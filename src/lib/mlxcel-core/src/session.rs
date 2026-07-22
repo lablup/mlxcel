@@ -67,6 +67,13 @@ use crate::ffi::MlxArray;
 use crate::generate::{CxxGenerator, GenerationStats, LanguageModel, SamplingConfig};
 use crate::sampling::TokenBiasMap;
 
+// Keep the prepared-prefill DTO discoverable from the session boundary while
+// its implementation remains in a focused module below the 500-line file cap.
+pub use crate::multimodal::{
+    OwnedTensor, PreparedAttentionBias, PreparedModality, PreparedPositions, PreparedPrefill,
+    PreparedPrefillError, PreparedTensorDType,
+};
+
 /// Capabilities a backend inference session advertises so the control plane can
 /// gate features a given backend does not support yet.
 ///

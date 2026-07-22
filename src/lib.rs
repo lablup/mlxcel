@@ -74,6 +74,10 @@ pub use mlxcel_core::generate::{
     SamplingConfig,
 };
 pub use mlxcel_core::speculative::SpeculativeGenerator;
+pub use multimodal::host_preprocessor::{
+    FakeHostMultimodalPreprocessor, HostMultimodalPreprocessor, HostPreprocessorError,
+    LlavaHostPreprocessor,
+};
 pub use multimodal::{
     internvl_prompt, kimi_vl_prompt, minicpmo_prompt, moondream2_prompt, moondream3_prompt,
     phi3v_prompt, phi4_siglip_prompt, phi4mm_prompt, pixtral_prompt, qwen_vl, smolvlm_prompt,
@@ -88,7 +92,11 @@ pub use multimodal::{
 // the server batched path keeps using `load_model`. Under default features both
 // fold to the single MLX variant with no runtime dispatch.
 pub use backend::{Backend, ComputeBackend, MlxBackend, Session, select_backend};
-pub use mlxcel_core::session::{InferenceSession, MlxInferenceSession, SessionCapabilities};
+pub use mlxcel_core::session::{
+    InferenceSession, MlxInferenceSession, OwnedTensor, PreparedAttentionBias, PreparedModality,
+    PreparedPositions, PreparedPrefill, PreparedPrefillError, PreparedTensorDType,
+    SessionCapabilities,
+};
 
 // Re-export split modules
 pub use loaded_model::LoadedModel;

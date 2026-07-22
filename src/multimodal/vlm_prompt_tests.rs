@@ -32,7 +32,7 @@ fn apply_image_token_blocks_expands_existing_tokens_with_boi_eoi() {
     };
     let mut prompt_tokens = vec![1, 99, 2];
 
-    let stats = apply_image_token_blocks(&mut prompt_tokens, info, 1);
+    let stats = apply_image_token_blocks(&mut prompt_tokens, info, 1).unwrap();
 
     assert_eq!(
         stats,
@@ -62,7 +62,7 @@ fn apply_image_token_blocks_inserts_blocks_after_bos() {
     };
     let mut prompt_tokens = vec![1, 2, 3];
 
-    let stats = apply_image_token_blocks(&mut prompt_tokens, info, 2);
+    let stats = apply_image_token_blocks(&mut prompt_tokens, info, 2).unwrap();
 
     assert_eq!(
         stats,
@@ -91,7 +91,7 @@ fn apply_image_token_blocks_paligemma_format() {
     };
     let mut prompt_tokens = vec![100, 200, 300]; // text tokens only, no BOS
 
-    let stats = apply_image_token_blocks(&mut prompt_tokens, info, 1);
+    let stats = apply_image_token_blocks(&mut prompt_tokens, info, 1).unwrap();
 
     assert_eq!(
         stats,
@@ -125,11 +125,14 @@ fn apply_image_token_blocks_is_noop_without_prompt_or_images() {
     let mut empty_prompt = Vec::new();
     assert_eq!(
         apply_image_token_blocks(&mut empty_prompt, info.clone(), 1),
-        None
+        Err(super::ImageTokenBlockError::EmptyPrompt { image_count: 1 })
     );
 
     let mut prompt_tokens = vec![1, 2, 3];
-    assert_eq!(apply_image_token_blocks(&mut prompt_tokens, info, 0), None);
+    assert_eq!(
+        apply_image_token_blocks(&mut prompt_tokens, info, 0),
+        Ok(None)
+    );
     assert_eq!(prompt_tokens, vec![1, 2, 3]);
 }
 
@@ -153,7 +156,7 @@ fn apply_image_token_blocks_expands_with_block_prefix_and_suffix() {
     // Prompt has a BOI token (10) that should be expanded
     let mut prompt_tokens = vec![1, 10, 2];
 
-    let stats = apply_image_token_blocks(&mut prompt_tokens, info, 1);
+    let stats = apply_image_token_blocks(&mut prompt_tokens, info, 1).unwrap();
 
     assert_eq!(
         stats,
@@ -166,4 +169,54 @@ fn apply_image_token_blocks_expands_with_block_prefix_and_suffix() {
     );
     // prefix(108) + BOI(10) + img*3(99,99,99) + EOI(11) + suffix(108)
     assert_eq!(prompt_tokens, vec![1, 108, 10, 99, 99, 99, 11, 108, 2]);
+}
+
+#[test]
+fn apply_image_token_blocks_rejects_media_cardinality_mismatch() {
+    let info = ImageTokenBlockInfo {
+        use_boi_eoi: false,
+        image_token_id: 99,
+        mm_tokens_per_image: 2,
+        boi_token_id: 0,
+        eoi_token_id: 0,
+        has_bos: true,
+        separator_token_id: None,
+        suffix_tokens: Vec::new(),
+        block_prefix_tokens: Vec::new(),
+        block_suffix_tokens: Vec::new(),
+    };
+    let mut prompt_tokens = vec![1, 99, 2];
+
+    let error = apply_image_token_blocks(&mut prompt_tokens, info, 2).unwrap_err();
+
+    assert_eq!(
+        error,
+        super::ImageTokenBlockError::MediaCardinality {
+            placeholder_count: 1,
+            image_count: 2,
+        }
+    );
+    assert_eq!(prompt_tokens, vec![1, 99, 2]);
+}
+
+#[test]
+fn apply_image_token_blocks_rejects_insert_capacity_overflow() {
+    let info = ImageTokenBlockInfo {
+        use_boi_eoi: true,
+        image_token_id: 99,
+        mm_tokens_per_image: 2,
+        boi_token_id: 10,
+        eoi_token_id: 11,
+        has_bos: true,
+        separator_token_id: None,
+        suffix_tokens: Vec::new(),
+        block_prefix_tokens: Vec::new(),
+        block_suffix_tokens: Vec::new(),
+    };
+    let mut prompt_tokens = vec![1, 2];
+
+    let error = apply_image_token_blocks(&mut prompt_tokens, info, usize::MAX).unwrap_err();
+
+    assert_eq!(error, super::ImageTokenBlockError::CapacityOverflow);
+    assert_eq!(prompt_tokens, vec![1, 2]);
 }

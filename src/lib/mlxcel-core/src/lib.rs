@@ -2595,6 +2595,10 @@ pub use ops::{concatenate, divide_scalar, multiply_scalar, stack, stack_owned, w
 pub use sampling::TokenBiasMap;
 // Re-export the inference-session contract (issue #448, ADR 0004) so the root
 // crate's compute-backend seam can construct and dispatch MLX sessions.
+pub use multimodal::{
+    OwnedTensor, PreparedAttentionBias, PreparedModality, PreparedPositions, PreparedPrefill,
+    PreparedPrefillError, PreparedTensorDType,
+};
 pub use session::{InferenceSession, MlxInferenceSession, SessionCapabilities};
 // Re-export N-gram loop-detection so the server control plane and CLI decode
 // loops can configure and run early-stop on degenerate token-repetition.
@@ -2938,6 +2942,11 @@ pub mod generate;
 // `InferenceSession` trait plus the MLX `MlxInferenceSession` that wraps
 // `CxxGenerator`. The CLI single-sequence paths drive generation through this.
 pub mod session;
+
+// Backend-neutral owned tensors produced by host-side multimodal preprocessing.
+// Kept beside the session contract so compiler backends can consume prepared
+// prefills without depending on MLX array handles or server request types.
+pub mod multimodal;
 
 // Decode-loop setup helpers shared by standard and speculative generation.
 // Public so that the server batch scheduler can reuse seed/EOS/history helpers.

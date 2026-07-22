@@ -18,6 +18,8 @@
 //! predictable insertion or expansion of image-token blocks. This module keeps
 //! that policy separate from model loading and request parsing.
 
+use thiserror::Error;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageTokenBlockInfo {
     pub use_boi_eoi: bool,
@@ -57,13 +59,32 @@ pub struct ImageTokenBlockStats {
     pub tokens_per_image: usize,
 }
 
+/// Invalid family-neutral image-placeholder layouts.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum ImageTokenBlockError {
+    #[error("cannot place {image_count} image(s) into an empty tokenized prompt")]
+    EmptyPrompt { image_count: usize },
+    #[error("image-token block size must be greater than zero")]
+    EmptyImageBlock,
+    #[error(
+        "prompt contains {placeholder_count} image placeholder(s), but {image_count} decoded image(s) were provided"
+    )]
+    MediaCardinality {
+        placeholder_count: usize,
+        image_count: usize,
+    },
+    #[error("image-token expansion capacity overflowed")]
+    CapacityOverflow,
+}
+
 pub fn apply_image_token_blocks(
     prompt_tokens: &mut Vec<i32>,
     info: ImageTokenBlockInfo,
     num_images: usize,
-) -> Option<ImageTokenBlockStats> {
-    if prompt_tokens.is_empty() || num_images == 0 {
-        return None;
+) -> Result<Option<ImageTokenBlockStats>, ImageTokenBlockError> {
+    if info.mm_tokens_per_image == 0 {
+        return Err(ImageTokenBlockError::EmptyImageBlock);
     }
 
     // Count existing image tokens or BOI tokens (from chat template) that
@@ -84,11 +105,36 @@ pub fn apply_image_token_blocks(
     };
     let total_existing = existing_image_count + existing_boi_count;
 
+    if total_existing != 0 && total_existing != num_images {
+        return Err(ImageTokenBlockError::MediaCardinality {
+            placeholder_count: total_existing,
+            image_count: num_images,
+        });
+    }
+    if num_images == 0 {
+        return Ok(None);
+    }
+    if prompt_tokens.is_empty() {
+        return Err(ImageTokenBlockError::EmptyPrompt {
+            image_count: num_images,
+        });
+    }
+
     if total_existing > 0 {
-        let extra_per_block = info.block_prefix_tokens.len() + info.block_suffix_tokens.len();
-        let mut expanded = Vec::with_capacity(
-            prompt_tokens.len() + (info.mm_tokens_per_image - 1 + extra_per_block) * total_existing,
-        );
+        let wrapper_tokens = if info.use_boi_eoi { 2 } else { 0 };
+        let extra_tokens = info
+            .mm_tokens_per_image
+            .checked_sub(1)
+            .and_then(|tokens| tokens.checked_add(wrapper_tokens))
+            .and_then(|tokens| tokens.checked_add(info.block_prefix_tokens.len()))
+            .and_then(|tokens| tokens.checked_add(info.block_suffix_tokens.len()))
+            .and_then(|tokens| tokens.checked_mul(total_existing))
+            .ok_or(ImageTokenBlockError::CapacityOverflow)?;
+        let capacity = prompt_tokens
+            .len()
+            .checked_add(extra_tokens)
+            .ok_or(ImageTokenBlockError::CapacityOverflow)?;
+        let mut expanded = Vec::with_capacity(capacity);
         for &token in prompt_tokens.iter() {
             if token == info.image_token_id || (info.use_boi_eoi && token == info.boi_token_id) {
                 // Insert block prefix tokens (e.g., \n\n for Gemma3 VLM)
@@ -110,15 +156,31 @@ pub fn apply_image_token_blocks(
         }
         *prompt_tokens = expanded;
 
-        return Some(ImageTokenBlockStats {
+        return Ok(Some(ImageTokenBlockStats {
             action: ImageTokenBlockAction::Expanded {
                 existing_image_count: total_existing,
             },
             tokens_per_image: info.mm_tokens_per_image,
-        });
+        }));
     }
 
-    let mut image_tokens = Vec::new();
+    let wrapper_tokens = if info.use_boi_eoi { 2 } else { 0 };
+    let block_len = info
+        .mm_tokens_per_image
+        .checked_add(wrapper_tokens)
+        .ok_or(ImageTokenBlockError::CapacityOverflow)?;
+    let image_token_capacity = block_len
+        .checked_mul(num_images)
+        .ok_or(ImageTokenBlockError::CapacityOverflow)?;
+    let separator_len = usize::from(!info.has_bos && info.separator_token_id.is_some());
+    prompt_tokens
+        .len()
+        .checked_add(image_token_capacity)
+        .and_then(|len| len.checked_add(separator_len))
+        .and_then(|len| len.checked_add(info.suffix_tokens.len()))
+        .ok_or(ImageTokenBlockError::CapacityOverflow)?;
+
+    let mut image_tokens = Vec::with_capacity(image_token_capacity);
     for _ in 0..num_images {
         if info.use_boi_eoi {
             image_tokens.push(info.boi_token_id);
@@ -150,12 +212,12 @@ pub fn apply_image_token_blocks(
 
     prompt_tokens.extend_from_slice(&info.suffix_tokens);
 
-    Some(ImageTokenBlockStats {
+    Ok(Some(ImageTokenBlockStats {
         action: ImageTokenBlockAction::Inserted {
             image_blocks: num_images,
         },
         tokens_per_image: info.mm_tokens_per_image,
-    })
+    }))
 }
 
 #[cfg(test)]

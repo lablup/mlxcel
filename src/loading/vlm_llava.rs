@@ -22,17 +22,20 @@
 //! selection and projector wiring, so their config normalization lives here.
 
 use anyhow::Result;
+use mlxcel_core::layers::UnifiedEmbedding;
 use mlxcel_core::weights::WeightMap;
 use serde_json::Value;
 use std::path::Path;
 
 use crate::LoadedModel;
 use crate::models;
+use crate::multimodal::host_preprocessor::{HostPreprocessorError, LlavaHostPreprocessor};
 use crate::vision;
+use crate::vision::config::VLMConfig;
 
 use super::{
-    load_vlm_weights_common, parse_vlm_config, read_sanitized_vlm_config,
-    strip_language_model_prefix,
+    load_vlm_weights_common, load_vlm_weights_common_filtered_canonical, parse_vlm_config,
+    read_sanitized_vlm_config, strip_language_model_prefix,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,6 +203,175 @@ fn llava_processor(
     } else {
         vision::processors::siglip::SigLipProcessor::new(image_size)
     }
+}
+
+/// Whether a raw checkpoint tensor belongs to the host-first LLaVA prefix.
+///
+/// The optional `language_model.` wrapper is normalized by
+/// [`strip_language_model_prefix`] after loading. Decoder layers, final norm,
+/// and LM head deliberately fail this predicate, so they are never retained by
+/// the host preprocessor.
+pub(super) fn is_llava_host_preprocessor_weight(name: &str) -> bool {
+    let canonical = name.strip_prefix("language_model.").unwrap_or(name);
+    canonical.starts_with("vision_tower.")
+        || canonical.starts_with("multi_modal_projector.")
+        || canonical.starts_with("model.embed_tokens.")
+}
+
+fn require_llava_host_family(config: &VLMConfig) -> Result<(), HostPreprocessorError> {
+    if !matches!(config.model_type.as_str(), "llava" | "llava_next") {
+        return Err(HostPreprocessorError::FamilyMismatch {
+            actual: config.model_type.clone(),
+        });
+    }
+    if !(config.vision_config.model_type.contains("clip")
+        || config.vision_config.model_type.contains("siglip"))
+    {
+        return Err(HostPreprocessorError::FamilyMismatch {
+            actual: format!(
+                "{} with vision tower {}",
+                config.model_type, config.vision_config.model_type
+            ),
+        });
+    }
+    if config.vision_config.num_channels != 3 {
+        return Err(HostPreprocessorError::InvalidConfig(format!(
+            "LLaVA host preprocessing supports RGB vision towers only, got {} channels",
+            config.vision_config.num_channels
+        )));
+    }
+    if config.vision_config.patch_size == 0
+        || !config
+            .vision_config
+            .image_size
+            .is_multiple_of(config.vision_config.patch_size)
+    {
+        return Err(HostPreprocessorError::InvalidConfig(format!(
+            "LLaVA image_size {} must be divisible by non-zero patch_size {}",
+            config.vision_config.image_size, config.vision_config.patch_size
+        )));
+    }
+    Ok(())
+}
+
+/// Load only the host-side components needed to prepare LLaVA embeddings for
+/// XLA. The full text decoder is neither constructed nor retained.
+pub(crate) fn load_llava_host_preprocessor(
+    model_path: &Path,
+) -> Result<LlavaHostPreprocessor, HostPreprocessorError> {
+    use vision::connectors::mlp::MLPProjector;
+    use vision::encoders::siglip::SigLipVisionModel;
+
+    let (config_str, full_config) = read_sanitized_vlm_config(model_path)
+        .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    let vlm_config: VLMConfig = parse_vlm_config(&config_str, "VLM config")
+        .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    require_llava_host_family(&vlm_config)?;
+
+    let text_model_type = vlm_config
+        .text_config
+        .get("model_type")
+        .and_then(Value::as_str)
+        .unwrap_or("llama");
+    llava_text_backend(text_model_type, "LLaVA host preprocessor").map_err(|error| {
+        HostPreprocessorError::FamilyMismatch {
+            actual: error.to_string(),
+        }
+    })?;
+
+    let weights = load_vlm_weights_common_filtered_canonical(model_path, |name| {
+        is_llava_host_preprocessor_weight(name)
+    })
+    .map(strip_language_model_prefix)
+    .map_err(|error| HostPreprocessorError::WeightLoad(error.to_string()))?;
+
+    let quant_group_size = full_config
+        .get("quantization")
+        .and_then(|q| q.get("group_size"))
+        .and_then(Value::as_i64)
+        .unwrap_or(64) as i32;
+    let quant_bits = full_config
+        .get("quantization")
+        .and_then(|q| q.get("bits"))
+        .and_then(Value::as_i64)
+        .unwrap_or(4) as i32;
+
+    let text_embeddings = UnifiedEmbedding::from_weights(
+        &weights,
+        "model.embed_tokens",
+        quant_group_size,
+        quant_bits,
+    )
+    .map_err(|error| {
+        HostPreprocessorError::WeightLoad(format!(
+            "missing or invalid LLaVA text embedding table: {error}"
+        ))
+    })?;
+    let connector = MLPProjector::from_weights(
+        &weights,
+        "multi_modal_projector",
+        quant_group_size,
+        quant_bits,
+    )
+    .map_err(|error| {
+        HostPreprocessorError::WeightLoad(format!(
+            "missing or invalid LLaVA multi_modal_projector weights: {error}"
+        ))
+    })?;
+    let encoder = SigLipVisionModel::from_weights(
+        &weights,
+        &vlm_config.vision_config,
+        "vision_tower.vision_model",
+    )
+    .map_err(|error| {
+        HostPreprocessorError::WeightLoad(format!(
+            "missing or invalid LLaVA vision_tower weights: {error}"
+        ))
+    })?
+    .with_feature_selection(
+        vlm_config.vision_feature_layer,
+        vlm_config.vision_feature_select_strategy.clone(),
+    );
+
+    let text_hidden_size = vlm_config
+        .text_config
+        .get("hidden_size")
+        .and_then(Value::as_u64)
+        .or_else(|| full_config.get("hidden_size").and_then(Value::as_u64))
+        .ok_or_else(|| {
+            HostPreprocessorError::InvalidConfig(
+                "LLaVA text_config.hidden_size is required for host preprocessing".to_string(),
+            )
+        })? as usize;
+    let max_sequence_len = vlm_config
+        .text_config
+        .get("max_position_embeddings")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            full_config
+                .get("max_position_embeddings")
+                .and_then(Value::as_u64)
+        })
+        .unwrap_or(4096) as usize;
+    let num_patches =
+        (vlm_config.vision_config.image_size / vlm_config.vision_config.patch_size).pow(2);
+    let tokens_per_image = vlm_config.mm_tokens_per_image.unwrap_or(num_patches);
+    let processor = llava_processor(
+        &vlm_config.vision_config.model_type,
+        vlm_config.vision_config.image_size,
+    );
+
+    LlavaHostPreprocessor::from_parts(
+        Box::new(processor),
+        Box::new(encoder),
+        Box::new(connector),
+        text_embeddings,
+        vlm_config.image_token_index,
+        tokens_per_image,
+        text_hidden_size,
+        vlm_config.vision_config.image_size,
+        max_sequence_len,
+    )
 }
 
 fn bunny_processor(

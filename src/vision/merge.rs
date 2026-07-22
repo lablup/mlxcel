@@ -207,9 +207,6 @@ pub fn merge_llava(
     // Use masked_scatter to place features at image token positions
     let final_embedding = masked_scatter(inputs_embeds, &image_mask_expanded, &flat_features);
 
-    // Cast to input dtype
-    let final_embedding = mlxcel_core::astype(&final_embedding, embed_dtype);
-
     InputEmbeddings {
         inputs_embeds: final_embedding,
         attention_mask_4d: None, // LLaVA uses standard causal masking

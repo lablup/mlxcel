@@ -106,7 +106,7 @@ pub(crate) use idefics2::load_idefics2_vlm;
 pub(crate) use internvl::load_internvl_vlm;
 pub(crate) use kimi_vl_loader::load_kimi_vl_vlm;
 pub(crate) use lfm2_vl::load_lfm2_vl;
-pub(crate) use llava::{load_llava_bunny_vlm, load_llava_vlm};
+pub(crate) use llava::{load_llava_bunny_vlm, load_llava_host_preprocessor, load_llava_vlm};
 pub(crate) use minimax_m3_vl::load_minimax_m3_vl;
 pub(crate) use mllama::load_mllama_vlm;
 pub(crate) use nemotron_h_nano_omni::load_nemotron_h_nano_omni_vlm;
@@ -207,7 +207,7 @@ pub(crate) fn load_vlm_weights_common(
 ) -> Result<WeightMap> {
     let mut weights = mlxcel_core::weights::load_weights_from_dir(model_path)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
-    finish_vlm_weights_common(model_path, &mut weights, transform)?;
+    finish_vlm_weights_common(model_path, &mut weights, transform, true)?;
 
     Ok(weights)
 }
@@ -227,7 +227,28 @@ where
 {
     let mut weights = mlxcel_core::weights::load_weights_from_dir_filtered(model_path, keep)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
-    finish_vlm_weights_common(model_path, &mut weights, transform)?;
+    finish_vlm_weights_common(model_path, &mut weights, transform, true)?;
+
+    Ok(weights)
+}
+
+/// Filtered canonical-checkpoint loader for host data paired with a backend
+/// that reads the checkpoint directly.
+///
+/// Unlike [`load_vlm_weights_common_filtered`], this path deliberately ignores
+/// the process-global surgery fallback. The paired backend therefore cannot
+/// observe raw checkpoint tensors while host preprocessing observes transformed
+/// tensors. Explicit transformations are not accepted on this boundary.
+pub(crate) fn load_vlm_weights_common_filtered_canonical<F>(
+    model_path: &Path,
+    keep: F,
+) -> Result<WeightMap>
+where
+    F: FnMut(&str) -> bool,
+{
+    let mut weights = mlxcel_core::weights::load_weights_from_dir_filtered(model_path, keep)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    finish_vlm_weights_common(model_path, &mut weights, None, false)?;
 
     Ok(weights)
 }
@@ -236,6 +257,7 @@ fn finish_vlm_weights_common(
     model_path: &Path,
     weights: &mut WeightMap,
     transform: Option<&dyn mlxcel_core::weights::WeightTransform>,
+    allow_active_pipeline: bool,
 ) -> Result<()> {
     // On Apple Silicon, convert bf16 → f16 for performance (no Apple GPU has
     // native bf16 ALU).  Quantized models keep bf16 scales/biases as-is.
@@ -268,10 +290,11 @@ fn finish_vlm_weights_common(
     //   2. CLI-installed active pipeline (--surgery flag).
     //   3. Baseline — no transform applied.
     #[cfg(feature = "surgery")]
-    let active_pipeline = transform
-        .is_none()
+    let active_pipeline = (allow_active_pipeline && transform.is_none())
         .then(crate::surgery::snapshot_active_pipeline)
         .flatten();
+    #[cfg(not(feature = "surgery"))]
+    let _ = allow_active_pipeline;
     let resolved_transform: Option<&dyn mlxcel_core::weights::WeightTransform> = match transform {
         Some(t) => Some(t),
         None => {

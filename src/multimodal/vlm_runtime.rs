@@ -628,10 +628,11 @@ where
             }))
         }
         VlmRuntimeRef::Gemma3n(gemma3n_vl) => {
-            let preparation = model
-                .image_token_block_info()
-                .and_then(|info| apply_image_token_blocks(prompt_tokens, info, images.len()))
-                .map(VlmPreparationSummary::ImageBlocks);
+            let preparation = match model.image_token_block_info() {
+                Some(info) => apply_image_token_blocks(prompt_tokens, info, images.len())?
+                    .map(VlmPreparationSummary::ImageBlocks),
+                None => None,
+            };
 
             let pixel_values = gemma3n_vl.processor.preprocess(images);
             let input_ids_arr = prompt_ids_array(prompt_tokens);
@@ -1380,7 +1381,7 @@ where
             };
             let tokens_per_image = vision_module.mm_tokens_per_image;
             let preparation =
-                apply_image_token_blocks(prompt_tokens, info, images.len()).map(|_| {
+                apply_image_token_blocks(prompt_tokens, info, images.len())?.map(|_| {
                     VlmPreparationSummary::FastVLM {
                         image_blocks: images.len(),
                         total_image_tokens: (images.len() * tokens_per_image) as i32,
@@ -1616,10 +1617,11 @@ where
             }))
         }
         VlmRuntimeRef::Standard(vision_module) => {
-            let preparation = model
-                .image_token_block_info()
-                .and_then(|info| apply_image_token_blocks(prompt_tokens, info, images.len()))
-                .map(VlmPreparationSummary::ImageBlocks);
+            let preparation = match model.image_token_block_info() {
+                Some(info) => apply_image_token_blocks(prompt_tokens, info, images.len())?
+                    .map(VlmPreparationSummary::ImageBlocks),
+                None => None,
+            };
 
             let pixel_values = vision_module.processor.preprocess(images);
             let mask =

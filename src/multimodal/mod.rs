@@ -23,6 +23,7 @@
 //!   vision wrapper that needs `forward_batched_with_context_and_ids` to route
 //!   each row through `forward_with_sequence_id`.
 //! - `gemma4_vl`: Gemma 4 mixed-length batching helpers
+//! - `host_preprocessor`: owned host-first prefill production for compiler backends
 //! - `phi4mm_prompt`: Phi4MM `<|image_N|>` normalization and audio guard
 //! - `phi4_siglip_prompt`: Phi4-SigLIP `<image>` placeholder handling
 //! - `minicpmo_prompt`: MiniCPM-o image placeholder expansion and bounds
@@ -40,6 +41,7 @@ pub mod deepseekocr_prompt;
 pub mod fastvlm_prompt;
 pub mod gemma4_vl;
 pub mod granite_vision_prompt;
+pub mod host_preprocessor;
 pub mod internvl_prompt;
 pub mod kimi_vl_prompt;
 pub mod lfm2_vl_prompt;
