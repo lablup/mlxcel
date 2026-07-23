@@ -907,13 +907,22 @@ impl Config {
                     .get("rope_type")
                     .or_else(|| scaling.get("type"))
                     .and_then(serde_json::Value::as_str);
+                let has_mrope_section = scaling.get("mrope_section").is_some();
+                if rope_type == Some("mrope") && !has_mrope_section {
+                    return Err("config.json rope_scaling.rope_type = \"mrope\" requires \
+                         rope_scaling.mrope_section"
+                        .to_string());
+                }
                 match rope_type {
                     // `default` is HF's identity rope (Seed-OSS). `dynamic` NTK
                     // (InternLM2/3) is identity within the original context and only
                     // rescales beyond it, so short / in-context generation is served
                     // as plain RoPE here (both use `rope_theta`); the long-context
-                    // NTK rescale is a follow-up.
+                    // NTK rescale is a follow-up. Some Qwen/GLM configs omit the
+                    // type while carrying the M-RoPE section table; the table is
+                    // the explicit schema signal in that representation.
                     Some("default") | Some("dynamic") | Some("mrope") => RopeScaling::Plain,
+                    None if has_mrope_section => RopeScaling::Plain,
                     Some("llama3") => {
                         let sf = |k: &str| -> Result<f64, String> {
                             scaling
@@ -1442,13 +1451,19 @@ mod tests {
 
     #[test]
     fn parses_and_validates_explicit_mrope_sections() {
-        let base = |model_type: &str, section: &str, extra: &str| {
+        let config = |model_type: &str, scaling: &str| {
             format!(
                 r#"{{"model_type":"{model_type}","hidden_size":12,"intermediate_size":24,
                 "num_hidden_layers":2,"num_attention_heads":2,"num_key_value_heads":1,
                 "head_dim":6,"rms_norm_eps":1e-6,"rope_theta":1e6,"vocab_size":16,
-                "tie_word_embeddings":true,"hidden_act":"silu","rope_scaling":{{
-                "rope_type":"mrope","mrope_section":{section}{extra}}}}}"#
+                "tie_word_embeddings":true,"hidden_act":"silu",
+                "rope_scaling":{{{scaling}}}}}"#
+            )
+        };
+        let base = |model_type: &str, section: &str, extra: &str| {
+            config(
+                model_type,
+                &format!(r#""rope_type":"mrope","mrope_section":{section}{extra}"#),
             )
         };
 
@@ -1471,6 +1486,31 @@ mod tests {
             Config::from_json_str(&base("qwen3", "[1,1,1]", ",\"mrope_interleaved\":false"))
                 .expect("explicit layout override parses");
         assert_eq!(forced.mrope.unwrap().layout, MropeLayout::Chunked);
+
+        let explicit_without_sections = config("qwen2", r#""rope_type":"mrope""#);
+        let error = Config::from_json_str(&explicit_without_sections)
+            .expect_err("explicit M-RoPE type without sections must fail");
+        assert!(
+            error.contains("requires rope_scaling.mrope_section"),
+            "missing-section error identifies the required schema: {error}"
+        );
+
+        for (model_type, scaling, expected_layout) in [
+            (
+                "qwen2",
+                r#""rope_type":"default","mrope_section":[1,1,1]"#,
+                MropeLayout::Chunked,
+            ),
+            (
+                "qwen3",
+                r#""mrope_section":[1,1,1]"#,
+                MropeLayout::Interleaved,
+            ),
+        ] {
+            let parsed = Config::from_json_str(&config(model_type, scaling))
+                .expect("M-RoPE sections are authoritative when rope type is default or omitted");
+            assert_eq!(parsed.mrope.expect("M-RoPE config").layout, expected_layout);
+        }
 
         for (json, needle) in [
             (base("qwen2", "[1,2]", ""), "exactly 3"),
