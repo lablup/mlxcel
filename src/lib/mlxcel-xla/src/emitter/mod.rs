@@ -64,7 +64,7 @@ mod context_tests;
 
 #[allow(unused_imports)]
 pub(crate) use config::{
-    Config, MropeConfig, MropeLayout, NormStyle, QkNorm, QuantConfig, WeightScheme,
+    Config, DeepStackConfig, MropeConfig, MropeLayout, NormStyle, QkNorm, QuantConfig, WeightScheme,
 };
 #[allow(unused_imports)]
 pub(crate) use gemma3n::{
@@ -127,8 +127,9 @@ pub(crate) use model::{
     PREFILL_EMBEDDINGS_MASKED_VALUE, PositionInputMode, PrefillEmbeddingsDType,
     PrefillEmbeddingsInputMetadata, emit_decode, emit_decode_batched, emit_decode_ragged,
     emit_decode_ragged_with, emit_decode_with, emit_moe_probe, emit_moe_probe_with, emit_prefill,
-    emit_prefill_embeddings, emit_prefill_embeddings_with, emit_prefill_with, mrope_axis_selector,
-    validate_prefill_embeddings_attention_bias, validate_prefill_embeddings_metadata,
+    emit_prefill_embeddings, emit_prefill_embeddings_deepstack_with, emit_prefill_embeddings_with,
+    emit_prefill_with, mrope_axis_selector, validate_prefill_embeddings_attention_bias,
+    validate_prefill_embeddings_metadata,
 };
 
 #[cfg(test)]
@@ -828,6 +829,13 @@ mod tests {
             emit_prefill_embeddings(&cfg, false),
         )
         .expect("write embeddings prefill graph");
+        if cfg.deepstack.is_some() {
+            std::fs::write(
+                dir.join("prefill_embeddings_deepstack_logits.mlir"),
+                emit_prefill_embeddings_deepstack_with(&cfg, false, super::builder::Precision::F32),
+            )
+            .expect("write DeepStack embeddings prefill graph");
+        }
     }
 
     #[test]
@@ -908,6 +916,113 @@ mod tests {
             .rfind(|line| line.contains("stablehlo.dot_general"))
             .expect("untied logits dot");
         assert!(untied_tail.contains("%arg2"), "untied logits use lm_head");
+    }
+
+    #[test]
+    fn deepstack_prefill_is_distinct_sparse_and_leaves_ordinary_graph_byte_exact() {
+        let mut cfg = qwen_like(false);
+        cfg.n_layers = 4;
+        let ordinary = emit_prefill_embeddings(&cfg, false);
+        let token = emit_prefill(&cfg, false);
+        let decode = emit_decode(&cfg, false);
+        cfg.deepstack = Some(DeepStackConfig {
+            target_layer_indices: vec![0, 2, 3],
+            max_visual_positions: 5,
+        });
+
+        assert_eq!(
+            emit_prefill_embeddings(&cfg, false),
+            ordinary,
+            "declaring DeepStack must not change the ordinary embeddings entry"
+        );
+        assert_eq!(
+            emit_prefill(&cfg, false),
+            token,
+            "declaring DeepStack must not change token prefill"
+        );
+        assert_eq!(
+            emit_decode(&cfg, false),
+            decode,
+            "declaring DeepStack must not change decode"
+        );
+        let deepstack =
+            emit_prefill_embeddings_deepstack_with(&cfg, false, super::builder::Precision::F32);
+        assert!(deepstack.starts_with("module @prefill_embeddings_deepstack {"));
+        assert!(
+            !deepstack.contains("tensor<4x2048x8xf32>"),
+            "the ABI must not expose a dense [num_layers, Lp, hidden] payload"
+        );
+
+        let ordered = [
+            "loc(\"embeddings\")",
+            "loc(\"positions\")",
+            "loc(\"real_len\")",
+            "loc(\"attention_bias\")",
+            "loc(\"deepstack.visual_positions\")",
+            "loc(\"deepstack.layer_features\")",
+            "loc(\"deepstack.layer_indices\")",
+            "loc(\"deepstack.actual_layer_count\")",
+            "loc(\"deepstack.actual_visual_count\")",
+        ];
+        let offsets = ordered
+            .iter()
+            .map(|needle| deepstack.find(needle).expect("DeepStack schema arg"))
+            .collect::<Vec<_>>();
+        assert!(offsets.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(deepstack.contains("tensor<5xi32> loc(\"deepstack.visual_positions\")"));
+        assert!(deepstack.contains("tensor<3x5x8xf32> loc(\"deepstack.layer_features\")"));
+        assert!(deepstack.contains("tensor<3xi32> loc(\"deepstack.layer_indices\")"));
+        assert_eq!(
+            occurs(&deepstack, "stablehlo.select ") - occurs(&ordinary, "stablehlo.select "),
+            3,
+            "first, middle, and last target layers each get one sparse residual injection"
+        );
+        assert_eq!(
+            occurs(&deepstack, "stablehlo.reduce(") - occurs(&ordinary, "stablehlo.reduce("),
+            3,
+            "each target reduces only across the compact visual-position axis"
+        );
+    }
+
+    #[test]
+    fn qwen_deepstack_config_parses_and_rejects_unstable_schema() {
+        let valid = r#"{"model_type":"qwen3","hidden_size":8,"num_attention_heads":2,
+            "num_key_value_heads":1,"head_dim":4,"intermediate_size":16,
+            "num_hidden_layers":4,"rms_norm_eps":1e-6,"rope_theta":1e6,
+            "vocab_size":10,"tie_word_embeddings":true,
+            "deepstack_language_layer_indices":[0,2,3],
+            "deepstack_max_visual_positions":5}"#;
+        let cfg = Config::from_json_str(valid).expect("canonical Qwen DeepStack config");
+        assert_eq!(
+            cfg.deepstack,
+            Some(DeepStackConfig {
+                target_layer_indices: vec![0, 2, 3],
+                max_visual_positions: 5,
+            })
+        );
+        assert!(
+            format!("{cfg:?}").contains("target_layer_indices: [0, 2, 3]"),
+            "target language layers participate in the compiled artifact identity"
+        );
+
+        for invalid in [
+            valid.replace("[0,2,3]", "[0,2,2]"),
+            valid.replace("[0,2,3]", "[0,2,4]"),
+            valid.replace(",\n            \"deepstack_max_visual_positions\":5", ""),
+            valid.replace(
+                "\"deepstack_language_layer_indices\":[0,2,3],\n            ",
+                "",
+            ),
+            valid.replace(
+                "\"deepstack_max_visual_positions\":5",
+                "\"deepstack_max_visual_positions\":0",
+            ),
+        ] {
+            assert!(
+                Config::from_json_str(&invalid).is_err(),
+                "invalid DeepStack schema must fail closed: {invalid}"
+            );
+        }
     }
 
     #[test]

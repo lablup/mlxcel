@@ -53,6 +53,7 @@ mod context;
 #[cfg(any(feature = "iree", test))]
 #[cfg_attr(not(feature = "iree"), allow(dead_code))]
 mod prepared;
+mod prepared_deepstack;
 mod prepared_gemma3n;
 
 #[cfg(feature = "iree")]
@@ -142,6 +143,7 @@ pub fn dequantize_gemma3n_affine_diagnostic(
 pub use emitter::{Gemma3nDiagnosticLayout, Gemma3nDiagnosticSegment};
 #[cfg(feature = "iree")]
 pub use prepared::PreparedInputError;
+pub use prepared_deepstack::{DeepStackFeatures, DeepStackInputError, DeepStackPreparedPrefill};
 pub use prepared_gemma3n::{Gemma3nDensePle, Gemma3nDensePleError, Gemma3nPreparedPrefill};
 #[cfg(feature = "iree")]
 pub use sampler::SampleParams;
@@ -415,6 +417,52 @@ impl XlaInferenceSession {
             let _ = request;
             Err(NOT_WIRED.to_string())
         }
+    }
+
+    /// Seed a session through the distinct sparse DeepStack embeddings entry.
+    pub fn prefill_deepstack_prepared(
+        &mut self,
+        request: &DeepStackPreparedPrefill,
+    ) -> Result<i32, String> {
+        #[cfg(feature = "iree")]
+        {
+            let first = self.engine.prefill_deepstack_prepared_first(request)?;
+            self.cache_len = i32::try_from(request.prepared().sequence_len)
+                .map_err(|_| "prepared sequence length does not fit i32".to_string())?;
+            Ok(first)
+        }
+        #[cfg(not(feature = "iree"))]
+        {
+            let _ = request;
+            Err(NOT_WIRED.to_string())
+        }
+    }
+
+    /// Greedy generation seeded by compact prefill-only DeepStack additions.
+    pub fn generate_deepstack_prepared_greedy(
+        &mut self,
+        request: &DeepStackPreparedPrefill,
+        max_new_tokens: usize,
+        eos_token_ids: &[i32],
+    ) -> Result<Vec<i32>, String> {
+        if max_new_tokens == 0 {
+            return Ok(Vec::new());
+        }
+        validate_request_capacity(
+            request.prepared().sequence_len,
+            max_new_tokens,
+            self.context_capacity,
+        )
+        .map_err(|error| error.to_string())?;
+        let first = self.prefill_deepstack_prepared(request)?;
+        let mut out = Vec::with_capacity(max_new_tokens);
+        out.push(first);
+        let mut current = first;
+        while out.len() < max_new_tokens && !eos_token_ids.contains(&current) {
+            current = self.decode_step(current)?;
+            out.push(current);
+        }
+        Ok(out)
     }
 
     /// Greedy generation seeded by Gemma3n post-scale embeddings and dense PLE.

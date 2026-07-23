@@ -48,6 +48,8 @@ use mlxcel_core::session::{
 #[cfg(feature = "iree")]
 use std::path::Path;
 
+#[cfg(feature = "iree")]
+use crate::DeepStackPreparedPrefill;
 use crate::Gemma3nDensePle;
 #[cfg(feature = "iree")]
 use crate::Gemma3nPreparedPrefill;
@@ -58,6 +60,7 @@ use crate::prepared::PreparedPositionMode;
 use crate::prepared::{
     MropeCoordinateError, PreparedInputError, PreparedIreePrefill, mrope_decode_coordinate,
 };
+use crate::prepared_deepstack::PreparedDeepStack;
 use crate::sampler::SampleParams;
 #[cfg(feature = "iree")]
 use crate::sampler::sample;
@@ -71,6 +74,7 @@ pub enum XlaAdmissionError {
     ContextCapacity(ContextCapacityError),
     Prepared(PreparedInputError),
     Gemma3nPrepared(String),
+    DeepStackPrepared(String),
 }
 
 impl fmt::Display for XlaAdmissionError {
@@ -81,6 +85,7 @@ impl fmt::Display for XlaAdmissionError {
             Self::ContextCapacity(err) => err.fmt(f),
             Self::Prepared(err) => err.fmt(f),
             Self::Gemma3nPrepared(err) => f.write_str(err),
+            Self::DeepStackPrepared(err) => f.write_str(err),
         }
     }
 }
@@ -153,6 +158,10 @@ enum PendingInput {
         prepared: PreparedIreePrefill,
         dense_ple: Gemma3nDensePle,
     },
+    DeepStackPrepared {
+        prepared: PreparedIreePrefill,
+        deepstack: PreparedDeepStack,
+    },
 }
 
 impl PendingInput {
@@ -161,6 +170,7 @@ impl PendingInput {
             Self::Tokens(tokens) => tokens,
             Self::Prepared(prepared) => &prepared.token_ids,
             Self::Gemma3nPrepared { prepared, .. } => &prepared.token_ids,
+            Self::DeepStackPrepared { prepared, .. } => &prepared.token_ids,
         }
     }
 
@@ -169,6 +179,7 @@ impl PendingInput {
             Self::Tokens(tokens) => tokens.len(),
             Self::Prepared(prepared) => prepared.effective_len,
             Self::Gemma3nPrepared { prepared, .. } => prepared.effective_len,
+            Self::DeepStackPrepared { prepared, .. } => prepared.effective_len,
         }
     }
 
@@ -368,6 +379,28 @@ fn mrope_slot_coordinates(slots: &[Option<Slot>]) -> Result<Vec<[i32; 3]>, Mrope
         .collect()
 }
 
+fn queue_deepstack_prepared_request(
+    sched: &mut Scheduler,
+    prepared: PreparedIreePrefill,
+    deepstack: PreparedDeepStack,
+    max_new_tokens: usize,
+    params: SampleParams,
+    context_capacity: usize,
+) -> Result<u64, XlaAdmissionError> {
+    if max_new_tokens == 0 {
+        return Err(XlaAdmissionError::ZeroMaxNewTokens);
+    }
+    validate_request_capacity(prepared.effective_len, max_new_tokens, context_capacity)?;
+    Ok(sched.submit_input(
+        PendingInput::DeepStackPrepared {
+            prepared,
+            deepstack,
+        },
+        max_new_tokens,
+        params,
+    ))
+}
+
 /// The continuous-batching engine: `B_max` slots over one ragged decode graph,
 /// fed by a FIFO queue. See the module docs.
 #[cfg(feature = "iree")]
@@ -520,6 +553,34 @@ impl XlaBatchEngine {
         )
     }
 
+    /// Queue a prepared embeddings request with compact per-layer DeepStack
+    /// features. The pending entry owns both static payloads and drops them on
+    /// admission, cancellation, or any error path; decode slot state retains
+    /// only KV and logical token history.
+    pub fn submit_deepstack_prepared(
+        &mut self,
+        request: DeepStackPreparedPrefill,
+        max_new_tokens: usize,
+        params: SampleParams,
+    ) -> Result<u64, XlaAdmissionError> {
+        let context_capacity = self.context_capacity();
+        let (prepared, features) = request.into_parts();
+        let deepstack = self
+            .engine
+            .prepare_deepstack(&features)
+            .map_err(XlaAdmissionError::DeepStackPrepared)?;
+        let prepared =
+            PreparedIreePrefill::prepare(&prepared, self.engine.hidden_size(), context_capacity)?;
+        queue_deepstack_prepared_request(
+            &mut self.sched,
+            prepared,
+            deepstack,
+            max_new_tokens,
+            params,
+            context_capacity,
+        )
+    }
+
     /// Cancel a request by id (frees its slot or drops it from the queue).
     /// Returns whether it was found. A cancelled request emits no further events.
     pub fn cancel(&mut self, req_id: u64) -> bool {
@@ -562,6 +623,12 @@ impl XlaBatchEngine {
                 } => self
                     .engine
                     .prefill_gemma3n_prepared_slot_logits(s, prepared, dense_ple)?,
+                PendingInput::DeepStackPrepared {
+                    prepared,
+                    deepstack,
+                } => self
+                    .engine
+                    .prefill_deepstack_prepared_slot_logits(s, prepared, deepstack)?,
             };
             let mut rng = resolve_seed(&p.params, p.req_id);
             // History-based penalties see the prompt plus generated tokens (the
@@ -1126,6 +1193,22 @@ mod tests {
         }
     }
 
+    fn deepstack_input(tokens: Vec<i32>) -> PendingInput {
+        PendingInput::DeepStackPrepared {
+            prepared: prepared_input(tokens, 2, 8),
+            deepstack: PreparedDeepStack {
+                visual_positions: vec![1, -1],
+                layer_features: vec![1.0, 2.0, 0.0, 0.0],
+                layer_indices: vec![0],
+                actual_layer_count: 1,
+                actual_visual_count: 1,
+                max_layer_count: 1,
+                max_visual_count: 2,
+                hidden_size: 2,
+            },
+        }
+    }
+
     #[test]
     fn submit_assigns_increasing_ids_and_queues() {
         let mut s = Scheduler::new(2, EOS.to_vec());
@@ -1200,6 +1283,8 @@ mod tests {
         let multimodal =
             s.submit_input(PendingInput::Prepared(prepared), 8, SampleParams::greedy());
         let gemma3n = s.submit_input(gemma3n_input(vec![10, 11]), 8, SampleParams::greedy());
+        let deepstack =
+            s.submit_input(deepstack_input(vec![12, 13, 14]), 8, SampleParams::greedy());
 
         let first = s.pop_next_pending().unwrap();
         assert_eq!(first.req_id, text);
@@ -1218,6 +1303,15 @@ mod tests {
         assert!(matches!(third.input, PendingInput::Gemma3nPrepared { .. }));
         assert_eq!(third.input.logical_tokens(), &[10, 11]);
         assert_eq!(third.input.effective_len(), 2);
+
+        let fourth = s.pop_next_pending().unwrap();
+        assert_eq!(fourth.req_id, deepstack);
+        assert!(matches!(
+            fourth.input,
+            PendingInput::DeepStackPrepared { .. }
+        ));
+        assert_eq!(fourth.input.logical_tokens(), &[12, 13, 14]);
+        assert_eq!(fourth.input.effective_len(), 3);
     }
 
     #[test]
@@ -1333,6 +1427,22 @@ mod tests {
         assert!(
             s.queue.is_empty(),
             "cancellation must drop the request-owned PLE now, not at a later pump"
+        );
+
+        let replacement = s.submit(vec![9], 2, g());
+        assert_eq!(s.pop_next_pending().unwrap().req_id, replacement);
+        assert_eq!(s.free_slots(), vec![0]);
+    }
+
+    #[test]
+    fn deepstack_side_tensors_are_dropped_on_cancel_and_slot_can_be_reused() {
+        let mut s = Scheduler::new(1, EOS.to_vec());
+        let deepstack = s.submit_input(deepstack_input(vec![1, 2, 3]), 8, g());
+        assert_eq!(s.queue.len(), 1);
+        assert!(s.cancel(deepstack));
+        assert!(
+            s.queue.is_empty(),
+            "cancellation must drop request-owned DeepStack tensors immediately"
         );
 
         let replacement = s.submit(vec![9], 2, g());

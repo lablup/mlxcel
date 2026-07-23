@@ -176,6 +176,49 @@ pub struct MoeConfig {
     pub weight_prefix: &'static str,
 }
 
+/// Static DeepStack schema declared by an architecture.
+///
+/// The target language-layer indices are part of the compiled artifact identity.
+/// `max_visual_positions` is the compact side-input bucket; it is deliberately
+/// independent from `context_capacity`, so the host never allocates a dense
+/// `[layers, sequence, hidden]` tensor.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct DeepStackConfig {
+    pub target_layer_indices: Vec<usize>,
+    pub max_visual_positions: usize,
+}
+
+impl DeepStackConfig {
+    pub(crate) fn validate(&self, n_layers: usize, context_capacity: usize) -> Result<(), String> {
+        if self.target_layer_indices.is_empty() {
+            return Err("DeepStack requires at least one target language layer".to_string());
+        }
+        if self.max_visual_positions == 0 || self.max_visual_positions > context_capacity {
+            return Err(format!(
+                "DeepStack max_visual_positions={} must be in 1..={context_capacity}",
+                self.max_visual_positions
+            ));
+        }
+        if self
+            .target_layer_indices
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        {
+            return Err("DeepStack target language layers must be sorted and unique".to_string());
+        }
+        if let Some(&layer) = self
+            .target_layer_indices
+            .iter()
+            .find(|&&layer| layer >= n_layers)
+        {
+            return Err(format!(
+                "DeepStack target language layer {layer} is outside [0,{n_layers})"
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     /// Static sequence dimension shared by prefill, decode, and every KV cache.
@@ -248,6 +291,10 @@ pub struct Config {
     /// Three-axis multimodal RoPE. `None` preserves the exact one-dimensional
     /// prefill/decode schemas and emitted modules.
     pub mrope: Option<MropeConfig>,
+    /// Optional sparse, prefill-only residual additions injected immediately
+    /// after selected transformer layers. Ordinary embeddings prefill and decode
+    /// ignore this declaration and keep their existing schemas.
+    pub deepstack: Option<DeepStackConfig>,
     /// Mixture-of-Experts FFN parameters (issues #500 / #501). `Some` for a MoE
     /// architecture (Mixtral, Qwen2-MoE, Qwen3-MoE, OLMoE); the FFN then routes the
     /// top-k of N experts instead of a dense MLP. `None` for a dense model, whose
@@ -363,6 +410,7 @@ impl Config {
             sliding_pattern: 2,
             use_rope_layers: None,
             mrope: None,
+            deepstack: None,
             moe: None,
             weight_scheme: WeightScheme::Llama,
             layernorm: false,
@@ -501,6 +549,46 @@ impl Config {
         let head_dim = ou("head_dim").unwrap_or(hidden / n_q.max(1));
         // ExaOne 3.x uses `num_layers` in place of `num_hidden_layers`.
         let n_layers = u_any(&["num_hidden_layers", "num_layers"])?;
+        let deepstack = match (
+            v.get("deepstack_language_layer_indices"),
+            v.get("deepstack_max_visual_positions"),
+        ) {
+            (None | Some(serde_json::Value::Null), None | Some(serde_json::Value::Null)) => None,
+            (Some(value), Some(max_visual_positions))
+                if !value.is_null() && !max_visual_positions.is_null() =>
+            {
+                let layers = value
+                    .as_array()
+                    .ok_or_else(|| {
+                        "config.json deepstack_language_layer_indices must be an integer array"
+                            .to_string()
+                    })?
+                    .iter()
+                    .map(|value| {
+                        value.as_u64().map(|layer| layer as usize).ok_or_else(|| {
+                            "config.json deepstack_language_layer_indices must contain non-negative integers"
+                                .to_string()
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let max_visual_positions = max_visual_positions.as_u64().ok_or_else(|| {
+                    "config.json deepstack_max_visual_positions must be a positive integer"
+                        .to_string()
+                })? as usize;
+                let config = DeepStackConfig {
+                    target_layer_indices: layers,
+                    max_visual_positions,
+                };
+                config.validate(n_layers, crate::DEFAULT_CONTEXT_CAPACITY)?;
+                Some(config)
+            }
+            _ => {
+                return Err(
+                    "config.json must declare DeepStack layer indices and max visual positions together"
+                        .to_string(),
+                );
+            }
+        };
 
         // Norm epsilon: `rms_norm_eps` (RMSNorm archs), else `layer_norm_eps`
         // (Cohere / StableLM LayerNorm), else `layer_norm_epsilon` (ExaOne), else
@@ -1168,6 +1256,7 @@ impl Config {
             sliding_pattern,
             use_rope_layers,
             mrope,
+            deepstack,
             moe,
             weight_scheme,
             layernorm,
@@ -1199,6 +1288,9 @@ impl Config {
     /// Select the static sequence shape used by all emitted graphs and caches.
     pub fn with_context_capacity(mut self, context_capacity: usize) -> Result<Self, String> {
         self.context_capacity = crate::context::validate_context_capacity_value(context_capacity)?;
+        if let Some(deepstack) = &self.deepstack {
+            deepstack.validate(self.n_layers, self.context_capacity)?;
+        }
         Ok(self)
     }
 
