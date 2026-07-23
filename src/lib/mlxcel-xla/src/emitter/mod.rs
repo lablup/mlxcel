@@ -1024,6 +1024,30 @@ mod tests {
             "target language layers participate in the compiled artifact identity"
         );
 
+        let larger_bucket = valid.replace(
+            "\"deepstack_max_visual_positions\":5",
+            "\"deepstack_max_visual_positions\":300",
+        );
+        let parsed =
+            Config::from_json_str(&larger_bucket).expect("capacity-independent schema parses");
+        let selected = parsed
+            .clone()
+            .with_context_capacity(512)
+            .expect("selected 512 capacity admits compact maximum 300");
+        assert_eq!(selected.context_capacity, 512);
+        assert_eq!(
+            selected
+                .deepstack
+                .as_ref()
+                .expect("DeepStack schema")
+                .max_visual_positions,
+            300
+        );
+        let error = parsed
+            .with_context_capacity(256)
+            .expect_err("selected capacity below compact maximum must fail");
+        assert!(error.contains("exceeds selected context capacity 256"));
+
         for invalid in [
             valid.replace("[0,2,3]", "[0,2,2]"),
             valid.replace("[0,2,3]", "[0,2,4]"),

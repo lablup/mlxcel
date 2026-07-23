@@ -189,15 +189,12 @@ pub struct DeepStackConfig {
 }
 
 impl DeepStackConfig {
-    pub(crate) fn validate(&self, n_layers: usize, context_capacity: usize) -> Result<(), String> {
+    fn validate_structure(&self, n_layers: usize) -> Result<(), String> {
         if self.target_layer_indices.is_empty() {
             return Err("DeepStack requires at least one target language layer".to_string());
         }
-        if self.max_visual_positions == 0 || self.max_visual_positions > context_capacity {
-            return Err(format!(
-                "DeepStack max_visual_positions={} must be in 1..={context_capacity}",
-                self.max_visual_positions
-            ));
+        if self.max_visual_positions == 0 {
+            return Err("DeepStack max_visual_positions must be positive".to_string());
         }
         if self
             .target_layer_indices
@@ -216,6 +213,21 @@ impl DeepStackConfig {
             ));
         }
         Ok(())
+    }
+
+    fn validate_capacity(&self, context_capacity: usize) -> Result<(), String> {
+        if self.max_visual_positions > context_capacity {
+            return Err(format!(
+                "DeepStack max_visual_positions={} exceeds selected context capacity {context_capacity}",
+                self.max_visual_positions
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate(&self, n_layers: usize, context_capacity: usize) -> Result<(), String> {
+        self.validate_structure(n_layers)?;
+        self.validate_capacity(context_capacity)
     }
 }
 
@@ -579,7 +591,11 @@ impl Config {
                     target_layer_indices: layers,
                     max_visual_positions,
                 };
-                config.validate(n_layers, crate::DEFAULT_CONTEXT_CAPACITY)?;
+                // Capacity is selected by RuntimeConfig after parsing. Validate
+                // only intrinsic schema facts here so a 512-token graph may
+                // legitimately declare a compact visual maximum above the
+                // historical 256-token default.
+                config.validate_structure(n_layers)?;
                 Some(config)
             }
             _ => {
