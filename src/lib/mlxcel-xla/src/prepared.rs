@@ -20,12 +20,68 @@ use mlxcel_core::session::{OwnedTensor, PreparedPositions, PreparedPrefill, Prep
 
 const MASKED_VALUE: f32 = -1.0e30;
 
+/// Position schema compiled into an IREE language-model bundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreparedPositionMode {
+    OneD,
+    Mrope3D,
+}
+
+impl PreparedPositionMode {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::OneD => "1D",
+            Self::Mrope3D => "M-RoPE 3D",
+        }
+    }
+
+    pub(crate) const fn ffi_code(self) -> i32 {
+        match self {
+            Self::OneD => 0,
+            Self::Mrope3D => 1,
+        }
+    }
+}
+
+/// Static-bucket positions retained with their explicit semantic mode.
+#[derive(Debug)]
+pub(crate) enum PreparedIreePositions {
+    OneD(Vec<i32>),
+    Mrope3D {
+        /// Row-major `[3, context_capacity]`, ordered temporal/height/width.
+        values: Vec<i32>,
+        rope_delta: i32,
+    },
+}
+
+impl PreparedIreePositions {
+    pub(crate) const fn mode(&self) -> PreparedPositionMode {
+        match self {
+            Self::OneD(_) => PreparedPositionMode::OneD,
+            Self::Mrope3D { .. } => PreparedPositionMode::Mrope3D,
+        }
+    }
+
+    pub(crate) fn values(&self) -> &[i32] {
+        match self {
+            Self::OneD(values) | Self::Mrope3D { values, .. } => values,
+        }
+    }
+
+    pub(crate) const fn rope_delta(&self) -> i32 {
+        match self {
+            Self::OneD(_) => 0,
+            Self::Mrope3D { rope_delta, .. } => *rope_delta,
+        }
+    }
+}
+
 /// A validated prepared prefill in the exact static shapes consumed by IREE.
 #[derive(Debug)]
 pub(crate) struct PreparedIreePrefill {
     pub(crate) token_ids: Vec<i32>,
     pub(crate) embeddings: Vec<f32>,
-    pub(crate) positions: Vec<i32>,
+    pub(crate) positions: PreparedIreePositions,
     pub(crate) attention_bias: Vec<f32>,
     pub(crate) effective_len: usize,
     pub(crate) hidden_size: usize,
@@ -58,7 +114,19 @@ pub enum PreparedInputError {
         expected: usize,
     },
     PositionDType(PreparedTensorDType),
-    PositionShape(Vec<usize>),
+    PositionShape {
+        shape: Vec<usize>,
+        expected: Vec<usize>,
+    },
+    PositionModeMismatch {
+        expected: PreparedPositionMode,
+        actual: PreparedPositionMode,
+    },
+    NegativePosition {
+        axis: usize,
+        index: usize,
+        value: i32,
+    },
     UnsupportedPositions,
     AttentionBiasDType(PreparedTensorDType),
     AttentionBiasShape(Vec<usize>),
@@ -107,9 +175,23 @@ impl fmt::Display for PreparedInputError {
             Self::PositionDType(dtype) => {
                 write!(f, "IREE prepared positions must be Int32, got {dtype:?}")
             }
-            Self::PositionShape(shape) => write!(
+            Self::PositionShape { shape, expected } => write!(
                 f,
-                "prepared explicit positions shape {shape:?} must be [sequence] or [1, sequence]"
+                "prepared explicit positions shape {shape:?} must be {expected:?}"
+            ),
+            Self::PositionModeMismatch { expected, actual } => write!(
+                f,
+                "prepared position mode {} disagrees with loaded model mode {}",
+                actual.name(),
+                expected.name()
+            ),
+            Self::NegativePosition {
+                axis,
+                index,
+                value,
+            } => write!(
+                f,
+                "prepared M-RoPE position axis {axis} index {index} is negative ({value})"
             ),
             Self::UnsupportedPositions => f.write_str(
                 "IREE prepared positions must be the dense zero-based sequence; M-RoPE/offset positions are not supported",
@@ -138,6 +220,54 @@ impl fmt::Display for PreparedInputError {
 }
 
 impl std::error::Error for PreparedInputError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MropeCoordinateError {
+    Overflow { cache_len: i32, rope_delta: i32 },
+    Negative { cache_len: i32, rope_delta: i32 },
+}
+
+impl fmt::Display for MropeCoordinateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Overflow {
+                cache_len,
+                rope_delta,
+            } => write!(
+                f,
+                "M-RoPE decode coordinate overflow: cache_len={cache_len}, rope_delta={rope_delta}"
+            ),
+            Self::Negative {
+                cache_len,
+                rope_delta,
+            } => write!(
+                f,
+                "M-RoPE decode coordinate is negative: cache_len={cache_len}, rope_delta={rope_delta}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MropeCoordinateError {}
+
+pub(crate) fn mrope_decode_coordinate(
+    cache_len: i32,
+    rope_delta: i32,
+) -> Result<i32, MropeCoordinateError> {
+    let coordinate = cache_len
+        .checked_add(rope_delta)
+        .ok_or(MropeCoordinateError::Overflow {
+            cache_len,
+            rope_delta,
+        })?;
+    if coordinate < 0 {
+        return Err(MropeCoordinateError::Negative {
+            cache_len,
+            rope_delta,
+        });
+    }
+    Ok(coordinate)
+}
 
 pub(crate) fn validate_slot(slot: usize, slot_count: usize) -> Result<(), PreparedInputError> {
     if slot >= slot_count {
@@ -190,6 +320,20 @@ impl PreparedIreePrefill {
         hidden_size: usize,
         context_capacity: usize,
     ) -> Result<Self, PreparedInputError> {
+        Self::prepare_for_mode(
+            value,
+            hidden_size,
+            context_capacity,
+            PreparedPositionMode::OneD,
+        )
+    }
+
+    pub(crate) fn prepare_for_mode(
+        value: &PreparedPrefill,
+        hidden_size: usize,
+        context_capacity: usize,
+        expected_mode: PreparedPositionMode,
+    ) -> Result<Self, PreparedInputError> {
         let effective_len = value.sequence_len;
         if effective_len == 0 {
             return Err(PreparedInputError::Empty);
@@ -239,34 +383,111 @@ impl PreparedIreePrefill {
         let mut embeddings = vec![0.0; embedding_count];
         embeddings[..input_embeddings.len()].copy_from_slice(&input_embeddings);
 
-        let mut positions: Vec<i32> = (0..context_capacity)
+        let sequential: Vec<i32> = (0..context_capacity)
             .map(|position| i32::try_from(position).map_err(|_| PreparedInputError::ShapeOverflow))
             .collect::<Result<_, _>>()?;
-        match &value.positions {
-            PreparedPositions::Sequential { start, length } => {
+        let validate_1d = |tensor: &OwnedTensor| -> Result<Vec<i32>, PreparedInputError> {
+            if tensor.dtype != PreparedTensorDType::Int32 {
+                return Err(PreparedInputError::PositionDType(tensor.dtype));
+            }
+            if tensor.shape != [effective_len] && tensor.shape != [1, effective_len] {
+                return Err(PreparedInputError::PositionShape {
+                    shape: tensor.shape.clone(),
+                    expected: vec![effective_len],
+                });
+            }
+            let explicit = read_i32("positions", tensor)?;
+            if explicit
+                .iter()
+                .enumerate()
+                .any(|(index, &position)| position != index as i32)
+            {
+                return Err(PreparedInputError::UnsupportedPositions);
+            }
+            Ok(explicit)
+        };
+        let positions = match (expected_mode, &value.positions) {
+            (PreparedPositionMode::OneD, PreparedPositions::Sequential { start, length }) => {
                 if *start != 0 || *length != effective_len {
                     return Err(PreparedInputError::UnsupportedPositions);
                 }
+                PreparedIreePositions::OneD(sequential)
             }
-            PreparedPositions::Explicit(tensor) => {
+            (PreparedPositionMode::OneD, PreparedPositions::Explicit(tensor)) => {
+                let explicit = validate_1d(tensor)?;
+                let mut positions = sequential;
+                positions[..effective_len].copy_from_slice(&explicit);
+                PreparedIreePositions::OneD(positions)
+            }
+            (PreparedPositionMode::OneD, PreparedPositions::Mrope3D { .. }) => {
+                return Err(PreparedInputError::PositionModeMismatch {
+                    expected: PreparedPositionMode::OneD,
+                    actual: PreparedPositionMode::Mrope3D,
+                });
+            }
+            (PreparedPositionMode::Mrope3D, PreparedPositions::Sequential { start, length }) => {
+                if *start != 0 || *length != effective_len {
+                    return Err(PreparedInputError::UnsupportedPositions);
+                }
+                let mut values = Vec::with_capacity(3 * context_capacity);
+                for _ in 0..3 {
+                    values.extend_from_slice(&sequential);
+                }
+                PreparedIreePositions::Mrope3D {
+                    values,
+                    rope_delta: 0,
+                }
+            }
+            (PreparedPositionMode::Mrope3D, PreparedPositions::Explicit(tensor)) => {
+                let explicit = validate_1d(tensor)?;
+                let mut values = Vec::with_capacity(3 * context_capacity);
+                for _ in 0..3 {
+                    let mut axis = sequential.clone();
+                    axis[..effective_len].copy_from_slice(&explicit);
+                    values.extend(axis);
+                }
+                PreparedIreePositions::Mrope3D {
+                    values,
+                    rope_delta: 0,
+                }
+            }
+            (PreparedPositionMode::Mrope3D, PreparedPositions::Mrope3D { tensor, rope_delta }) => {
                 if tensor.dtype != PreparedTensorDType::Int32 {
                     return Err(PreparedInputError::PositionDType(tensor.dtype));
                 }
-                if tensor.shape != [effective_len] && tensor.shape != [1, effective_len] {
-                    return Err(PreparedInputError::PositionShape(tensor.shape.clone()));
+                if tensor.shape != [3, effective_len] {
+                    return Err(PreparedInputError::PositionShape {
+                        shape: tensor.shape.clone(),
+                        expected: vec![3, effective_len],
+                    });
                 }
                 let explicit = read_i32("positions", tensor)?;
-                if explicit
+                if let Some((flat_index, &position)) = explicit
                     .iter()
                     .enumerate()
-                    .any(|(index, &position)| position != index as i32)
+                    .find(|(_, position)| **position < 0)
                 {
-                    return Err(PreparedInputError::UnsupportedPositions);
+                    return Err(PreparedInputError::NegativePosition {
+                        axis: flat_index / effective_len,
+                        index: flat_index % effective_len,
+                        value: position,
+                    });
                 }
-                positions[..effective_len].copy_from_slice(&explicit);
+                let mut values = Vec::with_capacity(3 * context_capacity);
+                for axis in 0..3 {
+                    let mut padded = sequential.clone();
+                    let start = axis * effective_len;
+                    padded[..effective_len]
+                        .copy_from_slice(&explicit[start..start + effective_len]);
+                    values.extend(padded);
+                }
+                PreparedIreePositions::Mrope3D {
+                    values,
+                    rope_delta: *rope_delta,
+                }
             }
             _ => return Err(PreparedInputError::UnsupportedPositions),
-        }
+        };
 
         let bias_tensor = &value.attention_bias.tensor;
         if bias_tensor.dtype != PreparedTensorDType::Float32 {
@@ -356,6 +577,35 @@ mod tests {
         .unwrap()
     }
 
+    fn mrope_fixture(axes: [&[i32]; 3], rope_delta: i32) -> PreparedPrefill {
+        let sequence_len = axes[0].len();
+        assert!(axes.iter().all(|axis| axis.len() == sequence_len));
+        let coordinates = axes
+            .into_iter()
+            .flat_map(|axis| axis.iter().copied())
+            .flat_map(i32::to_le_bytes)
+            .collect();
+        PreparedPrefill::new(
+            vec![1; sequence_len],
+            tensor_f32(&[1, sequence_len, 2], vec![0.25; sequence_len * 2]),
+            PreparedPositions::Mrope3D {
+                tensor: OwnedTensor::new(
+                    coordinates,
+                    PreparedTensorDType::Int32,
+                    vec![3, sequence_len],
+                )
+                .unwrap(),
+                rope_delta,
+            },
+            PreparedAttentionBias {
+                tensor: tensor_f32(&[1, 1, 1, sequence_len], vec![0.0; sequence_len]),
+                causal: true,
+            },
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn materializes_static_shapes_and_causal_bias() {
         let prepared = PreparedIreePrefill::prepare(&fixture(), 2, 5).unwrap();
@@ -363,7 +613,10 @@ mod tests {
         assert_eq!(prepared.token_ids, [11, 22, 33]);
         assert_eq!(prepared.embeddings.len(), 10);
         assert_eq!(&prepared.embeddings[..6], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        assert_eq!(&prepared.positions, &[0, 1, 2, 3, 4]);
+        assert!(matches!(
+            prepared.positions,
+            PreparedIreePositions::OneD(ref values) if values == &[0, 1, 2, 3, 4]
+        ));
         assert_eq!(prepared.attention_bias[0], 0.0);
         assert_eq!(prepared.attention_bias[1], MASKED_VALUE);
         assert_eq!(prepared.attention_bias[2 * 5 + 2], 0.0);
@@ -464,5 +717,147 @@ mod tests {
             PreparedIreePrefill::prepare(&value, 2, 5),
             Err(PreparedInputError::InvalidFloat { .. })
         ));
+    }
+
+    #[test]
+    fn canonicalizes_mrope_axes_and_preserves_signed_delta() {
+        let mut value = fixture();
+        value.positions = PreparedPositions::Mrope3D {
+            tensor: OwnedTensor::new(
+                [0i32, 1, 2, 0, 4, 5, 0, 6, 7]
+                    .into_iter()
+                    .flat_map(i32::to_le_bytes)
+                    .collect(),
+                PreparedTensorDType::Int32,
+                vec![3, 3],
+            )
+            .unwrap(),
+            rope_delta: -4,
+        };
+
+        let prepared =
+            PreparedIreePrefill::prepare_for_mode(&value, 2, 5, PreparedPositionMode::Mrope3D)
+                .unwrap();
+        assert_eq!(prepared.positions.rope_delta(), -4);
+        assert_eq!(
+            prepared.positions.values(),
+            &[0, 1, 2, 3, 4, 0, 4, 5, 3, 4, 0, 6, 7, 3, 4]
+        );
+    }
+
+    #[test]
+    fn rejects_mrope_payload_for_one_dimensional_bundle() {
+        let mut value = fixture();
+        value.positions = PreparedPositions::Mrope3D {
+            tensor: OwnedTensor::new(vec![0; 3 * 3 * 4], PreparedTensorDType::Int32, vec![3, 3])
+                .unwrap(),
+            rope_delta: 0,
+        };
+        assert!(matches!(
+            PreparedIreePrefill::prepare(&value, 2, 5),
+            Err(PreparedInputError::PositionModeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn ports_qwen_text_image_multi_image_video_and_padding_coordinates() {
+        // These row-major fixtures are the direct outputs of the existing MLX
+        // Qwen `compute_rope_index` walk for merge=1. Padding fixtures pin the
+        // explicit prepared-input convention supported by this backend seam.
+        let fixtures: Vec<(&str, [&[i32]; 3], i32)> = vec![
+            (
+                "text-only",
+                [&[0, 1, 2, 3, 4], &[0, 1, 2, 3, 4], &[0, 1, 2, 3, 4]],
+                0,
+            ),
+            (
+                "one-image-1x2x2",
+                [
+                    &[0, 1, 2, 2, 2, 2, 4],
+                    &[0, 1, 2, 2, 3, 3, 4],
+                    &[0, 1, 2, 3, 2, 3, 4],
+                ],
+                -2,
+            ),
+            (
+                "multiple-images",
+                [
+                    &[0, 1, 1, 3, 4, 4, 6],
+                    &[0, 1, 1, 3, 4, 5, 6],
+                    &[0, 1, 2, 3, 4, 4, 6],
+                ],
+                0,
+            ),
+            (
+                "video-2x1x2",
+                [
+                    &[0, 1, 1, 2, 2, 3],
+                    &[0, 1, 1, 1, 1, 3],
+                    &[0, 1, 2, 1, 2, 3],
+                ],
+                -2,
+            ),
+            (
+                "left-padding",
+                [&[0, 0, 0, 1, 2], &[0, 0, 0, 1, 2], &[0, 0, 0, 1, 2]],
+                -2,
+            ),
+            (
+                "right-padding",
+                [&[0, 1, 2, 0, 0], &[0, 1, 2, 0, 0], &[0, 1, 2, 0, 0]],
+                -2,
+            ),
+        ];
+
+        for (name, axes, delta) in fixtures {
+            let sequence_len = axes[0].len();
+            let prepared = PreparedIreePrefill::prepare_for_mode(
+                &mrope_fixture(axes, delta),
+                2,
+                sequence_len + 2,
+                PreparedPositionMode::Mrope3D,
+            )
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(prepared.positions.rope_delta(), delta, "{name}");
+            for (axis, expected) in axes.iter().enumerate() {
+                let start = axis * (sequence_len + 2);
+                assert_eq!(
+                    &prepared.positions.values()[start..start + sequence_len],
+                    *expected,
+                    "{name} axis {axis}"
+                );
+            }
+        }
+
+        let long = (0..2048).collect::<Vec<i32>>();
+        let prepared = PreparedIreePrefill::prepare_for_mode(
+            &mrope_fixture([&long, &long, &long], 17),
+            2,
+            2050,
+            PreparedPositionMode::Mrope3D,
+        )
+        .expect("long M-RoPE fixture");
+        assert_eq!(&prepared.positions.values()[..2048], long);
+        assert_eq!(prepared.positions.rope_delta(), 17);
+    }
+
+    #[test]
+    fn decode_coordinate_supports_signed_deltas_and_typed_failures() {
+        assert_eq!(mrope_decode_coordinate(12, -5), Ok(7));
+        assert_eq!(mrope_decode_coordinate(12, 5), Ok(17));
+        assert_eq!(
+            mrope_decode_coordinate(2, -3),
+            Err(MropeCoordinateError::Negative {
+                cache_len: 2,
+                rope_delta: -3,
+            })
+        );
+        assert_eq!(
+            mrope_decode_coordinate(i32::MAX, 1),
+            Err(MropeCoordinateError::Overflow {
+                cache_len: i32::MAX,
+                rope_delta: 1,
+            })
+        );
     }
 }

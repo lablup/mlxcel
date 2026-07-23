@@ -114,3 +114,53 @@ fn prepared_prefill_rejects_floating_point_explicit_positions() {
         PreparedPrefillError::PositionDType(PreparedTensorDType::Float32)
     );
 }
+
+#[test]
+fn prepared_prefill_keeps_mrope_mode_and_signed_delta_explicit() {
+    let prepared = PreparedPrefill::new(
+        vec![1, 2, 3],
+        zeros(PreparedTensorDType::Float16, &[1, 3, 4]),
+        PreparedPositions::Mrope3D {
+            tensor: zeros(PreparedTensorDType::Int32, &[3, 3]),
+            rope_delta: -2,
+        },
+        PreparedAttentionBias {
+            tensor: zeros(PreparedTensorDType::Float32, &[1, 1, 1, 3]),
+            causal: true,
+        },
+        Vec::new(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        prepared.positions,
+        PreparedPositions::Mrope3D { rope_delta: -2, .. }
+    ));
+}
+
+#[test]
+fn prepared_prefill_rejects_missing_or_extra_mrope_axes() {
+    for axes in [2, 4] {
+        let error = PreparedPrefill::new(
+            vec![1, 2, 3],
+            zeros(PreparedTensorDType::Float16, &[1, 3, 4]),
+            PreparedPositions::Mrope3D {
+                tensor: zeros(PreparedTensorDType::Int32, &[axes, 3]),
+                rope_delta: 0,
+            },
+            PreparedAttentionBias {
+                tensor: zeros(PreparedTensorDType::Float32, &[1, 1, 1, 3]),
+                causal: true,
+            },
+            Vec::new(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            PreparedPrefillError::MropePositionShape {
+                shape: vec![axes, 3],
+                sequence_len: 3,
+            }
+        );
+    }
+}

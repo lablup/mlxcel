@@ -100,6 +100,9 @@ typedef struct xla_ctx {
   int32_t n_weights;
   int32_t context_capacity;
   int32_t hidden_size;
+  // Explicit position ABI selected when the bundle is created:
+  // 0 = scalar/1D RoPE, 1 = M-RoPE temporal/height/width coordinates.
+  int32_t position_mode;
   // 0 = ordinary `prefill_embeddings.main`, 1 = Gemma3n's distinct
   // `prefill_embeddings_ple.main` with a rank-3 dense PLE argument.
   int32_t prefill_embeddings_kind;
@@ -309,12 +312,17 @@ static iree_status_t xla_llama_create_impl(
     const void* const* weight_data,
     const int32_t* weight_dtypes, const int32_t* weight_ranks,
     const int64_t* weight_dims, int32_t context_capacity,
-    int32_t hidden_size, int32_t prefill_embeddings_kind,
+    int32_t hidden_size, int32_t position_mode,
+    int32_t prefill_embeddings_kind,
     int32_t dense_ple_layers, int32_t dense_ple_hidden) {
   if (context_capacity <= 0 || hidden_size <= 0 ||
       compatibility_fingerprint == 0) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "bundle fingerprint, context_capacity, and hidden_size must be positive");
+  }
+  if (position_mode != 0 && position_mode != 1) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "position_mode must be 0 (1D) or 1 (M-RoPE 3D)");
   }
   if ((prefill_embeddings_kind != 0 && prefill_embeddings_kind != 1) ||
       (prefill_embeddings_kind == 0 &&
@@ -328,6 +336,7 @@ static iree_status_t xla_llama_create_impl(
   c->n_weights = n_weights;
   c->context_capacity = context_capacity;
   c->hidden_size = hidden_size;
+  c->position_mode = position_mode;
   c->compatibility_fingerprint = compatibility_fingerprint;
   c->prefill_embeddings_kind = prefill_embeddings_kind;
   c->dense_ple_layers = dense_ple_layers;
@@ -447,6 +456,7 @@ xla_ctx* xla_llama_create(const char* device_uri, const char* prefill_vmfb,
                           const int32_t* weight_ranks,
                           const int64_t* weight_dims,
                           int32_t context_capacity, int32_t hidden_size,
+                          int32_t position_mode,
                           int32_t prefill_embeddings_kind,
                           int32_t dense_ple_layers,
                           int32_t dense_ple_hidden) {
@@ -459,6 +469,7 @@ xla_ctx* xla_llama_create(const char* device_uri, const char* prefill_vmfb,
                             compatibility_fingerprint, n_weights, weight_data,
                             weight_dtypes, weight_ranks, weight_dims,
                             context_capacity, hidden_size,
+                            position_mode,
                             prefill_embeddings_kind, dense_ple_layers,
                             dense_ple_hidden);
   if (!iree_status_is_ok(s)) {
@@ -474,7 +485,8 @@ xla_ctx* xla_llama_create(const char* device_uri, const char* prefill_vmfb,
   return c;
 }
 
-// prefill: tokens[lp], positions[lp], real_len -> first token id; the returned
+// prefill: tokens[lp], positions[lp] or positions[3, lp], real_len -> first token
+// id; the returned
 // KV cache becomes the resident cache decode threads forward.
 int xla_llama_prefill(xla_ctx* c, const int32_t* tokens, int32_t lp,
                       const int32_t* positions, int32_t real_len,
@@ -493,14 +505,19 @@ int xla_llama_prefill(xla_ctx* c, const int32_t* tokens, int32_t lp,
         iree_runtime_call_inputs_push_back_buffer_view(&call, c->weights[i]));
   }
   iree_hal_dim_t seq_shape[1] = {(iree_hal_dim_t)lp};
+  iree_hal_dim_t position_shape[2] = {3, (iree_hal_dim_t)lp};
   iree_host_size_t seq_bytes = (iree_host_size_t)lp * sizeof(int32_t);
+  iree_host_size_t position_bytes =
+      seq_bytes * (c->position_mode == 1 ? 3 : 1);
   iree_hal_buffer_view_t* tok_bv = NULL;
   iree_hal_buffer_view_t* pos_bv = NULL;
   iree_hal_buffer_view_t* len_bv = NULL;
   XLA_CHECK(xla_alloc_bv(c, 1, seq_shape, IREE_HAL_ELEMENT_TYPE_INT_32, tokens,
                          seq_bytes, &tok_bv));
-  XLA_CHECK(xla_alloc_bv(c, 1, seq_shape, IREE_HAL_ELEMENT_TYPE_INT_32,
-                         positions, seq_bytes, &pos_bv));
+  XLA_CHECK(xla_alloc_bv(c, c->position_mode == 1 ? 2 : 1,
+                         c->position_mode == 1 ? position_shape : seq_shape,
+                         IREE_HAL_ELEMENT_TYPE_INT_32, positions,
+                         position_bytes, &pos_bv));
   XLA_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32, &real_len,
                          sizeof(int32_t), &len_bv));
   XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, tok_bv));
@@ -540,16 +557,26 @@ int xla_llama_prefill(xla_ctx* c, const int32_t* tokens, int32_t lp,
   return 0;
 }
 
-// decode_step: token, pos, cache_len + resident KV -> next token id; advances
-// the resident KV cache in place.
-int xla_llama_decode(xla_ctx* c, int32_t token, int32_t pos, int32_t cache_len,
-                     int32_t* out_token) {
-  if (!c->kcache || !c->vcache || pos != cache_len || pos < 0 ||
-      pos >= c->context_capacity) {
+// Shared decode implementation. `position_mode` is an explicit ABI contract,
+// never inferred from the position buffer rank.
+static int xla_llama_decode_impl(xla_ctx* c, int32_t token,
+                                 const int32_t* positions,
+                                 int32_t position_mode, int32_t cache_len,
+                                 int32_t* out_token) {
+  if (!c->kcache || !c->vcache || c->position_mode != position_mode ||
+      cache_len < 0 || cache_len >= c->context_capacity) {
     fprintf(stderr,
-            "xla_llama_decode: pos=%d cache_len=%d context_capacity=%d or KV is uninitialized\n",
-            pos, cache_len, c->context_capacity);
+            "xla_llama_decode: mode=%d bundle_mode=%d cache_len=%d context_capacity=%d or KV is uninitialized\n",
+            position_mode, c->position_mode, cache_len, c->context_capacity);
     return 1;
+  }
+  int32_t position_count = position_mode == 1 ? 3 : 1;
+  for (int32_t axis = 0; axis < position_count; ++axis) {
+    if (positions[axis] < 0) {
+      fprintf(stderr, "xla_llama_decode: position axis %d is negative (%d)\n",
+              axis, positions[axis]);
+      return 1;
+    }
   }
   iree_runtime_call_t call;
   XLA_CHECK(iree_runtime_call_initialize_by_name(
@@ -563,8 +590,12 @@ int xla_llama_decode(xla_ctx* c, int32_t token, int32_t pos, int32_t cache_len,
   iree_hal_buffer_view_t* len_bv = NULL;
   XLA_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32, &token,
                          sizeof(int32_t), &tok_bv));
-  XLA_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32, &pos,
-                         sizeof(int32_t), &pos_bv));
+  iree_hal_dim_t position_shape[1] = {3};
+  XLA_CHECK(xla_alloc_bv(c, position_mode == 1 ? 1 : 0,
+                         position_mode == 1 ? position_shape : NULL,
+                         IREE_HAL_ELEMENT_TYPE_INT_32, positions,
+                         (iree_host_size_t)position_count * sizeof(int32_t),
+                         &pos_bv));
   XLA_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32, &cache_len,
                          sizeof(int32_t), &len_bv));
   XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, tok_bv));
@@ -608,6 +639,17 @@ int xla_llama_decode(xla_ctx* c, int32_t token, int32_t pos, int32_t cache_len,
   iree_hal_buffer_view_release(old_k);
   iree_hal_buffer_view_release(old_v);
   return 0;
+}
+
+int xla_llama_decode(xla_ctx* c, int32_t token, int32_t pos,
+                     int32_t cache_len, int32_t* out_token) {
+  return xla_llama_decode_impl(c, token, &pos, 0, cache_len, out_token);
+}
+
+int xla_llama_decode_mrope(xla_ctx* c, int32_t token,
+                           const int32_t positions[3], int32_t cache_len,
+                           int32_t* out_token) {
+  return xla_llama_decode_impl(c, token, positions, 1, cache_len, out_token);
 }
 
 // ===========================================================================
@@ -762,14 +804,19 @@ int xla_llama_prefill_slot_logits(xla_ctx* c, int32_t slot, const int32_t* token
         iree_runtime_call_inputs_push_back_buffer_view(&call, c->weights[i]));
   }
   iree_hal_dim_t seq_shape[1] = {(iree_hal_dim_t)lp};
+  iree_hal_dim_t position_shape[2] = {3, (iree_hal_dim_t)lp};
   iree_host_size_t seq_bytes = (iree_host_size_t)lp * sizeof(int32_t);
+  iree_host_size_t position_bytes =
+      seq_bytes * (c->position_mode == 1 ? 3 : 1);
   iree_hal_buffer_view_t* tok_bv = NULL;
   iree_hal_buffer_view_t* pos_bv = NULL;
   iree_hal_buffer_view_t* len_bv = NULL;
   XLA_CHECK(xla_alloc_bv(c, 1, seq_shape, IREE_HAL_ELEMENT_TYPE_INT_32, tokens,
                          seq_bytes, &tok_bv));
-  XLA_CHECK(xla_alloc_bv(c, 1, seq_shape, IREE_HAL_ELEMENT_TYPE_INT_32, positions,
-                         seq_bytes, &pos_bv));
+  XLA_CHECK(xla_alloc_bv(c, c->position_mode == 1 ? 2 : 1,
+                         c->position_mode == 1 ? position_shape : seq_shape,
+                         IREE_HAL_ELEMENT_TYPE_INT_32, positions,
+                         position_bytes, &pos_bv));
   XLA_CHECK(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32, &real_len,
                          sizeof(int32_t), &len_bv));
   XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, tok_bv));
@@ -898,25 +945,31 @@ cleanup:
 }
 
 static int xla_llama_prefill_embeddings_impl(
-    xla_ctx* c, int32_t slot, const xla_tensor_desc* embeddings,
+    xla_ctx* c, int32_t slot, int32_t position_mode,
+    const xla_tensor_desc* embeddings,
     const xla_tensor_desc* dense_ple,
     const xla_tensor_desc* positions, const xla_tensor_desc* attention_bias,
     int32_t real_len, int32_t vocab, int32_t* out_token, float* out_logits) {
-  if (!c || real_len <= 0 || real_len > c->context_capacity) {
+  if (!c || real_len <= 0 || real_len > c->context_capacity ||
+      position_mode != c->position_mode) {
     fprintf(stderr,
-            "xla_llama_prefill_embeddings: real_len=%d context_capacity=%d\n",
-            real_len, c ? c->context_capacity : 0);
+            "xla_llama_prefill_embeddings: real_len=%d context_capacity=%d mode=%d bundle_mode=%d\n",
+            real_len, c ? c->context_capacity : 0, position_mode,
+            c ? c->position_mode : -1);
     return 1;
   }
   int64_t embeddings_dims[2] = {c->context_capacity, c->hidden_size};
-  int64_t positions_dims[1] = {c->context_capacity};
+  int64_t positions_1d_dims[1] = {c->context_capacity};
+  int64_t positions_mrope_dims[2] = {3, c->context_capacity};
   int64_t bias_dims[2] = {c->context_capacity, c->context_capacity};
   int64_t dense_ple_dims[3] = {
       c->context_capacity, c->dense_ple_layers, c->dense_ple_hidden};
   if (xla_validate_tensor_desc("embeddings", embeddings, 0, 2,
                                embeddings_dims) != 0 ||
-      xla_validate_tensor_desc("positions", positions, 1, 1,
-                               positions_dims) != 0 ||
+      xla_validate_tensor_desc(
+          "positions", positions, 1, position_mode == 1 ? 2 : 1,
+          position_mode == 1 ? positions_mrope_dims : positions_1d_dims) !=
+          0 ||
       xla_validate_tensor_desc("attention_bias", attention_bias, 0, 2,
                                bias_dims) != 0) {
     return 1;
@@ -1031,63 +1084,77 @@ cleanup:
 }
 
 int xla_llama_prefill_embeddings(
-    xla_ctx* c, const xla_tensor_desc* embeddings,
+    xla_ctx* c, int32_t position_mode, const xla_tensor_desc* embeddings,
     const xla_tensor_desc* positions, const xla_tensor_desc* attention_bias,
     int32_t real_len, int32_t* out_token) {
   return xla_llama_prefill_embeddings_impl(
-      c, -1, embeddings, NULL, positions, attention_bias, real_len, 0, out_token,
-      NULL);
+      c, -1, position_mode, embeddings, NULL, positions, attention_bias,
+      real_len, 0, out_token, NULL);
 }
 
 int xla_llama_prefill_embeddings_slot_logits(
-    xla_ctx* c, int32_t slot, const xla_tensor_desc* embeddings,
+    xla_ctx* c, int32_t slot, int32_t position_mode,
+    const xla_tensor_desc* embeddings,
     const xla_tensor_desc* positions, const xla_tensor_desc* attention_bias,
     int32_t real_len, int32_t vocab, float* out_logits) {
   return xla_llama_prefill_embeddings_impl(
-      c, slot, embeddings, NULL, positions, attention_bias, real_len, vocab, NULL,
-      out_logits);
+      c, slot, position_mode, embeddings, NULL, positions, attention_bias,
+      real_len, vocab, NULL, out_logits);
 }
 
 int xla_llama_prefill_embeddings_ple(
-    xla_ctx* c, const xla_tensor_desc* embeddings,
+    xla_ctx* c, int32_t position_mode, const xla_tensor_desc* embeddings,
     const xla_tensor_desc* dense_ple, const xla_tensor_desc* positions,
     const xla_tensor_desc* attention_bias, int32_t real_len,
     int32_t* out_token) {
   return xla_llama_prefill_embeddings_impl(
-      c, -1, embeddings, dense_ple, positions, attention_bias, real_len, 0,
-      out_token, NULL);
+      c, -1, position_mode, embeddings, dense_ple, positions, attention_bias,
+      real_len, 0, out_token, NULL);
 }
 
 int xla_llama_prefill_embeddings_ple_slot_logits(
-    xla_ctx* c, int32_t slot, const xla_tensor_desc* embeddings,
+    xla_ctx* c, int32_t slot, int32_t position_mode,
+    const xla_tensor_desc* embeddings,
     const xla_tensor_desc* dense_ple, const xla_tensor_desc* positions,
     const xla_tensor_desc* attention_bias, int32_t real_len, int32_t vocab,
     float* out_logits) {
   return xla_llama_prefill_embeddings_impl(
-      c, slot, embeddings, dense_ple, positions, attention_bias, real_len,
-      vocab, NULL, out_logits);
+      c, slot, position_mode, embeddings, dense_ple, positions, attention_bias,
+      real_len, vocab, NULL, out_logits);
 }
 
 // Ragged decode_step: token[B], pos[B], cache_len[B] (per row), rank-5 KV ->
 // `[B, vocab]` LOGITS (copied to host `out_logits`); advances the resident rank-5
 // KV in place. The caller (engine) samples a token per row. Inactive rows
 // (token/pos/cache_len 0) are masked no-ops whose logits the caller discards.
-int xla_llama_decode_ragged_logits(xla_ctx* c, int32_t bsz, const int32_t* tokens,
-                                   const int32_t* pos, const int32_t* cache_len,
-                                   int32_t vocab, float* out_logits) {
-  if (bsz != c->rg_bsz || !c->kcache_b || !c->vcache_b) {
+static int xla_llama_decode_ragged_impl(
+    xla_ctx* c, int32_t bsz, const int32_t* tokens,
+    const int32_t* positions, int32_t position_mode,
+    const int32_t* cache_len, int32_t vocab, float* out_logits) {
+  if (bsz != c->rg_bsz || !c->kcache_b || !c->vcache_b ||
+      c->position_mode != position_mode) {
     fprintf(stderr,
-            "xla_llama_decode_ragged_logits: bsz=%d configured=%d or KV is uninitialized\n",
-            bsz, c->rg_bsz);
+            "xla_llama_decode_ragged_logits: bsz=%d configured=%d mode=%d bundle_mode=%d or KV is uninitialized\n",
+            bsz, c->rg_bsz, position_mode, c->position_mode);
     return 1;
   }
   for (int32_t i = 0; i < bsz; ++i) {
-    if (pos[i] != cache_len[i] || pos[i] < 0 ||
-        pos[i] >= c->context_capacity) {
+    if (cache_len[i] < 0 || cache_len[i] >= c->context_capacity) {
       fprintf(stderr,
-              "xla_llama_decode_ragged_logits: row=%d pos=%d cache_len=%d context_capacity=%d\n",
-              i, pos[i], cache_len[i], c->context_capacity);
+              "xla_llama_decode_ragged_logits: row=%d cache_len=%d context_capacity=%d\n",
+              i, cache_len[i], c->context_capacity);
       return 1;
+    }
+    int32_t position_count = position_mode == 1 ? 3 : 1;
+    for (int32_t axis = 0; axis < position_count; ++axis) {
+      int32_t coordinate = positions[i * position_count + axis];
+      if (coordinate < 0 ||
+          (position_mode == 0 && coordinate != cache_len[i])) {
+        fprintf(stderr,
+                "xla_llama_decode_ragged_logits: row=%d axis=%d coordinate=%d cache_len=%d\n",
+                i, axis, coordinate, cache_len[i]);
+        return 1;
+      }
     }
   }
   iree_runtime_call_t call;
@@ -1098,14 +1165,19 @@ int xla_llama_decode_ragged_logits(xla_ctx* c, int32_t bsz, const int32_t* token
         iree_runtime_call_inputs_push_back_buffer_view(&call, c->weights[i]));
   }
   iree_hal_dim_t vshape[1] = {(iree_hal_dim_t)bsz};
+  iree_hal_dim_t position_shape[2] = {(iree_hal_dim_t)bsz, 3};
   iree_host_size_t vbytes = (iree_host_size_t)bsz * sizeof(int32_t);
+  iree_host_size_t position_bytes =
+      vbytes * (position_mode == 1 ? 3 : 1);
   iree_hal_buffer_view_t* tok_bv = NULL;
   iree_hal_buffer_view_t* pos_bv = NULL;
   iree_hal_buffer_view_t* len_bv = NULL;
   XLA_CHECK(xla_alloc_bv(c, 1, vshape, IREE_HAL_ELEMENT_TYPE_INT_32, tokens,
                          vbytes, &tok_bv));
-  XLA_CHECK(xla_alloc_bv(c, 1, vshape, IREE_HAL_ELEMENT_TYPE_INT_32, pos, vbytes,
-                         &pos_bv));
+  XLA_CHECK(xla_alloc_bv(c, position_mode == 1 ? 2 : 1,
+                         position_mode == 1 ? position_shape : vshape,
+                         IREE_HAL_ELEMENT_TYPE_INT_32, positions,
+                         position_bytes, &pos_bv));
   XLA_CHECK(xla_alloc_bv(c, 1, vshape, IREE_HAL_ELEMENT_TYPE_INT_32, cache_len,
                          vbytes, &len_bv));
   XLA_CHECK(iree_runtime_call_inputs_push_back_buffer_view(&call, tok_bv));
@@ -1151,6 +1223,23 @@ int xla_llama_decode_ragged_logits(xla_ctx* c, int32_t bsz, const int32_t* token
   iree_hal_buffer_view_release(old_k);
   iree_hal_buffer_view_release(old_v);
   return 0;
+}
+
+int xla_llama_decode_ragged_logits(xla_ctx* c, int32_t bsz,
+                                   const int32_t* tokens,
+                                   const int32_t* positions,
+                                   const int32_t* cache_len, int32_t vocab,
+                                   float* out_logits) {
+  return xla_llama_decode_ragged_impl(c, bsz, tokens, positions, 0, cache_len,
+                                      vocab, out_logits);
+}
+
+int xla_llama_decode_ragged_mrope_logits(
+    xla_ctx* c, int32_t bsz, const int32_t* tokens,
+    const int32_t* positions, const int32_t* cache_len, int32_t vocab,
+    float* out_logits) {
+  return xla_llama_decode_ragged_impl(c, bsz, tokens, positions, 1, cache_len,
+                                      vocab, out_logits);
 }
 
 void xla_llama_free(xla_ctx* c) {

@@ -79,6 +79,24 @@ pub struct QkNorm {
     pub one_plus: bool,
 }
 
+/// How the three temporal/height/width frequency sources are assigned to the
+/// rotary-frequency columns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MropeLayout {
+    /// Qwen2/Qwen2.5-VL: contiguous temporal, height, and width sections.
+    Chunked,
+    /// Qwen3-VL: the existing MLX step-3 axis-selection layout.
+    Interleaved,
+}
+
+/// Validated multimodal three-axis RoPE configuration.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MropeConfig {
+    /// Section widths over the half-rotary frequency dimension, ordered T/H/W.
+    pub sections: [usize; 3],
+    pub layout: MropeLayout,
+}
+
 /// The checkpoint tensor-naming scheme (issue #499). Almost every Llama-family
 /// checkpoint uses the standard HF layout
 /// (`model.layers.{i}.self_attn.q_proj.weight`, `model.embed_tokens.weight`,
@@ -227,6 +245,9 @@ pub struct Config {
     /// Per-layer NoPE mask (SmolLM3): `use_rope_layers[li] == false` skips RoPE on
     /// that layer (`no_rope_layers`). `None` applies RoPE on every layer.
     pub use_rope_layers: Option<Vec<bool>>,
+    /// Three-axis multimodal RoPE. `None` preserves the exact one-dimensional
+    /// prefill/decode schemas and emitted modules.
+    pub mrope: Option<MropeConfig>,
     /// Mixture-of-Experts FFN parameters (issues #500 / #501). `Some` for a MoE
     /// architecture (Mixtral, Qwen2-MoE, Qwen3-MoE, OLMoE); the FFN then routes the
     /// top-k of N experts instead of a dense MLP. `None` for a dense model, whose
@@ -341,6 +362,7 @@ impl Config {
             sliding_window: None,
             sliding_pattern: 2,
             use_rope_layers: None,
+            mrope: None,
             moe: None,
             weight_scheme: WeightScheme::Llama,
             layernorm: false,
@@ -877,7 +899,8 @@ impl Config {
         // When present, the supported schemes are llama3 (scaled) and, served as
         // plain RoPE, the `default` (identity) and in-context `dynamic` types;
         // anything else (e.g. yarn, which OLMo3 uses at full size) is a follow-up.
-        let rope = match v.get("rope_scaling") {
+        let rope_scaling = v.get("rope_scaling");
+        let rope = match rope_scaling {
             None | Some(serde_json::Value::Null) => RopeScaling::Plain,
             Some(scaling) => {
                 let rope_type = scaling
@@ -890,7 +913,7 @@ impl Config {
                     // rescales beyond it, so short / in-context generation is served
                     // as plain RoPE here (both use `rope_theta`); the long-context
                     // NTK rescale is a follow-up.
-                    Some("default") | Some("dynamic") => RopeScaling::Plain,
+                    Some("default") | Some("dynamic") | Some("mrope") => RopeScaling::Plain,
                     Some("llama3") => {
                         let sf = |k: &str| -> Result<f64, String> {
                             scaling
@@ -924,6 +947,71 @@ impl Config {
                         ));
                     }
                 }
+            }
+        };
+
+        let mrope = match rope_scaling.and_then(|scaling| scaling.get("mrope_section")) {
+            None => None,
+            Some(section) => {
+                let values = section.as_array().ok_or_else(|| {
+                    "config.json rope_scaling.mrope_section must be an integer array".to_string()
+                })?;
+                if values.len() != 3 {
+                    return Err(format!(
+                        "config.json rope_scaling.mrope_section must contain exactly 3 T/H/W axes, got {}",
+                        values.len()
+                    ));
+                }
+                let mut sections = [0usize; 3];
+                for (axis, value) in values.iter().enumerate() {
+                    let width = value.as_u64().ok_or_else(|| {
+                        format!(
+                            "config.json rope_scaling.mrope_section[{axis}] must be a positive integer"
+                        )
+                    })?;
+                    sections[axis] = usize::try_from(width).map_err(|_| {
+                        format!("config.json rope_scaling.mrope_section[{axis}] does not fit usize")
+                    })?;
+                    if sections[axis] == 0 {
+                        return Err(format!(
+                            "config.json rope_scaling.mrope_section[{axis}] must be positive"
+                        ));
+                    }
+                }
+                let rotary_width = rotary_dim.unwrap_or(head_dim);
+                if rotary_width == 0 || !rotary_width.is_multiple_of(2) {
+                    return Err(format!(
+                        "M-RoPE rotary width {rotary_width} must be a positive even value"
+                    ));
+                }
+                let section_sum = sections.iter().try_fold(0usize, |sum, &width| {
+                    sum.checked_add(width)
+                        .ok_or_else(|| "M-RoPE section sum overflowed".to_string())
+                })?;
+                if section_sum != rotary_width / 2 {
+                    return Err(format!(
+                        "M-RoPE T/H/W sections {sections:?} sum to {section_sum}, expected rotary_width/2 = {}",
+                        rotary_width / 2
+                    ));
+                }
+                let supported_family = matches!(model_type, Some("qwen2") | Some("qwen3"));
+                if !supported_family {
+                    return Err(format!(
+                        "M-RoPE sections are only supported by the Qwen2/Qwen3 language backbone, got model_type={model_type:?}"
+                    ));
+                }
+                let interleaved = rope_scaling
+                    .and_then(|scaling| scaling.get("mrope_interleaved"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(model_type == Some("qwen3"));
+                Some(MropeConfig {
+                    sections,
+                    layout: if interleaved {
+                        MropeLayout::Interleaved
+                    } else {
+                        MropeLayout::Chunked
+                    },
+                })
             }
         };
 
@@ -1046,6 +1134,7 @@ impl Config {
             sliding_window,
             sliding_pattern,
             use_rope_layers,
+            mrope,
             moe,
             weight_scheme,
             layernorm,
@@ -1132,6 +1221,12 @@ impl Config {
     /// else the full `head_dim` (Llama family). Always even.
     pub fn rotary_width(&self) -> usize {
         self.rotary_dim.unwrap_or(self.head_dim)
+    }
+
+    /// Whether this runtime uses an explicit T/H/W position schema.
+    #[must_use]
+    pub fn uses_mrope(&self) -> bool {
+        self.mrope.is_some()
     }
 
     /// Gemma input-embedding normalizer `sqrt(hidden)` (computed in f64 then
@@ -1343,5 +1438,51 @@ mod tests {
                 .contains("model_type"),
             "unsupported model_type rejected"
         );
+    }
+
+    #[test]
+    fn parses_and_validates_explicit_mrope_sections() {
+        let base = |model_type: &str, section: &str, extra: &str| {
+            format!(
+                r#"{{"model_type":"{model_type}","hidden_size":12,"intermediate_size":24,
+                "num_hidden_layers":2,"num_attention_heads":2,"num_key_value_heads":1,
+                "head_dim":6,"rms_norm_eps":1e-6,"rope_theta":1e6,"vocab_size":16,
+                "tie_word_embeddings":true,"hidden_act":"silu","rope_scaling":{{
+                "rope_type":"mrope","mrope_section":{section}{extra}}}}}"#
+            )
+        };
+
+        let qwen2 =
+            Config::from_json_str(&base("qwen2", "[1,1,1]", "")).expect("Qwen2 M-RoPE parses");
+        assert_eq!(
+            qwen2.mrope,
+            Some(MropeConfig {
+                sections: [1, 1, 1],
+                layout: MropeLayout::Chunked,
+            })
+        );
+        let qwen3 = Config::from_json_str(&base("qwen3", "[1,1,1]", "")).expect("Qwen3 parses");
+        assert_eq!(
+            qwen3.mrope.unwrap().layout,
+            MropeLayout::Interleaved,
+            "Qwen3 defaults to its interleaved layout"
+        );
+        let forced =
+            Config::from_json_str(&base("qwen3", "[1,1,1]", ",\"mrope_interleaved\":false"))
+                .expect("explicit layout override parses");
+        assert_eq!(forced.mrope.unwrap().layout, MropeLayout::Chunked);
+
+        for (json, needle) in [
+            (base("qwen2", "[1,2]", ""), "exactly 3"),
+            (base("qwen2", "[1,1,0]", ""), "positive"),
+            (base("qwen2", "[1,1,2]", ""), "sum to"),
+            (base("llama", "[1,1,1]", ""), "Qwen2/Qwen3"),
+        ] {
+            let error = Config::from_json_str(&json).expect_err("invalid M-RoPE must fail");
+            assert!(
+                error.contains(needle),
+                "expected {needle:?} in validation error: {error}"
+            );
+        }
     }
 }

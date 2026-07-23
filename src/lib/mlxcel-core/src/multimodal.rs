@@ -98,9 +98,19 @@ impl OwnedTensor {
 pub enum PreparedPositions {
     /// Dense positions `start..start + length`, the LLaVA reference layout.
     Sequential { start: i32, length: usize },
-    /// Explicit position rows for model families that do not use a scalar
-    /// sequence position (for example multimodal RoPE families).
+    /// Explicit scalar positions for a one-dimensional RoPE model.
     Explicit(OwnedTensor),
+    /// Canonical temporal/height/width coordinates for an M-RoPE model.
+    ///
+    /// `tensor` is row-major `[3, sequence]` in `[temporal, height, width]`
+    /// order. `rope_delta` is the signed per-sequence decode adjustment:
+    /// decode coordinate = physical KV length + `rope_delta`. Keeping this as a
+    /// distinct enum variant prevents a native backend from guessing position
+    /// semantics from tensor rank after the ownership boundary.
+    Mrope3D {
+        tensor: OwnedTensor,
+        rope_delta: i32,
+    },
 }
 
 impl PreparedPositions {
@@ -109,6 +119,7 @@ impl PreparedPositions {
         match self {
             Self::Sequential { length, .. } => Some(*length),
             Self::Explicit(tensor) => tensor.shape.last().copied(),
+            Self::Mrope3D { tensor, .. } => tensor.shape.last().copied(),
         }
     }
 }
@@ -184,10 +195,27 @@ impl PreparedPrefill {
                 actual: position_len,
             });
         }
-        if let PreparedPositions::Explicit(tensor) = &positions
-            && tensor.dtype != PreparedTensorDType::Int32
-        {
-            return Err(PreparedPrefillError::PositionDType(tensor.dtype));
+        match &positions {
+            PreparedPositions::Explicit(tensor)
+                if tensor.shape != [sequence_len] && tensor.shape != [1, sequence_len] =>
+            {
+                return Err(PreparedPrefillError::ExplicitPositionShape {
+                    shape: tensor.shape.clone(),
+                    sequence_len,
+                });
+            }
+            PreparedPositions::Mrope3D { tensor, .. } if tensor.shape != [3, sequence_len] => {
+                return Err(PreparedPrefillError::MropePositionShape {
+                    shape: tensor.shape.clone(),
+                    sequence_len,
+                });
+            }
+            PreparedPositions::Explicit(tensor) | PreparedPositions::Mrope3D { tensor, .. }
+                if tensor.dtype != PreparedTensorDType::Int32 =>
+            {
+                return Err(PreparedPrefillError::PositionDType(tensor.dtype));
+            }
+            _ => {}
         }
         if !attention_bias.tensor.dtype.is_float() {
             return Err(PreparedPrefillError::AttentionBiasDType(
@@ -243,6 +271,16 @@ pub enum PreparedPrefillError {
     PositionLength {
         expected: usize,
         actual: Option<usize>,
+    },
+    #[error("prepared 1D position shape {shape:?} must be [{sequence_len}] or [1, {sequence_len}]")]
+    ExplicitPositionShape {
+        shape: Vec<usize>,
+        sequence_len: usize,
+    },
+    #[error("prepared M-RoPE position shape {shape:?} must be [3, {sequence_len}]")]
+    MropePositionShape {
+        shape: Vec<usize>,
+        sequence_len: usize,
     },
     #[error("prepared explicit-position dtype {0:?} must be Int32")]
     PositionDType(PreparedTensorDType),

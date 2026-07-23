@@ -20,7 +20,7 @@
 //! is byte-identical to before.
 
 use super::builder::{Builder, Precision, Ty, Val, precision_from_env, quant_in_graph};
-use super::config::{Config, NormStyle};
+use super::config::{Config, MropeLayout, NormStyle};
 use super::moe::{self, MoeLayerW, MoeSharedW};
 use super::rope;
 
@@ -43,18 +43,27 @@ pub(crate) enum PrefillEmbeddingsDType {
     Bf16,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PositionInputMode {
+    OneD,
+    Mrope3D,
+}
+
 /// Shape/dtype metadata validated before compiling or invoking
 /// `prefill_embeddings.main`.
 ///
 /// Argument order after the model weights is stable and deliberately documented
-/// here: `embeddings`, `positions`, `real_len`, `attention_bias`. Positions remain
-/// one-dimensional in this entry; a later M-RoPE entry can add a distinct position
-/// representation without overloading this contract.
+/// here: `embeddings`, `positions`, `real_len`, `attention_bias`. The explicit
+/// `position_mode` fixes positions as either `[L]` or M-RoPE `[3,L]`; rank is
+/// never inferred from the payload after the runtime boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PrefillEmbeddingsInputMetadata {
     pub embeddings_shape: [usize; 2],
     pub embeddings_dtype: PrefillEmbeddingsDType,
-    pub positions_shape: [usize; 1],
+    pub position_mode: PositionInputMode,
+    /// The first `positions_rank` dimensions are significant.
+    pub positions_shape: [usize; 2],
+    pub positions_rank: usize,
     pub attention_bias_shape: [usize; 2],
     pub attention_bias_dtype: PrefillEmbeddingsDType,
     pub real_len: usize,
@@ -67,7 +76,13 @@ impl PrefillEmbeddingsInputMetadata {
         Self {
             embeddings_shape: [lp, c.hidden],
             embeddings_dtype: PrefillEmbeddingsDType::F32,
-            positions_shape: [lp],
+            position_mode: if c.uses_mrope() {
+                PositionInputMode::Mrope3D
+            } else {
+                PositionInputMode::OneD
+            },
+            positions_shape: if c.uses_mrope() { [3, lp] } else { [lp, 0] },
+            positions_rank: if c.uses_mrope() { 2 } else { 1 },
             attention_bias_shape: [lp, lp],
             attention_bias_dtype: PrefillEmbeddingsDType::F32,
             real_len: lp,
@@ -100,10 +115,25 @@ pub(crate) fn validate_prefill_embeddings_metadata(
             metadata.embeddings_dtype
         ));
     }
-    if metadata.positions_shape != [lp] {
+    let expected_position_mode = if c.uses_mrope() {
+        PositionInputMode::Mrope3D
+    } else {
+        PositionInputMode::OneD
+    };
+    let expected_positions_shape = if c.uses_mrope() { [3, lp] } else { [lp, 0] };
+    let expected_positions_rank = if c.uses_mrope() { 2 } else { 1 };
+    if metadata.position_mode != expected_position_mode
+        || metadata.positions_shape != expected_positions_shape
+        || metadata.positions_rank != expected_positions_rank
+    {
         return Err(format!(
-            "prefill positions shape {:?} does not match required [{}]",
-            metadata.positions_shape, lp
+            "prefill position mode/shape {:?} {:?} rank {} does not match required {:?} {:?} rank {}",
+            metadata.position_mode,
+            metadata.positions_shape,
+            metadata.positions_rank,
+            expected_position_mode,
+            expected_positions_shape,
+            expected_positions_rank,
         ));
     }
     if metadata.attention_bias_shape != [lp, lp] {
@@ -597,7 +627,12 @@ fn build_arg_schema(b: &mut Builder, c: &Config) -> (Vec<ArgDecl>, Args) {
     }
 
     let token = take_arg(&mut decls, &mut idx, Ty::scalar("i32"), "token".into());
-    let pos = take_arg(&mut decls, &mut idx, Ty::scalar("i32"), "pos".into());
+    let pos = take_arg(
+        &mut decls,
+        &mut idx,
+        Ty::new(if c.uses_mrope() { vec![3] } else { vec![] }, "i32"),
+        "pos".into(),
+    );
     let cache_len = take_arg(&mut decls, &mut idx, Ty::scalar("i32"), "cache_len".into());
     let kcache = take_arg(
         &mut decls,
@@ -1816,20 +1851,32 @@ pub fn emit_decode_with(c: &Config, sample: bool, precision: Precision) -> Strin
     let emb = b.reshape(&emb_row, vec![h]);
     let mut x = scale_embedding(&mut b, c, emb, vec![h]);
 
-    let cos_row = b.dynamic_slice(&k.cos_table, &[&a.pos, &k.c0], vec![1, rot]);
-    let cos_vec = b.reshape(&cos_row, vec![rot]);
-    let sin_row = b.dynamic_slice(&k.sin_table, &[&a.pos, &k.c0], vec![1, rot]);
-    let sin_vec = b.reshape(&sin_row, vec![rot]);
-    // Dual-RoPE (Gemma3 / OLMo3): the local-base [rot] vectors for the sliding layers.
-    let (cos_local, sin_local) = match (&k.cos_local, &k.sin_local) {
-        (Some(ct), Some(st)) => {
-            let cr = b.dynamic_slice(ct, &[&a.pos, &k.c0], vec![1, rot]);
-            let cl = b.reshape(&cr, vec![rot]);
-            let sr = b.dynamic_slice(st, &[&a.pos, &k.c0], vec![1, rot]);
-            let sl = b.reshape(&sr, vec![rot]);
-            (Some(cl), Some(sl))
-        }
-        _ => (None, None),
+    let (cos_vec, sin_vec, cos_local, sin_local) = if c.uses_mrope() {
+        let positions = b.reshape(&a.pos, vec![3, 1]);
+        let (cos, sin) = mrope_cos_sin(&mut b, c, &positions, 1);
+        (
+            b.reshape(&cos, vec![rot]),
+            b.reshape(&sin, vec![rot]),
+            None,
+            None,
+        )
+    } else {
+        let cos_row = b.dynamic_slice(&k.cos_table, &[&a.pos, &k.c0], vec![1, rot]);
+        let cos_vec = b.reshape(&cos_row, vec![rot]);
+        let sin_row = b.dynamic_slice(&k.sin_table, &[&a.pos, &k.c0], vec![1, rot]);
+        let sin_vec = b.reshape(&sin_row, vec![rot]);
+        // Dual-RoPE (Gemma3 / OLMo3): the local-base [rot] vectors for the sliding layers.
+        let (cos_local, sin_local) = match (&k.cos_local, &k.sin_local) {
+            (Some(ct), Some(st)) => {
+                let cr = b.dynamic_slice(ct, &[&a.pos, &k.c0], vec![1, rot]);
+                let cl = b.reshape(&cr, vec![rot]);
+                let sr = b.dynamic_slice(st, &[&a.pos, &k.c0], vec![1, rot]);
+                let sl = b.reshape(&sr, vec![rot]);
+                (Some(cl), Some(sl))
+            }
+            _ => (None, None),
+        };
+        (cos_vec, sin_vec, cos_local, sin_local)
     };
 
     // mask: keys s valid iff s <= cache_len -> additive 0 / -1e30, shape [S]
@@ -1967,7 +2014,12 @@ fn build_batched_arg_schema(
         Ty::new(vec![bsz], "i32"),
         "token".into(),
     );
-    let pos = take_arg(&mut decls, &mut idx, Ty::scalar("i32"), "pos".into());
+    let pos = take_arg(
+        &mut decls,
+        &mut idx,
+        Ty::new(if c.uses_mrope() { vec![3] } else { vec![] }, "i32"),
+        "pos".into(),
+    );
     let cache_len = take_arg(&mut decls, &mut idx, Ty::scalar("i32"), "cache_len".into());
     let kcache = take_arg(
         &mut decls,
@@ -2063,10 +2115,17 @@ pub fn emit_decode_batched_with(
     let mut x = b.gather(&a.embed, &tok_idx); // [B, H]
 
     // pos is shared (lockstep), so cos/sin are one [d] vector for every row.
-    let cos_row = b.dynamic_slice(&k.cos_table, &[&a.pos, &k.c0], vec![1, d]);
-    let cos_vec = b.reshape(&cos_row, vec![d]);
-    let sin_row = b.dynamic_slice(&k.sin_table, &[&a.pos, &k.c0], vec![1, d]);
-    let sin_vec = b.reshape(&sin_row, vec![d]);
+    let (cos_vec, sin_vec) = if c.uses_mrope() {
+        let positions = b.reshape(&a.pos, vec![3, 1]);
+        let (cos, sin) = mrope_cos_sin(&mut b, c, &positions, 1);
+        (b.reshape(&cos, vec![d]), b.reshape(&sin, vec![d]))
+    } else {
+        let cos_row = b.dynamic_slice(&k.cos_table, &[&a.pos, &k.c0], vec![1, d]);
+        let cos_vec = b.reshape(&cos_row, vec![d]);
+        let sin_row = b.dynamic_slice(&k.sin_table, &[&a.pos, &k.c0], vec![1, d]);
+        let sin_vec = b.reshape(&sin_row, vec![d]);
+        (cos_vec, sin_vec)
+    };
 
     // shared key mask [S]: key s valid iff s <= cache_len -> additive 0 / -1e30
     let ii = b.iota(seq);
@@ -2302,7 +2361,14 @@ fn build_ragged_arg_schema(b: &mut Builder, c: &Config, bsz: usize) -> (Vec<ArgD
     let pos = take_arg(
         &mut decls,
         &mut idx,
-        Ty::new(vec![bsz], "i32"),
+        Ty::new(
+            if c.uses_mrope() {
+                vec![bsz, 3]
+            } else {
+                vec![bsz]
+            },
+            "i32",
+        ),
         "pos".into(),
     );
     let cache_len = take_arg(
@@ -2381,13 +2447,20 @@ pub fn emit_decode_ragged_with(
     let mut x = scale_embedding(&mut b, c, emb, vec![bsz, h]);
 
     // each row's rope vectors come from its own position: gather [B,d] by pos[B]
-    let pos_idx = b.reshape(&a.pos, vec![bsz, 1]);
-    let cos = b.gather(&k.cos_table, &pos_idx); // [B, d]
-    let sin = b.gather(&k.sin_table, &pos_idx); // [B, d]
-    // Dual-RoPE (Gemma3 / OLMo3): per-row local-base gathers for the sliding layers.
-    let (cos_local, sin_local) = match (&k.cos_local, &k.sin_local) {
-        (Some(ct), Some(st)) => (Some(b.gather(ct, &pos_idx)), Some(b.gather(st, &pos_idx))),
-        _ => (None, None),
+    let (cos, sin, cos_local, sin_local) = if c.uses_mrope() {
+        let positions = b.transpose(&a.pos, &[1, 0]);
+        let (cos, sin) = mrope_cos_sin(&mut b, c, &positions, bsz);
+        (cos, sin, None, None)
+    } else {
+        let pos_idx = b.reshape(&a.pos, vec![bsz, 1]);
+        let cos = b.gather(&k.cos_table, &pos_idx); // [B, d]
+        let sin = b.gather(&k.sin_table, &pos_idx); // [B, d]
+        // Dual-RoPE (Gemma3 / OLMo3): per-row local-base gathers for the sliding layers.
+        let (cos_local, sin_local) = match (&k.cos_local, &k.sin_local) {
+            (Some(ct), Some(st)) => (Some(b.gather(ct, &pos_idx)), Some(b.gather(st, &pos_idx))),
+            _ => (None, None),
+        };
+        (cos, sin, cos_local, sin_local)
     };
 
     // per-row key mask [B,S]: key s valid for row b iff s <= cache_len[b]
@@ -2418,7 +2491,14 @@ pub fn emit_decode_ragged_with(
         sin_local,
         mask: kmask,
         mask_local: kmask_local,
-        pos: a.pos.clone(),
+        // M-RoPE KV writes are indexed by physical cache length while the
+        // distinct position input may include a signed per-slot delta. Preserve
+        // the byte-exact legacy 1D graph, whose ABI validates pos == cache_len.
+        pos: if c.uses_mrope() {
+            a.cache_len.clone()
+        } else {
+            a.pos.clone()
+        },
         row_idx,
     };
 
@@ -2565,7 +2645,14 @@ fn build_prefill_arg_schema(
     let positions = take_arg(
         &mut decls,
         &mut idx,
-        Ty::new(vec![lp], "i32"),
+        Ty::new(
+            if c.uses_mrope() {
+                vec![3, lp]
+            } else {
+                vec![lp]
+            },
+            "i32",
+        ),
         "positions".into(),
     );
     let real_len = take_arg(&mut decls, &mut idx, Ty::scalar("i32"), "real_len".into());
@@ -2636,6 +2723,87 @@ fn apply_rope_seq(
     let x_pass = b.slice(x, &[(0, n), (0, heads), (rd, d)]);
     let rotated = rotate_seq(b, c, &x_rot, cos, sin, n, heads, rd);
     b.concatenate(&rotated, &x_pass, 2)
+}
+
+/// The MLX Qwen axis source for each half-rotary frequency column.
+pub(crate) fn mrope_axis_selector(c: &Config) -> Result<Vec<usize>, String> {
+    let mrope = c
+        .mrope
+        .as_ref()
+        .ok_or_else(|| "M-RoPE axis selection requires an M-RoPE config".to_string())?;
+    let half = c.rotary_width() / 2;
+    let selector = match mrope.layout {
+        MropeLayout::Chunked => {
+            let mut selector = Vec::with_capacity(half);
+            for (axis, &width) in mrope.sections.iter().enumerate() {
+                selector.extend(std::iter::repeat_n(axis, width));
+            }
+            selector
+        }
+        MropeLayout::Interleaved => {
+            // Match `InterleavedMRoPE::apply_interleaved_mrope` in the MLX Qwen3
+            // implementation: temporal is the default, and H/W overwrite the
+            // step-3 columns within their configured windows.
+            let mut selector = vec![0usize; half];
+            for (offset, &section_len) in mrope.sections[1..].iter().enumerate() {
+                let axis = offset + 1;
+                let mut index = axis;
+                while index < section_len * 3 {
+                    if index < selector.len() {
+                        selector[index] = axis;
+                    }
+                    index += 3;
+                }
+            }
+            selector
+        }
+    };
+    if selector.len() != half {
+        return Err(format!(
+            "M-RoPE axis selector has {} columns, expected {half}",
+            selector.len()
+        ));
+    }
+    Ok(selector)
+}
+
+/// Build dynamic M-RoPE cos/sin values for explicit signed coordinates.
+///
+/// `positions` is `[3, N]` ordered temporal/height/width. Unlike the ordinary
+/// one-dimensional path, this intentionally computes trig in the graph instead
+/// of indexing a context-sized table: decode coordinates are physical KV length
+/// plus a signed per-sequence delta and therefore are not bounded by the KV
+/// table's index range.
+fn mrope_cos_sin(b: &mut Builder, c: &Config, positions: &Val, n: usize) -> (Val, Val) {
+    assert_eq!(positions.ty.elt, "i32");
+    assert_eq!(positions.ty.shape, vec![3, n]);
+    let selector =
+        mrope_axis_selector(c).unwrap_or_else(|error| panic!("invalid M-RoPE config: {error}"));
+    let axes: Vec<Val> = (0..3)
+        .map(|axis| {
+            let row = b.slice(positions, &[(axis, axis + 1), (0, n)]);
+            b.reshape(&row, vec![n])
+        })
+        .collect();
+    let columns: Vec<Val> = selector
+        .into_iter()
+        .map(|axis| b.broadcast(&axes[axis], &[0], vec![n, 1]))
+        .collect();
+    let mut columns = columns.into_iter();
+    let mut selected = columns.next().expect("positive M-RoPE rotary width");
+    for column in columns {
+        selected = b.concatenate(&selected, &column, 1);
+    }
+    let selected = b.convert(&selected, "f32");
+    let inv = rope::inv_freq(c)
+        .into_iter()
+        .map(|value| value as f32)
+        .collect::<Vec<_>>();
+    let inv = b.const_tensor_f32(&inv, vec![c.rotary_width() / 2]);
+    let inv = b.broadcast(&inv, &[1], vec![n, c.rotary_width() / 2]);
+    let freqs = b.multiply(&selected, &inv);
+    let angles = b.concatenate(&freqs, &freqs, 1);
+    (b.cosine(&angles), b.sine(&angles))
 }
 
 /// The core RoPE rotation on x:[N, heads, rd] with per-row cos/sin [N, rd].
@@ -2728,13 +2896,19 @@ fn emit_prefill_module(
     };
 
     // --- shared position preparation ---
-    let pos_idx = b.reshape(&a.positions, vec![lp, 1]);
-    let cos = b.gather(&k.cos_table, &pos_idx); // [Lp, d]
-    let sin = b.gather(&k.sin_table, &pos_idx); // [Lp, d]
-    // Dual-RoPE (Gemma3 / OLMo3): per-position local-base gathers for sliding layers.
-    let (cos_local, sin_local) = match (&k.cos_local, &k.sin_local) {
-        (Some(ct), Some(st)) => (Some(b.gather(ct, &pos_idx)), Some(b.gather(st, &pos_idx))),
-        _ => (None, None),
+    let (cos, sin, cos_local, sin_local) = if c.uses_mrope() {
+        let (cos, sin) = mrope_cos_sin(&mut b, c, &a.positions, lp);
+        (cos, sin, None, None)
+    } else {
+        let pos_idx = b.reshape(&a.positions, vec![lp, 1]);
+        let cos = b.gather(&k.cos_table, &pos_idx); // [Lp, d]
+        let sin = b.gather(&k.sin_table, &pos_idx); // [Lp, d]
+        // Dual-RoPE (Gemma3 / OLMo3): per-position local-base gathers for sliding layers.
+        let (cos_local, sin_local) = match (&k.cos_local, &k.sin_local) {
+            (Some(ct), Some(st)) => (Some(b.gather(ct, &pos_idx)), Some(b.gather(st, &pos_idx))),
+            _ => (None, None),
+        };
+        (cos, sin, cos_local, sin_local)
     };
 
     // --- attention-bias preparation ---

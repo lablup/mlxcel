@@ -53,7 +53,11 @@ use crate::Gemma3nDensePle;
 use crate::Gemma3nPreparedPrefill;
 #[cfg(feature = "iree")]
 use crate::iree::{IreeLlama, IreeRaggedLlama};
-use crate::prepared::{PreparedInputError, PreparedIreePrefill};
+#[cfg(feature = "iree")]
+use crate::prepared::PreparedPositionMode;
+use crate::prepared::{
+    MropeCoordinateError, PreparedInputError, PreparedIreePrefill, mrope_decode_coordinate,
+};
 use crate::sampler::SampleParams;
 #[cfg(feature = "iree")]
 use crate::sampler::sample;
@@ -122,6 +126,8 @@ struct Slot {
     cur: i32,
     /// Tokens currently in this slot's KV (== the next write position).
     cache_len: i32,
+    /// Signed logical RoPE offset retained independently for this slot.
+    rope_delta: i32,
     /// Tokens emitted so far (counts toward `cap`).
     produced: usize,
     /// Token budget (`max_new_tokens`).
@@ -163,6 +169,13 @@ impl PendingInput {
             Self::Tokens(tokens) => tokens.len(),
             Self::Prepared(prepared) => prepared.effective_len,
             Self::Gemma3nPrepared { prepared, .. } => prepared.effective_len,
+        }
+    }
+
+    fn rope_delta(&self) -> i32 {
+        match self {
+            Self::Tokens(_) | Self::Gemma3nPrepared { .. } => 0,
+            Self::Prepared(prepared) => prepared.positions.rope_delta(),
         }
     }
 }
@@ -342,6 +355,19 @@ fn queue_gemma3n_prepared_request(
     ))
 }
 
+fn mrope_slot_coordinates(slots: &[Option<Slot>]) -> Result<Vec<[i32; 3]>, MropeCoordinateError> {
+    slots
+        .iter()
+        .map(|slot| {
+            let Some(slot) = slot else {
+                return Ok([0; 3]);
+            };
+            let coordinate = mrope_decode_coordinate(slot.cache_len, slot.rope_delta)?;
+            Ok([coordinate; 3])
+        })
+        .collect()
+}
+
 /// The continuous-batching engine: `B_max` slots over one ragged decode graph,
 /// fed by a FIFO queue. See the module docs.
 #[cfg(feature = "iree")]
@@ -453,8 +479,12 @@ impl XlaBatchEngine {
         params: SampleParams,
     ) -> Result<u64, XlaAdmissionError> {
         let context_capacity = self.context_capacity();
-        let prepared =
-            PreparedIreePrefill::prepare(&prepared, self.engine.hidden_size(), context_capacity)?;
+        let prepared = PreparedIreePrefill::prepare_for_mode(
+            &prepared,
+            self.engine.hidden_size(),
+            context_capacity,
+            self.engine.position_mode(),
+        )?;
         queue_prepared_request(
             &mut self.sched,
             prepared,
@@ -555,6 +585,7 @@ impl XlaBatchEngine {
                 req_id: p.req_id,
                 cur: first,
                 cache_len: p.input.effective_len() as i32,
+                rope_delta: p.input.rope_delta(),
                 produced: 1,
                 cap: p.cap,
                 params: p.params,
@@ -580,16 +611,24 @@ impl XlaBatchEngine {
         // zeros (masked no-ops) and their logits are discarded.
         let b = self.sched.b_max;
         let mut tok = vec![0i32; b];
-        let mut pos = vec![0i32; b];
         let mut clen = vec![0i32; b];
+        let mut pos = vec![0i32; b];
         for (s, slot) in self.sched.slots.iter().enumerate() {
             if let Some(st) = slot {
                 tok[s] = st.cur;
-                pos[s] = st.cache_len;
                 clen[s] = st.cache_len;
+                pos[s] = st.cache_len;
             }
         }
-        let logits = self.engine.decode_ragged_logits(&tok, &pos, &clen)?;
+        let logits = match self.engine.position_mode() {
+            PreparedPositionMode::OneD => self.engine.decode_ragged_logits(&tok, &pos, &clen)?,
+            PreparedPositionMode::Mrope3D => {
+                let mrope_positions =
+                    mrope_slot_coordinates(&self.sched.slots).map_err(|error| error.to_string())?;
+                self.engine
+                    .decode_ragged_mrope_logits(&tok, &mrope_positions, &clen)?
+            }
+        };
         let vocab = self.engine.vocab();
 
         // ADVANCE + EVICT: sample each active row from its `[vocab]` logit slice.
@@ -1024,6 +1063,7 @@ impl XlaReferenceEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prepared::PreparedIreePositions;
     use mlxcel_core::session::{
         OwnedTensor, PreparedAttentionBias, PreparedModality, PreparedPositions,
         PreparedTensorDType,
@@ -1120,6 +1160,7 @@ mod tests {
             req_id: 41,
             cur: 7,
             cache_len: 300,
+            rope_delta: 0,
             produced: 4,
             cap: 100,
             params: g(),
@@ -1180,6 +1221,77 @@ mod tests {
     }
 
     #[test]
+    fn mixed_text_and_mrope_slots_keep_deltas_independent_through_reuse() {
+        let text = prepared_input(vec![1, 2, 3], 2, 8);
+        assert_eq!(text.positions.rope_delta(), 0);
+        let mut vision = prepared_input(vec![4, 5, 6, 7], 2, 8);
+        vision.positions = PreparedIreePositions::Mrope3D {
+            values: vec![0; 3 * 8],
+            rope_delta: -2,
+        };
+        let mut positive = prepared_input(vec![8, 9], 2, 8);
+        positive.positions = PreparedIreePositions::Mrope3D {
+            values: vec![0; 3 * 8],
+            rope_delta: 5,
+        };
+
+        let mut sched = Scheduler::new(3, EOS.to_vec());
+        let text_id = sched.submit_input(PendingInput::Prepared(text), 8, g());
+        let vision_id = sched.submit_input(PendingInput::Prepared(vision), 8, g());
+        let positive_id = sched.submit_input(PendingInput::Prepared(positive), 8, g());
+        for slot in 0..3 {
+            let pending = sched.pop_next_pending().unwrap();
+            let rope_delta = pending.input.rope_delta();
+            sched.slots[slot] = Some(Slot {
+                req_id: pending.req_id,
+                cur: 1,
+                cache_len: pending.input.effective_len() as i32,
+                rope_delta,
+                produced: 1,
+                cap: pending.cap,
+                params: pending.params,
+                rng: 0,
+                history: Vec::new(),
+            });
+        }
+
+        assert_eq!(
+            mrope_slot_coordinates(&sched.slots).unwrap(),
+            [[3, 3, 3], [2, 2, 2], [7, 7, 7]]
+        );
+        assert!(sched.cancel(vision_id));
+        assert_eq!(
+            mrope_slot_coordinates(&sched.slots).unwrap(),
+            [[3, 3, 3], [0, 0, 0], [7, 7, 7]],
+            "cancelling one row clears only its own delta"
+        );
+
+        let replacement = sched.submit(vec![10, 11], 8, g());
+        let pending = sched.pop_next_pending().unwrap();
+        assert_eq!(pending.req_id, replacement);
+        let free = sched.free_slots();
+        assert_eq!(free, [1]);
+        sched.slots[free[0]] = Some(Slot {
+            req_id: pending.req_id,
+            cur: 1,
+            cache_len: pending.input.effective_len() as i32,
+            rope_delta: pending.input.rope_delta(),
+            produced: 1,
+            cap: pending.cap,
+            params: pending.params,
+            rng: 0,
+            history: Vec::new(),
+        });
+        assert_eq!(
+            mrope_slot_coordinates(&sched.slots).unwrap(),
+            [[3, 3, 3], [2, 2, 2], [7, 7, 7]],
+            "reused text slot starts with delta zero"
+        );
+        assert_eq!(sched.slots[0].as_ref().unwrap().req_id, text_id);
+        assert_eq!(sched.slots[2].as_ref().unwrap().req_id, positive_id);
+    }
+
+    #[test]
     fn cancel_each_input_form_before_and_after_admit_reuses_slots() {
         let mut s = Scheduler::new(1, EOS.to_vec());
         let queued_text = s.submit(vec![1, 2], 8, g());
@@ -1197,6 +1309,7 @@ mod tests {
             req_id: queued_prepared,
             cur: 7,
             cache_len: effective_len as i32,
+            rope_delta: 0,
             produced: 1,
             cap: 8,
             params: g(),
@@ -1248,6 +1361,7 @@ mod tests {
             req_id: p.req_id,
             cur: 5,
             cache_len: 1,
+            rope_delta: 0,
             produced: 1,
             cap: p.cap,
             params: p.params,

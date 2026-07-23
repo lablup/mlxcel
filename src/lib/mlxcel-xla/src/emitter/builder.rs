@@ -1053,6 +1053,12 @@ impl Builder {
     pub fn tanh(&mut self, a: &Val) -> Val {
         self.unary("tanh", a)
     }
+    pub fn cosine(&mut self, a: &Val) -> Val {
+        self.unary("cosine", a)
+    }
+    pub fn sine(&mut self, a: &Val) -> Val {
+        self.unary("sine", a)
+    }
 
     /// Error function from the CHLO extension accepted by StableHLO import.
     /// Gemma3n's sparse GELU uses the exact erf form (the ordinary GeGLU path

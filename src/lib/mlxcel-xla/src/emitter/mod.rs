@@ -63,7 +63,9 @@ mod rope;
 mod context_tests;
 
 #[allow(unused_imports)]
-pub(crate) use config::{Config, NormStyle, QkNorm, QuantConfig, WeightScheme};
+pub(crate) use config::{
+    Config, MropeConfig, MropeLayout, NormStyle, QkNorm, QuantConfig, WeightScheme,
+};
 #[allow(unused_imports)]
 pub(crate) use gemma3n::{
     Gemma3nConfig, Gemma3nLayerType, Gemma3nPleDType, Gemma3nPleMetadata, validate_gemma3n_ple,
@@ -122,11 +124,11 @@ pub(crate) use builder::{
 };
 #[allow(unused_imports)]
 pub(crate) use model::{
-    PREFILL_EMBEDDINGS_MASKED_VALUE, PrefillEmbeddingsDType, PrefillEmbeddingsInputMetadata,
-    emit_decode, emit_decode_batched, emit_decode_ragged, emit_decode_ragged_with,
-    emit_decode_with, emit_moe_probe, emit_moe_probe_with, emit_prefill, emit_prefill_embeddings,
-    emit_prefill_embeddings_with, emit_prefill_with, validate_prefill_embeddings_attention_bias,
-    validate_prefill_embeddings_metadata,
+    PREFILL_EMBEDDINGS_MASKED_VALUE, PositionInputMode, PrefillEmbeddingsDType,
+    PrefillEmbeddingsInputMetadata, emit_decode, emit_decode_batched, emit_decode_ragged,
+    emit_decode_ragged_with, emit_decode_with, emit_moe_probe, emit_moe_probe_with, emit_prefill,
+    emit_prefill_embeddings, emit_prefill_embeddings_with, emit_prefill_with, mrope_axis_selector,
+    validate_prefill_embeddings_attention_bias, validate_prefill_embeddings_metadata,
 };
 
 #[cfg(test)]
@@ -189,6 +191,20 @@ mod tests {
             // pull them (sliding_pattern, use_rope_layers, weight_scheme, and the
             // dense-arch-pack flags) from the reference Llama config.
             ..Config::llama_3_2_1b()
+        }
+    }
+
+    fn mrope_qwen(layout: MropeLayout) -> Config {
+        Config {
+            context_capacity: 8,
+            hidden: 24,
+            n_q: 2,
+            head_dim: 12,
+            mrope: Some(MropeConfig {
+                sections: [2, 2, 2],
+                layout,
+            }),
+            ..qwen_like(true)
         }
     }
 
@@ -915,7 +931,7 @@ mod tests {
                 ..valid
             },
             PrefillEmbeddingsInputMetadata {
-                positions_shape: [lp - 1],
+                positions_shape: [lp - 1, 0],
                 ..valid
             },
             PrefillEmbeddingsInputMetadata {
@@ -1257,6 +1273,131 @@ mod tests {
             // dense-arch-pack flags all take their Llama defaults.
             ..Config::llama_3_2_1b()
         }
+    }
+
+    #[test]
+    fn mrope_axis_selection_matches_qwen2_and_qwen3_layouts() {
+        let chunked = mrope_axis_selector(&mrope_qwen(MropeLayout::Chunked)).unwrap();
+        assert_eq!(chunked, [0, 0, 1, 1, 2, 2]);
+
+        let interleaved = mrope_axis_selector(&mrope_qwen(MropeLayout::Interleaved)).unwrap();
+        assert_eq!(interleaved, [0, 1, 2, 0, 1, 2]);
+    }
+
+    fn eager_mrope_half_split(
+        input: &[f32],
+        rows: usize,
+        rotary_width: usize,
+        positions: &[[i32; 3]],
+        axes: &[usize],
+        theta: f64,
+    ) -> Vec<f32> {
+        let half = rotary_width / 2;
+        let mut output = vec![0.0; input.len()];
+        for row in 0..rows {
+            for column in 0..half {
+                let inv = 1.0 / theta.powf((2 * column) as f64 / rotary_width as f64);
+                let angle = positions[row][axes[column]] as f64 * inv;
+                let (sin, cos) = angle.sin_cos();
+                let left = input[row * rotary_width + column] as f64;
+                let right = input[row * rotary_width + half + column] as f64;
+                output[row * rotary_width + column] = (left * cos - right * sin) as f32;
+                output[row * rotary_width + half + column] = (right * cos + left * sin) as f32;
+            }
+        }
+        output
+    }
+
+    #[test]
+    fn mrope_qk_rotation_matches_independent_eager_oracle() {
+        let positions = [[3, 5, 7], [11, 13, 17]];
+        let q = (0..24)
+            .map(|index| index as f32 * 0.03125 - 0.4)
+            .collect::<Vec<_>>();
+        let k = (0..24)
+            .map(|index| 0.7 - index as f32 * 0.021)
+            .collect::<Vec<_>>();
+
+        for (layout, oracle_axes) in [
+            (MropeLayout::Chunked, [0, 0, 1, 1, 2, 2]),
+            (MropeLayout::Interleaved, [0, 1, 2, 0, 1, 2]),
+        ] {
+            let cfg = mrope_qwen(layout);
+            let emitted_axes = mrope_axis_selector(&cfg).unwrap();
+            for tensor in [&q, &k] {
+                let actual = eager_mrope_half_split(
+                    tensor,
+                    2,
+                    cfg.rotary_width(),
+                    &positions,
+                    &emitted_axes,
+                    cfg.rope_theta,
+                );
+                let expected = eager_mrope_half_split(
+                    tensor,
+                    2,
+                    cfg.rotary_width(),
+                    &positions,
+                    &oracle_axes,
+                    cfg.rope_theta,
+                );
+                assert!(
+                    actual
+                        .iter()
+                        .zip(expected.iter())
+                        .all(|(left, right)| (left - right).abs() < 1.0e-6),
+                    "{layout:?} transformed Q/K must match the independent eager oracle"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mrope_graphs_have_explicit_position_shapes_and_dynamic_trig() {
+        let cfg = mrope_qwen(MropeLayout::Chunked);
+        let prefill = emit_prefill(&cfg, false);
+        let embeddings = emit_prefill_embeddings(&cfg, false);
+        let decode = emit_decode(&cfg, false);
+        let ragged = emit_decode_ragged(&cfg, 4, false);
+
+        for graph in [&prefill, &embeddings] {
+            assert!(
+                graph.contains("tensor<3x8xi32>"),
+                "prefill positions must be explicit [3,L]"
+            );
+            assert!(graph.contains("stablehlo.cosine"));
+            assert!(graph.contains("stablehlo.sine"));
+        }
+        assert!(
+            decode.contains("tensor<3xi32>"),
+            "single decode carries one explicit T/H/W coordinate"
+        );
+        assert!(
+            ragged.contains("tensor<4x3xi32>"),
+            "ragged decode carries one T/H/W coordinate per slot"
+        );
+        for graph in [&decode, &ragged] {
+            assert!(graph.contains("stablehlo.cosine"));
+            assert!(graph.contains("stablehlo.sine"));
+        }
+
+        let metadata = PrefillEmbeddingsInputMetadata::canonical(&cfg);
+        assert_eq!(metadata.position_mode, PositionInputMode::Mrope3D);
+        assert_eq!(metadata.positions_shape, [3, 8]);
+        assert_eq!(metadata.positions_rank, 2);
+        validate_prefill_embeddings_metadata(&cfg, &metadata).unwrap();
+        assert!(
+            validate_prefill_embeddings_metadata(
+                &cfg,
+                &PrefillEmbeddingsInputMetadata {
+                    position_mode: PositionInputMode::OneD,
+                    positions_shape: [8, 0],
+                    positions_rank: 1,
+                    ..metadata
+                }
+            )
+            .is_err()
+        );
     }
 
     fn qwen3_like() -> Config {
