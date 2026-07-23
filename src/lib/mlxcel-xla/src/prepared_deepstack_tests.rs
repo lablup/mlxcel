@@ -107,6 +107,46 @@ fn accepts_zero_visual_positions_without_special_dense_buffers() {
 }
 
 #[test]
+fn fixed_qwen3_vl_fixture_matches_every_post_hook_residual() {
+    // Port of Qwen3VLModel::deepstack_process's issue #650 fixture: hidden
+    // states start at one, image positions are 1..=3, and every visual feature
+    // component is ten. Repeating the same MLX add-after-layer operation at the
+    // first, middle, and last target gives the fixed 11/21/31 residual table.
+    const SEQUENCE: usize = 5;
+    const HIDDEN: usize = 4;
+    const POSITIONS: [usize; 3] = [1, 2, 3];
+    const EXPECTED_VISUAL_ROWS: [f32; 3] = [11.0, 21.0, 31.0];
+
+    let mut hidden = vec![1.0f32; SEQUENCE * HIDDEN];
+    let mut snapshots = Vec::new();
+    for _target_layer in 0..3 {
+        for &position in &POSITIONS {
+            for column in 0..HIDDEN {
+                hidden[position * HIDDEN + column] += 10.0;
+            }
+        }
+        snapshots.push(hidden.clone());
+    }
+
+    for (layer, snapshot) in snapshots.iter().enumerate() {
+        for position in 0..SEQUENCE {
+            for column in 0..HIDDEN {
+                let expected = if POSITIONS.contains(&position) {
+                    EXPECTED_VISUAL_ROWS[layer]
+                } else {
+                    1.0
+                };
+                assert_eq!(
+                    snapshot[position * HIDDEN + column],
+                    expected,
+                    "post-hook layer={layer} position={position} hidden={column}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn request_validation_rejects_position_metadata_and_non_finite_features() {
     for (positions, expected) in [
         (vec![1, 1], DeepStackInputError::PositionsNotSortedUnique),

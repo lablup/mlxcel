@@ -127,8 +127,9 @@ pub(crate) use model::{
     PREFILL_EMBEDDINGS_MASKED_VALUE, PositionInputMode, PrefillEmbeddingsDType,
     PrefillEmbeddingsInputMetadata, emit_decode, emit_decode_batched, emit_decode_ragged,
     emit_decode_ragged_with, emit_decode_with, emit_moe_probe, emit_moe_probe_with, emit_prefill,
-    emit_prefill_embeddings, emit_prefill_embeddings_deepstack_with, emit_prefill_embeddings_with,
-    emit_prefill_with, mrope_axis_selector, validate_prefill_embeddings_attention_bias,
+    emit_prefill_embeddings, emit_prefill_embeddings_deepstack_diagnostics_with,
+    emit_prefill_embeddings_deepstack_with, emit_prefill_embeddings_with, emit_prefill_with,
+    mrope_axis_selector, validate_prefill_embeddings_attention_bias,
     validate_prefill_embeddings_metadata,
 };
 
@@ -835,6 +836,14 @@ mod tests {
                 emit_prefill_embeddings_deepstack_with(&cfg, false, super::builder::Precision::F32),
             )
             .expect("write DeepStack embeddings prefill graph");
+            std::fs::write(
+                dir.join("prefill_embeddings_deepstack_diagnostics.mlir"),
+                emit_prefill_embeddings_deepstack_diagnostics_with(
+                    &cfg,
+                    super::builder::Precision::F32,
+                ),
+            )
+            .expect("write DeepStack post-hook diagnostics graph");
         }
     }
 
@@ -981,6 +990,16 @@ mod tests {
             occurs(&deepstack, "stablehlo.reduce(") - occurs(&ordinary, "stablehlo.reduce("),
             3,
             "each target reduces only across the compact visual-position axis"
+        );
+
+        let diagnostics = emit_prefill_embeddings_deepstack_diagnostics_with(
+            &cfg,
+            super::builder::Precision::F32,
+        );
+        assert!(diagnostics.starts_with("module @prefill_embeddings_deepstack_diagnostics {"));
+        assert!(
+            diagnostics.contains("tensor<3x256x8xf32>"),
+            "diagnostics return every first/middle/last post-hook hidden state"
         );
     }
 

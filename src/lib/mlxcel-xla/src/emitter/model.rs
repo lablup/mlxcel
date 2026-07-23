@@ -2908,7 +2908,7 @@ pub fn emit_prefill(c: &Config, sample: bool) -> String {
 }
 
 pub fn emit_prefill_with(c: &Config, sample: bool, precision: Precision) -> String {
-    emit_prefill_module(c, sample, precision, PrefillInputKind::Tokens)
+    emit_prefill_module(c, sample, precision, PrefillInputKind::Tokens, false)
 }
 
 /// Emit the distinct prefill-from-embeddings StableHLO module at the ambient
@@ -2924,7 +2924,7 @@ pub(crate) fn emit_prefill_embeddings_with(
     sample: bool,
     precision: Precision,
 ) -> String {
-    emit_prefill_module(c, sample, precision, PrefillInputKind::Embeddings)
+    emit_prefill_module(c, sample, precision, PrefillInputKind::Embeddings, false)
 }
 
 /// Emit the optional sparse DeepStack embeddings-prefill entry.
@@ -2942,7 +2942,23 @@ pub(crate) fn emit_prefill_embeddings_deepstack_with(
         .expect("DeepStack prefill requires a declared schema")
         .validate(c.n_layers, c.context_capacity)
         .expect("invalid DeepStack schema");
-    emit_prefill_module(c, sample, precision, PrefillInputKind::DeepStack)
+    emit_prefill_module(c, sample, precision, PrefillInputKind::DeepStack, false)
+}
+
+/// Emit the full DeepStack prefill plus post-hook hidden states for oracle tests.
+///
+/// This uses the production layer loop and residual hook but remains a diagnostic
+/// module that is never loaded into a serving session.
+pub(crate) fn emit_prefill_embeddings_deepstack_diagnostics_with(
+    c: &Config,
+    precision: Precision,
+) -> String {
+    c.deepstack
+        .as_ref()
+        .expect("DeepStack diagnostics require a declared schema")
+        .validate(c.n_layers, c.context_capacity)
+        .expect("invalid DeepStack schema");
+    emit_prefill_module(c, false, precision, PrefillInputKind::DeepStack, true)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3016,7 +3032,12 @@ fn emit_prefill_module(
     sample: bool,
     precision: Precision,
     input_kind: PrefillInputKind,
+    capture_deepstack_states: bool,
 ) -> String {
+    assert!(
+        !capture_deepstack_states || matches!(input_kind, PrefillInputKind::DeepStack),
+        "post-hook state capture is only valid for DeepStack prefill"
+    );
     let lp = c.context_capacity;
     let mut b = Builder::new().with_precision(precision);
     let (decls, a) = build_prefill_arg_schema(&mut b, c, lp, input_kind);
@@ -3134,6 +3155,7 @@ fn emit_prefill_module(
     // caches start as zeros; prefill writes the [0:Lp] block and returns them
     let mut kcache = b.broadcast(&k.zero, &[], vec![c.n_layers, lp, nkv, d]);
     let mut vcache = b.broadcast(&k.zero, &[], vec![c.n_layers, lp, nkv, d]);
+    let mut deepstack_states: Option<Val> = None;
 
     for li in 0..c.n_layers {
         let lw = &a.layers[li];
@@ -3151,6 +3173,13 @@ fn emit_prefill_module(
                 &deepstack.actual_layer_count,
                 &deepstack.actual_visual_count,
             );
+            if capture_deepstack_states && schema.target_layer_indices.contains(&li) {
+                let state = b.reshape(&x, vec![1, lp, h]);
+                deepstack_states = Some(match deepstack_states {
+                    Some(previous) => b.concatenate(&previous, &state, 0),
+                    None => state,
+                });
+            }
         }
     }
 
@@ -3182,22 +3211,32 @@ fn emit_prefill_module(
 
     let sig = render_signature(&decls);
     let cache_ty = Ty::f32(vec![c.n_layers, lp, c.n_kv, c.head_dim]).render();
-    let module_name = match input_kind {
-        PrefillInputKind::Tokens => "prefill",
-        PrefillInputKind::Embeddings => "prefill_embeddings",
-        PrefillInputKind::DeepStack => "prefill_embeddings_deepstack",
+    let module_name = match (input_kind, capture_deepstack_states) {
+        (PrefillInputKind::DeepStack, true) => "prefill_embeddings_deepstack_diagnostics",
+        (PrefillInputKind::Tokens, false) => "prefill",
+        (PrefillInputKind::Embeddings, false) => "prefill_embeddings",
+        (PrefillInputKind::DeepStack, false) => "prefill_embeddings_deepstack",
+        _ => unreachable!("diagnostic capture requires DeepStack"),
     };
-    format!(
-        "module @{module_name} {{\n  func.func public @main({sig}) -> ({out_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {out_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
-        module_name = module_name,
-        sig = sig,
-        out_ty = out_ty,
-        cache_ty = cache_ty,
-        body = b.body(),
-        l = out_val,
-        kc = kcache.name,
-        vc = vcache.name,
-    )
+    if let Some(states) = deepstack_states {
+        let state_ty = states.ty.render();
+        format!(
+            "module @{module_name} {{\n  func.func public @main({sig}) -> ({out_ty}, {cache_ty}, {cache_ty}, {state_ty}) {{\n{body}    return {l}, {kc}, {vc}, {states} : {out_ty}, {cache_ty}, {cache_ty}, {state_ty}\n  }}\n}}\n",
+            body = b.body(),
+            l = out_val,
+            kc = kcache.name,
+            vc = vcache.name,
+            states = states.name,
+        )
+    } else {
+        format!(
+            "module @{module_name} {{\n  func.func public @main({sig}) -> ({out_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {out_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
+            body = b.body(),
+            l = out_val,
+            kc = kcache.name,
+            vc = vcache.name,
+        )
+    }
 }
 
 // ===========================================================================

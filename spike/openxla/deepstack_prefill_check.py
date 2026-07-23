@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Compile and execute the real sparse DeepStack prefill entry with IREE.
 
-The Qwen3 fixture makes every transformer projection zero, keeps all RMSNorm
-weights at one, and uses an identity untied LM head. Sparse features injected
-after the first, middle, and last language layers therefore accumulate at the
-final visual row to [1, 1, 1, 0]. The expected logits are its exact
-RMS-normalized value. This exercises the production StableHLO entry and the
-same post-language-layer injection point as MLX Qwen3-VL, not a test-only probe.
+This ports the fixed `Qwen3VLModel::deepstack_process` regression fixture:
+hidden states start at one, visual positions are 1..=3, and each visual feature
+component is ten. With zero transformer projections and unit RMSNorm weights,
+the first/middle/last post-hook residuals are exactly 11/21/31 at visual rows
+and one elsewhere. The production entry's final logits and every K/V element
+are also checked. The diagnostic entry reuses the production layer loop and
+only exposes those post-hook states for this oracle.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ IREE_RUN = Path(
 LP = 256
 HIDDEN = 4
 LAYERS = 3
-VISUAL_MAX = 2
+VISUAL_MAX = 3
 EPS = 1e-6
 
 
@@ -111,15 +112,13 @@ def weight_inputs(work: Path) -> list[str]:
 
 
 def runtime_inputs(work: Path) -> list[str]:
-    features = [0.0] * (LAYERS * VISUAL_MAX * HIDDEN)
-    for layer in range(LAYERS):
-        features[(layer * VISUAL_MAX * HIDDEN) + layer] = 1.0
+    features = [10.0] * (LAYERS * VISUAL_MAX * HIDDEN)
     return [
-        input_file(work, "embeddings", (LP, HIDDEN), "f32", [0.0] * (LP * HIDDEN)),
+        input_file(work, "embeddings", (LP, HIDDEN), "f32", [1.0] * (LP * HIDDEN)),
         input_file(work, "positions", (LP,), "i32", list(range(LP))),
-        "--input=i32=2",
+        "--input=i32=4",
         input_file(work, "bias", (LP, LP), "f32", [0.0] * (LP * LP)),
-        input_file(work, "visual_positions", (VISUAL_MAX,), "i32", [1, -1]),
+        input_file(work, "visual_positions", (VISUAL_MAX,), "i32", [1, 2, 3]),
         input_file(
             work,
             "layer_features",
@@ -129,8 +128,60 @@ def runtime_inputs(work: Path) -> list[str]:
         ),
         input_file(work, "layer_indices", (LAYERS,), "i32", [0, 1, 2]),
         f"--input=i32={LAYERS}",
-        "--input=i32=1",
+        f"--input=i32={VISUAL_MAX}",
     ]
+
+
+def compile_module(source: Path, output: Path) -> None:
+    subprocess.run(
+        [
+            str(IREE_COMPILE),
+            str(source),
+            "--iree-input-type=stablehlo",
+            "--iree-hal-target-device=local",
+            "--iree-hal-local-target-device-backends=llvm-cpu",
+            "--iree-llvmcpu-target-cpu=host",
+            "-o",
+            str(output),
+        ],
+        check=True,
+    )
+
+
+def expected_post_hook_states(work: Path) -> str:
+    # Exact MLX-derived table, extended with unchanged rows to the static bucket.
+    visual_values = [11.0, 21.0, 31.0]
+    states: list[float] = []
+    for value in visual_values:
+        for position in range(LP):
+            row_value = value if position in (1, 2, 3) else 1.0
+            states.extend([row_value] * HIDDEN)
+    path = work / "expected_post_hook_states.bin"
+    write_values(path, "f", states)
+    return f"--expected_output={LAYERS}x{LP}x{HIDDEN}xf32=@{path}"
+
+
+def run_module(work: Path, vmfb: Path, include_states: bool) -> None:
+    normalized = 31.0 / math.sqrt(31.0 * 31.0 + EPS)
+    expected = [
+        f"--expected_output=4xf32={normalized} {normalized} {normalized} {normalized}",
+        f"--expected_output={LAYERS}x{LP}x1x{HIDDEN}xf32=0",
+        f"--expected_output={LAYERS}x{LP}x1x{HIDDEN}xf32=0",
+    ]
+    if include_states:
+        expected.append(expected_post_hook_states(work))
+    subprocess.run(
+        [
+            str(IREE_RUN),
+            "--device=local-task",
+            f"--module={vmfb}",
+            "--function=main",
+            *weight_inputs(work),
+            *runtime_inputs(work),
+            *expected,
+        ],
+        check=True,
+    )
 
 
 def main() -> int:
@@ -159,35 +210,18 @@ def main() -> int:
             },
             check=True,
         )
-        mlir = work / "prefill_embeddings_deepstack_logits.mlir"
-        vmfb = work / "prefill_embeddings_deepstack_logits.vmfb"
-        subprocess.run(
-            [
-                str(IREE_COMPILE),
-                str(mlir),
-                "--iree-input-type=stablehlo",
-                "--iree-hal-target-device=local",
-                "--iree-hal-local-target-device-backends=llvm-cpu",
-                "--iree-llvmcpu-target-cpu=host",
-                "-o",
-                str(vmfb),
-            ],
-            check=True,
-        )
-        normalized = 1.0 / math.sqrt(0.75 + EPS)
-        command = [
-            str(IREE_RUN),
-            "--device=local-task",
-            f"--module={vmfb}",
-            "--function=main",
-            *weight_inputs(work),
-            *runtime_inputs(work),
-            f"--expected_output=4xf32={normalized} {normalized} {normalized} 0",
-            "--expected_output=(ignored)",
-            "--expected_output=(ignored)",
-        ]
-        subprocess.run(command, check=True)
-    print("RESULT: PASS (sparse DeepStack prefill, IREE local-task)")
+        production_mlir = work / "prefill_embeddings_deepstack_logits.mlir"
+        production_vmfb = work / "prefill_embeddings_deepstack_logits.vmfb"
+        diagnostics_mlir = work / "prefill_embeddings_deepstack_diagnostics.mlir"
+        diagnostics_vmfb = work / "prefill_embeddings_deepstack_diagnostics.vmfb"
+        compile_module(production_mlir, production_vmfb)
+        compile_module(diagnostics_mlir, diagnostics_vmfb)
+        run_module(work, production_vmfb, include_states=False)
+        run_module(work, diagnostics_vmfb, include_states=True)
+    print(
+        "RESULT: PASS (Qwen3-VL fixed post-hook states, logits, and every K/V; "
+        "IREE local-task)"
+    )
     return 0
 
 
