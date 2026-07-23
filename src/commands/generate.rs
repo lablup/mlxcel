@@ -1042,6 +1042,16 @@ fn validate_xla_output_audio(output_audio: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(feature = "xla-backend", test))]
+fn validate_xla_cli_image_cardinality(declared: usize, decoded: usize) -> Result<()> {
+    ensure!(
+        declared == decoded,
+        "OpenXLA image decode cardinality mismatch: {declared} image path(s) provided, \
+         {decoded} decoded; refusing partial image execution"
+    );
+    Ok(())
+}
+
 #[cfg(feature = "xla-backend")]
 fn decode_xla_cli_images(paths: &[std::path::PathBuf]) -> Result<Vec<image::DynamicImage>> {
     let limits = mlxcel::current_image_input_limits();
@@ -1071,7 +1081,9 @@ fn decode_xla_cli_images(paths: &[std::path::PathBuf]) -> Result<Vec<image::Dyna
         );
         payloads.push(bytes);
     }
-    mlxcel::decode_image_payloads_with_limits(&payloads, limits)
+    let images = mlxcel::decode_image_payloads_with_limits(&payloads, limits)?;
+    validate_xla_cli_image_cardinality(paths.len(), images.len())?;
+    Ok(images)
 }
 
 /// Self-contained generation for the OpenXLA backend (issue #449 Phase 3).

@@ -17,7 +17,7 @@ use super::{
     estimate_delta_label_and_bytes, generated_suffix, generation_stats_from_duration,
     memory_preflight_ctx_len, resolve_cli_pipeline_assignments, resolve_cli_prompt,
     should_route_offline_mtp, strip_trailing_eos, validate_pipeline_parallel_args,
-    validate_tensor_parallel_args, validate_xla_output_audio,
+    validate_tensor_parallel_args, validate_xla_cli_image_cardinality, validate_xla_output_audio,
 };
 use mlxcel::server::chat_template::ChatTemplateProcessor;
 use mlxcel_core::drafter::DrafterKind;
@@ -34,6 +34,26 @@ fn xla_rejects_output_audio_before_generation() {
             .to_string()
             .contains("not supported by the OpenXLA backend")
     );
+}
+
+#[test]
+fn xla_cli_rejects_partial_multi_image_decode() {
+    let payloads = vec![
+        include_bytes!("../../tests/fixtures/test_image.png").to_vec(),
+        b"not-an-image".to_vec(),
+    ];
+    let images =
+        mlxcel::decode_image_payloads_with_limits(&payloads, mlxcel::ImageInputLimits::default())
+            .unwrap();
+    assert_eq!(images.len(), 1, "the shared decoder remains tolerant");
+
+    let error = validate_xla_cli_image_cardinality(payloads.len(), images.len())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("2 image path(s) provided"));
+    assert!(error.contains("1 decoded"));
+    assert!(error.contains("refusing partial image execution"));
+    assert!(validate_xla_cli_image_cardinality(1, images.len()).is_ok());
 }
 
 // issue #166: the offline MTP loop is constructed only when the operator
