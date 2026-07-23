@@ -226,6 +226,20 @@ Qwen-style `<think>` models. To turn thinking off, pass
 default via `--chat-template-kwargs` or `LLAMA_ARG_CHAT_TEMPLATE_KWARGS`. A
 per-request value always wins over the server default.
 
+### CLI reasoning display (`--show-reasoning`)
+
+`mlxcel generate` and `mlxcel run` decode with special tokens intact, so a
+thinking checkpoint's raw channel markers and chain-of-thought would otherwise
+print to the terminal as if they were the answer. Both commands now hide the
+reasoning channel by default and print only the final answer, for both Gemma
+4's `<|channel>thought` / `<channel|>` pair and Qwen-style `<think>` /
+`</think>` models. Pass `--show-reasoning` to also print the reasoning body
+(dimmed on a terminal); the raw channel markers never print either way. This
+is a separate axis from `enable_thinking` / `chat_template_kwargs` above: that
+controls whether the model generates reasoning at all, while
+`--show-reasoning` only controls whether the CLI displays reasoning the model
+already generated.
+
 ### `thinking` alias for the DeepSeek-V3.2 (`deepseek_v32`) chat template
 
 The upstream `deepseek-ai/DeepSeek-V3.2-Exp` chat template gates its

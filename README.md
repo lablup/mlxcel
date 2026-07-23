@@ -80,6 +80,8 @@ mlxcel run
 
 `generate`, `serve`, and `inspect` take the same model argument via `-m`, a HuggingFace `owner/name` repo-id (auto-downloaded into the store and reused after), a bare name (resolved as `mlx-community/<name>`), or an existing local path. `mlxcel run` is a thin wrapper over `mlxcel generate` and shares its sampling and generation flags.
 
+The default model, and other thinking-capable checkpoints such as Qwen-style `<think>` models, write a chain-of-thought before the final answer. `generate` and `run` hide it from the terminal by default so only the answer prints; pass `--show-reasoning` to also print the reasoning, dimmed on a terminal. The raw `<|channel>thought` / `<channel|>` or `<think>` / `</think>` markers never print either way.
+
 Output length follows llama.cpp: with no `-n/--max-tokens` (default `-1`), `generate` / `run` keep generating until the model emits an end-of-sequence token or fills its context window. The server's `--n-predict` default (`-1`) behaves the same per request. Pass an explicit `-n N` (or `--n-predict N`) to cap output at exactly `N` tokens.
 
 ```bash

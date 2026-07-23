@@ -497,6 +497,37 @@ mod tests {
         assert_eq!(content, "Hello, world <| ok");
     }
 
+    #[test]
+    fn multiple_reasoning_blocks_in_one_stream_all_hidden() {
+        // The state machine must re-enter Thinking on a second open marker, not
+        // just once per filter lifetime.
+        let out = split_once(
+            &gemma_markers(),
+            "<|channel>thought\nfirst<channel|>mid<|channel>thought\nsecond<channel|>end",
+        );
+        assert_eq!(out.content, "midend");
+        assert_eq!(out.reasoning, "\nfirst\nsecond");
+        assert_no_markers(&out.content);
+        assert_no_markers(&out.reasoning);
+    }
+
+    #[test]
+    fn flush_is_idempotent_after_holding_back_a_partial_marker() {
+        // "<chan" is a proper prefix of the close marker "<channel|>", so
+        // `feed` holds it back in the buffer instead of releasing it as
+        // reasoning; only `flush` releases it, and a second `flush` call must
+        // be a no-op rather than replaying the same text.
+        let mut f = ReasoningFilter::new(&gemma_markers());
+        let a = f.feed("<|channel>thought\nreason<chan");
+        assert_eq!(a.reasoning, "\nreason");
+        assert_eq!(a.content, "");
+        let first_flush = f.flush();
+        let second_flush = f.flush();
+        assert_eq!(first_flush.reasoning, "<chan");
+        assert_eq!(first_flush.content, "");
+        assert_eq!(second_flush, ReasoningSplit::default());
+    }
+
     // -- (e) --show-reasoning surfaces reasoning without raw markers --
 
     #[test]
@@ -542,7 +573,10 @@ mod tests {
     #[test]
     fn render_full_passthrough_is_byte_identical_when_no_channel() {
         let text = "Just a direct answer with a < b comparison.";
-        assert_eq!(render_full(&gemma_markers(), text, false, false, true), text);
+        assert_eq!(
+            render_full(&gemma_markers(), text, false, false, true),
+            text
+        );
         // A non-thinking model is also byte-identical.
         assert_eq!(
             render_full(&ThinkingMarkers::default(), text, false, true, true),
@@ -649,10 +683,7 @@ mod tests {
             "<|channel>thought\n<channel|>"
         ));
         // A plain generation prompt with no primed channel.
-        assert!(!prompt_primed_open_thinking(
-            &q,
-            "<|im_start|>assistant\n"
-        ));
+        assert!(!prompt_primed_open_thinking(&q, "<|im_start|>assistant\n"));
         // Non-thinking model never counts as primed.
         assert!(!prompt_primed_open_thinking(
             &ThinkingMarkers::default(),
