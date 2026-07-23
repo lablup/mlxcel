@@ -73,6 +73,7 @@ pub use config::{
     DecodeStorageBackend, PipelineParallelRuntimeConfig, PreemptionPolicy,
     RemotePipelineStageConfig, ServerConfig, ServerGenerateOptions,
 };
+pub(crate) use media::current_image_input_limits;
 pub use media::{
     DEFAULT_MAX_IMAGE_DECODE_ALLOC_BYTES, DEFAULT_MAX_IMAGE_HEIGHT, DEFAULT_MAX_IMAGE_PAYLOAD_SIZE,
     DEFAULT_MAX_IMAGE_WIDTH, DEFAULT_MAX_IMAGES_PER_REQUEST, ImageInputLimits,

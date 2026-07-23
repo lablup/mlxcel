@@ -46,6 +46,77 @@ use mlxcel_core::session::{MlxInferenceSession, SessionCapabilities};
 #[cfg(feature = "xla-backend")]
 use mlxcel_xla::XlaInferenceSession;
 
+/// Root-crate OpenXLA session with the matching host image preprocessor.
+///
+/// The compiler runtime lives in `mlxcel-xla`, while the host preprocessor
+/// deliberately reuses this crate's qualified MLX vision tower and projector.
+/// Keeping both in one session makes capability reporting and image execution
+/// depend on the same loaded value.
+#[cfg(feature = "xla-backend")]
+pub struct XlaBackendSession {
+    engine: XlaInferenceSession,
+    image_preprocessor: Option<Box<dyn crate::HostMultimodalPreprocessor>>,
+}
+
+#[cfg(feature = "xla-backend")]
+impl XlaBackendSession {
+    #[must_use]
+    pub(crate) fn new(
+        engine: XlaInferenceSession,
+        image_preprocessor: Option<Box<dyn crate::HostMultimodalPreprocessor>>,
+    ) -> Self {
+        Self {
+            engine,
+            image_preprocessor,
+        }
+    }
+
+    /// Report only capabilities whose complete host/runtime path was loaded.
+    #[must_use]
+    pub fn capabilities(&self) -> SessionCapabilities {
+        let mut capabilities = self.engine.capabilities();
+        capabilities.multimodal = capabilities.multimodal && self.image_preprocessor.is_some();
+        capabilities
+    }
+
+    /// Whether this session can prepare and execute image-prefill requests.
+    #[must_use]
+    pub fn supports_images(&self) -> bool {
+        self.image_preprocessor.is_some() && self.engine.capabilities().multimodal
+    }
+
+    /// Prepare decoded images through the exact preprocessor used by the
+    /// capability predicate.
+    pub fn prepare_images(
+        &self,
+        token_ids: &[i32],
+        images: &[image::DynamicImage],
+    ) -> Result<PreparedPrefill, String> {
+        let preprocessor = self.image_preprocessor.as_ref().ok_or_else(|| {
+            "the loaded OpenXLA model/runtime bundle does not support image input".to_string()
+        })?;
+        preprocessor
+            .prepare(token_ids, images)
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(feature = "xla-backend")]
+impl std::ops::Deref for XlaBackendSession {
+    type Target = XlaInferenceSession;
+
+    fn deref(&self) -> &Self::Target {
+        &self.engine
+    }
+}
+
+#[cfg(feature = "xla-backend")]
+impl std::ops::DerefMut for XlaBackendSession {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.engine
+    }
+}
+
 /// The inference session selected for a load.
 ///
 /// Under default features this enum has a single variant, [`Session::Mlx`].
@@ -61,7 +132,7 @@ pub enum Session {
     /// on-device, so it self-drives the engine-neutral prefill / decode_step
     /// contract and ignores the threaded MLX model and sampling config (greedy).
     #[cfg(feature = "xla-backend")]
-    Xla(XlaInferenceSession),
+    Xla(XlaBackendSession),
 }
 
 impl Session {
@@ -76,8 +147,11 @@ impl Session {
     #[cfg(feature = "xla-backend")]
     #[inline]
     #[must_use]
-    pub fn xla(session: XlaInferenceSession) -> Self {
-        Session::Xla(session)
+    pub(crate) fn xla(
+        session: XlaInferenceSession,
+        image_preprocessor: Option<Box<dyn crate::HostMultimodalPreprocessor>>,
+    ) -> Self {
+        Session::Xla(XlaBackendSession::new(session, image_preprocessor))
     }
 
     /// What this session can do, so the control plane can gate features.

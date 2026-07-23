@@ -63,6 +63,40 @@ pub trait HostMultimodalPreprocessor {
     ) -> Result<PreparedPrefill, HostPreprocessorError>;
 }
 
+/// Load the image preprocessor supported by the OpenXLA host-first path.
+///
+/// `Ok(None)` is the conservative result for text-only checkpoints and VLM
+/// families whose processor/position contract has not been qualified for XLA
+/// yet. Once a checkpoint is identified as the supported LLaVA family, missing
+/// or malformed processor/projector weights are startup errors rather than a
+/// capability downgrade.
+///
+/// # Errors
+///
+/// Returns a typed configuration or weight-loading error for a supported LLaVA
+/// checkpoint that cannot construct its complete host preprocessor.
+pub fn load_xla_image_preprocessor(
+    model_path: &Path,
+) -> Result<Option<Box<dyn HostMultimodalPreprocessor>>, HostPreprocessorError> {
+    let model_type = crate::models::get_model_type(model_path).map_err(|error| {
+        HostPreprocessorError::InvalidConfig(format!(
+            "failed to identify model family from {}: {error}",
+            model_path.display()
+        ))
+    })?;
+    if model_type != crate::models::ModelType::LlavaVLM {
+        return Ok(None);
+    }
+
+    match LlavaHostPreprocessor::load(model_path) {
+        Ok(preprocessor) => Ok(Some(Box::new(preprocessor))),
+        // A LLaVA-shaped checkpoint can still carry an unqualified text or
+        // vision backend. Keep capability false for that combination.
+        Err(HostPreprocessorError::FamilyMismatch { .. }) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// LLaVA host preprocessor retaining only the components needed before XLA.
 pub struct LlavaHostPreprocessor {
     processor: Box<dyn ImageProcessor>,
@@ -214,6 +248,16 @@ impl HostMultimodalPreprocessor for LlavaHostPreprocessor {
                 &text_embeddings,
                 &input_ids,
             )
+        };
+
+        // The qualified IREE embeddings entry is intentionally F32-only. MLX
+        // checkpoints may store the language embedding table and vision tower
+        // in BF16/F16, so widen the fully merged result exactly once at the
+        // ownership boundary instead of making the runtime accept a dtype it
+        // cannot execute.
+        let merged = InputEmbeddings {
+            inputs_embeds: mlxcel_core::astype(&merged.inputs_embeds, mlxcel_core::dtype::FLOAT32),
+            attention_mask_4d: merged.attention_mask_4d,
         };
 
         export_llava_prefill(

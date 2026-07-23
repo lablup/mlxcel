@@ -240,15 +240,10 @@ fn require_llava_host_family(config: &VLMConfig) -> Result<(), HostPreprocessorE
             config.vision_config.num_channels
         )));
     }
-    if config.vision_config.patch_size == 0
-        || !config
-            .vision_config
-            .image_size
-            .is_multiple_of(config.vision_config.patch_size)
-    {
+    if config.vision_config.patch_size == 0 {
         return Err(HostPreprocessorError::InvalidConfig(format!(
-            "LLaVA image_size {} must be divisible by non-zero patch_size {}",
-            config.vision_config.image_size, config.vision_config.patch_size
+            "LLaVA patch_size must be non-zero for image_size {}",
+            config.vision_config.image_size
         )));
     }
     Ok(())

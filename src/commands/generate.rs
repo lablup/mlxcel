@@ -18,7 +18,7 @@
 //! prompt preparation, generation-mode selection, and terminal output helpers.
 
 use anyhow::{Result, anyhow, ensure};
-use std::io::{self, IsTerminal, Write as IoWrite};
+use std::io::{self, IsTerminal, Read, Write as IoWrite};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -1031,31 +1031,87 @@ fn xla_num_layers(model_dir: &Path) -> usize {
         .map_or(0, |n| n as usize)
 }
 
-/// Self-contained text generation for the OpenXLA backend (issue #449 Phase 3).
+#[cfg(feature = "xla-backend")]
+fn decode_xla_cli_images(paths: &[std::path::PathBuf]) -> Result<Vec<image::DynamicImage>> {
+    let limits = mlxcel::current_image_input_limits();
+    ensure!(
+        paths.len() <= limits.max_images_per_request,
+        "OpenXLA image request contains {} image(s), exceeding the configured maximum of {}",
+        paths.len(),
+        limits.max_images_per_request
+    );
+    let read_limit = limits
+        .max_payload_bytes
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("configured image payload limit overflowed"))?;
+    let mut payloads = Vec::with_capacity(paths.len());
+    for path in paths {
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .map_err(|error| anyhow!("Failed to open image {path:?}: {error}"))?
+            .take(read_limit as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|error| anyhow!("Failed to read image {path:?}: {error}"))?;
+        ensure!(
+            bytes.len() <= limits.max_payload_bytes,
+            "Image payload {path:?} is {} bytes, exceeding the configured maximum of {}",
+            bytes.len(),
+            limits.max_payload_bytes
+        );
+        payloads.push(bytes);
+    }
+    mlxcel::decode_image_payloads_with_limits(&payloads, limits)
+}
+
+/// Self-contained generation for the OpenXLA backend (issue #449 Phase 3).
 ///
 /// The OpenXLA engine drives generation from its own session and has no MLX
 /// `LoadedModel`, so this path skips `load_model` (which the XLA backend rejects)
 /// and the generic model-threaded loop: it creates the session straight from the
-/// model directory and runs the session's own greedy loop, which seeds KV and
-/// samples on-device. Text-only and greedy by design (no VLM / draft / sampling
-/// knobs), so the caller routes here only when `MLXCEL_BACKEND=xla` is selected.
+/// model directory and runs the session's own greedy loop. Image requests use
+/// the same decoded-image security limits and owned `PreparedPrefill` contract
+/// as serving; audio and video remain explicit unsupported modalities.
 #[cfg(feature = "xla-backend")]
-fn generate_xla_text(
+fn generate_xla(
     model_path: &Path,
     num_layers: usize,
     prompt_tokens: &[i32],
+    image_paths: &[std::path::PathBuf],
+    has_audio: bool,
+    has_video: bool,
     max_tokens: usize,
     kv_cache_mode: KVCacheMode,
     token_bias: TokenBiasMap,
 ) -> Result<(Vec<i32>, GenerationStats)> {
+    ensure!(
+        !has_audio,
+        "the OpenXLA backend does not support audio input yet"
+    );
+    ensure!(
+        !has_video,
+        "the OpenXLA backend does not support video input yet"
+    );
     let mut session =
         select_backend().create_session(model_path, num_layers, kv_cache_mode, token_bias)?;
     let start_time = Instant::now();
     let tokens = match &mut session {
         mlxcel::Session::Xla(s) => {
             let eos = s.eos_token_ids().to_vec();
-            s.generate_greedy(prompt_tokens, max_tokens, &eos)
-                .map_err(|e| anyhow!("OpenXLA generation failed: {e}"))?
+            if image_paths.is_empty() {
+                s.generate_greedy(prompt_tokens, max_tokens, &eos)
+                    .map_err(|e| anyhow!("OpenXLA generation failed: {e}"))?
+            } else {
+                ensure!(
+                    s.supports_images(),
+                    "the loaded OpenXLA model/runtime bundle does not support image input"
+                );
+                let images = decode_xla_cli_images(image_paths)?;
+                let prepared = s
+                    .prepare_images(prompt_tokens, &images)
+                    .map_err(|error| anyhow!("OpenXLA image preprocessing failed: {error}"))?;
+                s.generate_prepared_greedy(&prepared, max_tokens, &eos)
+                    .map_err(|error| anyhow!("OpenXLA image generation failed: {error}"))?
+            }
         }
         // `select_backend()` returned the XLA backend, so its `create_session`
         // yields an XLA session; any other variant would be a wiring bug.
@@ -1819,10 +1875,13 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     if select_backend().name() == "xla" {
         let num_layers = xla_num_layers(&args.model.model);
         print_generation_preamble(&user_prompt)?;
-        let (generated_tokens, stats) = generate_xla_text(
+        let (generated_tokens, stats) = generate_xla(
             &args.model.model,
             num_layers,
             &prompt_tokens,
+            &args.generation.image,
+            args.generation.audio.is_some(),
+            !args.generation.video.is_empty(),
             args.generation.max_tokens,
             kv_cache_mode,
             token_bias,

@@ -161,13 +161,14 @@ fn xla_backend_creates_a_single_sequence_session_scaffold() {
         "the XLA backend drives generation through the session, not load_model"
     );
 
+    let model_dir = tempfile::tempdir().expect("temporary text-model fixture");
+    std::fs::write(
+        model_dir.path().join("config.json"),
+        r#"{"model_type":"llama"}"#,
+    )
+    .expect("write text-model config");
     let session = backend
-        .create_session(
-            std::path::Path::new("/tmp/model"),
-            16,
-            KVCacheMode::Fp16,
-            TokenBiasMap::new(),
-        )
+        .create_session(model_dir.path(), 16, KVCacheMode::Fp16, TokenBiasMap::new())
         .expect("xla session creation must succeed");
     let caps = session.capabilities();
     assert!(

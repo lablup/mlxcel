@@ -893,6 +893,47 @@ fn resolve_weight_shards(model_dir: &Path, names: &[String]) -> Result<Vec<PathB
         .collect()
 }
 
+fn language_model_tensor_name(name: &str) -> String {
+    format!("language_model.{name}")
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DenseCheckpointNames {
+    Canonical,
+    LanguageModelPrefixed,
+}
+
+/// Resolve dense-language weights from either a standalone checkpoint or the
+/// `language_model.*` namespace used by LLaVA wrappers.
+///
+/// A single-file checkpoint defers namespace detection until its safetensors
+/// header is open. A sharded checkpoint must choose one complete namespace
+/// from the index so a partially mixed wrapper is rejected.
+fn resolve_dense_weight_sources(
+    model_dir: &Path,
+    names: &[String],
+) -> Result<(Vec<PathBuf>, Option<DenseCheckpointNames>), String> {
+    let single = model_dir.join("model.safetensors");
+    if single.exists() {
+        return Ok((vec![single; names.len()], None));
+    }
+    if let Ok(paths) = resolve_weight_shards(model_dir, names) {
+        return Ok((paths, Some(DenseCheckpointNames::Canonical)));
+    }
+    let wrapped: Vec<String> = names
+        .iter()
+        .map(|name| language_model_tensor_name(name))
+        .collect();
+    resolve_weight_shards(model_dir, &wrapped)
+        .map(|paths| (paths, Some(DenseCheckpointNames::LanguageModelPrefixed)))
+        .map_err(|error| {
+            format!(
+                "dense checkpoint has neither a complete canonical nor `language_model.*` \
+                 weight namespace: {error}"
+            )
+        })
+}
+
 /// mlx-community Gemma3n quantized repacks retain the upstream index but rewrite
 /// the language backbone's safetensors prefix. Keep the graph's canonical HF
 /// argument order and only try this one architecture-specific alternate after
@@ -1158,12 +1199,15 @@ fn load_weights(
 ) -> Result<(Vec<WeightBuf>, Vec<c_int>, Vec<c_int>, Vec<i64>), String> {
     let specs = cfg.weight_specs();
     let names: Vec<String> = specs.iter().map(|s| s.tensor_name().to_string()).collect();
-    let (shard_paths, gemma3n_name_scheme) = match cfg {
+    let (shard_paths, mut dense_name_scheme, gemma3n_name_scheme) = match cfg {
         RuntimeConfig::Gemma3n(_) => {
             let (paths, scheme) = resolve_gemma3n_weight_sources(model_dir, &names)?;
-            (paths, Some(scheme))
+            (paths, None, Some(scheme))
         }
-        RuntimeConfig::Dense(_) => (resolve_weight_shards(model_dir, &names)?, None),
+        RuntimeConfig::Dense(_) => {
+            let (paths, scheme) = resolve_dense_weight_sources(model_dir, &names)?;
+            (paths, scheme, None)
+        }
     };
 
     // Group weight indices by shard so each shard file is opened/mmap'd once; the
@@ -1190,13 +1234,51 @@ fn load_weights(
             .map_err(|e| format!("parse {}: {e}", shard.display()))?;
         for &i in &idxs {
             let name = &names[i];
-            let checkpoint_name = checkpoint_tensor_name(gemma3n_name_scheme, name)?;
-            let t = st.tensor(&checkpoint_name).map_err(|e| {
-                format!(
-                    "resolved weight {checkpoint_name} (canonical {name}) in {}: {e}",
-                    shard.display()
-                )
-            })?;
+            let (checkpoint_name, t) = match cfg {
+                RuntimeConfig::Gemma3n(_) => {
+                    let checkpoint_name = checkpoint_tensor_name(gemma3n_name_scheme, name)?;
+                    let tensor = st.tensor(&checkpoint_name).map_err(|error| {
+                        format!(
+                            "resolved weight {checkpoint_name} (canonical {name}) in {}: {error}",
+                            shard.display()
+                        )
+                    })?;
+                    (checkpoint_name, tensor)
+                }
+                RuntimeConfig::Dense(_) => {
+                    let checkpoint_name = match dense_name_scheme {
+                        Some(DenseCheckpointNames::Canonical) => name.clone(),
+                        Some(DenseCheckpointNames::LanguageModelPrefixed) => {
+                            language_model_tensor_name(name)
+                        }
+                        None => {
+                            if st.tensor(name).is_ok() {
+                                dense_name_scheme = Some(DenseCheckpointNames::Canonical);
+                                name.clone()
+                            } else {
+                                let wrapped = language_model_tensor_name(name);
+                                st.tensor(&wrapped).map_err(|error| {
+                                    format!(
+                                        "resolved neither canonical weight {name} nor wrapped \
+                                         weight {wrapped} in {}: {error}",
+                                        shard.display()
+                                    )
+                                })?;
+                                dense_name_scheme =
+                                    Some(DenseCheckpointNames::LanguageModelPrefixed);
+                                wrapped
+                            }
+                        }
+                    };
+                    let tensor = st.tensor(&checkpoint_name).map_err(|error| {
+                        format!(
+                            "resolved weight {checkpoint_name} (canonical {name}) in {}: {error}",
+                            shard.display()
+                        )
+                    })?;
+                    (checkpoint_name, tensor)
+                }
+            };
 
             // issue #516 packed path: upload the raw quantized part (the packed U32
             // weight, or its f16 scales / biases) as-is, no dequant. Its native dtype

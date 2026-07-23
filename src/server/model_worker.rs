@@ -1016,6 +1016,22 @@ pub(crate) fn spawn_xla_model_worker(
                     return;
                 }
             };
+            let mut worker = match crate::server::batch::XlaServeWorker::new(
+                engine,
+                tokenizer,
+                model_path,
+                request_rx,
+                batch_metrics,
+                batch_observability,
+            ) {
+                Ok(worker) => worker,
+                Err(err) => {
+                    tracing::error!(
+                        "Failed to load the OpenXLA image preprocessor/runtime bundle: {err}"
+                    );
+                    return;
+                }
+            };
             let load_elapsed = load_start.elapsed();
             tracing::info!(
                 worker_model_id = %worker_model_id,
@@ -1024,14 +1040,6 @@ pub(crate) fn spawn_xla_model_worker(
                 load_elapsed.as_secs_f64(),
             );
             loaded.store(true, Ordering::Release);
-
-            let mut worker = crate::server::batch::XlaServeWorker::new(
-                engine,
-                tokenizer,
-                request_rx,
-                batch_metrics,
-                batch_observability,
-            );
             worker.serve();
         })
     })

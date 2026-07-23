@@ -77,7 +77,7 @@ pub use mlxcel_core::generate::{
 pub use mlxcel_core::speculative::SpeculativeGenerator;
 pub use multimodal::host_preprocessor::{
     FakeHostMultimodalPreprocessor, HostMultimodalPreprocessor, HostPreprocessorError,
-    LlavaHostPreprocessor,
+    LlavaHostPreprocessor, load_xla_image_preprocessor,
 };
 pub use multimodal::{
     internvl_prompt, kimi_vl_prompt, minicpmo_prompt, moondream2_prompt, moondream3_prompt,
@@ -98,6 +98,21 @@ pub use mlxcel_core::session::{
     PreparedPositions, PreparedPrefill, PreparedPrefillError, PreparedTensorDType,
     SessionCapabilities,
 };
+pub use server::ImageInputLimits;
+
+/// Return the image admission limits shared by CLI and server requests.
+#[must_use]
+pub fn current_image_input_limits() -> ImageInputLimits {
+    server::current_image_input_limits()
+}
+
+/// Decode already-bounded image payloads with the same limits as the server.
+pub fn decode_image_payloads_with_limits(
+    images: &[Vec<u8>],
+    limits: ImageInputLimits,
+) -> anyhow::Result<Vec<image::DynamicImage>> {
+    server::model_provider::model_worker::decode_request_images_with_limits(images, limits)
+}
 
 // Re-export split modules
 pub use loaded_model::LoadedModel;

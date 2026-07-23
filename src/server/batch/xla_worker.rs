@@ -23,7 +23,10 @@
 //! [`EngineEvent`] back to a [`GenerateEvent`] on that request's channel, reusing
 //! the server's [`StreamingDecodeState`] for byte-fallback-safe detokenization.
 //!
-//! Scope: text-only. This path honors `max_tokens`, the model's EOS ids,
+//! Text and qualified LLaVA image requests share this path. Image decoding and
+//! host vision execution run through a bounded preprocessing stage, then enter
+//! the same engine as an owned prepared prefill. This path honors `max_tokens`,
+//! the model's EOS ids,
 //! sampling (temperature / top-k / top-p / min-p / seed, #449 M3 Stage 2d), the
 //! history-based penalties (repetition / frequency / presence / DRY, #449 M3
 //! Stage 2d, applied host-side in the engine's sampler with the same math and
@@ -35,7 +38,7 @@
 //! applied incrementally so it is safe across token boundaries). Requests that
 //! need features the engine cannot provide are rejected with a clear error rather
 //! than served wrong: logprobs (no logit readback), structured / JSON-schema
-//! output (no constraint masking), and multimodal inputs (text-only).
+//! output (no constraint masking), and unsupported audio/video inputs.
 //!
 //! Compiled only under `xla-iree` (real IREE execution). The MLX serving path is
 //! untouched.
@@ -46,16 +49,91 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Instant;
 
+use mlxcel_core::session::PreparedPrefill;
 use mlxcel_xla::{EngineEvent, FinishReason as XlaFinishReason, SampleParams, XlaBatchEngine};
 
 use super::BatchEngine;
 use super::observability::BatchObservability;
 use super::stop_matcher::StopMatcher;
+use super::xla_preprocess::ImagePreprocessStage;
 use crate::server::ServerGenerateOptions;
 use crate::server::model_provider::model_worker::StreamingDecodeState;
 use crate::server::model_provider::{GenerateEvent, ModelRequest};
 use crate::server::state::BatchMetrics;
 use crate::tokenizer::MlxcelTokenizer;
+
+#[path = "xla_worker_admission.rs"]
+mod admission;
+#[cfg(test)]
+#[path = "xla_worker_tests.rs"]
+mod tests;
+
+pub(crate) trait XlaServingEngine {
+    fn b_max(&self) -> usize;
+    fn is_idle(&self) -> bool;
+    fn pending_len(&self) -> usize;
+    fn active_len(&self) -> usize;
+    fn submit(
+        &mut self,
+        prompt: &[i32],
+        max_new_tokens: usize,
+        params: SampleParams,
+    ) -> Result<u64, String>;
+    fn submit_prepared(
+        &mut self,
+        prepared: PreparedPrefill,
+        max_new_tokens: usize,
+        params: SampleParams,
+    ) -> Result<u64, String>;
+    fn cancel(&mut self, req_id: u64) -> bool;
+    fn pump(&mut self) -> Result<Vec<EngineEvent>, String>;
+}
+
+impl XlaServingEngine for XlaBatchEngine {
+    fn b_max(&self) -> usize {
+        XlaBatchEngine::b_max(self)
+    }
+
+    fn is_idle(&self) -> bool {
+        XlaBatchEngine::is_idle(self)
+    }
+
+    fn pending_len(&self) -> usize {
+        XlaBatchEngine::pending_len(self)
+    }
+
+    fn active_len(&self) -> usize {
+        XlaBatchEngine::active_len(self)
+    }
+
+    fn submit(
+        &mut self,
+        prompt: &[i32],
+        max_new_tokens: usize,
+        params: SampleParams,
+    ) -> Result<u64, String> {
+        XlaBatchEngine::submit(self, prompt, max_new_tokens, params)
+            .map_err(|error| error.to_string())
+    }
+
+    fn submit_prepared(
+        &mut self,
+        prepared: PreparedPrefill,
+        max_new_tokens: usize,
+        params: SampleParams,
+    ) -> Result<u64, String> {
+        XlaBatchEngine::submit_prepared(self, prepared, max_new_tokens, params)
+            .map_err(|error| error.to_string())
+    }
+
+    fn cancel(&mut self, req_id: u64) -> bool {
+        XlaBatchEngine::cancel(self, req_id)
+    }
+
+    fn pump(&mut self) -> Result<Vec<EngineEvent>, String> {
+        XlaBatchEngine::pump(self)
+    }
+}
 
 /// Per-active-request state, keyed by the engine's request id.
 struct ServeState {
@@ -66,7 +144,11 @@ struct ServeState {
     /// request set no stop strings, so those requests stream exactly as before.
     stop: StopMatcher,
     start: Instant,
+    /// Public/API usage keeps the original logical prompt count.
     prompt_token_count: usize,
+    /// Internal prefill throughput and KV positions use the expanded prepared
+    /// length. Kept separately so future metrics cannot conflate the two.
+    effective_prefill_len: usize,
     max_tokens: usize,
     /// Tokens the engine has generated for this request (one per `Token` event,
     /// counted even when detok withholds the piece), reported to `BatchMetrics`
@@ -74,11 +156,21 @@ struct ServeState {
     generated_tokens: usize,
 }
 
+struct PendingImageState {
+    response_tx: mpsc::Sender<GenerateEvent>,
+    cancelled: Arc<AtomicBool>,
+    prompt_tokens: Vec<i32>,
+    params: SampleParams,
+    stop_sequences: Vec<String>,
+    max_tokens: usize,
+    start: Instant,
+}
+
 /// Server-side worker that serves requests through the OpenXLA continuous-batching
 /// engine. Built and run on a single worker thread (see
 /// `model_worker::spawn_xla_model_worker`).
-pub(crate) struct XlaServeWorker {
-    engine: XlaBatchEngine,
+pub(crate) struct XlaServeWorker<E = XlaBatchEngine> {
+    engine: E,
     tokenizer: MlxcelTokenizer,
     request_rx: mpsc::Receiver<ModelRequest>,
     /// Active requests, keyed by the engine req id `submit` returned.
@@ -91,28 +183,38 @@ pub(crate) struct XlaServeWorker {
     /// prefill/decode token throughput. The cache-pool / paged gauges are
     /// MLX-specific and stay zero for this path (it has neither).
     batch_observability: Arc<BatchObservability>,
+    image_preprocessor: Option<ImagePreprocessStage>,
+    pending_images: HashMap<u64, PendingImageState>,
+    next_image_job_id: u64,
     shutdown: bool,
 }
 
-impl XlaServeWorker {
+impl XlaServeWorker<XlaBatchEngine> {
     pub(crate) fn new(
         engine: XlaBatchEngine,
         tokenizer: MlxcelTokenizer,
+        model_path: std::path::PathBuf,
         request_rx: mpsc::Receiver<ModelRequest>,
         batch_metrics: Arc<BatchMetrics>,
         batch_observability: Arc<BatchObservability>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        let image_preprocessor = ImagePreprocessStage::spawn_for_model(model_path, engine.b_max())?;
+        Ok(Self {
             engine,
             tokenizer,
             request_rx,
             states: HashMap::new(),
             batch_metrics,
             batch_observability,
+            image_preprocessor,
+            pending_images: HashMap::new(),
+            next_image_job_id: 0,
             shutdown: false,
-        }
+        })
     }
+}
 
+impl<E: XlaServingEngine> XlaServeWorker<E> {
     /// Refresh the active-count and queue-depth gauges from the engine. Cheap
     /// (two atomic stores), called each serve iteration so `/metrics` tracks the
     /// live batch.
@@ -121,165 +223,6 @@ impl XlaServeWorker {
             .set_active_count(self.engine.active_len());
         self.batch_metrics
             .set_queue_depth(self.engine.pending_len());
-    }
-
-    /// Validate, tokenize, and submit one `Generate` request, or send a terminal
-    /// `Error` / empty `Done` when it cannot be served as submitted.
-    fn admit(
-        &mut self,
-        prompt: String,
-        options: ServerGenerateOptions,
-        images: Vec<Vec<u8>>,
-        audio: Vec<Vec<u8>>,
-        videos: Vec<crate::server::media::ResolvedVideo>,
-        response_tx: mpsc::Sender<GenerateEvent>,
-        cancelled: Arc<AtomicBool>,
-    ) {
-        // Reject what the engine genuinely cannot serve, rather than serve it wrong.
-        if !images.is_empty() || !audio.is_empty() || !videos.is_empty() {
-            let _ = response_tx.send(GenerateEvent::Error(
-                "the OpenXLA backend is text-only; multimodal inputs are not supported".to_string(),
-            ));
-            return;
-        }
-        if options.logprobs.enabled {
-            let _ = response_tx.send(GenerateEvent::Error(
-                "the OpenXLA backend does not support logprobs (greedy argmax, no logit readback)"
-                    .to_string(),
-            ));
-            return;
-        }
-        if options.structured.is_some() {
-            let _ = response_tx.send(GenerateEvent::Error(
-                "the OpenXLA backend does not support structured / JSON-schema output".to_string(),
-            ));
-            return;
-        }
-
-        // Sampling: temperature / top-k / top-p / min-p / seed and the
-        // history-based penalties (repetition / frequency / presence / DRY) are
-        // honored; stop strings are enforced below by a per-request `StopMatcher`.
-        // The penalty math runs host-side in the engine's sampler and mirrors the
-        // MLX path, so the two backends penalize identically for the same history.
-        let sampling = &options.sampling;
-        let params = SampleParams {
-            temperature: sampling.temperature,
-            top_k: sampling.top_k.max(0) as usize,
-            top_p: sampling.top_p,
-            min_p: sampling.min_p,
-            seed: sampling.seed,
-            repetition_penalty: sampling.repetition_penalty,
-            frequency_penalty: sampling.frequency_penalty,
-            presence_penalty: sampling.presence_penalty,
-            dry_multiplier: sampling.dry_multiplier,
-            dry_base: sampling.dry_base,
-            dry_allowed_length: sampling.dry_allowed_length,
-            dry_penalty_last_n: sampling.dry_penalty_last_n,
-            dry_sequence_breakers: sampling.dry_sequence_breakers.clone(),
-        };
-
-        let add_special = !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
-        let token_ids = match self.tokenizer.encode(&prompt, add_special) {
-            Ok(ids) => ids,
-            Err(err) => {
-                let _ =
-                    response_tx.send(GenerateEvent::Error(format!("Tokenization error: {err}")));
-                return;
-            }
-        };
-        let prompt_tokens: Vec<i32> = token_ids.iter().map(|&x| x as i32).collect();
-
-        // A zero token budget asks for no generation: return an empty result so the
-        // route still sees usage counts, without touching the engine.
-        if options.max_tokens == 0 {
-            let detok = StreamingDecodeState::new(&self.tokenizer, &prompt_tokens);
-            let result = detok.finish(Instant::now(), prompt_tokens.len(), 0);
-            let _ = response_tx.send(GenerateEvent::Done(result));
-            return;
-        }
-
-        let detok = StreamingDecodeState::new(&self.tokenizer, &prompt_tokens);
-        match self
-            .engine
-            .submit(&prompt_tokens, options.max_tokens, params)
-        {
-            Ok(req_id) => {
-                // The sequence has entered the batch; count it and its prompt.
-                self.batch_observability
-                    .record_prefill_start(prompt_tokens.len());
-                self.states.insert(
-                    req_id,
-                    ServeState {
-                        response_tx,
-                        cancelled,
-                        detok,
-                        stop: StopMatcher::new(options.stop_sequences.unwrap_or_default()),
-                        start: Instant::now(),
-                        prompt_token_count: prompt_tokens.len(),
-                        max_tokens: options.max_tokens,
-                        generated_tokens: 0,
-                    },
-                );
-            }
-            Err(err) => {
-                let _ = response_tx.send(GenerateEvent::Error(format!(
-                    "OpenXLA submit failed: {err}"
-                )));
-            }
-        }
-    }
-
-    fn handle(&mut self, req: ModelRequest) {
-        match req {
-            ModelRequest::Generate {
-                prompt,
-                // The XLA worker tokenizes on its own engine thread; the
-                // dispatch-thread pre-tokenized ids (issue #633) are unused here
-                // (the XLA provider path never sets a pre-tokenizer).
-                prompt_token_ids: _,
-                options,
-                images,
-                audio,
-                videos,
-                response_tx,
-                cancelled,
-            } => self.admit(
-                prompt,
-                options,
-                images,
-                audio,
-                videos,
-                response_tx,
-                cancelled,
-            ),
-            ModelRequest::Shutdown => self.shutdown = true,
-        }
-    }
-
-    /// Pull requests off the channel. When `block` is set (the engine is idle so
-    /// there is nothing else to do), block for the first one; then drain any more
-    /// that are already queued without blocking.
-    fn drain_incoming(&mut self, block: bool) {
-        if block {
-            match self.request_rx.recv() {
-                Ok(req) => self.handle(req),
-                // Sender dropped: treat as shutdown.
-                Err(_) => {
-                    self.shutdown = true;
-                    return;
-                }
-            }
-        }
-        loop {
-            match self.request_rx.try_recv() {
-                Ok(req) => self.handle(req),
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.shutdown = true;
-                    break;
-                }
-            }
-        }
     }
 
     /// Drop any requests whose client cancelled, freeing their engine slots. A
@@ -294,6 +237,15 @@ impl XlaServeWorker {
         for id in ids {
             self.engine.cancel(id);
             self.states.remove(&id);
+        }
+        let jobs: Vec<u64> = self
+            .pending_images
+            .iter()
+            .filter(|(_, state)| state.cancelled.load(Ordering::Relaxed))
+            .map(|(&job_id, _)| job_id)
+            .collect();
+        for job_id in jobs {
+            self.pending_images.remove(&job_id);
         }
     }
 
@@ -340,10 +292,16 @@ impl XlaServeWorker {
                             mut stop,
                             start,
                             prompt_token_count,
+                            effective_prefill_len,
                             max_tokens,
                             generated_tokens,
                             ..
                         } = state;
+                        tracing::debug!(
+                            prompt_token_count,
+                            effective_prefill_len,
+                            "OpenXLA request completed with distinct public and KV prefill lengths"
+                        );
                         self.batch_metrics
                             .record_sequence_completed(generated_tokens);
                         self.batch_observability.record_sequence_completed();
@@ -411,22 +369,29 @@ impl XlaServeWorker {
                 .response_tx
                 .send(GenerateEvent::Error(msg.to_string()));
         }
+        for (_, state) in self.pending_images.drain() {
+            let _ = state
+                .response_tx
+                .send(GenerateEvent::Error(msg.to_string()));
+        }
     }
 }
 
-impl BatchEngine for XlaServeWorker {
+impl<E: XlaServingEngine> BatchEngine for XlaServeWorker<E> {
     fn serve(&mut self) {
         tracing::info!(
             "OpenXLA serve worker starting (continuous batching, B_max={}, sampling, stop strings)",
             self.engine.b_max()
         );
         loop {
+            self.drain_preprocessed();
             self.evict_cancelled();
 
             // If the engine has no work, block for the next request so the thread
             // does not spin; otherwise pick up any newly queued requests and pump.
             let block = self.engine.is_idle() && !self.shutdown;
             self.drain_incoming(block);
+            self.drain_preprocessed();
             self.evict_cancelled();
             // Reflect admits/cancels (and a drained-to-idle batch) in the gauges.
             self.update_gauges();

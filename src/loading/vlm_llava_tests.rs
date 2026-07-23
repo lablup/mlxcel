@@ -217,3 +217,24 @@ fn host_family_validation_rejects_incompatible_processor_family() {
         HostPreprocessorError::FamilyMismatch { .. }
     ));
 }
+
+#[test]
+fn host_family_validation_accepts_floor_patch_grid_used_by_llava_interleave() {
+    let config: VLMConfig = serde_json::from_value(json!({
+        "model_type": "llava",
+        "text_config": {"model_type": "qwen2", "hidden_size": 8},
+        "vision_config": {
+            "model_type": "siglip_vision_model",
+            "num_hidden_layers": 1,
+            "hidden_size": 8,
+            "intermediate_size": 16,
+            "num_attention_heads": 1,
+            "patch_size": 14,
+            "image_size": 384,
+            "num_channels": 3
+        }
+    }))
+    .unwrap();
+
+    require_llava_host_family(&config).unwrap();
+}

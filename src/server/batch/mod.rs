@@ -63,6 +63,8 @@ mod stop_matcher;
 /// `mlxcel-xla` continuous-batching engine to the [`BatchEngine`] contract.
 /// Behind `xla-iree` (real IREE execution); the MLX serving path is unaffected.
 #[cfg(feature = "xla-iree")]
+mod xla_preprocess;
+#[cfg(feature = "xla-iree")]
 pub(crate) mod xla_worker;
 
 pub use active::ActiveBatch;

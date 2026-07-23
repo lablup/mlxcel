@@ -398,8 +398,32 @@ impl Config {
     /// a `rope_scaling` whose `rope_type` is not `llama3` (e.g. yarn), or MiniCPM3's
     /// MLA attention.
     pub fn from_json_str(s: &str) -> Result<Self, String> {
-        let v: serde_json::Value =
+        let root: serde_json::Value =
             serde_json::from_str(s).map_err(|e| format!("parse config.json: {e}"))?;
+        let v = if matches!(
+            root.get("model_type").and_then(serde_json::Value::as_str),
+            Some("llava" | "llava_next")
+        ) {
+            let mut text = root
+                .get("text_config")
+                .and_then(serde_json::Value::as_object)
+                .cloned()
+                .ok_or_else(|| {
+                    "LLaVA config.json missing object `text_config` for the XLA text graph"
+                        .to_string()
+                })?;
+            // mlx-community quantized VLMs commonly keep the affine scheme at
+            // the wrapper level even though the tensors belong to the nested
+            // language model.
+            if !text.contains_key("quantization")
+                && let Some(quantization) = root.get("quantization")
+            {
+                text.insert("quantization".to_string(), quantization.clone());
+            }
+            serde_json::Value::Object(text)
+        } else {
+            root
+        };
 
         let model_type = v.get("model_type").and_then(serde_json::Value::as_str);
 
@@ -1524,5 +1548,31 @@ mod tests {
                 "expected {needle:?} in validation error: {error}"
             );
         }
+    }
+
+    #[test]
+    fn llava_wrapper_uses_nested_qwen2_text_config() {
+        let j = r#"{
+            "model_type":"llava",
+            "quantization":{"bits":4,"group_size":64},
+            "vision_config":{"model_type":"siglip_vision_model"},
+            "text_config":{
+                "model_type":"qwen2","hidden_size":1024,"intermediate_size":2816,
+                "num_hidden_layers":24,"num_attention_heads":16,"num_key_value_heads":16,
+                "rms_norm_eps":1e-6,"rope_theta":1000000,"vocab_size":152000,
+                "tie_word_embeddings":true
+            }
+        }"#;
+        let config = Config::from_json_str(j).expect("nested LLaVA text config parses");
+        assert_eq!(config.hidden, 1024);
+        assert_eq!(config.n_layers, 24);
+        assert!(config.qkv_bias);
+        assert_eq!(
+            config.quantization,
+            Some(QuantConfig {
+                bits: 4,
+                group_size: 64
+            })
+        );
     }
 }

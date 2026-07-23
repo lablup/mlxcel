@@ -107,9 +107,11 @@ impl ComputeBackend for XlaBackend {
         // without it, the session loads but `prefill` / `decode_step` report that
         // the `iree` feature is off. KV mode and token bias do not apply: the
         // session owns its own KV and samples greedily on-device.
+        let image_preprocessor = crate::load_xla_image_preprocessor(model_path)
+            .map_err(|error| anyhow::anyhow!("OpenXLA image preprocessor load failed: {error}"))?;
         let session =
             XlaInferenceSession::load(model_path, num_layers).map_err(|e| anyhow::anyhow!(e))?;
-        Ok(Session::xla(session))
+        Ok(Session::xla(session, image_preprocessor))
     }
 
     fn supports_batched_serving(&self) -> bool {
