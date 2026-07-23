@@ -21,6 +21,20 @@ use super::super::xla_preprocess::{
 };
 use super::*;
 
+pub(super) fn validate_xla_output_features(logprobs: bool, structured: bool) -> Result<(), String> {
+    if logprobs {
+        return Err(
+            "the OpenXLA backend does not support logprobs (no logit readback)".to_string(),
+        );
+    }
+    if structured {
+        return Err(
+            "the OpenXLA backend does not support structured / JSON-schema output".to_string(),
+        );
+    }
+    Ok(())
+}
+
 impl<E: XlaServingEngine> XlaServeWorker<E> {
     /// Validate, tokenize, and submit one request. Images enter the bounded
     /// preprocessing stage; text reaches the engine directly.
@@ -33,34 +47,20 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
         images: Vec<Vec<u8>>,
         audio: Vec<Vec<u8>>,
         videos: Vec<crate::server::media::ResolvedVideo>,
+        media: MediaRequestMetadata,
         response_tx: mpsc::Sender<GenerateEvent>,
         cancelled: Arc<AtomicBool>,
     ) {
-        if options.logprobs.enabled {
-            let _ = response_tx.send(GenerateEvent::Error(
-                "the OpenXLA backend does not support logprobs (no logit readback)".to_string(),
-            ));
+        if let Err(error) = media.validate_xla_raw_counts(images.len(), audio.len(), videos.len()) {
+            let _ = response_tx.send(GenerateEvent::Error(error));
             return;
         }
-        if options.structured.is_some() {
-            let _ = response_tx.send(GenerateEvent::Error(
-                "the OpenXLA backend does not support structured / JSON-schema output".to_string(),
-            ));
+        if let Err(error) =
+            validate_xla_output_features(options.logprobs.enabled, options.structured.is_some())
+        {
+            let _ = response_tx.send(GenerateEvent::Error(error));
             return;
         }
-        if !audio.is_empty() {
-            let _ = response_tx.send(GenerateEvent::Error(
-                "the OpenXLA backend does not support audio input yet".to_string(),
-            ));
-            return;
-        }
-        if !videos.is_empty() {
-            let _ = response_tx.send(GenerateEvent::Error(
-                "the OpenXLA backend does not support video input yet".to_string(),
-            ));
-            return;
-        }
-
         let prompt_tokens = match prompt_token_ids {
             Some(tokens) => tokens,
             None => {
@@ -109,6 +109,7 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
         let job = ImagePreprocessJob {
             job_id,
             token_ids: prompt_tokens.clone(),
+            expected_image_count: media.declared_images,
             images,
             cancelled: cancelled.clone(),
         };
@@ -280,6 +281,7 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                 images,
                 audio,
                 videos,
+                media,
                 response_tx,
                 cancelled,
             } => self.admit(
@@ -289,6 +291,7 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                 images,
                 audio,
                 videos,
+                media,
                 response_tx,
                 cancelled,
             ),

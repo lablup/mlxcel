@@ -17,13 +17,24 @@ use super::{
     estimate_delta_label_and_bytes, generated_suffix, generation_stats_from_duration,
     memory_preflight_ctx_len, resolve_cli_pipeline_assignments, resolve_cli_prompt,
     should_route_offline_mtp, strip_trailing_eos, validate_pipeline_parallel_args,
-    validate_tensor_parallel_args,
+    validate_tensor_parallel_args, validate_xla_output_audio,
 };
 use mlxcel::server::chat_template::ChatTemplateProcessor;
 use mlxcel_core::drafter::DrafterKind;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
+
+#[test]
+fn xla_rejects_output_audio_before_generation() {
+    assert!(validate_xla_output_audio(None).is_ok());
+    let error = validate_xla_output_audio(Some(std::path::Path::new("out.wav"))).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("not supported by the OpenXLA backend")
+    );
+}
 
 // issue #166: the offline MTP loop is constructed only when the operator
 // explicitly passes `--draft-kind mtp`. An auto-detected MTP shape (no explicit

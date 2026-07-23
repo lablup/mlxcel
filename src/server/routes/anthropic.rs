@@ -193,13 +193,16 @@ async fn non_stream_messages(
         &prepared.audio_data,
     );
 
-    let result = match state.model_provider.generate_with_media_and_videos(
-        prepared.prompt,
-        options,
-        prepared.image_data,
-        prepared.audio_data,
-        prepared.videos,
-    ) {
+    let result = match state
+        .model_provider
+        .generate_with_media_and_videos_declared(
+            prepared.prompt,
+            options,
+            prepared.image_data,
+            prepared.audio_data,
+            prepared.videos,
+            prepared.media,
+        ) {
         Ok(r) => r,
         Err(e) => {
             return AnthropicErrorResponse::api_error(format!("Generation failed: {e}"))
@@ -365,12 +368,13 @@ async fn stream_messages(
 
         let result = state
             .model_provider
-            .generate_streaming_with_logprobs_cancellable_videos(
+            .generate_streaming_with_logprobs_cancellable_videos_declared(
                 prepared.prompt,
                 options,
                 prepared.image_data,
                 prepared.audio_data,
                 prepared.videos,
+                prepared.media,
                 cancelled,
                 |token, _lp| {
                     if let Ok(mut acc) = acc_clone.lock() {

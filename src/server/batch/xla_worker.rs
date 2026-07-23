@@ -57,6 +57,7 @@ use super::observability::BatchObservability;
 use super::stop_matcher::StopMatcher;
 use super::xla_preprocess::ImagePreprocessStage;
 use crate::server::ServerGenerateOptions;
+use crate::server::media::MediaRequestMetadata;
 use crate::server::model_provider::model_worker::StreamingDecodeState;
 use crate::server::model_provider::{GenerateEvent, ModelRequest};
 use crate::server::state::BatchMetrics;

@@ -19,7 +19,7 @@ use mlxcel_core::dtype;
 
 use super::{
     FakeHostMultimodalPreprocessor, HostMultimodalPreprocessor, HostPreprocessorError,
-    export_llava_prefill, export_mlx_tensor, validate_processor_shape,
+    export_llava_prefill, export_mlx_tensor, load_xla_image_preprocessor, validate_processor_shape,
 };
 use crate::multimodal::vlm_prompt::ImageTokenBlockError;
 use crate::vision::merge::merge_llava;
@@ -40,6 +40,59 @@ fn fake() -> FakeHostMultimodalPreprocessor {
         hidden_size: 3,
         max_sequence_len: 32,
     }
+}
+
+#[test]
+fn xla_loader_keeps_text_and_unqualified_vlm_image_capability_false() {
+    for model_type in ["llama", "qwen2_vl"] {
+        let model_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            model_dir.path().join("config.json"),
+            format!(r#"{{"model_type":"{model_type}"}}"#),
+        )
+        .unwrap();
+        let preprocessor = load_xla_image_preprocessor(model_dir.path()).unwrap();
+        assert!(
+            preprocessor.is_none(),
+            "{model_type} is not a qualified LLaVA host/runtime pair"
+        );
+    }
+}
+
+#[test]
+fn xla_loader_fails_startup_for_llava_missing_required_artifacts() {
+    let model_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        model_dir.path().join("config.json"),
+        r#"{
+            "model_type": "llava",
+            "text_config": {
+                "model_type": "llama",
+                "hidden_size": 8,
+                "max_position_embeddings": 32
+            },
+            "vision_config": {
+                "model_type": "siglip_vision_model",
+                "num_hidden_layers": 1,
+                "hidden_size": 8,
+                "intermediate_size": 16,
+                "num_attention_heads": 1,
+                "patch_size": 2,
+                "image_size": 4,
+                "num_channels": 3
+            },
+            "image_token_index": -200
+        }"#,
+    )
+    .unwrap();
+
+    let error = load_xla_image_preprocessor(model_dir.path())
+        .err()
+        .expect("qualified LLaVA without projector/vision/embedding artifacts must fail");
+    assert!(
+        !matches!(error, HostPreprocessorError::FamilyMismatch { .. }),
+        "a qualified family must fail startup, not silently downgrade capability: {error}"
+    );
 }
 
 #[test]

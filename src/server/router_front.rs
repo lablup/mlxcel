@@ -622,6 +622,10 @@ fn service_unavailable(message: &str) -> Response {
         .into_response()
 }
 
+fn has_declared_media(media: super::media::MediaRequestMetadata) -> bool {
+    media.declared_images > 0 || media.declared_audio > 0 || media.declared_videos > 0
+}
+
 /// Core chat routing logic: tokenizes, sends to prefill, merges result.
 async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> Result<Response> {
     // Admission control first: reject with 503 when the cluster cannot take the
@@ -641,10 +645,7 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    if !prepared.image_data.is_empty()
-        || !prepared.audio_data.is_empty()
-        || !prepared.videos.is_empty()
-    {
+    if has_declared_media(prepared.media) {
         anyhow::bail!("the disaggregated router supports text-only requests");
     }
 

@@ -95,6 +95,99 @@ impl ResolvedVideo {
     }
 }
 
+/// Declared and successfully resolved media cardinality for one request.
+///
+/// Generic MLX paths intentionally remain tolerant of resolver failures. XLA
+/// uses both halves at its admission boundary so an invalid media declaration
+/// cannot collapse to an empty vector and silently become a text request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct MediaRequestMetadata {
+    pub(crate) declared_images: usize,
+    pub(crate) declared_audio: usize,
+    pub(crate) declared_videos: usize,
+    pub(crate) resolved_images: usize,
+    pub(crate) resolved_audio: usize,
+    pub(crate) resolved_videos: usize,
+}
+
+impl MediaRequestMetadata {
+    #[must_use]
+    pub(crate) const fn new(
+        declared_images: usize,
+        declared_audio: usize,
+        declared_videos: usize,
+        resolved_images: usize,
+        resolved_audio: usize,
+        resolved_videos: usize,
+    ) -> Self {
+        Self {
+            declared_images,
+            declared_audio,
+            declared_videos,
+            resolved_images,
+            resolved_audio,
+            resolved_videos,
+        }
+    }
+
+    /// Metadata for non-chat/internal callers that already supply raw media.
+    ///
+    /// These callers have no separate resolution phase, so declaration and
+    /// resolution cardinalities are identical and their historical behavior is
+    /// unchanged.
+    #[must_use]
+    pub(crate) const fn from_resolved(images: usize, audio: usize, videos: usize) -> Self {
+        Self::new(images, audio, videos, images, audio, videos)
+    }
+
+    /// Validate the XLA request seam without changing tolerant MLX resolution.
+    ///
+    /// Audio/video declarations are rejected from the declared counts so a
+    /// failed resolver cannot erase an unsupported modality. Images require a
+    /// one-to-one declaration → raw payload handoff; decoded cardinality is
+    /// checked later by the bounded preprocessing worker.
+    #[cfg_attr(not(feature = "xla-iree"), allow(dead_code))]
+    pub(crate) fn validate_xla_raw_counts(
+        self,
+        images: usize,
+        audio: usize,
+        videos: usize,
+    ) -> Result<(), String> {
+        if self.declared_audio > 0 {
+            return Err(format!(
+                "the OpenXLA backend does not support audio input yet ({} declared)",
+                self.declared_audio
+            ));
+        }
+        if self.declared_videos > 0 {
+            return Err(format!(
+                "the OpenXLA backend does not support video input yet ({} declared)",
+                self.declared_videos
+            ));
+        }
+        if (
+            self.resolved_images,
+            self.resolved_audio,
+            self.resolved_videos,
+        ) != (images, audio, videos)
+        {
+            return Err(format!(
+                "OpenXLA media handoff cardinality changed after resolution: metadata \
+                 image/audio/video={}/{}/{}, payloads={images}/{audio}/{videos}",
+                self.resolved_images, self.resolved_audio, self.resolved_videos
+            ));
+        }
+        if self.declared_images != self.resolved_images {
+            return Err(format!(
+                "OpenXLA image resolution cardinality mismatch: {} image input(s) declared, \
+                 {} raw payload(s) resolved; refusing text fallback",
+                self.declared_images, self.resolved_images
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Maximum encoded image payload size after base64/HTTP/file resolution: 64 MiB.
 ///
 /// This keeps common VLM uploads well inside the default while bounding the

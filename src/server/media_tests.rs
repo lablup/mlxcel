@@ -16,7 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use super::{
-    ImageInputLimits, collect_image_data, extract_chat_image_data,
+    ImageInputLimits, MediaRequestMetadata, collect_image_data, extract_chat_image_data,
     extract_chat_video_paths_with_allowlist, read_image_url, scan_insecure_allowlist_dirs,
     try_collect_image_data_with_limits, try_read_image_url_with_limits,
 };
@@ -127,6 +127,68 @@ async fn collect_image_data_skips_invalid_entries() {
     ])
     .await;
     assert_eq!(images, vec![b"hello".to_vec()]);
+}
+
+#[tokio::test]
+async fn xla_rejects_all_invalid_images_instead_of_text_fallback() {
+    let images = try_collect_image_data_with_limits(
+        [
+            "ftp://example.com/image.png",
+            "data:image/png;base64,%%%bad%%%",
+        ],
+        ImageInputLimits::default(),
+    )
+    .await
+    .unwrap();
+    assert!(images.is_empty(), "generic resolution remains tolerant");
+
+    let media = MediaRequestMetadata::new(2, 0, 0, images.len(), 0, 0);
+    let error = media
+        .validate_xla_raw_counts(images.len(), 0, 0)
+        .unwrap_err();
+    assert!(error.contains("2 image input(s) declared"));
+    assert!(error.contains("refusing text fallback"));
+}
+
+#[tokio::test]
+async fn xla_rejects_partial_image_resolution_instead_of_partial_execution() {
+    let images = try_collect_image_data_with_limits(
+        [
+            "data:image/png;base64,aGVsbG8=",
+            "data:image/png;base64,%%%bad%%%",
+        ],
+        ImageInputLimits::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(images, vec![b"hello".to_vec()]);
+
+    let media = MediaRequestMetadata::new(2, 0, 0, images.len(), 0, 0);
+    let error = media
+        .validate_xla_raw_counts(images.len(), 0, 0)
+        .unwrap_err();
+    assert!(error.contains("2 image input(s) declared"));
+    assert!(error.contains("1 raw payload(s) resolved"));
+}
+
+#[tokio::test]
+async fn xla_rejects_oversized_image_dropped_by_tolerant_resolver() {
+    let limits = ImageInputLimits {
+        max_payload_bytes: 2,
+        ..ImageInputLimits::default()
+    };
+    let images = try_collect_image_data_with_limits(["data:image/png;base64,aGVsbG8="], limits)
+        .await
+        .unwrap();
+    assert!(images.is_empty(), "generic resolution remains tolerant");
+
+    let media = MediaRequestMetadata::new(1, 0, 0, images.len(), 0, 0);
+    assert!(
+        media
+            .validate_xla_raw_counts(images.len(), 0, 0)
+            .unwrap_err()
+            .contains("refusing text fallback")
+    );
 }
 
 #[tokio::test]

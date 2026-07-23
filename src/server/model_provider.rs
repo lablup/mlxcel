@@ -28,7 +28,7 @@ use mlxcel_core::sampling::TokenLogprobData;
 
 use crate::server::ServerGenerateOptions;
 use crate::server::batch::BatchObservability;
-use crate::server::media::ResolvedVideo;
+use crate::server::media::{MediaRequestMetadata, ResolvedVideo};
 use crate::server::state::BatchMetrics;
 
 /// Request to the model thread
@@ -58,6 +58,13 @@ pub(crate) enum ModelRequest {
         /// path — closing the canonicalise → ffmpeg-open TOCTOU window.
         /// Empty for non-video requests.
         videos: Vec<ResolvedVideo>,
+        /// Declared and resolved media counts retained from the HTTP boundary.
+        ///
+        /// MLX/diffusion workers ignore this metadata and keep their tolerant
+        /// resolver behavior. XLA validates it before deciding whether a
+        /// request is text-only.
+        #[cfg_attr(not(feature = "xla-iree"), allow(dead_code))]
+        media: MediaRequestMetadata,
         response_tx: mpsc::Sender<GenerateEvent>,
         /// Cancellation flag set by the SSE sender when the client disconnects.
         /// The `BatchScheduler` polls this to abort orphaned sequences.
@@ -890,7 +897,23 @@ impl ModelProvider {
         audio: Vec<Vec<u8>>,
         videos: Vec<ResolvedVideo>,
     ) -> Result<GenerationResult> {
-        let response_rx = self.send_generate_request(prompt, options, images, audio, videos)?;
+        let media = MediaRequestMetadata::from_resolved(images.len(), audio.len(), videos.len());
+        self.generate_with_media_and_videos_declared(prompt, options, images, audio, videos, media)
+    }
+
+    /// Generation entry used by prepared HTTP requests that retain declared
+    /// media cardinality across tolerant resolution.
+    pub(crate) fn generate_with_media_and_videos_declared(
+        &self,
+        prompt: String,
+        options: ServerGenerateOptions,
+        images: Vec<Vec<u8>>,
+        audio: Vec<Vec<u8>>,
+        videos: Vec<ResolvedVideo>,
+        media: MediaRequestMetadata,
+    ) -> Result<GenerationResult> {
+        let response_rx = self
+            .send_generate_request_with_metadata(prompt, options, images, audio, videos, media)?;
         drain_generation_events(response_rx, self.decode_hang_timeout, |_| {})
     }
 
@@ -1020,8 +1043,31 @@ impl ModelProvider {
     where
         F: FnMut(String, Option<TokenLogprobData>),
     {
-        let response_rx = self.send_generate_request_with_cancellation(
-            prompt, options, images, audio, videos, cancelled,
+        let media = MediaRequestMetadata::from_resolved(images.len(), audio.len(), videos.len());
+        self.generate_streaming_with_logprobs_cancellable_videos_declared(
+            prompt, options, images, audio, videos, media, cancelled, callback,
+        )
+    }
+
+    /// Streaming entry used by prepared HTTP requests that retain declared
+    /// media cardinality across tolerant resolution.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn generate_streaming_with_logprobs_cancellable_videos_declared<F>(
+        &self,
+        prompt: String,
+        options: ServerGenerateOptions,
+        images: Vec<Vec<u8>>,
+        audio: Vec<Vec<u8>>,
+        videos: Vec<ResolvedVideo>,
+        media: MediaRequestMetadata,
+        cancelled: Arc<AtomicBool>,
+        callback: F,
+    ) -> Result<GenerationResult>
+    where
+        F: FnMut(String, Option<TokenLogprobData>),
+    {
+        let response_rx = self.send_generate_request_with_cancellation_and_metadata(
+            prompt, options, images, audio, videos, media, cancelled,
         )?;
         drain_generation_events_with_logprobs(response_rx, self.decode_hang_timeout, callback)
     }
@@ -1034,12 +1080,26 @@ impl ModelProvider {
         audio: Vec<Vec<u8>>,
         videos: Vec<ResolvedVideo>,
     ) -> Result<mpsc::Receiver<GenerateEvent>> {
-        self.send_generate_request_with_cancellation(
+        let media = MediaRequestMetadata::from_resolved(images.len(), audio.len(), videos.len());
+        self.send_generate_request_with_metadata(prompt, options, images, audio, videos, media)
+    }
+
+    fn send_generate_request_with_metadata(
+        &self,
+        prompt: String,
+        options: ServerGenerateOptions,
+        images: Vec<Vec<u8>>,
+        audio: Vec<Vec<u8>>,
+        videos: Vec<ResolvedVideo>,
+        media: MediaRequestMetadata,
+    ) -> Result<mpsc::Receiver<GenerateEvent>> {
+        self.send_generate_request_with_cancellation_and_metadata(
             prompt,
             options,
             images,
             audio,
             videos,
+            media,
             Arc::new(AtomicBool::new(false)),
         )
     }
@@ -1056,6 +1116,23 @@ impl ModelProvider {
         images: Vec<Vec<u8>>,
         audio: Vec<Vec<u8>>,
         videos: Vec<ResolvedVideo>,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<mpsc::Receiver<GenerateEvent>> {
+        let media = MediaRequestMetadata::from_resolved(images.len(), audio.len(), videos.len());
+        self.send_generate_request_with_cancellation_and_metadata(
+            prompt, options, images, audio, videos, media, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_generate_request_with_cancellation_and_metadata(
+        &self,
+        prompt: String,
+        options: ServerGenerateOptions,
+        images: Vec<Vec<u8>>,
+        audio: Vec<Vec<u8>>,
+        videos: Vec<ResolvedVideo>,
+        media: MediaRequestMetadata,
         cancelled: Arc<AtomicBool>,
     ) -> Result<mpsc::Receiver<GenerateEvent>> {
         let (response_tx, response_rx) = mpsc::channel();
@@ -1084,6 +1161,7 @@ impl ModelProvider {
                 images,
                 audio,
                 videos,
+                media,
                 response_tx,
                 cancelled,
             })

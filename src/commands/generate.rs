@@ -18,7 +18,9 @@
 //! prompt preparation, generation-mode selection, and terminal output helpers.
 
 use anyhow::{Result, anyhow, ensure};
-use std::io::{self, IsTerminal, Read, Write as IoWrite};
+#[cfg(feature = "xla-backend")]
+use std::io::Read;
+use std::io::{self, IsTerminal, Write as IoWrite};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -1031,6 +1033,15 @@ fn xla_num_layers(model_dir: &Path) -> usize {
         .map_or(0, |n| n as usize)
 }
 
+#[cfg(any(feature = "xla-backend", test))]
+fn validate_xla_output_audio(output_audio: Option<&Path>) -> Result<()> {
+    ensure!(
+        output_audio.is_none(),
+        "--output-audio is not supported by the OpenXLA backend"
+    );
+    Ok(())
+}
+
 #[cfg(feature = "xla-backend")]
 fn decode_xla_cli_images(paths: &[std::path::PathBuf]) -> Result<Vec<image::DynamicImage>> {
     let limits = mlxcel::current_image_input_limits();
@@ -1873,6 +1884,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     // `token_bias` is sound because this branch diverges with `return`.)
     #[cfg(feature = "xla-backend")]
     if select_backend().name() == "xla" {
+        validate_xla_output_audio(args.generation.output_audio.as_deref())?;
         let num_layers = xla_num_layers(&args.model.model);
         print_generation_preamble(&user_prompt)?;
         let (generated_tokens, stats) = generate_xla(

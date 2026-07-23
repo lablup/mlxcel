@@ -68,7 +68,8 @@ use super::chat_template_kwargs::{
     strip_think_block,
 };
 use super::media::{
-    ResolvedVideo, extract_chat_audio_data, extract_chat_video_paths, try_extract_chat_image_data,
+    MediaRequestMetadata, ResolvedVideo, extract_chat_audio_data, extract_chat_video_paths,
+    try_extract_chat_image_data,
 };
 use super::prompt_cache::key::resolve_session_key;
 use super::types::ChatCompletionRequest;
@@ -77,6 +78,12 @@ use super::types::request::{ContentPart, Message, MessageContent, Tool};
 pub(crate) struct PreparedChatRequest {
     pub(crate) prompt: String,
     pub(crate) image_data: Vec<Vec<u8>>,
+    /// Cardinalities before and after the tolerant media resolver.
+    ///
+    /// MLX consumers retain their historical behavior. XLA carries this
+    /// metadata to its worker so invalid or partially resolved media cannot be
+    /// mistaken for a text-only request.
+    pub(crate) media: MediaRequestMetadata,
     /// Request-scoped Gemma 4 image soft-token budget, resolved from the
     /// `detail` / `max_soft_tokens` fields on the `image_url` content parts
     /// (see [`crate::server::types::request::ImageUrl`]).
@@ -225,15 +232,28 @@ pub(crate) async fn prepare_chat_request_with_cache(
         .image_soft_tokens()
         .map_err(|err| anyhow::anyhow!("{err}"))?;
 
+    let declared_images = request.image_urls().len();
+    let declared_audio = request.audio_inputs().len();
+    let declared_videos = request.video_urls().len();
     let (image_data, audio_data, videos) = tokio::join!(
         try_extract_chat_image_data(request),
         extract_chat_audio_data(request),
         extract_chat_video_paths(request),
     );
+    let image_data = image_data?;
+    let media = MediaRequestMetadata::new(
+        declared_images,
+        declared_audio,
+        declared_videos,
+        image_data.len(),
+        audio_data.len(),
+        videos.len(),
+    );
 
     Ok(PreparedChatRequest {
         prompt,
-        image_data: image_data?,
+        image_data,
+        media,
         image_soft_tokens,
         audio_data,
         videos,

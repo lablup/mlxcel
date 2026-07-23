@@ -25,6 +25,19 @@
 
 use super::*;
 
+#[test]
+fn text_only_router_rejects_declared_media_even_when_resolution_drops_it() {
+    let invalid_image = super::super::media::MediaRequestMetadata::new(1, 0, 0, 0, 0, 0);
+    let invalid_audio = super::super::media::MediaRequestMetadata::new(0, 1, 0, 0, 0, 0);
+    let invalid_video = super::super::media::MediaRequestMetadata::new(0, 0, 1, 0, 0, 0);
+    assert!(has_declared_media(invalid_image));
+    assert!(has_declared_media(invalid_audio));
+    assert!(has_declared_media(invalid_video));
+    assert!(!has_declared_media(
+        super::super::media::MediaRequestMetadata::default()
+    ));
+}
+
 /// When the worker reports an authoritative count, it is used verbatim even if
 /// it differs from the emitted-piece count. This is the byte-fallback case: a
 /// Gemma `<0xXX>` sequence produces fewer text pieces than model tokens, so the

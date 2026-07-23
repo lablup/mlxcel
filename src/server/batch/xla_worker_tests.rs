@@ -117,6 +117,10 @@ fn options(max_tokens: usize) -> ServerGenerateOptions {
     )
 }
 
+fn media(images: usize, audio: usize, videos: usize) -> MediaRequestMetadata {
+    MediaRequestMetadata::from_resolved(images, audio, videos)
+}
+
 fn image_stage() -> ImagePreprocessStage {
     ImagePreprocessStage::spawn_with_loader(2, || {
         Ok(Some(Box::new(FakeHostMultimodalPreprocessor {
@@ -180,6 +184,7 @@ fn mixed_text_and_image_admission_keeps_public_and_effective_lengths_distinct() 
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        media(0, 0, 0),
         text_tx,
         Arc::new(AtomicBool::new(false)),
     );
@@ -190,6 +195,7 @@ fn mixed_text_and_image_admission_keeps_public_and_effective_lengths_distinct() 
         vec![png_bytes()],
         Vec::new(),
         Vec::new(),
+        media(1, 0, 0),
         image_tx,
         Arc::new(AtomicBool::new(false)),
     );
@@ -240,6 +246,7 @@ fn malformed_image_failure_does_not_disturb_active_text_request() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        media(0, 0, 0),
         text_tx,
         Arc::new(AtomicBool::new(false)),
     );
@@ -250,6 +257,7 @@ fn malformed_image_failure_does_not_disturb_active_text_request() {
         vec![b"not-an-image".to_vec()],
         Vec::new(),
         Vec::new(),
+        media(1, 0, 0),
         image_tx,
         Arc::new(AtomicBool::new(false)),
     );
@@ -265,10 +273,87 @@ fn malformed_image_failure_does_not_disturb_active_text_request() {
     let events = worker.engine.pump().unwrap();
     worker.dispatch(events);
     assert_eq!(receive_done(&text_rx).prompt_tokens, 2);
+
+    let (reuse_tx, reuse_rx) = mpsc::channel();
+    worker.admit(
+        String::new(),
+        Some(vec![5, -200, 6]),
+        options(1),
+        vec![png_bytes()],
+        Vec::new(),
+        Vec::new(),
+        media(1, 0, 0),
+        reuse_tx,
+        Arc::new(AtomicBool::new(false)),
+    );
+    wait_for_preprocessing(&mut worker);
+    let events = worker.engine.pump().unwrap();
+    worker.dispatch(events);
+    assert_eq!(receive_done(&reuse_rx).prompt_tokens, 3);
 }
 
 #[test]
-fn unsupported_logprobs_and_audio_are_rejected_before_engine_admission() {
+fn cancelled_image_does_not_disturb_active_text_or_prevent_slot_reuse() {
+    let mut worker = worker(Some(image_stage()));
+    let (text_tx, text_rx) = mpsc::channel();
+    let (cancelled_tx, cancelled_rx) = mpsc::channel();
+
+    worker.admit(
+        String::new(),
+        Some(vec![1, 2]),
+        options(1),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        media(0, 0, 0),
+        text_tx,
+        Arc::new(AtomicBool::new(false)),
+    );
+    worker.admit(
+        String::new(),
+        Some(vec![3, -200, 4]),
+        options(1),
+        vec![png_bytes()],
+        Vec::new(),
+        Vec::new(),
+        media(1, 0, 0),
+        cancelled_tx,
+        Arc::new(AtomicBool::new(true)),
+    );
+    wait_for_preprocessing(&mut worker);
+    assert!(cancelled_rx.try_recv().is_err());
+    assert_eq!(worker.states.len(), 1);
+
+    let events = worker.engine.pump().unwrap();
+    worker.dispatch(events);
+    assert_eq!(receive_done(&text_rx).prompt_tokens, 2);
+
+    let (reuse_tx, reuse_rx) = mpsc::channel();
+    worker.admit(
+        String::new(),
+        Some(vec![5, -200, 6]),
+        options(1),
+        vec![png_bytes()],
+        Vec::new(),
+        Vec::new(),
+        media(1, 0, 0),
+        reuse_tx,
+        Arc::new(AtomicBool::new(false)),
+    );
+    wait_for_preprocessing(&mut worker);
+    let events = worker.engine.pump().unwrap();
+    worker.dispatch(events);
+    assert_eq!(receive_done(&reuse_rx).prompt_tokens, 3);
+}
+
+#[test]
+fn unsupported_output_features_are_rejected_before_engine_admission() {
+    assert!(
+        admission::validate_xla_output_features(false, true)
+            .unwrap_err()
+            .contains("structured")
+    );
+
     let mut worker = worker(Some(image_stage()));
     let (logprobs_tx, logprobs_rx) = mpsc::channel();
     let mut logprobs_options = options(1);
@@ -280,6 +365,7 @@ fn unsupported_logprobs_and_audio_are_rejected_before_engine_admission() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        media(0, 0, 0),
         logprobs_tx,
         Arc::new(AtomicBool::new(false)),
     );
@@ -296,6 +382,7 @@ fn unsupported_logprobs_and_audio_are_rejected_before_engine_admission() {
         Vec::new(),
         vec![vec![1, 2, 3]],
         Vec::new(),
+        media(0, 1, 0),
         audio_tx,
         Arc::new(AtomicBool::new(false)),
     );
@@ -303,6 +390,69 @@ fn unsupported_logprobs_and_audio_are_rejected_before_engine_admission() {
         panic!("audio must be explicitly unsupported");
     };
     assert!(error.contains("does not support audio"));
+    assert!(worker.engine.text_submissions.is_empty());
+    assert!(worker.engine.prepared_submissions.is_empty());
+}
+
+#[test]
+fn declared_audio_video_and_unqualified_images_never_fall_back_to_text() {
+    let mut worker = worker(None);
+
+    for (media, expected) in [
+        (MediaRequestMetadata::new(0, 1, 0, 0, 0, 0), "audio"),
+        (MediaRequestMetadata::new(0, 0, 1, 0, 0, 0), "video"),
+    ] {
+        let (tx, rx) = mpsc::channel();
+        worker.admit(
+            String::new(),
+            Some(vec![1]),
+            options(1),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            media,
+            tx,
+            Arc::new(AtomicBool::new(false)),
+        );
+        let GenerateEvent::Error(error) = rx.recv().unwrap() else {
+            panic!("{expected} declaration must be rejected");
+        };
+        assert!(error.contains(expected));
+    }
+
+    let (partial_tx, partial_rx) = mpsc::channel();
+    worker.admit(
+        String::new(),
+        Some(vec![1]),
+        options(1),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        MediaRequestMetadata::new(1, 0, 0, 0, 0, 0),
+        partial_tx,
+        Arc::new(AtomicBool::new(false)),
+    );
+    let GenerateEvent::Error(error) = partial_rx.recv().unwrap() else {
+        panic!("dropped image declaration must be rejected");
+    };
+    assert!(error.contains("refusing text fallback"));
+
+    let (unsupported_tx, unsupported_rx) = mpsc::channel();
+    worker.admit(
+        String::new(),
+        Some(vec![1, -200, 2]),
+        options(1),
+        vec![png_bytes()],
+        Vec::new(),
+        Vec::new(),
+        media(1, 0, 0),
+        unsupported_tx,
+        Arc::new(AtomicBool::new(false)),
+    );
+    let GenerateEvent::Error(error) = unsupported_rx.recv().unwrap() else {
+        panic!("image input without qualified preprocessor must be rejected");
+    };
+    assert!(error.contains("does not support image input"));
     assert!(worker.engine.text_submissions.is_empty());
     assert!(worker.engine.prepared_submissions.is_empty());
 }
@@ -330,6 +480,7 @@ fn pending_preprocess_poll_timeout_does_not_shutdown_worker() {
         vec![png_bytes()],
         Vec::new(),
         Vec::new(),
+        media(1, 0, 0),
         response_tx,
         Arc::new(AtomicBool::new(false)),
     );

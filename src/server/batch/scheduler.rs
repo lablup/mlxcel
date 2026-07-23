@@ -2846,6 +2846,7 @@ impl BatchScheduler {
                 images,
                 audio,
                 videos,
+                media: _,
                 response_tx,
                 cancelled,
             } => {

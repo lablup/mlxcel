@@ -34,6 +34,11 @@ use crate::{
 pub(super) struct ImagePreprocessJob {
     pub job_id: u64,
     pub token_ids: Vec<i32>,
+    /// Declaration count captured at the HTTP boundary.
+    ///
+    /// The worker rejects any decode result that does not preserve this count,
+    /// preventing malformed or oversized images from silently disappearing.
+    pub expected_image_count: usize,
     pub images: Vec<Vec<u8>>,
     pub cancelled: Arc<AtomicBool>,
 }
@@ -141,6 +146,7 @@ fn process_job(
     let ImagePreprocessJob {
         job_id,
         token_ids,
+        expected_image_count,
         images,
         cancelled,
     } = job;
@@ -153,6 +159,13 @@ fn process_job(
 
     let prepared = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let decoded = decode_request_images(&images).map_err(|error| error.to_string())?;
+        if decoded.len() != expected_image_count {
+            return Err(format!(
+                "decoded image cardinality mismatch: expected {expected_image_count}, decoded {}; \
+                 refusing partial multimodal execution",
+                decoded.len()
+            ));
+        }
         if cancelled.load(Ordering::Acquire) {
             return Err("request cancelled during image decoding".to_string());
         }
@@ -190,9 +203,34 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     use image::{DynamicImage, ImageFormat};
+    use mlxcel_core::session::PreparedPrefill;
 
     use super::*;
     use crate::{FakeHostMultimodalPreprocessor, HostPreprocessorError};
+
+    struct BlockingPreprocessor {
+        started_tx: mpsc::Sender<i32>,
+        release_rx: mpsc::Receiver<()>,
+        finished_tx: Option<mpsc::Sender<i32>>,
+        inner: FakeHostMultimodalPreprocessor,
+    }
+
+    impl HostMultimodalPreprocessor for BlockingPreprocessor {
+        fn prepare(
+            &self,
+            token_ids: &[i32],
+            images: &[DynamicImage],
+        ) -> Result<PreparedPrefill, HostPreprocessorError> {
+            let marker = token_ids[0];
+            self.started_tx.send(marker).unwrap();
+            self.release_rx.recv().unwrap();
+            let prepared = self.inner.prepare(token_ids, images);
+            if let Some(finished_tx) = &self.finished_tx {
+                let _ = finished_tx.send(marker);
+            }
+            prepared
+        }
+    }
 
     fn png_bytes() -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -228,6 +266,16 @@ mod tests {
         panic!("timed out waiting for image preprocessing")
     }
 
+    fn job(job_id: u64, marker: i32, cancelled: Arc<AtomicBool>) -> ImagePreprocessJob {
+        ImagePreprocessJob {
+            job_id,
+            token_ids: vec![marker, -200, marker + 1],
+            expected_image_count: 1,
+            images: vec![png_bytes()],
+            cancelled,
+        }
+    }
+
     #[test]
     fn bounded_stage_prepares_owned_payload() {
         let stage = stage(16);
@@ -235,6 +283,7 @@ mod tests {
             .try_submit(ImagePreprocessJob {
                 job_id: 7,
                 token_ids: vec![1, -200, 2],
+                expected_image_count: 1,
                 images: vec![png_bytes()],
                 cancelled: Arc::new(AtomicBool::new(false)),
             })
@@ -255,6 +304,7 @@ mod tests {
             .try_submit(ImagePreprocessJob {
                 job_id: 1,
                 token_ids: vec![1, -200, 2],
+                expected_image_count: 1,
                 images: vec![b"not-an-image".to_vec()],
                 cancelled: Arc::new(AtomicBool::new(false)),
             })
@@ -266,8 +316,23 @@ mod tests {
 
         stage
             .try_submit(ImagePreprocessJob {
+                job_id: 5,
+                token_ids: vec![1, -200, 2, -200, 3],
+                expected_image_count: 2,
+                images: vec![png_bytes(), b"not-an-image".to_vec()],
+                cancelled: Arc::new(AtomicBool::new(false)),
+            })
+            .unwrap();
+        let ImagePreprocessOutcome::Failed(error) = receive(&stage).outcome else {
+            panic!("partial decode must fail the whole request");
+        };
+        assert!(error.contains("decoded image cardinality mismatch"));
+
+        stage
+            .try_submit(ImagePreprocessJob {
                 job_id: 2,
                 token_ids: vec![1, -200, -200, 2],
+                expected_image_count: 1,
                 images: vec![png_bytes()],
                 cancelled: Arc::new(AtomicBool::new(false)),
             })
@@ -285,6 +350,7 @@ mod tests {
             .try_submit(ImagePreprocessJob {
                 job_id: 3,
                 token_ids: vec![1, -200, 2],
+                expected_image_count: 1,
                 images: vec![png_bytes()],
                 cancelled: Arc::new(AtomicBool::new(false)),
             })
@@ -299,6 +365,7 @@ mod tests {
             .try_submit(ImagePreprocessJob {
                 job_id: 4,
                 token_ids: vec![1, -200, 2],
+                expected_image_count: 1,
                 images: vec![png_bytes()],
                 cancelled,
             })
@@ -307,6 +374,98 @@ mod tests {
             receive(&stage).outcome,
             ImagePreprocessOutcome::Cancelled
         ));
+    }
+
+    #[test]
+    fn bounded_stage_preserves_fifo_and_progress_after_inflight_cancel() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let stage = ImagePreprocessStage::spawn_with_loader(1, move || {
+            Ok(Some(Box::new(BlockingPreprocessor {
+                started_tx,
+                release_rx,
+                finished_tx: None,
+                inner: FakeHostMultimodalPreprocessor {
+                    image_token_id: -200,
+                    tokens_per_image: 2,
+                    hidden_size: 3,
+                    max_sequence_len: 16,
+                },
+            })))
+        })
+        .unwrap()
+        .unwrap();
+
+        let cancelled_a = Arc::new(AtomicBool::new(false));
+        stage.try_submit(job(10, 10, cancelled_a.clone())).unwrap();
+        assert_eq!(
+            started_rx.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(10)
+        );
+
+        stage
+            .try_submit(job(20, 20, Arc::new(AtomicBool::new(false))))
+            .unwrap();
+        let full = stage
+            .try_submit(job(30, 30, Arc::new(AtomicBool::new(false))))
+            .unwrap_err();
+        assert!(matches!(full, mpsc::TrySendError::Full(_)));
+
+        cancelled_a.store(true, Ordering::Release);
+        release_tx.send(()).unwrap();
+        assert!(matches!(
+            receive(&stage).outcome,
+            ImagePreprocessOutcome::Cancelled
+        ));
+        assert_eq!(
+            started_rx.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(20),
+            "the queued request must start next in FIFO order"
+        );
+
+        release_tx.send(()).unwrap();
+        let result = receive(&stage);
+        assert_eq!(result.job_id, 20);
+        assert!(matches!(
+            result.outcome,
+            ImagePreprocessOutcome::Prepared(_)
+        ));
+    }
+
+    #[test]
+    fn result_receiver_disconnect_does_not_strand_inflight_preprocessor() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let stage = ImagePreprocessStage::spawn_with_loader(1, move || {
+            Ok(Some(Box::new(BlockingPreprocessor {
+                started_tx,
+                release_rx,
+                finished_tx: Some(finished_tx),
+                inner: FakeHostMultimodalPreprocessor {
+                    image_token_id: -200,
+                    tokens_per_image: 2,
+                    hidden_size: 3,
+                    max_sequence_len: 16,
+                },
+            })))
+        })
+        .unwrap()
+        .unwrap();
+
+        stage
+            .try_submit(job(40, 40, Arc::new(AtomicBool::new(false))))
+            .unwrap();
+        assert_eq!(
+            started_rx.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(40)
+        );
+        drop(stage);
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            finished_rx.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(40)
+        );
     }
 
     #[test]

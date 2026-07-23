@@ -205,6 +205,7 @@ pub(crate) fn run_diffusion_worker_loop(
                 images,
                 audio,
                 videos,
+                media: _,
                 response_tx,
                 cancelled,
             } => {
@@ -510,6 +511,7 @@ pub(crate) fn run_llada2_worker_loop(
                 images,
                 audio,
                 videos,
+                media: _,
                 response_tx,
                 cancelled,
             } => {

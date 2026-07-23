@@ -438,12 +438,13 @@ async fn non_stream_chat_completion(
     // model supports video.
     let result = state
         .model_provider
-        .generate_with_media_and_videos(
+        .generate_with_media_and_videos_declared(
             prepared.prompt,
             options,
             prepared.image_data,
             prepared.audio_data,
             prepared.videos,
+            prepared.media,
         )
         .map_err(|e| ErrorResponse::new(format!("Generation error: {e}"), "server_error"))?;
 
@@ -746,12 +747,13 @@ async fn stream_chat_completion(
 
         let result = state
             .model_provider
-            .generate_streaming_with_logprobs_cancellable_videos(
+            .generate_streaming_with_logprobs_cancellable_videos_declared(
                 prepared.prompt,
                 options,
                 prepared.image_data,
                 prepared.audio_data,
                 prepared.videos,
+                prepared.media,
                 cancelled,
                 |token, lp_data| {
                     // Single lock per token (issue #633): accumulate raw text,

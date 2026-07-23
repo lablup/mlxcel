@@ -46,6 +46,23 @@ use mlxcel_core::session::{MlxInferenceSession, SessionCapabilities};
 #[cfg(feature = "xla-backend")]
 use mlxcel_xla::XlaInferenceSession;
 
+#[cfg(feature = "xla-backend")]
+pub(super) fn qualified_xla_capabilities(
+    mut engine_capabilities: SessionCapabilities,
+    has_image_preprocessor: bool,
+) -> SessionCapabilities {
+    engine_capabilities.multimodal = engine_capabilities.multimodal && has_image_preprocessor;
+    engine_capabilities
+}
+
+#[cfg(feature = "xla-backend")]
+pub(super) fn qualified_xla_supports_images(
+    engine_capabilities: SessionCapabilities,
+    has_image_preprocessor: bool,
+) -> bool {
+    qualified_xla_capabilities(engine_capabilities, has_image_preprocessor).multimodal
+}
+
 /// Root-crate OpenXLA session with the matching host image preprocessor.
 ///
 /// The compiler runtime lives in `mlxcel-xla`, while the host preprocessor
@@ -74,15 +91,19 @@ impl XlaBackendSession {
     /// Report only capabilities whose complete host/runtime path was loaded.
     #[must_use]
     pub fn capabilities(&self) -> SessionCapabilities {
-        let mut capabilities = self.engine.capabilities();
-        capabilities.multimodal = capabilities.multimodal && self.image_preprocessor.is_some();
-        capabilities
+        qualified_xla_capabilities(
+            self.engine.capabilities(),
+            self.image_preprocessor.is_some(),
+        )
     }
 
     /// Whether this session can prepare and execute image-prefill requests.
     #[must_use]
     pub fn supports_images(&self) -> bool {
-        self.image_preprocessor.is_some() && self.engine.capabilities().multimodal
+        qualified_xla_supports_images(
+            self.engine.capabilities(),
+            self.image_preprocessor.is_some(),
+        )
     }
 
     /// Prepare decoded images through the exact preprocessor used by the
