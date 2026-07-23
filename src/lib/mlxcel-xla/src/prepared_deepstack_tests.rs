@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::*;
+use crate::prepared::{PreparedInputError, PreparedIreePrefill, PreparedPositionMode};
 use mlxcel_core::session::{
     PreparedAttentionBias, PreparedModality, PreparedPositions, PreparedTensorDType,
 };
@@ -71,6 +72,44 @@ fn schema() -> DeepStackConfig {
     DeepStackConfig {
         target_layer_indices: vec![0, 2, 3],
         max_visual_positions: 4,
+    }
+}
+
+#[test]
+fn public_deepstack_request_preserves_mrope_delta_and_rejects_wrong_mode() {
+    for rope_delta in [-2, 5] {
+        let mut value = prepared(2);
+        value.positions = PreparedPositions::Mrope3D {
+            tensor: tensor_i32(&[3, 4], [0, 1, 2, 3, 0, 1, 3, 3, 0, 2, 2, 3]),
+            rope_delta,
+        };
+        let request =
+            DeepStackPreparedPrefill::new(value, features(&[1, 3], &[0, 2, 3], 2)).unwrap();
+        let prepared = PreparedIreePrefill::prepare_for_mode(
+            request.prepared(),
+            2,
+            8,
+            PreparedPositionMode::Mrope3D,
+        )
+        .unwrap();
+        assert_eq!(prepared.positions.mode(), PreparedPositionMode::Mrope3D);
+        assert_eq!(prepared.positions.rope_delta(), rope_delta);
+        assert_eq!(prepared.positions.values().len(), 3 * 8);
+
+        let error = PreparedIreePrefill::prepare_for_mode(
+            request.prepared(),
+            2,
+            8,
+            PreparedPositionMode::OneD,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            PreparedInputError::PositionModeMismatch {
+                expected: PreparedPositionMode::OneD,
+                actual: PreparedPositionMode::Mrope3D,
+            }
+        );
     }
 }
 

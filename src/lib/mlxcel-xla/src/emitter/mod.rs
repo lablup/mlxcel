@@ -1004,6 +1004,43 @@ mod tests {
     }
 
     #[test]
+    fn deepstack_c_abi_pins_explicit_position_mode_rank_and_bytes() {
+        let source = include_str!("../../csrc/xla_iree.c");
+        let (_, implementation) = source
+            .split_once("static int xla_llama_prefill_embeddings_deepstack_impl(")
+            .expect("DeepStack C implementation");
+        let (implementation, _) = implementation
+            .split_once("int xla_llama_prefill_embeddings_deepstack(")
+            .expect("DeepStack C public wrappers");
+        assert!(
+            implementation.contains("position_mode != c->position_mode"),
+            "the native boundary must reject a caller mode that disagrees with the bundle"
+        );
+        assert!(
+            implementation.contains("\"positions\", positions, 1, position_mode == 1 ? 2 : 1,")
+        );
+        assert!(
+            implementation
+                .contains("position_mode == 1 ? positions_mrope_dims : positions_1d_dims")
+        );
+        assert!(
+            source
+                .contains("xla_ctx* c, int32_t position_mode, const xla_tensor_desc* embeddings,"),
+            "single DeepStack ABI must carry the explicit position mode"
+        );
+        assert!(
+            source.contains(
+                "xla_ctx* c, int32_t slot, int32_t position_mode,\n    const xla_tensor_desc* embeddings,"
+            ),
+            "ragged DeepStack ABI must carry the explicit position mode"
+        );
+        assert!(
+            source.contains("desc->byte_length != expected_bytes"),
+            "the shared descriptor validator must reject rank-correct truncated buffers"
+        );
+    }
+
+    #[test]
     fn qwen_deepstack_config_parses_and_rejects_unstable_schema() {
         let valid = r#"{"model_type":"qwen3","hidden_size":8,"num_attention_heads":2,
             "num_key_value_heads":1,"head_dim":4,"intermediate_size":16,
@@ -1512,16 +1549,22 @@ mod tests {
 
     #[test]
     fn mrope_graphs_have_explicit_position_shapes_and_dynamic_trig() {
-        let cfg = mrope_qwen(MropeLayout::Chunked);
+        let mut cfg = mrope_qwen(MropeLayout::Chunked);
+        cfg.deepstack = Some(DeepStackConfig {
+            target_layer_indices: vec![0],
+            max_visual_positions: 2,
+        });
         let prefill = emit_prefill(&cfg, false);
         let embeddings = emit_prefill_embeddings(&cfg, false);
+        let deepstack =
+            emit_prefill_embeddings_deepstack_with(&cfg, false, super::builder::Precision::F32);
         let decode = emit_decode(&cfg, false);
         let ragged = emit_decode_ragged(&cfg, 4, false);
 
-        for graph in [&prefill, &embeddings] {
+        for graph in [&prefill, &embeddings, &deepstack] {
             assert!(
                 graph.contains("tensor<3x8xi32>"),
-                "prefill positions must be explicit [3,L]"
+                "every prefill entry must carry explicit M-RoPE [3,L] positions"
             );
             assert!(graph.contains("stablehlo.cosine"));
             assert!(graph.contains("stablehlo.sine"));

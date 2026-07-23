@@ -7,7 +7,9 @@ component is ten. With zero transformer projections and unit RMSNorm weights,
 the first/middle/last post-hook residuals are exactly 11/21/31 at visual rows
 and one elsewhere. The production entry's final logits and every K/V element
 are also checked. The diagnostic entry reuses the production layer loop and
-only exposes those post-hook states for this oracle.
+only exposes those post-hook states for this oracle. Both ordinary 1D and
+explicit Qwen M-RoPE `[3, S]` positions execute the same fixed oracle; the root
+`xla_prepared_prefill` integration test covers the stateful first decode step.
 """
 
 from __future__ import annotations
@@ -35,14 +37,14 @@ IREE_RUN = Path(
 )
 
 LP = 256
-HIDDEN = 4
+HIDDEN = 6
 LAYERS = 3
 VISUAL_MAX = 3
 EPS = 1e-6
 
 
-def config() -> dict[str, object]:
-    return {
+def config(mrope: bool) -> dict[str, object]:
+    value: dict[str, object] = {
         "model_type": "qwen3",
         "hidden_size": HIDDEN,
         "intermediate_size": HIDDEN,
@@ -57,6 +59,12 @@ def config() -> dict[str, object]:
         "deepstack_language_layer_indices": [0, 1, 2],
         "deepstack_max_visual_positions": VISUAL_MAX,
     }
+    if mrope:
+        value["rope_scaling"] = {
+            "rope_type": "mrope",
+            "mrope_section": [1, 1, 1],
+        }
+    return value
 
 
 def write_values(path: Path, code: str, values: list[float | int]) -> None:
@@ -111,11 +119,25 @@ def weight_inputs(work: Path) -> list[str]:
     ]
 
 
-def runtime_inputs(work: Path) -> list[str]:
+def runtime_inputs(work: Path, mrope: bool) -> list[str]:
     features = [10.0] * (LAYERS * VISUAL_MAX * HIDDEN)
+    if mrope:
+        position_shape = (3, LP)
+        positions = [
+            coordinate
+            for axis in range(3)
+            for coordinate in (
+                list(range(LP))
+                if axis == 0
+                else [max(0, value - axis) for value in range(LP)]
+            )
+        ]
+    else:
+        position_shape = (LP,)
+        positions = list(range(LP))
     return [
         input_file(work, "embeddings", (LP, HIDDEN), "f32", [1.0] * (LP * HIDDEN)),
-        input_file(work, "positions", (LP,), "i32", list(range(LP))),
+        input_file(work, "positions", position_shape, "i32", positions),
         "--input=i32=4",
         input_file(work, "bias", (LP, LP), "f32", [0.0] * (LP * LP)),
         input_file(work, "visual_positions", (VISUAL_MAX,), "i32", [1, 2, 3]),
@@ -161,10 +183,11 @@ def expected_post_hook_states(work: Path) -> str:
     return f"--expected_output={LAYERS}x{LP}x{HIDDEN}xf32=@{path}"
 
 
-def run_module(work: Path, vmfb: Path, include_states: bool) -> None:
+def run_module(work: Path, vmfb: Path, include_states: bool, mrope: bool) -> None:
     normalized = 31.0 / math.sqrt(31.0 * 31.0 + EPS)
     expected = [
-        f"--expected_output=4xf32={normalized} {normalized} {normalized} {normalized}",
+        f"--expected_output={HIDDEN}xf32="
+        + " ".join([str(normalized)] * HIDDEN),
         f"--expected_output={LAYERS}x{LP}x1x{HIDDEN}xf32=0",
         f"--expected_output={LAYERS}x{LP}x1x{HIDDEN}xf32=0",
     ]
@@ -177,7 +200,7 @@ def run_module(work: Path, vmfb: Path, include_states: bool) -> None:
             f"--module={vmfb}",
             "--function=main",
             *weight_inputs(work),
-            *runtime_inputs(work),
+            *runtime_inputs(work, mrope),
             *expected,
         ],
         check=True,
@@ -188,39 +211,43 @@ def main() -> int:
     if not IREE_COMPILE.is_file() or not IREE_RUN.is_file():
         raise SystemExit("set IREE_COMPILE and IREE_RUN_MODULE to pinned IREE tools")
     with tempfile.TemporaryDirectory(prefix="mlxcel_deepstack_") as temp:
-        work = Path(temp)
-        config_path = work / "config.json"
-        config_path.write_text(json.dumps(config()), encoding="utf-8")
-        subprocess.run(
-            [
-                os.environ.get("CARGO", "cargo"),
-                "test",
-                "-p",
-                "mlxcel-xla",
-                "--lib",
-                "emitter::tests::dump_prefill_embeddings_parity_graphs",
-                "--",
-                "--ignored",
-            ],
-            cwd=REPO_ROOT,
-            env={
-                **os.environ,
-                "MLXCEL_DUMP_CONFIG": str(config_path),
-                "MLXCEL_DUMP_DIR": str(work),
-            },
-            check=True,
-        )
-        production_mlir = work / "prefill_embeddings_deepstack_logits.mlir"
-        production_vmfb = work / "prefill_embeddings_deepstack_logits.vmfb"
-        diagnostics_mlir = work / "prefill_embeddings_deepstack_diagnostics.mlir"
-        diagnostics_vmfb = work / "prefill_embeddings_deepstack_diagnostics.vmfb"
-        compile_module(production_mlir, production_vmfb)
-        compile_module(diagnostics_mlir, diagnostics_vmfb)
-        run_module(work, production_vmfb, include_states=False)
-        run_module(work, diagnostics_vmfb, include_states=True)
+        root = Path(temp)
+        for mode_name, mrope in [("one_d", False), ("mrope", True)]:
+            work = root / mode_name
+            work.mkdir()
+            config_path = work / "config.json"
+            config_path.write_text(json.dumps(config(mrope)), encoding="utf-8")
+            subprocess.run(
+                [
+                    os.environ.get("CARGO", "cargo"),
+                    "test",
+                    "-p",
+                    "mlxcel-xla",
+                    "--lib",
+                    "emitter::tests::dump_prefill_embeddings_parity_graphs",
+                    "--",
+                    "--ignored",
+                ],
+                cwd=REPO_ROOT,
+                env={
+                    **os.environ,
+                    "MLXCEL_DUMP_CONFIG": str(config_path),
+                    "MLXCEL_DUMP_DIR": str(work),
+                },
+                check=True,
+            )
+            production_mlir = work / "prefill_embeddings_deepstack_logits.mlir"
+            production_vmfb = work / "prefill_embeddings_deepstack_logits.vmfb"
+            diagnostics_mlir = work / "prefill_embeddings_deepstack_diagnostics.mlir"
+            diagnostics_vmfb = work / "prefill_embeddings_deepstack_diagnostics.vmfb"
+            compile_module(production_mlir, production_vmfb)
+            compile_module(diagnostics_mlir, diagnostics_vmfb)
+            run_module(work, production_vmfb, include_states=False, mrope=mrope)
+            run_module(work, diagnostics_vmfb, include_states=True, mrope=mrope)
+            print(f"MODE {mode_name}: PASS")
     print(
-        "RESULT: PASS (Qwen3-VL fixed post-hook states, logits, and every K/V; "
-        "IREE local-task)"
+        "RESULT: PASS (1D + M-RoPE Qwen3-VL fixed post-hook states, logits, "
+        "and every K/V; IREE local-task)"
     )
     return 0
 

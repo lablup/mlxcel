@@ -1190,24 +1190,27 @@ int xla_llama_prefill_embeddings_ple_slot_logits(
 }
 
 static int xla_llama_prefill_embeddings_deepstack_impl(
-    xla_ctx* c, int32_t slot, const xla_tensor_desc* embeddings,
+    xla_ctx* c, int32_t slot, int32_t position_mode,
+    const xla_tensor_desc* embeddings,
     const xla_tensor_desc* positions, const xla_tensor_desc* attention_bias,
     const xla_tensor_desc* visual_positions,
     const xla_tensor_desc* layer_features,
     const xla_tensor_desc* layer_indices, int32_t actual_layer_count,
     int32_t actual_visual_count, int32_t real_len, int32_t vocab,
     int32_t* out_token, float* out_logits) {
-  if (!c || !c->has_deepstack || real_len <= 0 ||
+  if (!c || !c->has_deepstack || position_mode != c->position_mode ||
+      real_len <= 0 ||
       real_len > c->context_capacity ||
       actual_layer_count != c->deepstack_layers ||
       actual_visual_count < 0 ||
       actual_visual_count > c->deepstack_visual_positions) {
     fprintf(stderr,
-            "xla_llama_prefill_embeddings_deepstack: invalid bundle/count/length contract\n");
+            "xla_llama_prefill_embeddings_deepstack: invalid bundle/mode/count/length contract\n");
     return 1;
   }
   int64_t embeddings_dims[2] = {c->context_capacity, c->hidden_size};
-  int64_t positions_dims[1] = {c->context_capacity};
+  int64_t positions_1d_dims[1] = {c->context_capacity};
+  int64_t positions_mrope_dims[2] = {3, c->context_capacity};
   int64_t bias_dims[2] = {c->context_capacity, c->context_capacity};
   int64_t visual_position_dims[1] = {c->deepstack_visual_positions};
   int64_t layer_feature_dims[3] = {
@@ -1215,8 +1218,9 @@ static int xla_llama_prefill_embeddings_deepstack_impl(
   int64_t layer_index_dims[1] = {c->deepstack_layers};
   if (xla_validate_tensor_desc("embeddings", embeddings, 0, 2,
                                embeddings_dims) != 0 ||
-      xla_validate_tensor_desc("positions", positions, 1, 1,
-                               positions_dims) != 0 ||
+      xla_validate_tensor_desc(
+          "positions", positions, 1, position_mode == 1 ? 2 : 1,
+          position_mode == 1 ? positions_mrope_dims : positions_1d_dims) != 0 ||
       xla_validate_tensor_desc("attention_bias", attention_bias, 0, 2,
                                bias_dims) != 0 ||
       xla_validate_tensor_desc("deepstack.visual_positions", visual_positions,
@@ -1392,20 +1396,21 @@ cleanup:
 }
 
 int xla_llama_prefill_embeddings_deepstack(
-    xla_ctx* c, const xla_tensor_desc* embeddings,
+    xla_ctx* c, int32_t position_mode, const xla_tensor_desc* embeddings,
     const xla_tensor_desc* positions, const xla_tensor_desc* attention_bias,
     const xla_tensor_desc* visual_positions,
     const xla_tensor_desc* layer_features,
     const xla_tensor_desc* layer_indices, int32_t actual_layer_count,
     int32_t actual_visual_count, int32_t real_len, int32_t* out_token) {
   return xla_llama_prefill_embeddings_deepstack_impl(
-      c, -1, embeddings, positions, attention_bias, visual_positions,
+      c, -1, position_mode, embeddings, positions, attention_bias, visual_positions,
       layer_features, layer_indices, actual_layer_count, actual_visual_count,
       real_len, 0, out_token, NULL);
 }
 
 int xla_llama_prefill_embeddings_deepstack_slot_logits(
-    xla_ctx* c, int32_t slot, const xla_tensor_desc* embeddings,
+    xla_ctx* c, int32_t slot, int32_t position_mode,
+    const xla_tensor_desc* embeddings,
     const xla_tensor_desc* positions, const xla_tensor_desc* attention_bias,
     const xla_tensor_desc* visual_positions,
     const xla_tensor_desc* layer_features,
@@ -1413,7 +1418,7 @@ int xla_llama_prefill_embeddings_deepstack_slot_logits(
     int32_t actual_visual_count, int32_t real_len, int32_t vocab,
     float* out_logits) {
   return xla_llama_prefill_embeddings_deepstack_impl(
-      c, slot, embeddings, positions, attention_bias, visual_positions,
+      c, slot, position_mode, embeddings, positions, attention_bias, visual_positions,
       layer_features, layer_indices, actual_layer_count, actual_visual_count,
       real_len, vocab, NULL, out_logits);
 }

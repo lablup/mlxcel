@@ -571,8 +571,12 @@ impl XlaBatchEngine {
             .engine
             .prepare_deepstack(&features)
             .map_err(XlaAdmissionError::DeepStackPrepared)?;
-        let prepared =
-            PreparedIreePrefill::prepare(&prepared, self.engine.hidden_size(), context_capacity)?;
+        let prepared = PreparedIreePrefill::prepare_for_mode(
+            &prepared,
+            self.engine.hidden_size(),
+            context_capacity,
+            self.engine.position_mode(),
+        )?;
         queue_deepstack_prepared_request(
             &mut self.sched,
             prepared,
@@ -1132,7 +1136,6 @@ impl XlaReferenceEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::prepared::PreparedIreePositions;
     use mlxcel_core::session::{
         OwnedTensor, PreparedAttentionBias, PreparedModality, PreparedPositions,
         PreparedTensorDType,
@@ -1314,80 +1317,6 @@ mod tests {
         ));
         assert_eq!(fourth.input.logical_tokens(), &[12, 13, 14]);
         assert_eq!(fourth.input.effective_len(), 3);
-    }
-
-    #[test]
-    fn mixed_text_and_mrope_slots_keep_deltas_independent_through_reuse() {
-        let text = prepared_input(vec![1, 2, 3], 2, 8);
-        assert_eq!(text.positions.rope_delta(), 0);
-        let mut vision = deepstack_input(vec![4, 5, 6, 7]);
-        let PendingInput::DeepStackPrepared { prepared, .. } = &mut vision else {
-            panic!("DeepStack test helper must produce a prepared payload");
-        };
-        prepared.positions = PreparedIreePositions::Mrope3D {
-            values: vec![0; 3 * 8],
-            rope_delta: -2,
-        };
-        let mut positive = prepared_input(vec![8, 9], 2, 8);
-        positive.positions = PreparedIreePositions::Mrope3D {
-            values: vec![0; 3 * 8],
-            rope_delta: 5,
-        };
-
-        let mut sched = Scheduler::new(3, EOS.to_vec());
-        let text_id = sched.submit_input(PendingInput::Prepared(text), 8, g());
-        let vision_id = sched.submit_input(vision, 8, g());
-        let positive_id = sched.submit_input(PendingInput::Prepared(positive), 8, g());
-        for slot in 0..3 {
-            let pending = sched.pop_next_pending().unwrap();
-            let rope_delta = pending.input.rope_delta();
-            sched.slots[slot] = Some(Slot {
-                req_id: pending.req_id,
-                cur: 1,
-                cache_len: pending.input.effective_len() as i32,
-                rope_delta,
-                produced: 1,
-                cap: pending.cap,
-                params: pending.params,
-                rng: 0,
-                history: Vec::new(),
-            });
-        }
-
-        assert_eq!(
-            mrope_slot_coordinates(&sched.slots).unwrap(),
-            [[3, 3, 3], [2, 2, 2], [7, 7, 7]]
-        );
-        assert!(sched.cancel(vision_id));
-        assert_eq!(
-            mrope_slot_coordinates(&sched.slots).unwrap(),
-            [[3, 3, 3], [0, 0, 0], [7, 7, 7]],
-            "cancelling one row clears only its own delta"
-        );
-
-        let replacement = sched.submit(vec![10, 11], 8, g());
-        let pending = sched.pop_next_pending().unwrap();
-        assert_eq!(pending.req_id, replacement);
-        let free = sched.free_slots();
-        assert_eq!(free, [1]);
-        sched.slots[free[0]] = Some(Slot {
-            req_id: pending.req_id,
-            cur: 1,
-            cache_len: pending.input.effective_len() as i32,
-            rope_delta: pending.input.rope_delta(),
-            produced: 1,
-            cap: pending.cap,
-            params: pending.params,
-            rng: 0,
-            history: Vec::new(),
-        });
-        assert_eq!(
-            mrope_slot_coordinates(&sched.slots).unwrap(),
-            [[3, 3, 3], [2, 2, 2], [7, 7, 7]],
-            "reused text slot starts with delta zero"
-        );
-        assert_eq!(sched.slots[0].as_ref().unwrap().req_id, text_id);
-        assert_eq!(sched.slots[2].as_ref().unwrap().req_id, positive_id);
     }
 
     #[test]

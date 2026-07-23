@@ -21,9 +21,13 @@
 use std::collections::HashMap;
 
 use mlxcel::{
-    OwnedTensor, PreparedAttentionBias, PreparedPositions, PreparedPrefill, PreparedTensorDType,
+    OwnedTensor, PreparedAttentionBias, PreparedModality, PreparedPositions, PreparedPrefill,
+    PreparedTensorDType,
 };
-use mlxcel_xla::{EngineEvent, SampleParams, XlaBatchEngine, XlaInferenceSession};
+use mlxcel_xla::{
+    DeepStackFeatures, DeepStackPreparedPrefill, EngineEvent, SampleParams, XlaBatchEngine,
+    XlaInferenceSession,
+};
 use safetensors::{Dtype, tensor::TensorView};
 use tempfile::TempDir;
 
@@ -117,7 +121,7 @@ fn create_tiny_model() -> TinyModel {
     let dir = tempfile::tempdir().expect("temporary model directory");
     std::fs::write(
         dir.path().join("config.json"),
-        r#"{"model_type":"llama","hidden_size":8,"intermediate_size":16,"num_hidden_layers":2,"num_attention_heads":2,"num_key_value_heads":1,"head_dim":4,"vocab_size":32,"rms_norm_eps":1e-6,"rope_theta":10000.0,"tie_word_embeddings":true}"#,
+        r#"{"model_type":"llama","hidden_size":8,"intermediate_size":16,"num_hidden_layers":2,"num_attention_heads":2,"num_key_value_heads":1,"head_dim":4,"vocab_size":32,"rms_norm_eps":1e-6,"rope_theta":10000.0,"tie_word_embeddings":true,"deepstack_language_layer_indices":[0,1],"deepstack_max_visual_positions":2}"#,
     )
     .expect("model config");
 
@@ -184,7 +188,7 @@ fn create_tiny_mrope_model() -> TinyModel {
     let dir = tempfile::tempdir().expect("temporary M-RoPE model directory");
     std::fs::write(
         dir.path().join("config.json"),
-        r#"{"model_type":"qwen2","hidden_size":12,"intermediate_size":24,"num_hidden_layers":2,"num_attention_heads":2,"num_key_value_heads":1,"head_dim":6,"vocab_size":32,"rms_norm_eps":1e-6,"rope_theta":10000.0,"tie_word_embeddings":true,"attention_bias":true,"hidden_act":"silu","rope_scaling":{"rope_type":"mrope","mrope_section":[1,1,1]}}"#,
+        r#"{"model_type":"qwen2","hidden_size":12,"intermediate_size":24,"num_hidden_layers":2,"num_attention_heads":2,"num_key_value_heads":1,"head_dim":6,"vocab_size":32,"rms_norm_eps":1e-6,"rope_theta":10000.0,"tie_word_embeddings":true,"attention_bias":true,"hidden_act":"silu","rope_scaling":{"rope_type":"mrope","mrope_section":[1,1,1]},"deepstack_language_layer_indices":[0,1],"deepstack_max_visual_positions":2}"#,
     )
     .expect("M-RoPE model config");
 
@@ -316,6 +320,46 @@ fn mrope_text_prepared(fixture: &TinyModel, tokens: &[i32]) -> PreparedPrefill {
     .expect("valid text-only prepared input for an M-RoPE bundle")
 }
 
+fn deepstack_request(
+    mut prepared: PreparedPrefill,
+    visual_positions: &[i32],
+    layer_indices: &[i32],
+    hidden_size: usize,
+    feature_value: f32,
+) -> DeepStackPreparedPrefill {
+    prepared.modalities = vec![PreparedModality {
+        family: "deepstack-test".to_string(),
+        item_count: usize::from(!visual_positions.is_empty()),
+        token_count: visual_positions.len(),
+    }];
+    let features = DeepStackFeatures::new(
+        tensor_i32(&[visual_positions.len()], visual_positions),
+        tensor_f32(
+            &[layer_indices.len(), visual_positions.len(), hidden_size],
+            &vec![feature_value; layer_indices.len() * visual_positions.len() * hidden_size],
+        ),
+        tensor_i32(&[layer_indices.len()], layer_indices),
+    )
+    .expect("valid compact DeepStack features");
+    DeepStackPreparedPrefill::new(prepared, features).expect("valid DeepStack request")
+}
+
+fn mrope_positions_for_one_d_fixture(
+    mut prepared: PreparedPrefill,
+    rope_delta: i32,
+) -> PreparedPrefill {
+    let sequence = prepared.sequence_len;
+    let values = (0..3)
+        .flat_map(|_| 0..sequence)
+        .map(|position| position as i32)
+        .collect::<Vec<_>>();
+    prepared.positions = PreparedPositions::Mrope3D {
+        tensor: tensor_i32(&[3, sequence], &values),
+        rope_delta,
+    };
+    prepared
+}
+
 #[test]
 #[ignore = "requires the pinned IREE runtime and compiler"]
 fn local_task_token_and_prepared_paths_are_exact_with_mixed_slot_reuse() {
@@ -336,6 +380,15 @@ fn local_task_token_and_prepared_paths_are_exact_with_mixed_slot_reuse() {
         .generate_prepared_greedy(&prepared, 2, &[])
         .expect("prepared generation");
     assert_eq!(prepared_output, text_output);
+
+    let deepstack = deepstack_request(prepared.clone(), &[1, 2], &[0, 1], HIDDEN, 0.01);
+    let mut deepstack_session =
+        XlaInferenceSession::load_with_context_capacity(fixture.path(), 2, CAPACITY)
+            .expect("1D DeepStack session");
+    let deepstack_output = deepstack_session
+        .generate_deepstack_prepared_greedy(&deepstack, 3, &[])
+        .expect("1D DeepStack prefill and first decode");
+    assert_eq!(deepstack_output.len(), 3);
 
     let mut batch =
         XlaBatchEngine::load_with_context_capacity(fixture.path(), 4, "local-task", CAPACITY)
@@ -371,12 +424,44 @@ fn local_task_token_and_prepared_paths_are_exact_with_mixed_slot_reuse() {
     let reused = batch
         .submit_prepared(fixture.prepared(&tokens), 2, SampleParams::greedy())
         .expect("reuse released slot");
-    let events = batch.pump().expect("pump reused slot");
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, EngineEvent::Token { req_id, .. } if *req_id == reused))
+    let deepstack_id = batch
+        .submit_deepstack_prepared(deepstack, 3, SampleParams::greedy())
+        .expect("queue public 1D DeepStack request");
+    let mut reused_seen = false;
+    let mut deepstack_tokens = Vec::new();
+    while !batch.is_idle() {
+        for event in batch.pump().expect("pump reused and DeepStack slots") {
+            if let EngineEvent::Token { req_id, token } = event {
+                reused_seen |= req_id == reused;
+                if req_id == deepstack_id {
+                    deepstack_tokens.push(token);
+                }
+            }
+        }
+    }
+    assert!(reused_seen);
+    assert_eq!(deepstack_tokens, deepstack_output);
+
+    let wrong_mode = deepstack_request(
+        mrope_positions_for_one_d_fixture(fixture.prepared(&tokens), -1),
+        &[1, 2],
+        &[0, 1],
+        HIDDEN,
+        0.01,
     );
+    let mut wrong_single =
+        XlaInferenceSession::load_with_context_capacity(fixture.path(), 2, CAPACITY)
+            .expect("wrong-mode single session");
+    let error = wrong_single
+        .prefill_deepstack_prepared(&wrong_mode)
+        .expect_err("M-RoPE positions must fail against a 1D DeepStack bundle");
+    assert!(error.contains("position mode"));
+    let pending_before = batch.pending_len();
+    let error = batch
+        .submit_deepstack_prepared(wrong_mode, 2, SampleParams::greedy())
+        .expect_err("wrong-mode batch admission must fail closed");
+    assert!(error.to_string().contains("position mode"));
+    assert_eq!(batch.pending_len(), pending_before);
 }
 
 #[test]
@@ -396,6 +481,10 @@ fn local_task_mrope_prefill_decode_and_per_slot_deltas_execute() {
         [&[0, 1, 1, 3], &[0, 1, 2, 3], &[0, 2, 1, 3]],
         2,
     );
+    let negative_deepstack =
+        deepstack_request(negative.clone(), &[1, 3], &[0, 1], MROPE_HIDDEN, 0.01);
+    let positive_deepstack =
+        deepstack_request(positive.clone(), &[1, 3], &[0, 1], MROPE_HIDDEN, 0.02);
 
     let mut single_text =
         XlaInferenceSession::load_with_context_capacity(fixture.path(), 2, CAPACITY)
@@ -421,6 +510,36 @@ fn local_task_mrope_prefill_decode_and_per_slot_deltas_execute() {
         .expect("real-IREE M-RoPE single prefill/decode");
     assert_eq!(single_tokens.len(), 3);
 
+    let mut single_deepstack =
+        XlaInferenceSession::load_with_context_capacity(fixture.path(), 2, CAPACITY)
+            .expect("M-RoPE single DeepStack session");
+    let single_deepstack_tokens = single_deepstack
+        .generate_deepstack_prepared_greedy(&negative_deepstack, 3, &[])
+        .expect("real-IREE M-RoPE DeepStack prefill and first decode");
+    assert_eq!(single_deepstack_tokens.len(), 3);
+
+    let mut atomic = XlaInferenceSession::load_with_context_capacity(fixture.path(), 2, CAPACITY)
+        .expect("M-RoPE DeepStack atomic-failure session");
+    let first = atomic
+        .prefill_deepstack_prepared(&negative_deepstack)
+        .expect("seed negative-delta DeepStack state");
+    let wrong_layers = deepstack_request(negative.clone(), &[1, 3], &[0], MROPE_HIDDEN, 0.01);
+    let error = atomic
+        .prefill_deepstack_prepared(&wrong_layers)
+        .expect_err("runtime DeepStack schema mismatch must fail");
+    assert!(error.contains("do not match compiled target layers"));
+    let after_failure = mlxcel::InferenceSession::decode_step(&mut atomic, first)
+        .expect("failed prefill must retain the prior signed-delta decode state");
+    let mut control = XlaInferenceSession::load_with_context_capacity(fixture.path(), 2, CAPACITY)
+        .expect("M-RoPE DeepStack atomic-failure control");
+    let control_first = control
+        .prefill_deepstack_prepared(&negative_deepstack)
+        .expect("seed control negative-delta state");
+    let control_next =
+        mlxcel::InferenceSession::decode_step(&mut control, control_first).expect("decode control");
+    assert_eq!(first, control_first);
+    assert_eq!(after_failure, control_next);
+
     let mut batch =
         XlaBatchEngine::load_with_context_capacity(fixture.path(), 4, "local-task", CAPACITY)
             .expect("M-RoPE ragged batch");
@@ -428,11 +547,11 @@ fn local_task_mrope_prefill_decode_and_per_slot_deltas_execute() {
         .submit(&tokens, 3, SampleParams::greedy())
         .expect("text-only Qwen request canonicalizes to 3D with delta zero");
     let vision = batch
-        .submit_prepared(negative, 3, SampleParams::greedy())
-        .expect("negative-delta vision request");
+        .submit_deepstack_prepared(negative_deepstack, 3, SampleParams::greedy())
+        .expect("negative-delta DeepStack vision request");
     let cancelled = batch
-        .submit_prepared(positive.clone(), 3, SampleParams::greedy())
-        .expect("positive-delta cancellation candidate");
+        .submit_deepstack_prepared(positive_deepstack.clone(), 3, SampleParams::greedy())
+        .expect("positive-delta DeepStack cancellation candidate");
     assert!(batch.cancel(cancelled));
 
     let mut text_tokens = Vec::new();
@@ -453,13 +572,13 @@ fn local_task_mrope_prefill_decode_and_per_slot_deltas_execute() {
         "ragged text token prefill must upload the exact [3, capacity] position buffer"
     );
     assert_eq!(
-        vision_tokens, single_tokens,
-        "single and ragged logits must select the same M-RoPE tokens"
+        vision_tokens, single_deepstack_tokens,
+        "single and ragged DeepStack logits must select the same M-RoPE tokens"
     );
 
     let reused = batch
-        .submit_prepared(positive, 2, SampleParams::greedy())
-        .expect("positive delta enters a released slot");
+        .submit_deepstack_prepared(positive_deepstack, 2, SampleParams::greedy())
+        .expect("positive-delta DeepStack request enters a released slot");
     let reused_text = batch
         .submit(&tokens, 3, SampleParams::greedy())
         .expect("text token request reuses a released M-RoPE slot");

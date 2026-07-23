@@ -319,6 +319,7 @@ unsafe extern "C" {
     ) -> c_int;
     fn xla_llama_prefill_embeddings_deepstack(
         c: *mut XlaCtx,
+        position_mode: c_int,
         embeddings: *const XlaTensorDesc,
         positions: *const XlaTensorDesc,
         attention_bias: *const XlaTensorDesc,
@@ -333,6 +334,7 @@ unsafe extern "C" {
     fn xla_llama_prefill_embeddings_deepstack_slot_logits(
         c: *mut XlaCtx,
         slot: c_int,
+        position_mode: c_int,
         embeddings: *const XlaTensorDesc,
         positions: *const XlaTensorDesc,
         attention_bias: *const XlaTensorDesc,
@@ -1820,12 +1822,14 @@ impl IreeLlama {
             "DeepStack prefill was requested from a runtime bundle without that capability"
                 .to_string()
         })?;
-        let prepared = PreparedIreePrefill::prepare(
+        let prepared = PreparedIreePrefill::prepare_for_mode(
             request.prepared(),
             self.hidden_size,
             self.context_capacity,
+            self.position_mode,
         )
         .map_err(|error| error.to_string())?;
+        let rope_delta = prepared.positions.rope_delta();
         let deepstack = PreparedDeepStack::prepare(request.deepstack(), schema, self.hidden_size)
             .map_err(|error| error.to_string())?;
         let (embeddings, positions, attention_bias) = prepared_descriptors(&prepared)?;
@@ -1843,6 +1847,7 @@ impl IreeLlama {
         let rc = unsafe {
             xla_llama_prefill_embeddings_deepstack(
                 self.ctx,
+                prepared.positions.mode().ffi_code(),
                 &embeddings,
                 &positions,
                 &attention_bias,
@@ -1860,6 +1865,7 @@ impl IreeLlama {
                 "xla_llama_prefill_embeddings_deepstack failed (status {rc})"
             ));
         }
+        self.rope_delta = rope_delta;
         Ok(out)
     }
 
@@ -2380,6 +2386,9 @@ impl IreeRaggedLlama {
         validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
         if prepared.hidden_size != self.hidden_size
             || prepared.context_capacity != self.context_capacity
+            || prepared.effective_len == 0
+            || prepared.effective_len > self.context_capacity
+            || prepared.positions.mode() != self.position_mode
             || deepstack.hidden_size != self.hidden_size
             || deepstack.max_layer_count != schema.target_layer_indices.len()
             || deepstack.max_visual_count != schema.max_visual_positions
@@ -2406,6 +2415,7 @@ impl IreeRaggedLlama {
             xla_llama_prefill_embeddings_deepstack_slot_logits(
                 self.ctx,
                 slot,
+                prepared.positions.mode().ffi_code(),
                 &embeddings,
                 &positions,
                 &attention_bias,
