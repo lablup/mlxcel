@@ -53,6 +53,7 @@ mod context;
 #[cfg(any(feature = "iree", test))]
 #[cfg_attr(not(feature = "iree"), allow(dead_code))]
 mod prepared;
+mod prepared_gemma3n;
 
 #[cfg(feature = "iree")]
 mod iree;
@@ -109,6 +110,7 @@ pub use context::{
     CONTEXT_CAPACITY_ENV, ContextCapacityError, DEFAULT_CONTEXT_CAPACITY,
     context_capacity_from_env, validate_request_capacity,
 };
+pub use prepared_gemma3n::{Gemma3nDensePle, Gemma3nDensePleError};
 #[cfg(feature = "iree")]
 pub use prepared::PreparedInputError;
 #[cfg(feature = "iree")]

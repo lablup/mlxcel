@@ -47,6 +47,13 @@
 
 mod builder;
 mod config;
+mod gemma3n;
+mod gemma3n_decode;
+mod gemma3n_emit;
+mod gemma3n_emit_ops;
+mod gemma3n_math;
+mod gemma3n_schema;
+mod gemma3n_weights;
 mod model;
 mod moe;
 mod rope;
@@ -55,6 +62,16 @@ mod rope;
 mod context_tests;
 
 pub(crate) use config::{Config, NormStyle, QkNorm, WeightScheme};
+#[allow(unused_imports)]
+pub(crate) use gemma3n::{
+    Gemma3nConfig, Gemma3nLayerType, Gemma3nPleDType, Gemma3nPleMetadata, validate_gemma3n_ple,
+};
+#[allow(unused_imports)]
+pub(crate) use gemma3n_decode::emit_gemma3n_decode;
+#[allow(unused_imports)]
+pub(crate) use gemma3n_emit::{emit_gemma3n_prefill, emit_gemma3n_prefill_embeddings_ple};
+#[allow(unused_imports)]
+pub(crate) use gemma3n_weights::{Gemma3nWeightSpec, gemma3n_weight_specs};
 // MoE FFN config types (issue #500), read by the weight loader (`iree.rs`) and the
 // validation harness. `SharedExpertConfig` is only named in some build cfgs.
 #[allow(unused_imports)]

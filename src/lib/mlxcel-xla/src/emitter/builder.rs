@@ -630,6 +630,22 @@ impl Builder {
         self.unary("tanh", a)
     }
 
+    /// Error function from the CHLO extension accepted by StableHLO import.
+    /// Gemma3n's sparse GELU uses the exact erf form (the ordinary GeGLU path
+    /// deliberately keeps the tanh approximation).
+    pub fn erf(&mut self, a: &Val) -> Val {
+        let ty = a.ty.clone();
+        let r = self.fresh();
+        self.line(format!(
+            "{} = \"chlo.erf\"({}) : ({}) -> {}",
+            r,
+            a.name,
+            ty.render(),
+            ty.render()
+        ));
+        Val { name: r, ty }
+    }
+
     /// `compare DIR, a, b, SIGNED|FLOAT` -> i1 tensor of the same shape.
     pub fn compare(&mut self, dir: &str, a: &Val, b: &Val, kind: &str) -> Val {
         let ty = Ty::new(a.ty.shape.clone(), "i1");
