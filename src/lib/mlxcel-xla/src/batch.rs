@@ -186,7 +186,9 @@ impl PendingInput {
     fn rope_delta(&self) -> i32 {
         match self {
             Self::Tokens(_) | Self::Gemma3nPrepared { .. } => 0,
-            Self::Prepared(prepared) => prepared.positions.rope_delta(),
+            Self::Prepared(prepared) | Self::DeepStackPrepared { prepared, .. } => {
+                prepared.positions.rope_delta()
+            }
         }
     }
 }
@@ -1318,8 +1320,11 @@ mod tests {
     fn mixed_text_and_mrope_slots_keep_deltas_independent_through_reuse() {
         let text = prepared_input(vec![1, 2, 3], 2, 8);
         assert_eq!(text.positions.rope_delta(), 0);
-        let mut vision = prepared_input(vec![4, 5, 6, 7], 2, 8);
-        vision.positions = PreparedIreePositions::Mrope3D {
+        let mut vision = deepstack_input(vec![4, 5, 6, 7]);
+        let PendingInput::DeepStackPrepared { prepared, .. } = &mut vision else {
+            panic!("DeepStack test helper must produce a prepared payload");
+        };
+        prepared.positions = PreparedIreePositions::Mrope3D {
             values: vec![0; 3 * 8],
             rope_delta: -2,
         };
@@ -1331,7 +1336,7 @@ mod tests {
 
         let mut sched = Scheduler::new(3, EOS.to_vec());
         let text_id = sched.submit_input(PendingInput::Prepared(text), 8, g());
-        let vision_id = sched.submit_input(PendingInput::Prepared(vision), 8, g());
+        let vision_id = sched.submit_input(vision, 8, g());
         let positive_id = sched.submit_input(PendingInput::Prepared(positive), 8, g());
         for slot in 0..3 {
             let pending = sched.pop_next_pending().unwrap();

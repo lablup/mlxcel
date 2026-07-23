@@ -373,8 +373,8 @@ pub(crate) const RAGGED_B_VALUES: &[usize] = &[4, 8];
 
 #[derive(Clone, Debug)]
 enum RuntimeConfig {
-    Dense(Config),
-    Gemma3n(Gemma3nConfig),
+    Dense(Box<Config>),
+    Gemma3n(Box<Gemma3nConfig>),
 }
 
 fn checked_ffi_int(value: usize, name: &str) -> Result<c_int, String> {
@@ -440,11 +440,13 @@ impl RuntimeConfig {
         if matches!(model_type, Some("gemma3n" | "gemma3n_text")) {
             return Gemma3nConfig::from_json_str(&text)
                 .and_then(|config| config.with_context_capacity(context_capacity))
+                .map(Box::new)
                 .map(Self::Gemma3n)
                 .map_err(|error| format!("{}: {error}", path.display()));
         }
         Config::from_json(model_dir)?
             .with_context_capacity(context_capacity)
+            .map(Box::new)
             .map(Self::Dense)
     }
 
@@ -1170,7 +1172,7 @@ mod checkpoint_name_tests {
     use super::*;
 
     fn tiny_gemma3n_runtime() -> RuntimeConfig {
-        RuntimeConfig::Gemma3n(
+        RuntimeConfig::Gemma3n(Box::new(
             Gemma3nConfig::from_json_str(
                 &serde_json::json!({
                     "model_type": "gemma3n_text",
@@ -1194,7 +1196,7 @@ mod checkpoint_name_tests {
             .unwrap()
             .with_context_capacity(4)
             .unwrap(),
-        )
+        ))
     }
 
     #[test]
