@@ -899,16 +899,22 @@ pub(super) fn phi4_siglip_text_config_value(full_config: &Value) -> Result<Value
     Ok(text_config)
 }
 
-fn phi4mm_vision_lora_scale(full_config: &Value) -> f32 {
-    let vision_lora = full_config.get("vision_lora").and_then(Value::as_object);
-    let rank = vision_lora
+fn phi4mm_lora_scale(
+    full_config: &Value,
+    adapter: &str,
+    default_rank: f64,
+    default_alpha: f64,
+) -> f32 {
+    let config_key = format!("{adapter}_lora");
+    let lora = full_config.get(&config_key).and_then(Value::as_object);
+    let rank = lora
         .and_then(|cfg| cfg.get("r"))
         .and_then(Value::as_f64)
-        .unwrap_or(256.0);
-    let alpha = vision_lora
+        .unwrap_or(default_rank);
+    let alpha = lora
         .and_then(|cfg| cfg.get("lora_alpha"))
         .and_then(Value::as_f64)
-        .unwrap_or(512.0);
+        .unwrap_or(default_alpha);
     (alpha / rank.max(1.0)) as f32
 }
 
@@ -931,12 +937,11 @@ fn flatten_phi4mm_patch_embedding(
     mlxcel_core::reshape(&transposed, &[shape[0], shape[1] * shape[2] * shape[3]])
 }
 
-fn rewrite_phi4mm_vision_key(key: &str) -> Option<String> {
-    if key.contains("position_ids")
-        || key.contains("img_processor.head.")
-        || key.starts_with("model.embed_tokens_extend.audio_embed.")
-    {
+fn rewrite_phi4mm_weight_key(key: &str) -> Option<String> {
+    if key.contains("position_ids") || key.contains("img_processor.head.") {
         None
+    } else if let Some(rest) = key.strip_prefix("model.embed_tokens_extend.audio_embed.") {
+        Some(format!("audio_embed.{rest}"))
     } else if key == "model.embed_tokens_extend.image_embed.glb_GN" {
         Some("glb_GN".to_string())
     } else if key == "model.embed_tokens_extend.image_embed.sub_GN" {
@@ -1002,98 +1007,109 @@ pub(super) fn phi4mm_vision_config_value(full_config: &Value) -> Value {
     })
 }
 
-/// LoRA pair: (lora_A weight, lora_B weight) keyed by the base weight name.
-type LoRAPairs = Vec<(
-    String,
-    mlxcel_core::UniquePtr<mlxcel_core::MlxArray>,
-    mlxcel_core::UniquePtr<mlxcel_core::MlxArray>,
-)>;
+struct Phi4MMLoRAPair {
+    adapter: &'static str,
+    base_key: String,
+    a: mlxcel_core::UniquePtr<mlxcel_core::MlxArray>,
+    b: mlxcel_core::UniquePtr<mlxcel_core::MlxArray>,
+}
+
+type PartialPhi4MMLoRA = (
+    Option<mlxcel_core::UniquePtr<mlxcel_core::MlxArray>>,
+    Option<mlxcel_core::UniquePtr<mlxcel_core::MlxArray>>,
+);
 
 /// Returns (remapped_weights, lora_pairs) where lora_pairs contains
 /// the raw LoRA A/B weights for runtime on-the-fly application.
-fn remap_phi4mm_weights(
-    raw_weights: WeightMap,
-    vision_lora_scale: f32,
-) -> Result<(WeightMap, LoRAPairs, f32)> {
-    let mut phi4mm_vision_lora: HashMap<
-        String,
-        (
-            Option<mlxcel_core::UniquePtr<mlxcel_core::MlxArray>>,
-            Option<mlxcel_core::UniquePtr<mlxcel_core::MlxArray>>,
-        ),
-    > = HashMap::new();
+fn remap_phi4mm_weights(raw_weights: WeightMap) -> Result<(WeightMap, Vec<Phi4MMLoRAPair>)> {
+    let mut partial_loras: HashMap<(&'static str, String), PartialPhi4MMLoRA> = HashMap::new();
     let mut base_weights = WeightMap::new();
 
     for (key, value) in raw_weights {
-        if let Some(base_key) = key.strip_suffix(".lora_A.vision.weight") {
-            let final_key = rewrite_phi4mm_vision_key(&format!("{}.weight", base_key))
-                .map(|key| key.replace(".base_layer.", "."));
-            if let Some(final_key) = final_key {
-                phi4mm_vision_lora
-                    .entry(final_key)
-                    .or_insert((None, None))
-                    .0 = Some(value);
+        let mut lora_component = None;
+        for (adapter, suffix, is_a) in [
+            ("vision", ".lora_A.vision.weight", true),
+            ("vision", ".lora_B.vision.weight", false),
+            ("speech", ".lora_A.speech.weight", true),
+            ("speech", ".lora_B.speech.weight", false),
+        ] {
+            if let Some(base_key) = key.strip_suffix(suffix) {
+                lora_component = Some((adapter, base_key.to_string(), is_a));
+                break;
             }
-            continue;
         }
-        if let Some(base_key) = key.strip_suffix(".lora_B.vision.weight") {
-            let final_key = rewrite_phi4mm_vision_key(&format!("{}.weight", base_key))
-                .map(|key| key.replace(".base_layer.", "."));
-            if let Some(final_key) = final_key {
-                phi4mm_vision_lora
-                    .entry(final_key)
-                    .or_insert((None, None))
-                    .1 = Some(value);
+        if let Some((adapter, base_key, is_a)) = lora_component {
+            let final_key = rewrite_phi4mm_weight_key(&format!("{base_key}.weight"))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Phi4MM {adapter} LoRA has rejected base key {base_key}")
+                })?
+                .replace(".base_layer.", ".");
+            let pair = partial_loras
+                .entry((adapter, final_key))
+                .or_insert((None, None));
+            if is_a {
+                pair.0 = Some(value);
+            } else {
+                pair.1 = Some(value);
             }
-            continue;
-        }
-        if key.contains(".lora_A.speech.") || key.contains(".lora_B.speech.") {
             continue;
         }
 
-        let Some(mut new_key) = rewrite_phi4mm_vision_key(&key) else {
+        let Some(mut new_key) = rewrite_phi4mm_weight_key(&key) else {
             continue;
         };
         if new_key.contains(".base_layer.") {
             new_key = new_key.replace(".base_layer.", ".");
         }
 
+        let shape = mlxcel_core::array_shape(&value);
         let value = if new_key.ends_with("patch_embedding.weight") {
             flatten_phi4mm_patch_embedding(&value)
+        } else if new_key.starts_with("audio_embed.encoder.")
+            && new_key.ends_with(".weight")
+            && shape.len() == 4
+        {
+            mlxcel_core::transpose_axes(&value, &[0, 2, 3, 1])
+        } else if new_key.starts_with("audio_embed.encoder.")
+            && new_key.ends_with(".weight")
+            && shape.len() == 3
+        {
+            mlxcel_core::transpose_axes(&value, &[0, 2, 1])
         } else {
             value
         };
         base_weights.insert(new_key, value);
     }
 
-    let mut lora_pairs: LoRAPairs = Vec::new();
-    let effective_scale = vision_lora_scale;
-    for (base_key, (lora_a, lora_b)) in phi4mm_vision_lora {
-        let (Some(lora_a), Some(lora_b)) = (lora_a, lora_b) else {
-            tracing::warn!(
-                "Incomplete Phi4MM vision LoRA pair for {}: missing lora_A or lora_B",
-                base_key
-            );
-            continue;
+    let mut lora_pairs = Vec::with_capacity(partial_loras.len());
+    for ((adapter, base_key), (lora_a, lora_b)) in partial_loras {
+        let (Some(a), Some(b)) = (lora_a, lora_b) else {
+            return Err(anyhow::anyhow!(
+                "Incomplete Phi4MM {adapter} LoRA pair for {base_key}"
+            ));
         };
-
         if !base_weights.contains_key(&base_key) {
-            tracing::warn!(
-                "Skipping Phi4MM vision LoRA pair for {} because the base weight is missing",
-                base_key
-            );
-            continue;
+            return Err(anyhow::anyhow!(
+                "Phi4MM {adapter} LoRA base weight is missing: {base_key}"
+            ));
         }
-
-        // Store raw LoRA A/B for runtime on-the-fly application (not fused)
-        lora_pairs.push((base_key, lora_a, lora_b));
+        lora_pairs.push(Phi4MMLoRAPair {
+            adapter,
+            base_key,
+            a,
+            b,
+        });
     }
 
-    Ok((base_weights, lora_pairs, effective_scale))
+    Ok((base_weights, lora_pairs))
 }
 
 pub(crate) fn load_phi4mm_vlm(model_path: &Path) -> Result<LoadedModel> {
+    use crate::audio::phi4mm::{
+        Phi4MMAudioConfig, Phi4MMAudioEncoder, Phi4MMAudioFeatureExtractor, Phi4MMAudioProjection,
+    };
     use vision::encoders::phi4_siglip::{Phi4SigLipVisionConfig, Phi4SigLipVisionEncoder};
+    use vision::phi4mm_vl::Phi4MMRequestModes;
     use vision::processors::phi4mm::Phi4MMProcessor;
 
     let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
@@ -1106,9 +1122,12 @@ pub(crate) fn load_phi4mm_vlm(model_path: &Path) -> Result<LoadedModel> {
     let vision_config: Phi4SigLipVisionConfig =
         serde_json::from_value(phi4mm_vision_config_value(&full_config))
             .map_err(|e| anyhow::anyhow!("Failed to parse Phi4MM vision config: {}", e))?;
+    let audio_config =
+        Phi4MMAudioConfig::from_model_config(&full_config).map_err(anyhow::Error::msg)?;
 
     let select_layer = -2isize;
-    let vision_lora_scale = phi4mm_vision_lora_scale(&full_config);
+    let vision_lora_scale = phi4mm_lora_scale(&full_config, "vision", 256.0, 512.0);
+    let speech_lora_scale = phi4mm_lora_scale(&full_config, "speech", 320.0, 640.0);
 
     // Read HD transform config
     let image_embd_layer = full_config
@@ -1141,10 +1160,8 @@ pub(crate) fn load_phi4mm_vlm(model_path: &Path) -> Result<LoadedModel> {
         }
     };
 
-    let (mut weights, lora_pairs, effective_scale) = remap_phi4mm_weights(
-        load_vlm_weights_common(model_path, None)?,
-        vision_lora_scale,
-    )?;
+    let (mut weights, lora_pairs) =
+        remap_phi4mm_weights(load_vlm_weights_common(model_path, None)?)?;
     models::sanitize_tied_embeddings(&mut weights, &full_config);
 
     // Load glb_GN and sub_GN learnable separator weights
@@ -1160,58 +1177,85 @@ pub(crate) fn load_phi4mm_vlm(model_path: &Path) -> Result<LoadedModel> {
     let mut text_model = models::Phi4MMModel::from_weights(&weights, &text_config)
         .map_err(|e| anyhow::anyhow!("Failed to load Phi4MM text model: {}", e))?;
 
-    // Set runtime LoRA weights on the text model's linear layers.
-    // LoRA starts active (applied during prefill) and is deactivated
-    // by after_prefill() so decode uses base weights only — matching
-    // Python PEFT behavior.
-    let has_runtime_lora = !lora_pairs.is_empty();
-    let mut lora_set_count = 0usize;
-    for (key, lora_a, lora_b) in lora_pairs {
+    // Register both official request-time adapters on every decoder projection.
+    // The request-scoped runtime selects language / vision / speech before each
+    // prefill and decode call; loading fails closed on any incomplete pair.
+    let mut lora_set_count: HashMap<&'static str, usize> = HashMap::new();
+    for pair in lora_pairs {
         // key = "model.layers.N.{section}.{proj}.weight"
-        let parts: Vec<&str> = key.split('.').collect();
-        if parts.len() < 5 || parts[0] != "model" || parts[1] != "layers" {
-            continue;
+        let parts: Vec<&str> = pair.base_key.split('.').collect();
+        if parts.len() != 6 || parts[0] != "model" || parts[1] != "layers" || parts[5] != "weight" {
+            return Err(anyhow::anyhow!(
+                "unsupported Phi4MM {} LoRA base key: {}",
+                pair.adapter,
+                pair.base_key
+            ));
         }
-        let Some(layer_idx) = parts[2].parse::<usize>().ok() else {
-            continue;
-        };
+        let layer_idx = parts[2]
+            .parse::<usize>()
+            .map_err(|_| anyhow::anyhow!("invalid Phi4MM LoRA layer in {}", pair.base_key))?;
         if layer_idx >= text_model.layers.len() {
-            continue;
+            return Err(anyhow::anyhow!(
+                "Phi4MM {} LoRA layer {} is out of range",
+                pair.adapter,
+                layer_idx
+            ));
         }
         let layer = &mut text_model.layers[layer_idx];
-        match (parts[3], parts[4]) {
-            ("self_attn", "qkv_proj") => {
-                layer
-                    .self_attn
-                    .qkv_proj
-                    .set_lora(lora_a, lora_b, effective_scale);
-                lora_set_count += 1;
+        let linear = match (parts[3], parts[4]) {
+            ("self_attn", "qkv_proj") => &mut layer.self_attn.qkv_proj,
+            ("self_attn", "o_proj") => &mut layer.self_attn.o_proj,
+            ("mlp", "gate_up_proj") => &mut layer.mlp.gate_up_proj,
+            ("mlp", "down_proj") => &mut layer.mlp.down_proj,
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "unsupported Phi4MM {} LoRA projection: {}",
+                    pair.adapter,
+                    pair.base_key
+                ));
             }
-            ("self_attn", "o_proj") => {
-                layer
-                    .self_attn
-                    .o_proj
-                    .set_lora(lora_a, lora_b, effective_scale);
-                lora_set_count += 1;
-            }
-            ("mlp", "gate_up_proj") => {
-                layer
-                    .mlp
-                    .gate_up_proj
-                    .set_lora(lora_a, lora_b, effective_scale);
-                lora_set_count += 1;
-            }
-            ("mlp", "down_proj") => {
-                layer
-                    .mlp
-                    .down_proj
-                    .set_lora(lora_a, lora_b, effective_scale);
-                lora_set_count += 1;
-            }
-            _ => {}
+        };
+        let scale = if pair.adapter == "speech" {
+            speech_lora_scale
+        } else {
+            vision_lora_scale
+        };
+        linear
+            .set_lora_named(pair.adapter, pair.a, pair.b, scale)
+            .map_err(anyhow::Error::msg)?;
+        *lora_set_count.entry(pair.adapter).or_default() += 1;
+    }
+    let expected_lora_count = text_config.num_hidden_layers * 4;
+    for adapter in ["vision", "speech"] {
+        let actual = lora_set_count.get(adapter).copied().unwrap_or_default();
+        if actual != expected_lora_count {
+            return Err(anyhow::anyhow!(
+                "Phi4MM {adapter} LoRA is incomplete: loaded {actual}, expected {expected_lora_count}"
+            ));
         }
     }
-    tracing::debug!("Phi4MM: set LoRA on {} linear layers", lora_set_count);
+    for layer in &text_model.layers {
+        layer
+            .self_attn
+            .qkv_proj
+            .select_lora(None)
+            .map_err(anyhow::Error::msg)?;
+        layer
+            .self_attn
+            .o_proj
+            .select_lora(None)
+            .map_err(anyhow::Error::msg)?;
+        layer
+            .mlp
+            .gate_up_proj
+            .select_lora(None)
+            .map_err(anyhow::Error::msg)?;
+        layer
+            .mlp
+            .down_proj
+            .select_lora(None)
+            .map_err(anyhow::Error::msg)?;
+    }
 
     let vision_tower = Phi4SigLipVisionEncoder::from_weights(
         &weights,
@@ -1236,6 +1280,12 @@ pub(crate) fn load_phi4mm_vlm(model_path: &Path) -> Result<LoadedModel> {
         text_config.bits(),
     )
     .map_err(|e| anyhow::anyhow!("Failed to load Phi4MM mm_projector_linear2: {}", e))?;
+    let audio_encoder =
+        Phi4MMAudioEncoder::from_weights(&weights, &audio_config, "audio_embed.encoder")
+            .map_err(anyhow::Error::msg)?;
+    let audio_projection =
+        Phi4MMAudioProjection::from_weights(&weights, "audio_embed.audio_projection")
+            .map_err(anyhow::Error::msg)?;
 
     let processor = Phi4MMProcessor::new(crop_size, vision_config.patch_size, dynamic_hd);
     let eos_token_ids = match full_config.get("eos_token_id") {
@@ -1253,12 +1303,15 @@ pub(crate) fn load_phi4mm_vlm(model_path: &Path) -> Result<LoadedModel> {
         mm_projector_linear1,
         mm_projector_linear2,
         processor,
+        audio_encoder,
+        audio_projection,
+        audio_extractor: Phi4MMAudioFeatureExtractor::new(),
         select_layer,
         eos_token_ids,
         glb_gn,
         sub_gn,
         hd_transform_order,
-        has_runtime_lora,
+        request_modes: Phi4MMRequestModes::default(),
     }))
 }
 

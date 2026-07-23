@@ -473,8 +473,7 @@ pub trait LanguageModel {
     }
 
     /// Called once after prefill completes and before decode starts.
-    /// Used by models that need to adjust internal state between phases,
-    /// e.g. Phi4MM unfuses vision LoRA so decode uses base weights.
+    /// Used by models that need to adjust internal state between phases.
     fn after_prefill(&self) {}
 
     /// Trim internal caches after padded prefill. Models with internal
@@ -1590,7 +1589,7 @@ impl CxxGenerator {
         // those arrays are replaced.
         ffi::eval(&logits);
 
-        // Allow models to adjust state between prefill and decode (e.g. Phi4MM LoRA unfusion)
+        // Allow models to adjust state between prefill and decode.
         model.after_prefill();
 
         ffi::clear_memory_cache();

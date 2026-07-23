@@ -181,8 +181,13 @@ fn resolve_max_batch_prefill_tokens(
 /// function lets the safety conditions be pinned by a unit test so a future
 /// edit cannot silently enable-by-default or allow video sharing.
 #[inline]
-fn vlm_prefix_sharing_allowed(enabled: bool, is_multimodal: bool, has_videos: bool) -> bool {
-    enabled && is_multimodal && !has_videos
+fn vlm_prefix_sharing_allowed(
+    enabled: bool,
+    is_multimodal: bool,
+    has_videos: bool,
+    requires_mode_restore: bool,
+) -> bool {
+    enabled && is_multimodal && !has_videos && !requires_mode_restore
 }
 
 fn effective_decode_storage_backend(
@@ -2961,12 +2966,14 @@ impl BatchScheduler {
         // Experimental VLM prompt-prefix cache sharing (#124 step c). Off by
         // default; the operator opts in with `--enable-vlm-prefix-cache`. Video
         // payloads are excluded because video frame bytes are not folded into
-        // the request's multimodal digest yet, so a video prefix could collide
-        // with a different one in the same bucket.
+        // the request's multimodal digest yet. Phi4MM is also excluded because
+        // cache adoption cannot yet restore its per-sequence speech/vision
+        // adapter mode alongside the detached KV payload.
         let vlm_sharing_ok = vlm_prefix_sharing_allowed(
             self.enable_vlm_prefix_cache,
             is_multimodal,
             !videos.is_empty(),
+            matches!(self.model, LoadedModel::Phi4MMVLM(_)),
         );
 
         // For VLM sharing the image/audio placeholder tokens must be expanded

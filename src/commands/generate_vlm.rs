@@ -378,6 +378,20 @@ pub(crate) fn compute_vlm_embeddings(
         ));
     }
 
+    // Phi4MM accepts one audio clip, optionally combined with images.
+    if let Some(audio) = audio_path
+        && let LoadedModel::Phi4MMVLM(phi4mm) = model
+    {
+        return compute_phi4mm_audio_embeddings(
+            phi4mm,
+            prompt_tokens,
+            prompt,
+            image_paths,
+            audio,
+            tokenizer,
+        );
+    }
+
     // Handle audio-only mode for Gemma4
     if image_paths.is_empty()
         && let Some(audio) = audio_path
@@ -442,7 +456,7 @@ pub(crate) fn compute_vlm_embeddings(
     if audio_path.is_some() {
         return Err(anyhow::anyhow!(
             "--audio input is not supported for this model family. Currently audio is wired \
-             through Gemma 4, Nemotron H Nano Omni, and Qwen3-Omni MoE VLMs only."
+             through Phi4MM, Gemma 4, Nemotron H Nano Omni, and Qwen3-Omni MoE VLMs only."
         ));
     }
 
@@ -516,6 +530,69 @@ pub(crate) fn compute_vlm_embeddings(
     } else {
         Ok(None)
     }
+}
+
+/// Compute Phi4MM audio-only or mixed image+audio embeddings. The official
+/// request contract uses one numbered placeholder per clip and selects the
+/// speech adapter for audio-only or the vision adapter/projection for mixed
+/// image+audio requests.
+fn compute_phi4mm_audio_embeddings(
+    phi4mm: &mlxcel::vision::Phi4MMVLModel,
+    prompt_tokens: &mut Vec<i32>,
+    prompt: &str,
+    image_paths: &[PathBuf],
+    audio_path: &Path,
+    tokenizer: &MlxcelTokenizer,
+) -> Result<Option<InputEmbeddings>> {
+    let images: Vec<image::DynamicImage> = image_paths
+        .iter()
+        .map(|path| {
+            image::open(path)
+                .map_err(|error| anyhow::anyhow!("Failed to load image {:?}: {}", path, error))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let processed_images = phi4mm.processor.preprocess(&images);
+
+    let (samples, sample_rate) =
+        mlxcel::audio::load_wav_file(audio_path).map_err(anyhow::Error::msg)?;
+    let audio_batch = phi4mm
+        .extract_audio(&[(samples, sample_rate)])
+        .map_err(anyhow::Error::msg)?;
+    let prepared = mlxcel::phi4mm_prompt::prepare_phi4mm_prompt_tokens(
+        prompt,
+        processed_images.len(),
+        1,
+        |text, add_special| {
+            tokenizer
+                .encode(text, add_special)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|token| token as i32)
+                .collect()
+        },
+    )
+    .map_err(anyhow::Error::msg)?;
+    let image_sizes: Vec<usize> = processed_images
+        .iter()
+        .map(|image| image.num_img_tokens)
+        .collect();
+    *prompt_tokens = mlxcel::phi4mm_prompt::expand_phi4mm_placeholders(
+        &prepared.tokens,
+        &image_sizes,
+        &audio_batch.embed_sizes,
+    )
+    .map_err(anyhow::Error::msg)?;
+
+    let input_ids = mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
+    let embeddings = phi4mm
+        .get_input_embeddings_with_audio(&input_ids, &processed_images, &audio_batch)
+        .map_err(anyhow::Error::msg)?;
+    println!(
+        "Phi4MM: prepared {} image(s) and one audio clip as {} prompt tokens",
+        processed_images.len(),
+        prompt_tokens.len()
+    );
+    Ok(Some(embeddings))
 }
 
 /// Compute audio-only embeddings for Gemma4 VLM.

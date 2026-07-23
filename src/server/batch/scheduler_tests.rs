@@ -910,14 +910,16 @@ fn auto_decode_storage_prefers_paged_only_for_supported_workers() {
 fn vlm_prefix_sharing_gate_pins_safety_conditions() {
     // Default off: even a clean image request is ineligible when the operator
     // did not pass --enable-vlm-prefix-cache.
-    assert!(!vlm_prefix_sharing_allowed(false, true, false));
+    assert!(!vlm_prefix_sharing_allowed(false, true, false, false));
     // Text-only requests never share, opt-in or not.
-    assert!(!vlm_prefix_sharing_allowed(true, false, false));
-    assert!(!vlm_prefix_sharing_allowed(false, false, false));
+    assert!(!vlm_prefix_sharing_allowed(true, false, false, false));
+    assert!(!vlm_prefix_sharing_allowed(false, false, false, false));
     // Video is excluded because its bytes are not folded into the digest.
-    assert!(!vlm_prefix_sharing_allowed(true, true, true));
+    assert!(!vlm_prefix_sharing_allowed(true, true, true, false));
+    // Phi4MM's request-scoped adapter mode is not part of cache snapshots yet.
+    assert!(!vlm_prefix_sharing_allowed(true, true, false, true));
     // The one eligible case: opted in, multimodal, no video.
-    assert!(vlm_prefix_sharing_allowed(true, true, false));
+    assert!(vlm_prefix_sharing_allowed(true, true, false, false));
 }
 
 /// #124 step b: the scheduler must fold the request context's multimodal

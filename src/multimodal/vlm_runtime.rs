@@ -34,7 +34,7 @@ use crate::moondream2_prompt::{Moondream2PromptMode, prepare_moondream2_prompt_t
 use crate::moondream3_prompt::{Moondream3PromptMode, prepare_moondream3_prompt_tokens};
 use crate::phi3v_prompt::prepare_phi3v_prompt_tokens;
 use crate::phi4_siglip_prompt::prepare_phi4_siglip_prompt_tokens;
-use crate::phi4mm_prompt::prepare_phi4mm_prompt_tokens;
+use crate::phi4mm_prompt::{expand_phi4mm_placeholders, prepare_phi4mm_prompt_tokens};
 use crate::pixtral_prompt::insert_pixtral_image_tokens;
 use crate::qwen_vl::{insert_qwen_vl_image_tokens, insert_qwen3_omni_image_tokens};
 use crate::smolvlm_prompt::insert_smolvlm_image_tokens;
@@ -737,36 +737,20 @@ where
             }))
         }
         VlmRuntimeRef::Phi4MM(phi4mm) => {
-            // 1. Preprocess images first to get num_img_tokens per image
             let processed_images = phi4mm.processor.preprocess(images);
-
-            // 2. Tokenize prompt (gets 1x -200 per image placeholder)
-            let prepared = prepare_phi4mm_prompt_tokens(prompt, images.len(), &mut encode)
+            let prepared = prepare_phi4mm_prompt_tokens(prompt, images.len(), 0, &mut encode)
                 .map_err(|err| anyhow::anyhow!("{}", err))?;
-            let tokens = prepared.tokens;
-
-            // 3. Expand each -200 sentinel to match num_img_tokens from HD transform
-            let mut img_idx = 0;
-            let mut expanded = Vec::with_capacity(tokens.len());
-            for &tok in &tokens {
-                if tok == crate::phi4_siglip_prompt::PHI4_SIGLIP_IMAGE_TOKEN_INDEX {
-                    if let Some(processed) = processed_images.get(img_idx) {
-                        expanded.extend(std::iter::repeat_n(
-                            crate::phi4_siglip_prompt::PHI4_SIGLIP_IMAGE_TOKEN_INDEX,
-                            processed.num_img_tokens,
-                        ));
-                    } else {
-                        expanded.push(tok);
-                    }
-                    img_idx += 1;
-                } else {
-                    expanded.push(tok);
-                }
-            }
-            *prompt_tokens = expanded;
+            let image_sizes: Vec<usize> = processed_images
+                .iter()
+                .map(|image| image.num_img_tokens)
+                .collect();
+            *prompt_tokens = expand_phi4mm_placeholders(&prepared.tokens, &image_sizes, &[])
+                .map_err(anyhow::Error::msg)?;
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
-            let embeddings = phi4mm.get_input_embeddings(&input_ids_arr, &processed_images);
+            let embeddings = phi4mm
+                .get_input_embeddings(&input_ids_arr, &processed_images)
+                .map_err(anyhow::Error::msg)?;
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,

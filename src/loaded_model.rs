@@ -350,6 +350,10 @@ impl LanguageModel for LoadedModel {
         delegate_language_model!(self, output_suppressed_token_ids())
     }
 
+    fn supports_chunked_prefill(&self) -> bool {
+        delegate_language_model!(self, supports_chunked_prefill())
+    }
+
     fn make_caches(&self) -> Vec<mlxcel_core::layers::KVCache> {
         // Use fully qualified syntax to ensure we call the trait method, not inherent methods
         delegate_language_model!(self, make_caches())

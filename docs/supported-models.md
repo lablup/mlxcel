@@ -115,6 +115,36 @@ Audio/video capability is model-specific. The server request types include
 must advertise support for the corresponding modality. Video frame extraction
 uses the system `ffmpeg`/`ffprobe` binaries at runtime.
 
+### Phi-4 Multimodal audio
+
+Phi4MM supports the official `microsoft/Phi-4-multimodal-instruct` checkpoint
+at revision `93f923e1a7727d1c4f446756212d9d3e8fcc5d81`. The CLI accepts one WAV
+clip through `--audio <path>`, optionally together with repeated `--image`
+arguments. The OpenAI-compatible server accepts multiple `input_audio` content
+blocks and can combine them with `image_url` blocks.
+
+Numbered placeholders such as `<|audio_1|>` and `<|image_1|>` determine the
+exact feature order. When placeholders are omitted, mlxcel synthesizes them;
+the server's normalized media representation groups audio before images, so
+callers that require the original content-part interleaving must include the
+numbered placeholders explicitly. Missing, extra, malformed, or duplicated
+audio placeholders are rejected rather than silently reordered.
+
+The shared WAV decoder accepts mono or multi-channel PCM and supplies mono
+samples to the Phi4MM frontend. Sample-rate handling intentionally follows the
+pinned processor's integer-ratio policy rather than an ideal rational
+resampler: native 8 kHz and 16 kHz are unchanged; rates above 16 kHz are
+downsampled by `floor(rate / 16000)` and then labeled 16 kHz; rates strictly
+between 8 kHz and 16 kHz use `floor(rate / 8000)` and are labeled 8 kHz. Thus,
+for example, the released processor labels 24 kHz input as 16 kHz without
+changing its samples. This behavior is required for the official frame count
+and token-exact output. Rates below 8 kHz are rejected. Clips of 40 seconds or
+less are recommended for checkpoint-quality parity, and clips over 30 minutes
+are rejected. Audio-only requests select the speech adapter and speech
+projection. Mixed image/audio requests select the vision adapter and vision
+projection, while text-only requests use the base language model. The selected
+mode remains active through decode and is isolated per request.
+
 ### Gemma 4 image soft-token budget
 
 Gemma 4's vision front-end is resolution-driven: it works over whatever patch

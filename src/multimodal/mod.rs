@@ -24,7 +24,7 @@
 //!   each row through `forward_with_sequence_id`.
 //! - `gemma4_vl`: Gemma 4 mixed-length batching helpers
 //! - `host_preprocessor`: owned host-first prefill production for compiler backends
-//! - `phi4mm_prompt`: Phi4MM `<|image_N|>` normalization and audio guard
+//! - `phi4mm_prompt`: Phi4MM numbered image/audio placeholder normalization
 //! - `phi4_siglip_prompt`: Phi4-SigLIP `<image>` placeholder handling
 //! - `minicpmo_prompt`: MiniCPM-o image placeholder expansion and bounds
 //! - `moondream2_prompt`: Moondream2 query/caption template shaping

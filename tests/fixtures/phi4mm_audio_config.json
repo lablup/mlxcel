@@ -1,0 +1,17 @@
+{
+  "audio_processor": { "config": {
+    "activation": "swish", "attention_dim": 1024, "attention_heads": 16,
+    "batch_norm": false, "bias_in_glu": true, "causal": true, "chunk_size": -1,
+    "conv_activation": "swish", "conv_glu_type": "swish",
+    "depthwise_multiplier": 1, "depthwise_seperable_out_channel": 1024,
+    "encoder_embedding_config": { "input_size": 80 },
+    "ext_pw_kernel_size": 1, "ext_pw_out_channel": 1024,
+    "input_layer": "nemo_conv", "input_size": 80,
+    "kernel_size": 3, "linear_units": 1536, "num_blocks": 24,
+    "time_reduction": 8, "nemo_conv_settings": { "conv_channels": 1024 },
+    "relative_attention_bias_args": { "type": "t5", "t5_bias_max_distance": 500 }
+  } },
+  "embd_layer": { "audio_embd_layer": {
+    "compression_rate": 8, "downsample_rate": 1, "projection_cls": "mlp"
+  } }
+}

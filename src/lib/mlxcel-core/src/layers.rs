@@ -661,25 +661,24 @@ impl LayerNorm {
     }
 }
 
-/// Optional LoRA weights for runtime on-the-fly application.
-/// Used by: Phi4MM VLM (vision LoRA active during prefill only)
+/// Named LoRA weights for runtime on-the-fly application.
+/// Used by: Phi4MM VLM (language / vision / speech request modes)
 pub struct LoRAWeights {
+    pub name: String,
     /// LoRA A weight: [rank, in_features]
     pub a: UniquePtr<MlxArray>,
     /// LoRA B weight: [out_features, rank]
     pub b: UniquePtr<MlxArray>,
     pub scale: f32,
-    /// Whether LoRA is currently active. Uses Cell for interior mutability
-    /// so that after_prefill(&self) can toggle it without &mut self.
-    active: std::cell::Cell<bool>,
 }
 
 /// Regular (non-quantized) Linear layer
 pub struct Linear {
     pub weight: UniquePtr<MlxArray>,
     pub bias: Option<UniquePtr<MlxArray>>,
-    /// Optional runtime LoRA (applied on-the-fly, not fused into weight)
-    lora: Option<LoRAWeights>,
+    /// Runtime LoRA adapters (applied on-the-fly, not fused into weight).
+    loras: Vec<LoRAWeights>,
+    active_lora: std::cell::Cell<Option<usize>>,
 }
 
 impl Linear {
@@ -688,7 +687,8 @@ impl Linear {
         Self {
             weight,
             bias,
-            lora: None,
+            loras: Vec::new(),
+            active_lora: std::cell::Cell::new(None),
         }
     }
 
@@ -708,24 +708,80 @@ impl Linear {
         Ok(Self {
             weight,
             bias,
-            lora: None,
+            loras: Vec::new(),
+            active_lora: std::cell::Cell::new(None),
         })
     }
 
     /// Set runtime LoRA weights. Starts active.
     pub fn set_lora(&mut self, a: UniquePtr<MlxArray>, b: UniquePtr<MlxArray>, scale: f32) {
-        self.lora = Some(LoRAWeights {
+        // Preserve the legacy setter's replacement semantics while allowing
+        // independent named adapters to coexist.
+        self.loras.retain(|adapter| adapter.name != "default");
+        self.set_lora_named("default", a, b, scale)
+            .expect("default LoRA shape must match its base linear");
+        self.select_lora(Some("default"))
+            .expect("default LoRA was just registered");
+    }
+
+    /// Register a named runtime LoRA adapter after validating its tensor shape.
+    pub fn set_lora_named(
+        &mut self,
+        name: &str,
+        a: UniquePtr<MlxArray>,
+        b: UniquePtr<MlxArray>,
+        scale: f32,
+    ) -> Result<(), String> {
+        let weight_shape = ffi::array_shape(&self.weight);
+        let a_shape = ffi::array_shape(&a);
+        let b_shape = ffi::array_shape(&b);
+        if weight_shape.len() != 2
+            || a_shape.len() != 2
+            || b_shape.len() != 2
+            || a_shape[1] != weight_shape[1]
+            || b_shape[0] != weight_shape[0]
+            || b_shape[1] != a_shape[0]
+        {
+            return Err(format!(
+                "LoRA adapter {name} shape mismatch: base={weight_shape:?}, A={a_shape:?}, B={b_shape:?}"
+            ));
+        }
+        if self.loras.iter().any(|adapter| adapter.name == name) {
+            return Err(format!("duplicate LoRA adapter name: {name}"));
+        }
+        self.loras.push(LoRAWeights {
+            name: name.to_string(),
             a,
             b,
             scale,
-            active: std::cell::Cell::new(true),
         });
+        Ok(())
+    }
+
+    /// Select one named adapter, or `None` for the base language model.
+    pub fn select_lora(&self, name: Option<&str>) -> Result<(), String> {
+        let selected = match name {
+            None => None,
+            Some(name) => Some(
+                self.loras
+                    .iter()
+                    .position(|adapter| adapter.name == name)
+                    .ok_or_else(|| format!("LoRA adapter not loaded: {name}"))?,
+            ),
+        };
+        self.active_lora.set(selected);
+        Ok(())
     }
 
     /// Toggle LoRA active state (no-op if no LoRA weights set)
     pub fn set_lora_active(&self, active: bool) {
-        if let Some(ref lora) = self.lora {
-            lora.active.set(active);
+        if self.loras.is_empty() {
+            return;
+        }
+        if active {
+            self.active_lora.set(Some(0));
+        } else {
+            self.active_lora.set(None);
         }
     }
 
@@ -736,8 +792,8 @@ impl Linear {
         let mut result = ffi::matmul(x, &wt);
 
         // Apply runtime LoRA: result += (x @ A.T) @ B.T * scale
-        if let Some(ref lora) = self.lora
-            && lora.active.get()
+        if let Some(index) = self.active_lora.get()
+            && let Some(lora) = self.loras.get(index)
         {
             let at = ffi::transpose(&lora.a);
             let bt = ffi::transpose(&lora.b);
@@ -762,7 +818,8 @@ impl Linear {
         Self {
             weight: ffi::copy(&self.weight),
             bias: self.bias.as_ref().map(|b| ffi::copy(b)),
-            lora: None,
+            loras: Vec::new(),
+            active_lora: std::cell::Cell::new(None),
         }
     }
 }
@@ -1240,6 +1297,32 @@ impl UnifiedLinear {
     pub fn set_lora(&mut self, a: UniquePtr<MlxArray>, b: UniquePtr<MlxArray>, scale: f32) {
         if let Self::Regular(linear) = self {
             linear.set_lora(a, b, scale);
+        }
+    }
+
+    /// Register a named runtime adapter. Quantized base linears are rejected:
+    /// the current on-the-fly LoRA path needs a dense base projection.
+    pub fn set_lora_named(
+        &mut self,
+        name: &str,
+        a: UniquePtr<MlxArray>,
+        b: UniquePtr<MlxArray>,
+        scale: f32,
+    ) -> Result<(), String> {
+        match self {
+            Self::Regular(linear) => linear.set_lora_named(name, a, b, scale),
+            Self::Quantized { .. } => Err(format!(
+                "runtime LoRA adapter {name} is not supported on a quantized base linear"
+            )),
+        }
+    }
+
+    /// Select one named adapter, or disable adapters with `None`.
+    pub fn select_lora(&self, name: Option<&str>) -> Result<(), String> {
+        match self {
+            Self::Regular(linear) => linear.select_lora(name),
+            Self::Quantized { .. } if name.is_none() => Ok(()),
+            Self::Quantized { .. } => Err("runtime LoRA is unavailable on quantized linear".into()),
         }
     }
 
@@ -3985,6 +4068,57 @@ pub fn compiled_gelu_mlp_fp16(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn named_lora_selection_is_reversible_and_validated() {
+        let mut linear = Linear::new(ffi::zeros(&[2, 2], crate::dtype::FLOAT32), None);
+        let identity = || ffi::from_slice_f32(&[1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        linear
+            .set_lora_named("speech", identity(), identity(), 1.0)
+            .unwrap();
+        linear
+            .set_lora_named(
+                "vision",
+                identity(),
+                ffi::from_slice_f32(&[2.0, 0.0, 0.0, 2.0], &[2, 2]),
+                1.0,
+            )
+            .unwrap();
+        let input = ffi::from_slice_f32(&[1.0, 1.0], &[1, 2]);
+        let output_values = |output: UniquePtr<MlxArray>| {
+            ffi::eval(&output);
+            (0..2)
+                .map(|index| {
+                    let value = ffi::slice(&output, &[0, index], &[1, index + 1]);
+                    ffi::eval(&value);
+                    ffi::item_f32(&value)
+                })
+                .collect::<Vec<_>>()
+        };
+
+        linear.select_lora(None).unwrap();
+        assert_eq!(output_values(linear.forward(&input)), vec![0.0, 0.0]);
+        linear.select_lora(Some("speech")).unwrap();
+        assert_eq!(output_values(linear.forward(&input)), vec![1.0, 1.0]);
+        linear.select_lora(Some("vision")).unwrap();
+        assert_eq!(output_values(linear.forward(&input)), vec![2.0, 2.0]);
+        linear.select_lora(Some("speech")).unwrap();
+        assert_eq!(output_values(linear.forward(&input)), vec![1.0, 1.0]);
+
+        assert!(linear.select_lora(Some("missing")).is_err());
+        assert!(
+            linear
+                .set_lora_named("speech", identity(), identity(), 1.0)
+                .is_err()
+        );
+
+        linear.set_lora(identity(), identity(), 3.0);
+        assert_eq!(output_values(linear.forward(&input)), vec![3.0, 3.0]);
+        linear.set_lora(identity(), identity(), 4.0);
+        assert_eq!(output_values(linear.forward(&input)), vec![4.0, 4.0]);
+        linear.select_lora(Some("speech")).unwrap();
+        assert_eq!(output_values(linear.forward(&input)), vec![1.0, 1.0]);
+    }
 
     fn insert_quantized_qkv_projection(
         weights: &mut crate::weights::WeightMap,

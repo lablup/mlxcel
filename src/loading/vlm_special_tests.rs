@@ -19,9 +19,9 @@ use super::{
     moondream2_text_config_value, moondream3_text_config_value, moondream3_vision_config_value,
     parse_molmo2_vit_layers, phi3_num_crops, phi4_siglip_text_config_value,
     phi4mm_text_config_value, phi4mm_vision_config_value, remap_minicpmo_text_weights,
-    remap_minicpmv4_6_weights, resolve_moondream2_eos_token_id, rewrite_molmo2_weight_key,
-    rewrite_moondream2_weight_key, rewrite_moondream3_weight_key, rewrite_phi3_weight_key,
-    rewrite_phi4_siglip_weight_key, rewrite_phi4mm_vision_key,
+    remap_minicpmv4_6_weights, remap_phi4mm_weights, resolve_moondream2_eos_token_id,
+    rewrite_molmo2_weight_key, rewrite_moondream2_weight_key, rewrite_moondream3_weight_key,
+    rewrite_phi3_weight_key, rewrite_phi4_siglip_weight_key, rewrite_phi4mm_weight_key,
     should_transpose_phi3_patch_embedding,
 };
 use crate::moondream2_prompt::Moondream2PromptStyle;
@@ -650,9 +650,9 @@ fn phi4_siglip_text_config_value_inherits_root_text_fields() {
 }
 
 #[test]
-fn rewrite_phi4mm_vision_key_maps_multimodal_prefixes_and_skips_audio() {
+fn rewrite_phi4mm_weight_key_maps_multimodal_prefixes() {
     assert_eq!(
-        rewrite_phi4mm_vision_key(
+        rewrite_phi4mm_weight_key(
             "model.embed_tokens_extend.image_embed.img_processor.embeddings.patch_embedding.weight"
         ),
         Some(
@@ -660,19 +660,65 @@ fn rewrite_phi4mm_vision_key_maps_multimodal_prefixes_and_skips_audio() {
         )
     );
     assert_eq!(
-        rewrite_phi4mm_vision_key("model.embed_tokens_extend.image_embed.img_projection.0.weight"),
+        rewrite_phi4mm_weight_key("model.embed_tokens_extend.image_embed.img_projection.0.weight"),
         Some("mm_projector_linear1.weight".to_string())
     );
     assert_eq!(
-        rewrite_phi4mm_vision_key("model.layers.0.self_attn.qkv_proj.base_layer.weight"),
+        rewrite_phi4mm_weight_key("model.layers.0.self_attn.qkv_proj.base_layer.weight"),
         Some("model.layers.0.self_attn.qkv_proj.base_layer.weight".to_string())
     );
     assert_eq!(
-        rewrite_phi4mm_vision_key(
+        rewrite_phi4mm_weight_key(
             "model.embed_tokens_extend.audio_embed.audio_projection.speech.0.weight"
         ),
-        None
+        Some("audio_embed.audio_projection.speech.0.weight".to_string())
     );
+}
+
+#[test]
+fn remap_phi4mm_audio_weights_transposes_convolutions_and_rejects_partial_lora() {
+    let mut weights = WeightMap::new();
+    weights.insert(
+        "model.embed_tokens_extend.audio_embed.encoder.embed.conv.0.weight".into(),
+        mlxcel_core::ones(&[2, 1, 3, 3], dtype::FLOAT32),
+    );
+    weights.insert(
+        "model.embed_tokens_extend.audio_embed.encoder.encoders.0.conv.dw_sep_conv_1d.dw_conv.weight"
+            .into(),
+        mlxcel_core::ones(&[2, 1, 3], dtype::FLOAT32),
+    );
+    weights.insert(
+        "model.embed_tokens_extend.audio_embed.encoder.embed.out.weight".into(),
+        mlxcel_core::ones(&[2, 3], dtype::FLOAT32),
+    );
+    let (remapped, loras) = remap_phi4mm_weights(weights).unwrap();
+    assert!(loras.is_empty());
+    assert_eq!(
+        mlxcel_core::array_shape(&remapped["audio_embed.encoder.embed.conv.0.weight"]),
+        vec![2, 3, 3, 1]
+    );
+    assert_eq!(
+        mlxcel_core::array_shape(
+            &remapped["audio_embed.encoder.encoders.0.conv.dw_sep_conv_1d.dw_conv.weight"]
+        ),
+        vec![2, 3, 1]
+    );
+    assert_eq!(
+        mlxcel_core::array_shape(&remapped["audio_embed.encoder.embed.out.weight"]),
+        vec![2, 3]
+    );
+
+    let mut partial = WeightMap::new();
+    partial.insert(
+        "model.layers.0.self_attn.qkv_proj.base_layer.weight".into(),
+        mlxcel_core::ones(&[2, 2], dtype::FLOAT32),
+    );
+    partial.insert(
+        "model.layers.0.self_attn.qkv_proj.lora_A.speech.weight".into(),
+        mlxcel_core::ones(&[1, 2], dtype::FLOAT32),
+    );
+    let error = remap_phi4mm_weights(partial).err().unwrap();
+    assert!(error.to_string().contains("Incomplete Phi4MM speech LoRA"));
 }
 
 #[test]

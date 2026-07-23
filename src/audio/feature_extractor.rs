@@ -533,16 +533,35 @@ fn parse_wav<R: std::io::Read>(mut reader: R) -> Result<(Vec<f32>, u32), String>
         }
     };
 
-    if data_size > MAX_DATA_SIZE {
-        return Err(format!(
-            "WAV data size {data_size} bytes exceeds maximum allowed ({MAX_DATA_SIZE} bytes)"
-        ));
-    }
+    let data = if data_size == u32::MAX as usize {
+        // Some streaming WAV writers leave both RIFF and data lengths at the
+        // all-ones sentinel because the final size was unknown when the header
+        // was emitted. Treat the bytes remaining in the bounded input as the
+        // data chunk, while retaining the same allocation limit used for
+        // ordinary declared lengths.
+        let mut data = Vec::new();
+        let mut bounded = reader.take((MAX_DATA_SIZE + 1) as u64);
+        std::io::Read::read_to_end(&mut bounded, &mut data)
+            .map_err(|e| format!("Failed to read streaming WAV data: {e}"))?;
+        if data.len() > MAX_DATA_SIZE {
+            return Err(format!(
+                "Streaming WAV data exceeds maximum allowed ({MAX_DATA_SIZE} bytes)"
+            ));
+        }
+        data
+    } else {
+        if data_size > MAX_DATA_SIZE {
+            return Err(format!(
+                "WAV data size {data_size} bytes exceeds maximum allowed ({MAX_DATA_SIZE} bytes)"
+            ));
+        }
 
-    let mut data = vec![0u8; data_size];
-    reader
-        .read_exact(&mut data)
-        .map_err(|e| format!("Failed to read WAV data: {e}"))?;
+        let mut data = vec![0u8; data_size];
+        reader
+            .read_exact(&mut data)
+            .map_err(|e| format!("Failed to read WAV data: {e}"))?;
+        data
+    };
 
     let samples: Vec<f32> = match (audio_format, bits_per_sample) {
         (1, 16) => {
@@ -857,5 +876,29 @@ mod tests {
         // A well-formed default config is untouched by the guards.
         let ok = AudioFeatureExtractor::new(defaults);
         assert_eq!(ok.feature_size(), 128);
+    }
+
+    #[test]
+    fn streaming_wav_length_sentinel_reads_bounded_payload_to_eof() {
+        let mut wav = Vec::from(&b"RIFF"[..]);
+        wav.extend_from_slice(&u32::MAX.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&24_000u32.to_le_bytes());
+        wav.extend_from_slice(&48_000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&u32::MAX.to_le_bytes());
+        wav.extend_from_slice(&0i16.to_le_bytes());
+        wav.extend_from_slice(&i16::MAX.to_le_bytes());
+
+        let (samples, sample_rate) = load_wav_from_bytes(&wav).expect("streaming WAV must parse");
+        assert_eq!(sample_rate, 24_000);
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0], 0.0);
+        assert!((samples[1] - (i16::MAX as f32 / 32768.0)).abs() < f32::EPSILON);
     }
 }

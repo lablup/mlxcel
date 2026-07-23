@@ -22,10 +22,18 @@
 //!
 //! Used by: Phi4MM VLM
 
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+
 use crate::LanguageModel;
+use crate::audio::phi4mm::{
+    Phi4MMAudioBatch, Phi4MMAudioEncoder, Phi4MMAudioFeatureExtractor, Phi4MMAudioProjection,
+};
 use crate::multimodal::phi4_siglip_prompt::PHI4_SIGLIP_IMAGE_TOKEN_INDEX;
+use crate::multimodal::phi4mm_prompt::PHI4MM_AUDIO_TOKEN_ID;
 use crate::vision::merge::InputEmbeddings;
 use crate::vision::{encoders, processors};
+use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
 use mlxcel_core::layers::{KVCache, UnifiedLinear};
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -35,6 +43,9 @@ pub struct Phi4MMVLModel {
     pub mm_projector_linear1: UnifiedLinear,
     pub mm_projector_linear2: UnifiedLinear,
     pub processor: processors::phi4mm::Phi4MMProcessor,
+    pub audio_encoder: Phi4MMAudioEncoder,
+    pub audio_projection: Phi4MMAudioProjection,
+    pub audio_extractor: Phi4MMAudioFeatureExtractor,
     pub select_layer: isize,
     pub eos_token_ids: Vec<i32>,
     /// Learnable global separator: [1, 1, vision_dim]
@@ -43,9 +54,93 @@ pub struct Phi4MMVLModel {
     pub sub_gn: UniquePtr<MlxArray>,
     /// hd_transform_order: "sub_glb" or "glb_sub"
     pub hd_transform_order: String,
-    /// Whether the model has runtime LoRA weights set on its linear layers.
-    /// Vision LoRA stays active for all steps (prefill + decode), matching Python PEFT.
-    pub has_runtime_lora: bool,
+    pub request_modes: Phi4MMRequestModes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Phi4MMInputMode {
+    #[default]
+    Language,
+    Vision,
+    Speech,
+    VisionSpeech,
+}
+
+impl Phi4MMInputMode {
+    fn adapter(self) -> Option<&'static str> {
+        match self {
+            Self::Language => None,
+            Self::Speech => Some("speech"),
+            Self::Vision | Self::VisionSpeech => Some("vision"),
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct Phi4MMRequestModes {
+    embedding_modes: RefCell<HashMap<usize, Phi4MMInputMode>>,
+    sequence_modes: RefCell<HashMap<SequenceId, Phi4MMInputMode>>,
+    fallback: Cell<Phi4MMInputMode>,
+}
+
+impl Phi4MMRequestModes {
+    fn register_embeddings(&self, embeddings: &MlxArray, mode: Phi4MMInputMode) {
+        self.embedding_modes
+            .borrow_mut()
+            .insert(embeddings as *const MlxArray as usize, mode);
+    }
+
+    fn begin_prefill(
+        &self,
+        embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+    ) -> Phi4MMInputMode {
+        let mode = embeddings
+            .and_then(|value| {
+                self.embedding_modes
+                    .borrow_mut()
+                    .remove(&(value as *const MlxArray as usize))
+            })
+            .unwrap_or(Phi4MMInputMode::Language);
+        if let Some(seq_id) = seq_id {
+            self.sequence_modes.borrow_mut().insert(seq_id, mode);
+        } else {
+            self.fallback.set(mode);
+        }
+        mode
+    }
+
+    fn decode_mode(&self, seq_id: Option<SequenceId>) -> Phi4MMInputMode {
+        match seq_id {
+            Some(id) => self
+                .sequence_modes
+                .borrow()
+                .get(&id)
+                .copied()
+                .unwrap_or(Phi4MMInputMode::Language),
+            None => self.fallback.get(),
+        }
+    }
+
+    fn prepare(&self, seq_id: SequenceId) {
+        self.sequence_modes
+            .borrow_mut()
+            .insert(seq_id, Phi4MMInputMode::Language);
+    }
+
+    fn release(&self, seq_id: SequenceId) {
+        self.sequence_modes.borrow_mut().remove(&seq_id);
+    }
+
+    fn reset(&self) {
+        // `CxxGenerator` resets model runtime state after the caller has
+        // already built and registered multimodal embeddings. Keep those
+        // one-shot pointer registrations until `begin_prefill` consumes
+        // them; only active/fallback sequence state belongs to the previous
+        // generation.
+        self.sequence_modes.borrow_mut().clear();
+        self.fallback.set(Phi4MMInputMode::Language);
+    }
 }
 
 impl Phi4MMVLModel {
@@ -53,15 +148,57 @@ impl Phi4MMVLModel {
         &self,
         input_ids: &MlxArray,
         processed_images: &[processors::phi4mm::Phi4MMImageInput],
-    ) -> InputEmbeddings {
+    ) -> Result<InputEmbeddings, String> {
+        self.merge_input_embeddings(input_ids, processed_images, &[], Phi4MMInputMode::Vision)
+    }
+
+    pub fn extract_audio(&self, audios: &[(Vec<f32>, u32)]) -> Result<Phi4MMAudioBatch, String> {
+        self.audio_extractor.extract_batch(audios)
+    }
+
+    pub fn get_input_embeddings_with_audio(
+        &self,
+        input_ids: &MlxArray,
+        processed_images: &[processors::phi4mm::Phi4MMImageInput],
+        audio: &Phi4MMAudioBatch,
+    ) -> Result<InputEmbeddings, String> {
+        let vision_mode = !processed_images.is_empty();
+        let mut projected = Vec::with_capacity(audio.clips.len());
+        for (index, features) in audio.clips.iter().enumerate() {
+            let encoded = self.audio_encoder.forward(features)?;
+            let encoded_shape = mlxcel_core::array_shape(&encoded);
+            let encoded_len = encoded_shape[1] as usize;
+            let needed = audio.embed_sizes[index];
+            if encoded_len < needed {
+                return Err(format!(
+                    "Phi4MM audio encoder returned {encoded_len} rows for clip {}, expected at least {needed}",
+                    index + 1
+                ));
+            }
+            let encoded =
+                mlxcel_core::slice(&encoded, &[0, 0, 0], &[1, needed as i32, encoded_shape[2]]);
+            projected.push(self.audio_projection.forward(&encoded, vision_mode));
+        }
+        let mode = if vision_mode {
+            Phi4MMInputMode::VisionSpeech
+        } else {
+            Phi4MMInputMode::Speech
+        };
+        self.merge_input_embeddings(input_ids, processed_images, &projected, mode)
+    }
+
+    fn merge_input_embeddings(
+        &self,
+        input_ids: &MlxArray,
+        processed_images: &[processors::phi4mm::Phi4MMImageInput],
+        audio_features: &[UniquePtr<MlxArray>],
+        mode: Phi4MMInputMode,
+    ) -> Result<InputEmbeddings, String> {
         let ids_shape = mlxcel_core::array_shape(input_ids);
         let seq_len = ids_shape[1] as usize;
         let mut safe_tokens = Vec::with_capacity(seq_len);
-        let mut image_positions: Vec<Vec<usize>> = Vec::new();
-        let mut current_image_positions: Vec<usize> = Vec::new();
-        let mut last_was_image = false;
+        let mut token_values = Vec::with_capacity(seq_len);
 
-        // Find contiguous runs of -200 tokens (each run = one image)
         for token_idx in 0..seq_len {
             let token = mlxcel_core::slice(
                 input_ids,
@@ -70,87 +207,133 @@ impl Phi4MMVLModel {
             );
             mlxcel_core::eval(&token);
             let value = mlxcel_core::item_i32(&token);
-            if value == PHI4_SIGLIP_IMAGE_TOKEN_INDEX {
-                current_image_positions.push(token_idx);
-                safe_tokens.push(0);
-                last_was_image = true;
-            } else {
-                if last_was_image && !current_image_positions.is_empty() {
-                    image_positions.push(std::mem::take(&mut current_image_positions));
-                }
-                safe_tokens.push(value);
-                last_was_image = false;
-            }
-        }
-        if !current_image_positions.is_empty() {
-            image_positions.push(current_image_positions);
+            token_values.push(value);
+            safe_tokens.push(
+                if value == PHI4_SIGLIP_IMAGE_TOKEN_INDEX || value == PHI4MM_AUDIO_TOKEN_ID {
+                    0
+                } else {
+                    value
+                },
+            );
         }
 
         let safe_input_ids = mlxcel_core::from_slice_i32(&safe_tokens, &[1, seq_len as i32]);
         let inputs_embeds = self.text_model.get_embed_tokens(&safe_input_ids);
-
-        if processed_images.is_empty() || image_positions.is_empty() {
-            return InputEmbeddings {
-                inputs_embeds,
-                attention_mask_4d: None,
-            };
-        }
-
         let embed_dtype = mlxcel_core::array_dtype(&inputs_embeds);
         let hidden_size = mlxcel_core::array_shape(&inputs_embeds)[2];
 
-        // Process each image through HD transform
-        let mut vision_features_list: Vec<UniquePtr<MlxArray>> = Vec::new();
-        for processed in processed_images.iter() {
-            let features = self.hd_transform(processed, embed_dtype);
-            vision_features_list.push(features);
-        }
+        let vision_features: Vec<UniquePtr<MlxArray>> = processed_images
+            .iter()
+            .map(|processed| self.hd_transform(processed, embed_dtype))
+            .collect();
 
-        // Merge vision features into text embeddings using index_put-style logic
-        // All -200 positions for an image are filled with that image's vision features
-        let mut segments: Vec<UniquePtr<MlxArray>> = Vec::new();
-        let mut previous_end = 0usize;
-
-        for (image_idx, positions) in image_positions.iter().enumerate() {
-            if positions.is_empty() {
+        // Partition sentinel rows by encoder output length, not by text
+        // separators. Adjacent numbered tags expand to adjacent equal IDs but
+        // still represent distinct media inputs.
+        let mut media_segments: Vec<(i32, usize, usize, usize)> = Vec::new();
+        let mut token_index = 0usize;
+        let mut image_index = 0usize;
+        let mut audio_index = 0usize;
+        while token_index < seq_len {
+            let kind = token_values[token_index];
+            if kind != PHI4_SIGLIP_IMAGE_TOKEN_INDEX && kind != PHI4MM_AUDIO_TOKEN_ID {
+                token_index += 1;
                 continue;
             }
-            let start = positions[0];
-            let end = *positions.last().unwrap() + 1;
+            let (feature_index, feature_len) = if kind == PHI4_SIGLIP_IMAGE_TOKEN_INDEX {
+                let features = vision_features.get(image_index).ok_or_else(|| {
+                    "Phi4MM prompt has more image placeholder rows than image inputs".to_string()
+                })?;
+                let current = image_index;
+                image_index += 1;
+                (current, mlxcel_core::array_shape(features)[1] as usize)
+            } else {
+                let features = audio_features.get(audio_index).ok_or_else(|| {
+                    "Phi4MM prompt has more audio placeholder rows than audio inputs".to_string()
+                })?;
+                let current = audio_index;
+                audio_index += 1;
+                (current, mlxcel_core::array_shape(features)[1] as usize)
+            };
+            if feature_len == 0 || token_index + feature_len > seq_len {
+                return Err(format!(
+                    "Phi4MM media encoder produced invalid row count {feature_len} at prompt position {token_index}"
+                ));
+            }
+            let end = token_index + feature_len;
+            if token_values[token_index..end]
+                .iter()
+                .any(|token| *token != kind)
+            {
+                return Err(format!(
+                    "Phi4MM media placeholder at position {token_index} does not contain the encoder's {feature_len} contiguous rows"
+                ));
+            }
+            media_segments.push((kind, token_index, end, feature_index));
+            token_index = end;
+        }
+        if image_index != vision_features.len() || audio_index != audio_features.len() {
+            return Err(format!(
+                "Phi4MM placeholder cardinality mismatch: prompt consumed {image_index} image/{audio_index} audio inputs, received {}/{}",
+                vision_features.len(),
+                audio_features.len()
+            ));
+        }
 
-            // Text segment before this image
+        let mut segments: Vec<UniquePtr<MlxArray>> = Vec::new();
+        let mut previous_end = 0usize;
+        for (kind, start, end, feature_index) in media_segments {
             if start > previous_end {
-                let segment = mlxcel_core::slice(
+                segments.push(mlxcel_core::slice(
                     &inputs_embeds,
                     &[0, previous_end as i32, 0],
                     &[1, start as i32, hidden_size],
-                );
-                segments.push(segment);
+                ));
             }
-
-            // Insert vision features for this image
-            if let Some(vision_features) = vision_features_list.get(image_idx) {
-                // vision_features shape: [1, num_tokens, hidden_size]
-                segments.push(mlxcel_core::copy(vision_features));
-            }
-
+            let features = if kind == PHI4_SIGLIP_IMAGE_TOKEN_INDEX {
+                &vision_features[feature_index]
+            } else {
+                &audio_features[feature_index]
+            };
+            segments.push(mlxcel_core::astype(features, embed_dtype));
             previous_end = end;
         }
-
-        // Trailing text tokens
         if previous_end < seq_len {
-            let tail = mlxcel_core::slice(
+            segments.push(mlxcel_core::slice(
                 &inputs_embeds,
                 &[0, previous_end as i32, 0],
                 &[1, seq_len as i32, hidden_size],
-            );
-            segments.push(tail);
+            ));
         }
-
-        let merged = encoders::phi4_siglip::concat_arrays(&segments, 1);
-        InputEmbeddings {
+        let merged = if segments.is_empty() {
+            inputs_embeds
+        } else {
+            encoders::phi4_siglip::concat_arrays(&segments, 1)
+        };
+        self.request_modes.register_embeddings(
+            merged
+                .as_ref()
+                .ok_or("Phi4MM produced null input embeddings")?,
+            mode,
+        );
+        Ok(InputEmbeddings {
             inputs_embeds: merged,
             attention_mask_4d: None,
+        })
+    }
+
+    fn activate_input_mode(&self, mode: Phi4MMInputMode) {
+        let adapter = mode.adapter();
+        let select = |linear: &UnifiedLinear| {
+            if let Err(error) = linear.select_lora(adapter) {
+                panic!("validated Phi4MM adapter selection failed: {error}");
+            }
+        };
+        for layer in &self.text_model.layers {
+            select(&layer.self_attn.qkv_proj);
+            select(&layer.self_attn.o_proj);
+            select(&layer.mlp.gate_up_proj);
+            select(&layer.mlp.down_proj);
         }
     }
 
@@ -357,6 +540,7 @@ impl LanguageModel for Phi4MMVLModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        self.activate_input_mode(self.request_modes.decode_mode(None));
         self.text_model.forward(input_ids, caches, mask)
     }
 
@@ -367,6 +551,33 @@ impl LanguageModel for Phi4MMVLModel {
         caches: &mut [KVCache],
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
+        let mode = self.request_modes.begin_prefill(input_embeddings, None);
+        self.activate_input_mode(mode);
+        self.text_model
+            .forward_impl(input_ids, input_embeddings, caches, mask)
+    }
+
+    fn forward_with_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.activate_input_mode(self.request_modes.decode_mode(seq_id));
+        self.text_model.forward(input_ids, caches, mask)
+    }
+
+    fn forward_with_embeddings_and_sequence_id(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let mode = self.request_modes.begin_prefill(input_embeddings, seq_id);
+        self.activate_input_mode(mode);
         self.text_model
             .forward_impl(input_ids, input_embeddings, caches, mask)
     }
@@ -387,8 +598,101 @@ impl LanguageModel for Phi4MMVLModel {
         self.eos_token_ids.clone()
     }
 
-    fn after_prefill(&self) {
-        // Python PEFT keeps vision LoRA active for ALL steps (prefill + decode).
-        // No deactivation needed.
+    fn output_suppressed_token_ids(&self) -> Vec<i32> {
+        vec![PHI4MM_AUDIO_TOKEN_ID]
+    }
+
+    fn supports_chunked_prefill(&self) -> bool {
+        false
+    }
+
+    fn supports_padded_prefill(&self) -> bool {
+        // Padding copies the merged embedding array and would sever the
+        // request-mode registration used to choose the official Phi4MM LoRA.
+        false
+    }
+
+    fn supports_batching(&self) -> bool {
+        false
+    }
+
+    fn sequence_state_layout(&self) -> SequenceStateLayout {
+        // Phi4MM selects one checkpoint LoRA adapter per request, so decode
+        // remains single-slot. Its text backbone still stores state in the
+        // external Phi-3 KV cache slice; declaring that layout explicitly
+        // prevents the scheduler from allocating the empty placeholder used
+        // by model-owned SSM/recurrent runtimes.
+        SequenceStateLayout::dense_kv_cache(self.text_model.num_layers())
+    }
+
+    fn prepare_sequence_state(&self, seq_id: SequenceId) {
+        self.request_modes.prepare(seq_id);
+    }
+
+    fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
+        self.request_modes.release(seq_id);
+    }
+
+    fn reset_runtime_state(&self) {
+        self.request_modes.reset();
+        self.activate_input_mode(Phi4MMInputMode::Language);
+    }
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::*;
+
+    #[test]
+    fn request_modes_do_not_leak_between_sequences() {
+        let modes = Phi4MMRequestModes::default();
+        let audio = mlxcel_core::zeros(&[1, 1, 4], mlxcel_core::dtype::FLOAT32);
+        let vision = mlxcel_core::zeros(&[1, 1, 4], mlxcel_core::dtype::FLOAT32);
+        let audio_ref = audio.as_ref().unwrap();
+        let vision_ref = vision.as_ref().unwrap();
+        modes.register_embeddings(audio_ref, Phi4MMInputMode::Speech);
+        modes.register_embeddings(vision_ref, Phi4MMInputMode::VisionSpeech);
+        let first = SequenceId::from_raw(41);
+        let second = SequenceId::from_raw(42);
+        assert_eq!(
+            modes.begin_prefill(Some(audio_ref), Some(first)),
+            Phi4MMInputMode::Speech
+        );
+        assert_eq!(
+            modes.begin_prefill(Some(vision_ref), Some(second)),
+            Phi4MMInputMode::VisionSpeech
+        );
+        assert_eq!(modes.decode_mode(Some(first)), Phi4MMInputMode::Speech);
+        assert_eq!(
+            modes.decode_mode(Some(second)),
+            Phi4MMInputMode::VisionSpeech
+        );
+        modes.release(first);
+        assert_eq!(modes.decode_mode(Some(first)), Phi4MMInputMode::Language);
+        assert_eq!(
+            modes.decode_mode(Some(second)),
+            Phi4MMInputMode::VisionSpeech
+        );
+
+        modes.fallback.set(Phi4MMInputMode::Speech);
+        assert_eq!(
+            modes.decode_mode(Some(first)),
+            Phi4MMInputMode::Language,
+            "a missing sequence must not inherit the legacy fallback mode"
+        );
+
+        modes.reset();
+        assert_eq!(modes.decode_mode(Some(first)), Phi4MMInputMode::Language);
+        assert_eq!(modes.decode_mode(Some(second)), Phi4MMInputMode::Language);
+
+        let pending = mlxcel_core::zeros(&[1, 1, 4], mlxcel_core::dtype::FLOAT32);
+        let pending_ref = pending.as_ref().unwrap();
+        modes.register_embeddings(pending_ref, Phi4MMInputMode::Speech);
+        modes.reset();
+        assert_eq!(
+            modes.begin_prefill(Some(pending_ref), None),
+            Phi4MMInputMode::Speech,
+            "a generator reset must preserve embeddings prepared for the new request"
+        );
     }
 }

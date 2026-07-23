@@ -1167,6 +1167,12 @@ pub(crate) fn prepare_request_vlm_embeddings(
 
     // Audio-only or audio+images for Gemma4 / Gemma4 Unified
     if !audio.is_empty() {
+        if let Some(embeddings) =
+            prepare_phi4mm_audio_embeddings(model, tokenizer, prompt, prompt_tokens, images, audio)?
+        {
+            return Ok(Some(embeddings));
+        }
+
         // The server renders chat messages text-only, so the prompt carries no
         // `<|audio|>` marker (issue #437). Resolve the Gemma `<end_of_turn>`
         // id so the per-family audio expansion can place the audio block inside
@@ -1317,6 +1323,83 @@ pub(crate) fn prepare_request_vlm_embeddings(
     }
 
     Ok(None)
+}
+
+/// Process every request audio clip (and optional images) through the pinned
+/// Phi4MM SpeechLib/Conformer path. Unlike older single-audio handlers, this
+/// preserves clip cardinality and prompt order exactly.
+fn prepare_phi4mm_audio_embeddings(
+    model: &LoadedModel,
+    tokenizer: &MlxcelTokenizer,
+    prompt: &str,
+    prompt_tokens: &mut Vec<i32>,
+    images: &[Vec<u8>],
+    audio_data: &[Vec<u8>],
+) -> Result<Option<InputEmbeddings>> {
+    let phi4mm = match model {
+        LoadedModel::Phi4MMVLM(model) => model,
+        _ => return Ok(None),
+    };
+
+    let decoded_images = if images.is_empty() {
+        Vec::new()
+    } else {
+        decode_request_images(images)?
+    };
+    let processed_images = phi4mm.processor.preprocess(&decoded_images);
+    let decoded_audio: Vec<(Vec<f32>, u32)> = audio_data
+        .iter()
+        .enumerate()
+        .map(|(index, bytes)| {
+            crate::audio::load_wav_from_bytes(bytes).map_err(|error| {
+                anyhow!(
+                    "Failed to decode Phi4MM audio clip {}: {}",
+                    index + 1,
+                    error
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let audio_batch = phi4mm
+        .extract_audio(&decoded_audio)
+        .map_err(anyhow::Error::msg)?;
+
+    let prepared = crate::phi4mm_prompt::prepare_phi4mm_prompt_tokens(
+        prompt,
+        processed_images.len(),
+        decoded_audio.len(),
+        |text, add_special| {
+            tokenizer
+                .encode(text, add_special)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|token| token as i32)
+                .collect()
+        },
+    )
+    .map_err(anyhow::Error::msg)?;
+    let image_sizes: Vec<usize> = processed_images
+        .iter()
+        .map(|image| image.num_img_tokens)
+        .collect();
+    *prompt_tokens = crate::phi4mm_prompt::expand_phi4mm_placeholders(
+        &prepared.tokens,
+        &image_sizes,
+        &audio_batch.embed_sizes,
+    )
+    .map_err(anyhow::Error::msg)?;
+
+    let input_ids = mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
+    let embeddings = phi4mm
+        .get_input_embeddings_with_audio(&input_ids, &processed_images, &audio_batch)
+        .map_err(anyhow::Error::msg)?;
+    tracing::info!(
+        images = processed_images.len(),
+        audio_clips = decoded_audio.len(),
+        prompt_tokens = prompt_tokens.len(),
+        "Prepared Phi4MM mixed-media embeddings"
+    );
+    Ok(Some(embeddings))
 }
 
 /// Resolve the per-family end-of-turn token id from the tokenizer.

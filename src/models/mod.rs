@@ -300,7 +300,7 @@ pub enum ModelType {
     Gemma3nVLM, // Gemma 3n VLM (MobileNetV5 + Gemma3n)
     Phi,      // Phi 1/2
     Phi3,     // Phi 3
-    Phi4MMVLM, // Phi-4 Multimodal (SigLIP2 NaFlex + Phi4 text, image path only)
+    Phi4MMVLM, // Phi-4 Multimodal (SigLIP2 NaFlex + Conformer audio + Phi4 text)
     Phi4SigLipVLM, // Phi-4 reasoning vision (SigLIP2 NaFlex + Phi3-style text)
     Phi3VLM,  // Phi 3.5 Vision (CLIP + Phi3)
     MolmoVLM, // Molmo v1 (CLIP ViT + attention pooling + OLMo-style text)
