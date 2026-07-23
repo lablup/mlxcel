@@ -311,6 +311,79 @@ mod cache_isolation {
         }
     }
 
+    /// Issue #885 end-to-end parity: chunked prefill that feeds the server's
+    /// chunk-local, offset-0 `create_padded_prefill_mask` on every CONTINUATION
+    /// chunk (exactly what the scheduler passes for a model-owned-cache batching
+    /// model, whose dummy cache view reports offset 0) must still match single-
+    /// pass prefill. Before the fix that too-short caller mask was reused for
+    /// both attention families and discarded by `trim_mask_to_keys`, dropping
+    /// the causal / sliding-window alignment and collapsing sliding-window
+    /// output into reserved `<unused...>` tokens. The fix rebuilds each family's
+    /// mask from its cache's live window, so the pathological caller mask no
+    /// longer corrupts attention. `window` = 4 with `chunk` = 8 reproduces the
+    /// real-model over-window ratio (chunk 2048 over window 1024).
+    #[test]
+    fn gemma4_chunked_prefill_with_server_caller_mask_matches_single_pass() {
+        for (layer_type, window) in [
+            ("sliding_attention", 4),
+            ("sliding_attention", 8),
+            ("full_attention", 8),
+        ] {
+            let build = || {
+                let mut args = make_test_gemma4_args_with_layer(layer_type);
+                args.text_config["sliding_window"] = serde_json::json!(window);
+                let weights = make_test_gemma4_weight_map();
+                Gemma4Wrapper::new(Gemma4Model::from_weights(&weights, &args).unwrap())
+            };
+            let prompt: Vec<i32> = (0..24).map(|i| i % 7).collect();
+
+            let single = build();
+            let mut caches = single.make_caches();
+            let input = mlxcel_core::from_slice_i32(&prompt, &[1, prompt.len() as i32]);
+            let s_logits = single.forward_last_logits(&input, &mut caches, None, prompt.len() - 1);
+            let s_vals = array_to_vec_f32(s_logits.as_ref().unwrap());
+
+            let chunked = build();
+            let mut caches = chunked.make_caches();
+            let mut c_logits = None;
+            for (chunk_idx, piece) in prompt.chunks(8).enumerate() {
+                let input = mlxcel_core::from_slice_i32(piece, &[1, piece.len() as i32]);
+                // Chunk 0 is a cold prefill (offset 0); continuation chunks get
+                // the server's offset-0 chunk-local mask that triggered #885.
+                let caller_mask = (chunk_idx > 0).then(|| {
+                    mlxcel_core::utils::create_padded_prefill_mask(
+                        piece.len() as i32,
+                        piece.len() as i32,
+                        0,
+                    )
+                });
+                let mask_ref = caller_mask.as_ref().map(|m| m.as_ref().unwrap());
+                let logits =
+                    chunked.forward_last_logits(&input, &mut caches, mask_ref, piece.len() - 1);
+                mlxcel_core::eval(&logits);
+                c_logits = Some(logits);
+            }
+            let c_vals = array_to_vec_f32(c_logits.unwrap().as_ref().unwrap());
+
+            assert!(
+                c_vals.iter().all(|v| v.is_finite()),
+                "{layer_type} window={window}: chunked prefill with the server caller mask \
+                 produced non-finite logits: {c_vals:?}"
+            );
+            let max_diff = s_vals
+                .iter()
+                .zip(&c_vals)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                max_diff < 1e-3,
+                "{layer_type} window={window}: chunked prefill with the server caller mask \
+                 diverged from single-pass (max diff {max_diff}); single={s_vals:?} \
+                 chunked={c_vals:?}"
+            );
+        }
+    }
+
     /// `Gemma4Wrapper` must declare `supports_batching == true`
     /// so the server scheduler actually drives the batched-decode dispatch
     /// path that calls `forward_with_sequence_id` per row.
