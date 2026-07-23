@@ -52,6 +52,7 @@ mod gemma3n_decode;
 mod gemma3n_emit;
 mod gemma3n_emit_ops;
 mod gemma3n_math;
+mod gemma3n_qmv;
 mod gemma3n_schema;
 mod gemma3n_weights;
 mod model;
@@ -61,15 +62,49 @@ mod rope;
 #[cfg(test)]
 mod context_tests;
 
-pub(crate) use config::{Config, NormStyle, QkNorm, WeightScheme};
+#[allow(unused_imports)]
+pub(crate) use config::{Config, NormStyle, QkNorm, QuantConfig, WeightScheme};
 #[allow(unused_imports)]
 pub(crate) use gemma3n::{
     Gemma3nConfig, Gemma3nLayerType, Gemma3nPleDType, Gemma3nPleMetadata, validate_gemma3n_ple,
 };
 #[allow(unused_imports)]
-pub(crate) use gemma3n_decode::emit_gemma3n_decode;
+pub(crate) use gemma3n_decode::{
+    emit_gemma3n_decode, emit_gemma3n_decode_ragged, emit_gemma3n_decode_ragged_with,
+    emit_gemma3n_decode_ragged_with_qmv, emit_gemma3n_decode_with, emit_gemma3n_decode_with_qmv,
+};
+#[cfg(feature = "diagnostics")]
+pub use gemma3n_emit::{Gemma3nDiagnosticLayout, Gemma3nDiagnosticSegment};
+#[cfg(feature = "diagnostics")]
+pub(crate) use gemma3n_emit::{
+    emit_gemma3n_all_layer_diagnostics_with_qmv, emit_gemma3n_prefill_diagnostics_with_qmv,
+};
 #[allow(unused_imports)]
-pub(crate) use gemma3n_emit::{emit_gemma3n_prefill, emit_gemma3n_prefill_embeddings_ple};
+pub(crate) use gemma3n_emit::{
+    emit_gemma3n_prefill, emit_gemma3n_prefill_embeddings_ple,
+    emit_gemma3n_prefill_embeddings_ple_with, emit_gemma3n_prefill_embeddings_ple_with_qmv,
+    emit_gemma3n_prefill_with, emit_gemma3n_prefill_with_qmv,
+};
+#[allow(unused_imports)]
+pub(crate) use gemma3n_qmv::{
+    artifact_identity as gemma3n_qmv_artifact_identity, is_available as gemma3n_qmv_is_available,
+};
+#[cfg(all(feature = "diagnostics", xla_iree_cuda))]
+pub use gemma3n_qmv::{
+    run_altup_correct_diagnostic_probe as run_gemma3n_altup_correct_diagnostic_probe,
+    run_altup_predict_diagnostic_probe as run_gemma3n_altup_predict_diagnostic_probe,
+    run_attention_diagnostic_probe as run_gemma3n_attention_diagnostic_probe,
+    run_decode_attention_diagnostic_probe as run_gemma3n_decode_attention_diagnostic_probe,
+    run_dense_mlp_diagnostic_probe as run_gemma3n_dense_mlp_diagnostic_probe,
+    run_diagnostic_probe as run_gemma3n_qmv_diagnostic_probe,
+    run_initial_altup_diagnostic_probe as run_gemma3n_initial_altup_diagnostic_probe,
+    run_ple_diagnostic_probe as run_gemma3n_ple_diagnostic_probe,
+    run_ple_injection_all_planes_diagnostic_probe as run_gemma3n_ple_injection_all_planes_diagnostic_probe,
+    run_ple_injection_diagnostic_probe as run_gemma3n_ple_injection_diagnostic_probe,
+    run_post_attention_diagnostic_probe as run_gemma3n_post_attention_diagnostic_probe,
+    run_rms_diagnostic_probe as run_gemma3n_rms_diagnostic_probe,
+    run_sdpa_vector_context_diagnostic_probe as run_gemma3n_sdpa_vector_context_diagnostic_probe,
+};
 #[allow(unused_imports)]
 pub(crate) use gemma3n_weights::{Gemma3nWeightSpec, gemma3n_weight_specs};
 // MoE FFN config types (issue #500), read by the weight loader (`iree.rs`) and the

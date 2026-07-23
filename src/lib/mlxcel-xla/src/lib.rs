@@ -106,13 +106,43 @@ mod validation;
 
 #[cfg(feature = "iree")]
 pub use batch::{EngineEvent, FinishReason, XlaAdmissionError, XlaBatchEngine, XlaReferenceEngine};
+#[cfg(feature = "diagnostics")]
+pub use batch::{
+    Gemma3nAllLayerDiagnosticRun, Gemma3nCanonicalDiagnosticRun, Gemma3nPrefixDecodeDiagnosticRun,
+    run_gemma3n_all_layer_diagnostics, run_gemma3n_canonical_diagnostics,
+    run_gemma3n_prefix_decode_diagnostic,
+};
 pub use context::{
     CONTEXT_CAPACITY_ENV, ContextCapacityError, DEFAULT_CONTEXT_CAPACITY,
     context_capacity_from_env, validate_request_capacity,
 };
-pub use prepared_gemma3n::{Gemma3nDensePle, Gemma3nDensePleError};
+#[cfg(all(feature = "diagnostics", xla_iree_cuda))]
+pub use emitter::{
+    run_gemma3n_altup_correct_diagnostic_probe, run_gemma3n_altup_predict_diagnostic_probe,
+    run_gemma3n_attention_diagnostic_probe, run_gemma3n_decode_attention_diagnostic_probe,
+    run_gemma3n_dense_mlp_diagnostic_probe, run_gemma3n_initial_altup_diagnostic_probe,
+    run_gemma3n_ple_diagnostic_probe, run_gemma3n_ple_injection_all_planes_diagnostic_probe,
+    run_gemma3n_ple_injection_diagnostic_probe, run_gemma3n_post_attention_diagnostic_probe,
+    run_gemma3n_qmv_diagnostic_probe, run_gemma3n_rms_diagnostic_probe,
+    run_gemma3n_sdpa_vector_context_diagnostic_probe,
+};
+#[cfg(feature = "diagnostics")]
+pub fn dequantize_gemma3n_affine_diagnostic(
+    packed: &[u8],
+    scales: &[u8],
+    biases: &[u8],
+    out: usize,
+    in_packed: usize,
+    bits: usize,
+    group_size: usize,
+) -> Result<Vec<f32>, String> {
+    weights::dequantize_affine_bf16_fused(packed, scales, biases, out, in_packed, bits, group_size)
+}
+#[cfg(feature = "diagnostics")]
+pub use emitter::{Gemma3nDiagnosticLayout, Gemma3nDiagnosticSegment};
 #[cfg(feature = "iree")]
 pub use prepared::PreparedInputError;
+pub use prepared_gemma3n::{Gemma3nDensePle, Gemma3nDensePleError, Gemma3nPreparedPrefill};
 #[cfg(feature = "iree")]
 pub use sampler::SampleParams;
 
@@ -329,6 +359,34 @@ impl XlaInferenceSession {
         Ok(out)
     }
 
+    /// Seed KV from a complete token prompt and return the prefill argmax.
+    ///
+    /// This mirrors the batched slot-seed convention and is distinct from the
+    /// prefix-prefill-plus-decode generation loop.
+    pub fn prefill_first_token(&mut self, prompt_tokens: &[i32]) -> Result<i32, String> {
+        if prompt_tokens.is_empty() {
+            return Err("prefill_first_token requires a non-empty prompt".to_string());
+        }
+        if prompt_tokens.len() > self.context_capacity {
+            return Err(format!(
+                "prefill length {} exceeds context_capacity={}",
+                prompt_tokens.len(),
+                self.context_capacity
+            ));
+        }
+        #[cfg(feature = "iree")]
+        {
+            let first = self.engine.prefill_first(prompt_tokens)?;
+            self.cache_len = i32::try_from(prompt_tokens.len())
+                .map_err(|_| "prefill length does not fit i32".to_string())?;
+            Ok(first)
+        }
+        #[cfg(not(feature = "iree"))]
+        {
+            Err(NOT_WIRED.to_string())
+        }
+    }
+
     /// Greedy generation seeded by an owned prepared-embeddings payload.
     pub fn generate_prepared_greedy(
         &mut self,
@@ -337,6 +395,53 @@ impl XlaInferenceSession {
         eos_token_ids: &[i32],
     ) -> Result<Vec<i32>, String> {
         self.generate_prepared_streaming_greedy(prepared, max_new_tokens, eos_token_ids, |_| true)
+    }
+
+    /// Seed a Gemma3n session through its distinct embeddings-plus-dense-PLE
+    /// entry and return the first generated token.
+    pub fn prefill_gemma3n_prepared(
+        &mut self,
+        request: &Gemma3nPreparedPrefill,
+    ) -> Result<i32, String> {
+        #[cfg(feature = "iree")]
+        {
+            let first = self.engine.prefill_gemma3n_prepared_first(request)?;
+            self.cache_len = i32::try_from(request.prepared().sequence_len)
+                .map_err(|_| "prepared sequence length does not fit i32".to_string())?;
+            Ok(first)
+        }
+        #[cfg(not(feature = "iree"))]
+        {
+            let _ = request;
+            Err(NOT_WIRED.to_string())
+        }
+    }
+
+    /// Greedy generation seeded by Gemma3n post-scale embeddings and dense PLE.
+    pub fn generate_gemma3n_prepared_greedy(
+        &mut self,
+        request: &Gemma3nPreparedPrefill,
+        max_new_tokens: usize,
+        eos_token_ids: &[i32],
+    ) -> Result<Vec<i32>, String> {
+        if max_new_tokens == 0 {
+            return Ok(Vec::new());
+        }
+        validate_request_capacity(
+            request.prepared().sequence_len,
+            max_new_tokens,
+            self.context_capacity,
+        )
+        .map_err(|error| error.to_string())?;
+        let first = self.prefill_gemma3n_prepared(request)?;
+        let mut out = Vec::with_capacity(max_new_tokens);
+        out.push(first);
+        let mut current = first;
+        while out.len() < max_new_tokens && !eos_token_ids.contains(&current) {
+            current = self.decode_step(current)?;
+            out.push(current);
+        }
+        Ok(out)
     }
 
     /// Streaming greedy generation from prepared embeddings. The embeddings

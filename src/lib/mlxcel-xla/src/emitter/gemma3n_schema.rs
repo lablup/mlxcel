@@ -53,6 +53,7 @@ pub(super) fn build_schema(
     prepared: bool,
     rows: usize,
     scalar_inputs: bool,
+    vector_real_len: bool,
 ) -> (Vec<Decl>, Args) {
     let mut decls = Vec::new();
     let mut index = 0;
@@ -322,7 +323,16 @@ pub(super) fn build_schema(
         },
         "positions",
     );
-    let real_len = take(&mut decls, &mut index, Ty::scalar("i32"), "real_len");
+    let real_len = take(
+        &mut decls,
+        &mut index,
+        if vector_real_len {
+            Ty::new(vec![rows], "i32")
+        } else {
+            Ty::scalar("i32")
+        },
+        "real_len",
+    );
     let attention_bias = prepared.then(|| {
         take(
             &mut decls,

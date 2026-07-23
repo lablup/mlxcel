@@ -26,6 +26,10 @@ build = "build.rs"
 # in CI (no IREE dist). When on, build.rs compiles csrc/xla_iree.c and links the
 # prebuilt IREE runtime (IREE_DIST must point at the extracted dist).
 iree = ["dep:safetensors", "dep:memmap2"]
+# Test-only Gemma3n intermediate-oracle surface. Default-off and intentionally
+# separate from `iree`, so production bundles never compile or load diagnostic
+# MLIR unless the explicit root `xla-diagnostics` feature forwards this flag.
+diagnostics = ["iree"]
 
 [dependencies]
 # The engine-neutral inference-session contract lives in mlxcel-core. This

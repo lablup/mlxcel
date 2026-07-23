@@ -94,6 +94,7 @@ mod tests {
     fn cfg() -> Gemma3nConfig {
         Gemma3nConfig {
             context_capacity: 8,
+            max_position_embeddings: 4096,
             hidden: 8,
             intermediate: vec![16; 4],
             n_layers: 4,
@@ -114,11 +115,11 @@ mod tests {
             sliding_window: 4,
             rope_theta: 1e6,
             rope_local_base: 1e4,
-            final_logit_softcap: 30.0,
+            final_logit_softcap: Some(30.0),
             num_kv_shared_layers: 2,
             altup_num_inputs: 4,
             altup_active_idx: 0,
-            altup_coef_clip: 120.0,
+            altup_coef_clip: Some(120.0),
             altup_correct_scale: true,
             laurel_rank: 2,
             tie_word_embeddings: true,

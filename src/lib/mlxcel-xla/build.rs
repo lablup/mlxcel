@@ -18,9 +18,59 @@
 // the vmfbs at runtime so the bytecode and the linked runtime match.
 use std::env;
 use std::path::PathBuf;
+use std::process::Command;
+
+fn cuda_nvcc() -> PathBuf {
+    if let Some(path) = env::var_os("NVCC") {
+        return PathBuf::from(path);
+    }
+    let conventional = PathBuf::from("/usr/local/cuda/bin/nvcc");
+    if conventional.is_file() {
+        return conventional;
+    }
+    let available_on_path = Command::new("nvcc")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if available_on_path {
+        return PathBuf::from("nvcc");
+    }
+    panic!(
+        "the CUDA IREE Gemma3n QMV build requires nvcc; set NVCC, install \
+         /usr/local/cuda/bin/nvcc, or put nvcc on PATH"
+    );
+}
+
+fn compile_gemma3n_qmv_ptx() {
+    let source = PathBuf::from("csrc/gemma3n_qmv.cu");
+    let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR"))
+        .join("gemma3n_qmv_sm80.ptx");
+    let nvcc = cuda_nvcc();
+    let mut command = Command::new(&nvcc);
+    command
+        .arg("-ptx")
+        .arg("--std=c++17")
+        .arg("-O3")
+        .arg("-arch=compute_80");
+    let result = command
+        .arg("-o")
+        .arg(&output)
+        .arg(&source)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run {}: {error}", nvcc.display()));
+    if !result.status.success() {
+        panic!(
+            "failed to compile Gemma3n QMV PTX with {}:\n{}",
+            nvcc.display(),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
 
 fn main() {
     println!("cargo:rerun-if-changed=csrc/xla_iree.c");
+    println!("cargo:rerun-if-changed=csrc/gemma3n_qmv.cu");
+    println!("cargo:rerun-if-env-changed=NVCC");
     println!("cargo:rerun-if-env-changed=IREE_DIST");
     println!("cargo:rerun-if-env-changed=IREE_CUDA_HOME");
     println!("cargo:rerun-if-env-changed=IREE_CUDA_COMPILE");
@@ -58,6 +108,7 @@ fn main() {
             .include(&bld_inc)
             .define("XLA_GATE_CUDA", None)
             .compile("xla_iree");
+        compile_gemma3n_qmv_ptx();
         println!("cargo:rustc-cfg=xla_iree_cuda");
         if let Ok(ic) = env::var("IREE_CUDA_COMPILE") {
             println!("cargo:rustc-env=MLXCEL_XLA_IREE_COMPILE={ic}");

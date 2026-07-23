@@ -158,6 +158,7 @@ pub(crate) fn scheme_names(scheme: WeightScheme) -> SchemeNames {
 /// conditional `input_layernorm`, the q/k/v biases, the q/k norms, the feed-forward
 /// norms, the #498 biases) come from that one place. A fused (Phi3) checkpoint
 /// lists its fused tensor once per arg that row-slices it.
+#[allow(dead_code)]
 pub(crate) fn weight_names(cfg: &Config) -> Vec<String> {
     crate::weights::weight_specs(cfg)
         .iter()

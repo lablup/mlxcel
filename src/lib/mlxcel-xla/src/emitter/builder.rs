@@ -11,6 +11,8 @@
 
 use std::fmt::Write as _;
 
+use super::gemma3n::{checked_native_i32_dim, checked_native_i32_product};
+
 /// Tensor type: shape plus element type ("f32" | "i32" | "i1").
 #[derive(Clone, Debug)]
 pub struct Ty {
@@ -43,6 +45,15 @@ impl Ty {
 pub struct Val {
     pub name: String,
     pub ty: Ty,
+}
+
+fn native_dispatch_i32(name: &str, value: usize) -> i32 {
+    checked_native_i32_dim(name, value).unwrap_or_else(|error| panic!("{error}"))
+}
+
+fn native_dispatch_length(name: &str, dims: &[usize]) -> (usize, i32) {
+    let value = checked_native_i32_product(name, dims).unwrap_or_else(|error| panic!("{error}"));
+    (value as usize, value)
 }
 
 /// Contraction (matmul) input precision. `F32` is the default (unchanged
@@ -197,6 +208,7 @@ pub struct Builder {
     body: String,
     next: usize,
     precision: Precision,
+    gemma3n_qmv: bool,
 }
 
 fn dims_list(d: &[usize]) -> String {
@@ -226,6 +238,7 @@ impl Builder {
             body: String::new(),
             next: 0,
             precision: Precision::F32,
+            gemma3n_qmv: false,
         }
     }
 
@@ -234,6 +247,17 @@ impl Builder {
     pub fn with_precision(mut self, precision: Precision) -> Self {
         self.precision = precision;
         self
+    }
+
+    /// Enable the CUDA custom QMV dispatch used only by Gemma3n Q4 prefill.
+    #[must_use]
+    pub(crate) fn with_gemma3n_qmv(mut self, enabled: bool) -> Self {
+        self.gemma3n_qmv = enabled;
+        self
+    }
+
+    pub(crate) fn gemma3n_qmv_enabled(&self) -> bool {
+        self.gemma3n_qmv
     }
 
     /// The contraction precision this builder emits at (`F32` by default, else the
@@ -257,6 +281,403 @@ impl Builder {
         self.body.push_str("    ");
         self.body.push_str(&s);
         self.body.push('\n');
+    }
+
+    /// Dispatch the fixed-schedule CUDA Gemma3n QMV kernel.
+    ///
+    /// Inputs are f32 BF16 carriers. Rank-1 inputs are modeled as one row and
+    /// reshaped back after dispatch; rank-2 inputs preserve all M rows.
+    pub(crate) fn gemma3n_qmv(&mut self, input: &Val, weight: &Val) -> Val {
+        assert!(self.gemma3n_qmv, "Gemma3n QMV is not enabled");
+        assert_eq!(input.ty.elt, "f32");
+        assert_eq!(weight.ty.elt, "f32");
+        assert_eq!(weight.ty.shape.len(), 2);
+        let (input, rank_one) = match input.ty.shape.as_slice() {
+            [k] => (self.reshape(input, vec![1, *k]), true),
+            [_, _] => (input.clone(), false),
+            shape => panic!("Gemma3n QMV input must have rank 1 or 2, got {shape:?}"),
+        };
+        let m = input.ty.shape[0];
+        let k = input.ty.shape[1];
+        let n = weight.ty.shape[0];
+        assert_eq!(
+            weight.ty.shape[1], k,
+            "Gemma3n QMV contraction width mismatch"
+        );
+        let m_value = native_dispatch_i32("Gemma3n native QMV M", m);
+        let n_value = native_dispatch_i32("Gemma3n native QMV N", n);
+        let k_value = native_dispatch_i32("Gemma3n native QMV K", k);
+        let m_index = self.fresh();
+        self.line(format!("{m_index} = arith.constant {m} : index"));
+        let n_index = self.fresh();
+        self.line(format!("{n_index} = arith.constant {n} : index"));
+        let m_i32 = self.fresh();
+        self.line(format!("{m_i32} = arith.constant {m_value} : i32"));
+        let n_i32 = self.fresh();
+        self.line(format!("{n_i32} = arith.constant {n_value} : i32"));
+        let k_i32 = self.fresh();
+        self.line(format!("{k_i32} = arith.constant {k_value} : i32"));
+        let result = self.fresh();
+        let result_ty = Ty::f32(vec![m, n]);
+        self.line(format!(
+            "{result} = flow.dispatch @custom_qmv::@gemma3n_qmv[{n_index}, {m_index}]\
+             ({m_i32}, {n_i32}, {k_i32}, {input}, {weight}) : \
+             (i32, i32, i32, {input_ty}, {weight_ty}) -> {result_ty}",
+            input = input.name,
+            weight = weight.name,
+            input_ty = input.ty.render(),
+            weight_ty = weight.ty.render(),
+            result_ty = result_ty.render(),
+        ));
+        let output = Val {
+            name: result,
+            ty: result_ty,
+        };
+        if rank_one {
+            self.reshape(&output, vec![n])
+        } else {
+            output
+        }
+    }
+
+    /// Dispatch CUDA's `tanhf` for Gemma3n when the embedded native executable
+    /// is enabled, otherwise retain portable StableHLO tanh.
+    ///
+    /// MLX CUDA uses `cuda::std::tanh(float)`. IREE's generic StableHLO tanh
+    /// differs by an f32 ULP near zero, which is amplified by AltUp's f32
+    /// coefficient projection before the next BF16 boundary.
+    pub(crate) fn gemma3n_tanh(&mut self, input: &Val) -> Val {
+        if !self.gemma3n_qmv {
+            return self.tanh(input);
+        }
+        assert_eq!(input.ty.elt, "f32");
+        let shape = input.ty.shape.clone();
+        let (length, length_value) = native_dispatch_length("Gemma3n native tanh length", &shape);
+        let flat = if shape.len() == 1 {
+            input.clone()
+        } else {
+            self.reshape(input, vec![length])
+        };
+        let length_index = self.fresh();
+        self.line(format!("{length_index} = arith.constant {length} : index"));
+        let length_i32 = self.fresh();
+        self.line(format!(
+            "{length_i32} = arith.constant {length_value} : i32"
+        ));
+        let result = self.fresh();
+        let result_ty = Ty::f32(vec![length]);
+        self.line(format!(
+            "{result} = flow.dispatch @custom_qmv::@gemma3n_tanh[{length_index}]\
+             ({length_i32}, {input}) : (i32, {input_ty}) -> {result_ty}",
+            input = flat.name,
+            input_ty = flat.ty.render(),
+            result_ty = result_ty.render(),
+        ));
+        let output = Val {
+            name: result,
+            ty: result_ty,
+        };
+        if shape.len() == 1 {
+            output
+        } else {
+            self.reshape(&output, shape)
+        }
+    }
+
+    /// Dispatch the fixed-schedule TF32 coefficient projection used by
+    /// Gemma3n AltUp when the native CUDA executable is enabled.
+    pub(crate) fn gemma3n_altup_coeff(&mut self, input: &Val, weight: &Val) -> Val {
+        if !self.gemma3n_qmv {
+            return self.linear_seq(input, weight);
+        }
+        assert_eq!(input.ty.elt, "f32");
+        assert_eq!(weight.ty.elt, "f32");
+        assert_eq!(input.ty.shape.len(), 2);
+        assert_eq!(weight.ty.shape.len(), 2);
+        let rows = input.ty.shape[0];
+        let inner = input.ty.shape[1];
+        let output_width = weight.ty.shape[0];
+        assert_eq!(weight.ty.shape[1], inner);
+        let rows_value = native_dispatch_i32("Gemma3n native AltUp coefficient rows", rows);
+        let output_value = native_dispatch_i32(
+            "Gemma3n native AltUp coefficient output width",
+            output_width,
+        );
+        let inner_value =
+            native_dispatch_i32("Gemma3n native AltUp coefficient inner width", inner);
+        native_dispatch_length(
+            "Gemma3n native AltUp coefficient output length",
+            &[rows, output_width],
+        );
+        let rows_index = self.fresh();
+        self.line(format!("{rows_index} = arith.constant {rows} : index"));
+        let output_index = self.fresh();
+        self.line(format!(
+            "{output_index} = arith.constant {output_width} : index"
+        ));
+        let rows_i32 = self.fresh();
+        self.line(format!("{rows_i32} = arith.constant {rows_value} : i32"));
+        let output_i32 = self.fresh();
+        self.line(format!(
+            "{output_i32} = arith.constant {output_value} : i32"
+        ));
+        let inner_i32 = self.fresh();
+        self.line(format!("{inner_i32} = arith.constant {inner_value} : i32"));
+        let result = self.fresh();
+        let result_ty = Ty::f32(vec![rows, output_width]);
+        self.line(format!(
+            "{result} = flow.dispatch @custom_qmv::@gemma3n_altup_coeff\
+             [{rows_index}, {output_index}]({rows_i32}, {output_i32}, {inner_i32}, \
+             {input}, {weight}) : (i32, i32, i32, {input_ty}, {weight_ty}) -> {result_ty}",
+            input = input.name,
+            weight = weight.name,
+            input_ty = input.ty.render(),
+            weight_ty = weight.ty.render(),
+            result_ty = result_ty.render(),
+        ));
+        Val {
+            name: result,
+            ty: result_ty,
+        }
+    }
+
+    /// Reproduce MLX CUDA's FAST_TF32 batched AltUp prediction, residual add,
+    /// and BF16 output boundary when the native executable is enabled.
+    ///
+    /// `planes` is `[plane, row, hidden]`; `coefficients` is the transposed
+    /// reference layout `[row, source, target]`.
+    pub(crate) fn gemma3n_altup_predict(&mut self, planes: &Val, coefficients: &Val) -> Val {
+        assert_eq!(planes.ty.elt, "f32");
+        assert_eq!(coefficients.ty.elt, "f32");
+        assert_eq!(planes.ty.shape.len(), 3);
+        assert_eq!(coefficients.ty.shape.len(), 3);
+        let plane_count = planes.ty.shape[0];
+        let rows = planes.ty.shape[1];
+        let hidden = planes.ty.shape[2];
+        assert_eq!(coefficients.ty.shape, vec![rows, plane_count, plane_count]);
+
+        if !self.gemma3n_qmv {
+            let by_feature = self.transpose(planes, &[1, 2, 0]);
+            let delta = self.dot_general(
+                &by_feature,
+                coefficients,
+                &[0],
+                &[0],
+                &[2],
+                &[1],
+                vec![rows, hidden, plane_count],
+            );
+            let delta = self.transpose(&delta, &[2, 0, 1]);
+            let predicted = self.add(planes, &delta);
+            let predicted = self.convert(&predicted, "bf16");
+            return self.convert(&predicted, "f32");
+        }
+        assert_eq!(
+            plane_count, 4,
+            "native Gemma3n AltUp prediction requires four planes"
+        );
+
+        let plane_count_value =
+            native_dispatch_i32("Gemma3n native AltUp prediction plane count", plane_count);
+        let rows_value = native_dispatch_i32("Gemma3n native AltUp prediction rows", rows);
+        let hidden_value =
+            native_dispatch_i32("Gemma3n native AltUp prediction hidden width", hidden);
+        native_dispatch_length(
+            "Gemma3n native AltUp prediction plane size",
+            &[rows, hidden],
+        );
+        native_dispatch_length(
+            "Gemma3n native AltUp prediction length",
+            &[plane_count, rows, hidden],
+        );
+        let plane_count_index = self.fresh();
+        self.line(format!(
+            "{plane_count_index} = arith.constant {plane_count} : index"
+        ));
+        let rows_index = self.fresh();
+        self.line(format!("{rows_index} = arith.constant {rows} : index"));
+        let hidden_index = self.fresh();
+        self.line(format!("{hidden_index} = arith.constant {hidden} : index"));
+        let plane_count_i32 = self.fresh();
+        self.line(format!(
+            "{plane_count_i32} = arith.constant {plane_count_value} : i32"
+        ));
+        let rows_i32 = self.fresh();
+        self.line(format!("{rows_i32} = arith.constant {rows_value} : i32"));
+        let hidden_i32 = self.fresh();
+        self.line(format!(
+            "{hidden_i32} = arith.constant {hidden_value} : i32"
+        ));
+        let result = self.fresh();
+        let result_ty = Ty::f32(vec![plane_count, rows, hidden]);
+        self.line(format!(
+            "{result} = flow.dispatch @custom_qmv::@gemma3n_altup_predict\
+             [{plane_count_index}, {rows_index}, {hidden_index}]\
+             ({plane_count_i32}, {rows_i32}, {hidden_i32}, {planes}, {coefficients}) : \
+             (i32, i32, i32, {planes_ty}, {coefficients_ty}) -> {result_ty}",
+            planes = planes.name,
+            coefficients = coefficients.name,
+            planes_ty = planes.ty.render(),
+            coefficients_ty = coefficients.ty.render(),
+            result_ty = result_ty.render(),
+        ));
+        Val {
+            name: result,
+            ty: result_ty,
+        }
+    }
+
+    /// Dispatch MLX CUDA Compiled's BF16-typed GeGLU tape exactly.
+    pub(crate) fn gemma3n_geglu_bf16(&mut self, gate: &Val, up: &Val) -> Val {
+        assert_eq!(gate.ty.elt, up.ty.elt);
+        assert_eq!(gate.ty.shape, up.ty.shape);
+        assert_eq!(gate.ty.elt, "f32");
+        let shape = gate.ty.shape.clone();
+        let (length, length_value) = native_dispatch_length("Gemma3n native GeGLU length", &shape);
+        assert!(
+            self.gemma3n_qmv,
+            "native Gemma3n GeGLU requires the custom CUDA executable"
+        );
+
+        let flat_gate = if shape.len() == 1 {
+            gate.clone()
+        } else {
+            self.reshape(gate, vec![length])
+        };
+        let flat_up = if shape.len() == 1 {
+            up.clone()
+        } else {
+            self.reshape(up, vec![length])
+        };
+        let length_index = self.fresh();
+        self.line(format!("{length_index} = arith.constant {length} : index"));
+        let length_i32 = self.fresh();
+        self.line(format!(
+            "{length_i32} = arith.constant {length_value} : i32"
+        ));
+        let result = self.fresh();
+        let result_ty = Ty::f32(vec![length]);
+        self.line(format!(
+            "{result} = flow.dispatch @custom_qmv::@gemma3n_geglu_bf16[{length_index}]\
+             ({length_i32}, {gate}, {up}) : (i32, {gate_ty}, {up_ty}) -> {result_ty}",
+            gate = flat_gate.name,
+            up = flat_up.name,
+            gate_ty = flat_gate.ty.render(),
+            up_ty = flat_up.ty.render(),
+            result_ty = result_ty.render(),
+        ));
+        let output = Val {
+            name: result,
+            ty: result_ty,
+        };
+        if shape.len() == 1 {
+            output
+        } else {
+            self.reshape(&output, shape)
+        }
+    }
+
+    /// Dispatch the D=256 MLX vector-SDPA schedule for one decode query.
+    pub(crate) fn gemma3n_sdpa_vector(
+        &mut self,
+        query: &Val,
+        keys: &Val,
+        values: &Val,
+        position: &Val,
+        window: Option<usize>,
+        scale: f32,
+    ) -> Val {
+        assert!(
+            self.gemma3n_qmv,
+            "Gemma3n SDPA requires the custom CUDA executable"
+        );
+        assert_eq!(query.ty.elt, "f32");
+        assert_eq!(keys.ty.elt, "f32");
+        assert_eq!(values.ty.elt, "f32");
+        assert_eq!(query.ty.shape.len(), 2);
+        assert_eq!(keys.ty.shape.len(), 3);
+        assert_eq!(values.ty.shape, keys.ty.shape);
+        let query_heads = query.ty.shape[0];
+        let head_dim = query.ty.shape[1];
+        let capacity = keys.ty.shape[0];
+        let kv_heads = keys.ty.shape[1];
+        assert_eq!(position.ty.elt, "i32");
+        assert!(position.ty.shape.is_empty());
+        assert_eq!(head_dim, 256, "native SDPA requires D=256");
+        assert_eq!(keys.ty.shape[2], head_dim);
+        assert!(query_heads > 0 && kv_heads > 0);
+        assert!(query_heads.is_multiple_of(kv_heads));
+        assert!(capacity > 0);
+        assert!(
+            capacity <= 1024,
+            "native SDPA supports cache capacity <=1024"
+        );
+        let window = window.unwrap_or(0);
+        assert!(window <= i32::MAX as usize);
+        assert!(
+            window == 0 || window >= capacity,
+            "native SDPA does not support truncated sliding-window masks"
+        );
+        assert!(
+            scale.is_finite() && scale > 0.0,
+            "native SDPA requires a finite positive scale"
+        );
+
+        let query_heads_value =
+            native_dispatch_i32("Gemma3n SDPA diagnostic query heads", query_heads);
+        let kv_heads_value = native_dispatch_i32("Gemma3n SDPA diagnostic KV heads", kv_heads);
+        let capacity_value = native_dispatch_i32("Gemma3n SDPA diagnostic capacity", capacity);
+        let window_value = window as i32;
+        let query_heads_index = self.fresh();
+        self.line(format!(
+            "{query_heads_index} = arith.constant {query_heads} : index"
+        ));
+        let query_heads_i32 = self.fresh();
+        self.line(format!(
+            "{query_heads_i32} = arith.constant {query_heads_value} : i32"
+        ));
+        let kv_heads_i32 = self.fresh();
+        self.line(format!(
+            "{kv_heads_i32} = arith.constant {kv_heads_value} : i32"
+        ));
+        let capacity_i32 = self.fresh();
+        self.line(format!(
+            "{capacity_i32} = arith.constant {capacity_value} : i32"
+        ));
+        let position_i32 = self.fresh();
+        self.line(format!(
+            "{position_i32} = tensor.extract {position}[] : tensor<i32>",
+            position = position.name,
+        ));
+        let window_i32 = self.fresh();
+        self.line(format!(
+            "{window_i32} = arith.constant {window_value} : i32"
+        ));
+        let scale_i32 = self.fresh();
+        let scale_bits = scale.to_bits() as i32;
+        self.line(format!("{scale_i32} = arith.constant {scale_bits} : i32"));
+
+        let result = self.fresh();
+        let result_ty = Ty::f32(vec![query_heads, head_dim]);
+        self.line(format!(
+            "{result} = flow.dispatch \
+             @custom_qmv::@gemma3n_sdpa_vector[{query_heads_index}]\
+             ({query_heads_i32}, {kv_heads_i32}, {capacity_i32}, {position_i32}, \
+             {window_i32}, {scale_i32}, {query}, {keys}, {values}) : \
+             (i32, i32, i32, i32, i32, i32, {query_ty}, {keys_ty}, {values_ty}) -> \
+             {result_ty}",
+            query = query.name,
+            keys = keys.name,
+            values = values.name,
+            query_ty = query.ty.render(),
+            keys_ty = keys.ty.render(),
+            values_ty = values.ty.render(),
+            result_ty = result_ty.render(),
+        ));
+        Val {
+            name: result,
+            ty: result_ty,
+        }
     }
 
     /// Construct a handle to an existing func argument (not emitted).
@@ -626,6 +1047,9 @@ impl Builder {
     pub fn rsqrt(&mut self, a: &Val) -> Val {
         self.unary("rsqrt", a)
     }
+    pub fn sqrt(&mut self, a: &Val) -> Val {
+        self.unary("sqrt", a)
+    }
     pub fn tanh(&mut self, a: &Val) -> Val {
         self.unary("tanh", a)
     }
@@ -973,6 +1397,29 @@ mod tests {
         assert!(packed_runs_on("cuda", true));
         assert!(packed_runs_on("local-task", true));
         assert!(packed_runs_on("local-sync", true));
+    }
+
+    #[test]
+    fn native_dispatch_i32_preflight_rejects_dimensions_and_products() {
+        assert_eq!(
+            checked_native_i32_dim("dimension", i32::MAX as usize).unwrap(),
+            i32::MAX
+        );
+        assert!(
+            checked_native_i32_dim("dimension", i32::MAX as usize + 1)
+                .unwrap_err()
+                .contains("exceeds the signed i32 dispatch maximum")
+        );
+        assert!(
+            checked_native_i32_product("length", &[i32::MAX as usize, 2])
+                .unwrap_err()
+                .contains("exceeds the signed i32 dispatch maximum")
+        );
+        assert!(
+            checked_native_i32_product("length", &[usize::MAX, 2])
+                .unwrap_err()
+                .contains("overflow usize")
+        );
     }
 
     /// 4-bit affine dequant-in-graph (issue #516): a `[out, in_packed]` ui32 weight

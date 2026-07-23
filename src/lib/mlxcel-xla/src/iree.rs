@@ -58,11 +58,20 @@ use mlxcel_core::session::PreparedPrefill;
 use safetensors::{Dtype, SafeTensors};
 
 use crate::emitter::{
-    Config, Precision, check_packed_supported, emit_decode_ragged_with, emit_decode_with,
-    emit_prefill_embeddings_with, emit_prefill_with, quant_in_graph, resolve_precision,
-    resolve_precision_checked,
+    Config, Gemma3nConfig, Gemma3nWeightSpec, Precision, QuantConfig, check_packed_supported,
+    emit_decode_ragged_with, emit_decode_with, emit_gemma3n_decode_ragged_with_qmv,
+    emit_gemma3n_decode_with_qmv, emit_gemma3n_prefill_embeddings_ple_with_qmv,
+    emit_gemma3n_prefill_with_qmv, emit_prefill_embeddings_with, emit_prefill_with,
+    gemma3n_qmv_artifact_identity, gemma3n_qmv_is_available, gemma3n_weight_specs, quant_in_graph,
+    resolve_precision, resolve_precision_checked,
+};
+#[cfg(feature = "diagnostics")]
+use crate::emitter::{
+    Gemma3nDiagnosticLayout, emit_gemma3n_all_layer_diagnostics_with_qmv,
+    emit_gemma3n_prefill_diagnostics_with_qmv,
 };
 use crate::prepared::{PreparedIreePrefill, validate_slot};
+use crate::{Gemma3nDensePle, Gemma3nPreparedPrefill};
 // The loader reads the per-architecture checkpoint-weight order from
 // `weights::weight_specs`, which sources its names from `weight_names::scheme_names`
 // (issue #499 naming schemes) and covers the #498 dense pack (LayerNorm / o_proj /
@@ -70,8 +79,8 @@ use crate::prepared::{PreparedIreePrefill, validate_slot};
 // and the #500 MoE expert bank (the stacked `switch_mlp` weights, dequantized with
 // `dequantize_affine_stacked`). Both are pure-Rust and unit-tested without `iree`.
 use crate::weights::{
-    QuantPart, WeightSpec, bf16_to_f32, dequantize_affine, dequantize_affine_stacked, f16_to_f32,
-    f32_le_to_f32, pack_f16, slice_rows, weight_specs,
+    QuantPart, WeightSpec, bf16_to_f32, dequantize_affine, dequantize_affine_bf16_fused,
+    dequantize_affine_stacked, f16_to_f32, f32_le_to_f32, pack_f16, slice_rows, weight_specs,
 };
 
 /// Weight-buffer element dtype passed to the C shim (issue #516 per-weight ABI):
@@ -154,7 +163,8 @@ impl XlaTensorDesc {
             data,
             byte_length,
             dtype,
-            rank: shape.len() as c_int,
+            rank: c_int::try_from(shape.len())
+                .map_err(|_| format!("IREE tensor rank {} does not fit c_int", shape.len()))?,
             dims,
         })
     }
@@ -193,6 +203,7 @@ unsafe extern "C" {
         prefill: *const c_char,
         prefill_embeddings: *const c_char,
         decode: *const c_char,
+        prefill_diagnostics: *const c_char,
         compatibility_fingerprint: u64,
         n_weights: c_int,
         weight_data: *const *const c_void,
@@ -201,6 +212,9 @@ unsafe extern "C" {
         weight_dims: *const i64,
         context_capacity: c_int,
         hidden_size: c_int,
+        prefill_embeddings_kind: c_int,
+        dense_ple_layers: c_int,
+        dense_ple_hidden: c_int,
     ) -> *mut XlaCtx;
     fn xla_llama_prefill(
         c: *mut XlaCtx,
@@ -232,6 +246,17 @@ unsafe extern "C" {
         vocab: c_int,
         out_logits: *mut f32,
     ) -> c_int;
+    #[cfg(feature = "diagnostics")]
+    fn xla_llama_prefill_diagnostics_slot(
+        c: *mut XlaCtx,
+        slot: c_int,
+        tokens: *const c_int,
+        lp: c_int,
+        positions: *const c_int,
+        real_len: c_int,
+        diagnostic_len: c_int,
+        out_diagnostics: *mut f32,
+    ) -> c_int;
     fn xla_llama_prefill_embeddings(
         c: *mut XlaCtx,
         embeddings: *const XlaTensorDesc,
@@ -244,6 +269,26 @@ unsafe extern "C" {
         c: *mut XlaCtx,
         slot: c_int,
         embeddings: *const XlaTensorDesc,
+        positions: *const XlaTensorDesc,
+        attention_bias: *const XlaTensorDesc,
+        real_len: c_int,
+        vocab: c_int,
+        out_logits: *mut f32,
+    ) -> c_int;
+    fn xla_llama_prefill_embeddings_ple(
+        c: *mut XlaCtx,
+        embeddings: *const XlaTensorDesc,
+        dense_ple: *const XlaTensorDesc,
+        positions: *const XlaTensorDesc,
+        attention_bias: *const XlaTensorDesc,
+        real_len: c_int,
+        out_token: *mut c_int,
+    ) -> c_int;
+    fn xla_llama_prefill_embeddings_ple_slot_logits(
+        c: *mut XlaCtx,
+        slot: c_int,
+        embeddings: *const XlaTensorDesc,
+        dense_ple: *const XlaTensorDesc,
         positions: *const XlaTensorDesc,
         attention_bias: *const XlaTensorDesc,
         real_len: c_int,
@@ -266,6 +311,237 @@ unsafe extern "C" {
 /// ragged decode graph for the chosen `b_max` is emitted from the model config at
 /// load (any `b_max` is emittable; the worker selects from this set).
 pub(crate) const RAGGED_B_VALUES: &[usize] = &[4, 8];
+
+#[derive(Clone, Debug)]
+enum RuntimeConfig {
+    Dense(Config),
+    Gemma3n(Gemma3nConfig),
+}
+
+fn checked_ffi_int(value: usize, name: &str) -> Result<c_int, String> {
+    c_int::try_from(value).map_err(|_| format!("{name}={value} does not fit the IREE C ABI c_int"))
+}
+
+fn checked_ffi_i64(value: usize, name: &str) -> Result<i64, String> {
+    i64::try_from(value).map_err(|_| format!("{name}={value} does not fit the IREE C ABI i64"))
+}
+
+#[derive(Debug)]
+struct RuntimeFfiDimensions {
+    n_weights: c_int,
+    context_capacity: c_int,
+    hidden: c_int,
+    dense_ple_layers: c_int,
+    dense_ple_hidden: c_int,
+}
+
+fn runtime_ffi_dimensions(
+    cfg: &RuntimeConfig,
+    n_weights: usize,
+) -> Result<RuntimeFfiDimensions, String> {
+    let dense_ple = cfg.dense_ple_shape();
+    checked_ffi_int(cfg.vocab(), "vocab_size")?;
+    Ok(RuntimeFfiDimensions {
+        n_weights: checked_ffi_int(n_weights, "n_weights")?,
+        context_capacity: checked_ffi_int(cfg.context_capacity(), "context_capacity")?,
+        hidden: checked_ffi_int(cfg.hidden(), "hidden_size")?,
+        dense_ple_layers: checked_ffi_int(
+            dense_ple.map_or(0, |shape| shape[1]),
+            "dense_ple_layers",
+        )?,
+        dense_ple_hidden: checked_ffi_int(
+            dense_ple.map_or(0, |shape| shape[2]),
+            "dense_ple_hidden",
+        )?,
+    })
+}
+
+impl RuntimeConfig {
+    fn from_json(model_dir: &Path, context_capacity: usize) -> Result<Self, String> {
+        let path = model_dir.join("config.json");
+        let text = std::fs::read_to_string(&path)
+            .map_err(|error| format!("read {}: {error}", path.display()))?;
+        let root: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|error| format!("parse {}: {error}", path.display()))?;
+        let model_type = root.get("model_type").and_then(serde_json::Value::as_str);
+        if matches!(model_type, Some("gemma3n" | "gemma3n_text")) {
+            return Gemma3nConfig::from_json_str(&text)
+                .and_then(|config| config.with_context_capacity(context_capacity))
+                .map(Self::Gemma3n)
+                .map_err(|error| format!("{}: {error}", path.display()));
+        }
+        Config::from_json(model_dir)?
+            .with_context_capacity(context_capacity)
+            .map(Self::Dense)
+    }
+
+    fn context_capacity(&self) -> usize {
+        match self {
+            Self::Dense(config) => config.context_capacity,
+            Self::Gemma3n(config) => config.context_capacity,
+        }
+    }
+
+    fn hidden(&self) -> usize {
+        match self {
+            Self::Dense(config) => config.hidden,
+            Self::Gemma3n(config) => config.hidden,
+        }
+    }
+
+    fn vocab(&self) -> usize {
+        match self {
+            Self::Dense(config) => config.vocab,
+            Self::Gemma3n(config) => config.vocab,
+        }
+    }
+
+    fn quantization(&self) -> Option<QuantConfig> {
+        match self {
+            Self::Dense(config) => config.quantization,
+            Self::Gemma3n(config) => config.quantization,
+        }
+    }
+
+    fn weight_specs(&self) -> Vec<WeightSpec> {
+        match self {
+            Self::Dense(config) => weight_specs(config),
+            Self::Gemma3n(config) => gemma3n_weight_specs(config)
+                .into_iter()
+                .map(|spec| match spec {
+                    Gemma3nWeightSpec::Tensor(name) => WeightSpec::Whole(name),
+                    Gemma3nWeightSpec::Projection(name) => WeightSpec::Proj(name),
+                })
+                .collect(),
+        }
+    }
+
+    fn artifact_identity(&self) -> String {
+        match self {
+            Self::Dense(config) => format!("dense:{config:?}"),
+            Self::Gemma3n(config) => config.compatibility_fingerprint(),
+        }
+    }
+
+    fn supports_f16_resident(&self) -> bool {
+        matches!(self, Self::Dense(config) if config.supports_f16_resident())
+    }
+
+    fn dense_ple_shape(&self) -> Option<[usize; 3]> {
+        match self {
+            Self::Dense(_) => None,
+            Self::Gemma3n(config) => Some(config.dense_ple_shape()),
+        }
+    }
+}
+
+fn effective_precision(device: &str, cfg: &RuntimeConfig) -> Result<Precision, String> {
+    match cfg {
+        RuntimeConfig::Dense(_) => resolve_precision_checked(device),
+        RuntimeConfig::Gemma3n(_) if device == "metal" => Err(
+            "Gemma3n uses an exact BF16 activation stream with F32 AltUp coefficient islands, \
+             but the Metal target cannot lower BF16. Use CUDA or a CPU local-task/local-sync \
+             target."
+                .to_string(),
+        ),
+        RuntimeConfig::Gemma3n(_) => Ok(Precision::Bf16),
+    }
+}
+
+fn gemma3n_native_qmv_eligibility(
+    device: &str,
+    quantization: Option<QuantConfig>,
+    qmv_available: bool,
+) -> Result<bool, String> {
+    if device != "cuda" {
+        return Ok(false);
+    }
+    let Some(quantization) = quantization else {
+        return Ok(false);
+    };
+    if quantization.bits == 8 {
+        return Ok(false);
+    }
+    if quantization.bits != 4 {
+        return Err(format!(
+            "Gemma3n CUDA native QMV supports 4-bit checkpoints; got {} bits",
+            quantization.bits
+        ));
+    }
+    if quantization.group_size != 64 {
+        return Err(format!(
+            "Gemma3n CUDA native QMV currently pins the Q4 group_size=64 contract; got {}",
+            quantization.group_size
+        ));
+    }
+    if !qmv_available {
+        return Err(
+            "Gemma3n CUDA Q4 requires the token-exact native QMV, but this binary was \
+             built without the CUDA-IREE PTX (`cfg(xla_iree_cuda)`). Rebuild with \
+             IREE_CUDA_HOME and nvcc; refusing the numerically different dot fallback."
+                .to_string(),
+        );
+    }
+    Ok(true)
+}
+
+fn gemma3n_native_qmv(device: &str, config: &Gemma3nConfig) -> Result<bool, String> {
+    let enabled =
+        gemma3n_native_qmv_eligibility(device, config.quantization, gemma3n_qmv_is_available())?;
+    if enabled {
+        config.validate_native_cuda_dispatches()?;
+    }
+    Ok(enabled)
+}
+
+#[cfg(test)]
+mod gemma3n_qmv_eligibility_tests {
+    use super::*;
+
+    const Q4_GROUP64: Option<QuantConfig> = Some(QuantConfig {
+        bits: 4,
+        group_size: 64,
+    });
+
+    #[test]
+    fn cuda_q4_requires_native_qmv_and_exact_group_contract() {
+        assert!(gemma3n_native_qmv_eligibility("cuda", Q4_GROUP64, true).unwrap());
+        assert!(
+            gemma3n_native_qmv_eligibility("cuda", Q4_GROUP64, false)
+                .unwrap_err()
+                .contains("refusing the numerically different dot fallback")
+        );
+        assert!(
+            gemma3n_native_qmv_eligibility(
+                "cuda",
+                Some(QuantConfig {
+                    bits: 4,
+                    group_size: 32,
+                }),
+                true,
+            )
+            .unwrap_err()
+            .contains("group_size=64")
+        );
+    }
+
+    #[test]
+    fn only_cuda_q4_selects_native_qmv() {
+        assert!(!gemma3n_native_qmv_eligibility("local-task", Q4_GROUP64, true).unwrap());
+        assert!(
+            !gemma3n_native_qmv_eligibility(
+                "cuda",
+                Some(QuantConfig {
+                    bits: 8,
+                    group_size: 64,
+                }),
+                true,
+            )
+            .unwrap()
+        );
+        assert!(!gemma3n_native_qmv_eligibility("cuda", None, true).unwrap());
+    }
+}
 
 // The per-architecture checkpoint-weight order the loader reads lives in
 // `weights::weight_specs` (pure logic, unit-tested without the IREE runtime, and
@@ -403,9 +679,11 @@ struct CompiledBundle {
 /// weight argument schema, precision, context/hidden/KV dimensions, and ABI
 /// schema version; a member compiled from a different contract therefore cannot
 /// be substituted without changing the fingerprint.
+#[allow(clippy::too_many_arguments)]
 fn compile_bundle(
     device: &str,
-    cfg: &Config,
+    cfg: &RuntimeConfig,
+    gemma3n_qmv: bool,
     prefill_mlir: &str,
     prefill_tag: &str,
     prefill_embeddings_mlir: &str,
@@ -420,38 +698,44 @@ fn compile_bundle(
             iree_compile.display()
         ));
     }
-    let flags = target_flags(device)?;
+    let mut flags = target_flags(device)?.to_vec();
+    if gemma3n_qmv {
+        flags.push("--iree-cuda-target=sm_80");
+    }
     let cache = std::env::temp_dir().join("mlxcel-xla-vmfb");
     std::fs::create_dir_all(&cache).map_err(|e| format!("mkdir {}: {e}", cache.display()))?;
     let pre = compile_one(
         &iree_compile,
         prefill_mlir,
-        flags,
+        &flags,
         &cache,
         prefill_tag,
-        cfg.context_capacity,
+        cfg.context_capacity(),
     )?;
     let pre_embeddings = compile_one(
         &iree_compile,
         prefill_embeddings_mlir,
-        flags,
+        &flags,
         &cache,
         prefill_embeddings_tag,
-        cfg.context_capacity,
+        cfg.context_capacity(),
     )?;
     let dec = compile_one(
         &iree_compile,
         decode_mlir,
-        flags,
+        &flags,
         &cache,
         decode_tag,
-        cfg.context_capacity,
+        cfg.context_capacity(),
     )?;
     let mut fingerprint = std::collections::hash_map::DefaultHasher::new();
     "mlxcel-xla-runtime-bundle-v1".hash(&mut fingerprint);
-    format!("{cfg:?}").hash(&mut fingerprint);
-    format!("{:?}", weight_specs(cfg)).hash(&mut fingerprint);
-    format!("{:?}", resolve_precision(device)).hash(&mut fingerprint);
+    cfg.artifact_identity().hash(&mut fingerprint);
+    format!("{:?}", cfg.weight_specs()).hash(&mut fingerprint);
+    format!("{:?}", effective_precision(device, cfg)?).hash(&mut fingerprint);
+    if gemma3n_qmv {
+        gemma3n_qmv_artifact_identity().hash(&mut fingerprint);
+    }
     prefill_mlir.hash(&mut fingerprint);
     prefill_embeddings_mlir.hash(&mut fingerprint);
     decode_mlir.hash(&mut fingerprint);
@@ -465,15 +749,31 @@ fn compile_bundle(
 }
 
 /// Emit and compile the argmax prefill bundle for a single-sequence engine.
-fn compile_vmfbs(device: &str, cfg: &Config) -> Result<CompiledBundle, String> {
-    let precision = resolve_precision_checked(device)?;
-    check_packed_supported(device, quant_in_graph() && cfg.supports_packed_quant())?;
-    let prefill = emit_prefill_with(cfg, true, precision);
-    let prefill_embeddings = emit_prefill_embeddings_with(cfg, true, precision);
-    let decode = emit_decode_with(cfg, true, precision);
+fn compile_vmfbs(device: &str, cfg: &RuntimeConfig) -> Result<CompiledBundle, String> {
+    let precision = effective_precision(device, cfg)?;
+    let native_qmv = match cfg {
+        RuntimeConfig::Dense(_) => false,
+        RuntimeConfig::Gemma3n(config) => gemma3n_native_qmv(device, config)?,
+    };
+    let (prefill, prefill_embeddings, decode) = match cfg {
+        RuntimeConfig::Dense(config) => {
+            check_packed_supported(device, quant_in_graph() && config.supports_packed_quant())?;
+            (
+                emit_prefill_with(config, true, precision),
+                emit_prefill_embeddings_with(config, true, precision),
+                emit_decode_with(config, true, precision),
+            )
+        }
+        RuntimeConfig::Gemma3n(config) => (
+            emit_gemma3n_prefill_with_qmv(config, true, precision, native_qmv),
+            emit_gemma3n_prefill_embeddings_ple_with_qmv(config, true, precision, native_qmv),
+            emit_gemma3n_decode_with_qmv(config, true, precision, native_qmv),
+        ),
+    };
     compile_bundle(
         device,
         cfg,
+        native_qmv,
         &prefill,
         "prefill",
         &prefill_embeddings,
@@ -481,6 +781,49 @@ fn compile_vmfbs(device: &str, cfg: &Config) -> Result<CompiledBundle, String> {
         &decode,
         "decode",
     )
+}
+
+#[cfg(feature = "diagnostics")]
+fn compile_gemma3n_diagnostics(
+    device: &str,
+    cfg: &RuntimeConfig,
+    all_layers: bool,
+) -> Result<(PathBuf, Gemma3nDiagnosticLayout), String> {
+    let RuntimeConfig::Gemma3n(config) = cfg else {
+        return Err("Gemma3n diagnostics require a Gemma3n runtime config".to_string());
+    };
+    let precision = effective_precision(device, cfg)?;
+    let native_qmv = gemma3n_native_qmv(device, config)?;
+    let (mlir, layout) = if all_layers {
+        emit_gemma3n_all_layer_diagnostics_with_qmv(config, precision, native_qmv)
+    } else {
+        emit_gemma3n_prefill_diagnostics_with_qmv(config, precision, native_qmv)
+    };
+    layout.validate()?;
+    let compiler = iree_compile_bin()?;
+    if !compiler.exists() {
+        return Err(format!("iree-compile not found at {}", compiler.display()));
+    }
+    let cache = std::env::temp_dir().join("mlxcel-xla-vmfb");
+    std::fs::create_dir_all(&cache)
+        .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
+    let mut flags = target_flags(device)?.to_vec();
+    if native_qmv {
+        flags.push("--iree-cuda-target=sm_80");
+    }
+    let vmfb = compile_one(
+        &compiler,
+        &mlir,
+        &flags,
+        &cache,
+        if all_layers {
+            "prefill_all_layer_diagnostics"
+        } else {
+            "prefill_diagnostics"
+        },
+        cfg.context_capacity(),
+    )?;
+    Ok((vmfb, layout))
 }
 
 /// Map each needed weight name to the safetensors file that holds it, in the same
@@ -519,6 +862,254 @@ fn resolve_weight_shards(model_dir: &Path, names: &[String]) -> Result<Vec<PathB
         .collect()
 }
 
+/// mlx-community Gemma3n quantized repacks retain the upstream index but rewrite
+/// the language backbone's safetensors prefix. Keep the graph's canonical HF
+/// argument order and only try this one architecture-specific alternate after
+/// the canonical name is absent.
+fn gemma3n_repackaged_tensor_name(name: &str) -> Option<String> {
+    name.strip_prefix("model.language_model.")
+        .map(|suffix| format!("language_model.model.{suffix}"))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Gemma3nCheckpointNames {
+    Canonical,
+    Repackaged,
+}
+
+fn merge_gemma3n_name_scheme(
+    current: Option<Gemma3nCheckpointNames>,
+    observed: Gemma3nCheckpointNames,
+) -> Result<Option<Gemma3nCheckpointNames>, String> {
+    match current {
+        Some(current) if current != observed => Err(
+            "Gemma3n checkpoint mixes canonical `model.language_model.*` and repackaged \
+             `language_model.model.*` tensor names"
+                .to_string(),
+        ),
+        Some(current) => Ok(Some(current)),
+        None => Ok(Some(observed)),
+    }
+}
+
+fn gemma3n_candidate_shards(model_dir: &Path, names: &[String]) -> Result<Vec<PathBuf>, String> {
+    let indexed = resolve_weight_shards(model_dir, names);
+    if let Ok(paths) = &indexed
+        && paths.iter().all(|path| path.is_file())
+    {
+        let mut unique = paths.clone();
+        unique.sort();
+        unique.dedup();
+        return Ok(unique);
+    }
+    let mut actual: Vec<PathBuf> = std::fs::read_dir(model_dir)
+        .map_err(|error| format!("read {}: {error}", model_dir.display()))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".safetensors"))
+        })
+        .collect();
+    actual.sort();
+    if actual.is_empty() {
+        return Err(match indexed {
+            Err(error) => error,
+            Ok(_) => format!("no safetensors files found in {}", model_dir.display()),
+        });
+    }
+    Ok(actual)
+}
+
+fn resolve_gemma3n_weight_sources(
+    model_dir: &Path,
+    names: &[String],
+) -> Result<(Vec<PathBuf>, Gemma3nCheckpointNames), String> {
+    let candidate_shards = gemma3n_candidate_shards(model_dir, names)?;
+    let mut resolved: Vec<Option<PathBuf>> = vec![None; names.len()];
+    let mut scheme = None;
+    for shard in candidate_shards {
+        let file = File::open(&shard).map_err(|e| format!("open {}: {e}", shard.display()))?;
+        // Safety: the file is read-only for the lifetime of this header scan.
+        let mmap =
+            unsafe { Mmap::map(&file) }.map_err(|e| format!("mmap {}: {e}", shard.display()))?;
+        let st = SafeTensors::deserialize(&mmap)
+            .map_err(|e| format!("parse {}: {e}", shard.display()))?;
+        for (index, canonical) in names.iter().enumerate() {
+            let alias = gemma3n_repackaged_tensor_name(canonical).ok_or_else(|| {
+                format!("Gemma3n graph weight has an unsupported canonical name: {canonical}")
+            })?;
+            let has_canonical = st.tensor(canonical).is_ok();
+            let has_alias = st.tensor(&alias).is_ok();
+            let observed = match (has_canonical, has_alias) {
+                (false, false) => continue,
+                (true, false) => Gemma3nCheckpointNames::Canonical,
+                (false, true) => Gemma3nCheckpointNames::Repackaged,
+                (true, true) => {
+                    return Err(format!(
+                        "Gemma3n checkpoint {} contains both `{canonical}` and `{alias}`",
+                        shard.display()
+                    ));
+                }
+            };
+            if let Some(previous) = &resolved[index] {
+                return Err(format!(
+                    "Gemma3n tensor `{canonical}` is duplicated in {} and {}",
+                    previous.display(),
+                    shard.display()
+                ));
+            }
+            resolved[index] = Some(shard.clone());
+            scheme = merge_gemma3n_name_scheme(scheme, observed)?;
+        }
+    }
+    let missing: Vec<&str> = resolved
+        .iter()
+        .zip(names)
+        .filter_map(|(path, name)| path.is_none().then_some(name.as_str()))
+        .collect();
+    if !missing.is_empty() {
+        let preview = missing
+            .iter()
+            .take(8)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "Gemma3n checkpoint is missing {} graph weight(s): {preview}",
+            missing.len()
+        ));
+    }
+    let scheme = scheme.ok_or_else(|| "Gemma3n checkpoint has no graph weights".to_string())?;
+    Ok((
+        resolved
+            .into_iter()
+            .map(|path| path.expect("missing paths rejected above"))
+            .collect(),
+        scheme,
+    ))
+}
+
+fn checkpoint_tensor_name(
+    scheme: Option<Gemma3nCheckpointNames>,
+    canonical: &str,
+) -> Result<String, String> {
+    match scheme {
+        Some(Gemma3nCheckpointNames::Repackaged) => gemma3n_repackaged_tensor_name(canonical)
+            .ok_or_else(|| format!("unsupported Gemma3n tensor name: {canonical}")),
+        Some(Gemma3nCheckpointNames::Canonical) | None => Ok(canonical.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_name_tests {
+    use super::*;
+
+    fn tiny_gemma3n_runtime() -> RuntimeConfig {
+        RuntimeConfig::Gemma3n(
+            Gemma3nConfig::from_json_str(
+                &serde_json::json!({
+                    "model_type": "gemma3n_text",
+                    "hidden_size": 8, "intermediate_size": [12, 12],
+                    "max_position_embeddings": 4096,
+                    "num_hidden_layers": 2, "num_attention_heads": 2,
+                    "num_key_value_heads": 1, "head_dim": 4, "rms_norm_eps": 1e-6,
+                    "vocab_size": 12, "vocab_size_per_layer_input": 10,
+                    "hidden_size_per_layer_input": 2,
+                    "layer_types": ["sliding_attention", "full_attention"],
+                    "activation_sparsity_pattern": [0.0, 0.0],
+                    "sliding_window": 2, "rope_theta": 1000000.0,
+                    "rope_local_base_freq": 10000.0, "final_logit_softcapping": 30.0,
+                    "num_kv_shared_layers": 0, "altup_num_inputs": 2,
+                    "altup_active_idx": 0, "altup_coef_clip": 120.0,
+                    "altup_correct_scale": true, "laurel_rank": 2,
+                    "tie_word_embeddings": true
+                })
+                .to_string(),
+            )
+            .unwrap()
+            .with_context_capacity(4)
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn gemma3n_runtime_precision_is_fixed_bf16_and_rejects_metal() {
+        let cfg = tiny_gemma3n_runtime();
+        assert_eq!(effective_precision("cuda", &cfg).unwrap(), Precision::Bf16);
+        assert_eq!(
+            effective_precision("local-task", &cfg).unwrap(),
+            Precision::Bf16
+        );
+        assert!(
+            effective_precision("metal", &cfg)
+                .unwrap_err()
+                .contains("BF16")
+        );
+    }
+
+    #[test]
+    fn runtime_ffi_preflight_rejects_oversized_config_and_weight_count() {
+        let mut cfg = tiny_gemma3n_runtime();
+        let RuntimeConfig::Gemma3n(config) = &mut cfg else {
+            unreachable!()
+        };
+        config.hidden = i32::MAX as usize + 1;
+        let error = runtime_ffi_dimensions(&cfg, 1).unwrap_err();
+        assert!(error.contains("hidden_size"));
+        assert!(error.contains("does not fit"));
+
+        let cfg = tiny_gemma3n_runtime();
+        let error = runtime_ffi_dimensions(&cfg, i32::MAX as usize + 1).unwrap_err();
+        assert!(error.contains("n_weights"));
+        assert!(error.contains("does not fit"));
+    }
+
+    #[test]
+    fn gemma3n_repack_alias_covers_weight_and_quant_companions() {
+        assert_eq!(
+            gemma3n_repackaged_tensor_name("model.language_model.layers.0.self_attn.q_proj.weight")
+                .as_deref(),
+            Some("language_model.model.layers.0.self_attn.q_proj.weight")
+        );
+        assert_eq!(
+            gemma3n_repackaged_tensor_name("model.language_model.embed_tokens.scales").as_deref(),
+            Some("language_model.model.embed_tokens.scales")
+        );
+        assert_eq!(
+            gemma3n_repackaged_tensor_name("model.language_model.embed_tokens.biases").as_deref(),
+            Some("language_model.model.embed_tokens.biases")
+        );
+    }
+
+    #[test]
+    fn gemma3n_name_scheme_rejects_mixed_checkpoints() {
+        let scheme = merge_gemma3n_name_scheme(None, Gemma3nCheckpointNames::Canonical).unwrap();
+        let error =
+            merge_gemma3n_name_scheme(scheme, Gemma3nCheckpointNames::Repackaged).unwrap_err();
+        assert!(error.contains("mixes canonical"));
+    }
+
+    #[test]
+    #[ignore = "requires GEMMA3N_MODEL_DIR pointing at a real local checkpoint"]
+    fn real_gemma3n_headers_resolve_every_graph_weight_once() {
+        let model_dir =
+            PathBuf::from(std::env::var_os("GEMMA3N_MODEL_DIR").expect("GEMMA3N_MODEL_DIR"));
+        let cfg = RuntimeConfig::from_json(&model_dir, 8).unwrap();
+        let names: Vec<String> = cfg
+            .weight_specs()
+            .iter()
+            .map(|spec| spec.tensor_name().to_string())
+            .collect();
+        let (paths, _) = resolve_gemma3n_weight_sources(&model_dir, &names).unwrap();
+        assert_eq!(paths.len(), names.len());
+        assert!(paths.iter().all(|path| path.is_file()));
+    }
+}
+
 /// Load the weights bf16 -> f32 in the emitter's arg order, returning the owned
 /// f32 buffers (kept alive until the shim copies them) plus the flat (ptr, rank,
 /// dims) arrays the C ABI takes. `cfg` fixes the layer count and weight order.
@@ -531,12 +1122,18 @@ fn resolve_weight_shards(model_dir: &Path, names: &[String]) -> Result<Vec<PathB
 #[allow(clippy::type_complexity)]
 fn load_weights(
     model_dir: &Path,
-    cfg: &Config,
+    cfg: &RuntimeConfig,
     resident_f16: bool,
 ) -> Result<(Vec<WeightBuf>, Vec<c_int>, Vec<c_int>, Vec<i64>), String> {
-    let specs = weight_specs(cfg);
+    let specs = cfg.weight_specs();
     let names: Vec<String> = specs.iter().map(|s| s.tensor_name().to_string()).collect();
-    let shard_paths = resolve_weight_shards(model_dir, &names)?;
+    let (shard_paths, gemma3n_name_scheme) = match cfg {
+        RuntimeConfig::Gemma3n(_) => {
+            let (paths, scheme) = resolve_gemma3n_weight_sources(model_dir, &names)?;
+            (paths, Some(scheme))
+        }
+        RuntimeConfig::Dense(_) => (resolve_weight_shards(model_dir, &names)?, None),
+    };
 
     // Group weight indices by shard so each shard file is opened/mmap'd once; the
     // results are placed by index, preserving the emitter's arg order. A Phi3
@@ -562,9 +1159,13 @@ fn load_weights(
             .map_err(|e| format!("parse {}: {e}", shard.display()))?;
         for &i in &idxs {
             let name = &names[i];
-            let t = st
-                .tensor(name)
-                .map_err(|e| format!("weight {name} in {}: {e}", shard.display()))?;
+            let checkpoint_name = checkpoint_tensor_name(gemma3n_name_scheme, name)?;
+            let t = st.tensor(&checkpoint_name).map_err(|e| {
+                format!(
+                    "resolved weight {checkpoint_name} (canonical {name}) in {}: {e}",
+                    shard.display()
+                )
+            })?;
 
             // issue #516 packed path: upload the raw quantized part (the packed U32
             // weight, or its f16 scales / biases) as-is, no dequant. Its native dtype
@@ -589,8 +1190,8 @@ fn load_weights(
                 }
                 dtypes[i] = code;
                 ranks[i] = 2;
-                dims[i * 4] = shape[0] as i64;
-                dims[i * 4 + 1] = shape[1] as i64;
+                dims[i * 4] = checked_ffi_i64(shape[0], &format!("weight {name} dim 0"))?;
+                dims[i * 4 + 1] = checked_ffi_i64(shape[1], &format!("weight {name} dim 1"))?;
                 bufs[i] = WeightBuf::Raw(t.data().to_vec());
                 continue;
             }
@@ -599,14 +1200,14 @@ fn load_weights(
             // graph's dtype): an MLX affine `U32`-packed weight is dequantized (the
             // layernorms / biases are not quantized and take the widen path).
             let (data, shape): (Vec<f32>, Vec<usize>) = if t.dtype() == Dtype::U32 {
-                let qc = cfg.quantization.ok_or_else(|| {
+                let qc = cfg.quantization().ok_or_else(|| {
                     format!(
                         "weight {name} is U32 (quantized) but config.json has no `quantization`"
                     )
                 })?;
-                let prefix = name
-                    .strip_suffix(".weight")
-                    .ok_or_else(|| format!("quantized weight {name} does not end in `.weight`"))?;
+                let prefix = checkpoint_name.strip_suffix(".weight").ok_or_else(|| {
+                    format!("quantized weight {checkpoint_name} does not end in `.weight`")
+                })?;
                 let scales_name = format!("{prefix}.scales");
                 let biases_name = format!("{prefix}.biases");
                 let scales = st.tensor(&scales_name).map_err(|e| {
@@ -634,16 +1235,33 @@ fn load_weights(
                     2 => {
                         let (out, in_packed) = (shape[0], shape[1]);
                         let in_ = in_packed * (32 / qc.bits);
-                        let d = dequantize_affine(
-                            t.data(),
-                            scales.data(),
-                            biases.data(),
-                            out,
-                            in_packed,
-                            qc.bits,
-                            qc.group_size,
-                            sb_bf16,
-                        )
+                        let d = if matches!(cfg, RuntimeConfig::Gemma3n(_)) {
+                            if !sb_bf16 {
+                                return Err(format!(
+                                    "{prefix} uses F16 affine scales/biases, but Gemma3n requires BF16 affine metadata"
+                                ));
+                            }
+                            dequantize_affine_bf16_fused(
+                                t.data(),
+                                scales.data(),
+                                biases.data(),
+                                out,
+                                in_packed,
+                                qc.bits,
+                                qc.group_size,
+                            )
+                        } else {
+                            dequantize_affine(
+                                t.data(),
+                                scales.data(),
+                                biases.data(),
+                                out,
+                                in_packed,
+                                qc.bits,
+                                qc.group_size,
+                                sb_bf16,
+                            )
+                        }
                         .map_err(|e| format!("dequantize {name}: {e}"))?;
                         (d, vec![out, in_])
                     }
@@ -696,9 +1314,9 @@ fn load_weights(
             // Place the whole tensor, or (Phi3 fused) a row-slice, into arg slot i.
             match &specs[i] {
                 WeightSpec::Whole(_) => {
-                    ranks[i] = shape.len() as c_int;
+                    ranks[i] = checked_ffi_int(shape.len(), &format!("weight {name} rank"))?;
                     for (k, &s) in shape.iter().enumerate() {
-                        dims[i * 4 + k] = s as i64;
+                        dims[i * 4 + k] = checked_ffi_i64(s, &format!("weight {name} dim {k}"))?;
                     }
                     bufs[i] = WeightBuf::F32(data);
                 }
@@ -707,9 +1325,9 @@ fn load_weights(
                 // and halving its per-step DRAM read; otherwise upload f32, identical
                 // to the old `Whole`. `data` / `shape` are the widened row-major weight.
                 WeightSpec::Proj(_) => {
-                    ranks[i] = shape.len() as c_int;
+                    ranks[i] = checked_ffi_int(shape.len(), &format!("weight {name} rank"))?;
                     for (k, &s) in shape.iter().enumerate() {
-                        dims[i * 4 + k] = s as i64;
+                        dims[i * 4 + k] = checked_ffi_i64(s, &format!("weight {name} dim {k}"))?;
                     }
                     if resident_f16 {
                         dtypes[i] = WDT_F16;
@@ -730,8 +1348,9 @@ fn load_weights(
                             .map_err(|e| format!("row-slice {name}: {e}"))?,
                     );
                     ranks[i] = 2;
-                    dims[i * 4] = (*end - *start) as i64;
-                    dims[i * 4 + 1] = shape[1] as i64;
+                    dims[i * 4] =
+                        checked_ffi_i64(*end - *start, &format!("weight {name} sliced rows"))?;
+                    dims[i * 4 + 1] = checked_ffi_i64(shape[1], &format!("weight {name} dim 1"))?;
                 }
                 WeightSpec::QuantRaw { .. } => {
                     unreachable!("QuantRaw is handled by the early-continue above")
@@ -762,20 +1381,35 @@ fn prepared_descriptors(
     Ok((embeddings, positions, attention_bias))
 }
 
+fn dense_ple_descriptor(dense_ple: &Gemma3nDensePle) -> Result<XlaTensorDesc, String> {
+    XlaTensorDesc::f32(dense_ple.as_slice(), &dense_ple.shape())
+}
+
 /// Load the weights and create the C execution context for a (prefill, decode)
 /// vmfb pair on `device`. Shared by the single-sequence ([`IreeLlama`]) and ragged
 /// ([`IreeRaggedLlama`]) engines, which differ only in which decode vmfb they pass.
 fn create_ctx(
     model_dir: &Path,
-    cfg: &Config,
+    cfg: &RuntimeConfig,
     device: &str,
     bundle: &CompiledBundle,
+) -> Result<*mut XlaCtx, String> {
+    create_ctx_with_diagnostics(model_dir, cfg, device, bundle, None)
+}
+
+fn create_ctx_with_diagnostics(
+    model_dir: &Path,
+    cfg: &RuntimeConfig,
+    device: &str,
+    bundle: &CompiledBundle,
+    prefill_diagnostics_vmfb: Option<&Path>,
 ) -> Result<*mut XlaCtx, String> {
     // issue #572: the f16 GPU path uploads the projection weights f16-resident to
     // match the emitter's f16 args. Uses the same resolve_precision(device) the graph
     // emit uses, so the uploaded buffer dtype always lines up with the emitted arg.
     let resident_f16 = resolve_precision(device) == Precision::F16 && cfg.supports_f16_resident();
     let (bufs, dtypes, ranks, dims) = load_weights(model_dir, cfg, resident_f16)?;
+    let ffi = runtime_ffi_dimensions(cfg, bufs.len())?;
     let ptrs: Vec<*const c_void> = bufs
         .iter()
         .map(|b| b.as_u8_ptr() as *const c_void)
@@ -784,6 +1418,7 @@ fn create_ctx(
     let c_pre = path_cstring(&bundle.prefill_vmfb)?;
     let c_pre_embeddings = path_cstring(&bundle.prefill_embeddings_vmfb)?;
     let c_dec = path_cstring(&bundle.decode_vmfb)?;
+    let c_diagnostics = prefill_diagnostics_vmfb.map(path_cstring).transpose()?;
     // Safety: pointers are valid for the duration of the call; the shim copies
     // the weight data into device buffers before returning.
     let ctx = unsafe {
@@ -792,14 +1427,20 @@ fn create_ctx(
             c_pre.as_ptr(),
             c_pre_embeddings.as_ptr(),
             c_dec.as_ptr(),
+            c_diagnostics
+                .as_ref()
+                .map_or(std::ptr::null(), |path| path.as_ptr()),
             bundle.compatibility_fingerprint,
-            bufs.len() as c_int,
+            ffi.n_weights,
             ptrs.as_ptr(),
             dtypes.as_ptr(),
             ranks.as_ptr(),
             dims.as_ptr(),
-            cfg.context_capacity as c_int,
-            cfg.hidden as c_int,
+            ffi.context_capacity,
+            ffi.hidden,
+            i32::from(cfg.dense_ple_shape().is_some()),
+            ffi.dense_ple_layers,
+            ffi.dense_ple_hidden,
         )
     };
     // Weights are resident on the device now; free the host copy.
@@ -820,6 +1461,7 @@ pub struct IreeLlama {
     ctx: *mut XlaCtx,
     context_capacity: usize,
     hidden_size: usize,
+    dense_ple_shape: Option<[usize; 3]>,
 }
 
 impl IreeLlama {
@@ -827,13 +1469,15 @@ impl IreeLlama {
     /// (`"local-task"` for CPU). Compiles the bundled graphs, uploads the
     /// weights resident, and readies the prefill / decode calls.
     pub fn load(model_dir: &Path, device: &str, context_capacity: usize) -> Result<Self, String> {
-        let cfg = Config::from_json(model_dir)?.with_context_capacity(context_capacity)?;
+        let cfg = RuntimeConfig::from_json(model_dir, context_capacity)?;
+        runtime_ffi_dimensions(&cfg, cfg.weight_specs().len())?;
         let bundle = compile_vmfbs(device, &cfg)?;
         let ctx = create_ctx(model_dir, &cfg, device, &bundle)?;
         Ok(Self {
             ctx,
-            context_capacity: cfg.context_capacity,
-            hidden_size: cfg.hidden,
+            context_capacity: cfg.context_capacity(),
+            hidden_size: cfg.hidden(),
+            dense_ple_shape: cfg.dense_ple_shape(),
         })
     }
 
@@ -868,6 +1512,11 @@ impl IreeLlama {
     /// Validate an owned embeddings payload, seed the resident KV through the
     /// dedicated embeddings module, and return the first sampled token.
     pub fn prefill_prepared_first(&mut self, prepared: &PreparedPrefill) -> Result<i32, String> {
+        if self.dense_ple_shape.is_some() {
+            return Err(
+                "Gemma3n requires the distinct embeddings-plus-dense-PLE prefill entry".to_string(),
+            );
+        }
         let prepared =
             PreparedIreePrefill::prepare(prepared, self.hidden_size, self.context_capacity)
                 .map_err(|error| error.to_string())?;
@@ -893,6 +1542,53 @@ impl IreeLlama {
         Ok(out)
     }
 
+    /// Seed Gemma3n KV from post-scale merged embeddings plus a canonical dense
+    /// projected PLE tensor.
+    pub fn prefill_gemma3n_prepared_first(
+        &mut self,
+        request: &Gemma3nPreparedPrefill,
+    ) -> Result<i32, String> {
+        let expected = self.dense_ple_shape.ok_or_else(|| {
+            "dense Gemma3n PLE prefill was requested from a non-Gemma3n bundle".to_string()
+        })?;
+        let prepared = PreparedIreePrefill::prepare(
+            request.prepared(),
+            self.hidden_size,
+            self.context_capacity,
+        )
+        .map_err(|error| error.to_string())?;
+        if request.dense_ple().shape() != expected {
+            return Err(format!(
+                "Gemma3n dense PLE shape {:?} does not match runtime bundle {expected:?}",
+                request.dense_ple().shape()
+            ));
+        }
+        let (embeddings, positions, attention_bias) = prepared_descriptors(&prepared)?;
+        let dense_ple = dense_ple_descriptor(request.dense_ple())?;
+        let real_len = i32::try_from(prepared.effective_len)
+            .map_err(|_| "prepared effective length does not fit i32".to_string())?;
+        let mut out = 0i32;
+        // Safety: all typed descriptors reference validated owned vectors that
+        // outlive the call; the C shim repeats exact dtype/rank/shape/byte checks.
+        let rc = unsafe {
+            xla_llama_prefill_embeddings_ple(
+                self.ctx,
+                &embeddings,
+                &dense_ple,
+                &positions,
+                &attention_bias,
+                real_len,
+                &mut out,
+            )
+        };
+        if rc != 0 {
+            return Err(format!(
+                "xla_llama_prefill_embeddings_ple failed (status {rc})"
+            ));
+        }
+        Ok(out)
+    }
+
     /// Pad `prompt` into the configured static bucket, run the prefill, and return its
     /// first token. Accepts an empty prompt (the seed-then-decode loop prefills a
     /// zero-length prefix when the prompt is a single token).
@@ -906,16 +1602,18 @@ impl IreeLlama {
         }
         let mut tokens = vec![0i32; self.context_capacity];
         tokens[..prompt.len()].copy_from_slice(prompt);
-        let positions: Vec<c_int> = (0..self.context_capacity as c_int).collect();
+        let capacity = checked_ffi_int(self.context_capacity, "context_capacity")?;
+        let real_len = checked_ffi_int(prompt.len(), "prompt length")?;
+        let positions: Vec<c_int> = (0..capacity).collect();
         let mut out = 0i32;
         // Safety: buffers outlive the call; the shim stores the returned KV.
         let rc = unsafe {
             xla_llama_prefill(
                 self.ctx,
                 tokens.as_ptr(),
-                self.context_capacity as c_int,
+                capacity,
                 positions.as_ptr(),
-                prompt.len() as c_int,
+                real_len,
                 &mut out,
             )
         };
@@ -972,6 +1670,9 @@ pub struct IreeRaggedLlama {
     vocab: usize,
     context_capacity: usize,
     hidden_size: usize,
+    dense_ple_shape: Option<[usize; 3]>,
+    #[cfg(feature = "diagnostics")]
+    diagnostic_layout: Option<Gemma3nDiagnosticLayout>,
 }
 
 impl IreeRaggedLlama {
@@ -986,7 +1687,41 @@ impl IreeRaggedLlama {
         b_max: usize,
         context_capacity: usize,
     ) -> Result<Self, String> {
-        let cfg = Config::from_json(model_dir)?.with_context_capacity(context_capacity)?;
+        Self::load_inner(model_dir, device, b_max, context_capacity, false, false)
+    }
+
+    #[cfg(feature = "diagnostics")]
+    pub fn load_with_diagnostics(
+        model_dir: &Path,
+        device: &str,
+        b_max: usize,
+        context_capacity: usize,
+    ) -> Result<Self, String> {
+        Self::load_inner(model_dir, device, b_max, context_capacity, true, false)
+    }
+
+    #[cfg(feature = "diagnostics")]
+    pub fn load_with_all_layer_diagnostics(
+        model_dir: &Path,
+        device: &str,
+        b_max: usize,
+        context_capacity: usize,
+    ) -> Result<Self, String> {
+        Self::load_inner(model_dir, device, b_max, context_capacity, false, true)
+    }
+
+    fn load_inner(
+        model_dir: &Path,
+        device: &str,
+        b_max: usize,
+        context_capacity: usize,
+        diagnostics: bool,
+        all_layer_diagnostics: bool,
+    ) -> Result<Self, String> {
+        debug_assert!(!(diagnostics && all_layer_diagnostics));
+        let cfg = RuntimeConfig::from_json(model_dir, context_capacity)?;
+        runtime_ffi_dimensions(&cfg, cfg.weight_specs().len())?;
+        checked_ffi_int(b_max, "b_max")?;
         if !RAGGED_B_VALUES.contains(&b_max) {
             return Err(format!(
                 "the OpenXLA serve worker selects B_max from {RAGGED_B_VALUES:?}; \
@@ -995,14 +1730,30 @@ impl IreeRaggedLlama {
         }
         // Emit the logits prefill + the ragged decode graph for this model + b_max
         // at the device-resolved precision (f16 on GPU by default, f32 on CPU).
-        let precision = resolve_precision_checked(device)?;
-        check_packed_supported(device, quant_in_graph() && cfg.supports_packed_quant())?;
-        let prefill_mlir = emit_prefill_with(&cfg, false, precision);
-        let prefill_embeddings_mlir = emit_prefill_embeddings_with(&cfg, false, precision);
-        let decode_mlir = emit_decode_ragged_with(&cfg, b_max, false, precision);
+        let precision = effective_precision(device, &cfg)?;
+        let native_qmv = match &cfg {
+            RuntimeConfig::Dense(_) => false,
+            RuntimeConfig::Gemma3n(config) => gemma3n_native_qmv(device, config)?,
+        };
+        let (prefill_mlir, prefill_embeddings_mlir, decode_mlir) = match &cfg {
+            RuntimeConfig::Dense(config) => {
+                check_packed_supported(device, quant_in_graph() && config.supports_packed_quant())?;
+                (
+                    emit_prefill_with(config, false, precision),
+                    emit_prefill_embeddings_with(config, false, precision),
+                    emit_decode_ragged_with(config, b_max, false, precision),
+                )
+            }
+            RuntimeConfig::Gemma3n(config) => (
+                emit_gemma3n_prefill_with_qmv(config, false, precision, native_qmv),
+                emit_gemma3n_prefill_embeddings_ple_with_qmv(config, false, precision, native_qmv),
+                emit_gemma3n_decode_ragged_with_qmv(config, b_max, false, precision, native_qmv),
+            ),
+        };
         let bundle = compile_bundle(
             device,
             &cfg,
+            native_qmv,
             &prefill_mlir,
             "prefill_logits",
             &prefill_embeddings_mlir,
@@ -1010,9 +1761,28 @@ impl IreeRaggedLlama {
             &decode_mlir,
             &format!("decode_ragged_logits_b{b_max}"),
         )?;
+        #[cfg(feature = "diagnostics")]
+        let (diagnostic_vmfb, diagnostic_layout) = if diagnostics || all_layer_diagnostics {
+            let (vmfb, layout) = compile_gemma3n_diagnostics(device, &cfg, all_layer_diagnostics)?;
+            (Some(vmfb), Some(layout))
+        } else {
+            (None, None)
+        };
+        #[cfg(not(feature = "diagnostics"))]
+        debug_assert!(!diagnostics && !all_layer_diagnostics);
+        #[cfg(feature = "diagnostics")]
+        let ctx = create_ctx_with_diagnostics(
+            model_dir,
+            &cfg,
+            device,
+            &bundle,
+            diagnostic_vmfb.as_deref(),
+        )?;
+        #[cfg(not(feature = "diagnostics"))]
         let ctx = create_ctx(model_dir, &cfg, device, &bundle)?;
         // Safety: ctx is a fresh valid context from create_ctx; free it on error.
-        let rc = unsafe { xla_llama_ragged_reset(ctx, b_max as c_int) };
+        let b_max_ffi = checked_ffi_int(b_max, "b_max")?;
+        let rc = unsafe { xla_llama_ragged_reset(ctx, b_max_ffi) };
         if rc != 0 {
             unsafe { xla_llama_free(ctx) };
             return Err(format!("xla_llama_ragged_reset failed (status {rc})"));
@@ -1020,9 +1790,12 @@ impl IreeRaggedLlama {
         Ok(Self {
             ctx,
             b_max,
-            vocab: cfg.vocab,
-            context_capacity: cfg.context_capacity,
-            hidden_size: cfg.hidden,
+            vocab: cfg.vocab(),
+            context_capacity: cfg.context_capacity(),
+            hidden_size: cfg.hidden(),
+            dense_ple_shape: cfg.dense_ple_shape(),
+            #[cfg(feature = "diagnostics")]
+            diagnostic_layout,
         })
     }
 
@@ -1051,6 +1824,73 @@ impl IreeRaggedLlama {
         self.hidden_size
     }
 
+    pub fn validate_gemma3n_dense_ple(&self, dense_ple: &Gemma3nDensePle) -> Result<(), String> {
+        let expected = self.dense_ple_shape.ok_or_else(|| {
+            "dense Gemma3n PLE was submitted to a non-Gemma3n runtime bundle".to_string()
+        })?;
+        if dense_ple.shape() != expected {
+            return Err(format!(
+                "Gemma3n dense PLE shape {:?} does not match runtime bundle {expected:?}",
+                dense_ple.shape()
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "diagnostics")]
+    pub fn diagnostic_layout(&self) -> Result<&Gemma3nDiagnosticLayout, String> {
+        self.diagnostic_layout
+            .as_ref()
+            .ok_or_else(|| "this runtime bundle has no diagnostic module".to_string())
+    }
+
+    #[cfg(feature = "diagnostics")]
+    pub fn prefill_diagnostics_slot(
+        &mut self,
+        slot: usize,
+        prompt: &[i32],
+    ) -> Result<Vec<f32>, String> {
+        validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
+        if prompt.is_empty() || prompt.len() > self.context_capacity {
+            return Err(format!(
+                "diagnostic prompt length {} is outside 1..={}",
+                prompt.len(),
+                self.context_capacity
+            ));
+        }
+        let layout = self.diagnostic_layout()?.clone();
+        layout.validate()?;
+        let mut tokens = vec![0i32; self.context_capacity];
+        tokens[..prompt.len()].copy_from_slice(prompt);
+        let slot = checked_ffi_int(slot, "slot")?;
+        let capacity = checked_ffi_int(self.context_capacity, "context_capacity")?;
+        let real_len = checked_ffi_int(prompt.len(), "prompt length")?;
+        let positions: Vec<c_int> = (0..capacity).collect();
+        let diagnostic_len = c_int::try_from(layout.total_len)
+            .map_err(|_| "diagnostic output length does not fit c_int".to_string())?;
+        let mut output = vec![0.0f32; layout.total_len];
+        // Safety: every input/output slice has the statically validated length;
+        // the C shim validates the optional module and exact output element count.
+        let rc = unsafe {
+            xla_llama_prefill_diagnostics_slot(
+                self.ctx,
+                slot,
+                tokens.as_ptr(),
+                capacity,
+                positions.as_ptr(),
+                real_len,
+                diagnostic_len,
+                output.as_mut_ptr(),
+            )
+        };
+        if rc != 0 {
+            return Err(format!(
+                "xla_llama_prefill_diagnostics_slot failed (status {rc})"
+            ));
+        }
+        Ok(output)
+    }
+
     /// Seed slot `slot` with `prompt` (up to the configured capacity) and return its
     /// first-token `[vocab]` LOGITS (#449 M3 Stage 2d). The prompt's KV is written
     /// device-side into the slot's region of the rank-5 cache; the other slots are
@@ -1070,19 +1910,23 @@ impl IreeRaggedLlama {
         }
         let mut tokens = vec![0i32; self.context_capacity];
         tokens[..prompt.len()].copy_from_slice(prompt);
-        let positions: Vec<c_int> = (0..self.context_capacity as c_int).collect();
+        let slot = checked_ffi_int(slot, "slot")?;
+        let capacity = checked_ffi_int(self.context_capacity, "context_capacity")?;
+        let real_len = checked_ffi_int(prompt.len(), "prompt length")?;
+        let vocab = checked_ffi_int(self.vocab, "vocab_size")?;
+        let positions: Vec<c_int> = (0..capacity).collect();
         let mut logits = vec![0f32; self.vocab];
         // Safety: input buffers outlive the call; `logits` has self.vocab elements,
         // which the shim fills; the shim also writes the slot's KV device-side.
         let rc = unsafe {
             xla_llama_prefill_slot_logits(
                 self.ctx,
-                slot as c_int,
+                slot,
                 tokens.as_ptr(),
-                self.context_capacity as c_int,
+                capacity,
                 positions.as_ptr(),
-                prompt.len() as c_int,
-                self.vocab as c_int,
+                real_len,
+                vocab,
                 logits.as_mut_ptr(),
             )
         };
@@ -1102,6 +1946,11 @@ impl IreeRaggedLlama {
         slot: usize,
         prepared: &PreparedIreePrefill,
     ) -> Result<Vec<f32>, String> {
+        if self.dense_ple_shape.is_some() {
+            return Err(
+                "Gemma3n requires the distinct embeddings-plus-dense-PLE prefill entry".to_string(),
+            );
+        }
         validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
         if prepared.hidden_size != self.hidden_size
             || prepared.context_capacity != self.context_capacity
@@ -1115,24 +1964,77 @@ impl IreeRaggedLlama {
         let (embeddings, positions, attention_bias) = prepared_descriptors(prepared)?;
         let real_len = i32::try_from(prepared.effective_len)
             .map_err(|_| "prepared effective length does not fit i32".to_string())?;
+        let slot = checked_ffi_int(slot, "slot")?;
+        let vocab = checked_ffi_int(self.vocab, "vocab_size")?;
         let mut logits = vec![0.0; self.vocab];
         // Safety: descriptors and output buffers outlive the call and carry
         // exact lengths; the shim validates slot/vocab and every descriptor.
         let rc = unsafe {
             xla_llama_prefill_embeddings_slot_logits(
                 self.ctx,
-                slot as c_int,
+                slot,
                 &embeddings,
                 &positions,
                 &attention_bias,
                 real_len,
-                self.vocab as c_int,
+                vocab,
                 logits.as_mut_ptr(),
             )
         };
         if rc != 0 {
             return Err(format!(
                 "xla_llama_prefill_embeddings_slot_logits failed (status {rc})"
+            ));
+        }
+        Ok(logits)
+    }
+
+    /// Seed one Gemma3n batch slot from owned prepared embeddings and dense PLE.
+    pub fn prefill_gemma3n_prepared_slot_logits(
+        &mut self,
+        slot: usize,
+        prepared: &PreparedIreePrefill,
+        dense_ple: &Gemma3nDensePle,
+    ) -> Result<Vec<f32>, String> {
+        validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
+        let expected = self.dense_ple_shape.ok_or_else(|| {
+            "dense Gemma3n PLE prefill was requested from a non-Gemma3n bundle".to_string()
+        })?;
+        if dense_ple.shape() != expected
+            || prepared.hidden_size != self.hidden_size
+            || prepared.context_capacity != self.context_capacity
+            || prepared.effective_len == 0
+            || prepared.effective_len > self.context_capacity
+        {
+            return Err(
+                "Gemma3n prepared payload is incompatible with this runtime bundle".to_string(),
+            );
+        }
+        let (embeddings, positions, attention_bias) = prepared_descriptors(prepared)?;
+        let dense_ple = dense_ple_descriptor(dense_ple)?;
+        let real_len = i32::try_from(prepared.effective_len)
+            .map_err(|_| "prepared effective length does not fit i32".to_string())?;
+        let slot = checked_ffi_int(slot, "slot")?;
+        let vocab = checked_ffi_int(self.vocab, "vocab_size")?;
+        let mut logits = vec![0.0; self.vocab];
+        // Safety: the typed descriptors and output remain live for the call; the
+        // shim validates the Gemma3n-specific descriptor before device upload.
+        let rc = unsafe {
+            xla_llama_prefill_embeddings_ple_slot_logits(
+                self.ctx,
+                slot,
+                &embeddings,
+                &dense_ple,
+                &positions,
+                &attention_bias,
+                real_len,
+                vocab,
+                logits.as_mut_ptr(),
+            )
+        };
+        if rc != 0 {
+            return Err(format!(
+                "xla_llama_prefill_embeddings_ple_slot_logits failed (status {rc})"
             ));
         }
         Ok(logits)
@@ -1166,16 +2068,18 @@ impl IreeRaggedLlama {
             }
         }
         let mut logits = vec![0f32; self.b_max * self.vocab];
+        let b_max = checked_ffi_int(self.b_max, "b_max")?;
+        let vocab = checked_ffi_int(self.vocab, "vocab_size")?;
         // Safety: the three input slices are length b_max == bsz; `logits` has
         // b_max*self.vocab elements, which the shim fills; it threads its rank-5 KV.
         let rc = unsafe {
             xla_llama_decode_ragged_logits(
                 self.ctx,
-                self.b_max as c_int,
+                b_max,
                 tokens.as_ptr(),
                 pos.as_ptr(),
                 cache_len.as_ptr(),
-                self.vocab as c_int,
+                vocab,
                 logits.as_mut_ptr(),
             )
         };

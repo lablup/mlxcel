@@ -100,6 +100,12 @@ typedef struct xla_ctx {
   int32_t n_weights;
   int32_t context_capacity;
   int32_t hidden_size;
+  // 0 = ordinary `prefill_embeddings.main`, 1 = Gemma3n's distinct
+  // `prefill_embeddings_ple.main` with a rank-3 dense PLE argument.
+  int32_t prefill_embeddings_kind;
+  int32_t dense_ple_layers;
+  int32_t dense_ple_hidden;
+  int32_t has_prefill_diagnostics;
   iree_hal_buffer_view_t** weights;  // resident weights, uploaded once
   iree_hal_buffer_view_t* kcache;    // threaded KV (set by prefill, advanced by decode)
   iree_hal_buffer_view_t* vcache;
@@ -298,20 +304,36 @@ static int xla_validate_kv_pair(xla_ctx* c, iree_hal_buffer_view_t* kc,
 static iree_status_t xla_llama_create_impl(
     xla_ctx* c, const char* device_uri, const char* prefill_vmfb,
     const char* prefill_embeddings_vmfb, const char* decode_vmfb,
+    const char* prefill_diagnostics_vmfb,
     uint64_t compatibility_fingerprint, int32_t n_weights,
     const void* const* weight_data,
     const int32_t* weight_dtypes, const int32_t* weight_ranks,
     const int64_t* weight_dims, int32_t context_capacity,
-    int32_t hidden_size) {
+    int32_t hidden_size, int32_t prefill_embeddings_kind,
+    int32_t dense_ple_layers, int32_t dense_ple_hidden) {
   if (context_capacity <= 0 || hidden_size <= 0 ||
       compatibility_fingerprint == 0) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "bundle fingerprint, context_capacity, and hidden_size must be positive");
   }
+  if ((prefill_embeddings_kind != 0 && prefill_embeddings_kind != 1) ||
+      (prefill_embeddings_kind == 0 &&
+       (dense_ple_layers != 0 || dense_ple_hidden != 0)) ||
+      (prefill_embeddings_kind == 1 &&
+       (dense_ple_layers <= 0 || dense_ple_hidden <= 0))) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "invalid embeddings entry kind or dense PLE dimensions");
+  }
   c->n_weights = n_weights;
   c->context_capacity = context_capacity;
   c->hidden_size = hidden_size;
   c->compatibility_fingerprint = compatibility_fingerprint;
+  c->prefill_embeddings_kind = prefill_embeddings_kind;
+  c->dense_ple_layers = dense_ple_layers;
+  c->dense_ple_hidden = dense_ple_hidden;
+  c->has_prefill_diagnostics =
+      prefill_diagnostics_vmfb && prefill_diagnostics_vmfb[0] != '\0';
 
   iree_runtime_instance_options_t inst_opts;
   iree_runtime_instance_options_initialize(&inst_opts);
@@ -341,13 +363,26 @@ static iree_status_t xla_llama_create_impl(
       c->session, prefill_embeddings_vmfb));
   IREE_RETURN_IF_ERROR(iree_runtime_session_append_bytecode_module_from_file(
       c->session, decode_vmfb));
+  if (c->has_prefill_diagnostics) {
+    IREE_RETURN_IF_ERROR(iree_runtime_session_append_bytecode_module_from_file(
+        c->session, prefill_diagnostics_vmfb));
+  }
 
-  const char* required_entries[] = {"prefill.main", "prefill_embeddings.main",
+  const char* embeddings_entry = prefill_embeddings_kind == 1
+                                      ? "prefill_embeddings_ple.main"
+                                      : "prefill_embeddings.main";
+  const char* required_entries[] = {"prefill.main", embeddings_entry,
                                     "decode_step.main"};
   for (size_t i = 0; i < 3; ++i) {
     iree_runtime_call_t probe;
     IREE_RETURN_IF_ERROR(iree_runtime_call_initialize_by_name(
         c->session, iree_make_cstring_view(required_entries[i]), &probe));
+    iree_runtime_call_deinitialize(&probe);
+  }
+  if (c->has_prefill_diagnostics) {
+    iree_runtime_call_t probe;
+    IREE_RETURN_IF_ERROR(iree_runtime_call_initialize_by_name(
+        c->session, iree_make_cstring_view("prefill_diagnostics.main"), &probe));
     iree_runtime_call_deinitialize(&probe);
   }
 
@@ -404,21 +439,28 @@ static iree_status_t xla_llama_create_impl(
 xla_ctx* xla_llama_create(const char* device_uri, const char* prefill_vmfb,
                           const char* prefill_embeddings_vmfb,
                           const char* decode_vmfb,
+                          const char* prefill_diagnostics_vmfb,
                           uint64_t compatibility_fingerprint,
                           int32_t n_weights,
                           const void* const* weight_data,
                           const int32_t* weight_dtypes,
                           const int32_t* weight_ranks,
                           const int64_t* weight_dims,
-                          int32_t context_capacity, int32_t hidden_size) {
+                          int32_t context_capacity, int32_t hidden_size,
+                          int32_t prefill_embeddings_kind,
+                          int32_t dense_ple_layers,
+                          int32_t dense_ple_hidden) {
   xla_ctx* c = (xla_ctx*)calloc(1, sizeof(xla_ctx));
   if (!c) return NULL;
   iree_status_t s =
       xla_llama_create_impl(c, device_uri, prefill_vmfb,
                             prefill_embeddings_vmfb, decode_vmfb,
+                            prefill_diagnostics_vmfb,
                             compatibility_fingerprint, n_weights, weight_data,
                             weight_dtypes, weight_ranks, weight_dims,
-                            context_capacity, hidden_size);
+                            context_capacity, hidden_size,
+                            prefill_embeddings_kind, dense_ple_layers,
+                            dense_ple_hidden);
   if (!iree_status_is_ok(s)) {
     char buf[512];
     iree_host_size_t got = 0;
@@ -772,8 +814,92 @@ int xla_llama_prefill_slot_logits(xla_ctx* c, int32_t slot, const int32_t* token
   return copy_rc;
 }
 
+// Test-only Gemma3n intermediate-oracle entry. The optional diagnostic module
+// is never loaded by normal bundles. Its first output is one statically laid
+// out f32 vector; K/V are handled exactly like ordinary slot prefill so the
+// same loaded context can continue through decode and greedy validation.
+int xla_llama_prefill_diagnostics_slot(
+    xla_ctx* c, int32_t slot, const int32_t* tokens, int32_t lp,
+    const int32_t* positions, int32_t real_len, int32_t diagnostic_len,
+    float* out_diagnostics) {
+  if (!c || !c->has_prefill_diagnostics || slot < 0 || slot >= c->rg_bsz ||
+      lp != c->context_capacity || real_len <= 0 || real_len > lp ||
+      diagnostic_len <= 0 || !out_diagnostics) {
+    fprintf(stderr,
+            "xla_llama_prefill_diagnostics_slot: invalid diagnostic bundle/input contract\n");
+    return 1;
+  }
+  int rc = 0;
+  bool call_initialized = false;
+  iree_runtime_call_t call;
+  iree_hal_buffer_view_t* tok_bv = NULL;
+  iree_hal_buffer_view_t* pos_bv = NULL;
+  iree_hal_buffer_view_t* len_bv = NULL;
+  iree_hal_buffer_view_t* output = NULL;
+  iree_hal_buffer_view_t* kc = NULL;
+  iree_hal_buffer_view_t* vc = NULL;
+  XLA_CHECK_GOTO(iree_runtime_call_initialize_by_name(
+                     c->session,
+                     iree_make_cstring_view("prefill_diagnostics.main"), &call),
+                 cleanup, rc);
+  call_initialized = true;
+  for (int32_t i = 0; i < c->n_weights; ++i) {
+    XLA_CHECK_GOTO(
+        iree_runtime_call_inputs_push_back_buffer_view(&call, c->weights[i]),
+        cleanup, rc);
+  }
+  iree_hal_dim_t seq_shape[1] = {(iree_hal_dim_t)lp};
+  iree_host_size_t seq_bytes = (iree_host_size_t)lp * sizeof(int32_t);
+  XLA_CHECK_GOTO(xla_alloc_bv(c, 1, seq_shape, IREE_HAL_ELEMENT_TYPE_INT_32,
+                             tokens, seq_bytes, &tok_bv),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(xla_alloc_bv(c, 1, seq_shape, IREE_HAL_ELEMENT_TYPE_INT_32,
+                             positions, seq_bytes, &pos_bv),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32,
+                             &real_len, sizeof(int32_t), &len_bv),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(
+      iree_runtime_call_inputs_push_back_buffer_view(&call, tok_bv), cleanup,
+      rc);
+  XLA_CHECK_GOTO(
+      iree_runtime_call_inputs_push_back_buffer_view(&call, pos_bv), cleanup,
+      rc);
+  XLA_CHECK_GOTO(
+      iree_runtime_call_inputs_push_back_buffer_view(&call, len_bv), cleanup,
+      rc);
+  XLA_CHECK_GOTO(iree_runtime_call_invoke(&call, 0), cleanup, rc);
+  XLA_CHECK_GOTO(
+      iree_runtime_call_outputs_pop_front_buffer_view(&call, &output), cleanup,
+      rc);
+  XLA_CHECK_GOTO(iree_runtime_call_outputs_pop_front_buffer_view(&call, &kc),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(iree_runtime_call_outputs_pop_front_buffer_view(&call, &vc),
+                 cleanup, rc);
+  if (xla_validate_kv_pair(c, kc, vc, 4, 1) != 0) {
+    rc = 1;
+    goto cleanup;
+  }
+  XLA_CHECK_GOTO(
+      xla_read_logits(c, output, out_diagnostics,
+                      (iree_host_size_t)diagnostic_len),
+      cleanup, rc);
+  rc = xla_store_prefill_kv_slot(c, slot, kc, vc);
+
+cleanup:
+  if (output) iree_hal_buffer_view_release(output);
+  if (kc) iree_hal_buffer_view_release(kc);
+  if (vc) iree_hal_buffer_view_release(vc);
+  if (tok_bv) iree_hal_buffer_view_release(tok_bv);
+  if (pos_bv) iree_hal_buffer_view_release(pos_bv);
+  if (len_bv) iree_hal_buffer_view_release(len_bv);
+  if (call_initialized) iree_runtime_call_deinitialize(&call);
+  return rc;
+}
+
 static int xla_llama_prefill_embeddings_impl(
     xla_ctx* c, int32_t slot, const xla_tensor_desc* embeddings,
+    const xla_tensor_desc* dense_ple,
     const xla_tensor_desc* positions, const xla_tensor_desc* attention_bias,
     int32_t real_len, int32_t vocab, int32_t* out_token, float* out_logits) {
   if (!c || real_len <= 0 || real_len > c->context_capacity) {
@@ -785,12 +911,22 @@ static int xla_llama_prefill_embeddings_impl(
   int64_t embeddings_dims[2] = {c->context_capacity, c->hidden_size};
   int64_t positions_dims[1] = {c->context_capacity};
   int64_t bias_dims[2] = {c->context_capacity, c->context_capacity};
+  int64_t dense_ple_dims[3] = {
+      c->context_capacity, c->dense_ple_layers, c->dense_ple_hidden};
   if (xla_validate_tensor_desc("embeddings", embeddings, 0, 2,
                                embeddings_dims) != 0 ||
       xla_validate_tensor_desc("positions", positions, 1, 1,
                                positions_dims) != 0 ||
       xla_validate_tensor_desc("attention_bias", attention_bias, 0, 2,
                                bias_dims) != 0) {
+    return 1;
+  }
+  if ((c->prefill_embeddings_kind == 0 && dense_ple != NULL) ||
+      (c->prefill_embeddings_kind == 1 &&
+       xla_validate_tensor_desc("dense_ple", dense_ple, 0, 3,
+                                dense_ple_dims) != 0)) {
+    fprintf(stderr,
+            "xla_llama_prefill_embeddings: dense PLE does not match bundle kind\n");
     return 1;
   }
   bool batched = slot >= 0;
@@ -805,6 +941,7 @@ static int xla_llama_prefill_embeddings_impl(
   bool call_initialized = false;
   iree_runtime_call_t call;
   iree_hal_buffer_view_t* embeddings_bv = NULL;
+  iree_hal_buffer_view_t* dense_ple_bv = NULL;
   iree_hal_buffer_view_t* positions_bv = NULL;
   iree_hal_buffer_view_t* len_bv = NULL;
   iree_hal_buffer_view_t* bias_bv = NULL;
@@ -814,7 +951,11 @@ static int xla_llama_prefill_embeddings_impl(
 
   XLA_CHECK_GOTO(iree_runtime_call_initialize_by_name(
                      c->session,
-                     iree_make_cstring_view("prefill_embeddings.main"), &call),
+                     iree_make_cstring_view(
+                         c->prefill_embeddings_kind == 1
+                             ? "prefill_embeddings_ple.main"
+                             : "prefill_embeddings.main"),
+                     &call),
                  cleanup, rc);
   call_initialized = true;
   for (int32_t i = 0; i < c->n_weights; ++i) {
@@ -823,6 +964,9 @@ static int xla_llama_prefill_embeddings_impl(
         cleanup, rc);
   }
   XLA_CHECK_GOTO(xla_alloc_desc_bv(c, embeddings, &embeddings_bv), cleanup, rc);
+  if (dense_ple) {
+    XLA_CHECK_GOTO(xla_alloc_desc_bv(c, dense_ple, &dense_ple_bv), cleanup, rc);
+  }
   XLA_CHECK_GOTO(xla_alloc_desc_bv(c, positions, &positions_bv), cleanup, rc);
   XLA_CHECK_GOTO(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32,
                              &real_len, sizeof(int32_t), &len_bv),
@@ -831,6 +975,11 @@ static int xla_llama_prefill_embeddings_impl(
   XLA_CHECK_GOTO(
       iree_runtime_call_inputs_push_back_buffer_view(&call, embeddings_bv),
       cleanup, rc);
+  if (dense_ple_bv) {
+    XLA_CHECK_GOTO(
+        iree_runtime_call_inputs_push_back_buffer_view(&call, dense_ple_bv),
+        cleanup, rc);
+  }
   XLA_CHECK_GOTO(
       iree_runtime_call_inputs_push_back_buffer_view(&call, positions_bv),
       cleanup, rc);
@@ -873,6 +1022,7 @@ cleanup:
   if (kc) iree_hal_buffer_view_release(kc);
   if (vc) iree_hal_buffer_view_release(vc);
   if (embeddings_bv) iree_hal_buffer_view_release(embeddings_bv);
+  if (dense_ple_bv) iree_hal_buffer_view_release(dense_ple_bv);
   if (positions_bv) iree_hal_buffer_view_release(positions_bv);
   if (len_bv) iree_hal_buffer_view_release(len_bv);
   if (bias_bv) iree_hal_buffer_view_release(bias_bv);
@@ -885,7 +1035,7 @@ int xla_llama_prefill_embeddings(
     const xla_tensor_desc* positions, const xla_tensor_desc* attention_bias,
     int32_t real_len, int32_t* out_token) {
   return xla_llama_prefill_embeddings_impl(
-      c, -1, embeddings, positions, attention_bias, real_len, 0, out_token,
+      c, -1, embeddings, NULL, positions, attention_bias, real_len, 0, out_token,
       NULL);
 }
 
@@ -894,8 +1044,28 @@ int xla_llama_prefill_embeddings_slot_logits(
     const xla_tensor_desc* positions, const xla_tensor_desc* attention_bias,
     int32_t real_len, int32_t vocab, float* out_logits) {
   return xla_llama_prefill_embeddings_impl(
-      c, slot, embeddings, positions, attention_bias, real_len, vocab, NULL,
+      c, slot, embeddings, NULL, positions, attention_bias, real_len, vocab, NULL,
       out_logits);
+}
+
+int xla_llama_prefill_embeddings_ple(
+    xla_ctx* c, const xla_tensor_desc* embeddings,
+    const xla_tensor_desc* dense_ple, const xla_tensor_desc* positions,
+    const xla_tensor_desc* attention_bias, int32_t real_len,
+    int32_t* out_token) {
+  return xla_llama_prefill_embeddings_impl(
+      c, -1, embeddings, dense_ple, positions, attention_bias, real_len, 0,
+      out_token, NULL);
+}
+
+int xla_llama_prefill_embeddings_ple_slot_logits(
+    xla_ctx* c, int32_t slot, const xla_tensor_desc* embeddings,
+    const xla_tensor_desc* dense_ple, const xla_tensor_desc* positions,
+    const xla_tensor_desc* attention_bias, int32_t real_len, int32_t vocab,
+    float* out_logits) {
+  return xla_llama_prefill_embeddings_impl(
+      c, slot, embeddings, dense_ple, positions, attention_bias, real_len,
+      vocab, NULL, out_logits);
 }
 
 // Ragged decode_step: token[B], pos[B], cache_len[B] (per row), rank-5 KV ->

@@ -71,6 +71,11 @@ xla-backend = ["dep:mlxcel-xla"]
 # StableHLO prefill / decode_step graphs. Needs IREE_DIST at build time (the
 # extracted iree dist), so it is a local / opt-in build, not a CI default.
 xla-iree = ["xla-backend", "mlxcel-xla/iree"]
+# Explicit test-only forwarding for Gemma3n intermediate oracle validation.
+# Its pinned reference is the production CUDA runtime, so enabling diagnostics
+# also enables the root MLX CUDA backend. This is not part of `xla-iree`; normal
+# production bundles remain unchanged.
+xla-diagnostics = ["cuda", "xla-iree", "mlxcel-xla/diagnostics"]
 # Axis A "weight-load surgery" framework.
 #
 # On by default so production `mlxcel` and `mlxcel-server` binaries expose

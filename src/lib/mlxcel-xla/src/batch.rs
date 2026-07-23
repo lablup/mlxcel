@@ -40,10 +40,17 @@ use std::fmt;
 
 #[cfg(feature = "iree")]
 use mlxcel_core::session::PreparedPrefill;
+#[cfg(feature = "diagnostics")]
+use mlxcel_core::session::{
+    OwnedTensor, PreparedAttentionBias, PreparedPositions, PreparedTensorDType,
+};
 
 #[cfg(feature = "iree")]
 use std::path::Path;
 
+use crate::Gemma3nDensePle;
+#[cfg(feature = "iree")]
+use crate::Gemma3nPreparedPrefill;
 #[cfg(feature = "iree")]
 use crate::iree::{IreeLlama, IreeRaggedLlama};
 use crate::prepared::{PreparedInputError, PreparedIreePrefill};
@@ -59,6 +66,7 @@ pub enum XlaAdmissionError {
     ZeroMaxNewTokens,
     ContextCapacity(ContextCapacityError),
     Prepared(PreparedInputError),
+    Gemma3nPrepared(String),
 }
 
 impl fmt::Display for XlaAdmissionError {
@@ -68,6 +76,7 @@ impl fmt::Display for XlaAdmissionError {
             Self::ZeroMaxNewTokens => f.write_str("max_new_tokens must be >= 1"),
             Self::ContextCapacity(err) => err.fmt(f),
             Self::Prepared(err) => err.fmt(f),
+            Self::Gemma3nPrepared(err) => f.write_str(err),
         }
     }
 }
@@ -134,6 +143,10 @@ struct Slot {
 enum PendingInput {
     Tokens(Vec<i32>),
     Prepared(PreparedIreePrefill),
+    Gemma3nPrepared {
+        prepared: PreparedIreePrefill,
+        dense_ple: Gemma3nDensePle,
+    },
 }
 
 impl PendingInput {
@@ -141,6 +154,7 @@ impl PendingInput {
         match self {
             Self::Tokens(tokens) => tokens,
             Self::Prepared(prepared) => &prepared.token_ids,
+            Self::Gemma3nPrepared { prepared, .. } => &prepared.token_ids,
         }
     }
 
@@ -148,6 +162,7 @@ impl PendingInput {
         match self {
             Self::Tokens(tokens) => tokens.len(),
             Self::Prepared(prepared) => prepared.effective_len,
+            Self::Gemma3nPrepared { prepared, .. } => prepared.effective_len,
         }
     }
 }
@@ -232,11 +247,13 @@ impl Scheduler {
                 return true;
             }
         }
-        for p in &mut self.queue {
-            if p.req_id == req_id && !p.cancelled {
-                p.cancelled = true;
-                return true;
-            }
+        if let Some(index) = self
+            .queue
+            .iter()
+            .position(|pending| pending.req_id == req_id && !pending.cancelled)
+        {
+            self.queue.remove(index);
+            return true;
         }
         false
     }
@@ -301,6 +318,28 @@ fn queue_prepared_request(
     }
     validate_request_capacity(prepared.effective_len, max_new_tokens, context_capacity)?;
     Ok(sched.submit_input(PendingInput::Prepared(prepared), max_new_tokens, params))
+}
+
+fn queue_gemma3n_prepared_request(
+    sched: &mut Scheduler,
+    prepared: PreparedIreePrefill,
+    dense_ple: Gemma3nDensePle,
+    max_new_tokens: usize,
+    params: SampleParams,
+    context_capacity: usize,
+) -> Result<u64, XlaAdmissionError> {
+    if max_new_tokens == 0 {
+        return Err(XlaAdmissionError::ZeroMaxNewTokens);
+    }
+    validate_request_capacity(prepared.effective_len, max_new_tokens, context_capacity)?;
+    Ok(sched.submit_input(
+        PendingInput::Gemma3nPrepared {
+            prepared,
+            dense_ple,
+        },
+        max_new_tokens,
+        params,
+    ))
 }
 
 /// The continuous-batching engine: `B_max` slots over one ragged decode graph,
@@ -425,6 +464,32 @@ impl XlaBatchEngine {
         )
     }
 
+    /// Queue a Gemma3n embeddings-plus-dense-PLE request. Both allocations move
+    /// into the pending entry and are dropped immediately on cancellation or
+    /// after the slot is seeded.
+    pub fn submit_gemma3n_prepared(
+        &mut self,
+        request: Gemma3nPreparedPrefill,
+        max_new_tokens: usize,
+        params: SampleParams,
+    ) -> Result<u64, XlaAdmissionError> {
+        let context_capacity = self.context_capacity();
+        let (prepared, dense_ple) = request.into_parts();
+        self.engine
+            .validate_gemma3n_dense_ple(&dense_ple)
+            .map_err(XlaAdmissionError::Gemma3nPrepared)?;
+        let prepared =
+            PreparedIreePrefill::prepare(&prepared, self.engine.hidden_size(), context_capacity)?;
+        queue_gemma3n_prepared_request(
+            &mut self.sched,
+            prepared,
+            dense_ple,
+            max_new_tokens,
+            params,
+            context_capacity,
+        )
+    }
+
     /// Cancel a request by id (frees its slot or drops it from the queue).
     /// Returns whether it was found. A cancelled request emits no further events.
     pub fn cancel(&mut self, req_id: u64) -> bool {
@@ -461,6 +526,12 @@ impl XlaBatchEngine {
                 PendingInput::Prepared(prepared) => {
                     self.engine.prefill_prepared_slot_logits(s, prepared)?
                 }
+                PendingInput::Gemma3nPrepared {
+                    prepared,
+                    dense_ple,
+                } => self
+                    .engine
+                    .prefill_gemma3n_prepared_slot_logits(s, prepared, dense_ple)?,
             };
             let mut rng = resolve_seed(&p.params, p.req_id);
             // History-based penalties see the prompt plus generated tokens (the
@@ -543,6 +614,336 @@ impl XlaBatchEngine {
         }
         Ok(events)
     }
+}
+
+#[cfg(feature = "diagnostics")]
+#[derive(Debug)]
+pub struct Gemma3nCanonicalDiagnosticRun {
+    pub layout: crate::Gemma3nDiagnosticLayout,
+    pub intermediates: Vec<f32>,
+    pub token_prefill_logits: Vec<f32>,
+    pub prepared_prefill_logits: Vec<f32>,
+    pub prefix_decode_logits: Vec<f32>,
+    pub greedy_tokens: Vec<i32>,
+}
+
+#[cfg(feature = "diagnostics")]
+#[derive(Debug)]
+pub struct Gemma3nAllLayerDiagnosticRun {
+    pub layout: crate::Gemma3nDiagnosticLayout,
+    pub intermediates: Vec<f32>,
+}
+
+#[cfg(feature = "diagnostics")]
+#[derive(Debug)]
+pub struct Gemma3nPrefixDecodeDiagnosticRun {
+    pub active_slot: usize,
+    pub carrier_tokens: Vec<i32>,
+    pub carrier_positions: Vec<i32>,
+    pub carrier_cache_lengths: Vec<i32>,
+    pub logits: Vec<f32>,
+    pub top1: i32,
+}
+
+#[cfg(feature = "diagnostics")]
+fn diagnostic_argmax(values: &[f32]) -> i32 {
+    values
+        .iter()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(right.1))
+        .map_or(0, |(index, _)| index as i32)
+}
+
+#[cfg(feature = "diagnostics")]
+pub fn run_gemma3n_all_layer_diagnostics(
+    model_dir: &Path,
+    device: &str,
+    context_capacity: usize,
+    prompt: &[i32],
+) -> Result<Gemma3nAllLayerDiagnosticRun, String> {
+    const DIAGNOSTIC_SLOTS: usize = 4;
+    if prompt.is_empty() || prompt.len() > context_capacity {
+        return Err(format!(
+            "all-layer diagnostic prompt length {} must be in 1..={context_capacity}",
+            prompt.len()
+        ));
+    }
+    let mut engine = IreeRaggedLlama::load_with_all_layer_diagnostics(
+        model_dir,
+        device,
+        DIAGNOSTIC_SLOTS,
+        context_capacity,
+    )?;
+    let intermediates = engine.prefill_diagnostics_slot(0, prompt)?;
+    let layout = engine.diagnostic_layout()?.clone();
+    layout.validate()?;
+    if intermediates.len() != layout.total_len {
+        return Err(format!(
+            "all-layer diagnostic output has {} values, expected {}",
+            intermediates.len(),
+            layout.total_len
+        ));
+    }
+    Ok(Gemma3nAllLayerDiagnosticRun {
+        layout,
+        intermediates,
+    })
+}
+
+/// Seed exactly one fixed batch slot with a prefix, then execute one production
+/// ragged decode step with zero-valued carrier rows around it.
+///
+/// This bounded probe deliberately excludes the canonical diagnostic module,
+/// prepared-prefill parity, and greedy continuation. It exists to validate the
+/// actual production decode bundle after emitter/plumbing changes without
+/// consuming a canonical-oracle approval.
+#[cfg(feature = "diagnostics")]
+pub fn run_gemma3n_prefix_decode_diagnostic(
+    model_dir: &Path,
+    device: &str,
+    context_capacity: usize,
+    prompt: &[i32],
+) -> Result<Gemma3nPrefixDecodeDiagnosticRun, String> {
+    const DIAGNOSTIC_SLOTS: usize = 4;
+    const ACTIVE_SLOT: usize = DIAGNOSTIC_SLOTS - 1;
+    if prompt.len() < 2 || prompt.len() > context_capacity {
+        return Err(format!(
+            "prefix-decode diagnostic prompt length {} must be in 2..={context_capacity}",
+            prompt.len()
+        ));
+    }
+    let mut engine = IreeRaggedLlama::load(model_dir, device, DIAGNOSTIC_SLOTS, context_capacity)?;
+    let prefix = &prompt[..prompt.len() - 1];
+    let prefix_logits = engine.prefill_slot_logits(ACTIVE_SLOT, prefix)?;
+    if prefix_logits.len() != engine.vocab() {
+        return Err("prefix prefill returned an invalid vocabulary width".to_string());
+    }
+
+    let mut carrier_tokens = vec![0; DIAGNOSTIC_SLOTS];
+    let mut carrier_positions = vec![0; DIAGNOSTIC_SLOTS];
+    let mut carrier_cache_lengths = vec![0; DIAGNOSTIC_SLOTS];
+    carrier_tokens[ACTIVE_SLOT] = prompt[prompt.len() - 1];
+    let prefix_len =
+        i32::try_from(prefix.len()).map_err(|_| "prefix length does not fit i32".to_string())?;
+    carrier_positions[ACTIVE_SLOT] = prefix_len;
+    carrier_cache_lengths[ACTIVE_SLOT] = prefix_len;
+
+    let all_logits =
+        engine.decode_ragged_logits(&carrier_tokens, &carrier_positions, &carrier_cache_lengths)?;
+    let vocab = engine.vocab();
+    let start = ACTIVE_SLOT
+        .checked_mul(vocab)
+        .ok_or_else(|| "active decode row offset overflows".to_string())?;
+    let end = start
+        .checked_add(vocab)
+        .ok_or_else(|| "active decode row end overflows".to_string())?;
+    let logits = all_logits
+        .get(start..end)
+        .ok_or_else(|| "ragged decode returned a truncated active row".to_string())?
+        .to_vec();
+    let top1 = diagnostic_argmax(&logits);
+    Ok(Gemma3nPrefixDecodeDiagnosticRun {
+        active_slot: ACTIVE_SLOT,
+        carrier_tokens,
+        carrier_positions,
+        carrier_cache_lengths,
+        logits,
+        top1,
+    })
+}
+
+/// Execute the entire pinned Gemma3n oracle surface with one model load.
+///
+/// This symbol only exists behind the explicit `diagnostics` feature. Normal
+/// `iree` builds expose no raw-logit or intermediate-state diagnostic API and
+/// do not compile/load the optional diagnostic module.
+#[cfg(feature = "diagnostics")]
+pub fn run_gemma3n_canonical_diagnostics(
+    model_dir: &Path,
+    device: &str,
+    context_capacity: usize,
+    prompt: &[i32],
+    greedy_steps: usize,
+) -> Result<Gemma3nCanonicalDiagnosticRun, String> {
+    const DIAGNOSTIC_SLOTS: usize = 4;
+    if prompt.len() < 2 || prompt.len() >= context_capacity {
+        return Err(format!(
+            "canonical diagnostic prompt length {} must be in 2..{context_capacity}",
+            prompt.len()
+        ));
+    }
+    if greedy_steps == 0 || prompt.len().saturating_add(greedy_steps) > context_capacity {
+        return Err("canonical diagnostic greedy trajectory exceeds context capacity".to_string());
+    }
+    let mut engine = IreeRaggedLlama::load_with_diagnostics(
+        model_dir,
+        device,
+        DIAGNOSTIC_SLOTS,
+        context_capacity,
+    )?;
+    let intermediates = engine.prefill_diagnostics_slot(0, prompt)?;
+    let layout = engine.diagnostic_layout()?.clone();
+    layout.validate()?;
+    if intermediates.len() != layout.total_len {
+        return Err(format!(
+            "diagnostic output has {} values, expected {}",
+            intermediates.len(),
+            layout.total_len
+        ));
+    }
+    let embeddings_segment = layout
+        .segment("scaled_embeddings")
+        .ok_or_else(|| "diagnostic layout is missing scaled_embeddings".to_string())?;
+    let expected_embeddings_shape = [context_capacity, engine.hidden_size()];
+    if embeddings_segment.shape != expected_embeddings_shape {
+        return Err(format!(
+            "diagnostic scaled_embeddings shape {:?} does not match {:?}",
+            embeddings_segment.shape, expected_embeddings_shape
+        ));
+    }
+    let embeddings_len = prompt
+        .len()
+        .checked_mul(engine.hidden_size())
+        .ok_or_else(|| "diagnostic embedding prefix length overflows".to_string())?;
+    let embeddings_end = embeddings_segment
+        .offset
+        .checked_add(embeddings_len)
+        .ok_or_else(|| "diagnostic embedding range overflows".to_string())?;
+    let embeddings = intermediates
+        .get(embeddings_segment.offset..embeddings_end)
+        .ok_or_else(|| "diagnostic embedding prefix is truncated".to_string())?;
+    let prepared = PreparedPrefill::new(
+        prompt.to_vec(),
+        OwnedTensor::new(
+            embeddings
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
+            PreparedTensorDType::Float32,
+            vec![1, prompt.len(), engine.hidden_size()],
+        )
+        .map_err(|error| error.to_string())?,
+        PreparedPositions::Sequential {
+            start: 0,
+            length: prompt.len(),
+        },
+        PreparedAttentionBias {
+            tensor: OwnedTensor::new(
+                vec![0; prompt.len() * std::mem::size_of::<f32>()],
+                PreparedTensorDType::Float32,
+                vec![1, 1, 1, prompt.len()],
+            )
+            .map_err(|error| error.to_string())?,
+            causal: true,
+        },
+        Vec::new(),
+    )
+    .map_err(|error| error.to_string())?;
+
+    let ple_segment = layout
+        .segment("projected_ple")
+        .ok_or_else(|| "diagnostic layout is missing projected_ple".to_string())?;
+    if ple_segment.shape.len() != 3 || ple_segment.shape[0] != context_capacity {
+        return Err(format!(
+            "diagnostic projected_ple shape {:?} is not [capacity, layers, hidden]",
+            ple_segment.shape
+        ));
+    }
+    let ple_row = ple_segment.shape[1]
+        .checked_mul(ple_segment.shape[2])
+        .ok_or_else(|| "diagnostic PLE row width overflows".to_string())?;
+    let ple_prefix_len = prompt
+        .len()
+        .checked_mul(ple_row)
+        .ok_or_else(|| "diagnostic PLE prefix length overflows".to_string())?;
+    let ple_end = ple_segment
+        .offset
+        .checked_add(ple_prefix_len)
+        .ok_or_else(|| "diagnostic PLE range overflows".to_string())?;
+    let ple_prefix = intermediates
+        .get(ple_segment.offset..ple_end)
+        .ok_or_else(|| "diagnostic PLE prefix is truncated".to_string())?;
+    let mut ple = vec![0.0; ple_segment.len];
+    ple[..ple_prefix.len()].copy_from_slice(ple_prefix);
+    let request = Gemma3nPreparedPrefill::new(
+        prepared,
+        Gemma3nDensePle::new(
+            ple,
+            context_capacity,
+            ple_segment.shape[1],
+            ple_segment.shape[2],
+        )
+        .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+
+    let token_prefill_logits = engine.prefill_slot_logits(1, prompt)?;
+    let (prepared, dense_ple) = request.into_parts();
+    engine.validate_gemma3n_dense_ple(&dense_ple)?;
+    let prepared = PreparedIreePrefill::prepare(&prepared, engine.hidden_size(), context_capacity)
+        .map_err(|error| error.to_string())?;
+    let prepared_prefill_logits =
+        engine.prefill_gemma3n_prepared_slot_logits(2, &prepared, &dense_ple)?;
+    let prefix = &prompt[..prompt.len() - 1];
+    let prefix_logits = engine.prefill_slot_logits(3, prefix)?;
+    let diagnostic_logits_segment = layout
+        .segment("logits")
+        .ok_or_else(|| "diagnostic layout is missing logits".to_string())?;
+    let diagnostic_logits = &intermediates[diagnostic_logits_segment.offset
+        ..diagnostic_logits_segment.offset + diagnostic_logits_segment.len];
+
+    let mut tokens = vec![
+        diagnostic_argmax(diagnostic_logits),
+        diagnostic_argmax(&token_prefill_logits),
+        diagnostic_argmax(&prepared_prefill_logits),
+        prompt[prompt.len() - 1],
+    ];
+    let prompt_position =
+        i32::try_from(prompt.len()).map_err(|_| "prompt length does not fit i32".to_string())?;
+    let prefix_position =
+        i32::try_from(prefix.len()).map_err(|_| "prefix length does not fit i32".to_string())?;
+    let mut positions = vec![
+        prompt_position,
+        prompt_position,
+        prompt_position,
+        prefix_position,
+    ];
+    let first_decode = engine.decode_ragged_logits(&tokens, &positions, &positions)?;
+    let vocab = engine.vocab();
+    let prefix_decode_logits = first_decode[3 * vocab..4 * vocab].to_vec();
+    let mut greedy_tokens = vec![tokens[1]];
+    if greedy_steps > 1 {
+        tokens = first_decode
+            .chunks_exact(vocab)
+            .map(diagnostic_argmax)
+            .collect();
+        greedy_tokens.push(tokens[1]);
+    }
+    for _ in 2..greedy_steps {
+        for position in &mut positions {
+            *position += 1;
+        }
+        if positions
+            .iter()
+            .any(|position| *position < 0 || *position as usize >= context_capacity)
+        {
+            return Err("canonical diagnostic decode exceeded context capacity".to_string());
+        }
+        let logits = engine.decode_ragged_logits(&tokens, &positions, &positions)?;
+        tokens = logits.chunks_exact(vocab).map(diagnostic_argmax).collect();
+        greedy_tokens.push(tokens[1]);
+    }
+    if prefix_logits.len() != vocab {
+        return Err("prefix prefill returned an invalid vocabulary width".to_string());
+    }
+    Ok(Gemma3nCanonicalDiagnosticRun {
+        layout,
+        intermediates,
+        token_prefill_logits,
+        prepared_prefill_logits,
+        prefix_decode_logits,
+        greedy_tokens,
+    })
 }
 
 /// A single-sequence reference engine used to validate [`XlaBatchEngine`]: it
@@ -678,6 +1079,13 @@ mod tests {
         PreparedIreePrefill::prepare(&value, hidden, capacity).unwrap()
     }
 
+    fn gemma3n_input(tokens: Vec<i32>) -> PendingInput {
+        PendingInput::Gemma3nPrepared {
+            prepared: prepared_input(tokens, 2, 8),
+            dense_ple: Gemma3nDensePle::new(vec![0.0; 8 * 2 * 2], 8, 2, 2).unwrap(),
+        }
+    }
+
     #[test]
     fn submit_assigns_increasing_ids_and_queues() {
         let mut s = Scheduler::new(2, EOS.to_vec());
@@ -750,6 +1158,7 @@ mod tests {
         let prepared = prepared_input(vec![7, 8, 9], 2, 8);
         let multimodal =
             s.submit_input(PendingInput::Prepared(prepared), 8, SampleParams::greedy());
+        let gemma3n = s.submit_input(gemma3n_input(vec![10, 11]), 8, SampleParams::greedy());
 
         let first = s.pop_next_pending().unwrap();
         assert_eq!(first.req_id, text);
@@ -762,6 +1171,12 @@ mod tests {
         assert!(matches!(second.input, PendingInput::Prepared(_)));
         assert_eq!(second.input.logical_tokens(), &[7, 8, 9]);
         assert_eq!(second.input.effective_len(), 3);
+
+        let third = s.pop_next_pending().unwrap();
+        assert_eq!(third.req_id, gemma3n);
+        assert!(matches!(third.input, PendingInput::Gemma3nPrepared { .. }));
+        assert_eq!(third.input.logical_tokens(), &[10, 11]);
+        assert_eq!(third.input.effective_len(), 2);
     }
 
     #[test]
@@ -793,6 +1208,22 @@ mod tests {
 
         let reused = s.submit(vec![9], 2, g());
         assert_eq!(s.pop_next_pending().unwrap().req_id, reused);
+        assert_eq!(s.free_slots(), vec![0]);
+    }
+
+    #[test]
+    fn gemma3n_ple_is_removed_immediately_on_cancel_and_slot_can_be_reused() {
+        let mut s = Scheduler::new(1, EOS.to_vec());
+        let gemma = s.submit_input(gemma3n_input(vec![1, 2, 3]), 8, g());
+        assert_eq!(s.queue.len(), 1);
+        assert!(s.cancel(gemma));
+        assert!(
+            s.queue.is_empty(),
+            "cancellation must drop the request-owned PLE now, not at a later pump"
+        );
+
+        let replacement = s.submit(vec![9], 2, g());
+        assert_eq!(s.pop_next_pending().unwrap().req_id, replacement);
         assert_eq!(s.free_slots(), vec![0]);
     }
 

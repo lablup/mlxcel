@@ -1221,6 +1221,24 @@ impl UnifiedLinear {
         }
     }
 
+    /// Return the logical dense `[out, in]` weight for diagnostics and external
+    /// compiler backends that need to isolate a projection from MLX's QMM.
+    pub fn dequantized_weight(&self) -> UniquePtr<MlxArray> {
+        match self {
+            Self::Quantized { weight, .. } => unsafe {
+                ffi::dequantize(
+                    &weight.weight,
+                    &weight.scales,
+                    weight.biases_ptr(),
+                    weight.group_size,
+                    weight.bits,
+                    &weight.mode,
+                )
+            },
+            Self::Regular(linear) => ffi::copy(&linear.weight),
+        }
+    }
+
     /// Forward pass
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         match self {

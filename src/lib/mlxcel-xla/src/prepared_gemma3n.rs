@@ -6,11 +6,22 @@
 
 use std::fmt;
 
+use mlxcel_core::session::PreparedPrefill;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Gemma3nDensePleError {
     ZeroDimension(&'static str),
     ElementCountOverflow,
-    LengthMismatch { actual: usize, expected: usize },
+    LengthMismatch {
+        actual: usize,
+        expected: usize,
+    },
+    SequenceCapacity {
+        sequence_len: usize,
+        capacity: usize,
+    },
+    NonFinite,
+    NonZeroPadding,
 }
 
 impl fmt::Display for Gemma3nDensePleError {
@@ -22,6 +33,17 @@ impl fmt::Display for Gemma3nDensePleError {
                 f,
                 "Gemma3n dense PLE has {actual} f32 elements; expected exactly {expected}"
             ),
+            Self::SequenceCapacity {
+                sequence_len,
+                capacity,
+            } => write!(
+                f,
+                "Gemma3n prepared sequence length {sequence_len} exceeds dense PLE capacity {capacity}"
+            ),
+            Self::NonFinite => f.write_str("Gemma3n dense PLE contains a non-finite value"),
+            Self::NonZeroPadding => {
+                f.write_str("Gemma3n dense PLE rows after sequence_len must be explicit zeros")
+            }
         }
     }
 }
@@ -67,6 +89,9 @@ impl Gemma3nDensePle {
                 expected,
             });
         }
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(Gemma3nDensePleError::NonFinite);
+        }
         Ok(Self {
             values,
             capacity,
@@ -93,6 +118,66 @@ impl Gemma3nDensePle {
     pub fn into_values(self) -> Vec<f32> {
         self.values
     }
+
+    fn validate_sequence(&self, sequence_len: usize) -> Result<(), Gemma3nDensePleError> {
+        if sequence_len > self.capacity {
+            return Err(Gemma3nDensePleError::SequenceCapacity {
+                sequence_len,
+                capacity: self.capacity,
+            });
+        }
+        let row_width = self
+            .layers
+            .checked_mul(self.hidden_per_layer)
+            .ok_or(Gemma3nDensePleError::ElementCountOverflow)?;
+        if self.values[sequence_len * row_width..]
+            .iter()
+            .any(|value| *value != 0.0)
+        {
+            return Err(Gemma3nDensePleError::NonZeroPadding);
+        }
+        Ok(())
+    }
+}
+
+/// An owned Gemma3n multimodal prefill request.
+///
+/// The ordinary prepared-embeddings schema remains unchanged. Gemma3n callers
+/// opt into this separate request type, which couples post-scale merged
+/// embeddings with the dense projected PLE rows consumed by
+/// `prefill_embeddings_ple.main`.
+#[derive(Clone, Debug)]
+pub struct Gemma3nPreparedPrefill {
+    prepared: PreparedPrefill,
+    dense_ple: Gemma3nDensePle,
+}
+
+impl Gemma3nPreparedPrefill {
+    pub fn new(
+        prepared: PreparedPrefill,
+        dense_ple: Gemma3nDensePle,
+    ) -> Result<Self, Gemma3nDensePleError> {
+        dense_ple.validate_sequence(prepared.sequence_len)?;
+        Ok(Self {
+            prepared,
+            dense_ple,
+        })
+    }
+
+    #[must_use]
+    pub fn prepared(&self) -> &PreparedPrefill {
+        &self.prepared
+    }
+
+    #[must_use]
+    pub fn dense_ple(&self) -> &Gemma3nDensePle {
+        &self.dense_ple
+    }
+
+    #[cfg(feature = "iree")]
+    pub(crate) fn into_parts(self) -> (PreparedPrefill, Gemma3nDensePle) {
+        (self.prepared, self.dense_ple)
+    }
 }
 
 #[cfg(test)]
@@ -113,6 +198,41 @@ mod tests {
         let ple = Gemma3nDensePle::new(vec![0.0; 24], 2, 3, 4).unwrap();
         assert_eq!(ple.shape(), [2, 3, 4]);
         assert_eq!(ple.byte_len(), 96);
+    }
+
+    #[test]
+    fn prepared_request_rejects_nonzero_padding() {
+        use mlxcel_core::session::{
+            OwnedTensor, PreparedAttentionBias, PreparedPositions, PreparedTensorDType,
+        };
+
+        let tensor = |shape: Vec<usize>, values: Vec<f32>| {
+            OwnedTensor::new(
+                values.into_iter().flat_map(f32::to_le_bytes).collect(),
+                PreparedTensorDType::Float32,
+                shape,
+            )
+            .unwrap()
+        };
+        let prepared = PreparedPrefill::new(
+            vec![1],
+            tensor(vec![1, 1, 2], vec![0.0; 2]),
+            PreparedPositions::Sequential {
+                start: 0,
+                length: 1,
+            },
+            PreparedAttentionBias {
+                tensor: tensor(vec![1], vec![0.0]),
+                causal: true,
+            },
+            Vec::new(),
+        )
+        .unwrap();
+        let ple = Gemma3nDensePle::new(vec![0.0, 0.0, 1.0, 0.0], 2, 1, 2).unwrap();
+        assert_eq!(
+            Gemma3nPreparedPrefill::new(prepared, ple).unwrap_err(),
+            Gemma3nDensePleError::NonZeroPadding
+        );
     }
 
     #[test]
