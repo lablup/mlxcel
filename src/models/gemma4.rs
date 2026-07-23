@@ -5713,7 +5713,7 @@ mod gemma4_unified_mask_tests {
     }
 
     /// A mask LONGER than the keys (correctly-offset caller mask on the sliding
-    /// family) must still be cropped, not discarded — the pre-#885 crop path is
+    /// family) must still be cropped, not discarded: the pre-#885 crop path is
     /// preserved for `query_len > 1`.
     #[test]
     fn trim_mask_to_keys_crops_when_mask_longer_than_keys() {
