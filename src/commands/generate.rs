@@ -862,18 +862,26 @@ fn decode_generated_text(
 /// those raw markers reach the terminal (issue #884). Route the whole decoded
 /// reply through the shared `mlxcel::reasoning_stream` splitter so the channel
 /// is suppressed by default (only the final answer prints, no raw markers) and
-/// surfaced dimmed
-/// when `--show-reasoning` is set. A non-thinking model has no markers, so the
-/// filter is an inert passthrough and the returned string is byte-identical to
-/// `generated_text`.
+/// surfaced dimmed when `--show-reasoning` is set. A non-thinking model has no
+/// markers, so the filter is an inert passthrough and the returned string is
+/// byte-identical to `generated_text`. When the rendered prompt primed an open
+/// thinking marker the filter starts inside the channel so the primed reasoning
+/// is suppressed too.
 fn filter_reasoning_for_display(
     tokenizer: &mlxcel::tokenizer::MlxcelTokenizer,
+    prompt: &str,
     generated_text: &str,
     show_reasoning: bool,
 ) -> String {
     let markers = tokenizer.infer_thinking_markers();
+    // When the rendered prompt primed an open thinking marker (`<think>\n` for
+    // Qwen-style, `<|channel>thought\n` for a thinking-on Gemma-4 channel) the
+    // generated text starts already inside the channel with no open marker, so
+    // start the filter in the reasoning state to keep the primed thought body
+    // and its raw close marker off the terminal.
+    let primed = mlxcel::reasoning_stream::prompt_primed_open_thinking(&markers, prompt);
     let dim = io::stdout().is_terminal();
-    mlxcel::reasoning_stream::render_full(&markers, generated_text, show_reasoning, dim)
+    mlxcel::reasoning_stream::render_full(&markers, generated_text, primed, show_reasoning, dim)
 }
 
 fn print_generation_result(
@@ -1822,6 +1830,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         let generated_text = decode_generated_text(&tokenizer, &prompt_tokens, &generated_tokens);
         let visible = filter_reasoning_for_display(
             &tokenizer,
+            &prompt,
             &generated_text,
             args.generation.show_reasoning,
         );
@@ -1929,8 +1938,12 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         generation
     };
     let generated_text = decode_generated_text(&tokenizer, &prompt_tokens, &generated_tokens);
-    let visible =
-        filter_reasoning_for_display(&tokenizer, &generated_text, args.generation.show_reasoning);
+    let visible = filter_reasoning_for_display(
+        &tokenizer,
+        &prompt,
+        &generated_text,
+        args.generation.show_reasoning,
+    );
     print_generation_result(&visible, &stats, args.generation.profile)?;
 
     // Cleanup

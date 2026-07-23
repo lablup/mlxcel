@@ -602,7 +602,16 @@ fn stream_turn<M: LanguageModel>(
     // byte-identical to the pre-#884 path. The raw generated ids are collected
     // in parallel so the final turn text is decoded byte-exactly for history.
     let mut decode_state = StreamingDecodeState::new(tokenizer, &prompt_tokens);
-    let mut filter = reasoning_stream::ReasoningFilter::new(&tokenizer.infer_thinking_markers());
+    // Start the reasoning filter inside the channel when the rendered prompt
+    // primed an open thinking marker (Qwen-style `<think>\n`); otherwise the
+    // primed thought body and its raw `</think>` close marker would print, since
+    // the open marker is in the prompt rather than the generated tokens.
+    let markers = tokenizer.infer_thinking_markers();
+    let mut filter = if reasoning_stream::prompt_primed_open_thinking(&markers, prompt) {
+        reasoning_stream::ReasoningFilter::new_primed_open_thinking(&markers)
+    } else {
+        reasoning_stream::ReasoningFilter::new(&markers)
+    };
     let mut generated_ids: Vec<u32> = Vec::with_capacity(max_tokens);
     let mut stdout = io::stdout();
     let dim = stdout.is_terminal();
