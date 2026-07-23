@@ -1396,3 +1396,37 @@ fn divergent_verify_mask_sliding_band_uses_logical_positions() {
         );
     }
 }
+
+// ===========================================================================
+// Issue #891 regression: MTP verify path must not panic in trim_mask_to_keys
+// ===========================================================================
+
+/// Regression for the #891 DoS: a K >= 2 MTP verify round on a buffered sliding
+/// `RotatingKVCache` whose live length has reached the sliding window must NOT
+/// panic in `trim_mask_to_keys`.
+///
+/// The buffered MTP cache (`buffer_size > 0`) returns `sliding_live_len +
+/// query_len` uncompacted keys, which exceed the window-capped
+/// `create_sliding_window_prefill_mask` axis once the live length reaches the
+/// window. Pre-#885 this discarded the too-short mask and fell back to
+/// `causal_attention` with the layer window (correct for the chronological
+/// buffered layout); #891 turned that discard into a `panic!`, crashing the
+/// server worker on this legitimate path.
+#[test]
+fn mtp_multi_token_verify_at_window_does_not_panic() {
+    let _runtime = crate::initialize_runtime();
+    let sampler = SamplingConfig::greedy();
+    let logprobs = mlxcel_core::sampling::LogprobsConfig::default();
+    let w = crate::models::gemma4_tests::build_synthetic_wrapper_with_layer("sliding_attention");
+    let a = Gemma4MtpTargetAdapter::new(&w, None);
+    let prompt: Vec<i32> = vec![1, 2, 3, 4, 5, 6, 7, 1]; // len 8 == sliding_window
+    let (bonus, _seed, _lp) = a.prefill_and_seed(&prompt, &sampler, &[], &logprobs);
+    // K = 2 verify block => query_len == 2 > 1, buffered sliding cache at
+    // live_len == window: the too-short mask must be discarded, not a panic.
+    let vout = a.verify_forward(&[bonus, 0], &sampler, &logprobs);
+    assert_eq!(
+        vout.target_tokens.len(),
+        2,
+        "K=2 verify must yield 2 per-position tokens"
+    );
+}

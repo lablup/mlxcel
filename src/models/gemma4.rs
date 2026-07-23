@@ -2377,34 +2377,34 @@ fn trim_mask_to_keys(
     } else if mask_len > key_len {
         let start = mask_len - key_len;
         Some(slice_axis(mask, -1, start, mask_len))
-    } else if query_len > 1 {
-        // Mask SHORTER than the keys on a MULTI-token chunk (prefill /
-        // continuation / verify). Silently discarding it (the pre-#885
-        // behaviour) drops the causal + sliding-window alignment for every
-        // query row and routes the layer through the maskless
-        // `causal_attention` fallback, whose offset handling cannot
-        // reconstruct the correct window for a rotated key buffer. On a
-        // sliding-window Gemma 4 model that corrupts attention and collapses
-        // the output into reserved `<unused...>` tokens. The forward is
-        // responsible for building a mask whose key axis matches the keys this
-        // layer's cache returns (see `forward_with_speculative_sinks`), so a
-        // too-short mask here is an invariant violation: fail loudly instead
-        // of serving garbage.
-        panic!(
-            "trim_mask_to_keys: caller mask key axis ({mask_len}) is shorter than the returned \
-             key length ({key_len}) for a multi-token chunk (query_len={query_len}); the prefill \
-             mask must be sized to the cache's returned keys (issue #885)"
-        );
     } else {
+        // Mask SHORTER than the keys: discard it and let the layer fall back to
+        // the maskless `causal_attention` path with its own window. This covers
+        // both single-token decode and multi-token chunks.
+        //
         // Single-token decode (`query_len == 1`): a caller mask built with a
         // stale offset can be shorter than the keys, but the decode kernel
-        // derives its own causal / sliding-window mask, so discarding the
-        // undersized mask and returning `None` is safe here.
+        // derives its own causal / sliding-window mask, so discarding is safe.
+        //
+        // Multi-token chunk (`query_len > 1`): the #885 corruption on the
+        // chunked-prefill path is prevented upstream by the caller-mask-branch
+        // rebuild in `forward_with_speculative_sinks`, which sizes both
+        // attention-family masks to the keys the caches return before this
+        // function is called; on that path a too-short multi-token mask never
+        // reaches here. The one legitimate too-short multi-token case that does
+        // reach here is the buffered MTP `RotatingKVCache` verify path
+        // (`buffer_size > 0`): its `update_and_fetch` returns `sliding_live_len
+        // + query_len` uncompacted keys, which exceed the window-capped
+        // `create_sliding_window_prefill_mask` axis once the live length reaches
+        // the window. Discarding here and falling back to `causal_attention`
+        // with the layer window is the correct, pre-#885 behaviour for that
+        // chronological buffered layout. Panicking here (the #891 regression)
+        // crashed the server worker on that legitimate path.
         tracing::warn!(
             mask_len,
             key_len,
-            "trim_mask_to_keys: mask shorter than key length on single-token decode, \
-             discarding caller mask"
+            query_len,
+            "trim_mask_to_keys: mask shorter than key length, discarding caller mask"
         );
         None
     }
@@ -5731,17 +5731,23 @@ mod gemma4_unified_mask_tests {
         );
     }
 
-    /// Issue #885 hardening: a too-short mask on a MULTI-token chunk must fail
-    /// loudly rather than silently discard (silent discard is the corruption).
+    /// A too-short mask on a MULTI-token chunk is discarded (returns `None`),
+    /// not a panic. The #885 chunked-prefill corruption is prevented upstream by
+    /// the caller-mask-branch rebuild in `forward_with_speculative_sinks`, so the
+    /// only too-short multi-token mask that reaches here is the buffered MTP
+    /// `RotatingKVCache` verify path, where discarding and falling back to
+    /// `causal_attention` is correct (panicking here was the #891 DoS).
     #[test]
-    #[should_panic(expected = "issue #885")]
-    fn trim_mask_to_keys_panics_on_too_short_multi_token() {
+    fn trim_mask_to_keys_discards_too_short_multi_token() {
         const H: i32 = 2;
         const D: i32 = 4;
         let keys = make_kv(H, 6, D, 0.0); // 6 returned keys
         let short = mlxcel_core::utils::create_padded_prefill_mask(3, 3, 0); // [3, 3]
-        // query_len = 3 (> 1): the invariant violation must panic.
-        let _ = trim_mask_to_keys(Some(&short), &keys, 3);
+        // query_len = 3 (> 1): a too-short mask is discarded, not a panic.
+        assert!(
+            trim_mask_to_keys(Some(&short), &keys, 3).is_none(),
+            "a too-short mask on a multi-token chunk is discarded, not a panic"
+        );
     }
 
     /// A too-short mask on single-token DECODE (`query_len == 1`) is still
