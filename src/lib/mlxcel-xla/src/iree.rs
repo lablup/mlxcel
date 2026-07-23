@@ -71,7 +71,8 @@ use crate::emitter::{
     emit_gemma3n_prefill_diagnostics_with_qmv,
 };
 use crate::prepared::{
-    PreparedIreePrefill, PreparedPositionMode, mrope_decode_coordinate, validate_slot,
+    PreparedIreePrefill, PreparedPositionMode, canonical_text_positions, mrope_decode_coordinate,
+    validate_slot,
 };
 use crate::{Gemma3nDensePle, Gemma3nPreparedPrefill};
 // The loader reads the per-architecture checkpoint-weight order from
@@ -1655,17 +1656,8 @@ impl IreeLlama {
         tokens[..prompt.len()].copy_from_slice(prompt);
         let capacity = checked_ffi_int(self.context_capacity, "context_capacity")?;
         let real_len = checked_ffi_int(prompt.len(), "prompt length")?;
-        let one_axis: Vec<c_int> = (0..capacity).collect();
-        let positions = match self.position_mode {
-            PreparedPositionMode::OneD => one_axis,
-            PreparedPositionMode::Mrope3D => {
-                let mut values = Vec::with_capacity(self.context_capacity * 3);
-                values.extend_from_slice(&one_axis);
-                values.extend_from_slice(&one_axis);
-                values.extend_from_slice(&one_axis);
-                values
-            }
-        };
+        let positions = canonical_text_positions(self.position_mode, self.context_capacity)
+            .map_err(|error| format!("cannot build text-only prefill positions: {error}"))?;
         let mut out = 0i32;
         // Safety: buffers outlive the call; the shim stores the returned KV.
         let rc = unsafe {
@@ -1946,17 +1938,8 @@ impl IreeRaggedLlama {
         let slot = checked_ffi_int(slot, "slot")?;
         let capacity = checked_ffi_int(self.context_capacity, "context_capacity")?;
         let real_len = checked_ffi_int(prompt.len(), "prompt length")?;
-        let one_axis: Vec<c_int> = (0..capacity).collect();
-        let positions = match self.position_mode {
-            PreparedPositionMode::OneD => one_axis,
-            PreparedPositionMode::Mrope3D => {
-                let mut values = Vec::with_capacity(self.context_capacity * 3);
-                values.extend_from_slice(&one_axis);
-                values.extend_from_slice(&one_axis);
-                values.extend_from_slice(&one_axis);
-                values
-            }
-        };
+        let positions = canonical_text_positions(self.position_mode, self.context_capacity)
+            .map_err(|error| format!("cannot build text-only diagnostic positions: {error}"))?;
         let diagnostic_len = c_int::try_from(layout.total_len)
             .map_err(|_| "diagnostic output length does not fit c_int".to_string())?;
         let mut output = vec![0.0f32; layout.total_len];
@@ -2005,7 +1988,8 @@ impl IreeRaggedLlama {
         let capacity = checked_ffi_int(self.context_capacity, "context_capacity")?;
         let real_len = checked_ffi_int(prompt.len(), "prompt length")?;
         let vocab = checked_ffi_int(self.vocab, "vocab_size")?;
-        let positions: Vec<c_int> = (0..capacity).collect();
+        let positions = canonical_text_positions(self.position_mode, self.context_capacity)
+            .map_err(|error| format!("cannot build text-only slot positions: {error}"))?;
         let mut logits = vec![0f32; self.vocab];
         // Safety: input buffers outlive the call; `logits` has self.vocab elements,
         // which the shim fills; the shim also writes the slot's KV device-side.

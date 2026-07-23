@@ -292,6 +292,30 @@ fn mrope_prepared(
     .expect("valid M-RoPE prepared input")
 }
 
+fn mrope_text_prepared(fixture: &TinyModel, tokens: &[i32]) -> PreparedPrefill {
+    let values = tokens
+        .iter()
+        .flat_map(|&token| {
+            let row = token as usize * MROPE_HIDDEN;
+            fixture.embeddings[row..row + MROPE_HIDDEN].iter().copied()
+        })
+        .collect::<Vec<_>>();
+    PreparedPrefill::new(
+        tokens.to_vec(),
+        tensor_f32(&[1, tokens.len(), MROPE_HIDDEN], &values),
+        PreparedPositions::Sequential {
+            start: 0,
+            length: tokens.len(),
+        },
+        PreparedAttentionBias {
+            tensor: tensor_f32(&[1, 1, 1, tokens.len()], &vec![0.0; tokens.len()]),
+            causal: true,
+        },
+        Vec::new(),
+    )
+    .expect("valid text-only prepared input for an M-RoPE bundle")
+}
+
 #[test]
 #[ignore = "requires the pinned IREE runtime and compiler"]
 fn local_task_token_and_prepared_paths_are_exact_with_mixed_slot_reuse() {
@@ -373,6 +397,23 @@ fn local_task_mrope_prefill_decode_and_per_slot_deltas_execute() {
         2,
     );
 
+    let mut single_text =
+        XlaInferenceSession::load_with_context_capacity(fixture.path(), 2, CAPACITY)
+            .expect("M-RoPE single text session");
+    let single_text_tokens = single_text
+        .generate_greedy(&tokens, 3, &[])
+        .expect("real-IREE M-RoPE text token prefill/decode");
+    let mut single_prepared_text =
+        XlaInferenceSession::load_with_context_capacity(fixture.path(), 2, CAPACITY)
+            .expect("M-RoPE single prepared-text session");
+    let prepared_text_tokens = single_prepared_text
+        .generate_prepared_greedy(&mrope_text_prepared(&fixture, &tokens), 3, &[])
+        .expect("real-IREE M-RoPE sequential prepared prefill/decode");
+    assert_eq!(
+        prepared_text_tokens, single_text_tokens,
+        "text-only sequential positions must canonicalize to three identical M-RoPE axes"
+    );
+
     let mut single = XlaInferenceSession::load_with_context_capacity(fixture.path(), 2, CAPACITY)
         .expect("M-RoPE single session");
     let single_tokens = single
@@ -407,7 +448,10 @@ fn local_task_mrope_prefill_decode_and_per_slot_deltas_execute() {
             }
         }
     }
-    assert_eq!(text_tokens.len(), 3);
+    assert_eq!(
+        text_tokens, single_text_tokens,
+        "ragged text token prefill must upload the exact [3, capacity] position buffer"
+    );
     assert_eq!(
         vision_tokens, single_tokens,
         "single and ragged logits must select the same M-RoPE tokens"
@@ -416,14 +460,25 @@ fn local_task_mrope_prefill_decode_and_per_slot_deltas_execute() {
     let reused = batch
         .submit_prepared(positive, 2, SampleParams::greedy())
         .expect("positive delta enters a released slot");
+    let reused_text = batch
+        .submit(&tokens, 3, SampleParams::greedy())
+        .expect("text token request reuses a released M-RoPE slot");
     let mut reused_tokens = 0;
+    let mut reused_text_tokens = Vec::new();
     while !batch.is_idle() {
-        reused_tokens += batch
-            .pump()
-            .expect("reused positive-delta slot")
-            .iter()
-            .filter(|event| matches!(event, EngineEvent::Token { req_id, .. } if *req_id == reused))
-            .count();
+        for event in batch.pump().expect("mixed reused M-RoPE slots") {
+            if let EngineEvent::Token { req_id, token } = event {
+                if req_id == reused {
+                    reused_tokens += 1;
+                } else if req_id == reused_text {
+                    reused_text_tokens.push(token);
+                }
+            }
+        }
     }
     assert_eq!(reused_tokens, 2);
+    assert_eq!(
+        reused_text_tokens, single_text_tokens,
+        "reused text slot must retain zero delta and canonical three-axis positions"
+    );
 }

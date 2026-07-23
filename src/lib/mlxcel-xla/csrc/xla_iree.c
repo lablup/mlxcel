@@ -896,12 +896,17 @@ int xla_llama_prefill_diagnostics_slot(
         cleanup, rc);
   }
   iree_hal_dim_t seq_shape[1] = {(iree_hal_dim_t)lp};
+  iree_hal_dim_t position_shape[2] = {3, (iree_hal_dim_t)lp};
   iree_host_size_t seq_bytes = (iree_host_size_t)lp * sizeof(int32_t);
+  iree_host_size_t position_bytes =
+      seq_bytes * (c->position_mode == 1 ? 3 : 1);
   XLA_CHECK_GOTO(xla_alloc_bv(c, 1, seq_shape, IREE_HAL_ELEMENT_TYPE_INT_32,
                              tokens, seq_bytes, &tok_bv),
                  cleanup, rc);
-  XLA_CHECK_GOTO(xla_alloc_bv(c, 1, seq_shape, IREE_HAL_ELEMENT_TYPE_INT_32,
-                             positions, seq_bytes, &pos_bv),
+  XLA_CHECK_GOTO(xla_alloc_bv(c, c->position_mode == 1 ? 2 : 1,
+                             c->position_mode == 1 ? position_shape : seq_shape,
+                             IREE_HAL_ELEMENT_TYPE_INT_32, positions,
+                             position_bytes, &pos_bv),
                  cleanup, rc);
   XLA_CHECK_GOTO(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32,
                              &real_len, sizeof(int32_t), &len_bv),

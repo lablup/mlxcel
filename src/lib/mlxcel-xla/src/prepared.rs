@@ -250,6 +250,37 @@ impl fmt::Display for MropeCoordinateError {
 
 impl std::error::Error for MropeCoordinateError {}
 
+/// Build the static position buffer for text-only input.
+///
+/// Accepting backend-neutral sequential or explicit 1D positions in an
+/// M-RoPE bundle is intentional: text tokens use the same logical coordinate
+/// on the temporal, height, and width axes. The resulting row-major buffer is
+/// therefore `[axis0, axis1, axis2]`, with each axis containing the same
+/// zero-based sequence. Multimodal callers must instead provide
+/// [`PreparedPositions::Mrope3D`] so their axes and signed decode delta remain
+/// explicit.
+pub(crate) fn canonical_text_positions(
+    mode: PreparedPositionMode,
+    context_capacity: usize,
+) -> Result<Vec<i32>, PreparedInputError> {
+    let one_axis: Vec<i32> = (0..context_capacity)
+        .map(|position| i32::try_from(position).map_err(|_| PreparedInputError::ShapeOverflow))
+        .collect::<Result<_, _>>()?;
+    match mode {
+        PreparedPositionMode::OneD => Ok(one_axis),
+        PreparedPositionMode::Mrope3D => {
+            let capacity = context_capacity
+                .checked_mul(3)
+                .ok_or(PreparedInputError::ShapeOverflow)?;
+            let mut values = Vec::with_capacity(capacity);
+            for _ in 0..3 {
+                values.extend_from_slice(&one_axis);
+            }
+            Ok(values)
+        }
+    }
+}
+
 pub(crate) fn mrope_decode_coordinate(
     cache_len: i32,
     rope_delta: i32,
@@ -383,9 +414,7 @@ impl PreparedIreePrefill {
         let mut embeddings = vec![0.0; embedding_count];
         embeddings[..input_embeddings.len()].copy_from_slice(&input_embeddings);
 
-        let sequential: Vec<i32> = (0..context_capacity)
-            .map(|position| i32::try_from(position).map_err(|_| PreparedInputError::ShapeOverflow))
-            .collect::<Result<_, _>>()?;
+        let sequential = canonical_text_positions(PreparedPositionMode::OneD, context_capacity)?;
         let validate_1d = |tensor: &OwnedTensor| -> Result<Vec<i32>, PreparedInputError> {
             if tensor.dtype != PreparedTensorDType::Int32 {
                 return Err(PreparedInputError::PositionDType(tensor.dtype));
@@ -429,22 +458,20 @@ impl PreparedIreePrefill {
                 if *start != 0 || *length != effective_len {
                     return Err(PreparedInputError::UnsupportedPositions);
                 }
-                let mut values = Vec::with_capacity(3 * context_capacity);
-                for _ in 0..3 {
-                    values.extend_from_slice(&sequential);
-                }
                 PreparedIreePositions::Mrope3D {
-                    values,
+                    values: canonical_text_positions(
+                        PreparedPositionMode::Mrope3D,
+                        context_capacity,
+                    )?,
                     rope_delta: 0,
                 }
             }
             (PreparedPositionMode::Mrope3D, PreparedPositions::Explicit(tensor)) => {
                 let explicit = validate_1d(tensor)?;
-                let mut values = Vec::with_capacity(3 * context_capacity);
-                for _ in 0..3 {
-                    let mut axis = sequential.clone();
+                let mut values =
+                    canonical_text_positions(PreparedPositionMode::Mrope3D, context_capacity)?;
+                for axis in values.chunks_exact_mut(context_capacity) {
                     axis[..effective_len].copy_from_slice(&explicit);
-                    values.extend(axis);
                 }
                 PreparedIreePositions::Mrope3D {
                     values,
@@ -743,6 +770,44 @@ mod tests {
             prepared.positions.values(),
             &[0, 1, 2, 3, 4, 0, 4, 5, 3, 4, 0, 6, 7, 3, 4]
         );
+    }
+
+    #[test]
+    fn intentionally_canonicalizes_text_only_positions_for_mrope_bundles() {
+        let expected = [0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4];
+        assert_eq!(
+            canonical_text_positions(PreparedPositionMode::Mrope3D, 5).unwrap(),
+            expected
+        );
+
+        let sequential =
+            PreparedIreePrefill::prepare_for_mode(&fixture(), 2, 5, PreparedPositionMode::Mrope3D)
+                .expect("text-only sequential positions in an M-RoPE bundle");
+        assert_eq!(sequential.positions.mode(), PreparedPositionMode::Mrope3D);
+        assert_eq!(sequential.positions.values(), expected);
+        assert_eq!(sequential.positions.rope_delta(), 0);
+
+        let mut explicit_value = fixture();
+        explicit_value.positions = PreparedPositions::Explicit(
+            OwnedTensor::new(
+                [0i32, 1, 2]
+                    .into_iter()
+                    .flat_map(i32::to_le_bytes)
+                    .collect(),
+                PreparedTensorDType::Int32,
+                vec![1, 3],
+            )
+            .unwrap(),
+        );
+        let explicit = PreparedIreePrefill::prepare_for_mode(
+            &explicit_value,
+            2,
+            5,
+            PreparedPositionMode::Mrope3D,
+        )
+        .expect("text-only explicit positions in an M-RoPE bundle");
+        assert_eq!(explicit.positions.values(), expected);
+        assert_eq!(explicit.positions.rope_delta(), 0);
     }
 
     #[test]
