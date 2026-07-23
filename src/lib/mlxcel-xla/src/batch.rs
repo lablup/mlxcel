@@ -39,10 +39,14 @@ use std::collections::VecDeque;
 use std::fmt;
 
 #[cfg(feature = "iree")]
+use mlxcel_core::session::PreparedPrefill;
+
+#[cfg(feature = "iree")]
 use std::path::Path;
 
 #[cfg(feature = "iree")]
 use crate::iree::{IreeLlama, IreeRaggedLlama};
+use crate::prepared::{PreparedInputError, PreparedIreePrefill};
 use crate::sampler::SampleParams;
 #[cfg(feature = "iree")]
 use crate::sampler::sample;
@@ -54,6 +58,7 @@ pub enum XlaAdmissionError {
     EmptyPrompt,
     ZeroMaxNewTokens,
     ContextCapacity(ContextCapacityError),
+    Prepared(PreparedInputError),
 }
 
 impl fmt::Display for XlaAdmissionError {
@@ -62,6 +67,7 @@ impl fmt::Display for XlaAdmissionError {
             Self::EmptyPrompt => f.write_str("XLA batched submit requires a non-empty prompt"),
             Self::ZeroMaxNewTokens => f.write_str("max_new_tokens must be >= 1"),
             Self::ContextCapacity(err) => err.fmt(f),
+            Self::Prepared(err) => err.fmt(f),
         }
     }
 }
@@ -71,6 +77,12 @@ impl std::error::Error for XlaAdmissionError {}
 impl From<ContextCapacityError> for XlaAdmissionError {
     fn from(value: ContextCapacityError) -> Self {
         Self::ContextCapacity(value)
+    }
+}
+
+impl From<PreparedInputError> for XlaAdmissionError {
+    fn from(value: PreparedInputError) -> Self {
+        Self::Prepared(value)
     }
 }
 
@@ -116,10 +128,34 @@ struct Slot {
     history: Vec<i32>,
 }
 
+/// Owned input retained while a request is queued. Logical token ids stay
+/// separate from the prepared static embeddings buffers so history-based
+/// sampling and request accounting never infer token history from KV length.
+enum PendingInput {
+    Tokens(Vec<i32>),
+    Prepared(PreparedIreePrefill),
+}
+
+impl PendingInput {
+    fn logical_tokens(&self) -> &[i32] {
+        match self {
+            Self::Tokens(tokens) => tokens,
+            Self::Prepared(prepared) => &prepared.token_ids,
+        }
+    }
+
+    fn effective_len(&self) -> usize {
+        match self {
+            Self::Tokens(tokens) => tokens.len(),
+            Self::Prepared(prepared) => prepared.effective_len,
+        }
+    }
+}
+
 /// A queued, not-yet-admitted request.
 struct Pending {
     req_id: u64,
-    prompt: Vec<i32>,
+    input: PendingInput,
     cap: usize,
     params: SampleParams,
     cancelled: bool,
@@ -169,17 +205,21 @@ impl Scheduler {
     }
 
     /// Queue a request and return its id (monotonically increasing).
-    fn submit(&mut self, prompt: Vec<i32>, cap: usize, params: SampleParams) -> u64 {
+    fn submit_input(&mut self, input: PendingInput, cap: usize, params: SampleParams) -> u64 {
         let req_id = self.next_id;
         self.next_id += 1;
         self.queue.push_back(Pending {
             req_id,
-            prompt,
+            input,
             cap,
             params,
             cancelled: false,
         });
         req_id
+    }
+
+    fn submit(&mut self, prompt: Vec<i32>, cap: usize, params: SampleParams) -> u64 {
+        self.submit_input(PendingInput::Tokens(prompt), cap, params)
     }
 
     /// Cancel a request by id: free its slot if active, or drop it from the queue
@@ -247,6 +287,20 @@ fn queue_request(
     }
     validate_request_capacity(prompt.len(), max_new_tokens, context_capacity)?;
     Ok(sched.submit(prompt.to_vec(), max_new_tokens, params))
+}
+
+fn queue_prepared_request(
+    sched: &mut Scheduler,
+    prepared: PreparedIreePrefill,
+    max_new_tokens: usize,
+    params: SampleParams,
+    context_capacity: usize,
+) -> Result<u64, XlaAdmissionError> {
+    if max_new_tokens == 0 {
+        return Err(XlaAdmissionError::ZeroMaxNewTokens);
+    }
+    validate_request_capacity(prepared.effective_len, max_new_tokens, context_capacity)?;
+    Ok(sched.submit_input(PendingInput::Prepared(prepared), max_new_tokens, params))
 }
 
 /// The continuous-batching engine: `B_max` slots over one ragged decode graph,
@@ -350,6 +404,27 @@ impl XlaBatchEngine {
         )
     }
 
+    /// Queue an owned prepared-embeddings request. Validation and static-bucket
+    /// materialization complete before scheduler state changes, and the queue
+    /// then owns the only runtime copy until admission or cancellation.
+    pub fn submit_prepared(
+        &mut self,
+        prepared: PreparedPrefill,
+        max_new_tokens: usize,
+        params: SampleParams,
+    ) -> Result<u64, XlaAdmissionError> {
+        let context_capacity = self.context_capacity();
+        let prepared =
+            PreparedIreePrefill::prepare(&prepared, self.engine.hidden_size(), context_capacity)?;
+        queue_prepared_request(
+            &mut self.sched,
+            prepared,
+            max_new_tokens,
+            params,
+            context_capacity,
+        )
+    }
+
     /// Cancel a request by id (frees its slot or drops it from the queue).
     /// Returns whether it was found. A cancelled request emits no further events.
     pub fn cancel(&mut self, req_id: u64) -> bool {
@@ -381,14 +456,19 @@ impl XlaBatchEngine {
             let Some(p) = self.sched.pop_next_pending() else {
                 break;
             };
-            let logits = self.engine.prefill_slot_logits(s, &p.prompt)?;
+            let logits = match &p.input {
+                PendingInput::Tokens(prompt) => self.engine.prefill_slot_logits(s, prompt)?,
+                PendingInput::Prepared(prepared) => {
+                    self.engine.prefill_prepared_slot_logits(s, prepared)?
+                }
+            };
             let mut rng = resolve_seed(&p.params, p.req_id);
             // History-based penalties see the prompt plus generated tokens (the
             // same window mlxcel-core seeds via `initial_token_history`). Build it
             // only when a penalty is active; greedy requests keep it empty.
             let needs_history = p.params.needs_penalties();
             let mut history = if needs_history {
-                p.prompt.clone()
+                p.input.logical_tokens().to_vec()
             } else {
                 Vec::new()
             };
@@ -403,7 +483,7 @@ impl XlaBatchEngine {
             let slot = Slot {
                 req_id: p.req_id,
                 cur: first,
-                cache_len: p.prompt.len() as i32,
+                cache_len: p.input.effective_len() as i32,
                 produced: 1,
                 cap: p.cap,
                 params: p.params,
@@ -543,6 +623,10 @@ impl XlaReferenceEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mlxcel_core::session::{
+        OwnedTensor, PreparedAttentionBias, PreparedModality, PreparedPositions,
+        PreparedTensorDType,
+    };
 
     const EOS: [i32; 1] = [42];
 
@@ -557,6 +641,41 @@ mod tests {
 
     fn g() -> SampleParams {
         SampleParams::greedy()
+    }
+
+    fn prepared_input(tokens: Vec<i32>, hidden: usize, capacity: usize) -> PreparedIreePrefill {
+        let sequence = tokens.len();
+        let embedding_bytes = vec![0; sequence * hidden * std::mem::size_of::<f32>()];
+        let bias_bytes = vec![0; sequence * std::mem::size_of::<f32>()];
+        let value = mlxcel_core::session::PreparedPrefill::new(
+            tokens,
+            OwnedTensor::new(
+                embedding_bytes,
+                PreparedTensorDType::Float32,
+                vec![1, sequence, hidden],
+            )
+            .unwrap(),
+            PreparedPositions::Sequential {
+                start: 0,
+                length: sequence,
+            },
+            PreparedAttentionBias {
+                tensor: OwnedTensor::new(
+                    bias_bytes,
+                    PreparedTensorDType::Float32,
+                    vec![1, 1, 1, sequence],
+                )
+                .unwrap(),
+                causal: true,
+            },
+            vec![PreparedModality {
+                family: "test".into(),
+                item_count: 1,
+                token_count: 1,
+            }],
+        )
+        .unwrap();
+        PreparedIreePrefill::prepare(&value, hidden, capacity).unwrap()
     }
 
     #[test]
@@ -622,6 +741,70 @@ mod tests {
         let got = s.pop_next_pending().expect("a live request remains");
         assert_eq!(got.req_id, b);
         assert!(s.pop_next_pending().is_none());
+    }
+
+    #[test]
+    fn mixed_pending_inputs_keep_logical_history_and_effective_length_distinct() {
+        let mut s = Scheduler::new(2, EOS.to_vec());
+        let text = s.submit(vec![1, 2], 8, g());
+        let prepared = prepared_input(vec![7, 8, 9], 2, 8);
+        let multimodal =
+            s.submit_input(PendingInput::Prepared(prepared), 8, SampleParams::greedy());
+
+        let first = s.pop_next_pending().unwrap();
+        assert_eq!(first.req_id, text);
+        assert!(matches!(first.input, PendingInput::Tokens(_)));
+        assert_eq!(first.input.logical_tokens(), &[1, 2]);
+        assert_eq!(first.input.effective_len(), 2);
+
+        let second = s.pop_next_pending().unwrap();
+        assert_eq!(second.req_id, multimodal);
+        assert!(matches!(second.input, PendingInput::Prepared(_)));
+        assert_eq!(second.input.logical_tokens(), &[7, 8, 9]);
+        assert_eq!(second.input.effective_len(), 3);
+    }
+
+    #[test]
+    fn cancel_each_input_form_before_and_after_admit_reuses_slots() {
+        let mut s = Scheduler::new(1, EOS.to_vec());
+        let queued_text = s.submit(vec![1, 2], 8, g());
+        assert!(s.cancel(queued_text));
+
+        let prepared = prepared_input(vec![4, 5, 6], 2, 8);
+        let queued_prepared =
+            s.submit_input(PendingInput::Prepared(prepared), 8, SampleParams::greedy());
+        let pending = s.pop_next_pending().expect("prepared request remains");
+        assert_eq!(pending.req_id, queued_prepared);
+        let effective_len = pending.input.effective_len();
+        drop(pending);
+
+        s.slots[0] = Some(Slot {
+            req_id: queued_prepared,
+            cur: 7,
+            cache_len: effective_len as i32,
+            produced: 1,
+            cap: 8,
+            params: g(),
+            rng: 0,
+            history: vec![4, 5, 6, 7],
+        });
+        assert!(s.cancel(queued_prepared));
+        assert_eq!(s.free_slots(), vec![0]);
+
+        let reused = s.submit(vec![9], 2, g());
+        assert_eq!(s.pop_next_pending().unwrap().req_id, reused);
+        assert_eq!(s.free_slots(), vec![0]);
+    }
+
+    #[test]
+    fn prepared_capacity_rejection_is_atomic() {
+        let mut s = Scheduler::new(1, EOS.to_vec());
+        let prepared = prepared_input(vec![1, 2, 3], 2, 4);
+        let err = queue_prepared_request(&mut s, prepared, 2, g(), 4).unwrap_err();
+        assert!(matches!(err, XlaAdmissionError::ContextCapacity(_)));
+        assert_eq!(s.next_id, 0);
+        assert!(s.queue.is_empty());
+        assert_eq!(s.free_slots(), vec![0]);
     }
 
     #[test]

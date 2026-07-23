@@ -20,6 +20,7 @@
 // token-exact from Rust before being vendored here. Rust calls the flat C ABI
 // (`xla_llama_*`) and never binds the IREE runtime structs directly.
 #include <stdint.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -31,14 +32,6 @@
 #include <iree/runtime/api.h>
 #include <iree/hal/buffer_view_util.h>
 #include <iree/hal/buffer_transfer.h>
-#ifdef XLA_GATE_CUDA
-// CUDA mode (GB10): built against a source-built cuda-enabled IREE runtime
-// (build.rs cuda mode defines XLA_GATE_CUDA). The unified runtime bundles the
-// cuda driver impl + local-task, but the registration wrapper is separate, so
-// the driver is registered explicitly below.
-#include <iree/hal/drivers/cuda/registration/driver_module.h>
-#endif
-
 // libc-backed implementation of the system allocator control function.
 iree_status_t iree_xla_libc_ctl(void* self, iree_allocator_command_t command,
                                 const void* params, void** inout_ptr) {
@@ -85,13 +78,28 @@ iree_status_t iree_xla_libc_ctl(void* self, iree_allocator_command_t command,
     }                                                                    \
   } while (0)
 
+#define XLA_CHECK_GOTO(expr, label, rc_var)                              \
+  do {                                                                   \
+    iree_status_t _s = (expr);                                           \
+    if (!iree_status_is_ok(_s)) {                                        \
+      int _c = (int)iree_status_code(_s);                                \
+      fprintf(stderr, "xla_iree: %s failed (status %d):\n", #expr, _c); \
+      iree_status_fprint(stderr, _s);                                    \
+      iree_status_ignore(_s);                                            \
+      rc_var = _c ? _c : 1;                                             \
+      goto label;                                                        \
+    }                                                                    \
+  } while (0)
+
 typedef struct xla_ctx {
   iree_runtime_instance_t* instance;
   iree_hal_device_t* device;
-  iree_runtime_session_t* session;   // holds both @prefill and @decode_step
-  iree_hal_allocator_t* allocator;   // device allocator (shared by both calls)
+  iree_runtime_session_t* session;   // holds @prefill, @prefill_embeddings, @decode_step
+  iree_hal_allocator_t* allocator;   // device allocator (shared by all calls)
+  uint64_t compatibility_fingerprint;
   int32_t n_weights;
   int32_t context_capacity;
+  int32_t hidden_size;
   iree_hal_buffer_view_t** weights;  // resident weights, uploaded once
   iree_hal_buffer_view_t* kcache;    // threaded KV (set by prefill, advanced by decode)
   iree_hal_buffer_view_t* vcache;
@@ -106,6 +114,17 @@ typedef struct xla_ctx {
   iree_host_size_t rg_per;
   iree_hal_dim_t rg_dims[4];
 } xla_ctx;
+
+// Explicit descriptor for host tensors entering the embeddings ABI. `dtype` is
+// 0=f32 or 1=i32. Rust supplies every byte/rank/shape field and this shim repeats
+// all safety-critical checks before constructing an IREE buffer view.
+typedef struct xla_tensor_desc {
+  const void* data;
+  size_t byte_length;
+  int32_t dtype;
+  int32_t rank;
+  int64_t dims[4];
+} xla_tensor_desc;
 
 // Forward declaration: xla_llama_create's error path frees a partial context.
 void xla_llama_free(xla_ctx* c);
@@ -187,6 +206,59 @@ static iree_status_t xla_alloc_bv(xla_ctx* c, iree_host_size_t rank,
       iree_make_const_byte_span(data, nbytes), out);
 }
 
+static int xla_validate_tensor_desc(const char* name,
+                                    const xla_tensor_desc* desc,
+                                    int32_t expected_dtype,
+                                    int32_t expected_rank,
+                                    const int64_t* expected_dims) {
+  if (!desc || !desc->data || desc->dtype != expected_dtype ||
+      desc->rank != expected_rank || expected_rank < 0 || expected_rank > 4) {
+    fprintf(stderr,
+            "xla_iree: invalid %s descriptor pointer/dtype/rank (want dtype=%d rank=%d)\n",
+            name, expected_dtype, expected_rank);
+    return 1;
+  }
+  size_t element_size = expected_dtype == 0 ? sizeof(float) : sizeof(int32_t);
+  size_t elements = 1;
+  for (int32_t axis = 0; axis < expected_rank; ++axis) {
+    int64_t dim = desc->dims[axis];
+    if (dim <= 0 || dim != expected_dims[axis] ||
+        (size_t)dim > SIZE_MAX / elements) {
+      fprintf(stderr,
+              "xla_iree: invalid %s descriptor axis %d=%lld (want %lld)\n",
+              name, axis, (long long)dim, (long long)expected_dims[axis]);
+      return 1;
+    }
+    elements *= (size_t)dim;
+  }
+  if (elements > SIZE_MAX / element_size) {
+    fprintf(stderr, "xla_iree: %s descriptor byte count overflowed\n", name);
+    return 1;
+  }
+  size_t expected_bytes = elements * element_size;
+  if (desc->byte_length != expected_bytes) {
+    fprintf(stderr,
+            "xla_iree: invalid %s descriptor byte_length=%zu (want %zu)\n",
+            name, desc->byte_length, expected_bytes);
+    return 1;
+  }
+  return 0;
+}
+
+static iree_status_t xla_alloc_desc_bv(xla_ctx* c,
+                                       const xla_tensor_desc* desc,
+                                       iree_hal_buffer_view_t** out) {
+  iree_hal_dim_t shape[4];
+  for (int32_t axis = 0; axis < desc->rank; ++axis) {
+    shape[axis] = (iree_hal_dim_t)desc->dims[axis];
+  }
+  iree_hal_element_type_t element_type =
+      desc->dtype == 0 ? IREE_HAL_ELEMENT_TYPE_FLOAT_32
+                       : IREE_HAL_ELEMENT_TYPE_INT_32;
+  return xla_alloc_bv(c, (iree_host_size_t)desc->rank, shape, element_type,
+                      desc->data, (iree_host_size_t)desc->byte_length, out);
+}
+
 // Validate the static KV contract shared by the paired prefill/decode modules.
 // `context_axis` is 1 for rank-4 [L,S,nkv,d] and 2 for rank-5 [B,L,S,nkv,d].
 static int xla_validate_kv_pair(xla_ctx* c, iree_hal_buffer_view_t* kc,
@@ -194,8 +266,12 @@ static int xla_validate_kv_pair(xla_ctx* c, iree_hal_buffer_view_t* kc,
                                 iree_host_size_t rank,
                                 iree_host_size_t context_axis) {
   if (!kc || !vc || iree_hal_buffer_view_shape_rank(kc) != rank ||
-      iree_hal_buffer_view_shape_rank(vc) != rank) {
-    fprintf(stderr, "xla_iree: expected matching rank-%zu K/V buffers\n",
+      iree_hal_buffer_view_shape_rank(vc) != rank ||
+      iree_hal_buffer_view_element_type(kc) !=
+          IREE_HAL_ELEMENT_TYPE_FLOAT_32 ||
+      iree_hal_buffer_view_element_type(vc) !=
+          IREE_HAL_ELEMENT_TYPE_FLOAT_32) {
+    fprintf(stderr, "xla_iree: expected matching rank-%zu f32 K/V buffers\n",
             (size_t)rank);
     return 1;
   }
@@ -221,27 +297,28 @@ static int xla_validate_kv_pair(xla_ctx* c, iree_hal_buffer_view_t* kc,
 
 static iree_status_t xla_llama_create_impl(
     xla_ctx* c, const char* device_uri, const char* prefill_vmfb,
-    const char* decode_vmfb, int32_t n_weights, const void* const* weight_data,
+    const char* prefill_embeddings_vmfb, const char* decode_vmfb,
+    uint64_t compatibility_fingerprint, int32_t n_weights,
+    const void* const* weight_data,
     const int32_t* weight_dtypes, const int32_t* weight_ranks,
-    const int64_t* weight_dims, int32_t context_capacity) {
-  if (context_capacity <= 0) {
+    const int64_t* weight_dims, int32_t context_capacity,
+    int32_t hidden_size) {
+  if (context_capacity <= 0 || hidden_size <= 0 ||
+      compatibility_fingerprint == 0) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "context_capacity must be positive");
+                            "bundle fingerprint, context_capacity, and hidden_size must be positive");
   }
   c->n_weights = n_weights;
   c->context_capacity = context_capacity;
-
-#ifdef XLA_GATE_CUDA
-  // Register the CUDA driver so use_all_available_drivers exposes it for a
-  // device_uri of "cuda" (GB10). Non-fatal; CUDA is initialized only when a
-  // cuda device is actually created.
-  iree_status_t cu_reg =
-      iree_hal_cuda_driver_module_register(iree_hal_driver_registry_default());
-  if (!iree_status_is_ok(cu_reg)) iree_status_ignore(cu_reg);
-#endif
+  c->hidden_size = hidden_size;
+  c->compatibility_fingerprint = compatibility_fingerprint;
 
   iree_runtime_instance_options_t inst_opts;
   iree_runtime_instance_options_initialize(&inst_opts);
+  // The unified runtime's register-all module owns both CUDA and local-task.
+  // Pre-registering CUDA here makes register-all stop at the duplicate entry
+  // before local-task is reached, which silently breaks CPU parity runs in a
+  // CUDA-enabled build.
   iree_runtime_instance_options_use_all_available_drivers(&inst_opts);
   IREE_RETURN_IF_ERROR(iree_runtime_instance_create(
       &inst_opts, iree_allocator_system(), &c->instance));
@@ -255,12 +332,24 @@ static iree_status_t xla_llama_create_impl(
       c->instance, &sess_opts, c->device,
       iree_runtime_instance_host_allocator(c->instance), &c->session));
 
-  // Both modules in one session; their distinct names (@prefill, @decode_step)
-  // make the calls "prefill.main" and "decode_step.main".
+  // All bundle members enter one session atomically. Their distinct names make
+  // the calls "prefill.main", "prefill_embeddings.main", and
+  // "decode_step.main".
   IREE_RETURN_IF_ERROR(iree_runtime_session_append_bytecode_module_from_file(
       c->session, prefill_vmfb));
   IREE_RETURN_IF_ERROR(iree_runtime_session_append_bytecode_module_from_file(
+      c->session, prefill_embeddings_vmfb));
+  IREE_RETURN_IF_ERROR(iree_runtime_session_append_bytecode_module_from_file(
       c->session, decode_vmfb));
+
+  const char* required_entries[] = {"prefill.main", "prefill_embeddings.main",
+                                    "decode_step.main"};
+  for (size_t i = 0; i < 3; ++i) {
+    iree_runtime_call_t probe;
+    IREE_RETURN_IF_ERROR(iree_runtime_call_initialize_by_name(
+        c->session, iree_make_cstring_view(required_entries[i]), &probe));
+    iree_runtime_call_deinitialize(&probe);
+  }
 
   c->allocator = iree_runtime_session_device_allocator(c->session);
 
@@ -313,18 +402,23 @@ static iree_status_t xla_llama_create_impl(
 // caller may free them after this returns. Returns NULL on failure (after printing
 // a diagnostic).
 xla_ctx* xla_llama_create(const char* device_uri, const char* prefill_vmfb,
-                          const char* decode_vmfb, int32_t n_weights,
+                          const char* prefill_embeddings_vmfb,
+                          const char* decode_vmfb,
+                          uint64_t compatibility_fingerprint,
+                          int32_t n_weights,
                           const void* const* weight_data,
                           const int32_t* weight_dtypes,
                           const int32_t* weight_ranks,
                           const int64_t* weight_dims,
-                          int32_t context_capacity) {
+                          int32_t context_capacity, int32_t hidden_size) {
   xla_ctx* c = (xla_ctx*)calloc(1, sizeof(xla_ctx));
   if (!c) return NULL;
   iree_status_t s =
-      xla_llama_create_impl(c, device_uri, prefill_vmfb, decode_vmfb, n_weights,
-                            weight_data, weight_dtypes, weight_ranks, weight_dims,
-                            context_capacity);
+      xla_llama_create_impl(c, device_uri, prefill_vmfb,
+                            prefill_embeddings_vmfb, decode_vmfb,
+                            compatibility_fingerprint, n_weights, weight_data,
+                            weight_dtypes, weight_ranks, weight_dims,
+                            context_capacity, hidden_size);
   if (!iree_status_is_ok(s)) {
     char buf[512];
     iree_host_size_t got = 0;
@@ -491,7 +585,16 @@ int xla_llama_decode(xla_ctx* c, int32_t token, int32_t pos, int32_t cache_len,
 // makes a zeroed (cache_len 0) slot a harmless no-op whose output is discarded.
 static iree_status_t xla_ensure_batch_kv(xla_ctx* c) {
   if (c->kcache_b && c->vcache_b) return iree_ok_status();
+  if (c->rg_bsz <= 0 || c->rg_per == 0 ||
+      (iree_host_size_t)c->rg_bsz > SIZE_MAX / c->rg_per) {
+    return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                            "batch KV element count overflowed");
+  }
   iree_host_size_t count = (iree_host_size_t)c->rg_bsz * c->rg_per;
+  if (count > SIZE_MAX / sizeof(float)) {
+    return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                            "batch KV byte count overflowed");
+  }
   iree_host_size_t bytes = count * sizeof(float);
   float* zeros = (float*)calloc((size_t)count, sizeof(float));
   if (!zeros) return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED);
@@ -504,7 +607,67 @@ static iree_status_t xla_ensure_batch_kv(xla_ctx* c) {
                      &c->vcache_b);
   }
   free(zeros);
+  if (!iree_status_is_ok(s)) {
+    if (c->kcache_b) {
+      iree_hal_buffer_view_release(c->kcache_b);
+      c->kcache_b = NULL;
+    }
+    if (c->vcache_b) {
+      iree_hal_buffer_view_release(c->vcache_b);
+      c->vcache_b = NULL;
+    }
+  }
   return s;
+}
+
+// Copy one rank-4 prefill KV pair directly into the selected region of the
+// resident rank-5 batch cache. Token and embeddings prefill both use this exact
+// device-side path; no KV bytes cross host memory.
+static int xla_store_prefill_kv_slot(xla_ctx* c, int32_t slot,
+                                     iree_hal_buffer_view_t* kc,
+                                     iree_hal_buffer_view_t* vc) {
+  if (slot < 0 || slot >= c->rg_bsz ||
+      xla_validate_kv_pair(c, kc, vc, 4, 1) != 0) {
+    return 1;
+  }
+  iree_host_size_t per = iree_hal_buffer_view_element_count(kc);
+  if (c->rg_per == 0) {
+    c->rg_per = per;
+    for (int32_t i = 0; i < 4; ++i) {
+      c->rg_dims[i] = iree_hal_buffer_view_shape_dim(kc, i);
+    }
+  } else {
+    if (per != c->rg_per) {
+      fprintf(stderr, "xla_iree: prefill KV element count changed\n");
+      return 1;
+    }
+    for (int32_t i = 0; i < 4; ++i) {
+      if (c->rg_dims[i] != iree_hal_buffer_view_shape_dim(kc, i)) {
+        fprintf(stderr, "xla_iree: prefill KV shape changed at axis %d\n", i);
+        return 1;
+      }
+    }
+  }
+  XLA_CHECK(xla_ensure_batch_kv(c));
+  if (per > IREE_DEVICE_SIZE_MAX / sizeof(float)) {
+    fprintf(stderr, "xla_iree: prefill KV byte count overflowed\n");
+    return 1;
+  }
+  iree_device_size_t len = (iree_device_size_t)per * sizeof(float);
+  if ((iree_device_size_t)slot > IREE_DEVICE_SIZE_MAX / len) {
+    fprintf(stderr, "xla_iree: prefill KV slot offset overflowed\n");
+    return 1;
+  }
+  iree_device_size_t off = (iree_device_size_t)slot * len;
+  XLA_CHECK(iree_hal_device_transfer_d2d(
+      c->device, iree_hal_buffer_view_buffer(kc), 0,
+      iree_hal_buffer_view_buffer(c->kcache_b), off, len,
+      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout()));
+  XLA_CHECK(iree_hal_device_transfer_d2d(
+      c->device, iree_hal_buffer_view_buffer(vc), 0,
+      iree_hal_buffer_view_buffer(c->vcache_b), off, len,
+      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout()));
+  return 0;
 }
 
 // Reset the batched state for `bsz` slots: drop any rank-5 KV and forget the
@@ -589,11 +752,6 @@ int xla_llama_prefill_slot_logits(xla_ctx* c, int32_t slot, const int32_t* token
     iree_runtime_call_deinitialize(&call);
     return 1;
   }
-  if (c->kcache) iree_hal_buffer_view_release(c->kcache);
-  if (c->vcache) iree_hal_buffer_view_release(c->vcache);
-  c->kcache = kc;
-  c->vcache = vc;
-
   iree_status_t rs =
       xla_read_logits(c, logits, out_logits, (iree_host_size_t)vocab);
   iree_hal_buffer_view_release(logits);
@@ -604,45 +762,140 @@ int xla_llama_prefill_slot_logits(xla_ctx* c, int32_t slot, const int32_t* token
   if (!iree_status_is_ok(rs)) {
     int code = (int)iree_status_code(rs);
     iree_status_ignore(rs);
+    iree_hal_buffer_view_release(kc);
+    iree_hal_buffer_view_release(vc);
     return code ? code : 1;
   }
+  int copy_rc = xla_store_prefill_kv_slot(c, slot, kc, vc);
+  iree_hal_buffer_view_release(kc);
+  iree_hal_buffer_view_release(vc);
+  return copy_rc;
+}
 
-  iree_host_size_t per = iree_hal_buffer_view_element_count(c->kcache);
-  if (c->rg_per == 0) {
-    c->rg_per = per;
-    for (int32_t i = 0; i < 4; i++) {
-      c->rg_dims[i] = iree_hal_buffer_view_shape_dim(c->kcache, i);
-    }
-  } else {
-    if (per != c->rg_per) {
-      fprintf(stderr, "xla_llama_prefill_slot_logits: KV element count changed\n");
-      return 1;
-    }
-    for (int32_t i = 0; i < 4; i++) {
-      if (c->rg_dims[i] != iree_hal_buffer_view_shape_dim(c->kcache, i)) {
-        fprintf(stderr,
-                "xla_llama_prefill_slot_logits: KV shape changed at axis %d\n",
-                i);
-        return 1;
-      }
-    }
+static int xla_llama_prefill_embeddings_impl(
+    xla_ctx* c, int32_t slot, const xla_tensor_desc* embeddings,
+    const xla_tensor_desc* positions, const xla_tensor_desc* attention_bias,
+    int32_t real_len, int32_t vocab, int32_t* out_token, float* out_logits) {
+  if (!c || real_len <= 0 || real_len > c->context_capacity) {
+    fprintf(stderr,
+            "xla_llama_prefill_embeddings: real_len=%d context_capacity=%d\n",
+            real_len, c ? c->context_capacity : 0);
+    return 1;
   }
-  XLA_CHECK(xla_ensure_batch_kv(c));
-  iree_device_size_t off = (iree_device_size_t)slot * per * sizeof(float);
-  iree_device_size_t len = (iree_device_size_t)per * sizeof(float);
-  XLA_CHECK(iree_hal_device_transfer_d2d(
-      c->device, iree_hal_buffer_view_buffer(c->kcache), 0,
-      iree_hal_buffer_view_buffer(c->kcache_b), off, len,
-      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout()));
-  XLA_CHECK(iree_hal_device_transfer_d2d(
-      c->device, iree_hal_buffer_view_buffer(c->vcache), 0,
-      iree_hal_buffer_view_buffer(c->vcache_b), off, len,
-      IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout()));
-  iree_hal_buffer_view_release(c->kcache);
-  c->kcache = NULL;
-  iree_hal_buffer_view_release(c->vcache);
-  c->vcache = NULL;
-  return 0;
+  int64_t embeddings_dims[2] = {c->context_capacity, c->hidden_size};
+  int64_t positions_dims[1] = {c->context_capacity};
+  int64_t bias_dims[2] = {c->context_capacity, c->context_capacity};
+  if (xla_validate_tensor_desc("embeddings", embeddings, 0, 2,
+                               embeddings_dims) != 0 ||
+      xla_validate_tensor_desc("positions", positions, 1, 1,
+                               positions_dims) != 0 ||
+      xla_validate_tensor_desc("attention_bias", attention_bias, 0, 2,
+                               bias_dims) != 0) {
+    return 1;
+  }
+  bool batched = slot >= 0;
+  if ((!batched && !out_token) ||
+      (batched && (slot >= c->rg_bsz || vocab <= 0 || !out_logits))) {
+    fprintf(stderr,
+            "xla_llama_prefill_embeddings: invalid slot/output/vocab contract\n");
+    return 1;
+  }
+
+  int rc = 0;
+  bool call_initialized = false;
+  iree_runtime_call_t call;
+  iree_hal_buffer_view_t* embeddings_bv = NULL;
+  iree_hal_buffer_view_t* positions_bv = NULL;
+  iree_hal_buffer_view_t* len_bv = NULL;
+  iree_hal_buffer_view_t* bias_bv = NULL;
+  iree_hal_buffer_view_t* output = NULL;
+  iree_hal_buffer_view_t* kc = NULL;
+  iree_hal_buffer_view_t* vc = NULL;
+
+  XLA_CHECK_GOTO(iree_runtime_call_initialize_by_name(
+                     c->session,
+                     iree_make_cstring_view("prefill_embeddings.main"), &call),
+                 cleanup, rc);
+  call_initialized = true;
+  for (int32_t i = 0; i < c->n_weights; ++i) {
+    XLA_CHECK_GOTO(
+        iree_runtime_call_inputs_push_back_buffer_view(&call, c->weights[i]),
+        cleanup, rc);
+  }
+  XLA_CHECK_GOTO(xla_alloc_desc_bv(c, embeddings, &embeddings_bv), cleanup, rc);
+  XLA_CHECK_GOTO(xla_alloc_desc_bv(c, positions, &positions_bv), cleanup, rc);
+  XLA_CHECK_GOTO(xla_alloc_bv(c, 0, NULL, IREE_HAL_ELEMENT_TYPE_INT_32,
+                             &real_len, sizeof(int32_t), &len_bv),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(xla_alloc_desc_bv(c, attention_bias, &bias_bv), cleanup, rc);
+  XLA_CHECK_GOTO(
+      iree_runtime_call_inputs_push_back_buffer_view(&call, embeddings_bv),
+      cleanup, rc);
+  XLA_CHECK_GOTO(
+      iree_runtime_call_inputs_push_back_buffer_view(&call, positions_bv),
+      cleanup, rc);
+  XLA_CHECK_GOTO(iree_runtime_call_inputs_push_back_buffer_view(&call, len_bv),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(iree_runtime_call_inputs_push_back_buffer_view(&call, bias_bv),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(iree_runtime_call_invoke(&call, 0), cleanup, rc);
+  XLA_CHECK_GOTO(
+      iree_runtime_call_outputs_pop_front_buffer_view(&call, &output), cleanup,
+      rc);
+  XLA_CHECK_GOTO(iree_runtime_call_outputs_pop_front_buffer_view(&call, &kc),
+                 cleanup, rc);
+  XLA_CHECK_GOTO(iree_runtime_call_outputs_pop_front_buffer_view(&call, &vc),
+                 cleanup, rc);
+  if (xla_validate_kv_pair(c, kc, vc, 4, 1) != 0) {
+    rc = 1;
+    goto cleanup;
+  }
+
+  if (batched) {
+    XLA_CHECK_GOTO(
+        xla_read_logits(c, output, out_logits, (iree_host_size_t)vocab),
+        cleanup, rc);
+    rc = xla_store_prefill_kv_slot(c, slot, kc, vc);
+  } else {
+    XLA_CHECK_GOTO(xla_read_token(c, output, out_token), cleanup, rc);
+    iree_hal_buffer_view_t* old_k = c->kcache;
+    iree_hal_buffer_view_t* old_v = c->vcache;
+    c->kcache = kc;
+    c->vcache = vc;
+    kc = NULL;
+    vc = NULL;
+    if (old_k) iree_hal_buffer_view_release(old_k);
+    if (old_v) iree_hal_buffer_view_release(old_v);
+  }
+
+cleanup:
+  if (output) iree_hal_buffer_view_release(output);
+  if (kc) iree_hal_buffer_view_release(kc);
+  if (vc) iree_hal_buffer_view_release(vc);
+  if (embeddings_bv) iree_hal_buffer_view_release(embeddings_bv);
+  if (positions_bv) iree_hal_buffer_view_release(positions_bv);
+  if (len_bv) iree_hal_buffer_view_release(len_bv);
+  if (bias_bv) iree_hal_buffer_view_release(bias_bv);
+  if (call_initialized) iree_runtime_call_deinitialize(&call);
+  return rc;
+}
+
+int xla_llama_prefill_embeddings(
+    xla_ctx* c, const xla_tensor_desc* embeddings,
+    const xla_tensor_desc* positions, const xla_tensor_desc* attention_bias,
+    int32_t real_len, int32_t* out_token) {
+  return xla_llama_prefill_embeddings_impl(
+      c, -1, embeddings, positions, attention_bias, real_len, 0, out_token,
+      NULL);
+}
+
+int xla_llama_prefill_embeddings_slot_logits(
+    xla_ctx* c, int32_t slot, const xla_tensor_desc* embeddings,
+    const xla_tensor_desc* positions, const xla_tensor_desc* attention_bias,
+    int32_t real_len, int32_t vocab, float* out_logits) {
+  return xla_llama_prefill_embeddings_impl(
+      c, slot, embeddings, positions, attention_bias, real_len, vocab, NULL,
+      out_logits);
 }
 
 // Ragged decode_step: token[B], pos[B], cache_len[B] (per row), rank-5 KV ->

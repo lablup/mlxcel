@@ -40,6 +40,8 @@ use mlxcel_core::MlxArray;
 use mlxcel_core::generate::{GenerationStats, LanguageModel, SamplingConfig};
 #[cfg(feature = "xla-backend")]
 use mlxcel_core::session::InferenceSession;
+#[cfg(feature = "xla-backend")]
+use mlxcel_core::session::PreparedPrefill;
 use mlxcel_core::session::{MlxInferenceSession, SessionCapabilities};
 #[cfg(feature = "xla-backend")]
 use mlxcel_xla::XlaInferenceSession;
@@ -180,11 +182,14 @@ impl Session {
                 sampling,
                 on_token,
             ),
-            // The XLA session is single-sequence text; it has no multimodal
-            // capability, so it ignores the input embeddings and drives the token
-            // stream from the prompt ids.
             #[cfg(feature = "xla-backend")]
             Session::Xla(s) => {
+                if input_embeddings.is_some() || mask.is_some() {
+                    eprintln!(
+                        "OpenXLA generation rejected native MLX embeddings; provide an owned PreparedPrefill through generate_streaming_with_prepared"
+                    );
+                    return Vec::new();
+                }
                 let eos = s.eos_token_ids().to_vec();
                 s.generate_streaming_greedy(prompt_tokens, max_tokens, &eos, on_token)
                     .unwrap_or_else(|e| {
@@ -220,6 +225,49 @@ impl Session {
         }
     }
 
+    /// Streaming OpenXLA generation from the backend-neutral owned embeddings
+    /// contract. MLX callers must continue using their native array entry.
+    #[cfg(feature = "xla-backend")]
+    #[inline]
+    pub fn generate_streaming_with_prepared<F: FnMut(i32) -> bool>(
+        &mut self,
+        prepared: &PreparedPrefill,
+        max_tokens: usize,
+        on_token: F,
+    ) -> Result<Vec<i32>, String> {
+        match self {
+            Session::Mlx(_) => Err(
+                "the MLX session does not consume PreparedPrefill; use generate_streaming_with_embeddings with native MLX arrays"
+                    .to_string(),
+            ),
+            Session::Xla(s) => {
+                let eos = s.eos_token_ids().to_vec();
+                s.generate_prepared_streaming_greedy(prepared, max_tokens, &eos, on_token)
+            }
+        }
+    }
+
+    /// Non-streaming OpenXLA generation from owned prepared embeddings.
+    #[cfg(feature = "xla-backend")]
+    #[inline]
+    pub fn generate_with_stats_and_prepared(
+        &mut self,
+        prepared: &PreparedPrefill,
+        max_tokens: usize,
+    ) -> Result<(Vec<i32>, GenerationStats), String> {
+        match self {
+            Session::Mlx(_) => Err(
+                "the MLX session does not consume PreparedPrefill; use generate_with_stats_and_embeddings with native MLX arrays"
+                    .to_string(),
+            ),
+            Session::Xla(s) => {
+                let eos = s.eos_token_ids().to_vec();
+                let tokens = s.generate_prepared_greedy(prepared, max_tokens, &eos)?;
+                Ok((tokens, GenerationStats::default()))
+            }
+        }
+    }
+
     /// Embedding-prefill generation with profiling stats.
     #[inline]
     pub fn generate_with_stats_and_embeddings<M: LanguageModel>(
@@ -242,6 +290,12 @@ impl Session {
             ),
             #[cfg(feature = "xla-backend")]
             Session::Xla(s) => {
+                if input_embeddings.is_some() || mask.is_some() {
+                    eprintln!(
+                        "OpenXLA generation rejected native MLX embeddings; provide an owned PreparedPrefill through generate_with_stats_and_prepared"
+                    );
+                    return (Vec::new(), GenerationStats::default());
+                }
                 let eos = s.eos_token_ids().to_vec();
                 let toks = s
                     .generate_greedy(prompt_tokens, max_tokens, &eos)

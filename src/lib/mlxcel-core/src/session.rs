@@ -113,6 +113,13 @@ impl SessionCapabilities {
             multimodal: false,
         }
     }
+
+    /// Advertise owned/native multimodal prefill on a single-sequence session.
+    #[must_use]
+    pub const fn with_multimodal(mut self) -> Self {
+        self.multimodal = true;
+        self
+    }
 }
 
 /// The engine-neutral, single-sequence inference contract (ADR 0004).
@@ -144,6 +151,20 @@ pub trait InferenceSession {
     /// Backends that do not expose token-level stepping (the MLX reference
     /// session) return an error pointing at the fused generation entry points.
     fn prefill(&mut self, token_ids: &[i32]) -> Result<(), String>;
+
+    /// Seed KV from an owned, validated embeddings payload and return the first
+    /// sampled token produced at its effective final position.
+    ///
+    /// Returning the first token keeps the expanded embedding length distinct
+    /// from logical token history: the backend seeds every prepared position
+    /// exactly once, then decode begins at `sequence_len`.
+    ///
+    /// # Errors
+    ///
+    /// Backends without an owned prepared-prefill entry return an explicit
+    /// unsupported error. Implementations must never fall back to token prefill
+    /// while silently discarding this payload.
+    fn prefill_prepared(&mut self, prepared: &PreparedPrefill) -> Result<i32, String>;
 
     /// Advance generation by one token given the previously emitted token, and
     /// return the next sampled token id (conceptual contract).
@@ -325,6 +346,13 @@ impl InferenceSession for MlxInferenceSession {
 
     fn prefill(&mut self, _token_ids: &[i32]) -> Result<(), String> {
         Err(RESERVED_STEP_CONTRACT.to_string())
+    }
+
+    fn prefill_prepared(&mut self, _prepared: &PreparedPrefill) -> Result<i32, String> {
+        Err(
+            "MlxInferenceSession does not consume the owned PreparedPrefill contract; use its native MLX embedding-prefill entry points"
+                .to_string(),
+        )
     }
 
     fn decode_step(&mut self, _token: i32) -> Result<i32, String> {

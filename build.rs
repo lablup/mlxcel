@@ -114,20 +114,27 @@ fn main() {
             ] {
                 println!("cargo:rustc-link-search=native={}", b.join(d).display());
             }
-            for arg in [
+            let mut link_args = vec![
                 "-Wl,--whole-archive",
                 "-l:libiree_runtime_unified.a",
                 "-Wl,--no-whole-archive",
                 "-Wl,--start-group",
                 "-l:libiree_hal_drivers_cuda_registration_registration.a",
-                "-l:libprintf_printf.a",
                 "-l:libflatcc_parsing.a",
                 "-lgcc",
                 "-lm",
                 "-lpthread",
                 "-ldl",
                 "-Wl,--end-group",
-            ] {
+            ];
+            // Older source builds leave the vendored printf implementation in
+            // its own archive; newer unified runtimes carry it directly and do
+            // not produce that archive. Link it only when the build generated it.
+            let printf = b.join("build_tools/third_party/printf/libprintf_printf.a");
+            if printf.exists() {
+                link_args.insert(5, "-l:libprintf_printf.a");
+            }
+            for arg in link_args {
                 println!("cargo:rustc-link-arg={arg}");
             }
             return;

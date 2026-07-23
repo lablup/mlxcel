@@ -54,12 +54,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use memmap2::Mmap;
+use mlxcel_core::session::PreparedPrefill;
 use safetensors::{Dtype, SafeTensors};
 
 use crate::emitter::{
     Config, Precision, check_packed_supported, emit_decode_ragged_with, emit_decode_with,
-    emit_prefill_with, quant_in_graph, resolve_precision, resolve_precision_checked,
+    emit_prefill_embeddings_with, emit_prefill_with, quant_in_graph, resolve_precision,
+    resolve_precision_checked,
 };
+use crate::prepared::{PreparedIreePrefill, validate_slot};
 // The loader reads the per-architecture checkpoint-weight order from
 // `weights::weight_specs`, which sources its names from `weight_names::scheme_names`
 // (issue #499 naming schemes) and covers the #498 dense pack (LayerNorm / o_proj /
@@ -78,6 +81,84 @@ use crate::weights::{
 const WDT_F32: c_int = 0;
 const WDT_F16: c_int = 1;
 const WDT_U32: c_int = 2;
+
+/// C-side tensor element types. Keep in sync with `xla_tensor_desc` validation
+/// in `csrc/xla_iree.c`.
+const TENSOR_F32: c_int = 0;
+const TENSOR_I32: c_int = 1;
+
+/// Explicit tensor descriptor crossing the C ABI. Every input includes its byte
+/// length, dtype, rank, and complete static shape; the shim revalidates these
+/// fields before constructing an IREE buffer view.
+#[repr(C)]
+struct XlaTensorDesc {
+    data: *const c_void,
+    byte_length: usize,
+    dtype: c_int,
+    rank: c_int,
+    dims: [i64; 4],
+}
+
+impl XlaTensorDesc {
+    fn f32(data: &[f32], shape: &[usize]) -> Result<Self, String> {
+        Self::new(
+            data.as_ptr().cast(),
+            data.len(),
+            std::mem::size_of::<f32>(),
+            TENSOR_F32,
+            shape,
+        )
+    }
+
+    fn i32(data: &[i32], shape: &[usize]) -> Result<Self, String> {
+        Self::new(
+            data.as_ptr().cast(),
+            data.len(),
+            std::mem::size_of::<i32>(),
+            TENSOR_I32,
+            shape,
+        )
+    }
+
+    fn new(
+        data: *const c_void,
+        elements: usize,
+        element_size: usize,
+        dtype: c_int,
+        shape: &[usize],
+    ) -> Result<Self, String> {
+        if shape.len() > 4 {
+            return Err(format!(
+                "IREE tensor descriptor rank {} exceeds 4",
+                shape.len()
+            ));
+        }
+        let expected = shape
+            .iter()
+            .try_fold(1usize, |count, &dim| count.checked_mul(dim))
+            .ok_or_else(|| "IREE tensor descriptor element count overflowed".to_string())?;
+        if elements != expected {
+            return Err(format!(
+                "IREE tensor descriptor element count {elements} disagrees with shape {shape:?} ({expected})"
+            ));
+        }
+        let byte_length = elements
+            .checked_mul(element_size)
+            .ok_or_else(|| "IREE tensor descriptor byte count overflowed".to_string())?;
+        let mut dims = [0i64; 4];
+        for (index, &dim) in shape.iter().enumerate() {
+            dims[index] = i64::try_from(dim)
+                .map_err(|_| format!("IREE tensor dimension {dim} does not fit i64"))?;
+        }
+        Ok(Self {
+            data,
+            byte_length,
+            dtype,
+            rank: shape.len() as c_int,
+            dims,
+        })
+    }
+}
 
 /// A resident-weight host buffer, kept alive until the shim copies it to the device.
 /// f32 values (a widened / dequantized weight, the proven path), f16 values (an
@@ -110,13 +191,16 @@ unsafe extern "C" {
     fn xla_llama_create(
         device: *const c_char,
         prefill: *const c_char,
+        prefill_embeddings: *const c_char,
         decode: *const c_char,
+        compatibility_fingerprint: u64,
         n_weights: c_int,
         weight_data: *const *const c_void,
         weight_dtypes: *const c_int,
         weight_ranks: *const c_int,
         weight_dims: *const i64,
         context_capacity: c_int,
+        hidden_size: c_int,
     ) -> *mut XlaCtx;
     fn xla_llama_prefill(
         c: *mut XlaCtx,
@@ -144,6 +228,24 @@ unsafe extern "C" {
         tokens: *const c_int,
         lp: c_int,
         positions: *const c_int,
+        real_len: c_int,
+        vocab: c_int,
+        out_logits: *mut f32,
+    ) -> c_int;
+    fn xla_llama_prefill_embeddings(
+        c: *mut XlaCtx,
+        embeddings: *const XlaTensorDesc,
+        positions: *const XlaTensorDesc,
+        attention_bias: *const XlaTensorDesc,
+        real_len: c_int,
+        out_token: *mut c_int,
+    ) -> c_int;
+    fn xla_llama_prefill_embeddings_slot_logits(
+        c: *mut XlaCtx,
+        slot: c_int,
+        embeddings: *const XlaTensorDesc,
+        positions: *const XlaTensorDesc,
+        attention_bias: *const XlaTensorDesc,
         real_len: c_int,
         vocab: c_int,
         out_logits: *mut f32,
@@ -288,16 +390,29 @@ fn compile_one(
     Ok(vmfb_path)
 }
 
-/// Compile a (prefill, decode) graph pair for `device`. The single-sequence engine
-/// uses the argmax pair; the ragged engine uses the logits pair (Stage 2d).
-fn compile_pair(
+/// Three compatible entry modules loaded atomically into one runtime session.
+struct CompiledBundle {
+    prefill_vmfb: PathBuf,
+    prefill_embeddings_vmfb: PathBuf,
+    decode_vmfb: PathBuf,
+    compatibility_fingerprint: u64,
+}
+
+/// Compile the token prefill, embeddings prefill, and decode entries as one
+/// compatibility bundle. The fingerprint binds their architecture/config text,
+/// weight argument schema, precision, context/hidden/KV dimensions, and ABI
+/// schema version; a member compiled from a different contract therefore cannot
+/// be substituted without changing the fingerprint.
+fn compile_bundle(
     device: &str,
+    cfg: &Config,
     prefill_mlir: &str,
     prefill_tag: &str,
+    prefill_embeddings_mlir: &str,
+    prefill_embeddings_tag: &str,
     decode_mlir: &str,
     decode_tag: &str,
-    context_capacity: usize,
-) -> Result<(PathBuf, PathBuf), String> {
+) -> Result<CompiledBundle, String> {
     let iree_compile = iree_compile_bin()?;
     if !iree_compile.exists() {
         return Err(format!(
@@ -314,7 +429,15 @@ fn compile_pair(
         flags,
         &cache,
         prefill_tag,
-        context_capacity,
+        cfg.context_capacity,
+    )?;
+    let pre_embeddings = compile_one(
+        &iree_compile,
+        prefill_embeddings_mlir,
+        flags,
+        &cache,
+        prefill_embeddings_tag,
+        cfg.context_capacity,
     )?;
     let dec = compile_one(
         &iree_compile,
@@ -322,27 +445,41 @@ fn compile_pair(
         flags,
         &cache,
         decode_tag,
-        context_capacity,
+        cfg.context_capacity,
     )?;
-    Ok((pre, dec))
+    let mut fingerprint = std::collections::hash_map::DefaultHasher::new();
+    "mlxcel-xla-runtime-bundle-v1".hash(&mut fingerprint);
+    format!("{cfg:?}").hash(&mut fingerprint);
+    format!("{:?}", weight_specs(cfg)).hash(&mut fingerprint);
+    format!("{:?}", resolve_precision(device)).hash(&mut fingerprint);
+    prefill_mlir.hash(&mut fingerprint);
+    prefill_embeddings_mlir.hash(&mut fingerprint);
+    decode_mlir.hash(&mut fingerprint);
+    let compatibility_fingerprint = fingerprint.finish();
+    Ok(CompiledBundle {
+        prefill_vmfb: pre,
+        prefill_embeddings_vmfb: pre_embeddings,
+        decode_vmfb: dec,
+        compatibility_fingerprint: compatibility_fingerprint.max(1),
+    })
 }
 
-/// Emit and compile the argmax prefill + single-token decode graphs for `cfg` on
-/// `device` (the single-sequence engine's on-device-argmax pair). The graph text
-/// is emitted from the model config, so `compile_one`'s text-hash cache keys a
-/// distinct vmfb per architecture.
-fn compile_vmfbs(device: &str, cfg: &Config) -> Result<(PathBuf, PathBuf), String> {
+/// Emit and compile the argmax prefill bundle for a single-sequence engine.
+fn compile_vmfbs(device: &str, cfg: &Config) -> Result<CompiledBundle, String> {
     let precision = resolve_precision_checked(device)?;
     check_packed_supported(device, quant_in_graph() && cfg.supports_packed_quant())?;
     let prefill = emit_prefill_with(cfg, true, precision);
+    let prefill_embeddings = emit_prefill_embeddings_with(cfg, true, precision);
     let decode = emit_decode_with(cfg, true, precision);
-    compile_pair(
+    compile_bundle(
         device,
+        cfg,
         &prefill,
         "prefill",
+        &prefill_embeddings,
+        "prefill_embeddings",
         &decode,
         "decode",
-        cfg.context_capacity,
     )
 }
 
@@ -610,6 +747,21 @@ fn path_cstring(p: &Path) -> Result<CString, String> {
         .map_err(|_| format!("path has an interior nul byte: {}", p.display()))
 }
 
+fn prepared_descriptors(
+    prepared: &PreparedIreePrefill,
+) -> Result<(XlaTensorDesc, XlaTensorDesc, XlaTensorDesc), String> {
+    let embeddings = XlaTensorDesc::f32(
+        &prepared.embeddings,
+        &[prepared.context_capacity, prepared.hidden_size],
+    )?;
+    let positions = XlaTensorDesc::i32(&prepared.positions, &[prepared.context_capacity])?;
+    let attention_bias = XlaTensorDesc::f32(
+        &prepared.attention_bias,
+        &[prepared.context_capacity, prepared.context_capacity],
+    )?;
+    Ok((embeddings, positions, attention_bias))
+}
+
 /// Load the weights and create the C execution context for a (prefill, decode)
 /// vmfb pair on `device`. Shared by the single-sequence ([`IreeLlama`]) and ragged
 /// ([`IreeRaggedLlama`]) engines, which differ only in which decode vmfb they pass.
@@ -617,8 +769,7 @@ fn create_ctx(
     model_dir: &Path,
     cfg: &Config,
     device: &str,
-    prefill_vmfb: &Path,
-    decode_vmfb: &Path,
+    bundle: &CompiledBundle,
 ) -> Result<*mut XlaCtx, String> {
     // issue #572: the f16 GPU path uploads the projection weights f16-resident to
     // match the emitter's f16 args. Uses the same resolve_precision(device) the graph
@@ -630,21 +781,25 @@ fn create_ctx(
         .map(|b| b.as_u8_ptr() as *const c_void)
         .collect();
     let c_dev = CString::new(device).map_err(|_| "device has interior nul".to_string())?;
-    let c_pre = path_cstring(prefill_vmfb)?;
-    let c_dec = path_cstring(decode_vmfb)?;
+    let c_pre = path_cstring(&bundle.prefill_vmfb)?;
+    let c_pre_embeddings = path_cstring(&bundle.prefill_embeddings_vmfb)?;
+    let c_dec = path_cstring(&bundle.decode_vmfb)?;
     // Safety: pointers are valid for the duration of the call; the shim copies
     // the weight data into device buffers before returning.
     let ctx = unsafe {
         xla_llama_create(
             c_dev.as_ptr(),
             c_pre.as_ptr(),
+            c_pre_embeddings.as_ptr(),
             c_dec.as_ptr(),
+            bundle.compatibility_fingerprint,
             bufs.len() as c_int,
             ptrs.as_ptr(),
             dtypes.as_ptr(),
             ranks.as_ptr(),
             dims.as_ptr(),
             cfg.context_capacity as c_int,
+            cfg.hidden as c_int,
         )
     };
     // Weights are resident on the device now; free the host copy.
@@ -664,6 +819,7 @@ fn create_ctx(
 pub struct IreeLlama {
     ctx: *mut XlaCtx,
     context_capacity: usize,
+    hidden_size: usize,
 }
 
 impl IreeLlama {
@@ -672,11 +828,12 @@ impl IreeLlama {
     /// weights resident, and readies the prefill / decode calls.
     pub fn load(model_dir: &Path, device: &str, context_capacity: usize) -> Result<Self, String> {
         let cfg = Config::from_json(model_dir)?.with_context_capacity(context_capacity)?;
-        let (prefill_vmfb, decode_vmfb) = compile_vmfbs(device, &cfg)?;
-        let ctx = create_ctx(model_dir, &cfg, device, &prefill_vmfb, &decode_vmfb)?;
+        let bundle = compile_vmfbs(device, &cfg)?;
+        let ctx = create_ctx(model_dir, &cfg, device, &bundle)?;
         Ok(Self {
             ctx,
             context_capacity: cfg.context_capacity,
+            hidden_size: cfg.hidden,
         })
     }
 
@@ -706,6 +863,34 @@ impl IreeLlama {
             return Err("prefill_first requires a non-empty prompt".to_string());
         }
         self.prefill_padded(prompt)
+    }
+
+    /// Validate an owned embeddings payload, seed the resident KV through the
+    /// dedicated embeddings module, and return the first sampled token.
+    pub fn prefill_prepared_first(&mut self, prepared: &PreparedPrefill) -> Result<i32, String> {
+        let prepared =
+            PreparedIreePrefill::prepare(prepared, self.hidden_size, self.context_capacity)
+                .map_err(|error| error.to_string())?;
+        let (embeddings, positions, attention_bias) = prepared_descriptors(&prepared)?;
+        let real_len = i32::try_from(prepared.effective_len)
+            .map_err(|_| "prepared effective length does not fit i32".to_string())?;
+        let mut out = 0i32;
+        // Safety: every descriptor references a validated owned vector that
+        // outlives the call; the C shim repeats dtype/rank/shape/byte checks.
+        let rc = unsafe {
+            xla_llama_prefill_embeddings(
+                self.ctx,
+                &embeddings,
+                &positions,
+                &attention_bias,
+                real_len,
+                &mut out,
+            )
+        };
+        if rc != 0 {
+            return Err(format!("xla_llama_prefill_embeddings failed (status {rc})"));
+        }
+        Ok(out)
     }
 
     /// Pad `prompt` into the configured static bucket, run the prefill, and return its
@@ -786,6 +971,7 @@ pub struct IreeRaggedLlama {
     /// buffers and the per-row logits slice are sized by it.
     vocab: usize,
     context_capacity: usize,
+    hidden_size: usize,
 }
 
 impl IreeRaggedLlama {
@@ -812,16 +998,19 @@ impl IreeRaggedLlama {
         let precision = resolve_precision_checked(device)?;
         check_packed_supported(device, quant_in_graph() && cfg.supports_packed_quant())?;
         let prefill_mlir = emit_prefill_with(&cfg, false, precision);
+        let prefill_embeddings_mlir = emit_prefill_embeddings_with(&cfg, false, precision);
         let decode_mlir = emit_decode_ragged_with(&cfg, b_max, false, precision);
-        let (prefill_vmfb, decode_vmfb) = compile_pair(
+        let bundle = compile_bundle(
             device,
+            &cfg,
             &prefill_mlir,
             "prefill_logits",
+            &prefill_embeddings_mlir,
+            "prefill_embeddings_logits",
             &decode_mlir,
             &format!("decode_ragged_logits_b{b_max}"),
-            cfg.context_capacity,
         )?;
-        let ctx = create_ctx(model_dir, &cfg, device, &prefill_vmfb, &decode_vmfb)?;
+        let ctx = create_ctx(model_dir, &cfg, device, &bundle)?;
         // Safety: ctx is a fresh valid context from create_ctx; free it on error.
         let rc = unsafe { xla_llama_ragged_reset(ctx, b_max as c_int) };
         if rc != 0 {
@@ -833,6 +1022,7 @@ impl IreeRaggedLlama {
             b_max,
             vocab: cfg.vocab,
             context_capacity: cfg.context_capacity,
+            hidden_size: cfg.hidden,
         })
     }
 
@@ -855,15 +1045,19 @@ impl IreeRaggedLlama {
         self.context_capacity
     }
 
+    /// Model hidden width compiled into the embeddings entry.
+    #[must_use]
+    pub fn hidden_size(&self) -> usize {
+        self.hidden_size
+    }
+
     /// Seed slot `slot` with `prompt` (up to the configured capacity) and return its
     /// first-token `[vocab]` LOGITS (#449 M3 Stage 2d). The prompt's KV is written
     /// device-side into the slot's region of the rank-5 cache; the other slots are
     /// untouched, so a mid-stream admit does not disturb live sequences. The caller
     /// samples the first token from the returned logits.
     pub fn prefill_slot_logits(&mut self, slot: usize, prompt: &[i32]) -> Result<Vec<f32>, String> {
-        if slot >= self.b_max {
-            return Err(format!("slot {slot} out of range [0,{})", self.b_max));
-        }
+        validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
         if prompt.is_empty() {
             return Err("prefill_slot_logits requires a non-empty prompt".to_string());
         }
@@ -895,6 +1089,50 @@ impl IreeRaggedLlama {
         if rc != 0 {
             return Err(format!(
                 "xla_llama_prefill_slot_logits failed (status {rc})"
+            ));
+        }
+        Ok(logits)
+    }
+
+    /// Seed one batch slot from a validated owned embeddings payload. The C
+    /// shim copies the returned rank-4 KV directly into this slot's rank-5
+    /// device cache, sharing the token-prefill slot population path.
+    pub fn prefill_prepared_slot_logits(
+        &mut self,
+        slot: usize,
+        prepared: &PreparedIreePrefill,
+    ) -> Result<Vec<f32>, String> {
+        validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
+        if prepared.hidden_size != self.hidden_size
+            || prepared.context_capacity != self.context_capacity
+            || prepared.effective_len == 0
+            || prepared.effective_len > self.context_capacity
+        {
+            return Err(
+                "prepared IREE payload is incompatible with this runtime bundle".to_string(),
+            );
+        }
+        let (embeddings, positions, attention_bias) = prepared_descriptors(prepared)?;
+        let real_len = i32::try_from(prepared.effective_len)
+            .map_err(|_| "prepared effective length does not fit i32".to_string())?;
+        let mut logits = vec![0.0; self.vocab];
+        // Safety: descriptors and output buffers outlive the call and carry
+        // exact lengths; the shim validates slot/vocab and every descriptor.
+        let rc = unsafe {
+            xla_llama_prefill_embeddings_slot_logits(
+                self.ctx,
+                slot as c_int,
+                &embeddings,
+                &positions,
+                &attention_bias,
+                real_len,
+                self.vocab as c_int,
+                logits.as_mut_ptr(),
+            )
+        };
+        if rc != 0 {
+            return Err(format!(
+                "xla_llama_prefill_embeddings_slot_logits failed (status {rc})"
             ));
         }
         Ok(logits)

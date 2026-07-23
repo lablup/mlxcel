@@ -47,9 +47,12 @@
 
 use std::path::{Path, PathBuf};
 
-use mlxcel_core::session::{InferenceSession, SessionCapabilities};
+use mlxcel_core::session::{InferenceSession, PreparedPrefill, SessionCapabilities};
 
 mod context;
+#[cfg(any(feature = "iree", test))]
+#[cfg_attr(not(feature = "iree"), allow(dead_code))]
+mod prepared;
 
 #[cfg(feature = "iree")]
 mod iree;
@@ -106,6 +109,8 @@ pub use context::{
     CONTEXT_CAPACITY_ENV, ContextCapacityError, DEFAULT_CONTEXT_CAPACITY,
     context_capacity_from_env, validate_request_capacity,
 };
+#[cfg(feature = "iree")]
+pub use prepared::PreparedInputError;
 #[cfg(feature = "iree")]
 pub use sampler::SampleParams;
 
@@ -321,11 +326,62 @@ impl XlaInferenceSession {
         }
         Ok(out)
     }
+
+    /// Greedy generation seeded by an owned prepared-embeddings payload.
+    pub fn generate_prepared_greedy(
+        &mut self,
+        prepared: &PreparedPrefill,
+        max_new_tokens: usize,
+        eos_token_ids: &[i32],
+    ) -> Result<Vec<i32>, String> {
+        self.generate_prepared_streaming_greedy(prepared, max_new_tokens, eos_token_ids, |_| true)
+    }
+
+    /// Streaming greedy generation from prepared embeddings. The embeddings
+    /// entry seeds all `sequence_len` positions and returns the first generated
+    /// token, so decode starts at the expanded length without replaying a
+    /// placeholder or logical token.
+    pub fn generate_prepared_streaming_greedy<F: FnMut(i32) -> bool>(
+        &mut self,
+        prepared: &PreparedPrefill,
+        max_new_tokens: usize,
+        eos_token_ids: &[i32],
+        mut on_token: F,
+    ) -> Result<Vec<i32>, String> {
+        if max_new_tokens == 0 {
+            return Ok(Vec::new());
+        }
+        validate_request_capacity(prepared.sequence_len, max_new_tokens, self.context_capacity)
+            .map_err(|error| error.to_string())?;
+        let first = self.prefill_prepared(prepared)?;
+        let mut out = Vec::with_capacity(max_new_tokens);
+        out.push(first);
+        if !on_token(first) || eos_token_ids.contains(&first) {
+            return Ok(out);
+        }
+        let mut current = first;
+        while out.len() < max_new_tokens {
+            let next = self.decode_step(current)?;
+            out.push(next);
+            if !on_token(next) || eos_token_ids.contains(&next) {
+                break;
+            }
+            current = next;
+        }
+        Ok(out)
+    }
 }
 
 impl InferenceSession for XlaInferenceSession {
     fn capabilities(&self) -> SessionCapabilities {
-        SessionCapabilities::single_sequence()
+        #[cfg(feature = "iree")]
+        {
+            SessionCapabilities::single_sequence().with_multimodal()
+        }
+        #[cfg(not(feature = "iree"))]
+        {
+            SessionCapabilities::single_sequence()
+        }
     }
 
     #[cfg(feature = "iree")]
@@ -344,6 +400,19 @@ impl InferenceSession for XlaInferenceSession {
 
     #[cfg(not(feature = "iree"))]
     fn prefill(&mut self, _token_ids: &[i32]) -> Result<(), String> {
+        Err(NOT_WIRED.to_string())
+    }
+
+    #[cfg(feature = "iree")]
+    fn prefill_prepared(&mut self, prepared: &PreparedPrefill) -> Result<i32, String> {
+        let first = self.engine.prefill_prepared_first(prepared)?;
+        self.cache_len = i32::try_from(prepared.sequence_len)
+            .map_err(|_| "prepared sequence length does not fit i32".to_string())?;
+        Ok(first)
+    }
+
+    #[cfg(not(feature = "iree"))]
+    fn prefill_prepared(&mut self, _prepared: &PreparedPrefill) -> Result<i32, String> {
         Err(NOT_WIRED.to_string())
     }
 
@@ -373,9 +442,34 @@ impl InferenceSession for XlaInferenceSession {
 #[cfg(all(test, not(feature = "iree")))]
 mod tests {
     use super::*;
+    use mlxcel_core::session::{
+        OwnedTensor, PreparedAttentionBias, PreparedPositions, PreparedTensorDType,
+    };
 
     fn session() -> XlaInferenceSession {
         XlaInferenceSession::load(Path::new("/tmp/xla-model"), 16).unwrap()
+    }
+
+    fn prepared() -> PreparedPrefill {
+        PreparedPrefill::new(
+            vec![1],
+            OwnedTensor::new(vec![0; 4], PreparedTensorDType::Float32, vec![1, 1, 1]).unwrap(),
+            PreparedPositions::Sequential {
+                start: 0,
+                length: 1,
+            },
+            PreparedAttentionBias {
+                tensor: OwnedTensor::new(
+                    vec![0; 4],
+                    PreparedTensorDType::Float32,
+                    vec![1, 1, 1, 1],
+                )
+                .unwrap(),
+                causal: true,
+            },
+            Vec::new(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -411,6 +505,7 @@ mod tests {
     fn token_primitives_report_not_wired() {
         let mut s = session();
         assert_eq!(s.prefill(&[1, 2, 3]).unwrap_err(), NOT_WIRED);
+        assert_eq!(s.prefill_prepared(&prepared()).unwrap_err(), NOT_WIRED);
         assert_eq!(s.decode_step(1).unwrap_err(), NOT_WIRED);
     }
 
@@ -419,6 +514,11 @@ mod tests {
         let mut s = session();
         assert_eq!(
             s.generate_greedy(&[1, 2, 3], 8, &[2]).unwrap_err(),
+            NOT_WIRED
+        );
+        assert_eq!(
+            s.generate_prepared_greedy(&prepared(), 8, &[2])
+                .unwrap_err(),
             NOT_WIRED
         );
     }
