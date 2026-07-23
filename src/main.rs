@@ -398,6 +398,16 @@ pub(crate) struct GenerationOptions {
     #[arg(long, default_value_t = false)]
     pub(crate) no_chat_template: bool,
 
+    /// Show the model's reasoning channel in the output.
+    ///
+    /// Reasoning-capable checkpoints (e.g. Gemma 4) emit a hidden
+    /// chain-of-thought channel before the answer. By default it is suppressed
+    /// so only the final answer prints. Pass this flag to also print the
+    /// reasoning (dimmed on a terminal); the raw channel markers are never
+    /// shown either way.
+    #[arg(long, default_value_t = false)]
+    pub(crate) show_reasoning: bool,
+
     /// Print the recommended quantization mode for this model on the current hardware.
     ///
     /// Detects Apple Silicon generation and available memory, estimates model

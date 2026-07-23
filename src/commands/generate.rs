@@ -18,7 +18,7 @@
 //! prompt preparation, generation-mode selection, and terminal output helpers.
 
 use anyhow::{Result, anyhow, ensure};
-use std::io::{self, Write as IoWrite};
+use std::io::{self, IsTerminal, Write as IoWrite};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -854,6 +854,28 @@ fn decode_generated_text(
     generated_suffix(&full_text, &prompt_decoded).to_string()
 }
 
+/// Split the reasoning channel out of a one-shot generation before display.
+///
+/// Reasoning-capable checkpoints (Gemma 4's `<|channel>thought` / `<channel|>`
+/// pair, Qwen-style `<think>` / `</think>`) emit their chain-of-thought inline
+/// with the answer, and `decode_generated_text` renders with special tokens so
+/// those raw markers reach the terminal (issue #884). Route the whole decoded
+/// reply through the shared `mlxcel::reasoning_stream` splitter so the channel
+/// is suppressed by default (only the final answer prints, no raw markers) and
+/// surfaced dimmed
+/// when `--show-reasoning` is set. A non-thinking model has no markers, so the
+/// filter is an inert passthrough and the returned string is byte-identical to
+/// `generated_text`.
+fn filter_reasoning_for_display(
+    tokenizer: &mlxcel::tokenizer::MlxcelTokenizer,
+    generated_text: &str,
+    show_reasoning: bool,
+) -> String {
+    let markers = tokenizer.infer_thinking_markers();
+    let dim = io::stdout().is_terminal();
+    mlxcel::reasoning_stream::render_full(&markers, generated_text, show_reasoning, dim)
+}
+
 fn print_generation_result(
     generated_text: &str,
     stats: &GenerationStats,
@@ -1525,6 +1547,7 @@ fn chat_options_from_args(args: &GenerateArgs) -> Result<crate::commands::ChatOp
     opts.models_dir = args.model.models_dir.clone();
     opts.kv_cache_mode = kv_cache_mode;
     opts.no_chat_template = args.generation.no_chat_template;
+    opts.show_reasoning = args.generation.show_reasoning;
     Ok(opts)
 }
 
@@ -1797,7 +1820,12 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             token_bias,
         )?;
         let generated_text = decode_generated_text(&tokenizer, &prompt_tokens, &generated_tokens);
-        print_generation_result(&generated_text, &stats, args.generation.profile)?;
+        let visible = filter_reasoning_for_display(
+            &tokenizer,
+            &generated_text,
+            args.generation.show_reasoning,
+        );
+        print_generation_result(&visible, &stats, args.generation.profile)?;
         mlxcel_core::clear_memory_cache();
         return Ok(());
     }
@@ -1901,7 +1929,9 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         generation
     };
     let generated_text = decode_generated_text(&tokenizer, &prompt_tokens, &generated_tokens);
-    print_generation_result(&generated_text, &stats, args.generation.profile)?;
+    let visible =
+        filter_reasoning_for_display(&tokenizer, &generated_text, args.generation.show_reasoning);
+    print_generation_result(&visible, &stats, args.generation.profile)?;
 
     // Cleanup
     mlxcel_core::clear_memory_cache();

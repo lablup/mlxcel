@@ -60,6 +60,7 @@ use rustyline::error::ReadlineError;
 use mlxcel::cli::max_tokens::{
     DEFAULT_CONTEXT_WINDOW_FALLBACK, UNLIMITED_MAX_TOKENS, resolve_unlimited_max_tokens,
 };
+use mlxcel::reasoning_stream;
 use mlxcel::sampling::{ResolvedSamplingParams, build_sampling_config};
 use mlxcel::server::chat_template::{ChatMessage, ChatTemplateProcessor};
 use mlxcel::server::model_provider::model_worker::StreamingDecodeState;
@@ -102,6 +103,10 @@ pub struct ChatOptions {
     /// the model (mirrors `generate --no-chat-template`). Multi-turn context is
     /// then concatenated as plain text.
     pub no_chat_template: bool,
+    /// When `true`, also print the model's reasoning channel (dimmed on a TTY)
+    /// instead of suppressing it. Mirrors `generate --show-reasoning`. The raw
+    /// channel markers are never printed regardless of this flag.
+    pub show_reasoning: bool,
 }
 
 impl ChatOptions {
@@ -119,6 +124,7 @@ impl ChatOptions {
             sampling,
             kv_cache_mode: KVCacheMode::Fp16,
             no_chat_template: false,
+            show_reasoning: false,
         }
     }
 }
@@ -320,6 +326,7 @@ pub fn run_chat(opts: ChatOptions) -> Result<()> {
                     opts.max_tokens,
                     context_window,
                     &sampling_config,
+                    opts.show_reasoning,
                 )?;
 
                 conversation.push(ChatMessage {
@@ -562,6 +569,7 @@ fn concat_userassistant_fallback(conversation: &[ChatMessage]) -> String {
 /// [`Session::generate_streaming`] — which delegates to the same
 /// `CxxGenerator::generate_streaming` loop the offline path uses — with a
 /// per-token callback that streams text via [`StreamingDecodeState`].
+#[allow(clippy::too_many_arguments)]
 fn stream_turn<M: LanguageModel>(
     session: &mut Session,
     model: &M,
@@ -570,6 +578,7 @@ fn stream_turn<M: LanguageModel>(
     max_tokens: usize,
     context_window: usize,
     sampling_config: &SamplingConfig,
+    show_reasoning: bool,
 ) -> Result<String> {
     let add_special = !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
     let prompt_tokens: Vec<i32> = tokenizer
@@ -586,13 +595,17 @@ fn stream_turn<M: LanguageModel>(
     let max_tokens = resolve_unlimited_max_tokens(max_tokens, context_window, prompt_tokens.len());
 
     // Stream display through the shared incremental detokenizer (byte-fallback
-    // safe), accumulating exactly what was printed. The raw generated ids are
-    // collected in parallel so the final turn text is decoded byte-exactly,
-    // independent of any tail bytes the streaming view held back mid-stream.
+    // safe), then split the reasoning channel out of the visible output so a
+    // Gemma 4 (or Qwen-style) checkpoint's chain-of-thought and its raw
+    // `<|channel>thought` / `<channel|>` markers never print (issue #884). For a
+    // non-thinking model the filter is an inert passthrough, so output is
+    // byte-identical to the pre-#884 path. The raw generated ids are collected
+    // in parallel so the final turn text is decoded byte-exactly for history.
     let mut decode_state = StreamingDecodeState::new(tokenizer, &prompt_tokens);
+    let mut filter = reasoning_stream::ReasoningFilter::new(&tokenizer.infer_thinking_markers());
     let mut generated_ids: Vec<u32> = Vec::with_capacity(max_tokens);
-    let mut streamed = String::new();
     let mut stdout = io::stdout();
+    let dim = stdout.is_terminal();
 
     session.generate_streaming(
         model,
@@ -602,28 +615,40 @@ fn stream_turn<M: LanguageModel>(
         |token_id| {
             generated_ids.push(token_id as u32);
             if let Some(text) = decode_state.on_token(token_id, tokenizer) {
-                print!("{text}");
-                let _ = stdout.flush();
-                streamed.push_str(&text);
+                let visible =
+                    reasoning_stream::render_visible(&filter.feed(&text), show_reasoning, dim);
+                if !visible.is_empty() {
+                    print!("{visible}");
+                    let _ = stdout.flush();
+                }
             }
             true
         },
     );
 
-    // Decode the full assistant turn (skip special tokens so template markers do
-    // not leak into the next turn's rendered history). This is the byte-exact
-    // turn text used both for the transcript and to flush any tail the streaming
-    // view held back (e.g. a multi-byte char split across the final tokens).
-    let reply = tokenizer.decode(&generated_ids, true).unwrap_or_default();
-    if let Some(tail) = reply.strip_prefix(&streamed)
-        && !tail.is_empty()
-    {
-        print!("{tail}");
+    // Flush the detokenizer's held-back tail (e.g. a multi-byte char split
+    // across the final tokens), then the reasoning filter's own buffered tail
+    // (a partial marker, or an unclosed thought block that stays hidden), so no
+    // visible text is lost or duplicated.
+    if let Some(tail) = decode_state.flush(tokenizer) {
+        let visible = reasoning_stream::render_visible(&filter.feed(&tail), show_reasoning, dim);
+        if !visible.is_empty() {
+            print!("{visible}");
+            let _ = stdout.flush();
+        }
+    }
+    let visible = reasoning_stream::render_visible(&filter.flush(), show_reasoning, dim);
+    if !visible.is_empty() {
+        print!("{visible}");
         let _ = stdout.flush();
     }
     println!();
     println!();
 
+    // Decode the full assistant turn (skip special tokens so template markers do
+    // not leak into the next turn's rendered history). Kept as the byte-exact
+    // turn text used for the transcript.
+    let reply = tokenizer.decode(&generated_ids, true).unwrap_or_default();
     Ok(reply)
 }
 

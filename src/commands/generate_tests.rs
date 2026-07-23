@@ -394,6 +394,7 @@ fn sample_generate_args(model_path: PathBuf) -> crate::GenerateArgs {
             max_tokens: 16,
             profile: false,
             no_chat_template: false,
+            show_reasoning: false,
             recommend_quant: false,
             estimate_memory: false,
             force_memory: false,
