@@ -57,6 +57,8 @@ use self::vlm::*;
 
 // Re-exported at the crate root for the CLI's lazy `--output-audio` load.
 pub(crate) use self::vlm::load_llava_host_preprocessor;
+#[cfg(feature = "xla-iree")]
+pub(crate) use self::vlm::load_llava_iree_host_preprocessor;
 pub use self::vlm::load_qwen3_omni_speech;
 
 /// Resolve model path: if a file is given, use its parent directory.

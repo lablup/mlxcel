@@ -29,6 +29,8 @@ use std::path::Path;
 
 use crate::LoadedModel;
 use crate::models;
+#[cfg(feature = "xla-iree")]
+use crate::multimodal::host_preprocessor::LlavaIreeHostPreprocessor;
 use crate::multimodal::host_preprocessor::{HostPreprocessorError, LlavaHostPreprocessor};
 use crate::vision;
 use crate::vision::config::VLMConfig;
@@ -205,6 +207,101 @@ fn llava_processor(
     }
 }
 
+#[cfg(any(feature = "xla-iree", test))]
+fn validate_iree_processor_metadata(
+    model_path: &Path,
+    processor: &vision::processors::siglip::SigLipProcessor,
+) -> Result<(), HostPreprocessorError> {
+    let path = model_path.join("preprocessor_config.json");
+    let value: Value = serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
+        HostPreprocessorError::InvalidConfig(format!("{}: {error}", path.display()))
+    })?)
+    .map_err(|error| {
+        HostPreprocessorError::InvalidConfig(format!("parse {}: {error}", path.display()))
+    })?;
+    let object = value.as_object().ok_or_else(|| {
+        HostPreprocessorError::InvalidConfig(format!("{} must be a JSON object", path.display()))
+    })?;
+    let required_bool = |name: &str| {
+        object.get(name).and_then(Value::as_bool).ok_or_else(|| {
+            HostPreprocessorError::InvalidConfig(format!(
+                "{} {name} must be a boolean",
+                path.display()
+            ))
+        })
+    };
+    if !required_bool("do_resize")? || !required_bool("do_rescale")? {
+        return Err(HostPreprocessorError::InvalidConfig(
+            "IREE vision host processing requires resize and rescale".to_string(),
+        ));
+    }
+    if required_bool("do_normalize")? != processor.do_normalize {
+        return Err(HostPreprocessorError::InvalidConfig(
+            "preprocessor do_normalize disagrees with the selected host processor".to_string(),
+        ));
+    }
+    if object
+        .get("do_center_crop")
+        .is_some_and(|value| value.as_bool() != Some(false))
+    {
+        return Err(HostPreprocessorError::InvalidConfig(
+            "center-crop preprocessing is outside the qualified IREE vision path".to_string(),
+        ));
+    }
+    let size = object
+        .get("size")
+        .and_then(Value::as_object)
+        .and_then(|size| Some((size.get("height")?.as_u64()?, size.get("width")?.as_u64()?)))
+        .ok_or_else(|| {
+            HostPreprocessorError::InvalidConfig(
+                "preprocessor size must contain integer height and width".to_string(),
+            )
+        })?;
+    if size != (processor.image_size as u64, processor.image_size as u64) {
+        return Err(HostPreprocessorError::InvalidConfig(format!(
+            "preprocessor size {size:?} disagrees with selected image size {}",
+            processor.image_size
+        )));
+    }
+    let rescale = object
+        .get("rescale_factor")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| {
+            HostPreprocessorError::InvalidConfig(
+                "preprocessor rescale_factor must be a number".to_string(),
+            )
+        })?;
+    if !rescale.is_finite() || (rescale - 1.0 / 255.0).abs() > 1e-12 {
+        return Err(HostPreprocessorError::InvalidConfig(format!(
+            "preprocessor rescale_factor {rescale} disagrees with the host 1/255 conversion"
+        )));
+    }
+    for (name, expected) in [("image_mean", processor.mean), ("image_std", processor.std)] {
+        let actual = object
+            .get(name)
+            .and_then(Value::as_array)
+            .filter(|values| values.len() == 3)
+            .ok_or_else(|| {
+                HostPreprocessorError::InvalidConfig(format!(
+                    "preprocessor {name} must contain three values"
+                ))
+            })?;
+        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            let actual = actual.as_f64().ok_or_else(|| {
+                HostPreprocessorError::InvalidConfig(format!(
+                    "preprocessor {name}[{index}] must be a number"
+                ))
+            })?;
+            if !actual.is_finite() || (actual - f64::from(expected)).abs() > 1e-6 {
+                return Err(HostPreprocessorError::InvalidConfig(format!(
+                    "preprocessor {name}[{index}]={actual} disagrees with selected host value {expected}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Whether a raw checkpoint tensor belongs to the host-first LLaVA prefix.
 ///
 /// The optional `language_model.` wrapper is normalized by
@@ -216,6 +313,12 @@ pub(super) fn is_llava_host_preprocessor_weight(name: &str) -> bool {
     canonical.starts_with("vision_tower.")
         || canonical.starts_with("multi_modal_projector.")
         || canonical.starts_with("model.embed_tokens.")
+}
+
+#[cfg(feature = "xla-iree")]
+fn is_llava_text_embedding_weight(name: &str) -> bool {
+    let canonical = name.strip_prefix("language_model.").unwrap_or(name);
+    canonical.starts_with("model.embed_tokens.")
 }
 
 /// Widen only the host vision tower and projector weights used by the
@@ -386,6 +489,103 @@ pub(crate) fn load_llava_host_preprocessor(
         text_hidden_size,
         vlm_config.vision_config.image_size,
         max_sequence_len,
+    )
+}
+
+/// Load the production LLaVA producer with only host image processing and text
+/// embedding lookup retained in MLX. Vision-tower/projector tensors are loaded
+/// independently by the resident IREE module.
+#[cfg(feature = "xla-iree")]
+pub(crate) fn load_llava_iree_host_preprocessor(
+    model_path: &Path,
+    device: &str,
+) -> Result<LlavaIreeHostPreprocessor, HostPreprocessorError> {
+    let (config_str, full_config) = read_sanitized_vlm_config(model_path)
+        .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    let vlm_config: VLMConfig = parse_vlm_config(&config_str, "VLM config")
+        .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    require_llava_host_family(&vlm_config)?;
+
+    let text_model_type = vlm_config
+        .text_config
+        .get("model_type")
+        .and_then(Value::as_str)
+        .unwrap_or("llama");
+    llava_text_backend(text_model_type, "LLaVA IREE vision preprocessor").map_err(|error| {
+        HostPreprocessorError::FamilyMismatch {
+            actual: error.to_string(),
+        }
+    })?;
+
+    let weights = load_vlm_weights_common_filtered_canonical(model_path, |name| {
+        is_llava_text_embedding_weight(name)
+    })
+    .map(strip_language_model_prefix)
+    .map_err(|error| HostPreprocessorError::WeightLoad(error.to_string()))?;
+    let quant_group_size = full_config
+        .get("quantization")
+        .and_then(|q| q.get("group_size"))
+        .and_then(Value::as_i64)
+        .unwrap_or(64) as i32;
+    let quant_bits = full_config
+        .get("quantization")
+        .and_then(|q| q.get("bits"))
+        .and_then(Value::as_i64)
+        .unwrap_or(4) as i32;
+    let text_embeddings = UnifiedEmbedding::from_weights(
+        &weights,
+        "model.embed_tokens",
+        quant_group_size,
+        quant_bits,
+    )
+    .map_err(|error| {
+        HostPreprocessorError::WeightLoad(format!(
+            "missing or invalid LLaVA text embedding table: {error}"
+        ))
+    })?;
+
+    let text_hidden_size = vlm_config
+        .text_config
+        .get("hidden_size")
+        .and_then(Value::as_u64)
+        .or_else(|| full_config.get("hidden_size").and_then(Value::as_u64))
+        .ok_or_else(|| {
+            HostPreprocessorError::InvalidConfig(
+                "LLaVA text_config.hidden_size is required for IREE vision preprocessing"
+                    .to_string(),
+            )
+        })? as usize;
+    let max_sequence_len = vlm_config
+        .text_config
+        .get("max_position_embeddings")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            full_config
+                .get("max_position_embeddings")
+                .and_then(Value::as_u64)
+        })
+        .unwrap_or(4096) as usize;
+    let num_patches =
+        (vlm_config.vision_config.image_size / vlm_config.vision_config.patch_size).pow(2);
+    let tokens_per_image = vlm_config.mm_tokens_per_image.unwrap_or(num_patches);
+    let processor = llava_processor(
+        &vlm_config.vision_config.model_type,
+        vlm_config.vision_config.image_size,
+    );
+    validate_iree_processor_metadata(model_path, &processor)?;
+    let projector = mlxcel_xla::IreeVisionProjector::load(model_path, device)
+        .map_err(HostPreprocessorError::Iree)?;
+
+    LlavaIreeHostPreprocessor::from_parts(
+        Box::new(processor),
+        text_embeddings,
+        projector,
+        vlm_config.image_token_index,
+        tokens_per_image,
+        text_hidden_size,
+        vlm_config.vision_config.image_size,
+        max_sequence_len,
+        device.to_string(),
     )
 }
 

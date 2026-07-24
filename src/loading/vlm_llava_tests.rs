@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::validate_iree_processor_metadata;
 use super::{
     LlavaTextBackend, detect_bunny_text_backend, infer_llama_config_from_weights,
     inherit_text_quantization_if_missing, is_llava_host_preprocessor_weight, llava_text_backend,
@@ -237,4 +238,33 @@ fn host_family_validation_accepts_floor_patch_grid_used_by_llava_interleave() {
     .unwrap();
 
     require_llava_host_family(&config).unwrap();
+}
+
+#[test]
+fn iree_vision_contract_processor_metadata_must_match_host_pixel_producer() {
+    let model = tempfile::tempdir().unwrap();
+    let path = model.path().join("preprocessor_config.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({
+            "do_resize": true,
+            "do_rescale": true,
+            "do_normalize": true,
+            "rescale_factor": 1.0 / 255.0,
+            "size": {"height": 384, "width": 384},
+            "image_mean": [0.5, 0.5, 0.5],
+            "image_std": [0.5, 0.5, 0.5]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let processor = crate::vision::processors::siglip::SigLipProcessor::new(384);
+    validate_iree_processor_metadata(model.path(), &processor).unwrap();
+
+    let mut drifted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    drifted["image_mean"] = json!([0.4, 0.5, 0.5]);
+    std::fs::write(&path, serde_json::to_vec(&drifted).unwrap()).unwrap();
+    let error = validate_iree_processor_metadata(model.path(), &processor).unwrap_err();
+    assert!(error.to_string().contains("image_mean[0]"));
 }

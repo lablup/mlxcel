@@ -19,7 +19,8 @@ use mlxcel_core::dtype;
 
 use super::{
     FakeHostMultimodalPreprocessor, HostMultimodalPreprocessor, HostPreprocessorError,
-    export_llava_prefill, export_mlx_tensor, load_xla_image_preprocessor, validate_processor_shape,
+    XlaVisionBackend, XlaVisionBackendPolicy, export_llava_prefill, export_mlx_tensor,
+    load_xla_image_preprocessor, validate_processor_shape,
 };
 use crate::multimodal::vlm_prompt::ImageTokenBlockError;
 use crate::vision::merge::merge_llava;
@@ -40,6 +41,28 @@ fn fake() -> FakeHostMultimodalPreprocessor {
         hidden_size: 3,
         max_sequence_len: 32,
     }
+}
+
+#[test]
+fn iree_vision_contract_policy_is_explicit_and_strict() {
+    assert_eq!(
+        XlaVisionBackendPolicy::from_value(None).unwrap(),
+        XlaVisionBackendPolicy::Auto
+    );
+    assert_eq!(
+        XlaVisionBackendPolicy::from_value(Some("auto")).unwrap(),
+        XlaVisionBackendPolicy::Auto
+    );
+    assert_eq!(
+        XlaVisionBackendPolicy::from_value(Some("host")).unwrap(),
+        XlaVisionBackendPolicy::Host
+    );
+    assert_eq!(
+        XlaVisionBackendPolicy::from_value(Some("iree")).unwrap(),
+        XlaVisionBackendPolicy::Iree
+    );
+    assert!(XlaVisionBackendPolicy::from_value(Some("cuda")).is_err());
+    assert_eq!(fake().backend(), XlaVisionBackend::Host);
 }
 
 #[test]

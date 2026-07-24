@@ -28,11 +28,14 @@ use std::time::Instant;
 
 use image::DynamicImage;
 use mlxcel::{
-    HostMultimodalPreprocessor, HostPreprocessorError, LlavaHostPreprocessor, OwnedTensor,
-    PreparedPositions, PreparedTensorDType, initialize_runtime, server::ChatTemplateProcessor,
-    tokenizer::load_tokenizer, vlm_prompt::ImageTokenBlockError,
+    HostMultimodalPreprocessor, HostPreprocessorError, LlavaHostPreprocessor,
+    LlavaIreeHostPreprocessor, OwnedTensor, PreparedPositions, PreparedTensorDType,
+    XlaVisionBackend, initialize_runtime, server::ChatTemplateProcessor, tokenizer::load_tokenizer,
+    vlm_prompt::ImageTokenBlockError,
 };
-use mlxcel_xla::LlavaReferenceDiagnosticEngine;
+use mlxcel_xla::{
+    IreeVisionDiagnosticProjector, LlavaReferenceDiagnosticEngine, VisionDiagnosticProjection,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -185,6 +188,149 @@ fn f32_bytes(values: &[f32]) -> Vec<u8> {
         .iter()
         .flat_map(|value| value.to_le_bytes())
         .collect()
+}
+
+fn tensor_f32(tensor: &OwnedTensor, label: &str) -> Vec<f32> {
+    assert_eq!(
+        tensor.dtype,
+        PreparedTensorDType::Float32,
+        "{label} must be float32"
+    );
+    tensor
+        .bytes
+        .chunks_exact(4)
+        .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("four-byte f32 chunk")))
+        .collect()
+}
+
+fn production_prepared_max_abs(
+    production: &mlxcel::PreparedPrefill,
+    diagnostic: &mlxcel::PreparedPrefill,
+) -> f32 {
+    assert_eq!(production.token_ids, diagnostic.token_ids);
+    assert_eq!(production.positions, diagnostic.positions);
+    assert_eq!(production.attention_bias, diagnostic.attention_bias);
+    assert_eq!(production.sequence_len, diagnostic.sequence_len);
+    assert_eq!(production.modalities, diagnostic.modalities);
+    assert_eq!(production.embeddings.dtype, diagnostic.embeddings.dtype);
+    assert_eq!(production.embeddings.shape, diagnostic.embeddings.shape);
+    tensor_f32(&production.embeddings, "production prepared embeddings")
+        .into_iter()
+        .zip(tensor_f32(
+            &diagnostic.embeddings,
+            "diagnostic prepared embeddings",
+        ))
+        .map(|(production, diagnostic)| (production - diagnostic).abs())
+        .fold(0.0, f32::max)
+}
+
+fn owned_f32(values: &[f32], shape: Vec<usize>) -> OwnedTensor {
+    OwnedTensor::new(f32_bytes(values), PreparedTensorDType::Float32, shape)
+        .expect("IREE diagnostic tensor shape and bytes agree")
+}
+
+fn stack_projection_values(
+    runs: &[VisionDiagnosticProjection],
+    select: impl Fn(&VisionDiagnosticProjection) -> &[f32],
+) -> Vec<f32> {
+    runs.iter()
+        .flat_map(|run| select(run).iter().copied())
+        .collect()
+}
+
+fn replace_with_iree_vision(
+    capture: &mut mlxcel::LlavaHostReferenceCapture,
+    projector: &mut IreeVisionDiagnosticProjector,
+    image_token_id: i32,
+) -> f64 {
+    let Some(pixel_tensor) = &capture.pixel_values else {
+        return 0.0;
+    };
+    assert_eq!(pixel_tensor.shape.len(), 4);
+    let image_count = pixel_tensor.shape[0];
+    let elements_per_image = pixel_tensor.shape[1..].iter().product::<usize>();
+    let pixels = tensor_f32(pixel_tensor, "processor pixels");
+    let runs = pixels
+        .chunks_exact(elements_per_image)
+        .map(|image| {
+            projector
+                .project(image)
+                .unwrap_or_else(|error| panic!("run native IREE vision projector: {error}"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(runs.len(), image_count);
+    let hidden_shape = runs[0].hidden_shape;
+    let projected_shape = runs[0].projected_shape;
+    let hidden_count = runs[0].hidden_states.len();
+    let block0_count = runs[0].block0_states.len();
+    assert!(
+        runs.iter().all(|run| {
+            run.hidden_shape == hidden_shape
+                && run.projected_shape == projected_shape
+                && run.hidden_states.len() == hidden_count
+                && run.block0_states.len() == block0_count
+        }),
+        "per-image IREE vision contracts must agree"
+    );
+    capture.vision_hidden_states = (0..hidden_count)
+        .map(|stage| {
+            let values = stack_projection_values(&runs, |run| run.hidden_states[stage].as_slice());
+            owned_f32(&values, vec![image_count, hidden_shape[0], hidden_shape[1]])
+        })
+        .collect();
+    capture.vision_block0_states = (0..block0_count)
+        .map(|stage| {
+            let width = if stage == 8 || stage == 9 {
+                runs[0].block0_states[stage].len() / hidden_shape[0]
+            } else {
+                hidden_shape[1]
+            };
+            let values = stack_projection_values(&runs, |run| run.block0_states[stage].as_slice());
+            owned_f32(&values, vec![image_count, hidden_shape[0], width])
+        })
+        .collect();
+    let selected = stack_projection_values(&runs, |run| run.selected_vision_features.as_slice());
+    capture.selected_vision_features = Some(owned_f32(
+        &selected,
+        vec![image_count, hidden_shape[0], hidden_shape[1]],
+    ));
+    let projected = stack_projection_values(&runs, |run| run.projected_image_features.as_slice());
+    capture.projected_image_features = Some(owned_f32(
+        &projected,
+        vec![image_count, projected_shape[0], projected_shape[1]],
+    ));
+
+    let embedding = &mut capture.prepared.embeddings;
+    assert_eq!(
+        embedding.dtype,
+        PreparedTensorDType::Float32,
+        "mixed-runtime merge requires F32 prepared embeddings"
+    );
+    assert_eq!(
+        embedding.shape,
+        [1, capture.prepared.sequence_len, projected_shape[1]]
+    );
+    let row_bytes = projected_shape[1] * std::mem::size_of::<f32>();
+    let projected_bytes = f32_bytes(&projected);
+    let mut image_row = 0usize;
+    for (position, token) in capture.prepared.token_ids.iter().enumerate() {
+        if *token != image_token_id {
+            continue;
+        }
+        let target = position * row_bytes;
+        let source = image_row * row_bytes;
+        embedding.bytes[target..target + row_bytes]
+            .copy_from_slice(&projected_bytes[source..source + row_bytes]);
+        image_row += 1;
+    }
+    assert_eq!(
+        image_row,
+        image_count * projected_shape[0],
+        "expanded image-token rows and IREE projections must agree"
+    );
+    runs.iter()
+        .map(|run| run.metrics.elapsed_seconds)
+        .sum::<f64>()
 }
 
 fn sha256_file(path: &Path) -> String {
@@ -462,6 +608,13 @@ fn main() {
     let host_load_started = Instant::now();
     let preprocessor = LlavaHostPreprocessor::load(&model)
         .unwrap_or_else(|error| panic!("load LLaVA host preprocessor: {error}"));
+    let image_token_id = serde_json::from_slice::<Value>(
+        &fs::read(model.join("config.json")).expect("read converted config"),
+    )
+    .expect("parse converted config")["image_token_index"]
+        .as_i64()
+        .and_then(|value| i32::try_from(value).ok())
+        .expect("converted config image_token_index must fit i32");
     let chat_template = ChatTemplateProcessor::from_model_path(&model)
         .unwrap_or_else(|error| panic!("load converted checkpoint chat template: {error}"))
         .expect("converted checkpoint must include a chat template");
@@ -469,6 +622,11 @@ fn main() {
         .unwrap_or_else(|error| panic!("load converted checkpoint tokenizer: {error}"));
     let host_load_seconds = host_load_started.elapsed().as_secs_f64();
     let compile_started = Instant::now();
+    let mut vision_projector = IreeVisionDiagnosticProjector::load(&model, &device)
+        .unwrap_or_else(|error| panic!("load LLaVA IREE vision projector: {error}"));
+    let production_preprocessor = LlavaIreeHostPreprocessor::load(&model, &device)
+        .unwrap_or_else(|error| panic!("load production LLaVA IREE preprocessor: {error}"));
+    assert_eq!(production_preprocessor.backend(), XlaVisionBackend::Iree);
     let mut engine = LlavaReferenceDiagnosticEngine::load(&model, &device, context_capacity)
         .unwrap_or_else(|error| panic!("load LLaVA IREE diagnostic engine: {error}"));
     let compile_load_seconds = compile_started.elapsed().as_secs_f64();
@@ -535,7 +693,7 @@ fn main() {
             .map(|transform| transformed_image(&image, transform))
             .collect();
         let preprocessing_started = Instant::now();
-        let capture = preprocessor
+        let mut capture = preprocessor
             .prepare_with_reference_diagnostics(&converted_ids, &images)
             .unwrap_or_else(|error| {
                 panic!(
@@ -569,6 +727,24 @@ fn main() {
                 "reversing two-image order must change the processor tensor"
             );
         }
+        let native_vision_seconds =
+            replace_with_iree_vision(&mut capture, &mut vision_projector, image_token_id);
+        let production_prepared = production_preprocessor
+            .prepare(&converted_ids, &images)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "prepare production IREE vision case {}: {error}",
+                    reference_case.name
+                )
+            });
+        let production_parity_max_abs =
+            production_prepared_max_abs(&production_prepared, &capture.prepared);
+        assert!(
+            production_parity_max_abs <= 1e-4,
+            "production prepared-prefill embedding diverged from diagnostic IREE replacement for {}: max_abs={production_parity_max_abs:.9}",
+            reference_case.name,
+        );
+        capture.prepared = production_prepared;
         let preprocessing_seconds = preprocessing_started.elapsed().as_secs_f64();
         let run = engine
             .capture(
@@ -725,6 +901,7 @@ fn main() {
             "arrays": arrays,
             "timings": {
                 "host_preprocessing_seconds": preprocessing_seconds,
+                "iree_vision_seconds": native_vision_seconds,
                 "prefill_seconds": run.prefill_seconds,
                 "decode_seconds": run.decode_seconds,
                 "decode_tokens_per_second": if run.tokens.len() > 1 {
@@ -733,6 +910,7 @@ fn main() {
                     0.0
                 },
             },
+            "production_prepared_parity_max_abs": production_parity_max_abs,
         }));
     }
 
@@ -763,6 +941,7 @@ fn main() {
         "schema": 1,
         "producer": "mlxcel-xla-diagnostics",
         "device": device,
+        "vision_backend": production_preprocessor.backend().as_str(),
         "host_preprocessor_device": runtime.device.to_string(),
         "host_compute": {
             "vision_projector": "float32",
@@ -771,8 +950,8 @@ fn main() {
                 .unwrap_or_else(|_| "1 (MLX default)".to_string()),
         },
         "model_ownership": {
-            "host": "processor, vision tower, projector, and text embedding table only",
-            "iree": "single resident text decoder bundle used for prefill, KV capture, and decode",
+            "host": "image processor and text embedding table only",
+            "iree": "resident vision/projector module plus one text decoder bundle used for prefill, KV capture, and decode",
             "duplicate_text_decoder": false,
         },
         "context_capacity": context_capacity,
