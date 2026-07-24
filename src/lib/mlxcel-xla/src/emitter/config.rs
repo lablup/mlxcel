@@ -499,7 +499,40 @@ impl Config {
         let wrapper_model_type = root.get("model_type").and_then(serde_json::Value::as_str);
         let is_phi4mm = wrapper_model_type == Some("phi4mm");
         let is_molmo2 = wrapper_model_type == Some("molmo2");
-        let v = if matches!(wrapper_model_type, Some("llava" | "llava_next" | "molmo2")) {
+        let inferred_qwen3_vl_deepstack = if wrapper_model_type == Some("qwen3_vl") {
+            let vision = root
+                .get("vision_config")
+                .and_then(serde_json::Value::as_object)
+                .ok_or_else(|| {
+                    "Qwen3-VL config.json missing object `vision_config` for DeepStack".to_string()
+                })?;
+            let visual_layers = vision
+                .get("deepstack_visual_indexes")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| {
+                    "Qwen3-VL config.json missing array \
+                         `vision_config.deepstack_visual_indexes`"
+                        .to_string()
+                })?;
+            if visual_layers.is_empty() {
+                return Err(
+                    "Qwen3-VL vision_config.deepstack_visual_indexes must not be empty".to_string(),
+                );
+            }
+            Some(DeepStackConfig {
+                // Qwen3-VL injects the ordered vision branches into the first
+                // language layers. The actual vision layer indices remain part
+                // of the vision artifact identity.
+                target_layer_indices: (0..visual_layers.len()).collect(),
+                max_visual_positions: super::qwen3_vl::QWEN3_VL_MAX_MERGED_VISUAL_POSITIONS,
+            })
+        } else {
+            None
+        };
+        let v = if matches!(
+            wrapper_model_type,
+            Some("llava" | "llava_next" | "molmo2" | "qwen3_vl")
+        ) {
             let mut text = root
                 .get("text_config")
                 .and_then(serde_json::Value::as_object)
@@ -599,7 +632,7 @@ impl Config {
         let head_dim = ou("head_dim").unwrap_or(hidden / n_q.max(1));
         // ExaOne 3.x uses `num_layers` in place of `num_hidden_layers`.
         let n_layers = u_any(&["num_hidden_layers", "num_layers"])?;
-        let deepstack = match (
+        let declared_deepstack = match (
             v.get("deepstack_language_layer_indices"),
             v.get("deepstack_max_visual_positions"),
         ) {
@@ -642,6 +675,20 @@ impl Config {
                         .to_string(),
                 );
             }
+        };
+        let deepstack = match (inferred_qwen3_vl_deepstack, declared_deepstack) {
+            (Some(inferred), None) => {
+                inferred.validate_structure(n_layers)?;
+                Some(inferred)
+            }
+            (Some(_), Some(_)) => {
+                return Err(
+                    "Qwen3-VL DeepStack mapping is architecture-defined and must not be \
+                     overridden in text_config"
+                        .to_string(),
+                );
+            }
+            (None, declared) => declared,
         };
 
         // Norm epsilon: `rms_norm_eps` (RMSNorm archs), else `layer_norm_eps`
@@ -742,7 +789,7 @@ impl Config {
                 // is therefore the ordinary Qwen2 graph with M-RoPE positions.
                 qkv_bias = true;
             }
-            Some("qwen3") => {
+            Some("qwen3" | "qwen3_vl_text") => {
                 // Qwen3 drops the Qwen2 bias and adds a per-head q/k RMSNorm (raw
                 // weight, over head_dim) before RoPE.
                 qk_norm = Some(QkNorm {
@@ -1231,7 +1278,7 @@ impl Config {
                 }
                 let supported_family = matches!(
                     model_type,
-                    Some("qwen2") | Some("qwen2_vl") | Some("qwen2_5_vl") | Some("qwen3")
+                    Some("qwen2" | "qwen2_vl" | "qwen2_5_vl" | "qwen3" | "qwen3_vl_text")
                 );
                 if !supported_family {
                     return Err(format!(
@@ -1241,7 +1288,7 @@ impl Config {
                 let interleaved = rope_scaling
                     .and_then(|scaling| scaling.get("mrope_interleaved"))
                     .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(model_type == Some("qwen3"));
+                    .unwrap_or(matches!(model_type, Some("qwen3" | "qwen3_vl_text")));
                 Some(MropeConfig {
                     sections,
                     layout: if interleaved {

@@ -25,6 +25,7 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 
 use mlxcel_core::session::PreparedPrefill;
+use mlxcel_xla::DeepStackPreparedPrefill;
 
 use crate::{
     HostMultimodalPreprocessor, XlaVisionBackend, load_xla_image_preprocessor,
@@ -43,8 +44,23 @@ pub(super) struct ImagePreprocessJob {
     pub cancelled: Arc<AtomicBool>,
 }
 
+pub(super) enum PreparedImagePrefill {
+    Standard(PreparedPrefill),
+    DeepStack(DeepStackPreparedPrefill),
+}
+
+impl PreparedImagePrefill {
+    #[must_use]
+    pub(super) fn sequence_len(&self) -> usize {
+        match self {
+            Self::Standard(prepared) => prepared.sequence_len,
+            Self::DeepStack(request) => request.prepared().sequence_len,
+        }
+    }
+}
+
 pub(super) enum ImagePreprocessOutcome {
-    Prepared(PreparedPrefill),
+    Prepared(PreparedImagePrefill),
     Cancelled,
     Failed(String),
 }
@@ -188,9 +204,17 @@ fn process_job(
         if cancelled.load(Ordering::Acquire) {
             return Err("request cancelled during image decoding".to_string());
         }
-        preprocessor
-            .prepare(&token_ids, &decoded)
-            .map_err(|error| error.to_string())
+        if let Some(request) = preprocessor
+            .prepare_deepstack(&token_ids, &decoded)
+            .map_err(|error| error.to_string())?
+        {
+            Ok(PreparedImagePrefill::DeepStack(request))
+        } else {
+            preprocessor
+                .prepare(&token_ids, &decoded)
+                .map(PreparedImagePrefill::Standard)
+                .map_err(|error| error.to_string())
+        }
     }));
 
     let outcome = if cancelled.load(Ordering::Acquire) {
@@ -331,6 +355,9 @@ mod tests {
         assert_eq!(result.job_id, 7);
         let ImagePreprocessOutcome::Prepared(prepared) = result.outcome else {
             panic!("expected prepared payload");
+        };
+        let PreparedImagePrefill::Standard(prepared) = prepared else {
+            panic!("fake preprocessor must use the standard payload");
         };
         assert_eq!(prepared.token_ids, vec![1, -200, -200, 2]);
         assert_eq!(prepared.sequence_len, 4);

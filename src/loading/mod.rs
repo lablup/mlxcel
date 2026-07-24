@@ -66,6 +66,8 @@ pub use self::vlm::{
     load_molmo2_xla_vision_reference,
 };
 #[cfg(feature = "xla-iree")]
+pub(crate) use self::vlm::load_qwen3_vl_iree_host_preprocessor;
+#[cfg(feature = "xla-iree")]
 pub(crate) use self::vlm::{
     Phi4MMXlaVisionComponents, load_molmo2_xla_text_embeddings, load_phi4mm_xla_media_components,
     load_phi4mm_xla_text_embeddings,

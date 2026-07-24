@@ -50,7 +50,10 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use mlxcel_core::session::PreparedPrefill;
-use mlxcel_xla::{EngineEvent, FinishReason as XlaFinishReason, SampleParams, XlaBatchEngine};
+use mlxcel_xla::{
+    DeepStackPreparedPrefill, EngineEvent, FinishReason as XlaFinishReason, SampleParams,
+    XlaBatchEngine,
+};
 
 use super::BatchEngine;
 use super::observability::BatchObservability;
@@ -88,6 +91,12 @@ pub(crate) trait XlaServingEngine {
     fn submit_prepared(
         &mut self,
         prepared: PreparedPrefill,
+        max_new_tokens: usize,
+        params: SampleParams,
+    ) -> Result<u64, String>;
+    fn submit_deepstack_prepared(
+        &mut self,
+        request: DeepStackPreparedPrefill,
         max_new_tokens: usize,
         params: SampleParams,
     ) -> Result<u64, String>;
@@ -192,6 +201,16 @@ impl XlaServingEngine for XlaBatchEngine {
         params: SampleParams,
     ) -> Result<u64, String> {
         XlaBatchEngine::submit_prepared(self, prepared, max_new_tokens, params)
+            .map_err(|error| error.to_string())
+    }
+
+    fn submit_deepstack_prepared(
+        &mut self,
+        request: DeepStackPreparedPrefill,
+        max_new_tokens: usize,
+        params: SampleParams,
+    ) -> Result<u64, String> {
+        XlaBatchEngine::submit_deepstack_prepared(self, request, max_new_tokens, params)
             .map_err(|error| error.to_string())
     }
 

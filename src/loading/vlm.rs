@@ -160,6 +160,7 @@ pub(crate) use qwen::{
 #[cfg(feature = "xla-iree")]
 pub(crate) use qwen::{
     load_qwen2_5_vl_iree_host_preprocessor, load_qwen2_vl_iree_host_preprocessor,
+    load_qwen3_vl_iree_host_preprocessor,
 };
 // Public (re-exported at the crate root): the CLI loads the speech stack
 // lazily, outside the LoadedModel dispatch.
