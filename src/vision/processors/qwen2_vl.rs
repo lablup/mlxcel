@@ -38,6 +38,7 @@ pub struct Qwen2VLProcessor {
     pub video_default_fps: f64,
     pub video_min_frames: usize,
     pub video_max_frames: usize,
+    resize_filter: FilterType,
 }
 
 /// Default lower pixel bound the Qwen2-VL processors are constructed with.
@@ -178,6 +179,7 @@ impl Qwen2VLProcessor {
             video_default_fps: DEFAULT_VIDEO_FPS,
             video_min_frames: DEFAULT_VIDEO_MIN_FRAMES,
             video_max_frames: DEFAULT_VIDEO_MAX_FRAMES,
+            resize_filter: FilterType::Lanczos3,
         }
     }
 
@@ -201,6 +203,7 @@ impl Qwen2VLProcessor {
             video_default_fps: DEFAULT_VIDEO_FPS,
             video_min_frames: DEFAULT_VIDEO_MIN_FRAMES,
             video_max_frames: DEFAULT_VIDEO_MAX_FRAMES,
+            resize_filter: FilterType::Lanczos3,
         }
     }
 
@@ -225,6 +228,14 @@ impl Qwen2VLProcessor {
         self.video_default_fps = config.fps;
         self.video_min_frames = config.min_frames;
         self.video_max_frames = config.max_frames;
+        self
+    }
+
+    /// Override the image resampler while preserving the historical Qwen2
+    /// default for callers that do not opt in.
+    #[must_use]
+    pub fn with_resize_filter(mut self, resize_filter: FilterType) -> Self {
+        self.resize_filter = resize_filter;
         self
     }
 
@@ -258,7 +269,6 @@ impl Qwen2VLProcessor {
             self.max_pixels,
         )
     }
-
     /// Compute target size that satisfies constraints
     /// Returns (height, width) padded to multiples of factor
     pub(crate) fn smart_resize(&self, orig_h: u32, orig_w: u32) -> (u32, u32) {
@@ -361,6 +371,7 @@ impl Qwen2VLProcessor {
         let patch_area = self.patch_size * self.patch_size;
         let features_per_pixel = in_channels * patch_area;
 
+<<<<<<< HEAD
         for item in media {
             let (frames, target_h, target_w, grid_t) = match *item {
                 Qwen2VLMediaInput::Image(image) => {
@@ -368,6 +379,29 @@ impl Qwen2VLProcessor {
                     let frames =
                         std::iter::repeat_n(image, self.temporal_patch_size).collect::<Vec<_>>();
                     (frames, h, w, 1usize)
+=======
+        for (img_idx, img) in images.iter().enumerate() {
+            let (t, h_patches, w_patches) = grid_thw[img_idx];
+            let target_h = h_patches as u32 * self.patch_size as u32;
+            let target_w = w_patches as u32 * self.patch_size as u32;
+
+            // Resize image
+            let resized = img.resize_exact(target_w, target_h, self.resize_filter);
+            let rgb = resized.to_rgb8();
+
+            // Normalize: (pixel / 255.0 - mean) / std
+            let h = target_h as usize;
+            let w = target_w as usize;
+            let mut normalized = vec![0f32; in_channels * h * w];
+            for y in 0..h {
+                for x in 0..w {
+                    let pixel = rgb.get_pixel(x as u32, y as u32);
+                    for c in 0..3 {
+                        let val = pixel[c] as f32 / 255.0;
+                        let norm_val = (val - self.mean[c]) / self.std[c];
+                        normalized[c * h * w + y * w + x] = norm_val;
+                    }
+>>>>>>> ddd793f5 (fix(xla): honor Qwen3-VL processor contract)
                 }
                 Qwen2VLMediaInput::Video(frames) => {
                     let frames = self.pad_video_frames(frames)?;
@@ -465,7 +499,7 @@ impl Qwen2VLProcessor {
         target_h: u32,
         target_w: u32,
     ) -> Vec<f32> {
-        let resized = image.resize_exact(target_w, target_h, FilterType::Lanczos3);
+        let resized = image.resize_exact(target_w, target_h, self.resize_filter);
         let rgb = resized.to_rgb8();
         let h = target_h as usize;
         let w = target_w as usize;
@@ -632,6 +666,17 @@ mod tests {
         assert_eq!(
             mlxcel_core::array_shape(&pixel_values),
             vec![64, 3 * 14 * 14]
+        );
+    }
+
+    #[test]
+    fn qwen3_checkpoint_policy_lifts_224_square_to_sixteen_by_sixteen_grid() {
+        let processor = Qwen2VLProcessor::new_with_norm(16, 2, 2, [0.5; 3], [0.5; 3])
+            .with_pixel_bounds(65_536, 16_777_216)
+            .with_resize_filter(FilterType::CatmullRom);
+        assert_eq!(
+            processor.compute_grid_thw(&[DynamicImage::new_rgb8(224, 224)]),
+            vec![(1, 16, 16)]
         );
     }
 }

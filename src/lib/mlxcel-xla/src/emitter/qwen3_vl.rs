@@ -31,10 +31,10 @@ use super::builder::{Builder, Ty, Val};
 /// Every capacity is divisible by `spatial_merge_size²` for the checkpoint's
 /// 2x2 merger. Larger grids fail explicitly instead of triggering an unbounded
 /// compile or falling back to the MLX vision encoder.
-pub(crate) const QWEN3_VL_PATCH_BUCKETS: [usize; 3] = [16, 64, 256];
+pub(crate) const QWEN3_VL_PATCH_BUCKETS: [usize; 4] = [16, 64, 256, 512];
 
 /// Compact DeepStack side-input capacity after the required 2x2 merge.
-pub(crate) const QWEN3_VL_MAX_MERGED_VISUAL_POSITIONS: usize = 256 / 4;
+pub(crate) const QWEN3_VL_MAX_MERGED_VISUAL_POSITIONS: usize = 512 / 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Qwen3VlWeightSpec {
@@ -289,6 +289,12 @@ impl Qwen3VlConfig {
         if actual_patches == 0 {
             return Err("Qwen3-VL image grid must contain at least one patch".to_string());
         }
+        let maximum = QWEN3_VL_PATCH_BUCKETS[QWEN3_VL_PATCH_BUCKETS.len() - 1];
+        if actual_patches > maximum {
+            return Err(format!(
+                "Qwen3-VL image grid has {actual_patches} patches, exceeding qualified capacity {maximum}"
+            ));
+        }
         let merge_area = self
             .spatial_merge_size
             .checked_mul(self.spatial_merge_size)
@@ -302,12 +308,7 @@ impl Qwen3VlConfig {
             .iter()
             .copied()
             .find(|&bucket| actual_patches <= bucket)
-            .ok_or_else(|| {
-                format!(
-                    "Qwen3-VL image grid has {actual_patches} patches, exceeding qualified capacity {}",
-                    QWEN3_VL_PATCH_BUCKETS[QWEN3_VL_PATCH_BUCKETS.len() - 1]
-                )
-            })
+            .ok_or_else(|| "Qwen3-VL patch bucket selection failed".to_string())
     }
 
     /// Validate each image grid before selecting one packed static bucket.
@@ -1021,6 +1022,7 @@ mod tests {
         assert_eq!(config.bucket_for_patches(16), Ok(16));
         assert_eq!(config.bucket_for_patches(20), Ok(64));
         assert_eq!(config.bucket_for_patches(256), Ok(256));
+        assert_eq!(config.bucket_for_patches(512), Ok(512));
         assert!(
             config
                 .bucket_for_patches(18)
@@ -1029,7 +1031,7 @@ mod tests {
         );
         assert!(
             config
-                .bucket_for_patches(260)
+                .bucket_for_patches(513)
                 .unwrap_err()
                 .contains("exceeding qualified capacity")
         );
@@ -1052,6 +1054,14 @@ mod tests {
         assert_eq!(packed.actual_patches, 48);
         assert_eq!(packed.packed_cu_seqlens, vec![0, 16, 48]);
         assert_eq!(packed.merged_tokens_per_image, vec![4, 8]);
+
+        let canonical_two_image = config
+            .plan_image_grids(&[(1, 16, 16), (1, 16, 16)])
+            .unwrap();
+        assert_eq!(canonical_two_image.patch_bucket, 512);
+        assert_eq!(canonical_two_image.actual_patches, 512);
+        assert_eq!(canonical_two_image.packed_cu_seqlens, vec![0, 256, 512]);
+        assert_eq!(canonical_two_image.merged_tokens_per_image, vec![64, 64]);
     }
 
     #[test]
@@ -1089,6 +1099,14 @@ mod tests {
         assert!(mlir.contains("tensor<4x16x1xi32>"));
         assert!(mlir.contains("-> (tensor<4x12xf32>, tensor<4x12xf32>, tensor<4x12xf32>)"));
         assert_eq!(mlir.matches("chlo.erf").count(), 3);
+
+        let two_image_mlir = emit_qwen3_vl(&config, 512);
+        assert!(two_image_mlir.contains("loc(\"patches.grouped\")"));
+        assert!(two_image_mlir.contains("tensor<512x24xf32>"));
+        assert!(
+            two_image_mlir
+                .contains("-> (tensor<128x12xf32>, tensor<128x12xf32>, tensor<128x12xf32>)")
+        );
     }
 
     #[test]
@@ -1132,6 +1150,23 @@ mod tests {
             prepare_qwen3_vl_host_inputs(&config, &grids, &non_finite)
                 .unwrap_err()
                 .contains("flat index 7")
+        );
+
+        let canonical_grids = [(1, 16, 16), (1, 16, 16)];
+        let canonical_values = vec![0.25; 512 * 2 * row_width];
+        let canonical =
+            prepare_qwen3_vl_host_inputs(&config, &canonical_grids, &canonical_values).unwrap();
+        assert_eq!(canonical.plan.patch_bucket, 512);
+        assert_eq!(canonical.plan.merged_tokens_per_image, vec![64, 64]);
+        assert_eq!(canonical.patches.len(), 512 * 24);
+        assert_eq!(canonical.position_indices.len(), 4 * 512);
+        assert_eq!(
+            canonical.packed_attention_bias[255 * 512 + 256],
+            f32::NEG_INFINITY
+        );
+        assert_eq!(
+            canonical.packed_attention_bias[256 * 512 + 255],
+            f32::NEG_INFINITY
         );
     }
 }

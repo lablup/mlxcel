@@ -183,8 +183,37 @@ fn processor_identity(model_dir: &Path, config: &Qwen3VlConfig) -> Result<String
             ));
         }
     }
+    let size = object.get("size").and_then(serde_json::Value::as_object);
+    let positive_bound = |nested: &str, fallback: &str| -> Result<usize, String> {
+        size.and_then(|size| size.get(nested))
+            .or_else(|| object.get(fallback))
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|&value| value > 0)
+            .ok_or_else(|| {
+                format!(
+                    "preprocessor_config.json requires positive integer size.{nested} or {fallback}"
+                )
+            })
+    };
+    let min_pixels = positive_bound("shortest_edge", "min_pixels")?;
+    let max_pixels = positive_bound("longest_edge", "max_pixels")?;
+    if min_pixels > max_pixels {
+        return Err(format!(
+            "preprocessor_config.json pixel bounds are inverted: min={min_pixels}, max={max_pixels}"
+        ));
+    }
+    let resample = object
+        .get("resample")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "preprocessor_config.json resample must be integer 3".to_string())?;
+    if resample != 3 {
+        return Err(format!(
+            "Qwen3-VL IREE vision requires PIL BICUBIC resample=3, got {resample}"
+        ));
+    }
     Ok(format!(
-        "qwen3-vl-processor-v1:sha256={}:patch={}:temporal={}:merge={}",
+        "qwen3-vl-processor-v2:sha256={}:patch={}:temporal={}:merge={}:min_pixels={min_pixels}:max_pixels={max_pixels}:resample={resample}",
         sha256_hex(&bytes),
         config.patch_size,
         config.temporal_patch_size,
