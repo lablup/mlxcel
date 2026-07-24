@@ -708,7 +708,7 @@ async fn decode_video_data_uri(url: &str) -> Option<(PathBuf, TempFile)> {
 /// Connect timeout, total request timeout, and redirect cap are configured
 /// on the shared client (see [`http_image_client`]).
 async fn fetch_remote_video(url: &str) -> Option<(PathBuf, TempFile)> {
-    let client = match http_image_client() {
+    let client = match http_image_client().await {
         Ok(client) => client,
         Err(err) => {
             tracing::warn!("Failed to build image/media HTTP client: {}", err);
@@ -1207,7 +1207,7 @@ async fn fetch_remote_bytes_with_limit_cancel(
     cancelled: Option<&dyn AudioAcquisitionCancellation>,
 ) -> Result<Vec<u8>> {
     check_media_cancel(cancelled, 0)?;
-    let response = match http_image_client()?.get(url).send().await {
+    let response = match http_image_client().await?.get(url).send().await {
         Ok(response) => response,
         Err(err) => bail!("Failed to fetch {kind} URL {url}: {err}"),
     };
@@ -1320,7 +1320,7 @@ fn validate_payload_size(bytes: Vec<u8>, kind: &str, max_size: usize) -> Result<
 /// A bad `MLXCEL_EXTRA_CA_CERTS` is an operator misconfiguration, not a
 /// programmer invariant, so it's surfaced as a normal error to the caller
 /// (same as the downloader's client) rather than panicking the request path.
-fn http_image_client() -> Result<&'static reqwest::Client> {
+async fn http_image_client() -> Result<&'static reqwest::Client> {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     if let Some(client) = CLIENT.get() {
         return Ok(client);
@@ -1337,11 +1337,38 @@ fn http_image_client() -> Result<&'static reqwest::Client> {
     // See `downloader::load_extra_ca_certificates` — this client fetches
     // remote media URLs over the same rustls-tls backend, so it needs the
     // same MLXCEL_EXTRA_CA_CERTS trust anchors to work behind a
-    // TLS-inspecting corporate proxy.
-    for cert in crate::downloader::load_extra_ca_certificates()? {
+    // TLS-inspecting corporate proxy. Loading is a blocking fs::read + PEM
+    // parse, so it runs on the blocking pool instead of this async worker
+    // thread.
+    let extra_certs = match tokio::task::spawn_blocking(|| {
+        // Serializes with `downloader::tests`' MLXCEL_EXTRA_CA_CERTS
+        // mutations. This is the only production path that reads that env
+        // var outside of a test-controlled call; cargo test runs every
+        // #[test] in one process, so an unguarded read here can race
+        // unsynchronized env::set_var calls elsewhere in the same test
+        // binary — undefined behavior per Rust 2024's env contract. Held
+        // only within this synchronous closure (never across an `.await`,
+        // which would make the guard's non-`Send` MutexGuard poison the
+        // enclosing future). Compiled out entirely outside test builds.
+        #[cfg(test)]
+        let _env_guard = crate::test_support::env_lock::env_lock();
+        crate::downloader::load_extra_ca_certificates()
+    })
+    .await
+    .context("extra CA cert loader task panicked")?
+    {
+        Ok(certs) => certs,
+        // A concurrent caller may have already won the init race while
+        // our (possibly transient) cert load failed; prefer their
+        // result over surfacing our own failure.
+        Err(err) => return CLIENT.get().map(Ok).unwrap_or(Err(err)),
+    };
+    for cert in extra_certs {
         builder = builder.add_root_certificate(cert);
     }
-    let client = builder.build().expect("server image client should build");
+    let client = builder
+        .build()
+        .context("Failed to create server image/media HTTP client")?;
     // Another task may have raced us and already initialized CLIENT; either
     // way `get_or_init` returns the single winning client.
     Ok(CLIENT.get_or_init(|| client))
