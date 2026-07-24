@@ -1054,6 +1054,9 @@ fn validate_xla_cli_image_cardinality(declared: usize, decoded: usize) -> Result
 
 #[cfg(feature = "xla-backend")]
 fn decode_xla_cli_images(paths: &[std::path::PathBuf]) -> Result<Vec<image::DynamicImage>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
     let limits = mlxcel::current_image_input_limits();
     ensure!(
         paths.len() <= limits.max_images_per_request,
