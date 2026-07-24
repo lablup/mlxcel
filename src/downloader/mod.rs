@@ -60,6 +60,12 @@
 //!   half-closed TCP connection therefore fails fast instead of hanging the
 //!   CLI/server indefinitely. Total elapsed download time is intentionally
 //!   unbounded (large files take time); only inactivity is bounded.
+//! - **Extra CA certificates** — set `MLXCEL_EXTRA_CA_CERTS=/path/to/bundle.pem`
+//!   to additionally trust one or more custom root/intermediate CAs (PEM,
+//!   concatenated) for this module's `reqwest::Client`, on top of its default
+//!   trust store. Needed behind a TLS-inspecting corporate proxy (Cloudflare
+//!   Zero Trust / WARP Gateway, Netskope, Zscaler, ...) whose root CA isn't
+//!   picked up otherwise.
 //! - **URL segment encoding** — `repo_id`, `revision`, and `filename` are
 //!   percent-encoded per-segment when composing the GET/HEAD URL so that
 //!   adversarial repo metadata containing `?`, `#`, or other reserved
@@ -329,6 +335,51 @@ const INSECURE_ENDPOINT_OPT_OUT: &str = "MLXCEL_ALLOW_INSECURE_ENDPOINT";
 /// honor the same operator escape hatch.
 fn is_insecure_endpoint_opt_out() -> bool {
     matches!(std::env::var(INSECURE_ENDPOINT_OPT_OUT), Ok(val) if !val.trim().is_empty())
+}
+
+/// Env var pointing at a PEM file of additional CA certificates to trust,
+/// on top of (not instead of) the built-in Mozilla root bundle.
+///
+/// Exists because the shared `reqwest::Client` is built with the
+/// `rustls-tls` backend, whose default root store (`webpki-roots`) is a
+/// bundle baked into the binary at compile time — unlike the `hf-hub`-owned
+/// client used for manifest fetches, it never consults the OS trust store
+/// (Keychain / `/etc/ssl`), so trusting a corporate TLS-inspecting proxy
+/// (Cloudflare Zero Trust, Netskope, Zscaler, ...) system-wide has no effect
+/// on it. Point this at the intercepting proxy's root CA to fix that without
+/// weakening the default trust anchors for everyone else.
+const EXTRA_CA_CERTS_ENV: &str = "MLXCEL_EXTRA_CA_CERTS";
+
+/// Load additional trust anchors from [`EXTRA_CA_CERTS_ENV`], if set.
+///
+/// Returns an empty `Vec` when the env var is unset or empty — the default,
+/// zero-config path. When set, the file at that path is read and parsed as a
+/// PEM bundle (one or more concatenated `-----BEGIN CERTIFICATE-----` blocks,
+/// e.g. `cat corp-ca.pem >> extra-ca-certs.pem` to add more than one). A
+/// missing file, unreadable file, or bundle with zero valid certificates is
+/// a hard error rather than a silent no-op: an operator who set this var
+/// intended for it to take effect, and downloads would otherwise fail later
+/// with a much less actionable TLS error.
+fn load_extra_ca_certificates() -> Result<Vec<reqwest::Certificate>> {
+    let path = match std::env::var(EXTRA_CA_CERTS_ENV) {
+        Ok(val) if !val.trim().is_empty() => val.trim().to_string(),
+        _ => return Ok(Vec::new()),
+    };
+    let bytes = fs::read(&path).with_context(|| {
+        format!("{EXTRA_CA_CERTS_ENV} is set to '{path}' but the file could not be read")
+    })?;
+    let certs = reqwest::Certificate::from_pem_bundle(&bytes).with_context(|| {
+        format!(
+            "{EXTRA_CA_CERTS_ENV} points to '{path}', but it could not be parsed as a PEM \
+             certificate bundle"
+        )
+    })?;
+    if certs.is_empty() {
+        return Err(anyhow!(
+            "{EXTRA_CA_CERTS_ENV} points to '{path}', but it contains no certificates"
+        ));
+    }
+    Ok(certs)
 }
 
 /// Refuse plaintext endpoints when a token would be transmitted (M1).
@@ -775,6 +826,9 @@ fn download_repo_blocking(opts: DownloadOptions) -> Result<()> {
             .default_headers(headers);
         if enforce_https {
             builder = builder.https_only(true);
+        }
+        for cert in load_extra_ca_certificates()? {
+            builder = builder.add_root_certificate(cert);
         }
         builder.build().context("Failed to create HTTP client")
     })?;
