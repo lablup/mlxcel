@@ -350,11 +350,35 @@ fn acquire_auxiliary_cache_lock_with_policy(
 }
 
 fn cache_lock_is_stale(path: &Path, stale_after: Duration) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(token) = std::fs::read_to_string(path) {
+            if let Some(pid) = cache_lock_owner_pid(&token) {
+                match Path::new("/proc").join(pid.to_string()).try_exists() {
+                    Ok(false) => return true,
+                    Ok(true) => {}
+                    Err(_) => {}
+                }
+            }
+        }
+    }
     std::fs::metadata(path)
         .and_then(|metadata| metadata.modified())
         .ok()
         .and_then(|modified| SystemTime::now().duration_since(modified).ok())
         .is_some_and(|age| age >= stale_after)
+}
+
+#[cfg(target_os = "linux")]
+fn cache_lock_owner_pid(token: &str) -> Option<u32> {
+    let mut fields = token.split(';');
+    let pid = fields.next()?.strip_prefix("pid=")?.parse().ok()?;
+    fields
+        .next()?
+        .strip_prefix("nonce=")?
+        .parse::<u128>()
+        .ok()?;
+    fields.next().is_none().then_some(pid)
 }
 
 fn cache_lock_path(vmfb: &Path) -> PathBuf {
@@ -570,12 +594,57 @@ mod tests {
         drop(held);
 
         let lock = cache_lock_path(&vmfb);
-        std::fs::write(&lock, "abandoned").unwrap();
+        #[cfg(target_os = "linux")]
+        for token in [b"".as_slice(), b"damaged".as_slice(), &[0xff]] {
+            std::fs::write(&lock, token).unwrap();
+            assert!(
+                !cache_lock_is_stale(&lock, Duration::from_secs(1)),
+                "a fresh incomplete owner token must remain live"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+            let recovered = acquire_auxiliary_cache_lock_with_policy(
+                &vmfb,
+                Duration::from_millis(50),
+                Duration::from_millis(1),
+                Duration::from_millis(1),
+            )
+            .unwrap();
+            drop(recovered);
+            assert!(!lock.exists());
+        }
+        std::fs::write(
+            &lock,
+            format!("pid={};nonce={}", std::process::id(), unique_nonce()),
+        )
+        .unwrap();
         std::thread::sleep(Duration::from_millis(5));
         let recovered = acquire_auxiliary_cache_lock_with_policy(
             &vmfb,
             Duration::from_millis(50),
             Duration::from_millis(1),
+            Duration::from_millis(1),
+        )
+        .unwrap();
+        drop(recovered);
+        assert!(!lock.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cache_lock_immediately_recovers_an_impossible_dead_pid() {
+        let vmfb = temp_vmfb("dead-owner");
+        let lock = cache_lock_path(&vmfb);
+        let impossible_pid = u32::MAX;
+        assert!(
+            !Path::new("/proc").join(impossible_pid.to_string()).exists(),
+            "test PID unexpectedly exists"
+        );
+        std::fs::write(&lock, format!("pid={impossible_pid};nonce=1")).unwrap();
+
+        let recovered = acquire_auxiliary_cache_lock_with_policy(
+            &vmfb,
+            Duration::from_millis(50),
+            Duration::from_secs(60 * 60),
             Duration::from_millis(1),
         )
         .unwrap();
