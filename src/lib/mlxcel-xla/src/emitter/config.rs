@@ -132,6 +132,8 @@ pub enum WeightScheme {
     /// ExaOne 3.x GPT-2-style names (`transformer.h.{i}...`, gated MLP `c_fc_0` /
     /// `c_fc_1` / `c_proj`, `out_proj` attention output).
     Exaone,
+    /// Molmo2's OLMo-style names under a VLM `language_model.*` namespace.
+    Molmo2,
 }
 
 /// MLX affine weight quantization (`config.json` `quantization`). The linear /
@@ -482,14 +484,17 @@ impl Config {
             serde_json::from_str(s).map_err(|e| format!("parse config.json: {e}"))?;
         let wrapper_model_type = root.get("model_type").and_then(serde_json::Value::as_str);
         let is_phi4mm = wrapper_model_type == Some("phi4mm");
-        let v = if matches!(wrapper_model_type, Some("llava" | "llava_next")) {
+        let is_molmo2 = wrapper_model_type == Some("molmo2");
+        let v = if matches!(wrapper_model_type, Some("llava" | "llava_next" | "molmo2")) {
             let mut text = root
                 .get("text_config")
                 .and_then(serde_json::Value::as_object)
                 .cloned()
                 .ok_or_else(|| {
-                    "LLaVA config.json missing object `text_config` for the XLA text graph"
-                        .to_string()
+                    format!(
+                        "{} config.json missing object `text_config` for the XLA text graph",
+                        wrapper_model_type.unwrap_or("VLM")
+                    )
                 })?;
             // mlx-community quantized VLMs commonly keep the affine scheme at
             // the wrapper level even though the tensors belong to the nested
@@ -509,10 +514,10 @@ impl Config {
         // ExaOne 3.x keeps GPT-2-style tensor names; every other supported family
         // uses the standard HF Llama layout. Loader-only (see [`WeightScheme`]), so
         // it never changes the emitted graph.
-        let weight_scheme = if model_type == Some("exaone") {
-            WeightScheme::Exaone
-        } else {
-            WeightScheme::Llama
+        let weight_scheme = match model_type {
+            Some("exaone") => WeightScheme::Exaone,
+            Some("molmo2_text") if is_molmo2 => WeightScheme::Molmo2,
+            _ => WeightScheme::Llama,
         };
 
         // Interleaved (GPT-J-style) RoPE reaches the supported families only through
@@ -870,6 +875,19 @@ impl Config {
                 tie_default = false;
                 rotary_dim = partial_rotary(1.0);
             }
+            Some("molmo2_text") if is_molmo2 => {
+                // Molmo2 reuses the shared dense text graph: plain pre-norm,
+                // fused QKV, per-head raw q/k RMSNorm, and fused SwiGLU. Its
+                // checkpoint names and gate/up half ordering are loader-only
+                // differences captured by WeightScheme::Molmo2.
+                fused_qkv = true;
+                fused_gate_up = true;
+                tie_default = false;
+                qk_norm = Some(QkNorm {
+                    per_head: true,
+                    one_plus: false,
+                });
+            }
             Some("stablelm") => {
                 // LayerNorm with bias, partial RoPE, optional q/k/v bias, untied.
                 layernorm = true;
@@ -1003,7 +1021,7 @@ impl Config {
                 return Err(format!(
                     "the OpenXLA emitter supports the dense architectures Llama, Qwen2, \
                      Qwen3, Gemma1/2/3, SmolLM3, OLMo2/3, Seed-OSS, MiMo, InternLM3, ExaOne, \
-                     Cohere, Cohere2, Phi3, Phi4MM, StableLM, StarCoder2, Granite, and MiniCPM, plus \
+                     Cohere, Cohere2, Phi3, Phi4MM, Molmo2, StableLM, StarCoder2, Granite, and MiniCPM, plus \
                      the Mixtral, Qwen2-MoE, Qwen3-MoE, and OLMoE mixture-of-experts \
                      architectures; config.json model_type = {other:?} (other MoE / MLA / \
                      novel-activation variants are follow-ups)"

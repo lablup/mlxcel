@@ -42,6 +42,9 @@ use super::vlm_prompt::{ImageTokenBlockError, ImageTokenBlockInfo, apply_image_t
 mod export;
 #[cfg(feature = "xla-iree")]
 use super::qwen_vl::insert_qwen_vl_image_tokens;
+#[cfg(feature = "xla-iree")]
+#[path = "molmo2_xla_preprocessor.rs"]
+mod molmo2_xla;
 use export::export_mlx_tensor;
 use export::{
     build_prepared_prefill, export_llava_prefill, usize_to_i32, validate_embedding_shape,
@@ -52,6 +55,8 @@ use export::{
 // turns that into a hard error. The gate has to match the single call site.
 #[cfg(any(feature = "xla-iree", test))]
 use export::export_qwen2_vl_prefill;
+#[cfg(feature = "xla-iree")]
+pub use molmo2_xla::Molmo2IreeHostPreprocessor;
 
 /// Vision implementation selected for OpenXLA multimodal preprocessing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,47 +184,78 @@ pub fn load_xla_image_preprocessor(
                 .to_string(),
         ));
     }
-    if model_type == crate::models::ModelType::Qwen2VL {
-        let policy = XlaVisionBackendPolicy::from_env()?;
-        if policy == XlaVisionBackendPolicy::Host {
-            return Err(HostPreprocessorError::InvalidConfig(
-                "Qwen2-VL XLA vision has no MLX fallback; MLXCEL_XLA_VISION_BACKEND=host is unsupported"
-                    .to_string(),
-            ));
-        }
-        #[cfg(feature = "xla-iree")]
-        {
-            let device = std::env::var("MLXCEL_XLA_DEVICE")
-                .unwrap_or_else(|_| mlxcel_xla::default_device().to_string());
-            let preprocessor = Qwen2VlIreeHostPreprocessor::load(model_path, &device)?;
-            tracing::info!(
-                vision_backend = "iree",
-                vision_device = %device,
-                family = "qwen2_vl",
-                "OpenXLA multimodal vision backend selected"
-            );
-            return Ok(Some(Box::new(preprocessor)));
-        }
-        // No MLX fallback exists for this family, so an image-capable session
-        // cannot be built here. Report it as a build-configuration error with
-        // the remedy attached: both callers surface this string verbatim, so
-        // the rebuild instruction is the only actionable part the operator
-        // gets.
-        #[cfg(not(feature = "xla-iree"))]
-        {
-            return Err(HostPreprocessorError::InvalidConfig(
-                "Qwen2-VL XLA image execution requires the xla-iree feature; rebuild mlxcel with \
-                 `--features xla-iree` (this family has no MLX vision fallback)"
-                    .to_string(),
-            ));
-        }
-    }
-    if model_type != crate::models::ModelType::LlavaVLM {
+    if model_type != crate::models::ModelType::LlavaVLM
+        && model_type != crate::models::ModelType::Molmo2VLM
+        && model_type != crate::models::ModelType::Qwen2VL
+    {
         return Ok(None);
     }
 
     let policy = XlaVisionBackendPolicy::from_env()?;
-    load_llava_image_preprocessor(model_path, policy)
+    match model_type {
+        crate::models::ModelType::Qwen2VL => {
+            if policy == XlaVisionBackendPolicy::Host {
+                return Err(HostPreprocessorError::InvalidConfig(
+                    "Qwen2-VL XLA vision has no MLX fallback; MLXCEL_XLA_VISION_BACKEND=host is unsupported"
+                        .to_string(),
+                ));
+            }
+            #[cfg(feature = "xla-iree")]
+            {
+                let device = std::env::var("MLXCEL_XLA_DEVICE")
+                    .unwrap_or_else(|_| mlxcel_xla::default_device().to_string());
+                let preprocessor = Qwen2VlIreeHostPreprocessor::load(model_path, &device)?;
+                tracing::info!(
+                    vision_backend = "iree",
+                    vision_device = %device,
+                    family = "qwen2_vl",
+                    "OpenXLA multimodal vision backend selected"
+                );
+                Ok(Some(Box::new(preprocessor)))
+            }
+            // No MLX fallback exists for this family, so an image-capable session
+            // cannot be built here. Report it as a build-configuration error with
+            // the remedy attached: both callers surface this string verbatim, so
+            // the rebuild instruction is the only actionable part the operator
+            // gets.
+            #[cfg(not(feature = "xla-iree"))]
+            {
+                Err(HostPreprocessorError::InvalidConfig(
+                    "Qwen2-VL XLA image execution requires the xla-iree feature; rebuild mlxcel \
+                     with `--features xla-iree` (this family has no MLX vision fallback)"
+                        .to_string(),
+                ))
+            }
+        }
+        crate::models::ModelType::LlavaVLM => load_llava_image_preprocessor(model_path, policy),
+        crate::models::ModelType::Molmo2VLM => {
+            #[cfg(feature = "xla-iree")]
+            {
+                if policy == XlaVisionBackendPolicy::Host {
+                    return Ok(None);
+                }
+                let device = std::env::var("MLXCEL_XLA_DEVICE")
+                    .unwrap_or_else(|_| mlxcel_xla::default_device().to_string());
+                let preprocessor = Molmo2IreeHostPreprocessor::load(model_path, &device)?;
+                tracing::info!(
+                    vision_backend = "iree",
+                    vision_device = %device,
+                    "OpenXLA Molmo2 image preprocessing stage ready"
+                );
+                Ok(Some(Box::new(preprocessor)))
+            }
+            #[cfg(not(feature = "xla-iree"))]
+            {
+                if policy == XlaVisionBackendPolicy::Iree {
+                    return Err(HostPreprocessorError::InvalidConfig(
+                        "MLXCEL_XLA_VISION_BACKEND=iree requires the xla-iree feature".to_string(),
+                    ));
+                }
+                Ok(None)
+            }
+        }
+        _ => Ok(None),
+    }
 }
 
 fn load_llava_host_preprocessor_boxed(

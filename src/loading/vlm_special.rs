@@ -1369,6 +1369,47 @@ pub(crate) fn load_phi4mm_xla_text_embeddings(
     ))
 }
 
+/// Load only Molmo2's dual text embedding table for prepared XLA prefills.
+#[cfg(feature = "xla-iree")]
+pub(crate) fn load_molmo2_xla_text_embeddings(
+    model_path: &Path,
+) -> Result<(models::molmo2::Molmo2Embedding, usize, usize)> {
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+    if full_config.get("model_type").and_then(Value::as_str) != Some("molmo2") {
+        return Err(anyhow::anyhow!(
+            "{} is not a Molmo2 checkpoint",
+            model_path.display()
+        ));
+    }
+    let text = full_config
+        .get("text_config")
+        .ok_or_else(|| anyhow::anyhow!("Molmo2 config is missing text_config"))?;
+    let hidden_size = text
+        .get("hidden_size")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("Molmo2 text_config.hidden_size is required"))?
+        as usize;
+    let max_sequence_len = text
+        .get("max_position_embeddings")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("Molmo2 text_config.max_position_embeddings is required"))?
+        as usize;
+    let raw_weights = super::load_vlm_weights_common_filtered_canonical(model_path, |name| {
+        matches!(
+            name,
+            "language_model.model.wte.embedding"
+                | "language_model.model.wte.new_embedding"
+                | "model.transformer.wte.embedding"
+                | "model.transformer.wte.new_embedding"
+        )
+    })?;
+    let weights = remap_molmo2_weights(raw_weights);
+    let embeddings =
+        models::molmo2::Molmo2Embedding::from_weights(&weights, "language_model.model.wte")
+            .map_err(|error| anyhow::anyhow!("invalid Molmo2 text embedding tables: {error}"))?;
+    Ok((embeddings, hidden_size, max_sequence_len))
+}
+
 /// Filtered Phi4MM host components used by the XLA prepared-prefill producer.
 ///
 /// The struct deliberately contains no text decoder, LM head, audio encoder, or

@@ -58,6 +58,8 @@ mod gemma3n_weights;
 mod model;
 mod moe;
 pub(crate) mod numeric_ops;
+mod molmo2_config;
+mod molmo2_vision;
 mod phi4_audio;
 mod qwen2_vl;
 mod rope;
@@ -151,6 +153,10 @@ pub(crate) use model::{
     mrope_axis_selector, validate_prefill_embeddings_attention_bias,
     validate_prefill_embeddings_metadata,
 };
+#[allow(unused_imports)]
+pub(crate) use molmo2_config::{Molmo2VisionConfig, Molmo2VisionWeightSpec};
+#[allow(unused_imports)]
+pub(crate) use molmo2_vision::emit_molmo2_vision;
 #[allow(unused_imports)]
 pub(crate) use vision::emit_vision;
 // The only consumer is `IreeVisionDiagnosticProjector` in `vision_runtime`, which
