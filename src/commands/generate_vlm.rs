@@ -14,6 +14,7 @@
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use mlxcel::LoadedModel;
 use mlxcel::video;
@@ -23,6 +24,21 @@ use mlxcel::vlm_prompt::ImageTokenBlockAction;
 use mlxcel::vlm_runtime::{VlmPreparationSummary, prepare_and_compute_vlm_embeddings_with_budget};
 
 use crate::MlxcelTokenizer;
+
+fn print_audio_preprocess_summary(batch: &mlxcel::audio::AudioWaveformBatch, started: Instant) {
+    println!(
+        "Audio preprocessing [{}]: clips={}, source_seconds={:.6}, source_samples={}, \
+         normalized_samples={}, feature_frames={}, effective_audio_tokens={}, latency_ms={:.3}",
+        batch.family,
+        batch.clips.len(),
+        batch.total_source_duration_micros as f64 / 1_000_000.0,
+        batch.total_source_samples,
+        batch.total_samples,
+        batch.estimated_frames,
+        batch.effective_audio_tokens,
+        started.elapsed().as_secs_f64() * 1000.0,
+    );
+}
 
 fn print_preparation_summary(summary: VlmPreparationSummary) {
     match summary {
@@ -576,10 +592,12 @@ fn compute_phi4mm_audio_embeddings(
         .collect::<Result<Vec<_>>>()?;
     let processed_images = phi4mm.processor.preprocess(&images);
 
+    let preprocess_started = Instant::now();
     let cancelled = std::sync::atomic::AtomicBool::new(false);
     let waveform =
         mlxcel::audio::preprocess_wav_file(audio_path, phi4mm.audio_preprocess_policy, &cancelled)
             .map_err(anyhow::Error::msg)?;
+    print_audio_preprocess_summary(&waveform, preprocess_started);
     let audios: Vec<_> = waveform
         .clips
         .into_iter()
@@ -653,10 +671,12 @@ fn compute_gemma3n_audio_embeddings(
             image_paths.len(),
         )?;
     }
+    let preprocess_started = Instant::now();
     let cancelled = std::sync::atomic::AtomicBool::new(false);
     let waveform =
         mlxcel::audio::preprocess_wav_file(audio_path, gemma3n.audio_preprocess_policy, &cancelled)
             .map_err(anyhow::Error::msg)?;
+    print_audio_preprocess_summary(&waveform, preprocess_started);
     let samples = waveform
         .clips
         .into_iter()

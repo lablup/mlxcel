@@ -157,6 +157,15 @@ impl Phi4MMVLModel {
         self.audio_extractor.extract_batch(audios)
     }
 
+    pub fn extract_audio_cancellable(
+        &self,
+        audios: &[(Vec<f32>, u32)],
+        cancelled: &dyn crate::audio::AudioCancellation,
+    ) -> Result<Phi4MMAudioBatch, String> {
+        self.audio_extractor
+            .extract_batch_cancellable(audios, cancelled)
+    }
+
     pub fn get_input_embeddings_with_audio(
         &self,
         input_ids: &MlxArray,

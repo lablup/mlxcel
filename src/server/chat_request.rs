@@ -161,6 +161,12 @@ pub(crate) async fn prepare_chat_request_with_cache(
     server_default_kwargs: Option<&ChatTemplateKwargs>,
     prompt_cache_enabled: bool,
 ) -> Result<PreparedChatRequest> {
+    let declared_images = request.image_urls().len();
+    let declared_audio = request.audio_inputs().len();
+    let declared_videos = request.video_urls().len();
+    if declared_audio > 0 {
+        validate_no_reserved_media_sentinels(request)?;
+    }
     // Determine effective tools based on tool_choice
     let effective_tools = effective_tools(request);
     let merged_extra_body = request.merged_extra_body();
@@ -236,9 +242,6 @@ pub(crate) async fn prepare_chat_request_with_cache(
         .image_soft_tokens()
         .map_err(|err| anyhow::anyhow!("{err}"))?;
 
-    let declared_images = request.image_urls().len();
-    let declared_audio = request.audio_inputs().len();
-    let declared_videos = request.video_urls().len();
     // Audio acquisition is owned by this request-preparation future. Before
     // scheduler admission there is no streaming disconnect token to pass, so
     // handler cancellation drops this future (and its URL stream) as a unit.
@@ -268,6 +271,31 @@ pub(crate) async fn prepare_chat_request_with_cache(
         audio_data,
         videos,
     })
+}
+
+fn validate_no_reserved_media_sentinels(request: &ChatCompletionRequest) -> Result<()> {
+    for message in &request.messages {
+        match &message.content {
+            MessageContent::Text(text)
+                if text.contains(super::types::request::ORDERED_MEDIA_PREFIX) =>
+            {
+                anyhow::bail!("message text contains a reserved ordered-media sentinel");
+            }
+            MessageContent::Parts(parts) => {
+                if parts.iter().any(|part| {
+                    matches!(
+                        part,
+                        ContentPart::Text { text }
+                            if text.contains(super::types::request::ORDERED_MEDIA_PREFIX)
+                    )
+                }) {
+                    anyhow::bail!("message text contains a reserved ordered-media sentinel");
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Emit an INFO log exactly once per resolved session when the
@@ -431,6 +459,9 @@ fn build_raw_json_messages_with_thinking(
     request: &ChatCompletionRequest,
     preserve_thinking: bool,
 ) -> serde_json::Value {
+    let preserve_media_order = !request.audio_inputs().is_empty();
+    let mut image_ordinal = 0usize;
+    let mut audio_ordinal = 0usize;
     // Decide which assistant messages (by index) need their think blocks
     // stripped. Empty set means "keep everything."
     let strip_indices: std::collections::HashSet<usize> = if preserve_thinking {
@@ -448,7 +479,12 @@ fn build_raw_json_messages_with_thinking(
         .map(|(idx, m)| {
             // Strip think blocks from assistant messages before the checkpoint.
             let stripped = strip_indices.contains(&idx);
-            let raw_content = m.content.text();
+            let raw_content = if preserve_media_order {
+                m.content
+                    .text_with_ordered_media(&mut image_ordinal, &mut audio_ordinal)
+            } else {
+                m.content.text()
+            };
             let content = if stripped {
                 serde_json::Value::String(strip_think_block(&raw_content).into_owned())
             } else {
@@ -637,6 +673,9 @@ fn build_chat_messages_with_thinking(
     request: &ChatCompletionRequest,
     preserve_thinking: bool,
 ) -> Vec<ChatMessage> {
+    let preserve_media_order = !request.audio_inputs().is_empty();
+    let mut image_ordinal = 0usize;
+    let mut audio_ordinal = 0usize;
     let strip_indices: std::collections::HashSet<usize> = if preserve_thinking {
         std::collections::HashSet::new()
     } else {
@@ -650,7 +689,13 @@ fn build_chat_messages_with_thinking(
         .iter()
         .enumerate()
         .map(|(idx, message)| {
-            let raw = message.content.text();
+            let raw = if preserve_media_order {
+                message
+                    .content
+                    .text_with_ordered_media(&mut image_ordinal, &mut audio_ordinal)
+            } else {
+                message.content.text()
+            };
             let content = if strip_indices.contains(&idx) {
                 strip_think_block(&raw).into_owned()
             } else {

@@ -1143,7 +1143,12 @@ impl ModelProvider {
         // falls back to `None` so the scheduler encodes it and surfaces the
         // error through the normal response channel.
         let prompt_token_ids = self.prompt_tokenizer.as_ref().and_then(|tok| {
-            tokenize_prompt_for_generation(tok, &prompt)
+            let tokenized = if audio.is_empty() {
+                tokenize_prompt_for_generation(tok, &prompt)
+            } else {
+                tokenize_prompt_for_generation_with_ordered_media(tok, &prompt, true)
+            };
+            tokenized
                 .map_err(|err| {
                     tracing::debug!(
                         "HTTP-side prompt tokenization failed ({err}); deferring to scheduler"
@@ -1182,8 +1187,24 @@ pub(crate) fn tokenize_prompt_for_generation(
     tokenizer: &crate::tokenizer::MlxcelTokenizer,
     prompt: &str,
 ) -> Result<Vec<i32>> {
-    let add_special = !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
-    let ids = tokenizer.encode(prompt, add_special)?;
+    tokenize_prompt_for_generation_with_ordered_media(tokenizer, prompt, false)
+}
+
+pub(crate) fn tokenize_prompt_for_generation_with_ordered_media(
+    tokenizer: &crate::tokenizer::MlxcelTokenizer,
+    prompt: &str,
+    has_audio: bool,
+) -> Result<Vec<i32>> {
+    let plain_prompt = if has_audio {
+        std::borrow::Cow::Owned(
+            crate::server::types::request::strip_ordered_media_sentinels(prompt)
+                .map_err(anyhow::Error::msg)?,
+        )
+    } else {
+        std::borrow::Cow::Borrowed(prompt)
+    };
+    let add_special = !plain_prompt.starts_with("<bos>") && !plain_prompt.starts_with("<s>");
+    let ids = tokenizer.encode(&plain_prompt, add_special)?;
     Ok(ids.iter().map(|&x| x as i32).collect())
 }
 

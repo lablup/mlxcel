@@ -53,9 +53,12 @@ pub(super) fn append_audio_preprocess_metrics(body: &mut String, snap: &Observab
          # HELP mlxcel_audio_preprocess_cancelled_total Cancelled audio preprocessing jobs\n\
          # TYPE mlxcel_audio_preprocess_cancelled_total counter\n\
          mlxcel_audio_preprocess_cancelled_total {}\n\
-         # HELP mlxcel_audio_preprocess_queued_bytes Encoded audio bytes waiting in the bounded queue\n\
+         # HELP mlxcel_audio_preprocess_queued_bytes Encoded audio bytes retained across queued, processing, and result-handoff states\n\
          # TYPE mlxcel_audio_preprocess_queued_bytes gauge\n\
-         mlxcel_audio_preprocess_queued_bytes {}",
+         mlxcel_audio_preprocess_queued_bytes {}\n\
+         # HELP mlxcel_audio_preprocess_inflight_host_bytes Host bytes reserved across queued, processing, and result handoff\n\
+         # TYPE mlxcel_audio_preprocess_inflight_host_bytes gauge\n\
+         mlxcel_audio_preprocess_inflight_host_bytes {}",
         snap.audio_source_duration_micros as f64 / 1_000_000.0,
         snap.audio_source_samples,
         snap.audio_normalized_samples,
@@ -73,6 +76,7 @@ pub(super) fn append_audio_preprocess_metrics(body: &mut String, snap: &Observab
         snap.audio_reject_context_limit,
         snap.audio_preprocess_cancelled,
         snap.audio_preprocess_queued_bytes,
+        snap.audio_preprocess_inflight_host_bytes,
     );
 }
 

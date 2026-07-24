@@ -18,12 +18,17 @@ use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
 
 use super::{
     StreamingDecodeState, build_generation_result, decode_request_images,
-    decode_request_images_with_limits, merge_config_stop_tokens, resolve_end_of_turn_token_id,
-    resolve_xtc_newline_token_ids,
+    decode_request_images_with_limits, encode_ordered_media_prompt,
+    materialize_phi4mm_ordered_prompt, merge_config_stop_tokens, preprocess_server_audio,
+    resolve_end_of_turn_token_id, resolve_xtc_newline_token_ids,
 };
 use crate::SamplingConfig;
+use crate::audio::AudioFamilyPolicy;
+use crate::server::batch::BatchObservability;
 use crate::server::media::ImageInputLimits;
+use crate::server::types::request::{ordered_audio_sentinel, ordered_image_sentinel};
 use crate::tokenizer::MlxcelTokenizer;
+use crate::vlm_prompt::{ImageTokenBlockInfo, apply_image_token_blocks};
 use crate::worker_failfast::run_core_thread_or_abort;
 
 fn encode_png_bytes() -> Vec<u8> {
@@ -31,6 +36,206 @@ fn encode_png_bytes() -> Vec<u8> {
     let mut cursor = Cursor::new(Vec::new());
     image.write_to(&mut cursor, ImageFormat::Png).unwrap();
     cursor.into_inner()
+}
+
+fn wav_pcm16(samples: &[i16]) -> Vec<u8> {
+    let data_len = samples.len() * 2;
+    let mut wav = Vec::with_capacity(44 + data_len);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36u32 + data_len as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&16_000u32.to_le_bytes());
+    wav.extend_from_slice(&32_000u32.to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(data_len as u32).to_le_bytes());
+    for sample in samples {
+        wav.extend_from_slice(&sample.to_le_bytes());
+    }
+    wav
+}
+
+fn encode_test_text(text: &str, add_special: bool) -> anyhow::Result<Vec<i32>> {
+    let mut tokens = Vec::with_capacity(text.len() + usize::from(add_special));
+    if add_special {
+        tokens.push(1);
+    }
+    tokens.extend(text.bytes().map(i32::from));
+    Ok(tokens)
+}
+
+#[test]
+fn phi4mm_ordered_prompt_keeps_exact_mixed_media_positions() {
+    let prompt = format!(
+        "A{}B{}C{}D",
+        ordered_audio_sentinel(1),
+        ordered_image_sentinel(1),
+        ordered_audio_sentinel(2)
+    );
+    let materialized = materialize_phi4mm_ordered_prompt(&prompt, 1, 2).unwrap();
+    assert_eq!(materialized, "A<|audio_1|>B<|image_1|>C<|audio_2|>D");
+
+    let prepared = crate::phi4mm_prompt::prepare_phi4mm_prompt_tokens(
+        &materialized,
+        1,
+        2,
+        |text, add_special| encode_test_text(text, add_special).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        prepared.tokens,
+        vec![
+            1,
+            i32::from(b'A'),
+            crate::phi4mm_prompt::PHI4MM_AUDIO_TOKEN_ID,
+            i32::from(b'B'),
+            crate::phi4_siglip_prompt::PHI4_SIGLIP_IMAGE_TOKEN_INDEX,
+            i32::from(b'C'),
+            crate::phi4mm_prompt::PHI4MM_AUDIO_TOKEN_ID,
+            i32::from(b'D'),
+        ]
+    );
+}
+
+#[test]
+fn gemma3n_ordered_prompt_expands_media_in_place_without_clustering() {
+    const IMAGE: i32 = 800;
+    const IMAGE_BEGIN: i32 = 801;
+    const IMAGE_END: i32 = 802;
+    const AUDIO: i32 = 900;
+    const AUDIO_BEGIN: i32 = 901;
+    const AUDIO_END: i32 = 902;
+    const WRAPPER: i32 = 10;
+    let prompt = format!(
+        "{}A{}B{}C",
+        ordered_audio_sentinel(1),
+        ordered_image_sentinel(1),
+        ordered_audio_sentinel(2)
+    );
+    let mut tokens = encode_ordered_media_prompt(&prompt, IMAGE, AUDIO, 1, 2, encode_test_text)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        tokens,
+        vec![
+            1,
+            AUDIO,
+            i32::from(b'A'),
+            IMAGE,
+            i32::from(b'B'),
+            AUDIO,
+            i32::from(b'C')
+        ],
+        "a leading media part must still follow BOS and retain its exact turn position"
+    );
+
+    apply_image_token_blocks(
+        &mut tokens,
+        ImageTokenBlockInfo {
+            use_boi_eoi: true,
+            image_token_id: IMAGE,
+            mm_tokens_per_image: 2,
+            boi_token_id: IMAGE_BEGIN,
+            eoi_token_id: IMAGE_END,
+            has_bos: true,
+            separator_token_id: None,
+            suffix_tokens: Vec::new(),
+            block_prefix_tokens: Vec::new(),
+            block_suffix_tokens: Vec::new(),
+        },
+        1,
+    )
+    .unwrap();
+    crate::vlm_runtime::expand_gemma3n_audio_tokens(
+        &mut tokens,
+        AUDIO,
+        AUDIO_BEGIN,
+        AUDIO_END,
+        2,
+        2,
+        &[WRAPPER],
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        tokens,
+        vec![
+            1,
+            WRAPPER,
+            AUDIO_BEGIN,
+            AUDIO,
+            AUDIO,
+            AUDIO_END,
+            WRAPPER,
+            i32::from(b'A'),
+            IMAGE_BEGIN,
+            IMAGE,
+            IMAGE,
+            IMAGE_END,
+            i32::from(b'B'),
+            WRAPPER,
+            AUDIO_BEGIN,
+            AUDIO,
+            AUDIO,
+            AUDIO_END,
+            WRAPPER,
+            i32::from(b'C'),
+        ]
+    );
+}
+
+#[test]
+fn mlx_server_audio_metrics_are_live_nonzero_and_counted_once() {
+    let observability = BatchObservability::new();
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let waveform = preprocess_server_audio(
+        &[wav_pcm16(&vec![1; 800])],
+        AudioFamilyPolicy::gemma3n(),
+        &cancelled,
+        &observability,
+    )
+    .unwrap();
+    observability.record_audio_effective_prefill(123);
+
+    assert_eq!(waveform.total_source_samples, 800);
+    let snapshot = observability.snapshot();
+    assert_eq!(snapshot.audio_source_samples, 800);
+    assert_eq!(snapshot.audio_normalized_samples, 800);
+    assert_eq!(snapshot.audio_source_duration_micros, 50_000);
+    assert_eq!(snapshot.audio_feature_frames, 3);
+    assert_eq!(snapshot.audio_effective_tokens, 188);
+    assert_eq!(snapshot.audio_effective_prefill_tokens, 123);
+    assert!(snapshot.audio_preprocess_latency_micros > 0);
+    assert_eq!(snapshot.audio_preprocess_rejections, 0);
+    assert_eq!(snapshot.audio_preprocess_cancelled, 0);
+}
+
+#[test]
+fn mlx_server_cancelled_audio_counts_once_without_rejection_or_work_metrics() {
+    let observability = BatchObservability::new();
+    let cancelled = std::sync::atomic::AtomicBool::new(true);
+    let error = preprocess_server_audio(
+        &[wav_pcm16(&vec![1; 800])],
+        AudioFamilyPolicy::gemma3n(),
+        &cancelled,
+        &observability,
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        crate::audio::AudioPreprocessError::Cancelled { .. }
+    ));
+    let snapshot = observability.snapshot();
+    assert_eq!(snapshot.audio_preprocess_cancelled, 1);
+    assert_eq!(snapshot.audio_preprocess_rejections, 0);
+    assert_eq!(snapshot.audio_source_samples, 0);
+    assert_eq!(snapshot.audio_normalized_samples, 0);
+    assert!(snapshot.audio_preprocess_latency_micros > 0);
 }
 
 fn png_chunk(name: &[u8; 4], data: &[u8]) -> Vec<u8> {

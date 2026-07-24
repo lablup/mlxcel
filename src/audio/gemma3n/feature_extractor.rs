@@ -16,6 +16,8 @@
 
 use std::f64::consts::PI;
 
+use crate::audio::{AudioCancellation, AudioPreprocessCheckpoint};
+
 pub const GEMMA3N_SAMPLE_RATE: u32 = 16_000;
 pub const GEMMA3N_MAX_SAMPLES: usize = 480_000;
 pub const GEMMA3N_AUDIO_SOFT_TOKENS: usize = 188;
@@ -63,10 +65,20 @@ impl Gemma3nAudioFeatureExtractor {
     /// left-pads the batch to its longest clip and then to a multiple of 128
     /// samples (`AutoProcessor(..., padding_side="left")`).
     pub fn extract_batch(&self, clips: &[Vec<f32>]) -> Result<Gemma3nAudioFeatureBatch, String> {
+        self.extract_batch_cancellable(clips, &std::sync::atomic::AtomicBool::new(false))
+    }
+
+    pub fn extract_batch_cancellable(
+        &self,
+        clips: &[Vec<f32>],
+        cancelled: &dyn AudioCancellation,
+    ) -> Result<Gemma3nAudioFeatureBatch, String> {
+        check_feature_cancelled(cancelled)?;
         if clips.is_empty() {
             return Err("Gemma3n audio batch must contain at least one clip".into());
         }
         for (index, clip) in clips.iter().enumerate() {
+            check_feature_cancelled(cancelled)?;
             if clip.is_empty() {
                 return Err(format!("Gemma3n audio clip {index} is empty"));
             }
@@ -97,6 +109,7 @@ impl Gemma3nAudioFeatureExtractor {
         let mut valid_mask = Vec::with_capacity(clips.len() * frames);
 
         for clip in clips {
+            check_feature_cancelled(cancelled)?;
             let effective_len = clip.len().min(GEMMA3N_MAX_SAMPLES);
             let mut waveform = vec![0.0f32; padded_len];
             let left_padding = padded_len - effective_len;
@@ -104,6 +117,9 @@ impl Gemma3nAudioFeatureExtractor {
                 .copy_from_slice(&clip[..effective_len]);
 
             for frame_index in 0..frames {
+                if frame_index % 8 == 0 {
+                    check_feature_cancelled(cancelled)?;
+                }
                 let start = frame_index * HOP_LENGTH;
                 let unfolded = &waveform[start..start + FRAME_LENGTH + 1];
                 let mut fft_input = vec![0.0f64; FFT_LENGTH];
@@ -131,6 +147,7 @@ impl Gemma3nAudioFeatureExtractor {
                 valid_mask.push(start >= left_padding && start < left_padding + effective_len);
             }
         }
+        check_feature_cancelled(cancelled)?;
 
         Ok(Gemma3nAudioFeatureBatch {
             features,
@@ -138,6 +155,14 @@ impl Gemma3nAudioFeatureExtractor {
             batch_size: clips.len(),
             frames,
         })
+    }
+}
+
+fn check_feature_cancelled(cancelled: &dyn AudioCancellation) -> Result<(), String> {
+    if cancelled.is_cancelled(AudioPreprocessCheckpoint::Feature) {
+        Err("Gemma3n audio feature extraction was cancelled".to_string())
+    } else {
+        Ok(())
     }
 }
 
@@ -225,6 +250,15 @@ fn mel_filter_bank() -> Vec<f32> {
 mod tests {
     use super::*;
 
+    struct CancelInsideFeature(std::sync::atomic::AtomicUsize);
+
+    impl AudioCancellation for CancelInsideFeature {
+        fn is_cancelled(&self, checkpoint: AudioPreprocessCheckpoint) -> bool {
+            checkpoint == AudioPreprocessCheckpoint::Feature
+                && self.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel) >= 4
+        }
+    }
+
     #[test]
     fn official_boundary_emits_2997_mel_frames_and_188_tokens() {
         let batch = Gemma3nAudioFeatureExtractor::new()
@@ -233,6 +267,17 @@ mod tests {
         assert_eq!(batch.frames, 2997);
         let sscp_frames = batch.frames.div_ceil(2).div_ceil(2);
         assert_eq!(sscp_frames.div_ceil(4), GEMMA3N_AUDIO_SOFT_TOKENS);
+    }
+
+    #[test]
+    fn feature_loop_observes_live_cancellation() {
+        let error = Gemma3nAudioFeatureExtractor::new()
+            .extract_batch_cancellable(
+                &[vec![0.0; 16_000]],
+                &CancelInsideFeature(std::sync::atomic::AtomicUsize::new(0)),
+            )
+            .unwrap_err();
+        assert!(error.contains("cancelled"));
     }
 
     #[test]

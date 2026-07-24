@@ -18,13 +18,14 @@
 //! future family feature producer. It intentionally has no production
 //! Phi4MM/Gemma3n producer yet; therefore XLA admission remains audio-false.
 
+use std::mem::size_of;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Instant;
 
-use mlxcel_core::session::PreparedPrefill;
+use mlxcel_core::session::{OwnedTensor, PreparedPositions, PreparedPrefill};
 use thiserror::Error;
 
 use super::observability::BatchObservability;
@@ -51,6 +52,7 @@ pub(crate) enum AudioPreprocessOutcome {
 pub(crate) struct AudioPreprocessResult {
     pub job_id: u64,
     pub outcome: AudioPreprocessOutcome,
+    _reservation: HostMemoryReservation,
 }
 
 #[derive(Debug, Error)]
@@ -68,6 +70,14 @@ pub(crate) enum AudioStageError {
         "audio prepared-prefill context limit exceeded for {family}: actual {actual}, maximum {maximum}"
     )]
     ContextLimit {
+        family: &'static str,
+        actual: usize,
+        maximum: usize,
+    },
+    #[error(
+        "audio prepared-prefill host-memory limit exceeded for {family}: actual {actual} bytes, maximum {maximum} bytes"
+    )]
+    ResultMemoryLimit {
         family: &'static str,
         actual: usize,
         maximum: usize,
@@ -92,6 +102,14 @@ pub(crate) enum AudioQueueError {
         queued_bytes: usize,
         maximum_bytes: usize,
     },
+    #[error(
+        "audio in-flight host-memory limit exceeded: request reservation {request_bytes} bytes, in flight {in_flight_bytes}, maximum {maximum_bytes}"
+    )]
+    HostMemoryLimit {
+        request_bytes: usize,
+        in_flight_bytes: usize,
+        maximum_bytes: usize,
+    },
     #[error("audio queued-memory size calculation overflowed")]
     Overflow,
 }
@@ -107,14 +125,22 @@ pub(crate) trait AudioFeatureProducer: Send + 'static {
 
 pub(crate) struct AudioPreprocessLimits {
     pub queue_depth: usize,
+    pub result_queue_depth: usize,
     pub max_queued_encoded_bytes: usize,
+    pub max_in_flight_host_bytes: usize,
 }
 
 impl Default for AudioPreprocessLimits {
     fn default() -> Self {
         Self {
             queue_depth: 8,
+            result_queue_depth: 2,
             max_queued_encoded_bytes: 512 * 1024 * 1024,
+            // One maximum-size Phi4MM request reserves 1 GiB across encoded,
+            // waveform-working, and prepared-result policy budgets. Leave a
+            // bounded 256 MiB envelope margin for Vec capacities and DTO
+            // metadata so that exact family maxima remain admissible.
+            max_in_flight_host_bytes: 1280 * 1024 * 1024,
         }
     }
 }
@@ -132,6 +158,7 @@ pub(crate) struct AudioPreprocessMetrics {
     effective_prefill_tokens: AtomicU64,
     preprocessing_latency_micros: AtomicU64,
     queued_encoded_bytes: AtomicUsize,
+    in_flight_host_bytes: AtomicUsize,
     reject_queue_full: AtomicU64,
     reject_memory_limit: AtomicU64,
     reject_worker_unavailable: AtomicU64,
@@ -158,6 +185,7 @@ impl AudioPreprocessMetrics {
             effective_prefill_tokens: AtomicU64::new(0),
             preprocessing_latency_micros: AtomicU64::new(0),
             queued_encoded_bytes: AtomicUsize::new(0),
+            in_flight_host_bytes: AtomicUsize::new(0),
             reject_queue_full: AtomicU64::new(0),
             reject_memory_limit: AtomicU64::new(0),
             reject_worker_unavailable: AtomicU64::new(0),
@@ -184,6 +212,7 @@ impl AudioPreprocessMetrics {
             effective_prefill_tokens: self.effective_prefill_tokens.load(Ordering::Relaxed),
             preprocessing_latency_micros: self.preprocessing_latency_micros.load(Ordering::Relaxed),
             queued_encoded_bytes: self.queued_encoded_bytes.load(Ordering::Acquire),
+            in_flight_host_bytes: self.in_flight_host_bytes.load(Ordering::Acquire),
             reject_queue_full: self.reject_queue_full.load(Ordering::Relaxed),
             reject_memory_limit: self.reject_memory_limit.load(Ordering::Relaxed),
             reject_worker_unavailable: self.reject_worker_unavailable.load(Ordering::Relaxed),
@@ -301,6 +330,7 @@ pub(crate) struct AudioPreprocessMetricsSnapshot {
     pub effective_prefill_tokens: u64,
     pub preprocessing_latency_micros: u64,
     pub queued_encoded_bytes: usize,
+    pub in_flight_host_bytes: usize,
     pub reject_queue_full: u64,
     pub reject_memory_limit: u64,
     pub reject_worker_unavailable: u64,
@@ -311,47 +341,55 @@ pub(crate) struct AudioPreprocessMetricsSnapshot {
     pub reject_context_limit: u64,
 }
 
-struct QueuedJob {
-    job: Option<AudioPreprocessJob>,
-    reserved_bytes: usize,
+struct HostMemoryReservation {
+    encoded_bytes: usize,
+    host_bytes: usize,
     metrics: Arc<AudioPreprocessMetrics>,
 }
 
-impl QueuedJob {
-    fn dequeue(mut self) -> Option<AudioPreprocessJob> {
-        self.release();
-        self.job.take()
-    }
-
-    fn release(&mut self) {
-        if self.reserved_bytes != 0 {
-            self.metrics
-                .queued_encoded_bytes
-                .fetch_sub(self.reserved_bytes, Ordering::AcqRel);
-            self.metrics
-                .observability
-                .audio_preprocess_queued_bytes
-                .store(
-                    self.metrics.queued_encoded_bytes.load(Ordering::Acquire),
-                    Ordering::Release,
-                );
-            self.reserved_bytes = 0;
-        }
+impl Drop for HostMemoryReservation {
+    fn drop(&mut self) {
+        self.metrics
+            .queued_encoded_bytes
+            .fetch_sub(self.encoded_bytes, Ordering::AcqRel);
+        self.metrics
+            .in_flight_host_bytes
+            .fetch_sub(self.host_bytes, Ordering::AcqRel);
+        self.metrics
+            .observability
+            .audio_preprocess_queued_bytes
+            .store(
+                self.metrics.queued_encoded_bytes.load(Ordering::Acquire),
+                Ordering::Release,
+            );
+        self.metrics
+            .observability
+            .audio_preprocess_inflight_host_bytes
+            .store(
+                self.metrics.in_flight_host_bytes.load(Ordering::Acquire),
+                Ordering::Release,
+            );
     }
 }
 
-impl Drop for QueuedJob {
-    fn drop(&mut self) {
-        self.release();
+struct QueuedJob {
+    job: Option<AudioPreprocessJob>,
+    reservation: Option<HostMemoryReservation>,
+}
+
+impl QueuedJob {
+    fn dequeue(mut self) -> Option<(AudioPreprocessJob, HostMemoryReservation)> {
+        self.job.take().zip(self.reservation.take())
     }
 }
 
 pub(crate) struct AudioPreprocessStage {
     sender: Option<mpsc::SyncSender<QueuedJob>>,
-    result_rx: mpsc::Receiver<AudioPreprocessResult>,
+    result_rx: Option<mpsc::Receiver<AudioPreprocessResult>>,
     metrics: Arc<AudioPreprocessMetrics>,
     healthy: Arc<AtomicBool>,
     max_queued_encoded_bytes: usize,
+    max_in_flight_host_bytes: usize,
     worker: Option<thread::JoinHandle<()>>,
 }
 
@@ -362,7 +400,7 @@ impl AudioPreprocessStage {
         observability: Arc<BatchObservability>,
     ) -> Result<Self, String> {
         let (sender, receiver) = mpsc::sync_channel::<QueuedJob>(limits.queue_depth.max(1));
-        let (result_tx, result_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::sync_channel(limits.result_queue_depth.max(1));
         let metrics = Arc::new(AudioPreprocessMetrics::new(observability));
         let worker_metrics = metrics.clone();
         let healthy = Arc::new(AtomicBool::new(true));
@@ -371,10 +409,10 @@ impl AudioPreprocessStage {
             .name("mlxcel-xla-audio-preprocess".to_string())
             .spawn(move || {
                 while let Ok(queued) = receiver.recv() {
-                    let Some(job) = queued.dequeue() else {
+                    let Some((job, reservation)) = queued.dequeue() else {
                         continue;
                     };
-                    let result = process_job(&mut producer, job, &worker_metrics);
+                    let result = process_job(&mut producer, job, reservation, &worker_metrics);
                     if result_tx.send(result).is_err() {
                         break;
                     }
@@ -384,10 +422,11 @@ impl AudioPreprocessStage {
             .map_err(|error| format!("failed to spawn audio preprocessing worker: {error}"))?;
         Ok(Self {
             sender: Some(sender),
-            result_rx,
+            result_rx: Some(result_rx),
             metrics,
             healthy,
             max_queued_encoded_bytes: limits.max_queued_encoded_bytes,
+            max_in_flight_host_bytes: limits.max_in_flight_host_bytes,
             worker: Some(worker),
         })
     }
@@ -415,6 +454,26 @@ impl AudioPreprocessStage {
                 return Err(error);
             }
         };
+        if request_bytes > job.policy.max_encoded_bytes_per_request {
+            self.metrics
+                .record_rejection(AudioRejectionReason::MemoryLimit);
+            return Err(AudioQueueError::MemoryLimit {
+                request_bytes,
+                queued_bytes: self.metrics.queued_encoded_bytes.load(Ordering::Acquire),
+                maximum_bytes: job.policy.max_encoded_bytes_per_request,
+            });
+        }
+        let host_reservation_bytes = job_envelope_host_bytes(&job)
+            .and_then(|bytes| bytes.checked_add(job.policy.max_waveform_working_bytes_per_request))
+            .and_then(|bytes| bytes.checked_add(job.policy.max_prepared_result_bytes_per_request));
+        let host_reservation_bytes = match host_reservation_bytes {
+            Some(bytes) => bytes,
+            None => {
+                self.metrics
+                    .record_rejection(AudioRejectionReason::Overflow);
+                return Err(AudioQueueError::Overflow);
+            }
+        };
         if let Err(error) = reserve_queued_bytes(
             &self.metrics.queued_encoded_bytes,
             request_bytes,
@@ -427,6 +486,21 @@ impl AudioPreprocessStage {
             });
             return Err(error);
         }
+        if let Err(error) = reserve_host_bytes(
+            &self.metrics.in_flight_host_bytes,
+            host_reservation_bytes,
+            self.max_in_flight_host_bytes,
+        ) {
+            self.metrics
+                .queued_encoded_bytes
+                .fetch_sub(request_bytes, Ordering::AcqRel);
+            self.metrics.record_rejection(match &error {
+                AudioQueueError::HostMemoryLimit { .. } => AudioRejectionReason::MemoryLimit,
+                AudioQueueError::Overflow => AudioRejectionReason::Overflow,
+                _ => AudioRejectionReason::WorkerUnavailable,
+            });
+            return Err(error);
+        }
         self.metrics
             .observability
             .audio_preprocess_queued_bytes
@@ -434,10 +508,20 @@ impl AudioPreprocessStage {
                 self.metrics.queued_encoded_bytes.load(Ordering::Acquire),
                 Ordering::Release,
             );
+        self.metrics
+            .observability
+            .audio_preprocess_inflight_host_bytes
+            .store(
+                self.metrics.in_flight_host_bytes.load(Ordering::Acquire),
+                Ordering::Release,
+            );
         let queued = QueuedJob {
             job: Some(job),
-            reserved_bytes: request_bytes,
-            metrics: self.metrics.clone(),
+            reservation: Some(HostMemoryReservation {
+                encoded_bytes: request_bytes,
+                host_bytes: host_reservation_bytes,
+                metrics: self.metrics.clone(),
+            }),
         };
         let Some(sender) = self.sender.as_ref() else {
             self.metrics
@@ -463,11 +547,14 @@ impl AudioPreprocessStage {
     }
 
     pub fn try_recv(&self) -> Result<AudioPreprocessResult, mpsc::TryRecvError> {
-        self.result_rx.try_recv()
+        self.result_rx
+            .as_ref()
+            .ok_or(mpsc::TryRecvError::Disconnected)?
+            .try_recv()
     }
 
     pub fn recv(&self) -> Result<AudioPreprocessResult, mpsc::RecvError> {
-        self.result_rx.recv()
+        self.result_rx.as_ref().ok_or(mpsc::RecvError)?.recv()
     }
 
     pub fn metrics(&self) -> &Arc<AudioPreprocessMetrics> {
@@ -482,6 +569,7 @@ impl AudioPreprocessStage {
 impl Drop for AudioPreprocessStage {
     fn drop(&mut self) {
         self.sender.take();
+        self.result_rx.take();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -491,12 +579,14 @@ impl Drop for AudioPreprocessStage {
 fn process_job<P: AudioFeatureProducer>(
     producer: &mut P,
     job: AudioPreprocessJob,
+    reservation: HostMemoryReservation,
     metrics: &AudioPreprocessMetrics,
 ) -> AudioPreprocessResult {
     let started = Instant::now();
     let job_id = job.job_id;
     let family = job.policy.family;
     let max_prefill_tokens = job.max_prefill_tokens;
+    let max_result_bytes = job.policy.max_prepared_result_bytes_per_request;
     let outcome = match preprocess_wav_batch(&job.clips, job.policy, job.cancelled.as_ref()) {
         Err(AudioPreprocessError::Cancelled { checkpoint, .. }) => {
             AudioPreprocessOutcome::Cancelled(checkpoint)
@@ -522,8 +612,18 @@ fn process_job<P: AudioFeatureProducer>(
                         })
                     }
                     Ok(Ok(prepared)) => {
-                        metrics.record_effective_prefill(prepared.sequence_len);
-                        AudioPreprocessOutcome::Prepared(prepared)
+                        let result_bytes =
+                            prepared_prefill_host_bytes(&prepared).unwrap_or(usize::MAX);
+                        if result_bytes > max_result_bytes {
+                            AudioPreprocessOutcome::Failed(AudioStageError::ResultMemoryLimit {
+                                family,
+                                actual: result_bytes,
+                                maximum: max_result_bytes,
+                            })
+                        } else {
+                            metrics.record_effective_prefill(prepared.sequence_len);
+                            AudioPreprocessOutcome::Prepared(prepared)
+                        }
                     }
                     Ok(Err(reason)) => {
                         AudioPreprocessOutcome::Failed(AudioStageError::Feature { family, reason })
@@ -535,7 +635,7 @@ fn process_job<P: AudioFeatureProducer>(
             }
         }
     };
-    let elapsed_micros = started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+    let elapsed_micros = (started.elapsed().as_micros().min(u64::MAX as u128) as u64).max(1);
     metrics
         .preprocessing_latency_micros
         .fetch_add(elapsed_micros, Ordering::Relaxed);
@@ -560,10 +660,62 @@ fn process_job<P: AudioFeatureProducer>(
                 AudioStageError::Feature { .. } => AudioRejectionReason::Feature,
                 AudioStageError::FeaturePanic { .. } => AudioRejectionReason::FeaturePanic,
                 AudioStageError::ContextLimit { .. } => AudioRejectionReason::ContextLimit,
+                AudioStageError::ResultMemoryLimit { .. } => AudioRejectionReason::MemoryLimit,
             });
         }
     }
-    AudioPreprocessResult { job_id, outcome }
+    AudioPreprocessResult {
+        job_id,
+        outcome,
+        _reservation: reservation,
+    }
+}
+
+fn prepared_prefill_host_bytes(prepared: &PreparedPrefill) -> Option<usize> {
+    fn tensor_bytes(tensor: &OwnedTensor) -> Option<usize> {
+        tensor
+            .bytes
+            .capacity()
+            .checked_add(tensor.shape.capacity().checked_mul(size_of::<usize>())?)
+    }
+
+    let mut total = size_of::<PreparedPrefill>().checked_add(
+        prepared
+            .token_ids
+            .capacity()
+            .checked_mul(size_of::<i32>())?,
+    )?;
+    total = total.checked_add(tensor_bytes(&prepared.embeddings)?)?;
+    if let PreparedPositions::Explicit(tensor) | PreparedPositions::Mrope3D { tensor, .. } =
+        &prepared.positions
+    {
+        total = total.checked_add(tensor_bytes(tensor)?)?;
+    }
+    total = total.checked_add(tensor_bytes(&prepared.attention_bias.tensor)?)?;
+    total = total.checked_add(
+        prepared
+            .modalities
+            .capacity()
+            .checked_mul(size_of::<mlxcel_core::session::PreparedModality>())?,
+    )?;
+    for modality in &prepared.modalities {
+        total = total.checked_add(modality.family.capacity())?;
+    }
+    Some(total)
+}
+
+fn job_envelope_host_bytes(job: &AudioPreprocessJob) -> Option<usize> {
+    let mut total = size_of::<AudioPreprocessJob>();
+    total = total.checked_add(job.token_ids.capacity().checked_mul(size_of::<i32>())?)?;
+    total = total.checked_add(
+        job.clips
+            .capacity()
+            .checked_mul(size_of::<AudioEncodedClip>())?,
+    )?;
+    for clip in &job.clips {
+        total = total.checked_add(clip.bytes.capacity())?;
+    }
+    Some(total)
 }
 
 fn reserve_queued_bytes(
@@ -584,6 +736,30 @@ fn reserve_queued_bytes(
             });
         }
         match queued.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return Ok(()),
+            Err(actual) => current = actual,
+        }
+    }
+}
+
+fn reserve_host_bytes(
+    in_flight: &AtomicUsize,
+    request: usize,
+    maximum: usize,
+) -> Result<(), AudioQueueError> {
+    let mut current = in_flight.load(Ordering::Acquire);
+    loop {
+        let next = current
+            .checked_add(request)
+            .ok_or(AudioQueueError::Overflow)?;
+        if next > maximum {
+            return Err(AudioQueueError::HostMemoryLimit {
+                request_bytes: request,
+                in_flight_bytes: current,
+                maximum_bytes: maximum,
+            });
+        }
+        match in_flight.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {
             Ok(_) => return Ok(()),
             Err(actual) => current = actual,
         }

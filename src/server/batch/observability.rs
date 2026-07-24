@@ -253,6 +253,7 @@ pub struct BatchObservability {
     pub audio_reject_context_limit: AtomicU64,
     pub audio_preprocess_cancelled: AtomicU64,
     pub audio_preprocess_queued_bytes: AtomicUsize,
+    pub audio_preprocess_inflight_host_bytes: AtomicUsize,
 }
 
 impl Default for BatchObservability {
@@ -309,6 +310,7 @@ impl BatchObservability {
             audio_reject_context_limit: AtomicU64::new(0),
             audio_preprocess_cancelled: AtomicU64::new(0),
             audio_preprocess_queued_bytes: AtomicUsize::new(0),
+            audio_preprocess_inflight_host_bytes: AtomicUsize::new(0),
         }
     }
 
@@ -444,6 +446,46 @@ impl BatchObservability {
         self.request_decode_tok_s.snapshot()
     }
 
+    pub(crate) fn record_audio_waveforms(&self, waveforms: &crate::audio::AudioWaveformBatch) {
+        self.audio_source_duration_micros
+            .fetch_add(waveforms.total_source_duration_micros, Ordering::Relaxed);
+        self.audio_source_samples
+            .fetch_add(waveforms.total_source_samples as u64, Ordering::Relaxed);
+        self.audio_normalized_samples
+            .fetch_add(waveforms.total_samples as u64, Ordering::Relaxed);
+        self.audio_feature_frames
+            .fetch_add(waveforms.estimated_frames as u64, Ordering::Relaxed);
+        self.audio_effective_tokens
+            .fetch_add(waveforms.effective_audio_tokens as u64, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_audio_effective_prefill(&self, sequence_len: usize) {
+        self.audio_effective_prefill_tokens
+            .fetch_add(sequence_len as u64, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_audio_preprocess_latency(&self, elapsed_micros: u64) {
+        self.audio_preprocess_latency_micros
+            .fetch_add(elapsed_micros, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_audio_waveform_rejection(&self) {
+        self.audio_preprocess_rejections
+            .fetch_add(1, Ordering::Relaxed);
+        self.audio_reject_waveform.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_audio_feature_rejection(&self) {
+        self.audio_preprocess_rejections
+            .fetch_add(1, Ordering::Relaxed);
+        self.audio_reject_feature.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_audio_cancelled(&self) {
+        self.audio_preprocess_cancelled
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     // -- Gauge updates (called by the scheduler thread) --
 
     /// Update the point-in-time gauge values.
@@ -539,6 +581,9 @@ impl BatchObservability {
             audio_preprocess_queued_bytes: self
                 .audio_preprocess_queued_bytes
                 .load(Ordering::Relaxed),
+            audio_preprocess_inflight_host_bytes: self
+                .audio_preprocess_inflight_host_bytes
+                .load(Ordering::Relaxed),
             prompt_cache_hits: self.prompt_cache_hits.load(Ordering::Relaxed),
             prompt_cache_hit_tokens: self.prompt_cache_hit_tokens.load(Ordering::Relaxed),
             prompt_cache_inserts: self.prompt_cache_inserts.load(Ordering::Relaxed),
@@ -620,6 +665,7 @@ pub struct ObservabilitySnapshot {
     pub audio_reject_context_limit: u64,
     pub audio_preprocess_cancelled: u64,
     pub audio_preprocess_queued_bytes: usize,
+    pub audio_preprocess_inflight_host_bytes: usize,
     /// successful prompt-cache adoptions.
     pub prompt_cache_hits: u64,
     /// tokens skipped due to cache hits (Σ

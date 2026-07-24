@@ -158,6 +158,74 @@ fn batch_preserves_clip_boundaries_order_and_placeholder_ordinals() {
 }
 
 #[test]
+fn aggregate_caps_reject_before_waveform_allocation_and_do_not_multiply_per_clip_max() {
+    let clips = [
+        clip(wav_f32(16_000, 1, &[0.0; 6]), 1),
+        clip(wav_f32(16_000, 1, &[0.0; 6]), 2),
+    ];
+    let mut policy = AudioFamilyPolicy::gemma3n();
+    policy.max_normalized_samples_per_request = 10;
+    let error = preprocess_wav_batch(&clips, policy, &NeverCancel).unwrap_err();
+    assert!(matches!(
+        error,
+        AudioPreprocessError::Limit {
+            limit: "normalized samples per request",
+            actual: 12,
+            maximum: 10,
+        }
+    ));
+
+    let mut duration_policy = AudioFamilyPolicy::gemma3n();
+    duration_policy.max_source_duration_micros_per_request = 500;
+    let error = preprocess_wav_batch(&clips, duration_policy, &NeverCancel).unwrap_err();
+    assert!(matches!(
+        error,
+        AudioPreprocessError::Limit {
+            limit: "source duration micros per request",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn source_rate_and_phi_polyphase_work_are_bounded_and_inner_loop_is_cancellable() {
+    let too_fast = preprocess_wav_batch(
+        &[clip(wav_f32(192_001, 1, &[0.0; 8]), 1)],
+        AudioFamilyPolicy::phi4mm(),
+        &NeverCancel,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        too_fast,
+        AudioPreprocessError::Limit {
+            limit: "source sample rate",
+            ..
+        }
+    ));
+
+    struct CancelDuringPolyphase(std::sync::atomic::AtomicUsize);
+    impl AudioCancellation for CancelDuringPolyphase {
+        fn is_cancelled(&self, checkpoint: AudioPreprocessCheckpoint) -> bool {
+            checkpoint == AudioPreprocessCheckpoint::Resample
+                && self.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel) >= 2
+        }
+    }
+    let error = preprocess_wav_batch(
+        &[clip(wav_f32(48_000, 1, &[0.0; 48_000]), 1)],
+        AudioFamilyPolicy::phi4mm(),
+        &CancelDuringPolyphase(std::sync::atomic::AtomicUsize::new(0)),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        AudioPreprocessError::Cancelled {
+            checkpoint: AudioPreprocessCheckpoint::Resample,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn malformed_nonfinite_oversize_and_placeholder_fail_typed() {
     let corrupt = preprocess_wav_batch(
         &[clip(b"not wav".to_vec(), 1)],
@@ -330,6 +398,14 @@ fn malformed_known_policy_keys_fail_closed_with_typed_startup_errors() {
         }
     });
     assert!(AudioFamilyPolicy::from_gemma3n_configs(&model, Some(&beyond_pinned), 188).is_err());
+
+    let aggregate_beyond_pinned = serde_json::json!({
+        "mlxcel_audio_limits": {
+            "max_normalized_samples_per_request":
+                AudioFamilyPolicy::gemma3n().max_normalized_samples_per_request + 1
+        }
+    });
+    assert!(AudioFamilyPolicy::from_gemma3n_configs(&aggregate_beyond_pinned, None, 188).is_err());
 }
 
 #[test]

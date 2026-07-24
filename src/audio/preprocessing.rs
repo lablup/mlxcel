@@ -20,6 +20,7 @@
 //! downmixing, resampling, clip order, and resource accounting.
 
 use std::io::Read;
+use std::mem::size_of;
 use std::path::Path;
 
 use thiserror::Error;
@@ -34,7 +35,7 @@ pub(crate) mod wav;
 pub use policy::{
     AudioFamilyPolicy, AudioPlaceholderPolicy, AudioPolicySource, AudioResamplingPolicy,
 };
-use wav::{decode_wav, duration_micros, estimate_frames, resample};
+use wav::{decode_wav, duration_micros, estimate_frames, inspect_wav, resample, resampled_shape};
 
 /// Point at which cancellation was observed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,13 +239,15 @@ pub fn preprocess_wav_refs(
         });
     }
 
-    let mut clips = Vec::with_capacity(encoded.len());
-    let mut boundaries = Vec::with_capacity(encoded.len());
-    let mut total_source_samples = 0usize;
-    let mut total_samples = 0usize;
-    let mut total_duration = 0u64;
-    let mut estimated_frames = 0usize;
-    let mut effective_tokens = 0usize;
+    // Inspect every RIFF header and enforce aggregate family limits before
+    // allocating any decoded or resampled waveform. This prevents a request
+    // from multiplying a valid per-clip maximum by `max_clips`.
+    let mut preflight_encoded_bytes = 0usize;
+    let mut preflight_source_samples = 0usize;
+    let mut preflight_normalized_samples = 0usize;
+    let mut preflight_duration_micros = 0u64;
+    let mut preflight_frames = 0usize;
+    let mut preflight_max_source_clip = 0usize;
     for (index, input) in encoded.iter().enumerate() {
         if input.placeholder_ordinal != index + 1 {
             return Err(AudioPreprocessError::Placeholder {
@@ -258,13 +261,116 @@ pub fn preprocess_wav_refs(
         if input.bytes.is_empty() {
             return Err(AudioPreprocessError::Empty { clip_index: index });
         }
-        if input.bytes.len() > policy.max_encoded_bytes_per_clip {
+        enforce_limit(
+            "encoded bytes per clip",
+            input.bytes.len(),
+            policy.max_encoded_bytes_per_clip,
+        )?;
+        preflight_encoded_bytes = checked_add(
+            preflight_encoded_bytes,
+            input.bytes.len(),
+            "request encoded bytes",
+        )?;
+        enforce_limit(
+            "encoded bytes per request",
+            preflight_encoded_bytes,
+            policy.max_encoded_bytes_per_request,
+        )?;
+        let spec = inspect_wav(input.bytes, index, policy, cancelled)?;
+        let source_duration = duration_micros(spec.frames, spec.sample_rate)?;
+        preflight_source_samples = checked_add(
+            preflight_source_samples,
+            spec.frames,
+            "request source samples",
+        )?;
+        enforce_limit(
+            "source samples per request",
+            preflight_source_samples,
+            policy.max_source_samples_per_request,
+        )?;
+        preflight_duration_micros = preflight_duration_micros
+            .checked_add(source_duration)
+            .ok_or(AudioPreprocessError::Overflow {
+                context: "request source duration",
+            })?;
+        if preflight_duration_micros > policy.max_source_duration_micros_per_request {
             return Err(AudioPreprocessError::Limit {
-                limit: "encoded bytes per clip",
-                actual: input.bytes.len(),
-                maximum: policy.max_encoded_bytes_per_clip,
+                limit: "source duration micros per request",
+                actual: usize::try_from(preflight_duration_micros).unwrap_or(usize::MAX),
+                maximum: usize::try_from(policy.max_source_duration_micros_per_request)
+                    .unwrap_or(usize::MAX),
             });
         }
+        let (normalized_samples, effective_rate) =
+            resampled_shape(spec.frames, spec.sample_rate, policy)?;
+        let per_clip_max = if policy.resampling == AudioResamplingPolicy::Phi4MmSpeechLib {
+            (effective_rate as usize)
+                .checked_mul(policy.max_duration_seconds)
+                .ok_or(AudioPreprocessError::Overflow {
+                    context: "Phi4MM effective sample limit",
+                })?
+        } else {
+            policy.max_samples_per_clip
+        };
+        enforce_limit("duration samples", normalized_samples, per_clip_max)?;
+        preflight_normalized_samples = checked_add(
+            preflight_normalized_samples,
+            normalized_samples,
+            "request normalized samples",
+        )?;
+        enforce_limit(
+            "normalized samples per request",
+            preflight_normalized_samples,
+            policy.max_normalized_samples_per_request,
+        )?;
+        let frames = estimate_frames(normalized_samples, effective_rate, policy);
+        enforce_limit(
+            "feature frames per clip",
+            frames,
+            policy.max_frames_per_clip,
+        )?;
+        preflight_frames = checked_add(preflight_frames, frames, "request feature frames")?;
+        enforce_limit(
+            "feature frames per request",
+            preflight_frames,
+            policy.max_frames_per_request,
+        )?;
+        preflight_max_source_clip = preflight_max_source_clip.max(spec.frames);
+    }
+    let waveform_result_bytes = preflight_normalized_samples
+        .checked_mul(size_of::<f32>())
+        .ok_or(AudioPreprocessError::Overflow {
+            context: "request waveform result bytes",
+        })?;
+    enforce_limit(
+        "waveform result bytes per request",
+        waveform_result_bytes,
+        policy.max_waveform_result_bytes_per_request,
+    )?;
+    let peak_source_bytes = preflight_max_source_clip
+        .checked_mul(size_of::<f32>())
+        .ok_or(AudioPreprocessError::Overflow {
+            context: "peak source waveform bytes",
+        })?;
+    let waveform_working_bytes = peak_source_bytes.checked_add(waveform_result_bytes).ok_or(
+        AudioPreprocessError::Overflow {
+            context: "waveform working bytes",
+        },
+    )?;
+    enforce_limit(
+        "waveform working bytes per request",
+        waveform_working_bytes,
+        policy.max_waveform_working_bytes_per_request,
+    )?;
+
+    let mut clips = Vec::with_capacity(encoded.len());
+    let mut boundaries = Vec::with_capacity(encoded.len());
+    let mut total_source_samples = 0usize;
+    let mut total_samples = 0usize;
+    let mut total_duration = 0u64;
+    let mut estimated_frames = 0usize;
+    let mut effective_tokens = 0usize;
+    for (index, input) in encoded.iter().enumerate() {
         let native = decode_wav(input.bytes, index, policy, cancelled)?;
         let duration_micros = duration_micros(native.frames, native.sample_rate)?;
         total_source_samples = total_source_samples.checked_add(native.frames).ok_or(
@@ -357,6 +463,32 @@ pub fn preprocess_wav_refs(
     })
 }
 
+fn checked_add(
+    current: usize,
+    value: usize,
+    context: &'static str,
+) -> Result<usize, AudioPreprocessError> {
+    current
+        .checked_add(value)
+        .ok_or(AudioPreprocessError::Overflow { context })
+}
+
+fn enforce_limit(
+    limit: &'static str,
+    actual: usize,
+    maximum: usize,
+) -> Result<(), AudioPreprocessError> {
+    if actual > maximum {
+        Err(AudioPreprocessError::Limit {
+            limit,
+            actual,
+            maximum,
+        })
+    } else {
+        Ok(())
+    }
+}
+
 /// Compatibility decoder used by legacy audio families.
 ///
 /// This keeps one WAV parser/downmixer while preserving the historical native
@@ -375,6 +507,7 @@ pub(crate) fn decode_wav_native_compat(
         family: "legacy-wav",
         target_sample_rate: 1,
         minimum_source_sample_rate: 1,
+        maximum_source_sample_rate: u32::MAX,
         target_channels: 1,
         dtype: "f32",
         resampling: AudioResamplingPolicy::Native,
@@ -382,9 +515,17 @@ pub(crate) fn decode_wav_native_compat(
         max_samples_per_clip: usize::MAX,
         max_encoded_bytes_per_clip: 500 * 1024 * 1024,
         max_clips: 1,
+        max_encoded_bytes_per_request: 500 * 1024 * 1024,
+        max_source_samples_per_request: usize::MAX / size_of::<f32>(),
+        max_normalized_samples_per_request: usize::MAX / size_of::<f32>(),
+        max_source_duration_micros_per_request: u64::MAX,
         frame_length_samples: 1,
         frame_hop_samples: 1,
         max_frames_per_clip: usize::MAX,
+        max_frames_per_request: usize::MAX,
+        max_waveform_result_bytes_per_request: usize::MAX,
+        max_waveform_working_bytes_per_request: usize::MAX,
+        max_prepared_result_bytes_per_request: usize::MAX,
         placeholder: AudioPlaceholderPolicy::NumberedPerClip,
         source: AudioPolicySource::PinnedOfficialDefault("legacy-wav-native"),
     };

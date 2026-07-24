@@ -19,8 +19,10 @@ use mlxcel_core::sampling::TokenLogprobData;
 
 use super::{
     DECODE_HANG_TIMEOUT, GenerateEvent, GenerationResult, ModelProvider, ModelRequest,
-    drain_generation_events, send_shutdown_signal, validated_decode_hang_timeout,
+    drain_generation_events, send_shutdown_signal, tokenize_prompt_for_generation,
+    tokenize_prompt_for_generation_with_ordered_media, validated_decode_hang_timeout,
 };
+use crate::tokenizer::MlxcelTokenizer;
 
 fn sample_result() -> GenerationResult {
     GenerationResult {
@@ -110,6 +112,52 @@ fn send_shutdown_signal_reports_closed_channel() {
 fn model_provider_relies_on_auto_traits_for_shared_state() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<ModelProvider>();
+}
+
+#[test]
+fn ordered_media_stripping_is_scoped_to_audio_requests() {
+    let marker = "<|mlxcel_ordered_user_text_1|>";
+    let json = format!(
+        r#"{{
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": [],
+            "normalizer": null,
+            "pre_tokenizer": null,
+            "post_processor": null,
+            "decoder": null,
+            "model": {{
+                "type": "BPE",
+                "dropout": null,
+                "unk_token": null,
+                "continuing_subword_prefix": null,
+                "end_of_word_suffix": null,
+                "fuse_unk": false,
+                "byte_fallback": false,
+                "vocab": {{"{marker}": 42}},
+                "merges": []
+            }}
+        }}"#
+    );
+    let tokenizer =
+        MlxcelTokenizer::HuggingFace(tokenizers::Tokenizer::from_bytes(json.as_bytes()).unwrap());
+
+    let direct = tokenizer
+        .encode(marker, true)
+        .unwrap()
+        .into_iter()
+        .map(|token| token as i32)
+        .collect::<Vec<_>>();
+    assert!(
+        tokenize_prompt_for_generation_with_ordered_media(&tokenizer, marker, true).is_err(),
+        "audio requests must reject an injected private-prefix lookalike"
+    );
+    assert_eq!(
+        tokenize_prompt_for_generation(&tokenizer, marker).unwrap(),
+        direct,
+        "text/image requests must follow the unchanged direct tokenizer path"
+    );
 }
 
 // ── validated_decode_hang_timeout tests ─────────────────────────

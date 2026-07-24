@@ -1113,9 +1113,17 @@ pub(crate) fn prepare_request_vlm_embeddings(
     videos: &[crate::server::media::ResolvedVideo],
     vision_caches: Option<&ModelVisionCaches>,
     image_soft_tokens: Option<usize>,
+    cancelled: &AtomicBool,
+    observability: &BatchObservability,
 ) -> Result<Option<InputEmbeddings>> {
     let has_media = !images.is_empty() || !audio.is_empty() || !videos.is_empty();
 
+    if !audio.is_empty() && !model.is_vlm() {
+        observability.record_audio_feature_rejection();
+        return Err(anyhow!(
+            "Audio input is not supported by the loaded non-VLM model"
+        ));
+    }
     if !has_media || !model.is_vlm() {
         // Moondream3 needs special prompt formatting even for text-only
         if images.is_empty() && matches!(model, LoadedModel::Moondream3VLM(_)) {
@@ -1176,9 +1184,16 @@ pub(crate) fn prepare_request_vlm_embeddings(
 
     // Audio-only or audio+images for Gemma4 / Gemma4 Unified
     if !audio.is_empty() {
-        if let Some(embeddings) =
-            prepare_phi4mm_audio_embeddings(model, tokenizer, prompt, prompt_tokens, images, audio)?
-        {
+        if let Some(embeddings) = prepare_phi4mm_audio_embeddings(
+            model,
+            tokenizer,
+            prompt,
+            prompt_tokens,
+            images,
+            audio,
+            cancelled,
+            observability,
+        )? {
             return Ok(Some(embeddings));
         }
 
@@ -1195,6 +1210,9 @@ pub(crate) fn prepare_request_vlm_embeddings(
             images,
             audio,
             end_of_turn_token_id,
+            prompt,
+            cancelled,
+            observability,
         )? {
             return Ok(Some(embeddings));
         }
@@ -1236,10 +1254,10 @@ pub(crate) fn prepare_request_vlm_embeddings(
         )? {
             Some(embeddings) => return Ok(Some(embeddings)),
             None => {
-                // Model does not support audio (not Gemma4 / Nemotron H Nano
-                // Omni, or no audio tower). Log a warning and fall through to
-                // image-only or text-only paths.
-                tracing::warn!("Audio input provided but model does not support audio; ignoring");
+                observability.record_audio_feature_rejection();
+                return Err(anyhow!(
+                    "Audio input is not supported by the loaded VLM family"
+                ));
             }
         }
     }
@@ -1354,6 +1372,8 @@ fn prepare_phi4mm_audio_embeddings(
     prompt_tokens: &mut Vec<i32>,
     images: &[Vec<u8>],
     audio_data: &[Vec<u8>],
+    cancelled: &AtomicBool,
+    observability: &BatchObservability,
 ) -> Result<Option<InputEmbeddings>> {
     let phi4mm = match model {
         LoadedModel::Phi4MMVLM(model) => model,
@@ -1366,19 +1386,29 @@ fn prepare_phi4mm_audio_embeddings(
         decode_request_images(images)?
     };
     let processed_images = phi4mm.processor.preprocess(&decoded_images);
-    let waveform = preprocess_server_audio(audio_data, phi4mm.audio_preprocess_policy)
-        .map_err(|error| anyhow!("Failed to preprocess Phi4MM audio: {error}"))?;
+    let waveform = preprocess_server_audio(
+        audio_data,
+        phi4mm.audio_preprocess_policy,
+        cancelled,
+        observability,
+    )
+    .map_err(|error| anyhow!("Failed to preprocess Phi4MM audio: {error}"))?;
     let decoded_audio: Vec<(Vec<f32>, u32)> = waveform
         .clips
         .into_iter()
         .map(|clip| (clip.samples, clip.sample_rate))
         .collect();
+    check_audio_feature_cancelled(cancelled, observability)?;
     let audio_batch = phi4mm
-        .extract_audio(&decoded_audio)
-        .map_err(anyhow::Error::msg)?;
+        .extract_audio_cancellable(&decoded_audio, cancelled)
+        .map_err(|error| audio_feature_error(error, cancelled, observability))?;
+    check_audio_feature_cancelled(cancelled, observability)?;
 
+    let ordered_prompt =
+        materialize_phi4mm_ordered_prompt(prompt, processed_images.len(), decoded_audio.len())
+            .map_err(|error| audio_feature_error(error.to_string(), cancelled, observability))?;
     let prepared = crate::phi4mm_prompt::prepare_phi4mm_prompt_tokens(
-        prompt,
+        &ordered_prompt,
         processed_images.len(),
         decoded_audio.len(),
         |text, add_special| {
@@ -1390,7 +1420,7 @@ fn prepare_phi4mm_audio_embeddings(
                 .collect()
         },
     )
-    .map_err(anyhow::Error::msg)?;
+    .map_err(|error| audio_feature_error(error, cancelled, observability))?;
     let image_sizes: Vec<usize> = processed_images
         .iter()
         .map(|image| image.num_img_tokens)
@@ -1400,18 +1430,19 @@ fn prepare_phi4mm_audio_embeddings(
         &image_sizes,
         &audio_batch.embed_sizes,
     )
-    .map_err(anyhow::Error::msg)?;
+    .map_err(|error| audio_feature_error(error, cancelled, observability))?;
 
     let input_ids = mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
     let embeddings = phi4mm
         .get_input_embeddings_with_audio(&input_ids, &processed_images, &audio_batch)
-        .map_err(anyhow::Error::msg)?;
+        .map_err(|error| audio_feature_error(error, cancelled, observability))?;
     tracing::info!(
         images = processed_images.len(),
         audio_clips = decoded_audio.len(),
         prompt_tokens = prompt_tokens.len(),
         "Prepared Phi4MM mixed-media embeddings"
     );
+    observability.record_audio_effective_prefill(prompt_tokens.len());
     Ok(Some(embeddings))
 }
 
@@ -1424,42 +1455,74 @@ fn prepare_gemma3n_audio_embeddings(
     images: &[Vec<u8>],
     audio_data: &[Vec<u8>],
     end_of_turn_token_id: Option<i32>,
+    prompt: &str,
+    cancelled: &AtomicBool,
+    observability: &BatchObservability,
 ) -> Result<Option<InputEmbeddings>> {
     let gemma3n = match model {
         LoadedModel::Gemma3nVLM(model) => model,
         _ => return Ok(None),
     };
     if !gemma3n.supports_audio() {
+        observability.record_audio_feature_rejection();
         return Err(anyhow!(
             "This Gemma3n checkpoint was loaded without audio parameters"
         ));
     }
+    if let Some(ordered_tokens) = tokenize_ordered_media_prompt(
+        prompt,
+        tokenizer,
+        gemma3n.image_token_id,
+        gemma3n.audio_token_id,
+        images.len(),
+        audio_data.len(),
+    )
+    .map_err(|error| audio_feature_error(error.to_string(), cancelled, observability))?
+    {
+        *prompt_tokens = ordered_tokens;
+    }
     if !images.is_empty()
         && let Some(info) = model.image_token_block_info()
     {
-        let _ = crate::vlm_prompt::apply_image_token_blocks(prompt_tokens, info, images.len())?;
+        let _ = crate::vlm_prompt::apply_image_token_blocks(prompt_tokens, info, images.len())
+            .map_err(|error| audio_feature_error(error.to_string(), cancelled, observability))?;
     }
 
-    let waveform = preprocess_server_audio(audio_data, gemma3n.audio_preprocess_policy)
-        .map_err(|error| anyhow!("Failed to preprocess Gemma3n audio: {error}"))?;
+    let waveform = preprocess_server_audio(
+        audio_data,
+        gemma3n.audio_preprocess_policy,
+        cancelled,
+        observability,
+    )
+    .map_err(|error| anyhow!("Failed to preprocess Gemma3n audio: {error}"))?;
     let clips: Vec<Vec<f32>> = waveform
         .clips
         .into_iter()
         .map(|clip| clip.samples)
         .collect();
 
+    check_audio_feature_cancelled(cancelled, observability)?;
     let batch = crate::audio::gemma3n::Gemma3nAudioFeatureExtractor::new()
-        .extract_batch(&clips)
-        .map_err(|error| anyhow!(error))?;
+        .extract_batch_cancellable(&clips, cancelled)
+        .map_err(|error| audio_feature_error(error, cancelled, observability))?;
+    check_audio_feature_cancelled(cancelled, observability)?;
     let wrapper_tokens: Vec<i32> = tokenizer
         .encode("\n\n", false)
-        .map_err(|error| anyhow!("Failed to tokenize Gemma3n audio wrapper: {error}"))?
+        .map_err(|error| {
+            audio_feature_error(
+                format!("Failed to tokenize Gemma3n audio wrapper: {error}"),
+                cancelled,
+                observability,
+            )
+        })?
         .into_iter()
         .map(|token| token as i32)
         .collect();
     if wrapper_tokens.is_empty() {
-        return Err(anyhow!(
-            "Gemma3n audio wrapper tokenized to an empty sequence"
+        return Err(audio_feature_error(
+            "Gemma3n audio wrapper tokenized to an empty sequence".to_string(),
+            cancelled,
+            observability,
         ));
     }
     crate::vlm_runtime::expand_gemma3n_audio_tokens(
@@ -1471,7 +1534,8 @@ fn prepare_gemma3n_audio_embeddings(
         gemma3n.audio_soft_tokens_per_clip,
         &wrapper_tokens,
         end_of_turn_token_id,
-    )?;
+    )
+    .map_err(|error| audio_feature_error(error.to_string(), cancelled, observability))?;
 
     let features = mlxcel_core::from_slice_f32(
         &batch.features,
@@ -1504,15 +1568,18 @@ fn prepare_gemma3n_audio_embeddings(
             Some(&features),
             Some(&invalid),
         )
-        .map_err(|error| anyhow!(error))?;
+        .map_err(|error| audio_feature_error(error, cancelled, observability))?;
+    observability.record_audio_effective_prefill(prompt_tokens.len());
     Ok(Some(embeddings))
 }
 
 fn preprocess_server_audio(
     audio_data: &[Vec<u8>],
     policy: crate::audio::AudioFamilyPolicy,
+    cancelled: &AtomicBool,
+    observability: &BatchObservability,
 ) -> std::result::Result<crate::audio::AudioWaveformBatch, crate::audio::AudioPreprocessError> {
-    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let started = Instant::now();
     let encoded: Vec<_> = audio_data
         .iter()
         .enumerate()
@@ -1522,7 +1589,173 @@ fn preprocess_server_audio(
             placeholder_ordinal: index + 1,
         })
         .collect();
-    crate::audio::preprocess_wav_refs(&encoded, policy, &cancelled)
+    let result = crate::audio::preprocess_wav_refs(&encoded, policy, cancelled);
+    let elapsed_micros = (started.elapsed().as_micros().min(u64::MAX as u128) as u64).max(1);
+    observability.record_audio_preprocess_latency(elapsed_micros);
+    match &result {
+        Ok(waveforms) => observability.record_audio_waveforms(waveforms),
+        Err(crate::audio::AudioPreprocessError::Cancelled { .. }) => {
+            observability.record_audio_cancelled();
+        }
+        Err(_) => observability.record_audio_waveform_rejection(),
+    }
+    result
+}
+
+fn check_audio_feature_cancelled(
+    cancelled: &AtomicBool,
+    observability: &BatchObservability,
+) -> Result<()> {
+    if cancelled.load(Ordering::Acquire) {
+        observability.record_audio_cancelled();
+        Err(anyhow!(
+            "Audio preprocessing cancelled during feature extraction"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn audio_feature_error(
+    error: String,
+    cancelled: &AtomicBool,
+    observability: &BatchObservability,
+) -> anyhow::Error {
+    if cancelled.load(Ordering::Acquire) {
+        observability.record_audio_cancelled();
+    } else {
+        observability.record_audio_feature_rejection();
+    }
+    anyhow::Error::msg(error)
+}
+
+fn materialize_phi4mm_ordered_prompt(
+    prompt: &str,
+    expected_images: usize,
+    expected_audio: usize,
+) -> Result<String> {
+    use crate::server::types::request::{
+        ORDERED_MEDIA_PREFIX, OrderedMediaSegment, parse_ordered_media_segments,
+    };
+
+    if !prompt.contains(ORDERED_MEDIA_PREFIX) {
+        return if expected_images == 0 && expected_audio == 0 {
+            Ok(prompt.to_string())
+        } else {
+            Err(anyhow!(
+                "rendered Phi4MM prompt lost ordered media markers for {expected_images} image/{expected_audio} audio inputs"
+            ))
+        };
+    }
+    let mut materialized = String::with_capacity(prompt.len());
+    let mut images = 0usize;
+    let mut audio = 0usize;
+    for segment in parse_ordered_media_segments(prompt).map_err(anyhow::Error::msg)? {
+        match segment {
+            OrderedMediaSegment::Text(text) => materialized.push_str(text),
+            OrderedMediaSegment::Image(ordinal) => {
+                images += 1;
+                materialized.push_str(&format!("<|image_{ordinal}|>"));
+            }
+            OrderedMediaSegment::Audio(ordinal) => {
+                audio += 1;
+                materialized.push_str(&format!("<|audio_{ordinal}|>"));
+            }
+        }
+    }
+    if (images, audio) != (expected_images, expected_audio) {
+        return Err(anyhow!(
+            "ordered media cardinality mismatch: prompt has {images} image/{audio} audio markers, request has {expected_images}/{expected_audio}"
+        ));
+    }
+    Ok(materialized)
+}
+
+fn tokenize_ordered_media_prompt(
+    prompt: &str,
+    tokenizer: &MlxcelTokenizer,
+    image_token_id: i32,
+    audio_token_id: i32,
+    expected_images: usize,
+    expected_audio: usize,
+) -> Result<Option<Vec<i32>>> {
+    encode_ordered_media_prompt(
+        prompt,
+        image_token_id,
+        audio_token_id,
+        expected_images,
+        expected_audio,
+        |text, add_special| {
+            tokenizer
+                .encode(text, add_special)
+                .map(|tokens| tokens.into_iter().map(|token| token as i32).collect())
+                .map_err(|error| anyhow!("Failed to tokenize ordered media prompt: {error}"))
+        },
+    )
+}
+
+fn encode_ordered_media_prompt<E>(
+    prompt: &str,
+    image_token_id: i32,
+    audio_token_id: i32,
+    expected_images: usize,
+    expected_audio: usize,
+    mut encode: E,
+) -> Result<Option<Vec<i32>>>
+where
+    E: FnMut(&str, bool) -> Result<Vec<i32>>,
+{
+    use crate::server::types::request::{
+        ORDERED_MEDIA_PREFIX, OrderedMediaSegment, parse_ordered_media_segments,
+    };
+
+    if !prompt.contains(ORDERED_MEDIA_PREFIX) {
+        return if expected_images == 0 && expected_audio == 0 {
+            Ok(None)
+        } else {
+            Err(anyhow!(
+                "rendered Gemma3n prompt lost ordered media markers for {expected_images} image/{expected_audio} audio inputs"
+            ))
+        };
+    }
+    let mut tokens = Vec::new();
+    let mut images = 0usize;
+    let mut audio = 0usize;
+    let mut first_text = true;
+    for segment in parse_ordered_media_segments(prompt).map_err(anyhow::Error::msg)? {
+        match segment {
+            OrderedMediaSegment::Text(text) => {
+                let add_special =
+                    first_text && !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
+                tokens.extend(encode(text, add_special)?);
+                first_text = false;
+            }
+            OrderedMediaSegment::Image(_) => {
+                if first_text {
+                    let add_special = !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
+                    tokens.extend(encode("", add_special)?);
+                    first_text = false;
+                }
+                images += 1;
+                tokens.push(image_token_id);
+            }
+            OrderedMediaSegment::Audio(_) => {
+                if first_text {
+                    let add_special = !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
+                    tokens.extend(encode("", add_special)?);
+                    first_text = false;
+                }
+                audio += 1;
+                tokens.push(audio_token_id);
+            }
+        }
+    }
+    if (images, audio) != (expected_images, expected_audio) {
+        return Err(anyhow!(
+            "ordered media cardinality mismatch: prompt has {images} image/{audio} audio markers, request has {expected_images}/{expected_audio}"
+        ));
+    }
+    Ok(Some(tokens))
 }
 
 /// Resolve the per-family end-of-turn token id from the tokenizer.

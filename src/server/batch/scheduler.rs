@@ -2886,10 +2886,18 @@ impl BatchScheduler {
         // `add_special` convention so both paths are byte-identical.
         let mut prompt_tokens: Vec<i32> = match prompt_token_ids {
             Some(ids) => ids,
-            None => match crate::server::model_provider::tokenize_prompt_for_generation(
-                &self.tokenizer,
-                &prompt,
-            ) {
+            None => match if audio.is_empty() {
+                crate::server::model_provider::tokenize_prompt_for_generation(
+                    &self.tokenizer,
+                    &prompt,
+                )
+            } else {
+                crate::server::model_provider::tokenize_prompt_for_generation_with_ordered_media(
+                    &self.tokenizer,
+                    &prompt,
+                    true,
+                )
+            } {
                 Ok(ids) => ids,
                 Err(err) => {
                     let _ = response_tx
@@ -2996,6 +3004,8 @@ impl BatchScheduler {
                 &videos,
                 Some(self.vision_caches.as_ref()),
                 options.image_soft_tokens,
+                cancelled.as_ref(),
+                self.batch_observability.as_ref(),
             ) {
                 Ok(emb) => Some(emb),
                 Err(err) => {
@@ -3079,6 +3089,8 @@ impl BatchScheduler {
                 &videos,
                 Some(self.vision_caches.as_ref()),
                 options.image_soft_tokens,
+                cancelled.as_ref(),
+                self.batch_observability.as_ref(),
             ) {
                 Ok(emb) => emb,
                 Err(err) => {

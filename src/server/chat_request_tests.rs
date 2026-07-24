@@ -70,6 +70,87 @@ fn build_chat_messages_flattens_text_parts() {
     assert_eq!(messages[0].content, "Hello world");
 }
 
+#[test]
+fn mixed_audio_messages_preserve_global_media_order_across_turns() {
+    let request = request_with_messages(vec![
+        Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![
+                ContentPart::Text {
+                    text: "u1-before".to_string(),
+                },
+                ContentPart::InputAudio {
+                    input_audio: InputAudio {
+                        data: "audio-a".to_string(),
+                        format: "wav".to_string(),
+                    },
+                },
+                ContentPart::Text {
+                    text: "u1-after".to_string(),
+                },
+            ]),
+            name: None,
+            tool_call_id: None,
+            reasoning: None,
+            tool_calls: None,
+        },
+        Message {
+            role: Role::Assistant,
+            content: MessageContent::Text("assistant-turn".to_string()),
+            name: None,
+            tool_call_id: None,
+            reasoning: None,
+            tool_calls: None,
+        },
+        Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![
+                ContentPart::ImageUrl {
+                    image_url: ImageUrl::new("image-a"),
+                },
+                ContentPart::Text {
+                    text: "u2-middle".to_string(),
+                },
+                ContentPart::InputAudio {
+                    input_audio: InputAudio {
+                        data: "audio-b".to_string(),
+                        format: "wav".to_string(),
+                    },
+                },
+                ContentPart::Text {
+                    text: "u2-after".to_string(),
+                },
+            ]),
+            name: None,
+            tool_call_id: None,
+            reasoning: None,
+            tool_calls: None,
+        },
+    ]);
+
+    let messages = build_chat_messages(&request);
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "u1-before<|mlxcel_ordered_audio_1|>u1-after",
+            "assistant-turn",
+            "<|mlxcel_ordered_image_1|>u2-middle<|mlxcel_ordered_audio_2|>u2-after",
+        ]
+    );
+    let raw = build_raw_json_messages(&request);
+    assert_eq!(
+        raw[0]["content"],
+        "u1-before<|mlxcel_ordered_audio_1|>u1-after"
+    );
+    assert_eq!(
+        raw[2]["content"],
+        "<|mlxcel_ordered_image_1|>u2-middle<|mlxcel_ordered_audio_2|>u2-after"
+    );
+}
+
 #[tokio::test]
 async fn prepare_chat_request_uses_template_output_and_extracts_images() {
     let request = request_with_messages(vec![Message {
