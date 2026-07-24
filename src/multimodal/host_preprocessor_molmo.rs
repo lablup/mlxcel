@@ -239,10 +239,13 @@ impl MolmoHostPreprocessor {
             &logical_tokens,
             &[1, usize_to_i32(logical_tokens.len(), "sequence length")?],
         );
-        let text = mlxcel_core::astype(
-            &self.text_embeddings.forward(&input_ids),
-            mlxcel_core::dtype::FLOAT32,
-        );
+        let text = self.text_embeddings.forward(&input_ids);
+        let embedding_dtype = match mlxcel_core::array_dtype(&text) {
+            mlxcel_core::dtype::FLOAT16 => mlxcel_xla::MolmoEmbeddingDType::Float16,
+            mlxcel_core::dtype::BFLOAT16 => mlxcel_xla::MolmoEmbeddingDType::BFloat16,
+            mlxcel_core::dtype::FLOAT32 => mlxcel_xla::MolmoEmbeddingDType::Float32,
+            other => return Err(HostPreprocessorError::UnsupportedDType(other)),
+        };
         validate_embedding_shape(
             &mlxcel_core::array_shape(&text),
             logical_tokens.len(),
@@ -250,6 +253,7 @@ impl MolmoHostPreprocessor {
             "Molmo text embedding table",
         )?;
 
+        let text = mlxcel_core::astype(&text, mlxcel_core::dtype::FLOAT32);
         let mut text_values = tensor_f32(export_mlx_tensor(&text, "Molmo text embeddings")?)?;
         let projected_values = match &self.vision {
             MolmoVision::Host(vision_tower) => {
@@ -315,7 +319,7 @@ impl MolmoHostPreprocessor {
                 projection.values
             }
         };
-        plan.apply(&mut text_values, &projected_values)
+        plan.apply_in_dtype(&mut text_values, &projected_values, embedding_dtype)
             .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
         let mut bytes = Vec::with_capacity(
             text_values

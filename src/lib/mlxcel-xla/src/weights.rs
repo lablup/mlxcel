@@ -193,10 +193,17 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
                 } else {
                     format!("{p}mlp.gate_up_proj.weight")
                 };
+                let (start, end) = if cfg.weight_scheme == crate::emitter::WeightScheme::Molmo {
+                    // Molmo stores ff_proj as [value | gate], while the
+                    // shared emitter applies SiLU to `gate`.
+                    (inter, 2 * inter)
+                } else {
+                    (0, inter)
+                };
                 out.push(WeightSpec::Rows {
                     name: phi4_base_projection(cfg, fused),
-                    start: 0,
-                    end: inter,
+                    start,
+                    end,
                 });
             } else {
                 push_proj(
@@ -226,10 +233,17 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
                 } else {
                     format!("{p}mlp.gate_up_proj.weight")
                 };
+                let (start, end) = if cfg.weight_scheme == crate::emitter::WeightScheme::Molmo {
+                    // The first Molmo half is the multiplicative value
+                    // (`x_part` in the MLX reference), not the SiLU gate.
+                    (0, inter)
+                } else {
+                    (inter, 2 * inter)
+                };
                 out.push(WeightSpec::Rows {
                     name: phi4_base_projection(cfg, fused),
-                    start: inter,
-                    end: 2 * inter,
+                    start,
+                    end,
                 });
             } else if cfg.dense_mlp {
                 out.push(WeightSpec::Whole(format!("{p}mlp.c_fc.weight")));
@@ -824,16 +838,34 @@ mod tests {
         assert!(specs.contains(&rows(8, 12)));
         assert!(specs.contains(&rows(0, 8)));
         assert!(specs.contains(&rows(12, 16)));
-        assert!(specs.contains(&WeightSpec::Rows {
-            name: "language_model.model.blocks.0.ff_proj.weight".to_string(),
-            start: 0,
-            end: 12,
-        }));
-        assert!(specs.contains(&WeightSpec::Rows {
-            name: "language_model.model.blocks.0.ff_proj.weight".to_string(),
-            start: 12,
-            end: 24,
-        }));
+        let fused_mlp_slices = specs
+            .iter()
+            .filter(|spec| spec.tensor_name() == "language_model.model.blocks.0.ff_proj.weight")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fused_mlp_slices,
+            [
+                &WeightSpec::Rows {
+                    name: "language_model.model.blocks.0.ff_proj.weight".to_string(),
+                    start: 12,
+                    end: 24,
+                },
+                &WeightSpec::Rows {
+                    name: "language_model.model.blocks.0.ff_proj.weight".to_string(),
+                    start: 0,
+                    end: 12,
+                },
+            ],
+            "the shared emitter takes gate then value, while Molmo stores value then gate"
+        );
+        let value = 1.0f32;
+        let gate = 4.0f32;
+        let expected = gate / (1.0 + (-gate).exp()) * value;
+        let reversed = value / (1.0 + (-value).exp()) * gate;
+        assert_ne!(
+            expected, reversed,
+            "the fixture must detect applying SiLU to the wrong fused half"
+        );
         assert!(specs.contains(&WeightSpec::Elements {
             name: "language_model.model.blocks.0.att_proj.bias".to_string(),
             start: 8,

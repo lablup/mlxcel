@@ -182,8 +182,8 @@ pub use phi4_audio::{
 #[doc(hidden)]
 pub use phi4_audio::{Phi4AudioCheckpoint, Phi4AudioDiagnosticRuntime, Phi4AudioDiagnostics};
 pub use prepared_molmo::{
-    MOLMO_V1_MERGE_MODE, MolmoPreparedImage, MolmoSparseAddError, MolmoSparseAddPair,
-    MolmoSparseAddPlan,
+    MOLMO_V1_MERGE_MODE, MolmoEmbeddingDType, MolmoPreparedImage, MolmoSparseAddError,
+    MolmoSparseAddPair, MolmoSparseAddPlan,
 };
 #[cfg(feature = "iree")]
 pub use qwen2_vl_runtime::{

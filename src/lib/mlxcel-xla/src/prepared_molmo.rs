@@ -58,6 +58,24 @@ pub struct MolmoSparseAddPlan {
     hidden_size: usize,
 }
 
+/// Floating-point storage dtype of the post-scale OLMo text embeddings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MolmoEmbeddingDType {
+    Float16,
+    BFloat16,
+    Float32,
+}
+
+impl MolmoEmbeddingDType {
+    fn round(self, value: f32) -> f32 {
+        match self {
+            Self::Float16 => crate::weights::half_to_f32(crate::weights::f32_to_f16_bits(value)),
+            Self::BFloat16 => crate::weights::round_bf16_f32(value),
+            Self::Float32 => value,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MolmoSparseAddError {
     ZeroDimension(&'static str),
@@ -367,6 +385,21 @@ impl MolmoSparseAddPlan {
         text_embeddings: &mut [f32],
         projected_features: &[f32],
     ) -> Result<(), MolmoSparseAddError> {
+        self.apply_in_dtype(
+            text_embeddings,
+            projected_features,
+            MolmoEmbeddingDType::Float32,
+        )
+    }
+
+    /// Cast projected rows to the text-embedding dtype, add in that dtype, and
+    /// widen the rounded result to F32 for the prepared-prefill boundary.
+    pub fn apply_in_dtype(
+        &self,
+        text_embeddings: &mut [f32],
+        projected_features: &[f32],
+        dtype: MolmoEmbeddingDType,
+    ) -> Result<(), MolmoSparseAddError> {
         let expected_text = checked_product(&[self.text_len, self.hidden_size])?;
         let expected_features = checked_product(&[self.feature_rows, self.hidden_size])?;
         for (tensor, expected, actual) in [
@@ -409,10 +442,9 @@ impl MolmoSparseAddPlan {
             let text_start = pair.target_position * self.hidden_size;
             let feature_start = pair.feature_row * self.hidden_size;
             for offset in 0..self.hidden_size {
-                if !(text_embeddings[text_start + offset]
-                    + projected_features[feature_start + offset])
-                    .is_finite()
-                {
+                let text = dtype.round(text_embeddings[text_start + offset]);
+                let feature = dtype.round(projected_features[feature_start + offset]);
+                if !dtype.round(text + feature).is_finite() {
                     return Err(MolmoSparseAddError::NonFinite {
                         tensor: "merged embeddings",
                         flat_index: text_start + offset,
@@ -424,7 +456,9 @@ impl MolmoSparseAddPlan {
             let text_start = pair.target_position * self.hidden_size;
             let feature_start = pair.feature_row * self.hidden_size;
             for offset in 0..self.hidden_size {
-                text_embeddings[text_start + offset] += projected_features[feature_start + offset];
+                let text = dtype.round(text_embeddings[text_start + offset]);
+                let feature = dtype.round(projected_features[feature_start + offset]);
+                text_embeddings[text_start + offset] = dtype.round(text + feature);
             }
         }
         Ok(())

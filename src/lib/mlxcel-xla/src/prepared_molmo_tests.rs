@@ -85,6 +85,28 @@ fn replacement_negative_fixture_is_caught_by_additive_oracle() {
 }
 
 #[test]
+fn sparse_add_rounds_projected_and_sum_in_text_embedding_dtype() {
+    let plan = MolmoSparseAddPlan::from_image_input_idx(&[-100, 0], 1, 1, 2, 1).unwrap();
+    let projected = [100.0, 0.0006];
+
+    let mut f16_text = [1.0];
+    plan.apply_in_dtype(&mut f16_text, &projected, MolmoEmbeddingDType::Float16)
+        .unwrap();
+    assert_eq!(f16_text, [1.000_976_6]);
+    assert_ne!(f16_text[0], 1.0 + projected[1]);
+
+    let mut bf16_text = [1.0];
+    plan.apply_in_dtype(
+        &mut bf16_text,
+        &[100.0, 0.005],
+        MolmoEmbeddingDType::BFloat16,
+    )
+    .unwrap();
+    assert_eq!(bf16_text, [1.007_812_5]);
+    assert_ne!(bf16_text[0], 1.0 + 0.005);
+}
+
+#[test]
 fn capacity_shape_and_nonfinite_fail_closed() {
     assert!(matches!(
         MolmoSparseAddPlan::from_image_input_idx(&[0, 1], 2, 2, 1, 2),
