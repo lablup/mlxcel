@@ -2,13 +2,13 @@
 //!
 //! Waveform decoding, resampling, and log-mel extraction stay on the bounded
 //! host stage. This module defines the exact static shape and numeric policy
-//! compiled into `audio.main`.
+//! compiled into the split `audio.encode` and `audio.merge_ple` artifacts.
 
 use std::path::Path;
 
 use serde::Deserialize;
 
-pub const GEMMA3N_AUDIO_GRAPH_ABI: &str = "gemma3n-audio-main-v1";
+pub const GEMMA3N_AUDIO_GRAPH_ABI: &str = "gemma3n-audio-split-v2";
 pub const GEMMA3N_AUDIO_MODALITY_FAMILY: &str = "gemma3n_audio";
 pub const GEMMA3N_AUDIO_MEL_BINS: usize = 128;
 pub const GEMMA3N_AUDIO_MAX_FRAMES: usize = 2_997;

@@ -1,6 +1,6 @@
 //! Owned Gemma3n audio inputs and prepared-prefill outputs.
 //!
-//! Canonical mel features and valid-frame masks enter `audio.main`; post-scale
+//! Canonical mel features and valid-frame masks enter `audio.encode`; post-scale
 //! merged embeddings and dense PLE leave it. Owned buffers make normal
 //! completion, cancellation, and admission failure use the same drop path.
 
@@ -12,6 +12,7 @@ use crate::gemma3n_audio_config::{
     GEMMA3N_AUDIO_MEL_BINS, GEMMA3N_AUDIO_MODALITY_FAMILY, GEMMA3N_AUDIO_SOFT_TOKENS,
     validate_gemma3n_audio_frame_bucket,
 };
+use crate::gemma3n_audio_rows::build_gemma3n_audio_row_indices;
 
 pub fn select_gemma3n_audio_frame_bucket(frames: usize) -> Result<usize, Gemma3nAudioInputError> {
     if frames == 0 {
@@ -106,7 +107,7 @@ impl fmt::Display for Gemma3nAudioInputError {
 
 impl std::error::Error for Gemma3nAudioInputError {}
 
-/// Canonical, zero-padded input to one static `audio.main` frame bucket.
+/// Canonical, zero-padded input to one static `audio.encode` frame bucket.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Gemma3nAudioInput {
     mel: Vec<f32>,
@@ -231,12 +232,13 @@ impl Gemma3nAudioInput {
     }
 }
 
-/// `audio.main` output ready for the existing Gemma3n dense-PLE prefill entry.
+/// Split audio artifact output ready for the existing Gemma3n dense-PLE prefill entry.
 #[derive(Clone, Debug)]
 pub struct Gemma3nAudioPreparedPrefill {
     request: Gemma3nPreparedPrefill,
     projected_lengths: Vec<usize>,
     placeholder_starts: Vec<usize>,
+    audio_row_indices: Vec<i32>,
     frame_bucket: usize,
 }
 
@@ -301,10 +303,14 @@ impl Gemma3nAudioPreparedPrefill {
                 placeholder_starts.len()
             ));
         }
+        let audio_row_indices =
+            build_gemma3n_audio_row_indices(&prepared.token_ids, audio_token_id, clips)
+                .map_err(|error| error.to_string())?;
         Ok(Self {
             request,
             projected_lengths,
             placeholder_starts,
+            audio_row_indices,
             frame_bucket,
         })
     }
@@ -322,6 +328,23 @@ impl Gemma3nAudioPreparedPrefill {
     #[must_use]
     pub fn placeholder_starts(&self) -> &[usize] {
         &self.placeholder_starts
+    }
+
+    #[must_use]
+    pub fn audio_row_indices(&self) -> &[i32] {
+        &self.audio_row_indices
+    }
+
+    pub fn padded_audio_row_indices(&self, capacity: usize) -> Result<Vec<i32>, String> {
+        if capacity < self.audio_row_indices.len() {
+            return Err(format!(
+                "Gemma3n audio row-map capacity {capacity} is smaller than sequence length {}",
+                self.audio_row_indices.len()
+            ));
+        }
+        let mut rows = self.audio_row_indices.clone();
+        rows.resize(capacity, -1);
+        Ok(rows)
     }
 
     #[must_use]
@@ -454,6 +477,11 @@ mod tests {
             prepared.placeholder_starts(),
             &[1, GEMMA3N_AUDIO_SOFT_TOKENS + 2]
         );
+        let rows = prepared.audio_row_indices();
+        assert_eq!(rows[0], -1);
+        assert_eq!(rows[1], 0);
+        assert_eq!(rows[GEMMA3N_AUDIO_SOFT_TOKENS], 187);
+        assert_eq!(rows[GEMMA3N_AUDIO_SOFT_TOKENS + 2], 188);
 
         let mut malformed = tokens;
         malformed.remove(1);

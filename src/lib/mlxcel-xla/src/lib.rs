@@ -53,6 +53,7 @@ mod context;
 #[cfg(any(feature = "diagnostics", test))]
 mod diagnostic_flags;
 mod gemma3n_audio_config;
+mod gemma3n_audio_rows;
 mod gemma3n_audio_weights;
 #[cfg(any(feature = "iree", test))]
 #[allow(dead_code)]
@@ -215,6 +216,7 @@ pub use gemma3n_audio_config::{
     GEMMA3N_AUDIO_MAX_FRAMES, GEMMA3N_AUDIO_MEL_BINS, GEMMA3N_AUDIO_MODALITY_FAMILY,
     GEMMA3N_AUDIO_SOFT_TOKENS, Gemma3nXlaAudioConfig,
 };
+pub use gemma3n_audio_rows::{Gemma3nAudioRowMapError, validate_gemma3n_audio_row_indices};
 pub use gemma3n_audio_weights::{
     GEMMA3N_AUDIO_CHECKPOINT_TENSOR_COUNT, Gemma3nAudioCheckpointDType,
     Gemma3nAudioCheckpointError, Gemma3nAudioCheckpointTensorSpec, gemma3n_audio_checkpoint_specs,

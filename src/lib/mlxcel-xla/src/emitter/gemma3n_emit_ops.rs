@@ -206,6 +206,62 @@ pub(super) fn rms_last_bf16(
     }
 }
 
+/// Build the dense per-layer embedding stream from post-scale model
+/// embeddings. Token prefill and audio prefill must use this exact shared
+/// sequence: the BF16 rounding boundaries are part of Gemma3n's numerical
+/// contract.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn dense_ple_input_head(
+    b: &mut Builder,
+    c: &Gemma3nConfig,
+    tokens: &Val,
+    embeddings: &Val,
+    token_ple_weight: &Val,
+    projection_weight: &Val,
+    projection_norm_weight: &Val,
+    rows: usize,
+    eps: &Val,
+    zero: &Val,
+    inv_sqrt2: &Val,
+) -> Val {
+    let ple_width = c.n_layers * c.hidden_per_layer_input;
+    let limit = b.const_i32(c.per_layer_vocab as i32);
+    let limit = b.broadcast(&limit, &[], vec![rows]);
+    let zero_i = b.const_i32(0);
+    let zero_ids = b.broadcast(&zero_i, &[], vec![rows]);
+    let nonnegative = b.compare("GE", tokens, &zero_ids, "SIGNED");
+    let below = b.compare("LT", tokens, &limit, "SIGNED");
+    let valid = b.select(&nonnegative, &below, &nonnegative);
+    let safe = b.select(&valid, tokens, &zero_ids);
+    let safe = b.reshape(&safe, vec![rows, 1]);
+    let token_ple = b.gather(token_ple_weight, &safe);
+    let zeros = b.broadcast(zero, &[], vec![rows, ple_width]);
+    let valid = b.broadcast(&valid, &[0], vec![rows, ple_width]);
+    let token_ple = b.select(&valid, &token_ple, &zeros);
+    let token_scale = bf16_scalar(b, (c.hidden_per_layer_input as f32).sqrt());
+    let token_scale = b.broadcast(&token_scale, &[], vec![rows, ple_width]);
+    let token_ple = b.multiply(&token_ple, &token_scale);
+    let token_ple = round_bf16(b, &token_ple);
+
+    let projected = linear_seq_bf16(b, embeddings, projection_weight);
+    let model_scale = bf16_scalar(b, (c.hidden as f32).sqrt().recip());
+    let model_scale = b.broadcast(&model_scale, &[], vec![rows, ple_width]);
+    let projected = b.multiply(&projected, &model_scale);
+    let projected = round_bf16(b, &projected);
+    let projected = b.reshape(&projected, vec![rows, c.n_layers, c.hidden_per_layer_input]);
+    let projected = rms_last_bf16(b, &projected, Some(projection_norm_weight), eps, zero);
+    let token_ple = b.reshape(&token_ple, vec![rows, c.n_layers, c.hidden_per_layer_input]);
+    let inv = b.broadcast(
+        inv_sqrt2,
+        &[],
+        vec![rows, c.n_layers, c.hidden_per_layer_input],
+    );
+    let combined = b.add(&projected, &token_ple);
+    let combined = round_bf16(b, &combined);
+    let combined = b.multiply(&combined, &inv);
+    round_bf16(b, &combined)
+}
+
 pub(super) fn normalize_to(b: &mut Builder, plane: &Val, target: &Val, k: &Constants) -> Val {
     let axis = plane.ty.shape.len() - 1;
     let width = plane.ty.shape[axis];

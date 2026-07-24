@@ -48,6 +48,11 @@
 mod builder;
 mod config;
 mod gemma3n;
+mod gemma3n_audio_attention;
+mod gemma3n_audio_emit;
+mod gemma3n_audio_math;
+mod gemma3n_audio_ops;
+mod gemma3n_audio_schema;
 mod gemma3n_decode;
 mod gemma3n_emit;
 mod gemma3n_emit_ops;
@@ -76,6 +81,12 @@ pub(crate) use config::{
 pub(crate) use gemma3n::{
     Gemma3nConfig, Gemma3nLayerType, Gemma3nPleDType, Gemma3nPleMetadata, validate_gemma3n_ple,
 };
+#[cfg(feature = "diagnostics")]
+pub(crate) use gemma3n_audio_emit::emit_gemma3n_audio_diagnostic;
+#[cfg(feature = "diagnostics")]
+pub use gemma3n_audio_emit::{Gemma3nAudioDiagnosticLayout, Gemma3nAudioDiagnosticStage};
+#[allow(unused_imports)]
+pub(crate) use gemma3n_audio_emit::{emit_gemma3n_audio_encode, emit_gemma3n_audio_merge_ple};
 #[allow(unused_imports)]
 pub(crate) use gemma3n_decode::{
     emit_gemma3n_decode, emit_gemma3n_decode_ragged, emit_gemma3n_decode_ragged_with,
