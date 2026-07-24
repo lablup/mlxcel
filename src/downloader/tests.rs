@@ -844,6 +844,27 @@ fn extra_ca_certs_errors_on_missing_file() {
     restore_env(EXTRA_CA_CERTS_ENV, prev);
 }
 
+#[cfg(unix)]
+#[test]
+fn extra_ca_certs_errors_on_non_utf8_value() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let _env_guard = env_lock();
+    let prev = std::env::var(EXTRA_CA_CERTS_ENV).ok();
+    let invalid = std::ffi::OsString::from_vec(vec![0xFF, 0xFE]);
+    // SAFETY: serialized via the crate-wide ENV_LOCK acquired above.
+    unsafe {
+        std::env::set_var(EXTRA_CA_CERTS_ENV, &invalid);
+    }
+    let err = load_extra_ca_certificates()
+        .expect_err("non-UTF8 value must error, not be silently treated as unset");
+    assert!(
+        err.to_string().contains(EXTRA_CA_CERTS_ENV),
+        "error should name the env var: {err}"
+    );
+    restore_env(EXTRA_CA_CERTS_ENV, prev);
+}
+
 #[test]
 fn extra_ca_certs_errors_on_malformed_pem() {
     let _env_guard = env_lock();

@@ -366,7 +366,12 @@ const EXTRA_CA_CERTS_ENV: &str = "MLXCEL_EXTRA_CA_CERTS";
 pub(crate) fn load_extra_ca_certificates() -> Result<Vec<reqwest::Certificate>> {
     let path = match std::env::var(EXTRA_CA_CERTS_ENV) {
         Ok(val) if !val.trim().is_empty() => val.trim().to_string(),
-        _ => return Ok(Vec::new()),
+        Ok(_) | Err(std::env::VarError::NotPresent) => return Ok(Vec::new()),
+        Err(std::env::VarError::NotUnicode(raw)) => {
+            return Err(anyhow!(
+                "{EXTRA_CA_CERTS_ENV} is set but is not valid UTF-8: {raw:?}"
+            ));
+        }
     };
     let bytes = fs::read(&path).with_context(|| {
         format!("{EXTRA_CA_CERTS_ENV} is set to '{path}' but the file could not be read")
