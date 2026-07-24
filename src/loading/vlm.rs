@@ -142,6 +142,10 @@ pub(crate) use qwen::{
 pub use qwen::load_qwen3_omni_speech;
 pub(crate) use siglip::{load_aya_vision_vlm, load_paligemma_vlm};
 pub(crate) use smolvlm::load_smolvlm_vlm;
+#[cfg(feature = "xla-diagnostics")]
+pub use special::{
+    Molmo2XlaVisionReference, Molmo2XlaVisionReferenceProjection, load_molmo2_xla_vision_reference,
+};
 #[cfg(feature = "xla-iree")]
 pub(crate) use special::{
     Phi4MMXlaVisionComponents, load_molmo2_xla_text_embeddings, load_phi4mm_xla_media_components,
