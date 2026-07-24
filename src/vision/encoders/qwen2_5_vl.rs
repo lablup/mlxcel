@@ -98,6 +98,22 @@ fn default_fullatt_block_indexes() -> Vec<usize> {
     vec![7, 15, 23, 31]
 }
 
+fn restoration_indices(window_index: &[i32]) -> Vec<i32> {
+    let mut restore = vec![0i32; window_index.len()];
+    let mut seen = vec![false; window_index.len()];
+    for (window_position, &original_position) in window_index.iter().enumerate() {
+        let original_position = usize::try_from(original_position)
+            .expect("Qwen2.5-VL window indices are validated as non-negative");
+        assert!(
+            original_position < restore.len() && !seen[original_position],
+            "Qwen2.5-VL window indices must be an in-range permutation"
+        );
+        seen[original_position] = true;
+        restore[original_position] = window_position as i32;
+    }
+    restore
+}
+
 // RMSNorm for vision encoder.
 struct VisionRMSNorm {
     weight: UniquePtr<MlxArray>,
@@ -741,17 +757,10 @@ impl Qwen25VLVisionEncoder {
         // Merge patches
         h = self.merger.forward(&h);
 
-        // Un-reorder: apply reverse indices from argsort(window_index)
-        let mut reverse_indices = vec![0i32; window_index.len()];
-        let mut indexed: Vec<(i32, usize)> = window_index
-            .iter()
-            .enumerate()
-            .map(|(i, &v)| (v, i))
-            .collect();
-        indexed.sort_by_key(|&(v, _)| v);
-        for (rank, &(_, orig_idx)) in indexed.iter().enumerate() {
-            reverse_indices[orig_idx] = rank as i32;
-        }
+        // Un-reorder: destination original_position reads its corresponding
+        // window_position. This is the inverse permutation, not window_index
+        // itself (the two differ for non-self-inverse window layouts).
+        let reverse_indices = restoration_indices(&window_index);
 
         // After merger: h has shape [total_merged, out_hidden_size]
         // reverse_indices maps from window-ordered to original order
@@ -767,5 +776,23 @@ impl Qwen25VLVisionEncoder {
 impl super::VisionEncoder for Qwen25VLVisionEncoder {
     fn forward(&self, _pixel_values: &MlxArray) -> VisionEncoderOutput {
         panic!("Qwen2.5-VL vision encoder requires grid_thw; use forward_with_grid() instead");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::restoration_indices;
+
+    #[test]
+    fn restoration_is_the_true_inverse_for_non_self_inverse_permutation() {
+        let window_index = [2, 0, 3, 1];
+        let restore = restoration_indices(&window_index);
+        assert_eq!(restore, vec![1, 3, 0, 2]);
+        let window_ordered = ["two", "zero", "three", "one"];
+        let original = restore
+            .into_iter()
+            .map(|index| window_ordered[index as usize])
+            .collect::<Vec<_>>();
+        assert_eq!(original, vec!["zero", "one", "two", "three"]);
     }
 }

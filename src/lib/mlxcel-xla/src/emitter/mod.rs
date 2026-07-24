@@ -59,6 +59,7 @@ mod model;
 mod moe;
 pub(crate) mod numeric_ops;
 mod phi4_audio;
+mod qwen2_5_vl;
 mod qwen2_vl;
 mod rope;
 mod vision;
@@ -126,7 +127,7 @@ pub(crate) use qwen2_vl::emit_qwen2_vl;
 #[allow(unused_imports)]
 pub(crate) use qwen2_vl::{
     QWEN2_VL_PATCH_BUCKETS, Qwen2VlConfig, Qwen2VlGridPlan, Qwen2VlHostInputs, Qwen2VlWeightSpec,
-    prepare_qwen2_vl_host_inputs,
+    QwenVlVisionVariant, prepare_qwen2_vl_host_inputs,
 };
 // MoE FFN config types (issue #500), read by the weight loader (`iree.rs`) and the
 // validation harness. `SharedExpertConfig` is only named in some build cfgs.

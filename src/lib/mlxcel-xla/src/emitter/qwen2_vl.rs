@@ -35,6 +35,15 @@ use super::numeric_ops::{exact_gelu, layer_norm_2d as layer_norm, stable_softmax
 pub(crate) const QWEN2_VL_PATCH_BUCKETS: [usize; 3] = [16, 64, 256];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum QwenVlVisionVariant {
+    Qwen2,
+    Qwen25 {
+        window_size: usize,
+        full_attention_blocks: Vec<usize>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Qwen2VlWeightSpec {
     pub(crate) name: String,
     /// Logical dequantized F32 shape consumed by StableHLO.
@@ -43,6 +52,7 @@ pub(crate) struct Qwen2VlWeightSpec {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Qwen2VlConfig {
+    pub(crate) variant: QwenVlVisionVariant,
     pub(crate) depth: usize,
     pub(crate) hidden: usize,
     pub(crate) intermediate: usize,
@@ -61,6 +71,9 @@ pub(crate) struct Qwen2VlGridPlan {
     pub(crate) patch_bucket: usize,
     pub(crate) actual_patches: usize,
     pub(crate) packed_cu_seqlens: Vec<usize>,
+    pub(crate) window_cu_seqlens: Option<Vec<usize>>,
+    pub(crate) window_index: Vec<usize>,
+    pub(crate) restore_indices: Vec<usize>,
     pub(crate) merged_tokens_per_image: Vec<usize>,
 }
 
@@ -70,6 +83,7 @@ pub(crate) struct Qwen2VlHostInputs {
     pub(crate) patches: Vec<f32>,
     pub(crate) vision_rope_freqs: Vec<f32>,
     pub(crate) packed_attention_bias: Vec<f32>,
+    pub(crate) window_attention_bias: Option<Vec<f32>>,
 }
 
 struct Args {
@@ -130,6 +144,13 @@ fn positive_usize(object: &serde_json::Map<String, Value>, field: &str) -> Resul
 }
 
 impl Qwen2VlConfig {
+    fn family_name(&self) -> &'static str {
+        match &self.variant {
+            QwenVlVisionVariant::Qwen2 => "Qwen2-VL",
+            QwenVlVisionVariant::Qwen25 { .. } => "Qwen2.5-VL",
+        }
+    }
+
     pub(crate) fn from_model_dir(model_dir: &Path) -> Result<Self, String> {
         let path = model_dir.join("config.json");
         let text = std::fs::read_to_string(&path)
@@ -140,39 +161,56 @@ impl Qwen2VlConfig {
     pub(crate) fn from_json_str(text: &str) -> Result<Self, String> {
         let root: Value =
             serde_json::from_str(text).map_err(|error| format!("parse config.json: {error}"))?;
-        if root.get("model_type").and_then(Value::as_str) != Some("qwen2_vl") {
-            return Err("Qwen2-VL IREE vision requires model_type=qwen2_vl".to_string());
+        let model_type = root
+            .get("model_type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Qwen-VL IREE vision requires config.json model_type".to_string())?;
+        if !matches!(model_type, "qwen2_vl" | "qwen2_5_vl") {
+            return Err(format!(
+                "Qwen-VL IREE vision requires model_type=qwen2_vl or qwen2_5_vl, got {model_type}"
+            ));
         }
         let vision = root
             .get("vision_config")
             .and_then(Value::as_object)
             .ok_or_else(|| "config.json vision_config must be an object".to_string())?;
         let depth = positive_usize(vision, "depth")?;
-        let hidden = positive_usize(vision, "embed_dim")?;
+        let hidden = positive_usize(
+            vision,
+            if model_type == "qwen2_5_vl" {
+                "hidden_size"
+            } else {
+                "embed_dim"
+            },
+        )?;
         let heads = positive_usize(vision, "num_heads")?;
         if hidden % heads != 0 {
             return Err(format!(
                 "Qwen2-VL vision embed_dim={hidden} is not divisible by num_heads={heads}"
             ));
         }
-        let mlp_ratio = vision
-            .get("mlp_ratio")
-            .and_then(Value::as_f64)
-            .ok_or_else(|| {
-                "config.json vision_config.mlp_ratio must be a positive number".to_string()
-            })?;
-        if !mlp_ratio.is_finite() || mlp_ratio <= 0.0 {
-            return Err(
-                "config.json vision_config.mlp_ratio must be finite and positive".to_string(),
-            );
-        }
-        let intermediate_f64 = hidden as f64 * mlp_ratio;
-        if intermediate_f64.fract() != 0.0 || intermediate_f64 > usize::MAX as f64 {
-            return Err(format!(
-                "Qwen2-VL vision intermediate size {hidden} * {mlp_ratio} is not an integer"
-            ));
-        }
-        let intermediate = intermediate_f64 as usize;
+        let intermediate = if model_type == "qwen2_5_vl" {
+            positive_usize(vision, "intermediate_size")?
+        } else {
+            let mlp_ratio = vision
+                .get("mlp_ratio")
+                .and_then(Value::as_f64)
+                .ok_or_else(|| {
+                    "config.json vision_config.mlp_ratio must be a positive number".to_string()
+                })?;
+            if !mlp_ratio.is_finite() || mlp_ratio <= 0.0 {
+                return Err(
+                    "config.json vision_config.mlp_ratio must be finite and positive".to_string(),
+                );
+            }
+            let intermediate_f64 = hidden as f64 * mlp_ratio;
+            if intermediate_f64.fract() != 0.0 || intermediate_f64 > usize::MAX as f64 {
+                return Err(format!(
+                    "Qwen2-VL vision intermediate size {hidden} * {mlp_ratio} is not an integer"
+                ));
+            }
+            intermediate_f64 as usize
+        };
         let patch_size = positive_usize(vision, "patch_size")?;
         let temporal_patch_size = positive_usize(vision, "temporal_patch_size")?;
         let spatial_merge_size = positive_usize(vision, "spatial_merge_size")?;
@@ -198,6 +236,19 @@ impl Qwen2VlConfig {
             })?;
         if text_hidden == 0 {
             return Err("config.json hidden_size must be positive".to_string());
+        }
+        if model_type == "qwen2_5_vl" {
+            let out_hidden = positive_usize(vision, "out_hidden_size")?;
+            if out_hidden != text_hidden {
+                return Err(format!(
+                    "Qwen2.5-VL vision out_hidden_size={out_hidden} disagrees with text hidden_size={text_hidden}"
+                ));
+            }
+            if vision.get("hidden_act").and_then(Value::as_str) != Some("silu") {
+                return Err(
+                    "Qwen2.5-VL IREE vision requires vision_config.hidden_act=silu".to_string(),
+                );
+            }
         }
         if spatial_merge_size != 2 {
             return Err(format!(
@@ -232,7 +283,53 @@ impl Qwen2VlConfig {
                 Some((bits, group_size))
             }
         };
+        let variant = if model_type == "qwen2_5_vl" {
+            let window_size = positive_usize(vision, "window_size")?;
+            let window_divisor = spatial_merge_size
+                .checked_mul(patch_size)
+                .ok_or_else(|| "Qwen2.5-VL window divisor overflowed".to_string())?;
+            if !window_size.is_multiple_of(window_divisor) {
+                return Err(format!(
+                    "Qwen2.5-VL window_size={window_size} must be divisible by spatial_merge_size*patch_size={window_divisor}"
+                ));
+            }
+            let full_attention_blocks = vision
+                .get("fullatt_block_indexes")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "Qwen2.5-VL IREE vision requires fullatt_block_indexes".to_string())?
+                .iter()
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .and_then(|value| usize::try_from(value).ok())
+                        .ok_or_else(|| {
+                            "Qwen2.5-VL fullatt_block_indexes must contain non-negative integers"
+                                .to_string()
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut unique = std::collections::BTreeSet::new();
+            for &index in &full_attention_blocks {
+                if index >= depth {
+                    return Err(format!(
+                        "Qwen2.5-VL full-attention block index {index} is outside depth {depth}"
+                    ));
+                }
+                if !unique.insert(index) {
+                    return Err(format!(
+                        "Qwen2.5-VL full-attention block index {index} is duplicated"
+                    ));
+                }
+            }
+            QwenVlVisionVariant::Qwen25 {
+                window_size,
+                full_attention_blocks,
+            }
+        } else {
+            QwenVlVisionVariant::Qwen2
+        };
         Ok(Self {
+            variant,
             depth,
             hidden,
             intermediate,
@@ -290,7 +387,8 @@ impl Qwen2VlConfig {
         for (index, &(temporal, height, width)) in grids.iter().enumerate() {
             if temporal != 1 {
                 return Err(format!(
-                    "Qwen2-VL grid {index} has temporal size {temporal}; video/temporal grids are unsupported by the image-only XLA path"
+                    "{} grid {index} has temporal size {temporal}; video/temporal grids are unsupported by the image-only XLA path",
+                    self.family_name()
                 ));
             }
             let height = usize::try_from(height)
@@ -319,12 +417,88 @@ impl Qwen2VlConfig {
             packed_cu_seqlens.push(actual_patches);
             merged_tokens_per_image.push(self.merged_tokens(patches));
         }
-        Ok(Qwen2VlGridPlan {
+        let mut plan = Qwen2VlGridPlan {
             patch_bucket: self.bucket_for_patches(actual_patches)?,
             actual_patches,
             packed_cu_seqlens,
+            window_cu_seqlens: None,
+            window_index: (0..self.merged_tokens(actual_patches)).collect(),
+            restore_indices: (0..self.merged_tokens(actual_patches)).collect(),
             merged_tokens_per_image,
-        })
+        };
+        if let QwenVlVisionVariant::Qwen25 { window_size, .. } = &self.variant {
+            let window_groups = *window_size / self.spatial_merge_size / self.patch_size;
+            let merge_unit = self.spatial_merge_size * self.spatial_merge_size;
+            let mut window_index = Vec::with_capacity(self.merged_tokens(actual_patches));
+            let mut window_cu_seqlens = vec![0usize];
+            let mut merged_offset = 0usize;
+            for &(temporal, height, width) in grids {
+                let temporal = temporal as usize;
+                let merged_height = height as usize / self.spatial_merge_size;
+                let merged_width = width as usize / self.spatial_merge_size;
+                let windows_height = merged_height.div_ceil(window_groups);
+                let windows_width = merged_width.div_ceil(window_groups);
+                for time in 0..temporal {
+                    for window_h in 0..windows_height {
+                        for window_w in 0..windows_width {
+                            let mut valid_groups = 0usize;
+                            for inner_h in 0..window_groups {
+                                for inner_w in 0..window_groups {
+                                    let row = window_h * window_groups + inner_h;
+                                    let column = window_w * window_groups + inner_w;
+                                    if row < merged_height && column < merged_width {
+                                        let local = time * merged_height * merged_width
+                                            + row * merged_width
+                                            + column;
+                                        window_index.push(merged_offset + local);
+                                        valid_groups += 1;
+                                    }
+                                }
+                            }
+                            if valid_groups > 0 {
+                                let next = window_cu_seqlens
+                                    .last()
+                                    .copied()
+                                    .ok_or_else(|| {
+                                        "Qwen2.5-VL window boundary state is empty".to_string()
+                                    })?
+                                    .checked_add(valid_groups * merge_unit)
+                                    .ok_or_else(|| {
+                                        "Qwen2.5-VL window cumulative length overflowed".to_string()
+                                    })?;
+                                window_cu_seqlens.push(next);
+                            }
+                        }
+                    }
+                }
+                merged_offset += temporal * merged_height * merged_width;
+            }
+            if window_index.len() != self.merged_tokens(actual_patches)
+                || window_cu_seqlens.last().copied() != Some(actual_patches)
+            {
+                return Err(format!(
+                    "Qwen2.5-VL window reordering produced {} merged indices and final boundary {:?}, expected {} indices and {actual_patches} patches",
+                    window_index.len(),
+                    window_cu_seqlens.last(),
+                    self.merged_tokens(actual_patches)
+                ));
+            }
+            let mut seen = vec![false; window_index.len()];
+            let mut restore_indices = vec![0usize; window_index.len()];
+            for (window_position, &original_position) in window_index.iter().enumerate() {
+                if original_position >= seen.len() || seen[original_position] {
+                    return Err(format!(
+                        "Qwen2.5-VL window index {original_position} is out of range or duplicated"
+                    ));
+                }
+                seen[original_position] = true;
+                restore_indices[original_position] = window_position;
+            }
+            plan.window_cu_seqlens = Some(window_cu_seqlens);
+            plan.window_index = window_index;
+            plan.restore_indices = restore_indices;
+        }
+        Ok(plan)
     }
 
     #[must_use]
@@ -334,8 +508,15 @@ impl Qwen2VlConfig {
 
     #[must_use]
     pub(crate) fn fingerprint(&self, patch_bucket: usize) -> String {
+        let variant = match &self.variant {
+            QwenVlVisionVariant::Qwen2 => "family=qwen2".to_string(),
+            QwenVlVisionVariant::Qwen25 {
+                window_size,
+                full_attention_blocks,
+            } => format!("family=qwen2_5:window={window_size}:full={full_attention_blocks:?}"),
+        };
         format!(
-            "qwen2-vl-vision-v1:bucket={patch_bucket}:patch={}:temporal={}:merge={}:channels={}:hidden={}:intermediate={}:heads={}:depth={}:text={}:dtype=f32:source_quant={:?}",
+            "qwen-vl-vision-v2:{variant}:bucket={patch_bucket}:patch={}:temporal={}:merge={}:channels={}:hidden={}:intermediate={}:heads={}:depth={}:text={}:dtype=f32:source_quant={:?}",
             self.patch_size,
             self.temporal_patch_size,
             self.spatial_merge_size,
@@ -358,20 +539,37 @@ impl Qwen2VlConfig {
         )];
         for layer in 0..self.depth {
             let prefix = format!("vision_tower.blocks.{layer}");
-            for (suffix, shape) in [
-                ("norm1.weight", vec![self.hidden]),
-                ("norm1.bias", vec![self.hidden]),
-                ("attn.qkv.weight", vec![self.hidden * 3, self.hidden]),
-                ("attn.qkv.bias", vec![self.hidden * 3]),
-                ("attn.proj.weight", vec![self.hidden, self.hidden]),
-                ("attn.proj.bias", vec![self.hidden]),
-                ("norm2.weight", vec![self.hidden]),
-                ("norm2.bias", vec![self.hidden]),
-                ("mlp.fc1.weight", vec![self.intermediate, self.hidden]),
-                ("mlp.fc1.bias", vec![self.intermediate]),
-                ("mlp.fc2.weight", vec![self.hidden, self.intermediate]),
-                ("mlp.fc2.bias", vec![self.hidden]),
-            ] {
+            let layer_specs = match &self.variant {
+                QwenVlVisionVariant::Qwen2 => vec![
+                    ("norm1.weight", vec![self.hidden]),
+                    ("norm1.bias", vec![self.hidden]),
+                    ("attn.qkv.weight", vec![self.hidden * 3, self.hidden]),
+                    ("attn.qkv.bias", vec![self.hidden * 3]),
+                    ("attn.proj.weight", vec![self.hidden, self.hidden]),
+                    ("attn.proj.bias", vec![self.hidden]),
+                    ("norm2.weight", vec![self.hidden]),
+                    ("norm2.bias", vec![self.hidden]),
+                    ("mlp.fc1.weight", vec![self.intermediate, self.hidden]),
+                    ("mlp.fc1.bias", vec![self.intermediate]),
+                    ("mlp.fc2.weight", vec![self.hidden, self.intermediate]),
+                    ("mlp.fc2.bias", vec![self.hidden]),
+                ],
+                QwenVlVisionVariant::Qwen25 { .. } => vec![
+                    ("norm1.weight", vec![self.hidden]),
+                    ("attn.qkv.weight", vec![self.hidden * 3, self.hidden]),
+                    ("attn.qkv.bias", vec![self.hidden * 3]),
+                    ("attn.proj.weight", vec![self.hidden, self.hidden]),
+                    ("attn.proj.bias", vec![self.hidden]),
+                    ("norm2.weight", vec![self.hidden]),
+                    ("mlp.gate_proj.weight", vec![self.intermediate, self.hidden]),
+                    ("mlp.gate_proj.bias", vec![self.intermediate]),
+                    ("mlp.up_proj.weight", vec![self.intermediate, self.hidden]),
+                    ("mlp.up_proj.bias", vec![self.intermediate]),
+                    ("mlp.down_proj.weight", vec![self.hidden, self.intermediate]),
+                    ("mlp.down_proj.bias", vec![self.hidden]),
+                ],
+            };
+            for (suffix, shape) in layer_specs {
                 specs.push(Qwen2VlWeightSpec {
                     name: format!("{prefix}.{suffix}"),
                     shape,
@@ -379,9 +577,11 @@ impl Qwen2VlConfig {
             }
         }
         let merge_width = self.hidden * self.spatial_merge_size * self.spatial_merge_size;
+        specs.push(self.spec("vision_tower.merger.ln_q.weight", [self.hidden]));
+        if matches!(&self.variant, QwenVlVisionVariant::Qwen2) {
+            specs.push(self.spec("vision_tower.merger.ln_q.bias", [self.hidden]));
+        }
         specs.extend([
-            self.spec("vision_tower.merger.ln_q.weight", [self.hidden]),
-            self.spec("vision_tower.merger.ln_q.bias", [self.hidden]),
             self.spec(
                 "vision_tower.merger.mlp.0.weight",
                 [merge_width, merge_width],
@@ -444,11 +644,20 @@ pub(crate) fn prepare_qwen2_vl_host_inputs(
         .patch_bucket
         .checked_mul(patch_width)
         .ok_or_else(|| "Qwen2-VL padded patch tensor size overflowed".to_string())?;
+    let merge_unit = config.spatial_merge_size * config.spatial_merge_size;
+    let patch_order = plan
+        .window_index
+        .iter()
+        .flat_map(|&group| (0..merge_unit).map(move |inner| group * merge_unit + inner))
+        .collect::<Vec<_>>();
     let mut patches = Vec::with_capacity(padded_values);
-    // The shared processor emits the temporal rows contiguously for each
-    // spatial patch. Flattening those adjacent rows is exactly the
-    // `[patch, temporal*channels*height*width]` patch-projection contract.
-    patches.extend_from_slice(temporal_patch_rows);
+    // The shared processor emits temporal rows contiguously for each patch.
+    // Qwen2 uses identity order; Qwen2.5 expands its merged-group window
+    // permutation back into patch rows before native execution.
+    for &patch in &patch_order {
+        let start = patch * patch_width;
+        patches.extend_from_slice(&temporal_patch_rows[start..start + patch_width]);
+    }
     patches.resize(padded_values, 0.0);
 
     let head_dim = config.hidden / config.heads;
@@ -482,30 +691,48 @@ pub(crate) fn prepare_qwen2_vl_host_inputs(
             }
         }
     }
-    vision_rope_freqs.resize(plan.patch_bucket * frequency_width, 0.0);
-
-    let bias_values = plan
-        .patch_bucket
-        .checked_mul(plan.patch_bucket)
-        .ok_or_else(|| "Qwen2-VL packed attention bias size overflowed".to_string())?;
-    let mut packed_attention_bias = vec![f32::NEG_INFINITY; bias_values];
-    for segment in plan.packed_cu_seqlens.windows(2) {
-        for row in segment[0]..segment[1] {
-            for column in segment[0]..segment[1] {
-                packed_attention_bias[row * plan.patch_bucket + column] = 0.0;
-            }
+    if matches!(&config.variant, QwenVlVisionVariant::Qwen25 { .. }) {
+        let original = vision_rope_freqs;
+        vision_rope_freqs = Vec::with_capacity(plan.patch_bucket * frequency_width);
+        for &patch in &patch_order {
+            let start = patch * frequency_width;
+            vision_rope_freqs.extend_from_slice(&original[start..start + frequency_width]);
         }
     }
-    // Give every padded query one finite self key so its softmax cannot create
-    // NaNs. Padded rows remain unreachable from every real media segment.
-    for index in plan.actual_patches..plan.patch_bucket {
-        packed_attention_bias[index * plan.patch_bucket + index] = 0.0;
-    }
+    vision_rope_freqs.resize(plan.patch_bucket * frequency_width, 0.0);
+
+    let attention_bias = |boundaries: &[usize]| -> Result<Vec<f32>, String> {
+        let bias_values = plan
+            .patch_bucket
+            .checked_mul(plan.patch_bucket)
+            .ok_or_else(|| "Qwen-VL packed attention bias size overflowed".to_string())?;
+        let mut bias = vec![f32::NEG_INFINITY; bias_values];
+        for segment in boundaries.windows(2) {
+            for row in segment[0]..segment[1] {
+                for column in segment[0]..segment[1] {
+                    bias[row * plan.patch_bucket + column] = 0.0;
+                }
+            }
+        }
+        // Give every padded query one finite self key so its softmax cannot
+        // create NaNs. Padding stays unreachable from real media segments.
+        for index in plan.actual_patches..plan.patch_bucket {
+            bias[index * plan.patch_bucket + index] = 0.0;
+        }
+        Ok(bias)
+    };
+    let packed_attention_bias = attention_bias(&plan.packed_cu_seqlens)?;
+    let window_attention_bias = plan
+        .window_cu_seqlens
+        .as_deref()
+        .map(attention_bias)
+        .transpose()?;
     Ok(Qwen2VlHostInputs {
         plan,
         patches,
         vision_rope_freqs,
         packed_attention_bias,
+        window_attention_bias,
     })
 }
 
@@ -645,6 +872,9 @@ fn encoder_layer(
 /// `attention_bias` are host-built from `grid_thw`/packed boundaries, keeping
 /// cross-image isolation explicit while preserving one finite static graph.
 pub(crate) fn emit_qwen2_vl(config: &Qwen2VlConfig, patch_bucket: usize) -> String {
+    if matches!(&config.variant, QwenVlVisionVariant::Qwen25 { .. }) {
+        return super::qwen2_5_vl::emit_qwen2_5_vl(config, patch_bucket);
+    }
     assert!(
         QWEN2_VL_PATCH_BUCKETS.contains(&patch_bucket),
         "unqualified Qwen2-VL patch bucket"
@@ -722,6 +952,30 @@ mod tests {
                     "patch_size": 14,
                     "spatial_merge_size": 2,
                     "temporal_patch_size": 2
+                }
+            }"#,
+        )
+        .unwrap()
+    }
+
+    fn qwen25_config() -> Qwen2VlConfig {
+        Qwen2VlConfig::from_json_str(
+            r#"{
+                "model_type": "qwen2_5_vl",
+                "hidden_size": 1536,
+                "vision_config": {
+                    "depth": 2,
+                    "hidden_act": "silu",
+                    "hidden_size": 1280,
+                    "intermediate_size": 3420,
+                    "out_hidden_size": 1536,
+                    "num_heads": 16,
+                    "in_chans": 3,
+                    "patch_size": 14,
+                    "spatial_merge_size": 2,
+                    "temporal_patch_size": 2,
+                    "window_size": 112,
+                    "fullatt_block_indexes": [1]
                 }
             }"#,
         )
@@ -832,5 +1086,115 @@ mod tests {
                 .unwrap_err()
                 .contains("flat index 7")
         );
+    }
+
+    #[test]
+    fn qwen25_window_plan_matches_padded_reference_partition_and_inverse() {
+        let config = qwen25_config();
+        assert!(
+            config
+                .plan_image_grids(&[(2, 4, 4)])
+                .unwrap_err()
+                .contains("Qwen2.5-VL")
+        );
+        let plan = config.plan_image_grids(&[(1, 12, 12)]).unwrap();
+        assert_eq!(plan.patch_bucket, 256);
+        assert_eq!(plan.window_cu_seqlens, Some(vec![0, 64, 96, 128, 144]));
+        assert_eq!(
+            &plan.window_index[..16],
+            &[0, 1, 2, 3, 6, 7, 8, 9, 12, 13, 14, 15, 18, 19, 20, 21]
+        );
+        for (original, &window_position) in plan.restore_indices.iter().enumerate() {
+            assert_eq!(plan.window_index[window_position], original);
+        }
+        let multi = config.plan_image_grids(&[(1, 8, 8), (1, 4, 4)]).unwrap();
+        assert_eq!(multi.packed_cu_seqlens, vec![0, 64, 80]);
+        assert_eq!(multi.window_cu_seqlens, Some(vec![0, 64, 80]));
+        assert_eq!(multi.merged_tokens_per_image, vec![16, 4]);
+    }
+
+    #[test]
+    fn qwen25_host_inputs_reorder_groups_and_isolate_windows() {
+        let config = qwen25_config();
+        let grids = [(1, 12, 12)];
+        let patch_width = 3 * 2 * 14 * 14;
+        let mut values = vec![0.0; 144 * patch_width];
+        for patch in 0..144 {
+            values[patch * patch_width] = patch as f32;
+        }
+        let inputs = prepare_qwen2_vl_host_inputs(&config, &grids, &values).unwrap();
+        let observed = (0..20)
+            .map(|patch| inputs.patches[patch * patch_width] as usize)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observed,
+            vec![
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 24, 25, 26, 27
+            ]
+        );
+        let full = &inputs.packed_attention_bias;
+        let window = inputs.window_attention_bias.as_ref().unwrap();
+        assert_eq!(full[0 * 256 + 80], 0.0);
+        assert_eq!(window[0 * 256 + 80], f32::NEG_INFINITY);
+        assert_eq!(window[144 * 256 + 144], 0.0);
+        assert_eq!(window[144 * 256], f32::NEG_INFINITY);
+    }
+
+    #[test]
+    fn qwen25_schema_and_emitter_are_family_specific_and_fingerprinted() {
+        let config = qwen25_config();
+        let specs = config.weight_specs();
+        assert_eq!(specs.len(), 1 + 2 * 12 + 5);
+        assert!(
+            specs
+                .iter()
+                .any(|spec| spec.name.ends_with("mlp.gate_proj.weight"))
+        );
+        assert!(!specs.iter().any(|spec| spec.name.ends_with("norm1.bias")));
+        let fingerprint = config.fingerprint(256);
+        assert!(fingerprint.contains("family=qwen2_5"));
+        assert!(fingerprint.contains("window=112"));
+        assert!(fingerprint.contains("full=[1]"));
+        let mlir = emit_qwen2_vl(&config, 16);
+        assert!(mlir.contains("loc(\"patches.windowed\")"));
+        assert!(mlir.contains("loc(\"full_attention.bias\")"));
+        assert!(mlir.contains("loc(\"window_attention.bias\")"));
+        assert!(mlir.contains("mlp.gate_proj.weight"));
+        assert!(!mlir.contains("norm1.bias"));
+    }
+
+    #[test]
+    fn qwen25_rejects_unknown_or_ambiguous_window_configuration() {
+        for (fragment, expected) in [
+            (
+                r#""window_size":112,"fullatt_block_indexes":[2]"#,
+                "outside depth",
+            ),
+            (
+                r#""window_size":112,"fullatt_block_indexes":[1,1]"#,
+                "block index 1 is duplicated",
+            ),
+            (
+                r#""window_size":101,"fullatt_block_indexes":[1]"#,
+                "must be divisible",
+            ),
+        ] {
+            let json = format!(
+                r#"{{
+                    "model_type":"qwen2_5_vl","hidden_size":12,
+                    "vision_config":{{
+                        "depth":2,"hidden_act":"silu","hidden_size":8,
+                        "intermediate_size":16,"out_hidden_size":12,"num_heads":2,
+                        "patch_size":2,"spatial_merge_size":2,"temporal_patch_size":2,
+                        {fragment}
+                    }}
+                }}"#
+            );
+            assert!(
+                Qwen2VlConfig::from_json_str(&json)
+                    .unwrap_err()
+                    .contains(expected)
+            );
+        }
     }
 }

@@ -35,7 +35,8 @@ use crate::aux::{
 };
 use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 use crate::emitter::{
-    Qwen2VlConfig, Qwen2VlHostInputs, emit_qwen2_vl, prepare_qwen2_vl_host_inputs,
+    Qwen2VlConfig, Qwen2VlHostInputs, QwenVlVisionVariant, emit_qwen2_vl,
+    prepare_qwen2_vl_host_inputs,
 };
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
 use crate::weights::{bf16_to_f32, dequantize_affine, f16_to_f32, f32_le_to_f32};
@@ -135,10 +136,15 @@ fn processor_identity(model_dir: &Path, config: &Qwen2VlConfig) -> Result<String
         .as_object()
         .ok_or_else(|| format!("{} must contain an object", path.display()))?;
     for field in ["do_resize", "do_rescale", "do_normalize", "do_convert_rgb"] {
-        if object.get(field).and_then(serde_json::Value::as_bool) != Some(true) {
-            return Err(format!(
-                "preprocessor_config.json {field}=true is required by Qwen2-VL IREE vision"
-            ));
+        let enabled = object.get(field).and_then(serde_json::Value::as_bool);
+        match (&config.variant, enabled) {
+            (QwenVlVisionVariant::Qwen2, Some(true))
+            | (QwenVlVisionVariant::Qwen25 { .. }, None | Some(true)) => {}
+            _ => {
+                return Err(format!(
+                    "preprocessor_config.json {field}=true is required by Qwen-VL IREE vision"
+                ));
+            }
         }
     }
     let positive = |field: &str| -> Result<usize, String> {
@@ -170,8 +176,18 @@ fn processor_identity(model_dir: &Path, config: &Qwen2VlConfig) -> Result<String
             "Qwen2-VL IREE vision requires image_processor_type=Qwen2VLImageProcessor".to_string(),
         );
     }
+    if matches!(&config.variant, QwenVlVisionVariant::Qwen25 { .. })
+        && object
+            .get("processor_class")
+            .and_then(serde_json::Value::as_str)
+            != Some("Qwen2_5_VLProcessor")
+    {
+        return Err(
+            "Qwen2.5-VL IREE vision requires processor_class=Qwen2_5_VLProcessor".to_string(),
+        );
+    }
     Ok(format!(
-        "qwen2-vl-processor-v1:sha256={}:patch={}:temporal={}:merge={}",
+        "qwen-vl-processor-v2:sha256={}:patch={}:temporal={}:merge={}",
         sha256_hex(&bytes),
         config.patch_size,
         config.temporal_patch_size,
@@ -567,7 +583,11 @@ fn compile_and_load(
         ),
         compiler_generation_identity(&compiler, flags, &mlir)?,
     )?;
-    let tag = format!("qwen2-vl-vision-{patch_bucket}");
+    let family = match &config.variant {
+        QwenVlVisionVariant::Qwen2 => "qwen2",
+        QwenVlVisionVariant::Qwen25 { .. } => "qwen2-5",
+    };
+    let tag = format!("{family}-vl-vision-{patch_bucket}");
     let vmfb = cached_vmfb_path(&compiler, &mlir, flags, &cache, &tag, 0);
     ensure_qualified_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
         compile_one_to(&compiler, &mlir, flags, &cache, &tag, 0, temporary)
@@ -629,6 +649,7 @@ impl IreeQwen2VlProjector {
             patches,
             vision_rope_freqs,
             packed_attention_bias,
+            window_attention_bias,
         } = prepare_qwen2_vl_host_inputs(&self.config, grids, temporal_patch_rows)?;
         let patch_width = self.config.channels
             * self.config.temporal_patch_size
@@ -645,24 +666,32 @@ impl IreeQwen2VlProjector {
         let mut output =
             vec![0u8; full_output_shape.iter().product::<usize>() * std::mem::size_of::<f32>()];
         let started = Instant::now();
+        let mut inputs = vec![
+            AuxiliaryInput {
+                bytes: f32_as_bytes(&patches),
+                dtype: AuxiliaryTensorDType::Float32,
+                shape: &patch_shape,
+            },
+            AuxiliaryInput {
+                bytes: f32_as_bytes(&vision_rope_freqs),
+                dtype: AuxiliaryTensorDType::Float32,
+                shape: &frequency_shape,
+            },
+            AuxiliaryInput {
+                bytes: f32_as_bytes(&packed_attention_bias),
+                dtype: AuxiliaryTensorDType::Float32,
+                shape: &bias_shape,
+            },
+        ];
+        if let Some(window_attention_bias) = &window_attention_bias {
+            inputs.push(AuxiliaryInput {
+                bytes: f32_as_bytes(window_attention_bias),
+                dtype: AuxiliaryTensorDType::Float32,
+                shape: &bias_shape,
+            });
+        }
         self.ensure_bucket(plan.patch_bucket)?.invoke(
-            &[
-                AuxiliaryInput {
-                    bytes: f32_as_bytes(&patches),
-                    dtype: AuxiliaryTensorDType::Float32,
-                    shape: &patch_shape,
-                },
-                AuxiliaryInput {
-                    bytes: f32_as_bytes(&vision_rope_freqs),
-                    dtype: AuxiliaryTensorDType::Float32,
-                    shape: &frequency_shape,
-                },
-                AuxiliaryInput {
-                    bytes: f32_as_bytes(&packed_attention_bias),
-                    dtype: AuxiliaryTensorDType::Float32,
-                    shape: &bias_shape,
-                },
-            ],
+            &inputs,
             &mut [AuxiliaryOutput {
                 bytes: &mut output,
                 dtype: AuxiliaryTensorDType::Float32,
@@ -675,10 +704,21 @@ impl IreeQwen2VlProjector {
         let actual_values = actual_tokens
             .checked_mul(self.config.text_hidden)
             .ok_or_else(|| "Qwen2-VL projected output size overflowed".to_string())?;
-        let values = all_values
+        let window_ordered = all_values
             .get(..actual_values)
             .ok_or_else(|| "Qwen2-VL IREE output is shorter than the actual grid".to_string())?
             .to_vec();
+        let mut values = Vec::with_capacity(actual_values);
+        for &window_position in &plan.restore_indices {
+            let start = window_position
+                .checked_mul(self.config.text_hidden)
+                .ok_or_else(|| "Qwen-VL restoration offset overflowed".to_string())?;
+            values.extend_from_slice(
+                window_ordered
+                    .get(start..start + self.config.text_hidden)
+                    .ok_or_else(|| "Qwen-VL restoration index is out of range".to_string())?,
+            );
+        }
         Ok(Qwen2VlVisionProjection {
             values,
             shape: [actual_tokens, self.config.text_hidden],
@@ -687,7 +727,10 @@ impl IreeQwen2VlProjector {
             metrics: Qwen2VlVisionExecutionMetrics {
                 patch_upload_bytes: std::mem::size_of_val(patches.as_slice()),
                 metadata_upload_bytes: std::mem::size_of_val(vision_rope_freqs.as_slice())
-                    + std::mem::size_of_val(packed_attention_bias.as_slice()),
+                    + std::mem::size_of_val(packed_attention_bias.as_slice())
+                    + window_attention_bias
+                        .as_ref()
+                        .map_or(0, |bias| std::mem::size_of_val(bias.as_slice())),
                 projected_transfer_bytes: std::mem::size_of_val(all_values.as_slice()),
                 elapsed_seconds,
             },
