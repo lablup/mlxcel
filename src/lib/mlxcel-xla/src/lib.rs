@@ -67,6 +67,7 @@ mod operator_numeric_contract;
 mod prepared;
 mod prepared_deepstack;
 mod prepared_gemma3n;
+mod prepared_molmo;
 
 #[cfg(feature = "iree")]
 mod aux;
@@ -179,6 +180,10 @@ pub use phi4_audio::{Phi4AudioCheckpoint, Phi4AudioDiagnosticRuntime, Phi4AudioD
 #[cfg(feature = "iree")]
 pub use qwen2_vl_runtime::{
     IreeQwen2VlProjector, Qwen2VlVisionExecutionMetrics, Qwen2VlVisionProjection,
+};
+pub use prepared_molmo::{
+    MOLMO_V1_MERGE_MODE, MolmoPreparedImage, MolmoSparseAddError, MolmoSparseAddPair,
+    MolmoSparseAddPlan,
 };
 #[cfg(feature = "diagnostics")]
 pub use vision_runtime::{IreeVisionDiagnosticProjector, VisionDiagnosticProjection};
