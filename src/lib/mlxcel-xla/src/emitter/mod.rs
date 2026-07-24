@@ -58,6 +58,8 @@ mod gemma3n_weights;
 mod model;
 mod moe;
 pub(crate) mod numeric_ops;
+mod molmo_vision;
+mod molmo_vision_config;
 mod phi4_audio;
 mod qwen2_vl;
 mod rope;
@@ -150,6 +152,12 @@ pub(crate) use model::{
     emit_prefill_embeddings_deepstack_with, emit_prefill_embeddings_with, emit_prefill_with,
     mrope_axis_selector, validate_prefill_embeddings_attention_bias,
     validate_prefill_embeddings_metadata,
+};
+#[allow(unused_imports)]
+pub(crate) use molmo_vision::emit_molmo_vision;
+#[allow(unused_imports)]
+pub(crate) use molmo_vision_config::{
+    MolmoVisionConfig, MolmoVisionWeightDType, MolmoVisionWeightSpec,
 };
 #[allow(unused_imports)]
 pub(crate) use vision::emit_vision;
