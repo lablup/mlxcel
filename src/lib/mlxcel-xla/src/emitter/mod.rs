@@ -136,6 +136,8 @@ pub(crate) use model::{
 };
 #[allow(unused_imports)]
 pub(crate) use vision::emit_vision;
+#[cfg(any(test, feature = "diagnostics"))]
+pub(crate) use vision::emit_vision_diagnostics;
 #[allow(unused_imports)]
 pub(crate) use vision_config::{LlavaVisionConfig, VisionActivation, VisionWeightSpec};
 

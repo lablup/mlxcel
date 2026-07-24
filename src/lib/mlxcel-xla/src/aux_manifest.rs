@@ -79,9 +79,9 @@ fn weight_schema(weights: &[AuxiliaryWeight]) -> Result<String, String> {
             return Err(format!("auxiliary weight {index} name must be non-empty"));
         }
         use std::fmt::Write;
-        write!(
+        writeln!(
             schema,
-            "{index}:{}:{:?}:{:?}\n",
+            "{index}:{}:{:?}:{:?}",
             weight.name, weight.dtype, weight.shape
         )
         .expect("writing to String cannot fail");

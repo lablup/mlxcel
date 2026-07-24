@@ -201,10 +201,13 @@ fn attention(
     hidden: &Val,
     args: &mut Args,
     config: &LlavaVisionConfig,
-) -> Val {
+) -> AttentionValues {
     let q = linear_2d(builder, hidden, &args.take(), &args.take());
     let k = linear_2d(builder, hidden, &args.take(), &args.take());
     let v = linear_2d(builder, hidden, &args.take(), &args.take());
+    let projected_q = q.clone();
+    let projected_k = k.clone();
+    let projected_v = v.clone();
     let tokens = hidden.ty.shape[0];
     let head_dim = config.hidden / config.heads;
     let q = builder.reshape(&q, vec![tokens, config.heads, head_dim]);
@@ -245,7 +248,33 @@ fn attention(
     );
     let context = builder.transpose(&context, &[1, 0, 2]);
     let context = builder.reshape(&context, vec![tokens, config.hidden]);
-    linear_2d(builder, &context, &args.take(), &args.take())
+    let output = linear_2d(builder, &context, &args.take(), &args.take());
+    AttentionValues {
+        q: projected_q,
+        k: projected_k,
+        v: projected_v,
+        context,
+        output,
+    }
+}
+
+struct AttentionValues {
+    q: Val,
+    k: Val,
+    v: Val,
+    context: Val,
+    output: Val,
+}
+
+struct EncoderLayerValues {
+    norm1: Val,
+    attention: AttentionValues,
+    attention_residual: Val,
+    norm2: Val,
+    mlp_fc1: Val,
+    mlp_activation: Val,
+    mlp_fc2: Val,
+    output: Val,
 }
 
 fn encoder_layer(
@@ -253,30 +282,40 @@ fn encoder_layer(
     hidden: &Val,
     args: &mut Args,
     config: &LlavaVisionConfig,
-) -> Val {
-    let norm = layer_norm(
+) -> EncoderLayerValues {
+    let norm1 = layer_norm(
         builder,
         hidden,
         &args.take(),
         &args.take(),
         config.layer_norm_eps,
     );
-    let attention = attention(builder, &norm, args, config);
-    let residual = builder.add(hidden, &attention);
-    let norm = layer_norm(
+    let attention = attention(builder, &norm1, args, config);
+    let attention_residual = builder.add(hidden, &attention.output);
+    let norm2 = layer_norm(
         builder,
-        &residual,
+        &attention_residual,
         &args.take(),
         &args.take(),
         config.layer_norm_eps,
     );
-    let intermediate = linear_2d(builder, &norm, &args.take(), &args.take());
-    let intermediate = activate(builder, &intermediate, config.activation);
-    let output = linear_2d(builder, &intermediate, &args.take(), &args.take());
-    builder.add(&residual, &output)
+    let mlp_fc1 = linear_2d(builder, &norm2, &args.take(), &args.take());
+    let mlp_activation = activate(builder, &mlp_fc1, config.activation);
+    let mlp_fc2 = linear_2d(builder, &mlp_activation, &args.take(), &args.take());
+    let output = builder.add(&attention_residual, &mlp_fc2);
+    EncoderLayerValues {
+        norm1,
+        attention,
+        attention_residual,
+        norm2,
+        mlp_fc1,
+        mlp_activation,
+        mlp_fc2,
+        output,
+    }
 }
 
-pub(crate) fn emit_vision(config: &LlavaVisionConfig) -> String {
+fn emit_vision_impl(config: &LlavaVisionConfig, diagnostics: bool) -> String {
     let specs = config.weight_specs();
     let mut args = Args::new(&specs);
     let mut builder = Builder::new();
@@ -317,8 +356,31 @@ pub(crate) fn emit_vision(config: &LlavaVisionConfig) -> String {
     if let Some((weight, bias)) = pre_layer_norm {
         hidden = layer_norm(&mut builder, &hidden, &weight, &bias, config.layer_norm_eps);
     }
-    for _ in 0..=config.feature_layer {
-        hidden = encoder_layer(&mut builder, &hidden, &mut args, config);
+    let mut diagnostic_values = diagnostics.then(|| vec![hidden.clone()]);
+    for layer in 0..=config.feature_layer {
+        let values = encoder_layer(&mut builder, &hidden, &mut args, config);
+        if layer == 0
+            && let Some(outputs) = &mut diagnostic_values
+        {
+            outputs.extend([
+                values.norm1.clone(),
+                values.attention.q.clone(),
+                values.attention.k.clone(),
+                values.attention.v.clone(),
+                values.attention.context.clone(),
+                values.attention.output.clone(),
+                values.attention_residual.clone(),
+                values.norm2.clone(),
+                values.mlp_fc1.clone(),
+                values.mlp_activation.clone(),
+                values.mlp_fc2.clone(),
+                values.output.clone(),
+            ]);
+        }
+        hidden = values.output;
+        if let Some(outputs) = &mut diagnostic_values {
+            outputs.push(hidden.clone());
+        }
     }
     if config.drop_first_token {
         hidden = builder.slice(&hidden, &[(1, config.position_count()), (0, config.hidden)]);
@@ -327,12 +389,41 @@ pub(crate) fn emit_vision(config: &LlavaVisionConfig) -> String {
     let projected = exact_gelu(&mut builder, &projected);
     let projected = linear_2d(&mut builder, &projected, &args.take(), &args.take());
     assert_eq!(args.cursor, specs.len(), "vision weight schema drifted");
+    let outputs = if let Some(mut values) = diagnostic_values {
+        values.push(hidden);
+        values.push(projected);
+        values
+    } else {
+        vec![projected]
+    };
+    let output_types = outputs
+        .iter()
+        .map(|value| value.ty.render())
+        .collect::<Vec<_>>();
+    let result_type = if output_types.len() == 1 {
+        output_types[0].clone()
+    } else {
+        format!("({})", output_types.join(", "))
+    };
+    let result_values = outputs
+        .iter()
+        .map(|value| value.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
-        "module @vision {{\n  func.func public @main({signature}) -> {output_ty} {{\n{body}    \
-         return {output} : {output_ty}\n  }}\n}}\n",
+        "module @vision {{\n  func.func public @main({signature}) -> {result_type} {{\n{body}    \
+         return {result_values} : {return_types}\n  }}\n}}\n",
         signature = args.declarations.join(", "),
-        output_ty = projected.ty.render(),
         body = builder.body(),
-        output = projected.name,
+        return_types = output_types.join(", "),
     )
+}
+
+pub(crate) fn emit_vision(config: &LlavaVisionConfig) -> String {
+    emit_vision_impl(config, false)
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+pub(crate) fn emit_vision_diagnostics(config: &LlavaVisionConfig) -> String {
+    emit_vision_impl(config, true)
 }

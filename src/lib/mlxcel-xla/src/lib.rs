@@ -64,6 +64,8 @@ mod aux_manifest;
 mod aux_smoke;
 #[cfg(feature = "iree")]
 mod iree;
+#[cfg(feature = "iree")]
+mod vision_runtime;
 
 // The continuous-batching engine (#449 M3 Stage 2b). Present under `iree` (real
 // execution) and under `test` (so its backend-neutral Scheduler bookkeeping is
@@ -137,6 +139,10 @@ pub use emitter::{
 };
 #[cfg(feature = "diagnostics")]
 pub use iree::PreparedPrefillDiagnostics;
+#[cfg(feature = "diagnostics")]
+pub use vision_runtime::{IreeVisionDiagnosticProjector, VisionDiagnosticProjection};
+#[cfg(feature = "iree")]
+pub use vision_runtime::{IreeVisionProjector, VisionExecutionMetrics, VisionProjection};
 #[cfg(any(test, feature = "diagnostics"))]
 #[must_use]
 pub fn llava_diagnostic_device_memory_note(device: &str) -> &'static str {

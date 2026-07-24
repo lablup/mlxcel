@@ -319,6 +319,13 @@ required-features = ["xla-iree"]
 name = "xla_llava_reference_check"
 required-features = ["xla-diagnostics"]
 
+# Ordered first-divergence gate for the native IREE LLaVA vision/projector.
+# It consumes the independently generated #862 oracle and is intentionally
+# excluded from default builds because it links the diagnostic IREE runtime.
+[[example]]
+name = "xla_vision_reference_check"
+required-features = ["xla-diagnostics"]
+
 [[example]]
 name = "xla_aux_smoke"
 required-features = ["xla-iree"]
