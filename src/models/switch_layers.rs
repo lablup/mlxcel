@@ -34,6 +34,16 @@ use mlxcel_core::{MlxArray, UniquePtr, dtype};
 /// case-insensitive) to force the proven `gather_qmm` / `SwitchGLU` path; any
 /// other value, or leaving it unset, keeps the kernel on.
 ///
+/// #886 hardening: the original kernel rounded each per-expert partial to the
+/// activation dtype before the K-sum, which blew up to 5-13% relative error
+/// on decode steps whose expert outputs nearly cancel and corrupted long
+/// gemma-4-26b-a4b greedy runs. The down kernel now emits f32 partials, the
+/// K-sum runs in f32, and the result is rounded once at the end; parity vs
+/// the all-f32 dense reference is pinned by `fused_moe_parity_tests` in
+/// `mlxcel-core`. `MLXCEL_FUSED_MOE_PARITY_CHECK=1` enables a heavy per-call
+/// in-situ probe (fused rerun determinism + gather_qmm reference + f32 ground
+/// truth) for future corruption triage.
+///
 /// This only chooses whether to *attempt* the kernel. Callers still fall back to
 /// `gather_qmm` automatically for any config the kernel does not support
 /// (non-affine, unsupported bit widths, mismatched gate/up bits, prefill).

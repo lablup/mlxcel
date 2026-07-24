@@ -3006,3 +3006,10 @@ pub(crate) mod test_support;
 #[cfg(test)]
 #[path = "ffi_tests.rs"]
 mod ffi_tests;
+
+// Numeric-parity, determinism, and SGY-invariance tests for the fused
+// single-token decode-MoE GeGLU kernel (#886). GPU-only (Metal or CUDA);
+// they skip on CPU-only builds.
+#[cfg(test)]
+#[path = "fused_moe_parity_tests.rs"]
+mod fused_moe_parity_tests;

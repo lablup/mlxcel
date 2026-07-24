@@ -9,7 +9,9 @@
 // header is backend-agnostic: builds without CUDA link the no_cuda stub.
 #include "mlx/backend/cuda/cuda.h"
 
+#include <atomic>
 #include <chrono>
+#include <cmath>
 
 namespace mlx_cxx {
 
@@ -1185,15 +1187,17 @@ std::unique_ptr<MlxArray> fused_moe_forward(
             std::make_tuple(32, sgy, 1),
             ta, std::nullopt, false, {});
 
-        // B) fc2 * score -> partial[K, Din]; summed over K into [1, Din].
+        // B) fc2 * score -> f32 partial[K, Din]; summed over K in f32 and
+        // rounded to the activation dtype once, mirroring the #886 change to
+        // run_fused_moe_two_kernel (moe_down emits f32 partials now).
         auto& kB = moe_down_kernel_fn();
         std::vector<array> inB = {
             idx_u32,
             fc2_weight.inner, astype(fc2_scales.inner, T), astype(fc2_biases.inner, T),
-            rA[0], astype(reshape(topk_scores, {k}), T),
+            rA[0], astype(reshape(topk_scores, {k}), float32),
         };
         auto rB = kB(
-            inB, { Shape{k, din} }, { T },
+            inB, { Shape{k, din} }, { float32 },
             std::make_tuple(32, round_up(din, sgy), k),
             std::make_tuple(32, sgy, 1),
             ta, std::nullopt, false, {});
@@ -1206,7 +1210,7 @@ std::unique_ptr<MlxArray> fused_moe_forward(
                 now - profile_checkpoint).count();
             profile_checkpoint = now;
         }
-        result = reshape(sum(rB[0], 0, false), {1, din});
+        result = reshape(astype(sum(rB[0], 0, false), T), {1, din});
         if (profile_nemotron_moe) {
             result.eval();
             auto now = ProfileClock::now();
@@ -1390,11 +1394,18 @@ void ssm_update_kernel(
 // memory between two dispatches, so every GEMV output row runs as an
 // independent simdgroup across all GPU cores:
 //   A) gate/up GEMV + swiglu  -> act_g[K, Dff] (f32)
-//   B) down GEMV * score       -> partial[K, Din]
-// partial is summed over K by the host wrapper. This is non-redundant (each
-// weight read once) and beats gather_qmm by ~3.5% on qwen3-30b-a3b, greedy
-// output byte-identical. Power-of-2 bits only (4/8); callers fall back to
-// SwitchGLU for 6-bit, non-affine, or oversized configs (#268 step 2b).
+//   B) down GEMV * score       -> partial[K, Din] (f32)
+// partial is summed over K in f32 by the host wrapper and rounded to the
+// activation dtype exactly once at the end. Keeping the partials in f32
+// matters (#886): the K expert outputs routinely near-cancel, and rounding
+// each partial to bf16 BEFORE the K-sum turned that cancellation into
+// 5-13% relative error on the layer's residual update (measured in-situ on
+// gemma-4-26b-a4b), which corrupted long greedy decodes. Rounding once
+// AFTER the sum keeps the error at the output's own bf16 quantum (~0.4%)
+// regardless of cancellation. This is non-redundant (each weight read once)
+// and beats gather_qmm by ~3.5% on qwen3-30b-a3b. Power-of-2 bits only
+// (4/8); callers fall back to SwitchGLU for 6-bit, non-affine, or oversized
+// configs (#268 step 2b).
 namespace {
     // SGY = simdgroups per threadgroup; each owns one output row (grid.y) and
     // its 32 lanes stride the contraction dim, reduced with simd_sum (cf.
@@ -1510,7 +1521,11 @@ namespace {
         }
         d = simd_sum(d);
         if (lane == 0u) {
-            out[eslot * Din + h] = (T)((float)scores[eslot] * d);
+            // f32 partial (score folded in f32): the host sums the K partials
+            // in f32 and rounds to the activation dtype exactly once, instead
+            // of rounding each per-expert output here. Cuts the kernel's
+            // deviation from the all-f32 reference by ~10x (#886).
+            out[eslot * Din + h] = (float)scores[eslot] * d;
         }
     )";
 
@@ -1675,7 +1690,11 @@ namespace {
         #pragma unroll
         for (int o = 16; o > 0; o >>= 1) d += __shfl_down_sync(0xffffffffu, d, o);
         if (lane == 0u) {
-            out[eslot * Din + h] = (T)((float)scores[eslot] * d);
+            // f32 partial (score folded in f32): the host sums the K partials
+            // in f32 and rounds to the activation dtype exactly once, instead
+            // of rounding each per-expert output here. Cuts the kernel's
+            // deviation from the all-f32 reference by ~10x (#886).
+            out[eslot * Din + h] = (float)scores[eslot] * d;
         }
     )";
 
@@ -1848,21 +1867,193 @@ std::unique_ptr<MlxArray> run_fused_moe_two_kernel(
         taA, std::nullopt, false, {}
     );
 
-    // B) down * score -> partial[K, Din]; summed over K into [Din].
+    // B) down * score -> f32 partial[K, Din]; summed over K in f32 and rounded
+    // to the activation dtype exactly once (#886: rounding each per-expert
+    // partial to bf16 before the K-sum dominated the kernel's deviation from
+    // the all-f32 reference). Scores are passed in f32 for the same reason;
+    // this also keeps the JIT signature uniform across models regardless of
+    // the checkpoint's score dtype.
     auto& kB = use_cuda ? get_moe_down_kernel_cuda().get()
                         : get_moe_down_kernel().get();
     std::vector<array> inB = {
         astype(indices.inner, uint32),
         down_w.inner, astype(down_s.inner, T), astype(down_b.inner, T),
-        rA[0], astype(scores.inner, T),
+        rA[0], astype(scores.inner, float32),
     };
     auto rB = kB(
-        inB, { Shape{k, din} }, { T },
+        inB, { Shape{k, din} }, { float32 },
         std::make_tuple(32, round_up(din, sgy), k),
         std::make_tuple(32, sgy, 1),
         taB, std::nullopt, false, {}
     );
-    auto summed = sum(rB[0], /*axis=*/0, /*keepdims=*/false);
+    auto summed = astype(
+        sum(rB[0], /*axis=*/0, /*keepdims=*/false), T);
+
+    // ---- In-situ parity / determinism probe (#886, diagnostic) -------------
+    // MLXCEL_FUSED_MOE_PARITY_CHECK=1 re-runs the fused pair on the same
+    // inputs (bitwise-determinism check) and computes the gather_qmm reference
+    // (numeric-parity check) for every call, reporting any call whose fused
+    // output is non-deterministic or deviates from the reference beyond
+    // MLXCEL_FUSED_MOE_PARITY_THRESHOLD (normalized RMS, default 0.05). Heavy:
+    // adds two eager evals per MoE call; strictly a debugging aid for
+    // corruption triage on real models, never enabled by default.
+    static const int parity_check = [] {
+        const char* s = std::getenv("MLXCEL_FUSED_MOE_PARITY_CHECK");
+        return s ? std::atoi(s) : 0;
+    }();
+    if (parity_check) {
+        static const double threshold = [] {
+            const char* s = std::getenv("MLXCEL_FUSED_MOE_PARITY_THRESHOLD");
+            return s ? std::atof(s) : 0.05;
+        }();
+        auto to_host = [](const array& a) {
+            auto f = astype(a, float32);
+            f.eval();
+            std::vector<float> v(f.size());
+            std::memcpy(v.data(), f.data<float>(), f.size() * sizeof(float));
+            return v;
+        };
+
+        // Second fused run on identical inputs: any bitwise difference is a
+        // launch-order / synchronization bug, not rounding.
+        auto rA2 = kA(
+            inA, { Shape{k, dff} }, { float32 },
+            std::make_tuple(32, round_up(dff, sgy), k),
+            std::make_tuple(32, sgy, 1),
+            taA, std::nullopt, false, {}
+        );
+        std::vector<array> inB2 = {
+            astype(indices.inner, uint32),
+            down_w.inner, astype(down_s.inner, T), astype(down_b.inner, T),
+            rA2[0], astype(scores.inner, float32),
+        };
+        auto rB2 = kB(
+            inB2, { Shape{k, din} }, { float32 },
+            std::make_tuple(32, round_up(din, sgy), k),
+            std::make_tuple(32, sgy, 1),
+            taB, std::nullopt, false, {}
+        );
+        auto summed2 = astype(
+            sum(rB2[0], /*axis=*/0, /*keepdims=*/false), T);
+
+        // gather_qmm reference chain on the very same arrays, shaped like the
+        // production fallback (`x [1, 1, 1, din]`, `rhs_indices [1, k]`).
+        auto x4 = reshape(x.inner, {1, 1, 1, din});
+        auto idx2 = reshape(astype(indices.inner, uint32), {1, k});
+        auto gate = mlx::core::gather_qmm(
+            x4, gate_w.inner, gate_s.inner, std::optional<array>(gate_b.inner),
+            std::nullopt, std::optional<array>(idx2), true,
+            std::optional<int>(group_size), std::optional<int>(gu_bits),
+            "affine", false);
+        auto up = mlx::core::gather_qmm(
+            x4, up_w.inner, up_s.inner, std::optional<array>(up_b.inner),
+            std::nullopt, std::optional<array>(idx2), true,
+            std::optional<int>(group_size), std::optional<int>(gu_bits),
+            "affine", false);
+        array act_ref = (act == 1)
+            ? multiply(gelu_tanh_approx(gate), up)
+            : multiply(multiply(gate, sigmoid(gate)), up);
+        auto down = mlx::core::gather_qmm(
+            act_ref, down_w.inner, down_s.inner, std::optional<array>(down_b.inner),
+            std::nullopt, std::optional<array>(idx2), true,
+            std::optional<int>(group_size), std::optional<int>(d_bits),
+            "affine", false);
+        auto per_expert = reshape(astype(down, float32), {k, din});
+        auto w_col = reshape(astype(scores.inner, float32), {k, 1});
+        auto ref = sum(multiply(per_expert, w_col), /*axis=*/0, false);
+
+        // All-f32 ground truth on the same inputs (selected experts only):
+        // dequantize + f32 matmul + f32 activation + f32 weighted K-sum.
+        // Scales/biases are upcast to f32 BEFORE dequantize (exact for
+        // bf16/f16 values) so the dequantized weights stay f32; `dequantize`
+        // emits the scales dtype, and both the fused kernel and gather_qmm
+        // compute w*scale+bias inline in f32 registers, so a bf16-dequant
+        // truth would itself carry a per-weight rounding the production
+        // paths do not have.
+        auto idx1 = astype(indices.inner, uint32);
+        auto dq_sel = [&](const array& w_q, const array& s_q, const array& b_q,
+                          int bits_q) {
+            return dequantize(
+                take(w_q, idx1, 0), astype(take(s_q, idx1, 0), float32),
+                std::optional<array>(astype(take(b_q, idx1, 0), float32)),
+                group_size, bits_q, "affine");
+        };
+        auto gsel = dq_sel(gate_w.inner, gate_s.inner, gate_b.inner, gu_bits);
+        auto usel = dq_sel(up_w.inner, up_s.inner, up_b.inner, gu_bits);
+        auto dsel = dq_sel(down_w.inner, down_s.inner, down_b.inner, d_bits);
+        auto xc = reshape(astype(x.inner, float32), {din, 1});
+        auto gt = matmul(gsel, xc); // [k, dff, 1]
+        auto ut = matmul(usel, xc);
+        array actt = (act == 1)
+            ? multiply(gelu_tanh_approx(gt), ut)
+            : multiply(multiply(gt, sigmoid(gt)), ut);
+        auto ot = reshape(matmul(dsel, reshape(actt, {k, dff, 1})), {k, din});
+        auto truth = sum(multiply(ot, w_col), /*axis=*/0, false);
+
+        auto f1 = to_host(summed);
+        auto f2 = to_host(summed2);
+        auto fr = to_host(ref);
+        auto ft = to_host(truth);
+
+        bool deterministic = std::memcmp(
+            f1.data(), f2.data(), f1.size() * sizeof(float)) == 0;
+        auto nrms_of = [](const std::vector<float>& a,
+                          const std::vector<float>& b) {
+            double diff_sq = 0.0, ref_sq = 0.0;
+            for (size_t i = 0; i < a.size(); ++i) {
+                double d = (double)a[i] - (double)b[i];
+                diff_sq += d * d;
+                ref_sq += (double)b[i] * (double)b[i];
+            }
+            double ref_rms = std::sqrt(ref_sq / (double)b.size());
+            return std::make_pair(
+                std::sqrt(diff_sq / (double)a.size())
+                    / std::max(ref_rms, 1e-20),
+                ref_rms);
+        };
+        auto [nrms, ref_rms] = nrms_of(f1, fr);
+        auto [nrms_ft, truth_rms] = nrms_of(f1, ft);
+        auto [nrms_rt, truth_rms2] = nrms_of(fr, ft);
+        (void)truth_rms2;
+
+        static std::atomic<long> calls{0};
+        static std::atomic<long> exceeds{0};
+        static std::atomic<long> nondet{0};
+        // Relaxed max-tracking: fine for a diagnostic log.
+        static std::atomic<double> worst_ft{0.0};
+        static std::atomic<double> worst_rt{0.0};
+        long n = ++calls;
+        for (auto [w_ptr, v] : {std::make_pair(&worst_ft, nrms_ft),
+                                std::make_pair(&worst_rt, nrms_rt)}) {
+            double w = w_ptr->load();
+            while (v > w && !w_ptr->compare_exchange_weak(w, v)) {}
+        }
+        if (!deterministic) {
+            ++nondet;
+            fprintf(stderr,
+                    "[fused-moe-parity] call %ld: NON-DETERMINISTIC fused rerun "
+                    "(act=%d k=%d din=%d dff=%d)\n",
+                    n, act, k, din, dff);
+        }
+        if (nrms > threshold || nrms_ft > threshold || nrms_rt > threshold) {
+            ++exceeds;
+            fprintf(stderr,
+                    "[fused-moe-parity] call %ld: fused-vs-ref=%.3e "
+                    "fused-vs-truth=%.3e ref-vs-truth=%.3e ref_rms=%.3e "
+                    "truth_rms=%.3e (act=%d k=%d din=%d dff=%d)\n",
+                    n, nrms, nrms_ft, nrms_rt, ref_rms, truth_rms,
+                    act, k, din, dff);
+        }
+        if (n % 5000 == 0) {
+            fprintf(stderr,
+                    "[fused-moe-parity] %ld calls: worst fused-vs-truth=%.3e "
+                    "worst ref-vs-truth=%.3e, %ld over threshold %.1e, %ld "
+                    "non-deterministic\n",
+                    n, worst_ft.load(), worst_rt.load(), exceeds.load(),
+                    threshold, nondet.load());
+        }
+    }
+
     return std::make_unique<MlxArray>(std::move(summed));
 }
 }  // namespace
