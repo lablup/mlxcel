@@ -1779,7 +1779,7 @@ fn remap_molmo_weights(raw_weights: WeightMap) -> WeightMap {
 
 /// Read a vision config field with a reference default. Molmo-7B ships an almost
 /// empty `vision_config`, so most fields fall back to the dataclass defaults.
-fn molmo_vision_i32(vision_config: &Value, key: &str, default: i32) -> i32 {
+pub(super) fn molmo_vision_i32(vision_config: &Value, key: &str, default: i32) -> i32 {
     vision_config
         .get(key)
         .and_then(|v| v.as_i64())
@@ -1930,7 +1930,7 @@ pub(crate) fn load_molmo_vlm(model_path: &Path) -> Result<LoadedModel> {
 }
 
 /// Read a 3-element CLIP normalization triple from the preprocessor config.
-fn read_clip_triple(config: Option<&Value>, key: &str) -> Option<[f32; 3]> {
+pub(super) fn read_clip_triple(config: Option<&Value>, key: &str) -> Option<[f32; 3]> {
     config
         .and_then(|c| c.get(key))
         .and_then(|v| v.as_array())

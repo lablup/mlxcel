@@ -61,6 +61,8 @@ pub(crate) use self::vlm::load_llava_host_preprocessor;
 pub(crate) use self::vlm::load_llava_iree_host_preprocessor;
 #[cfg(feature = "xla-iree")]
 pub(crate) use self::vlm::load_qwen2_vl_iree_host_preprocessor;
+#[cfg(feature = "xla-backend")]
+pub(crate) use self::vlm::load_molmo_host_preprocessor;
 pub use self::vlm::load_qwen3_omni_speech;
 #[cfg(feature = "xla-iree")]
 pub(crate) use self::vlm::{

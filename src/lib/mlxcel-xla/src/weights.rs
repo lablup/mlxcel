@@ -284,7 +284,7 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
         }
         // q/k/v projection biases (k, q, v order).
         if cfg.qkv_bias {
-            if cfg.fused_qkv {
+            if cfg.fused_qkv && cfg.weight_scheme == crate::emitter::WeightScheme::Molmo {
                 let bias = format!("{p}{}", s.q_bias);
                 out.push(WeightSpec::Rows {
                     name: bias.clone(),
