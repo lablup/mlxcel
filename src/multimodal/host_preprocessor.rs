@@ -130,13 +130,13 @@ pub trait HostMultimodalPreprocessor {
 ///
 /// `Ok(None)` is the conservative result for text-only checkpoints and VLM
 /// families whose processor/position contract has not been qualified for XLA
-/// yet. Once a checkpoint is identified as the supported LLaVA family, missing
-/// or malformed processor/projector weights are startup errors rather than a
-/// capability downgrade.
+/// yet. Once a checkpoint is identified as a supported multimodal family,
+/// missing or malformed processor/projector weights are startup errors rather
+/// than a capability downgrade.
 ///
 /// # Errors
 ///
-/// Returns a typed configuration or weight-loading error for a supported LLaVA
+/// Returns a typed configuration or weight-loading error for a supported
 /// checkpoint that cannot construct its complete host preprocessor.
 pub fn load_xla_image_preprocessor(
     model_path: &Path,
@@ -147,8 +147,8 @@ pub fn load_xla_image_preprocessor(
             model_path.display()
         ))
     })?;
+    let policy = XlaVisionBackendPolicy::from_env()?;
     if model_type == crate::models::ModelType::Qwen2VL {
-        let policy = XlaVisionBackendPolicy::from_env()?;
         if policy == XlaVisionBackendPolicy::Host {
             return Err(HostPreprocessorError::InvalidConfig(
                 "Qwen2-VL XLA vision has no MLX fallback; MLXCEL_XLA_VISION_BACKEND=host is unsupported"
@@ -159,7 +159,11 @@ pub fn load_xla_image_preprocessor(
         {
             let device = std::env::var("MLXCEL_XLA_DEVICE")
                 .unwrap_or_else(|_| mlxcel_xla::default_device().to_string());
-            let preprocessor = Qwen2VlIreeHostPreprocessor::load(model_path, &device)?;
+            let preprocessor = match Qwen2VlIreeHostPreprocessor::load(model_path, &device) {
+                Ok(preprocessor) => preprocessor,
+                Err(HostPreprocessorError::FamilyMismatch { .. }) => return Ok(None),
+                Err(error) => return Err(error),
+            };
             tracing::info!(
                 vision_backend = "iree",
                 vision_device = %device,
@@ -175,12 +179,52 @@ pub fn load_xla_image_preprocessor(
             ));
         }
     }
+    if model_type == crate::models::ModelType::Gemma3VLM {
+        return load_gemma3_image_preprocessor(model_path, policy);
+    }
     if model_type != crate::models::ModelType::LlavaVLM {
         return Ok(None);
     }
 
-    let policy = XlaVisionBackendPolicy::from_env()?;
     load_llava_image_preprocessor(model_path, policy)
+}
+
+fn load_gemma3_image_preprocessor(
+    model_path: &Path,
+    policy: XlaVisionBackendPolicy,
+) -> Result<Option<Box<dyn HostMultimodalPreprocessor>>, HostPreprocessorError> {
+    if policy == XlaVisionBackendPolicy::Host {
+        return Err(HostPreprocessorError::InvalidConfig(
+            "Gemma3 VLM requires MLXCEL_XLA_VISION_BACKEND=iree; the host LLaVA merge does not implement Gemma3 scaling or additive-mask semantics"
+                .to_string(),
+        ));
+    }
+
+    #[cfg(feature = "xla-iree")]
+    {
+        let device = std::env::var("MLXCEL_XLA_DEVICE")
+            .unwrap_or_else(|_| mlxcel_xla::default_device().to_string());
+        let preprocessor = match Gemma3IreeHostPreprocessor::load(model_path, &device) {
+            Ok(preprocessor) => preprocessor,
+            Err(HostPreprocessorError::FamilyMismatch { .. }) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        tracing::info!(
+            vision_backend = "iree",
+            vision_device = %device,
+            vision_backend_policy = ?policy,
+            "OpenXLA Gemma3 multimodal vision backend selected"
+        );
+        return Ok(Some(Box::new(preprocessor)));
+    }
+
+    #[cfg(not(feature = "xla-iree"))]
+    {
+        let _ = model_path;
+        Err(HostPreprocessorError::InvalidConfig(
+            "Gemma3 VLM image input requires the xla-iree feature".to_string(),
+        ))
+    }
 }
 
 fn load_llava_host_preprocessor_boxed(
@@ -458,6 +502,251 @@ impl HostMultimodalPreprocessor for Qwen2VlIreeHostPreprocessor {
     }
 }
 
+/// Gemma3 producer that retains only host image processing and the filtered
+/// text embedding table. SigLIP and the averaging projector execute in IREE;
+/// this owner then constructs Gemma3's post-scale embeddings and exact
+/// bidirectional additive prefill mask.
+#[cfg(feature = "xla-iree")]
+pub struct Gemma3IreeHostPreprocessor {
+    processor: Box<dyn ImageProcessor>,
+    text_embeddings: UnifiedEmbedding,
+    projector: RefCell<mlxcel_xla::IreeVisionProjector>,
+    image_token_id: i32,
+    pad_token_id: i32,
+    boi_token_id: i32,
+    eoi_token_id: i32,
+    tokens_per_image: usize,
+    hidden_size: usize,
+    image_size: usize,
+    max_sequence_len: usize,
+    device: String,
+}
+
+#[cfg(feature = "xla-iree")]
+impl Gemma3IreeHostPreprocessor {
+    pub fn load(model_path: &Path, device: &str) -> Result<Self, HostPreprocessorError> {
+        crate::loading::load_gemma3_iree_host_preprocessor(model_path, device)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_parts(
+        processor: Box<dyn ImageProcessor>,
+        text_embeddings: UnifiedEmbedding,
+        projector: mlxcel_xla::IreeVisionProjector,
+        image_token_id: i32,
+        pad_token_id: i32,
+        boi_token_id: i32,
+        eoi_token_id: i32,
+        tokens_per_image: usize,
+        hidden_size: usize,
+        image_size: usize,
+        max_sequence_len: usize,
+        device: String,
+    ) -> Result<Self, HostPreprocessorError> {
+        validate_image_preprocessor_dimensions(
+            tokens_per_image,
+            hidden_size,
+            image_size,
+            max_sequence_len,
+        )?;
+        if [image_token_id, pad_token_id, boi_token_id, eoi_token_id]
+            .windows(2)
+            .any(|pair| pair[0] == pair[1])
+            || image_token_id == boi_token_id
+            || image_token_id == eoi_token_id
+            || pad_token_id == eoi_token_id
+        {
+            return Err(HostPreprocessorError::InvalidConfig(
+                "Gemma3 image, padding, BOI, and EOI token IDs must be distinct".to_string(),
+            ));
+        }
+        let expected_input = [1, 3, image_size, image_size];
+        if projector.input_shape() != expected_input {
+            return Err(HostPreprocessorError::InvalidConfig(format!(
+                "Gemma3 IREE vision input shape {:?} does not match processor shape {expected_input:?}",
+                projector.input_shape()
+            )));
+        }
+        let expected_output = [tokens_per_image, hidden_size];
+        if projector.output_shape() != expected_output {
+            return Err(HostPreprocessorError::InvalidConfig(format!(
+                "Gemma3 IREE vision output shape {:?} does not match prepared-prefill shape {expected_output:?}",
+                projector.output_shape()
+            )));
+        }
+        Ok(Self {
+            processor,
+            text_embeddings,
+            projector: RefCell::new(projector),
+            image_token_id,
+            pad_token_id,
+            boi_token_id,
+            eoi_token_id,
+            tokens_per_image,
+            hidden_size,
+            image_size,
+            max_sequence_len,
+            device,
+        })
+    }
+
+    fn token_block_info(&self) -> ImageTokenBlockInfo {
+        ImageTokenBlockInfo {
+            use_boi_eoi: true,
+            image_token_id: self.image_token_id,
+            mm_tokens_per_image: self.tokens_per_image,
+            boi_token_id: self.boi_token_id,
+            eoi_token_id: self.eoi_token_id,
+            has_bos: true,
+            separator_token_id: None,
+            suffix_tokens: Vec::new(),
+            block_prefix_tokens: vec![108],
+            block_suffix_tokens: vec![108],
+        }
+    }
+
+    fn prepare_iree(
+        &self,
+        token_ids: &[i32],
+        images: &[DynamicImage],
+    ) -> Result<PreparedPrefill, HostPreprocessorError> {
+        let mut logical_tokens = token_ids.to_vec();
+        apply_image_token_blocks(&mut logical_tokens, self.token_block_info(), images.len())?;
+        validate_sequence_capacity(logical_tokens.len(), self.max_sequence_len)?;
+        let attention_mask = logical_tokens
+            .iter()
+            .map(|token| i32::from(*token != self.pad_token_id))
+            .collect::<Vec<_>>();
+        let input_ids = mlxcel_core::from_slice_i32(
+            &logical_tokens,
+            &[1, usize_to_i32(logical_tokens.len(), "sequence length")?],
+        );
+        let text_embeddings = mlxcel_core::astype(
+            &self.text_embeddings.forward(&input_ids),
+            mlxcel_core::dtype::FLOAT32,
+        );
+        validate_embedding_shape(
+            &mlxcel_core::array_shape(&text_embeddings),
+            logical_tokens.len(),
+            self.hidden_size,
+            "Gemma3 text embedding table",
+        )?;
+        let raw_text_embeddings = export_mlx_tensor(&text_embeddings, "Gemma3 text embeddings")?;
+        let raw_text_embeddings = raw_text_embeddings
+            .bytes
+            .chunks_exact(std::mem::size_of::<f32>())
+            .map(|bytes| f32::from_ne_bytes(bytes.try_into().expect("four-byte f32 chunk")))
+            .collect::<Vec<_>>();
+
+        let mut projected_values = Vec::new();
+        if !images.is_empty() {
+            let pixels = self.processor.preprocess(images);
+            validate_processor_shape(
+                &mlxcel_core::array_shape(&pixels),
+                images.len(),
+                self.image_size,
+            )?;
+            let pixels = export_mlx_tensor(&pixels, "Gemma3 processor pixel_values")?;
+            if pixels.dtype != PreparedTensorDType::Float32 {
+                return Err(HostPreprocessorError::InvalidConfig(format!(
+                    "Gemma3 IREE vision requires float32 processor output, got {:?}",
+                    pixels.dtype
+                )));
+            }
+            let pixel_values = pixels
+                .bytes
+                .chunks_exact(std::mem::size_of::<f32>())
+                .map(|bytes| f32::from_ne_bytes(bytes.try_into().expect("four-byte f32 chunk")))
+                .collect::<Vec<_>>();
+            let pixels_per_image = 3usize
+                .checked_mul(self.image_size)
+                .and_then(|count| count.checked_mul(self.image_size))
+                .ok_or(HostPreprocessorError::ShapeOverflow)?;
+            let projected_per_image = self
+                .tokens_per_image
+                .checked_mul(self.hidden_size)
+                .ok_or(HostPreprocessorError::ShapeOverflow)?;
+            projected_values.reserve(
+                images
+                    .len()
+                    .checked_mul(projected_per_image)
+                    .ok_or(HostPreprocessorError::ShapeOverflow)?,
+            );
+            let mut elapsed_seconds = 0.0;
+            let mut upload_bytes = 0usize;
+            let mut transfer_bytes = 0usize;
+            let mut projector = self.projector.try_borrow_mut().map_err(|_| {
+                HostPreprocessorError::Iree(
+                    "concurrent/re-entrant Gemma3 IREE vision invocation is unsupported"
+                        .to_string(),
+                )
+            })?;
+            for image_pixels in pixel_values.chunks_exact(pixels_per_image) {
+                let projection = projector
+                    .project(image_pixels)
+                    .map_err(HostPreprocessorError::Iree)?;
+                if projection.shape != [self.tokens_per_image, self.hidden_size] {
+                    return Err(HostPreprocessorError::ProjectedShape {
+                        actual: projection
+                            .shape
+                            .into_iter()
+                            .map(|dimension| i32::try_from(dimension).unwrap_or(i32::MAX))
+                            .collect(),
+                        image_count: 1,
+                        tokens_per_image: self.tokens_per_image,
+                        hidden_size: self.hidden_size,
+                    });
+                }
+                elapsed_seconds += projection.metrics.elapsed_seconds;
+                upload_bytes = upload_bytes
+                    .checked_add(projection.metrics.pixel_upload_bytes)
+                    .ok_or(HostPreprocessorError::ShapeOverflow)?;
+                transfer_bytes = transfer_bytes
+                    .checked_add(projection.metrics.projected_transfer_bytes)
+                    .ok_or(HostPreprocessorError::ShapeOverflow)?;
+                projected_values.extend(projection.values);
+            }
+            tracing::info!(
+                vision_backend = "iree",
+                vision_device = %self.device,
+                image_count = images.len(),
+                pixel_upload_bytes = upload_bytes,
+                projected_transfer_bytes = transfer_bytes,
+                iree_vision_seconds = elapsed_seconds,
+                "OpenXLA Gemma3 vision projection completed"
+            );
+        }
+
+        mlxcel_xla::prepare_gemma3_vlm_prefill(
+            logical_tokens,
+            &raw_text_embeddings,
+            &projected_values,
+            &attention_mask,
+            self.hidden_size,
+            self.max_sequence_len,
+            self.pad_token_id,
+            self.image_token_id,
+            images.len(),
+        )
+        .map_err(|error| HostPreprocessorError::Gemma3(error.to_string()))
+    }
+}
+
+#[cfg(feature = "xla-iree")]
+impl HostMultimodalPreprocessor for Gemma3IreeHostPreprocessor {
+    fn backend(&self) -> XlaVisionBackend {
+        XlaVisionBackend::Iree
+    }
+
+    fn prepare(
+        &self,
+        token_ids: &[i32],
+        images: &[DynamicImage],
+    ) -> Result<PreparedPrefill, HostPreprocessorError> {
+        self.prepare_iree(token_ids, images)
+    }
+}
+
 #[cfg(feature = "xla-iree")]
 impl LlavaIreeHostPreprocessor {
     /// Load the host processor/text embedding table and resident IREE vision
@@ -478,7 +767,7 @@ impl LlavaIreeHostPreprocessor {
         max_sequence_len: usize,
         device: String,
     ) -> Result<Self, HostPreprocessorError> {
-        validate_llava_preprocessor_dimensions(
+        validate_image_preprocessor_dimensions(
             tokens_per_image,
             hidden_size,
             image_size,
@@ -740,7 +1029,7 @@ impl LlavaHostPreprocessor {
         image_size: usize,
         max_sequence_len: usize,
     ) -> Result<Self, HostPreprocessorError> {
-        validate_llava_preprocessor_dimensions(
+        validate_image_preprocessor_dimensions(
             tokens_per_image,
             hidden_size,
             image_size,
@@ -939,7 +1228,7 @@ impl HostMultimodalPreprocessor for LlavaHostPreprocessor {
     }
 }
 
-fn validate_llava_preprocessor_dimensions(
+fn validate_image_preprocessor_dimensions(
     tokens_per_image: usize,
     hidden_size: usize,
     image_size: usize,
@@ -947,22 +1236,22 @@ fn validate_llava_preprocessor_dimensions(
 ) -> Result<(), HostPreprocessorError> {
     if tokens_per_image == 0 {
         return Err(HostPreprocessorError::InvalidConfig(
-            "LLaVA mm_tokens_per_image must be greater than zero".to_string(),
+            "multimodal tokens_per_image must be greater than zero".to_string(),
         ));
     }
     if hidden_size == 0 {
         return Err(HostPreprocessorError::InvalidConfig(
-            "LLaVA text hidden_size must be greater than zero".to_string(),
+            "multimodal text hidden_size must be greater than zero".to_string(),
         ));
     }
     if image_size == 0 {
         return Err(HostPreprocessorError::InvalidConfig(
-            "LLaVA processor image_size must be greater than zero".to_string(),
+            "multimodal processor image_size must be greater than zero".to_string(),
         ));
     }
     if max_sequence_len == 0 {
         return Err(HostPreprocessorError::InvalidConfig(
-            "LLaVA max sequence length must be greater than zero".to_string(),
+            "multimodal max sequence length must be greater than zero".to_string(),
         ));
     }
     Ok(())
@@ -1065,14 +1354,16 @@ impl HostMultimodalPreprocessor for FakeHostMultimodalPreprocessor {
 pub enum HostPreprocessorError {
     #[error(transparent)]
     Placeholder(#[from] ImageTokenBlockError),
-    #[error("incompatible multimodal family: expected LLaVA, got {actual}")]
+    #[error("incompatible multimodal family: {actual}")]
     FamilyMismatch { actual: String },
-    #[error("invalid LLaVA host-preprocessor config: {0}")]
+    #[error("invalid multimodal host-preprocessor config: {0}")]
     InvalidConfig(String),
-    #[error("failed to load LLaVA host-preprocessor weights: {0}")]
+    #[error("failed to load multimodal host-preprocessor weights: {0}")]
     WeightLoad(String),
     #[error("IREE vision backend failed: {0}")]
     Iree(String),
+    #[error("Gemma3 multimodal prefill failed: {0}")]
+    Gemma3(String),
     #[error(
         "processor output shape {actual:?} does not match decoded RGB batch [{image_count}, 3, {image_size}, {image_size}]"
     )]

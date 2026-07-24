@@ -24,6 +24,20 @@ pub(crate) enum VisionActivation {
     GeluPytorchTanh,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum VisionProjector {
+    LlavaMlp,
+    Gemma3AvgPool {
+        tokens_per_side: usize,
+        kernel_size: usize,
+        image_token_id: i32,
+        pad_token_id: i32,
+        boi_token_id: i32,
+        eoi_token_id: i32,
+        newline_token_id: i32,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,6 +185,55 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn gemma3_avg_pool_projector_binds_pool_and_prompt_contract() {
+        let config = LlavaVisionConfig::from_json_str(
+            &serde_json::json!({
+                "model_type": "gemma3",
+                "image_token_index": 99,
+                "pad_token_id": 0,
+                "boi_token_index": 97,
+                "eoi_token_index": 98,
+                "mm_tokens_per_image": 1,
+                "vision_config": {
+                    "model_type": "siglip_vision_model",
+                    "image_size": 28,
+                    "patch_size": 14,
+                    "num_channels": 3,
+                    "hidden_size": 8,
+                    "intermediate_size": 16,
+                    "num_hidden_layers": 2,
+                    "num_attention_heads": 2
+                },
+                "text_config": {"hidden_size": 12}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(config.feature_layer, 1);
+        assert!(!config.drop_first_token);
+        assert_eq!(config.image_tokens(), 1);
+        assert_eq!(
+            config.projector,
+            VisionProjector::Gemma3AvgPool {
+                tokens_per_side: 1,
+                kernel_size: 2,
+                image_token_id: 99,
+                pad_token_id: 0,
+                boi_token_id: 97,
+                eoi_token_id: 98,
+                newline_token_id: 108,
+            }
+        );
+        assert!(config.fingerprint().contains("image_token_id: 99"));
+        let specs = config.weight_specs();
+        assert_eq!(
+            specs[specs.len() - 2].name,
+            "multi_modal_projector.mm_soft_emb_norm.weight"
+        );
+        assert_eq!(specs.last().unwrap().shape, [8, 12]);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -188,6 +251,7 @@ pub(crate) struct LlavaVisionConfig {
     pub(crate) feature_layer: usize,
     pub(crate) drop_first_token: bool,
     pub(crate) text_hidden: usize,
+    pub(crate) projector: VisionProjector,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,8 +296,14 @@ impl LlavaVisionConfig {
     pub(crate) fn from_json_str(text: &str) -> Result<Self, String> {
         let root: Value =
             serde_json::from_str(text).map_err(|error| format!("parse config.json: {error}"))?;
-        if root.get("model_type").and_then(Value::as_str) != Some("llava") {
-            return Err("IREE vision currently supports only model_type=llava".to_string());
+        let model_type = root
+            .get("model_type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "config.json model_type is required".to_string())?;
+        if !matches!(model_type, "llava" | "gemma3") {
+            return Err(format!(
+                "IREE vision currently supports model_type=llava or gemma3, got {model_type:?}"
+            ));
         }
         let vision = object(&root, "vision_config")?;
         let vision_model_type = vision
@@ -292,12 +362,14 @@ impl LlavaVisionConfig {
                 ));
             }
         };
-        match root.get("projector_hidden_act").and_then(Value::as_str) {
-            None | Some("gelu") => {}
-            other => {
-                return Err(format!(
-                    "unsupported projector_hidden_act {other:?}; only exact GELU is qualified"
-                ));
+        if model_type == "llava" {
+            match root.get("projector_hidden_act").and_then(Value::as_str) {
+                None | Some("gelu") => {}
+                other => {
+                    return Err(format!(
+                        "unsupported projector_hidden_act {other:?}; only exact GELU is qualified"
+                    ));
+                }
             }
         }
         let text_hidden = object(&root, "text_config")?
@@ -311,10 +383,13 @@ impl LlavaVisionConfig {
         if text_hidden == 0 {
             return Err("text_config.hidden_size must be greater than zero".to_string());
         }
-        let requested_layer = root
-            .get("vision_feature_layer")
-            .and_then(Value::as_i64)
-            .unwrap_or(-2);
+        let requested_layer = if model_type == "gemma3" {
+            -1
+        } else {
+            root.get("vision_feature_layer")
+                .and_then(Value::as_i64)
+                .unwrap_or(-2)
+        };
         let resolved = if requested_layer < 0 {
             i64::try_from(layers).map_err(|_| "vision layer count does not fit i64".to_string())?
                 + requested_layer
@@ -326,18 +401,69 @@ impl LlavaVisionConfig {
                 "vision_feature_layer={requested_layer} resolves outside {layers} encoder layers"
             ));
         }
-        let strategy = root
-            .get("vision_feature_select_strategy")
-            .and_then(Value::as_str)
-            .unwrap_or("default");
-        let drop_first_token = match strategy {
-            "default" => true,
-            "full" => false,
-            other => {
+        let drop_first_token = if model_type == "gemma3" {
+            false
+        } else {
+            match root
+                .get("vision_feature_select_strategy")
+                .and_then(Value::as_str)
+                .unwrap_or("default")
+            {
+                "default" => true,
+                "full" => false,
+                other => {
+                    return Err(format!(
+                        "unsupported vision_feature_select_strategy={other:?}"
+                    ));
+                }
+            }
+        };
+        let projector = if model_type == "gemma3" {
+            if class_token {
+                return Err("Gemma3 IREE vision requires the class-token-free SigLIP tower".into());
+            }
+            let image_tokens = root
+                .get("mm_tokens_per_image")
+                .and_then(Value::as_u64)
+                .map_or(Ok(256usize), |value| {
+                    usize::try_from(value)
+                        .map_err(|_| "mm_tokens_per_image does not fit usize".to_string())
+                })?;
+            let tokens_per_side = (image_tokens as f64).sqrt() as usize;
+            if tokens_per_side == 0
+                || tokens_per_side
+                    .checked_mul(tokens_per_side)
+                    .ok_or_else(|| "Gemma3 image-token grid overflowed".to_string())?
+                    != image_tokens
+            {
                 return Err(format!(
-                    "unsupported vision_feature_select_strategy={other:?}"
+                    "Gemma3 mm_tokens_per_image={image_tokens} must be a non-zero square"
                 ));
             }
+            let patch_grid = image_size / patch_size;
+            if image_size % patch_size != 0 || patch_grid % tokens_per_side != 0 {
+                return Err(format!(
+                    "Gemma3 patch grid {patch_grid} must divide exactly into {tokens_per_side} pooled tokens per side"
+                ));
+            }
+            let token_id = |name: &str, default: i32| -> Result<i32, String> {
+                match root.get(name).and_then(Value::as_i64) {
+                    Some(value) => i32::try_from(value)
+                        .map_err(|_| format!("config.json {name} does not fit i32")),
+                    None => Ok(default),
+                }
+            };
+            VisionProjector::Gemma3AvgPool {
+                tokens_per_side,
+                kernel_size: patch_grid / tokens_per_side,
+                image_token_id: token_id("image_token_index", 262_144)?,
+                pad_token_id: token_id("pad_token_id", 0)?,
+                boi_token_id: token_id("boi_token_index", 255_999)?,
+                eoi_token_id: token_id("eoi_token_index", 256_000)?,
+                newline_token_id: 108,
+            }
+        } else {
+            VisionProjector::LlavaMlp
         };
         Ok(Self {
             image_size,
@@ -353,6 +479,7 @@ impl LlavaVisionConfig {
             feature_layer: resolved as usize,
             drop_first_token,
             text_hidden,
+            projector,
         })
     }
 
@@ -368,14 +495,19 @@ impl LlavaVisionConfig {
 
     #[must_use]
     pub(crate) fn image_tokens(&self) -> usize {
-        self.position_count() - usize::from(self.drop_first_token)
+        match self.projector {
+            VisionProjector::LlavaMlp => self.position_count() - usize::from(self.drop_first_token),
+            VisionProjector::Gemma3AvgPool {
+                tokens_per_side, ..
+            } => tokens_per_side * tokens_per_side,
+        }
     }
 
     #[must_use]
     pub(crate) fn fingerprint(&self) -> String {
         format!(
-            "llava-vision-v1:image={}:patch={}:channels={}:hidden={}:intermediate={}:layers={}:\
-             heads={}:eps={:08x}:activation={:?}:class={}:feature={}:drop_first={}:text={}",
+            "iree-vision-v2:image={}:patch={}:channels={}:hidden={}:intermediate={}:layers={}:\
+             heads={}:eps={:08x}:activation={:?}:class={}:feature={}:drop_first={}:text={}:projector={:?}",
             self.image_size,
             self.patch_size,
             self.channels,
@@ -388,7 +520,8 @@ impl LlavaVisionConfig {
             self.class_token,
             self.feature_layer,
             self.drop_first_token,
-            self.text_hidden
+            self.text_hidden,
+            self.projector,
         )
     }
 
@@ -448,18 +581,30 @@ impl LlavaVisionConfig {
                 });
             }
         }
-        specs.extend([
-            self.spec(
-                "multi_modal_projector.linear_1.weight",
-                [self.text_hidden, self.hidden],
-            ),
-            self.spec("multi_modal_projector.linear_1.bias", [self.text_hidden]),
-            self.spec(
-                "multi_modal_projector.linear_2.weight",
-                [self.text_hidden, self.text_hidden],
-            ),
-            self.spec("multi_modal_projector.linear_2.bias", [self.text_hidden]),
-        ]);
+        match self.projector {
+            VisionProjector::LlavaMlp => specs.extend([
+                self.spec(
+                    "multi_modal_projector.linear_1.weight",
+                    [self.text_hidden, self.hidden],
+                ),
+                self.spec("multi_modal_projector.linear_1.bias", [self.text_hidden]),
+                self.spec(
+                    "multi_modal_projector.linear_2.weight",
+                    [self.text_hidden, self.text_hidden],
+                ),
+                self.spec("multi_modal_projector.linear_2.bias", [self.text_hidden]),
+            ]),
+            VisionProjector::Gemma3AvgPool { .. } => specs.extend([
+                self.spec(
+                    "multi_modal_projector.mm_soft_emb_norm.weight",
+                    [self.hidden],
+                ),
+                self.spec(
+                    "multi_modal_projector.mm_input_projection_weight",
+                    [self.hidden, self.text_hidden],
+                ),
+            ]),
+        }
         specs
     }
 

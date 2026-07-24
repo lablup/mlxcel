@@ -67,7 +67,7 @@ fn iree_vision_contract_policy_is_explicit_and_strict() {
 
 #[test]
 fn xla_loader_keeps_text_and_unqualified_vlm_image_capability_false() {
-    for model_type in ["llama", "qwen2_vl"] {
+    for model_type in ["llama", "qwen2_vl", "gemma3"] {
         let model_dir = tempfile::tempdir().unwrap();
         std::fs::write(
             model_dir.path().join("config.json"),

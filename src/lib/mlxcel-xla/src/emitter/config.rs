@@ -313,6 +313,11 @@ pub struct Config {
     /// uses 4; Cohere2 uses `sliding_window_pattern` (4). Only meaningful when
     /// `sliding_window` is `Some`.
     pub sliding_pattern: usize,
+    /// The embeddings-prefill caller supplies the complete per-layer attention
+    /// policy. Gemma3 VLM uses one bidirectional padding mask for every layer,
+    /// so the emitter must not intersect it with the text model's ordinary
+    /// sliding-window schedule. Token prefill remains causal/windowed.
+    pub embeddings_prefill_uses_authoritative_mask: bool,
     /// Per-layer NoPE mask (SmolLM3): `use_rope_layers[li] == false` skips RoPE on
     /// that layer (`no_rope_layers`). `None` applies RoPE on every layer.
     pub use_rope_layers: Option<Vec<bool>>,
@@ -439,6 +444,7 @@ impl Config {
             final_logit_softcap: None,
             sliding_window: None,
             sliding_pattern: 2,
+            embeddings_prefill_uses_authoritative_mask: false,
             use_rope_layers: None,
             mrope: None,
             deepstack: None,
@@ -482,15 +488,38 @@ impl Config {
             serde_json::from_str(s).map_err(|e| format!("parse config.json: {e}"))?;
         let wrapper_model_type = root.get("model_type").and_then(serde_json::Value::as_str);
         let is_phi4mm = wrapper_model_type == Some("phi4mm");
-        let v = if matches!(wrapper_model_type, Some("llava" | "llava_next")) {
+        let v = if matches!(wrapper_model_type, Some("llava" | "llava_next" | "gemma3")) {
             let mut text = root
                 .get("text_config")
                 .and_then(serde_json::Value::as_object)
                 .cloned()
                 .ok_or_else(|| {
-                    "LLaVA config.json missing object `text_config` for the XLA text graph"
-                        .to_string()
+                    format!(
+                        "{wrapper_model_type:?} config.json missing object `text_config` for the XLA text graph"
+                    )
                 })?;
+            if wrapper_model_type == Some("gemma3") {
+                // mlx-vlm's Gemma3 TextConfig supplies these architecture
+                // defaults. mlx-community conversions commonly omit them from
+                // the nested object, so resolve the same explicit contract here
+                // instead of deriving head_dim from hidden_size (Gemma3's q
+                // projection width is intentionally smaller than hidden_size).
+                let defaults = [
+                    ("num_attention_heads", serde_json::json!(8)),
+                    ("num_key_value_heads", serde_json::json!(4)),
+                    ("head_dim", serde_json::json!(256)),
+                    ("rms_norm_eps", serde_json::json!(1.0e-6)),
+                    ("vocab_size", serde_json::json!(262_208)),
+                    ("rope_theta", serde_json::json!(1_000_000.0)),
+                    ("rope_local_base_freq", serde_json::json!(10_000.0)),
+                    ("query_pre_attn_scalar", serde_json::json!(256.0)),
+                    ("sliding_window", serde_json::json!(1024)),
+                    ("sliding_window_pattern", serde_json::json!(6)),
+                ];
+                for (name, value) in defaults {
+                    text.entry(name.to_string()).or_insert(value);
+                }
+            }
             // mlx-community quantized VLMs commonly keep the affine scheme at
             // the wrapper level even though the tensors belong to the nested
             // language model.
@@ -653,6 +682,7 @@ impl Config {
         let mut final_logit_softcap: Option<f32> = None;
         let mut sliding_window: Option<usize> = None;
         let mut sliding_pattern = 2usize;
+        let mut embeddings_prefill_uses_authoritative_mask = false;
         let mut use_rope_layers: Option<Vec<bool>> = None;
         // issue #498 dense arch pack flags.
         let mut layernorm = false;
@@ -765,6 +795,7 @@ impl Config {
                 });
                 sliding_pattern = ou("sliding_window_pattern").unwrap_or(6).max(1);
                 sliding_window = Some(ou("sliding_window").unwrap_or(4096));
+                embeddings_prefill_uses_authoritative_mask = true;
                 rope_local_base = Some(of("rope_local_base_freq").unwrap_or(10000.0));
                 read_gemma_common(
                     &mut query_pre_attn_scalar,
@@ -1072,6 +1103,12 @@ impl Config {
                     // type while carrying the M-RoPE section table; the table is
                     // the explicit schema signal in that representation.
                     Some("default") | Some("dynamic") | Some("mrope") => RopeScaling::Plain,
+                    // The qualified Gemma3 MLX implementation and upstream
+                    // mlx-vlm Gemma3 model select distinct local/global bases
+                    // but do not apply the conversion metadata's legacy linear
+                    // scaling block. Preserve that reference contract instead
+                    // of silently applying a different HF-only position scale.
+                    Some("linear") if model_type == Some("gemma3_text") => RopeScaling::Plain,
                     None if has_mrope_section => RopeScaling::Plain,
                     Some("llama3") => {
                         let sf = |k: &str| -> Result<f64, String> {
@@ -1369,6 +1406,7 @@ impl Config {
             final_logit_softcap,
             sliding_window,
             sliding_pattern,
+            embeddings_prefill_uses_authoritative_mask,
             use_rope_layers,
             mrope,
             deepstack,
@@ -1544,6 +1582,40 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gemma3_embeddings_prefill_owns_the_complete_external_mask() {
+        let config = Config::from_json_str(
+            r#"{"model_type":"gemma3_text","hidden_size":8,"num_attention_heads":2,
+                "num_key_value_heads":1,"head_dim":4,"intermediate_size":16,
+                "num_hidden_layers":4,"rms_norm_eps":1e-6,"rope_theta":1000000,
+                "rope_local_base_freq":10000,"sliding_window":2,
+                "sliding_window_pattern":3,"vocab_size":12,
+                "hidden_activation":"gelu_pytorch_tanh"}"#,
+        )
+        .unwrap();
+        assert!(config.embeddings_prefill_uses_authoritative_mask);
+        assert_eq!(config.sliding_window, Some(2));
+        assert!(config.is_sliding_layer(0), "token prefill remains windowed");
+    }
+
+    #[test]
+    fn gemma3_wrapper_uses_nested_text_config_and_wrapper_quantization() {
+        let config = Config::from_json_str(
+            r#"{"model_type":"gemma3","quantization":{"bits":4,"group_size":64},
+                "text_config":{"model_type":"gemma3_text","hidden_size":2560,
+                "intermediate_size":10240,"num_hidden_layers":34,"sliding_window":1024,
+                "rope_scaling":{"factor":8.0,"rope_type":"linear"}}}"#,
+        )
+        .unwrap();
+        assert!(config.embeddings_prefill_uses_authoritative_mask);
+        assert_eq!(config.quantization.unwrap().bits, 4);
+        assert_eq!(config.hidden, 2560);
+        assert_eq!(config.n_q, 8);
+        assert_eq!(config.n_kv, 4);
+        assert_eq!(config.head_dim, 256);
+        assert_eq!(config.rope, RopeScaling::Plain);
+    }
 
     /// ERNIE-4.5 is rejected with a message naming its interleaved (GPT-J-style)
     /// RoPE: it looks like a plain-RoPE Llama in config.json but its `rotate_half`

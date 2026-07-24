@@ -66,6 +66,7 @@ mod operator_numeric_contract;
 #[cfg_attr(not(feature = "iree"), allow(dead_code))]
 mod prepared;
 mod prepared_deepstack;
+mod prepared_gemma3;
 mod prepared_gemma3n;
 
 #[cfg(feature = "iree")]
@@ -210,6 +211,10 @@ pub use emitter::{Gemma3nDiagnosticLayout, Gemma3nDiagnosticSegment};
 #[cfg(feature = "iree")]
 pub use prepared::PreparedInputError;
 pub use prepared_deepstack::{DeepStackFeatures, DeepStackInputError, DeepStackPreparedPrefill};
+pub use prepared_gemma3::{
+    GEMMA3_VLM_MASK_MODE, GEMMA3_VLM_MASKED_VALUE, Gemma3VlmPreparedError,
+    prepare_gemma3_vlm_prefill,
+};
 pub use prepared_gemma3n::{Gemma3nDensePle, Gemma3nDensePleError, Gemma3nPreparedPrefill};
 #[cfg(feature = "iree")]
 pub use sampler::SampleParams;

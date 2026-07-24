@@ -56,6 +56,8 @@ use self::special::try_load_special_model_from_weights;
 use self::vlm::*;
 
 // Re-exported at the crate root for the CLI's lazy `--output-audio` load.
+#[cfg(feature = "xla-iree")]
+pub(crate) use self::vlm::load_gemma3_iree_host_preprocessor;
 pub(crate) use self::vlm::load_llava_host_preprocessor;
 #[cfg(feature = "xla-iree")]
 pub(crate) use self::vlm::load_llava_iree_host_preprocessor;

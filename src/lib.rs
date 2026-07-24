@@ -75,6 +75,8 @@ pub use mlxcel_core::generate::{
     SamplingConfig,
 };
 pub use mlxcel_core::speculative::SpeculativeGenerator;
+#[cfg(feature = "xla-iree")]
+pub use multimodal::host_preprocessor::Gemma3IreeHostPreprocessor;
 #[cfg(feature = "xla-diagnostics")]
 pub use multimodal::host_preprocessor::LlavaHostReferenceCapture;
 #[cfg(feature = "xla-iree")]

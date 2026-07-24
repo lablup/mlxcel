@@ -23,7 +23,9 @@
 
 use super::builder::{Builder, Ty, Val};
 use super::numeric_ops::{exact_gelu, layer_norm_2d as layer_norm, stable_softmax, tanh_gelu};
-use super::vision_config::{LlavaVisionConfig, VisionActivation, VisionWeightSpec};
+use super::vision_config::{
+    LlavaVisionConfig, VisionActivation, VisionProjector, VisionWeightSpec,
+};
 
 struct Args {
     values: Vec<Val>,
@@ -56,6 +58,34 @@ mod tests {
         assert!(mlir.contains("-> tensor<729x1024xf32>"));
         assert!(!mlir.contains("-> tensor<1x729x1024xf32>"));
         assert!(mlir.contains("return "));
+    }
+
+    #[test]
+    fn gemma3_graph_avg_pools_norms_and_projects_without_llava_mlp() {
+        let config = LlavaVisionConfig::from_json_str(
+            &serde_json::json!({
+                "model_type": "gemma3",
+                "image_token_index": 99,
+                "mm_tokens_per_image": 1,
+                "vision_config": {
+                    "model_type": "siglip_vision_model",
+                    "image_size": 28,
+                    "patch_size": 14,
+                    "hidden_size": 8,
+                    "intermediate_size": 16,
+                    "num_hidden_layers": 1,
+                    "num_attention_heads": 2
+                },
+                "text_config": {"hidden_size": 12}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mlir = emit_vision(&config);
+        assert!(mlir.contains("multi_modal_projector.mm_soft_emb_norm.weight"));
+        assert!(mlir.contains("multi_modal_projector.mm_input_projection_weight"));
+        assert!(!mlir.contains("multi_modal_projector.linear_1"));
+        assert!(mlir.contains("-> tensor<1x12xf32>"));
     }
 
     #[cfg(feature = "iree")]
@@ -127,6 +157,73 @@ fn bias_2d(builder: &mut Builder, value: &Val, bias: &Val) -> Val {
 fn linear_2d(builder: &mut Builder, value: &Val, weight: &Val, bias: &Val) -> Val {
     let value = builder.linear_seq(value, weight);
     bias_2d(builder, &value, bias)
+}
+
+fn gemma_rms_norm(builder: &mut Builder, value: &Val, weight: &Val, epsilon: f32) -> Val {
+    let rows = value.ty.shape[0];
+    let width = value.ty.shape[1];
+    let zero = builder.const_f32(0.0);
+    let squared = builder.multiply(value, value);
+    let squared_sum = builder.reduce_add(&squared, 1, &zero);
+    let width_scalar = builder.const_f32(width as f32);
+    let width_rows = builder.broadcast(&width_scalar, &[], vec![rows]);
+    let mean_square = builder.divide(&squared_sum, &width_rows);
+    let epsilon = builder.const_f32(epsilon);
+    let epsilon = builder.broadcast(&epsilon, &[], vec![rows]);
+    let mean_square = builder.add(&mean_square, &epsilon);
+    let inv_rms = builder.rsqrt(&mean_square);
+    let inv_rms = builder.broadcast(&inv_rms, &[0], vec![rows, width]);
+    let normalized = builder.multiply(value, &inv_rms);
+    let one = builder.const_f32(1.0);
+    let one = builder.broadcast(&one, &[], vec![width]);
+    let weight = builder.add(weight, &one);
+    let weight = builder.broadcast(&weight, &[1], vec![rows, width]);
+    builder.multiply(&normalized, &weight)
+}
+
+fn gemma3_project(
+    builder: &mut Builder,
+    hidden: &Val,
+    args: &mut Args,
+    config: &LlavaVisionConfig,
+    tokens_per_side: usize,
+    kernel_size: usize,
+) -> Val {
+    let pooled = builder.reshape(
+        hidden,
+        vec![
+            tokens_per_side,
+            kernel_size,
+            tokens_per_side,
+            kernel_size,
+            config.hidden,
+        ],
+    );
+    let zero = builder.const_f32(0.0);
+    let pooled = builder.reduce_add(&pooled, 3, &zero);
+    let pooled = builder.reduce_add(&pooled, 1, &zero);
+    let divisor = builder.const_f32((kernel_size * kernel_size) as f32);
+    let divisor = builder.broadcast(
+        &divisor,
+        &[],
+        vec![tokens_per_side, tokens_per_side, config.hidden],
+    );
+    let pooled = builder.divide(&pooled, &divisor);
+    let pooled = builder.reshape(
+        &pooled,
+        vec![tokens_per_side * tokens_per_side, config.hidden],
+    );
+    let normalized = gemma_rms_norm(builder, &pooled, &args.take(), config.layer_norm_eps);
+    let projection = args.take();
+    builder.dot_general(
+        &normalized,
+        &projection,
+        &[],
+        &[],
+        &[1],
+        &[0],
+        vec![tokens_per_side * tokens_per_side, config.text_hidden],
+    )
 }
 
 fn activate(builder: &mut Builder, value: &Val, activation: VisionActivation) -> Val {
@@ -317,9 +414,25 @@ fn emit_vision_impl(config: &LlavaVisionConfig, diagnostics: bool) -> String {
     if config.drop_first_token {
         hidden = builder.slice(&hidden, &[(1, config.position_count()), (0, config.hidden)]);
     }
-    let projected = linear_2d(&mut builder, &hidden, &args.take(), &args.take());
-    let projected = exact_gelu(&mut builder, &projected);
-    let projected = linear_2d(&mut builder, &projected, &args.take(), &args.take());
+    let projected = match config.projector {
+        VisionProjector::LlavaMlp => {
+            let projected = linear_2d(&mut builder, &hidden, &args.take(), &args.take());
+            let projected = exact_gelu(&mut builder, &projected);
+            linear_2d(&mut builder, &projected, &args.take(), &args.take())
+        }
+        VisionProjector::Gemma3AvgPool {
+            tokens_per_side,
+            kernel_size,
+            ..
+        } => gemma3_project(
+            &mut builder,
+            &hidden,
+            &mut args,
+            config,
+            tokens_per_side,
+            kernel_size,
+        ),
+    };
     assert_eq!(args.cursor, specs.len(), "vision weight schema drifted");
     let outputs = if let Some(mut values) = diagnostic_values {
         values.push(hidden);
