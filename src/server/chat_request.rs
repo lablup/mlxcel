@@ -73,7 +73,9 @@ use super::media::{
 };
 use super::prompt_cache::key::resolve_session_key;
 use super::types::ChatCompletionRequest;
-use super::types::request::{ContentPart, Message, MessageContent, Tool};
+use super::types::request::{
+    ContentPart, Message, MessageContent, Tool, ordered_audio_sentinel, ordered_image_sentinel,
+};
 
 pub(crate) struct PreparedChatRequest {
     pub(crate) prompt: String,
@@ -164,6 +166,9 @@ pub(crate) async fn prepare_chat_request_with_cache(
     let declared_images = request.image_urls().len();
     let declared_audio = request.audio_inputs().len();
     let declared_videos = request.video_urls().len();
+    if declared_audio > 0 && declared_videos > 0 {
+        anyhow::bail!("Combined video and audio inputs are not supported");
+    }
     if declared_audio > 0 {
         validate_no_reserved_media_sentinels(request)?;
     }
@@ -460,8 +465,7 @@ fn build_raw_json_messages_with_thinking(
     preserve_thinking: bool,
 ) -> serde_json::Value {
     let preserve_media_order = !request.audio_inputs().is_empty();
-    let mut image_ordinal = 0usize;
-    let mut audio_ordinal = 0usize;
+    let mut ordered_media = preserve_media_order.then(OrderedMediaOrdinals::default);
     // Decide which assistant messages (by index) need their think blocks
     // stripped. Empty set means "keep everything."
     let strip_indices: std::collections::HashSet<usize> = if preserve_thinking {
@@ -479,16 +483,12 @@ fn build_raw_json_messages_with_thinking(
         .map(|(idx, m)| {
             // Strip think blocks from assistant messages before the checkpoint.
             let stripped = strip_indices.contains(&idx);
-            let raw_content = if preserve_media_order {
-                m.content
-                    .text_with_ordered_media(&mut image_ordinal, &mut audio_ordinal)
-            } else {
-                m.content.text()
-            };
+            let normalized_content = template_content(&m.content, ordered_media.as_mut());
+            let raw_content = template_text_content(&normalized_content);
             let content = if stripped {
                 serde_json::Value::String(strip_think_block(&raw_content).into_owned())
             } else {
-                template_content(&m.content)
+                normalized_content
             };
 
             let mut msg = serde_json::json!({
@@ -564,7 +564,44 @@ fn has_template_media_parts(request: &ChatCompletionRequest) -> bool {
 /// into rendering and fail templates such as LLaVA's, which select
 /// `content.type == "image"`. Keep only an ordered semantic marker at this
 /// boundary.
-fn template_content(content: &MessageContent) -> serde_json::Value {
+#[derive(Default)]
+struct OrderedMediaOrdinals {
+    image: usize,
+    audio: usize,
+}
+
+fn template_content(
+    content: &MessageContent,
+    ordered_media: Option<&mut OrderedMediaOrdinals>,
+) -> serde_json::Value {
+    // Audio-capable families consume private image/audio ordinals after chat
+    // rendering. Combined audio/video requests are rejected before this
+    // helper, so the ordered representation deliberately has no video
+    // sentinel.
+    if let Some(ordinals) = ordered_media {
+        return match content {
+            MessageContent::Text(text) => serde_json::Value::String(text.clone()),
+            MessageContent::Parts(parts) => {
+                let mut flattened = String::new();
+                for part in parts {
+                    match part {
+                        ContentPart::Text { text } => flattened.push_str(text),
+                        ContentPart::ImageUrl { .. } => {
+                            ordinals.image += 1;
+                            flattened.push_str(&ordered_image_sentinel(ordinals.image));
+                        }
+                        ContentPart::InputAudio { .. } => {
+                            ordinals.audio += 1;
+                            flattened.push_str(&ordered_audio_sentinel(ordinals.audio));
+                        }
+                        ContentPart::VideoUrl { .. } => {}
+                    }
+                }
+                serde_json::Value::String(flattened)
+            }
+        };
+    }
+
     match content {
         MessageContent::Text(text) => serde_json::Value::String(text.clone()),
         MessageContent::Parts(parts) => serde_json::Value::Array(
@@ -587,6 +624,17 @@ fn template_content(content: &MessageContent) -> serde_json::Value {
                 })
                 .collect(),
         ),
+    }
+}
+
+fn template_text_content(content: &serde_json::Value) -> String {
+    match content {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
+            .collect(),
+        _ => String::new(),
     }
 }
 
@@ -674,8 +722,7 @@ fn build_chat_messages_with_thinking(
     preserve_thinking: bool,
 ) -> Vec<ChatMessage> {
     let preserve_media_order = !request.audio_inputs().is_empty();
-    let mut image_ordinal = 0usize;
-    let mut audio_ordinal = 0usize;
+    let mut ordered_media = preserve_media_order.then(OrderedMediaOrdinals::default);
     let strip_indices: std::collections::HashSet<usize> = if preserve_thinking {
         std::collections::HashSet::new()
     } else {
@@ -689,13 +736,8 @@ fn build_chat_messages_with_thinking(
         .iter()
         .enumerate()
         .map(|(idx, message)| {
-            let raw = if preserve_media_order {
-                message
-                    .content
-                    .text_with_ordered_media(&mut image_ordinal, &mut audio_ordinal)
-            } else {
-                message.content.text()
-            };
+            let normalized_content = template_content(&message.content, ordered_media.as_mut());
+            let raw = template_text_content(&normalized_content);
             let content = if strip_indices.contains(&idx) {
                 strip_think_block(&raw).into_owned()
             } else {

@@ -14,7 +14,7 @@
 
 use super::{
     build_chat_messages, build_raw_json_messages, prepare_chat_request,
-    prepare_chat_request_with_cache, request_has_effective_input,
+    prepare_chat_request_with_cache, request_has_effective_input, template_content,
 };
 use crate::server::chat_template::ChatTemplateProcessor;
 use crate::server::types::request::{InputAudio, ToolCallFunction, ToolCallInMessage, VideoUrl};
@@ -152,6 +152,42 @@ fn mixed_audio_messages_preserve_global_media_order_across_turns() {
 }
 
 #[tokio::test]
+async fn prepare_chat_request_rejects_combined_audio_and_video_before_resolution() {
+    let request = request_with_messages(vec![Message {
+        role: Role::User,
+        content: MessageContent::Parts(vec![
+            ContentPart::InputAudio {
+                input_audio: InputAudio {
+                    data: "not-resolved".to_string(),
+                    format: "wav".to_string(),
+                },
+            },
+            ContentPart::VideoUrl {
+                video_url: VideoUrl {
+                    url: "/not/resolved.mp4".to_string(),
+                    fps: None,
+                },
+            },
+        ]),
+        name: None,
+        tool_call_id: None,
+        reasoning: None,
+        tool_calls: None,
+    }]);
+    let processor = ChatTemplateProcessor::with_template("unused".to_string());
+
+    let error = prepare_chat_request(&processor, &request, None)
+        .await
+        .err()
+        .expect("combined audio/video input must be rejected");
+
+    assert_eq!(
+        error.to_string(),
+        "Combined video and audio inputs are not supported"
+    );
+}
+
+#[tokio::test]
 async fn prepare_chat_request_uses_template_output_and_extracts_images() {
     let request = request_with_messages(vec![Message {
         role: Role::User,
@@ -226,40 +262,33 @@ async fn llava_server_render_preserves_image_marker_and_exact_prompt() {
 
 #[test]
 fn raw_template_content_normalizes_openai_media_types_without_payloads() {
-    let request = request_with_messages(vec![Message {
-        role: Role::User,
-        content: MessageContent::Parts(vec![
-            ContentPart::Text {
-                text: "before".to_string(),
+    let content = MessageContent::Parts(vec![
+        ContentPart::Text {
+            text: "before".to_string(),
+        },
+        ContentPart::ImageUrl {
+            image_url: ImageUrl::new("https://secret.example/image.png"),
+        },
+        ContentPart::VideoUrl {
+            video_url: VideoUrl {
+                url: "https://secret.example/video.mp4".to_string(),
+                fps: Some(2.0),
             },
-            ContentPart::ImageUrl {
-                image_url: ImageUrl::new("https://secret.example/image.png"),
+        },
+        ContentPart::InputAudio {
+            input_audio: InputAudio {
+                data: "private-audio-data".to_string(),
+                format: "wav".to_string(),
             },
-            ContentPart::VideoUrl {
-                video_url: VideoUrl {
-                    url: "https://secret.example/video.mp4".to_string(),
-                    fps: Some(2.0),
-                },
-            },
-            ContentPart::InputAudio {
-                input_audio: InputAudio {
-                    data: "private-audio-data".to_string(),
-                    format: "wav".to_string(),
-                },
-            },
-            ContentPart::Text {
-                text: "after".to_string(),
-            },
-        ]),
-        name: None,
-        tool_call_id: None,
-        reasoning: None,
-        tool_calls: None,
-    }]);
+        },
+        ContentPart::Text {
+            text: "after".to_string(),
+        },
+    ]);
 
-    let raw = build_raw_json_messages(&request);
+    let normalized = template_content(&content, None);
     assert_eq!(
-        raw[0]["content"],
+        normalized,
         serde_json::json!([
             {"type": "text", "text": "before"},
             {"type": "image"},
@@ -268,7 +297,7 @@ fn raw_template_content_normalizes_openai_media_types_without_payloads() {
             {"type": "text", "text": "after"},
         ])
     );
-    let serialized = raw.to_string();
+    let serialized = normalized.to_string();
     assert!(!serialized.contains("secret.example"));
     assert!(!serialized.contains("private-audio-data"));
 }

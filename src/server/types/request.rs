@@ -352,38 +352,6 @@ impl MessageContent {
         }
     }
 
-    /// Flatten content while retaining exact image/audio part positions as
-    /// private numbered sentinels. The sentinels are never sent to a model:
-    /// ordinary tokenization strips them, while the Phi4MM and Gemma3n audio
-    /// paths replace them with their family token ids in place.
-    pub(crate) fn text_with_ordered_media(
-        &self,
-        image_ordinal: &mut usize,
-        audio_ordinal: &mut usize,
-    ) -> String {
-        match self {
-            MessageContent::Text(text) => text.clone(),
-            MessageContent::Parts(parts) => {
-                let mut flattened = String::new();
-                for part in parts {
-                    match part {
-                        ContentPart::Text { text } => flattened.push_str(text),
-                        ContentPart::ImageUrl { .. } => {
-                            *image_ordinal += 1;
-                            flattened.push_str(&ordered_image_sentinel(*image_ordinal));
-                        }
-                        ContentPart::InputAudio { .. } => {
-                            *audio_ordinal += 1;
-                            flattened.push_str(&ordered_audio_sentinel(*audio_ordinal));
-                        }
-                        ContentPart::VideoUrl { .. } => {}
-                    }
-                }
-                flattened
-            }
-        }
-    }
-
     /// Returns `true` when the content has at least one non-whitespace text
     /// character, without allocating a `String` the way [`Self::text`] does.
     ///
@@ -1149,49 +1117,16 @@ mod tests {
     }
 
     #[test]
-    fn ordered_media_flattening_preserves_text_and_exact_part_order() {
-        let content = MessageContent::Parts(vec![
-            ContentPart::Text {
-                text: "alpha".to_string(),
-            },
-            ContentPart::InputAudio {
-                input_audio: InputAudio {
-                    data: "audio-a".to_string(),
-                    format: "wav".to_string(),
-                },
-            },
-            ContentPart::Text {
-                text: "beta".to_string(),
-            },
-            ContentPart::ImageUrl {
-                image_url: ImageUrl::new("image-a"),
-            },
-            ContentPart::InputAudio {
-                input_audio: InputAudio {
-                    data: "audio-b".to_string(),
-                    format: "wav".to_string(),
-                },
-            },
-            ContentPart::Text {
-                text: "gamma".to_string(),
-            },
-        ]);
-        let mut image_ordinal = 0;
-        let mut audio_ordinal = 0;
-        let flattened = content.text_with_ordered_media(&mut image_ordinal, &mut audio_ordinal);
-
-        assert_eq!(
-            flattened,
-            concat!(
-                "alpha<|mlxcel_ordered_audio_1|>",
-                "beta<|mlxcel_ordered_image_1|>",
-                "<|mlxcel_ordered_audio_2|>gamma"
-            )
+    fn ordered_media_parser_preserves_text_and_exact_part_order() {
+        let flattened = concat!(
+            "alpha<|mlxcel_ordered_audio_1|>",
+            "beta<|mlxcel_ordered_image_1|>",
+            "<|mlxcel_ordered_audio_2|>gamma"
         );
-        assert_eq!(content.text(), "alphabetagamma");
-        assert_eq!((image_ordinal, audio_ordinal), (1, 2));
+        assert_eq!(ordered_audio_sentinel(1), "<|mlxcel_ordered_audio_1|>");
+        assert_eq!(ordered_image_sentinel(1), "<|mlxcel_ordered_image_1|>");
         assert_eq!(
-            parse_ordered_media_segments(&flattened).unwrap(),
+            parse_ordered_media_segments(flattened).unwrap(),
             vec![
                 OrderedMediaSegment::Text("alpha"),
                 OrderedMediaSegment::Audio(1),
