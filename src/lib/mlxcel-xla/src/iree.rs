@@ -2254,6 +2254,23 @@ impl IreeRaggedLlama {
         self.b_max
     }
 
+    /// Clear all ragged KV slots before an independent diagnostic capture.
+    ///
+    /// Production batching retains slots between scheduler steps. Diagnostic
+    /// baselines instead compare independent prepared payloads on the same
+    /// loaded engine, so each capture must start from an empty cache.
+    #[cfg(feature = "diagnostics")]
+    pub(crate) fn reset_slots_for_diagnostics(&mut self) -> Result<(), String> {
+        let b_max = checked_ffi_int(self.b_max, "b_max")?;
+        // Safety: `self.ctx` remains valid for the lifetime of this engine, and
+        // the call only releases/reinitializes cache objects owned by that ctx.
+        let rc = unsafe { xla_llama_ragged_reset(self.ctx, b_max) };
+        if rc != 0 {
+            return Err(format!("xla_llama_ragged_reset failed (status {rc})"));
+        }
+        Ok(())
+    }
+
     /// The vocabulary size (logits per row). The engine slices the ragged decode's
     /// flat `[b_max * vocab]` logits by this.
     #[must_use]

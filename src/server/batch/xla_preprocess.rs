@@ -27,7 +27,7 @@ use std::thread;
 use mlxcel_core::session::PreparedPrefill;
 
 use crate::{
-    HostMultimodalPreprocessor, load_xla_image_preprocessor,
+    HostMultimodalPreprocessor, XlaVisionBackend, load_xla_image_preprocessor,
     server::model_provider::model_worker::decode_request_images,
 };
 
@@ -62,6 +62,7 @@ pub(super) struct ImagePreprocessResult {
 pub(super) struct ImagePreprocessStage {
     job_tx: mpsc::SyncSender<ImagePreprocessJob>,
     result_rx: mpsc::Receiver<ImagePreprocessResult>,
+    vision_backend: XlaVisionBackend,
 }
 
 impl ImagePreprocessStage {
@@ -90,7 +91,8 @@ impl ImagePreprocessStage {
                 let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(loader));
                 let Some(preprocessor) = (match loaded {
                     Ok(Ok(preprocessor)) => {
-                        let _ = ready_tx.send(Ok(preprocessor.is_some()));
+                        let backend = preprocessor.as_ref().map(|loaded| loaded.backend());
+                        let _ = ready_tx.send(Ok(backend));
                         preprocessor
                     }
                     Ok(Err(error)) => {
@@ -118,13 +120,30 @@ impl ImagePreprocessStage {
             .map_err(|error| format!("failed to spawn OpenXLA image preprocessor: {error}"))?;
 
         match ready_rx.recv() {
-            Ok(Ok(true)) => Ok(Some(Self { job_tx, result_rx })),
-            Ok(Ok(false)) => Ok(None),
+            Ok(Ok(Some(vision_backend))) => {
+                let stage = Self {
+                    job_tx,
+                    result_rx,
+                    vision_backend,
+                };
+                tracing::info!(
+                    vision_backend = %stage.vision_backend(),
+                    queue_depth = queue_depth.max(1),
+                    "OpenXLA image preprocessing stage ready"
+                );
+                Ok(Some(stage))
+            }
+            Ok(Ok(None)) => Ok(None),
             Ok(Err(error)) => Err(error),
             Err(_) => {
                 Err("OpenXLA image preprocessor exited before reporting startup status".to_string())
             }
         }
+    }
+
+    #[must_use]
+    pub(super) fn vision_backend(&self) -> XlaVisionBackend {
+        self.vision_backend
     }
 
     pub(super) fn try_submit(
@@ -215,6 +234,25 @@ mod tests {
         inner: FakeHostMultimodalPreprocessor,
     }
 
+    struct TaggedPreprocessor {
+        backend: XlaVisionBackend,
+        inner: FakeHostMultimodalPreprocessor,
+    }
+
+    impl HostMultimodalPreprocessor for TaggedPreprocessor {
+        fn backend(&self) -> XlaVisionBackend {
+            self.backend
+        }
+
+        fn prepare(
+            &self,
+            token_ids: &[i32],
+            images: &[DynamicImage],
+        ) -> Result<PreparedPrefill, HostPreprocessorError> {
+            self.inner.prepare(token_ids, images)
+        }
+    }
+
     impl HostMultimodalPreprocessor for BlockingPreprocessor {
         fn prepare(
             &self,
@@ -279,6 +317,7 @@ mod tests {
     #[test]
     fn bounded_stage_prepares_owned_payload() {
         let stage = stage(16);
+        assert_eq!(stage.vision_backend(), XlaVisionBackend::Host);
         stage
             .try_submit(ImagePreprocessJob {
                 job_id: 7,
@@ -295,6 +334,24 @@ mod tests {
         };
         assert_eq!(prepared.token_ids, vec![1, -200, -200, 2]);
         assert_eq!(prepared.sequence_len, 4);
+    }
+
+    #[test]
+    fn readiness_preserves_selected_vision_backend() {
+        let stage = ImagePreprocessStage::spawn_with_loader(1, || {
+            Ok(Some(Box::new(TaggedPreprocessor {
+                backend: XlaVisionBackend::Iree,
+                inner: FakeHostMultimodalPreprocessor {
+                    image_token_id: -200,
+                    tokens_per_image: 2,
+                    hidden_size: 3,
+                    max_sequence_len: 16,
+                },
+            })))
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(stage.vision_backend(), XlaVisionBackend::Iree);
     }
 
     #[test]

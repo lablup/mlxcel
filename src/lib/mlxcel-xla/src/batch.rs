@@ -823,6 +823,7 @@ impl LlavaReferenceDiagnosticEngine {
         if max_new_tokens == 0 {
             return Err("LLaVA diagnostic generation requires max_new_tokens >= 1".to_string());
         }
+        self.engine.reset_slots_for_diagnostics()?;
         let prepared_iree = PreparedIreePrefill::prepare(
             prepared,
             self.engine.hidden_size(),

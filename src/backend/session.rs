@@ -63,12 +63,19 @@ pub(super) fn qualified_xla_supports_images(
     qualified_xla_capabilities(engine_capabilities, has_image_preprocessor).multimodal
 }
 
+#[cfg(feature = "xla-backend")]
+pub(super) fn qualified_xla_vision_backend(
+    image_preprocessor: Option<&dyn crate::HostMultimodalPreprocessor>,
+) -> Option<crate::XlaVisionBackend> {
+    image_preprocessor.map(|preprocessor| preprocessor.backend())
+}
+
 /// Root-crate OpenXLA session with the matching host image preprocessor.
 ///
 /// The compiler runtime lives in `mlxcel-xla`, while the host preprocessor
-/// deliberately reuses this crate's qualified MLX vision tower and projector.
-/// Keeping both in one session makes capability reporting and image execution
-/// depend on the same loaded value.
+/// either owns the qualified MLX vision path or a resident IREE projector.
+/// Keeping it in the session makes capability and backend reporting depend on
+/// the same loaded value.
 #[cfg(feature = "xla-backend")]
 pub struct XlaBackendSession {
     engine: XlaInferenceSession,
@@ -104,6 +111,12 @@ impl XlaBackendSession {
             self.engine.capabilities(),
             self.image_preprocessor.is_some(),
         )
+    }
+
+    /// Selected implementation for the loaded XLA vision tower/projector.
+    #[must_use]
+    pub fn vision_backend(&self) -> Option<crate::XlaVisionBackend> {
+        qualified_xla_vision_backend(self.image_preprocessor.as_deref())
     }
 
     /// Prepare decoded images through the exact preprocessor used by the
@@ -183,6 +196,16 @@ impl Session {
             Session::Mlx(s) => s.capabilities(),
             #[cfg(feature = "xla-backend")]
             Session::Xla(s) => s.capabilities(),
+        }
+    }
+
+    /// Selected XLA vision implementation, when this is an image-capable XLA session.
+    #[must_use]
+    pub fn xla_vision_backend(&self) -> Option<crate::XlaVisionBackend> {
+        match self {
+            Session::Mlx(_) => None,
+            #[cfg(feature = "xla-backend")]
+            Session::Xla(session) => session.vision_backend(),
         }
     }
 

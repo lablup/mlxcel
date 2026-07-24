@@ -83,6 +83,39 @@ fn tolerance(manifest: &Value, stage: &str) -> (f64, f64) {
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ComparisonStats {
+    max_absolute: f64,
+    max_relative: f64,
+    failures: usize,
+    non_finite_count: usize,
+}
+
+fn comparison_stats(actual: &[f32], expected: &[f32], atol: f64, rtol: f64) -> ComparisonStats {
+    assert_eq!(actual.len(), expected.len(), "comparison lengths differ");
+    let mut stats = ComparisonStats {
+        max_absolute: 0.0,
+        max_relative: 0.0,
+        failures: 0,
+        non_finite_count: 0,
+    };
+    for (&observed, &reference) in actual.iter().zip(expected) {
+        if !observed.is_finite() || !reference.is_finite() {
+            stats.failures += 1;
+            stats.non_finite_count += 1;
+            continue;
+        }
+        let absolute = f64::from((observed - reference).abs());
+        let relative = absolute / f64::from(reference.abs()).max(f64::MIN_POSITIVE);
+        stats.max_absolute = stats.max_absolute.max(absolute);
+        stats.max_relative = stats.max_relative.max(relative);
+        if absolute > atol + rtol * f64::from(reference.abs()) {
+            stats.failures += 1;
+        }
+    }
+    stats
+}
+
 fn compare(
     reference_dir: &Path,
     manifest: &Value,
@@ -104,28 +137,34 @@ fn compare(
         "{stage} element count differs"
     );
     let (atol, rtol) = tolerance(manifest, stage);
-    let mut max_absolute = 0.0f64;
-    let mut max_relative = 0.0f64;
-    let mut failures = 0usize;
-    for (&observed, &reference) in actual.iter().zip(&expected) {
-        let absolute = f64::from((observed - reference).abs());
-        let relative = absolute / f64::from(reference.abs()).max(f64::MIN_POSITIVE);
-        max_absolute = max_absolute.max(absolute);
-        max_relative = max_relative.max(relative);
-        if absolute > atol + rtol * f64::from(reference.abs()) {
-            failures += 1;
-        }
-    }
+    let stats = comparison_stats(actual, &expected, atol, rtol);
     json!({
         "stage": stage,
         "elements": actual.len(),
         "atol": atol,
         "rtol": rtol,
-        "max_absolute": max_absolute,
-        "max_relative": max_relative,
-        "failures": failures,
-        "passed": failures == 0,
+        "max_absolute": stats.max_absolute,
+        "max_relative": stats.max_relative,
+        "failures": stats.failures,
+        "non_finite_count": stats.non_finite_count,
+        "passed": stats.failures == 0,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn comparison_rejects_non_finite_actual_and_reference_values() {
+        let actual_nan = comparison_stats(&[1.0, f32::NAN], &[1.0, 2.0], 1e-6, 1e-6);
+        assert_eq!(actual_nan.failures, 1);
+        assert_eq!(actual_nan.non_finite_count, 1);
+
+        let reference_inf = comparison_stats(&[1.0, 2.0], &[1.0, f32::INFINITY], 1e-6, 1e-6);
+        assert_eq!(reference_inf.failures, 1);
+        assert_eq!(reference_inf.non_finite_count, 1);
+    }
 }
 
 fn main() {

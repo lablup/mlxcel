@@ -1122,16 +1122,57 @@ def compare_capture_roots(reference_root: Path, actual_root: Path) -> dict[str, 
                 stage_report["actual_shape"] = list(got.shape)
                 if ref.shape != got.shape:
                     stage_report.update(passed=False, error="shape mismatch")
-                elif (
-                    np.issubdtype(ref.dtype, np.floating)
-                    and (
-                        not bool(np.isfinite(ref).all())
-                        or not bool(np.isfinite(got).all())
+                elif np.issubdtype(ref.dtype, np.floating):
+                    reference_non_finite_count = int(
+                        np.count_nonzero(~np.isfinite(ref))
                     )
-                ):
-                    stage_report.update(
-                        passed=False, error="non-finite array value"
+                    actual_non_finite_count = int(
+                        np.count_nonzero(~np.isfinite(got))
                     )
+                    non_finite_count = (
+                        reference_non_finite_count + actual_non_finite_count
+                    )
+                    if non_finite_count:
+                        stage_report.update(
+                            passed=False,
+                            error="non-finite array value",
+                            reference_non_finite_count=reference_non_finite_count,
+                            actual_non_finite_count=actual_non_finite_count,
+                            non_finite_count=non_finite_count,
+                        )
+                    else:
+                        policy_dtype = STAGE_POLICY_DTYPES.get(
+                            stage, actual_spec["dtype"]
+                        )
+                        if policy_dtype not in TOLERANCES:
+                            policy_dtype = "float32"
+                        tolerance = TOLERANCES[policy_dtype][stage]
+                        delta = np.abs(
+                            got.astype(np.float64) - ref.astype(np.float64)
+                        )
+                        limit = tolerance["atol"] + tolerance["rtol"] * np.abs(
+                            ref.astype(np.float64)
+                        )
+                        mismatch = np.flatnonzero(
+                            delta.reshape(-1) > limit.reshape(-1)
+                        )
+                        relative = delta / np.maximum(np.abs(ref), 1.0e-12)
+                        stage_report.update(
+                            tolerance_dtype=policy_dtype,
+                            atol=tolerance["atol"],
+                            rtol=tolerance["rtol"],
+                            max_abs=float(delta.max(initial=0.0)),
+                            max_rel=float(relative.max(initial=0.0)),
+                            mismatch_count=int(mismatch.size),
+                        )
+                        if mismatch.size:
+                            index = int(mismatch[0])
+                            stage_report.update(
+                                passed=False,
+                                first_mismatch_index=index,
+                                reference=float(ref.reshape(-1)[index]),
+                                actual=float(got.reshape(-1)[index]),
+                            )
                 elif np.issubdtype(ref.dtype, np.integer):
                     mismatch = np.flatnonzero(ref.reshape(-1) != got.reshape(-1))
                     stage_report["mismatch_count"] = int(mismatch.size)
@@ -1142,35 +1183,6 @@ def compare_capture_roots(reference_root: Path, actual_root: Path) -> dict[str, 
                             first_mismatch_index=index,
                             reference=int(ref.reshape(-1)[index]),
                             actual=int(got.reshape(-1)[index]),
-                        )
-                else:
-                    policy_dtype = STAGE_POLICY_DTYPES.get(
-                        stage, actual_spec["dtype"]
-                    )
-                    if policy_dtype not in TOLERANCES:
-                        policy_dtype = "float32"
-                    tolerance = TOLERANCES[policy_dtype][stage]
-                    delta = np.abs(got.astype(np.float64) - ref.astype(np.float64))
-                    limit = tolerance["atol"] + tolerance["rtol"] * np.abs(
-                        ref.astype(np.float64)
-                    )
-                    mismatch = np.flatnonzero(delta.reshape(-1) > limit.reshape(-1))
-                    relative = delta / np.maximum(np.abs(ref), 1.0e-12)
-                    stage_report.update(
-                        tolerance_dtype=policy_dtype,
-                        atol=tolerance["atol"],
-                        rtol=tolerance["rtol"],
-                        max_abs=float(delta.max(initial=0.0)),
-                        max_rel=float(relative.max(initial=0.0)),
-                        mismatch_count=int(mismatch.size),
-                    )
-                    if mismatch.size:
-                        index = int(mismatch[0])
-                        stage_report.update(
-                            passed=False,
-                            first_mismatch_index=index,
-                            reference=float(ref.reshape(-1)[index]),
-                            actual=float(got.reshape(-1)[index]),
                         )
             if not stage_report["passed"]:
                 case_report["passed"] = False

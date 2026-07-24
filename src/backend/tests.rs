@@ -127,7 +127,9 @@ fn mlx_session_threads_the_token_bias_through() {
 #[cfg(feature = "xla-backend")]
 #[test]
 fn xla_image_capability_requires_runtime_and_host_preprocessor() {
-    use super::session::{qualified_xla_capabilities, qualified_xla_supports_images};
+    use super::session::{
+        qualified_xla_capabilities, qualified_xla_supports_images, qualified_xla_vision_backend,
+    };
     use mlxcel_core::session::SessionCapabilities;
 
     let text_runtime = SessionCapabilities::single_sequence();
@@ -145,6 +147,13 @@ fn xla_image_capability_requires_runtime_and_host_preprocessor() {
         qualified_xla_capabilities(multimodal_runtime, true).multimodal,
         "only a qualified runtime plus loaded preprocessor advertises images"
     );
+
+    let preprocessor = crate::FakeHostMultimodalPreprocessor::default();
+    assert_eq!(
+        qualified_xla_vision_backend(Some(&preprocessor)),
+        Some(crate::XlaVisionBackend::Host)
+    );
+    assert_eq!(qualified_xla_vision_backend(None), None);
 }
 
 /// The experimental scaffold has no engine wired in, so it cannot produce a

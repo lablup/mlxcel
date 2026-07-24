@@ -182,21 +182,37 @@ class ComparatorContractTests(unittest.TestCase):
             self.assert_rejected("duplicate json key")
 
     def test_non_finite_arrays_are_rejected(self) -> None:
-        path = self.actual / "image_text.first_prefill_logits.bin"
-        for value in (np.nan, np.inf):
-            with self.subTest(value=value):
-                with path.open("r+b") as stream:
-                    stream.write(np.asarray([value], dtype=np.float32).tobytes())
-                report = oracle.compare_capture_roots(self.reference, self.actual)
-                self.assertFalse(report["passed"], report)
-                stage = next(
-                    stage
-                    for case in report["cases"]
-                    if case["name"] == "image_text"
-                    for stage in case["stages"]
-                    if stage["stage"] == "first_prefill_logits"
-                )
-                self.assertEqual(stage.get("error"), "non-finite array value")
+        for role, root, count_key in (
+            ("actual", self.actual, "actual_non_finite_count"),
+            ("reference", self.reference, "reference_non_finite_count"),
+        ):
+            path = root / "image_text.first_prefill_logits.bin"
+            original = path.read_bytes()
+            for value in (np.nan, np.inf):
+                with self.subTest(role=role, value=value):
+                    try:
+                        with path.open("r+b") as stream:
+                            stream.write(
+                                np.asarray([value], dtype=np.float32).tobytes()
+                            )
+                        report = oracle.compare_capture_roots(
+                            self.reference, self.actual
+                        )
+                        self.assertFalse(report["passed"], report)
+                        stage = next(
+                            stage
+                            for case in report["cases"]
+                            if case["name"] == "image_text"
+                            for stage in case["stages"]
+                            if stage["stage"] == "first_prefill_logits"
+                        )
+                        self.assertEqual(
+                            stage.get("error"), "non-finite array value"
+                        )
+                        self.assertEqual(stage.get(count_key), 1)
+                        self.assertEqual(stage.get("non_finite_count"), 1)
+                    finally:
+                        path.write_bytes(original)
 
     def test_dtype_mismatch_is_rejected(self) -> None:
         self.actual_manifest["cases"][0]["arrays"]["first_prefill_logits"][

@@ -22,6 +22,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -77,9 +78,12 @@ pub struct VisionDiagnosticProjection {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut output = String::with_capacity(digest.len() * 2);
-    for byte in digest {
+    hex_bytes(&Sha256::digest(bytes))
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
         use std::fmt::Write;
         write!(output, "{byte:02x}").expect("writing to String cannot fail");
     }
@@ -102,12 +106,42 @@ fn compiler_generation_identity(
             String::from_utf8_lossy(&version.stderr)
         ));
     }
-    Ok(format!(
-        "compiler={};version={};flags={flags:?};mlir_sha256={}",
-        compiler.display(),
+    compiler_generation_identity_from_version(
+        compiler,
+        flags,
+        mlir,
         String::from_utf8_lossy(&version.stdout).trim(),
+    )
+}
+
+fn compiler_generation_identity_from_version(
+    compiler: &Path,
+    flags: &[&str],
+    mlir: &str,
+    version: &str,
+) -> Result<String, String> {
+    Ok(format!(
+        "compiler={};compiler_sha256={};version={version};flags={flags:?};mlir_sha256={}",
+        compiler.display(),
+        sha256_file(compiler)?,
         sha256_hex(mlir.as_bytes())
     ))
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut file = File::open(path).map_err(|error| format!("open {}: {error}", path.display()))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("read {}: {error}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(hex_bytes(&digest.finalize()))
 }
 
 fn required_bool(
@@ -502,6 +536,7 @@ fn load_weights(
                     values.len()
                 ));
             }
+            validate_finite_values(&format!("vision tensor {}", spec.name), &values)?;
             loaded[index] = Some(AuxiliaryWeight {
                 name: spec.name.clone(),
                 bytes: native_f32_bytes(values),
@@ -570,11 +605,32 @@ fn f32_as_bytes(values: &[f32]) -> &[u8] {
     }
 }
 
-fn bytes_to_f32(bytes: Vec<u8>) -> Vec<f32> {
-    bytes
+fn validate_finite_values(label: &str, values: &[f32]) -> Result<(), String> {
+    if let Some((index, value)) = values
+        .iter()
+        .enumerate()
+        .find(|(_, value)| !value.is_finite())
+    {
+        return Err(format!(
+            "{label} contains non-finite value {value} at flat index {index}"
+        ));
+    }
+    Ok(())
+}
+
+fn checked_f32_output(label: &str, bytes: Vec<u8>) -> Result<Vec<f32>, String> {
+    if !bytes.len().is_multiple_of(std::mem::size_of::<f32>()) {
+        return Err(format!(
+            "{label} returned {} bytes, which is not a whole number of f32 values",
+            bytes.len()
+        ));
+    }
+    let values = bytes
         .chunks_exact(std::mem::size_of::<f32>())
         .map(|chunk| f32::from_ne_bytes(chunk.try_into().expect("four-byte f32 chunk")))
-        .collect()
+        .collect::<Vec<_>>();
+    validate_finite_values(label, &values)?;
+    Ok(values)
 }
 
 fn validate_pixels(config: &LlavaVisionConfig, pixels: &[f32]) -> Result<[usize; 4], String> {
@@ -650,8 +706,9 @@ impl IreeVisionProjector {
             }],
         )?;
         let elapsed_seconds = started.elapsed().as_secs_f64();
+        let values = checked_f32_output("IREE vision projected output", output)?;
         Ok(VisionProjection {
-            values: bytes_to_f32(output),
+            values,
             shape: output_shape,
             metrics: VisionExecutionMetrics {
                 pixel_upload_bytes: std::mem::size_of_val(pixels),
@@ -737,7 +794,14 @@ impl IreeVisionDiagnosticProjector {
         )?;
         let elapsed_seconds = started.elapsed().as_secs_f64();
         drop(outputs);
-        let mut values = buffers.into_iter().map(bytes_to_f32);
+        let values = buffers
+            .into_iter()
+            .enumerate()
+            .map(|(index, bytes)| {
+                checked_f32_output(&format!("IREE vision diagnostic output {index}"), bytes)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let mut values = values.into_iter();
         let hidden0 = values
             .next()
             .expect("diagnostics includes hidden state zero");
@@ -775,6 +839,18 @@ impl IreeVisionDiagnosticProjector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aux_manifest::auxiliary_manifest_path;
+
+    fn temp_path(tag: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock must be after the Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "mlxcel-xla-vision-{tag}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
 
     fn test_config() -> LlavaVisionConfig {
         LlavaVisionConfig::from_json_str(
@@ -812,5 +888,64 @@ mod tests {
         let error = validate_pixels(&config, &pixels).unwrap_err();
         assert!(error.contains("non-finite"));
         assert!(error.contains("17"));
+    }
+
+    #[test]
+    fn weight_and_projector_outputs_reject_every_non_finite_value() {
+        assert!(validate_finite_values("weight", &[0.0, -1.0, 3.0]).is_ok());
+        let error = validate_finite_values("weight", &[0.0, f32::INFINITY]).unwrap_err();
+        assert!(error.contains("weight"));
+        assert!(error.contains("flat index 1"));
+
+        let mut bytes = 1.0f32.to_ne_bytes().to_vec();
+        bytes.extend_from_slice(&f32::NAN.to_ne_bytes());
+        let error = checked_f32_output("projector", bytes).unwrap_err();
+        assert!(error.contains("projector"));
+        assert!(error.contains("flat index 1"));
+    }
+
+    #[test]
+    fn compiler_binary_replacement_at_same_path_and_version_rebuilds_cache() {
+        let compiler = temp_path("compiler");
+        let vmfb = temp_path("compiler-digest").with_extension("vmfb");
+        let weights = vec![AuxiliaryWeight {
+            name: "weight".to_string(),
+            bytes: 1.0f32.to_ne_bytes().to_vec(),
+            dtype: AuxiliaryWeightDType::Float32,
+            shape: vec![1],
+        }];
+        std::fs::write(&compiler, b"compiler-build-a").unwrap();
+        let first_generation =
+            compiler_generation_identity_from_version(&compiler, &["--target=cuda"], "mlir", "v1")
+                .unwrap();
+        let first_contract =
+            AuxiliaryArtifactContract::new("vision.main", "config=v1", &first_generation).unwrap();
+        let mut compile_count = 0usize;
+        ensure_qualified_auxiliary_artifact(&vmfb, &first_contract, &weights, |temporary| {
+            compile_count += 1;
+            std::fs::write(temporary, b"vmfb-a")
+                .map_err(|error| format!("write test VMFB: {error}"))
+        })
+        .unwrap();
+
+        std::fs::write(&compiler, b"compiler-build-b").unwrap();
+        let second_generation =
+            compiler_generation_identity_from_version(&compiler, &["--target=cuda"], "mlir", "v1")
+                .unwrap();
+        assert_ne!(first_generation, second_generation);
+        let second_contract =
+            AuxiliaryArtifactContract::new("vision.main", "config=v1", second_generation).unwrap();
+        ensure_qualified_auxiliary_artifact(&vmfb, &second_contract, &weights, |temporary| {
+            compile_count += 1;
+            std::fs::write(temporary, b"vmfb-b")
+                .map_err(|error| format!("write test VMFB: {error}"))
+        })
+        .unwrap();
+        assert_eq!(compile_count, 2);
+        assert_eq!(std::fs::read(&vmfb).unwrap(), b"vmfb-b");
+
+        std::fs::remove_file(auxiliary_manifest_path(&vmfb)).ok();
+        std::fs::remove_file(vmfb).ok();
+        std::fs::remove_file(compiler).ok();
     }
 }
