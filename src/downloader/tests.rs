@@ -777,7 +777,10 @@ fn extra_ca_certs_defaults_to_empty_when_unset() {
         std::env::remove_var(EXTRA_CA_CERTS_ENV);
     }
     let certs = load_extra_ca_certificates().expect("unset env var must not error");
-    assert!(certs.is_empty(), "expected no extra certs when var is unset");
+    assert!(
+        certs.is_empty(),
+        "expected no extra certs when var is unset"
+    );
     restore_env(EXTRA_CA_CERTS_ENV, prev);
 }
 
@@ -790,7 +793,10 @@ fn extra_ca_certs_treats_whitespace_value_as_unset() {
         std::env::set_var(EXTRA_CA_CERTS_ENV, "   ");
     }
     let certs = load_extra_ca_certificates().expect("whitespace-only value must not error");
-    assert!(certs.is_empty(), "whitespace-only value must be treated as unset");
+    assert!(
+        certs.is_empty(),
+        "whitespace-only value must be treated as unset"
+    );
     restore_env(EXTRA_CA_CERTS_ENV, prev);
 }
 
