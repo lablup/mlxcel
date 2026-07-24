@@ -110,8 +110,8 @@ pub use batch::{EngineEvent, FinishReason, XlaAdmissionError, XlaBatchEngine, Xl
 #[cfg(feature = "diagnostics")]
 pub use batch::{
     Gemma3nAllLayerDiagnosticRun, Gemma3nCanonicalDiagnosticRun, Gemma3nPrefixDecodeDiagnosticRun,
-    run_gemma3n_all_layer_diagnostics, run_gemma3n_canonical_diagnostics,
-    run_gemma3n_prefix_decode_diagnostic,
+    LlavaReferenceDiagnosticEngine, LlavaReferenceDiagnosticRun, run_gemma3n_all_layer_diagnostics,
+    run_gemma3n_canonical_diagnostics, run_gemma3n_prefix_decode_diagnostic,
 };
 pub use context::{
     CONTEXT_CAPACITY_ENV, ContextCapacityError, DEFAULT_CONTEXT_CAPACITY,
@@ -127,6 +127,17 @@ pub use emitter::{
     run_gemma3n_qmv_diagnostic_probe, run_gemma3n_rms_diagnostic_probe,
     run_gemma3n_sdpa_vector_context_diagnostic_probe,
 };
+#[cfg(feature = "diagnostics")]
+pub use iree::PreparedPrefillDiagnostics;
+#[cfg(any(test, feature = "diagnostics"))]
+#[must_use]
+pub fn llava_diagnostic_device_memory_note(device: &str) -> &'static str {
+    if device == "cuda" {
+        "IREE CUDA reports N/A for dedicated memory on GB10 unified memory"
+    } else {
+        "the IREE C runtime integration exposes no portable device-allocation counter"
+    }
+}
 #[cfg(feature = "diagnostics")]
 pub fn dequantize_gemma3n_affine_diagnostic(
     packed: &[u8],
@@ -702,5 +713,39 @@ mod tests {
         assert_eq!(d, "metal");
         #[cfg(not(target_os = "macos"))]
         assert_eq!(d, "local-task");
+    }
+
+    #[test]
+    fn llava_diagnostics_share_the_production_embeddings_prefill() {
+        let c = include_str!("../csrc/xla_iree.c");
+        let diagnostic = c
+            .split("int xla_llama_prefill_embeddings_slot_diagnostics(")
+            .nth(1)
+            .expect("diagnostic C ABI")
+            .split("int xla_llama_prefill_embeddings_ple(")
+            .next()
+            .expect("bounded diagnostic C ABI");
+        assert!(diagnostic.contains("xla_llama_prefill_embeddings_impl("));
+        assert!(!diagnostic.contains("iree_runtime_call_invoke"));
+
+        let rust = include_str!("iree.rs");
+        let ffi = rust
+            .split("fn xla_llama_prefill_embeddings_slot_diagnostics(")
+            .next()
+            .expect("diagnostic Rust FFI");
+        assert!(
+            ffi.lines()
+                .rev()
+                .take(2)
+                .any(|line| line.contains("cfg(feature = \"diagnostics\")")),
+            "the diagnostic ABI must remain feature-gated"
+        );
+    }
+
+    #[test]
+    fn llava_device_memory_note_does_not_label_cpu_as_cuda() {
+        assert!(super::llava_diagnostic_device_memory_note("cuda").contains("GB10"));
+        assert!(!super::llava_diagnostic_device_memory_note("local-sync").contains("CUDA"));
+        assert!(!super::llava_diagnostic_device_memory_note("local-task").contains("GB10"));
     }
 }

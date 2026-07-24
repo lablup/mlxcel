@@ -37,6 +37,8 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+#[cfg(feature = "diagnostics")]
+use std::time::Instant;
 
 #[cfg(feature = "iree")]
 use mlxcel_core::session::PreparedPrefill;
@@ -51,6 +53,8 @@ use std::path::Path;
 use crate::Gemma3nDensePle;
 #[cfg(feature = "iree")]
 use crate::Gemma3nPreparedPrefill;
+#[cfg(feature = "diagnostics")]
+use crate::iree::PreparedPrefillDiagnostics;
 #[cfg(feature = "iree")]
 use crate::iree::{IreeLlama, IreeRaggedLlama};
 #[cfg(any(feature = "iree", test))]
@@ -784,6 +788,97 @@ fn diagnostic_argmax(values: &[f32]) -> i32 {
         .enumerate()
         .max_by(|left, right| left.1.total_cmp(right.1))
         .map_or(0, |(index, _)| index as i32)
+}
+
+/// Diagnostics-only LLaVA runner that shares one production ragged prefill /
+/// decode bundle for capture and greedy generation.
+#[cfg(feature = "diagnostics")]
+pub struct LlavaReferenceDiagnosticEngine {
+    engine: IreeRaggedLlama,
+}
+
+#[cfg(feature = "diagnostics")]
+impl LlavaReferenceDiagnosticEngine {
+    /// Compile and load the smallest production serve bundle at an explicit
+    /// static context capacity.
+    pub fn load(model_path: &Path, device: &str, context_capacity: usize) -> Result<Self, String> {
+        Ok(Self {
+            engine: IreeRaggedLlama::load(model_path, device, 4, context_capacity)?,
+        })
+    }
+
+    #[must_use]
+    pub fn context_capacity(&self) -> usize {
+        self.engine.context_capacity()
+    }
+
+    /// Capture production prefill logits plus selected all-layer K/V and then
+    /// continue greedily on the same resident cache.
+    pub fn capture(
+        &mut self,
+        prepared: &PreparedPrefill,
+        kv_width: usize,
+        max_new_tokens: usize,
+    ) -> Result<LlavaReferenceDiagnosticRun, String> {
+        if max_new_tokens == 0 {
+            return Err("LLaVA diagnostic generation requires max_new_tokens >= 1".to_string());
+        }
+        let prepared_iree = PreparedIreePrefill::prepare(
+            prepared,
+            self.engine.hidden_size(),
+            self.engine.context_capacity(),
+        )
+        .map_err(|error| error.to_string())?;
+        let prefill_started = Instant::now();
+        let prefill = self
+            .engine
+            .prefill_prepared_slot_diagnostics(0, &prepared_iree, kv_width)?;
+        let prefill_seconds = prefill_started.elapsed().as_secs_f64();
+        let mut tokens = Vec::with_capacity(max_new_tokens);
+        let mut current = diagnostic_argmax(&prefill.logits);
+        tokens.push(current);
+        let mut cache_len = i32::try_from(prepared.sequence_len)
+            .map_err(|_| "prepared sequence length does not fit i32".to_string())?;
+        let decode_started = Instant::now();
+        while tokens.len() < max_new_tokens {
+            if cache_len as usize >= self.engine.context_capacity() {
+                return Err(format!(
+                    "diagnostic decode would exceed context_capacity={}",
+                    self.engine.context_capacity()
+                ));
+            }
+            let mut carrier_tokens = vec![0; self.engine.b_max()];
+            let mut carrier_positions = vec![0; self.engine.b_max()];
+            let mut carrier_cache_lengths = vec![0; self.engine.b_max()];
+            carrier_tokens[0] = current;
+            carrier_positions[0] = cache_len;
+            carrier_cache_lengths[0] = cache_len;
+            let logits = self.engine.decode_ragged_logits(
+                &carrier_tokens,
+                &carrier_positions,
+                &carrier_cache_lengths,
+            )?;
+            current = diagnostic_argmax(&logits[..self.engine.vocab()]);
+            tokens.push(current);
+            cache_len += 1;
+        }
+        let decode_seconds = decode_started.elapsed().as_secs_f64();
+        Ok(LlavaReferenceDiagnosticRun {
+            prefill,
+            tokens,
+            prefill_seconds,
+            decode_seconds,
+        })
+    }
+}
+
+#[cfg(feature = "diagnostics")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct LlavaReferenceDiagnosticRun {
+    pub prefill: PreparedPrefillDiagnostics,
+    pub tokens: Vec<i32>,
+    pub prefill_seconds: f64,
+    pub decode_seconds: f64,
 }
 
 #[cfg(feature = "diagnostics")]

@@ -21,7 +21,7 @@
 //! - VisionEmbeddings: Conv2d patch embedding + learned position embedding [+ CLS token for CLIP]
 //! - EncoderLayer: LayerNorm → Attention → residual → LayerNorm → MLP → residual
 //! - Attention: standard multi-head with bias, uses scaled_dot_product_attention
-//! - MLP: Linear → GELU(precise) → Linear
+//! - MLP: Linear → checkpoint-selected GELU → Linear
 //!
 //! Used by: Gemma3 VLM (SigLIP), LLaVA (CLIP or SigLIP), Idefics2 (via
 //! `forward_with_position_ids`, bucketized variable-resolution tiles)
@@ -31,27 +31,88 @@ use mlxcel_core::layers::{LayerNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
-use crate::vision::config::VisionConfig;
+use crate::vision::config::{VisionConfig, VisionHiddenActivation};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VisionMlpActivation {
+    Exact,
+    PytorchTanh,
+    FastSigmoid,
+}
+
+fn select_mlp_activation(
+    hidden_act: VisionHiddenActivation,
+    use_fast_gelu: bool,
+) -> VisionMlpActivation {
+    if use_fast_gelu {
+        VisionMlpActivation::FastSigmoid
+    } else {
+        match hidden_act {
+            VisionHiddenActivation::GeluPytorchTanh => VisionMlpActivation::PytorchTanh,
+            VisionHiddenActivation::ExactGelu => VisionMlpActivation::Exact,
+        }
+    }
+}
 
 // Vision MLP.
 struct VisionMLP {
     fc1: UnifiedLinear,
     fc2: UnifiedLinear,
-    /// When true, use the sigmoid `GELU(approx="fast")` (`x * sigmoid(1.702x)`)
-    /// that the Idefics2 vision tower uses; otherwise the tanh `approx="precise"`
-    /// GELU that SigLIP/CLIP, Idefics3/SmolVLM, Gemma3, and LLaVA use.
-    use_fast_gelu: bool,
+    activation: VisionMlpActivation,
+}
+
+/// Hugging Face's `gelu_pytorch_tanh`, evaluated in F32 to avoid the BF16
+/// `x.pow(3)` overflow that motivated the legacy exact-erf fallback.
+///
+/// Keep this SigLIP/CLIP-specific: changing the global `gelu_approx` helper
+/// would silently alter model families whose checkpoints expect exact GELU.
+fn gelu_pytorch_tanh(x: &MlxArray) -> UniquePtr<MlxArray> {
+    let output_dtype = mlxcel_core::array_dtype(x);
+    let x = mlxcel_core::astype(x, mlxcel_core::dtype::FLOAT32);
+    let half = mlxcel_core::full_f32(&[1], 0.5, mlxcel_core::dtype::FLOAT32);
+    let one = mlxcel_core::full_f32(&[1], 1.0, mlxcel_core::dtype::FLOAT32);
+    let sqrt_two_over_pi = mlxcel_core::full_f32(&[1], 0.797_884_6, mlxcel_core::dtype::FLOAT32);
+    let cubic_coefficient = mlxcel_core::full_f32(&[1], 0.044_715, mlxcel_core::dtype::FLOAT32);
+
+    // Multiplication, rather than a generic power operation, is defined for
+    // negative inputs and matches PyTorch's polynomial evaluation order.
+    let squared = mlxcel_core::multiply(&x, &x);
+    let cubed = mlxcel_core::multiply(&squared, &x);
+    let cubic = mlxcel_core::multiply(&cubic_coefficient, &cubed);
+    let inner = mlxcel_core::multiply(&sqrt_two_over_pi, &mlxcel_core::add(&x, &cubic));
+    let cdf = mlxcel_core::multiply(&half, &mlxcel_core::add(&one, &mlxcel_core::tanh(&inner)));
+    let activated = mlxcel_core::multiply(&x, &cdf);
+    if output_dtype == mlxcel_core::dtype::FLOAT32 {
+        activated
+    } else {
+        mlxcel_core::astype(&activated, output_dtype)
+    }
 }
 
 impl VisionMLP {
-    fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+    fn forward_impl(
+        &self,
+        x: &MlxArray,
+        capture: bool,
+    ) -> (UniquePtr<MlxArray>, Vec<UniquePtr<MlxArray>>) {
         let x = self.fc1.forward(x);
-        let x = if self.use_fast_gelu {
-            mlxcel_core::utils::gelu_sigmoid(&x)
-        } else {
-            mlxcel_core::gelu_approx(&x)
+        let mut diagnostics = Vec::new();
+        if capture {
+            diagnostics.push(mlxcel_core::copy(&x));
+        }
+        let x = match self.activation {
+            VisionMlpActivation::Exact => mlxcel_core::gelu_approx(&x),
+            VisionMlpActivation::PytorchTanh => gelu_pytorch_tanh(&x),
+            VisionMlpActivation::FastSigmoid => mlxcel_core::utils::gelu_sigmoid(&x),
         };
-        self.fc2.forward(&x)
+        if capture {
+            diagnostics.push(mlxcel_core::copy(&x));
+        }
+        let x = self.fc2.forward(&x);
+        if capture {
+            diagnostics.push(mlxcel_core::copy(&x));
+        }
+        (x, diagnostics)
     }
 
     fn from_weights(
@@ -59,7 +120,7 @@ impl VisionMLP {
         prefix: &str,
         group_size: i32,
         bits: i32,
-        use_fast_gelu: bool,
+        activation: VisionMlpActivation,
     ) -> Result<Self, String> {
         let fc1 =
             UnifiedLinear::from_weights(weights, &format!("{}.fc1", prefix), group_size, bits)?;
@@ -68,7 +129,7 @@ impl VisionMLP {
         Ok(Self {
             fc1,
             fc2,
-            use_fast_gelu,
+            activation,
         })
     }
 }
@@ -84,7 +145,11 @@ struct VisionAttention {
 }
 
 impl VisionAttention {
-    fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+    fn forward_impl(
+        &self,
+        x: &MlxArray,
+        capture: bool,
+    ) -> (UniquePtr<MlxArray>, Vec<UniquePtr<MlxArray>>) {
         let shape = mlxcel_core::array_shape(x);
         let b = shape[0];
         let l = shape[1];
@@ -92,6 +157,12 @@ impl VisionAttention {
         let queries = self.q_proj.forward(x);
         let keys = self.k_proj.forward(x);
         let values = self.v_proj.forward(x);
+        let mut diagnostics = Vec::new();
+        if capture {
+            diagnostics.push(mlxcel_core::copy(&queries));
+            diagnostics.push(mlxcel_core::copy(&keys));
+            diagnostics.push(mlxcel_core::copy(&values));
+        }
 
         let head_dim = mlxcel_core::array_shape(&queries)[2] / self.num_heads;
 
@@ -119,8 +190,15 @@ impl VisionAttention {
         // Transpose back and reshape: [B, num_heads, L, head_dim] -> [B, L, D]
         let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
         let output = mlxcel_core::reshape(&output, &[b, l, self.num_heads * head_dim]);
+        if capture {
+            diagnostics.push(mlxcel_core::copy(&output));
+        }
 
-        self.out_proj.forward(&output)
+        let output = self.out_proj.forward(&output);
+        if capture {
+            diagnostics.push(mlxcel_core::copy(&output));
+        }
+        (output, diagnostics)
     }
 
     fn from_weights(
@@ -168,14 +246,38 @@ struct EncoderLayer {
 
 impl EncoderLayer {
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        self.forward_impl(x, false).0
+    }
+
+    fn forward_impl(
+        &self,
+        x: &MlxArray,
+        capture: bool,
+    ) -> (UniquePtr<MlxArray>, Vec<UniquePtr<MlxArray>>) {
+        let mut diagnostics = Vec::new();
         // LayerNorm -> Attention -> residual
         let ln1 = self.layer_norm1.forward(x);
-        let r = self.self_attn.forward(&ln1);
+        if capture {
+            diagnostics.push(mlxcel_core::copy(&ln1));
+        }
+        let (r, attention_diagnostics) = self.self_attn.forward_impl(&ln1, capture);
+        diagnostics.extend(attention_diagnostics);
         let h = mlxcel_core::add(x, &r);
+        if capture {
+            diagnostics.push(mlxcel_core::copy(&h));
+        }
         // LayerNorm -> MLP -> residual
         let ln2 = self.layer_norm2.forward(&h);
-        let r = self.mlp.forward(&ln2);
-        mlxcel_core::add(&h, &r)
+        if capture {
+            diagnostics.push(mlxcel_core::copy(&ln2));
+        }
+        let (r, mlp_diagnostics) = self.mlp.forward_impl(&ln2, capture);
+        diagnostics.extend(mlp_diagnostics);
+        let output = mlxcel_core::add(&h, &r);
+        if capture {
+            diagnostics.push(mlxcel_core::copy(&output));
+        }
+        (output, diagnostics)
     }
 
     fn from_weights(
@@ -184,7 +286,7 @@ impl EncoderLayer {
         config: &VisionConfig,
         group_size: i32,
         bits: i32,
-        use_fast_gelu: bool,
+        activation: VisionMlpActivation,
     ) -> Result<Self, String> {
         let self_attn = VisionAttention::from_weights(
             weights,
@@ -211,7 +313,7 @@ impl EncoderLayer {
             &format!("{}.mlp", prefix),
             group_size,
             bits,
-            use_fast_gelu,
+            activation,
         )?;
 
         Ok(Self {
@@ -413,8 +515,9 @@ impl SigLipVisionModel {
 
     /// Like [`Self::from_weights_with_quant`] but selects the encoder MLP GELU
     /// variant. `use_fast_gelu = true` uses the sigmoid `GELU(approx="fast")`
-    /// that the Idefics2 vision tower uses; `false` keeps the tanh
-    /// `approx="precise"` GELU every other SigLIP/CLIP consumer uses.
+    /// that the Idefics2 vision tower uses. Otherwise `hidden_act` selects the
+    /// explicit PyTorch tanh approximation, with exact-erf GELU as the
+    /// compatibility default for missing and unknown values.
     pub fn from_weights_with_quant_and_gelu(
         weights: &WeightMap,
         config: &VisionConfig,
@@ -426,6 +529,7 @@ impl SigLipVisionModel {
         let emb_prefix = format!("{}.embeddings", prefix);
         let embeddings =
             VisionEmbeddings::from_weights(weights, &emb_prefix, config, group_size, bits)?;
+        let activation = select_mlp_activation(config.hidden_act, use_fast_gelu);
 
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for i in 0..config.num_hidden_layers {
@@ -436,7 +540,7 @@ impl SigLipVisionModel {
                 config,
                 group_size,
                 bits,
-                use_fast_gelu,
+                activation,
             )?;
             layers.push(layer);
         }
@@ -537,12 +641,43 @@ impl SigLipVisionModel {
 
 impl VisionEncoder for SigLipVisionModel {
     fn forward(&self, pixel_values: &MlxArray) -> VisionEncoderOutput {
+        self.forward_impl(pixel_values, false).0
+    }
+
+    #[cfg(feature = "xla-diagnostics")]
+    fn forward_with_hidden_state_diagnostics(
+        &self,
+        pixel_values: &MlxArray,
+    ) -> (
+        VisionEncoderOutput,
+        Vec<UniquePtr<MlxArray>>,
+        Vec<UniquePtr<MlxArray>>,
+    ) {
+        self.forward_impl(pixel_values, true)
+    }
+}
+
+impl SigLipVisionModel {
+    fn forward_impl(
+        &self,
+        pixel_values: &MlxArray,
+        capture_hidden_states: bool,
+    ) -> (
+        VisionEncoderOutput,
+        Vec<UniquePtr<MlxArray>>,
+        Vec<UniquePtr<MlxArray>>,
+    ) {
         // Embed patches (+ CLS for CLIP)
         let mut h = self.embeddings.forward(pixel_values);
 
         // Apply pre-layernorm if present (CLIP only)
         if let Some(ref pre_ln) = self.pre_layrnorm {
             h = pre_ln.forward(&h);
+        }
+        let mut hidden_states = Vec::new();
+        let mut block0_diagnostics = Vec::new();
+        if capture_hidden_states {
+            hidden_states.push(mlxcel_core::copy(&h));
         }
 
         // Check if we need to collect hidden states for layer selection
@@ -557,30 +692,58 @@ impl VisionEncoder for SigLipVisionModel {
             };
 
             for (i, layer) in self.layers.iter().enumerate() {
-                h = layer.forward(&h);
+                if capture_hidden_states && i == 0 {
+                    (h, block0_diagnostics) = layer.forward_impl(&h, true);
+                } else {
+                    h = layer.forward(&h);
+                }
+                if capture_hidden_states {
+                    hidden_states.push(mlxcel_core::copy(&h));
+                }
                 if i == target_layer {
                     // Select features from this layer (before post_layernorm)
                     let selected = self.apply_feature_select_strategy(&h);
-                    return VisionEncoderOutput {
-                        hidden_states: selected,
-                    };
+                    return (
+                        VisionEncoderOutput {
+                            hidden_states: selected,
+                        },
+                        hidden_states,
+                        block0_diagnostics,
+                    );
                 }
             }
             // Fallback: if target_layer >= num_layers, use last layer output
             let selected = self.apply_feature_select_strategy(&h);
-            return VisionEncoderOutput {
-                hidden_states: selected,
-            };
+            return (
+                VisionEncoderOutput {
+                    hidden_states: selected,
+                },
+                hidden_states,
+                block0_diagnostics,
+            );
         }
 
         // Default path (Gemma3 SigLIP): pass through all layers + post_layernorm
-        for layer in &self.layers {
-            h = layer.forward(&h);
+        for (i, layer) in self.layers.iter().enumerate() {
+            if capture_hidden_states && i == 0 {
+                (h, block0_diagnostics) = layer.forward_impl(&h, true);
+            } else {
+                h = layer.forward(&h);
+            }
+            if capture_hidden_states {
+                hidden_states.push(mlxcel_core::copy(&h));
+            }
         }
 
-        let hidden_states = self.post_layernorm.forward(&h);
+        let selected = self.post_layernorm.forward(&h);
 
-        VisionEncoderOutput { hidden_states }
+        (
+            VisionEncoderOutput {
+                hidden_states: selected,
+            },
+            hidden_states,
+            block0_diagnostics,
+        )
     }
 }
 
@@ -626,4 +789,41 @@ fn load_layer_norm(weights: &WeightMap, prefix: &str, eps: f32) -> Result<LayerN
     let bias = weights.get(&bias_key).map(|w| mlxcel_core::copy(w));
 
     Ok(LayerNorm::new(weight, bias, eps))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{VisionMlpActivation, gelu_pytorch_tanh, select_mlp_activation};
+    use crate::vision::config::VisionHiddenActivation;
+
+    #[test]
+    fn activation_selection_preserves_exact_and_fast_compatibility() {
+        assert_eq!(
+            select_mlp_activation(VisionHiddenActivation::ExactGelu, false),
+            VisionMlpActivation::Exact
+        );
+        assert_eq!(
+            select_mlp_activation(VisionHiddenActivation::GeluPytorchTanh, false),
+            VisionMlpActivation::PytorchTanh
+        );
+        assert_eq!(
+            select_mlp_activation(VisionHiddenActivation::GeluPytorchTanh, true),
+            VisionMlpActivation::FastSigmoid
+        );
+    }
+
+    #[test]
+    fn pytorch_tanh_gelu_matches_hugging_face_f32_golden() {
+        let input = mlxcel_core::from_slice_f32(&[-3.0, -1.0, 0.0, 1.0, 3.0], &[5]);
+        let output = gelu_pytorch_tanh(&input);
+        mlxcel_core::eval(&output);
+        let expected = [-0.003_637_433, -0.158_808, 0.0, 0.841_192, 2.996_362_7];
+        for (index, expected) in expected.into_iter().enumerate() {
+            let value = mlxcel_core::slice(&output, &[index as i32], &[index as i32 + 1]);
+            assert!(
+                (mlxcel_core::item_f32(&value) - expected).abs() <= 2.0e-6,
+                "GELU mismatch at {index}"
+            );
+        }
+    }
 }

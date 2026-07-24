@@ -209,6 +209,92 @@ static iree_status_t xla_read_logits(xla_ctx* c, iree_hal_buffer_view_t* out,
       IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout());
 }
 
+// Diagnostics-only readback of one compact K/V slice per decoder layer.
+//
+// The normal prefill graph already returns the complete rank-4 caches
+// [layers, sequence, kv_heads, head_dim]. Reading the final effective prompt
+// position, head zero, and a caller-bounded prefix of head_dim lets the LLaVA
+// reference harness compare every layer without compiling a second decoder or
+// copying the full caches to host. Production callers pass kv_width=0 and never
+// enter this branch.
+static int xla_read_selected_kv(xla_ctx* c, iree_hal_buffer_view_t* kc,
+                                iree_hal_buffer_view_t* vc, int32_t real_len,
+                                int32_t kv_width, float* out_kv) {
+  if (kv_width == 0 && out_kv == NULL) return 0;
+  if (kv_width <= 0 || !out_kv || real_len <= 0 ||
+      real_len > c->context_capacity) {
+    fprintf(stderr, "xla_iree: invalid selected KV diagnostic contract\n");
+    return 1;
+  }
+  iree_hal_dim_t layers = iree_hal_buffer_view_shape_dim(kc, 0);
+  iree_hal_dim_t sequence = iree_hal_buffer_view_shape_dim(kc, 1);
+  iree_hal_dim_t kv_heads = iree_hal_buffer_view_shape_dim(kc, 2);
+  iree_hal_dim_t head_dim = iree_hal_buffer_view_shape_dim(kc, 3);
+  if (layers != (iree_hal_dim_t)c->model_layers ||
+      sequence != (iree_hal_dim_t)c->context_capacity || kv_heads <= 0 ||
+      (iree_hal_dim_t)kv_width > head_dim) {
+    fprintf(stderr,
+            "xla_iree: selected KV dimensions disagree with runtime "
+            "(layers=%lld sequence=%lld heads=%lld head_dim=%lld width=%d)\n",
+            (long long)layers, (long long)sequence, (long long)kv_heads,
+            (long long)head_dim, kv_width);
+    return 1;
+  }
+
+  iree_hal_buffer_t* buffers[2] = {
+      iree_hal_buffer_view_buffer(kc),
+      iree_hal_buffer_view_buffer(vc),
+  };
+  for (iree_hal_dim_t layer = 0; layer < layers; ++layer) {
+    uint64_t element_offset = (uint64_t)layer;
+    if (element_offset > UINT64_MAX / (uint64_t)sequence) {
+      fprintf(stderr, "xla_iree: selected KV layer offset overflowed\n");
+      return 1;
+    }
+    element_offset *= (uint64_t)sequence;
+    if (element_offset > UINT64_MAX - (uint64_t)(real_len - 1)) {
+      fprintf(stderr, "xla_iree: selected KV position offset overflowed\n");
+      return 1;
+    }
+    element_offset += (uint64_t)(real_len - 1);
+    if (element_offset > UINT64_MAX / (uint64_t)kv_heads) {
+      fprintf(stderr, "xla_iree: selected KV head offset overflowed\n");
+      return 1;
+    }
+    element_offset *= (uint64_t)kv_heads;
+    if (element_offset > UINT64_MAX / (uint64_t)head_dim) {
+      fprintf(stderr, "xla_iree: selected KV dimension offset overflowed\n");
+      return 1;
+    }
+    element_offset *= (uint64_t)head_dim;
+    if (element_offset > UINT64_MAX / sizeof(float)) {
+      fprintf(stderr, "xla_iree: selected KV byte offset overflowed\n");
+      return 1;
+    }
+    iree_device_size_t byte_offset =
+        (iree_device_size_t)(element_offset * sizeof(float));
+    for (int32_t kind = 0; kind < 2; ++kind) {
+      float* destination =
+          out_kv + (((size_t)layer * 2u + (size_t)kind) * (size_t)kv_width);
+      iree_status_t status = iree_hal_device_transfer_d2h(
+          c->device, buffers[kind], byte_offset, destination,
+          (iree_device_size_t)kv_width * sizeof(float),
+          IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout());
+      if (!iree_status_is_ok(status)) {
+        int code = (int)iree_status_code(status);
+        fprintf(stderr,
+                "xla_iree: selected KV d2h failed at layer=%lld kind=%d "
+                "(status %d):\n",
+                (long long)layer, kind, code);
+        iree_status_fprint(stderr, status);
+        iree_status_ignore(status);
+        return code ? code : 1;
+      }
+    }
+  }
+  return 0;
+}
+
 // Allocate a resident device buffer view of the given shape/elt and copy bytes.
 static iree_status_t xla_alloc_bv(xla_ctx* c, iree_host_size_t rank,
                                   const iree_hal_dim_t* shape,
@@ -285,8 +371,13 @@ static int xla_validate_kv_pair(xla_ctx* c, iree_hal_buffer_view_t* kc,
       iree_hal_buffer_view_element_type(kc) !=
           IREE_HAL_ELEMENT_TYPE_FLOAT_32 ||
       iree_hal_buffer_view_element_type(vc) !=
-          IREE_HAL_ELEMENT_TYPE_FLOAT_32) {
-    fprintf(stderr, "xla_iree: expected matching rank-%zu f32 K/V buffers\n",
+          IREE_HAL_ELEMENT_TYPE_FLOAT_32 ||
+      iree_hal_buffer_view_encoding_type(kc) !=
+          IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR ||
+      iree_hal_buffer_view_encoding_type(vc) !=
+          IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR) {
+    fprintf(stderr,
+            "xla_iree: expected matching dense-row-major rank-%zu f32 K/V buffers\n",
             (size_t)rank);
     return 1;
   }
@@ -1015,7 +1106,8 @@ static int xla_llama_prefill_embeddings_impl(
     const xla_tensor_desc* embeddings,
     const xla_tensor_desc* dense_ple,
     const xla_tensor_desc* positions, const xla_tensor_desc* attention_bias,
-    int32_t real_len, int32_t vocab, int32_t* out_token, float* out_logits) {
+    int32_t real_len, int32_t vocab, int32_t* out_token, float* out_logits,
+    int32_t kv_width, float* out_kv) {
   if (!c || real_len <= 0 || real_len > c->context_capacity ||
       position_mode != c->position_mode) {
     fprintf(stderr,
@@ -1123,6 +1215,8 @@ static int xla_llama_prefill_embeddings_impl(
     XLA_CHECK_GOTO(
         xla_read_logits(c, output, out_logits, (iree_host_size_t)vocab),
         cleanup, rc);
+    rc = xla_read_selected_kv(c, kc, vc, real_len, kv_width, out_kv);
+    if (rc != 0) goto cleanup;
     rc = xla_store_prefill_kv_slot(c, slot, kc, vc);
   } else {
     XLA_CHECK_GOTO(xla_read_token(c, output, out_token), cleanup, rc);
@@ -1155,7 +1249,7 @@ int xla_llama_prefill_embeddings(
     int32_t real_len, int32_t* out_token) {
   return xla_llama_prefill_embeddings_impl(
       c, -1, position_mode, embeddings, NULL, positions, attention_bias,
-      real_len, 0, out_token, NULL);
+      real_len, 0, out_token, NULL, 0, NULL);
 }
 
 int xla_llama_prefill_embeddings_slot_logits(
@@ -1165,7 +1259,18 @@ int xla_llama_prefill_embeddings_slot_logits(
     int32_t real_len, int32_t vocab, float* out_logits) {
   return xla_llama_prefill_embeddings_impl(
       c, slot, position_mode, embeddings, NULL, positions, attention_bias,
-      real_len, vocab, NULL, out_logits);
+      real_len, vocab, NULL, out_logits, 0, NULL);
+}
+
+int xla_llama_prefill_embeddings_slot_diagnostics(
+    xla_ctx* c, int32_t slot, int32_t position_mode,
+    const xla_tensor_desc* embeddings,
+    const xla_tensor_desc* positions, const xla_tensor_desc* attention_bias,
+    int32_t real_len, int32_t vocab, int32_t kv_width, float* out_logits,
+    float* out_kv) {
+  return xla_llama_prefill_embeddings_impl(
+      c, slot, position_mode, embeddings, NULL, positions, attention_bias,
+      real_len, vocab, NULL, out_logits, kv_width, out_kv);
 }
 
 int xla_llama_prefill_embeddings_ple(
@@ -1175,7 +1280,7 @@ int xla_llama_prefill_embeddings_ple(
     int32_t* out_token) {
   return xla_llama_prefill_embeddings_impl(
       c, -1, position_mode, embeddings, dense_ple, positions, attention_bias,
-      real_len, 0, out_token, NULL);
+      real_len, 0, out_token, NULL, 0, NULL);
 }
 
 int xla_llama_prefill_embeddings_ple_slot_logits(
@@ -1186,7 +1291,7 @@ int xla_llama_prefill_embeddings_ple_slot_logits(
     float* out_logits) {
   return xla_llama_prefill_embeddings_impl(
       c, slot, position_mode, embeddings, dense_ple, positions, attention_bias,
-      real_len, vocab, NULL, out_logits);
+      real_len, vocab, NULL, out_logits, 0, NULL);
 }
 
 static int xla_llama_prefill_embeddings_deepstack_impl(

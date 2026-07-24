@@ -37,7 +37,6 @@ use super::vlm_prompt::{ImageTokenBlockError, ImageTokenBlockInfo, apply_image_t
 
 #[path = "host_preprocessor_export.rs"]
 mod export;
-#[cfg(test)]
 use export::export_mlx_tensor;
 use export::{
     build_prepared_prefill, export_llava_prefill, usize_to_i32, validate_embedding_shape,
@@ -111,6 +110,25 @@ pub struct LlavaHostPreprocessor {
     hidden_size: usize,
     image_size: usize,
     max_sequence_len: usize,
+}
+
+/// Diagnostics-only capture from the exact host preprocessing path used by
+/// OpenXLA image requests.
+#[cfg(feature = "xla-diagnostics")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlavaHostReferenceCapture {
+    pub prepared: PreparedPrefill,
+    /// Canonical processor output in `[images, 3, height, width]` layout.
+    pub pixel_values: Option<OwnedTensor>,
+    /// Selected vision-tower output before the multimodal projector in
+    /// `[images, image_tokens, vision_hidden]` layout.
+    pub selected_vision_features: Option<OwnedTensor>,
+    /// Encoder embedding output followed by each selected vision layer output.
+    pub vision_hidden_states: Vec<OwnedTensor>,
+    /// First encoder block's normalization, attention, and MLP sub-stages.
+    pub vision_block0_states: Vec<OwnedTensor>,
+    /// Projected vision features in `[images, image_tokens, hidden]` layout.
+    pub projected_image_features: Option<OwnedTensor>,
 }
 
 impl LlavaHostPreprocessor {
@@ -190,14 +208,23 @@ impl LlavaHostPreprocessor {
             block_suffix_tokens: Vec::new(),
         }
     }
-}
 
-impl HostMultimodalPreprocessor for LlavaHostPreprocessor {
-    fn prepare(
+    fn prepare_internal(
         &self,
         token_ids: &[i32],
         images: &[DynamicImage],
-    ) -> Result<PreparedPrefill, HostPreprocessorError> {
+        capture_diagnostics: bool,
+    ) -> Result<
+        (
+            PreparedPrefill,
+            Option<OwnedTensor>,
+            Option<OwnedTensor>,
+            Option<OwnedTensor>,
+            Vec<OwnedTensor>,
+            Vec<OwnedTensor>,
+        ),
+        HostPreprocessorError,
+    > {
         let mut logical_tokens = token_ids.to_vec();
         apply_image_token_blocks(&mut logical_tokens, self.token_block_info(), images.len())?;
         validate_sequence_capacity(logical_tokens.len(), self.max_sequence_len)?;
@@ -214,6 +241,17 @@ impl HostMultimodalPreprocessor for LlavaHostPreprocessor {
             "text embedding table",
         )?;
 
+        let mut pixel_values = None;
+        let mut selected_vision_features = None;
+        let mut projected_image_features = None;
+        #[cfg(feature = "xla-diagnostics")]
+        let mut vision_hidden_states = Vec::new();
+        #[cfg(not(feature = "xla-diagnostics"))]
+        let vision_hidden_states = Vec::new();
+        #[cfg(feature = "xla-diagnostics")]
+        let mut vision_block0_states = Vec::new();
+        #[cfg(not(feature = "xla-diagnostics"))]
+        let vision_block0_states = Vec::new();
         let merged = if images.is_empty() {
             InputEmbeddings {
                 inputs_embeds: text_embeddings,
@@ -226,14 +264,41 @@ impl HostMultimodalPreprocessor for LlavaHostPreprocessor {
                 images.len(),
                 self.image_size,
             )?;
+            if capture_diagnostics {
+                pixel_values = Some(export_mlx_tensor(&pixels, "processor pixel_values")?);
+            }
 
             // The standard processor emits channels-first f32. Normalize layout
-            // for the shared CLIP/SigLIP encoder and normalize dtype once to the
-            // text embedding dtype before vision execution.
+            // for the shared CLIP/SigLIP encoder. Keep the qualified LLaVA
+            // vision path in f32: layer-by-layer BF16 reduction differences
+            // compound sharply in this 26-layer SigLIP tower even when the
+            // checkpoint itself stores BF16 weights.
             let pixels = mlxcel_core::transpose_axes(&pixels, &[0, 2, 3, 1]);
-            let embed_dtype = mlxcel_core::array_dtype(&text_embeddings);
-            let pixels = mlxcel_core::astype(&pixels, embed_dtype);
+            let pixels = mlxcel_core::astype(&pixels, mlxcel_core::dtype::FLOAT32);
+            #[cfg(feature = "xla-diagnostics")]
+            let encoded = if capture_diagnostics {
+                let (encoded, hidden_states, block0_states) =
+                    self.encoder.forward_with_hidden_state_diagnostics(&pixels);
+                vision_hidden_states = hidden_states
+                    .iter()
+                    .map(|state| export_mlx_tensor(state, "vision hidden state"))
+                    .collect::<Result<Vec<_>, _>>()?;
+                vision_block0_states = block0_states
+                    .iter()
+                    .map(|state| export_mlx_tensor(state, "vision block 0 state"))
+                    .collect::<Result<Vec<_>, _>>()?;
+                encoded
+            } else {
+                self.encoder.forward(&pixels)
+            };
+            #[cfg(not(feature = "xla-diagnostics"))]
             let encoded = self.encoder.forward(&pixels);
+            if capture_diagnostics {
+                selected_vision_features = Some(export_mlx_tensor(
+                    &encoded.hidden_states,
+                    "selected vision features",
+                )?);
+            }
             let projected = self.connector.forward(&encoded.hidden_states);
             validate_projected_shape(
                 &mlxcel_core::array_shape(&projected),
@@ -241,6 +306,10 @@ impl HostMultimodalPreprocessor for LlavaHostPreprocessor {
                 self.tokens_per_image,
                 self.hidden_size,
             )?;
+            if capture_diagnostics {
+                projected_image_features =
+                    Some(export_mlx_tensor(&projected, "projected image features")?);
+            }
 
             merge_llava(
                 self.image_token_id,
@@ -260,14 +329,59 @@ impl HostMultimodalPreprocessor for LlavaHostPreprocessor {
             attention_mask_4d: merged.attention_mask_4d,
         };
 
-        export_llava_prefill(
+        let prepared = export_llava_prefill(
             logical_tokens,
             merged,
             self.image_token_id,
             images.len(),
             self.tokens_per_image,
             self.hidden_size,
-        )
+        )?;
+        Ok((
+            prepared,
+            pixel_values,
+            selected_vision_features,
+            projected_image_features,
+            vision_hidden_states,
+            vision_block0_states,
+        ))
+    }
+
+    /// Capture processor/projector/prepared values without changing the
+    /// production preprocessing sequence.
+    #[cfg(feature = "xla-diagnostics")]
+    pub fn prepare_with_reference_diagnostics(
+        &self,
+        token_ids: &[i32],
+        images: &[DynamicImage],
+    ) -> Result<LlavaHostReferenceCapture, HostPreprocessorError> {
+        let (
+            prepared,
+            pixel_values,
+            selected_vision_features,
+            projected_image_features,
+            vision_hidden_states,
+            vision_block0_states,
+        ) = self.prepare_internal(token_ids, images, true)?;
+        Ok(LlavaHostReferenceCapture {
+            prepared,
+            pixel_values,
+            selected_vision_features,
+            vision_hidden_states,
+            vision_block0_states,
+            projected_image_features,
+        })
+    }
+}
+
+impl HostMultimodalPreprocessor for LlavaHostPreprocessor {
+    fn prepare(
+        &self,
+        token_ids: &[i32],
+        images: &[DynamicImage],
+    ) -> Result<PreparedPrefill, HostPreprocessorError> {
+        self.prepare_internal(token_ids, images, false)
+            .map(|(prepared, _, _, _, _, _)| prepared)
     }
 }
 

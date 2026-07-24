@@ -185,12 +185,105 @@ plus every K/V element across one-token, nonzero-padding, and near-capacity case
 spike/openxla/.venv/bin/python spike/openxla/prefill_embeddings_check.py
 ```
 
+### LLaVA independent reference gate
+
+`scripts/xla/validate_llava_reference.sh` is the reproducible multimodal
+correctness gate. It compares the production host preprocessor and IREE
+prefill/decode bundle with Hugging Face Transformers, rather than treating an
+MLX or IREE result as its own oracle. The reference is pinned to:
+
+- source `llava-hf/llava-interleave-qwen-0.5b-hf` at
+  `1090956dd1c79bc93ae98dcf395590369435ec91`;
+- converted checkpoint `mlx-community/llava-interleave-qwen-0.5b-bf16` at
+  `ba7385935f69c5417bfbe29c3809858a98afc22f`;
+- the model and tokenizer SHA-256 values recorded in
+  `spike/openxla/llava_reference_oracle.py`.
+
+The source uses the Tongyi Qianwen Research License. Obtain and use it only
+under those research/evaluation terms. Model files and generated binary
+captures must remain outside Git. One way to obtain immutable local snapshots
+is:
+
+```bash
+hf download llava-hf/llava-interleave-qwen-0.5b-hf \
+  --revision 1090956dd1c79bc93ae98dcf395590369435ec91 \
+  --local-dir /tmp/llava-interleave-qwen-0.5b-hf
+hf download mlx-community/llava-interleave-qwen-0.5b-bf16 \
+  --revision ba7385935f69c5417bfbe29c3809858a98afc22f \
+  --local-dir /path/outside/repo/llava-interleave-qwen-0.5b-bf16
+```
+
+After configuring a real IREE CPU, CUDA, or Metal runtime, run:
+
+```bash
+scripts/xla/validate_llava_reference.sh \
+  --source-model /tmp/llava-interleave-qwen-0.5b-hf \
+  --model /path/outside/repo/llava-interleave-qwen-0.5b-bf16 \
+  --image tests/fixtures/test_image.png \
+  --out /tmp/mlxcel-llava-reference \
+  --device cuda
+```
+
+The companion command sets `MLX_ENABLE_TF32=0`: the declared reference policy
+is true F32, while MLX CUDA's default FAST_TF32 mode is an intentional,
+lower-precision throughput policy and is not labeled as F32 evidence.
+
+The gate verifies exact processor tokens, positions, and masks; every vision
+hidden state plus first-block internal stages; selected/projected image
+features; merged embeddings; first prefill logits; compact all-layer K/V
+samples; and the greedy token trajectory. Cases cover one image plus text,
+mandatory two-image ordering, and text-only input. Negative checks cover
+malformed placeholder counts and effective context overflow before device
+execution. Floating-point comparisons use the per-stage dtype policy recorded
+in the reference manifest and report the first divergent stage.
+
+The same command also checks non-streaming CLI output and the streaming OpenAI
+chat-completions contract, including role/content/finish/usage/`[DONE]` order
+and batch metrics. Manifests record compile/load, host preprocessing, prefill,
+decode, host peak RSS, and runtime device-memory evidence. Add
+`--text-model /path/to/text/checkpoint` to run `validate_arch.sh` as the
+ordinary text and batch regression companion. Use `--skip-surfaces` only when
+isolating a stage-level diagnostic failure.
+
+On the qualified GB10 host, IREE `local-task` could not create its worker pool
+under either 20-core or 4-core affinity (`thread creation failed with 22 (code
+13)`). `local-sync` is the CPU execution fallback on such constrained hosts; it
+ran the identical three-case reference comparison successfully. This is a mixed
+runtime check: MLX CUDA owns host vision preprocessing and IREE `local-sync`
+owns the text decoder. Use `--device local-sync` with the CUDA-enabled IREE
+runtime, or `local-task` where worker creation is permitted.
+
+The initial non-regression baseline was recorded on 2026-07-24 on an NVIDIA GB10
+(driver 580.159.03, CUDA 13.0), IREE 3.12.0rc20260721 CUDA, context 1536,
+four-token greedy decode, and `MLX_ENABLE_TF32=0`:
+
+| Case | Host preprocess | IREE prefill | Decode |
+|------|----------------:|-------------:|-------:|
+| one image + text (743 effective tokens) | 1.351 s | 0.985 s | 8.37 tok/s |
+| two images + text (1473 effective tokens) | 1.278 s | 0.670 s | 8.36 tok/s |
+| text only (14 effective tokens) | 0.0004 s | 0.675 s | 8.27 tok/s |
+
+Host component load was 0.220 s and IREE compile/load was 1.316 s. Peak process
+RSS was 2,551,368 KiB and MLX reported 2,401,427,528 peak device bytes. Dedicated
+IREE device bytes are unavailable on the GB10 unified-memory runtime, so the
+manifest also records Linux available-memory before/after. The host loader's
+allowlist retains processor, vision tower, projector, and the one text embedding
+table; decoder layers and LM head are rejected by its structural test. Prefill,
+selected-KV capture, and decode share one resident IREE text decoder bundle.
+
+The `local-sync` CPU fallback on the same host passed all stages and exact
+greedy tokens. It recorded 1.375 s compile/load, 1.035 s one-image host
+preprocessing, 19.158 s prefill, 1.30 decode tok/s, and 6,374,948 KiB peak RSS.
+The higher RSS and latency are expected from the static 1536-token CPU graph and
+serve as the CPU non-regression baseline.
+
 ### Scope / limits
 
 - The bundled graphs are authored for **Llama-3.2-1B-Instruct** specifically;
   `load` verifies `config.json` matches and errors otherwise.
 - The context capacity is a static graph shape selected with `MLXCEL_XLA_CONTEXT_CAPACITY` (compatibility default `256`).
-- Greedy sampling only; text-only (no VLM / draft).
+- Greedy sampling only; LLaVA prepared-prefill validation is limited to the
+  pinned family above, and draft-model decoding remains out of scope.
 - `XlaInferenceSession` is single-sequence; `XlaBatchEngine` (below) adds
   multi-sequence throughput.
 - **Metal precision (issue #575):** `f16` is the transferable lever on Metal (the
@@ -250,12 +343,16 @@ MLXCEL_BACKEND=xla MLXCEL_XLA_DEVICE=cuda ./target/release/mlxcel-server \
 # then POST /v1/completions (temperature / top_p / top_k / seed are honored).
 ```
 
-The serve path is text-only: it honors `max_tokens`, the model's EOS ids, and
-sampling (temperature / top-k / top-p / min-p / seed). The history-based penalties
-(repetition / frequency / presence / DRY) are not applied (logged once). Requests
-it cannot serve faithfully are rejected with a clear error rather than served
-wrong: logprobs, structured / JSON-schema output, and multimodal inputs. Stop
-strings are not enforced yet. `--max-batch-size` maps to the engine's bundled
+The serve path accepts text and qualified LLaVA image requests. LLaVA image
+decoding and the production MLX vision/projector path run in a bounded host
+preprocessing stage, then the resulting prepared embeddings enter the same IREE
+batch engine as text requests. The `xla-diagnostics` feature supplies the CUDA
+host runtime used by the reproducible mixed-runtime gate above. Sampling
+(temperature / top-k / top-p / min-p / seed), history-based penalties
+(repetition / frequency / presence / DRY), stop strings, `max_tokens`, and the
+model's EOS ids are honored. Requests the engine cannot serve faithfully are
+rejected with a clear error: logprobs, structured / JSON-schema output, and
+unsupported audio/video inputs. `--max-batch-size` maps to the engine's bundled
 `B_max` (`>= 8` -> 8, else 4).
 
 Prove the engine without the server with the reference-equivalence + throughput

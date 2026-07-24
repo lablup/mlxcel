@@ -218,6 +218,25 @@ pub(super) fn is_llava_host_preprocessor_weight(name: &str) -> bool {
         || canonical.starts_with("model.embed_tokens.")
 }
 
+/// Widen only the host vision tower and projector weights used by the
+/// qualified XLA LLaVA path.
+///
+/// The checkpoint remains immutable BF16 on disk and the text embedding table
+/// stays at its checkpoint dtype. MLX otherwise selects BF16 matmul output when
+/// either a vision weight or activation is BF16, so widening only the input
+/// pixels is insufficient to prevent layer-by-layer reduction drift.
+fn widen_llava_host_vision_weights(weights: &mut WeightMap) {
+    for (name, tensor) in weights.iter_mut() {
+        if !(name.starts_with("vision_tower.") || name.starts_with("multi_modal_projector.")) {
+            continue;
+        }
+        let dtype = mlxcel_core::array_dtype(tensor);
+        if dtype == mlxcel_core::dtype::BFLOAT16 || dtype == mlxcel_core::dtype::FLOAT16 {
+            *tensor = mlxcel_core::astype(tensor, mlxcel_core::dtype::FLOAT32);
+        }
+    }
+}
+
 fn require_llava_host_family(config: &VLMConfig) -> Result<(), HostPreprocessorError> {
     if !matches!(config.model_type.as_str(), "llava" | "llava_next") {
         return Err(HostPreprocessorError::FamilyMismatch {
@@ -274,11 +293,12 @@ pub(crate) fn load_llava_host_preprocessor(
         }
     })?;
 
-    let weights = load_vlm_weights_common_filtered_canonical(model_path, |name| {
+    let mut weights = load_vlm_weights_common_filtered_canonical(model_path, |name| {
         is_llava_host_preprocessor_weight(name)
     })
     .map(strip_language_model_prefix)
     .map_err(|error| HostPreprocessorError::WeightLoad(error.to_string()))?;
+    widen_llava_host_vision_weights(&mut weights);
 
     let quant_group_size = full_config
         .get("quantization")
@@ -425,6 +445,7 @@ fn parse_bunny_vision_config(
             image_size: 384,
             num_channels: 3,
             layer_norm_eps: 1e-6,
+            hidden_act: vision::config::VisionHiddenActivation::ExactGelu,
         }
     })
 }

@@ -75,6 +75,8 @@ pub use mlxcel_core::generate::{
     SamplingConfig,
 };
 pub use mlxcel_core::speculative::SpeculativeGenerator;
+#[cfg(feature = "xla-diagnostics")]
+pub use multimodal::host_preprocessor::LlavaHostReferenceCapture;
 pub use multimodal::host_preprocessor::{
     FakeHostMultimodalPreprocessor, HostMultimodalPreprocessor, HostPreprocessorError,
     LlavaHostPreprocessor, load_xla_image_preprocessor,

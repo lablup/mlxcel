@@ -75,6 +75,13 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                 }
             }
         };
+        #[cfg(feature = "xla-diagnostics")]
+        if !images.is_empty()
+            && let Err(error) = validate_reference_prompt_tokens_from_env(&prompt_tokens)
+        {
+            let _ = response_tx.send(GenerateEvent::Error(error));
+            return;
+        }
         let params = sample_params(&options);
         let stop_sequences = options.stop_sequences.unwrap_or_default();
         let start = Instant::now();
@@ -341,6 +348,27 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
             }
         }
     }
+}
+
+#[cfg(feature = "xla-diagnostics")]
+fn validate_reference_prompt_tokens_from_env(prompt_tokens: &[i32]) -> Result<(), String> {
+    const ENV_NAME: &str = "MLXCEL_XLA_REFERENCE_EXPECT_UNEXPANDED_IDS";
+    let Ok(raw) = std::env::var(ENV_NAME) else {
+        return Ok(());
+    };
+    let expected: Vec<i32> = serde_json::from_str(&raw)
+        .map_err(|error| format!("{ENV_NAME} must be a JSON integer array: {error}"))?;
+    if prompt_tokens != expected {
+        return Err(format!(
+            "OpenXLA reference prompt mismatch before admission: expected {expected:?}, \
+             server rendered {prompt_tokens:?}"
+        ));
+    }
+    tracing::info!(
+        unexpanded_prompt_ids = ?prompt_tokens,
+        "OpenXLA reference prompt matched before admission"
+    );
+    Ok(())
 }
 
 fn sample_params(options: &ServerGenerateOptions) -> SampleParams {

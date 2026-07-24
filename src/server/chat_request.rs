@@ -192,12 +192,16 @@ pub(crate) async fn prepare_chat_request_with_cache(
 
     let preserve_thinking = merged_kwargs.preserve_thinking();
 
-    let prompt = if has_tool_fields(request) || has_reasoning_fields(request) {
-        // When messages contain tool_calls / tool_call_id, or a parallel
-        // `reasoning` field (issue #362), use raw JSON rendering so the Jinja2
-        // template can access all fields. The typed `ChatMessage` path only
-        // carries role + content, so reasoning would otherwise be dropped
-        // before reaching templates that render `message.get('reasoning')`.
+    let prompt = if has_tool_fields(request)
+        || has_reasoning_fields(request)
+        || has_template_media_parts(request)
+    {
+        // When messages contain tool_calls / tool_call_id, a parallel
+        // `reasoning` field (issue #362), or typed media content, use raw JSON
+        // rendering so the Jinja2 template can access the complete message
+        // shape. The typed `ChatMessage` path only carries role + flattened
+        // text, which would otherwise drop image/audio/video positions before
+        // processor-aware templates can render their placeholder tokens.
         let raw_messages = build_raw_json_messages_with_thinking(request, preserve_thinking);
         // Build the stripped ChatMessages in parallel so the fallback path can
         // use them without re-running strip_rolling_checkpoint.
@@ -440,9 +444,9 @@ fn build_raw_json_messages_with_thinking(
             let stripped = strip_indices.contains(&idx);
             let raw_content = m.content.text();
             let content = if stripped {
-                strip_think_block(&raw_content).into_owned()
+                serde_json::Value::String(strip_think_block(&raw_content).into_owned())
             } else {
-                raw_content
+                template_content(&m.content)
             };
 
             let mut msg = serde_json::json!({
@@ -480,7 +484,7 @@ fn build_raw_json_messages_with_thinking(
             if !stripped
                 && let Some(reasoning) = m.reasoning.as_ref()
                 && !reasoning.is_empty()
-                && !content.contains("<think>")
+                && !raw_content.contains("<think>")
             {
                 msg["reasoning"] = serde_json::Value::String(reasoning.clone());
             }
@@ -490,6 +494,58 @@ fn build_raw_json_messages_with_thinking(
         .collect();
 
     serde_json::Value::Array(messages)
+}
+
+/// Return whether any message carries a media part whose position must reach
+/// the processor-aware chat template.
+///
+/// OpenAI's wire types (`image_url`, `video_url`, `input_audio`) are transport
+/// objects, while Hugging Face processor templates branch on semantic types
+/// (`image`, `video`, `audio`). Routing only these requests through the raw
+/// renderer keeps the established string-content path unchanged for ordinary
+/// text requests and text-only content arrays.
+fn has_template_media_parts(request: &ChatCompletionRequest) -> bool {
+    request.messages.iter().any(|message| {
+        matches!(
+            &message.content,
+            MessageContent::Parts(parts)
+                if parts.iter().any(|part| !matches!(part, ContentPart::Text { .. }))
+        )
+    })
+}
+
+/// Normalize OpenAI transport content into the typed content shape consumed by
+/// Hugging Face processor templates.
+///
+/// Media bytes/URLs are resolved by the server's media pipeline, not by Jinja.
+/// Exposing them to a template would both leak unnecessarily large payloads
+/// into rendering and fail templates such as LLaVA's, which select
+/// `content.type == "image"`. Keep only an ordered semantic marker at this
+/// boundary.
+fn template_content(content: &MessageContent) -> serde_json::Value {
+    match content {
+        MessageContent::Text(text) => serde_json::Value::String(text.clone()),
+        MessageContent::Parts(parts) => serde_json::Value::Array(
+            parts
+                .iter()
+                .map(|part| match part {
+                    ContentPart::Text { text } => serde_json::json!({
+                        "type": "text",
+                        "text": text,
+                    }),
+                    ContentPart::ImageUrl { .. } => serde_json::json!({
+                        "type": "image",
+                    }),
+                    ContentPart::VideoUrl { .. } => serde_json::json!({
+                        "type": "video",
+                    }),
+                    ContentPart::InputAudio { .. } => serde_json::json!({
+                        "type": "audio",
+                    }),
+                })
+                .collect(),
+        ),
+    }
 }
 
 /// Normalize each tool call's `function.arguments` from a JSON-encoded string

@@ -53,6 +53,7 @@ fn phi3_vision_config() -> vision::config::VisionConfig {
         num_channels: 3,
         patch_size: 14,
         layer_norm_eps: 1e-5,
+        hidden_act: vision::config::VisionHiddenActivation::ExactGelu,
     }
 }
 

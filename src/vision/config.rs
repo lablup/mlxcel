@@ -27,6 +27,19 @@ where
     Option::deserialize(deserializer).map(|opt| opt.unwrap_or_default())
 }
 
+/// Activation selected by a SigLIP/CLIP checkpoint.
+///
+/// Existing and unknown values retain mlxcel's exact-erf GELU behavior. The
+/// explicit `gelu_pytorch_tanh` variant follows the Hugging Face polynomial.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+pub enum VisionHiddenActivation {
+    #[serde(rename = "gelu_pytorch_tanh")]
+    GeluPytorchTanh,
+    #[default]
+    #[serde(other)]
+    ExactGelu,
+}
+
 /// Vision encoder configuration (SigLIP)
 #[derive(Debug, Clone, Deserialize)]
 pub struct VisionConfig {
@@ -42,6 +55,8 @@ pub struct VisionConfig {
     pub num_channels: usize,
     #[serde(default = "default_layer_norm_eps")]
     pub layer_norm_eps: f32,
+    #[serde(default, deserialize_with = "null_default")]
+    pub hidden_act: VisionHiddenActivation,
 }
 
 fn default_image_size() -> usize {
@@ -112,5 +127,40 @@ impl VLMConfig {
                     .map(|v| v as usize)
             })
             .unwrap_or(256)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{VisionConfig, VisionHiddenActivation};
+
+    fn config(hidden_act: Option<&str>) -> serde_json::Value {
+        let mut value = serde_json::json!({
+            "model_type": "siglip_vision_model",
+            "num_hidden_layers": 1,
+            "hidden_size": 8,
+            "intermediate_size": 16,
+            "num_attention_heads": 2,
+            "patch_size": 2
+        });
+        if let Some(hidden_act) = hidden_act {
+            value["hidden_act"] = serde_json::Value::String(hidden_act.to_string());
+        }
+        value
+    }
+
+    #[test]
+    fn vision_hidden_act_selects_only_the_explicit_pytorch_tanh_variant() {
+        let tanh: VisionConfig = serde_json::from_value(config(Some("gelu_pytorch_tanh"))).unwrap();
+        assert_eq!(tanh.hidden_act, VisionHiddenActivation::GeluPytorchTanh);
+
+        for value in [
+            config(None),
+            config(Some("gelu")),
+            config(Some("quick_gelu")),
+        ] {
+            let parsed: VisionConfig = serde_json::from_value(value).unwrap();
+            assert_eq!(parsed.hidden_act, VisionHiddenActivation::ExactGelu);
+        }
     }
 }

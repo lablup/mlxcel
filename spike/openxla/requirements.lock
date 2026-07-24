@@ -23,6 +23,7 @@ networkx==3.6.1
 numpy==2.5.0
 opt-einsum==3.4.0
 packaging==26.2
+pillow==10.4.0
 pygments==2.20.0
 pyyaml==6.0.3
 regex==2026.5.9

@@ -13,6 +13,10 @@
 # checkpoint in fp32 (dequantizing an MLX 4-bit/8-bit checkpoint offline first) and
 # records the greedy continuation the token-exact gate diffs against.
 #
+# LLaVA's host vision/projector plus prepared-embeddings path has a separate
+# independent HF stage oracle and CLI/server gate:
+#   scripts/xla/validate_llava_reference.sh --help
+#
 # The two execution gates need a real IREE build (the `xla-iree` feature), so set
 # the IREE environment first (see src/lib/mlxcel-xla/README.md):
 #   - CPU (prebuilt dist):  export IREE_DIST=/path/to/iree-dist

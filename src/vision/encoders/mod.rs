@@ -62,4 +62,18 @@ pub struct VisionEncoderOutput {
 /// Trait for vision encoders
 pub trait VisionEncoder {
     fn forward(&self, pixel_values: &MlxArray) -> VisionEncoderOutput;
+
+    /// Run the exact encoder path while retaining ordered hidden states for a
+    /// reference-oracle first-divergence report.
+    #[cfg(feature = "xla-diagnostics")]
+    fn forward_with_hidden_state_diagnostics(
+        &self,
+        pixel_values: &MlxArray,
+    ) -> (
+        VisionEncoderOutput,
+        Vec<UniquePtr<MlxArray>>,
+        Vec<UniquePtr<MlxArray>>,
+    ) {
+        (self.forward(pixel_values), Vec::new(), Vec::new())
+    }
 }

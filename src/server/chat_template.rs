@@ -74,34 +74,44 @@ impl ChatTemplateProcessor {
             None
         };
 
-        // Try tokenizer_config.json "chat_template" field first, then a separate
-        // chat_template.jinja file, then a chat_template.json file.
+        // Read tokenizer_config.json plus the two standalone template formats.
         // Some models (e.g. Gemma 4 MLX Community quantizations) have an empty
         // string for chat_template in tokenizer_config.json but ship a separate
         // .jinja file. Others (e.g. Idefics2) ship only a chat_template.json
         // (`{"chat_template": "..."}`), the newer transformers convention.
-        let template = config
+        //
+        // LLaVA interleave checkpoints can ship both: a legacy string-only
+        // tokenizer template and a processor-aware standalone JSON template.
+        // Transformers selects the latter for image messages. Prefer a
+        // standalone typed-content template over the legacy config value so
+        // CLI/server image requests render the same logical prompt.
+        let config_template = config
             .as_ref()
             .and_then(|c| c.get("chat_template"))
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
-            .map(String::from)
+            .map(String::from);
+        let jinja_template = std::fs::read_to_string(model_path.join("chat_template.jinja"))
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        let json_template = std::fs::read_to_string(model_path.join("chat_template.json"))
+            .ok()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+            .and_then(|value| value.get("chat_template")?.as_str().map(String::from))
+            .filter(|s| !s.is_empty());
+        let typed_standalone = jinja_template
+            .as_ref()
+            .filter(|template| template_renders_typed_image_content(template))
             .or_else(|| {
-                let jinja_path = model_path.join("chat_template.jinja");
-                std::fs::read_to_string(jinja_path)
-                    .ok()
-                    .filter(|s| !s.trim().is_empty())
+                json_template
+                    .as_ref()
+                    .filter(|template| template_renders_typed_image_content(template))
             })
-            .or_else(|| {
-                let json_path = model_path.join("chat_template.json");
-                let content = std::fs::read_to_string(json_path).ok()?;
-                serde_json::from_str::<serde_json::Value>(&content)
-                    .ok()?
-                    .get("chat_template")?
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                    .map(String::from)
-            });
+            .cloned();
+        let template = typed_standalone
+            .or(config_template)
+            .or(jinja_template)
+            .or(json_template);
 
         let Some(template) = template else {
             return Ok(None);
@@ -694,6 +704,37 @@ fn truncate_key_for_log(key: &str) -> String {
 /// effect on the rendered prompt, so we simply drop both delimiters so the
 /// template parses cleanly under minijinja. Affected models: SmolLM3, and
 /// any other HF template that adopts this marker.
+fn template_renders_typed_image_content(template: &str) -> bool {
+    let processor = ChatTemplateProcessor::with_template(template.to_string());
+    if !processor.supports_image_content() {
+        return false;
+    }
+    let with_image = serde_json::json!([{
+        "role": "user",
+        "content": [
+            {"type": "image"},
+            {"type": "text", "text": "__mlxcel_text_probe__"},
+        ],
+    }]);
+    let text_only = serde_json::json!([{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "__mlxcel_text_probe__"},
+        ],
+    }]);
+    match (
+        processor.apply_raw(&with_image, None),
+        processor.apply_raw(&text_only, None),
+    ) {
+        (Ok(with_image), Ok(text_only)) => {
+            with_image.contains("__mlxcel_text_probe__")
+                && text_only.contains("__mlxcel_text_probe__")
+                && with_image != text_only
+        }
+        _ => false,
+    }
+}
+
 fn preprocess_template(template: String) -> String {
     // Handle all whitespace-control variants of the two delimiters. Using
     // explicit replaces keeps this allocation-light and regex-free.
@@ -1101,6 +1142,113 @@ impl std::fmt::Debug for ChatTemplateProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standalone_typed_template_overrides_legacy_string_template() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("tokenizer_config.json"),
+            r#"{"chat_template":"legacy={{ messages[0]['content'] }}"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join("chat_template.json"),
+            serde_json::json!({
+                "chat_template": "{% for item in messages[0]['content'] %}{% if item['type'] == 'image' %}<image>{% else %}{{ item['text'] }}{% endif %}{% endfor %}"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let processor = ChatTemplateProcessor::from_model_path(directory.path())
+            .unwrap()
+            .unwrap();
+        assert!(processor.supports_image_content());
+        let rendered = processor
+            .apply_raw(
+                &serde_json::json!([{
+                    "role": "user",
+                    "content": [
+                        {"type": "image"},
+                        {"type": "text", "text": "describe"},
+                    ],
+                }]),
+                None,
+            )
+            .unwrap();
+        assert_eq!(rendered, "<image>describe");
+        let text_only = processor
+            .apply_raw(
+                &serde_json::json!([{
+                    "role": "user",
+                    "content": [{"type": "text", "text": "hello"}],
+                }]),
+                None,
+            )
+            .unwrap();
+        assert_eq!(text_only, "hello");
+    }
+
+    #[test]
+    fn tokenizer_config_only_legacy_template_keeps_existing_precedence() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("tokenizer_config.json"),
+            r#"{"chat_template":"legacy={{ messages[0]['content'] }}"}"#,
+        )
+        .unwrap();
+
+        let processor = ChatTemplateProcessor::from_model_path(directory.path())
+            .unwrap()
+            .unwrap();
+        assert!(!processor.supports_image_content());
+        assert_eq!(
+            processor
+                .apply(
+                    &[ChatMessage {
+                        role: "user".to_string(),
+                        content: "hello".to_string(),
+                    }],
+                    None,
+                )
+                .unwrap(),
+            "legacy=hello"
+        );
+    }
+
+    #[test]
+    fn malformed_or_untyped_standalone_template_falls_back_to_legacy_config() {
+        for standalone in [
+            r#"{"chat_template":"{% if broken %}"}"#,
+            r#"{"chat_template":"standalone={{ messages[0]['content'] }}"}"#,
+            r#"{"not_chat_template":"ignored"}"#,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::write(
+                directory.path().join("tokenizer_config.json"),
+                r#"{"chat_template":"legacy={{ messages[0]['content'] }}"}"#,
+            )
+            .unwrap();
+            std::fs::write(directory.path().join("chat_template.json"), standalone).unwrap();
+
+            let processor = ChatTemplateProcessor::from_model_path(directory.path())
+                .unwrap()
+                .unwrap();
+            assert!(!processor.supports_image_content());
+            assert_eq!(
+                processor
+                    .apply(
+                        &[ChatMessage {
+                            role: "user".to_string(),
+                            content: "hello".to_string(),
+                        }],
+                        None,
+                    )
+                    .unwrap(),
+                "legacy=hello"
+            );
+        }
+    }
 
     #[test]
     fn supports_audio_content_detects_audio_branch() {

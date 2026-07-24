@@ -87,14 +87,109 @@ async fn prepare_chat_request_uses_template_output_and_extracts_images() {
         reasoning: None,
         tool_calls: None,
     }]);
-    let processor =
-        ChatTemplateProcessor::with_template("Prompt: {{ messages[0].content }}".to_string());
+    let processor = ChatTemplateProcessor::with_template(
+        "{% for item in messages[0].content %}\
+         {% if item.type == 'image' %}<image>{% elif item.type == 'text' %}{{ item.text }}{% endif %}\
+         {% endfor %}"
+            .to_string(),
+    );
 
     let prepared = prepare_chat_request(&processor, &request, None)
         .await
         .unwrap();
-    assert_eq!(prepared.prompt, "Prompt: Look");
+    assert_eq!(prepared.prompt, "Look<image>");
     assert_eq!(prepared.image_data, vec![b"hello".to_vec()]);
+}
+
+#[tokio::test]
+async fn llava_server_render_preserves_image_marker_and_exact_prompt() {
+    let request = request_with_messages(vec![Message {
+        role: Role::User,
+        content: MessageContent::Parts(vec![
+            ContentPart::ImageUrl {
+                image_url: ImageUrl::new(
+                    "data:image/png;base64,aGVsbG8tdGVtcGxhdGUtYm91bmRhcnk=".to_string(),
+                ),
+            },
+            ContentPart::Text {
+                text: "Describe the image briefly.".to_string(),
+            },
+        ]),
+        name: None,
+        tool_call_id: None,
+        reasoning: None,
+        tool_calls: None,
+    }]);
+    let processor = ChatTemplateProcessor::with_template(
+        r#"{% for message in messages %}{{'<|im_start|>' + message['role'] + '
+'}}{% for content in message['content'] | selectattr('type', 'equalto', 'image') %}{{ '<image>' }}{% endfor %}{% if message['role'] != 'assistant' %}{% for content in message['content'] | selectattr('type', 'equalto', 'text') %}{{ '
+' + content['text'] }}{% endfor %}{% endif %}{{'<|im_end|>' + '
+'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant
+' }}{% endif %}"#
+            .to_string(),
+    );
+
+    let prepared = prepare_chat_request(&processor, &request, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        prepared.prompt,
+        "<|im_start|>user\n<image>\nDescribe the image briefly.<|im_end|>\n\
+         <|im_start|>assistant\n"
+    );
+    assert!(
+        !prepared.prompt.contains("base64"),
+        "transport payload must not enter the template prompt"
+    );
+}
+
+#[test]
+fn raw_template_content_normalizes_openai_media_types_without_payloads() {
+    let request = request_with_messages(vec![Message {
+        role: Role::User,
+        content: MessageContent::Parts(vec![
+            ContentPart::Text {
+                text: "before".to_string(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrl::new("https://secret.example/image.png"),
+            },
+            ContentPart::VideoUrl {
+                video_url: VideoUrl {
+                    url: "https://secret.example/video.mp4".to_string(),
+                    fps: Some(2.0),
+                },
+            },
+            ContentPart::InputAudio {
+                input_audio: InputAudio {
+                    data: "private-audio-data".to_string(),
+                    format: "wav".to_string(),
+                },
+            },
+            ContentPart::Text {
+                text: "after".to_string(),
+            },
+        ]),
+        name: None,
+        tool_call_id: None,
+        reasoning: None,
+        tool_calls: None,
+    }]);
+
+    let raw = build_raw_json_messages(&request);
+    assert_eq!(
+        raw[0]["content"],
+        serde_json::json!([
+            {"type": "text", "text": "before"},
+            {"type": "image"},
+            {"type": "video"},
+            {"type": "audio"},
+            {"type": "text", "text": "after"},
+        ])
+    );
+    let serialized = raw.to_string();
+    assert!(!serialized.contains("secret.example"));
+    assert!(!serialized.contains("private-audio-data"));
 }
 
 #[tokio::test]

@@ -311,3 +311,10 @@ required-features = ["xla-iree"]
 [[example]]
 name = "xla_traj_dump"
 required-features = ["xla-iree"]
+
+# Independent LLaVA stage capture against the pinned HF oracle (#862).
+# Host vision/projector diagnostics require the qualified CUDA-backed MLX path,
+# while text prefill/decode run on the selected IREE CPU or CUDA device.
+[[example]]
+name = "xla_llava_reference_check"
+required-features = ["xla-diagnostics"]

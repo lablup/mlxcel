@@ -295,6 +295,20 @@ unsafe extern "C" {
         vocab: c_int,
         out_logits: *mut f32,
     ) -> c_int;
+    #[cfg(feature = "diagnostics")]
+    fn xla_llama_prefill_embeddings_slot_diagnostics(
+        c: *mut XlaCtx,
+        slot: c_int,
+        position_mode: c_int,
+        embeddings: *const XlaTensorDesc,
+        positions: *const XlaTensorDesc,
+        attention_bias: *const XlaTensorDesc,
+        real_len: c_int,
+        vocab: c_int,
+        kv_width: c_int,
+        out_logits: *mut f32,
+        out_kv: *mut f32,
+    ) -> c_int;
     fn xla_llama_prefill_embeddings_ple(
         c: *mut XlaCtx,
         position_mode: c_int,
@@ -2012,6 +2026,17 @@ impl Drop for IreeLlama {
 ///
 /// [`prefill_slot_logits`]: Self::prefill_slot_logits
 /// [`decode_ragged_logits`]: Self::decode_ragged_logits
+#[cfg(feature = "diagnostics")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedPrefillDiagnostics {
+    /// First-token logits returned by the ordinary production prefill graph.
+    pub logits: Vec<f32>,
+    /// Flattened `[layers, 2 (K,V), kv_width]` final-position slices.
+    pub kv: Vec<f32>,
+    pub layers: usize,
+    pub kv_width: usize,
+}
+
 pub struct IreeRaggedLlama {
     ctx: *mut XlaCtx,
     b_max: usize,
@@ -2020,6 +2045,8 @@ pub struct IreeRaggedLlama {
     vocab: usize,
     context_capacity: usize,
     hidden_size: usize,
+    #[cfg(feature = "diagnostics")]
+    model_layers: usize,
     dense_ple_shape: Option<[usize; 3]>,
     position_mode: PreparedPositionMode,
     deepstack_schema: Option<DeepStackConfig>,
@@ -2160,6 +2187,8 @@ impl IreeRaggedLlama {
             vocab: cfg.vocab(),
             context_capacity: cfg.context_capacity(),
             hidden_size: cfg.hidden(),
+            #[cfg(feature = "diagnostics")]
+            model_layers: cfg.n_layers(),
             dense_ple_shape: cfg.dense_ple_shape(),
             position_mode: cfg.position_mode(),
             deepstack_schema: cfg.deepstack().cloned(),
@@ -2191,6 +2220,12 @@ impl IreeRaggedLlama {
     #[must_use]
     pub fn hidden_size(&self) -> usize {
         self.hidden_size
+    }
+
+    #[cfg(feature = "diagnostics")]
+    #[must_use]
+    pub fn model_layers(&self) -> usize {
+        self.model_layers
     }
 
     pub(crate) const fn position_mode(&self) -> PreparedPositionMode {
@@ -2376,6 +2411,80 @@ impl IreeRaggedLlama {
             ));
         }
         Ok(logits)
+    }
+
+    /// Run the ordinary embeddings prefill and read a compact final-position
+    /// K/V slice from every decoder layer.
+    ///
+    /// This diagnostics-only entry shares the production prefill invocation and
+    /// slot population path. It does not compile or retain a second decoder.
+    #[cfg(feature = "diagnostics")]
+    pub fn prefill_prepared_slot_diagnostics(
+        &mut self,
+        slot: usize,
+        prepared: &PreparedIreePrefill,
+        kv_width: usize,
+    ) -> Result<PreparedPrefillDiagnostics, String> {
+        if self.dense_ple_shape.is_some() {
+            return Err(
+                "LLaVA diagnostics require the ordinary embeddings prefill entry".to_string(),
+            );
+        }
+        validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
+        if prepared.hidden_size != self.hidden_size
+            || prepared.context_capacity != self.context_capacity
+            || prepared.effective_len == 0
+            || prepared.effective_len > self.context_capacity
+            || prepared.positions.mode() != self.position_mode
+        {
+            return Err(
+                "prepared IREE payload is incompatible with this runtime bundle".to_string(),
+            );
+        }
+        if kv_width == 0 {
+            return Err("diagnostic KV width must be greater than zero".to_string());
+        }
+        let (embeddings, positions, attention_bias) = prepared_descriptors(prepared)?;
+        let real_len = checked_ffi_int(prepared.effective_len, "prepared effective length")?;
+        let slot = checked_ffi_int(slot, "slot")?;
+        let vocab = checked_ffi_int(self.vocab, "vocab_size")?;
+        let kv_width_ffi = checked_ffi_int(kv_width, "diagnostic KV width")?;
+        let layers = self.model_layers();
+        let kv_len = layers
+            .checked_mul(2)
+            .and_then(|value| value.checked_mul(kv_width))
+            .ok_or_else(|| "diagnostic KV output length overflows".to_string())?;
+        let mut logits = vec![0.0; self.vocab];
+        let mut kv = vec![0.0; kv_len];
+        // Safety: descriptors and output buffers outlive the call. The C shim
+        // validates their exact runtime dimensions before any readback and uses
+        // the same production prefill call before extracting selected KV rows.
+        let rc = unsafe {
+            xla_llama_prefill_embeddings_slot_diagnostics(
+                self.ctx,
+                slot,
+                prepared.positions.mode().ffi_code(),
+                &embeddings,
+                &positions,
+                &attention_bias,
+                real_len,
+                vocab,
+                kv_width_ffi,
+                logits.as_mut_ptr(),
+                kv.as_mut_ptr(),
+            )
+        };
+        if rc != 0 {
+            return Err(format!(
+                "xla_llama_prefill_embeddings_slot_diagnostics failed (status {rc})"
+            ));
+        }
+        Ok(PreparedPrefillDiagnostics {
+            logits,
+            kv,
+            layers,
+            kv_width,
+        })
     }
 
     /// Seed one batch slot through the sparse DeepStack prefill entry.
