@@ -33,7 +33,7 @@ use sha2::{Digest, Sha256};
 
 use crate::aux::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
-    IreeAuxiliaryModule,
+    AuxiliaryWeightStorage, IreeAuxiliaryModule,
 };
 use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 #[cfg(feature = "diagnostics")]
@@ -539,7 +539,7 @@ fn load_weights(
             validate_finite_values(&format!("vision tensor {}", spec.name), &values)?;
             loaded[index] = Some(AuxiliaryWeight {
                 name: spec.name.clone(),
-                bytes: native_f32_bytes(values),
+                storage: AuxiliaryWeightStorage::Bytes(native_f32_bytes(values)),
                 dtype: AuxiliaryWeightDType::Float32,
                 shape: spec.shape.clone(),
             });
@@ -910,7 +910,7 @@ mod tests {
         let vmfb = temp_path("compiler-digest").with_extension("vmfb");
         let weights = vec![AuxiliaryWeight {
             name: "weight".to_string(),
-            bytes: 1.0f32.to_ne_bytes().to_vec(),
+            storage: AuxiliaryWeightStorage::Bytes(1.0f32.to_ne_bytes().to_vec()),
             dtype: AuxiliaryWeightDType::Float32,
             shape: vec![1],
         }];
