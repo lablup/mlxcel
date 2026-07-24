@@ -488,7 +488,13 @@ impl Config {
             serde_json::from_str(s).map_err(|e| format!("parse config.json: {e}"))?;
         let wrapper_model_type = root.get("model_type").and_then(serde_json::Value::as_str);
         let is_phi4mm = wrapper_model_type == Some("phi4mm");
-        let v = if matches!(wrapper_model_type, Some("llava" | "llava_next" | "gemma3")) {
+        let is_gemma3_vlm_wrapper = wrapper_model_type == Some("gemma3")
+            && root
+                .get("vision_config")
+                .is_some_and(serde_json::Value::is_object);
+        let v = if matches!(wrapper_model_type, Some("llava" | "llava_next"))
+            || is_gemma3_vlm_wrapper
+        {
             let mut text = root
                 .get("text_config")
                 .and_then(serde_json::Value::as_object)
@@ -498,7 +504,7 @@ impl Config {
                         "{wrapper_model_type:?} config.json missing object `text_config` for the XLA text graph"
                     )
                 })?;
-            if wrapper_model_type == Some("gemma3") {
+            if is_gemma3_vlm_wrapper {
                 // mlx-vlm's Gemma3 TextConfig supplies these architecture
                 // defaults. mlx-community conversions commonly omit them from
                 // the nested object, so resolve the same explicit contract here
@@ -1603,6 +1609,7 @@ mod tests {
     fn gemma3_wrapper_uses_nested_text_config_and_wrapper_quantization() {
         let config = Config::from_json_str(
             r#"{"model_type":"gemma3","quantization":{"bits":4,"group_size":64},
+                "vision_config":{},
                 "text_config":{"model_type":"gemma3_text","hidden_size":2560,
                 "intermediate_size":10240,"num_hidden_layers":34,"sliding_window":1024,
                 "rope_scaling":{"factor":8.0,"rope_type":"linear"}}}"#,
@@ -1615,6 +1622,24 @@ mod tests {
         assert_eq!(config.n_kv, 4);
         assert_eq!(config.head_dim, 256);
         assert_eq!(config.rope, RopeScaling::Plain);
+    }
+
+    #[test]
+    fn gemma3_root_text_config_remains_direct_without_vision() {
+        let config = Config::from_json_str(
+            r#"{"model_type":"gemma3","hidden_size":8,"num_attention_heads":2,
+                "num_key_value_heads":1,"head_dim":4,"intermediate_size":16,
+                "num_hidden_layers":4,"rms_norm_eps":1e-6,"rope_theta":1000000,
+                "rope_local_base_freq":10000,"sliding_window":2,
+                "sliding_window_pattern":3,"vocab_size":12,
+                "hidden_activation":"gelu_pytorch_tanh"}"#,
+        )
+        .unwrap();
+        assert_eq!(config.hidden, 8);
+        assert_eq!(config.n_q, 2);
+        assert_eq!(config.n_kv, 1);
+        assert_eq!(config.head_dim, 4);
+        assert!(config.embeddings_prefill_uses_authoritative_mask);
     }
 
     /// ERNIE-4.5 is rejected with a message naming its interleaved (GPT-J-style)
