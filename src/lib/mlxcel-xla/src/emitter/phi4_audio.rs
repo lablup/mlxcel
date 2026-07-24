@@ -469,6 +469,11 @@ fn mask_rows(b: &mut Builder, input: &Val, active: &Val) -> Val {
     b.select(&active, input, &zero)
 }
 
+fn round_bf16(b: &mut Builder, input: &Val) -> Val {
+    let narrow = b.convert(input, "bf16");
+    b.convert(&narrow, "f32")
+}
+
 fn conv2d(
     b: &mut Builder,
     weights: &HashMap<String, Val>,
@@ -676,7 +681,7 @@ fn conformer_block(
     relative_bias: &Val,
     active_rows: &Val,
     layer: usize,
-) -> Val {
+) -> ConformerBlockValues {
     let stem = format!("{RAW_PREFIX}.encoder.encoders.{layer}");
     let scale = b.const_f32(0.5);
     let scale = b.broadcast(&scale, &[], input.ty.shape.clone());
@@ -688,8 +693,8 @@ fn conformer_block(
         config.linear_units,
     );
     let ff = b.multiply(&ff, &scale);
-    let hidden = b.add(input, &ff);
-    let attention_input = layer_norm(b, weights, &hidden, &format!("{stem}.layer_norm_att"));
+    let after_ff_in = b.add(input, &ff);
+    let attention_input = layer_norm(b, weights, &after_ff_in, &format!("{stem}.layer_norm_att"));
     let attention = self_attention(
         b,
         weights,
@@ -699,20 +704,50 @@ fn conformer_block(
         active_rows,
         &stem,
     );
-    let hidden = b.add(&hidden, &attention);
-    let convolution = convolution_module(b, weights, config, &hidden, &stem);
-    let hidden = b.add(&hidden, &convolution);
+    let after_attention = b.add(&after_ff_in, &attention);
+    let convolution = convolution_module(b, weights, config, &after_attention, &stem);
+    let after_convolution = b.add(&after_attention, &convolution);
     let ff = feed_forward(
         b,
         weights,
-        &hidden,
+        &after_convolution,
         &format!("{stem}.feed_forward_out"),
         config.linear_units,
     );
     let ff = b.multiply(&ff, &scale);
-    let hidden = b.add(&hidden, &ff);
-    let hidden = layer_norm(b, weights, &hidden, &format!("{stem}.layer_norm"));
-    mask_rows(b, &hidden, active_rows)
+    let hidden = b.add(&after_convolution, &ff);
+    let output = layer_norm(b, weights, &hidden, &format!("{stem}.layer_norm"));
+    let output = mask_rows(b, &output, active_rows);
+    ConformerBlockValues {
+        after_ff_in,
+        attention,
+        after_attention,
+        convolution,
+        after_convolution,
+        ff_out: ff,
+        output,
+    }
+}
+
+struct ConformerBlockValues {
+    after_ff_in: Val,
+    attention: Val,
+    after_attention: Val,
+    convolution: Val,
+    after_convolution: Val,
+    ff_out: Val,
+    output: Val,
+}
+
+struct SubsampleValues {
+    conv0: Val,
+    conv1_depthwise: Val,
+    conv1_pointwise: Val,
+    conv1: Val,
+    conv2_depthwise: Val,
+    conv2_pointwise: Val,
+    conv2: Val,
+    projected: Val,
 }
 
 fn subsample(
@@ -720,42 +755,81 @@ fn subsample(
     weights: &HashMap<String, Val>,
     config: &Phi4AudioConfig,
     input: &Val,
-) -> Val {
+) -> SubsampleValues {
     let bucket = input.ty.shape[0];
     let mut hidden = b.reshape(input, vec![1, bucket, config.input_size, 1]);
     let embed = format!("{RAW_PREFIX}.encoder.embed");
     hidden = conv2d(b, weights, &hidden, &format!("{embed}.conv.0"), 2, 1, 1);
+    // MLX evaluates the first convolution with BF16 features/weights/bias and
+    // materializes its BF16 result. `relu()`'s F32 zero then promotes the
+    // remaining subsampler and all later captured stages to F32.
+    hidden = round_bf16(b, &hidden);
     let relu = |b: &mut Builder, value: &Val| {
         let zero = b.const_f32(0.0);
         let zero = b.broadcast(&zero, &[], value.ty.shape.clone());
         b.maximum(value, &zero)
     };
-    hidden = relu(b, &hidden);
-    for (depthwise, pointwise) in [(2, 3), (5, 6)] {
-        hidden = conv2d(
-            b,
-            weights,
-            &hidden,
-            &format!("{embed}.conv.{depthwise}"),
-            2,
-            1,
-            config.conv_channels,
-        );
-        hidden = conv2d(
-            b,
-            weights,
-            &hidden,
-            &format!("{embed}.conv.{pointwise}"),
-            1,
-            0,
-            1,
-        );
-        hidden = relu(b, &hidden);
-    }
-    let hidden = b.transpose(&hidden, &[0, 1, 3, 2]);
+    let conv0 = relu(b, &hidden);
+    let conv1_depthwise = conv2d(
+        b,
+        weights,
+        &conv0,
+        &format!("{embed}.conv.2"),
+        2,
+        1,
+        config.conv_channels,
+    );
+    let conv1_pointwise = conv2d(
+        b,
+        weights,
+        &conv1_depthwise,
+        &format!("{embed}.conv.3"),
+        1,
+        0,
+        1,
+    );
+    let conv1 = relu(b, &conv1_pointwise);
+    let conv2_depthwise = conv2d(
+        b,
+        weights,
+        &conv1,
+        &format!("{embed}.conv.5"),
+        2,
+        1,
+        config.conv_channels,
+    );
+    let conv2_pointwise = conv2d(
+        b,
+        weights,
+        &conv2_depthwise,
+        &format!("{embed}.conv.6"),
+        1,
+        0,
+        1,
+    );
+    let conv2 = relu(b, &conv2_pointwise);
+    let hidden = b.transpose(&conv2, &[0, 1, 3, 2]);
     let shape = hidden.ty.shape.clone();
     let hidden = b.reshape(&hidden, vec![shape[1], shape[2] * shape[3]]);
-    linear_bias(b, weights, &hidden, &format!("{embed}.out"))
+    let projected = linear_bias(b, weights, &hidden, &format!("{embed}.out"));
+    SubsampleValues {
+        conv0,
+        conv1_depthwise,
+        conv1_pointwise,
+        conv1,
+        conv2_depthwise,
+        conv2_pointwise,
+        conv2,
+        projected,
+    }
+}
+
+struct ProjectionValues {
+    speech_first: Val,
+    speech: Val,
+    vision_first: Val,
+    vision: Val,
+    selected: Val,
 }
 
 fn project_audio(
@@ -765,7 +839,7 @@ fn project_audio(
     encoded: &Val,
     projection_mode: &Val,
     active_rows: &Val,
-) -> Val {
+) -> ProjectionValues {
     let branch = |b: &mut Builder, mode: &str| {
         let first = linear_bias(
             b,
@@ -774,15 +848,16 @@ fn project_audio(
             &format!("{RAW_PREFIX}.audio_projection.{mode}.0"),
         );
         let activated = gelu(b, &first);
-        linear_bias(
+        let projected = linear_bias(
             b,
             weights,
             &activated,
             &format!("{RAW_PREFIX}.audio_projection.{mode}.2"),
-        )
+        );
+        (first, projected)
     };
-    let speech = branch(b, "speech");
-    let vision = branch(b, "vision");
+    let (speech_first, speech) = branch(b, "speech");
+    let (vision_first, vision) = branch(b, "vision");
     let shape = vec![encoded.ty.shape[0], config.projection_hidden];
     let zero = b.const_f32(0.0);
     let zero = b.broadcast(&zero, &[], shape.clone());
@@ -796,7 +871,14 @@ fn project_audio(
     let vision_active = b.broadcast(&vision_active, &[], shape);
     let selected = b.select(&speech_active, &speech, &zero);
     let selected = b.select(&vision_active, &vision, &selected);
-    mask_rows(b, &selected, active_rows)
+    let selected = mask_rows(b, &selected, active_rows);
+    ProjectionValues {
+        speech_first,
+        speech,
+        vision_first,
+        vision,
+        selected,
+    }
 }
 
 /// Emit `audio.main` for a static frame bucket.
@@ -810,6 +892,113 @@ pub(crate) fn emit_phi4_audio_with(
     config: &Phi4AudioConfig,
     frame_bucket: usize,
     precision: Precision,
+) -> Result<String, String> {
+    emit_phi4_audio_entry(config, frame_bucket, precision, false)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Phi4AudioDiagnosticSpec {
+    pub name: &'static str,
+    pub shape: Vec<usize>,
+}
+
+pub(crate) fn phi4_audio_diagnostic_specs(
+    config: &Phi4AudioConfig,
+    frame_bucket: usize,
+) -> Result<Vec<Phi4AudioDiagnosticSpec>, String> {
+    let reduce = |length: usize| (length - 1) / 2 + 1;
+    let time0 = reduce(frame_bucket);
+    let time1 = reduce(time0);
+    let time2 = reduce(time1);
+    let frequency0 = reduce(config.input_size);
+    let frequency1 = reduce(frequency0);
+    let frequency2 = reduce(frequency1);
+    let encoder = vec![1, time2, config.attention_dim];
+    let projection = vec![1, time2, config.projection_hidden];
+    let mut specs = vec![
+        Phi4AudioDiagnosticSpec {
+            name: "subsample.conv0",
+            shape: vec![1, time0, frequency0, config.conv_channels],
+        },
+        Phi4AudioDiagnosticSpec {
+            name: "subsample.conv1.depthwise",
+            shape: vec![1, time1, frequency1, config.conv_channels],
+        },
+        Phi4AudioDiagnosticSpec {
+            name: "subsample.conv1.pointwise",
+            shape: vec![1, time1, frequency1, config.conv_channels],
+        },
+        Phi4AudioDiagnosticSpec {
+            name: "subsample.conv1",
+            shape: vec![1, time1, frequency1, config.conv_channels],
+        },
+        Phi4AudioDiagnosticSpec {
+            name: "subsample.conv2.depthwise",
+            shape: vec![1, time2, frequency2, config.conv_channels],
+        },
+        Phi4AudioDiagnosticSpec {
+            name: "subsample.conv2.pointwise",
+            shape: vec![1, time2, frequency2, config.conv_channels],
+        },
+        Phi4AudioDiagnosticSpec {
+            name: "subsample.conv2",
+            shape: vec![1, time2, frequency2, config.conv_channels],
+        },
+        Phi4AudioDiagnosticSpec {
+            name: "subsample.projected",
+            shape: encoder.clone(),
+        },
+    ];
+    for name in [
+        "block0.after_ff_in",
+        "block0.attention",
+        "block0.after_attention",
+        "block0.convolution",
+        "block0.after_convolution",
+        "block0.ff_out",
+        "block0.output",
+        "block1.output",
+        "block5.output",
+        "block11.output",
+        "block17.output",
+        "block23.output",
+        "encoder.output",
+    ] {
+        specs.push(Phi4AudioDiagnosticSpec {
+            name,
+            shape: encoder.clone(),
+        });
+    }
+    for name in [
+        "projection.speech.first",
+        "projection.speech.output",
+        "projection.vision.first",
+        "projection.vision.output",
+    ] {
+        specs.push(Phi4AudioDiagnosticSpec {
+            name,
+            shape: projection.clone(),
+        });
+    }
+    if time2 != config.encoded_bucket_len(frame_bucket)? {
+        return Err("Phi4MM diagnostic subsampling shape drifted from audio contract".to_string());
+    }
+    Ok(specs)
+}
+
+pub(crate) fn emit_phi4_audio_diagnostic_with(
+    config: &Phi4AudioConfig,
+    frame_bucket: usize,
+    precision: Precision,
+) -> Result<String, String> {
+    emit_phi4_audio_entry(config, frame_bucket, precision, true)
+}
+
+fn emit_phi4_audio_entry(
+    config: &Phi4AudioConfig,
+    frame_bucket: usize,
+    precision: Precision,
+    diagnostic: bool,
 ) -> Result<String, String> {
     if config.attention_dim % config.attention_heads != 0 {
         return Err("Phi4MM audio attention_dim must be divisible by heads".to_string());
@@ -857,7 +1046,6 @@ pub(crate) fn emit_phi4_audio_with(
     let zero_i32 = b.const_i32(0);
     let zero_i32 = b.broadcast(&zero_i32, &[], vec![frame_bucket]);
     let frame_active = b.compare("GT", &frame_mask, &zero_i32, "SIGNED");
-    let features = mask_rows(&mut b, &features, &frame_active);
     let mean = b.broadcast(
         lookup(
             &weights,
@@ -874,9 +1062,19 @@ pub(crate) fn emit_phi4_audio_with(
         &[1],
         vec![frame_bucket, config.input_size],
     );
-    let normalized = b.subtract(&features, &mean);
-    let normalized = b.multiply(&normalized, &inverse_std);
-    let mut encoded = subsample(&mut b, &weights, config, &normalized);
+    // The MLX oracle casts features to the BF16 mean tensor. Its subtract and
+    // multiply therefore each materialize a BF16 boundary; the first ReLU then
+    // promotes the Conv2D stream and every captured Conformer stage to F32.
+    // Mirror those actual boundaries instead of demoting every contraction.
+    let centered = b.subtract(&features, &mean);
+    let centered = round_bf16(&mut b, &centered);
+    let normalized = b.multiply(&centered, &inverse_std);
+    let normalized = round_bf16(&mut b, &normalized);
+    // Host bucket padding is zero in transport space. Re-apply the frame mask
+    // after normalization so padded rows become the encoder's mathematical
+    // zero padding rather than `(0 - global_mean) * global_invstd`.
+    let normalized = mask_rows(&mut b, &normalized, &frame_active);
+    let subsampled = subsample(&mut b, &weights, config, &normalized);
 
     let reduction_minus_one = b.const_i32((config.time_reduction - 1) as i32);
     let reduction = b.const_i32(config.time_reduction as i32);
@@ -885,10 +1083,12 @@ pub(crate) fn emit_phi4_audio_with(
     let positions = b.iota(encoded_len);
     let valid_length_vector = b.broadcast(&valid_length, &[], vec![encoded_len]);
     let active_rows = b.compare("LT", &positions, &valid_length_vector, "SIGNED");
-    encoded = mask_rows(&mut b, &encoded, &active_rows);
+    let mut encoded = mask_rows(&mut b, &subsampled.projected, &active_rows);
     let relative_bias = relative_attention_bias(&mut b, &weights, config, encoded_len);
+    let mut block0 = None;
+    let mut selected_blocks = Vec::new();
     for layer in 0..config.num_blocks {
-        encoded = conformer_block(
+        let values = conformer_block(
             &mut b,
             &weights,
             config,
@@ -897,8 +1097,14 @@ pub(crate) fn emit_phi4_audio_with(
             &active_rows,
             layer,
         );
+        encoded = values.output.clone();
+        if layer == 0 {
+            block0 = Some(values);
+        } else if matches!(layer, 1 | 5 | 11 | 17 | 23) {
+            selected_blocks.push((layer, encoded.clone()));
+        }
     }
-    let projected = project_audio(
+    let projection = project_audio(
         &mut b,
         &weights,
         config,
@@ -906,7 +1112,6 @@ pub(crate) fn emit_phi4_audio_with(
         &projection_mode,
         &active_rows,
     );
-    let projected = b.reshape(&projected, vec![1, encoded_len, config.projection_hidden]);
     let signature = declarations
         .iter()
         .enumerate()
@@ -915,15 +1120,90 @@ pub(crate) fn emit_phi4_audio_with(
         })
         .collect::<Vec<_>>()
         .join(", ");
-    Ok(format!(
-        "module @audio {{\n  // #874 oracle stages: features tensor<1x{frame_bucket}x{input_size}xf32>, encoder tensor<1x{encoded_len}x{attention_dim}xf32>, projection {projected_ty}\n  func.func public @main({signature}) -> ({projected_ty}, tensor<i32>) {{\n{body}    return {projected}, {length} : {projected_ty}, tensor<i32> loc(\"projection\")\n  }}\n}}\n",
-        projected_ty = projected.ty.render(),
-        body = b.body(),
-        projected = projected.name,
-        length = valid_length.name,
-        input_size = config.input_size,
-        attention_dim = config.attention_dim,
-    ))
+    if diagnostic {
+        let block0 = block0.ok_or("Phi4MM diagnostic requires Conformer block 0")?;
+        let selected = |layer: usize| {
+            selected_blocks
+                .iter()
+                .find_map(|(candidate, value)| (*candidate == layer).then_some(value.clone()))
+                .ok_or_else(|| format!("Phi4MM diagnostic requires Conformer block {layer}"))
+        };
+        let reshape_encoder = |b: &mut Builder, value: &Val| {
+            b.reshape(value, vec![1, encoded_len, config.attention_dim])
+        };
+        let reshape_projection = |b: &mut Builder, value: &Val| {
+            b.reshape(value, vec![1, encoded_len, config.projection_hidden])
+        };
+        let mut checkpoints = vec![
+            subsampled.conv0,
+            subsampled.conv1_depthwise,
+            subsampled.conv1_pointwise,
+            subsampled.conv1,
+            subsampled.conv2_depthwise,
+            subsampled.conv2_pointwise,
+            subsampled.conv2,
+            reshape_encoder(&mut b, &subsampled.projected),
+            reshape_encoder(&mut b, &block0.after_ff_in),
+            reshape_encoder(&mut b, &block0.attention),
+            reshape_encoder(&mut b, &block0.after_attention),
+            reshape_encoder(&mut b, &block0.convolution),
+            reshape_encoder(&mut b, &block0.after_convolution),
+            reshape_encoder(&mut b, &block0.ff_out),
+            reshape_encoder(&mut b, &block0.output),
+        ];
+        for layer in [1, 5, 11, 17, 23] {
+            checkpoints.push(reshape_encoder(&mut b, &selected(layer)?));
+        }
+        checkpoints.extend([
+            reshape_encoder(&mut b, &encoded),
+            reshape_projection(&mut b, &projection.speech_first),
+            reshape_projection(&mut b, &projection.speech),
+            reshape_projection(&mut b, &projection.vision_first),
+            reshape_projection(&mut b, &projection.vision),
+        ]);
+        let specs = phi4_audio_diagnostic_specs(config, frame_bucket)?;
+        if checkpoints.len() != specs.len() {
+            return Err("Phi4MM diagnostic checkpoint schema length drifted".to_string());
+        }
+        for (checkpoint, spec) in checkpoints.iter().zip(&specs) {
+            if checkpoint.ty.shape != spec.shape {
+                return Err(format!(
+                    "Phi4MM diagnostic checkpoint {} has shape {:?}, expected {:?}",
+                    spec.name, checkpoint.ty.shape, spec.shape
+                ));
+            }
+        }
+        let return_values = checkpoints
+            .iter()
+            .map(|value| value.name.as_str())
+            .chain(std::iter::once(valid_length.name.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let return_types = checkpoints
+            .iter()
+            .map(|value| value.ty.render())
+            .chain(std::iter::once("tensor<i32>".to_string()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(format!(
+            "module @audio {{\n  func.func public @diagnostic({signature}) -> ({return_types}) {{\n{body}    return {return_values} : {return_types} loc(\"audio diagnostic checkpoints\")\n  }}\n}}\n",
+            body = b.body(),
+        ))
+    } else {
+        let projected = b.reshape(
+            &projection.selected,
+            vec![1, encoded_len, config.projection_hidden],
+        );
+        Ok(format!(
+            "module @audio {{\n  // #874 oracle stages: features tensor<1x{frame_bucket}x{input_size}xf32>, encoder tensor<1x{encoded_len}x{attention_dim}xf32>, projection {projected_ty}\n  func.func public @main({signature}) -> ({projected_ty}, tensor<i32>) {{\n{body}    return {projected}, {length} : {projected_ty}, tensor<i32> loc(\"projection\")\n  }}\n}}\n",
+            projected_ty = projected.ty.render(),
+            body = b.body(),
+            projected = projected.name,
+            length = valid_length.name,
+            input_size = config.input_size,
+            attention_dim = config.attention_dim,
+        ))
+    }
 }
 
 pub(crate) fn emit_phi4_audio(
@@ -986,10 +1266,16 @@ mod tests {
         serde_json::from_slice(&bytes).expect("parse safetensors header")
     }
 
-    fn compile_audio_graph_cpu(config: &Phi4AudioConfig, frame_bucket: usize, label: &str) {
+    fn compile_audio_graph_cpu(
+        config: &Phi4AudioConfig,
+        frame_bucket: usize,
+        precision: Precision,
+        label: &str,
+    ) {
         let compiler =
             PathBuf::from(std::env::var("MLXCEL_XLA_IREE_COMPILE").expect("set compiler path"));
-        let graph = emit_phi4_audio(config, frame_bucket).expect("emit audio graph");
+        let graph =
+            emit_phi4_audio_with(config, frame_bucket, precision).expect("emit audio graph");
         let stem = format!("mlxcel-phi4mm-audio-{label}-{}", std::process::id());
         let input = std::env::temp_dir().join(format!("{stem}.mlir"));
         let output = std::env::temp_dir().join(format!("{stem}.vmfb"));
@@ -1121,7 +1407,7 @@ mod tests {
     #[test]
     #[ignore = "requires MLXCEL_XLA_IREE_COMPILE pointing at iree-compile"]
     fn minimum_audio_graph_compiles_with_iree_cpu() {
-        compile_audio_graph_cpu(&minimum_compile_config(), 32, "minimum");
+        compile_audio_graph_cpu(&minimum_compile_config(), 32, Precision::F32, "minimum");
     }
 
     #[test]
@@ -1129,7 +1415,18 @@ mod tests {
     fn pinned_full_audio_graph_compiles_with_iree_cpu() {
         // The 512-frame production bucket contains #874's real 351-frame
         // oracle sample and emits all 24 Conformer blocks and 887 weights.
-        compile_audio_graph_cpu(&pinned_config(), 512, "pinned-full");
+        compile_audio_graph_cpu(&pinned_config(), 512, Precision::F32, "pinned-full");
+    }
+
+    #[test]
+    #[ignore = "requires MLXCEL_XLA_IREE_COMPILE pointing at iree-compile"]
+    fn pinned_full_mixed_bf16_audio_graph_compiles_with_iree_cpu() {
+        compile_audio_graph_cpu(
+            &pinned_config(),
+            512,
+            Precision::Bf16,
+            "pinned-full-mixed-bf16",
+        );
     }
 
     #[test]

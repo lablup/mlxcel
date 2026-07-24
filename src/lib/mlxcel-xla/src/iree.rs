@@ -226,9 +226,11 @@ unsafe extern "C" {
         deepstack_layers: c_int,
         deepstack_visual_positions: c_int,
         deepstack_target_layers: *const c_int,
+        has_adapter_modes: c_int,
     ) -> *mut XlaCtx;
     fn xla_llama_prefill(
         c: *mut XlaCtx,
+        adapter_mode: c_int,
         tokens: *const c_int,
         lp: c_int,
         positions: *const c_int,
@@ -237,6 +239,7 @@ unsafe extern "C" {
     ) -> c_int;
     fn xla_llama_decode(
         c: *mut XlaCtx,
+        adapter_mode: c_int,
         token: c_int,
         pos: c_int,
         cache_len: c_int,
@@ -244,6 +247,7 @@ unsafe extern "C" {
     ) -> c_int;
     fn xla_llama_decode_mrope(
         c: *mut XlaCtx,
+        adapter_mode: c_int,
         token: c_int,
         positions: *const c_int,
         cache_len: c_int,
@@ -257,6 +261,7 @@ unsafe extern "C" {
     fn xla_llama_prefill_slot_logits(
         c: *mut XlaCtx,
         slot: c_int,
+        adapter_mode: c_int,
         tokens: *const c_int,
         lp: c_int,
         positions: *const c_int,
@@ -268,6 +273,7 @@ unsafe extern "C" {
     fn xla_llama_prefill_diagnostics_slot(
         c: *mut XlaCtx,
         slot: c_int,
+        adapter_mode: c_int,
         tokens: *const c_int,
         lp: c_int,
         positions: *const c_int,
@@ -277,6 +283,7 @@ unsafe extern "C" {
     ) -> c_int;
     fn xla_llama_prefill_embeddings(
         c: *mut XlaCtx,
+        adapter_mode: c_int,
         position_mode: c_int,
         embeddings: *const XlaTensorDesc,
         positions: *const XlaTensorDesc,
@@ -287,6 +294,7 @@ unsafe extern "C" {
     fn xla_llama_prefill_embeddings_slot_logits(
         c: *mut XlaCtx,
         slot: c_int,
+        adapter_mode: c_int,
         position_mode: c_int,
         embeddings: *const XlaTensorDesc,
         positions: *const XlaTensorDesc,
@@ -299,6 +307,7 @@ unsafe extern "C" {
     fn xla_llama_prefill_embeddings_slot_diagnostics(
         c: *mut XlaCtx,
         slot: c_int,
+        adapter_mode: c_int,
         position_mode: c_int,
         embeddings: *const XlaTensorDesc,
         positions: *const XlaTensorDesc,
@@ -311,6 +320,7 @@ unsafe extern "C" {
     ) -> c_int;
     fn xla_llama_prefill_embeddings_ple(
         c: *mut XlaCtx,
+        adapter_mode: c_int,
         position_mode: c_int,
         embeddings: *const XlaTensorDesc,
         dense_ple: *const XlaTensorDesc,
@@ -322,6 +332,7 @@ unsafe extern "C" {
     fn xla_llama_prefill_embeddings_ple_slot_logits(
         c: *mut XlaCtx,
         slot: c_int,
+        adapter_mode: c_int,
         position_mode: c_int,
         embeddings: *const XlaTensorDesc,
         dense_ple: *const XlaTensorDesc,
@@ -333,6 +344,7 @@ unsafe extern "C" {
     ) -> c_int;
     fn xla_llama_prefill_embeddings_deepstack(
         c: *mut XlaCtx,
+        adapter_mode: c_int,
         position_mode: c_int,
         embeddings: *const XlaTensorDesc,
         positions: *const XlaTensorDesc,
@@ -348,6 +360,7 @@ unsafe extern "C" {
     fn xla_llama_prefill_embeddings_deepstack_slot_logits(
         c: *mut XlaCtx,
         slot: c_int,
+        adapter_mode: c_int,
         position_mode: c_int,
         embeddings: *const XlaTensorDesc,
         positions: *const XlaTensorDesc,
@@ -364,6 +377,7 @@ unsafe extern "C" {
     fn xla_llama_decode_ragged_logits(
         c: *mut XlaCtx,
         bsz: c_int,
+        adapter_modes: *const c_int,
         tokens: *const c_int,
         pos: *const c_int,
         cache_len: *const c_int,
@@ -373,6 +387,7 @@ unsafe extern "C" {
     fn xla_llama_decode_ragged_mrope_logits(
         c: *mut XlaCtx,
         bsz: c_int,
+        adapter_modes: *const c_int,
         tokens: *const c_int,
         positions: *const c_int,
         cache_len: *const c_int,
@@ -395,6 +410,22 @@ enum RuntimeConfig {
 
 fn checked_ffi_int(value: usize, name: &str) -> Result<c_int, String> {
     c_int::try_from(value).map_err(|_| format!("{name}={value} does not fit the IREE C ABI c_int"))
+}
+
+fn validate_adapter_modes(modes: &[i32], supported: bool) -> Result<(), String> {
+    for (row, &mode) in modes.iter().enumerate() {
+        if !(0..=2).contains(&mode) {
+            return Err(format!(
+                "adapter mode {mode} for row {row} is outside the supported range 0..=2"
+            ));
+        }
+        if !supported && mode != 0 {
+            return Err(format!(
+                "adapter mode {mode} for row {row} is incompatible with this runtime bundle"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn checked_ffi_i64(value: usize, name: &str) -> Result<i64, String> {
@@ -519,6 +550,10 @@ impl RuntimeConfig {
             Self::Dense(config) => format!("dense:{config:?}"),
             Self::Gemma3n(config) => config.compatibility_fingerprint(),
         }
+    }
+
+    fn has_adapter_modes(&self) -> bool {
+        matches!(self, Self::Dense(config) if config.phi4_lora.is_some())
     }
 
     fn supports_f16_resident(&self) -> bool {
@@ -1764,6 +1799,7 @@ fn create_ctx_with_diagnostics(
             } else {
                 deepstack_target_layers.as_ptr()
             },
+            i32::from(cfg.has_adapter_modes()),
         )
     };
     // Weights are resident on the device now; free the host copy.
@@ -1784,6 +1820,8 @@ pub struct IreeLlama {
     ctx: *mut XlaCtx,
     context_capacity: usize,
     hidden_size: usize,
+    has_adapter_modes: bool,
+    adapter_mode: i32,
     dense_ple_shape: Option<[usize; 3]>,
     position_mode: PreparedPositionMode,
     decode_position: DecodePositionState,
@@ -1803,6 +1841,8 @@ impl IreeLlama {
             ctx,
             context_capacity: cfg.context_capacity(),
             hidden_size: cfg.hidden(),
+            has_adapter_modes: cfg.has_adapter_modes(),
+            adapter_mode: 0,
             dense_ple_shape: cfg.dense_ple_shape(),
             position_mode: cfg.position_mode(),
             decode_position: DecodePositionState::default(),
@@ -1857,12 +1897,18 @@ impl IreeLlama {
         let (embeddings, positions, attention_bias) = prepared_descriptors(&prepared)?;
         let real_len = i32::try_from(prepared.effective_len)
             .map_err(|_| "prepared effective length does not fit i32".to_string())?;
+        if !self.has_adapter_modes && prepared.adapter_mode != 0 {
+            return Err(
+                "prepared adapter mode is incompatible with this runtime bundle".to_string(),
+            );
+        }
         let mut out = 0i32;
         // Safety: every descriptor references a validated owned vector that
         // outlives the call; the C shim repeats dtype/rank/shape/byte checks.
         let rc = unsafe {
             xla_llama_prefill_embeddings(
                 self.ctx,
+                prepared.adapter_mode,
                 prepared.positions.mode().ffi_code(),
                 &embeddings,
                 &positions,
@@ -1872,6 +1918,7 @@ impl IreeLlama {
             )
         };
         let result = if rc == 0 {
+            self.adapter_mode = prepared.adapter_mode;
             Ok(out)
         } else {
             Err(format!("xla_llama_prefill_embeddings failed (status {rc})"))
@@ -1913,6 +1960,7 @@ impl IreeLlama {
         let rc = unsafe {
             xla_llama_prefill_embeddings_deepstack(
                 self.ctx,
+                0,
                 prepared.positions.mode().ffi_code(),
                 &embeddings,
                 &positions,
@@ -1927,6 +1975,7 @@ impl IreeLlama {
             )
         };
         let result = if rc == 0 {
+            self.adapter_mode = 0;
             Ok(out)
         } else {
             Err(format!(
@@ -1967,6 +2016,7 @@ impl IreeLlama {
         let rc = unsafe {
             xla_llama_prefill_embeddings_ple(
                 self.ctx,
+                0,
                 prepared.positions.mode().ffi_code(),
                 &embeddings,
                 &dense_ple,
@@ -1977,6 +2027,7 @@ impl IreeLlama {
             )
         };
         let result = if rc == 0 {
+            self.adapter_mode = 0;
             Ok(out)
         } else {
             Err(format!(
@@ -2008,6 +2059,7 @@ impl IreeLlama {
         let rc = unsafe {
             xla_llama_prefill(
                 self.ctx,
+                0,
                 tokens.as_ptr(),
                 capacity,
                 positions.as_ptr(),
@@ -2016,6 +2068,7 @@ impl IreeLlama {
             )
         };
         let result = if rc == 0 {
+            self.adapter_mode = 0;
             Ok(out)
         } else {
             Err(format!("xla_llama_prefill failed (status {rc})"))
@@ -2036,7 +2089,16 @@ impl IreeLlama {
         let rc = match self.position_mode {
             PreparedPositionMode::OneD => {
                 // Safety: the shim threads its own resident KV; only scalars cross here.
-                unsafe { xla_llama_decode(self.ctx, token, cache_len, cache_len, &mut out) }
+                unsafe {
+                    xla_llama_decode(
+                        self.ctx,
+                        self.adapter_mode,
+                        token,
+                        cache_len,
+                        cache_len,
+                        &mut out,
+                    )
+                }
             }
             PreparedPositionMode::Mrope3D => {
                 let coordinate = self
@@ -2046,7 +2108,14 @@ impl IreeLlama {
                 let positions = [coordinate; 3];
                 // Safety: positions is exactly the explicit rank-1 `[3]` ABI payload.
                 unsafe {
-                    xla_llama_decode_mrope(self.ctx, token, positions.as_ptr(), cache_len, &mut out)
+                    xla_llama_decode_mrope(
+                        self.ctx,
+                        self.adapter_mode,
+                        token,
+                        positions.as_ptr(),
+                        cache_len,
+                        &mut out,
+                    )
                 }
             }
         };
@@ -2096,6 +2165,7 @@ pub struct IreeRaggedLlama {
     vocab: usize,
     context_capacity: usize,
     hidden_size: usize,
+    has_adapter_modes: bool,
     #[cfg(feature = "diagnostics")]
     model_layers: usize,
     dense_ple_shape: Option<[usize; 3]>,
@@ -2238,6 +2308,7 @@ impl IreeRaggedLlama {
             vocab: cfg.vocab(),
             context_capacity: cfg.context_capacity(),
             hidden_size: cfg.hidden(),
+            has_adapter_modes: cfg.has_adapter_modes(),
             #[cfg(feature = "diagnostics")]
             model_layers: cfg.n_layers(),
             dense_ple_shape: cfg.dense_ple_shape(),
@@ -2364,6 +2435,7 @@ impl IreeRaggedLlama {
             xla_llama_prefill_diagnostics_slot(
                 self.ctx,
                 slot,
+                0,
                 tokens.as_ptr(),
                 capacity,
                 positions.as_ptr(),
@@ -2412,6 +2484,7 @@ impl IreeRaggedLlama {
             xla_llama_prefill_slot_logits(
                 self.ctx,
                 slot,
+                0,
                 tokens.as_ptr(),
                 capacity,
                 positions.as_ptr(),
@@ -2452,6 +2525,11 @@ impl IreeRaggedLlama {
                 "prepared IREE payload is incompatible with this runtime bundle".to_string(),
             );
         }
+        if !self.has_adapter_modes && prepared.adapter_mode != 0 {
+            return Err(
+                "prepared adapter mode is incompatible with this runtime bundle".to_string(),
+            );
+        }
         let (embeddings, positions, attention_bias) = prepared_descriptors(prepared)?;
         let real_len = i32::try_from(prepared.effective_len)
             .map_err(|_| "prepared effective length does not fit i32".to_string())?;
@@ -2464,6 +2542,7 @@ impl IreeRaggedLlama {
             xla_llama_prefill_embeddings_slot_logits(
                 self.ctx,
                 slot,
+                prepared.adapter_mode,
                 prepared.positions.mode().ffi_code(),
                 &embeddings,
                 &positions,
@@ -2509,6 +2588,11 @@ impl IreeRaggedLlama {
                 "prepared IREE payload is incompatible with this runtime bundle".to_string(),
             );
         }
+        if !self.has_adapter_modes && prepared.adapter_mode != 0 {
+            return Err(
+                "prepared adapter mode is incompatible with this runtime bundle".to_string(),
+            );
+        }
         if kv_width == 0 {
             return Err("diagnostic KV width must be greater than zero".to_string());
         }
@@ -2531,6 +2615,7 @@ impl IreeRaggedLlama {
             xla_llama_prefill_embeddings_slot_diagnostics(
                 self.ctx,
                 slot,
+                prepared.adapter_mode,
                 prepared.positions.mode().ffi_code(),
                 &embeddings,
                 &positions,
@@ -2598,6 +2683,7 @@ impl IreeRaggedLlama {
             xla_llama_prefill_embeddings_deepstack_slot_logits(
                 self.ctx,
                 slot,
+                0,
                 prepared.positions.mode().ffi_code(),
                 &embeddings,
                 &positions,
@@ -2654,6 +2740,7 @@ impl IreeRaggedLlama {
             xla_llama_prefill_embeddings_ple_slot_logits(
                 self.ctx,
                 slot,
+                0,
                 prepared.positions.mode().ffi_code(),
                 &embeddings,
                 &dense_ple,
@@ -2682,15 +2769,32 @@ impl IreeRaggedLlama {
         pos: &[i32],
         cache_len: &[i32],
     ) -> Result<Vec<f32>, String> {
+        self.decode_ragged_logits_with_modes(&vec![0; self.b_max], tokens, pos, cache_len)
+    }
+
+    /// Mode-aware ragged decode. Each row retains the adapter selected at
+    /// prefill; inactive rows must carry the language mode (`0`).
+    pub fn decode_ragged_logits_with_modes(
+        &mut self,
+        adapter_modes: &[i32],
+        tokens: &[i32],
+        pos: &[i32],
+        cache_len: &[i32],
+    ) -> Result<Vec<f32>, String> {
         if self.position_mode != PreparedPositionMode::OneD {
             return Err("1D decode was requested from an M-RoPE runtime bundle".to_string());
         }
-        if tokens.len() != self.b_max || pos.len() != self.b_max || cache_len.len() != self.b_max {
+        if adapter_modes.len() != self.b_max
+            || tokens.len() != self.b_max
+            || pos.len() != self.b_max
+            || cache_len.len() != self.b_max
+        {
             return Err(format!(
-                "decode_ragged_logits expects per-row arrays of length b_max = {}",
+                "decode_ragged_logits expects adapter/token/position/cache arrays of length b_max = {}",
                 self.b_max
             ));
         }
+        validate_adapter_modes(adapter_modes, self.has_adapter_modes)?;
         for row in 0..self.b_max {
             if pos[row] != cache_len[row]
                 || pos[row] < 0
@@ -2711,6 +2815,7 @@ impl IreeRaggedLlama {
             xla_llama_decode_ragged_logits(
                 self.ctx,
                 b_max,
+                adapter_modes.as_ptr(),
                 tokens.as_ptr(),
                 pos.as_ptr(),
                 cache_len.as_ptr(),
@@ -2734,18 +2839,36 @@ impl IreeRaggedLlama {
         positions: &[[i32; 3]],
         cache_len: &[i32],
     ) -> Result<Vec<f32>, String> {
+        self.decode_ragged_mrope_logits_with_modes(
+            &vec![0; self.b_max],
+            tokens,
+            positions,
+            cache_len,
+        )
+    }
+
+    /// Mode-aware M-RoPE ragged decode.
+    pub fn decode_ragged_mrope_logits_with_modes(
+        &mut self,
+        adapter_modes: &[i32],
+        tokens: &[i32],
+        positions: &[[i32; 3]],
+        cache_len: &[i32],
+    ) -> Result<Vec<f32>, String> {
         if self.position_mode != PreparedPositionMode::Mrope3D {
             return Err("M-RoPE decode was requested from a 1D runtime bundle".to_string());
         }
-        if tokens.len() != self.b_max
+        if adapter_modes.len() != self.b_max
+            || tokens.len() != self.b_max
             || positions.len() != self.b_max
             || cache_len.len() != self.b_max
         {
             return Err(format!(
-                "decode_ragged_mrope_logits expects per-row arrays of length b_max = {}",
+                "decode_ragged_mrope_logits expects adapter/token/position/cache arrays of length b_max = {}",
                 self.b_max
             ));
         }
+        validate_adapter_modes(adapter_modes, self.has_adapter_modes)?;
         for (row, (&physical, coordinates)) in cache_len.iter().zip(positions.iter()).enumerate() {
             if physical < 0 || physical as usize >= self.context_capacity {
                 return Err(format!(
@@ -2772,6 +2895,7 @@ impl IreeRaggedLlama {
             xla_llama_decode_ragged_mrope_logits(
                 self.ctx,
                 b_max,
+                adapter_modes.as_ptr(),
                 tokens.as_ptr(),
                 flat_positions.as_ptr(),
                 cache_len.as_ptr(),

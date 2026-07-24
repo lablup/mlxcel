@@ -115,7 +115,8 @@ pub use gemma3n_qmv::{
 pub(crate) use gemma3n_weights::{Gemma3nWeightSpec, gemma3n_weight_specs};
 #[allow(unused_imports)]
 pub(crate) use phi4_audio::{
-    Phi4AudioConfig, Phi4AudioWeightSpec, emit_phi4_audio, emit_phi4_audio_with,
+    Phi4AudioConfig, Phi4AudioDiagnosticSpec, Phi4AudioWeightSpec, emit_phi4_audio,
+    emit_phi4_audio_diagnostic_with, emit_phi4_audio_with, phi4_audio_diagnostic_specs,
     phi4_audio_weight_specs, validate_phi4_audio_weight_shapes,
 };
 // MoE FFN config types (issue #500), read by the weight loader (`iree.rs`) and the

@@ -1327,6 +1327,41 @@ pub(crate) fn load_phi4mm_vlm(model_path: &Path) -> Result<LoadedModel> {
     }))
 }
 
+/// Load only Phi4MM's canonical text embedding table for the XLA audio
+/// producer. Decoder layers, LM head, vision tower, and MLX audio encoder are
+/// deliberately excluded.
+#[cfg(feature = "xla-iree")]
+pub(crate) fn load_phi4mm_xla_text_embeddings(
+    model_path: &Path,
+) -> Result<(mlxcel_core::layers::UnifiedEmbedding, usize, usize)> {
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+    if full_config.get("model_type").and_then(Value::as_str) != Some("phi4mm") {
+        return Err(anyhow::anyhow!(
+            "{} is not a Phi4MM checkpoint",
+            model_path.display()
+        ));
+    }
+    let mut text_config_value = phi4mm_text_config_value(&full_config)?;
+    inherit_quantization_if_missing(&mut text_config_value, &full_config)?;
+    let text_config: models::phi4mm::ModelArgs = serde_json::from_value(text_config_value)
+        .map_err(|error| anyhow::anyhow!("Failed to parse Phi4MM text config: {error}"))?;
+    let weights = super::load_vlm_weights_common_filtered_canonical(model_path, |name| {
+        name.starts_with("model.embed_tokens.")
+    })?;
+    let embeddings = mlxcel_core::layers::UnifiedEmbedding::from_weights(
+        &weights,
+        "model.embed_tokens",
+        text_config.group_size(),
+        text_config.bits(),
+    )
+    .map_err(|error| anyhow::anyhow!("invalid Phi4MM text embedding table: {error}"))?;
+    Ok((
+        embeddings,
+        text_config.hidden_size,
+        text_config.max_position_embeddings,
+    ))
+}
+
 pub(crate) fn load_phi4_siglip_vlm(model_path: &Path) -> Result<LoadedModel> {
     use vision::encoders::phi4_siglip::{Phi4SigLipVisionConfig, Phi4SigLipVisionEncoder};
     use vision::processors::phi4_siglip::Phi4SigLipProcessor;

@@ -114,13 +114,25 @@ pub(crate) enum AudioQueueError {
     Overflow,
 }
 
-pub(crate) trait AudioFeatureProducer: Send + 'static {
+pub(crate) trait AudioFeatureProducer: 'static {
     fn prepare(
         &mut self,
         waveforms: AudioWaveformBatch,
         token_ids: Vec<i32>,
         cancelled: &AtomicBool,
     ) -> Result<PreparedPrefill, String>;
+}
+
+#[cfg(feature = "xla-iree")]
+impl AudioFeatureProducer for crate::multimodal::phi4mm_xla_audio::Phi4MmXlaAudioProducer {
+    fn prepare(
+        &mut self,
+        waveforms: AudioWaveformBatch,
+        token_ids: Vec<i32>,
+        cancelled: &AtomicBool,
+    ) -> Result<PreparedPrefill, String> {
+        self.prepare_audio(waveforms, token_ids, cancelled)
+    }
 }
 
 pub(crate) struct AudioPreprocessLimits {
@@ -394,13 +406,29 @@ pub(crate) struct AudioPreprocessStage {
 }
 
 impl AudioPreprocessStage {
-    pub fn spawn<P: AudioFeatureProducer>(
-        mut producer: P,
+    pub fn spawn<P: AudioFeatureProducer + Send>(
+        producer: P,
         limits: AudioPreprocessLimits,
         observability: Arc<BatchObservability>,
     ) -> Result<Self, String> {
+        Self::spawn_with_loader(limits, observability, move || Ok(producer))
+    }
+
+    /// Construct MLX-backed feature producers inside their owning worker
+    /// thread. This keeps MLX handles thread-confined without imposing an
+    /// artificial `Send` contract on the producer.
+    pub fn spawn_with_loader<P, F>(
+        limits: AudioPreprocessLimits,
+        observability: Arc<BatchObservability>,
+        loader: F,
+    ) -> Result<Self, String>
+    where
+        P: AudioFeatureProducer,
+        F: FnOnce() -> Result<P, String> + Send + 'static,
+    {
         let (sender, receiver) = mpsc::sync_channel::<QueuedJob>(limits.queue_depth.max(1));
         let (result_tx, result_rx) = mpsc::sync_channel(limits.result_queue_depth.max(1));
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let metrics = Arc::new(AudioPreprocessMetrics::new(observability));
         let worker_metrics = metrics.clone();
         let healthy = Arc::new(AtomicBool::new(true));
@@ -408,6 +436,24 @@ impl AudioPreprocessStage {
         let worker = thread::Builder::new()
             .name("mlxcel-xla-audio-preprocess".to_string())
             .spawn(move || {
+                let mut producer = match catch_unwind(AssertUnwindSafe(loader)) {
+                    Ok(Ok(producer)) => {
+                        let _ = ready_tx.send(Ok(()));
+                        producer
+                    }
+                    Ok(Err(error)) => {
+                        let _ = ready_tx.send(Err(error));
+                        worker_healthy.store(false, Ordering::Release);
+                        return;
+                    }
+                    Err(_) => {
+                        let _ = ready_tx.send(Err(
+                            "audio feature producer panicked during startup".to_string(),
+                        ));
+                        worker_healthy.store(false, Ordering::Release);
+                        return;
+                    }
+                };
                 while let Ok(queued) = receiver.recv() {
                     let Some((job, reservation)) = queued.dequeue() else {
                         continue;
@@ -420,6 +466,19 @@ impl AudioPreprocessStage {
                 worker_healthy.store(false, Ordering::Release);
             })
             .map_err(|error| format!("failed to spawn audio preprocessing worker: {error}"))?;
+        match ready_rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                let _ = worker.join();
+                return Err(error);
+            }
+            Err(_) => {
+                let _ = worker.join();
+                return Err(
+                    "audio preprocessing worker exited before reporting startup status".to_string(),
+                );
+            }
+        }
         Ok(Self {
             sender: Some(sender),
             result_rx: Some(result_rx),

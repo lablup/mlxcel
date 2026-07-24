@@ -123,6 +123,8 @@ pub(crate) use qwen::{
 pub use qwen::load_qwen3_omni_speech;
 pub(crate) use siglip::{load_aya_vision_vlm, load_paligemma_vlm};
 pub(crate) use smolvlm::load_smolvlm_vlm;
+#[cfg(feature = "xla-iree")]
+pub(crate) use special::load_phi4mm_xla_text_embeddings;
 pub(crate) use special::{
     load_llama4_vlm, load_minicpmo_vlm, load_minicpmv4_6_vlm, load_molmo_point_vlm, load_molmo_vlm,
     load_molmo2_vlm, load_moondream2_vlm, load_moondream3_vlm, load_phi3_vlm, load_phi4_siglip_vlm,

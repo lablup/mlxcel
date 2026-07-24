@@ -147,6 +147,27 @@ pub struct PreparedModality {
     pub token_count: usize,
 }
 
+/// Request-scoped decoder adapter selected by a prepared multimodal prefill.
+///
+/// The value is carried into the engine slot and remains fixed for every
+/// decode step. Plain text and families without request-time adapters use
+/// [`Language`](Self::Language).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(i32)]
+pub enum PreparedAdapterMode {
+    #[default]
+    Language = 0,
+    Speech = 1,
+    Vision = 2,
+}
+
+impl PreparedAdapterMode {
+    #[must_use]
+    pub const fn code(self) -> i32 {
+        self as i32
+    }
+}
+
 /// Owned prefill payload crossing from host preprocessing to an engine worker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreparedPrefill {
@@ -158,6 +179,9 @@ pub struct PreparedPrefill {
     pub attention_bias: PreparedAttentionBias,
     pub sequence_len: usize,
     pub modalities: Vec<PreparedModality>,
+    /// Immutable request mode used by adapter-aware language graphs.
+    #[serde(default)]
+    pub adapter_mode: PreparedAdapterMode,
 }
 
 impl PreparedPrefill {
@@ -248,7 +272,15 @@ impl PreparedPrefill {
             attention_bias,
             sequence_len,
             modalities,
+            adapter_mode: PreparedAdapterMode::Language,
         })
+    }
+
+    /// Attach the immutable language-adapter mode selected by the producer.
+    #[must_use]
+    pub fn with_adapter_mode(mut self, mode: PreparedAdapterMode) -> Self {
+        self.adapter_mode = mode;
+        self
     }
 }
 

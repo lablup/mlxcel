@@ -1020,6 +1020,7 @@ pub(crate) fn spawn_xla_model_worker(
                 engine,
                 tokenizer,
                 model_path,
+                device.clone(),
                 request_rx,
                 batch_metrics,
                 batch_observability,

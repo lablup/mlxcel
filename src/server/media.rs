@@ -180,7 +180,18 @@ impl MediaRequestMetadata {
         audio: usize,
         videos: usize,
     ) -> Result<(), String> {
-        if self.declared_audio > 0 {
+        self.validate_xla_raw_counts_with_audio(images, audio, videos, false)
+    }
+
+    #[cfg_attr(not(feature = "xla-iree"), allow(dead_code))]
+    pub(crate) fn validate_xla_raw_counts_with_audio(
+        self,
+        images: usize,
+        audio: usize,
+        videos: usize,
+        supports_audio: bool,
+    ) -> Result<(), String> {
+        if self.declared_audio > 0 && !supports_audio {
             return Err(format!(
                 "the OpenXLA backend does not support audio input yet ({} declared)",
                 self.declared_audio
@@ -209,6 +220,13 @@ impl MediaRequestMetadata {
                 "OpenXLA image resolution cardinality mismatch: {} image input(s) declared, \
                  {} raw payload(s) resolved; refusing text fallback",
                 self.declared_images, self.resolved_images
+            ));
+        }
+        if self.declared_audio != self.resolved_audio {
+            return Err(format!(
+                "OpenXLA audio resolution cardinality mismatch: {} audio input(s) declared, \
+                 {} raw payload(s) resolved; refusing text fallback",
+                self.declared_audio, self.resolved_audio
             ));
         }
         Ok(())

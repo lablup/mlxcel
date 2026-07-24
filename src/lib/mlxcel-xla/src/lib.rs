@@ -66,6 +66,8 @@ mod aux_smoke;
 mod iree;
 #[cfg(feature = "iree")]
 mod vision_runtime;
+#[cfg(feature = "iree")]
+mod phi4_audio;
 
 // The continuous-batching engine (#449 M3 Stage 2b). Present under `iree` (real
 // execution) and under `test` (so its backend-neutral Scheduler bookkeeping is
@@ -143,6 +145,14 @@ pub use iree::PreparedPrefillDiagnostics;
 pub use vision_runtime::{IreeVisionDiagnosticProjector, VisionDiagnosticProjection};
 #[cfg(feature = "iree")]
 pub use vision_runtime::{IreeVisionProjector, VisionExecutionMetrics, VisionProjection};
+#[cfg(feature = "iree")]
+pub use phi4_audio::{
+    PHI4MM_AUDIO_CHECKPOINT_REVISION, PHI4MM_AUDIO_FRAME_BUCKETS, Phi4AudioOutput,
+    Phi4AudioProjectionMode, Phi4AudioRuntime, phi4_audio_bucket_for_frames,
+};
+#[cfg(feature = "iree")]
+#[doc(hidden)]
+pub use phi4_audio::{Phi4AudioCheckpoint, Phi4AudioDiagnosticRuntime, Phi4AudioDiagnostics};
 #[cfg(any(test, feature = "diagnostics"))]
 #[must_use]
 pub fn llava_diagnostic_device_memory_note(device: &str) -> &'static str {

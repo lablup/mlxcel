@@ -146,6 +146,11 @@ fn worker(image_preprocessor: Option<ImagePreprocessStage>) -> XlaServeWorker<Fa
         image_preprocessor,
         pending_images: HashMap::new(),
         next_image_job_id: 0,
+        audio_preprocessor: None,
+        audio_policy: None,
+        pending_audio: HashMap::new(),
+        next_audio_job_id: 0,
+        context_capacity: 32,
         shutdown: false,
     }
 }
@@ -470,6 +475,11 @@ fn pending_preprocess_poll_timeout_does_not_shutdown_worker() {
         image_preprocessor: Some(image_stage()),
         pending_images: HashMap::new(),
         next_image_job_id: 0,
+        audio_preprocessor: None,
+        audio_policy: None,
+        pending_audio: HashMap::new(),
+        next_audio_job_id: 0,
+        context_capacity: 32,
         shutdown: false,
     };
     let (response_tx, _response_rx) = mpsc::channel();

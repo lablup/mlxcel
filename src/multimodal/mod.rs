@@ -51,6 +51,9 @@ pub mod moondream3_prompt;
 pub mod phi3v_prompt;
 pub mod phi4_siglip_prompt;
 pub mod phi4mm_prompt;
+#[cfg(feature = "xla-iree")]
+#[doc(hidden)]
+pub mod phi4mm_xla_audio;
 pub mod pixtral_prompt;
 pub mod qwen_vl;
 pub mod smolvlm_prompt;

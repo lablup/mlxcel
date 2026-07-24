@@ -1167,7 +1167,7 @@ impl Builder {
             shape.push((padded - kernel_size) / strides[axis] + 1);
         }
         shape.push(kernel.ty.shape[spatial_rank + 1]);
-        let ty = Ty::new(shape, input.ty.elt);
+        let output_ty = Ty::new(shape, input.ty.elt);
         let input_demoted;
         let kernel_demoted;
         let (input, kernel) = match self.precision.dot_elt() {
@@ -1186,6 +1186,7 @@ impl Builder {
             }
             None => (input, kernel),
         };
+        let convolution_ty = Ty::new(output_ty.shape.clone(), input.ty.elt);
         let array = |values: &[usize]| {
             values
                 .iter()
@@ -1224,9 +1225,17 @@ impl Builder {
             feature_groups,
             input.ty.render(),
             kernel.ty.render(),
-            ty.render()
+            convolution_ty.render()
         ));
-        Val { name: r, ty }
+        let convolved = Val {
+            name: r,
+            ty: convolution_ty,
+        };
+        if convolved.ty.elt == output_ty.elt {
+            convolved
+        } else {
+            self.convert(&convolved, output_ty.elt)
+        }
     }
 
     // --- elementwise -------------------------------------------------------
