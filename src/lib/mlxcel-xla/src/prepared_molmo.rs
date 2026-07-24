@@ -75,6 +75,10 @@ pub enum MolmoSparseAddError {
         expected: usize,
         actual: usize,
     },
+    MaskValue {
+        flat_index: usize,
+        value_bits: u32,
+    },
     IndexCount {
         expected: usize,
         actual: usize,
@@ -120,6 +124,14 @@ impl fmt::Display for MolmoSparseAddError {
             Self::MaskCount { expected, actual } => write!(
                 formatter,
                 "Molmo image_masks has {actual} elements, expected {expected}"
+            ),
+            Self::MaskValue {
+                flat_index,
+                value_bits,
+            } => write!(
+                formatter,
+                "Molmo image_masks[{flat_index}]={} is outside [-1,1]",
+                f32::from_bits(*value_bits)
             ),
             Self::IndexCount { expected, actual } => write!(
                 formatter,
@@ -240,6 +252,12 @@ impl MolmoPreparedImage {
                 return Err(MolmoSparseAddError::NonFinite {
                     tensor: "image_masks",
                     flat_index,
+                });
+            }
+            if !(-1.0..=1.0).contains(value) {
+                return Err(MolmoSparseAddError::MaskValue {
+                    flat_index,
+                    value_bits: value.to_bits(),
                 });
             }
         }
@@ -391,123 +409,28 @@ impl MolmoSparseAddPlan {
             let text_start = pair.target_position * self.hidden_size;
             let feature_start = pair.feature_row * self.hidden_size;
             for offset in 0..self.hidden_size {
-                text_embeddings[text_start + offset] += projected_features[feature_start + offset];
+                if !(text_embeddings[text_start + offset]
+                    + projected_features[feature_start + offset])
+                    .is_finite()
+                {
+                    return Err(MolmoSparseAddError::NonFinite {
+                        tensor: "merged embeddings",
+                        flat_index: text_start + offset,
+                    });
+                }
             }
         }
-        if let Some((flat_index, _)) = text_embeddings
-            .iter()
-            .enumerate()
-            .find(|(_, value)| !value.is_finite())
-        {
-            return Err(MolmoSparseAddError::NonFinite {
-                tensor: "merged embeddings",
-                flat_index,
-            });
+        for pair in &self.pairs {
+            let text_start = pair.target_position * self.hidden_size;
+            let feature_start = pair.feature_row * self.hidden_size;
+            for offset in 0..self.hidden_size {
+                text_embeddings[text_start + offset] += projected_features[feature_start + offset];
+            }
         }
         Ok(())
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sentinels_preserve_original_feature_rows_and_non_contiguous_targets() {
-        let plan = MolmoSparseAddPlan::from_image_input_idx(&[-100, 3, -1, 0], 5, 2, 8, 8).unwrap();
-        assert_eq!(
-            plan.pairs(),
-            [
-                MolmoSparseAddPair {
-                    feature_row: 1,
-                    target_position: 3,
-                },
-                MolmoSparseAddPair {
-                    feature_row: 3,
-                    target_position: 0,
-                },
-            ]
-        );
-        let mut text = vec![10.0; 10];
-        let features = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
-        plan.apply(&mut text, &features).unwrap();
-        assert_eq!(
-            text,
-            [17.0, 18.0, 10.0, 10.0, 10.0, 10.0, 13.0, 14.0, 10.0, 10.0]
-        );
-    }
-
-    #[test]
-    fn rejects_duplicate_and_out_of_range_targets_before_merge() {
-        assert!(matches!(
-            MolmoSparseAddPlan::from_image_input_idx(&[1, -100, 1], 3, 2, 4, 4),
-            Err(MolmoSparseAddError::DuplicateTarget { .. })
-        ));
-        assert!(matches!(
-            MolmoSparseAddPlan::from_image_input_idx(&[-1, 3], 3, 2, 4, 4),
-            Err(MolmoSparseAddError::TargetOutOfRange { .. })
-        ));
-    }
-
-    #[test]
-    fn empty_active_features_are_valid_and_leave_text_unchanged() {
-        let plan = MolmoSparseAddPlan::from_image_input_idx(&[-100, -1], 2, 2, 4, 4).unwrap();
-        let mut text = vec![1.0, 2.0, 3.0, 4.0];
-        plan.apply(&mut text, &[5.0, 6.0, 7.0, 8.0]).unwrap();
-        assert_eq!(text, [1.0, 2.0, 3.0, 4.0]);
-    }
-
-    #[test]
-    fn replacement_negative_fixture_is_caught_by_additive_oracle() {
-        let plan = MolmoSparseAddPlan::from_image_input_idx(&[1], 2, 2, 1, 2).unwrap();
-        let original = vec![2.0, 3.0, 5.0, 7.0];
-        let features = vec![11.0, 13.0];
-        let mut additive = original.clone();
-        plan.apply(&mut additive, &features).unwrap();
-
-        let mut replacement = original;
-        replacement[2..4].copy_from_slice(&features);
-        assert_eq!(additive, [2.0, 3.0, 16.0, 20.0]);
-        assert_ne!(replacement, additive);
-    }
-
-    #[test]
-    fn capacity_shape_and_nonfinite_fail_closed() {
-        assert!(matches!(
-            MolmoSparseAddPlan::from_image_input_idx(&[0, 1], 2, 2, 1, 2),
-            Err(MolmoSparseAddError::Capacity {
-                dimension: "feature rows",
-                ..
-            })
-        ));
-        let plan = MolmoSparseAddPlan::from_image_input_idx(&[0], 1, 2, 1, 1).unwrap();
-        assert!(matches!(
-            plan.apply(&mut [0.0, 0.0], &[f32::NAN, 1.0]),
-            Err(MolmoSparseAddError::NonFinite {
-                tensor: "projected features",
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn processor_patch_rows_and_projected_rows_have_distinct_shapes() {
-        let prepared = MolmoPreparedImage {
-            pixel_values: vec![0.0; 2 * 4 * 3],
-            crop_count: 2,
-            patches_per_crop: 4,
-            patch_width: 3,
-            image_masks: vec![1.0; 2 * 4],
-            projected_rows_per_crop: 1,
-            image_input_idx: vec![-100, 2],
-        };
-        let plan = prepared.sparse_add_plan(4, 2, 2, 4, 2, 4).unwrap();
-        assert_eq!(
-            plan.pairs(),
-            [MolmoSparseAddPair {
-                feature_row: 1,
-                target_position: 2,
-            }]
-        );
-    }
-}
+#[path = "prepared_molmo_tests.rs"]
+mod tests;
