@@ -145,8 +145,12 @@ fn generation_identity_from_version(
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
-    let mut output = String::with_capacity(digest.len() * 2);
-    for byte in digest {
+    hex_bytes(&digest)
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
         use std::fmt::Write;
         write!(output, "{byte:02x}").expect("writing to String cannot fail");
     }
@@ -166,7 +170,7 @@ fn sha256_file(path: &Path) -> Result<String, String> {
         }
         digest.update(&buffer[..read]);
     }
-    Ok(sha256_hex(&digest.finalize()))
+    Ok(hex_bytes(&digest.finalize()))
 }
 
 fn validate_finite_values(label: &str, values: &[f32]) -> Result<(), String> {
@@ -808,6 +812,12 @@ mod tests {
         std::fs::write(&compiler, b"compiler-build-a").unwrap();
         let first_generation =
             generation_identity_from_version(&compiler, &["--target=cpu"], "mlir", "v1").unwrap();
+        assert!(
+            first_generation.contains(
+                "compiler_sha256=c998e735c573e64551765a30b12a0cc63d1255c2229f5943995ccdfef4939b7a"
+            ),
+            "generation identity should contain the compiler executable's raw SHA-256 digest"
+        );
         let first_contract =
             AuxiliaryArtifactContract::new("audio.main", "config=v1", &first_generation).unwrap();
         let mut compile_count = 0usize;
