@@ -20,14 +20,19 @@ use std::time::Duration;
 
 use image::{DynamicImage, ImageFormat};
 use mlxcel_core::session::{
-    OwnedTensor, PreparedAdapterMode, PreparedAttentionBias, PreparedPositions, PreparedTensorDType,
+    OwnedTensor, PreparedAdapterMode, PreparedAttentionBias, PreparedModality, PreparedPositions,
+    PreparedTensorDType,
+};
+use mlxcel_xla::{
+    GEMMA3N_AUDIO_MODALITY_FAMILY, GEMMA3N_AUDIO_SOFT_TOKENS, Gemma3nAudioPreparedPrefill,
+    Gemma3nDensePle,
 };
 
 use super::*;
 use crate::FakeHostMultimodalPreprocessor;
 use crate::audio::{AudioFamilyPolicy, AudioWaveformBatch};
 use crate::server::batch::xla_audio_preprocess::{
-    AudioFeatureProducer, AudioPreprocessLimits, AudioPreprocessStage,
+    AudioFeatureProducer, AudioPreparedRequest, AudioPreprocessLimits, AudioPreprocessStage,
 };
 use crate::server::request_options::{RequestOptionOverrides, build_server_generate_options};
 use crate::server::{GenerationResult, ServerConfig};
@@ -39,11 +44,16 @@ struct FakeServingEngine {
     text_submissions: Vec<Vec<i32>>,
     prepared_submissions: Vec<(Vec<i32>, usize)>,
     prepared_modes: Vec<PreparedAdapterMode>,
+    gemma3n_submissions: Vec<(Vec<i32>, usize)>,
 }
 
 impl XlaServingEngine for FakeServingEngine {
     fn b_max(&self) -> usize {
         4
+    }
+
+    fn context_capacity(&self) -> usize {
+        4_096
     }
 
     fn is_idle(&self) -> bool {
@@ -77,6 +87,19 @@ impl XlaServingEngine for FakeServingEngine {
         self.prepared_modes.push(prepared.adapter_mode);
         self.prepared_submissions
             .push((prepared.token_ids, prepared.sequence_len));
+        Ok(self.activate())
+    }
+
+    fn submit_gemma3n_prepared(
+        &mut self,
+        prepared: Gemma3nPreparedPrefill,
+        _max_new_tokens: usize,
+        _params: SampleParams,
+    ) -> Result<u64, String> {
+        self.gemma3n_submissions.push((
+            prepared.prepared().token_ids.clone(),
+            prepared.prepared().sequence_len,
+        ));
         Ok(self.activate())
     }
 
@@ -118,6 +141,10 @@ fn png_bytes() -> Vec<u8> {
 
 fn wav_bytes() -> Vec<u8> {
     let samples = [0i16; 320];
+    wav_pcm16(&samples)
+}
+
+fn wav_pcm16(samples: &[i16]) -> Vec<u8> {
     let data_len = samples.len() * 2;
     let mut wav = Vec::with_capacity(44 + data_len);
     wav.extend_from_slice(b"RIFF");
@@ -136,6 +163,72 @@ fn wav_bytes() -> Vec<u8> {
         wav.extend_from_slice(&sample.to_le_bytes());
     }
     wav
+}
+
+fn owned_tensor(shape: Vec<usize>, values: Vec<f32>) -> OwnedTensor {
+    OwnedTensor::new(
+        values.into_iter().flat_map(f32::to_le_bytes).collect(),
+        PreparedTensorDType::Float32,
+        shape,
+    )
+    .unwrap()
+}
+
+struct FakeGemma3nAudioProducer;
+
+impl AudioFeatureProducer for FakeGemma3nAudioProducer {
+    fn prepare(
+        &mut self,
+        _waveforms: AudioWaveformBatch,
+        token_ids: Vec<i32>,
+        _images: Vec<DynamicImage>,
+        _cancelled: &AtomicBool,
+    ) -> Result<AudioPreparedRequest, String> {
+        const AUDIO: i32 = 262_273;
+        let placeholder = token_ids
+            .iter()
+            .position(|&token| token == AUDIO)
+            .ok_or_else(|| "test prompt has no audio placeholder".to_string())?;
+        let mut expanded = token_ids;
+        expanded.splice(
+            placeholder..=placeholder,
+            std::iter::repeat_n(AUDIO, GEMMA3N_AUDIO_SOFT_TOKENS),
+        );
+        let sequence_len = expanded.len();
+        let prepared = PreparedPrefill::new(
+            expanded,
+            owned_tensor(vec![1, sequence_len, 2], vec![0.0; sequence_len * 2]),
+            PreparedPositions::Sequential {
+                start: 0,
+                length: sequence_len,
+            },
+            PreparedAttentionBias {
+                tensor: owned_tensor(vec![1, 1, 1, sequence_len], vec![0.0; sequence_len]),
+                causal: true,
+            },
+            vec![PreparedModality {
+                family: GEMMA3N_AUDIO_MODALITY_FAMILY.to_string(),
+                item_count: 1,
+                token_count: GEMMA3N_AUDIO_SOFT_TOKENS,
+            }],
+        )
+        .map_err(|error| error.to_string())?;
+        let dense_ple = Gemma3nDensePle::new(vec![0.0; sequence_len * 2], sequence_len, 1, 2)
+            .map_err(|error| error.to_string())?;
+        let prepared =
+            Gemma3nPreparedPrefill::new(prepared, dense_ple).map_err(|error| error.to_string())?;
+        Gemma3nAudioPreparedPrefill::new(prepared, AUDIO, vec![GEMMA3N_AUDIO_SOFT_TOKENS], 8)
+            .map(AudioPreparedRequest::Gemma3n)
+    }
+}
+
+fn audio_stage() -> AudioPreprocessStage {
+    AudioPreprocessStage::spawn(
+        FakeGemma3nAudioProducer,
+        AudioPreprocessLimits::default(),
+        Arc::new(BatchObservability::new()),
+    )
+    .unwrap()
 }
 
 fn options(max_tokens: usize) -> ServerGenerateOptions {
@@ -196,7 +289,7 @@ impl AudioFeatureProducer for FakePhi4MediaProducer {
         token_ids: Vec<i32>,
         images: Vec<DynamicImage>,
         _cancelled: &AtomicBool,
-    ) -> Result<PreparedPrefill, String> {
+    ) -> Result<AudioPreparedRequest, String> {
         let sequence = token_ids.len();
         let embeddings = OwnedTensor::new(
             vec![0; sequence * 2 * std::mem::size_of::<f32>()],
@@ -231,6 +324,7 @@ impl AudioFeatureProducer for FakePhi4MediaProducer {
             Vec::new(),
         )
         .map(|prepared| prepared.with_adapter_mode(mode))
+        .map(Into::into)
         .map_err(|error| error.to_string())
     }
 }
@@ -330,6 +424,17 @@ fn phi4mm_media_admission_selects_speech_or_vision_per_request() {
     }
 }
 
+fn wait_for_audio_preprocessing(worker: &mut XlaServeWorker<FakeServingEngine>) {
+    for _ in 0..500 {
+        worker.drain_preprocessed();
+        if worker.pending_audio.is_empty() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    panic!("timed out waiting for audio preprocessing");
+}
+
 fn receive_done(rx: &mpsc::Receiver<GenerateEvent>) -> GenerationResult {
     loop {
         match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
@@ -399,6 +504,95 @@ fn mixed_text_and_image_admission_keeps_public_and_effective_lengths_distinct() 
             .total_sequences_processed
             .load(Ordering::Relaxed),
         2
+    );
+}
+
+#[test]
+fn text_and_gemma3n_audio_batch_cancel_and_reuse_keep_request_ownership() {
+    let mut worker = worker(None);
+    worker.audio_preprocessor = Some(audio_stage());
+    worker.audio_policy = Some(AudioFamilyPolicy::gemma3n());
+    let (text_tx, text_rx) = mpsc::channel();
+    let (audio_tx, audio_rx) = mpsc::channel();
+
+    worker.admit(
+        String::new(),
+        Some(vec![10, 11]),
+        options(1),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        media(0, 0, 0),
+        text_tx,
+        Arc::new(AtomicBool::new(false)),
+    );
+    worker.admit(
+        String::new(),
+        Some(vec![20, 262_273, 21]),
+        options(1),
+        Vec::new(),
+        vec![wav_pcm16(&vec![0; 800])],
+        Vec::new(),
+        media(0, 1, 0),
+        audio_tx,
+        Arc::new(AtomicBool::new(false)),
+    );
+
+    assert_eq!(worker.engine.text_submissions, vec![vec![10, 11]]);
+    wait_for_audio_preprocessing(&mut worker);
+    assert_eq!(worker.engine.gemma3n_submissions.len(), 1);
+    assert_eq!(
+        worker.engine.gemma3n_submissions[0].1,
+        2 + GEMMA3N_AUDIO_SOFT_TOKENS
+    );
+    assert_eq!(worker.states.len(), 2);
+
+    let events = worker.engine.pump().unwrap();
+    worker.dispatch(events);
+    assert_eq!(receive_done(&text_rx).prompt_tokens, 2);
+    assert_eq!(receive_done(&audio_rx).prompt_tokens, 3);
+
+    let cancelled = Arc::new(AtomicBool::new(true));
+    let (cancelled_tx, cancelled_rx) = mpsc::channel();
+    worker.admit(
+        String::new(),
+        Some(vec![30, 262_273, 31]),
+        options(1),
+        Vec::new(),
+        vec![wav_pcm16(&vec![0; 800])],
+        Vec::new(),
+        media(0, 1, 0),
+        cancelled_tx,
+        cancelled,
+    );
+    worker.evict_cancelled();
+    wait_for_audio_preprocessing(&mut worker);
+    assert!(cancelled_rx.try_recv().is_err());
+    assert!(worker.states.is_empty());
+
+    let (reuse_tx, reuse_rx) = mpsc::channel();
+    worker.admit(
+        String::new(),
+        Some(vec![40, 262_273, 41]),
+        options(1),
+        Vec::new(),
+        vec![wav_pcm16(&vec![0; 800])],
+        Vec::new(),
+        media(0, 1, 0),
+        reuse_tx,
+        Arc::new(AtomicBool::new(false)),
+    );
+    wait_for_audio_preprocessing(&mut worker);
+    assert_eq!(worker.engine.gemma3n_submissions.len(), 2);
+    let events = worker.engine.pump().unwrap();
+    worker.dispatch(events);
+    assert_eq!(receive_done(&reuse_rx).prompt_tokens, 3);
+    assert_eq!(
+        worker
+            .batch_metrics
+            .total_sequences_processed
+            .load(Ordering::Relaxed),
+        3
     );
 }
 

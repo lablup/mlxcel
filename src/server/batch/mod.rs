@@ -61,10 +61,12 @@ mod speculative_slice_tests;
 mod stop_matcher;
 /// Backend-neutral bounded audio preprocessing foundation. This is compiled
 /// without `xla-iree` so queue/cancellation contracts remain testable on every
-/// platform, but no XLA worker advertises audio until a qualified family
-/// feature producer is wired.
+/// platform. XLA workers advertise audio only when a qualified family feature
+/// producer is constructed from the loaded checkpoint.
 #[cfg_attr(not(feature = "xla-iree"), allow(dead_code))]
 pub(crate) mod xla_audio_preprocess;
+#[cfg(feature = "xla-iree")]
+mod xla_gemma3n_audio;
 /// OpenXLA / IREE serve worker (issue #449 M3 Stage 2c): adapts the
 /// `mlxcel-xla` continuous-batching engine to the [`BatchEngine`] contract.
 /// Behind `xla-iree` (real IREE execution); the MLX serving path is unaffected.

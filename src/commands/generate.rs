@@ -1029,6 +1029,11 @@ fn xla_num_layers(model_dir: &Path) -> usize {
         .and_then(|v| {
             v.get("num_hidden_layers")
                 .and_then(serde_json::Value::as_u64)
+                .or_else(|| {
+                    v.get("text_config")
+                        .and_then(|text| text.get("num_hidden_layers"))
+                        .and_then(serde_json::Value::as_u64)
+                })
         })
         .map_or(0, |n| n as usize)
 }
@@ -1096,7 +1101,9 @@ fn decode_xla_cli_images(paths: &[std::path::PathBuf]) -> Result<Vec<image::Dyna
 /// and the generic model-threaded loop: it creates the session straight from the
 /// model directory and runs the session's own greedy loop. Image requests use
 /// the same decoded-image security limits and owned `PreparedPrefill` contract
-/// as serving; audio and video remain explicit unsupported modalities.
+/// as serving. Gemma3n audio uses the same bounded host front-end and split
+/// IREE prepared-prefill contract as serving; mixed image+audio remains
+/// fail-closed until a joint runtime is qualified.
 #[cfg(feature = "xla-backend")]
 fn generate_xla(
     model_path: &Path,
@@ -1192,10 +1199,62 @@ fn generate_xla(
                             anyhow!("OpenXLA Phi4MM media generation failed: {error}")
                         })?
                 }
-            } else if audio_path.is_some() {
-                anyhow::bail!(
-                    "the loaded OpenXLA model/runtime bundle does not support audio input"
+            } else if let Some(audio_path) = audio_path {
+                ensure!(
+                    image_paths.is_empty(),
+                    "the loaded OpenXLA Gemma3n runtime has not qualified mixed image+audio requests"
                 );
+                #[cfg(feature = "xla-iree")]
+                {
+                    let preparer = mlxcel::audio::gemma3n::Gemma3nXlaAudioPreparer::from_model(
+                        model_path,
+                        s.context_capacity(),
+                        tokenizer,
+                    )
+                    .map_err(|error| anyhow!("OpenXLA audio configuration failed: {error}"))?
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "the loaded OpenXLA model/runtime bundle does not support audio input"
+                        )
+                    })?;
+                    let cancelled = std::sync::atomic::AtomicBool::new(false);
+                    let waveforms = mlxcel::audio::preprocess_wav_file(
+                        audio_path,
+                        preparer.policy(),
+                        &cancelled,
+                    )
+                    .map_err(|error| anyhow!("OpenXLA audio preprocessing failed: {error}"))?;
+                    let prepared_input = preparer
+                        .prepare(
+                            &mlxcel::audio::gemma3n::Gemma3nAudioFeatureExtractor::new(),
+                            waveforms,
+                            prompt_tokens.to_vec(),
+                            &cancelled,
+                        )
+                        .map_err(|error| {
+                            anyhow!("OpenXLA audio feature preparation failed: {error}")
+                        })?;
+                    let mut runtime = s
+                        .load_gemma3n_audio(
+                            prepared_input.input.frame_bucket(),
+                            prepared_input.clips,
+                        )
+                        .map_err(|error| anyhow!("OpenXLA audio runtime load failed: {error}"))?;
+                    let prepared = runtime
+                        .invoke_prepared(
+                            &prepared_input.input,
+                            prepared_input.token_ids,
+                            preparer.audio_token_id(),
+                        )
+                        .map_err(|error| anyhow!("OpenXLA audio execution failed: {error}"))?;
+                    s.generate_gemma3n_prepared_greedy(prepared.request(), max_tokens, &eos)
+                        .map_err(|error| anyhow!("OpenXLA audio generation failed: {error}"))?
+                }
+                #[cfg(not(feature = "xla-iree"))]
+                {
+                    let _ = (audio_path, tokenizer);
+                    anyhow::bail!("OpenXLA audio execution requires the xla-iree feature");
+                }
             } else if image_paths.is_empty() {
                 s.generate_greedy(prompt_tokens, max_tokens, &eos)
                     .map_err(|e| anyhow!("OpenXLA generation failed: {e}"))?
@@ -1987,6 +2046,7 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             args.generation.max_tokens,
             kv_cache_mode,
             token_bias,
+            &tokenizer,
         )?;
         let generated_text = decode_generated_text(&tokenizer, &prompt_tokens, &generated_tokens);
         let visible = filter_reasoning_for_display(

@@ -19,7 +19,7 @@ use std::process::Command;
 
 use crate::aux::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
-    IreeAuxiliaryModule,
+    AuxiliaryWeightStorage, IreeAuxiliaryModule,
 };
 use crate::aux_manifest::{AuxiliaryArtifactContract, write_auxiliary_manifest};
 use crate::iree::{compile_one, iree_compile_bin, target_flags};
@@ -52,7 +52,7 @@ pub struct AuxiliaryAbiSmokeReport {
 fn weight() -> AuxiliaryWeight {
     AuxiliaryWeight {
         name: "smoke.weight".to_string(),
-        bytes: f32_bytes(&[1.5, -2.0]),
+        storage: AuxiliaryWeightStorage::Float32(vec![1.5, -2.0]),
         dtype: AuxiliaryWeightDType::Float32,
         shape: vec![2],
     }

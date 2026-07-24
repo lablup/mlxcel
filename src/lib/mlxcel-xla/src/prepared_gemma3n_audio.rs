@@ -53,7 +53,7 @@ pub enum Gemma3nAudioInputError {
         clip: usize,
     },
     NonFinite,
-    NonZeroMaskedFeature,
+    NonZeroBucketPadding,
 }
 
 impl fmt::Display for Gemma3nAudioInputError {
@@ -98,9 +98,9 @@ impl fmt::Display for Gemma3nAudioInputError {
                 write!(f, "Gemma3n audio clip {clip} is entirely padded")
             }
             Self::NonFinite => f.write_str("Gemma3n audio mel input contains a non-finite value"),
-            Self::NonZeroMaskedFeature => f.write_str(
-                "Gemma3n audio masked mel rows must be explicit zeros at the IREE boundary",
-            ),
+            Self::NonZeroBucketPadding => {
+                f.write_str("Gemma3n audio static bucket tail must contain only zeros")
+            }
         }
     }
 }
@@ -180,9 +180,13 @@ impl Gemma3nAudioInput {
                 });
             }
             let mask = &valid_mask[clip * frame_bucket..(clip + 1) * frame_bucket];
-            if mask[..frames].iter().any(|&value| value != 1)
-                || mask[frames..].iter().any(|&value| value != 0)
-            {
+            let first_valid = mask.iter().position(|&value| value == 1);
+            let last_valid = mask.iter().rposition(|&value| value == 1);
+            let valid_count = mask.iter().filter(|&&value| value == 1).count();
+            let contiguous = first_valid
+                .zip(last_valid)
+                .is_some_and(|(first, last)| mask[first..=last].iter().all(|&value| value == 1));
+            if mask.iter().any(|&value| value > 1) || valid_count != frames || !contiguous {
                 return Err(Gemma3nAudioInputError::InvalidFrameLength {
                     clip,
                     frames,
@@ -190,13 +194,17 @@ impl Gemma3nAudioInput {
                 });
             }
         }
-        if valid_mask.iter().enumerate().any(|(index, &valid)| {
-            valid == 0
-                && mel[index * GEMMA3N_AUDIO_MEL_BINS..(index + 1) * GEMMA3N_AUDIO_MEL_BINS]
-                    .iter()
-                    .any(|&value| value != 0.0)
-        }) {
-            return Err(Gemma3nAudioInputError::NonZeroMaskedFeature);
+        for clip in 0..clips {
+            let mask = &valid_mask[clip * frame_bucket..(clip + 1) * frame_bucket];
+            let last_valid = mask
+                .iter()
+                .rposition(|&value| value == 1)
+                .expect("all-padded clips rejected above");
+            let tail_start = (clip * frame_bucket + last_valid + 1) * GEMMA3N_AUDIO_MEL_BINS;
+            let tail_end = (clip + 1) * frame_bucket * GEMMA3N_AUDIO_MEL_BINS;
+            if mel[tail_start..tail_end].iter().any(|&value| value != 0.0) {
+                return Err(Gemma3nAudioInputError::NonZeroBucketPadding);
+            }
         }
         Ok(Self {
             mel,
@@ -419,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn input_rejects_all_padded_nonfinite_and_dirty_padding() {
+    fn input_preserves_left_padding_but_rejects_dirty_bucket_tail() {
         let bucket = 8;
         let valid = vec![1, 1, 0, 0, 0, 0, 0, 0];
         let input = Gemma3nAudioInput::new(
@@ -430,6 +438,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(input.clips(), 1);
+        Gemma3nAudioInput::new(
+            {
+                let mut mel = vec![0.0; bucket * GEMMA3N_AUDIO_MEL_BINS];
+                mel[0] = -6.25;
+                mel
+            },
+            vec![0, 0, 1, 1, 0, 0, 0, 0],
+            vec![2],
+            bucket,
+        )
+        .expect("the pinned processor uses left padding");
         assert!(matches!(
             Gemma3nAudioInput::new(
                 vec![0.0; bucket * GEMMA3N_AUDIO_MEL_BINS],
@@ -458,7 +477,7 @@ mod tests {
         dirty[2 * GEMMA3N_AUDIO_MEL_BINS] = 1.0;
         assert!(matches!(
             Gemma3nAudioInput::new(dirty, vec![1, 1, 0, 0, 0, 0, 0, 0], vec![2], bucket,),
-            Err(Gemma3nAudioInputError::NonZeroMaskedFeature)
+            Err(Gemma3nAudioInputError::NonZeroBucketPadding)
         ));
     }
 

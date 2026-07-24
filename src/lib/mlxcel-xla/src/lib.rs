@@ -54,6 +54,8 @@ mod context;
 mod diagnostic_flags;
 mod gemma3n_audio_config;
 mod gemma3n_audio_rows;
+#[cfg(feature = "iree")]
+mod gemma3n_audio_runtime;
 mod gemma3n_audio_weights;
 #[cfg(any(feature = "iree", test))]
 #[allow(dead_code)]
@@ -72,9 +74,11 @@ mod prepared_deepstack;
 mod prepared_gemma3n;
 mod prepared_gemma3n_audio;
 
-#[cfg(feature = "iree")]
+#[cfg(any(feature = "iree", test))]
+#[cfg_attr(not(feature = "iree"), allow(dead_code))]
 mod aux;
-#[cfg(feature = "iree")]
+#[cfg(any(feature = "iree", test))]
+#[cfg_attr(not(feature = "iree"), allow(dead_code))]
 mod aux_manifest;
 #[cfg(feature = "iree")]
 mod aux_smoke;
@@ -217,6 +221,8 @@ pub use gemma3n_audio_config::{
     GEMMA3N_AUDIO_SOFT_TOKENS, Gemma3nXlaAudioConfig,
 };
 pub use gemma3n_audio_rows::{Gemma3nAudioRowMapError, validate_gemma3n_audio_row_indices};
+#[cfg(feature = "iree")]
+pub use gemma3n_audio_runtime::{Gemma3nAudioGraphOutput, Gemma3nAudioIreeRuntime};
 pub use gemma3n_audio_weights::{
     GEMMA3N_AUDIO_CHECKPOINT_TENSOR_COUNT, Gemma3nAudioCheckpointDType,
     Gemma3nAudioCheckpointError, Gemma3nAudioCheckpointTensorSpec, gemma3n_audio_checkpoint_specs,
@@ -284,6 +290,8 @@ pub struct XlaInferenceSession {
     #[cfg(feature = "iree")]
     engine: iree::IreeLlama,
     #[cfg(feature = "iree")]
+    device: String,
+    #[cfg(feature = "iree")]
     cache_len: i32,
 }
 
@@ -346,6 +354,7 @@ impl XlaInferenceSession {
                 context_capacity,
                 eos_token_ids,
                 engine,
+                device,
                 cache_len: 0,
             })
         }
@@ -383,6 +392,24 @@ impl XlaInferenceSession {
     #[must_use]
     pub fn eos_token_ids(&self) -> &[i32] {
         &self.eos_token_ids
+    }
+
+    /// Conditionally load the Gemma3n audio split artifacts against this exact
+    /// verified #876 language bundle.
+    #[cfg(feature = "iree")]
+    pub fn load_gemma3n_audio(
+        &self,
+        frame_bucket: usize,
+        clips: usize,
+    ) -> Result<Gemma3nAudioIreeRuntime, String> {
+        Gemma3nAudioIreeRuntime::load(
+            &self.model_path,
+            &self.device,
+            self.context_capacity,
+            frame_bucket,
+            clips,
+            self.engine.compatibility_fingerprint(),
+        )
     }
 
     /// Self-contained greedy generation over the object-safe contract.

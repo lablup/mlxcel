@@ -95,6 +95,7 @@ impl AuxiliaryTensorDType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum AuxiliaryWeightDType {
     Float32,
     Float16,
@@ -118,9 +119,31 @@ impl AuxiliaryWeightDType {
     }
 }
 
+#[allow(dead_code)]
+pub(crate) enum AuxiliaryWeightStorage {
+    Bytes(Vec<u8>),
+    Float32(Vec<f32>),
+}
+
+impl AuxiliaryWeightStorage {
+    pub(crate) fn byte_len(&self) -> usize {
+        match self {
+            Self::Bytes(values) => values.len(),
+            Self::Float32(values) => values.len() * std::mem::size_of::<f32>(),
+        }
+    }
+
+    fn as_ptr(&self) -> *const c_void {
+        match self {
+            Self::Bytes(values) => values.as_ptr().cast(),
+            Self::Float32(values) => values.as_ptr().cast(),
+        }
+    }
+}
+
 pub(crate) struct AuxiliaryWeight {
     pub(crate) name: String,
-    pub(crate) bytes: Vec<u8>,
+    pub(crate) storage: AuxiliaryWeightStorage,
     pub(crate) dtype: AuxiliaryWeightDType,
     pub(crate) shape: Vec<usize>,
 }
@@ -202,10 +225,10 @@ impl IreeAuxiliaryModule {
             let label = format!("auxiliary weight {index}");
             let dims = checked_shape(&weight.shape, weight.dtype.size_bytes(), &label)?;
             let expected = expected_bytes(&weight.shape, weight.dtype.size_bytes(), &label)?;
-            if weight.bytes.len() != expected {
+            if weight.storage.byte_len() != expected {
                 return Err(format!(
                     "{label} has {} bytes, expected {expected} for {:?} {:?}",
-                    weight.bytes.len(),
+                    weight.storage.byte_len(),
                     weight.dtype,
                     weight.shape
                 ));
@@ -216,7 +239,7 @@ impl IreeAuxiliaryModule {
         }
         let pointers: Vec<*const c_void> = weights
             .iter()
-            .map(|weight| weight.bytes.as_ptr().cast())
+            .map(|weight| weight.storage.as_ptr())
             .collect();
         let device =
             CString::new(device).map_err(|_| "device URI has an interior nul byte".to_string())?;

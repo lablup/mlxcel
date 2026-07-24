@@ -343,4 +343,9 @@ required-features = ["xla-micro-oracle"]
 # Pinned #874 MLX-vs-IREE Phi4MM Conformer and speech/vision projection parity.
 [[example]]
 name = "xla_phi4_audio_check"
+
+# Deterministic Gemma3n audio split-runtime + dense-PLE language gate (#878).
+# Uses the pinned #875 WAV/checkpoint fixture selected by environment variables.
+[[example]]
+name = "xla_gemma3n_audio_check"
 required-features = ["xla-iree"]

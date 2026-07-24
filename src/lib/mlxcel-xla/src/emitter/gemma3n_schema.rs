@@ -365,3 +365,84 @@ pub(super) fn build_schema(
 fn norm(decls: &mut Vec<Decl>, index: &mut usize, width: usize, name: String) -> Val {
     take(decls, index, Ty::f32(vec![width]), name)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::emitter::{Gemma3nWeightSpec, gemma3n_weight_specs};
+    #[cfg(xla_iree_cuda)]
+    use crate::emitter::{Precision, emit_gemma3n_prefill_with_qmv};
+
+    fn config() -> Gemma3nConfig {
+        Gemma3nConfig::from_json_str(
+            &serde_json::json!({
+                "model_type": "gemma3n_text",
+                "hidden_size": 128,
+                "intermediate_size": [192, 192, 192, 192],
+                "max_position_embeddings": 4096,
+                "num_hidden_layers": 4,
+                "num_attention_heads": 2,
+                "num_key_value_heads": 1,
+                "head_dim": 64,
+                "rms_norm_eps": 1e-6,
+                "vocab_size": 128,
+                "vocab_size_per_layer_input": 128,
+                "hidden_size_per_layer_input": 64,
+                "layer_types": [
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "full_attention"
+                ],
+                "activation_sparsity_pattern": [0.5, 0.0, 0.0, 0.0],
+                "sliding_window": 2,
+                "rope_theta": 1000000.0,
+                "rope_local_base_freq": 10000.0,
+                "final_logit_softcapping": 30.0,
+                "num_kv_shared_layers": 2,
+                "altup_num_inputs": 4,
+                "altup_active_idx": 0,
+                "altup_coef_clip": 120.0,
+                "altup_correct_scale": true,
+                "laurel_rank": 64,
+                "tie_word_embeddings": true,
+                "quantization": {"bits": 4, "group_size": 64}
+            })
+            .to_string(),
+        )
+        .unwrap()
+        .with_context_capacity(4)
+        .unwrap()
+    }
+
+    #[test]
+    fn native_qmv_keeps_one_f32_carrier_argument_per_loader_weight() {
+        let config = config();
+        let loader_specs = gemma3n_weight_specs(&config);
+        let (declarations, _) = build_schema(&config, false, 4, false, false);
+        let graph_weights = &declarations[..loader_specs.len()];
+
+        assert_eq!(graph_weights.len(), loader_specs.len());
+        for (declaration, spec) in graph_weights.iter().zip(&loader_specs) {
+            assert_eq!(declaration.loc, spec.name());
+            assert_eq!(declaration.ty.elt, "f32");
+            if matches!(spec, Gemma3nWeightSpec::Projection(_)) {
+                assert_eq!(declaration.ty.shape.len(), 2);
+            }
+        }
+
+        #[cfg(xla_iree_cuda)]
+        {
+            let graph = emit_gemma3n_prefill_with_qmv(&config, false, Precision::Bf16, true);
+            assert_eq!(
+                graph.matches("loc(\"model.language_model").count(),
+                loader_specs.len()
+            );
+            assert!(!graph.contains(".scales\")"));
+            assert!(!graph.contains(".biases\")"));
+            assert!(graph.contains(
+                "(i32, i32, i32, tensor<4x128xf32>, tensor<192x128xf32>) -> tensor<4x192xf32>"
+            ));
+        }
+    }
+}

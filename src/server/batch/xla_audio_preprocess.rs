@@ -16,8 +16,8 @@
 //!
 //! This stage owns encoded image/audio request buffers, image and waveform
 //! decoding, resampling, host feature extraction, and prepared-prefill export.
-//! A single thread-confined producer handles image-only, audio-only, and mixed
-//! Phi4MM requests so request mode selection cannot split across workers.
+//! A single thread-confined family producer handles the request's supported
+//! media combination so request mode selection cannot split across workers.
 
 use std::mem::size_of;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -27,6 +27,8 @@ use std::thread;
 use std::time::Instant;
 
 use mlxcel_core::session::{OwnedTensor, PreparedPositions, PreparedPrefill};
+#[cfg(feature = "xla-iree")]
+use mlxcel_xla::Gemma3nAudioPreparedPrefill;
 use thiserror::Error;
 
 use super::observability::BatchObservability;
@@ -47,9 +49,31 @@ pub(crate) struct AudioPreprocessJob {
 }
 
 pub(crate) enum AudioPreprocessOutcome {
-    Prepared(PreparedPrefill),
+    Prepared(AudioPreparedRequest),
     Cancelled(AudioPreprocessCheckpoint),
     Failed(AudioStageError),
+}
+
+pub(crate) enum AudioPreparedRequest {
+    Generic(PreparedPrefill),
+    #[cfg(feature = "xla-iree")]
+    Gemma3n(Gemma3nAudioPreparedPrefill),
+}
+
+impl AudioPreparedRequest {
+    pub(crate) fn sequence_len(&self) -> usize {
+        match self {
+            Self::Generic(prepared) => prepared.sequence_len,
+            #[cfg(feature = "xla-iree")]
+            Self::Gemma3n(prepared) => prepared.request().prepared().sequence_len,
+        }
+    }
+}
+
+impl From<PreparedPrefill> for AudioPreparedRequest {
+    fn from(value: PreparedPrefill) -> Self {
+        Self::Generic(value)
+    }
 }
 
 pub(crate) struct AudioPreprocessResult {
@@ -129,7 +153,7 @@ pub(crate) trait AudioFeatureProducer: 'static {
         token_ids: Vec<i32>,
         images: Vec<image::DynamicImage>,
         cancelled: &AtomicBool,
-    ) -> Result<PreparedPrefill, String>;
+    ) -> Result<AudioPreparedRequest, String>;
 }
 
 #[cfg(feature = "xla-iree")]
@@ -140,8 +164,9 @@ impl AudioFeatureProducer for crate::multimodal::phi4mm_xla_audio::Phi4MmXlaAudi
         token_ids: Vec<i32>,
         images: Vec<image::DynamicImage>,
         cancelled: &AtomicBool,
-    ) -> Result<PreparedPrefill, String> {
+    ) -> Result<AudioPreparedRequest, String> {
         self.prepare_media(waveforms, token_ids, &images, cancelled)
+            .map(Into::into)
     }
 }
 
@@ -220,6 +245,7 @@ impl AudioPreprocessMetrics {
         }
     }
 
+    #[cfg(test)]
     pub fn snapshot(&self) -> AudioPreprocessMetricsSnapshot {
         AudioPreprocessMetricsSnapshot {
             accepted: self.accepted.load(Ordering::Relaxed),
@@ -339,6 +365,7 @@ enum AudioRejectionReason {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) struct AudioPreprocessMetricsSnapshot {
     pub accepted: u64,
     pub completed: u64,
@@ -409,6 +436,7 @@ pub(crate) struct AudioPreprocessStage {
     sender: Option<mpsc::SyncSender<QueuedJob>>,
     result_rx: Option<mpsc::Receiver<AudioPreprocessResult>>,
     metrics: Arc<AudioPreprocessMetrics>,
+    #[cfg_attr(not(test), allow(dead_code))]
     healthy: Arc<AtomicBool>,
     max_queued_encoded_bytes: usize,
     max_in_flight_host_bytes: usize,
@@ -634,14 +662,17 @@ impl AudioPreprocessStage {
             .try_recv()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn recv(&self) -> Result<AudioPreprocessResult, mpsc::RecvError> {
         self.result_rx.as_ref().ok_or(mpsc::RecvError)?.recv()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn metrics(&self) -> &Arc<AudioPreprocessMetrics> {
         &self.metrics
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::Acquire)
     }
@@ -727,10 +758,10 @@ fn process_job<P: AudioFeatureProducer>(
                                     AudioPreprocessCheckpoint::Feature,
                                 )
                             }
-                            Ok(Ok(prepared)) if prepared.sequence_len > max_prefill_tokens => {
+                            Ok(Ok(prepared)) if prepared.sequence_len() > max_prefill_tokens => {
                                 AudioPreprocessOutcome::Failed(AudioStageError::ContextLimit {
                                     family,
-                                    actual: prepared.sequence_len,
+                                    actual: prepared.sequence_len(),
                                     maximum: max_prefill_tokens,
                                 })
                             }
@@ -746,7 +777,7 @@ fn process_job<P: AudioFeatureProducer>(
                                         },
                                     )
                                 } else {
-                                    metrics.record_effective_prefill(prepared.sequence_len);
+                                    metrics.record_effective_prefill(prepared.sequence_len());
                                     AudioPreprocessOutcome::Prepared(prepared)
                                 }
                             }
@@ -804,7 +835,38 @@ fn process_job<P: AudioFeatureProducer>(
     }
 }
 
-fn prepared_prefill_host_bytes(prepared: &PreparedPrefill) -> Option<usize> {
+fn prepared_prefill_host_bytes(prepared: &AudioPreparedRequest) -> Option<usize> {
+    match prepared {
+        AudioPreparedRequest::Generic(prepared) => generic_prepared_prefill_host_bytes(prepared),
+        #[cfg(feature = "xla-iree")]
+        AudioPreparedRequest::Gemma3n(audio) => {
+            let request = audio.request();
+            generic_prepared_prefill_host_bytes(request.prepared())?
+                .checked_add(size_of::<Gemma3nAudioPreparedPrefill>())?
+                .checked_add(request.dense_ple().byte_len())?
+                .checked_add(
+                    audio
+                        .projected_lengths()
+                        .len()
+                        .checked_mul(size_of::<usize>())?,
+                )?
+                .checked_add(
+                    audio
+                        .placeholder_starts()
+                        .len()
+                        .checked_mul(size_of::<usize>())?,
+                )?
+                .checked_add(
+                    audio
+                        .audio_row_indices()
+                        .len()
+                        .checked_mul(size_of::<i32>())?,
+                )
+        }
+    }
+}
+
+fn generic_prepared_prefill_host_bytes(prepared: &PreparedPrefill) -> Option<usize> {
     fn tensor_bytes(tensor: &OwnedTensor) -> Option<usize> {
         tensor
             .bytes

@@ -43,11 +43,9 @@ pub(crate) trait AudioAcquisitionCancellation: Sync {
 /// admission. Its cancellation boundary is the request task itself: dropping
 /// the Axum handler future drops this acquisition future and any in-flight
 /// reqwest byte stream. The explicit probe is reserved for callers that already
-/// own a cooperative token (including the future XLA audio admission path).
-///
-/// Do not interpret this fallback as a live client-disconnect probe. XLA audio
-/// admission remains disabled until a family feature producer and token wiring
-/// are both present.
+/// own a cooperative token. Do not interpret this fallback as a live
+/// client-disconnect probe; after acquisition, XLA audio admission uses its
+/// request-owned cancellation token at every bounded preprocessing checkpoint.
 struct NeverCancelAudioAcquisition;
 
 impl AudioAcquisitionCancellation for NeverCancelAudioAcquisition {
@@ -169,10 +167,10 @@ impl MediaRequestMetadata {
 
     /// Validate the XLA request seam without changing tolerant MLX resolution.
     ///
-    /// Audio/video declarations are rejected from the declared counts so a
-    /// failed resolver cannot erase an unsupported modality. Images require a
-    /// one-to-one declaration → raw payload handoff; decoded cardinality is
-    /// checked later by the bounded preprocessing worker.
+    /// Video declarations are rejected from the declared count so a failed
+    /// resolver cannot erase an unsupported modality. Images and audio require
+    /// a one-to-one declaration → raw payload handoff; decoded cardinality is
+    /// checked later by their bounded preprocessing workers.
     #[cfg_attr(not(feature = "xla-iree"), allow(dead_code))]
     pub(crate) fn validate_xla_raw_counts(
         self,

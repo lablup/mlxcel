@@ -88,6 +88,12 @@ pub use gemma3n_audio_emit::{Gemma3nAudioDiagnosticLayout, Gemma3nAudioDiagnosti
 #[allow(unused_imports)]
 pub(crate) use gemma3n_audio_emit::{emit_gemma3n_audio_encode, emit_gemma3n_audio_merge_ple};
 #[allow(unused_imports)]
+pub(crate) use gemma3n_audio_schema::{
+    WeightSpec as Gemma3nAudioGraphWeightSpec,
+    encoder_weight_specs as gemma3n_audio_encoder_weights,
+    merge_weight_specs as gemma3n_audio_merge_weights,
+};
+#[allow(unused_imports)]
 pub(crate) use gemma3n_decode::{
     emit_gemma3n_decode, emit_gemma3n_decode_ragged, emit_gemma3n_decode_ragged_with,
     emit_gemma3n_decode_ragged_with_qmv, emit_gemma3n_decode_with, emit_gemma3n_decode_with_qmv,

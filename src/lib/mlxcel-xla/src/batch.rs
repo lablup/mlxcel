@@ -48,7 +48,7 @@ use mlxcel_core::session::{
 };
 
 #[cfg(feature = "iree")]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::Gemma3nDensePle;
 #[cfg(feature = "iree")]
@@ -444,6 +444,8 @@ where
 pub struct XlaBatchEngine {
     engine: IreeRaggedLlama,
     sched: Scheduler,
+    model_path: PathBuf,
+    device: String,
 }
 
 #[cfg(feature = "iree")]
@@ -475,6 +477,8 @@ impl XlaBatchEngine {
         Ok(Self {
             engine,
             sched: Scheduler::new(b_max, eos),
+            model_path: model_path.to_path_buf(),
+            device: device.to_string(),
         })
     }
 
@@ -490,10 +494,45 @@ impl XlaBatchEngine {
         self.engine.context_capacity()
     }
 
+    /// Checkpoint directory backing this resident language bundle.
+    #[must_use]
+    pub fn model_path(&self) -> &Path {
+        &self.model_path
+    }
+
+    /// IREE HAL device used by this resident language bundle.
+    #[must_use]
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+
+    /// Verified identity shared by every conditional Gemma3n auxiliary bundle.
+    #[must_use]
+    pub fn compatibility_fingerprint(&self) -> u64 {
+        self.engine.compatibility_fingerprint()
+    }
+
     /// The model's EOS token ids (from `generation_config.json`).
     #[must_use]
     pub fn eos_token_ids(&self) -> &[i32] {
         &self.sched.eos
+    }
+
+    /// Conditionally load a Gemma3n audio bucket against this exact verified
+    /// #876 batched language bundle.
+    pub fn load_gemma3n_audio(
+        &self,
+        frame_bucket: usize,
+        clips: usize,
+    ) -> Result<crate::Gemma3nAudioIreeRuntime, String> {
+        crate::Gemma3nAudioIreeRuntime::load(
+            &self.model_path,
+            &self.device,
+            self.context_capacity(),
+            frame_bucket,
+            clips,
+            self.engine.compatibility_fingerprint(),
+        )
     }
 
     /// No active slots and nothing queued: a driver loop can stop pumping.

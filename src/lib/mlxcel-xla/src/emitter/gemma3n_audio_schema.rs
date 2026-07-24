@@ -4,10 +4,9 @@ use std::collections::BTreeMap;
 
 use super::builder::{Builder, Ty, Val};
 use super::gemma3n::Gemma3nConfig;
-use crate::{
-    GEMMA3N_AUDIO_CHECKPOINT_TENSOR_COUNT, GEMMA3N_AUDIO_SOFT_TOKENS, Gemma3nXlaAudioConfig,
-    gemma3n_audio_checkpoint_specs,
-};
+#[cfg(test)]
+use crate::GEMMA3N_AUDIO_CHECKPOINT_TENSOR_COUNT;
+use crate::{GEMMA3N_AUDIO_SOFT_TOKENS, Gemma3nXlaAudioConfig, gemma3n_audio_checkpoint_specs};
 
 pub(super) struct Decl {
     pub ty: Ty,
@@ -15,7 +14,7 @@ pub(super) struct Decl {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct WeightSpec {
+pub(crate) struct WeightSpec {
     pub name: String,
     pub shape: Vec<usize>,
     pub projection: bool,
@@ -61,7 +60,7 @@ fn logical_weight(name: impl Into<String>, shape: Vec<usize>) -> WeightSpec {
     }
 }
 
-fn encoder_weight_specs(
+pub(crate) fn encoder_weight_specs(
     audio: &Gemma3nXlaAudioConfig,
     text: &Gemma3nConfig,
 ) -> Result<Vec<WeightSpec>, String> {
@@ -92,7 +91,7 @@ fn encoder_weight_specs(
     Ok(specs)
 }
 
-fn merge_weight_specs(text: &Gemma3nConfig) -> Vec<WeightSpec> {
+pub(crate) fn merge_weight_specs(text: &Gemma3nConfig) -> Vec<WeightSpec> {
     vec![
         logical_weight(
             "model.language_model.embed_tokens.weight",

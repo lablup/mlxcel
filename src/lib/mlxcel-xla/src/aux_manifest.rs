@@ -658,7 +658,7 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     use super::*;
-    use crate::aux::{AuxiliaryWeight, AuxiliaryWeightDType};
+    use crate::aux::{AuxiliaryWeight, AuxiliaryWeightDType, AuxiliaryWeightStorage};
     use crate::numeric_dtype_contract::{NumericDType, NumericDTypeContract, WeightExecution};
     use crate::operator_numeric_contract::{
         AffineDequantizationContract, AffineEvaluationOrder, AssociationPolicy,
@@ -680,7 +680,7 @@ mod tests {
     fn weights() -> Vec<AuxiliaryWeight> {
         vec![AuxiliaryWeight {
             name: "weight".to_string(),
-            bytes: 1.0f32.to_ne_bytes().to_vec(),
+            storage: AuxiliaryWeightStorage::Float32(vec![1.0]),
             dtype: AuxiliaryWeightDType::Float32,
             shape: vec![1],
         }]

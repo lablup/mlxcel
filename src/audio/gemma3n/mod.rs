@@ -22,6 +22,8 @@ mod attention;
 mod config;
 mod encoder;
 mod feature_extractor;
+#[cfg(feature = "xla-backend")]
+mod xla;
 
 use mlxcel_core::layers::UnifiedLinear;
 use mlxcel_core::weights::WeightMap;
@@ -89,3 +91,5 @@ pub use feature_extractor::{
     GEMMA3N_AUDIO_SOFT_TOKENS, GEMMA3N_MAX_SAMPLES, GEMMA3N_SAMPLE_RATE, Gemma3nAudioFeatureBatch,
     Gemma3nAudioFeatureExtractor,
 };
+#[cfg(feature = "xla-backend")]
+pub use xla::{Gemma3nXlaAudioPreparer, Gemma3nXlaPreparedAudioInput};
