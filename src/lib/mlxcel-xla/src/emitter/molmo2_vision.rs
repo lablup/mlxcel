@@ -243,9 +243,16 @@ fn indexed_pool(
     let zero_f32 = builder.const_f32(0.0);
     let sums = builder.reduce_add(&gathered, 1, &zero_f32);
     let counts = builder.reduce_add(&valid_f32, 1, &zero_f32);
-    let one = builder.const_f32(1.0);
-    let ones = builder.broadcast(&one, &[], vec![groups]);
-    let denominator = builder.maximum(&counts, &ones);
+    let denominator = if config.pooling_attention_mask {
+        let one = builder.const_f32(1.0);
+        let ones = builder.broadcast(&one, &[], vec![groups]);
+        builder.maximum(&counts, &ones)
+    } else {
+        // Match the MLX reference: invalid entries are zeroed above, but an
+        // unmasked pooling query is the mean over the full fixed-size window.
+        let group_size = builder.const_f32(group_size as f32);
+        builder.broadcast(&group_size, &[], vec![groups])
+    };
     let denominator = builder.broadcast(&denominator, &[0], vec![groups, config.selected_width()]);
     let query = builder.divide(&sums, &denominator);
 
@@ -426,9 +433,8 @@ pub(crate) fn emit_molmo2_vision(config: &Molmo2VisionConfig) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn emitted_pooling_clamps_then_masks_and_keeps_additive_merge_outside_graph() {
-        let config = Molmo2VisionConfig::from_json_strs(
+    fn test_config(pooling_attention_mask: bool) -> Molmo2VisionConfig {
+        Molmo2VisionConfig::from_json_strs(
             &serde_json::json!({
                 "model_type":"molmo2","image_patch_id":151938,
                 "vit_config":{"hidden_size":8,"intermediate_size":16,"num_attention_heads":2,
@@ -436,14 +442,19 @@ mod tests {
                     "image_patch_size":14,"image_num_pos":4,"layer_norm_eps":1e-6},
                 "adapter_config":{"hidden_size":8,"intermediate_size":12,"text_hidden_size":10,
                     "num_attention_heads":2,"head_dim":4,"vit_layers":[0,1],
-                    "pooling_attention_mask":true}
+                    "pooling_attention_mask":pooling_attention_mask}
             })
             .to_string(),
             &serde_json::json!({"patch_size":14,"max_crops":1,"overlap_margins":[0,0],
                 "pooling_size":[2,2],"size":{"height":28,"width":28}})
             .to_string(),
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn emitted_pooling_clamps_then_masks_and_keeps_additive_merge_outside_graph() {
+        let config = test_config(true);
         let mlir = emit_molmo2_vision(&config);
         assert!(mlir.contains("molmo2.image_token_pooling.signed"));
         assert!(mlir.contains("stablehlo.compare GE"));
@@ -453,6 +464,13 @@ mod tests {
         assert!(mlir.contains("vision_tower.image_vit.patch_embedding.weight"));
         assert!(mlir.contains("vision_tower.image_projector.w3.weight"));
         assert!(!mlir.contains("image_input_idx"));
+    }
+
+    #[test]
+    fn unmasked_pooling_uses_full_window_denominator() {
+        let mlir = emit_molmo2_vision(&test_config(false));
+        assert!(mlir.contains("stablehlo.constant dense<0x40800000> : tensor<f32>"));
+        assert!(!mlir.contains("stablehlo.select"));
     }
 
     #[test]

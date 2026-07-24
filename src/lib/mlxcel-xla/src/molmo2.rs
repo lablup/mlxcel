@@ -51,6 +51,12 @@ pub enum Molmo2InputError {
         positions: usize,
         projected_tokens: usize,
     },
+    ActiveTokenCount {
+        active_groups: usize,
+        grid_groups: usize,
+        prompt_positions: usize,
+        all_invalid_groups: Vec<usize>,
+    },
     NonFinite {
         tensor: &'static str,
         index: usize,
@@ -104,6 +110,15 @@ impl fmt::Display for Molmo2InputError {
             } => write!(
                 f,
                 "Molmo2 prompt has {positions} image_patch_id positions but projector returned {projected_tokens} tokens"
+            ),
+            Self::ActiveTokenCount {
+                active_groups,
+                grid_groups,
+                prompt_positions,
+                all_invalid_groups,
+            } => write!(
+                f,
+                "Molmo2 projected active rows ({active_groups}) and grid rows ({grid_groups}) must match prompt image_patch_id positions ({prompt_positions}) before native invocation; all-invalid pooling groups: {all_invalid_groups:?}"
             ),
             Self::NonFinite { tensor, index } => {
                 write!(
@@ -199,14 +214,49 @@ impl Molmo2SafePooling {
         })
     }
 
-    /// Safe denominators for query means. All-invalid groups use one and stay
-    /// zero because their gathered values are masked before reduction.
+    /// Safe denominators for query means under the configured attention-mask policy.
+    ///
+    /// Masked pooling averages only valid patches and clamps all-invalid groups
+    /// to one. Unmasked pooling matches the MLX reference by averaging the
+    /// zero-masked values over the full fixed-size pooling window.
     #[must_use]
-    pub fn mean_denominators(&self) -> Vec<i32> {
-        self.valid_counts
+    pub fn mean_denominators(&self, pooling_attention_mask: bool) -> Vec<i32> {
+        if pooling_attention_mask {
+            self.valid_counts
+                .iter()
+                .map(|&count| count.max(1))
+                .collect()
+        } else {
+            vec![i32::try_from(self.group_size).unwrap_or(i32::MAX); self.groups]
+        }
+    }
+
+    pub(crate) fn active_groups_for_prompt(
+        &self,
+        grid_groups: usize,
+        prompt_positions: usize,
+    ) -> Result<Vec<usize>, Molmo2InputError> {
+        let active = self
+            .valid_counts
             .iter()
-            .map(|&count| count.max(1))
-            .collect()
+            .enumerate()
+            .filter_map(|(index, &count)| (count > 0).then_some(index))
+            .collect::<Vec<_>>();
+        if grid_groups != prompt_positions || active.len() != prompt_positions {
+            let all_invalid_groups = self
+                .valid_counts
+                .iter()
+                .enumerate()
+                .filter_map(|(index, &count)| (count == 0).then_some(index))
+                .collect::<Vec<_>>();
+            return Err(Molmo2InputError::ActiveTokenCount {
+                active_groups: active.len(),
+                grid_groups,
+                prompt_positions,
+                all_invalid_groups,
+            });
+        }
+        Ok(active)
     }
 }
 
@@ -314,7 +364,8 @@ mod tests {
         assert_eq!(pooling.gather_indices, vec![4, 0, 2, 0, 0, 0, 0, 0]);
         assert_eq!(pooling.valid_mask, vec![1, 0, 1, 0, 0, 0, 0, 0]);
         assert_eq!(pooling.valid_counts, vec![2, 0]);
-        assert_eq!(pooling.mean_denominators(), vec![2, 1]);
+        assert_eq!(pooling.mean_denominators(true), vec![2, 1]);
+        assert_eq!(pooling.mean_denominators(false), vec![4, 4]);
 
         let patches = [100.0, 1.0, 2.0, 3.0, 4.0];
         let masked_sums = (0..pooling.groups)
@@ -345,6 +396,35 @@ mod tests {
                 value: 3,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn active_rows_are_rejected_before_native_invoke_when_cardinality_drifts() {
+        let partial = Molmo2SafePooling::prepare(&[0, -1, -1, -1, 1, -1, -1, -1], 2, 4, 2)
+            .expect("partially filled groups are valid");
+        assert_eq!(partial.active_groups_for_prompt(2, 2).unwrap(), vec![0, 1]);
+
+        let all_invalid = Molmo2SafePooling::prepare(&[0, -1, -1, -1, -1, -1, -1, -1], 2, 4, 2)
+            .expect("negative sentinels remain valid inputs");
+        assert!(matches!(
+            all_invalid.active_groups_for_prompt(2, 2),
+            Err(Molmo2InputError::ActiveTokenCount {
+                active_groups: 1,
+                grid_groups: 2,
+                prompt_positions: 2,
+                all_invalid_groups,
+            }) if all_invalid_groups == vec![1]
+        ));
+
+        assert!(matches!(
+            partial.active_groups_for_prompt(2, 1),
+            Err(Molmo2InputError::ActiveTokenCount {
+                active_groups: 2,
+                grid_groups: 2,
+                prompt_positions: 1,
+                all_invalid_groups,
+            }) if all_invalid_groups.is_empty()
         ));
     }
 

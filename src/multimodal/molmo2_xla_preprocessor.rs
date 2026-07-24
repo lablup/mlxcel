@@ -192,6 +192,10 @@ impl Molmo2IreeHostPreprocessor {
         let processed = self.processor.preprocess_image(image);
         let image_tokens = Self::image_tokens(processed.image_grid)?;
         let logical_tokens = Self::expand_prompt(token_ids, &image_tokens)?;
+        let prompt_image_patch_count = logical_tokens
+            .iter()
+            .filter(|&&token| token == IMAGE_PATCH_ID)
+            .count();
         validate_sequence_capacity(logical_tokens.len(), self.max_sequence_len)?;
         let input_ids = mlxcel_core::from_slice_i32(
             &logical_tokens,
@@ -242,6 +246,7 @@ impl Molmo2IreeHostPreprocessor {
                 image_grid: processed.image_grid,
                 image_num_crops: usize::try_from(processed.image_num_crops)
                     .map_err(|_| HostPreprocessorError::ShapeOverflow)?,
+                prompt_image_patch_count,
             })
             .map_err(HostPreprocessorError::Iree)?;
         let positions = mlxcel_xla::add_molmo2_projected_features(

@@ -54,6 +54,7 @@ pub struct Molmo2VisionInput<'a> {
     pub pooling_shape: [usize; 2],
     pub image_grid: [i32; 4],
     pub image_num_crops: usize,
+    pub prompt_image_patch_count: usize,
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -421,6 +422,9 @@ impl IreeMolmo2VisionProjector {
             crops * patches,
         )
         .map_err(|error| error.to_string())?;
+        let active_groups = safe
+            .active_groups_for_prompt(grid_groups, input.prompt_image_patch_count)
+            .map_err(|error| error.to_string())?;
         let static_patch_values =
             self.config.static_crops * self.config.patches_per_crop * self.config.patch_dim;
         let mut padded_patches = vec![0.0f32; static_patch_values];
@@ -456,14 +460,8 @@ impl IreeMolmo2VisionProjector {
             }],
         )?;
         let all_values = decode_output(&output)?;
-        let valid_groups = safe
-            .valid_counts
-            .iter()
-            .enumerate()
-            .filter_map(|(index, &count)| (count > 0).then_some(index))
-            .collect::<Vec<_>>();
-        let mut values = Vec::with_capacity(valid_groups.len() * self.config.text_hidden);
-        for group in valid_groups {
+        let mut values = Vec::with_capacity(active_groups.len() * self.config.text_hidden);
+        for group in active_groups {
             let start = group * self.config.text_hidden;
             values.extend_from_slice(&all_values[start..start + self.config.text_hidden]);
         }
