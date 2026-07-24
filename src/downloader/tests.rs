@@ -846,6 +846,39 @@ fn extra_ca_certs_errors_on_missing_file() {
 
 #[cfg(unix)]
 #[test]
+fn extra_ca_certs_errors_on_unreadable_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // SAFETY: reading our own euid, no env/global state touched.
+    if unsafe { libc::geteuid() } == 0 {
+        // root bypasses Unix permission bits entirely, so this test would
+        // spuriously pass/fail depending on the CI runner's privilege level.
+        return;
+    }
+
+    let _env_guard = env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("unreadable.pem");
+    std::fs::write(&path, TEST_CA_CERT_1).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let prev = std::env::var(EXTRA_CA_CERTS_ENV).ok();
+    // SAFETY: serialized via the crate-wide ENV_LOCK acquired above.
+    unsafe {
+        std::env::set_var(EXTRA_CA_CERTS_ENV, path.to_str().unwrap());
+    }
+    let err =
+        load_extra_ca_certificates().expect_err("unreadable file must error, not silently pass");
+    assert!(
+        err.to_string().contains(EXTRA_CA_CERTS_ENV),
+        "error should name the env var: {err}"
+    );
+    // Restore permissions so the tempdir's own Drop cleanup can remove it.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    restore_env(EXTRA_CA_CERTS_ENV, prev);
+}
+
+#[cfg(unix)]
+#[test]
 fn extra_ca_certs_errors_on_non_utf8_value() {
     use std::os::unix::ffi::OsStringExt;
 
