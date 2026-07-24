@@ -260,7 +260,21 @@ impl Qwen2VlConfig {
                 "Qwen2-VL IREE image vision currently qualifies temporal_patch_size=2, got {temporal_patch_size}"
             ));
         }
-        let quantization = match root.get("quantization") {
+        // mlx-community conversion can quantize the language tower while
+        // deliberately leaving the vision tower in its source precision. The
+        // Qwen2.5-VL converter records that split as
+        // `vision_config.skip_vision=true`; treating the root text contract as
+        // a vision contract rejects valid dimensions and would later expect
+        // affine metadata that the vision checkpoint does not contain.
+        let vision_quantization =
+            if vision.get("skip_vision").and_then(Value::as_bool) == Some(true) {
+                None
+            } else {
+                vision
+                    .get("quantization")
+                    .or_else(|| root.get("quantization"))
+            };
+        let quantization = match vision_quantization {
             None => None,
             Some(value) => {
                 let object = value
@@ -664,7 +678,7 @@ pub(crate) fn prepare_qwen2_vl_host_inputs(
     let rotary_dim = head_dim / 2;
     let frequency_width = rotary_dim;
     let axis_width = rotary_dim / 2;
-    if head_dim % 4 != 0 {
+    if !head_dim.is_multiple_of(4) {
         return Err(format!(
             "Qwen2-VL vision head_dim={head_dim} must be divisible by 4 for 2D RoPE"
         ));
@@ -1196,5 +1210,60 @@ mod tests {
                     .contains(expected)
             );
         }
+    }
+
+    #[test]
+    fn qwen25_skip_vision_keeps_text_quantization_out_of_vision_contract() {
+        let config = Qwen2VlConfig::from_json_str(
+            r#"{
+                "model_type":"qwen2_5_vl",
+                "hidden_size":2048,
+                "quantization":{"group_size":64,"bits":4},
+                "vision_config":{
+                    "depth":32,
+                    "hidden_act":"silu",
+                    "hidden_size":1280,
+                    "intermediate_size":3420,
+                    "out_hidden_size":2048,
+                    "num_heads":16,
+                    "patch_size":14,
+                    "spatial_merge_size":2,
+                    "temporal_patch_size":2,
+                    "window_size":112,
+                    "fullatt_block_indexes":[7,15,23,31],
+                    "skip_vision":true
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(config.quantization, None);
+        assert!(config.fingerprint(256).contains("source_quant=None"));
+    }
+
+    #[test]
+    fn qwen2_still_inherits_the_root_quantization_contract() {
+        let config = Qwen2VlConfig::from_json_str(
+            r#"{
+                "model_type":"qwen2_vl",
+                "hidden_size":1536,
+                "quantization":{"group_size":64,"bits":4},
+                "vision_config":{
+                    "depth":2,
+                    "embed_dim":1280,
+                    "mlp_ratio":4,
+                    "num_heads":16,
+                    "patch_size":14,
+                    "spatial_merge_size":2,
+                    "temporal_patch_size":2
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(config.quantization, Some((4, 64)));
+        assert!(
+            config
+                .fingerprint(256)
+                .contains("source_quant=Some((4, 64))")
+        );
     }
 }
