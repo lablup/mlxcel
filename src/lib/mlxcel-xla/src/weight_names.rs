@@ -146,6 +146,28 @@ pub(crate) fn scheme_names(scheme: WeightScheme) -> SchemeNames {
             pre_ff_norm: "pre_feedforward_layernorm.weight",
             post_ff_norm: "post_feedforward_layernorm.weight",
         },
+        WeightScheme::Molmo => SchemeNames {
+            embed: "language_model.model.wte.embedding",
+            final_norm: "language_model.model.ln_f.weight",
+            lm_head: "language_model.model.ff_out.weight",
+            layer_stem: "language_model.model.blocks.",
+            down: "ff_out.weight",
+            gate: "ff_proj.weight",
+            input_layernorm: "attn_norm.weight",
+            post_attention_layernorm: "ff_norm.weight",
+            up: "ff_proj.weight",
+            k_proj: "att_proj.weight",
+            o_proj: "attn_out.weight",
+            q_proj: "att_proj.weight",
+            v_proj: "att_proj.weight",
+            k_bias: "att_proj.bias",
+            q_bias: "att_proj.bias",
+            v_bias: "att_proj.bias",
+            q_norm: "unused.q_norm.weight",
+            k_norm: "unused.k_norm.weight",
+            pre_ff_norm: "unused.pre_ff_norm.weight",
+            post_ff_norm: "unused.post_ff_norm.weight",
+        },
     }
 }
 

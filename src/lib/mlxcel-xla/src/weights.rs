@@ -180,8 +180,13 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
         // gate (gated MLP only; the first half of gate_up_proj for a fused Phi3).
         if gated && !moe_layer {
             if cfg.fused_gate_up {
+                let fused = if cfg.weight_scheme == crate::emitter::WeightScheme::Molmo {
+                    format!("{p}{}", s.gate)
+                } else {
+                    format!("{p}mlp.gate_up_proj.weight")
+                };
                 out.push(WeightSpec::Rows {
-                    name: phi4_base_projection(cfg, format!("{p}mlp.gate_up_proj.weight")),
+                    name: phi4_base_projection(cfg, fused),
                     start: 0,
                     end: inter,
                 });
@@ -208,8 +213,13 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
         // Skipped on a MoE layer (issue #500), which has no dense up projection.
         if !moe_layer {
             if cfg.fused_gate_up {
+                let fused = if cfg.weight_scheme == crate::emitter::WeightScheme::Molmo {
+                    format!("{p}{}", s.up)
+                } else {
+                    format!("{p}mlp.gate_up_proj.weight")
+                };
                 out.push(WeightSpec::Rows {
-                    name: phi4_base_projection(cfg, format!("{p}mlp.gate_up_proj.weight")),
+                    name: phi4_base_projection(cfg, fused),
                     start: inter,
                     end: 2 * inter,
                 });
@@ -225,7 +235,12 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
         }
         // wk, wo, wq, wv (JAX-alphabetical; a fused Phi3 qkv_proj is [Q|K|V] rows).
         if cfg.fused_qkv {
-            let qkv = phi4_base_projection(cfg, format!("{p}self_attn.qkv_proj.weight"));
+            let fused = if cfg.weight_scheme == crate::emitter::WeightScheme::Molmo {
+                format!("{p}{}", s.q_proj)
+            } else {
+                format!("{p}self_attn.qkv_proj.weight")
+            };
+            let qkv = phi4_base_projection(cfg, fused);
             out.push(WeightSpec::Rows {
                 name: qkv.clone(),
                 start: nq,
@@ -269,9 +284,28 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
         }
         // q/k/v projection biases (k, q, v order).
         if cfg.qkv_bias {
-            out.push(WeightSpec::Whole(format!("{p}{}", s.k_bias)));
-            out.push(WeightSpec::Whole(format!("{p}{}", s.q_bias)));
-            out.push(WeightSpec::Whole(format!("{p}{}", s.v_bias)));
+            if cfg.fused_qkv {
+                let bias = format!("{p}{}", s.q_bias);
+                out.push(WeightSpec::Rows {
+                    name: bias.clone(),
+                    start: nq,
+                    end: nq + nkv,
+                });
+                out.push(WeightSpec::Rows {
+                    name: bias.clone(),
+                    start: 0,
+                    end: nq,
+                });
+                out.push(WeightSpec::Rows {
+                    name: bias,
+                    start: nq + nkv,
+                    end: nq + 2 * nkv,
+                });
+            } else {
+                out.push(WeightSpec::Whole(format!("{p}{}", s.k_bias)));
+                out.push(WeightSpec::Whole(format!("{p}{}", s.q_bias)));
+                out.push(WeightSpec::Whole(format!("{p}{}", s.v_bias)));
+            }
         }
         // q/k norms (Qwen3 / Gemma3 per-head, OLMo2/3 flat), q then k.
         if cfg.qk_norm.is_some() {
@@ -739,7 +773,65 @@ pub(crate) fn dequantize_affine_stacked(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::emitter::Phi4LoraConfig;
+    use crate::emitter::{Phi4LoraConfig, WeightScheme};
+
+    #[test]
+    fn molmo_v1_maps_fused_olmo_weights_without_decoder_duplication() {
+        let config = Config::from_json_str(
+            r#"{
+                "model_type":"molmo",
+                "hidden_size":8,
+                "intermediate_size":24,
+                "num_hidden_layers":1,
+                "num_attention_heads":2,
+                "num_key_value_heads":1,
+                "layer_norm_eps":0.00001,
+                "rope_theta":1000000.0,
+                "vocab_size":32,
+                "qkv_bias":true,
+                "tie_word_embeddings":false,
+                "quantization":{"bits":4,"group_size":4}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(config.weight_scheme, WeightScheme::Molmo);
+        assert_eq!(config.inter, 12, "Molmo config stores fused gate+up width");
+        assert!(config.fused_qkv && config.fused_gate_up);
+        assert!(config.qkv_bias && config.rope_interleaved);
+
+        let specs = weight_specs_q(&config, false);
+        assert_eq!(
+            specs[0],
+            WeightSpec::Whole("language_model.model.wte.embedding".to_string())
+        );
+        assert_eq!(
+            specs[2],
+            WeightSpec::Whole("language_model.model.ff_out.weight".to_string())
+        );
+        let rows = |start, end| WeightSpec::Rows {
+            name: "language_model.model.blocks.0.att_proj.weight".to_string(),
+            start,
+            end,
+        };
+        assert!(specs.contains(&rows(8, 12)));
+        assert!(specs.contains(&rows(0, 8)));
+        assert!(specs.contains(&rows(12, 16)));
+        assert!(specs.contains(&WeightSpec::Rows {
+            name: "language_model.model.blocks.0.ff_proj.weight".to_string(),
+            start: 0,
+            end: 12,
+        }));
+        assert!(specs.contains(&WeightSpec::Rows {
+            name: "language_model.model.blocks.0.ff_proj.weight".to_string(),
+            start: 12,
+            end: 24,
+        }));
+        assert!(specs.contains(&WeightSpec::Rows {
+            name: "language_model.model.blocks.0.att_proj.bias".to_string(),
+            start: 8,
+            end: 12,
+        }));
+    }
 
     fn phi4_config() -> Config {
         Config {

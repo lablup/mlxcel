@@ -132,6 +132,9 @@ pub enum WeightScheme {
     /// ExaOne 3.x GPT-2-style names (`transformer.h.{i}...`, gated MLP `c_fc_0` /
     /// `c_fc_1` / `c_proj`, `out_proj` attention output).
     Exaone,
+    /// Molmo v1's OLMo-style decoder layout under `language_model.model`, with
+    /// fused `att_proj` QKV and fused `ff_proj` gate/up projections.
+    Molmo,
 }
 
 /// MLX affine weight quantization (`config.json` `quantization`). The linear /
@@ -509,10 +512,10 @@ impl Config {
         // ExaOne 3.x keeps GPT-2-style tensor names; every other supported family
         // uses the standard HF Llama layout. Loader-only (see [`WeightScheme`]), so
         // it never changes the emitted graph.
-        let weight_scheme = if model_type == Some("exaone") {
-            WeightScheme::Exaone
-        } else {
-            WeightScheme::Llama
+        let weight_scheme = match model_type {
+            Some("exaone") => WeightScheme::Exaone,
+            Some("molmo") => WeightScheme::Molmo,
+            _ => WeightScheme::Llama,
         };
 
         // Interleaved (GPT-J-style) RoPE reaches the supported families only through
@@ -870,6 +873,19 @@ impl Config {
                 tie_default = false;
                 rotary_dim = partial_rotary(1.0);
             }
+            Some("molmo") => {
+                if !matches!(
+                    v.get("rope_impl").and_then(serde_json::Value::as_str),
+                    None | Some("interleave")
+                ) {
+                    return Err("Molmo v1 XLA requires rope_impl = \"interleave\"".to_string());
+                }
+                qkv_bias = true;
+                tie_default = false;
+                fused_qkv = true;
+                fused_gate_up = true;
+                rope_interleaved = true;
+            }
             Some("stablelm") => {
                 // LayerNorm with bias, partial RoPE, optional q/k/v bias, untied.
                 layernorm = true;
@@ -1003,7 +1019,7 @@ impl Config {
                 return Err(format!(
                     "the OpenXLA emitter supports the dense architectures Llama, Qwen2, \
                      Qwen3, Gemma1/2/3, SmolLM3, OLMo2/3, Seed-OSS, MiMo, InternLM3, ExaOne, \
-                     Cohere, Cohere2, Phi3, Phi4MM, StableLM, StarCoder2, Granite, and MiniCPM, plus \
+                     Cohere, Cohere2, Phi3, Phi4MM, Molmo, StableLM, StarCoder2, Granite, and MiniCPM, plus \
                      the Mixtral, Qwen2-MoE, Qwen3-MoE, and OLMoE mixture-of-experts \
                      architectures; config.json model_type = {other:?} (other MoE / MLA / \
                      novel-activation variants are follow-ups)"
@@ -1343,10 +1359,22 @@ impl Config {
             None
         };
 
+        let intermediate = u("intermediate_size")?;
+        let intermediate = if model_type == Some("molmo") {
+            if !intermediate.is_multiple_of(2) {
+                return Err(format!(
+                    "Molmo fused intermediate_size={intermediate} must be even"
+                ));
+            }
+            intermediate / 2
+        } else {
+            intermediate
+        };
+
         Ok(Config {
             context_capacity: crate::DEFAULT_CONTEXT_CAPACITY,
             hidden,
-            inter: u("intermediate_size")?,
+            inter: intermediate,
             n_layers,
             n_q,
             n_kv: u("num_key_value_heads")?,
