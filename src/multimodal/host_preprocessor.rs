@@ -195,9 +195,36 @@ fn load_molmo_image_preprocessor(
     model_path: &Path,
     policy: XlaVisionBackendPolicy,
 ) -> Result<Option<Box<dyn HostMultimodalPreprocessor>>, HostPreprocessorError> {
+    #[cfg(feature = "xla-iree")]
+    if policy != XlaVisionBackendPolicy::Host {
+        let device = std::env::var("MLXCEL_XLA_DEVICE")
+            .unwrap_or_else(|_| mlxcel_xla::default_device().to_string());
+        match MolmoHostPreprocessor::load_iree(model_path, &device) {
+            Ok(preprocessor) => {
+                tracing::info!(
+                    vision_backend = "iree",
+                    vision_device = %device,
+                    vision_backend_policy = ?policy,
+                    merge_mode = mlxcel_xla::MOLMO_V1_MERGE_MODE,
+                    "OpenXLA Molmo v1 native vision backend selected"
+                );
+                return Ok(Some(Box::new(preprocessor)));
+            }
+            Err(error) if policy == XlaVisionBackendPolicy::Auto => {
+                tracing::warn!(
+                    vision_backend = "host",
+                    vision_device = %device,
+                    fallback_reason = %error,
+                    "Molmo v1 native vision unavailable; using observable host fallback"
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    #[cfg(not(feature = "xla-iree"))]
     if policy == XlaVisionBackendPolicy::Iree {
         return Err(HostPreprocessorError::InvalidConfig(
-            "Molmo v1 native IREE vision is not available in this build".to_string(),
+            "MLXCEL_XLA_VISION_BACKEND=iree requires the xla-iree feature".to_string(),
         ));
     }
     let preprocessor = MolmoHostPreprocessor::load(model_path)?;

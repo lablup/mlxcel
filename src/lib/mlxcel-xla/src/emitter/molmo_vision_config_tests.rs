@@ -24,6 +24,7 @@ fn pinned_defaults_bind_sparse_add_artifact_identity() {
     assert_eq!(config.emitted_layers(), 22);
     assert_eq!(config.projected_rows_per_crop(), 144);
     assert!(config.fingerprint().contains(MOLMO_V1_MERGE_MODE));
+    assert!(config.fingerprint().contains("olmo=hidden:3584,layers:28"));
 }
 
 #[test]
@@ -62,5 +63,27 @@ fn rejects_duplicate_or_out_of_range_selected_layers() {
         MolmoVisionConfig::from_json_strs(&invalid, r#"{"max_crops":1}"#)
             .unwrap_err()
             .contains("out of range")
+    );
+    let non_adjacent = duplicate.replace("[-1,2]", "[-1,0,2]");
+    assert!(
+        MolmoVisionConfig::from_json_strs(&non_adjacent, r#"{"max_crops":1}"#)
+            .unwrap_err()
+            .contains("unique")
+    );
+}
+
+#[test]
+fn rejects_quantized_widths_that_would_truncate_weight_layouts() {
+    let invalid = r#"{
+        "model_type":"molmo",
+        "hidden_size":3584,
+        "intermediate_size":37890,
+        "quantization":{"bits":4,"group_size":64},
+        "vision_config":{}
+    }"#;
+    assert!(
+        MolmoVisionConfig::from_json_strs(invalid, r#"{"max_crops":12}"#)
+            .unwrap_err()
+            .contains("projector hidden")
     );
 }

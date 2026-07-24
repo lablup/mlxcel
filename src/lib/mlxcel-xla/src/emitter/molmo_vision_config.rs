@@ -14,6 +14,7 @@
 
 //! Static Molmo v1 native vision/pool/projector artifact contract.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use serde_json::Value;
@@ -53,6 +54,7 @@ pub(crate) struct MolmoVisionConfig {
     pub(crate) group_size: usize,
     pub(crate) bits: usize,
     pub(crate) layer_norm_eps_bits: u32,
+    pub(crate) text_architecture: String,
 }
 
 fn positive(value: Option<u64>, default: usize, name: &str) -> Result<usize, String> {
@@ -62,6 +64,14 @@ fn positive(value: Option<u64>, default: usize, name: &str) -> Result<usize, Str
         return Err(format!("{name} must be greater than zero"));
     }
     Ok(value)
+}
+
+fn checked_product(values: &[usize], name: &str) -> Result<usize, String> {
+    values.iter().try_fold(1usize, |product, value| {
+        product
+            .checked_mul(*value)
+            .ok_or_else(|| format!("{name} overflows usize"))
+    })
 }
 
 impl MolmoVisionConfig {
@@ -113,6 +123,11 @@ impl MolmoVisionConfig {
         }
         let patch_h = input_size.0 / patch_size;
         let patch_w = input_size.1 / patch_size;
+        let patches_per_crop = checked_product(&[patch_h, patch_w], "Molmo patches per crop")?;
+        let patch_width = checked_product(&[patch_size, patch_size, 3], "Molmo patch width")?;
+        let positions = patches_per_crop
+            .checked_add(1)
+            .ok_or_else(|| "Molmo vision position count overflows usize".to_string())?;
         let pool_h = positive(
             vision.get("image_pooling_h").and_then(Value::as_u64),
             2,
@@ -141,22 +156,21 @@ impl MolmoVisionConfig {
         if raw_layers.is_empty() {
             return Err("Molmo vit_layers must not be empty".to_string());
         }
+        let layers_i64 =
+            i64::try_from(layers).map_err(|_| "Molmo layer count does not fit i64".to_string())?;
         let mut selected_layers = Vec::with_capacity(raw_layers.len());
+        let mut unique_layers = BTreeSet::new();
         for layer in raw_layers {
-            let resolved = if layer < 0 {
-                i64::try_from(layers)
-                    .map_err(|_| "Molmo layer count does not fit i64".to_string())?
-                    + layer
-            } else {
-                layer
-            };
-            if resolved < 0 || resolved >= layers as i64 {
+            let resolved = if layer < 0 { layers_i64 + layer } else { layer };
+            if resolved < 0 || resolved >= layers_i64 {
                 return Err(format!("Molmo vit_layers entry {layer} is out of range"));
             }
-            selected_layers.push(resolved as usize);
-        }
-        if selected_layers.windows(2).any(|pair| pair[0] == pair[1]) {
-            return Err("Molmo vit_layers must be unique".to_string());
+            let resolved = usize::try_from(resolved)
+                .map_err(|_| "Molmo selected layer does not fit usize".to_string())?;
+            if !unique_layers.insert(resolved) {
+                return Err("Molmo vit_layers must be unique".to_string());
+            }
+            selected_layers.push(resolved);
         }
 
         let hidden = positive(
@@ -203,6 +217,29 @@ impl MolmoVisionConfig {
             3584,
             "hidden_size",
         )?;
+        let text_layers = positive(
+            root.get("num_hidden_layers").and_then(Value::as_u64),
+            28,
+            "num_hidden_layers",
+        )?;
+        let text_heads = positive(
+            root.get("num_attention_heads").and_then(Value::as_u64),
+            28,
+            "num_attention_heads",
+        )?;
+        let text_kv_heads = positive(
+            root.get("num_key_value_heads").and_then(Value::as_u64),
+            4,
+            "num_key_value_heads",
+        )?;
+        if !text_hidden.is_multiple_of(text_heads) {
+            return Err("Molmo hidden_size must be divisible by num_attention_heads".to_string());
+        }
+        if text_heads % text_kv_heads != 0 {
+            return Err(
+                "Molmo num_attention_heads must be divisible by num_key_value_heads".to_string(),
+            );
+        }
         let fused_intermediate = positive(
             root.get("intermediate_size").and_then(Value::as_u64),
             37_888,
@@ -210,6 +247,40 @@ impl MolmoVisionConfig {
         )?;
         if fused_intermediate % 2 != 0 {
             return Err("Molmo intermediate_size must contain equal gate/up halves".to_string());
+        }
+        if root.get("qkv_bias").and_then(Value::as_bool) == Some(false) {
+            return Err("pinned Molmo v1 native path requires qkv_bias=true".to_string());
+        }
+        let rope_theta = root
+            .get("rope_theta")
+            .and_then(Value::as_f64)
+            .unwrap_or(1_000_000.0);
+        if !rope_theta.is_finite() || rope_theta <= 0.0 {
+            return Err("Molmo rope_theta must be finite and positive".to_string());
+        }
+        let selected_width = checked_product(
+            &[hidden, selected_layers.len()],
+            "Molmo selected vision width",
+        )?;
+        let packed_group = 32usize
+            .checked_div(bits)
+            .ok_or_else(|| "Molmo quantization bits must divide 32".to_string())?;
+        for (name, width) in [
+            ("vision hidden", hidden),
+            ("vision intermediate", 4096),
+            ("selected vision width", selected_width),
+            ("projector hidden", fused_intermediate / 2),
+        ] {
+            if !width.is_multiple_of(packed_group) {
+                return Err(format!(
+                    "Molmo {name}={width} must be divisible by packed group {packed_group}"
+                ));
+            }
+            if !width.is_multiple_of(group_size) {
+                return Err(format!(
+                    "Molmo {name}={width} must be divisible by quantization group_size={group_size}"
+                ));
+            }
         }
         let max_high_res_crops = positive(
             preprocess.get("max_crops").and_then(Value::as_u64),
@@ -223,15 +294,32 @@ impl MolmoVisionConfig {
         if !layer_norm_eps.is_finite() || layer_norm_eps <= 0.0 {
             return Err("vision_config.image_norm_eps must be finite and positive".to_string());
         }
+        let max_crops = max_high_res_crops
+            .checked_add(1)
+            .ok_or_else(|| "Molmo max crop count overflows usize".to_string())?;
+        let text_layer_norm_eps = root
+            .get("layer_norm_eps")
+            .and_then(Value::as_f64)
+            .unwrap_or(1e-6);
+        if !text_layer_norm_eps.is_finite() || text_layer_norm_eps <= 0.0 {
+            return Err("Molmo layer_norm_eps must be finite and positive".to_string());
+        }
+        let text_architecture = format!(
+            "olmo=hidden:{text_hidden},layers:{text_layers},heads:{text_heads},kv_heads:{text_kv_heads},\
+             fused_intermediate:{fused_intermediate},rope_theta:{:016x},rope:interleave,\
+             qkv_bias:true,norm:rms:{:016x},tied:false",
+            rope_theta.to_bits(),
+            text_layer_norm_eps.to_bits(),
+        );
         Ok(Self {
-            max_crops: max_high_res_crops + 1,
-            patches_per_crop: patch_h * patch_w,
-            patch_width: patch_size * patch_size * 3,
+            max_crops,
+            patches_per_crop,
+            patch_width,
             hidden,
             intermediate: 4096,
             heads,
             head_dim,
-            positions: patch_h * patch_w + 1,
+            positions,
             layers,
             selected_layers,
             pool_h,
@@ -241,6 +329,7 @@ impl MolmoVisionConfig {
             group_size,
             bits,
             layer_norm_eps_bits: (layer_norm_eps as f32).to_bits(),
+            text_architecture,
         })
     }
 
@@ -255,7 +344,7 @@ impl MolmoVisionConfig {
     pub(crate) fn fingerprint(&self) -> String {
         format!(
             "family=molmo-v1;crop={}x{}x{};max_crops={};vit={}x{}x{};layers={}/{};\
-             selected={:?};pool={}x{};projector={}->{}->{};quant={}/{};merge={};eps={:08x}",
+             selected={:?};pool={}x{};projector={}->{}->{};quant={}/{};merge={};eps={:08x};{}",
             self.patches_per_crop,
             self.patch_width,
             self.hidden,
@@ -275,6 +364,7 @@ impl MolmoVisionConfig {
             self.group_size,
             MOLMO_V1_MERGE_MODE,
             self.layer_norm_eps_bits,
+            self.text_architecture,
         )
     }
 
@@ -369,7 +459,10 @@ impl MolmoVisionConfig {
                 &[self.hidden],
             );
         }
-        let selected_width = self.hidden * self.selected_layers.len();
+        let selected_width = self
+            .hidden
+            .checked_mul(self.selected_layers.len())
+            .expect("validated selected vision width");
         push_f32(&mut specs, "vision_tower.pad_embed", &[2, selected_width]);
         for projection in ["wq", "wk", "wv"] {
             push_quant(

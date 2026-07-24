@@ -77,7 +77,7 @@ pub struct VisionDiagnosticProjection {
     pub metrics: VisionExecutionMetrics,
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     hex_bytes(&Sha256::digest(bytes))
 }
 
@@ -90,7 +90,7 @@ fn hex_bytes(bytes: &[u8]) -> String {
     output
 }
 
-fn compiler_generation_identity(
+pub(crate) fn compiler_generation_identity(
     compiler: &Path,
     flags: &[&str],
     mlir: &str,
@@ -344,7 +344,7 @@ impl VisionProcessorContract {
     }
 }
 
-fn model_shards(model_dir: &Path) -> Result<Vec<PathBuf>, String> {
+pub(crate) fn model_shards(model_dir: &Path) -> Result<Vec<PathBuf>, String> {
     let mut shards = std::fs::read_dir(model_dir)
         .map_err(|error| format!("read {}: {error}", model_dir.display()))?
         .map(|entry| {
@@ -426,7 +426,7 @@ fn resolve_weight_shards(
         .collect())
 }
 
-fn native_f32_bytes(values: Vec<f32>) -> Vec<u8> {
+pub(crate) fn native_f32_bytes(values: Vec<f32>) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(values.len() * std::mem::size_of::<f32>());
     for value in values {
         bytes.extend_from_slice(&value.to_ne_bytes());
@@ -597,7 +597,7 @@ fn compile_and_load(
     IreeAuxiliaryModule::load(device, &vmfb, &contract, weights)
 }
 
-fn f32_as_bytes(values: &[f32]) -> &[u8] {
+pub(crate) fn f32_as_bytes(values: &[f32]) -> &[u8] {
     // Safety: f32 has no invalid bit patterns and the byte slice cannot outlive
     // the immutable source slice.
     unsafe {
@@ -605,7 +605,7 @@ fn f32_as_bytes(values: &[f32]) -> &[u8] {
     }
 }
 
-fn validate_finite_values(label: &str, values: &[f32]) -> Result<(), String> {
+pub(crate) fn validate_finite_values(label: &str, values: &[f32]) -> Result<(), String> {
     if let Some((index, value)) = values
         .iter()
         .enumerate()
@@ -618,7 +618,7 @@ fn validate_finite_values(label: &str, values: &[f32]) -> Result<(), String> {
     Ok(())
 }
 
-fn checked_f32_output(label: &str, bytes: Vec<u8>) -> Result<Vec<f32>, String> {
+pub(crate) fn checked_f32_output(label: &str, bytes: Vec<u8>) -> Result<Vec<f32>, String> {
     if !bytes.len().is_multiple_of(std::mem::size_of::<f32>()) {
         return Err(format!(
             "{label} returned {} bytes, which is not a whole number of f32 values",

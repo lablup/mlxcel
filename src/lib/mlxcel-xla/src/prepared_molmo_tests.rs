@@ -61,6 +61,11 @@ fn empty_active_features_are_valid_and_leave_text_unchanged() {
 
 #[test]
 fn replacement_negative_fixture_is_caught_by_additive_oracle() {
+    fn oracle_logits(embeddings: &[f32]) -> [f32; 2] {
+        let active = &embeddings[2..4];
+        [active[0] + 2.0 * active[1], 3.0 * active[0] - active[1]]
+    }
+
     let plan = MolmoSparseAddPlan::from_image_input_idx(&[1], 2, 2, 1, 2).unwrap();
     let original = vec![2.0, 3.0, 5.0, 7.0];
     let features = vec![11.0, 13.0];
@@ -71,6 +76,12 @@ fn replacement_negative_fixture_is_caught_by_additive_oracle() {
     replacement[2..4].copy_from_slice(&features);
     assert_eq!(additive, [2.0, 3.0, 16.0, 20.0]);
     assert_ne!(replacement, additive);
+    assert_eq!(oracle_logits(&additive), [56.0, 28.0]);
+    assert_ne!(
+        oracle_logits(&replacement),
+        oracle_logits(&additive),
+        "the downstream logit oracle must reject replacement semantics"
+    );
 }
 
 #[test]

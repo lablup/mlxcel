@@ -208,3 +208,110 @@ pub(crate) fn load_molmo_host_preprocessor(
         projected_rows_per_crop,
     )
 }
+
+#[cfg(feature = "xla-iree")]
+pub(crate) fn load_molmo_iree_host_preprocessor(
+    model_path: &Path,
+    device: &str,
+) -> Result<MolmoHostPreprocessor, HostPreprocessorError> {
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)
+        .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    if full_config.get("model_type").and_then(Value::as_str) != Some("molmo") {
+        return Err(HostPreprocessorError::FamilyMismatch {
+            actual: full_config
+                .get("model_type")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+        });
+    }
+    let mut text_config_value = full_config
+        .get("text_config")
+        .cloned()
+        .unwrap_or_else(|| full_config.clone());
+    inherit_quantization_if_missing(&mut text_config_value, &full_config)
+        .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    let text_config: models::molmo::MolmoTextConfig = serde_json::from_value(text_config_value)
+        .map_err(|error| {
+            HostPreprocessorError::InvalidConfig(format!(
+                "failed to parse Molmo v1 text config: {error}"
+            ))
+        })?;
+    let raw_weights = load_vlm_weights_common_filtered_canonical(model_path, |name| {
+        name.starts_with("language_model.model.wte.") || name.starts_with("model.transformer.wte.")
+    })
+    .map_err(|error| HostPreprocessorError::WeightLoad(error.to_string()))?;
+    let mut weights = WeightMap::new();
+    for (name, value) in raw_weights {
+        weights.insert(rewrite_molmo_weight_key(&name), value);
+    }
+    let text_embeddings =
+        models::molmo::Molmo2Embedding::from_weights(&weights, "language_model.model.wte")
+            .map_err(HostPreprocessorError::WeightLoad)?;
+    let tokenizer = crate::tokenizer::load_tokenizer(model_path)
+        .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    let preprocessor_config = read_optional_model_json(model_path, "preprocessor_config.json");
+    let max_crops = preprocessor_config
+        .as_ref()
+        .and_then(|config| config.get("max_crops"))
+        .and_then(Value::as_u64)
+        .unwrap_or(12) as usize;
+    let overlap = preprocessor_config
+        .as_ref()
+        .and_then(|config| config.get("overlap_margins"))
+        .and_then(Value::as_array)
+        .and_then(|values| {
+            Some((
+                values.first()?.as_u64()? as usize,
+                values.get(1)?.as_u64()? as usize,
+            ))
+        });
+    let base_size = preprocessor_config
+        .as_ref()
+        .and_then(|config| config.get("base_image_input_size"))
+        .and_then(Value::as_array)
+        .and_then(|values| {
+            Some((
+                values.first()?.as_u64()? as usize,
+                values.get(1)?.as_u64()? as usize,
+            ))
+        });
+    let token_len = preprocessor_config.as_ref().and_then(|config| {
+        Some((
+            config.get("image_token_length_h")?.as_u64()? as usize,
+            config.get("image_token_length_w")?.as_u64()? as usize,
+        ))
+    });
+    let vision_config = full_config.get("vision_config").unwrap_or(&full_config);
+    let image_patch_size = molmo_vision_i32(vision_config, "image_patch_size", 14) as usize;
+    let processor = MolmoProcessor::new(
+        max_crops,
+        overlap,
+        Some(image_patch_size),
+        base_size,
+        token_len,
+        read_clip_triple(preprocessor_config.as_ref(), "image_mean"),
+        read_clip_triple(preprocessor_config.as_ref(), "image_std"),
+        MolmoImageTokens::default(),
+    );
+    let max_sequence_len = full_config
+        .get("max_position_embeddings")
+        .and_then(Value::as_u64)
+        .unwrap_or(4096) as usize;
+    let projector = mlxcel_xla::IreeMolmoVisionProjector::load(model_path, device)
+        .map_err(HostPreprocessorError::Iree)?;
+    if projector.text_hidden() != text_config.hidden_size {
+        return Err(HostPreprocessorError::InvalidConfig(format!(
+            "Molmo IREE text hidden {} disagrees with text config {}",
+            projector.text_hidden(),
+            text_config.hidden_size
+        )));
+    }
+    MolmoHostPreprocessor::from_iree_parts(
+        processor,
+        text_embeddings,
+        tokenizer,
+        max_sequence_len,
+        projector,
+    )
+}

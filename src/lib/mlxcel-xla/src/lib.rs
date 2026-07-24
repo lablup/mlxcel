@@ -78,6 +78,8 @@ mod aux_smoke;
 #[cfg(feature = "iree")]
 mod iree;
 #[cfg(feature = "iree")]
+mod molmo_vision_runtime;
+#[cfg(feature = "iree")]
 mod phi4_audio;
 #[cfg(feature = "iree")]
 mod qwen2_vl_runtime;
@@ -169,6 +171,8 @@ pub use emitter::{
 };
 #[cfg(feature = "diagnostics")]
 pub use iree::PreparedPrefillDiagnostics;
+#[cfg(feature = "iree")]
+pub use molmo_vision_runtime::{IreeMolmoVisionProjector, MolmoVisionProjection};
 #[cfg(feature = "iree")]
 pub use phi4_audio::{
     PHI4MM_AUDIO_CHECKPOINT_REVISION, PHI4MM_AUDIO_FRAME_BUCKETS, Phi4AudioOutput,

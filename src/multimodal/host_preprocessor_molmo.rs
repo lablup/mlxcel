@@ -19,6 +19,8 @@
 //! session. Processor-provided `image_input_idx` values are the authoritative
 //! sparse-add map; negative entries never consume a target position.
 
+#[cfg(feature = "xla-iree")]
+use std::cell::RefCell;
 use std::path::Path;
 
 use image::DynamicImage;
@@ -40,7 +42,7 @@ const MOLMO_V1_BOS_TOKEN_ID: i32 = 151_643;
 /// Host components that build Molmo v1's owned XLA prepared-prefill payload.
 pub struct MolmoHostPreprocessor {
     processor: MolmoProcessor,
-    vision_tower: MolmoVisionModel,
+    vision: MolmoVision,
     text_embeddings: Molmo2Embedding,
     tokenizer: MlxcelTokenizer,
     hidden_size: usize,
@@ -50,10 +52,21 @@ pub struct MolmoHostPreprocessor {
     projected_rows_per_crop: usize,
 }
 
+enum MolmoVision {
+    Host(MolmoVisionModel),
+    #[cfg(feature = "xla-iree")]
+    Iree(RefCell<mlxcel_xla::IreeMolmoVisionProjector>),
+}
+
 impl MolmoHostPreprocessor {
     /// Load only Molmo v1's prefill-side components; no decoder is retained.
     pub fn load(model_path: &Path) -> Result<Self, HostPreprocessorError> {
         crate::loading::load_molmo_host_preprocessor(model_path)
+    }
+
+    #[cfg(feature = "xla-iree")]
+    pub fn load_iree(model_path: &Path, device: &str) -> Result<Self, HostPreprocessorError> {
+        crate::loading::load_molmo_iree_host_preprocessor(model_path, device)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -83,7 +96,37 @@ impl MolmoHostPreprocessor {
         }
         Ok(Self {
             processor,
-            vision_tower,
+            vision: MolmoVision::Host(vision_tower),
+            text_embeddings,
+            tokenizer,
+            hidden_size,
+            max_sequence_len,
+            max_crops,
+            patches_per_crop,
+            projected_rows_per_crop,
+        })
+    }
+
+    #[cfg(feature = "xla-iree")]
+    pub(crate) fn from_iree_parts(
+        processor: MolmoProcessor,
+        text_embeddings: Molmo2Embedding,
+        tokenizer: MlxcelTokenizer,
+        max_sequence_len: usize,
+        projector: mlxcel_xla::IreeMolmoVisionProjector,
+    ) -> Result<Self, HostPreprocessorError> {
+        let hidden_size = projector.text_hidden();
+        let max_crops = projector.max_crops();
+        let patches_per_crop = projector.patches_per_crop();
+        let projected_rows_per_crop = projector.projected_rows_per_crop();
+        if projector.patch_width() == 0 || max_sequence_len == 0 {
+            return Err(HostPreprocessorError::InvalidConfig(
+                "Molmo IREE static dimensions must be non-zero".to_string(),
+            ));
+        }
+        Ok(Self {
+            processor,
+            vision: MolmoVision::Iree(RefCell::new(projector)),
             text_embeddings,
             tokenizer,
             hidden_size,
@@ -120,15 +163,25 @@ impl MolmoHostPreprocessor {
             .tokenizer
             .encode(&prompt, false)
             .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
-        let mut logical_tokens = Vec::with_capacity(1 + image_tokens.len() + prompt_ids.len());
+        let logical_len = 1usize
+            .checked_add(image_tokens.len())
+            .and_then(|length| length.checked_add(prompt_ids.len()))
+            .ok_or(HostPreprocessorError::ShapeOverflow)?;
+        validate_sequence_capacity(logical_len, self.max_sequence_len)?;
+        let prompt_ids = prompt_ids
+            .into_iter()
+            .map(|token| {
+                i32::try_from(token).map_err(|_| {
+                    HostPreprocessorError::InvalidConfig(format!(
+                        "Molmo v1 tokenizer id {token} does not fit i32"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut logical_tokens = Vec::with_capacity(logical_len);
         logical_tokens.push(MOLMO_V1_BOS_TOKEN_ID);
         logical_tokens.extend_from_slice(image_tokens);
-        logical_tokens.extend(
-            prompt_ids
-                .into_iter()
-                .map(|token| i32::try_from(token).unwrap_or(i32::MAX)),
-        );
-        validate_sequence_capacity(logical_tokens.len(), self.max_sequence_len)?;
+        logical_tokens.extend(prompt_ids);
         Ok(logical_tokens)
     }
 
@@ -148,8 +201,16 @@ impl MolmoHostPreprocessor {
         let shifted_indices = output
             .image_input_idx
             .iter()
-            .map(|&index| if index < 0 { index } else { index + 1 })
-            .collect::<Vec<_>>();
+            .map(|&index| {
+                if index < 0 {
+                    Ok(index)
+                } else {
+                    index
+                        .checked_add(1)
+                        .ok_or(HostPreprocessorError::ShapeOverflow)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let prepared_image = mlxcel_xla::MolmoPreparedImage {
             pixel_values: output.pixel_values,
             crop_count,
@@ -189,43 +250,71 @@ impl MolmoHostPreprocessor {
             "Molmo text embedding table",
         )?;
 
-        let pixels = mlxcel_core::from_slice_f32(
-            &prepared_image.pixel_values,
-            &[
-                1,
-                usize_to_i32(crop_count, "crop count")?,
-                usize_to_i32(patches_per_crop, "patches per crop")?,
-                usize_to_i32(patch_width, "patch width")?,
-            ],
-        );
-        let masks = mlxcel_core::from_slice_f32(
-            &prepared_image.image_masks,
-            &[
-                1,
-                usize_to_i32(crop_count, "crop count")?,
-                usize_to_i32(patches_per_crop, "patches per crop")?,
-            ],
-        );
-        let projected = mlxcel_core::astype(
-            &self.vision_tower.forward(&pixels, &masks),
-            mlxcel_core::dtype::FLOAT32,
-        );
-        let expected_projected = [
-            1,
-            crop_count as i32,
-            self.projected_rows_per_crop as i32,
-            self.hidden_size as i32,
-        ];
-        if mlxcel_core::array_shape(&projected) != expected_projected {
-            return Err(HostPreprocessorError::InvalidConfig(format!(
-                "Molmo projected image shape {:?} does not match {expected_projected:?}",
-                mlxcel_core::array_shape(&projected)
-            )));
-        }
-
         let mut text_values = tensor_f32(export_mlx_tensor(&text, "Molmo text embeddings")?)?;
-        let projected_values =
-            tensor_f32(export_mlx_tensor(&projected, "Molmo projected features")?)?;
+        let projected_values = match &self.vision {
+            MolmoVision::Host(vision_tower) => {
+                let pixels = mlxcel_core::from_slice_f32(
+                    &prepared_image.pixel_values,
+                    &[
+                        1,
+                        usize_to_i32(crop_count, "crop count")?,
+                        usize_to_i32(patches_per_crop, "patches per crop")?,
+                        usize_to_i32(patch_width, "patch width")?,
+                    ],
+                );
+                let masks = mlxcel_core::from_slice_f32(
+                    &prepared_image.image_masks,
+                    &[
+                        1,
+                        usize_to_i32(crop_count, "crop count")?,
+                        usize_to_i32(patches_per_crop, "patches per crop")?,
+                    ],
+                );
+                let projected = mlxcel_core::astype(
+                    &vision_tower.forward(&pixels, &masks),
+                    mlxcel_core::dtype::FLOAT32,
+                );
+                let expected = [
+                    1,
+                    usize_to_i32(crop_count, "crop count")?,
+                    usize_to_i32(self.projected_rows_per_crop, "projected rows per crop")?,
+                    usize_to_i32(self.hidden_size, "hidden size")?,
+                ];
+                if mlxcel_core::array_shape(&projected) != expected {
+                    return Err(HostPreprocessorError::InvalidConfig(format!(
+                        "Molmo projected image shape {:?} does not match {expected:?}",
+                        mlxcel_core::array_shape(&projected)
+                    )));
+                }
+                tensor_f32(export_mlx_tensor(&projected, "Molmo projected features")?)?
+            }
+            #[cfg(feature = "xla-iree")]
+            MolmoVision::Iree(projector) => {
+                let projection = projector
+                    .try_borrow_mut()
+                    .map_err(|_| {
+                        HostPreprocessorError::Iree(
+                            "concurrent/re-entrant Molmo IREE vision invocation is unsupported"
+                                .to_string(),
+                        )
+                    })?
+                    .project(
+                        &prepared_image.pixel_values,
+                        &prepared_image.image_masks,
+                        crop_count,
+                    )
+                    .map_err(HostPreprocessorError::Iree)?;
+                tracing::info!(
+                    vision_backend = "iree",
+                    crop_count,
+                    upload_bytes = projection.upload_bytes,
+                    transfer_bytes = projection.transfer_bytes,
+                    iree_vision_seconds = projection.elapsed_seconds,
+                    "Molmo v1 native vision projection completed"
+                );
+                projection.values
+            }
+        };
         plan.apply(&mut text_values, &projected_values)
             .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
         let mut bytes = Vec::with_capacity(
@@ -253,6 +342,14 @@ impl MolmoHostPreprocessor {
 }
 
 impl HostMultimodalPreprocessor for MolmoHostPreprocessor {
+    fn backend(&self) -> super::XlaVisionBackend {
+        match &self.vision {
+            MolmoVision::Host(_) => super::XlaVisionBackend::Host,
+            #[cfg(feature = "xla-iree")]
+            MolmoVision::Iree(_) => super::XlaVisionBackend::Iree,
+        }
+    }
+
     fn prepare(
         &self,
         token_ids: &[i32],
@@ -304,6 +401,29 @@ fn format_prompt(prompt: &str) -> String {
 mod tests {
     use super::*;
 
+    fn real_inputs() -> (std::path::PathBuf, Vec<i32>, DynamicImage) {
+        let model_path = std::env::var_os("MLXCEL_TEST_MOLMO_MODEL")
+            .map(std::path::PathBuf::from)
+            .expect("MLXCEL_TEST_MOLMO_MODEL is required");
+        let tokenizer = crate::tokenizer::load_tokenizer(&model_path).unwrap();
+        let token_ids = tokenizer
+            .encode("Describe the image.", true)
+            .unwrap()
+            .into_iter()
+            .map(|token| i32::try_from(token).unwrap())
+            .collect::<Vec<_>>();
+        let image = image::open("tests/fixtures/test_image.png").unwrap();
+        (model_path, token_ids, image)
+    }
+
+    fn assert_real_prepared(prepared: &PreparedPrefill) {
+        assert_eq!(prepared.embeddings.dtype, PreparedTensorDType::Float32);
+        assert_eq!(prepared.embeddings.shape[0], 1);
+        assert_eq!(prepared.embeddings.shape[1], prepared.token_ids.len());
+        assert_eq!(prepared.modalities[0].family, "molmo-v1");
+        assert_eq!(prepared.modalities[0].item_count, 1);
+    }
+
     #[test]
     fn prompt_format_matches_molmo_v1_processor_contract() {
         assert_eq!(
@@ -320,25 +440,23 @@ mod tests {
     #[ignore = "requires MLXCEL_TEST_MOLMO_MODEL and the checked-in image fixture"]
     fn real_checkpoint_builds_owned_sparse_add_prefill() {
         mlxcel_core::set_default_device(false);
-        let model_path = std::env::var_os("MLXCEL_TEST_MOLMO_MODEL")
-            .map(std::path::PathBuf::from)
-            .expect("MLXCEL_TEST_MOLMO_MODEL is required");
+        let (model_path, token_ids, image) = real_inputs();
         let preprocessor = MolmoHostPreprocessor::load(&model_path).unwrap();
-        let tokenizer = crate::tokenizer::load_tokenizer(&model_path).unwrap();
-        let token_ids = tokenizer
-            .encode("Describe the image.", true)
-            .unwrap()
-            .into_iter()
-            .map(|token| i32::try_from(token).unwrap())
-            .collect::<Vec<_>>();
-        let image = image::open("tests/fixtures/test_image.png").unwrap();
-
         let prepared = preprocessor.prepare(&token_ids, &[image]).unwrap();
+        assert_real_prepared(&prepared);
+    }
 
-        assert_eq!(prepared.embeddings.dtype, PreparedTensorDType::Float32);
-        assert_eq!(prepared.embeddings.shape[0], 1);
-        assert_eq!(prepared.embeddings.shape[1], prepared.token_ids.len());
-        assert_eq!(prepared.modalities[0].family, "molmo-v1");
-        assert_eq!(prepared.modalities[0].item_count, 1);
+    #[cfg(feature = "xla-iree")]
+    #[test]
+    #[ignore = "requires MLXCEL_TEST_MOLMO_MODEL and a real IREE runtime"]
+    fn real_checkpoint_builds_native_iree_sparse_add_prefill() {
+        mlxcel_core::set_default_device(false);
+        let (model_path, token_ids, image) = real_inputs();
+        let device =
+            std::env::var("MLXCEL_TEST_MOLMO_IREE_DEVICE").unwrap_or_else(|_| "cuda".to_string());
+        let preprocessor = MolmoHostPreprocessor::load_iree(&model_path, &device).unwrap();
+        assert_eq!(preprocessor.backend(), super::super::XlaVisionBackend::Iree);
+        let prepared = preprocessor.prepare(&token_ids, &[image]).unwrap();
+        assert_real_prepared(&prepared);
     }
 }

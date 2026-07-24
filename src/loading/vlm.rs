@@ -116,6 +116,8 @@ pub(crate) use minimax_m3_vl::load_minimax_m3_vl;
 pub(crate) use mllama::load_mllama_vlm;
 #[cfg(feature = "xla-backend")]
 pub(crate) use molmo_xla::load_molmo_host_preprocessor;
+#[cfg(feature = "xla-iree")]
+pub(crate) use molmo_xla::load_molmo_iree_host_preprocessor;
 pub(crate) use nemotron_h_nano_omni::load_nemotron_h_nano_omni_vlm;
 pub(crate) use paddleocr::load_paddleocr_vl;
 pub(crate) use pixtral::{load_mistral3_vlm, load_pixtral_vlm};
