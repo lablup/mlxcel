@@ -245,7 +245,7 @@ pub fn add_projected_features(
             index,
         });
     }
-    if projected_features.len() % hidden_size != 0 {
+    if !projected_features.len().is_multiple_of(hidden_size) {
         return Err(Molmo2InputError::ProjectedShape {
             values: projected_features.len(),
             tokens: projected_features.len() / hidden_size,

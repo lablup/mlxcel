@@ -387,7 +387,7 @@ impl IreeMolmo2VisionProjector {
                     .then_some(())
                     .ok_or_else(|| "Molmo2 image grid contains a negative dimension".to_string())
             })
-            .and_then(|()| Ok(input.image_grid.map(|value| value as usize)))?;
+            .map(|()| input.image_grid.map(|value| value as usize))?;
         if !self.config.valid_runtime_geometry(crops, grid) {
             return Err(format!(
                 "Molmo2 crop count {crops} and image grid {:?} disagree with processor geometry",
