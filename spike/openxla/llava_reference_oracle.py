@@ -22,12 +22,50 @@ import numpy as np
 
 SOURCE_REPO = "llava-hf/llava-interleave-qwen-0.5b-hf"
 SOURCE_REVISION = "1090956dd1c79bc93ae98dcf395590369435ec91"
-SOURCE_MODEL_SHA256 = "ec7b02696781afdb1f27871fdffe0f71ef030932d10fbd759bc59392669605f7"
-SOURCE_TOKENIZER_SHA256 = "d26f54ac5bcc30ba15d418234e89d2ca44caf0bd57ce14749612a74f436738ef"
 CONVERTED_REPO = "mlx-community/llava-interleave-qwen-0.5b-bf16"
 CONVERTED_REVISION = "ba7385935f69c5417bfbe29c3809858a98afc22f"
-CONVERTED_MODEL_SHA256 = "43919c1ea46e00c6063204515169bb9635d0c2c6b3a07f975e20e9ea23c33d4c"
-CONVERTED_TOKENIZER_SHA256 = "32e8f623d8dce60b5a93496ec810434ef744287ac041cf2c6032743a3578baa5"
+SOURCE_ARTIFACTS = {
+    "added_tokens.json": "f86f2a952b4888d195b8d77e3d56ad96864ecc696cca2155d0d4ac933fcfd55f",
+    "chat_template.json": "9d98326321da3c0514e31c907a2119f5efc323fc685d9794536c6098ca897852",
+    "config.json": "9b9b24a2b7a08b950c0c338f234d5cdfc5ebf526f360759f98a937b0f9374219",
+    "generation_config.json": "0b640df36b033e96856a803d834155919eafae4a427631ea046b67e12643157e",
+    "merges.txt": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+    "model.safetensors": "ec7b02696781afdb1f27871fdffe0f71ef030932d10fbd759bc59392669605f7",
+    "preprocessor_config.json": "6239b91cf50d40f36b4390ccc604a985c2388b95c5c77fa48c0658183bc5102c",
+    "processor_config.json": "e8ff88c7591da9738760aec6ca01c8aadc9cf514f30a2a88ca3994d8c1c4a52e",
+    "special_tokens_map.json": "f4f79e08d97f4d1c87f8d89264f525c8789da3b73b3bb55d1e12f692f41a7b1b",
+    "tokenizer.json": "d26f54ac5bcc30ba15d418234e89d2ca44caf0bd57ce14749612a74f436738ef",
+    "tokenizer_config.json": "5504fd209f6064bcba7a82b875f0af1927cd12fa7da2a6fbda0609070ce8d253",
+    "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+}
+SOURCE_ARTIFACT_MANIFEST_SHA256 = (
+    "9c16795365b84aa42b7792ddcab2b954cc4e09e1a6307dddbcbafc2fac692a62"
+)
+CONVERTED_ARTIFACTS = {
+    "added_tokens.json": "f86f2a952b4888d195b8d77e3d56ad96864ecc696cca2155d0d4ac933fcfd55f",
+    "chat_template.json": "b7e65242c4107a669b40a2a6f62e5f4306ef328fa0d00c6bc0117df44f411603",
+    "config.json": "77cafd419e5c4218e1b1a45b3bd4b603873a9e7a316c62e8d2d5391f40d93d1b",
+    "generation_config.json": "0b640df36b033e96856a803d834155919eafae4a427631ea046b67e12643157e",
+    "merges.txt": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+    "model.safetensors": "43919c1ea46e00c6063204515169bb9635d0c2c6b3a07f975e20e9ea23c33d4c",
+    "model.safetensors.index.json": "0bf1ff182c7dbdede0e53341fa3f0c65019f86ac909ec9d388aca065a713191e",
+    "preprocessor_config.json": "6239b91cf50d40f36b4390ccc604a985c2388b95c5c77fa48c0658183bc5102c",
+    "processor_config.json": "2634ec0e0c3a222fa9439131f6e4a43a02ab8b50d25cf77d1f7766eb3efdcf2a",
+    "special_tokens_map.json": "1710dcae506cfff57fc8e63e1bff58f1d8c6aa2e2a8af56b65b33ed808a4c644",
+    "tokenizer.json": "32e8f623d8dce60b5a93496ec810434ef744287ac041cf2c6032743a3578baa5",
+    "tokenizer_config.json": "9d874e0d02b5a74d6e4863b38979e749d3738c2b03c1324675a4f1578730a802",
+    "vocab.json": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+}
+CONVERTED_ARTIFACT_MANIFEST_SHA256 = (
+    "912650461f7abfce6fd3962711387c7aad485df239afb3c83c75126476f2050c"
+)
+FIXTURE_PATH = "tests/fixtures/test_image.png"
+FIXTURE_SHA256 = "5e7d54e8a7d21802378c87d2d70cf551e29739fe27599ddf129ebccdad1e6261"
+CASE_IMAGE_TRANSFORMS = {
+    "image_text": ("identity",),
+    "two_images": ("identity", "horizontal_mirror"),
+    "no_image": (),
+}
 IMAGE_SIZE = 384
 COMPUTE_DTYPES = {
     "processor": "float32",
@@ -105,6 +143,43 @@ for index, stage in enumerate(VISION_HIDDEN_STATE_STAGES):
     ]
 
 STAGE_POLICY_DTYPES = {"merged_embeddings": "bfloat16"}
+INTEGER_STAGES = {
+    "expanded_token_ids",
+    "positions",
+    "attention_mask",
+    "greedy_tokens",
+}
+CASE_REQUIRED_STAGES = {
+    "image_text": frozenset(STAGE_ORDER),
+    "two_images": frozenset(STAGE_ORDER),
+    "no_image": frozenset(
+        {
+            "expanded_token_ids",
+            "positions",
+            "attention_mask",
+            "merged_embeddings",
+            "first_prefill_logits",
+            "selected_kv",
+            "greedy_tokens",
+        }
+    ),
+}
+EXPECTED_NEGATIVE_CASES = {
+    "malformed_placeholder": {
+        "passed": True,
+        "outcome": "rejected",
+        "category": "placeholder_count_mismatch",
+    },
+    "context_overflow": {
+        "passed": True,
+        "outcome": "rejected",
+        "category": "context_capacity_exceeded",
+    },
+}
+
+
+class ContractError(ValueError):
+    """A capture failed the closed reference-manifest contract."""
 
 
 def sha256(path: Path) -> str:
@@ -123,6 +198,33 @@ def require_sha(path: Path, expected: str, label: str) -> None:
         raise SystemExit(
             f"error: {label} SHA-256 mismatch: expected {expected}, got {actual}"
         )
+
+
+def canonical_artifact_sha(artifacts: dict[str, str]) -> str:
+    payload = "".join(
+        f"{filename}={artifacts[filename]}\n" for filename in sorted(artifacts)
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def require_artifact_manifest(
+    root: Path,
+    expected_artifacts: dict[str, str],
+    expected_manifest_sha: str,
+    label: str,
+) -> dict[str, Any]:
+    for filename, expected_sha in expected_artifacts.items():
+        require_sha(root / filename, expected_sha, f"{label} {filename}")
+    actual_manifest_sha = canonical_artifact_sha(expected_artifacts)
+    if actual_manifest_sha != expected_manifest_sha:
+        raise SystemExit(
+            f"error: internal {label} canonical manifest mismatch: "
+            f"expected {expected_manifest_sha}, got {actual_manifest_sha}"
+        )
+    return {
+        "canonical_sha256": actual_manifest_sha,
+        "files": expected_artifacts,
+    }
 
 
 def verify_vision_block0_conversion(
@@ -205,6 +307,9 @@ def cases(processor: Any, image_path: Path) -> list[dict[str, Any]]:
     )
     result = []
     for name, user_prompt, image_count in definitions:
+        image_transforms = CASE_IMAGE_TRANSFORMS[name]
+        if len(image_transforms) != image_count:
+            raise AssertionError(f"invalid image transform contract for {name}")
         content = [{"type": "image"} for _ in range(image_count)]
         content.append({"type": "text", "text": user_prompt})
         text = processor.apply_chat_template(
@@ -221,6 +326,7 @@ def cases(processor: Any, image_path: Path) -> list[dict[str, Any]]:
                 "user_prompt": user_prompt,
                 "text": text,
                 "image_count": image_count,
+                "image_transforms": list(image_transforms),
                 "image_path": str(image_path),
                 "unexpanded_input_ids": tokenized.input_ids[0]
                 .to(dtype=np_int32_torch())
@@ -249,22 +355,26 @@ def capture(args: argparse.Namespace) -> int:
 
     source = args.source_model.resolve()
     converted = args.converted_model.resolve()
-    require_sha(source / "model.safetensors", SOURCE_MODEL_SHA256, "source weights")
-    require_sha(source / "tokenizer.json", SOURCE_TOKENIZER_SHA256, "source tokenizer")
-    require_sha(
-        converted / "model.safetensors", CONVERTED_MODEL_SHA256, "converted weights"
+    source_artifact_manifest = require_artifact_manifest(
+        source,
+        SOURCE_ARTIFACTS,
+        SOURCE_ARTIFACT_MANIFEST_SHA256,
+        "source snapshot",
     )
-    require_sha(
-        converted / "tokenizer.json",
-        CONVERTED_TOKENIZER_SHA256,
-        "converted tokenizer",
+    converted_artifact_manifest = require_artifact_manifest(
+        converted,
+        CONVERTED_ARTIFACTS,
+        CONVERTED_ARTIFACT_MANIFEST_SHA256,
+        "converted snapshot",
     )
+    image_path = args.image.resolve()
+    require_sha(image_path, FIXTURE_SHA256, "pinned image fixture")
     conversion_equivalence = verify_vision_block0_conversion(
         source / "model.safetensors", converted / "model.safetensors"
     )
     args.out.mkdir(parents=True, exist_ok=True)
     processor = AutoProcessor.from_pretrained(source, local_files_only=True)
-    image = Image.open(args.image).convert("RGB")
+    image = Image.open(image_path).convert("RGB")
     load_started = time.perf_counter()
     model = LlavaForConditionalGeneration.from_pretrained(
         source,
@@ -294,15 +404,18 @@ def capture(args: argparse.Namespace) -> int:
         "source": {
             "repo": SOURCE_REPO,
             "revision": SOURCE_REVISION,
-            "model_sha256": SOURCE_MODEL_SHA256,
-            "tokenizer_sha256": SOURCE_TOKENIZER_SHA256,
+            "artifact_manifest": source_artifact_manifest,
             "license": "Tongyi Qianwen Research License",
         },
         "converted_checkpoint": {
             "repo": CONVERTED_REPO,
             "revision": CONVERTED_REVISION,
-            "model_sha256": CONVERTED_MODEL_SHA256,
-            "tokenizer_sha256": CONVERTED_TOKENIZER_SHA256,
+            "artifact_manifest": converted_artifact_manifest,
+        },
+        "image_fixture": {
+            "path": FIXTURE_PATH,
+            "sha256": FIXTURE_SHA256,
+            "two_image_transform": "horizontal_mirror",
         },
         "conversion_equivalence": conversion_equivalence,
         "processor": {
@@ -332,9 +445,14 @@ def capture(args: argparse.Namespace) -> int:
         "cases": [],
     }
 
-    for definition in cases(processor, args.image.resolve()):
+    for definition in cases(processor, image_path):
         started = time.perf_counter()
-        images = [image.copy() for _ in range(definition["image_count"])]
+        images = [
+            image.copy()
+            if transform == "identity"
+            else image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+            for transform in definition["image_transforms"]
+        ]
         inputs = processor(
             text=definition["text"],
             images=images or None,
@@ -627,69 +745,242 @@ def capture(args: argparse.Namespace) -> int:
     return 0
 
 
+def strict_json_load(path: Path) -> dict[str, Any]:
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ContractError(f"duplicate JSON key {key!r} in {path}")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=lambda constant: (_ for _ in ()).throw(
+                ContractError(f"non-finite JSON value {constant!r} in {path}")
+            ),
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ContractError(f"cannot read {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise ContractError(f"{path} must contain a JSON object")
+    return value
+
+
+def validate_artifact_contract(
+    value: Any,
+    expected_artifacts: dict[str, str],
+    expected_manifest_sha: str,
+    label: str,
+) -> None:
+    if not isinstance(value, dict) or set(value) != {"canonical_sha256", "files"}:
+        raise ContractError(f"{label} artifact_manifest has an invalid schema")
+    if value["files"] != expected_artifacts:
+        raise ContractError(f"{label} artifact_manifest file hashes differ")
+    if value["canonical_sha256"] != expected_manifest_sha:
+        raise ContractError(f"{label} artifact_manifest canonical hash differs")
+    if canonical_artifact_sha(value["files"]) != expected_manifest_sha:
+        raise ContractError(f"{label} artifact_manifest is not canonical")
+
+
+def validate_capture_manifest(
+    root: Path, manifest: dict[str, Any], role: str
+) -> dict[str, dict[str, Any]]:
+    if manifest.get("schema") != 1:
+        raise ContractError(f"{role} manifest schema must be 1")
+    cases_value = manifest.get("cases")
+    if not isinstance(cases_value, list):
+        raise ContractError(f"{role} manifest cases must be a list")
+    cases: dict[str, dict[str, Any]] = {}
+    for case in cases_value:
+        if not isinstance(case, dict) or not isinstance(case.get("name"), str):
+            raise ContractError(f"{role} manifest has an invalid case")
+        name = case["name"]
+        if name in cases:
+            raise ContractError(f"{role} manifest has duplicate case {name!r}")
+        cases[name] = case
+    expected_cases = set(CASE_REQUIRED_STAGES)
+    if set(cases) != expected_cases:
+        missing = sorted(expected_cases - set(cases))
+        extra = sorted(set(cases) - expected_cases)
+        raise ContractError(
+            f"{role} case set differs: missing={missing}, extra={extra}"
+        )
+
+    fixture = manifest.get("image_fixture")
+    expected_fixture = {
+        "path": FIXTURE_PATH,
+        "sha256": FIXTURE_SHA256,
+        "two_image_transform": "horizontal_mirror",
+    }
+    if fixture != expected_fixture:
+        raise ContractError(f"{role} image fixture contract differs")
+
+    converted = manifest.get("converted_checkpoint")
+    if not isinstance(converted, dict):
+        raise ContractError(f"{role} converted checkpoint metadata is missing")
+    validate_artifact_contract(
+        converted.get("artifact_manifest"),
+        CONVERTED_ARTIFACTS,
+        CONVERTED_ARTIFACT_MANIFEST_SHA256,
+        f"{role} converted",
+    )
+    if role == "reference":
+        if converted.get("repo") != CONVERTED_REPO:
+            raise ContractError("reference converted repo differs")
+        if converted.get("revision") != CONVERTED_REVISION:
+            raise ContractError("reference converted revision differs")
+        source = manifest.get("source")
+        if not isinstance(source, dict):
+            raise ContractError("reference source metadata is missing")
+        if source.get("repo") != SOURCE_REPO:
+            raise ContractError("reference source repo differs")
+        if source.get("revision") != SOURCE_REVISION:
+            raise ContractError("reference source revision differs")
+        validate_artifact_contract(
+            source.get("artifact_manifest"),
+            SOURCE_ARTIFACTS,
+            SOURCE_ARTIFACT_MANIFEST_SHA256,
+            "reference source",
+        )
+    elif manifest.get("negative_cases") != EXPECTED_NEGATIVE_CASES:
+        raise ContractError(
+            "actual negative_cases must exactly match the required rejected outcomes"
+        )
+
+    root = root.resolve()
+    for case_name, case in cases.items():
+        expected_transforms = list(CASE_IMAGE_TRANSFORMS[case_name])
+        if case.get("image_count") != len(expected_transforms):
+            raise ContractError(f"{role} {case_name} image_count differs")
+        if case.get("image_transforms") != expected_transforms:
+            raise ContractError(f"{role} {case_name} image transforms differ")
+        arrays = case.get("arrays")
+        if not isinstance(arrays, dict):
+            raise ContractError(f"{role} {case_name} arrays must be an object")
+        required_stages = CASE_REQUIRED_STAGES[case_name]
+        if set(arrays) != required_stages:
+            missing = sorted(required_stages - set(arrays))
+            extra = sorted(set(arrays) - required_stages)
+            raise ContractError(
+                f"{role} {case_name} stage set differs: "
+                f"missing={missing}, extra={extra}"
+            )
+        for stage, spec in arrays.items():
+            if not isinstance(spec, dict) or set(spec) != {"file", "dtype", "shape"}:
+                raise ContractError(
+                    f"{role} {case_name}/{stage} has an invalid array schema"
+                )
+            expected_file = f"{case_name}.{stage}.bin"
+            if spec["file"] != expected_file:
+                raise ContractError(
+                    f"{role} {case_name}/{stage} has an invalid array path"
+                )
+            expected_dtype = "int32" if stage in INTEGER_STAGES else "float32"
+            if spec["dtype"] != expected_dtype:
+                raise ContractError(
+                    f"{role} {case_name}/{stage} dtype must be {expected_dtype}"
+                )
+            shape = spec["shape"]
+            if (
+                not isinstance(shape, list)
+                or not shape
+                or any(
+                    isinstance(dimension, bool)
+                    or not isinstance(dimension, int)
+                    or dimension <= 0
+                    for dimension in shape
+                )
+            ):
+                raise ContractError(
+                    f"{role} {case_name}/{stage} has an invalid shape"
+                )
+            element_count = 1
+            for dimension in shape:
+                element_count *= dimension
+                if element_count > 2**63 - 1:
+                    raise ContractError(
+                        f"{role} {case_name}/{stage} shape is too large"
+                    )
+            path = root / expected_file
+            if path.is_symlink() or not path.is_file():
+                raise ContractError(
+                    f"{role} {case_name}/{stage} binary is missing or not regular"
+                )
+            expected_size = element_count * np.dtype(expected_dtype).itemsize
+            actual_size = path.stat().st_size
+            if actual_size != expected_size:
+                raise ContractError(
+                    f"{role} {case_name}/{stage} binary size differs: "
+                    f"expected={expected_size}, actual={actual_size}"
+                )
+    return cases
+
+
 def load_array(root: Path, spec: dict[str, Any]) -> np.ndarray:
-    dtype = spec["dtype"]
-    path = root / spec["file"]
-    if dtype == "bfloat16":
-        raw = np.fromfile(path, dtype=np.uint16)
-        values = (raw.astype(np.uint32) << 16).view(np.float32)
-    else:
-        values = np.fromfile(path, dtype=np.dtype(dtype))
+    values = np.fromfile(root / spec["file"], dtype=np.dtype(spec["dtype"]))
     return values.reshape(spec["shape"])
 
 
-def compare(args: argparse.Namespace) -> int:
-    reference_manifest = json.loads(
-        (args.reference / "manifest.json").read_text(encoding="utf-8")
-    )
-    actual_manifest = json.loads(
-        (args.actual / "manifest.json").read_text(encoding="utf-8")
-    )
-    reference_cases = {case["name"]: case for case in reference_manifest["cases"]}
-    actual_cases = {case["name"]: case for case in actual_manifest["cases"]}
+def compare_capture_roots(reference_root: Path, actual_root: Path) -> dict[str, Any]:
     report: dict[str, Any] = {
         "schema": 1,
-        "reference": str(args.reference),
-        "actual": str(args.actual),
+        "reference": str(reference_root),
+        "actual": str(actual_root),
         "passed": True,
         "first_divergence": None,
         "cases": [],
     }
-    for case_name in ("image_text", "two_images", "no_image"):
+    try:
+        reference_manifest = strict_json_load(reference_root / "manifest.json")
+        actual_manifest = strict_json_load(actual_root / "manifest.json")
+        reference_cases = validate_capture_manifest(
+            reference_root, reference_manifest, "reference"
+        )
+        actual_cases = validate_capture_manifest(actual_root, actual_manifest, "actual")
+    except ContractError as error:
+        report.update(
+            passed=False,
+            first_divergence={"case": "manifest", "stage": "contract"},
+            error=str(error),
+        )
+        return report
+
+    for case_name in CASE_REQUIRED_STAGES:
         case_report: dict[str, Any] = {
             "name": case_name,
             "passed": True,
             "stages": [],
         }
-        if case_name not in reference_cases or case_name not in actual_cases:
-            case_report["passed"] = False
-            case_report["error"] = "case missing from one manifest"
-            report["passed"] = False
-            report["first_divergence"] = report["first_divergence"] or {
-                "case": case_name,
-                "stage": "case",
-            }
-            report["cases"].append(case_report)
-            continue
         reference = reference_cases[case_name]
         actual = actual_cases[case_name]
         for stage in STAGE_ORDER:
+            if stage not in CASE_REQUIRED_STAGES[case_name]:
+                continue
             ref_spec = reference["arrays"].get(stage)
             actual_spec = actual["arrays"].get(stage)
-            if ref_spec is None and actual_spec is None:
-                continue
             stage_report: dict[str, Any] = {"stage": stage, "passed": True}
-            if ref_spec is None or actual_spec is None:
-                stage_report.update(
-                    passed=False, error="stage missing from one capture"
-                )
+            if ref_spec["dtype"] != actual_spec["dtype"]:
+                stage_report.update(passed=False, error="dtype mismatch")
             else:
-                ref = load_array(args.reference, ref_spec)
-                got = load_array(args.actual, actual_spec)
+                ref = load_array(reference_root, ref_spec)
+                got = load_array(actual_root, actual_spec)
                 stage_report["reference_shape"] = list(ref.shape)
                 stage_report["actual_shape"] = list(got.shape)
                 if ref.shape != got.shape:
                     stage_report.update(passed=False, error="shape mismatch")
+                elif (
+                    np.issubdtype(ref.dtype, np.floating)
+                    and (
+                        not bool(np.isfinite(ref).all())
+                        or not bool(np.isfinite(got).all())
+                    )
+                ):
+                    stage_report.update(
+                        passed=False, error="non-finite array value"
+                    )
                 elif np.issubdtype(ref.dtype, np.integer):
                     mismatch = np.flatnonzero(ref.reshape(-1) != got.reshape(-1))
                     stage_report["mismatch_count"] = int(mismatch.size)
@@ -739,7 +1030,11 @@ def compare(args: argparse.Namespace) -> int:
                 }
             case_report["stages"].append(stage_report)
         report["cases"].append(case_report)
+    return report
 
+
+def compare(args: argparse.Namespace) -> int:
+    report = compare_capture_roots(args.reference, args.actual)
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report["first_divergence"], sort_keys=True))

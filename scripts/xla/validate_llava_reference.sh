@@ -39,6 +39,18 @@ SURFACE_CHECK="$REPO_ROOT/spike/openxla/llava_cli_server_check.py"
 CACHE_ROOT="${MLXCEL_REFERENCE_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/mlxcel/reference-models}"
 SOURCE_REVISION="1090956dd1c79bc93ae98dcf395590369435ec91"
 CONVERTED_REVISION="ba7385935f69c5417bfbe29c3809858a98afc22f"
+FIXTURE_SHA256="5e7d54e8a7d21802378c87d2d70cf551e29739fe27599ddf129ebccdad1e6261"
+SOURCE_ARTIFACTS=(
+  added_tokens.json chat_template.json config.json generation_config.json
+  merges.txt model.safetensors preprocessor_config.json processor_config.json
+  special_tokens_map.json tokenizer.json tokenizer_config.json vocab.json
+)
+CONVERTED_ARTIFACTS=(
+  added_tokens.json chat_template.json config.json generation_config.json
+  merges.txt model.safetensors model.safetensors.index.json
+  preprocessor_config.json processor_config.json special_tokens_map.json
+  tokenizer.json tokenizer_config.json vocab.json
+)
 
 usage() { sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//; $d'; }
 
@@ -93,12 +105,26 @@ for value in IMAGE OUT; do
 done
 [ -f "$IMAGE" ] || { echo "error: image not found: $IMAGE" >&2; exit 2; }
 [ -x "$PYTHON" ] || { echo "error: oracle Python not found: $PYTHON" >&2; exit 3; }
+ACTUAL_FIXTURE_SHA256="$(sha256sum "$IMAGE" | cut -d' ' -f1)"
+[ "$ACTUAL_FIXTURE_SHA256" = "$FIXTURE_SHA256" ] || {
+  echo "error: image fixture SHA-256 mismatch: expected $FIXTURE_SHA256, got $ACTUAL_FIXTURE_SHA256" >&2
+  exit 3
+}
 
 ensure_snapshot() {
   local repo="$1"
   local revision="$2"
   local directory="$3"
-  if [ -f "$directory/model.safetensors" ] && [ -f "$directory/tokenizer.json" ]; then
+  shift 3
+  local complete=1
+  local artifact
+  for artifact in "$@"; do
+    if [ ! -f "$directory/$artifact" ]; then
+      complete=0
+      break
+    fi
+  done
+  if [ "$complete" -eq 1 ]; then
     return
   fi
   command -v hf >/dev/null 2>&1 || {
@@ -108,16 +134,24 @@ ensure_snapshot() {
   mkdir -p "$directory"
   echo "== [download] $repo@$revision -> $directory =="
   hf download "$repo" --revision "$revision" --local-dir "$directory"
+  for artifact in "$@"; do
+    [ -f "$directory/$artifact" ] || {
+      echo "error: pinned snapshot is missing required artifact: $directory/$artifact" >&2
+      exit 3
+    }
+  done
 }
 
 ensure_snapshot \
   "llava-hf/llava-interleave-qwen-0.5b-hf" \
   "$SOURCE_REVISION" \
-  "$SOURCE_MODEL"
+  "$SOURCE_MODEL" \
+  "${SOURCE_ARTIFACTS[@]}"
 ensure_snapshot \
   "mlx-community/llava-interleave-qwen-0.5b-bf16" \
   "$CONVERTED_REVISION" \
-  "$MODEL"
+  "$MODEL" \
+  "${CONVERTED_ARTIFACTS[@]}"
 
 mkdir -p "$OUT"
 REFERENCE="$OUT/hf-reference"

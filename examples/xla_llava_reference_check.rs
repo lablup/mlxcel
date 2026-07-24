@@ -20,7 +20,9 @@
 //! `xla-diagnostics`. Generated binary captures stay outside Git and are
 //! compared by `spike/openxla/llava_reference_oracle.py`.
 
-use std::fs;
+use std::collections::BTreeMap;
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -31,14 +33,35 @@ use mlxcel::{
     tokenizer::load_tokenizer,
 };
 use mlxcel_xla::LlavaReferenceDiagnosticEngine;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Deserialize)]
 struct ReferenceManifest {
     kv_selection: KvSelection,
     generation: Generation,
+    image_fixture: ImageFixture,
+    converted_checkpoint: ConvertedCheckpoint,
     cases: Vec<ReferenceCase>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ArtifactManifest {
+    canonical_sha256: String,
+    files: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConvertedCheckpoint {
+    artifact_manifest: ArtifactManifest,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ImageFixture {
+    path: String,
+    sha256: String,
+    two_image_transform: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,8 +80,12 @@ struct ReferenceCase {
     user_prompt: String,
     text: String,
     image_count: usize,
+    image_transforms: Vec<String>,
     unexpanded_input_ids: Vec<i32>,
 }
+
+const FIXTURE_PATH: &str = "tests/fixtures/test_image.png";
+const FIXTURE_SHA256: &str = "5e7d54e8a7d21802378c87d2d70cf551e29739fe27599ddf129ebccdad1e6261";
 
 const VISION_BLOCK0_STAGES: [&str; 12] = [
     "vision_block0_layer_norm1",
@@ -153,6 +180,71 @@ fn f32_bytes(values: &[f32]) -> Vec<u8> {
         .collect()
 }
 
+fn sha256_file(path: &Path) -> String {
+    let mut file =
+        File::open(path).unwrap_or_else(|error| panic!("open pinned {}: {error}", path.display()));
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .unwrap_or_else(|error| panic!("hash pinned {}: {error}", path.display()));
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    format!("{:x}", digest.finalize())
+}
+
+fn verify_artifact_manifest(root: &Path, manifest: &ArtifactManifest) {
+    let mut canonical = String::new();
+    for (filename, expected) in &manifest.files {
+        assert!(
+            !filename.contains('/') && !filename.contains('\\'),
+            "artifact manifest path must be a filename: {filename}"
+        );
+        let path = root.join(filename);
+        let actual = sha256_file(&path);
+        assert_eq!(
+            actual,
+            *expected,
+            "converted snapshot hash differs for {}",
+            path.display()
+        );
+        canonical.push_str(filename);
+        canonical.push('=');
+        canonical.push_str(expected);
+        canonical.push('\n');
+    }
+    let actual_canonical = format!("{:x}", Sha256::digest(canonical.as_bytes()));
+    assert_eq!(
+        actual_canonical, manifest.canonical_sha256,
+        "converted snapshot canonical manifest hash differs"
+    );
+}
+
+fn transformed_image(image: &DynamicImage, transform: &str) -> DynamicImage {
+    match transform {
+        "identity" => image.clone(),
+        "horizontal_mirror" => {
+            DynamicImage::ImageRgb8(image::imageops::flip_horizontal(&image.to_rgb8()))
+        }
+        other => panic!("unsupported pinned image transform {other:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn streaming_hash_matches_the_pinned_fixture() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE_PATH);
+        assert_eq!(sha256_file(&fixture), FIXTURE_SHA256);
+    }
+}
+
 fn peak_rss_kib() -> Option<u64> {
     fs::read_to_string("/proc/self/status")
         .ok()?
@@ -219,6 +311,18 @@ fn main() {
             .unwrap_or_else(|error| panic!("read reference manifest: {error}")),
     )
     .unwrap_or_else(|error| panic!("parse reference manifest: {error}"));
+    assert_eq!(reference.image_fixture.path, FIXTURE_PATH);
+    assert_eq!(reference.image_fixture.sha256, FIXTURE_SHA256);
+    assert_eq!(
+        reference.image_fixture.two_image_transform,
+        "horizontal_mirror"
+    );
+    assert_eq!(
+        sha256_file(&image_path),
+        FIXTURE_SHA256,
+        "fixture image SHA-256 differs"
+    );
+    verify_artifact_manifest(&model, &reference.converted_checkpoint.artifact_manifest);
     let image = image::open(&image_path)
         .unwrap_or_else(|error| panic!("open fixture image {}: {error}", image_path.display()))
         .into_rgb8();
@@ -240,6 +344,12 @@ fn main() {
 
     let mut captured_cases = Vec::new();
     for reference_case in &reference.cases {
+        assert_eq!(
+            reference_case.image_count,
+            reference_case.image_transforms.len(),
+            "image count and transform count diverged for {}",
+            reference_case.name
+        );
         let converted_prompt = render_converted_prompt(
             &chat_template,
             &reference_case.user_prompt,
@@ -278,8 +388,10 @@ fn main() {
             "converted tokenizer round-trip diverged for {}",
             reference_case.name
         );
-        let images: Vec<DynamicImage> = (0..reference_case.image_count)
-            .map(|_| image.clone())
+        let images: Vec<DynamicImage> = reference_case
+            .image_transforms
+            .iter()
+            .map(|transform| transformed_image(&image, transform))
             .collect();
         let preprocessing_started = Instant::now();
         let capture = preprocessor
@@ -442,6 +554,7 @@ fn main() {
         captured_cases.push(json!({
             "name": reference_case.name,
             "image_count": reference_case.image_count,
+            "image_transforms": reference_case.image_transforms,
             "arrays": arrays,
             "timings": {
                 "host_preprocessing_seconds": preprocessing_seconds,
@@ -457,15 +570,15 @@ fn main() {
     }
 
     // Required negative cases exercise the same public boundaries, but retain
-    // only their stable error category/message in the manifest.
-    let malformed = preprocessor
+    // only their stable rejected outcome/category in the manifest.
+    let _malformed = preprocessor
         .prepare(&[151646, 151646], std::slice::from_ref(&image))
         .expect_err("two placeholders for one image must be rejected");
     let overflow_tokens = vec![1i32; context_capacity + 1];
     let overflow_prepared = preprocessor
         .prepare(&overflow_tokens, &[])
         .expect("host model capacity exceeds the IREE test bucket");
-    let overflow = engine
+    let _overflow = engine
         .capture(
             &overflow_prepared,
             reference.kv_selection.width,
@@ -490,6 +603,10 @@ fn main() {
             "duplicate_text_decoder": false,
         },
         "context_capacity": context_capacity,
+        "converted_checkpoint": {
+            "artifact_manifest": reference.converted_checkpoint.artifact_manifest,
+        },
+        "image_fixture": reference.image_fixture,
         "kv_selection": {
             "position": "last_effective_prompt",
             "kv_head": 0,
@@ -510,11 +627,13 @@ fn main() {
         "negative_cases": {
             "malformed_placeholder": {
                 "passed": true,
-                "error": malformed.to_string(),
+                "outcome": "rejected",
+                "category": "placeholder_count_mismatch",
             },
             "context_overflow": {
                 "passed": true,
-                "error": overflow,
+                "outcome": "rejected",
+                "category": "context_capacity_exceeded",
             },
         },
         "cases": captured_cases,

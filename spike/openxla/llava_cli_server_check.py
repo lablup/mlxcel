@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
@@ -16,6 +17,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+FIXTURE_SHA256 = "5e7d54e8a7d21802378c87d2d70cf551e29739fe27599ddf129ebccdad1e6261"
 
 
 def fail(message: str) -> None:
@@ -209,6 +212,12 @@ def main() -> int:
     ):
         if not path.exists():
             fail(f"{label} not found: {path}")
+    actual_fixture_sha = hashlib.sha256(args.image.read_bytes()).hexdigest()
+    if actual_fixture_sha != FIXTURE_SHA256:
+        fail(
+            "image fixture SHA-256 mismatch: "
+            f"expected {FIXTURE_SHA256}, got {actual_fixture_sha}"
+        )
     manifest = json.loads((args.reference / "manifest.json").read_text())
     case = next(case for case in manifest["cases"] if case["name"] == "image_text")
     if "greedy_text" not in case:
