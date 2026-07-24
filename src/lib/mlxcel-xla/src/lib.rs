@@ -57,6 +57,12 @@ mod prepared_deepstack;
 mod prepared_gemma3n;
 
 #[cfg(feature = "iree")]
+mod aux;
+#[cfg(feature = "iree")]
+mod aux_manifest;
+#[cfg(feature = "iree")]
+mod aux_smoke;
+#[cfg(feature = "iree")]
 mod iree;
 
 // The continuous-batching engine (#449 M3 Stage 2b). Present under `iree` (real
@@ -105,6 +111,8 @@ mod emitter;
 #[allow(dead_code)]
 mod validation;
 
+#[cfg(feature = "iree")]
+pub use aux_smoke::{AuxiliaryAbiSmokeReport, run_auxiliary_abi_smoke};
 #[cfg(feature = "iree")]
 pub use batch::{EngineEvent, FinishReason, XlaAdmissionError, XlaBatchEngine, XlaReferenceEngine};
 #[cfg(feature = "diagnostics")]

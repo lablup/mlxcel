@@ -684,7 +684,7 @@ fn iree_dist() -> Result<PathBuf, String> {
 /// iree-compile (version-matched to that runtime) is required via
 /// `MLXCEL_XLA_IREE_COMPILE` (runtime env, else baked at build); in the dist
 /// build it is the dist's own `bin/iree-compile`.
-fn iree_compile_bin() -> Result<PathBuf, String> {
+pub(crate) fn iree_compile_bin() -> Result<PathBuf, String> {
     if let Ok(ic) = std::env::var("MLXCEL_XLA_IREE_COMPILE") {
         return Ok(PathBuf::from(ic));
     }
@@ -717,7 +717,7 @@ fn iree_compile_bin() -> Result<PathBuf, String> {
 /// cuda codegen); `metal` -> the Metal target (metal-spirv codegen; the Apple
 /// Silicon dev path, where the macOS runtime registers the metal driver and the
 /// pinned macOS universal2 iree-compile has metal-spirv codegen).
-fn target_flags(device: &str) -> Result<&'static [&'static str], String> {
+pub(crate) fn target_flags(device: &str) -> Result<&'static [&'static str], String> {
     if device == "cuda" {
         Ok(&["--iree-hal-target-device=cuda"])
     } else if device == "metal" {
@@ -737,7 +737,7 @@ fn target_flags(device: &str) -> Result<&'static [&'static str], String> {
 
 /// Compile one bundled graph to a vmfb, cached by a hash of its text + flags so
 /// repeated loads skip the ~3 s compile.
-fn compile_one(
+pub(crate) fn compile_one(
     iree_compile: &Path,
     mlir: &str,
     flags: &[&str],

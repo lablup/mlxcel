@@ -318,3 +318,7 @@ required-features = ["xla-iree"]
 [[example]]
 name = "xla_llava_reference_check"
 required-features = ["xla-diagnostics"]
+
+[[example]]
+name = "xla_aux_smoke"
+required-features = ["xla-iree"]

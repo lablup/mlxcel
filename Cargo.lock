@@ -1990,6 +1990,7 @@ dependencies = [
  "mlxcel-core",
  "safetensors 0.4.5",
  "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

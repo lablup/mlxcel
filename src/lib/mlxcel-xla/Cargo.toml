@@ -25,7 +25,7 @@ build = "build.rs"
 # Real IREE execution. Off by default so `--features xla-backend` stays buildable
 # in CI (no IREE dist). When on, build.rs compiles csrc/xla_iree.c and links the
 # prebuilt IREE runtime (IREE_DIST must point at the extracted dist).
-iree = ["dep:safetensors", "dep:memmap2"]
+iree = ["dep:safetensors", "dep:memmap2", "dep:sha2"]
 # Test-only Gemma3n intermediate-oracle surface. Default-off and intentionally
 # separate from `iree`, so production bundles never compile or load diagnostic
 # MLIR unless the explicit root `xla-diagnostics` feature forwards this flag.
@@ -42,6 +42,7 @@ mlxcel-core = { path = "../mlxcel-core" }
 # feature, where the session uploads the real weights to the device.
 safetensors = { version = "0.4", optional = true }
 memmap2 = { version = "0.9", optional = true }
+sha2 = { version = "0.10", optional = true }
 # config.json parsing: the emitter reads model dimensions from it to generate the
 # graphs at load (always compiled with the crate), and the iree path also uses it.
 serde_json = { version = "1" }
