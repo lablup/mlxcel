@@ -25,7 +25,7 @@ use crate::emitter::{
     emit_gemma3n_audio_merge_ple, gemma3n_audio_encoder_weights, gemma3n_audio_merge_weights,
 };
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
-use crate::weights::{bf16_to_f32, dequantize_affine_bf16_fused, f16_to_f32, f32_le_to_f32};
+use crate::weights::{bf16_to_f32, dequantize_affine_bf16_sequential, f16_to_f32, f32_le_to_f32};
 use crate::{
     GEMMA3N_AUDIO_MODALITY_FAMILY, GEMMA3N_AUDIO_SOFT_TOKENS, Gemma3nAudioInput,
     Gemma3nAudioPreparedPrefill, Gemma3nDensePle, Gemma3nPreparedPrefill, Gemma3nXlaAudioConfig,
@@ -320,7 +320,7 @@ fn decode_weight(
             let logical_columns = packed[1]
                 .checked_mul(32 / quant_bits)
                 .ok_or_else(|| format!("{checkpoint_name} logical width overflows"))?;
-            let values = dequantize_affine_bf16_fused(
+            let values = dequantize_affine_bf16_sequential(
                 tensor.data(),
                 scales.data(),
                 biases.data(),
@@ -1021,9 +1021,16 @@ mod tests {
         let bf16_nan = bf16_to_f32(&0x7fc0u16.to_le_bytes());
         let f16_nan = f16_to_f32(&0x7e00u16.to_le_bytes());
         let f32_nan = f32_le_to_f32(&f32::NAN.to_le_bytes());
-        let q4_infinite =
-            dequantize_affine_bf16_fused(&[0; 4], &0x7f80u16.to_le_bytes(), &[0; 2], 1, 1, 4, 8)
-                .unwrap();
+        let q4_infinite = dequantize_affine_bf16_sequential(
+            &[0; 4],
+            &0x7f80u16.to_le_bytes(),
+            &[0; 2],
+            1,
+            1,
+            4,
+            8,
+        )
+        .unwrap();
 
         for (dtype, values) in [
             ("BF16", bf16_nan),

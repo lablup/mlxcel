@@ -84,7 +84,7 @@ use crate::{DeepStackFeatures, DeepStackPreparedPrefill, Gemma3nDensePle, Gemma3
 // and the #500 MoE expert bank (the stacked `switch_mlp` weights, dequantized with
 // `dequantize_affine_stacked`). Both are pure-Rust and unit-tested without `iree`.
 use crate::weights::{
-    QuantPart, WeightSpec, bf16_to_f32, dequantize_affine, dequantize_affine_bf16_fused,
+    QuantPart, WeightSpec, bf16_to_f32, dequantize_affine, dequantize_affine_bf16_sequential,
     dequantize_affine_stacked, f16_to_f32, f32_le_to_f32, pack_f16, slice_rows, weight_specs,
 };
 
@@ -1618,7 +1618,7 @@ fn load_weights(
                                     "{prefix} uses F16 affine scales/biases, but Gemma3n requires BF16 affine metadata"
                                 ));
                             }
-                            dequantize_affine_bf16_fused(
+                            dequantize_affine_bf16_sequential(
                                 t.data(),
                                 scales.data(),
                                 biases.data(),

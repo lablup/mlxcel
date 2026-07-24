@@ -211,7 +211,9 @@ pub fn dequantize_gemma3n_affine_diagnostic(
     bits: usize,
     group_size: usize,
 ) -> Result<Vec<f32>, String> {
-    weights::dequantize_affine_bf16_fused(packed, scales, biases, out, in_packed, bits, group_size)
+    weights::dequantize_affine_bf16_sequential(
+        packed, scales, biases, out, in_packed, bits, group_size,
+    )
 }
 #[cfg(feature = "diagnostics")]
 pub use emitter::{Gemma3nDiagnosticLayout, Gemma3nDiagnosticSegment};

@@ -575,11 +575,14 @@ pub(crate) fn dequantize_affine(
     Ok(w)
 }
 
-/// Gemma3n's MLX CUDA affine-dequant kernel evaluates `scale * q + bias` as a
-/// fused expression and rounds the result once to the BF16 scales dtype.
-/// Preserve those BF16 values in f32 carriers for the public IREE graph ABI.
+/// Match MLX CUDA's affine dequantization for BF16 scales and biases.
+///
+/// The CUDA kernel materializes `q * scale` as BF16 before adding the BF16
+/// zero point, so both operations round independently:
+/// `bf16(bf16(q * scale) + bias)`. Preserve those values in f32 carriers for
+/// the public IREE graph ABI.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn dequantize_affine_bf16_fused(
+pub(crate) fn dequantize_affine_bf16_sequential(
     packed: &[u8],
     scales: &[u8],
     biases: &[u8],
@@ -623,19 +626,21 @@ pub(crate) fn dequantize_affine_bf16_fused(
     if bits == 4 {
         // Reuse one LUT bank across all output rows. The embedding table has
         // hundreds of thousands of rows, so allocating it inside this loop
-        // would erase most of the fused-arithmetic speedup.
+        // would erase most of the dequantization speedup.
         let mut luts = vec![[0.0f32; 16]; n_groups];
         for output in 0..out {
             let row = &packed[output * in_packed * 4..(output + 1) * in_packed * 4];
             let group_row = output * n_groups;
             let weight_row = output * in_;
             // A Gemma3n E2B group has 64 lanes but only 16 possible nibble
-            // values. Compute the fused BF16 affine result once per value and
-            // group, then decode the packed row through the tiny hot LUT.
+            // values. Compute the sequentially-rounded BF16 affine result once
+            // per value and group, then decode the packed row through the tiny
+            // hot LUT.
             for (group_index, lut) in luts.iter_mut().enumerate() {
                 let group = group_row + group_index;
                 for (quantized, value) in lut.iter_mut().enumerate() {
-                    *value = round_bf16_f32(quantized as f32 * scales[group] + biases[group]);
+                    let scaled = round_bf16_f32(quantized as f32 * scales[group]);
+                    *value = round_bf16_f32(scaled + biases[group]);
                 }
             }
             for packed_index in 0..in_packed {
@@ -650,7 +655,8 @@ pub(crate) fn dequantize_affine_bf16_fused(
         }
     } else {
         // A 256-entry table can cost more than the usual 8-bit group saves, so
-        // retain the direct fused-round calculation for uncommon 8-bit checkpoints.
+        // retain the direct sequential-round calculation for uncommon 8-bit
+        // checkpoints.
         for output in 0..out {
             let row = &packed[output * in_packed * 4..(output + 1) * in_packed * 4];
             let group_row = output * n_groups;
@@ -662,8 +668,8 @@ pub(crate) fn dequantize_affine_bf16_fused(
                     let input = packed_index * per_u32 + lane;
                     let quantized = ((word >> (bits * lane)) & mask) as f32;
                     let group = group_row + input / group_size;
-                    weights[weight_row + input] =
-                        round_bf16_f32(quantized * scales[group] + biases[group]);
+                    let scaled = round_bf16_f32(quantized * scales[group]);
+                    weights[weight_row + input] = round_bf16_f32(scaled + biases[group]);
                 }
             }
         }
@@ -1145,15 +1151,21 @@ mod tests {
     }
 
     #[test]
-    fn gemma3n_bf16_affine_fuses_multiply_and_bias_before_rounding() {
-        // Low nibble q=9 with the actual E2B token-2 embedding group values.
-        let packed = 9u32.to_le_bytes();
-        let scale = 0xbbfb_u16.to_le_bytes();
-        let bias = 0x3d7b_u16.to_le_bytes();
-        let fused = dequantize_affine_bf16_fused(&packed, &scale, &bias, 1, 1, 4, 8).unwrap();
-        assert_eq!(fused[0], -0.007_659_912);
-        let ordinary = dequantize_affine(&packed, &scale, &bias, 1, 1, 4, 8, true).unwrap();
-        assert_eq!(fused, ordinary);
+    fn gemma3n_bf16_affine_rounds_multiply_before_adding_bias() {
+        // This projection group is a double-rounding counterexample: rounding
+        // only after q*scale+bias gives BF16 0xbc52, while MLX CUDA stores the
+        // BF16 product before the BF16 addition and therefore yields 0xbc50.
+        let packed = 10u32.to_le_bytes();
+        let scale = 0xbbd2_u16.to_le_bytes();
+        let bias = 0x3d52_u16.to_le_bytes();
+        let sequential =
+            dequantize_affine_bf16_sequential(&packed, &scale, &bias, 1, 1, 4, 8).unwrap();
+        assert_eq!(sequential[0].to_bits(), 0xbc50_0000);
+
+        let fused =
+            round_bf16_f32(10.0 * f32::from_bits(0xbbd2_0000) + f32::from_bits(0x3d52_0000));
+        assert_eq!(fused.to_bits(), 0xbc52_0000);
+        assert_ne!(sequential[0], fused);
     }
 
     #[test]
@@ -1169,12 +1181,13 @@ mod tests {
         };
         let scales = bf16_bytes(&scale_values);
         let biases = bf16_bytes(&bias_values);
-        let got = dequantize_affine_bf16_fused(&packed, &scales, &biases, 1, 1, 4, 4).unwrap();
+        let got = dequantize_affine_bf16_sequential(&packed, &scales, &biases, 1, 1, 4, 4).unwrap();
         let expected = (1..=8)
             .enumerate()
             .map(|(input, quantized)| {
                 let group = input / 4;
-                round_bf16_f32(quantized as f32 * scale_values[group] + bias_values[group])
+                let scaled = round_bf16_f32(quantized as f32 * scale_values[group]);
+                round_bf16_f32(scaled + bias_values[group])
             })
             .collect::<Vec<_>>();
         assert_eq!(got, expected);
