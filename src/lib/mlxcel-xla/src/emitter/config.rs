@@ -763,6 +763,12 @@ impl Config {
                 });
             }
             Some("youtu_vl") => {
+                if ob("attention_bias") == Some(true) {
+                    return Err("the OpenXLA Youtu-VL MLA emitter does not support \
+                         attention_bias = true for q_a_proj, kv_a_proj_with_mqa, \
+                         or o_proj"
+                        .to_string());
+                }
                 let parsed = MlaConfig {
                     q_lora_rank: u("q_lora_rank")?,
                     kv_lora_rank: u("kv_lora_rank")?,

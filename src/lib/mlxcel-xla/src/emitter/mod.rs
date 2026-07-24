@@ -1411,17 +1411,16 @@ mod tests {
 
     #[test]
     fn youtu_vl_selects_dense_mla_and_interleaved_rope() {
-        let config = Config::from_json_str(
-            r#"{"model_type":"youtu_vl","hidden_size":64,"intermediate_size":128,
+        let json = r#"{"model_type":"youtu_vl","hidden_size":64,"intermediate_size":128,
             "num_hidden_layers":2,"num_attention_heads":4,"num_key_value_heads":4,
             "vocab_size":128,"rms_norm_eps":1e-6,"rope_theta":500000,
             "kv_lora_rank":16,"q_lora_rank":24,"qk_nope_head_dim":8,
             "qk_rope_head_dim":4,"v_head_dim":8,"rope_interleave":true,
-            "tie_word_embeddings":true,"attention_bias":false,"mlp_bias":false}"#,
-        )
-        .unwrap()
-        .with_context_capacity(16)
-        .unwrap();
+            "tie_word_embeddings":true,"attention_bias":false,"mlp_bias":false}"#;
+        let config = Config::from_json_str(json)
+            .unwrap()
+            .with_context_capacity(16)
+            .unwrap();
         let mla = config.mla.expect("Youtu-VL must select MLA");
         assert_eq!(config.head_dim, 12);
         assert_eq!(config.rotary_width(), 4);
@@ -1433,6 +1432,17 @@ mod tests {
         assert!(prefill.contains("['mla_q_a']"));
         assert!(prefill.contains("['mla_kv_b']"));
         assert!(!prefill.contains("['wq']"));
+
+        let biased = json.replace("\"attention_bias\":false", "\"attention_bias\":true");
+        let error = Config::from_json_str(&biased)
+            .expect_err("Youtu-VL attention biases must fail closed until they are emitted");
+        assert!(
+            error.contains("attention_bias")
+                && error.contains("q_a_proj")
+                && error.contains("kv_a_proj_with_mqa")
+                && error.contains("o_proj"),
+            "unexpected Youtu-VL bias rejection: {error}"
+        );
     }
 
     #[test]
