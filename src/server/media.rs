@@ -1310,7 +1310,7 @@ fn validate_payload_size(bytes: Vec<u8>, kind: &str, max_size: usize) -> Result<
 fn http_image_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             // Total deadline for any single fetch.
             .timeout(Duration::from_secs(10))
             // Cap the time spent dialling a hostile or unreachable origin so
@@ -1318,9 +1318,17 @@ fn http_image_client() -> &'static reqwest::Client {
             .connect_timeout(Duration::from_secs(5))
             // Bound redirect chains so a malicious origin cannot bounce the
             // client through unbounded hops.
-            .redirect(reqwest::redirect::Policy::limited(5))
-            .build()
-            .expect("server image client should build")
+            .redirect(reqwest::redirect::Policy::limited(5));
+        // See `downloader::load_extra_ca_certificates` — this client fetches
+        // remote media URLs over the same rustls-tls backend, so it needs the
+        // same MLXCEL_EXTRA_CA_CERTS trust anchors to work behind a
+        // TLS-inspecting corporate proxy.
+        for cert in crate::downloader::load_extra_ca_certificates()
+            .expect("MLXCEL_EXTRA_CA_CERTS must be a valid PEM bundle")
+        {
+            builder = builder.add_root_certificate(cert);
+        }
+        builder.build().expect("server image client should build")
     })
 }
 

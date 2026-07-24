@@ -65,7 +65,10 @@
 //!   concatenated) for this module's `reqwest::Client`, on top of its default
 //!   trust store. Needed behind a TLS-inspecting corporate proxy (Cloudflare
 //!   Zero Trust / WARP Gateway, Netskope, Zscaler, ...) whose root CA isn't
-//!   picked up otherwise.
+//!   picked up otherwise. [`load_extra_ca_certificates`] is also used by the
+//!   server's `http_image_client` (`src/server/media.rs`), which fetches
+//!   remote media URLs through an independently-built client with the same
+//!   trust gap.
 //! - **URL segment encoding** — `repo_id`, `revision`, and `filename` are
 //!   percent-encoded per-segment when composing the GET/HEAD URL so that
 //!   adversarial repo metadata containing `?`, `#`, or other reserved
@@ -360,7 +363,7 @@ const EXTRA_CA_CERTS_ENV: &str = "MLXCEL_EXTRA_CA_CERTS";
 /// a hard error rather than a silent no-op: an operator who set this var
 /// intended for it to take effect, and downloads would otherwise fail later
 /// with a much less actionable TLS error.
-fn load_extra_ca_certificates() -> Result<Vec<reqwest::Certificate>> {
+pub(crate) fn load_extra_ca_certificates() -> Result<Vec<reqwest::Certificate>> {
     let path = match std::env::var(EXTRA_CA_CERTS_ENV) {
         Ok(val) if !val.trim().is_empty() => val.trim().to_string(),
         _ => return Ok(Vec::new()),
