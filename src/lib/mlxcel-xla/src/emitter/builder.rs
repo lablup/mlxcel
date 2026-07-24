@@ -727,23 +727,6 @@ impl Builder {
         }
     }
 
-    pub fn const_tensor_i32(&mut self, data: &[i32], shape: Vec<usize>) -> Val {
-        assert_eq!(data.len(), shape.iter().product::<usize>());
-        assert_eq!(shape.len(), 1);
-        let ty = Ty::new(shape, "i32");
-        let values = data
-            .iter()
-            .map(i32::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let r = self.fresh();
-        self.line(format!(
-            "{r} = stablehlo.constant dense<[{values}]> : {}",
-            ty.render()
-        ));
-        Val { name: r, ty }
-    }
-
     /// Dense f32 constant tensor from raw data (row-major), emitted as hex blob.
     pub fn const_tensor_f32(&mut self, data: &[f32], shape: Vec<usize>) -> Val {
         let ty = Ty::f32(shape);
@@ -1039,35 +1022,6 @@ impl Builder {
         Val { name: r, ty }
     }
 
-    /// Zero-interior static padding.
-    pub fn pad(&mut self, x: &Val, value: &Val, low: &[usize], high: &[usize]) -> Val {
-        assert_eq!(low.len(), x.ty.shape.len());
-        assert_eq!(high.len(), x.ty.shape.len());
-        let shape =
-            x.ty.shape
-                .iter()
-                .zip(low)
-                .zip(high)
-                .map(|((&dim, &before), &after)| before + dim + after)
-                .collect();
-        let ty = Ty::new(shape, x.ty.elt);
-        let interior = vec![0; x.ty.shape.len()];
-        let r = self.fresh();
-        self.line(format!(
-            "{} = stablehlo.pad {}, {}, low = {}, high = {}, interior = {} : ({}, {}) -> {}",
-            r,
-            x.name,
-            value.name,
-            dims_list(low),
-            dims_list(high),
-            dims_list(&interior),
-            x.ty.render(),
-            value.ty.render(),
-            ty.render()
-        ));
-        Val { name: r, ty }
-    }
-
     pub fn concatenate(&mut self, a: &Val, b: &Val, dim: usize) -> Val {
         let mut shape = a.ty.shape.clone();
         shape[dim] = a.ty.shape[dim] + b.ty.shape[dim];
@@ -1349,9 +1303,6 @@ impl Builder {
     }
     pub fn divide(&mut self, a: &Val, b: &Val) -> Val {
         self.binary("divide", a, b)
-    }
-    pub fn maximum(&mut self, a: &Val, b: &Val) -> Val {
-        self.binary("maximum", a, b)
     }
     pub fn minimum(&mut self, a: &Val, b: &Val) -> Val {
         self.binary("minimum", a, b)
@@ -1758,86 +1709,6 @@ impl Builder {
         let mut shape = x.ty.shape[..x.ty.shape.len() - 1].to_vec();
         shape.push(w.ty.shape[0]);
         self.reshape(&projected, shape)
-    }
-
-    /// Channels-last NWC/KIO or NHWC/HWIO convolution.
-    pub fn convolution(
-        &mut self,
-        input: &Val,
-        kernel: &Val,
-        strides: &[usize],
-        padding: &[(usize, usize)],
-        feature_groups: usize,
-    ) -> Val {
-        let rank = input.ty.shape.len();
-        assert!(matches!(rank, 3 | 4));
-        assert_eq!(kernel.ty.shape.len(), rank);
-        assert_eq!(input.ty.elt, kernel.ty.elt);
-        assert_eq!(input.ty.elt, "f32");
-        assert_eq!(strides.len(), rank - 2);
-        assert_eq!(padding.len(), rank - 2);
-        assert!(strides.iter().all(|stride| *stride > 0));
-        assert!(feature_groups > 0);
-        assert_eq!(
-            input.ty.shape[rank - 1],
-            kernel.ty.shape[rank - 2] * feature_groups
-        );
-        assert!(kernel.ty.shape[rank - 1].is_multiple_of(feature_groups));
-        let batch = input.ty.shape[0];
-        let mut shape = vec![batch];
-        for axis in 0..rank - 2 {
-            let padded = input.ty.shape[axis + 1] + padding[axis].0 + padding[axis].1;
-            assert!(padded >= kernel.ty.shape[axis]);
-            shape.push((padded - kernel.ty.shape[axis]) / strides[axis] + 1);
-        }
-        shape.push(kernel.ty.shape[rank - 1]);
-        let output_shape = shape;
-        let lhs_demoted;
-        let rhs_demoted;
-        let (input, kernel) = match self.precision.dot_elt() {
-            Some(elt) => {
-                lhs_demoted = self.convert(input, elt);
-                rhs_demoted = self.convert(kernel, elt);
-                (&lhs_demoted, &rhs_demoted)
-            }
-            None => (input, kernel),
-        };
-        let op_ty = Ty::new(output_shape, input.ty.elt);
-        let r = self.fresh();
-        let strides = dims_list(strides);
-        let padding = padding
-            .iter()
-            .map(|(low, high)| format!("[{low}, {high}]"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let dimension_numbers = if rank == 3 {
-            "[b, 0, f]x[0, i, o]->[b, 0, f]"
-        } else {
-            "[b, 0, 1, f]x[0, 1, i, o]->[b, 0, 1, f]"
-        };
-        self.line(format!(
-            "{} = stablehlo.convolution({}, {}) dim_numbers = {}, \
-             window = {{stride = {}, pad = [{}]}} \
-             {{batch_group_count = 1 : i64, feature_group_count = {} : i64, \
-             precision_config = [#stablehlo<precision DEFAULT>, #stablehlo<precision DEFAULT>]}} : \
-             ({}, {}) -> {}",
-            r,
-            input.name,
-            kernel.name,
-            dimension_numbers,
-            strides,
-            padding,
-            feature_groups,
-            input.ty.render(),
-            kernel.ty.render(),
-            op_ty.render()
-        ));
-        let result = Val { name: r, ty: op_ty };
-        if result.ty.elt == "f32" {
-            result
-        } else {
-            self.convert(&result, "f32")
-        }
     }
 }
 

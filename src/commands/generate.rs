@@ -2046,7 +2046,6 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             args.generation.max_tokens,
             kv_cache_mode,
             token_bias,
-            &tokenizer,
         )?;
         let generated_text = decode_generated_text(&tokenizer, &prompt_tokens, &generated_tokens);
         let visible = filter_reasoning_for_display(
