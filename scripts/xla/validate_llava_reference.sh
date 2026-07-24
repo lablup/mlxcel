@@ -35,6 +35,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PYTHON="${MLXCEL_ORACLE_PYTHON:-$REPO_ROOT/spike/openxla/.venv/bin/python}"
 ORACLE="$REPO_ROOT/spike/openxla/llava_reference_oracle.py"
+ORACLE_TEST="$REPO_ROOT/spike/openxla/test_llava_reference_oracle.py"
 SURFACE_CHECK="$REPO_ROOT/spike/openxla/llava_cli_server_check.py"
 CACHE_ROOT="${MLXCEL_REFERENCE_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/mlxcel/reference-models}"
 SOURCE_REVISION="1090956dd1c79bc93ae98dcf395590369435ec91"
@@ -89,8 +90,11 @@ cd "$REPO_ROOT"
 # which is a useful production throughput mode but a different compute dtype.
 export MLX_ENABLE_TF32=0
 
+[ -x "$PYTHON" ] || { echo "error: oracle Python not found: $PYTHON" >&2; exit 3; }
+
 if [ "$SKIP_STRUCTURAL" -eq 0 ]; then
   echo "== [structural] LLaVA diagnostic seam and chat-template selection =="
+  "$PYTHON" -m unittest -v "$ORACLE_TEST"
   cargo test -p mlxcel-xla --lib llava_diagnostics_share_the_production_embeddings_prefill
   cargo test --lib server::chat_template
   echo "[structural] PASS"
@@ -104,7 +108,6 @@ for value in IMAGE OUT; do
   [ -n "${!value}" ] || { echo "error: --$(echo "$value" | tr '[:upper:]_' '[:lower:]-') is required" >&2; usage; exit 2; }
 done
 [ -f "$IMAGE" ] || { echo "error: image not found: $IMAGE" >&2; exit 2; }
-[ -x "$PYTHON" ] || { echo "error: oracle Python not found: $PYTHON" >&2; exit 3; }
 ACTUAL_FIXTURE_SHA256="$(sha256sum "$IMAGE" | cut -d' ' -f1)"
 [ "$ACTUAL_FIXTURE_SHA256" = "$FIXTURE_SHA256" ] || {
   echo "error: image fixture SHA-256 mismatch: expected $FIXTURE_SHA256, got $ACTUAL_FIXTURE_SHA256" >&2

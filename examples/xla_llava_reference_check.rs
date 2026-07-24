@@ -28,9 +28,9 @@ use std::time::Instant;
 
 use image::DynamicImage;
 use mlxcel::{
-    HostMultimodalPreprocessor, LlavaHostPreprocessor, OwnedTensor, PreparedPositions,
-    PreparedTensorDType, initialize_runtime, server::ChatTemplateProcessor,
-    tokenizer::load_tokenizer,
+    HostMultimodalPreprocessor, HostPreprocessorError, LlavaHostPreprocessor, OwnedTensor,
+    PreparedPositions, PreparedTensorDType, initialize_runtime, server::ChatTemplateProcessor,
+    tokenizer::load_tokenizer, vlm_prompt::ImageTokenBlockError,
 };
 use mlxcel_xla::LlavaReferenceDiagnosticEngine;
 use serde::{Deserialize, Serialize};
@@ -64,13 +64,17 @@ struct ImageFixture {
     two_image_transform: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct KvSelection {
+    position: String,
+    kv_head: usize,
     width: usize,
+    layers: usize,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct Generation {
+    mode: String,
     max_new_tokens: usize,
 }
 
@@ -86,6 +90,9 @@ struct ReferenceCase {
 
 const FIXTURE_PATH: &str = "tests/fixtures/test_image.png";
 const FIXTURE_SHA256: &str = "5e7d54e8a7d21802378c87d2d70cf551e29739fe27599ddf129ebccdad1e6261";
+const PINNED_KV_WIDTH: usize = 8;
+const PINNED_TEXT_LAYERS: usize = 24;
+const PINNED_MAX_NEW_TOKENS: usize = 4;
 
 const VISION_BLOCK0_STAGES: [&str; 12] = [
     "vision_block0_layer_norm1",
@@ -198,6 +205,30 @@ fn sha256_file(path: &Path) -> String {
 }
 
 fn verify_artifact_manifest(root: &Path, manifest: &ArtifactManifest) {
+    let forbidden_names = [
+        "chat_template.jinja",
+        "tokenizer.model",
+        "tokenizer.jsonl",
+        "tiktoken.model",
+    ];
+    let mut runtime_alternates = fs::read_dir(root)
+        .unwrap_or_else(|error| panic!("inspect pinned {}: {error}", root.display()))
+        .filter_map(|entry| {
+            let entry = entry.unwrap_or_else(|error| panic!("inspect pinned artifact: {error}"));
+            let filename = entry.file_name().to_string_lossy().into_owned();
+            let is_runtime_alternate = forbidden_names.contains(&filename.as_str())
+                || filename.ends_with(".tiktoken")
+                || filename.ends_with(".safetensors")
+                || filename.ends_with(".safetensors.index.json")
+                || filename.ends_with(".index.json");
+            (is_runtime_alternate && !manifest.files.contains_key(&filename)).then_some(filename)
+        })
+        .collect::<Vec<_>>();
+    runtime_alternates.sort();
+    assert!(
+        runtime_alternates.is_empty(),
+        "converted snapshot has unpinned runtime alternate(s): {runtime_alternates:?}"
+    );
     let mut canonical = String::new();
     for (filename, expected) in &manifest.files {
         assert!(
@@ -227,10 +258,57 @@ fn verify_artifact_manifest(root: &Path, manifest: &ArtifactManifest) {
 fn transformed_image(image: &DynamicImage, transform: &str) -> DynamicImage {
     match transform {
         "identity" => image.clone(),
-        "horizontal_mirror" => {
-            DynamicImage::ImageRgb8(image::imageops::flip_horizontal(&image.to_rgb8()))
+        "swap_red_blue" => {
+            let mut transformed = image.to_rgb8();
+            for pixel in transformed.pixels_mut() {
+                pixel.0.swap(0, 2);
+            }
+            assert_ne!(
+                transformed.as_raw(),
+                image.as_bytes(),
+                "swap_red_blue must change the pinned RGB bytes"
+            );
+            DynamicImage::ImageRgb8(transformed)
         }
         other => panic!("unsupported pinned image transform {other:?}"),
+    }
+}
+
+fn expected_image_transforms(case: &str) -> &'static [&'static str] {
+    match case {
+        "image_text" => &["identity"],
+        "two_images" => &["identity", "swap_red_blue"],
+        "no_image" => &[],
+        other => panic!("unexpected pinned case {other:?}"),
+    }
+}
+
+fn classify_malformed_placeholder(error: &HostPreprocessorError) -> Result<&'static str, String> {
+    match error {
+        HostPreprocessorError::Placeholder(ImageTokenBlockError::MediaCardinality {
+            placeholder_count: 2,
+            image_count: 1,
+        }) => Ok("placeholder_count_mismatch"),
+        other => Err(format!(
+            "expected MediaCardinality {{ placeholder_count: 2, image_count: 1 }}, got {other:?}"
+        )),
+    }
+}
+
+fn classify_context_overflow(
+    error: &str,
+    effective_len: usize,
+    context_capacity: usize,
+) -> Result<&'static str, String> {
+    let expected = format!(
+        "prepared effective length {effective_len} exceeds context_capacity={context_capacity}"
+    );
+    if error == expected {
+        Ok("context_capacity_exceeded")
+    } else {
+        Err(format!(
+            "expected context-capacity error {expected:?}, got {error:?}"
+        ))
     }
 }
 
@@ -242,6 +320,56 @@ mod tests {
     fn streaming_hash_matches_the_pinned_fixture() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE_PATH);
         assert_eq!(sha256_file(&fixture), FIXTURE_SHA256);
+    }
+
+    #[test]
+    fn swap_red_blue_changes_rgb_bytes() {
+        let image = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            2,
+            1,
+            image::Rgb([255, 100, 50]),
+        ));
+        let transformed = transformed_image(&image, "swap_red_blue");
+        assert_ne!(image.as_bytes(), transformed.as_bytes());
+        assert_eq!(transformed.to_rgb8().get_pixel(0, 0).0, [50, 100, 255]);
+    }
+
+    #[test]
+    fn negative_error_classifiers_reject_wrong_variants() {
+        let correct = HostPreprocessorError::Placeholder(ImageTokenBlockError::MediaCardinality {
+            placeholder_count: 2,
+            image_count: 1,
+        });
+        assert_eq!(
+            classify_malformed_placeholder(&correct).unwrap(),
+            "placeholder_count_mismatch"
+        );
+        let wrong = HostPreprocessorError::Placeholder(ImageTokenBlockError::EmptyImageBlock);
+        assert!(classify_malformed_placeholder(&wrong).is_err());
+        assert_eq!(
+            classify_context_overflow(
+                "prepared effective length 1537 exceeds context_capacity=1536",
+                1537,
+                1536,
+            )
+            .unwrap(),
+            "context_capacity_exceeded"
+        );
+        assert!(classify_context_overflow("wrong error", 1537, 1536).is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "unpinned runtime alternate")]
+    fn converted_snapshot_rejects_extra_jinja() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("chat_template.jinja"), "conflict").unwrap();
+        verify_artifact_manifest(
+            directory.path(),
+            &ArtifactManifest {
+                canonical_sha256: String::new(),
+                files: BTreeMap::new(),
+            },
+        );
     }
 }
 
@@ -313,10 +441,13 @@ fn main() {
     .unwrap_or_else(|error| panic!("parse reference manifest: {error}"));
     assert_eq!(reference.image_fixture.path, FIXTURE_PATH);
     assert_eq!(reference.image_fixture.sha256, FIXTURE_SHA256);
-    assert_eq!(
-        reference.image_fixture.two_image_transform,
-        "horizontal_mirror"
-    );
+    assert_eq!(reference.image_fixture.two_image_transform, "swap_red_blue");
+    assert_eq!(reference.kv_selection.position, "last_effective_prompt");
+    assert_eq!(reference.kv_selection.kv_head, 0);
+    assert_eq!(reference.kv_selection.width, PINNED_KV_WIDTH);
+    assert_eq!(reference.kv_selection.layers, PINNED_TEXT_LAYERS);
+    assert_eq!(reference.generation.mode, "greedy");
+    assert_eq!(reference.generation.max_new_tokens, PINNED_MAX_NEW_TOKENS);
     assert_eq!(
         sha256_file(&image_path),
         FIXTURE_SHA256,
@@ -344,6 +475,16 @@ fn main() {
 
     let mut captured_cases = Vec::new();
     for reference_case in &reference.cases {
+        assert_eq!(
+            reference_case
+                .image_transforms
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            expected_image_transforms(&reference_case.name),
+            "pinned image transform contract differs for {}",
+            reference_case.name
+        );
         assert_eq!(
             reference_case.image_count,
             reference_case.image_transforms.len(),
@@ -402,6 +543,32 @@ fn main() {
                     reference_case.name
                 )
             });
+        if reference_case.name == "two_images" {
+            assert_ne!(
+                images[0].as_bytes(),
+                images[1].as_bytes(),
+                "two-image RGB inputs must be byte-distinct"
+            );
+            let pixels = capture
+                .pixel_values
+                .as_ref()
+                .expect("two-image capture must include processor pixels");
+            assert_eq!(pixels.shape, [2, 3, 384, 384]);
+            let bytes_per_image = pixels.bytes.len() / 2;
+            let first = &pixels.bytes[..bytes_per_image];
+            let second = &pixels.bytes[bytes_per_image..];
+            assert_ne!(
+                first, second,
+                "two-image processor tensors must differ after channel swap"
+            );
+            let mut reversed = Vec::with_capacity(pixels.bytes.len());
+            reversed.extend_from_slice(second);
+            reversed.extend_from_slice(first);
+            assert_ne!(
+                pixels.bytes, reversed,
+                "reversing two-image order must change the processor tensor"
+            );
+        }
         let preprocessing_seconds = preprocessing_started.elapsed().as_secs_f64();
         let run = engine
             .capture(
@@ -571,20 +738,26 @@ fn main() {
 
     // Required negative cases exercise the same public boundaries, but retain
     // only their stable rejected outcome/category in the manifest.
-    let _malformed = preprocessor
+    let malformed = preprocessor
         .prepare(&[151646, 151646], std::slice::from_ref(&image))
         .expect_err("two placeholders for one image must be rejected");
+    let malformed_category = classify_malformed_placeholder(&malformed)
+        .unwrap_or_else(|error| panic!("classify malformed-placeholder error: {error}"));
     let overflow_tokens = vec![1i32; context_capacity + 1];
     let overflow_prepared = preprocessor
         .prepare(&overflow_tokens, &[])
         .expect("host model capacity exceeds the IREE test bucket");
-    let _overflow = engine
+    let overflow_effective_len = overflow_prepared.sequence_len;
+    let overflow = engine
         .capture(
             &overflow_prepared,
             reference.kv_selection.width,
             reference.generation.max_new_tokens,
         )
         .expect_err("prepared prompt beyond IREE bucket must be rejected");
+    let overflow_category =
+        classify_context_overflow(&overflow, overflow_effective_len, context_capacity)
+            .unwrap_or_else(|error| panic!("classify context-overflow error: {error}"));
 
     let manifest = json!({
         "schema": 1,
@@ -607,11 +780,8 @@ fn main() {
             "artifact_manifest": reference.converted_checkpoint.artifact_manifest,
         },
         "image_fixture": reference.image_fixture,
-        "kv_selection": {
-            "position": "last_effective_prompt",
-            "kv_head": 0,
-            "width": reference.kv_selection.width,
-        },
+        "kv_selection": reference.kv_selection,
+        "generation": reference.generation,
         "timings": {
             "host_component_load_seconds": host_load_seconds,
             "iree_compile_and_load_seconds": compile_load_seconds,
@@ -628,12 +798,12 @@ fn main() {
             "malformed_placeholder": {
                 "passed": true,
                 "outcome": "rejected",
-                "category": "placeholder_count_mismatch",
+                "category": malformed_category,
             },
             "context_overflow": {
                 "passed": true,
                 "outcome": "rejected",
-                "category": "context_capacity_exceeded",
+                "category": overflow_category,
             },
         },
         "cases": captured_cases,

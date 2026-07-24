@@ -63,10 +63,34 @@ FIXTURE_PATH = "tests/fixtures/test_image.png"
 FIXTURE_SHA256 = "5e7d54e8a7d21802378c87d2d70cf551e29739fe27599ddf129ebccdad1e6261"
 CASE_IMAGE_TRANSFORMS = {
     "image_text": ("identity",),
-    "two_images": ("identity", "horizontal_mirror"),
+    "two_images": ("identity", "swap_red_blue"),
     "no_image": (),
 }
 IMAGE_SIZE = 384
+IMAGE_TOKENS = 729
+VISION_HIDDEN_SIZE = 1152
+VISION_INTERMEDIATE_SIZE = 4304
+TEXT_HIDDEN_SIZE = 1024
+VOCAB_SIZE = 152000
+TEXT_LAYERS = 24
+CASE_SEQUENCE_LENGTHS = {
+    "image_text": 743,
+    "two_images": 1473,
+    "no_image": 14,
+}
+PINNED_KV_SELECTION = {
+    "position": "last_effective_prompt",
+    "kv_head": 0,
+    "width": 8,
+    "layers": TEXT_LAYERS,
+}
+PINNED_GENERATION = {"mode": "greedy", "max_new_tokens": 4}
+FORBIDDEN_RUNTIME_ALTERNATE_NAMES = {
+    "chat_template.jinja",
+    "tokenizer.model",
+    "tokenizer.jsonl",
+    "tiktoken.model",
+}
 COMPUTE_DTYPES = {
     "processor": "float32",
     "prompt_embedding_lookup": "bfloat16",
@@ -207,12 +231,44 @@ def canonical_artifact_sha(artifacts: dict[str, str]) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def is_runtime_alternate(filename: str, allowed: set[str]) -> bool:
+    if filename in allowed:
+        return False
+    return (
+        filename in FORBIDDEN_RUNTIME_ALTERNATE_NAMES
+        or filename.endswith(".tiktoken")
+        or filename.endswith(".safetensors")
+        or filename.endswith(".safetensors.index.json")
+        or filename.endswith(".index.json")
+    )
+
+
+def reject_runtime_alternates(
+    root: Path, expected_artifacts: dict[str, str], label: str
+) -> None:
+    allowed = set(expected_artifacts)
+    try:
+        extras = sorted(
+            entry.name
+            for entry in root.iterdir()
+            if (entry.is_file() or entry.is_symlink())
+            and is_runtime_alternate(entry.name, allowed)
+        )
+    except OSError as error:
+        raise SystemExit(f"error: cannot inspect {label} snapshot {root}: {error}") from error
+    if extras:
+        raise SystemExit(
+            f"error: {label} snapshot has unpinned runtime alternate(s): {extras}"
+        )
+
+
 def require_artifact_manifest(
     root: Path,
     expected_artifacts: dict[str, str],
     expected_manifest_sha: str,
     label: str,
 ) -> dict[str, Any]:
+    reject_runtime_alternates(root, expected_artifacts, label)
     for filename, expected_sha in expected_artifacts.items():
         require_sha(root / filename, expected_sha, f"{label} {filename}")
     actual_manifest_sha = canonical_artifact_sha(expected_artifacts)
@@ -225,6 +281,70 @@ def require_artifact_manifest(
         "canonical_sha256": actual_manifest_sha,
         "files": expected_artifacts,
     }
+
+
+def transformed_image(image: Any, transform: str) -> Any:
+    from PIL import Image
+
+    if transform == "identity":
+        return image.copy()
+    if transform == "swap_red_blue":
+        red, green, blue = image.split()
+        transformed = Image.merge("RGB", (blue, green, red))
+        if transformed.size != image.size or transformed.tobytes() == image.tobytes():
+            raise AssertionError("swap_red_blue must preserve size and change RGB bytes")
+        return transformed
+    raise AssertionError(f"unsupported pinned image transform {transform!r}")
+
+
+def expected_stage_shapes(case_name: str) -> dict[str, list[int]]:
+    image_count = len(CASE_IMAGE_TRANSFORMS[case_name])
+    sequence_len = CASE_SEQUENCE_LENGTHS[case_name]
+    result = {
+        "expanded_token_ids": [1, sequence_len],
+        "positions": [1, sequence_len],
+        "attention_mask": [1, sequence_len],
+        "merged_embeddings": [1, sequence_len, TEXT_HIDDEN_SIZE],
+        "first_prefill_logits": [VOCAB_SIZE],
+        "selected_kv": [
+            TEXT_LAYERS,
+            2,
+            PINNED_KV_SELECTION["width"],
+        ],
+        "greedy_tokens": [PINNED_GENERATION["max_new_tokens"]],
+    }
+    if image_count:
+        result["processor_pixel_values"] = [
+            image_count,
+            3,
+            IMAGE_SIZE,
+            IMAGE_SIZE,
+        ]
+        for stage in VISION_HIDDEN_STATE_STAGES:
+            result[stage] = [
+                image_count,
+                IMAGE_TOKENS,
+                VISION_HIDDEN_SIZE,
+            ]
+        for stage in VISION_BLOCK0_STAGES:
+            width = (
+                VISION_INTERMEDIATE_SIZE
+                if stage
+                in {"vision_block0_mlp_fc1", "vision_block0_mlp_activation"}
+                else VISION_HIDDEN_SIZE
+            )
+            result[stage] = [image_count, IMAGE_TOKENS, width]
+        result["selected_vision_features"] = [
+            image_count,
+            IMAGE_TOKENS,
+            VISION_HIDDEN_SIZE,
+        ]
+        result["projected_image_features"] = [
+            image_count,
+            IMAGE_TOKENS,
+            TEXT_HIDDEN_SIZE,
+        ]
+    return result
 
 
 def verify_vision_block0_conversion(
@@ -343,6 +463,16 @@ def np_int32_torch() -> Any:
 
 
 def capture(args: argparse.Namespace) -> int:
+    if args.max_new != PINNED_GENERATION["max_new_tokens"]:
+        raise SystemExit(
+            "error: pinned capture requires "
+            f"--max-new {PINNED_GENERATION['max_new_tokens']}"
+        )
+    if args.kv_width != PINNED_KV_SELECTION["width"]:
+        raise SystemExit(
+            "error: pinned capture requires "
+            f"--kv-width {PINNED_KV_SELECTION['width']}"
+        )
     try:
         import torch
         from PIL import Image
@@ -415,7 +545,7 @@ def capture(args: argparse.Namespace) -> int:
         "image_fixture": {
             "path": FIXTURE_PATH,
             "sha256": FIXTURE_SHA256,
-            "two_image_transform": "horizontal_mirror",
+            "two_image_transform": "swap_red_blue",
         },
         "conversion_equivalence": conversion_equivalence,
         "processor": {
@@ -448,17 +578,28 @@ def capture(args: argparse.Namespace) -> int:
     for definition in cases(processor, image_path):
         started = time.perf_counter()
         images = [
-            image.copy()
-            if transform == "identity"
-            else image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+            transformed_image(image, transform)
             for transform in definition["image_transforms"]
         ]
+        if definition["name"] == "two_images":
+            if images[0].tobytes() == images[1].tobytes():
+                raise AssertionError("two-image RGB inputs must be byte-distinct")
         inputs = processor(
             text=definition["text"],
             images=images or None,
             return_tensors="pt",
         )
         inputs = inputs.to(device)
+        if definition["name"] == "two_images":
+            pixels = inputs.pixel_values
+            if torch.equal(pixels[0], pixels[1]):
+                raise AssertionError(
+                    "two-image processor tensors must differ after channel swap"
+                )
+            if torch.equal(pixels, pixels.flip(0)):
+                raise AssertionError(
+                    "reversing two-image order must change the processor tensor"
+                )
         processor_seconds = time.perf_counter() - started
         expanded_ids = inputs.input_ids
         attention_mask = inputs.attention_mask
@@ -813,10 +954,14 @@ def validate_capture_manifest(
     expected_fixture = {
         "path": FIXTURE_PATH,
         "sha256": FIXTURE_SHA256,
-        "two_image_transform": "horizontal_mirror",
+        "two_image_transform": "swap_red_blue",
     }
     if fixture != expected_fixture:
         raise ContractError(f"{role} image fixture contract differs")
+    if manifest.get("kv_selection") != PINNED_KV_SELECTION:
+        raise ContractError(f"{role} kv_selection contract differs")
+    if manifest.get("generation") != PINNED_GENERATION:
+        raise ContractError(f"{role} generation contract differs")
 
     converted = manifest.get("converted_checkpoint")
     if not isinstance(converted, dict):
@@ -852,6 +997,7 @@ def validate_capture_manifest(
 
     root = root.resolve()
     for case_name, case in cases.items():
+        expected_shapes = expected_stage_shapes(case_name)
         expected_transforms = list(CASE_IMAGE_TRANSFORMS[case_name])
         if case.get("image_count") != len(expected_transforms):
             raise ContractError(f"{role} {case_name} image_count differs")
@@ -896,6 +1042,11 @@ def validate_capture_manifest(
             ):
                 raise ContractError(
                     f"{role} {case_name}/{stage} has an invalid shape"
+                )
+            if shape != expected_shapes[stage]:
+                raise ContractError(
+                    f"{role} {case_name}/{stage} shape must be "
+                    f"{expected_shapes[stage]}, got {shape}"
                 )
             element_count = 1
             for dimension in shape:

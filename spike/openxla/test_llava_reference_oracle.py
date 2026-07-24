@@ -29,6 +29,8 @@ class ComparatorContractTests(unittest.TestCase):
         self.actual_manifest = self.manifest("actual")
         self.write_arrays(self.reference, self.reference_manifest)
         self.write_arrays(self.actual, self.actual_manifest)
+        self.write_distinct_two_image_pixels(self.reference)
+        self.write_distinct_two_image_pixels(self.actual)
         self.write_manifests()
 
     def tearDown(self) -> None:
@@ -42,8 +44,10 @@ class ComparatorContractTests(unittest.TestCase):
             "image_fixture": {
                 "path": oracle.FIXTURE_PATH,
                 "sha256": oracle.FIXTURE_SHA256,
-                "two_image_transform": "horizontal_mirror",
+                "two_image_transform": "swap_red_blue",
             },
+            "kv_selection": copy.deepcopy(oracle.PINNED_KV_SELECTION),
+            "generation": copy.deepcopy(oracle.PINNED_GENERATION),
             "converted_checkpoint": {
                 "repo": oracle.CONVERTED_REPO,
                 "revision": oracle.CONVERTED_REVISION,
@@ -69,12 +73,13 @@ class ComparatorContractTests(unittest.TestCase):
             )
         for case_name, stages in oracle.CASE_REQUIRED_STAGES.items():
             arrays = {}
+            expected_shapes = oracle.expected_stage_shapes(case_name)
             for stage in stages:
                 dtype = "int32" if stage in oracle.INTEGER_STAGES else "float32"
                 arrays[stage] = {
                     "file": f"{case_name}.{stage}.bin",
                     "dtype": dtype,
-                    "shape": [1],
+                    "shape": expected_shapes[stage],
                 }
             manifest["cases"].append(
                 {
@@ -92,9 +97,22 @@ class ComparatorContractTests(unittest.TestCase):
     def write_arrays(root: Path, manifest: dict[str, Any]) -> None:
         for case in manifest["cases"]:
             for spec in case["arrays"].values():
-                np.zeros(spec["shape"], dtype=spec["dtype"]).tofile(
-                    root / spec["file"]
-                )
+                element_count = int(np.prod(spec["shape"], dtype=np.int64))
+                with (root / spec["file"]).open("wb") as stream:
+                    stream.truncate(
+                        element_count * np.dtype(spec["dtype"]).itemsize
+                    )
+
+    @staticmethod
+    def write_distinct_two_image_pixels(root: Path) -> None:
+        per_image = 3 * oracle.IMAGE_SIZE * oracle.IMAGE_SIZE
+        pixels = np.concatenate(
+            (
+                np.zeros(per_image, dtype=np.float32),
+                np.ones(per_image, dtype=np.float32),
+            )
+        )
+        pixels.tofile(root / "two_images.processor_pixel_values.bin")
 
     def write_manifests(self) -> None:
         (self.reference / "manifest.json").write_text(
@@ -158,7 +176,7 @@ class ComparatorContractTests(unittest.TestCase):
             injection = (
                 '"arrays": {"selected_kv": '
                 '{"file": "image_text.selected_kv.bin", '
-                '"dtype": "float32", "shape": [1]},'
+                '"dtype": "float32", "shape": [24, 2, 8]},'
             )
             path.write_text(text.replace('"arrays": {', injection, 1), encoding="utf-8")
             self.assert_rejected("duplicate json key")
@@ -167,7 +185,8 @@ class ComparatorContractTests(unittest.TestCase):
         path = self.actual / "image_text.first_prefill_logits.bin"
         for value in (np.nan, np.inf):
             with self.subTest(value=value):
-                np.asarray([value], dtype=np.float32).tofile(path)
+                with path.open("r+b") as stream:
+                    stream.write(np.asarray([value], dtype=np.float32).tobytes())
                 report = oracle.compare_capture_roots(self.reference, self.actual)
                 self.assertFalse(report["passed"], report)
                 stage = next(
@@ -200,12 +219,29 @@ class ComparatorContractTests(unittest.TestCase):
             self.write_manifests()
             self.assert_rejected("invalid array path")
 
+    def test_positive_but_semantically_wrong_shapes_are_rejected(self) -> None:
+        mutations = (
+            ("first_prefill_logits", [1]),
+            (
+                "attention_mask",
+                [1, oracle.CASE_SEQUENCE_LENGTHS["image_text"] - 1],
+            ),
+            ("selected_kv", [oracle.TEXT_LAYERS, 1, 16]),
+        )
+        baseline = copy.deepcopy(self.actual_manifest)
+        for stage, shape in mutations:
+            with self.subTest(stage=stage):
+                self.actual_manifest = copy.deepcopy(baseline)
+                self.actual_manifest["cases"][0]["arrays"][stage]["shape"] = shape
+                self.write_manifests()
+                self.assert_rejected("shape must be")
+
     def test_truncated_and_oversized_binaries_are_rejected(self) -> None:
         path = self.actual / "image_text.selected_kv.bin"
         with self.subTest("truncated"):
             path.write_bytes(b"\x00\x00")
             self.assert_rejected("binary size differs")
-        np.zeros([1], dtype=np.float32).tofile(path)
+        path.write_bytes(bytes(oracle.TEXT_LAYERS * 2 * 8 * 4))
         with self.subTest("oversized"):
             path.write_bytes(path.read_bytes() + b"\x00")
             self.assert_rejected("binary size differs")
@@ -230,6 +266,77 @@ class ComparatorContractTests(unittest.TestCase):
                 mutate(self.actual_manifest["negative_cases"])
                 self.write_manifests()
                 self.assert_rejected("negative_cases")
+
+    def test_reversed_two_image_transform_labels_are_rejected(self) -> None:
+        two_images = next(
+            case
+            for case in self.actual_manifest["cases"]
+            if case["name"] == "two_images"
+        )
+        two_images["image_transforms"] = ["swap_red_blue", "identity"]
+        self.write_manifests()
+        self.assert_rejected("image transforms differ")
+
+    def test_reversed_two_image_tensor_payload_is_first_divergence(self) -> None:
+        path = self.actual / "two_images.processor_pixel_values.bin"
+        payload = path.read_bytes()
+        per_image = len(payload) // 2
+        path.write_bytes(payload[per_image:] + payload[:per_image])
+        report = oracle.compare_capture_roots(self.reference, self.actual)
+        self.assertFalse(report["passed"], report)
+        self.assertEqual(
+            report["first_divergence"],
+            {"case": "two_images", "stage": "processor_pixel_values"},
+        )
+
+    def test_kv_and_generation_metadata_are_exact(self) -> None:
+        with self.subTest("kv-width"):
+            self.actual_manifest["kv_selection"]["width"] = 1
+            self.write_manifests()
+            self.assert_rejected("kv_selection")
+        self.actual_manifest["kv_selection"] = copy.deepcopy(
+            oracle.PINNED_KV_SELECTION
+        )
+        with self.subTest("generation"):
+            self.actual_manifest["generation"]["max_new_tokens"] = 1
+            self.write_manifests()
+            self.assert_rejected("generation")
+
+
+class SnapshotPinningTests(unittest.TestCase):
+    def test_swap_red_blue_is_byte_distinct_and_reversible(self) -> None:
+        from PIL import Image
+
+        identity = Image.new("RGB", (2, 1), (255, 100, 50))
+        swapped = oracle.transformed_image(identity, "swap_red_blue")
+        self.assertNotEqual(identity.tobytes(), swapped.tobytes())
+        self.assertEqual(swapped.getpixel((0, 0)), (50, 100, 255))
+        restored = oracle.transformed_image(swapped, "swap_red_blue")
+        self.assertEqual(restored.tobytes(), identity.tobytes())
+
+    def test_extra_chat_template_jinja_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "chat_template.jinja").write_text("conflicting template")
+            with self.assertRaisesRegex(SystemExit, "unpinned runtime alternate"):
+                oracle.reject_runtime_alternates(
+                    root, oracle.CONVERTED_ARTIFACTS, "converted"
+                )
+
+    def test_runtime_metadata_is_ignored_but_alternate_weights_are_rejected(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "README.md").write_text("metadata")
+            oracle.reject_runtime_alternates(
+                root, oracle.CONVERTED_ARTIFACTS, "converted"
+            )
+            (root / "model-00001-of-00002.safetensors").write_bytes(b"")
+            with self.assertRaisesRegex(SystemExit, "unpinned runtime alternate"):
+                oracle.reject_runtime_alternates(
+                    root, oracle.CONVERTED_ARTIFACTS, "converted"
+                )
 
 
 if __name__ == "__main__":
