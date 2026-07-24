@@ -187,18 +187,23 @@ pub fn load_xla_image_preprocessor(
     if model_type != crate::models::ModelType::LlavaVLM
         && model_type != crate::models::ModelType::Molmo2VLM
         && model_type != crate::models::ModelType::Qwen2VL
+        && model_type != crate::models::ModelType::Qwen25VL
     {
         return Ok(None);
     }
 
     let policy = XlaVisionBackendPolicy::from_env()?;
     match model_type {
-        crate::models::ModelType::Qwen2VL => {
+        crate::models::ModelType::Qwen2VL | crate::models::ModelType::Qwen25VL => {
+            let family = if model_type == crate::models::ModelType::Qwen25VL {
+                "Qwen2.5-VL"
+            } else {
+                "Qwen2-VL"
+            };
             if policy == XlaVisionBackendPolicy::Host {
-                return Err(HostPreprocessorError::InvalidConfig(
-                    "Qwen2-VL XLA vision has no MLX fallback; MLXCEL_XLA_VISION_BACKEND=host is unsupported"
-                        .to_string(),
-                ));
+                return Err(HostPreprocessorError::InvalidConfig(format!(
+                    "{family} XLA vision has no MLX fallback; MLXCEL_XLA_VISION_BACKEND=host is unsupported"
+                )));
             }
             #[cfg(feature = "xla-iree")]
             {
@@ -208,7 +213,7 @@ pub fn load_xla_image_preprocessor(
                 tracing::info!(
                     vision_backend = "iree",
                     vision_device = %device,
-                    family = "qwen2_vl",
+                    family,
                     "OpenXLA multimodal vision backend selected"
                 );
                 Ok(Some(Box::new(preprocessor)))
@@ -220,11 +225,10 @@ pub fn load_xla_image_preprocessor(
             // gets.
             #[cfg(not(feature = "xla-iree"))]
             {
-                Err(HostPreprocessorError::InvalidConfig(
-                    "Qwen2-VL XLA image execution requires the xla-iree feature; rebuild mlxcel \
+                Err(HostPreprocessorError::InvalidConfig(format!(
+                    "{family} XLA image execution requires the xla-iree feature; rebuild mlxcel \
                      with `--features xla-iree` (this family has no MLX vision fallback)"
-                        .to_string(),
-                ))
+                )))
             }
         }
         crate::models::ModelType::LlavaVLM => load_llava_image_preprocessor(model_path, policy),
@@ -567,7 +571,19 @@ pub struct Qwen2VlIreeHostPreprocessor {
 #[cfg(feature = "xla-iree")]
 impl Qwen2VlIreeHostPreprocessor {
     pub fn load(model_path: &Path, device: &str) -> Result<Self, HostPreprocessorError> {
-        crate::loading::load_qwen2_vl_iree_host_preprocessor(model_path, device)
+        match crate::models::get_model_type(model_path)
+            .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?
+        {
+            crate::models::ModelType::Qwen2VL => {
+                crate::loading::load_qwen2_vl_iree_host_preprocessor(model_path, device)
+            }
+            crate::models::ModelType::Qwen25VL => {
+                crate::loading::load_qwen2_5_vl_iree_host_preprocessor(model_path, device)
+            }
+            actual => Err(HostPreprocessorError::FamilyMismatch {
+                actual: format!("{actual:?}"),
+            }),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -616,7 +632,7 @@ impl Qwen2VlIreeHostPreprocessor {
     ) -> Result<PreparedPrefill, HostPreprocessorError> {
         if images.is_empty() {
             return Err(HostPreprocessorError::InvalidConfig(
-                "Qwen2-VL image preprocessing requires at least one decoded image; text-only requests use ordinary XLA token prefill"
+                "Qwen-VL image preprocessing requires at least one decoded image; text-only requests use ordinary XLA token prefill"
                     .to_string(),
             ));
         }
@@ -631,13 +647,13 @@ impl Qwen2VlIreeHostPreprocessor {
         )
         .ok_or_else(|| {
             HostPreprocessorError::InvalidConfig(format!(
-                "Qwen2-VL image placeholder count does not match {} decoded image(s), or the prompt is already expanded",
+                "Qwen-VL image placeholder count does not match {} decoded image(s), or the prompt is already expanded",
                 images.len()
             ))
         })?;
         if inserted.image_blocks != images.len() {
             return Err(HostPreprocessorError::InvalidConfig(format!(
-                "Qwen2-VL expanded {} image blocks for {} decoded images",
+                "Qwen-VL expanded {} image blocks for {} decoded images",
                 inserted.image_blocks,
                 images.len()
             )));

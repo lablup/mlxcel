@@ -159,6 +159,21 @@ pub(crate) fn normalize_patch_embed_layout(
 #[path = "qwen2_5_vl_tests.rs"]
 mod tests;
 
+fn restoration_indices(window_index: &[i32]) -> Vec<i32> {
+    let mut restore = vec![0i32; window_index.len()];
+    let mut seen = vec![false; window_index.len()];
+    for (window_position, &original_position) in window_index.iter().enumerate() {
+        let original_position = usize::try_from(original_position)
+            .expect("Qwen2.5-VL window indices are validated as non-negative");
+        assert!(
+            original_position < restore.len() && !seen[original_position],
+            "Qwen2.5-VL window indices must be an in-range permutation"
+        );
+        seen[original_position] = true;
+        restore[original_position] = window_position as i32;
+    }
+    restore
+}
 // RMSNorm for vision encoder.
 struct VisionRMSNorm {
     weight: UniquePtr<MlxArray>,
@@ -712,9 +727,13 @@ impl Qwen25VLVisionEncoder {
         // Merge patches
         h = self.merger.forward(&h);
 
-        // After merger: h has shape [total_merged, out_hidden_size] in window
-        // order. `invert_window_index` maps it back to raster order.
-        let reverse_indices = invert_window_index(&window_index);
+        // Un-reorder: destination original_position reads its corresponding
+        // window_position. This is the inverse permutation, not window_index
+        // itself (the two differ for non-self-inverse window layouts).
+        let reverse_indices = restoration_indices(&window_index);
+
+        // After merger: h has shape [total_merged, out_hidden_size]
+        // reverse_indices maps from window-ordered to original order
         let reverse_arr =
             mlxcel_core::from_slice_i32(&reverse_indices, &[reverse_indices.len() as i32]);
         h = mlxcel_core::take(&h, &reverse_arr, 0);
