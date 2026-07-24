@@ -880,6 +880,22 @@ impl Config {
                 ) {
                     return Err("Molmo v1 XLA requires rope_impl = \"interleave\"".to_string());
                 }
+                if v.get("qkv_bias").and_then(serde_json::Value::as_bool) == Some(false) {
+                    return Err("Molmo v1 XLA requires qkv_bias = true".to_string());
+                }
+                if !matches!(
+                    v.get("layer_norm_type").and_then(serde_json::Value::as_str),
+                    None | Some("rms")
+                ) {
+                    return Err("Molmo v1 XLA requires layer_norm_type = \"rms\"".to_string());
+                }
+                if v.get("tie_word_embeddings")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                    || v.get("weight_tying").and_then(serde_json::Value::as_bool) == Some(true)
+                {
+                    return Err("Molmo v1 XLA requires an untied output head".to_string());
+                }
                 qkv_bias = true;
                 tie_default = false;
                 fused_qkv = true;

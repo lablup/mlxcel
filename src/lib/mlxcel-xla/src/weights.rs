@@ -49,6 +49,13 @@ pub(crate) enum WeightSpec {
         start: usize,
         end: usize,
     },
+    /// Load elements `[start, end)` of a rank-1 tensor. Molmo v1 uses this for
+    /// the bias paired with its fused `[Q|K|V]` attention projection.
+    Elements {
+        name: String,
+        start: usize,
+        end: usize,
+    },
     /// Upload one part of an MLX affine-quantized projection as RAW bytes without
     /// dequantizing (issue #516 packed path): the packed `[out, in_packed]` U32
     /// weight, or its `[out, in/group_size]` f16 `scales` / `biases`. The graph
@@ -74,6 +81,7 @@ impl WeightSpec {
             WeightSpec::Whole(n) => n,
             WeightSpec::Proj(n) => n,
             WeightSpec::Rows { name, .. } => name,
+            WeightSpec::Elements { name, .. } => name,
             WeightSpec::QuantRaw { name, .. } => name,
         }
     }
@@ -286,17 +294,17 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
         if cfg.qkv_bias {
             if cfg.fused_qkv && cfg.weight_scheme == crate::emitter::WeightScheme::Molmo {
                 let bias = format!("{p}{}", s.q_bias);
-                out.push(WeightSpec::Rows {
+                out.push(WeightSpec::Elements {
                     name: bias.clone(),
                     start: nq,
                     end: nq + nkv,
                 });
-                out.push(WeightSpec::Rows {
+                out.push(WeightSpec::Elements {
                     name: bias.clone(),
                     start: 0,
                     end: nq,
                 });
-                out.push(WeightSpec::Rows {
+                out.push(WeightSpec::Elements {
                     name: bias,
                     start: nq + nkv,
                     end: nq + 2 * nkv,
@@ -826,7 +834,7 @@ mod tests {
             start: 12,
             end: 24,
         }));
-        assert!(specs.contains(&WeightSpec::Rows {
+        assert!(specs.contains(&WeightSpec::Elements {
             name: "language_model.model.blocks.0.att_proj.bias".to_string(),
             start: 8,
             end: 12,

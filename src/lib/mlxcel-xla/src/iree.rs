@@ -1658,6 +1658,27 @@ fn load_weights(
                         checked_ffi_i64(*end - *start, &format!("weight {name} sliced rows"))?;
                     dims[i * 4 + 1] = checked_ffi_i64(shape[1], &format!("weight {name} dim 1"))?;
                 }
+                WeightSpec::Elements { start, end, .. } => {
+                    if shape.len() != 1 {
+                        return Err(format!(
+                            "element-slice weight {name} is rank {} (expected 1)",
+                            shape.len()
+                        ));
+                    }
+                    let sliced = data.get(*start..*end).ok_or_else(|| {
+                        format!(
+                            "element-slice {name}: range [{start},{end}) is outside length {}",
+                            shape[0]
+                        )
+                    })?;
+                    bufs[i] = WeightBuf::F32(sliced.to_vec());
+                    ranks[i] = 1;
+                    let length = end.checked_sub(*start).ok_or_else(|| {
+                        format!("element-slice {name}: start {start} exceeds end {end}")
+                    })?;
+                    dims[i * 4] =
+                        checked_ffi_i64(length, &format!("weight {name} sliced elements"))?;
+                }
                 WeightSpec::QuantRaw { .. } => {
                     unreachable!("QuantRaw is handled by the early-continue above")
                 }

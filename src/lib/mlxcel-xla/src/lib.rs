@@ -181,13 +181,13 @@ pub use phi4_audio::{
 #[cfg(feature = "iree")]
 #[doc(hidden)]
 pub use phi4_audio::{Phi4AudioCheckpoint, Phi4AudioDiagnosticRuntime, Phi4AudioDiagnostics};
-#[cfg(feature = "iree")]
-pub use qwen2_vl_runtime::{
-    IreeQwen2VlProjector, Qwen2VlVisionExecutionMetrics, Qwen2VlVisionProjection,
-};
 pub use prepared_molmo::{
     MOLMO_V1_MERGE_MODE, MolmoPreparedImage, MolmoSparseAddError, MolmoSparseAddPair,
     MolmoSparseAddPlan,
+};
+#[cfg(feature = "iree")]
+pub use qwen2_vl_runtime::{
+    IreeQwen2VlProjector, Qwen2VlVisionExecutionMetrics, Qwen2VlVisionProjection,
 };
 #[cfg(feature = "diagnostics")]
 pub use vision_runtime::{IreeVisionDiagnosticProjector, VisionDiagnosticProjection};
