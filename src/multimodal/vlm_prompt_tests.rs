@@ -172,6 +172,37 @@ fn apply_image_token_blocks_expands_with_block_prefix_and_suffix() {
 }
 
 #[test]
+fn apply_image_token_blocks_inserts_with_block_prefix_and_suffix() {
+    // Gemma3Processor expands a bare image into
+    // "\n\n" + BOI + image tokens + EOI + "\n\n" even when the caller did not
+    // provide an existing BOI placeholder.
+    let info = ImageTokenBlockInfo {
+        use_boi_eoi: true,
+        image_token_id: 99,
+        mm_tokens_per_image: 3,
+        boi_token_id: 10,
+        eoi_token_id: 11,
+        has_bos: true,
+        separator_token_id: None,
+        suffix_tokens: Vec::new(),
+        block_prefix_tokens: vec![108],
+        block_suffix_tokens: vec![108],
+    };
+    let mut prompt_tokens = vec![1, 2];
+
+    let stats = apply_image_token_blocks(&mut prompt_tokens, info, 1).unwrap();
+
+    assert_eq!(
+        stats,
+        Some(ImageTokenBlockStats {
+            action: ImageTokenBlockAction::Inserted { image_blocks: 1 },
+            tokens_per_image: 3,
+        })
+    );
+    assert_eq!(prompt_tokens, vec![1, 108, 10, 99, 99, 99, 11, 108, 2]);
+}
+
+#[test]
 fn apply_image_token_blocks_rejects_media_cardinality_mismatch() {
     let info = ImageTokenBlockInfo {
         use_boi_eoi: false,

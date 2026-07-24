@@ -168,6 +168,8 @@ pub fn apply_image_token_blocks(
     let block_len = info
         .mm_tokens_per_image
         .checked_add(wrapper_tokens)
+        .and_then(|tokens| tokens.checked_add(info.block_prefix_tokens.len()))
+        .and_then(|tokens| tokens.checked_add(info.block_suffix_tokens.len()))
         .ok_or(ImageTokenBlockError::CapacityOverflow)?;
     let image_token_capacity = block_len
         .checked_mul(num_images)
@@ -182,6 +184,7 @@ pub fn apply_image_token_blocks(
 
     let mut image_tokens = Vec::with_capacity(image_token_capacity);
     for _ in 0..num_images {
+        image_tokens.extend_from_slice(&info.block_prefix_tokens);
         if info.use_boi_eoi {
             image_tokens.push(info.boi_token_id);
         }
@@ -191,6 +194,7 @@ pub fn apply_image_token_blocks(
         if info.use_boi_eoi {
             image_tokens.push(info.eoi_token_id);
         }
+        image_tokens.extend_from_slice(&info.block_suffix_tokens);
     }
 
     if info.has_bos {
