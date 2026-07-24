@@ -307,6 +307,7 @@ Install with `pip install ./python`. See [Python client](docs/python-client.md) 
 - [Tensor and pipeline parallelism](docs/distributed.md)
 - [TurboQuant KV cache](docs/turbo-kv-cache.md)
 - [OpenAI Responses API](docs/responses-api.md)
+- [Audio input preprocessing](docs/audio-preprocessing.md)
 - [Python client](docs/python-client.md)
 - [Adding a new model](docs/adding-models.md)
 

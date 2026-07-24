@@ -35,6 +35,33 @@ use crate::multimodal::video::{TempFile, VideoSource, is_video_file};
 use super::types::ChatCompletionRequest;
 use super::types::request::{InputAudio, VideoUrl};
 
+pub(crate) trait AudioAcquisitionCancellation: Sync {
+    fn is_cancelled(&self, bytes_acquired: usize) -> bool;
+}
+
+/// The current HTTP preparation path has no disconnect token before scheduler
+/// admission. Its cancellation boundary is the request task itself: dropping
+/// the Axum handler future drops this acquisition future and any in-flight
+/// reqwest byte stream. The explicit probe is reserved for callers that already
+/// own a cooperative token (including the future XLA audio admission path).
+///
+/// Do not interpret this fallback as a live client-disconnect probe. XLA audio
+/// admission remains disabled until a family feature producer and token wiring
+/// are both present.
+struct NeverCancelAudioAcquisition;
+
+impl AudioAcquisitionCancellation for NeverCancelAudioAcquisition {
+    fn is_cancelled(&self, _bytes_acquired: usize) -> bool {
+        false
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("media acquisition cancelled after {bytes_acquired} bytes")]
+struct MediaAcquisitionCancelled {
+    bytes_acquired: usize,
+}
+
 /// Resolved video request item produced by
 /// [`extract_chat_video_paths_with_allowlist`].
 ///
@@ -789,121 +816,259 @@ fn sanitize_video_extension(ext: &str) -> &'static str {
     }
 }
 
+/// Typed audio acquisition failures. Unlike image resolution, an audio
+/// declaration must never disappear and silently become a text request.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub(crate) enum AudioAcquisitionError {
+    #[error("too many audio inputs: {actual}, maximum {maximum}")]
+    TooMany { actual: usize, maximum: usize },
+    #[error("audio clip {clip_index} uses unsupported format {format}; only wav is supported")]
+    UnsupportedFormat { clip_index: usize, format: String },
+    #[error("audio clip {clip_index} resolved to an empty payload")]
+    Empty { clip_index: usize },
+    #[error(
+        "audio clip {clip_index} exceeds the encoded byte limit: {actual} bytes, maximum {maximum}"
+    )]
+    PayloadLimit {
+        clip_index: usize,
+        actual: usize,
+        maximum: usize,
+    },
+    #[error(
+        "audio clip {clip_index} base64 input is too large: {encoded_chars} encoded characters, maximum {maximum_encoded_chars}"
+    )]
+    Base64Limit {
+        clip_index: usize,
+        encoded_chars: usize,
+        maximum_encoded_chars: usize,
+    },
+    #[error(
+        "audio request exceeds the aggregate encoded byte limit: {actual} bytes, maximum {maximum}"
+    )]
+    RequestPayloadLimit { actual: usize, maximum: usize },
+    #[error(
+        "audio clip {clip_index} acquisition from {origin} was cancelled after {bytes_acquired} bytes"
+    )]
+    Cancelled {
+        clip_index: usize,
+        origin: &'static str,
+        bytes_acquired: usize,
+    },
+    #[error("audio clip {clip_index} acquisition from {origin} failed: {reason}")]
+    Source {
+        clip_index: usize,
+        origin: &'static str,
+        reason: String,
+    },
+}
+
+const DEFAULT_MAX_AUDIO_INPUTS: usize = 16;
+/// Absolute acquisition ceiling before a loaded family's stricter policy is
+/// available on the model worker. It applies both per clip and across the
+/// request so 16 individually-valid clips cannot reserve multiple GiB. The
+/// second-stage waveform boundary applies the loaded per-family cap.
+const ABSOLUTE_MAX_AUDIO_PAYLOAD_SIZE: usize = 500 * 1024 * 1024;
+
 /// Extract raw audio bytes from chat request audio inputs.
 ///
 /// Supports base64-encoded inline data, `data:audio/...;base64,...` URIs,
 /// `file://` paths, bare local paths, and `http(s)` URLs.
 ///
-/// Only WAV format is currently supported; other formats are rejected early.
-pub(crate) async fn extract_chat_audio_data(request: &ChatCompletionRequest) -> Vec<Vec<u8>> {
-    let audio_inputs = request.audio_inputs();
-    let mut audio_data = Vec::new();
-    for input in &audio_inputs {
-        if let Some(bytes) = read_audio_input(input).await {
-            audio_data.push(bytes);
-        }
-    }
-    audio_data
+/// Only WAV format is currently supported. Any failed item rejects the full
+/// request, preserving declared cardinality and prompt order.
+///
+/// This entry point intentionally uses request-task lifetime cancellation, not
+/// a cooperative token. Callers that own a token must use
+/// [`try_extract_chat_audio_data_with_cancellation`].
+pub(crate) async fn try_extract_chat_audio_data(
+    request: &ChatCompletionRequest,
+) -> std::result::Result<Vec<Vec<u8>>, AudioAcquisitionError> {
+    try_extract_chat_audio_data_with_cancellation(request, &NeverCancelAudioAcquisition).await
 }
 
-/// Maximum raw audio payload size after decoding: 500 MB.
-/// This prevents OOM from extremely large base64 payloads before WAV
-/// parsing can apply its own data-chunk limit.
-const MAX_AUDIO_PAYLOAD_SIZE: usize = 500 * 1024 * 1024;
+pub(crate) async fn try_extract_chat_audio_data_with_cancellation(
+    request: &ChatCompletionRequest,
+    cancelled: &dyn AudioAcquisitionCancellation,
+) -> std::result::Result<Vec<Vec<u8>>, AudioAcquisitionError> {
+    let audio_inputs = request.audio_inputs();
+    if audio_inputs.len() > DEFAULT_MAX_AUDIO_INPUTS {
+        return Err(AudioAcquisitionError::TooMany {
+            actual: audio_inputs.len(),
+            maximum: DEFAULT_MAX_AUDIO_INPUTS,
+        });
+    }
+    let mut audio_data = Vec::with_capacity(audio_inputs.len());
+    let mut total_bytes = 0usize;
+    for (index, input) in audio_inputs.iter().enumerate() {
+        // Pass only the remaining aggregate budget into every source reader.
+        // URL/content-length and base64 preflights can then reject before a
+        // later clip transiently allocates beyond the request ceiling.
+        let remaining = ABSOLUTE_MAX_AUDIO_PAYLOAD_SIZE - total_bytes;
+        let bytes = read_audio_input(input, index, remaining, cancelled).await?;
+        total_bytes =
+            checked_audio_request_total(total_bytes, bytes.len(), ABSOLUTE_MAX_AUDIO_PAYLOAD_SIZE)?;
+        audio_data.push(bytes);
+    }
+    Ok(audio_data)
+}
 
-async fn read_audio_input(input: &InputAudio) -> Option<Vec<u8>> {
+fn checked_audio_request_total(
+    current: usize,
+    additional: usize,
+    maximum: usize,
+) -> std::result::Result<usize, AudioAcquisitionError> {
+    let actual =
+        current
+            .checked_add(additional)
+            .ok_or(AudioAcquisitionError::RequestPayloadLimit {
+                actual: usize::MAX,
+                maximum,
+            })?;
+    if actual > maximum {
+        return Err(AudioAcquisitionError::RequestPayloadLimit { actual, maximum });
+    }
+    Ok(actual)
+}
+
+async fn read_audio_input(
+    input: &InputAudio,
+    clip_index: usize,
+    max_payload_bytes: usize,
+    cancelled: &dyn AudioAcquisitionCancellation,
+) -> std::result::Result<Vec<u8>, AudioAcquisitionError> {
     // Validate format early -- only WAV is supported for now.
     if input.format != "wav" {
-        tracing::warn!(
-            "Unsupported audio format \'{}\'; only \'wav\' is currently supported",
-            input.format
-        );
-        return None;
+        return Err(AudioAcquisitionError::UnsupportedFormat {
+            clip_index,
+            format: input.format.clone(),
+        });
     }
 
     let data = &input.data;
+    check_audio_cancel(cancelled, clip_index, "input", 0)?;
 
     // data:audio/...;base64,... URI
     if data.starts_with("data:audio/") {
-        return validate_audio_size(
-            decode_data_uri_with_limit(data, "audio", MAX_AUDIO_PAYLOAD_SIZE)
-                .map_err(|err| {
-                    tracing::warn!("Failed to read audio data URI: {err:#}");
-                    err
-                })
-                .ok(),
-        );
+        let bytes =
+            decode_data_uri_with_limit(data, "audio", max_payload_bytes).map_err(|error| {
+                AudioAcquisitionError::Source {
+                    clip_index,
+                    origin: "data URI",
+                    reason: error.to_string(),
+                }
+            })?;
+        check_audio_cancel(cancelled, clip_index, "data URI", bytes.len())?;
+        return validate_audio_size(bytes, clip_index, max_payload_bytes);
     }
 
     // file:// prefix
     if let Some(path) = data.strip_prefix("file://") {
-        return validate_audio_size(
-            read_local_bytes_with_limit(Path::new(path), "audio", MAX_AUDIO_PAYLOAD_SIZE)
-                .await
-                .map_err(|err| {
-                    tracing::warn!("Failed to read audio file {}: {err:#}", path);
-                    err
-                })
-                .ok(),
-        );
+        let bytes = read_local_bytes_with_limit_cancel(
+            Path::new(path),
+            "audio",
+            max_payload_bytes,
+            Some(cancelled),
+        )
+        .await
+        .map_err(|error| map_audio_acquisition_error(error, clip_index, "file"))?;
+        return validate_audio_size(bytes, clip_index, max_payload_bytes);
     }
 
     // HTTP(S) URL
     if is_http_url(data) {
-        return validate_audio_size(
-            fetch_remote_bytes_with_limit(data, "audio", MAX_AUDIO_PAYLOAD_SIZE)
+        let bytes =
+            fetch_remote_bytes_with_limit_cancel(data, "audio", max_payload_bytes, Some(cancelled))
                 .await
-                .map_err(|err| {
-                    tracing::warn!("Failed to fetch audio URL {data}: {err:#}");
-                    err
-                })
-                .ok(),
-        );
+                .map_err(|error| map_audio_acquisition_error(error, clip_index, "URL"))?;
+        return validate_audio_size(bytes, clip_index, max_payload_bytes);
     }
 
     // Bare local path
     if Path::new(data).is_file() {
-        return validate_audio_size(
-            read_local_bytes_with_limit(Path::new(data), "audio", MAX_AUDIO_PAYLOAD_SIZE)
-                .await
-                .map_err(|err| {
-                    tracing::warn!("Failed to read audio file {data}: {err:#}");
-                    err
-                })
-                .ok(),
-        );
+        let bytes = read_local_bytes_with_limit_cancel(
+            Path::new(data),
+            "audio",
+            max_payload_bytes,
+            Some(cancelled),
+        )
+        .await
+        .map_err(|error| map_audio_acquisition_error(error, clip_index, "file"))?;
+        return validate_audio_size(bytes, clip_index, max_payload_bytes);
     }
 
     // Try as raw base64 data
-    if data.len() > max_base64_encoded_len(MAX_AUDIO_PAYLOAD_SIZE) {
-        tracing::warn!(
-            "Audio base64 payload is too large to fit the {} byte limit; rejecting",
-            MAX_AUDIO_PAYLOAD_SIZE
-        );
-        return None;
+    if data.len() > max_base64_encoded_len(max_payload_bytes) {
+        return Err(AudioAcquisitionError::Base64Limit {
+            clip_index,
+            encoded_chars: data.len(),
+            maximum_encoded_chars: max_base64_encoded_len(max_payload_bytes),
+        });
     }
-    match base64::engine::general_purpose::STANDARD.decode(data) {
-        Ok(bytes) if !bytes.is_empty() => validate_audio_size(Some(bytes)),
-        _ => {
-            tracing::warn!("Could not decode audio input data");
-            None
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|error| AudioAcquisitionError::Source {
+            clip_index,
+            origin: "inline base64",
+            reason: error.to_string(),
+        })?;
+    check_audio_cancel(cancelled, clip_index, "inline base64", bytes.len())?;
+    validate_audio_size(bytes, clip_index, max_payload_bytes)
+}
+
+fn check_audio_cancel(
+    cancelled: &dyn AudioAcquisitionCancellation,
+    clip_index: usize,
+    source: &'static str,
+    bytes_acquired: usize,
+) -> std::result::Result<(), AudioAcquisitionError> {
+    if cancelled.is_cancelled(bytes_acquired) {
+        Err(AudioAcquisitionError::Cancelled {
+            clip_index,
+            origin: source,
+            bytes_acquired,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn map_audio_acquisition_error(
+    error: anyhow::Error,
+    clip_index: usize,
+    source: &'static str,
+) -> AudioAcquisitionError {
+    if let Some(cancelled) = error.downcast_ref::<MediaAcquisitionCancelled>() {
+        AudioAcquisitionError::Cancelled {
+            clip_index,
+            origin: source,
+            bytes_acquired: cancelled.bytes_acquired,
+        }
+    } else {
+        AudioAcquisitionError::Source {
+            clip_index,
+            origin: source,
+            reason: error.to_string(),
         }
     }
 }
 
-/// Reject audio payloads that exceed `MAX_AUDIO_PAYLOAD_SIZE`.
-fn validate_audio_size(data: Option<Vec<u8>>) -> Option<Vec<u8>> {
-    match data {
-        Some(bytes) if bytes.len() > MAX_AUDIO_PAYLOAD_SIZE => {
-            tracing::warn!(
-                "Audio payload too large ({} bytes, max {}); rejecting",
-                bytes.len(),
-                MAX_AUDIO_PAYLOAD_SIZE
-            );
-            None
-        }
-        other => other,
+fn validate_audio_size(
+    bytes: Vec<u8>,
+    clip_index: usize,
+    max_payload_bytes: usize,
+) -> std::result::Result<Vec<u8>, AudioAcquisitionError> {
+    if bytes.is_empty() {
+        return Err(AudioAcquisitionError::Empty { clip_index });
     }
+    if bytes.len() > max_payload_bytes {
+        return Err(AudioAcquisitionError::PayloadLimit {
+            clip_index,
+            actual: bytes.len(),
+            maximum: max_payload_bytes,
+        });
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -1025,6 +1190,16 @@ fn is_http_url(url: &str) -> bool {
 }
 
 async fn fetch_remote_bytes_with_limit(url: &str, kind: &str, max_size: usize) -> Result<Vec<u8>> {
+    fetch_remote_bytes_with_limit_cancel(url, kind, max_size, None).await
+}
+
+async fn fetch_remote_bytes_with_limit_cancel(
+    url: &str,
+    kind: &str,
+    max_size: usize,
+    cancelled: Option<&dyn AudioAcquisitionCancellation>,
+) -> Result<Vec<u8>> {
+    check_media_cancel(cancelled, 0)?;
     let response = match http_image_client().get(url).send().await {
         Ok(response) => response,
         Err(err) => bail!("Failed to fetch {kind} URL {url}: {err}"),
@@ -1048,6 +1223,7 @@ async fn fetch_remote_bytes_with_limit(url: &str, kind: &str, max_size: usize) -
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
+        check_media_cancel(cancelled, bytes.len())?;
         let chunk = chunk.with_context(|| format!("Failed to read {kind} response body {url}"))?;
         if bytes.len().saturating_add(chunk.len()) > max_size {
             bail!(
@@ -1056,11 +1232,24 @@ async fn fetch_remote_bytes_with_limit(url: &str, kind: &str, max_size: usize) -
             );
         }
         bytes.extend_from_slice(&chunk);
+        check_media_cancel(cancelled, bytes.len())?;
     }
     Ok(bytes)
 }
 
 async fn read_local_bytes_with_limit(path: &Path, kind: &str, max_size: usize) -> Result<Vec<u8>> {
+    read_local_bytes_with_limit_cancel(path, kind, max_size, None).await
+}
+
+async fn read_local_bytes_with_limit_cancel(
+    path: &Path,
+    kind: &str,
+    max_size: usize,
+    cancelled: Option<&dyn AudioAcquisitionCancellation>,
+) -> Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+
+    check_media_cancel(cancelled, 0)?;
     match tokio::fs::metadata(path).await {
         Ok(meta) if meta.len() > max_size as u64 => {
             bail!(
@@ -1074,10 +1263,37 @@ async fn read_local_bytes_with_limit(path: &Path, kind: &str, max_size: usize) -
         Err(err) => bail!("Failed to stat {kind} file {}: {err}", path.display()),
     }
 
-    match tokio::fs::read(path).await {
-        Ok(bytes) => validate_payload_size(bytes, kind, max_size),
-        Err(err) => bail!("Failed to read {kind} file {}: {err}", path.display()),
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("Failed to open {kind} file {}", path.display()))?;
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        check_media_cancel(cancelled, bytes.len())?;
+        let read = file
+            .read(&mut chunk)
+            .await
+            .with_context(|| format!("Failed to read {kind} file {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        if bytes.len().saturating_add(read) > max_size {
+            bail!("{kind} payload too large: file body exceeded {max_size} bytes");
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+        check_media_cancel(cancelled, bytes.len())?;
     }
+    Ok(bytes)
+}
+
+fn check_media_cancel(
+    cancelled: Option<&dyn AudioAcquisitionCancellation>,
+    bytes_acquired: usize,
+) -> Result<()> {
+    if cancelled.is_some_and(|probe| probe.is_cancelled(bytes_acquired)) {
+        return Err(MediaAcquisitionCancelled { bytes_acquired }.into());
+    }
+    Ok(())
 }
 
 fn validate_payload_size(bytes: Vec<u8>, kind: &str, max_size: usize) -> Result<Vec<u8>> {

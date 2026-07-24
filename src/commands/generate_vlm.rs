@@ -576,11 +576,16 @@ fn compute_phi4mm_audio_embeddings(
         .collect::<Result<Vec<_>>>()?;
     let processed_images = phi4mm.processor.preprocess(&images);
 
-    let (samples, sample_rate) =
-        mlxcel::audio::load_wav_file(audio_path).map_err(anyhow::Error::msg)?;
-    let audio_batch = phi4mm
-        .extract_audio(&[(samples, sample_rate)])
-        .map_err(anyhow::Error::msg)?;
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let waveform =
+        mlxcel::audio::preprocess_wav_file(audio_path, phi4mm.audio_preprocess_policy, &cancelled)
+            .map_err(anyhow::Error::msg)?;
+    let audios: Vec<_> = waveform
+        .clips
+        .into_iter()
+        .map(|clip| (clip.samples, clip.sample_rate))
+        .collect();
+    let audio_batch = phi4mm.extract_audio(&audios).map_err(anyhow::Error::msg)?;
     let prepared = mlxcel::phi4mm_prompt::prepare_phi4mm_prompt_tokens(
         prompt,
         processed_images.len(),
@@ -648,13 +653,16 @@ fn compute_gemma3n_audio_embeddings(
             image_paths.len(),
         )?;
     }
-    let (samples, sample_rate) =
-        mlxcel::audio::load_wav_file(audio_path).map_err(|error| anyhow::anyhow!(error))?;
-    let samples = if sample_rate == mlxcel::audio::gemma3n::GEMMA3N_SAMPLE_RATE {
-        samples
-    } else {
-        mlxcel::audio::whisper_mel::resample_to_16k(&samples, sample_rate)
-    };
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let waveform =
+        mlxcel::audio::preprocess_wav_file(audio_path, gemma3n.audio_preprocess_policy, &cancelled)
+            .map_err(anyhow::Error::msg)?;
+    let samples = waveform
+        .clips
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Gemma3n audio waveform batch is empty"))?
+        .samples;
     let batch = mlxcel::audio::gemma3n::Gemma3nAudioFeatureExtractor::new()
         .extract_batch(&[samples])
         .map_err(|error| anyhow::anyhow!(error))?;

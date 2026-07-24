@@ -57,6 +57,7 @@ pub struct Gemma3nVLModel {
     pub boa_token_id: i32,
     pub eoa_token_id: i32,
     pub audio_soft_tokens_per_clip: usize,
+    pub audio_preprocess_policy: crate::audio::AudioFamilyPolicy,
     /// Per-sequence storage for the projected `per_layer_inputs` tensor
     /// that is produced during embedding prep and consumed during the
     /// prefill `forward_with_embeddings_and_sequence_id` call. See module
@@ -90,6 +91,7 @@ impl Gemma3nVLModel {
             boa_token_id: 256_000,
             eoa_token_id: 262_272,
             audio_soft_tokens_per_clip: crate::audio::gemma3n::GEMMA3N_AUDIO_SOFT_TOKENS,
+            audio_preprocess_policy: crate::audio::AudioFamilyPolicy::gemma3n(),
             per_layer_inputs_state: Gemma3nPerLayerInputsState::new(),
         }
     }
@@ -102,6 +104,7 @@ impl Gemma3nVLModel {
         boa_token_id: i32,
         eoa_token_id: i32,
         audio_soft_tokens_per_clip: usize,
+        audio_preprocess_policy: crate::audio::AudioFamilyPolicy,
     ) {
         self.audio_tower = Some(audio_tower);
         self.embed_audio = Some(embed_audio);
@@ -109,6 +112,7 @@ impl Gemma3nVLModel {
         self.boa_token_id = boa_token_id;
         self.eoa_token_id = eoa_token_id;
         self.audio_soft_tokens_per_clip = audio_soft_tokens_per_clip;
+        self.audio_preprocess_policy = audio_preprocess_policy;
     }
 
     pub fn supports_audio(&self) -> bool {

@@ -1144,22 +1144,32 @@ pub(crate) fn load_phi4mm_vlm(model_path: &Path) -> Result<LoadedModel> {
         .unwrap_or("glb_sub")
         .to_string();
 
-    // Read dynamic_hd from preprocessor_config.json
-    let dynamic_hd = {
+    // Read dynamic_hd and the audio waveform contract from the same pinned
+    // processor metadata. Missing metadata uses revision-pinned defaults.
+    let preprocessor_config = {
         let preproc_path = model_path.join("preprocessor_config.json");
         if preproc_path.exists() {
             let preproc_str = std::fs::read_to_string(&preproc_path)
                 .map_err(|e| anyhow::anyhow!("Failed to read preprocessor_config.json: {}", e))?;
-            let preproc: serde_json::Value = serde_json::from_str(&preproc_str)
-                .map_err(|e| anyhow::anyhow!("Failed to parse preprocessor_config.json: {}", e))?;
-            preproc
-                .get("dynamic_hd")
-                .and_then(Value::as_u64)
-                .unwrap_or(36) as usize
+            Some(
+                serde_json::from_str::<serde_json::Value>(&preproc_str).map_err(|e| {
+                    anyhow::anyhow!("Failed to parse preprocessor_config.json: {}", e)
+                })?,
+            )
         } else {
-            36
+            None
         }
     };
+    let dynamic_hd = preprocessor_config
+        .as_ref()
+        .and_then(|preproc| preproc.get("dynamic_hd"))
+        .and_then(Value::as_u64)
+        .unwrap_or(36) as usize;
+    let audio_preprocess_policy = crate::audio::AudioFamilyPolicy::from_phi4mm_configs(
+        &full_config,
+        preprocessor_config.as_ref(),
+    )
+    .map_err(|error| anyhow::anyhow!("Failed to load Phi4MM audio policy: {error}"))?;
 
     let (mut weights, lora_pairs) =
         remap_phi4mm_weights(load_vlm_weights_common(model_path, None)?)?;
@@ -1307,6 +1317,7 @@ pub(crate) fn load_phi4mm_vlm(model_path: &Path) -> Result<LoadedModel> {
         audio_encoder,
         audio_projection,
         audio_extractor: Phi4MMAudioFeatureExtractor::new(),
+        audio_preprocess_policy,
         select_layer,
         eos_token_ids,
         glb_gn,

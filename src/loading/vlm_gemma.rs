@@ -233,6 +233,10 @@ pub(crate) fn load_gemma3n_vlm(model_path: &Path) -> Result<LoadedModel> {
     let top_args: models::gemma3n::ModelArgs = parse_vlm_config(&config_str, "Gemma3n config")?;
     let text_config = top_args.text_args();
     let metadata = gemma3n_metadata(&full_config);
+    // Audio feature-extractor metadata belongs to preprocessor_config when
+    // both sidecars exist; processor_config is the compatibility fallback.
+    let processor_config = read_optional_model_json(model_path, "preprocessor_config.json")
+        .or_else(|| read_optional_model_json(model_path, "processor_config.json"));
 
     let mut weights = sanitize_gemma3n_weights(load_vlm_weights_common(model_path, None)?);
     models::sanitize_tied_embeddings(&mut weights, &full_config);
@@ -314,6 +318,12 @@ pub(crate) fn load_gemma3n_vlm(model_path: &Path) -> Result<LoadedModel> {
             bits,
         )
         .map_err(|error| anyhow::anyhow!("Failed to load Gemma3n audio embedder: {error}"))?;
+        let audio_preprocess_policy = crate::audio::AudioFamilyPolicy::from_gemma3n_configs(
+            &full_config,
+            processor_config.as_ref(),
+            metadata.audio_soft_tokens_per_clip,
+        )
+        .map_err(|error| anyhow::anyhow!("Failed to load Gemma3n audio policy: {error}"))?;
         vlm.set_audio(
             audio_tower,
             embed_audio,
@@ -321,6 +331,7 @@ pub(crate) fn load_gemma3n_vlm(model_path: &Path) -> Result<LoadedModel> {
             metadata.boa_token_id,
             metadata.eoa_token_id,
             metadata.audio_soft_tokens_per_clip,
+            audio_preprocess_policy,
         );
     }
 

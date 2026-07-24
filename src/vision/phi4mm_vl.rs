@@ -46,6 +46,7 @@ pub struct Phi4MMVLModel {
     pub audio_encoder: Phi4MMAudioEncoder,
     pub audio_projection: Phi4MMAudioProjection,
     pub audio_extractor: Phi4MMAudioFeatureExtractor,
+    pub audio_preprocess_policy: crate::audio::AudioFamilyPolicy,
     pub select_layer: isize,
     pub eos_token_ids: Vec<i32>,
     /// Learnable global separator: [1, 1, vision_dim]

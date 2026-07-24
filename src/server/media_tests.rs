@@ -14,13 +14,18 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
 use super::{
     ImageInputLimits, MediaRequestMetadata, collect_image_data, extract_chat_image_data,
     extract_chat_video_paths_with_allowlist, read_image_url, scan_insecure_allowlist_dirs,
-    try_collect_image_data_with_limits, try_read_image_url_with_limits,
+    try_collect_image_data_with_limits, try_extract_chat_audio_data,
+    try_extract_chat_audio_data_with_cancellation, try_read_image_url_with_limits,
 };
-use crate::server::types::request::VideoUrl;
+use crate::server::types::request::{InputAudio, VideoUrl};
 use crate::server::types::{
     ChatCompletionRequest, ContentPart, ImageUrl, Message, MessageContent, Role, SamplingParams,
 };
@@ -59,6 +64,211 @@ fn tiny_png_bytes() -> Vec<u8> {
     base64::engine::general_purpose::STANDARD
         .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO2N1ekAAAAASUVORK5CYII=")
         .unwrap()
+}
+
+#[tokio::test]
+async fn audio_acquisition_preserves_order_and_rejects_any_invalid_item() {
+    let request = build_chat_request(vec![
+        ContentPart::InputAudio {
+            input_audio: InputAudio {
+                data: base64::engine::general_purpose::STANDARD.encode(b"first"),
+                format: "wav".to_string(),
+            },
+        },
+        ContentPart::InputAudio {
+            input_audio: InputAudio {
+                data: "data:audio/wav;base64,c2Vjb25k".to_string(),
+                format: "wav".to_string(),
+            },
+        },
+    ]);
+    assert_eq!(
+        try_extract_chat_audio_data(&request).await.unwrap(),
+        [b"first".to_vec(), b"second".to_vec()]
+    );
+
+    let invalid = build_chat_request(vec![
+        ContentPart::InputAudio {
+            input_audio: InputAudio {
+                data: base64::engine::general_purpose::STANDARD.encode(b"first"),
+                format: "wav".to_string(),
+            },
+        },
+        ContentPart::InputAudio {
+            input_audio: InputAudio {
+                data: "%%%".to_string(),
+                format: "wav".to_string(),
+            },
+        },
+    ]);
+    let error = try_extract_chat_audio_data(&invalid).await.unwrap_err();
+    assert!(error.to_string().contains("clip 1"));
+    assert!(error.to_string().contains("inline base64"));
+}
+
+#[tokio::test]
+async fn unsupported_audio_format_is_typed_instead_of_silently_dropped() {
+    let request = build_chat_request(vec![ContentPart::InputAudio {
+        input_audio: InputAudio {
+            data: "AA==".to_string(),
+            format: "mp3".to_string(),
+        },
+    }]);
+    let error = try_extract_chat_audio_data(&request).await.unwrap_err();
+    assert!(matches!(
+        error,
+        super::AudioAcquisitionError::UnsupportedFormat { clip_index: 0, .. }
+    ));
+}
+
+#[test]
+fn aggregate_audio_bytes_are_bounded_across_individually_valid_clips() {
+    assert_eq!(
+        super::checked_audio_request_total(60, 40, 100).unwrap(),
+        100
+    );
+    assert!(matches!(
+        super::checked_audio_request_total(60, 41, 100),
+        Err(super::AudioAcquisitionError::RequestPayloadLimit {
+            actual: 101,
+            maximum: 100,
+        })
+    ));
+    assert!(matches!(
+        super::checked_audio_request_total(usize::MAX, 1, usize::MAX),
+        Err(super::AudioAcquisitionError::RequestPayloadLimit {
+            actual: usize::MAX,
+            maximum: usize::MAX,
+        })
+    ));
+}
+
+#[tokio::test]
+async fn local_audio_acquisition_cancels_between_bounded_read_chunks() {
+    struct CancelAfterFirstChunk;
+    impl super::AudioAcquisitionCancellation for CancelAfterFirstChunk {
+        fn is_cancelled(&self, bytes_acquired: usize) -> bool {
+            bytes_acquired > 0
+        }
+    }
+
+    let path = std::env::temp_dir().join(format!("mlxcel-audio-{}.wav", uuid::Uuid::new_v4()));
+    fs::write(&path, vec![0u8; 128 * 1024]).unwrap();
+    let request = build_chat_request(vec![ContentPart::InputAudio {
+        input_audio: InputAudio {
+            data: format!("file://{}", path.display()),
+            format: "wav".to_string(),
+        },
+    }]);
+    let error = try_extract_chat_audio_data_with_cancellation(&request, &CancelAfterFirstChunk)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        super::AudioAcquisitionError::Cancelled {
+            clip_index: 0,
+            origin: "file",
+            bytes_acquired: 65_536,
+        }
+    ));
+    fs::remove_file(path).unwrap();
+}
+
+/// The production HTTP path has no cooperative disconnect token before
+/// scheduler admission. Its real boundary is the Axum request task: aborting
+/// that task must drop the acquisition future, its partially-filled local
+/// `Vec`, and the reqwest response stream instead of draining the origin.
+#[tokio::test]
+async fn aborting_audio_acquisition_task_drops_slow_http_stream() {
+    struct FutureDropProbe(Arc<AtomicBool>);
+    impl Drop for FutureDropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    const CHUNK_BYTES: usize = 16 * 1024;
+    const CHUNK_COUNT: usize = 512;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (first_chunk_tx, first_chunk_rx) = tokio::sync::oneshot::channel();
+    let bytes_written = Arc::new(AtomicUsize::new(0));
+    let server_bytes = bytes_written.clone();
+    let origin_observed_close = Arc::new(AtomicBool::new(false));
+    let server_observed_close = origin_observed_close.clone();
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0u8; 2_048];
+        let _ = socket.read(&mut request).await.unwrap();
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nTransfer-Encoding: chunked\r\n\r\n",
+            )
+            .await
+            .unwrap();
+
+        let payload = vec![0u8; CHUNK_BYTES];
+        let chunk_header = format!("{CHUNK_BYTES:x}\r\n");
+        let mut first_chunk_tx = Some(first_chunk_tx);
+        for _ in 0..CHUNK_COUNT {
+            let write = async {
+                socket.write_all(chunk_header.as_bytes()).await?;
+                socket.write_all(&payload).await?;
+                socket.write_all(b"\r\n").await?;
+                socket.flush().await
+            }
+            .await;
+            if write.is_err() {
+                server_observed_close.store(true, Ordering::Release);
+                break;
+            }
+            server_bytes.fetch_add(CHUNK_BYTES, Ordering::Relaxed);
+            if let Some(tx) = first_chunk_tx.take() {
+                let _ = tx.send(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let _ = socket.shutdown().await;
+    });
+
+    let request = build_chat_request(vec![ContentPart::InputAudio {
+        input_audio: InputAudio {
+            data: format!("http://{addr}/slow.wav"),
+            format: "wav".to_string(),
+        },
+    }]);
+    let future_dropped = Arc::new(AtomicBool::new(false));
+    let task_drop = future_dropped.clone();
+    let client = tokio::spawn(async move {
+        let _drop_probe = FutureDropProbe(task_drop);
+        try_extract_chat_audio_data(&request).await
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), first_chunk_rx)
+        .await
+        .expect("origin did not send the first audio chunk")
+        .expect("origin closed before sending the first audio chunk");
+    client.abort();
+    assert!(client.await.unwrap_err().is_cancelled());
+    assert!(
+        future_dropped.load(Ordering::Acquire),
+        "aborting the handler task must drop the acquisition future and its local buffer"
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), server)
+        .await
+        .expect("origin did not observe the dropped response stream")
+        .unwrap();
+    assert!(
+        origin_observed_close.load(Ordering::Acquire),
+        "dropping the request task must close the slow origin stream"
+    );
+    assert!(
+        bytes_written.load(Ordering::Relaxed) < CHUNK_BYTES * CHUNK_COUNT,
+        "the client must not drain the body after its handler is aborted"
+    );
 }
 
 #[tokio::test]
@@ -127,6 +337,19 @@ async fn collect_image_data_skips_invalid_entries() {
     ])
     .await;
     assert_eq!(images, vec![b"hello".to_vec()]);
+}
+
+#[test]
+fn xla_capability_remains_audio_false_and_video_rejection_is_unchanged() {
+    let audio = MediaRequestMetadata::new(0, 1, 0, 0, 1, 0)
+        .validate_xla_raw_counts(0, 1, 0)
+        .unwrap_err();
+    assert!(audio.contains("does not support audio input yet"));
+
+    let video = MediaRequestMetadata::new(0, 0, 1, 0, 0, 1)
+        .validate_xla_raw_counts(0, 0, 1)
+        .unwrap_err();
+    assert!(video.contains("does not support video input yet"));
 }
 
 #[tokio::test]

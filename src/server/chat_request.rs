@@ -68,7 +68,7 @@ use super::chat_template_kwargs::{
     strip_think_block,
 };
 use super::media::{
-    MediaRequestMetadata, ResolvedVideo, extract_chat_audio_data, extract_chat_video_paths,
+    MediaRequestMetadata, ResolvedVideo, extract_chat_video_paths, try_extract_chat_audio_data,
     try_extract_chat_image_data,
 };
 use super::prompt_cache::key::resolve_session_key;
@@ -239,12 +239,18 @@ pub(crate) async fn prepare_chat_request_with_cache(
     let declared_images = request.image_urls().len();
     let declared_audio = request.audio_inputs().len();
     let declared_videos = request.video_urls().len();
+    // Audio acquisition is owned by this request-preparation future. Before
+    // scheduler admission there is no streaming disconnect token to pass, so
+    // handler cancellation drops this future (and its URL stream) as a unit.
+    // The audio resolver exposes a separate cooperative-token entry point for
+    // the future XLA audio admission path; XLA audio remains capability-false.
     let (image_data, audio_data, videos) = tokio::join!(
         try_extract_chat_image_data(request),
-        extract_chat_audio_data(request),
+        try_extract_chat_audio_data(request),
         extract_chat_video_paths(request),
     );
     let image_data = image_data?;
+    let audio_data = audio_data?;
     let media = MediaRequestMetadata::new(
         declared_images,
         declared_audio,

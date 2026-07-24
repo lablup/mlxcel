@@ -444,159 +444,23 @@ pub fn compute_audio_num_tokens(
 ///
 /// Returns mono f32 samples at the file's native sample rate.
 pub fn load_wav_file(path: &std::path::Path) -> Result<(Vec<f32>, u32), String> {
+    use std::io::Read;
+
+    const MAX_ENCODED_BYTES: usize = 500 * 1024 * 1024;
     let file = std::fs::File::open(path)
         .map_err(|e| format!("Failed to open audio file {}: {e}", path.display()))?;
-    let reader = std::io::BufReader::new(file);
-
-    // Simple WAV parser (supports PCM 16-bit and 32-bit float)
-    parse_wav(reader)
+    let mut bytes = Vec::new();
+    file.take((MAX_ENCODED_BYTES as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Failed to read audio file {}: {e}", path.display()))?;
+    crate::audio::preprocessing::decode_wav_native_compat(&bytes).map_err(|error| error.to_string())
 }
 
 /// Load raw audio samples from in-memory WAV bytes.
 ///
 /// Returns mono f32 samples at the file's native sample rate.
 pub fn load_wav_from_bytes(data: &[u8]) -> Result<(Vec<f32>, u32), String> {
-    let reader = std::io::Cursor::new(data);
-    parse_wav(reader)
-}
-
-fn parse_wav<R: std::io::Read>(mut reader: R) -> Result<(Vec<f32>, u32), String> {
-    // Maximum audio data size: 500 MB (16-bit mono at 16kHz ~ 4.3 hours).
-    // This prevents OOM from malformed WAV headers declaring absurd sizes.
-    const MAX_DATA_SIZE: usize = 500 * 1024 * 1024;
-    // Maximum number of chunk-scan iterations to prevent infinite loops
-    // on malformed WAV files with crafted chunk headers.
-    const MAX_CHUNK_SCAN_ITERATIONS: usize = 256;
-
-    let mut header = [0u8; 44];
-    reader
-        .read_exact(&mut header)
-        .map_err(|e| format!("Failed to read WAV header: {e}"))?;
-
-    // Verify RIFF/WAVE header
-    if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
-        return Err("Not a valid WAV file".to_string());
-    }
-
-    let num_channels = u16::from_le_bytes([header[22], header[23]]) as usize;
-    if num_channels == 0 {
-        return Err("Invalid WAV file: 0 channels".to_string());
-    }
-    let sample_rate = u32::from_le_bytes([header[24], header[25], header[26], header[27]]);
-    if sample_rate == 0 {
-        return Err("Invalid WAV file: 0 sample rate".to_string());
-    }
-    let bits_per_sample = u16::from_le_bytes([header[34], header[35]]);
-    let audio_format = u16::from_le_bytes([header[20], header[21]]);
-
-    // Find data chunk (header[36..] might be "data" or we need to scan)
-    let data_size = if &header[36..40] == b"data" {
-        u32::from_le_bytes([header[40], header[41], header[42], header[43]]) as usize
-    } else {
-        // Scan for data chunk with bounded iteration count
-        let mut buf = header[36..44].to_vec();
-        let mut iterations = 0;
-        loop {
-            if buf.len() >= 8 && &buf[..4] == b"data" {
-                break u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
-            }
-            iterations += 1;
-            if iterations > MAX_CHUNK_SCAN_ITERATIONS {
-                return Err(
-                    "WAV file has too many chunks before data; possibly malformed".to_string(),
-                );
-            }
-            let skip = if buf.len() >= 8 {
-                let s = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
-                if s == 0 {
-                    return Err(
-                        "WAV file contains zero-length chunk; possibly malformed".to_string()
-                    );
-                }
-                s
-            } else {
-                return Err("WAV file chunk too small to contain size field".to_string());
-            };
-            if skip > MAX_DATA_SIZE {
-                return Err(format!(
-                    "WAV chunk skip size {skip} exceeds maximum allowed"
-                ));
-            }
-            let mut skip_buf = vec![0u8; skip];
-            reader
-                .read_exact(&mut skip_buf)
-                .map_err(|e| format!("WAV scan error: {e}"))?;
-            buf = vec![0u8; 8];
-            reader
-                .read_exact(&mut buf)
-                .map_err(|e| format!("WAV scan error: {e}"))?;
-        }
-    };
-
-    let data = if data_size == u32::MAX as usize {
-        // Some streaming WAV writers leave both RIFF and data lengths at the
-        // all-ones sentinel because the final size was unknown when the header
-        // was emitted. Treat the bytes remaining in the bounded input as the
-        // data chunk, while retaining the same allocation limit used for
-        // ordinary declared lengths.
-        let mut data = Vec::new();
-        let mut bounded = reader.take((MAX_DATA_SIZE + 1) as u64);
-        std::io::Read::read_to_end(&mut bounded, &mut data)
-            .map_err(|e| format!("Failed to read streaming WAV data: {e}"))?;
-        if data.len() > MAX_DATA_SIZE {
-            return Err(format!(
-                "Streaming WAV data exceeds maximum allowed ({MAX_DATA_SIZE} bytes)"
-            ));
-        }
-        data
-    } else {
-        if data_size > MAX_DATA_SIZE {
-            return Err(format!(
-                "WAV data size {data_size} bytes exceeds maximum allowed ({MAX_DATA_SIZE} bytes)"
-            ));
-        }
-
-        let mut data = vec![0u8; data_size];
-        reader
-            .read_exact(&mut data)
-            .map_err(|e| format!("Failed to read WAV data: {e}"))?;
-        data
-    };
-
-    let samples: Vec<f32> = match (audio_format, bits_per_sample) {
-        (1, 16) => {
-            // PCM 16-bit
-            data.chunks_exact(2)
-                .map(|chunk| {
-                    let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-                    sample as f32 / 32768.0
-                })
-                .collect()
-        }
-        (3, 32) => {
-            // IEEE float 32-bit
-            data.chunks_exact(4)
-                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                .collect()
-        }
-        _ => {
-            return Err(format!(
-                "Unsupported WAV format: audio_format={audio_format}, bits_per_sample={bits_per_sample}"
-            ));
-        }
-    };
-
-    // Convert to mono by averaging channels
-    let mono = if num_channels > 1 {
-        samples
-            .chunks_exact(num_channels)
-            .map(|ch| ch.iter().sum::<f32>() / num_channels as f32)
-            .collect()
-    } else {
-        samples
-    };
-
-    Ok((mono, sample_rate))
+    crate::audio::preprocessing::decode_wav_native_compat(data).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

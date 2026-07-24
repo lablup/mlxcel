@@ -33,6 +33,7 @@ pub mod feature_extractor;
 pub mod gemma3n;
 pub mod nemotron_h_nano_omni;
 pub mod phi4mm;
+pub mod preprocessing;
 pub mod qwen3_omni_moe;
 pub mod wav_writer;
 pub mod whisper_mel;
@@ -43,5 +44,11 @@ pub(crate) use encoder::audio_probe_dump as encoder_probe_dump;
 pub use feature_extractor::{
     AudioFeatureExtractor, AudioFeatureExtractorConfig, compute_audio_num_tokens, load_wav_file,
     load_wav_from_bytes,
+};
+pub use preprocessing::{
+    AudioCancellation, AudioClipBoundary, AudioEncodedClip, AudioEncodedClipRef, AudioFamilyPolicy,
+    AudioPlaceholderPolicy, AudioPolicySource, AudioPreprocessCheckpoint, AudioPreprocessError,
+    AudioResamplingPolicy, AudioSourceKind, AudioWaveformBatch, OwnedAudioWaveform,
+    preprocess_wav_batch, preprocess_wav_file, preprocess_wav_refs,
 };
 pub use wav_writer::encode_wav_pcm16;

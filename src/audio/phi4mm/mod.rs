@@ -17,6 +17,8 @@
 //! Reference checkpoint: `microsoft/Phi-4-multimodal-instruct` at immutable
 //! revision `93f923e1a7727d1c4f446756212d9d3e8fcc5d81`.
 
+pub const PHI4MM_TRANSFORMERS_REFERENCE_REVISION: &str = "93f923e1a7727d1c4f446756212d9d3e8fcc5d81";
+
 mod config;
 mod encoder;
 mod feature_extractor;

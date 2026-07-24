@@ -1366,19 +1366,13 @@ fn prepare_phi4mm_audio_embeddings(
         decode_request_images(images)?
     };
     let processed_images = phi4mm.processor.preprocess(&decoded_images);
-    let decoded_audio: Vec<(Vec<f32>, u32)> = audio_data
-        .iter()
-        .enumerate()
-        .map(|(index, bytes)| {
-            crate::audio::load_wav_from_bytes(bytes).map_err(|error| {
-                anyhow!(
-                    "Failed to decode Phi4MM audio clip {}: {}",
-                    index + 1,
-                    error
-                )
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let waveform = preprocess_server_audio(audio_data, phi4mm.audio_preprocess_policy)
+        .map_err(|error| anyhow!("Failed to preprocess Phi4MM audio: {error}"))?;
+    let decoded_audio: Vec<(Vec<f32>, u32)> = waveform
+        .clips
+        .into_iter()
+        .map(|clip| (clip.samples, clip.sample_rate))
+        .collect();
     let audio_batch = phi4mm
         .extract_audio(&decoded_audio)
         .map_err(anyhow::Error::msg)?;
@@ -1446,17 +1440,13 @@ fn prepare_gemma3n_audio_embeddings(
         let _ = crate::vlm_prompt::apply_image_token_blocks(prompt_tokens, info, images.len())?;
     }
 
-    let mut clips = Vec::with_capacity(audio_data.len());
-    for (index, bytes) in audio_data.iter().enumerate() {
-        let (samples, sample_rate) = crate::audio::load_wav_from_bytes(bytes)
-            .map_err(|error| anyhow!("Failed to decode Gemma3n audio clip {index}: {error}"))?;
-        let samples = if sample_rate == crate::audio::gemma3n::GEMMA3N_SAMPLE_RATE {
-            samples
-        } else {
-            crate::audio::whisper_mel::resample_to_16k(&samples, sample_rate)
-        };
-        clips.push(samples);
-    }
+    let waveform = preprocess_server_audio(audio_data, gemma3n.audio_preprocess_policy)
+        .map_err(|error| anyhow!("Failed to preprocess Gemma3n audio: {error}"))?;
+    let clips: Vec<Vec<f32>> = waveform
+        .clips
+        .into_iter()
+        .map(|clip| clip.samples)
+        .collect();
 
     let batch = crate::audio::gemma3n::Gemma3nAudioFeatureExtractor::new()
         .extract_batch(&clips)
@@ -1516,6 +1506,23 @@ fn prepare_gemma3n_audio_embeddings(
         )
         .map_err(|error| anyhow!(error))?;
     Ok(Some(embeddings))
+}
+
+fn preprocess_server_audio(
+    audio_data: &[Vec<u8>],
+    policy: crate::audio::AudioFamilyPolicy,
+) -> std::result::Result<crate::audio::AudioWaveformBatch, crate::audio::AudioPreprocessError> {
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let encoded: Vec<_> = audio_data
+        .iter()
+        .enumerate()
+        .map(|(index, bytes)| crate::audio::AudioEncodedClipRef {
+            bytes,
+            source: crate::audio::AudioSourceKind::ServerInline,
+            placeholder_ordinal: index + 1,
+        })
+        .collect();
+    crate::audio::preprocess_wav_refs(&encoded, policy, &cancelled)
 }
 
 /// Resolve the per-family end-of-turn token id from the tokenizer.

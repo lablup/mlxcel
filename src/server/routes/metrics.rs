@@ -37,6 +37,10 @@ use crate::distributed::pipeline::PipelineObservabilitySnapshot;
 use crate::server::AppState;
 use crate::server::batch::observability::HistogramSnapshot;
 
+#[path = "metrics_audio.rs"]
+mod metrics_audio;
+use metrics_audio::append_audio_preprocess_metrics;
+
 /// GET /metrics -- Prometheus text format
 pub async fn metrics(State(state): State<AppState>) -> Response {
     let m = &state.metrics;
@@ -292,6 +296,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     );
 
     let mut body = body;
+    append_audio_preprocess_metrics(&mut body, &obs);
 
     // Per-request TTFT / decode-rate histograms (epic #623 #624). Populated
     // once per completed request by the scheduler's `finalize_completed`.
