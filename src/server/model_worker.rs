@@ -1816,6 +1816,19 @@ fn resolve_xtc_newline_token_ids(tokenizer: &MlxcelTokenizer) -> Vec<i32> {
         .unwrap_or_default()
 }
 
+fn require_single_server_audio_clip<'a>(
+    family: &str,
+    audio_data: &'a [Vec<u8>],
+) -> Result<&'a [u8]> {
+    match audio_data {
+        [clip] => Ok(clip),
+        clips => Err(anyhow!(
+            "{family} server audio path requires exactly one audio clip per request; received {}",
+            clips.len()
+        )),
+    }
+}
+
 /// Process audio (and optionally images) for Gemma4 VLM models.
 ///
 /// Returns `Ok(None)` if the model is not a Gemma4 VLM with audio support.
@@ -1839,15 +1852,7 @@ fn prepare_gemma4_audio_embeddings(
         return Ok(None);
     }
 
-    if audio_data.len() > 1 {
-        tracing::warn!(
-            "Multiple audio inputs provided ({}); only the first will be processed",
-            audio_data.len()
-        );
-    }
-
-    // Process the first audio input
-    let audio_bytes = &audio_data[0];
+    let audio_bytes = require_single_server_audio_clip("Gemma4", audio_data)?;
     let (samples, sample_rate) = audio::load_wav_from_bytes(audio_bytes)
         .map_err(|e| anyhow!("Failed to decode audio: {}", e))?;
 
@@ -1958,14 +1963,8 @@ fn prepare_gemma4_unified_audio_embeddings(
         return Ok(None);
     }
 
-    if audio_data.len() > 1 {
-        tracing::warn!(
-            "Multiple audio inputs provided ({}); only the first will be processed",
-            audio_data.len()
-        );
-    }
-
-    let (samples, sample_rate) = audio::load_wav_from_bytes(&audio_data[0])
+    let audio_bytes = require_single_server_audio_clip("Gemma4 Unified", audio_data)?;
+    let (samples, sample_rate) = audio::load_wav_from_bytes(audio_bytes)
         .map_err(|e| anyhow!("Failed to decode audio: {}", e))?;
     tracing::info!(
         "Gemma4 Unified audio input: {} samples at {} Hz ({:.1}s)",
@@ -2050,14 +2049,8 @@ fn prepare_qwen3_omni_audio_embeddings(
         _ => return Ok(None),
     };
 
-    if audio_data.len() > 1 {
-        tracing::warn!(
-            "Multiple audio inputs provided ({}); only the first will be processed",
-            audio_data.len()
-        );
-    }
-
-    let (samples, sample_rate) = audio::load_wav_from_bytes(&audio_data[0])
+    let audio_bytes = require_single_server_audio_clip("Qwen3-Omni", audio_data)?;
+    let (samples, sample_rate) = audio::load_wav_from_bytes(audio_bytes)
         .map_err(|e| anyhow!("Failed to decode audio: {}", e))?;
     tracing::info!(
         "Audio input: {} samples at {} Hz ({:.1}s)",
@@ -2152,15 +2145,8 @@ fn prepare_nemotron_h_nano_omni_audio_embeddings(
         }
     };
 
-    if audio_data.len() > 1 {
-        tracing::warn!(
-            "Multiple audio inputs provided ({}); only the first will be processed",
-            audio_data.len()
-        );
-    }
-
-    // Server passes inline payload bytes; decode the first clip.
-    let (samples, sample_rate) = audio::load_wav_from_bytes(&audio_data[0])
+    let audio_bytes = require_single_server_audio_clip("Nemotron H Nano Omni", audio_data)?;
+    let (samples, sample_rate) = audio::load_wav_from_bytes(audio_bytes)
         .map_err(|e| anyhow!("Failed to decode audio: {}", e))?;
     tracing::info!(
         "Audio input: {} samples at {} Hz ({:.1}s)",

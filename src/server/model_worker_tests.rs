@@ -20,7 +20,7 @@ use super::{
     StreamingDecodeState, build_generation_result, decode_request_images,
     decode_request_images_with_limits, encode_ordered_media_prompt,
     materialize_phi4mm_ordered_prompt, merge_config_stop_tokens, preprocess_server_audio,
-    resolve_end_of_turn_token_id, resolve_xtc_newline_token_ids,
+    require_single_server_audio_clip, resolve_end_of_turn_token_id, resolve_xtc_newline_token_ids,
 };
 use crate::SamplingConfig;
 use crate::audio::AudioFamilyPolicy;
@@ -185,6 +185,30 @@ fn gemma3n_ordered_prompt_expands_media_in_place_without_clustering() {
             WRAPPER,
             i32::from(b'C'),
         ]
+    );
+}
+
+#[test]
+fn legacy_server_audio_paths_reject_multi_clip_instead_of_using_first() {
+    let clips = vec![vec![1_u8], vec![2_u8]];
+    for family in [
+        "Gemma4",
+        "Gemma4 Unified",
+        "Qwen3-Omni",
+        "Nemotron H Nano Omni",
+    ] {
+        let error = require_single_server_audio_clip(family, &clips).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "{family} server audio path requires exactly one audio clip per request; received 2"
+            )
+        );
+    }
+
+    assert_eq!(
+        require_single_server_audio_clip("Gemma4", &clips[..1]).unwrap(),
+        &[1]
     );
 }
 
