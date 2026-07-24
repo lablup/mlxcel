@@ -708,7 +708,14 @@ async fn decode_video_data_uri(url: &str) -> Option<(PathBuf, TempFile)> {
 /// Connect timeout, total request timeout, and redirect cap are configured
 /// on the shared client (see [`http_image_client`]).
 async fn fetch_remote_video(url: &str) -> Option<(PathBuf, TempFile)> {
-    let response = match http_image_client().get(url).send().await {
+    let client = match http_image_client() {
+        Ok(client) => client,
+        Err(err) => {
+            tracing::warn!("Failed to build image/media HTTP client: {}", err);
+            return None;
+        }
+    };
+    let response = match client.get(url).send().await {
         Ok(r) => r,
         Err(err) => {
             tracing::warn!("Failed to fetch video URL {}: {}", url, err);
@@ -1200,7 +1207,7 @@ async fn fetch_remote_bytes_with_limit_cancel(
     cancelled: Option<&dyn AudioAcquisitionCancellation>,
 ) -> Result<Vec<u8>> {
     check_media_cancel(cancelled, 0)?;
-    let response = match http_image_client().get(url).send().await {
+    let response = match http_image_client()?.get(url).send().await {
         Ok(response) => response,
         Err(err) => bail!("Failed to fetch {kind} URL {url}: {err}"),
     };
@@ -1307,29 +1314,37 @@ fn validate_payload_size(bytes: Vec<u8>, kind: &str, max_size: usize) -> Result<
     Ok(bytes)
 }
 
-fn http_image_client() -> &'static reqwest::Client {
+/// Returns the shared image/media-fetch client, or an error if
+/// `MLXCEL_EXTRA_CA_CERTS` is set but invalid.
+///
+/// A bad `MLXCEL_EXTRA_CA_CERTS` is an operator misconfiguration, not a
+/// programmer invariant, so it's surfaced as a normal error to the caller
+/// (same as the downloader's client) rather than panicking the request path.
+fn http_image_client() -> Result<&'static reqwest::Client> {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        let mut builder = reqwest::Client::builder()
-            // Total deadline for any single fetch.
-            .timeout(Duration::from_secs(10))
-            // Cap the time spent dialling a hostile or unreachable origin so
-            // the request as a whole cannot stall longer than necessary.
-            .connect_timeout(Duration::from_secs(5))
-            // Bound redirect chains so a malicious origin cannot bounce the
-            // client through unbounded hops.
-            .redirect(reqwest::redirect::Policy::limited(5));
-        // See `downloader::load_extra_ca_certificates` — this client fetches
-        // remote media URLs over the same rustls-tls backend, so it needs the
-        // same MLXCEL_EXTRA_CA_CERTS trust anchors to work behind a
-        // TLS-inspecting corporate proxy.
-        for cert in crate::downloader::load_extra_ca_certificates()
-            .expect("MLXCEL_EXTRA_CA_CERTS must be a valid PEM bundle")
-        {
-            builder = builder.add_root_certificate(cert);
-        }
-        builder.build().expect("server image client should build")
-    })
+    if let Some(client) = CLIENT.get() {
+        return Ok(client);
+    }
+    let mut builder = reqwest::Client::builder()
+        // Total deadline for any single fetch.
+        .timeout(Duration::from_secs(10))
+        // Cap the time spent dialling a hostile or unreachable origin so
+        // the request as a whole cannot stall longer than necessary.
+        .connect_timeout(Duration::from_secs(5))
+        // Bound redirect chains so a malicious origin cannot bounce the
+        // client through unbounded hops.
+        .redirect(reqwest::redirect::Policy::limited(5));
+    // See `downloader::load_extra_ca_certificates` — this client fetches
+    // remote media URLs over the same rustls-tls backend, so it needs the
+    // same MLXCEL_EXTRA_CA_CERTS trust anchors to work behind a
+    // TLS-inspecting corporate proxy.
+    for cert in crate::downloader::load_extra_ca_certificates()? {
+        builder = builder.add_root_certificate(cert);
+    }
+    let client = builder.build().expect("server image client should build");
+    // Another task may have raced us and already initialized CLIENT; either
+    // way `get_or_init` returns the single winning client.
+    Ok(CLIENT.get_or_init(|| client))
 }
 
 #[cfg(test)]
