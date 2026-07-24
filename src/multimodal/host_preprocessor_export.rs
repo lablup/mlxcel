@@ -160,31 +160,78 @@ pub(super) fn export_qwen2_vl_prefill(
     spatial_merge_size: usize,
     hidden_size: usize,
 ) -> Result<PreparedPrefill, HostPreprocessorError> {
+    export_qwen_vl_prefill(
+        logical_tokens,
+        merged,
+        grids,
+        image_token_id,
+        video_token_id,
+        spatial_merge_size,
+        hidden_size,
+        "Qwen2-VL",
+        "qwen2_vl",
+    )
+}
+
+pub(super) fn export_qwen3_vl_prefill(
+    logical_tokens: Vec<i32>,
+    merged: InputEmbeddings,
+    grids: &[(i32, i32, i32)],
+    image_token_id: i32,
+    video_token_id: i32,
+    spatial_merge_size: usize,
+    hidden_size: usize,
+) -> Result<PreparedPrefill, HostPreprocessorError> {
+    export_qwen_vl_prefill(
+        logical_tokens,
+        merged,
+        grids,
+        image_token_id,
+        video_token_id,
+        spatial_merge_size,
+        hidden_size,
+        "Qwen3-VL",
+        "qwen3_vl",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn export_qwen_vl_prefill(
+    logical_tokens: Vec<i32>,
+    merged: InputEmbeddings,
+    grids: &[(i32, i32, i32)],
+    image_token_id: i32,
+    video_token_id: i32,
+    spatial_merge_size: usize,
+    hidden_size: usize,
+    family_label: &'static str,
+    family_key: &'static str,
+) -> Result<PreparedPrefill, HostPreprocessorError> {
     if spatial_merge_size == 0 {
-        return Err(HostPreprocessorError::InvalidConfig(
-            "Qwen2-VL spatial_merge_size must be positive".to_string(),
-        ));
+        return Err(HostPreprocessorError::InvalidConfig(format!(
+            "{family_label} spatial_merge_size must be positive"
+        )));
     }
     if logical_tokens.contains(&video_token_id) {
-        return Err(HostPreprocessorError::InvalidConfig(
-            "Qwen2-VL XLA image preprocessing does not support video placeholders".to_string(),
-        ));
+        return Err(HostPreprocessorError::InvalidConfig(format!(
+            "{family_label} XLA image preprocessing does not support video placeholders"
+        )));
     }
     validate_embedding_shape(
         &mlxcel_core::array_shape(&merged.inputs_embeds),
         logical_tokens.len(),
         hidden_size,
-        "Qwen2-VL merged embedding",
+        "Qwen-VL merged embedding",
     )?;
     if merged.attention_mask_4d.is_some() {
-        return Err(HostPreprocessorError::InvalidConfig(
-            "Qwen2-VL prepared prefill requires the standard causal mask".to_string(),
-        ));
+        return Err(HostPreprocessorError::InvalidConfig(format!(
+            "{family_label} prepared prefill requires the standard causal mask"
+        )));
     }
     let merge = i32::try_from(spatial_merge_size).map_err(|_| {
-        HostPreprocessorError::InvalidConfig(
-            "Qwen2-VL spatial_merge_size does not fit i32".to_string(),
-        )
+        HostPreprocessorError::InvalidConfig(format!(
+            "{family_label} spatial_merge_size does not fit i32"
+        ))
     })?;
     let expected_per_image = grids
         .iter()
@@ -197,7 +244,7 @@ pub(super) fn export_qwen2_vl_prefill(
                 || width % merge != 0
             {
                 return Err(HostPreprocessorError::InvalidConfig(format!(
-                    "invalid Qwen2-VL image grid {index}: ({temporal},{height},{width})"
+                    "invalid {family_label} image grid {index}: ({temporal},{height},{width})"
                 )));
             }
             let count = temporal
@@ -234,9 +281,9 @@ pub(super) fn export_qwen2_vl_prefill(
             cursor += 1;
         }
         if image_index >= grids.len() {
-            return Err(HostPreprocessorError::InvalidConfig(
-                "Qwen2-VL prompt has more image-token runs than decoded images".to_string(),
-            ));
+            return Err(HostPreprocessorError::InvalidConfig(format!(
+                "{family_label} prompt has more image-token runs than decoded images"
+            )));
         }
         let text_length = i32::try_from(vision_start - segment_start)
             .map_err(|_| HostPreprocessorError::ShapeOverflow)?;
@@ -255,7 +302,7 @@ pub(super) fn export_qwen2_vl_prefill(
         let run_length = cursor - vision_start;
         if run_length != expected_per_image[image_index] {
             return Err(HostPreprocessorError::InvalidConfig(format!(
-                "Qwen2-VL image-token run {image_index} has {run_length} tokens, expected {}",
+                "{family_label} image-token run {image_index} has {run_length} tokens, expected {}",
                 expected_per_image[image_index]
             )));
         }
@@ -291,7 +338,7 @@ pub(super) fn export_qwen2_vl_prefill(
     }
     if image_index != grids.len() {
         return Err(HostPreprocessorError::InvalidConfig(format!(
-            "Qwen2-VL prompt has {image_index} image-token runs, expected {}",
+            "{family_label} prompt has {image_index} image-token runs, expected {}",
             grids.len()
         )));
     }
@@ -305,9 +352,9 @@ pub(super) fn export_qwen2_vl_prefill(
         }
     }
     if axes.iter().any(|axis| axis.len() != logical_tokens.len()) {
-        return Err(HostPreprocessorError::InvalidConfig(
-            "Qwen2-VL M-RoPE position construction did not cover the logical prompt".to_string(),
-        ));
+        return Err(HostPreprocessorError::InvalidConfig(format!(
+            "{family_label} M-RoPE position construction did not cover the logical prompt"
+        )));
     }
     let maximum = axes
         .iter()
@@ -315,9 +362,9 @@ pub(super) fn export_qwen2_vl_prefill(
         .copied()
         .max()
         .ok_or_else(|| {
-            HostPreprocessorError::InvalidConfig(
-                "Qwen2-VL logical prompt must not be empty".to_string(),
-            )
+            HostPreprocessorError::InvalidConfig(format!(
+                "{family_label} logical prompt must not be empty"
+            ))
         })?;
     let sequence_len_i32 =
         i32::try_from(logical_tokens.len()).map_err(|_| HostPreprocessorError::ShapeOverflow)?;
@@ -331,7 +378,7 @@ pub(super) fn export_qwen2_vl_prefill(
         .flat_map(i32::to_ne_bytes)
         .collect::<Vec<_>>();
     let sequence_len = logical_tokens.len();
-    let embeddings = export_mlx_tensor(&merged.inputs_embeds, "Qwen2-VL merged embedding")?;
+    let embeddings = export_mlx_tensor(&merged.inputs_embeds, "Qwen-VL merged embedding")?;
     let attention_bytes = vec![
         0u8;
         sequence_len
@@ -358,7 +405,7 @@ pub(super) fn export_qwen2_vl_prefill(
             causal: true,
         },
         vec![PreparedModality {
-            family: "qwen2_vl".to_string(),
+            family: family_key.to_string(),
             item_count: grids.len(),
             token_count: expected_image_tokens,
         }],

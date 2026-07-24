@@ -1205,10 +1205,7 @@ fn generate_xla(
                     "the loaded OpenXLA model/runtime bundle does not support image input"
                 );
                 let images = decode_xla_cli_images(image_paths)?;
-                let prepared = s
-                    .prepare_images(prompt_tokens, &images)
-                    .map_err(|error| anyhow!("OpenXLA image preprocessing failed: {error}"))?;
-                s.generate_prepared_greedy(&prepared, max_tokens, &eos)
+                s.generate_images_greedy(prompt_tokens, &images, max_tokens)
                     .map_err(|error| anyhow!("OpenXLA image generation failed: {error}"))?
             }
         }

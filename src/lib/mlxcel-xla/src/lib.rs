@@ -81,6 +81,8 @@ mod phi4_audio;
 #[cfg(feature = "iree")]
 mod qwen2_vl_runtime;
 #[cfg(feature = "iree")]
+mod qwen3_vl_runtime;
+#[cfg(feature = "iree")]
 mod vision_runtime;
 
 #[cfg(feature = "micro-oracle")]
@@ -179,6 +181,10 @@ pub use phi4_audio::{Phi4AudioCheckpoint, Phi4AudioDiagnosticRuntime, Phi4AudioD
 #[cfg(feature = "iree")]
 pub use qwen2_vl_runtime::{
     IreeQwen2VlProjector, Qwen2VlVisionExecutionMetrics, Qwen2VlVisionProjection,
+};
+#[cfg(feature = "iree")]
+pub use qwen3_vl_runtime::{
+    IreeQwen3VlProjector, Qwen3VlVisionExecutionMetrics, Qwen3VlVisionProjection,
 };
 #[cfg(feature = "diagnostics")]
 pub use vision_runtime::{IreeVisionDiagnosticProjector, VisionDiagnosticProjection};

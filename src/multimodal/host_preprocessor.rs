@@ -44,8 +44,8 @@ mod export;
 use super::qwen_vl::insert_qwen_vl_image_tokens;
 use export::export_mlx_tensor;
 use export::{
-    build_prepared_prefill, export_llava_prefill, export_qwen2_vl_prefill, usize_to_i32,
-    validate_embedding_shape, validate_processor_shape, validate_projected_shape,
+    build_prepared_prefill, export_llava_prefill, export_qwen2_vl_prefill, export_qwen3_vl_prefill,
+    usize_to_i32, validate_embedding_shape, validate_processor_shape, validate_projected_shape,
     validate_sequence_capacity,
 };
 
@@ -124,6 +124,20 @@ pub trait HostMultimodalPreprocessor {
         token_ids: &[i32],
         images: &[DynamicImage],
     ) -> Result<PreparedPrefill, HostPreprocessorError>;
+
+    /// Prepare the distinct DeepStack payload used by Qwen3-VL.
+    ///
+    /// `None` is the safe default for every ordinary image family. Callers must
+    /// check this entry before invoking [`Self::prepare`], so a DeepStack model
+    /// can never be silently downgraded to main-merger-only embeddings.
+    #[cfg(feature = "xla-backend")]
+    fn prepare_deepstack(
+        &self,
+        _token_ids: &[i32],
+        _images: &[DynamicImage],
+    ) -> Result<Option<mlxcel_xla::DeepStackPreparedPrefill>, HostPreprocessorError> {
+        Ok(None)
+    }
 }
 
 /// Load the image preprocessor supported by the OpenXLA host-first path.
@@ -172,6 +186,36 @@ pub fn load_xla_image_preprocessor(
         {
             return Err(HostPreprocessorError::InvalidConfig(
                 "Qwen2-VL XLA image execution requires the xla-iree feature".to_string(),
+            ));
+        }
+    }
+    if model_type == crate::models::ModelType::Qwen3VL {
+        let policy = XlaVisionBackendPolicy::from_env()?;
+        if policy == XlaVisionBackendPolicy::Host {
+            return Err(HostPreprocessorError::InvalidConfig(
+                "Qwen3-VL XLA vision has no MLX fallback; MLXCEL_XLA_VISION_BACKEND=host is unsupported"
+                    .to_string(),
+            ));
+        }
+        #[cfg(feature = "xla-iree")]
+        {
+            let device = std::env::var("MLXCEL_XLA_DEVICE")
+                .unwrap_or_else(|_| mlxcel_xla::default_device().to_string());
+            let preprocessor = Qwen3VlIreeHostPreprocessor::load(model_path, &device)?;
+            tracing::info!(
+                vision_backend = "iree",
+                vision_device = %device,
+                family = "qwen3_vl",
+                media = "image",
+                video = false,
+                "OpenXLA multimodal vision backend selected"
+            );
+            return Ok(Some(Box::new(preprocessor)));
+        }
+        #[cfg(not(feature = "xla-iree"))]
+        {
+            return Err(HostPreprocessorError::InvalidConfig(
+                "Qwen3-VL XLA image execution requires the xla-iree feature".to_string(),
             ));
         }
     }
@@ -289,6 +333,23 @@ pub struct Qwen2VlIreeHostPreprocessor {
     spatial_merge_size: usize,
     hidden_size: usize,
     max_sequence_len: usize,
+    device: String,
+}
+
+/// Dense Qwen3-VL producer. The resident IREE graph returns the main merger and
+/// every ordered DeepStack branch; no MLX vision or MoE fallback is admitted.
+#[cfg(feature = "xla-iree")]
+pub struct Qwen3VlIreeHostPreprocessor {
+    processor: crate::vision::processors::qwen2_vl::Qwen2VLProcessor,
+    text_embeddings: UnifiedEmbedding,
+    projector: RefCell<mlxcel_xla::IreeQwen3VlProjector>,
+    image_token_id: i32,
+    video_token_id: i32,
+    vision_start_token_id: i32,
+    spatial_merge_size: usize,
+    hidden_size: usize,
+    max_sequence_len: usize,
+    deepstack_layer_count: usize,
     device: String,
 }
 
@@ -456,6 +517,270 @@ impl HostMultimodalPreprocessor for Qwen2VlIreeHostPreprocessor {
     ) -> Result<PreparedPrefill, HostPreprocessorError> {
         self.prepare_iree(token_ids, images)
     }
+}
+
+#[cfg(feature = "xla-iree")]
+impl Qwen3VlIreeHostPreprocessor {
+    pub fn load(model_path: &Path, device: &str) -> Result<Self, HostPreprocessorError> {
+        crate::loading::load_qwen3_vl_iree_host_preprocessor(model_path, device)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_parts(
+        processor: crate::vision::processors::qwen2_vl::Qwen2VLProcessor,
+        text_embeddings: UnifiedEmbedding,
+        projector: mlxcel_xla::IreeQwen3VlProjector,
+        image_token_id: i32,
+        video_token_id: i32,
+        vision_start_token_id: i32,
+        spatial_merge_size: usize,
+        hidden_size: usize,
+        max_sequence_len: usize,
+        device: String,
+    ) -> Result<Self, HostPreprocessorError> {
+        if hidden_size == 0 || max_sequence_len == 0 || spatial_merge_size == 0 {
+            return Err(HostPreprocessorError::InvalidConfig(
+                "Qwen3-VL hidden size, sequence capacity, and spatial merge size must be positive"
+                    .to_string(),
+            ));
+        }
+        if projector.text_hidden() != hidden_size {
+            return Err(HostPreprocessorError::InvalidConfig(format!(
+                "Qwen3-VL IREE projector hidden size {} disagrees with text hidden size {hidden_size}",
+                projector.text_hidden()
+            )));
+        }
+        let deepstack_layer_count = projector.deepstack_layer_count();
+        if deepstack_layer_count == 0 {
+            return Err(HostPreprocessorError::InvalidConfig(
+                "Qwen3-VL IREE requires at least one DeepStack branch".to_string(),
+            ));
+        }
+        Ok(Self {
+            processor,
+            text_embeddings,
+            projector: RefCell::new(projector),
+            image_token_id,
+            video_token_id,
+            vision_start_token_id,
+            spatial_merge_size,
+            hidden_size,
+            max_sequence_len,
+            deepstack_layer_count,
+            device,
+        })
+    }
+
+    fn prepare_iree_deepstack(
+        &self,
+        token_ids: &[i32],
+        images: &[DynamicImage],
+    ) -> Result<mlxcel_xla::DeepStackPreparedPrefill, HostPreprocessorError> {
+        if images.is_empty() {
+            return Err(HostPreprocessorError::InvalidConfig(
+                "Qwen3-VL image preprocessing requires at least one decoded image; text-only requests use ordinary XLA token prefill"
+                    .to_string(),
+            ));
+        }
+        let (patch_values, grids) = self.processor.preprocess_values_with_grid(images);
+        let mut logical_tokens = token_ids.to_vec();
+        let inserted = insert_qwen_vl_image_tokens(
+            &mut logical_tokens,
+            &grids,
+            self.spatial_merge_size,
+            self.vision_start_token_id,
+            self.image_token_id,
+        )
+        .ok_or_else(|| {
+            HostPreprocessorError::InvalidConfig(format!(
+                "Qwen3-VL image placeholder count does not match {} decoded image(s), or the prompt is already expanded",
+                images.len()
+            ))
+        })?;
+        if inserted.image_blocks != images.len() {
+            return Err(HostPreprocessorError::InvalidConfig(format!(
+                "Qwen3-VL expanded {} image blocks for {} decoded images",
+                inserted.image_blocks,
+                images.len()
+            )));
+        }
+        validate_sequence_capacity(logical_tokens.len(), self.max_sequence_len)?;
+        let input_ids = mlxcel_core::from_slice_i32(
+            &logical_tokens,
+            &[1, usize_to_i32(logical_tokens.len(), "sequence length")?],
+        );
+        let text_embeddings = mlxcel_core::astype(
+            &self.text_embeddings.forward(&input_ids),
+            mlxcel_core::dtype::FLOAT32,
+        );
+        validate_embedding_shape(
+            &mlxcel_core::array_shape(&text_embeddings),
+            logical_tokens.len(),
+            self.hidden_size,
+            "Qwen3-VL text embedding table",
+        )?;
+        let mut projector = self.projector.try_borrow_mut().map_err(|_| {
+            HostPreprocessorError::Iree(
+                "concurrent/re-entrant Qwen3-VL IREE vision invocation is unsupported".to_string(),
+            )
+        })?;
+        let projection = projector
+            .project(&patch_values, &grids)
+            .map_err(HostPreprocessorError::Iree)?;
+        let expected_projected_tokens = usize::try_from(inserted.total_image_tokens)
+            .map_err(|_| HostPreprocessorError::ShapeOverflow)?;
+        if projection.shape != [expected_projected_tokens, self.hidden_size] {
+            return Err(HostPreprocessorError::InvalidConfig(format!(
+                "Qwen3-VL IREE projection shape {:?} disagrees with expanded image-token shape [{expected_projected_tokens}, {}]",
+                projection.shape, self.hidden_size
+            )));
+        }
+        if projection.deepstack_values.len() != self.deepstack_layer_count
+            || projection
+                .deepstack_values
+                .iter()
+                .any(|values| values.len() != expected_projected_tokens * self.hidden_size)
+        {
+            return Err(HostPreprocessorError::InvalidConfig(format!(
+                "Qwen3-VL IREE returned {} DeepStack branch(es) with inconsistent visual shapes; expected {} branch(es) of [{expected_projected_tokens}, {}]",
+                projection.deepstack_values.len(),
+                self.deepstack_layer_count,
+                self.hidden_size
+            )));
+        }
+        tracing::info!(
+            vision_backend = "iree",
+            vision_device = %self.device,
+            image_count = images.len(),
+            deepstack_layers = self.deepstack_layer_count,
+            patch_upload_bytes = projection.metrics.patch_upload_bytes,
+            metadata_upload_bytes = projection.metrics.metadata_upload_bytes,
+            projected_transfer_bytes = projection.metrics.projected_transfer_bytes,
+            iree_vision_seconds = projection.metrics.elapsed_seconds,
+            packed_cu_seqlens = ?projection.packed_cu_seqlens,
+            "Qwen3-VL OpenXLA vision and DeepStack projection completed"
+        );
+        let projected = mlxcel_core::from_slice_f32(
+            &projection.values,
+            &[
+                usize_to_i32(expected_projected_tokens, "Qwen3-VL projected token count")?,
+                usize_to_i32(self.hidden_size, "hidden size")?,
+            ],
+        );
+        let merged = merge_llava(
+            self.image_token_id,
+            &projected,
+            &text_embeddings,
+            &input_ids,
+        );
+        let prepared = export_qwen3_vl_prefill(
+            logical_tokens.clone(),
+            InputEmbeddings {
+                inputs_embeds: mlxcel_core::astype(
+                    &merged.inputs_embeds,
+                    mlxcel_core::dtype::FLOAT32,
+                ),
+                attention_mask_4d: merged.attention_mask_4d,
+            },
+            &grids,
+            self.image_token_id,
+            self.video_token_id,
+            self.spatial_merge_size,
+            self.hidden_size,
+        )?;
+        let visual_positions = logical_tokens
+            .iter()
+            .enumerate()
+            .filter_map(|(position, &token)| (token == self.image_token_id).then_some(position))
+            .map(|position| {
+                i32::try_from(position).map_err(|_| HostPreprocessorError::ShapeOverflow)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if visual_positions.len() != expected_projected_tokens {
+            return Err(HostPreprocessorError::InvalidConfig(format!(
+                "Qwen3-VL visual position count {} disagrees with projected token count {expected_projected_tokens}",
+                visual_positions.len()
+            )));
+        }
+        let position_bytes = visual_positions
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let feature_values = projection
+            .deepstack_values
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let feature_bytes = feature_values
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let layer_indices = (0..self.deepstack_layer_count)
+            .map(|layer| {
+                i32::try_from(layer)
+                    .map(i32::to_le_bytes)
+                    .map_err(|_| HostPreprocessorError::ShapeOverflow)
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let features = mlxcel_xla::DeepStackFeatures::new(
+            OwnedTensor::new(
+                position_bytes,
+                PreparedTensorDType::Int32,
+                vec![expected_projected_tokens],
+            )?,
+            OwnedTensor::new(
+                feature_bytes,
+                PreparedTensorDType::Float32,
+                vec![
+                    self.deepstack_layer_count,
+                    expected_projected_tokens,
+                    self.hidden_size,
+                ],
+            )?,
+            OwnedTensor::new(
+                layer_indices,
+                PreparedTensorDType::Int32,
+                vec![self.deepstack_layer_count],
+            )?,
+        )
+        .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+        mlxcel_xla::DeepStackPreparedPrefill::new(prepared, features)
+            .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))
+    }
+}
+
+#[cfg(feature = "xla-iree")]
+impl HostMultimodalPreprocessor for Qwen3VlIreeHostPreprocessor {
+    fn backend(&self) -> XlaVisionBackend {
+        XlaVisionBackend::Iree
+    }
+
+    fn prepare(
+        &self,
+        _token_ids: &[i32],
+        _images: &[DynamicImage],
+    ) -> Result<PreparedPrefill, HostPreprocessorError> {
+        reject_qwen3_standard_prefill()
+    }
+
+    fn prepare_deepstack(
+        &self,
+        token_ids: &[i32],
+        images: &[DynamicImage],
+    ) -> Result<Option<mlxcel_xla::DeepStackPreparedPrefill>, HostPreprocessorError> {
+        self.prepare_iree_deepstack(token_ids, images).map(Some)
+    }
+}
+
+#[cfg(feature = "xla-iree")]
+pub(super) fn reject_qwen3_standard_prefill() -> Result<PreparedPrefill, HostPreprocessorError> {
+    Err(HostPreprocessorError::InvalidConfig(
+        "Qwen3-VL requires the DeepStack prepared-prefill entry; refusing to omit side features"
+            .to_string(),
+    ))
 }
 
 #[cfg(feature = "xla-iree")]

@@ -60,6 +60,7 @@ mod moe;
 pub(crate) mod numeric_ops;
 mod phi4_audio;
 mod qwen2_vl;
+mod qwen3_vl;
 mod rope;
 mod vision;
 mod vision_config;
@@ -127,6 +128,13 @@ pub(crate) use qwen2_vl::emit_qwen2_vl;
 pub(crate) use qwen2_vl::{
     QWEN2_VL_PATCH_BUCKETS, Qwen2VlConfig, Qwen2VlGridPlan, Qwen2VlHostInputs, Qwen2VlWeightSpec,
     prepare_qwen2_vl_host_inputs,
+};
+#[allow(unused_imports)]
+pub(crate) use qwen3_vl::emit_qwen3_vl;
+#[allow(unused_imports)]
+pub(crate) use qwen3_vl::{
+    QWEN3_VL_PATCH_BUCKETS, Qwen3VlConfig, Qwen3VlGridPlan, Qwen3VlHostInputs, Qwen3VlWeightSpec,
+    prepare_qwen3_vl_host_inputs,
 };
 // MoE FFN config types (issue #500), read by the weight loader (`iree.rs`) and the
 // validation harness. `SharedExpertConfig` is only named in some build cfgs.
@@ -1194,6 +1202,63 @@ mod tests {
                 "invalid DeepStack schema must fail closed: {invalid}"
             );
         }
+    }
+
+    #[test]
+    fn qwen3_vl_wrapper_derives_dense_deepstack_text_contract() {
+        let wrapper = r#"{
+            "model_type":"qwen3_vl",
+            "quantization":{"bits":4,"group_size":64},
+            "text_config":{
+                "model_type":"qwen3_vl_text",
+                "hidden_size":12,
+                "num_attention_heads":2,
+                "num_key_value_heads":1,
+                "head_dim":6,
+                "intermediate_size":16,
+                "num_hidden_layers":4,
+                "rms_norm_eps":1e-6,
+                "rope_theta":1e6,
+                "rope_scaling":{
+                    "rope_type":"default",
+                    "mrope_interleaved":true,
+                    "mrope_section":[1,1,1]
+                },
+                "vocab_size":10,
+                "tie_word_embeddings":true
+            },
+            "vision_config":{"deepstack_visual_indexes":[5,11,17]}
+        }"#;
+        let cfg = Config::from_json_str(wrapper).expect("Qwen3-VL wrapper text graph");
+        assert_eq!(
+            cfg.deepstack,
+            Some(DeepStackConfig {
+                target_layer_indices: vec![0, 1, 2],
+                max_visual_positions: 64,
+            })
+        );
+        assert_eq!(
+            cfg.quantization,
+            Some(QuantConfig {
+                bits: 4,
+                group_size: 64
+            })
+        );
+        assert_eq!(
+            cfg.mrope.expect("Qwen3-VL M-RoPE").layout,
+            MropeLayout::Interleaved
+        );
+        assert!(cfg.qk_norm.is_some(), "Qwen3-VL uses Qwen3 q/k RMSNorm");
+
+        let overridden = wrapper.replace(
+            "\"tie_word_embeddings\":true",
+            "\"tie_word_embeddings\":true,\n\
+             \"deepstack_language_layer_indices\":[0,1,2],\n\
+             \"deepstack_max_visual_positions\":64",
+        );
+        let error = Config::from_json_str(&overridden)
+            .expect_err("architecture-defined mapping must reject overrides");
+        assert!(error.contains("architecture-defined"));
     }
 
     #[test]

@@ -20,7 +20,7 @@ use super::super::xla_audio_preprocess::{
     AudioPreprocessJob, AudioPreprocessOutcome, AudioPreprocessResult, AudioQueueError,
 };
 use super::super::xla_preprocess::{
-    ImagePreprocessJob, ImagePreprocessOutcome, ImagePreprocessResult,
+    ImagePreprocessJob, ImagePreprocessOutcome, ImagePreprocessResult, PreparedImagePrefill,
 };
 use super::*;
 
@@ -327,7 +327,7 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
         let _ = response_tx.send(GenerateEvent::Done(detok.finish(start, prompt_len, 0)));
     }
 
-    fn handle_preprocessed(&mut self, result: ImagePreprocessResult) {
+    pub(super) fn handle_preprocessed(&mut self, result: ImagePreprocessResult) {
         let Some(state) = self.pending_images.remove(&result.job_id) else {
             return;
         };
@@ -349,12 +349,19 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
             return;
         }
 
-        let effective_prefill_len = prepared.sequence_len;
+        let effective_prefill_len = prepared.sequence_len();
         let prompt_token_count = state.prompt_tokens.len();
-        match self
-            .engine
-            .submit_prepared(prepared, state.max_tokens, state.params)
-        {
+        let submitted = match prepared {
+            PreparedImagePrefill::Standard(prepared) => {
+                self.engine
+                    .submit_prepared(prepared, state.max_tokens, state.params)
+            }
+            PreparedImagePrefill::DeepStack(request) => {
+                self.engine
+                    .submit_deepstack_prepared(request, state.max_tokens, state.params)
+            }
+        };
+        match submitted {
             Ok(req_id) => {
                 // Internal throughput/KV accounting uses the expanded prepared
                 // length; the API result below retains the logical prompt count.
