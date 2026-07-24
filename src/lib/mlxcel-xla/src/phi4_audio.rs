@@ -20,6 +20,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::File;
+use std::io::Read;
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -120,16 +121,65 @@ fn generation_identity(compiler: &Path, flags: &[&str], graph: &str) -> Result<S
             String::from_utf8_lossy(&version.stderr)
         ));
     }
-    let graph_digest = Sha256::digest(graph.as_bytes());
-    let graph_digest = graph_digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    Ok(format!(
-        "compiler={};version={};flags={flags:?};stablehlo_sha256={graph_digest}",
-        compiler.display(),
+    generation_identity_from_version(
+        compiler,
+        flags,
+        graph,
         String::from_utf8_lossy(&version.stdout).trim(),
+    )
+}
+
+fn generation_identity_from_version(
+    compiler: &Path,
+    flags: &[&str],
+    graph: &str,
+    version: &str,
+) -> Result<String, String> {
+    Ok(format!(
+        "compiler={};compiler_sha256={};version={version};flags={flags:?};stablehlo_sha256={}",
+        compiler.display(),
+        sha256_file(compiler)?,
+        sha256_hex(graph.as_bytes()),
     ))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write;
+        write!(output, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    output
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut file = File::open(path).map_err(|error| format!("open {}: {error}", path.display()))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("read {}: {error}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(sha256_hex(&digest.finalize()))
+}
+
+fn validate_finite_values(label: &str, values: &[f32]) -> Result<(), String> {
+    if let Some((index, value)) = values
+        .iter()
+        .enumerate()
+        .find(|(_, value)| !value.is_finite())
+    {
+        return Err(format!(
+            "{label} contains non-finite value {value} at flat index {index}"
+        ));
+    }
+    Ok(())
 }
 
 fn resolve_weight_shards(model_dir: &Path, names: &[String]) -> Result<Vec<PathBuf>, String> {
@@ -249,6 +299,7 @@ fn load_audio_weights(
                     values.len()
                 ));
             }
+            validate_finite_values(&format!("Phi4MM audio weight `{}`", spec.name), &values)?;
             loaded[index] = Some(AuxiliaryWeight {
                 name: spec.name.clone(),
                 bytes: f32_bytes(&values),
@@ -664,13 +715,13 @@ mod tests {
         }
     }
 
-    fn temporary_audio_vmfb() -> PathBuf {
+    fn temporary_audio_path(suffix: &str) -> PathBuf {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock must be after the Unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "mlxcel-phi4mm-audio-cache-test-{}-{nonce}.vmfb",
+            "mlxcel-phi4mm-audio-cache-test-{}-{nonce}.{suffix}",
             std::process::id(),
         ))
     }
@@ -694,7 +745,7 @@ mod tests {
 
     #[test]
     fn audio_contract_reuses_qualified_cache_and_rebuilds_stale_pair_once() {
-        let vmfb = temporary_audio_vmfb();
+        let vmfb = temporary_audio_path("vmfb");
         let weights = vec![AuxiliaryWeight {
             name: "model.embed_tokens_extend.audio_embed.weight".to_string(),
             bytes: 1.0f32.to_ne_bytes().to_vec(),
@@ -742,5 +793,58 @@ mod tests {
 
         std::fs::remove_file(auxiliary_manifest_path(&vmfb)).ok();
         std::fs::remove_file(vmfb).ok();
+    }
+
+    #[test]
+    fn compiler_binary_replacement_at_same_path_and_version_rebuilds_audio_cache() {
+        let compiler = temporary_audio_path("compiler");
+        let vmfb = temporary_audio_path("compiler-digest.vmfb");
+        let weights = vec![AuxiliaryWeight {
+            name: "weight".to_string(),
+            bytes: 1.0f32.to_ne_bytes().to_vec(),
+            dtype: AuxiliaryWeightDType::Float32,
+            shape: vec![1],
+        }];
+        std::fs::write(&compiler, b"compiler-build-a").unwrap();
+        let first_generation =
+            generation_identity_from_version(&compiler, &["--target=cpu"], "mlir", "v1").unwrap();
+        let first_contract =
+            AuxiliaryArtifactContract::new("audio.main", "config=v1", &first_generation).unwrap();
+        let mut compile_count = 0usize;
+        ensure_qualified_auxiliary_artifact(&vmfb, &first_contract, &weights, |temporary| {
+            compile_count += 1;
+            std::fs::write(temporary, b"vmfb-a")
+                .map_err(|error| format!("write test VMFB: {error}"))
+        })
+        .unwrap();
+
+        std::fs::write(&compiler, b"compiler-build-b").unwrap();
+        let second_generation =
+            generation_identity_from_version(&compiler, &["--target=cpu"], "mlir", "v1").unwrap();
+        assert_ne!(first_generation, second_generation);
+        let second_contract =
+            AuxiliaryArtifactContract::new("audio.main", "config=v1", second_generation).unwrap();
+        ensure_qualified_auxiliary_artifact(&vmfb, &second_contract, &weights, |temporary| {
+            compile_count += 1;
+            std::fs::write(temporary, b"vmfb-b")
+                .map_err(|error| format!("write test VMFB: {error}"))
+        })
+        .unwrap();
+
+        assert_eq!(compile_count, 2);
+        assert_eq!(std::fs::read(&vmfb).unwrap(), b"vmfb-b");
+        std::fs::remove_file(auxiliary_manifest_path(&vmfb)).ok();
+        std::fs::remove_file(vmfb).ok();
+        std::fs::remove_file(compiler).ok();
+    }
+
+    #[test]
+    fn audio_weight_values_reject_non_finite_before_native_upload() {
+        assert!(validate_finite_values("audio weight", &[0.0, -1.0, 3.0]).is_ok());
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let error = validate_finite_values("audio weight", &[0.0, value]).unwrap_err();
+            assert!(error.contains("audio weight"));
+            assert!(error.contains("flat index 1"));
+        }
     }
 }
