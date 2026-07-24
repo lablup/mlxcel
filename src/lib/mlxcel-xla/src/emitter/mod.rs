@@ -58,6 +58,8 @@ mod gemma3n_weights;
 mod model;
 mod moe;
 mod rope;
+mod vision;
+mod vision_config;
 
 #[cfg(test)]
 mod context_tests;
@@ -132,6 +134,10 @@ pub(crate) use model::{
     mrope_axis_selector, validate_prefill_embeddings_attention_bias,
     validate_prefill_embeddings_metadata,
 };
+#[allow(unused_imports)]
+pub(crate) use vision::emit_vision;
+#[allow(unused_imports)]
+pub(crate) use vision_config::{LlavaVisionConfig, VisionActivation, VisionWeightSpec};
 
 #[cfg(test)]
 mod tests {

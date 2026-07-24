@@ -780,6 +780,50 @@ impl Builder {
         Val { name: r, ty }
     }
 
+    /// Static NCHW/OIHW 2-D convolution with no padding or dilation.
+    ///
+    /// The vision emitter uses this for non-overlapping ViT patch extraction.
+    /// Keeping the checkpoint kernel in its canonical PyTorch `[out, in, h, w]`
+    /// layout makes this the single, documented tensor-layout boundary instead
+    /// of transposing a 4-D weight during loading.
+    pub fn convolution_nchw(&mut self, input: &Val, kernel: &Val, strides: [usize; 2]) -> Val {
+        assert_eq!(input.ty.shape.len(), 4, "convolution input must be NCHW");
+        assert_eq!(kernel.ty.shape.len(), 4, "convolution kernel must be OIHW");
+        assert_eq!(
+            input.ty.shape[1], kernel.ty.shape[1],
+            "convolution input channels must match the kernel"
+        );
+        let [batch, _, height, width] = input.ty.shape.as_slice() else {
+            unreachable!("rank checked above")
+        };
+        let [out_channels, _, kernel_h, kernel_w] = kernel.ty.shape.as_slice() else {
+            unreachable!("rank checked above")
+        };
+        assert!(
+            height >= kernel_h && width >= kernel_w,
+            "convolution kernel must fit the input"
+        );
+        let out_h = (height - kernel_h) / strides[0] + 1;
+        let out_w = (width - kernel_w) / strides[1] + 1;
+        let ty = Ty::new(vec![*batch, *out_channels, out_h, out_w], input.ty.elt);
+        let r = self.fresh();
+        self.line(format!(
+            "{r} = stablehlo.convolution({input}, {kernel}) dim_numbers = \
+             [b, f, 0, 1]x[o, i, 0, 1]->[b, f, 0, 1], window = \
+             {{stride = [{stride_h}, {stride_w}]}} \
+             {{batch_group_count = 1 : i64, feature_group_count = 1 : i64}} : \
+             ({input_ty}, {kernel_ty}) -> {output_ty}",
+            input = input.name,
+            kernel = kernel.name,
+            stride_h = strides[0],
+            stride_w = strides[1],
+            input_ty = input.ty.render(),
+            kernel_ty = kernel.ty.render(),
+            output_ty = ty.render(),
+        ));
+        Val { name: r, ty }
+    }
+
     /// Element-type conversion (`stablehlo.convert`), preserving shape. Used by
     /// the low-precision contraction path (f32 -> f16/bf16) and the int dequant
     /// path (ui32 -> f32, f16 -> f32).
