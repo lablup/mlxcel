@@ -1234,7 +1234,7 @@ mod tests {
             cfg.deepstack,
             Some(DeepStackConfig {
                 target_layer_indices: vec![0, 1, 2],
-                max_visual_positions: 64,
+                max_visual_positions: 128,
             })
         );
         assert_eq!(
