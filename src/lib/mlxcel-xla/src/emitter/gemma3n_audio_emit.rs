@@ -55,6 +55,8 @@ struct EncodeOutputs {
     projected_audio: Val,
     hard_audio: Val,
     projected_lengths: Val,
+    #[cfg(feature = "diagnostics")]
+    diagnostics: Vec<(String, Val)>,
 }
 
 struct MergeOutputs {
@@ -138,6 +140,7 @@ fn project_audio(
     text: &Gemma3nConfig,
     encoded: &Val,
     valid: &Val,
+    trace: &mut Trace,
 ) -> (Val, Val) {
     let soft = rms_norm(
         b,
@@ -146,28 +149,36 @@ fn project_audio(
         audio.rms_norm_eps,
     );
     let soft = round_bf16(b, &soft);
+    trace.push("soft_norm", &soft);
     let soft = b.linear_last(
         &soft,
         args.weight("embed_audio.embedding_projection.weight"),
     );
     let soft = round_bf16(b, &soft);
+    trace.push("soft_linear", &soft);
     let soft = rms_norm(b, &soft, None, audio.rms_norm_eps);
     let soft = round_bf16(b, &soft);
+    trace.push("soft_post_norm", &soft);
 
+    let hard_embedding = args.weight("embed_audio.embedding.weight");
+    trace.push("hard_embedding", hard_embedding);
     let hard = rms_norm(
         b,
-        args.weight("embed_audio.embedding.weight"),
+        hard_embedding,
         Some(args.weight("embed_audio.hard_embedding_norm.weight")),
         audio.rms_norm_eps,
     );
     let hard = round_bf16(b, &hard);
+    trace.push("hard_norm", &hard);
     let hard = b.linear_last(
         &hard,
         args.weight("embed_audio.embedding_projection.weight"),
     );
     let hard = round_bf16(b, &hard);
+    trace.push("hard_linear", &hard);
     let hard = rms_norm(b, &hard, None, audio.rms_norm_eps);
     let hard = round_bf16(b, &hard);
+    trace.push("hard_post_norm", &hard);
     let padding = b.slice(
         &hard,
         &[(audio.vocab_size - 1, audio.vocab_size), (0, text.hidden)],
@@ -298,13 +309,37 @@ fn build_encode(
     trace: &mut Trace,
 ) -> EncodeOutputs {
     let (encoded, valid, projected_lengths) = audio_encoder(b, args, audio, trace);
-    let (projected_audio, hard_audio) = project_audio(b, args, audio, text, &encoded, &valid);
+    let (projected_audio, hard_audio) =
+        project_audio(b, args, audio, text, &encoded, &valid, trace);
     trace.push("soft_projection", &projected_audio);
     trace.push("hard_projection", &hard_audio);
+    #[cfg(feature = "diagnostics")]
+    let diagnostics = [
+        "encoded_reduced",
+        "soft_norm",
+        "soft_linear",
+        "soft_post_norm",
+        "hard_embedding",
+        "hard_norm",
+        "hard_linear",
+        "hard_post_norm",
+    ]
+    .into_iter()
+    .map(|name| {
+        trace
+            .stages
+            .iter()
+            .find(|(stage, _)| stage == name)
+            .cloned()
+            .expect("selected Gemma3n audio diagnostic stage must exist")
+    })
+    .collect();
     EncodeOutputs {
         projected_audio,
         hard_audio,
         projected_lengths,
+        #[cfg(feature = "diagnostics")]
+        diagnostics,
     }
 }
 
@@ -340,15 +375,24 @@ fn render_encode(decls: &[Decl], b: &Builder, outputs: &EncodeOutputs) -> String
     let projected_ty = outputs.projected_audio.ty.render();
     let hard_ty = outputs.hard_audio.ty.render();
     let lengths_ty = outputs.projected_lengths.ty.render();
+    let mut output_types = vec![projected_ty, hard_ty, lengths_ty];
+    let mut output_values = vec![
+        outputs.projected_audio.name.clone(),
+        outputs.hard_audio.name.clone(),
+        outputs.projected_lengths.name.clone(),
+    ];
+    #[cfg(feature = "diagnostics")]
+    for (_, stage) in &outputs.diagnostics {
+        output_types.push(stage.ty.render());
+        output_values.push(stage.name.clone());
+    }
+    let output_types = output_types.join(", ");
+    let output_values = output_values.join(", ");
     format!(
-        "module @audio_encode {{\n  func.func public @main({signature}) -> ({projected_ty}, \
-         {hard_ty}, {lengths_ty}) {{\n{body}    return {projected}, {hard}, {lengths} : \
-         {projected_ty}, {hard_ty}, {lengths_ty}\n  }}\n}}\n",
+        "module @audio_encode {{\n  func.func public @main({signature}) -> ({output_types}) \
+         {{\n{body}    return {output_values} : {output_types}\n  }}\n}}\n",
         signature = signature(decls),
         body = b.body(),
-        projected = outputs.projected_audio.name,
-        hard = outputs.hard_audio.name,
-        lengths = outputs.projected_lengths.name,
     )
 }
 
@@ -363,17 +407,6 @@ fn render_merge(decls: &[Decl], b: &Builder, outputs: &MergeOutputs) -> String {
         body = b.body(),
         embeddings = outputs.embeddings.name,
         ple = outputs.dense_ple.name,
-    )
-}
-
-fn render_diagnostic(decls: &[Decl], b: &Builder, stage: &Val) -> String {
-    let stage_ty = stage.ty.render();
-    format!(
-        "module @audio_diagnostic {{\n  func.func public @main({signature}) -> {stage_ty} \
-         {{\n{body}    return {stage} : {stage_ty}\n  }}\n}}\n",
-        signature = signature(decls),
-        body = b.body(),
-        stage = stage.name,
     )
 }
 
@@ -427,38 +460,6 @@ pub(crate) fn emit_gemma3n_audio_merge_ple(
     let mut trace = Trace::new();
     let outputs = build_merge(&mut builder, &args, audio, text, &mut trace);
     Ok((render_merge(&decls, &builder, &outputs), trace.layout()))
-}
-
-#[cfg(feature = "diagnostics")]
-pub(crate) fn emit_gemma3n_audio_diagnostic(
-    text: &Gemma3nConfig,
-    audio: &Gemma3nXlaAudioConfig,
-    frame_bucket: usize,
-    clips: usize,
-    precision: Precision,
-    stage_name: &str,
-) -> Result<(String, Gemma3nAudioDiagnosticStage), String> {
-    audio.artifact_identity(
-        frame_bucket,
-        clips,
-        text.hidden,
-        text.n_layers,
-        text.hidden_per_layer_input,
-    )?;
-    let (decls, args) = build_encoder_schema(audio, text, frame_bucket, clips)?;
-    let mut builder = Builder::new().with_precision(precision);
-    let mut trace = Trace::new();
-    let _ = build_encode(&mut builder, &args, audio, text, &mut trace);
-    let (_, stage) = trace
-        .stages
-        .iter()
-        .find(|(name, _)| name == stage_name)
-        .ok_or_else(|| format!("unknown Gemma3n audio diagnostic stage `{stage_name}`"))?;
-    let metadata = Gemma3nAudioDiagnosticStage {
-        name: stage_name.to_string(),
-        shape: stage.ty.shape.clone(),
-    };
-    Ok((render_diagnostic(&decls, &builder, stage), metadata))
 }
 
 #[cfg(test)]

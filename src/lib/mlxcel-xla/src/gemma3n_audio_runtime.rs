@@ -4,7 +4,10 @@
 //! keeps the compiler at natural tensor boundaries while ensuring every model
 //! operation after host mel extraction still executes through IREE.
 
+#[cfg(feature = "diagnostics")]
+use std::collections::BTreeMap;
 use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -38,6 +41,12 @@ pub struct Gemma3nAudioGraphOutput {
     embeddings: Vec<f32>,
     dense_ple: Vec<f32>,
     projected_lengths: Vec<usize>,
+    #[cfg(feature = "diagnostics")]
+    projected_audio: Vec<f32>,
+    #[cfg(feature = "diagnostics")]
+    hard_audio: Vec<f32>,
+    #[cfg(feature = "diagnostics")]
+    diagnostics: BTreeMap<String, Vec<f32>>,
     context_capacity: usize,
     hidden_size: usize,
     layers: usize,
@@ -58,6 +67,24 @@ impl Gemma3nAudioGraphOutput {
     #[must_use]
     pub fn projected_lengths(&self) -> &[usize] {
         &self.projected_lengths
+    }
+
+    #[cfg(feature = "diagnostics")]
+    #[must_use]
+    pub fn projected_audio(&self) -> &[f32] {
+        &self.projected_audio
+    }
+
+    #[cfg(feature = "diagnostics")]
+    #[must_use]
+    pub fn hard_audio(&self) -> &[f32] {
+        &self.hard_audio
+    }
+
+    #[cfg(feature = "diagnostics")]
+    #[must_use]
+    pub fn diagnostic_stage(&self, name: &str) -> Option<&[f32]> {
+        self.diagnostics.get(name).map(Vec::as_slice)
     }
 
     #[must_use]
@@ -155,12 +182,17 @@ pub struct Gemma3nAudioIreeRuntime {
     layers: usize,
     hidden_per_layer: usize,
     language_fingerprint: u64,
+    #[cfg(feature = "diagnostics")]
+    diagnostic_shapes: Vec<(String, Vec<usize>)>,
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut result = String::with_capacity(digest.len() * 2);
-    for byte in digest {
+    hex_bytes(&Sha256::digest(bytes))
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    let mut result = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
         use std::fmt::Write;
         write!(result, "{byte:02x}").expect("writing to String cannot fail");
     }
@@ -179,12 +211,42 @@ fn generation_identity(compiler: &Path, flags: &[&str], mlir: &str) -> Result<St
             String::from_utf8_lossy(&version.stderr)
         ));
     }
-    Ok(format!(
-        "compiler={};version={};flags={flags:?};mlir-sha256={}",
-        compiler.display(),
+    generation_identity_from_version(
+        compiler,
+        flags,
+        mlir,
         String::from_utf8_lossy(&version.stdout).trim(),
+    )
+}
+
+fn generation_identity_from_version(
+    compiler: &Path,
+    flags: &[&str],
+    mlir: &str,
+    version: &str,
+) -> Result<String, String> {
+    Ok(format!(
+        "compiler={};compiler_sha256={};version={version};flags={flags:?};mlir_sha256={}",
+        compiler.display(),
+        sha256_file(compiler)?,
         sha256_hex(mlir.as_bytes())
     ))
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut file = File::open(path).map_err(|error| format!("open {}: {error}", path.display()))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("read {}: {error}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(hex_bytes(&digest.finalize()))
 }
 
 fn checkpoint_alias(name: &str) -> Option<String> {
@@ -282,7 +344,21 @@ fn decode_weight(
             spec.name, spec.shape
         ));
     }
+    validate_finite_values(&format!("Gemma3n auxiliary weight {}", spec.name), &values)?;
     Ok(values)
+}
+
+fn validate_finite_values(label: &str, values: &[f32]) -> Result<(), String> {
+    if let Some((index, value)) = values
+        .iter()
+        .enumerate()
+        .find(|(_, value)| !value.is_finite())
+    {
+        return Err(format!(
+            "{label} contains non-finite value {value} at flat index {index}"
+        ));
+    }
+    Ok(())
 }
 
 fn load_weights(
@@ -425,6 +501,25 @@ fn report_auxiliary_weights(label: &str, started: std::time::Instant, weights: &
 }
 
 impl Gemma3nAudioIreeRuntime {
+    #[cfg(feature = "diagnostics")]
+    pub fn load_audio_only_diagnostic(
+        model_dir: &Path,
+        device: &str,
+        context_capacity: usize,
+        frame_bucket: usize,
+        clips: usize,
+    ) -> Result<Self, String> {
+        const AUDIO_ONLY_DIAGNOSTIC_IDENTITY: u64 = 0x6175_6469_6f2d_6469;
+        Self::load(
+            model_dir,
+            device,
+            context_capacity,
+            frame_bucket,
+            clips,
+            AUDIO_ONLY_DIAGNOSTIC_IDENTITY,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn load(
         model_dir: &Path,
@@ -445,7 +540,7 @@ impl Gemma3nAudioIreeRuntime {
             .map_err(|error| error.to_string())?;
         report_load_timing("audio-config-and-schema-validation", load_started);
         let emit_started = std::time::Instant::now();
-        let (encode_mlir, _) =
+        let (encode_mlir, encode_layout) =
             emit_gemma3n_audio_encode(&text, &audio, frame_bucket, clips, Precision::Bf16)?;
         let (merge_mlir, _) = emit_gemma3n_audio_merge_ple(&text, &audio, clips, Precision::Bf16)?;
         report_load_timing("audio-stablehlo-emission", emit_started);
@@ -554,6 +649,29 @@ impl Gemma3nAudioIreeRuntime {
             IreeAuxiliaryModule::load(device, &merge_vmfb, &merge_contract, merge_weights)?;
         report_load_timing("audio-merge-vmfb-loaded", merge_module_started);
         report_load_timing("audio-total", load_started);
+        #[cfg(feature = "diagnostics")]
+        let diagnostic_shapes = [
+            "encoded_reduced",
+            "soft_norm",
+            "soft_linear",
+            "soft_post_norm",
+            "hard_embedding",
+            "hard_norm",
+            "hard_linear",
+            "hard_post_norm",
+        ]
+        .into_iter()
+        .map(|name| {
+            encode_layout
+                .stages
+                .iter()
+                .find(|stage| stage.name == name)
+                .map(|stage| (name.to_string(), stage.shape.clone()))
+                .ok_or_else(|| format!("Gemma3n audio diagnostic stage {name} is missing"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+        #[cfg(not(feature = "diagnostics"))]
+        let _ = encode_layout;
         Ok(Self {
             encode,
             merge_ple,
@@ -565,6 +683,8 @@ impl Gemma3nAudioIreeRuntime {
             layers: text.n_layers,
             hidden_per_layer: text.hidden_per_layer_input,
             language_fingerprint,
+            #[cfg(feature = "diagnostics")]
+            diagnostic_shapes,
         })
     }
 
@@ -611,19 +731,21 @@ impl Gemma3nAudioIreeRuntime {
         let mut hard = vec![0.0f32; self.audio.vocab_size * self.hidden_size];
         let mut lengths = vec![0i32; self.clips];
         let encode_started = std::time::Instant::now();
+        let encode_inputs = [
+            AuxiliaryInput {
+                bytes: f32_bytes(input.mel()),
+                dtype: AuxiliaryTensorDType::Float32,
+                shape: &[self.clips, self.frame_bucket, self.audio.input_feat_size],
+            },
+            AuxiliaryInput {
+                bytes: input.valid_mask(),
+                dtype: AuxiliaryTensorDType::Bool,
+                shape: &[self.clips, self.frame_bucket],
+            },
+        ];
+        #[cfg(not(feature = "diagnostics"))]
         self.encode.invoke(
-            &[
-                AuxiliaryInput {
-                    bytes: f32_bytes(input.mel()),
-                    dtype: AuxiliaryTensorDType::Float32,
-                    shape: &[self.clips, self.frame_bucket, self.audio.input_feat_size],
-                },
-                AuxiliaryInput {
-                    bytes: input.valid_mask(),
-                    dtype: AuxiliaryTensorDType::Bool,
-                    shape: &[self.clips, self.frame_bucket],
-                },
-            ],
+            &encode_inputs,
             &mut [
                 AuxiliaryOutput {
                     bytes: f32_bytes_mut(&mut projected),
@@ -642,6 +764,48 @@ impl Gemma3nAudioIreeRuntime {
                 },
             ],
         )?;
+        #[cfg(feature = "diagnostics")]
+        let diagnostics = {
+            let diagnostic_shapes = self.diagnostic_shapes.clone();
+            let mut diagnostic_values = diagnostic_shapes
+                .iter()
+                .map(|(_, shape)| vec![0.0f32; shape.iter().product()])
+                .collect::<Vec<_>>();
+            let projected_shape = [projected_rows, self.hidden_size];
+            let hard_shape = [self.audio.vocab_size, self.hidden_size];
+            let lengths_shape = [self.clips];
+            let mut outputs = vec![
+                AuxiliaryOutput {
+                    bytes: f32_bytes_mut(&mut projected),
+                    dtype: AuxiliaryTensorDType::Float32,
+                    shape: &projected_shape,
+                },
+                AuxiliaryOutput {
+                    bytes: f32_bytes_mut(&mut hard),
+                    dtype: AuxiliaryTensorDType::Float32,
+                    shape: &hard_shape,
+                },
+                AuxiliaryOutput {
+                    bytes: i32_bytes_mut(&mut lengths),
+                    dtype: AuxiliaryTensorDType::Int32,
+                    shape: &lengths_shape,
+                },
+            ];
+            for (values, (_, shape)) in diagnostic_values.iter_mut().zip(diagnostic_shapes.iter()) {
+                outputs.push(AuxiliaryOutput {
+                    bytes: f32_bytes_mut(values),
+                    dtype: AuxiliaryTensorDType::Float32,
+                    shape,
+                });
+            }
+            self.encode.invoke(&encode_inputs, &mut outputs)?;
+            drop(outputs);
+            diagnostic_shapes
+                .into_iter()
+                .map(|(name, _)| name)
+                .zip(diagnostic_values)
+                .collect::<BTreeMap<_, _>>()
+        };
         report_load_timing("audio-encoder-invoke", encode_started);
         let projected_lengths = lengths
             .into_iter()
@@ -713,6 +877,12 @@ impl Gemma3nAudioIreeRuntime {
             embeddings,
             dense_ple,
             projected_lengths,
+            #[cfg(feature = "diagnostics")]
+            projected_audio: projected,
+            #[cfg(feature = "diagnostics")]
+            hard_audio: hard,
+            #[cfg(feature = "diagnostics")]
+            diagnostics,
             context_capacity: self.context_capacity,
             hidden_size: self.hidden_size,
             layers: self.layers,
@@ -742,6 +912,18 @@ impl Gemma3nAudioIreeRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aux_manifest::auxiliary_manifest_path;
+
+    fn temp_path(tag: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock must be after the Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "mlxcel-xla-audio-{tag}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
 
     #[test]
     fn output_moves_into_request_scoped_dense_ple_owner() {
@@ -753,6 +935,12 @@ mod tests {
             embeddings: vec![0.25; context_capacity * 2],
             dense_ple: vec![0.5; context_capacity * 2],
             projected_lengths: vec![GEMMA3N_AUDIO_SOFT_TOKENS],
+            #[cfg(feature = "diagnostics")]
+            projected_audio: Vec::new(),
+            #[cfg(feature = "diagnostics")]
+            hard_audio: Vec::new(),
+            #[cfg(feature = "diagnostics")]
+            diagnostics: BTreeMap::new(),
             context_capacity,
             hidden_size: 2,
             layers: 1,
@@ -782,5 +970,71 @@ mod tests {
         .err()
         .expect("zero identity must fail");
         assert!(error.contains("verified #876 language bundle"));
+    }
+
+    #[test]
+    fn compiler_binary_replacement_at_same_path_and_version_rebuilds_cache() {
+        let compiler = temp_path("compiler");
+        let vmfb = temp_path("compiler-digest").with_extension("vmfb");
+        let weights = vec![AuxiliaryWeight {
+            name: "weight".to_string(),
+            storage: AuxiliaryWeightStorage::Bytes(1.0f32.to_ne_bytes().to_vec()),
+            dtype: AuxiliaryWeightDType::Float32,
+            shape: vec![1],
+        }];
+        std::fs::write(&compiler, b"compiler-build-a").unwrap();
+        let first_generation =
+            generation_identity_from_version(&compiler, &["--target=cuda"], "mlir", "v1").unwrap();
+        assert!(first_generation.contains(&sha256_hex(b"compiler-build-a")));
+        let first_contract =
+            AuxiliaryArtifactContract::new("audio.main", "config=v1", &first_generation).unwrap();
+        let mut compile_count = 0usize;
+        ensure_qualified_auxiliary_artifact(&vmfb, &first_contract, &weights, |temporary| {
+            compile_count += 1;
+            std::fs::write(temporary, b"vmfb-a")
+                .map_err(|error| format!("write test VMFB: {error}"))
+        })
+        .unwrap();
+
+        std::fs::write(&compiler, b"compiler-build-b").unwrap();
+        let second_generation =
+            generation_identity_from_version(&compiler, &["--target=cuda"], "mlir", "v1").unwrap();
+        assert_ne!(first_generation, second_generation);
+        let second_contract =
+            AuxiliaryArtifactContract::new("audio.main", "config=v1", second_generation).unwrap();
+        ensure_qualified_auxiliary_artifact(&vmfb, &second_contract, &weights, |temporary| {
+            compile_count += 1;
+            std::fs::write(temporary, b"vmfb-b")
+                .map_err(|error| format!("write test VMFB: {error}"))
+        })
+        .unwrap();
+        assert_eq!(compile_count, 2);
+        assert_eq!(std::fs::read(&vmfb).unwrap(), b"vmfb-b");
+
+        std::fs::remove_file(auxiliary_manifest_path(&vmfb)).ok();
+        std::fs::remove_file(vmfb).ok();
+        std::fs::remove_file(compiler).ok();
+    }
+
+    #[test]
+    fn decoded_audio_weights_reject_non_finite_values_before_native_upload() {
+        let bf16_nan = bf16_to_f32(&0x7fc0u16.to_le_bytes());
+        let f16_nan = f16_to_f32(&0x7e00u16.to_le_bytes());
+        let f32_nan = f32_le_to_f32(&f32::NAN.to_le_bytes());
+        let q4_infinite =
+            dequantize_affine_bf16_fused(&[0; 4], &0x7f80u16.to_le_bytes(), &[0; 2], 1, 1, 4, 8)
+                .unwrap();
+
+        for (dtype, values) in [
+            ("BF16", bf16_nan),
+            ("F16", f16_nan),
+            ("F32", f32_nan),
+            ("Q4", q4_infinite),
+        ] {
+            let error = validate_finite_values(dtype, &values).unwrap_err();
+            assert!(error.contains(dtype));
+            assert!(error.contains("non-finite"));
+            assert!(error.contains("flat index 0"));
+        }
     }
 }

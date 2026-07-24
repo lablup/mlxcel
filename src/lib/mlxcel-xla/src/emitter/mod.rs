@@ -81,10 +81,6 @@ pub(crate) use config::{
 pub(crate) use gemma3n::{
     Gemma3nConfig, Gemma3nLayerType, Gemma3nPleDType, Gemma3nPleMetadata, validate_gemma3n_ple,
 };
-#[cfg(feature = "diagnostics")]
-pub(crate) use gemma3n_audio_emit::emit_gemma3n_audio_diagnostic;
-#[cfg(feature = "diagnostics")]
-pub use gemma3n_audio_emit::{Gemma3nAudioDiagnosticLayout, Gemma3nAudioDiagnosticStage};
 #[allow(unused_imports)]
 pub(crate) use gemma3n_audio_emit::{emit_gemma3n_audio_encode, emit_gemma3n_audio_merge_ple};
 #[allow(unused_imports)]

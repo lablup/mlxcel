@@ -39,7 +39,7 @@ fn split_audio_graphs_preserve_stage_and_weight_boundaries() {
     assert!(encode.contains("\"stablehlo.reduce_window\""));
     assert!(!encode.contains("loc(\"audio.hard_embeddings\")"));
     assert!(!encode.contains("model.language_model."));
-    assert_eq!(encode_layout.stages.len(), 3 + 12 * 5 + 3);
+    assert_eq!(encode_layout.stages.len(), 3 + 12 * 5 + 10);
     for name in [
         "sscp_conv_0",
         "sscp_conv_1",
@@ -47,6 +47,13 @@ fn split_audio_graphs_preserve_stage_and_weight_boundaries() {
         "conformer.0.feed_forward_start",
         "conformer.11.final_norm",
         "encoded_reduced",
+        "soft_norm",
+        "soft_linear",
+        "soft_post_norm",
+        "hard_embedding",
+        "hard_norm",
+        "hard_linear",
+        "hard_post_norm",
         "soft_projection",
         "hard_projection",
     ] {

@@ -20,6 +20,8 @@
 
 mod attention;
 mod config;
+#[cfg(feature = "xla-diagnostics")]
+mod diagnostics;
 mod encoder;
 mod feature_extractor;
 #[cfg(feature = "xla-backend")]
@@ -86,6 +88,8 @@ pub(crate) fn checked_unified_linear(
 }
 
 pub use config::Gemma3nAudioConfig;
+#[cfg(feature = "xla-diagnostics")]
+pub use diagnostics::{Gemma3nAudioMlxDiagnosticOutput, run_gemma3n_audio_mlx_diagnostics};
 pub use encoder::Gemma3nAudioEncoder;
 pub use feature_extractor::{
     GEMMA3N_AUDIO_SOFT_TOKENS, GEMMA3N_MAX_SAMPLES, GEMMA3N_SAMPLE_RATE, Gemma3nAudioFeatureBatch,
