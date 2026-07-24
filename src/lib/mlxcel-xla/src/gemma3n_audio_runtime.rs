@@ -651,6 +651,7 @@ impl Gemma3nAudioIreeRuntime {
         report_load_timing("audio-total", load_started);
         #[cfg(feature = "diagnostics")]
         let diagnostic_shapes = [
+            "sscp_conv_0",
             "encoded_reduced",
             "soft_norm",
             "soft_linear",

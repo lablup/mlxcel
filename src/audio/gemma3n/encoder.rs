@@ -246,6 +246,19 @@ impl SubSampleConvProjection {
         let x = mlxcel_core::reshape(&x, &[shape[0], shape[1], shape[2] * shape[3]]);
         Ok(self.input_projection.forward(&x))
     }
+
+    #[cfg(feature = "xla-diagnostics")]
+    fn forward_with_conv0(
+        &self,
+        audio_mel: &MlxArray,
+    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>), String> {
+        let x = mlxcel_core::expand_dims(audio_mel, -1);
+        let conv0 = self.conv0.forward(&x)?;
+        let x = self.conv1.forward(&conv0)?;
+        let shape = mlxcel_core::array_shape(&x);
+        let x = mlxcel_core::reshape(&x, &[shape[0], shape[1], shape[2] * shape[3]]);
+        Ok((self.input_projection.forward(&x), conv0))
+    }
 }
 
 fn clip_gradient(x: &MlxArray, limit: f32) -> UniquePtr<MlxArray> {
@@ -624,11 +637,11 @@ impl Gemma3nAudioEncoder {
         mlxcel_core::take(mask, &mlxcel_core::from_slice_i32(&indices, &[length]), 1)
     }
 
-    pub fn forward(
+    fn validate_input_shapes(
         &self,
         audio_mel: &MlxArray,
         invalid_mel_mask: &MlxArray,
-    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>), String> {
+    ) -> Result<(), String> {
         let mel_shape = mlxcel_core::array_shape(audio_mel);
         let mask_shape = mlxcel_core::array_shape(invalid_mel_mask);
         if mel_shape.len() != 3
@@ -640,8 +653,14 @@ impl Gemma3nAudioEncoder {
                 self.config.input_feat_size
             ));
         }
+        Ok(())
+    }
 
-        let mut encodings = self.subsample.forward(audio_mel)?;
+    fn finish_forward(
+        &self,
+        mut encodings: UniquePtr<MlxArray>,
+        invalid_mel_mask: &MlxArray,
+    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>), String> {
         let mut invalid_mask = Self::stride_mask(
             invalid_mel_mask,
             self.config.time_stride_product(),
@@ -673,6 +692,35 @@ impl Gemma3nAudioEncoder {
             &encodings,
         );
         Ok((encodings, invalid_mask))
+    }
+
+    pub fn forward(
+        &self,
+        audio_mel: &MlxArray,
+        invalid_mel_mask: &MlxArray,
+    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>), String> {
+        self.validate_input_shapes(audio_mel, invalid_mel_mask)?;
+        let encodings = self.subsample.forward(audio_mel)?;
+        self.finish_forward(encodings, invalid_mel_mask)
+    }
+
+    #[cfg(feature = "xla-diagnostics")]
+    pub(super) fn forward_with_sscp_conv0_diagnostic(
+        &self,
+        audio_mel: &MlxArray,
+        invalid_mel_mask: &MlxArray,
+    ) -> Result<
+        (
+            UniquePtr<MlxArray>,
+            UniquePtr<MlxArray>,
+            UniquePtr<MlxArray>,
+        ),
+        String,
+    > {
+        self.validate_input_shapes(audio_mel, invalid_mel_mask)?;
+        let (encodings, sscp_conv0) = self.subsample.forward_with_conv0(audio_mel)?;
+        let (encoded, invalid) = self.finish_forward(encodings, invalid_mel_mask)?;
+        Ok((encoded, invalid, sscp_conv0))
     }
 }
 

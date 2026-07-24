@@ -235,6 +235,7 @@ fn main() -> Result<(), String> {
     }
 
     let stage_values = [
+        ("sscp_conv_0", mlx.sscp_conv_0.as_slice()),
         ("encoded_reduced", mlx.encoded_reduced.as_slice()),
         ("soft_norm", mlx.soft_norm.as_slice()),
         ("soft_linear", mlx.soft_linear.as_slice()),

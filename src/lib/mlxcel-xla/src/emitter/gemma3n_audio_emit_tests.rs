@@ -76,6 +76,68 @@ fn split_audio_graphs_preserve_stage_and_weight_boundaries() {
     );
 }
 
+#[test]
+fn first_sscp_convolution_rounds_mel_inputs_before_accumulation() {
+    fn synthetic_convolution(input: &[f32], weights: &[f32], pre_cast: bool) -> f32 {
+        let sum = input
+            .iter()
+            .zip(weights)
+            .map(|(&value, &weight)| {
+                let value = if pre_cast {
+                    crate::weights::round_bf16_f32(value)
+                } else {
+                    value
+                };
+                value * crate::weights::round_bf16_f32(weight)
+            })
+            .sum::<f32>();
+        crate::weights::round_bf16_f32(sum)
+    }
+
+    // Both values map to 1.0 in BF16, so the maintained MLX pre-cast cancels
+    // them exactly. Rounding only after the convolution preserves the small
+    // F32 difference and therefore produces a distinct non-zero output.
+    let input = [1.003, 1.0];
+    let weights = [1.0, -1.0];
+    let pre_cast = synthetic_convolution(&input, &weights, true);
+    let post_conv_only = synthetic_convolution(&input, &weights, false);
+    assert_eq!(pre_cast, 0.0);
+    assert_ne!(post_conv_only, 0.0);
+
+    // Pin that same semantic boundary in the emitted graph even when global
+    // contraction precision is F32: the reshaped mel is narrowed to BF16 and
+    // widened back before padding feeds the first convolution.
+    let (encode, _) = emit_gemma3n_audio_encode(
+        &text(),
+        &Gemma3nXlaAudioConfig::default(),
+        8,
+        1,
+        Precision::F32,
+    )
+    .unwrap();
+    let first_convolution = encode
+        .find("\"stablehlo.convolution\"")
+        .expect("Gemma3n audio graph must contain SSCP convolution");
+    let prefix = &encode[..first_convolution];
+    let narrow = prefix
+        .find(
+            "stablehlo.convert %0 : (tensor<1x8x128x1xf32>) -> \
+             tensor<1x8x128x1xbf16>",
+        )
+        .expect("mel input must narrow to BF16 before the first SSCP convolution");
+    let widen = prefix[narrow..]
+        .find(
+            "stablehlo.convert %1 : (tensor<1x8x128x1xbf16>) -> \
+             tensor<1x8x128x1xf32>",
+        )
+        .expect("BF16 mel input must widen to the graph's F32 carrier");
+    let pad = prefix[narrow + widen..]
+        .find("\"stablehlo.pad\"(%2")
+        .expect("the first SSCP padding must consume BF16-rounded mel");
+    assert!(widen > 0);
+    assert!(pad > 0);
+}
+
 fn compile(compiler: &std::ffi::OsStr, device: &str, stem: &str, artifact: &str, mlir: String) {
     let input = std::env::temp_dir().join(format!("{stem}-{artifact}.mlir"));
     let output = std::env::temp_dir().join(format!("{stem}-{artifact}.vmfb"));

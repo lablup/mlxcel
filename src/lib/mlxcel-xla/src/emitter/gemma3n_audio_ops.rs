@@ -91,6 +91,12 @@ fn subsample_convs(
     let time = args.mel.ty.shape[1];
     let frequency = args.mel.ty.shape[2];
     let x = b.reshape(&args.mel, vec![batch, time, frequency, 1]);
+    // The maintained MLX path explicitly casts processor-produced F32 mel
+    // features to `conv_0.weight.dtype` (BF16 in released checkpoints) before
+    // the first SSCP convolution. Keep this boundary explicit instead of
+    // relying on the graph-wide contraction precision: post-convolution
+    // rounding cannot recover the products formed from BF16-rounded inputs.
+    let x = round_bf16(b, &x);
     let root = "audio_tower.subsample_conv_projection";
 
     let conv0 = sscp_conv(

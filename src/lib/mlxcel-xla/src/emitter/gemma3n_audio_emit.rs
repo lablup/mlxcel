@@ -315,6 +315,7 @@ fn build_encode(
     trace.push("hard_projection", &hard_audio);
     #[cfg(feature = "diagnostics")]
     let diagnostics = [
+        "sscp_conv_0",
         "encoded_reduced",
         "soft_norm",
         "soft_linear",
