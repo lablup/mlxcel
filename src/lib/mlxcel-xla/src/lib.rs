@@ -52,6 +52,7 @@ use mlxcel_core::session::{InferenceSession, PreparedPrefill, SessionCapabilitie
 mod context;
 #[cfg(any(feature = "diagnostics", test))]
 mod diagnostic_flags;
+mod gemma3n_audio_config;
 #[cfg(any(feature = "iree", test))]
 #[allow(dead_code)]
 mod numeric_dtype_contract;
@@ -67,6 +68,7 @@ mod operator_numeric_contract;
 mod prepared;
 mod prepared_deepstack;
 mod prepared_gemma3n;
+mod prepared_gemma3n_audio;
 
 #[cfg(feature = "iree")]
 mod aux;
@@ -207,10 +209,19 @@ pub fn dequantize_gemma3n_affine_diagnostic(
 }
 #[cfg(feature = "diagnostics")]
 pub use emitter::{Gemma3nDiagnosticLayout, Gemma3nDiagnosticSegment};
+pub use gemma3n_audio_config::{
+    GEMMA3N_AUDIO_FRAME_BUCKETS, GEMMA3N_AUDIO_GRAPH_ABI, GEMMA3N_AUDIO_MAX_CLIPS,
+    GEMMA3N_AUDIO_MAX_FRAMES, GEMMA3N_AUDIO_MEL_BINS, GEMMA3N_AUDIO_MODALITY_FAMILY,
+    GEMMA3N_AUDIO_SOFT_TOKENS, Gemma3nXlaAudioConfig,
+};
 #[cfg(feature = "iree")]
 pub use prepared::PreparedInputError;
 pub use prepared_deepstack::{DeepStackFeatures, DeepStackInputError, DeepStackPreparedPrefill};
 pub use prepared_gemma3n::{Gemma3nDensePle, Gemma3nDensePleError, Gemma3nPreparedPrefill};
+pub use prepared_gemma3n_audio::{
+    Gemma3nAudioInput, Gemma3nAudioInputError, Gemma3nAudioPreparedPrefill,
+    select_gemma3n_audio_frame_bucket,
+};
 #[cfg(feature = "iree")]
 pub use sampler::SampleParams;
 
