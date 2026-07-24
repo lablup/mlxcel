@@ -48,14 +48,12 @@ use mlxcel_core::session::{
 #[cfg(feature = "iree")]
 use std::path::Path;
 
-#[cfg(feature = "iree")]
-use crate::DeepStackPreparedPrefill;
 use crate::Gemma3nDensePle;
 #[cfg(feature = "iree")]
 use crate::Gemma3nPreparedPrefill;
 #[cfg(feature = "iree")]
 use crate::iree::{IreeLlama, IreeRaggedLlama};
-#[cfg(feature = "iree")]
+#[cfg(any(feature = "iree", test))]
 use crate::prepared::PreparedPositionMode;
 use crate::prepared::{
     MropeCoordinateError, PreparedInputError, PreparedIreePrefill, mrope_decode_coordinate,
@@ -65,6 +63,8 @@ use crate::sampler::SampleParams;
 #[cfg(feature = "iree")]
 use crate::sampler::sample;
 use crate::{ContextCapacityError, validate_request_capacity};
+#[cfg(any(feature = "iree", test))]
+use crate::{DeepStackFeatures, DeepStackPreparedPrefill};
 
 /// Typed validation failure returned before a request enters the scheduler.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -403,6 +403,28 @@ fn queue_deepstack_prepared_request(
     ))
 }
 
+#[cfg(any(feature = "iree", test))]
+fn prepare_deepstack_input<F>(
+    request: DeepStackPreparedPrefill,
+    hidden_size: usize,
+    context_capacity: usize,
+    position_mode: PreparedPositionMode,
+    prepare_features: F,
+) -> Result<(PreparedIreePrefill, PreparedDeepStack), XlaAdmissionError>
+where
+    F: FnOnce(&DeepStackFeatures) -> Result<PreparedDeepStack, String>,
+{
+    let (prepared, features) = request.into_parts();
+    let deepstack = prepare_features(&features).map_err(XlaAdmissionError::DeepStackPrepared)?;
+    let prepared = PreparedIreePrefill::prepare_for_mode(
+        &prepared,
+        hidden_size,
+        context_capacity,
+        position_mode,
+    )?;
+    Ok((prepared, deepstack))
+}
+
 /// The continuous-batching engine: `B_max` slots over one ragged decode graph,
 /// fed by a FIFO queue. See the module docs.
 #[cfg(feature = "iree")]
@@ -566,16 +588,14 @@ impl XlaBatchEngine {
         params: SampleParams,
     ) -> Result<u64, XlaAdmissionError> {
         let context_capacity = self.context_capacity();
-        let (prepared, features) = request.into_parts();
-        let deepstack = self
-            .engine
-            .prepare_deepstack(&features)
-            .map_err(XlaAdmissionError::DeepStackPrepared)?;
-        let prepared = PreparedIreePrefill::prepare_for_mode(
-            &prepared,
-            self.engine.hidden_size(),
+        let hidden_size = self.engine.hidden_size();
+        let position_mode = self.engine.position_mode();
+        let (prepared, deepstack) = prepare_deepstack_input(
+            request,
+            hidden_size,
             context_capacity,
-            self.engine.position_mode(),
+            position_mode,
+            |features| self.engine.prepare_deepstack(features),
         )?;
         queue_deepstack_prepared_request(
             &mut self.sched,
@@ -1191,6 +1211,92 @@ mod tests {
         PreparedIreePrefill::prepare(&value, hidden, capacity).unwrap()
     }
 
+    fn tensor_i32(shape: &[usize], values: &[i32]) -> OwnedTensor {
+        OwnedTensor::new(
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
+            PreparedTensorDType::Int32,
+            shape.to_vec(),
+        )
+        .unwrap()
+    }
+
+    fn tensor_f32(shape: &[usize], values: &[f32]) -> OwnedTensor {
+        OwnedTensor::new(
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect(),
+            PreparedTensorDType::Float32,
+            shape.to_vec(),
+        )
+        .unwrap()
+    }
+
+    fn public_deepstack_input(rope_delta: i32) -> (PreparedIreePrefill, PreparedDeepStack) {
+        let sequence = 4;
+        let hidden = 2;
+        let prepared = mlxcel_core::session::PreparedPrefill::new(
+            vec![1, 2, 3, 4],
+            tensor_f32(&[1, sequence, hidden], &[0.0; 8]),
+            PreparedPositions::Mrope3D {
+                tensor: tensor_i32(&[3, sequence], &[0, 1, 2, 3, 0, 1, 3, 3, 0, 2, 2, 3]),
+                rope_delta,
+            },
+            PreparedAttentionBias {
+                tensor: tensor_f32(&[1, 1, 1, sequence], &[0.0; 4]),
+                causal: true,
+            },
+            vec![PreparedModality {
+                family: "deepstack-test".into(),
+                item_count: 1,
+                token_count: 1,
+            }],
+        )
+        .unwrap();
+        let features = DeepStackFeatures::new(
+            tensor_i32(&[1], &[1]),
+            tensor_f32(&[1, 1, hidden], &[0.25, -0.5]),
+            tensor_i32(&[1], &[0]),
+        )
+        .unwrap();
+        let request = DeepStackPreparedPrefill::new(prepared, features).unwrap();
+        let schema = crate::emitter::DeepStackConfig {
+            target_layer_indices: vec![0],
+            max_visual_positions: 2,
+        };
+        prepare_deepstack_input(
+            request,
+            hidden,
+            8,
+            PreparedPositionMode::Mrope3D,
+            |features| {
+                PreparedDeepStack::prepare(features, &schema, hidden)
+                    .map_err(|error| error.to_string())
+            },
+        )
+        .unwrap()
+    }
+
+    fn admit_next(scheduler: &mut Scheduler, slot_index: usize) -> u64 {
+        let pending = scheduler.pop_next_pending().expect("pending request");
+        let req_id = pending.req_id;
+        scheduler.slots[slot_index] = Some(Slot {
+            req_id,
+            cur: 7,
+            cache_len: pending.input.effective_len() as i32,
+            rope_delta: pending.input.rope_delta(),
+            produced: 1,
+            cap: pending.cap,
+            params: pending.params,
+            rng: 0,
+            history: Vec::new(),
+        });
+        req_id
+    }
+
     fn gemma3n_input(tokens: Vec<i32>) -> PendingInput {
         PendingInput::Gemma3nPrepared {
             prepared: prepared_input(tokens, 2, 8),
@@ -1317,6 +1423,70 @@ mod tests {
         ));
         assert_eq!(fourth.input.logical_tokens(), &[12, 13, 14]);
         assert_eq!(fourth.input.effective_len(), 3);
+    }
+
+    #[test]
+    fn public_deepstack_deltas_survive_pending_slots_and_zero_on_reuse() {
+        let mut scheduler = Scheduler::new(3, EOS.to_vec());
+        let (negative_prepared, negative_features) = public_deepstack_input(-1);
+        let negative = queue_deepstack_prepared_request(
+            &mut scheduler,
+            negative_prepared,
+            negative_features,
+            4,
+            g(),
+            8,
+        )
+        .unwrap();
+        let (positive_prepared, positive_features) = public_deepstack_input(2);
+        let positive = queue_deepstack_prepared_request(
+            &mut scheduler,
+            positive_prepared,
+            positive_features,
+            4,
+            g(),
+            8,
+        )
+        .unwrap();
+        let (zero_prepared, zero_features) = public_deepstack_input(0);
+        let zero = queue_deepstack_prepared_request(
+            &mut scheduler,
+            zero_prepared,
+            zero_features,
+            4,
+            g(),
+            8,
+        )
+        .unwrap();
+
+        assert_eq!(
+            scheduler
+                .queue
+                .iter()
+                .map(|pending| (pending.req_id, pending.input.rope_delta()))
+                .collect::<Vec<_>>(),
+            vec![(negative, -1), (positive, 2), (zero, 0)],
+            "the scheduler must own each public request's signed delta while pending"
+        );
+
+        assert_eq!(admit_next(&mut scheduler, 0), negative);
+        assert_eq!(admit_next(&mut scheduler, 1), positive);
+        assert_eq!(admit_next(&mut scheduler, 2), zero);
+        assert_eq!(
+            mrope_slot_coordinates(&scheduler.slots).unwrap(),
+            [[3, 3, 3], [6, 6, 6], [4, 4, 4]],
+            "the first decode coordinate for each row is sequence_len + its own delta"
+        );
+
+        assert!(scheduler.cancel(positive));
+        assert_eq!(scheduler.free_slots(), [1]);
+        let replacement = scheduler.submit(vec![9, 10, 11, 12], 4, g());
+        assert_eq!(admit_next(&mut scheduler, 1), replacement);
+        assert_eq!(
+            mrope_slot_coordinates(&scheduler.slots).unwrap(),
+            [[3, 3, 3], [4, 4, 4], [4, 4, 4]],
+            "reusing the cancelled positive-delta slot must restore text delta zero"
+        );
     }
 
     #[test]

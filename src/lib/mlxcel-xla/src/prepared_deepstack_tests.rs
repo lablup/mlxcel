@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use super::*;
-use crate::prepared::{PreparedInputError, PreparedIreePrefill, PreparedPositionMode};
+use crate::prepared::{
+    DecodePositionState, PreparedInputError, PreparedIreePrefill, PreparedPositionMode,
+};
 use mlxcel_core::session::{
     PreparedAttentionBias, PreparedModality, PreparedPositions, PreparedTensorDType,
 };
@@ -75,16 +77,19 @@ fn schema() -> DeepStackConfig {
     }
 }
 
+fn public_mrope_request(rope_delta: i32) -> DeepStackPreparedPrefill {
+    let mut value = prepared(2);
+    value.positions = PreparedPositions::Mrope3D {
+        tensor: tensor_i32(&[3, 4], [0, 1, 2, 3, 0, 1, 3, 3, 0, 2, 2, 3]),
+        rope_delta,
+    };
+    DeepStackPreparedPrefill::new(value, features(&[1, 3], &[0, 2, 3], 2)).unwrap()
+}
+
 #[test]
 fn public_deepstack_request_preserves_mrope_delta_and_rejects_wrong_mode() {
     for rope_delta in [-2, 5] {
-        let mut value = prepared(2);
-        value.positions = PreparedPositions::Mrope3D {
-            tensor: tensor_i32(&[3, 4], [0, 1, 2, 3, 0, 1, 3, 3, 0, 2, 2, 3]),
-            rope_delta,
-        };
-        let request =
-            DeepStackPreparedPrefill::new(value, features(&[1, 3], &[0, 2, 3], 2)).unwrap();
+        let request = public_mrope_request(rope_delta);
         let prepared = PreparedIreePrefill::prepare_for_mode(
             request.prepared(),
             2,
@@ -111,6 +116,51 @@ fn public_deepstack_request_preserves_mrope_delta_and_rejects_wrong_mode() {
             }
         );
     }
+}
+
+#[test]
+fn public_deepstack_delta_commits_single_decode_coordinate_only_on_success() {
+    let successful = public_mrope_request(-2);
+    let successful = PreparedIreePrefill::prepare_for_mode(
+        successful.prepared(),
+        2,
+        8,
+        PreparedPositionMode::Mrope3D,
+    )
+    .unwrap();
+    let mut state = DecodePositionState::default();
+    assert_eq!(
+        state
+            .complete_prefill(successful.positions.rope_delta(), Ok(17))
+            .unwrap(),
+        17
+    );
+    assert_eq!(
+        state.mrope_coordinate(successful.effective_len as i32),
+        Ok(2),
+        "the first decode coordinate is sequence_len + signed delta"
+    );
+
+    let failed = public_mrope_request(5);
+    let failed = PreparedIreePrefill::prepare_for_mode(
+        failed.prepared(),
+        2,
+        8,
+        PreparedPositionMode::Mrope3D,
+    )
+    .unwrap();
+    assert_eq!(
+        state.complete_prefill::<i32>(
+            failed.positions.rope_delta(),
+            Err("native prefill failed".to_string()),
+        ),
+        Err("native prefill failed".to_string())
+    );
+    assert_eq!(
+        state.mrope_coordinate(successful.effective_len as i32),
+        Ok(2),
+        "a failed prefill must retain the previously committed coordinate"
+    );
 }
 
 #[test]

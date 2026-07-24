@@ -329,7 +329,7 @@ impl DeepStackPreparedPrefill {
         &self.deepstack
     }
 
-    #[cfg(feature = "iree")]
+    #[cfg(any(feature = "iree", test))]
     pub(crate) fn into_parts(self) -> (PreparedPrefill, DeepStackFeatures) {
         (self.prepared, self.deepstack)
     }

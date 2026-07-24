@@ -300,6 +300,27 @@ pub(crate) fn mrope_decode_coordinate(
     Ok(coordinate)
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct DecodePositionState {
+    rope_delta: i32,
+}
+
+impl DecodePositionState {
+    pub(crate) fn complete_prefill<T>(
+        &mut self,
+        next_rope_delta: i32,
+        result: Result<T, String>,
+    ) -> Result<T, String> {
+        let output = result?;
+        self.rope_delta = next_rope_delta;
+        Ok(output)
+    }
+
+    pub(crate) fn mrope_coordinate(&self, cache_len: i32) -> Result<i32, MropeCoordinateError> {
+        mrope_decode_coordinate(cache_len, self.rope_delta)
+    }
+}
+
 pub(crate) fn validate_slot(slot: usize, slot_count: usize) -> Result<(), PreparedInputError> {
     if slot >= slot_count {
         return Err(PreparedInputError::Slot { slot, slot_count });

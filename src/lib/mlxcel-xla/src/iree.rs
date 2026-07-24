@@ -72,7 +72,7 @@ use crate::emitter::{
     emit_gemma3n_prefill_diagnostics_with_qmv,
 };
 use crate::prepared::{
-    PreparedIreePrefill, PreparedPositionMode, canonical_text_positions, mrope_decode_coordinate,
+    DecodePositionState, PreparedIreePrefill, PreparedPositionMode, canonical_text_positions,
     validate_slot,
 };
 use crate::prepared_deepstack::PreparedDeepStack;
@@ -1721,7 +1721,7 @@ pub struct IreeLlama {
     hidden_size: usize,
     dense_ple_shape: Option<[usize; 3]>,
     position_mode: PreparedPositionMode,
-    rope_delta: i32,
+    decode_position: DecodePositionState,
     deepstack_schema: Option<DeepStackConfig>,
 }
 
@@ -1740,7 +1740,7 @@ impl IreeLlama {
             hidden_size: cfg.hidden(),
             dense_ple_shape: cfg.dense_ple_shape(),
             position_mode: cfg.position_mode(),
-            rope_delta: 0,
+            decode_position: DecodePositionState::default(),
             deepstack_schema: cfg.deepstack().cloned(),
         })
     }
@@ -1806,11 +1806,12 @@ impl IreeLlama {
                 &mut out,
             )
         };
-        if rc != 0 {
-            return Err(format!("xla_llama_prefill_embeddings failed (status {rc})"));
-        }
-        self.rope_delta = rope_delta;
-        Ok(out)
+        let result = if rc == 0 {
+            Ok(out)
+        } else {
+            Err(format!("xla_llama_prefill_embeddings failed (status {rc})"))
+        };
+        self.decode_position.complete_prefill(rope_delta, result)
     }
 
     /// Seed KV through the distinct sparse DeepStack embeddings entry.
@@ -1860,13 +1861,14 @@ impl IreeLlama {
                 &mut out,
             )
         };
-        if rc != 0 {
-            return Err(format!(
+        let result = if rc == 0 {
+            Ok(out)
+        } else {
+            Err(format!(
                 "xla_llama_prefill_embeddings_deepstack failed (status {rc})"
-            ));
-        }
-        self.rope_delta = rope_delta;
-        Ok(out)
+            ))
+        };
+        self.decode_position.complete_prefill(rope_delta, result)
     }
 
     /// Seed Gemma3n KV from post-scale merged embeddings plus a canonical dense
@@ -1909,13 +1911,14 @@ impl IreeLlama {
                 &mut out,
             )
         };
-        if rc != 0 {
-            return Err(format!(
+        let result = if rc == 0 {
+            Ok(out)
+        } else {
+            Err(format!(
                 "xla_llama_prefill_embeddings_ple failed (status {rc})"
-            ));
-        }
-        self.rope_delta = 0;
-        Ok(out)
+            ))
+        };
+        self.decode_position.complete_prefill(0, result)
     }
 
     /// Pad `prompt` into the configured static bucket, run the prefill, and return its
@@ -1947,11 +1950,12 @@ impl IreeLlama {
                 &mut out,
             )
         };
-        if rc != 0 {
-            return Err(format!("xla_llama_prefill failed (status {rc})"));
-        }
-        self.rope_delta = 0;
-        Ok(out)
+        let result = if rc == 0 {
+            Ok(out)
+        } else {
+            Err(format!("xla_llama_prefill failed (status {rc})"))
+        };
+        self.decode_position.complete_prefill(0, result)
     }
 
     /// Advance one token at `cache_len` (== position), returning the next token
@@ -1970,7 +1974,9 @@ impl IreeLlama {
                 unsafe { xla_llama_decode(self.ctx, token, cache_len, cache_len, &mut out) }
             }
             PreparedPositionMode::Mrope3D => {
-                let coordinate = mrope_decode_coordinate(cache_len, self.rope_delta)
+                let coordinate = self
+                    .decode_position
+                    .mrope_coordinate(cache_len)
                     .map_err(|error| error.to_string())?;
                 let positions = [coordinate; 3];
                 // Safety: positions is exactly the explicit rank-1 `[3]` ABI payload.
