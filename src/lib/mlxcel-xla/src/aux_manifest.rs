@@ -89,7 +89,7 @@ fn weight_schema(weights: &[AuxiliaryWeight]) -> Result<String, String> {
     Ok(schema)
 }
 
-fn manifest_path(vmfb: &Path) -> PathBuf {
+pub(crate) fn auxiliary_manifest_path(vmfb: &Path) -> PathBuf {
     let mut name = vmfb
         .file_name()
         .map_or_else(|| "module.vmfb".into(), |name| name.to_os_string());
@@ -138,10 +138,28 @@ pub(crate) fn write_auxiliary_manifest(
         "vmfb_sha256": fields[4],
         "artifact_sha256": artifact_digest(&fields),
     });
-    let path = manifest_path(vmfb);
+    let path = auxiliary_manifest_path(vmfb);
     let bytes = serde_json::to_vec_pretty(&value)
         .map_err(|error| format!("serialize {}: {error}", path.display()))?;
-    std::fs::write(&path, bytes).map_err(|error| format!("write {}: {error}", path.display()))?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("system clock is before Unix epoch: {error}"))?
+        .as_nanos();
+    let mut temporary_name = path
+        .file_name()
+        .map_or_else(|| "module.vmfb.aux.json".into(), |name| name.to_os_string());
+    temporary_name.push(format!(".{}.{}.tmp", std::process::id(), nonce));
+    let temporary = path.with_file_name(temporary_name);
+    std::fs::write(&temporary, bytes)
+        .map_err(|error| format!("write {}: {error}", temporary.display()))?;
+    if let Err(error) = std::fs::rename(&temporary, &path) {
+        std::fs::remove_file(&temporary).ok();
+        return Err(format!(
+            "atomically install {} as {}: {error}",
+            temporary.display(),
+            path.display()
+        ));
+    }
     Ok(path)
 }
 
@@ -150,7 +168,7 @@ pub(crate) fn verify_auxiliary_manifest(
     contract: &AuxiliaryArtifactContract,
     weights: &[AuxiliaryWeight],
 ) -> Result<u64, String> {
-    let path = manifest_path(vmfb);
+    let path = auxiliary_manifest_path(vmfb);
     let bytes =
         std::fs::read(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
     let value: serde_json::Value = serde_json::from_slice(&bytes)
@@ -187,6 +205,80 @@ pub(crate) fn verify_auxiliary_manifest(
     let fingerprint = u64::from_str_radix(&digest[..16], 16)
         .map_err(|error| format!("invalid artifact digest: {error}"))?;
     Ok(fingerprint.max(1))
+}
+
+/// Reuse a qualified auxiliary VMFB or rebuild and publish one exactly once.
+///
+/// `compile` must write a complete VMFB to the supplied temporary sibling.
+/// The compiler never sees the final cache name, so another loader cannot
+/// observe partially-written bytecode. The final VMFB and manifest are each
+/// installed by atomic rename after stale pairs have been removed.
+pub(crate) fn ensure_qualified_auxiliary_artifact<F>(
+    vmfb: &Path,
+    contract: &AuxiliaryArtifactContract,
+    weights: &[AuxiliaryWeight],
+    compile: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&Path) -> Result<(), String>,
+{
+    let manifest = auxiliary_manifest_path(vmfb);
+    if vmfb.is_file()
+        && manifest.is_file()
+        && verify_auxiliary_manifest(vmfb, contract, weights).is_ok()
+    {
+        return Ok(());
+    }
+
+    remove_file_if_present(vmfb)?;
+    remove_file_if_present(&manifest)?;
+    let temporary = temporary_sibling(vmfb, "compile");
+    remove_file_if_present(&temporary)?;
+    if let Err(error) = compile(&temporary) {
+        std::fs::remove_file(&temporary).ok();
+        return Err(error);
+    }
+    if !temporary.is_file() {
+        return Err(format!(
+            "auxiliary compiler did not produce {}",
+            temporary.display()
+        ));
+    }
+    if let Err(error) = std::fs::rename(&temporary, vmfb) {
+        std::fs::remove_file(&temporary).ok();
+        return Err(format!(
+            "atomically install {} as {}: {error}",
+            temporary.display(),
+            vmfb.display()
+        ));
+    }
+    if let Err(error) = write_auxiliary_manifest(vmfb, contract, weights) {
+        // A VMFB without its matching identity is never a reusable cache
+        // member. Remove it so the next load cannot mistake it for qualified.
+        std::fs::remove_file(vmfb).ok();
+        std::fs::remove_file(&manifest).ok();
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn remove_file_if_present(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("remove stale {}: {error}", path.display())),
+    }
+}
+
+fn temporary_sibling(path: &Path, purpose: &str) -> PathBuf {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let mut name = path
+        .file_name()
+        .map_or_else(|| "module.vmfb".into(), |name| name.to_os_string());
+    name.push(format!(".{purpose}.{}.{}.tmp", std::process::id(), nonce));
+    path.with_file_name(name)
 }
 
 #[cfg(test)]
@@ -262,5 +354,44 @@ mod tests {
         );
         std::fs::remove_file(vmfb).ok();
         std::fs::remove_file(manifest).ok();
+    }
+
+    #[test]
+    fn cold_cache_compiles_once_then_reuses_and_rebuilds_stale_pair_once() {
+        let vmfb = temp_vmfb("single-compile");
+        let resident_weights = weights();
+        let contract =
+            AuxiliaryArtifactContract::new("aux.main", "config=v1", "compiler=v1").unwrap();
+        let mut compile_count = 0usize;
+        ensure_qualified_auxiliary_artifact(&vmfb, &contract, &resident_weights, |temporary| {
+            compile_count += 1;
+            std::fs::write(temporary, b"vmfb-v1")
+                .map_err(|error| format!("write test VMFB: {error}"))
+        })
+        .unwrap();
+        assert_eq!(compile_count, 1);
+        assert_eq!(std::fs::read(&vmfb).unwrap(), b"vmfb-v1");
+
+        ensure_qualified_auxiliary_artifact(&vmfb, &contract, &resident_weights, |_| {
+            compile_count += 1;
+            Err("qualified cache must not compile".to_string())
+        })
+        .unwrap();
+        assert_eq!(compile_count, 1);
+
+        let changed =
+            AuxiliaryArtifactContract::new("aux.main", "config=v2", "compiler=v1").unwrap();
+        ensure_qualified_auxiliary_artifact(&vmfb, &changed, &resident_weights, |temporary| {
+            compile_count += 1;
+            std::fs::write(temporary, b"vmfb-v2")
+                .map_err(|error| format!("write test VMFB: {error}"))
+        })
+        .unwrap();
+        assert_eq!(compile_count, 2);
+        assert_eq!(std::fs::read(&vmfb).unwrap(), b"vmfb-v2");
+        verify_auxiliary_manifest(&vmfb, &changed, &resident_weights).unwrap();
+
+        std::fs::remove_file(auxiliary_manifest_path(&vmfb)).ok();
+        std::fs::remove_file(vmfb).ok();
     }
 }
