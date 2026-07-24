@@ -42,6 +42,22 @@ pub enum RopeScaling {
         high_freq_factor: f64,
         orig_ctx: usize,
     },
+    /// Phi-3/Phi-4 SuScaled LongRoPE. The released Phi4MM runtime always
+    /// materializes the checkpoint's long-factor table and applies the
+    /// amplitude correction derived from max/original context.
+    LongRope { factors: Vec<f64>, amplitude: f64 },
+}
+
+/// Official Phi4MM request-time LoRA contract.
+///
+/// The ranks and scales affect graph shapes and numerics, so they are part of
+/// the emitted artifact identity rather than mutable serving configuration.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Phi4LoraConfig {
+    pub speech_rank: usize,
+    pub speech_scale: f32,
+    pub vision_rank: usize,
+    pub vision_scale: f32,
 }
 
 /// Per-layer norm placement. The three dense patterns differ in where the
@@ -384,6 +400,9 @@ pub struct Config {
     /// loader splits it (gate first, up second) into the emitter's `gate`/`up` args.
     /// Consumed by the weight loader (`iree.rs`); the emitter graph is unaffected.
     pub fused_gate_up: bool,
+    /// Per-request speech/vision adapters carried by the Phi4MM checkpoint.
+    /// `None` preserves the existing dense graph signatures byte-for-byte.
+    pub phi4_lora: Option<Phi4LoraConfig>,
 }
 
 impl Config {
@@ -441,6 +460,7 @@ impl Config {
             logit_div: None,
             fused_qkv: false,
             fused_gate_up: false,
+            phi4_lora: None,
         }
     }
 
@@ -460,10 +480,9 @@ impl Config {
     pub fn from_json_str(s: &str) -> Result<Self, String> {
         let root: serde_json::Value =
             serde_json::from_str(s).map_err(|e| format!("parse config.json: {e}"))?;
-        let v = if matches!(
-            root.get("model_type").and_then(serde_json::Value::as_str),
-            Some("llava" | "llava_next")
-        ) {
+        let wrapper_model_type = root.get("model_type").and_then(serde_json::Value::as_str);
+        let is_phi4mm = wrapper_model_type == Some("phi4mm");
+        let v = if matches!(wrapper_model_type, Some("llava" | "llava_next")) {
             let mut text = root
                 .get("text_config")
                 .and_then(serde_json::Value::as_object)
@@ -841,7 +860,7 @@ impl Config {
                 sliding_pattern = ou("sliding_window_pattern").unwrap_or(4).max(1);
                 logit_mul = Some(of("logit_scale").unwrap_or(0.0625) as f32);
             }
-            Some("phi3") => {
+            Some("phi3" | "phi4mm") => {
                 // Fused qkv_proj / gate_up_proj (split at load); RMSNorm; untied.
                 fused_qkv = true;
                 fused_gate_up = true;
@@ -981,7 +1000,7 @@ impl Config {
                 return Err(format!(
                     "the OpenXLA emitter supports the dense architectures Llama, Qwen2, \
                      Qwen3, Gemma1/2/3, SmolLM3, OLMo2/3, Seed-OSS, MiMo, InternLM3, ExaOne, \
-                     Cohere, Cohere2, Phi3, StableLM, StarCoder2, Granite, and MiniCPM, plus \
+                     Cohere, Cohere2, Phi3, Phi4MM, StableLM, StarCoder2, Granite, and MiniCPM, plus \
                      the Mixtral, Qwen2-MoE, Qwen3-MoE, and OLMoE mixture-of-experts \
                      architectures; config.json model_type = {other:?} (other MoE / MLA / \
                      novel-activation variants are follow-ups)"
@@ -1075,6 +1094,50 @@ impl Config {
                             high_freq_factor: sf("high_freq_factor")?,
                             orig_ctx,
                         }
+                    }
+                    Some("longrope") if is_phi4mm => {
+                        let values = scaling
+                            .get("long_factor")
+                            .and_then(serde_json::Value::as_array)
+                            .ok_or_else(|| {
+                                "Phi4MM LongRoPE requires rope_scaling.long_factor".to_string()
+                            })?;
+                        let factors = values
+                            .iter()
+                            .enumerate()
+                            .map(|(index, value)| {
+                                value.as_f64().ok_or_else(|| {
+                                    format!(
+                                        "Phi4MM rope_scaling.long_factor[{index}] must be finite"
+                                    )
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        if factors.len() != rotary_dim.unwrap_or(head_dim) / 2
+                            || factors
+                                .iter()
+                                .any(|factor| !factor.is_finite() || *factor <= 0.0)
+                        {
+                            return Err(format!(
+                                "Phi4MM LongRoPE requires {} positive finite factors, got {}",
+                                rotary_dim.unwrap_or(head_dim) / 2,
+                                factors.len()
+                            ));
+                        }
+                        let original = ou("original_max_position_embeddings").ok_or_else(|| {
+                            "Phi4MM LongRoPE requires original_max_position_embeddings".to_string()
+                        })?;
+                        let maximum = ou("max_position_embeddings").ok_or_else(|| {
+                            "Phi4MM LongRoPE requires max_position_embeddings".to_string()
+                        })?;
+                        if original <= 1 || maximum < original {
+                            return Err(format!(
+                                "invalid Phi4MM LongRoPE context bounds: original={original}, maximum={maximum}"
+                            ));
+                        }
+                        let ratio = maximum as f64 / original as f64;
+                        let amplitude = (1.0 + ratio.ln() / (original as f64).ln()).sqrt();
+                        RopeScaling::LongRope { factors, amplitude }
                     }
                     other => {
                         return Err(format!(
@@ -1243,6 +1306,38 @@ impl Config {
         // HF `PretrainedConfig` defaults this to `true`, but some arches default
         // untied (`tie_default`); an explicit config field always wins.
         let tie_word_embeddings = ob("tie_word_embeddings").unwrap_or(tie_default);
+        let phi4_lora = if is_phi4mm {
+            let parse = |name: &str| -> Result<(usize, f32), String> {
+                let lora = v
+                    .get(name)
+                    .and_then(serde_json::Value::as_object)
+                    .ok_or_else(|| format!("Phi4MM config missing object `{name}`"))?;
+                let rank = lora
+                    .get("r")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .filter(|rank| *rank > 0)
+                    .ok_or_else(|| format!("Phi4MM `{name}.r` must be positive"))?;
+                let alpha = lora
+                    .get("lora_alpha")
+                    .and_then(serde_json::Value::as_f64)
+                    .filter(|alpha| alpha.is_finite() && *alpha > 0.0)
+                    .ok_or_else(|| {
+                        format!("Phi4MM `{name}.lora_alpha` must be positive and finite")
+                    })?;
+                Ok((rank, (alpha / rank as f64) as f32))
+            };
+            let (speech_rank, speech_scale) = parse("speech_lora")?;
+            let (vision_rank, vision_scale) = parse("vision_lora")?;
+            Some(Phi4LoraConfig {
+                speech_rank,
+                speech_scale,
+                vision_rank,
+                vision_scale,
+            })
+        } else {
+            None
+        };
 
         Ok(Config {
             context_capacity: crate::DEFAULT_CONTEXT_CAPACITY,
@@ -1291,6 +1386,7 @@ impl Config {
             logit_div,
             fused_qkv,
             fused_gate_up,
+            phi4_lora,
         })
     }
 
@@ -1681,6 +1777,77 @@ mod tests {
                 bits: 4,
                 group_size: 64
             })
+        );
+    }
+
+    #[test]
+    fn phi4mm_pins_longrope_and_both_adapter_contracts() {
+        let config = Config::from_json_str(
+            r#"{
+                "model_type":"phi4mm","hidden_size":8,"intermediate_size":16,
+                "num_hidden_layers":2,"num_attention_heads":2,"num_key_value_heads":1,
+                "head_dim":4,"partial_rotary_factor":1.0,"rms_norm_eps":1e-5,
+                "rope_theta":10000.0,"vocab_size":32,"tie_word_embeddings":true,
+                "max_position_embeddings":16,"original_max_position_embeddings":4,
+                "hidden_act":"silu",
+                "rope_scaling":{"type":"longrope","long_factor":[1.0,2.0]},
+                "speech_lora":{"r":3,"lora_alpha":6},
+                "vision_lora":{"r":2,"lora_alpha":5}
+            }"#,
+        )
+        .expect("Phi4MM config");
+        assert!(config.fused_qkv);
+        assert!(config.fused_gate_up);
+        assert_eq!(
+            config.phi4_lora,
+            Some(Phi4LoraConfig {
+                speech_rank: 3,
+                speech_scale: 2.0,
+                vision_rank: 2,
+                vision_scale: 2.5,
+            })
+        );
+        let RopeScaling::LongRope { factors, amplitude } = config.rope else {
+            panic!("Phi4MM must preserve LongRoPE");
+        };
+        assert_eq!(factors, vec![1.0, 2.0]);
+        let expected = (1.0 + (4.0f64).ln() / (4.0f64).ln()).sqrt();
+        assert!((amplitude - expected).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn phi4mm_rejects_incomplete_lora_and_longrope_shapes() {
+        let base = r#"{
+            "model_type":"phi4mm","hidden_size":8,"intermediate_size":16,
+            "num_hidden_layers":2,"num_attention_heads":2,"num_key_value_heads":1,
+            "head_dim":4,"partial_rotary_factor":1.0,"rms_norm_eps":1e-5,
+            "rope_theta":10000.0,"vocab_size":32,
+            "max_position_embeddings":16,"original_max_position_embeddings":4,
+            "hidden_act":"silu",
+            "rope_scaling":{"type":"longrope","long_factor":[1.0,2.0]},
+            "speech_lora":{"r":3,"lora_alpha":6},
+            "vision_lora":{"r":2,"lora_alpha":5}
+        }"#;
+        let missing = base.replace(
+            r#""vision_lora":{"r":2,"lora_alpha":5}"#,
+            r#""removed_vision_lora":null"#,
+        );
+        assert!(
+            Config::from_json_str(&missing)
+                .unwrap_err()
+                .contains("vision_lora")
+        );
+        let wrong_factors = base.replace("[1.0,2.0]", "[1.0]");
+        assert!(
+            Config::from_json_str(&wrong_factors)
+                .unwrap_err()
+                .contains("requires 2")
+        );
+        let invalid_scale = base.replace(r#""lora_alpha":6"#, r#""lora_alpha":0"#);
+        assert!(
+            Config::from_json_str(&invalid_scale)
+                .unwrap_err()
+                .contains("positive and finite")
         );
     }
 }

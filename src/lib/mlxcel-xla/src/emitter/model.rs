@@ -252,6 +252,29 @@ struct LayerW {
     /// MoE FFN weight handles (issue #500), `Some` on a MoE layer (router, stacked
     /// experts, optional shared expert); `None` on a dense layer.
     moe: Option<MoeLayerW>,
+    /// Phi4MM's immutable speech/vision adapter pairs. The request's numeric
+    /// mode gates their deltas per row; the base weights are never mutated.
+    phi4_lora: Option<Phi4LayerLoraW>,
+}
+
+#[derive(Clone)]
+struct LoraPairW {
+    a: Val,
+    b: Val,
+    scale: f32,
+}
+
+#[derive(Clone)]
+struct ModalLoraW {
+    speech: LoraPairW,
+    vision: LoraPairW,
+}
+
+struct Phi4LayerLoraW {
+    qkv: ModalLoraW,
+    o: ModalLoraW,
+    gate_up: ModalLoraW,
+    down: ModalLoraW,
 }
 
 impl LayerW {
@@ -272,6 +295,7 @@ struct Args {
     /// Untied LM head (`None` when tied; the tail then reuses `embed`).
     lm_head: Option<Val>,
     layers: Vec<LayerW>,
+    adapter_mode: Option<Val>,
     token: Val,
     pos: Val,
     cache_len: Val,
@@ -501,6 +525,63 @@ fn take_layer_weights(
     // appended after the attention weights / biases / FF norms on a MoE layer, in the
     // same order `weight_specs` (`weights.rs`) lists them so the args line up.
     let moe = moe_layer.then(|| take_moe_weights(decls, idx, c, li));
+    let phi4_lora = c.phi4_lora.map(|lora| {
+        let pair = |decls: &mut Vec<ArgDecl>,
+                    idx: &mut usize,
+                    stem: &str,
+                    input: usize,
+                    output: usize,
+                    rank: usize,
+                    scale: f32,
+                    adapter: &str| {
+            LoraPairW {
+                a: take_arg(
+                    decls,
+                    idx,
+                    Ty::f32(vec![rank, input]),
+                    format!("params['layers'][{li}]['{stem}.lora_A.{adapter}']"),
+                ),
+                b: take_arg(
+                    decls,
+                    idx,
+                    Ty::f32(vec![output, rank]),
+                    format!("params['layers'][{li}]['{stem}.lora_B.{adapter}']"),
+                ),
+                scale,
+            }
+        };
+        let modal =
+            |decls: &mut Vec<ArgDecl>, idx: &mut usize, stem: &str, input: usize, output: usize| {
+                ModalLoraW {
+                    speech: pair(
+                        decls,
+                        idx,
+                        stem,
+                        input,
+                        output,
+                        lora.speech_rank,
+                        lora.speech_scale,
+                        "speech",
+                    ),
+                    vision: pair(
+                        decls,
+                        idx,
+                        stem,
+                        input,
+                        output,
+                        lora.vision_rank,
+                        lora.vision_scale,
+                        "vision",
+                    ),
+                }
+            };
+        Phi4LayerLoraW {
+            qkv: modal(decls, idx, "qkv", h, qd + 2 * kv),
+            o: modal(decls, idx, "o", qd, h),
+            gate_up: modal(decls, idx, "gate_up", h, 2 * inter),
+            down: modal(decls, idx, "down", inter, h),
+        }
+    });
     LayerW {
         down,
         gate,
@@ -525,6 +606,7 @@ fn take_layer_weights(
         gate_bias,
         up_bias,
         moe,
+        phi4_lora,
     }
 }
 
@@ -626,6 +708,14 @@ fn build_arg_schema(b: &mut Builder, c: &Config) -> (Vec<ArgDecl>, Args) {
         layers.push(take_layer_weights(b, &mut decls, &mut idx, c, li));
     }
 
+    let adapter_mode = c.phi4_lora.map(|_| {
+        take_arg(
+            &mut decls,
+            &mut idx,
+            Ty::scalar("i32"),
+            "adapter_mode".into(),
+        )
+    });
     let token = take_arg(&mut decls, &mut idx, Ty::scalar("i32"), "token".into());
     let pos = take_arg(
         &mut decls,
@@ -655,6 +745,7 @@ fn build_arg_schema(b: &mut Builder, c: &Config) -> (Vec<ArgDecl>, Args) {
             final_norm_bias,
             lm_head,
             layers,
+            adapter_mode,
             token,
             pos,
             cache_len,
@@ -1065,8 +1156,36 @@ fn emit_mlp_body(
         return layout.add_bias(b, down, lw.down_bias.as_ref());
     }
     let gate = layout.linear(b, hn, lw.gate.as_ref().expect("gated MLP has a gate"));
+    let gate_up_lora = lw
+        .phi4_lora
+        .as_ref()
+        .map(|lora| layout.modal_lora_delta(b, hn, &lora.gate_up));
+    let gate = match &gate_up_lora {
+        Some(delta) if delta.ty.shape.len() == 1 => {
+            let delta = b.slice(delta, &[(0, c.inter)]);
+            b.add(&gate, &delta)
+        }
+        Some(delta) => {
+            let rows = delta.ty.shape[0];
+            let delta = b.slice(delta, &[(0, rows), (0, c.inter)]);
+            b.add(&gate, &delta)
+        }
+        None => gate,
+    };
     let gate = layout.add_bias(b, gate, lw.gate_bias.as_ref());
     let up = layout.linear(b, hn, LayerW::dense(&lw.up));
+    let up = match &gate_up_lora {
+        Some(delta) if delta.ty.shape.len() == 1 => {
+            let delta = b.slice(delta, &[(c.inter, 2 * c.inter)]);
+            b.add(&up, &delta)
+        }
+        Some(delta) => {
+            let rows = delta.ty.shape[0];
+            let delta = b.slice(delta, &[(0, rows), (c.inter, 2 * c.inter)]);
+            b.add(&up, &delta)
+        }
+        None => up,
+    };
     let up = layout.add_bias(b, up, lw.up_bias.as_ref());
     let act = if c.mlp_geglu {
         gelu_tanh(b, &gate)
@@ -1075,6 +1194,13 @@ fn emit_mlp_body(
     };
     let act = b.multiply(&act, &up);
     let down = layout.linear(b, &act, LayerW::dense(&lw.down));
+    let down = match &lw.phi4_lora {
+        Some(lora) => {
+            let delta = layout.modal_lora_delta(b, &act, &lora.down);
+            b.add(&down, &delta)
+        }
+        None => down,
+    };
     let down = layout.add_bias(b, down, lw.down_bias.as_ref());
     if c.has_post_ff_norm() {
         let w = norm_w(
@@ -1249,6 +1375,7 @@ enum AttnLayout {
     /// `[d]` RoPE vector, an `[S]` key mask, and a shared-offset KV write at
     /// `cache_len`.
     Single {
+        adapter_mode: Option<Val>,
         cos: Val,
         sin: Val,
         /// Gemma3 / OLMo3 local-base RoPE vectors for the sliding layers (`Some`
@@ -1264,6 +1391,7 @@ enum AttnLayout {
     /// write at each row's own `pos[b]`.
     Ragged {
         bsz: usize,
+        adapter_mode: Option<Val>,
         cos: Val,
         sin: Val,
         cos_local: Option<Val>,
@@ -1278,6 +1406,7 @@ enum AttnLayout {
     /// Scores read the freshly projected K/V directly (no cache read-back).
     Prefill {
         lp: usize,
+        adapter_mode: Option<Val>,
         cos: Val,
         sin: Val,
         cos_local: Option<Val>,
@@ -1288,6 +1417,60 @@ enum AttnLayout {
 }
 
 impl AttnLayout {
+    fn adapter_mode(&self) -> Option<&Val> {
+        match self {
+            Self::Single { adapter_mode, .. }
+            | Self::Ragged { adapter_mode, .. }
+            | Self::Prefill { adapter_mode, .. } => adapter_mode.as_ref(),
+        }
+    }
+
+    fn adapter_predicate(&self, b: &mut Builder, code: i32, output_shape: &[usize]) -> Option<Val> {
+        let mode = self.adapter_mode()?;
+        let code = b.const_i32(code);
+        let code = if mode.ty.shape.is_empty() {
+            code
+        } else {
+            b.broadcast(&code, &[], mode.ty.shape.clone())
+        };
+        let predicate = b.compare("EQ", mode, &code, "SIGNED");
+        Some(if predicate.ty.shape == output_shape {
+            predicate
+        } else if predicate.ty.shape.is_empty() {
+            b.broadcast(&predicate, &[], output_shape.to_vec())
+        } else {
+            b.broadcast(&predicate, &[0], output_shape.to_vec())
+        })
+    }
+
+    fn lora_branch(&self, b: &mut Builder, x: &Val, pair: &LoraPairW) -> Val {
+        let low_rank = self.linear(b, x, &pair.a);
+        let delta = self.linear(b, &low_rank, &pair.b);
+        let scale = b.const_f32(pair.scale);
+        let scale = b.broadcast(&scale, &[], delta.ty.shape.clone());
+        b.multiply(&delta, &scale)
+    }
+
+    /// Compute a Phi4MM adapter delta without mutating resident base weights.
+    /// Mode 0 is language/base-only, 1 speech, and 2 vision (including the
+    /// official mixed vision-speech policy).
+    fn modal_lora_delta(&self, b: &mut Builder, x: &Val, lora: &ModalLoraW) -> Val {
+        let speech = self.lora_branch(b, x, &lora.speech);
+        let vision = self.lora_branch(b, x, &lora.vision);
+        let shape = speech.ty.shape.clone();
+        let zero = b.const_f32(0.0);
+        let zeros = b.broadcast(&zero, &[], shape.clone());
+        let speech_predicate = self
+            .adapter_predicate(b, 1, &shape)
+            .expect("Phi4MM LoRA requires an adapter-mode graph input");
+        let vision_predicate = self
+            .adapter_predicate(b, 2, &shape)
+            .expect("Phi4MM LoRA requires an adapter-mode graph input");
+        let speech = b.select(&speech_predicate, &speech, &zeros);
+        let vision = b.select(&vision_predicate, &vision, &zeros);
+        b.add(&speech, &vision)
+    }
+
     /// Normalization at this kind's activation rank (rank-reduced for single
     /// decode, per-row otherwise): RMSNorm for the Llama family, mean-subtract
     /// LayerNorm with the optional `bias` for a LayerNorm arch (issue #498).
@@ -1343,24 +1526,50 @@ impl AttnLayout {
         let (nq, nkv) = (c.n_q, c.n_kv);
         match self {
             AttnLayout::Single { .. } => {
+                let lora = lw
+                    .phi4_lora
+                    .as_ref()
+                    .map(|lora| self.modal_lora_delta(b, hn, &lora.qkv));
                 let q = b.linear(hn, &lw.wq);
+                let q = match &lora {
+                    Some(delta) => {
+                        let delta = b.slice(delta, &[(0, nq * d)]);
+                        b.add(&q, &delta)
+                    }
+                    None => q,
+                };
                 let q = add_proj_bias(b, q, &lw.bq);
                 let q = b.reshape(&q, vec![nq, d]);
                 let kk = b.linear(hn, &lw.wk);
+                let kk = match &lora {
+                    Some(delta) => {
+                        let delta = b.slice(delta, &[(nq * d, nq * d + nkv * d)]);
+                        b.add(&kk, &delta)
+                    }
+                    None => kk,
+                };
                 let kk = add_proj_bias(b, kk, &lw.bk);
                 let kk = b.reshape(&kk, vec![nkv, d]);
                 let vv = b.linear(hn, &lw.wv);
+                let vv = match &lora {
+                    Some(delta) => {
+                        let delta = b.slice(delta, &[(nq * d + nkv * d, nq * d + 2 * nkv * d)]);
+                        b.add(&vv, &delta)
+                    }
+                    None => vv,
+                };
                 let vv = add_proj_bias(b, vv, &lw.bv);
                 let vv = b.reshape(&vv, vec![nkv, d]);
                 (q, kk, vv)
             }
-            AttnLayout::Ragged { bsz, .. } => Self::project_qkv_seq(b, c, hn, lw, *bsz),
-            AttnLayout::Prefill { lp, .. } => Self::project_qkv_seq(b, c, hn, lw, *lp),
+            AttnLayout::Ragged { bsz, .. } => self.project_qkv_seq(b, c, hn, lw, *bsz),
+            AttnLayout::Prefill { lp, .. } => self.project_qkv_seq(b, c, hn, lw, *lp),
         }
     }
 
     /// The `[N, ...]` (seq) q/k/v projection shared by ragged decode and prefill.
     fn project_qkv_seq(
+        &self,
         b: &mut Builder,
         c: &Config,
         hn: &Val,
@@ -1369,13 +1578,38 @@ impl AttnLayout {
     ) -> (Val, Val, Val) {
         let d = c.head_dim;
         let (nq, nkv) = (c.n_q, c.n_kv);
+        let lora = lw
+            .phi4_lora
+            .as_ref()
+            .map(|lora| self.modal_lora_delta(b, hn, &lora.qkv));
         let q = b.linear_seq(hn, &lw.wq);
+        let q = match &lora {
+            Some(delta) => {
+                let delta = b.slice(delta, &[(0, n), (0, nq * d)]);
+                b.add(&q, &delta)
+            }
+            None => q,
+        };
         let q = add_proj_bias_seq(b, q, &lw.bq, n, nq * d);
         let q = b.reshape(&q, vec![n, nq, d]);
         let kk = b.linear_seq(hn, &lw.wk);
+        let kk = match &lora {
+            Some(delta) => {
+                let delta = b.slice(delta, &[(0, n), (nq * d, nq * d + nkv * d)]);
+                b.add(&kk, &delta)
+            }
+            None => kk,
+        };
         let kk = add_proj_bias_seq(b, kk, &lw.bk, n, nkv * d);
         let kk = b.reshape(&kk, vec![n, nkv, d]);
         let vv = b.linear_seq(hn, &lw.wv);
+        let vv = match &lora {
+            Some(delta) => {
+                let delta = b.slice(delta, &[(0, n), (nq * d + nkv * d, nq * d + 2 * nkv * d)]);
+                b.add(&vv, &delta)
+            }
+            None => vv,
+        };
         let vv = add_proj_bias_seq(b, vv, &lw.bv, n, nkv * d);
         let vv = b.reshape(&vv, vec![n, nkv, d]);
         (q, kk, vv)
@@ -1645,6 +1879,13 @@ impl AttnLayout {
             AttnLayout::Single { .. } => b.linear(o, &lw.wo),
             _ => b.linear_seq(o, &lw.wo),
         };
+        let out = match &lw.phi4_lora {
+            Some(lora) => {
+                let delta = self.modal_lora_delta(b, o, &lora.o);
+                b.add(&out, &delta)
+            }
+            None => out,
+        };
         self.add_bias(b, out, lw.wo_bias.as_ref())
     }
 }
@@ -1903,6 +2144,7 @@ pub fn emit_decode_with(c: &Config, sample: bool, precision: Precision) -> Strin
     });
 
     let layout = AttnLayout::Single {
+        adapter_mode: a.adapter_mode.clone(),
         cos: cos_vec,
         sin: sin_vec,
         cos_local,
@@ -1970,6 +2212,7 @@ struct BatchedArgs {
     final_norm_bias: Option<Val>,
     lm_head: Option<Val>,
     layers: Vec<LayerW>,
+    adapter_mode: Option<Val>,
     token: Val,     // [B] i32
     pos: Val,       // scalar i32 (shared across the batch)
     cache_len: Val, // scalar i32 (shared across the batch)
@@ -2008,6 +2251,14 @@ fn build_batched_arg_schema(
         layers.push(take_layer_weights(b, &mut decls, &mut idx, c, li));
     }
 
+    let adapter_mode = c.phi4_lora.map(|_| {
+        take_arg(
+            &mut decls,
+            &mut idx,
+            Ty::new(vec![bsz], "i32"),
+            "adapter_mode".into(),
+        )
+    });
     let token = take_arg(
         &mut decls,
         &mut idx,
@@ -2054,6 +2305,7 @@ fn build_batched_arg_schema(
             final_norm_bias,
             lm_head,
             layers,
+            adapter_mode,
             token,
             pos,
             cache_len,
@@ -2099,6 +2351,10 @@ pub fn emit_decode_batched_with(
     sample: bool,
     precision: Precision,
 ) -> String {
+    assert!(
+        c.phi4_lora.is_none(),
+        "Phi4MM requires per-row ragged decode; uniform batched decode cannot carry request-scoped adapter modes"
+    );
     let mut b = Builder::new().with_precision(precision);
     let (decls, a) = build_batched_arg_schema(&mut b, c, bsz);
     let k = emit_consts(&mut b, c);
@@ -2318,6 +2574,7 @@ struct RaggedArgs {
     final_norm_bias: Option<Val>,
     lm_head: Option<Val>,
     layers: Vec<LayerW>,
+    adapter_mode: Option<Val>,
     token: Val,     // [B] i32
     pos: Val,       // [B] i32 (per row)
     cache_len: Val, // [B] i32 (per row)
@@ -2352,6 +2609,14 @@ fn build_ragged_arg_schema(b: &mut Builder, c: &Config, bsz: usize) -> (Vec<ArgD
         layers.push(take_layer_weights(b, &mut decls, &mut idx, c, li));
     }
 
+    let adapter_mode = c.phi4_lora.map(|_| {
+        take_arg(
+            &mut decls,
+            &mut idx,
+            Ty::new(vec![bsz], "i32"),
+            "adapter_mode".into(),
+        )
+    });
     let token = take_arg(
         &mut decls,
         &mut idx,
@@ -2410,6 +2675,7 @@ fn build_ragged_arg_schema(b: &mut Builder, c: &Config, bsz: usize) -> (Vec<ArgD
             final_norm_bias,
             lm_head,
             layers,
+            adapter_mode,
             token,
             pos,
             cache_len,
@@ -2485,6 +2751,7 @@ pub fn emit_decode_ragged_with(
 
     let layout = AttnLayout::Ragged {
         bsz,
+        adapter_mode: a.adapter_mode.clone(),
         cos,
         sin,
         cos_local,
@@ -2597,6 +2864,7 @@ struct PrefillArgs {
     final_norm_bias: Option<Val>,
     lm_head: Option<Val>,
     layers: Vec<LayerW>,
+    adapter_mode: Option<Val>,
     input: PrefillInput,
     positions: Val,
     real_len: Val,
@@ -2634,6 +2902,14 @@ fn build_prefill_arg_schema(
         layers.push(take_layer_weights(b, &mut decls, &mut idx, c, li));
     }
 
+    let adapter_mode = c.phi4_lora.map(|_| {
+        take_arg(
+            &mut decls,
+            &mut idx,
+            Ty::scalar("i32"),
+            "adapter_mode".into(),
+        )
+    });
     let (tokens, embeddings) = match input_kind {
         PrefillInputKind::Tokens => (
             Some(take_arg(
@@ -2737,6 +3013,7 @@ fn build_prefill_arg_schema(
             final_norm_bias,
             lm_head,
             layers,
+            adapter_mode,
             input,
             positions,
             real_len,
@@ -3144,6 +3421,7 @@ fn emit_prefill_module(
 
     let layout = AttnLayout::Prefill {
         lp,
+        adapter_mode: a.adapter_mode.clone(),
         cos,
         sin,
         cos_local,

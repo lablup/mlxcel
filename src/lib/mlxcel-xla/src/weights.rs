@@ -125,6 +125,21 @@ fn push_proj(out: &mut Vec<WeightSpec>, name: String, quant: bool) {
     }
 }
 
+fn phi4_base_projection(cfg: &Config, name: String) -> String {
+    if cfg.phi4_lora.is_some() {
+        name.strip_suffix(".weight")
+            .map(|stem| format!("{stem}.base_layer.weight"))
+            .unwrap_or(name)
+    } else {
+        name
+    }
+}
+
+fn push_phi4_lora_pair(out: &mut Vec<WeightSpec>, stem: &str, adapter: &str) {
+    out.push(WeightSpec::Proj(format!("{stem}.lora_A.{adapter}.weight")));
+    out.push(WeightSpec::Proj(format!("{stem}.lora_B.{adapter}.weight")));
+}
+
 /// [`weight_specs`] with the packed-path decision passed explicitly (so it is
 /// testable without the `MLXCEL_XLA_QUANT` env). `quant` already folds in
 /// [`Config::supports_packed_quant`], so it is `true` only for the standard Llama
@@ -160,18 +175,22 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
             } else {
                 format!("{p}{}", s.down)
             };
-            push_proj(&mut out, name, quant);
+            push_proj(&mut out, phi4_base_projection(cfg, name), quant);
         }
         // gate (gated MLP only; the first half of gate_up_proj for a fused Phi3).
         if gated && !moe_layer {
             if cfg.fused_gate_up {
                 out.push(WeightSpec::Rows {
-                    name: format!("{p}mlp.gate_up_proj.weight"),
+                    name: phi4_base_projection(cfg, format!("{p}mlp.gate_up_proj.weight")),
                     start: 0,
                     end: inter,
                 });
             } else {
-                push_proj(&mut out, format!("{p}{}", s.gate), quant);
+                push_proj(
+                    &mut out,
+                    phi4_base_projection(cfg, format!("{p}{}", s.gate)),
+                    quant,
+                );
             }
         }
         // input_layernorm: present unless the OLMo reordered post-norm drops it.
@@ -190,25 +209,32 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
         if !moe_layer {
             if cfg.fused_gate_up {
                 out.push(WeightSpec::Rows {
-                    name: format!("{p}mlp.gate_up_proj.weight"),
+                    name: phi4_base_projection(cfg, format!("{p}mlp.gate_up_proj.weight")),
                     start: inter,
                     end: 2 * inter,
                 });
             } else if cfg.dense_mlp {
                 out.push(WeightSpec::Whole(format!("{p}mlp.c_fc.weight")));
             } else {
-                push_proj(&mut out, format!("{p}{}", s.up), quant);
+                push_proj(
+                    &mut out,
+                    phi4_base_projection(cfg, format!("{p}{}", s.up)),
+                    quant,
+                );
             }
         }
         // wk, wo, wq, wv (JAX-alphabetical; a fused Phi3 qkv_proj is [Q|K|V] rows).
         if cfg.fused_qkv {
-            let qkv = format!("{p}self_attn.qkv_proj.weight");
+            let qkv = phi4_base_projection(cfg, format!("{p}self_attn.qkv_proj.weight"));
             out.push(WeightSpec::Rows {
                 name: qkv.clone(),
                 start: nq,
                 end: nq + nkv,
             }); // wk
-            out.push(WeightSpec::Whole(format!("{p}{}", s.o_proj))); // wo
+            out.push(WeightSpec::Proj(phi4_base_projection(
+                cfg,
+                format!("{p}{}", s.o_proj),
+            ))); // wo
             out.push(WeightSpec::Rows {
                 name: qkv.clone(),
                 start: 0,
@@ -220,10 +246,26 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
                 end: nq + 2 * nkv,
             }); // wv
         } else {
-            push_proj(&mut out, format!("{p}{}", s.k_proj), quant);
-            push_proj(&mut out, format!("{p}{}", s.o_proj), quant);
-            push_proj(&mut out, format!("{p}{}", s.q_proj), quant);
-            push_proj(&mut out, format!("{p}{}", s.v_proj), quant);
+            push_proj(
+                &mut out,
+                phi4_base_projection(cfg, format!("{p}{}", s.k_proj)),
+                quant,
+            );
+            push_proj(
+                &mut out,
+                phi4_base_projection(cfg, format!("{p}{}", s.o_proj)),
+                quant,
+            );
+            push_proj(
+                &mut out,
+                phi4_base_projection(cfg, format!("{p}{}", s.q_proj)),
+                quant,
+            );
+            push_proj(
+                &mut out,
+                phi4_base_projection(cfg, format!("{p}{}", s.v_proj)),
+                quant,
+            );
         }
         // q/k/v projection biases (k, q, v order).
         if cfg.qkv_bias {
@@ -303,6 +345,17 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
                         "{p}{mp}.shared_expert_gate.weight"
                     )));
                 }
+            }
+        }
+        if cfg.phi4_lora.is_some() {
+            for stem in [
+                format!("{p}self_attn.qkv_proj"),
+                format!("{p}self_attn.o_proj"),
+                format!("{p}mlp.gate_up_proj"),
+                format!("{p}mlp.down_proj"),
+            ] {
+                push_phi4_lora_pair(&mut out, &stem, "speech");
+                push_phi4_lora_pair(&mut out, &stem, "vision");
             }
         }
     }
@@ -686,6 +739,110 @@ pub(crate) fn dequantize_affine_stacked(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::emitter::Phi4LoraConfig;
+
+    fn phi4_config() -> Config {
+        Config {
+            hidden: 8,
+            inter: 16,
+            n_layers: 2,
+            n_q: 2,
+            n_kv: 1,
+            head_dim: 4,
+            rotary_dim: Some(4),
+            vocab: 32,
+            tie_word_embeddings: true,
+            fused_qkv: true,
+            fused_gate_up: true,
+            phi4_lora: Some(Phi4LoraConfig {
+                speech_rank: 3,
+                speech_scale: 2.0,
+                vision_rank: 2,
+                vision_scale: 2.5,
+            }),
+            ..Config::llama_3_2_1b()
+        }
+    }
+
+    #[test]
+    fn phi4mm_weight_schema_uses_base_layers_and_complete_adapter_pairs() {
+        let config = phi4_config();
+        let specs = weight_specs_q(&config, false);
+        let names = specs
+            .iter()
+            .map(WeightSpec::tensor_name)
+            .collect::<Vec<_>>();
+        for layer in 0..config.n_layers {
+            let prefix = format!("model.layers.{layer}");
+            for projection in [
+                "self_attn.qkv_proj",
+                "self_attn.o_proj",
+                "mlp.gate_up_proj",
+                "mlp.down_proj",
+            ] {
+                let stem = format!("{prefix}.{projection}");
+                assert!(
+                    names.contains(&format!("{stem}.base_layer.weight").as_str()),
+                    "missing immutable base projection {stem}"
+                );
+                for adapter in ["speech", "vision"] {
+                    assert!(names.contains(&format!("{stem}.lora_A.{adapter}.weight").as_str()));
+                    assert!(names.contains(&format!("{stem}.lora_B.{adapter}.weight").as_str()));
+                }
+            }
+        }
+        assert_eq!(
+            names.iter().filter(|name| name.contains(".lora_")).count(),
+            config.n_layers * 4 * 2 * 2,
+            "four projections x two adapters x complete A/B pairs per layer"
+        );
+        assert!(
+            names
+                .iter()
+                .filter(|name| {
+                    name.contains("qkv_proj")
+                        || name.contains("o_proj")
+                        || name.contains("gate_up_proj")
+                        || name.contains("down_proj")
+                })
+                .all(|name| name.contains(".base_layer.") || name.contains(".lora_")),
+            "Phi4MM must never resolve a mutable unwrapped projection"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires PHI4MM_MODEL_DIR pointing at the pinned official checkpoint"]
+    fn real_phi4mm_index_covers_decoder_and_complete_lora_schema() {
+        let model_dir = std::path::PathBuf::from(
+            std::env::var("PHI4MM_MODEL_DIR").expect("set PHI4MM_MODEL_DIR"),
+        );
+        let config = Config::from_json(&model_dir).expect("parse pinned Phi4MM config");
+        let lora = config.phi4_lora.expect("Phi4MM LoRA contract");
+        assert_eq!((lora.speech_rank, lora.vision_rank), (320, 256));
+        assert_eq!((lora.speech_scale, lora.vision_scale), (2.0, 2.0));
+
+        let index_path = model_dir.join("model.safetensors.index.json");
+        let index: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&index_path).expect("read checkpoint index"),
+        )
+        .expect("parse checkpoint index");
+        let weight_map = index["weight_map"].as_object().expect("weight_map object");
+        let specs = weight_specs_q(&config, false);
+        let missing = specs
+            .iter()
+            .map(WeightSpec::tensor_name)
+            .filter(|name| !weight_map.contains_key(*name))
+            .collect::<Vec<_>>();
+        assert!(missing.is_empty(), "missing graph weights: {missing:?}");
+        assert_eq!(
+            specs
+                .iter()
+                .filter(|spec| spec.tensor_name().contains(".lora_"))
+                .count(),
+            512,
+            "32 layers x 4 projections x 2 modes x A/B"
+        );
+    }
 
     /// The Llama family weight order is embed + norm (f32-resident `Whole`) then, per
     /// layer, the 7 linear projections as `Proj` (f16-resident-capable, issue #572)

@@ -28,6 +28,16 @@ pub fn inv_freq(c: &Config) -> Vec<f64> {
             high_freq_factor,
             orig_ctx,
         } => llama3_inv_freq(c, *factor, *low_freq_factor, *high_freq_factor, *orig_ctx),
+        RopeScaling::LongRope { factors, .. } => {
+            let d = c.rotary_width();
+            factors
+                .iter()
+                .enumerate()
+                .map(|(index, factor)| {
+                    1.0 / (factor * c.rope_theta.powf((2 * index) as f64 / d as f64))
+                })
+                .collect()
+        }
     }
 }
 
@@ -130,7 +140,14 @@ pub fn rope_tables_from_inv(
 /// Build cos and sin tables of shape [max_seq, rotary_width] for the config's
 /// global RoPE scheme (half-split or interleaved).
 pub fn rope_tables(c: &Config, max_seq: usize) -> (Vec<f32>, Vec<f32>) {
-    rope_tables_from_inv(&inv_freq(c), c.rotary_width(), max_seq, c.rope_interleaved)
+    let (mut cos, mut sin) =
+        rope_tables_from_inv(&inv_freq(c), c.rotary_width(), max_seq, c.rope_interleaved);
+    if let RopeScaling::LongRope { amplitude, .. } = &c.rope {
+        let amplitude = *amplitude as f32;
+        cos.iter_mut().for_each(|value| *value *= amplitude);
+        sin.iter_mut().for_each(|value| *value *= amplitude);
+    }
+    (cos, sin)
 }
 
 /// Build the local cos/sin tables for a config with a distinct local RoPE base
