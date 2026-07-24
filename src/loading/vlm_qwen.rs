@@ -29,8 +29,12 @@ use std::path::Path;
 
 use crate::LoadedModel;
 use crate::models;
+#[cfg(feature = "xla-iree")]
+use crate::multimodal::host_preprocessor::{HostPreprocessorError, Qwen2VlIreeHostPreprocessor};
 use crate::vision;
 
+#[cfg(feature = "xla-iree")]
+use super::load_vlm_weights_common_filtered_canonical;
 use super::{
     Qwen35VlmVariant, QwenVisionTokenIds, inherit_qwen_text_quantization,
     inherit_qwen_vision_quantization, load_vlm_weights_common, load_vlm_weights_common_filtered,
@@ -93,6 +97,107 @@ pub(crate) fn load_qwen2_vl(model_path: &Path) -> Result<LoadedModel> {
     };
 
     Ok(LoadedModel::Qwen2VL(vlm))
+}
+
+/// Load only Qwen2-VL host patch preprocessing and the text embedding table;
+/// the complete vision tower and merger are resident in IREE.
+#[cfg(feature = "xla-iree")]
+pub(crate) fn load_qwen2_vl_iree_host_preprocessor(
+    model_path: &Path,
+    device: &str,
+) -> Result<Qwen2VlIreeHostPreprocessor, HostPreprocessorError> {
+    use mlxcel_core::layers::UnifiedEmbedding;
+    use vision::encoders::qwen2_vl::Qwen2VLVisionConfig;
+
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)
+        .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    if full_config
+        .get("model_type")
+        .and_then(serde_json::Value::as_str)
+        != Some("qwen2_vl")
+    {
+        return Err(HostPreprocessorError::FamilyMismatch {
+            actual: full_config
+                .get("model_type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<missing>")
+                .to_string(),
+        });
+    }
+    let mut vision_config: Qwen2VLVisionConfig =
+        parse_required_vlm_subconfig(&full_config, "vision_config", "Qwen2VL vision config")
+            .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    inherit_qwen_vision_quantization(&mut vision_config, &full_config);
+    let weights = load_vlm_weights_common_filtered_canonical(model_path, |name| {
+        let canonical = name.strip_prefix("language_model.").unwrap_or(name);
+        canonical.starts_with("model.embed_tokens.")
+    })
+    .map(strip_language_model_prefix)
+    .map_err(|error| HostPreprocessorError::WeightLoad(error.to_string()))?;
+    let quant_group_size = full_config
+        .get("quantization")
+        .and_then(|value| value.get("group_size"))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0) as i32;
+    let quant_bits = full_config
+        .get("quantization")
+        .and_then(|value| value.get("bits"))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0) as i32;
+    let text_embeddings = UnifiedEmbedding::from_weights(
+        &weights,
+        "model.embed_tokens",
+        quant_group_size,
+        quant_bits,
+    )
+    .map_err(|error| {
+        HostPreprocessorError::WeightLoad(format!(
+            "missing or invalid Qwen2-VL text embedding table: {error}"
+        ))
+    })?;
+    let hidden_size = full_config
+        .get("hidden_size")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|&value| value > 0)
+        .ok_or_else(|| {
+            HostPreprocessorError::InvalidConfig(
+                "Qwen2-VL hidden_size must be a positive integer".to_string(),
+            )
+        })?;
+    let max_sequence_len = full_config
+        .get("max_position_embeddings")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|&value| value > 0)
+        .ok_or_else(|| {
+            HostPreprocessorError::InvalidConfig(
+                "Qwen2-VL max_position_embeddings must be a positive integer".to_string(),
+            )
+        })?;
+    let token_ids = qwen_vl_token_ids(
+        &full_config,
+        QwenVisionTokenIds {
+            image_token_id: 151655,
+            video_token_id: 151656,
+            vision_start_token_id: 151652,
+        },
+    );
+    let processor = qwen_vl_processor(&vision_config);
+    let projector = mlxcel_xla::IreeQwen2VlProjector::load(model_path, device)
+        .map_err(HostPreprocessorError::Iree)?;
+    Qwen2VlIreeHostPreprocessor::from_parts(
+        processor,
+        text_embeddings,
+        projector,
+        token_ids.image_token_id,
+        token_ids.video_token_id,
+        token_ids.vision_start_token_id,
+        vision_config.spatial_merge_size,
+        hidden_size,
+        max_sequence_len,
+        device.to_string(),
+    )
 }
 
 /// Load a Qwen2.5-VL model (windowed ViT + Qwen2 language model with MRoPE)

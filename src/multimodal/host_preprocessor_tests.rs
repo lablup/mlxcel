@@ -20,7 +20,7 @@ use mlxcel_core::dtype;
 use super::{
     FakeHostMultimodalPreprocessor, HostMultimodalPreprocessor, HostPreprocessorError,
     XlaVisionBackend, XlaVisionBackendPolicy, export_llava_prefill, export_mlx_tensor,
-    load_xla_image_preprocessor, validate_processor_shape,
+    export_qwen2_vl_prefill, load_xla_image_preprocessor, validate_processor_shape,
 };
 use crate::multimodal::vlm_prompt::ImageTokenBlockError;
 use crate::vision::merge::merge_llava;
@@ -234,5 +234,83 @@ fn llava_export_rejects_hidden_size_mismatch() {
     assert!(matches!(
         error,
         HostPreprocessorError::EmbeddingShape { .. }
+    ));
+}
+
+#[test]
+fn qwen2_vl_export_builds_exact_mrope_positions_and_delta() {
+    ensure_cpu_device();
+    let merged = crate::vision::merge::InputEmbeddings {
+        inputs_embeds: mlxcel_core::from_slice_f32(&[0.0; 12], &[1, 6, 2]),
+        attention_mask_4d: None,
+    };
+    let prepared = export_qwen2_vl_prefill(
+        vec![10, 42, 42, 42, 42, 11],
+        merged,
+        &[(1, 4, 4)],
+        42,
+        43,
+        2,
+        2,
+    )
+    .unwrap();
+
+    let mlxcel_core::session::PreparedPositions::Mrope3D { tensor, rope_delta } =
+        prepared.positions
+    else {
+        panic!("Qwen2-VL must export M-RoPE positions");
+    };
+    assert_eq!(rope_delta, -2);
+    assert_eq!(tensor.shape, vec![3, 6]);
+    let positions = tensor
+        .bytes
+        .chunks_exact(4)
+        .map(|bytes| i32::from_ne_bytes(bytes.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        positions,
+        vec![
+            0, 1, 1, 1, 1, 3, // temporal axis
+            0, 1, 1, 2, 2, 3, // height axis
+            0, 1, 2, 1, 2, 3, // width axis
+        ]
+    );
+    assert_eq!(prepared.modalities[0].family, "qwen2_vl");
+    assert_eq!(prepared.modalities[0].item_count, 1);
+    assert_eq!(prepared.modalities[0].token_count, 4);
+}
+
+#[test]
+fn qwen2_vl_export_rejects_video_and_cross_image_run_drift() {
+    ensure_cpu_device();
+    let input = || crate::vision::merge::InputEmbeddings {
+        inputs_embeds: mlxcel_core::from_slice_f32(&[0.0; 12], &[1, 6, 2]),
+        attention_mask_4d: None,
+    };
+    let video = export_qwen2_vl_prefill(
+        vec![10, 43, 42, 42, 42, 11],
+        input(),
+        &[(1, 4, 4)],
+        42,
+        43,
+        2,
+        2,
+    )
+    .unwrap_err();
+    assert!(matches!(video, HostPreprocessorError::InvalidConfig(_)));
+
+    let split_runs = export_qwen2_vl_prefill(
+        vec![42, 42, 10, 42, 42, 11],
+        input(),
+        &[(1, 4, 4)],
+        42,
+        43,
+        2,
+        2,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        split_runs,
+        HostPreprocessorError::InvalidConfig(_)
     ));
 }

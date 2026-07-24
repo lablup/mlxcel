@@ -717,7 +717,10 @@ impl Config {
                     }
                 }
             }
-            Some("qwen2") => {
+            Some("qwen2") | Some("qwen2_vl") => {
+                // Qwen2-VL keeps the Qwen2 language configuration at the wrapper
+                // root (unlike LLaVA's nested `text_config`). Its language graph
+                // is therefore the ordinary Qwen2 graph with M-RoPE positions.
                 qkv_bias = true;
             }
             Some("qwen3") => {
@@ -1194,7 +1197,8 @@ impl Config {
                         rotary_width / 2
                     ));
                 }
-                let supported_family = matches!(model_type, Some("qwen2") | Some("qwen3"));
+                let supported_family =
+                    matches!(model_type, Some("qwen2") | Some("qwen2_vl") | Some("qwen3"));
                 if !supported_family {
                     return Err(format!(
                         "M-RoPE sections are only supported by the Qwen2/Qwen3 language backbone, got model_type={model_type:?}"
@@ -1704,6 +1708,10 @@ mod tests {
                 layout: MropeLayout::Chunked,
             })
         );
+        let qwen2_vl = Config::from_json_str(&base("qwen2_vl", "[1,1,1]", ""))
+            .expect("Qwen2-VL root language config parses");
+        assert_eq!(qwen2_vl.mrope, qwen2.mrope);
+        assert!(qwen2_vl.qkv_bias);
         let qwen3 = Config::from_json_str(&base("qwen3", "[1,1,1]", "")).expect("Qwen3 parses");
         assert_eq!(
             qwen3.mrope.unwrap().layout,

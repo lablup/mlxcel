@@ -58,6 +58,7 @@ mod gemma3n_weights;
 mod model;
 mod moe;
 mod phi4_audio;
+mod qwen2_vl;
 mod rope;
 mod vision;
 mod vision_config;
@@ -118,6 +119,13 @@ pub(crate) use phi4_audio::{
     Phi4AudioConfig, Phi4AudioDiagnosticSpec, Phi4AudioWeightSpec, emit_phi4_audio,
     emit_phi4_audio_diagnostic_with, emit_phi4_audio_with, phi4_audio_diagnostic_specs,
     phi4_audio_weight_specs, validate_phi4_audio_weight_shapes,
+};
+#[allow(unused_imports)]
+pub(crate) use qwen2_vl::emit_qwen2_vl;
+#[allow(unused_imports)]
+pub(crate) use qwen2_vl::{
+    QWEN2_VL_PATCH_BUCKETS, Qwen2VlConfig, Qwen2VlGridPlan, Qwen2VlHostInputs, Qwen2VlWeightSpec,
+    prepare_qwen2_vl_host_inputs,
 };
 // MoE FFN config types (issue #500), read by the weight loader (`iree.rs`) and the
 // validation harness. `SharedExpertConfig` is only named in some build cfgs.
