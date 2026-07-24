@@ -152,8 +152,26 @@ pub(super) fn reverse_window_indices(window_index: &[i32]) -> Vec<i32> {
         .collect();
     indexed.sort_by_key(|&(v, _)| v);
     let mut reverse = vec![0i32; window_index.len()];
-    for (rank, &(_, orig_idx)) in indexed.iter().enumerate() {
-        reverse[orig_idx] = rank as i32;
+    for (original_position, &(_, window_position)) in indexed.iter().enumerate() {
+        reverse[original_position] = window_position as i32;
     }
     reverse
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reverse_window_indices;
+
+    #[test]
+    fn reverse_indices_restore_original_group_order() {
+        let window_index = vec![0, 1, 4, 5, 2, 3];
+        let window_order = vec!["g0", "g1", "g4", "g5", "g2", "g3"];
+        let reverse = reverse_window_indices(&window_index);
+        let restored = reverse
+            .iter()
+            .map(|&position| window_order[position as usize])
+            .collect::<Vec<_>>();
+        assert_eq!(reverse, vec![0, 1, 4, 5, 2, 3]);
+        assert_eq!(restored, vec!["g0", "g1", "g2", "g3", "g4", "g5"]);
+    }
 }

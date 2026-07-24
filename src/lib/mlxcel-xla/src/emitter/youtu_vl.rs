@@ -1,0 +1,321 @@
+// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+
+//! StableHLO Youtu-VL windowed vision tower and built-in patch merger.
+
+use super::builder::{Builder, Ty, Val};
+use super::youtu_vl_plan::{YOUTU_VL_PATCH_BUCKETS, YoutuVlVisionConfig, YoutuVlWeightSpec};
+
+struct Args {
+    values: Vec<Val>,
+    declarations: Vec<String>,
+    cursor: usize,
+}
+
+impl Args {
+    fn new(specs: &[YoutuVlWeightSpec]) -> Self {
+        let mut values = Vec::with_capacity(specs.len() + 4);
+        let mut declarations = Vec::with_capacity(specs.len() + 4);
+        for (index, spec) in specs.iter().enumerate() {
+            let ty = Ty::f32(spec.shape.clone());
+            declarations.push(format!(
+                "%arg{index}: {} loc(\"{}\")",
+                ty.render(),
+                spec.name
+            ));
+            values.push(Builder::arg(index, ty));
+        }
+        Self {
+            values,
+            declarations,
+            cursor: 0,
+        }
+    }
+
+    fn take(&mut self) -> Val {
+        let value = self.values[self.cursor].clone();
+        self.cursor += 1;
+        value
+    }
+
+    fn input(&mut self, ty: Ty, name: &str) -> Val {
+        let index = self.values.len();
+        self.declarations
+            .push(format!("%arg{index}: {} loc(\"{name}\")", ty.render()));
+        let value = Builder::arg(index, ty);
+        self.values.push(value.clone());
+        value
+    }
+}
+
+fn add_bias(builder: &mut Builder, value: &Val, bias: &Val) -> Val {
+    let shape = value.ty.shape.clone();
+    let bias = builder.broadcast(bias, &[1], shape);
+    builder.add(value, &bias)
+}
+
+fn linear(builder: &mut Builder, value: &Val, weight: &Val, bias: &Val) -> Val {
+    let value = builder.linear_seq(value, weight);
+    add_bias(builder, &value, bias)
+}
+
+fn layer_norm(builder: &mut Builder, value: &Val, weight: &Val, bias: &Val, epsilon: f32) -> Val {
+    let rows = value.ty.shape[0];
+    let width = value.ty.shape[1];
+    let zero = builder.const_f32(0.0);
+    let width_scalar = builder.const_f32(width as f32);
+    let width_rows = builder.broadcast(&width_scalar, &[], vec![rows]);
+    let sum = builder.reduce_add(value, 1, &zero);
+    let mean = builder.divide(&sum, &width_rows);
+    let mean = builder.broadcast(&mean, &[0], vec![rows, width]);
+    let centered = builder.subtract(value, &mean);
+    let squared = builder.multiply(&centered, &centered);
+    let sum = builder.reduce_add(&squared, 1, &zero);
+    let variance = builder.divide(&sum, &width_rows);
+    let epsilon = builder.const_f32(epsilon);
+    let epsilon = builder.broadcast(&epsilon, &[], vec![rows]);
+    let variance = builder.add(&variance, &epsilon);
+    let inverse = builder.rsqrt(&variance);
+    let inverse = builder.broadcast(&inverse, &[0], vec![rows, width]);
+    let normalized = builder.multiply(&centered, &inverse);
+    let weight = builder.broadcast(weight, &[1], vec![rows, width]);
+    let bias = builder.broadcast(bias, &[1], vec![rows, width]);
+    let normalized = builder.multiply(&normalized, &weight);
+    builder.add(&normalized, &bias)
+}
+
+fn rms_norm(builder: &mut Builder, value: &Val, weight: &Val, epsilon: f32) -> Val {
+    let rows = value.ty.shape[0];
+    let width = value.ty.shape[1];
+    let zero = builder.const_f32(0.0);
+    let squared = builder.multiply(value, value);
+    let sum = builder.reduce_add(&squared, 1, &zero);
+    let width_scalar = builder.const_f32(width as f32);
+    let width_rows = builder.broadcast(&width_scalar, &[], vec![rows]);
+    let mean = builder.divide(&sum, &width_rows);
+    let epsilon = builder.const_f32(epsilon);
+    let epsilon = builder.broadcast(&epsilon, &[], vec![rows]);
+    let mean = builder.add(&mean, &epsilon);
+    let scale = builder.rsqrt(&mean);
+    let scale = builder.broadcast(&scale, &[0], vec![rows, width]);
+    let weight = builder.broadcast(weight, &[1], vec![rows, width]);
+    let value = builder.multiply(value, &scale);
+    builder.multiply(&value, &weight)
+}
+
+fn gelu_tanh(builder: &mut Builder, value: &Val) -> Val {
+    let shape = value.ty.shape.clone();
+    let half_scalar = builder.const_f32(0.5);
+    let half = builder.broadcast(&half_scalar, &[], shape.clone());
+    let one_scalar = builder.const_f32(1.0);
+    let one = builder.broadcast(&one_scalar, &[], shape.clone());
+    let coefficient_scalar = builder.const_f32(0.044_715);
+    let coefficient = builder.broadcast(&coefficient_scalar, &[], shape.clone());
+    let scale_scalar = builder.const_f32(0.797_884_6);
+    let scale = builder.broadcast(&scale_scalar, &[], shape);
+    let squared = builder.multiply(value, value);
+    let cubed = builder.multiply(&squared, value);
+    let nonlinear = builder.multiply(&coefficient, &cubed);
+    let inner = builder.add(value, &nonlinear);
+    let scaled = builder.multiply(&scale, &inner);
+    let tanh = builder.tanh(&scaled);
+    let cdf = builder.add(&one, &tanh);
+    let half_value = builder.multiply(value, &half);
+    builder.multiply(&half_value, &cdf)
+}
+
+fn rotate_half(builder: &mut Builder, value: &Val) -> Val {
+    let (tokens, heads, width) = (value.ty.shape[0], value.ty.shape[1], value.ty.shape[2]);
+    let half = width / 2;
+    let first = builder.slice(value, &[(0, tokens), (0, heads), (0, half)]);
+    let second = builder.slice(value, &[(0, tokens), (0, heads), (half, width)]);
+    let second = builder.negate(&second);
+    builder.concatenate(&second, &first, 2)
+}
+
+fn apply_rope(builder: &mut Builder, value: &Val, freqs: &Val) -> Val {
+    let tokens = value.ty.shape[0];
+    let heads = value.ty.shape[1];
+    let half = freqs.ty.shape[1];
+    let cos = builder.cosine(freqs);
+    let sin = builder.sine(freqs);
+    let cos = builder.concatenate(&cos, &cos, 1);
+    let sin = builder.concatenate(&sin, &sin, 1);
+    let cos = builder.broadcast(&cos, &[0, 2], vec![tokens, heads, half * 2]);
+    let sin = builder.broadcast(&sin, &[0, 2], vec![tokens, heads, half * 2]);
+    let direct = builder.multiply(value, &cos);
+    let rotated = rotate_half(builder, value);
+    let rotated = builder.multiply(&rotated, &sin);
+    builder.add(&direct, &rotated)
+}
+
+fn softmax(builder: &mut Builder, value: &Val) -> Val {
+    let shape = value.ty.shape.clone();
+    let negative = builder.const_f32(f32::NEG_INFINITY);
+    let maximum = builder.reduce_max(value, 2, &negative);
+    let maximum = builder.broadcast(&maximum, &[0, 1], shape.clone());
+    let shifted = builder.subtract(value, &maximum);
+    let exponentials = builder.exponential(&shifted);
+    let zero = builder.const_f32(0.0);
+    let denominator = builder.reduce_add(&exponentials, 2, &zero);
+    let denominator = builder.broadcast(&denominator, &[0, 1], shape);
+    builder.divide(&exponentials, &denominator)
+}
+
+fn attention(
+    builder: &mut Builder,
+    hidden: &Val,
+    args: &mut Args,
+    config: &YoutuVlVisionConfig,
+    freqs: &Val,
+    bias: &Val,
+) -> Val {
+    let tokens = hidden.ty.shape[0];
+    let head_dim = config.hidden / config.heads;
+    let q = linear(builder, hidden, &args.take(), &args.take());
+    let k = linear(builder, hidden, &args.take(), &args.take());
+    let v = linear(builder, hidden, &args.take(), &args.take());
+    let q = builder.reshape(&q, vec![tokens, config.heads, head_dim]);
+    let k = builder.reshape(&k, vec![tokens, config.heads, head_dim]);
+    let v = builder.reshape(&v, vec![tokens, config.heads, head_dim]);
+    let q = apply_rope(builder, &q, freqs);
+    let k = apply_rope(builder, &k, freqs);
+    let q = builder.transpose(&q, &[1, 0, 2]);
+    let k = builder.transpose(&k, &[1, 0, 2]);
+    let v = builder.transpose(&v, &[1, 0, 2]);
+    let scores = builder.dot_general(
+        &q,
+        &k,
+        &[0],
+        &[0],
+        &[2],
+        &[2],
+        vec![config.heads, tokens, tokens],
+    );
+    let scale = builder.const_f32((head_dim as f32).powf(-0.5));
+    let scale = builder.broadcast(&scale, &[], vec![config.heads, tokens, tokens]);
+    let scores = builder.multiply(&scores, &scale);
+    let bias = builder.broadcast(bias, &[1, 2], vec![config.heads, tokens, tokens]);
+    let scores = builder.add(&scores, &bias);
+    let probabilities = softmax(builder, &scores);
+    let context = builder.dot_general(
+        &probabilities,
+        &v,
+        &[0],
+        &[0],
+        &[2],
+        &[1],
+        vec![config.heads, tokens, head_dim],
+    );
+    let context = builder.transpose(&context, &[1, 0, 2]);
+    let context = builder.reshape(&context, vec![tokens, config.hidden]);
+    linear(builder, &context, &args.take(), &args.take())
+}
+
+fn layer(
+    builder: &mut Builder,
+    hidden: &Val,
+    args: &mut Args,
+    config: &YoutuVlVisionConfig,
+    freqs: &Val,
+    bias: &Val,
+) -> Val {
+    let normalized = layer_norm(
+        builder,
+        hidden,
+        &args.take(),
+        &args.take(),
+        config.layer_norm_eps,
+    );
+    let attention = attention(builder, &normalized, args, config, freqs, bias);
+    let residual = builder.add(hidden, &attention);
+    let normalized = layer_norm(
+        builder,
+        &residual,
+        &args.take(),
+        &args.take(),
+        config.layer_norm_eps,
+    );
+    let up = linear(builder, &normalized, &args.take(), &args.take());
+    let up = gelu_tanh(builder, &up);
+    let down = linear(builder, &up, &args.take(), &args.take());
+    builder.add(&residual, &down)
+}
+
+pub(crate) fn emit_youtu_vl(config: &YoutuVlVisionConfig, patch_bucket: usize) -> String {
+    assert!(
+        YOUTU_VL_PATCH_BUCKETS.contains(&patch_bucket),
+        "unqualified Youtu-VL patch bucket"
+    );
+    let specs = config.weight_specs();
+    let mut args = Args::new(&specs);
+    let mut builder = Builder::new();
+    let patch_width = config.channels * config.patch_size * config.patch_size;
+    let head_dim = config.hidden / config.heads;
+    let patches = args.input(
+        Ty::f32(vec![patch_bucket, patch_width]),
+        "patches.window_order",
+    );
+    let freqs = args.input(
+        Ty::f32(vec![patch_bucket, head_dim / 2]),
+        "vision_rope.freqs",
+    );
+    let window_bias = args.input(
+        Ty::f32(vec![patch_bucket, patch_bucket]),
+        "window_attention.bias",
+    );
+    let full_bias = args.input(
+        Ty::f32(vec![patch_bucket, patch_bucket]),
+        "full_attention.bias",
+    );
+    let mut hidden = linear(&mut builder, &patches, &args.take(), &args.take());
+    for layer_index in 0..config.depth {
+        let bias = if config.full_attention_layers.contains(&layer_index) {
+            &full_bias
+        } else {
+            &window_bias
+        };
+        hidden = layer(&mut builder, &hidden, &mut args, config, &freqs, bias);
+    }
+    hidden = layer_norm(
+        &mut builder,
+        &hidden,
+        &args.take(),
+        &args.take(),
+        config.layer_norm_eps,
+    );
+    hidden = rms_norm(&mut builder, &hidden, &args.take(), 1e-6);
+    let merged_width = config.hidden * config.spatial_merge_size * config.spatial_merge_size;
+    let merged = builder.reshape(&hidden, vec![patch_bucket / 4, merged_width]);
+    let merged = linear(&mut builder, &merged, &args.take(), &args.take());
+    let merged = gelu_tanh(&mut builder, &merged);
+    let projected = linear(&mut builder, &merged, &args.take(), &args.take());
+    assert_eq!(args.cursor, specs.len(), "Youtu-VL weight schema drifted");
+    format!(
+        "module @youtu_vl_vision {{\n  func.func public @main({signature}) -> {result_type} {{\n{body}    return {result} : {result_type}\n  }}\n}}\n",
+        signature = args.declarations.join(", "),
+        result_type = projected.ty.render(),
+        body = builder.body(),
+        result = projected.name,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn emits_window_and_full_attention_inputs() {
+        let config = YoutuVlVisionConfig::from_json_str(
+            r#"{"model_type":"youtu_vl","hidden_size":12,"vision_config":{"num_hidden_layers":2,"hidden_size":8,"intermediate_size":16,"num_attention_heads":2,"num_channels":3,"patch_size":2,"spatial_merge_size":2,"window_size":8,"fullatt_block_indexes":[1],"out_hidden_size":12,"num_patches":256}}"#,
+        )
+        .unwrap();
+        let ir = emit_youtu_vl(&config, 16);
+        assert!(ir.contains("window_attention.bias"));
+        assert!(ir.contains("full_attention.bias"));
+        assert!(ir.contains("merger.mlp.2.weight"));
+        assert!(ir.contains("tensor<4x12xf32>"));
+    }
+}

@@ -81,7 +81,7 @@ fn hex_bytes(bytes: &[u8]) -> String {
     output
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     hex_bytes(&Sha256::digest(bytes))
 }
 
@@ -101,7 +101,7 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(hex_bytes(&digest.finalize()))
 }
 
-fn compiler_generation_identity(
+pub(crate) fn compiler_generation_identity(
     compiler: &Path,
     flags: &[&str],
     mlir: &str,
@@ -179,7 +179,7 @@ fn processor_identity(model_dir: &Path, config: &Qwen2VlConfig) -> Result<String
     ))
 }
 
-fn model_shards(model_dir: &Path) -> Result<Vec<PathBuf>, String> {
+pub(crate) fn model_shards(model_dir: &Path) -> Result<Vec<PathBuf>, String> {
     let mut shards = std::fs::read_dir(model_dir)
         .map_err(|error| format!("read {}: {error}", model_dir.display()))?
         .map(|entry| {
@@ -230,7 +230,7 @@ fn tensor_locations(model_dir: &Path) -> Result<BTreeMap<String, PathBuf>, Strin
     Ok(locations)
 }
 
-fn native_f32_bytes(values: Vec<f32>) -> Vec<u8> {
+pub(crate) fn native_f32_bytes(values: Vec<f32>) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(values.len() * std::mem::size_of::<f32>());
     for value in values {
         bytes.extend_from_slice(&value.to_ne_bytes());
@@ -238,7 +238,7 @@ fn native_f32_bytes(values: Vec<f32>) -> Vec<u8> {
     bytes
 }
 
-fn validate_finite(label: &str, values: &[f32]) -> Result<(), String> {
+pub(crate) fn validate_finite(label: &str, values: &[f32]) -> Result<(), String> {
     if let Some((index, value)) = values
         .iter()
         .enumerate()
@@ -278,7 +278,7 @@ fn transpose_patch_t_h_w_c_to_t_c_h_w(values: Vec<f32>, config: &Qwen2VlConfig) 
     transposed
 }
 
-fn decode_direct_f32(
+pub(crate) fn decode_direct_f32(
     label: &str,
     dtype: Dtype,
     data: &[u8],
@@ -518,14 +518,14 @@ fn load_weights(
     ))
 }
 
-fn f32_as_bytes(values: &[f32]) -> &[u8] {
+pub(crate) fn f32_as_bytes(values: &[f32]) -> &[u8] {
     // Safety: f32 has no invalid bit patterns and the view cannot outlive input.
     unsafe {
         std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values))
     }
 }
 
-fn checked_f32_output(label: &str, bytes: Vec<u8>) -> Result<Vec<f32>, String> {
+pub(crate) fn checked_f32_output(label: &str, bytes: Vec<u8>) -> Result<Vec<f32>, String> {
     if !bytes.len().is_multiple_of(std::mem::size_of::<f32>()) {
         return Err(format!(
             "{label} returned {} bytes, not a whole number of f32 values",

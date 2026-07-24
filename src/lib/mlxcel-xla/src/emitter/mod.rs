@@ -63,6 +63,8 @@ mod qwen2_vl;
 mod rope;
 mod vision;
 mod vision_config;
+mod youtu_vl;
+mod youtu_vl_plan;
 
 #[cfg(test)]
 mod context_tests;
@@ -157,6 +159,12 @@ pub(crate) use vision::emit_vision;
 pub(crate) use vision::emit_vision_diagnostics;
 #[allow(unused_imports)]
 pub(crate) use vision_config::{LlavaVisionConfig, VisionActivation, VisionWeightSpec};
+#[allow(unused_imports)]
+pub(crate) use youtu_vl::emit_youtu_vl;
+#[allow(unused_imports)]
+pub(crate) use youtu_vl_plan::{
+    YoutuVlHostInputs, YoutuVlVisionConfig, prepare_youtu_vl_host_inputs,
+};
 
 #[cfg(test)]
 mod tests {
@@ -1399,6 +1407,75 @@ mod tests {
             "rms_norm_eps":1e-5,"rope_theta":1e4,"vocab_size":32}"#;
         let e = Config::from_json_str(j).unwrap_err();
         assert!(e.contains("MiniCPM3") && e.contains("MLA"), "got: {e}");
+    }
+
+    #[test]
+    fn youtu_vl_selects_dense_mla_and_interleaved_rope() {
+        let config = Config::from_json_str(
+            r#"{"model_type":"youtu_vl","hidden_size":64,"intermediate_size":128,
+            "num_hidden_layers":2,"num_attention_heads":4,"num_key_value_heads":4,
+            "vocab_size":128,"rms_norm_eps":1e-6,"rope_theta":500000,
+            "kv_lora_rank":16,"q_lora_rank":24,"qk_nope_head_dim":8,
+            "qk_rope_head_dim":4,"v_head_dim":8,"rope_interleave":true,
+            "tie_word_embeddings":true,"attention_bias":false,"mlp_bias":false}"#,
+        )
+        .unwrap()
+        .with_context_capacity(16)
+        .unwrap();
+        let mla = config.mla.expect("Youtu-VL must select MLA");
+        assert_eq!(config.head_dim, 12);
+        assert_eq!(config.rotary_width(), 4);
+        assert_eq!(config.cache_heads(), 1);
+        assert_eq!(config.cache_dim(), 20);
+        assert!(config.rope_interleaved);
+        assert_eq!(mla.q_head_dim(), 12);
+        let prefill = emit_prefill(&config, false);
+        assert!(prefill.contains("['mla_q_a']"));
+        assert!(prefill.contains("['mla_kv_b']"));
+        assert!(!prefill.contains("['wq']"));
+    }
+
+    #[test]
+    #[ignore = "requires YOUTU_VL_MODEL_DIR and IREE_CUDA_COMPILE"]
+    fn pinned_youtu_vl_mla_prefill_and_decode_compile_with_iree() {
+        let model_dir =
+            std::env::var("YOUTU_VL_MODEL_DIR").expect("set YOUTU_VL_MODEL_DIR to the checkpoint");
+        let compiler =
+            std::env::var("IREE_CUDA_COMPILE").expect("set IREE_CUDA_COMPILE to iree-compile");
+        let config = Config::from_json(std::path::Path::new(&model_dir))
+            .unwrap()
+            .with_context_capacity(16)
+            .unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "mlxcel-youtu-vl-mla-compile-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        for (name, graph) in [
+            ("prefill", emit_prefill(&config, false)),
+            ("decode", emit_decode(&config, false)),
+            ("ragged", emit_decode_ragged(&config, 2, false)),
+        ] {
+            let mlir_path = directory.join(format!("{name}.mlir"));
+            let vmfb_path = directory.join(format!("{name}.vmfb"));
+            std::fs::write(&mlir_path, graph).unwrap();
+            let output = std::process::Command::new(&compiler)
+                .arg(&mlir_path)
+                .args([
+                    "--iree-hal-target-device=local",
+                    "--iree-hal-local-target-device-backends=llvm-cpu",
+                ])
+                .arg("-o")
+                .arg(&vmfb_path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{name} iree-compile failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     /// The parallel-block archs (Cohere/Cohere2) carry a single `input_layernorm`

@@ -221,10 +221,13 @@ struct LayerW {
     /// MLP up projection. `None` on a MoE layer (issue #500); `Some` for every dense
     /// layer, so the dense-MLP op sequence is unchanged.
     up: Option<Val>,
-    wk: Val,
-    wo: Val,
-    wq: Val,
-    wv: Val,
+    wk: Option<Val>,
+    wo: Option<Val>,
+    wq: Option<Val>,
+    wv: Option<Val>,
+    /// Youtu-VL's dense DeepSeek-V3 MLA projections. Mutually exclusive with
+    /// the ordinary q/k/v projection handles above.
+    mla: Option<MlaLayerW>,
     bk: Option<Val>,
     bq: Option<Val>,
     bv: Option<Val>,
@@ -255,6 +258,16 @@ struct LayerW {
     /// Phi4MM's immutable speech/vision adapter pairs. The request's numeric
     /// mode gates their deltas per row; the base weights are never mutated.
     phi4_lora: Option<Phi4LayerLoraW>,
+}
+
+struct MlaLayerW {
+    q_a: Val,
+    q_a_norm: Val,
+    q_b: Val,
+    kv_a: Val,
+    kv_a_norm: Val,
+    kv_b: Val,
+    o: Val,
 }
 
 #[derive(Clone)]
@@ -463,13 +476,58 @@ fn take_layer_weights(
         .then(|| take_arg(decls, idx, Ty::f32(vec![h]), p("in_ln")));
     let post_ln = has_post.then(|| take_arg(decls, idx, Ty::f32(vec![h]), p("post_ln")));
     let up = (!moe_layer).then(|| take_weight(b, decls, idx, c, inter, h, p("up")));
-    let wk = take_weight(b, decls, idx, c, kv, h, p("wk"));
-    // o_proj maps `[n_q*head_dim]` -> `[hidden]`, so its weight is `[h, qd]` (HF's
-    // `[out, in]`). For Llama / Qwen2 `qd == h`, so this renders the same square
-    // type as before (byte-identical); Gemma is genuinely non-square.
-    let wo = take_weight(b, decls, idx, c, h, qd, p("wo"));
-    let wq = take_weight(b, decls, idx, c, qd, h, p("wq"));
-    let wv = take_weight(b, decls, idx, c, kv, h, p("wv"));
+    let (wk, wo, wq, wv, mla) = if let Some(m) = c.mla {
+        let q_a = take_weight(b, decls, idx, c, m.q_lora_rank, h, p("mla_q_a"));
+        let q_a_norm = take_arg(decls, idx, Ty::f32(vec![m.q_lora_rank]), p("mla_q_a_norm"));
+        let q_b = take_weight(
+            b,
+            decls,
+            idx,
+            c,
+            c.n_q * m.q_head_dim(),
+            m.q_lora_rank,
+            p("mla_q_b"),
+        );
+        let kv_a = take_weight(b, decls, idx, c, m.cache_dim(), h, p("mla_kv_a"));
+        let kv_a_norm = take_arg(
+            decls,
+            idx,
+            Ty::f32(vec![m.kv_lora_rank]),
+            p("mla_kv_a_norm"),
+        );
+        let kv_b = take_weight(
+            b,
+            decls,
+            idx,
+            c,
+            c.n_q * (m.qk_nope_head_dim + m.v_head_dim),
+            m.kv_lora_rank,
+            p("mla_kv_b"),
+        );
+        let o = take_weight(b, decls, idx, c, h, c.n_q * m.v_head_dim, p("mla_o"));
+        (
+            None,
+            None,
+            None,
+            None,
+            Some(MlaLayerW {
+                q_a,
+                q_a_norm,
+                q_b,
+                kv_a,
+                kv_a_norm,
+                kv_b,
+                o,
+            }),
+        )
+    } else {
+        let wk = take_weight(b, decls, idx, c, kv, h, p("wk"));
+        // o_proj maps `[n_q*head_dim]` -> `[hidden]`, so its weight is `[h, qd]`.
+        let wo = take_weight(b, decls, idx, c, h, qd, p("wo"));
+        let wq = take_weight(b, decls, idx, c, qd, h, p("wq"));
+        let wv = take_weight(b, decls, idx, c, kv, h, p("wv"));
+        (Some(wk), Some(wo), Some(wq), Some(wv), None)
+    };
     let (bk, bq, bv) = if c.qkv_bias {
         let bk = take_arg(decls, idx, Ty::f32(vec![kv]), p("bk"));
         let bq = take_arg(decls, idx, Ty::f32(vec![qd]), p("bq"));
@@ -592,6 +650,7 @@ fn take_layer_weights(
         wo,
         wq,
         wv,
+        mla,
         bk,
         bq,
         bv,
@@ -727,13 +786,23 @@ fn build_arg_schema(b: &mut Builder, c: &Config) -> (Vec<ArgDecl>, Args) {
     let kcache = take_arg(
         &mut decls,
         &mut idx,
-        Ty::f32(vec![c.n_layers, c.context_capacity, c.n_kv, c.head_dim]),
+        Ty::f32(vec![
+            c.n_layers,
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim(),
+        ]),
         "kcache".into(),
     );
     let vcache = take_arg(
         &mut decls,
         &mut idx,
-        Ty::f32(vec![c.n_layers, c.context_capacity, c.n_kv, c.head_dim]),
+        Ty::f32(vec![
+            c.n_layers,
+            c.context_capacity,
+            c.cache_heads(),
+            c.cache_dim(),
+        ]),
         "vcache".into(),
     );
 
@@ -1530,7 +1599,7 @@ impl AttnLayout {
                     .phi4_lora
                     .as_ref()
                     .map(|lora| self.modal_lora_delta(b, hn, &lora.qkv));
-                let q = b.linear(hn, &lw.wq);
+                let q = b.linear(hn, lw.wq.as_ref().expect("ordinary q projection"));
                 let q = match &lora {
                     Some(delta) => {
                         let delta = b.slice(delta, &[(0, nq * d)]);
@@ -1540,7 +1609,7 @@ impl AttnLayout {
                 };
                 let q = add_proj_bias(b, q, &lw.bq);
                 let q = b.reshape(&q, vec![nq, d]);
-                let kk = b.linear(hn, &lw.wk);
+                let kk = b.linear(hn, lw.wk.as_ref().expect("ordinary k projection"));
                 let kk = match &lora {
                     Some(delta) => {
                         let delta = b.slice(delta, &[(nq * d, nq * d + nkv * d)]);
@@ -1550,7 +1619,7 @@ impl AttnLayout {
                 };
                 let kk = add_proj_bias(b, kk, &lw.bk);
                 let kk = b.reshape(&kk, vec![nkv, d]);
-                let vv = b.linear(hn, &lw.wv);
+                let vv = b.linear(hn, lw.wv.as_ref().expect("ordinary v projection"));
                 let vv = match &lora {
                     Some(delta) => {
                         let delta = b.slice(delta, &[(nq * d + nkv * d, nq * d + 2 * nkv * d)]);
@@ -1582,7 +1651,7 @@ impl AttnLayout {
             .phi4_lora
             .as_ref()
             .map(|lora| self.modal_lora_delta(b, hn, &lora.qkv));
-        let q = b.linear_seq(hn, &lw.wq);
+        let q = b.linear_seq(hn, lw.wq.as_ref().expect("ordinary q projection"));
         let q = match &lora {
             Some(delta) => {
                 let delta = b.slice(delta, &[(0, n), (0, nq * d)]);
@@ -1592,7 +1661,7 @@ impl AttnLayout {
         };
         let q = add_proj_bias_seq(b, q, &lw.bq, n, nq * d);
         let q = b.reshape(&q, vec![n, nq, d]);
-        let kk = b.linear_seq(hn, &lw.wk);
+        let kk = b.linear_seq(hn, lw.wk.as_ref().expect("ordinary k projection"));
         let kk = match &lora {
             Some(delta) => {
                 let delta = b.slice(delta, &[(0, n), (nq * d, nq * d + nkv * d)]);
@@ -1602,7 +1671,7 @@ impl AttnLayout {
         };
         let kk = add_proj_bias_seq(b, kk, &lw.bk, n, nkv * d);
         let kk = b.reshape(&kk, vec![n, nkv, d]);
-        let vv = b.linear_seq(hn, &lw.wv);
+        let vv = b.linear_seq(hn, lw.wv.as_ref().expect("ordinary v projection"));
         let vv = match &lora {
             Some(delta) => {
                 let delta = b.slice(delta, &[(0, n), (nq * d + nkv * d, nq * d + 2 * nkv * d)]);
@@ -1876,8 +1945,10 @@ impl AttnLayout {
     /// family, byte-identical).
     fn o_proj(&self, b: &mut Builder, o: &Val, lw: &LayerW) -> Val {
         let out = match self {
-            AttnLayout::Single { .. } => b.linear(o, &lw.wo),
-            _ => b.linear_seq(o, &lw.wo),
+            AttnLayout::Single { .. } => {
+                b.linear(o, lw.wo.as_ref().expect("ordinary output projection"))
+            }
+            _ => b.linear_seq(o, lw.wo.as_ref().expect("ordinary output projection")),
         };
         let out = match &lw.phi4_lora {
             Some(lora) => {
@@ -1931,6 +2002,440 @@ fn apply_scale_and_softcap(b: &mut Builder, c: &Config, k: &Consts, scores: Val)
         Some(cap) => softcap(b, &scores, cap),
         None => scores,
     }
+}
+
+fn mla_rms_norm(
+    b: &mut Builder,
+    x: &Val,
+    weight: &Val,
+    eps: &Val,
+    rows: Option<usize>,
+    width: usize,
+) -> Val {
+    let width_f = b.const_f32(width as f32);
+    let zero = b.const_f32(0.0);
+    let square = b.multiply(x, x);
+    match rows {
+        None => {
+            let sum = b.reduce_add(&square, 0, &zero);
+            let mean = b.divide(&sum, &width_f);
+            let variance = b.add(&mean, eps);
+            let scale = b.rsqrt(&variance);
+            let scale = b.broadcast(&scale, &[], vec![width]);
+            let normalized = b.multiply(x, &scale);
+            b.multiply(&normalized, weight)
+        }
+        Some(rows) => {
+            let sum = b.reduce_add(&square, 1, &zero);
+            let width_f = b.broadcast(&width_f, &[], vec![rows]);
+            let mean = b.divide(&sum, &width_f);
+            let eps = b.broadcast(eps, &[], vec![rows]);
+            let variance = b.add(&mean, &eps);
+            let scale = b.rsqrt(&variance);
+            let scale = b.broadcast(&scale, &[0], vec![rows, width]);
+            let weight = b.broadcast(weight, &[1], vec![rows, width]);
+            let normalized = b.multiply(x, &scale);
+            b.multiply(&normalized, &weight)
+        }
+    }
+}
+
+fn mla_expand_latent(
+    b: &mut Builder,
+    latent: &Val,
+    kv_b: &Val,
+    rows: Option<usize>,
+    c: &Config,
+) -> (Val, Val) {
+    let m = c.mla.expect("MLA config");
+    let weights = b.reshape(
+        kv_b,
+        vec![c.n_q, m.qk_nope_head_dim + m.v_head_dim, m.kv_lora_rank],
+    );
+    let key_weights = b.slice(
+        &weights,
+        &[(0, c.n_q), (0, m.qk_nope_head_dim), (0, m.kv_lora_rank)],
+    );
+    let value_weights = b.slice(
+        &weights,
+        &[
+            (0, c.n_q),
+            (m.qk_nope_head_dim, m.qk_nope_head_dim + m.v_head_dim),
+            (0, m.kv_lora_rank),
+        ],
+    );
+    match rows {
+        None => {
+            let key = b.dot_general(
+                latent,
+                &key_weights,
+                &[],
+                &[],
+                &[0],
+                &[2],
+                vec![c.n_q, m.qk_nope_head_dim],
+            );
+            let value = b.dot_general(
+                latent,
+                &value_weights,
+                &[],
+                &[],
+                &[0],
+                &[2],
+                vec![c.n_q, m.v_head_dim],
+            );
+            (key, value)
+        }
+        Some(rows) => {
+            let key = b.dot_general(
+                latent,
+                &key_weights,
+                &[],
+                &[],
+                &[latent.ty.shape.len() - 1],
+                &[2],
+                if latent.ty.shape.len() == 2 {
+                    vec![rows, c.n_q, m.qk_nope_head_dim]
+                } else {
+                    vec![latent.ty.shape[0], rows, c.n_q, m.qk_nope_head_dim]
+                },
+            );
+            let value = b.dot_general(
+                latent,
+                &value_weights,
+                &[],
+                &[],
+                &[latent.ty.shape.len() - 1],
+                &[2],
+                if latent.ty.shape.len() == 2 {
+                    vec![rows, c.n_q, m.v_head_dim]
+                } else {
+                    vec![latent.ty.shape[0], rows, c.n_q, m.v_head_dim]
+                },
+            );
+            (key, value)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_mla_attention(
+    b: &mut Builder,
+    c: &Config,
+    k: &Consts,
+    lw: &LayerW,
+    li: usize,
+    x: &Val,
+    layout: &AttnLayout,
+    kcache: &mut Val,
+    vcache: &mut Val,
+) -> (Val, Val) {
+    let m = c.mla.expect("MLA config");
+    let mw = lw.mla.as_ref().expect("MLA layer weights");
+    let hn = arch_norm(b, c, k, layout, x, &lw.in_ln, lw.in_ln_bias.as_ref());
+    let rows = match layout {
+        AttnLayout::Single { .. } => None,
+        AttnLayout::Ragged { bsz, .. } => Some(*bsz),
+        AttnLayout::Prefill { lp, .. } => Some(*lp),
+    };
+    let q_latent = match rows {
+        None => b.linear(&hn, &mw.q_a),
+        Some(_) => b.linear_seq(&hn, &mw.q_a),
+    };
+    let q_latent = mla_rms_norm(b, &q_latent, &mw.q_a_norm, &k.eps, rows, m.q_lora_rank);
+    let q = match rows {
+        None => b.linear(&q_latent, &mw.q_b),
+        Some(_) => b.linear_seq(&q_latent, &mw.q_b),
+    };
+    let q = match rows {
+        None => b.reshape(&q, vec![c.n_q, m.q_head_dim()]),
+        Some(n) => b.reshape(&q, vec![n, c.n_q, m.q_head_dim()]),
+    };
+    let (q_nope, q_pe) = match rows {
+        None => (
+            b.slice(&q, &[(0, c.n_q), (0, m.qk_nope_head_dim)]),
+            b.slice(&q, &[(0, c.n_q), (m.qk_nope_head_dim, m.q_head_dim())]),
+        ),
+        Some(n) => (
+            b.slice(&q, &[(0, n), (0, c.n_q), (0, m.qk_nope_head_dim)]),
+            b.slice(
+                &q,
+                &[(0, n), (0, c.n_q), (m.qk_nope_head_dim, m.q_head_dim())],
+            ),
+        ),
+    };
+    let kv = match rows {
+        None => b.linear(&hn, &mw.kv_a),
+        Some(_) => b.linear_seq(&hn, &mw.kv_a),
+    };
+    let (latent, k_pe) = match rows {
+        None => (
+            b.slice(&kv, &[(0, m.kv_lora_rank)]),
+            b.slice(&kv, &[(m.kv_lora_rank, m.cache_dim())]),
+        ),
+        Some(n) => (
+            b.slice(&kv, &[(0, n), (0, m.kv_lora_rank)]),
+            b.slice(&kv, &[(0, n), (m.kv_lora_rank, m.cache_dim())]),
+        ),
+    };
+    let latent = mla_rms_norm(b, &latent, &mw.kv_a_norm, &k.eps, rows, m.kv_lora_rank);
+    let (q_pe, k_pe) = match layout {
+        AttnLayout::Single { cos, sin, .. } => {
+            let q_pe = rotate(b, c, &q_pe, cos, sin, c.n_q, m.qk_rope_head_dim);
+            let k_pe = b.reshape(&k_pe, vec![1, m.qk_rope_head_dim]);
+            let k_pe = rotate(b, c, &k_pe, cos, sin, 1, m.qk_rope_head_dim);
+            (q_pe, b.reshape(&k_pe, vec![m.qk_rope_head_dim]))
+        }
+        AttnLayout::Ragged { bsz, cos, sin, .. } => {
+            let q_pe = rotate_seq(b, c, &q_pe, cos, sin, *bsz, c.n_q, m.qk_rope_head_dim);
+            let k_pe = b.reshape(&k_pe, vec![*bsz, 1, m.qk_rope_head_dim]);
+            let k_pe = rotate_seq(b, c, &k_pe, cos, sin, *bsz, 1, m.qk_rope_head_dim);
+            (q_pe, b.reshape(&k_pe, vec![*bsz, m.qk_rope_head_dim]))
+        }
+        AttnLayout::Prefill { lp, cos, sin, .. } => {
+            let q_pe = rotate_seq(b, c, &q_pe, cos, sin, *lp, c.n_q, m.qk_rope_head_dim);
+            let k_pe = b.reshape(&k_pe, vec![*lp, 1, m.qk_rope_head_dim]);
+            let k_pe = rotate_seq(b, c, &k_pe, cos, sin, *lp, 1, m.qk_rope_head_dim);
+            (q_pe, b.reshape(&k_pe, vec![*lp, m.qk_rope_head_dim]))
+        }
+    };
+
+    let cache_width = m.cache_dim();
+    let (latent_slab, pe_slab) = match layout {
+        AttnLayout::Single { cache_len, .. } => {
+            let zeros_pe = b.broadcast(&k.zero, &[], vec![m.qk_rope_head_dim]);
+            let latent_row = b.concatenate(&latent, &zeros_pe, 0);
+            let zeros_latent = b.broadcast(&k.zero, &[], vec![m.kv_lora_rank]);
+            let pe_row = b.concatenate(&zeros_latent, &k_pe, 0);
+            let latent_update = b.reshape(&latent_row, vec![1, 1, 1, cache_width]);
+            *kcache = b.dynamic_update_slice(
+                kcache,
+                &latent_update,
+                &[&k.layer_idx[li], cache_len, &k.c0, &k.c0],
+            );
+            let pe_update = b.reshape(&pe_row, vec![1, 1, 1, cache_width]);
+            *vcache = b.dynamic_update_slice(
+                vcache,
+                &pe_update,
+                &[&k.layer_idx[li], cache_len, &k.c0, &k.c0],
+            );
+            let latent_slab = b.slice(
+                kcache,
+                &[
+                    (li, li + 1),
+                    (0, c.context_capacity),
+                    (0, 1),
+                    (0, m.kv_lora_rank),
+                ],
+            );
+            let pe_slab = b.slice(
+                vcache,
+                &[
+                    (li, li + 1),
+                    (0, c.context_capacity),
+                    (0, 1),
+                    (m.kv_lora_rank, cache_width),
+                ],
+            );
+            (
+                b.reshape(&latent_slab, vec![c.context_capacity, m.kv_lora_rank]),
+                b.reshape(&pe_slab, vec![c.context_capacity, m.qk_rope_head_dim]),
+            )
+        }
+        AttnLayout::Ragged {
+            bsz, pos, row_idx, ..
+        } => {
+            let zeros_pe = b.broadcast(&k.zero, &[], vec![*bsz, m.qk_rope_head_dim]);
+            let latent_rows = b.concatenate(&latent, &zeros_pe, 1);
+            let zeros_latent = b.broadcast(&k.zero, &[], vec![*bsz, m.kv_lora_rank]);
+            let pe_rows = b.concatenate(&zeros_latent, &k_pe, 1);
+            for r in 0..*bsz {
+                let pos_slice = b.slice(pos, &[(r, r + 1)]);
+                let pos_r = b.reshape(&pos_slice, vec![]);
+                let latent_row = b.slice(&latent_rows, &[(r, r + 1), (0, cache_width)]);
+                let latent_update = b.reshape(&latent_row, vec![1, 1, 1, 1, cache_width]);
+                *kcache = b.dynamic_update_slice(
+                    kcache,
+                    &latent_update,
+                    &[&row_idx[r], &k.layer_idx[li], &pos_r, &k.c0, &k.c0],
+                );
+                let pe_row = b.slice(&pe_rows, &[(r, r + 1), (0, cache_width)]);
+                let pe_update = b.reshape(&pe_row, vec![1, 1, 1, 1, cache_width]);
+                *vcache = b.dynamic_update_slice(
+                    vcache,
+                    &pe_update,
+                    &[&row_idx[r], &k.layer_idx[li], &pos_r, &k.c0, &k.c0],
+                );
+            }
+            let latent_slab = b.slice(
+                kcache,
+                &[
+                    (0, *bsz),
+                    (li, li + 1),
+                    (0, c.context_capacity),
+                    (0, 1),
+                    (0, m.kv_lora_rank),
+                ],
+            );
+            let pe_slab = b.slice(
+                vcache,
+                &[
+                    (0, *bsz),
+                    (li, li + 1),
+                    (0, c.context_capacity),
+                    (0, 1),
+                    (m.kv_lora_rank, cache_width),
+                ],
+            );
+            (
+                b.reshape(&latent_slab, vec![*bsz, c.context_capacity, m.kv_lora_rank]),
+                b.reshape(&pe_slab, vec![*bsz, c.context_capacity, m.qk_rope_head_dim]),
+            )
+        }
+        AttnLayout::Prefill { lp, .. } => {
+            let zeros_pe = b.broadcast(&k.zero, &[], vec![*lp, m.qk_rope_head_dim]);
+            let latent_rows = b.concatenate(&latent, &zeros_pe, 1);
+            let zeros_latent = b.broadcast(&k.zero, &[], vec![*lp, m.kv_lora_rank]);
+            let pe_rows = b.concatenate(&zeros_latent, &k_pe, 1);
+            let latent_update = b.reshape(&latent_rows, vec![1, *lp, 1, cache_width]);
+            *kcache = b.dynamic_update_slice(
+                kcache,
+                &latent_update,
+                &[&k.layer_idx[li], &k.c0, &k.c0, &k.c0],
+            );
+            let pe_update = b.reshape(&pe_rows, vec![1, *lp, 1, cache_width]);
+            *vcache = b.dynamic_update_slice(
+                vcache,
+                &pe_update,
+                &[&k.layer_idx[li], &k.c0, &k.c0, &k.c0],
+            );
+            (latent.clone(), k_pe.clone())
+        }
+    };
+    let sequence = match layout {
+        AttnLayout::Single { .. } | AttnLayout::Ragged { .. } => c.context_capacity,
+        AttnLayout::Prefill { lp, .. } => *lp,
+    };
+    let (keys, values) = mla_expand_latent(b, &latent_slab, &mw.kv_b, Some(sequence), c);
+    let scores = match layout {
+        AttnLayout::Single { .. } => {
+            let keys = b.transpose(&keys, &[1, 0, 2]);
+            let nope = b.dot_general(
+                &q_nope,
+                &keys,
+                &[0],
+                &[0],
+                &[1],
+                &[2],
+                vec![c.n_q, sequence],
+            );
+            let pe = b.transpose(&pe_slab, &[1, 0]);
+            let rotary = b.dot_general(&q_pe, &pe, &[], &[], &[1], &[0], vec![c.n_q, sequence]);
+            b.add(&nope, &rotary)
+        }
+        AttnLayout::Ragged { bsz, .. } => {
+            let keys = b.transpose(&keys, &[0, 2, 1, 3]);
+            let q_nope = b.reshape(&q_nope, vec![*bsz, c.n_q, 1, m.qk_nope_head_dim]);
+            let nope = b.dot_general(
+                &q_nope,
+                &keys,
+                &[0, 1],
+                &[0, 1],
+                &[3],
+                &[3],
+                vec![*bsz, c.n_q, 1, sequence],
+            );
+            let nope = b.reshape(&nope, vec![*bsz, c.n_q, sequence]);
+            let pe = b.transpose(&pe_slab, &[0, 2, 1]);
+            let q_pe = b.reshape(&q_pe, vec![*bsz, c.n_q, 1, m.qk_rope_head_dim]);
+            let pe = b.broadcast(
+                &pe,
+                &[0, 2, 3],
+                vec![*bsz, c.n_q, m.qk_rope_head_dim, sequence],
+            );
+            let rotary = b.dot_general(
+                &q_pe,
+                &pe,
+                &[0, 1],
+                &[0, 1],
+                &[3],
+                &[2],
+                vec![*bsz, c.n_q, 1, sequence],
+            );
+            let rotary = b.reshape(&rotary, vec![*bsz, c.n_q, sequence]);
+            b.add(&nope, &rotary)
+        }
+        AttnLayout::Prefill { lp, .. } => {
+            let q_nope = b.transpose(&q_nope, &[1, 0, 2]);
+            let keys = b.transpose(&keys, &[1, 0, 2]);
+            let nope = b.dot_general(
+                &q_nope,
+                &keys,
+                &[0],
+                &[0],
+                &[2],
+                &[2],
+                vec![c.n_q, *lp, *lp],
+            );
+            let q_pe = b.transpose(&q_pe, &[1, 0, 2]);
+            let pe = b.transpose(&pe_slab, &[1, 0]);
+            let rotary = b.dot_general(&q_pe, &pe, &[], &[], &[2], &[0], vec![c.n_q, *lp, *lp]);
+            let scores = b.add(&nope, &rotary);
+            b.reshape(&scores, vec![c.n_q, *lp, 1, *lp])
+        }
+    };
+    let scores = apply_scale_and_softcap(b, c, k, scores);
+    let scores = layout.add_mask(b, c, li, &scores);
+    let attention = attn_softmax(b, k, &scores, layout.score_axis());
+    let context = match layout {
+        AttnLayout::Single { .. } => {
+            let values = b.transpose(&values, &[1, 0, 2]);
+            let context = b.dot_general(
+                &attention,
+                &values,
+                &[0],
+                &[0],
+                &[1],
+                &[1],
+                vec![c.n_q, m.v_head_dim],
+            );
+            b.reshape(&context, vec![c.n_q * m.v_head_dim])
+        }
+        AttnLayout::Ragged { bsz, .. } => {
+            let values = b.transpose(&values, &[0, 2, 1, 3]);
+            let context = b.dot_general(
+                &attention,
+                &values,
+                &[0, 1],
+                &[0, 1],
+                &[2],
+                &[2],
+                vec![*bsz, c.n_q, m.v_head_dim],
+            );
+            b.reshape(&context, vec![*bsz, c.n_q * m.v_head_dim])
+        }
+        AttnLayout::Prefill { lp, .. } => {
+            let attention = b.reshape(&attention, vec![c.n_q, *lp, *lp]);
+            let values = b.transpose(&values, &[1, 0, 2]);
+            let context = b.dot_general(
+                &attention,
+                &values,
+                &[0],
+                &[0],
+                &[2],
+                &[1],
+                vec![c.n_q, *lp, m.v_head_dim],
+            );
+            let context = b.transpose(&context, &[1, 0, 2]);
+            b.reshape(&context, vec![*lp, c.n_q * m.v_head_dim])
+        }
+    };
+    let output = match layout {
+        AttnLayout::Single { .. } => b.linear(&context, &mw.o),
+        _ => b.linear_seq(&context, &mw.o),
+    };
+    let output = post_attn_norm(b, c, k, layout, output, lw);
+    (hn, output)
 }
 
 /// The input RMSNorm applied at a layout's rank: the Gemma `(1 + w)` weight offset
@@ -2002,6 +2507,9 @@ fn emit_attention(
     kcache: &mut Val,
     vcache: &mut Val,
 ) -> (Val, Val) {
+    if c.mla.is_some() {
+        return emit_mla_attention(b, c, k, lw, li, x, layout, kcache, vcache);
+    }
     let hn = arch_norm(b, c, k, layout, x, &lw.in_ln, lw.in_ln_bias.as_ref());
     let (q, kk, vv) = layout.project_qkv(b, c, &hn, lw);
     // q/k-norm hook (issue #494): Qwen3 / Gemma3 norm each head over head_dim,
@@ -2179,7 +2687,7 @@ pub fn emit_decode_with(c: &Config, sample: bool, precision: Precision) -> Strin
     };
 
     let sig = render_signature(&decls);
-    let cache_ty = Ty::f32(vec![c.n_layers, seq, c.n_kv, c.head_dim]).render();
+    let cache_ty = Ty::f32(vec![c.n_layers, seq, c.cache_heads(), c.cache_dim()]).render();
     format!(
         "module @decode_step {{\n  func.func public @main({sig}) -> ({out_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {out_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
         sig = sig,
@@ -2279,8 +2787,8 @@ fn build_batched_arg_schema(
             bsz,
             c.n_layers,
             c.context_capacity,
-            c.n_kv,
-            c.head_dim,
+            c.cache_heads(),
+            c.cache_dim(),
         ]),
         "kcache".into(),
     );
@@ -2291,8 +2799,8 @@ fn build_batched_arg_schema(
             bsz,
             c.n_layers,
             c.context_capacity,
-            c.n_kv,
-            c.head_dim,
+            c.cache_heads(),
+            c.cache_dim(),
         ]),
         "vcache".into(),
     );
@@ -2352,6 +2860,10 @@ pub fn emit_decode_batched_with(
     precision: Precision,
 ) -> String {
     assert!(
+        c.mla.is_none(),
+        "uniform lockstep decode does not support MLA; use ragged decode"
+    );
+    assert!(
         c.phi4_lora.is_none(),
         "Phi4MM requires per-row ragged decode; uniform batched decode cannot carry request-scoped adapter modes"
     );
@@ -2405,13 +2917,13 @@ pub fn emit_decode_batched_with(
             .as_ref()
             .expect("uniform-B batched decode is emitted only for pre-norm archs");
         let hn = rms_norm_seq(&mut b, &x, in_ln, &k, bsz, h); // [B, H]
-        let q = b.linear_seq(&hn, &lw.wq); // [B, qd]
+        let q = b.linear_seq(&hn, lw.wq.as_ref().expect("ordinary q projection")); // [B, qd]
         let q = add_proj_bias_seq(&mut b, q, &lw.bq, bsz, nq * d);
         let q = b.reshape(&q, vec![bsz, nq, d]);
-        let kk = b.linear_seq(&hn, &lw.wk); // [B, kv]
+        let kk = b.linear_seq(&hn, lw.wk.as_ref().expect("ordinary k projection")); // [B, kv]
         let kk = add_proj_bias_seq(&mut b, kk, &lw.bk, bsz, nkv * d);
         let kk = b.reshape(&kk, vec![bsz, nkv, d]);
-        let vv = b.linear_seq(&hn, &lw.wv); // [B, kv]
+        let vv = b.linear_seq(&hn, lw.wv.as_ref().expect("ordinary v projection")); // [B, kv]
         let vv = add_proj_bias_seq(&mut b, vv, &lw.bv, bsz, nkv * d);
         let vv = b.reshape(&vv, vec![bsz, nkv, d]);
 
@@ -2484,7 +2996,7 @@ pub fn emit_decode_batched_with(
         );
         let o = b.reshape(&o, vec![bsz, nq, d]);
         let o = b.reshape(&o, vec![bsz, nq * d]);
-        let attn_out = b.linear_seq(&o, &lw.wo); // [B, H]
+        let attn_out = b.linear_seq(&o, lw.wo.as_ref().expect("ordinary output projection")); // [B, H]
         x = b.add(&x, &attn_out);
 
         // FFN: the MoE block (issue #500) on a MoE layer, else the dense SwiGLU MLP
@@ -2541,7 +3053,7 @@ pub fn emit_decode_batched_with(
     };
 
     let sig = render_signature(&decls);
-    let cache_ty = Ty::f32(vec![bsz, c.n_layers, seq, c.n_kv, c.head_dim]).render();
+    let cache_ty = Ty::f32(vec![bsz, c.n_layers, seq, c.cache_heads(), c.cache_dim()]).render();
     format!(
         "module @decode_step {{\n  func.func public @main({sig}) -> ({out_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {out_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
         sig = sig,
@@ -2649,8 +3161,8 @@ fn build_ragged_arg_schema(b: &mut Builder, c: &Config, bsz: usize) -> (Vec<ArgD
             bsz,
             c.n_layers,
             c.context_capacity,
-            c.n_kv,
-            c.head_dim,
+            c.cache_heads(),
+            c.cache_dim(),
         ]),
         "kcache".into(),
     );
@@ -2661,8 +3173,8 @@ fn build_ragged_arg_schema(b: &mut Builder, c: &Config, bsz: usize) -> (Vec<ArgD
             bsz,
             c.n_layers,
             c.context_capacity,
-            c.n_kv,
-            c.head_dim,
+            c.cache_heads(),
+            c.cache_dim(),
         ]),
         "vcache".into(),
     );
@@ -2801,7 +3313,7 @@ pub fn emit_decode_ragged_with(
     };
 
     let sig = render_signature(&decls);
-    let cache_ty = Ty::f32(vec![bsz, c.n_layers, seq, c.n_kv, c.head_dim]).render();
+    let cache_ty = Ty::f32(vec![bsz, c.n_layers, seq, c.cache_heads(), c.cache_dim()]).render();
     format!(
         "module @decode_step {{\n  func.func public @main({sig}) -> ({out_ty}, {cache_ty}, {cache_ty}) {{\n{body}    return {l}, {kc}, {vc} : {out_ty}, {cache_ty}, {cache_ty}\n  }}\n}}\n",
         sig = sig,
@@ -3321,8 +3833,8 @@ fn emit_prefill_module(
     let k = emit_consts(&mut b, c);
 
     let h = c.hidden;
-    let d = c.head_dim;
-    let nkv = c.n_kv;
+    let d = c.cache_dim();
+    let nkv = c.cache_heads();
 
     // --- input head ---
     // Token prefill gathers + applies the architecture's embedding scale. The
@@ -3488,7 +4000,7 @@ fn emit_prefill_module(
     };
 
     let sig = render_signature(&decls);
-    let cache_ty = Ty::f32(vec![c.n_layers, lp, c.n_kv, c.head_dim]).render();
+    let cache_ty = Ty::f32(vec![c.n_layers, lp, c.cache_heads(), c.cache_dim()]).render();
     let module_name = match (input_kind, capture_deepstack_states) {
         (PrefillInputKind::DeepStack, true) => "prefill_embeddings_deepstack_diagnostics",
         (PrefillInputKind::Tokens, false) => "prefill",

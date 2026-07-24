@@ -135,6 +135,8 @@ pub(crate) use special::{
     load_phi4mm_vlm,
 };
 pub(crate) use step3p7::load_step3p7_vl;
+#[cfg(feature = "xla-iree")]
+pub(crate) use youtu_vl_loader::load_youtu_vl_iree_host_preprocessor;
 pub(crate) use youtu_vl_loader::load_youtu_vl_vlm;
 
 fn read_sanitized_vlm_config(model_path: &Path) -> Result<(String, Value)> {

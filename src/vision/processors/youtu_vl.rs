@@ -79,6 +79,9 @@ pub struct YoutuVLProcessor {
     pub max_patches_per_image: usize,
     pub mean: [f32; 3],
     pub std: [f32; 3],
+    /// PIL-compatible resize mode. The published Youtu-VL processor uses
+    /// `resample = 2` (bilinear).
+    pub resample: u8,
 }
 
 impl YoutuVLProcessor {
@@ -95,6 +98,7 @@ impl YoutuVLProcessor {
             max_patches_per_image: DEFAULT_MAX_PATCHES_PER_IMAGE,
             mean: [0.5, 0.5, 0.5],
             std: [0.5, 0.5, 0.5],
+            resample: 2,
         }
     }
 
@@ -112,6 +116,11 @@ impl YoutuVLProcessor {
 
     pub fn with_max_patches_per_image(mut self, max_patches: usize) -> Self {
         self.max_patches_per_image = max_patches;
+        self
+    }
+
+    pub fn with_resample(mut self, resample: u8) -> Self {
+        self.resample = resample;
         self
     }
 
@@ -155,6 +164,16 @@ impl YoutuVLProcessor {
             ));
         }
         Ok(())
+    }
+
+    fn resize_filter(&self) -> FilterType {
+        match self.resample {
+            0 => FilterType::Nearest,
+            3 => FilterType::CatmullRom,
+            1 => FilterType::Lanczos3,
+            // PIL BILINEAR=2. Triangle is image-rs' bilinear kernel.
+            _ => FilterType::Triangle,
+        }
     }
 
     fn resize_factor(&self) -> u32 {
@@ -218,10 +237,10 @@ impl YoutuVLProcessor {
             .collect()
     }
 
-    pub fn try_preprocess_with_spatial(
+    pub fn try_preprocess_values_with_spatial(
         &self,
         images: &[DynamicImage],
-    ) -> Result<(UniquePtr<MlxArray>, Vec<(i32, i32)>), YoutuVLPreprocessError> {
+    ) -> Result<(Vec<f32>, Vec<(i32, i32)>, usize), YoutuVLPreprocessError> {
         self.validate_config()?;
         let spatial_shapes = self.compute_spatial_shapes(images);
 
@@ -263,7 +282,7 @@ impl YoutuVLProcessor {
             let target_h = (h_patches as u32) * (self.patch_size as u32);
             let target_w = (w_patches as u32) * (self.patch_size as u32);
 
-            let resized = img.resize_exact(target_w, target_h, FilterType::Lanczos3);
+            let resized = img.resize_exact(target_w, target_h, self.resize_filter());
             let rgb = resized.to_rgb8();
 
             let h = target_h as usize;
@@ -308,6 +327,25 @@ impl YoutuVLProcessor {
             write_offset += total_patches_img;
         }
 
+        i32::try_from(total_patches).map_err(|_| YoutuVLPreprocessError::DimensionTooLarge {
+            dimension: total_patches,
+        })?;
+        i32::try_from(features_per_patch).map_err(|_| {
+            YoutuVLPreprocessError::DimensionTooLarge {
+                dimension: features_per_patch,
+            }
+        })?;
+
+        Ok((all_patches, spatial_shapes, features_per_patch))
+    }
+
+    pub fn try_preprocess_with_spatial(
+        &self,
+        images: &[DynamicImage],
+    ) -> Result<(UniquePtr<MlxArray>, Vec<(i32, i32)>), YoutuVLPreprocessError> {
+        let (all_patches, spatial_shapes, features_per_patch) =
+            self.try_preprocess_values_with_spatial(images)?;
+        let total_patches = all_patches.len() / features_per_patch;
         let total_patches_i32 = i32::try_from(total_patches).map_err(|_| {
             YoutuVLPreprocessError::DimensionTooLarge {
                 dimension: total_patches,

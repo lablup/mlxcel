@@ -39,13 +39,15 @@ use std::path::Path;
 
 use crate::LoadedModel;
 use crate::models::youtu_vl_lm::{YoutuLanguageModel, YoutuTextConfig, sanitize_text_weights};
+#[cfg(feature = "xla-iree")]
+use crate::multimodal::host_preprocessor::{HostPreprocessorError, YoutuVlIreeHostPreprocessor};
 use crate::vision::YoutuVLModel;
 use crate::vision::encoders::youtu_vl::{YoutuVLVisionEncoder, YoutuVisionConfig};
 use crate::vision::processors::youtu_vl::YoutuVLProcessor;
 
 use super::{
-    load_vlm_weights_common, parse_required_vlm_subconfig, parse_vlm_config,
-    read_sanitized_vlm_config,
+    load_vlm_weights_common, load_vlm_weights_common_filtered_canonical,
+    parse_required_vlm_subconfig, parse_vlm_config, read_sanitized_vlm_config,
 };
 
 /// Default token IDs from upstream `youtu_vl/config.py::ModelConfig`.
@@ -147,6 +149,109 @@ pub(crate) fn load_youtu_vl_vlm(model_path: &Path) -> Result<LoadedModel> {
     };
 
     Ok(LoadedModel::YoutuVL(vlm))
+}
+
+/// Load only Youtu-VL's checked host processor and text embedding table. The
+/// complete vision tower and built-in merger stay resident in IREE.
+#[cfg(feature = "xla-iree")]
+pub(crate) fn load_youtu_vl_iree_host_preprocessor(
+    model_path: &Path,
+    device: &str,
+) -> Result<YoutuVlIreeHostPreprocessor, HostPreprocessorError> {
+    use mlxcel_core::layers::UnifiedEmbedding;
+
+    let (config_str, full_config) = read_sanitized_vlm_config(model_path)
+        .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    if full_config
+        .get("model_type")
+        .and_then(serde_json::Value::as_str)
+        != Some("youtu_vl")
+    {
+        return Err(HostPreprocessorError::FamilyMismatch {
+            actual: full_config
+                .get("model_type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<missing>")
+                .to_string(),
+        });
+    }
+    let mut text_config: YoutuTextConfig = parse_vlm_config(&config_str, "Youtu-VL text config")
+        .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    if text_config.quantization.is_none()
+        && let Some(quantization) = full_config.get("quantization").cloned()
+        && let Ok(parsed) =
+            serde_json::from_value::<crate::models::youtu_vl_lm::QuantizationConfig>(quantization)
+    {
+        text_config.quantization = Some(parsed);
+    }
+    let vision_config: YoutuVisionConfig =
+        parse_required_vlm_subconfig(&full_config, "vision_config", "Youtu-VL vision config")
+            .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    let raw_embeddings = load_vlm_weights_common_filtered_canonical(model_path, |name| {
+        name == "model.embed_tokens.weight"
+            || name.starts_with("model.embed_tokens.")
+            || name == "language_model.model.embed_tokens.weight"
+            || name.starts_with("language_model.model.embed_tokens.")
+    })
+    .map_err(|error| HostPreprocessorError::WeightLoad(error.to_string()))?;
+    let weights = remap_youtu_vl_weights(raw_embeddings);
+    let (quant_group_size, quant_bits) = text_config
+        .quantization
+        .as_ref()
+        .map(|quantization| (quantization.group_size, quantization.bits))
+        .unwrap_or((0, 0));
+    let text_embeddings = UnifiedEmbedding::from_weights(
+        &weights,
+        "model.embed_tokens",
+        quant_group_size,
+        quant_bits,
+    )
+    .map_err(|error| {
+        HostPreprocessorError::WeightLoad(format!(
+            "missing or invalid Youtu-VL text embedding table: {error}"
+        ))
+    })?;
+    if text_config.hidden_size == 0 || text_config.max_position_embeddings == 0 {
+        return Err(HostPreprocessorError::InvalidConfig(
+            "Youtu-VL hidden_size and max_position_embeddings must be positive".to_string(),
+        ));
+    }
+    let image_token_id = config_token_id(&full_config, "image_token_id", DEFAULT_IMAGE_TOKEN_ID);
+    let video_token_id = config_token_id(&full_config, "video_token_id", DEFAULT_VIDEO_TOKEN_ID);
+    let vision_start_token_id = config_token_id(
+        &full_config,
+        "vision_start_token_id",
+        DEFAULT_VISION_START_TOKEN_ID,
+    );
+    let vision_end_token_id = config_token_id(
+        &full_config,
+        "vision_end_token_id",
+        DEFAULT_VISION_END_TOKEN_ID,
+    );
+    let processor = build_processor(model_path, &vision_config);
+    let projector = mlxcel_xla::IreeYoutuVlProjector::load(model_path, device)
+        .map_err(HostPreprocessorError::Iree)?;
+    YoutuVlIreeHostPreprocessor::from_parts(
+        processor,
+        text_embeddings,
+        projector,
+        image_token_id,
+        video_token_id,
+        vision_start_token_id,
+        vision_end_token_id,
+        vision_config.spatial_merge_size,
+        text_config.hidden_size,
+        text_config.max_position_embeddings,
+        device.to_string(),
+    )
+}
+
+fn config_token_id(config: &serde_json::Value, key: &str, default: i32) -> i32 {
+    config
+        .get(key)
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok())
+        .unwrap_or(default)
 }
 
 fn parse_eos_token_ids(config: &serde_json::Value) -> Vec<i32> {
@@ -269,8 +374,17 @@ fn build_processor(model_path: &Path, vision_config: &YoutuVisionConfig) -> Yout
     if let (Some(min_p), Some(max_p)) = (min_pixels, max_pixels) {
         processor = processor.with_pixel_bounds(min_p as usize, max_p as usize);
     }
-    if let Some(num_patches) = json.get("num_patches").and_then(|v| v.as_u64()) {
+    if let Some(num_patches) = json
+        .get("max_num_patches")
+        .or_else(|| json.get("num_patches"))
+        .and_then(|v| v.as_u64())
+    {
         processor = processor.with_max_patches_per_image(num_patches as usize);
+    }
+    if let Some(resample) = json.get("resample").and_then(|v| v.as_u64())
+        && let Ok(resample) = u8::try_from(resample)
+    {
+        processor = processor.with_resample(resample);
     }
 
     processor

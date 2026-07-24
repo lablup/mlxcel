@@ -82,6 +82,8 @@ mod phi4_audio;
 mod qwen2_vl_runtime;
 #[cfg(feature = "iree")]
 mod vision_runtime;
+#[cfg(feature = "iree")]
+mod youtu_vl_runtime;
 
 #[cfg(feature = "micro-oracle")]
 pub use numeric_oracle::{
@@ -184,6 +186,10 @@ pub use qwen2_vl_runtime::{
 pub use vision_runtime::{IreeVisionDiagnosticProjector, VisionDiagnosticProjection};
 #[cfg(feature = "iree")]
 pub use vision_runtime::{IreeVisionProjector, VisionExecutionMetrics, VisionProjection};
+#[cfg(feature = "iree")]
+pub use youtu_vl_runtime::{
+    IreeYoutuVlProjector, YoutuVlVisionExecutionMetrics, YoutuVlVisionProjection,
+};
 #[cfg(any(test, feature = "diagnostics"))]
 #[must_use]
 pub fn llava_diagnostic_device_memory_note(device: &str) -> &'static str {
