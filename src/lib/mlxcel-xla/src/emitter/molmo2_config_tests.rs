@@ -44,14 +44,42 @@ fn pinned_processor() -> String {
 #[test]
 fn resolves_pinned_layers_and_static_bucket_identity() {
     let config = Molmo2VisionConfig::from_json_strs(&pinned_config(), &pinned_processor()).unwrap();
-    assert_eq!(config.layers, 25);
-    assert_eq!(config.selected_layers, vec![22, 16]);
-    assert_eq!(config.emitted_layers, 23);
+    assert_eq!(config.layers, 27);
+    assert_eq!(config.selected_layers, vec![24, 18]);
+    assert_eq!(config.emitted_layers, 25);
+    let specs = config.weight_specs();
+    assert!(
+        specs
+            .iter()
+            .any(|spec| spec.name.contains("image_vit.transformer.24."))
+    );
+    assert!(
+        !specs
+            .iter()
+            .any(|spec| spec.name.contains("image_vit.transformer.25."))
+    );
     assert_eq!(config.static_crops, 9);
     assert_eq!(config.static_pool_groups, 9);
     assert!(config.fingerprint().contains("position=exact-default"));
-    assert!(config.fingerprint().contains("selected=[22, 16]"));
+    assert!(config.fingerprint().contains("selected=[24, 18]"));
     assert!(config.fingerprint().contains("pool-mask=true"));
+    assert!(config.fingerprint().contains("layers=27;emitted=25"));
+}
+
+#[test]
+fn configured_layer_order_and_mixed_index_signs_are_mutation_sensitive() {
+    let mut config: Value = serde_json::from_str(&pinned_config()).unwrap();
+    config["adapter_config"]["vit_layers"] = serde_json::json!([3, -3, 1, -9]);
+    let resolved =
+        Molmo2VisionConfig::from_json_strs(&config.to_string(), &pinned_processor()).unwrap();
+    assert_eq!(resolved.selected_layers, vec![3, 24, 1, 18]);
+    assert_eq!(resolved.emitted_layers, 25);
+
+    config["adapter_config"]["vit_layers"] = serde_json::json!([-9, -3, 3, 1]);
+    let reordered =
+        Molmo2VisionConfig::from_json_strs(&config.to_string(), &pinned_processor()).unwrap();
+    assert_eq!(reordered.selected_layers, vec![18, 24, 3, 1]);
+    assert_ne!(resolved.selected_layers, reordered.selected_layers);
 }
 
 #[test]
@@ -72,7 +100,13 @@ fn rejects_position_grid_and_selected_layer_drift() {
             .contains("exact position")
     );
     config["vit_config"]["image_num_pos"] = Value::from(4);
-    config["adapter_config"]["vit_layers"] = serde_json::json!([-26]);
+    config["adapter_config"]["vit_layers"] = serde_json::json!([-28]);
+    assert!(
+        Molmo2VisionConfig::from_json_strs(&config.to_string(), &pinned_processor())
+            .unwrap_err()
+            .contains("outside")
+    );
+    config["adapter_config"]["vit_layers"] = serde_json::json!([27]);
     assert!(
         Molmo2VisionConfig::from_json_strs(&config.to_string(), &pinned_processor())
             .unwrap_err()

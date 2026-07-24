@@ -1772,6 +1772,54 @@ pub(super) fn parse_molmo2_vit_layers(adapter_config: &Value) -> Vec<i32> {
         .unwrap_or_else(|| vec![-3, -9])
 }
 
+/// Resolve adapter layer indices against the checkpoint's declared ViT depth.
+///
+/// Molmo2 declares 27 logical layers but the pinned adapter selects `[-3, -9]`
+/// and therefore persists only the first 25 blocks. Resolving after truncating
+/// to the persisted execution depth would silently select `[22, 16]` instead
+/// of the canonical `[24, 18]`.
+pub(super) fn resolve_molmo2_vit_layers(
+    declared_layers: usize,
+    configured_layers: &[i32],
+) -> Result<Vec<usize>, String> {
+    if declared_layers == 0 {
+        return Err("Molmo2 ViT must declare at least one layer".to_string());
+    }
+    if configured_layers.is_empty() {
+        return Err("Molmo2 adapter must select at least one ViT layer".to_string());
+    }
+    configured_layers
+        .iter()
+        .enumerate()
+        .map(|(index, &layer)| {
+            let resolved = if layer < 0 {
+                i64::try_from(declared_layers)
+                    .map_err(|_| "Molmo2 declared ViT layer count does not fit i64".to_string())?
+                    + i64::from(layer)
+            } else {
+                i64::from(layer)
+            };
+            usize::try_from(resolved)
+                .ok()
+                .filter(|&resolved| resolved < declared_layers)
+                .ok_or_else(|| {
+                    format!(
+                        "Molmo2 vit_layers[{index}]={layer} resolves outside [0,{declared_layers})"
+                    )
+                })
+        })
+        .collect()
+}
+
+pub(super) fn molmo2_vit_execution_depth(selected_layers: &[usize]) -> Result<usize, String> {
+    selected_layers
+        .iter()
+        .copied()
+        .max()
+        .and_then(|layer| layer.checked_add(1))
+        .ok_or_else(|| "Molmo2 adapter must select at least one ViT layer".to_string())
+}
+
 pub(super) fn rewrite_molmo2_weight_key(key: &str) -> String {
     let mut new_key = key.to_string();
     if new_key.starts_with("model.transformer.") {
@@ -2009,12 +2057,18 @@ pub(crate) fn load_molmo2_vlm(model_path: &Path) -> Result<LoadedModel> {
     let vit_config = vision_config.get("vit_config").unwrap_or(vision_config);
     let adapter_config = vision_config.get("adapter_config").unwrap_or(vision_config);
 
-    let vit_num_layers = cap_molmo2_vit_num_layers(
-        vit_config
-            .get("num_hidden_layers")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(25) as usize,
-    );
+    // Resolve negative adapter indices against the declared depth before
+    // deriving the smaller prefix of blocks that the checkpoint must execute.
+    let vit_declared_num_layers = vit_config
+        .get("num_hidden_layers")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(25) as usize;
+    let vit_layers = resolve_molmo2_vit_layers(
+        vit_declared_num_layers,
+        &parse_molmo2_vit_layers(adapter_config),
+    )
+    .map_err(anyhow::Error::msg)?;
+    let vit_num_layers = molmo2_vit_execution_depth(&vit_layers).map_err(anyhow::Error::msg)?;
     let vit_hidden_size = vit_config
         .get("hidden_size")
         .and_then(|v| v.as_i64())
@@ -2116,7 +2170,7 @@ pub(crate) fn load_molmo2_vlm(model_path: &Path) -> Result<LoadedModel> {
         adapter_num_kv_heads,
         adapter_head_dim,
         adapter_float32_attention,
-        &parse_molmo2_vit_layers(adapter_config),
+        &vit_layers,
         pooling_attention_mask,
     )
     .map_err(|e| anyhow::anyhow!("Failed to load vision model: {}", e))?;

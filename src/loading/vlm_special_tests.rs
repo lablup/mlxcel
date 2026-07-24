@@ -16,13 +16,14 @@ use super::{
     cap_molmo2_vit_num_layers, dequantize_moondream3_weight, flatten_phi4mm_patch_embedding,
     inherit_quantization_if_missing, llama4_mm_tokens_per_image, llama4_quantization_params,
     llama4_token_ids, llama4_vision_prefix, load_minicpmv4_6_vlm, minicpmv4_6_text_weights,
-    molmo2_max_crops, moondream2_text_config_value, moondream3_text_config_value,
-    moondream3_vision_config_value, parse_molmo2_vit_layers, phi3_num_crops,
-    phi4_siglip_text_config_value, phi4mm_text_config_value, phi4mm_vision_config_value,
-    remap_minicpmo_text_weights, remap_minicpmv4_6_weights, remap_phi4mm_weights,
-    resolve_moondream2_eos_token_id, rewrite_molmo2_weight_key, rewrite_moondream2_weight_key,
-    rewrite_moondream3_weight_key, rewrite_phi3_weight_key, rewrite_phi4_siglip_weight_key,
-    rewrite_phi4mm_weight_key, should_transpose_phi3_patch_embedding,
+    molmo2_max_crops, molmo2_vit_execution_depth, moondream2_text_config_value,
+    moondream3_text_config_value, moondream3_vision_config_value, parse_molmo2_vit_layers,
+    phi3_num_crops, phi4_siglip_text_config_value, phi4mm_text_config_value,
+    phi4mm_vision_config_value, remap_minicpmo_text_weights, remap_minicpmv4_6_weights,
+    remap_phi4mm_weights, resolve_molmo2_vit_layers, resolve_moondream2_eos_token_id,
+    rewrite_molmo2_weight_key, rewrite_moondream2_weight_key, rewrite_moondream3_weight_key,
+    rewrite_phi3_weight_key, rewrite_phi4_siglip_weight_key, rewrite_phi4mm_weight_key,
+    should_transpose_phi3_patch_embedding,
 };
 use crate::moondream2_prompt::Moondream2PromptStyle;
 use mlxcel_core::dtype;
@@ -764,6 +765,24 @@ fn molmo2_helpers_clamp_layer_count_and_parse_defaults() {
         parse_molmo2_vit_layers(&json!({"vit_layers": [-1, -7, 3]})),
         vec![-1, -7, 3]
     );
+}
+
+#[test]
+fn molmo2_layer_resolution_uses_declared_depth_and_preserves_config_order() {
+    let configured = [-3, 4, -9, 0];
+    let resolved = resolve_molmo2_vit_layers(27, &configured).unwrap();
+    assert_eq!(resolved, vec![24, 4, 18, 0]);
+    assert_eq!(molmo2_vit_execution_depth(&resolved).unwrap(), 25);
+
+    let mut reordered = configured;
+    reordered.swap(0, 2);
+    let reordered = resolve_molmo2_vit_layers(27, &reordered).unwrap();
+    assert_eq!(reordered, vec![18, 4, 24, 0]);
+    assert_ne!(resolved, reordered);
+
+    assert!(resolve_molmo2_vit_layers(27, &[-28]).is_err());
+    assert!(resolve_molmo2_vit_layers(27, &[27]).is_err());
+    assert!(resolve_molmo2_vit_layers(27, &[]).is_err());
 }
 
 #[test]

@@ -574,9 +574,17 @@ impl Molmo2VisionModel {
         adapter_num_kv_heads: i32,
         adapter_head_dim: i32,
         adapter_float32_attention: bool,
-        vit_layers: &[i32],
+        vit_layers: &[usize],
         pooling_attention_mask: bool,
     ) -> Result<Self, String> {
+        if vit_layers.is_empty() {
+            return Err("Molmo2 adapter must select at least one ViT layer".to_string());
+        }
+        if let Some(&layer) = vit_layers.iter().find(|&&layer| layer >= vit_num_layers) {
+            return Err(format!(
+                "Molmo2 selected ViT layer {layer} is outside execution depth {vit_num_layers}"
+            ));
+        }
         let image_vit = Molmo2VisionTransformer::from_weights(
             weights,
             &format!("{}.image_vit", prefix),
@@ -607,23 +615,11 @@ impl Molmo2VisionModel {
         let image_projector =
             ImageProjectorMLP::from_weights(weights, &format!("{}.image_projector", prefix))?;
 
-        // Convert negative layer indices to positive
-        let resolved_layers: Vec<usize> = vit_layers
-            .iter()
-            .map(|&layer| {
-                if layer < 0 {
-                    (layer + vit_num_layers as i32) as usize
-                } else {
-                    layer as usize
-                }
-            })
-            .collect();
-
         Ok(Self {
             image_vit,
             image_pooling_2d,
             image_projector,
-            vit_layers: resolved_layers,
+            vit_layers: vit_layers.to_vec(),
             pooling_attention_mask,
         })
     }

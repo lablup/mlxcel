@@ -203,7 +203,7 @@ impl Molmo2VisionConfig {
             ));
         }
 
-        let layers = usize_field(vit, "num_hidden_layers")?.min(25);
+        let layers = usize_field(vit, "num_hidden_layers")?;
         let selected_raw = adapter
             .get("vit_layers")
             .and_then(Value::as_array)
@@ -218,7 +218,13 @@ impl Molmo2VisionConfig {
                 let raw = value
                     .as_i64()
                     .ok_or_else(|| format!("Molmo2 vit_layers[{index}] must be an integer"))?;
-                let resolved = if raw < 0 { layers as i64 + raw } else { raw };
+                let resolved = if raw < 0 {
+                    i64::try_from(layers).map_err(|_| {
+                        "Molmo2 declared ViT layer count does not fit i64".to_string()
+                    })? + raw
+                } else {
+                    raw
+                };
                 usize::try_from(resolved)
                     .ok()
                     .filter(|layer| *layer < layers)

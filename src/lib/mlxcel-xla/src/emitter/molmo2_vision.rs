@@ -475,8 +475,9 @@ mod tests {
 
     #[test]
     fn selected_layers_keep_adapter_order_instead_of_encoder_order() {
-        assert_eq!(selected_slot(&[22, 16], 22), Some(0));
-        assert_eq!(selected_slot(&[22, 16], 16), Some(1));
-        assert_eq!(selected_slot(&[22, 16], 21), None);
+        assert_eq!(selected_slot(&[24, 4, 18], 24), Some(0));
+        assert_eq!(selected_slot(&[24, 4, 18], 4), Some(1));
+        assert_eq!(selected_slot(&[24, 4, 18], 18), Some(2));
+        assert_eq!(selected_slot(&[24, 4, 18], 22), None);
     }
 }
