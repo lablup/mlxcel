@@ -1118,28 +1118,24 @@ fn generate_xla(
     let tokens = match &mut session {
         mlxcel::Session::Xla(s) => {
             let eos = s.eos_token_ids().to_vec();
-            if let Some(audio_path) = audio_path {
+            let phi4mm_media = mlxcel::models::get_model_type(model_path)?
+                == mlxcel::models::ModelType::Phi4MMVLM
+                && (audio_path.is_some() || !image_paths.is_empty());
+            if phi4mm_media {
                 #[cfg(not(feature = "xla-iree"))]
                 {
-                    let _ = (audio_path, prompt, tokenizer);
-                    anyhow::bail!("OpenXLA audio input requires a build with the xla-iree feature");
+                    let _ = (audio_path, prompt, tokenizer, image_paths);
+                    anyhow::bail!(
+                        "OpenXLA Phi4MM media input requires a build with the xla-iree feature"
+                    );
                 }
                 #[cfg(feature = "xla-iree")]
                 {
-                    ensure!(
-                        image_paths.is_empty(),
-                        "mixed Phi4MM image/audio generation requires the combined XLA producer"
-                    );
-                    ensure!(
-                        mlxcel::models::get_model_type(model_path)?
-                            == mlxcel::models::ModelType::Phi4MMVLM,
-                        "the loaded OpenXLA model/runtime bundle does not support audio input"
-                    );
                     let mut tokenization_error = None;
                     let normalized = mlxcel::phi4mm_prompt::prepare_phi4mm_prompt_tokens(
                         prompt,
-                        0,
-                        1,
+                        image_paths.len(),
+                        usize::from(audio_path.is_some()),
                         |text, add_special| match tokenizer.encode(text, add_special) {
                             Ok(tokens) => tokens.into_iter().map(|token| token as i32).collect(),
                             Err(error) => {
@@ -1152,30 +1148,51 @@ fn generate_xla(
                     if let Some(error) = tokenization_error {
                         return Err(anyhow!("Phi4MM tokenization failed: {error}"));
                     }
-                    let policy =
-                        mlxcel::multimodal::phi4mm_xla_audio::load_phi4mm_audio_policy(model_path)
-                            .map_err(anyhow::Error::msg)?;
                     let cancelled = std::sync::atomic::AtomicBool::new(false);
-                    let waveforms =
-                        mlxcel::audio::preprocess_wav_file(audio_path, policy, &cancelled)
-                            .map_err(|error| {
-                                anyhow!("OpenXLA audio waveform preprocessing failed: {error}")
-                            })?;
+                    let images = decode_xla_cli_images(image_paths)?;
                     let device = std::env::var("MLXCEL_XLA_DEVICE")
                         .unwrap_or_else(|_| mlxcel_xla::default_device().to_string());
-                    let mut producer =
+                    let mut producer = if images.is_empty() {
                         mlxcel::multimodal::phi4mm_xla_audio::Phi4MmXlaAudioProducer::load(
                             model_path,
                             &device,
                             s.context_capacity(),
                         )
-                        .map_err(anyhow::Error::msg)?;
-                    let prepared = producer
-                        .prepare_audio(waveforms, normalized.tokens, &cancelled)
-                        .map_err(|error| anyhow!("OpenXLA audio preprocessing failed: {error}"))?;
+                    } else {
+                        mlxcel::multimodal::phi4mm_xla_audio::Phi4MmXlaAudioProducer::load_multimodal(
+                            model_path,
+                            &device,
+                            s.context_capacity(),
+                        )
+                    }
+                    .map_err(anyhow::Error::msg)?;
+                    let prepared = if let Some(audio_path) = audio_path {
+                        let policy =
+                            mlxcel::multimodal::phi4mm_xla_audio::load_phi4mm_audio_policy(
+                                model_path,
+                            )
+                            .map_err(anyhow::Error::msg)?;
+                        let waveforms =
+                            mlxcel::audio::preprocess_wav_file(audio_path, policy, &cancelled)
+                                .map_err(|error| {
+                                    anyhow!("OpenXLA audio waveform preprocessing failed: {error}")
+                                })?;
+                        producer.prepare_media(waveforms, normalized.tokens, &images, &cancelled)
+                    } else {
+                        producer.prepare_images(normalized.tokens, &images, &cancelled)
+                    }
+                    .map_err(|error| {
+                        anyhow!("OpenXLA Phi4MM media preprocessing failed: {error}")
+                    })?;
                     s.generate_prepared_greedy(&prepared, max_tokens, &eos)
-                        .map_err(|error| anyhow!("OpenXLA audio generation failed: {error}"))?
+                        .map_err(|error| {
+                            anyhow!("OpenXLA Phi4MM media generation failed: {error}")
+                        })?
                 }
+            } else if audio_path.is_some() {
+                anyhow::bail!(
+                    "the loaded OpenXLA model/runtime bundle does not support audio input"
+                );
             } else if image_paths.is_empty() {
                 s.generate_greedy(prompt_tokens, max_tokens, &eos)
                     .map_err(|e| anyhow!("OpenXLA generation failed: {e}"))?

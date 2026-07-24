@@ -41,6 +41,8 @@ fn job(id: u64, samples: usize) -> AudioPreprocessJob {
         job_id: id,
         token_ids: vec![1, id as i32, 2],
         max_prefill_tokens: 4_096,
+        expected_image_count: 0,
+        images: Vec::new(),
         clips: vec![AudioEncodedClip {
             bytes: wav_pcm16(&vec![0; samples]),
             source: AudioSourceKind::ServerInline,
@@ -90,6 +92,7 @@ impl AudioFeatureProducer for RecordingProducer {
         &mut self,
         _waveforms: AudioWaveformBatch,
         token_ids: Vec<i32>,
+        _images: Vec<image::DynamicImage>,
         _cancelled: &AtomicBool,
     ) -> Result<PreparedPrefill, String> {
         self.order.lock().unwrap().push(token_ids[1] as u64);
@@ -147,6 +150,7 @@ impl AudioFeatureProducer for BlockingProducer {
         &mut self,
         _waveforms: AudioWaveformBatch,
         token_ids: Vec<i32>,
+        _images: Vec<image::DynamicImage>,
         _cancelled: &AtomicBool,
     ) -> Result<PreparedPrefill, String> {
         let _ = self.started.send(());
@@ -224,6 +228,7 @@ impl AudioFeatureProducer for CancelAfterFeature {
         &mut self,
         _waveforms: AudioWaveformBatch,
         token_ids: Vec<i32>,
+        _images: Vec<image::DynamicImage>,
         cancelled: &AtomicBool,
     ) -> Result<PreparedPrefill, String> {
         cancelled.store(true, Ordering::Release);
@@ -270,6 +275,7 @@ impl AudioFeatureProducer for PanicOnce {
         &mut self,
         _waveforms: AudioWaveformBatch,
         token_ids: Vec<i32>,
+        _images: Vec<image::DynamicImage>,
         _cancelled: &AtomicBool,
     ) -> Result<PreparedPrefill, String> {
         if !self.0 {
@@ -370,6 +376,7 @@ impl AudioFeatureProducer for StartedProducer {
         &mut self,
         _waveforms: AudioWaveformBatch,
         token_ids: Vec<i32>,
+        _images: Vec<image::DynamicImage>,
         _cancelled: &AtomicBool,
     ) -> Result<PreparedPrefill, String> {
         self.started.send(token_ids[1] as u64).unwrap();

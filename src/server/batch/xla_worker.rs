@@ -199,6 +199,9 @@ pub(crate) struct XlaServeWorker<E = XlaBatchEngine> {
     pending_images: HashMap<u64, PendingImageState>,
     next_image_job_id: u64,
     audio_preprocessor: Option<AudioPreprocessStage>,
+    /// The audio stage is the unified Phi4MM image/audio producer rather than
+    /// an audio-only family producer.
+    phi4mm_media_preprocessor: bool,
     audio_policy: Option<crate::audio::AudioFamilyPolicy>,
     pending_audio: HashMap<u64, PendingAudioState>,
     next_audio_job_id: u64,
@@ -219,10 +222,10 @@ impl XlaServeWorker<XlaBatchEngine> {
         let context_capacity = engine.context_capacity();
         let image_preprocessor =
             ImagePreprocessStage::spawn_for_model(model_path.clone(), engine.b_max())?;
-        let (audio_preprocessor, audio_policy) = if crate::models::get_model_type(&model_path)
+        let phi4mm_media_preprocessor = crate::models::get_model_type(&model_path)
             .map_err(|error| error.to_string())?
-            == crate::models::ModelType::Phi4MMVLM
-        {
+            == crate::models::ModelType::Phi4MMVLM;
+        let (audio_preprocessor, audio_policy) = if phi4mm_media_preprocessor {
             let policy =
                 crate::multimodal::phi4mm_xla_audio::load_phi4mm_audio_policy(&model_path)?;
             let producer_path = model_path.clone();
@@ -230,7 +233,7 @@ impl XlaServeWorker<XlaBatchEngine> {
                 AudioPreprocessLimits::default(),
                 batch_observability.clone(),
                 move || {
-                    crate::multimodal::phi4mm_xla_audio::Phi4MmXlaAudioProducer::load(
+                    crate::multimodal::phi4mm_xla_audio::Phi4MmXlaAudioProducer::load_multimodal(
                         &producer_path,
                         &device,
                         context_capacity,
@@ -252,6 +255,7 @@ impl XlaServeWorker<XlaBatchEngine> {
             pending_images: HashMap::new(),
             next_image_job_id: 0,
             audio_preprocessor,
+            phi4mm_media_preprocessor,
             audio_policy,
             pending_audio: HashMap::new(),
             next_audio_job_id: 0,

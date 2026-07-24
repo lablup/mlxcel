@@ -69,14 +69,9 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
             let _ = response_tx.send(GenerateEvent::Error(error));
             return;
         }
-        if !images.is_empty() && !audio.is_empty() {
-            let _ = response_tx.send(GenerateEvent::Error(
-                "mixed Phi4MM image/audio preparation is not available in this runtime bundle"
-                    .to_string(),
-            ));
-            return;
-        }
-        let prompt_tokens = if audio.is_empty() {
+        let uses_phi4mm_media =
+            self.phi4mm_media_preprocessor && (!images.is_empty() || !audio.is_empty());
+        let prompt_tokens = if !uses_phi4mm_media {
             match prompt_token_ids {
                 Some(tokens) => tokens,
                 None => {
@@ -92,14 +87,20 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                 }
             }
         } else if let Some(tokens) = prompt_token_ids {
-            let placeholders = tokens
+            let image_placeholders = tokens
+                .iter()
+                .filter(|&&token| token == crate::phi4_siglip_prompt::PHI4_SIGLIP_IMAGE_TOKEN_INDEX)
+                .count();
+            let audio_placeholders = tokens
                 .iter()
                 .filter(|&&token| token == crate::phi4mm_prompt::PHI4MM_AUDIO_TOKEN_ID)
                 .count();
-            if placeholders != audio.len() {
+            if image_placeholders != images.len() || audio_placeholders != audio.len() {
                 let _ = response_tx.send(GenerateEvent::Error(format!(
-                    "Phi4MM token ids contain {placeholders} audio placeholders for {} clip(s)",
-                    audio.len()
+                    "Phi4MM token ids contain {image_placeholders} image/{audio_placeholders} \
+                     audio placeholders for {}/{} inputs",
+                    images.len(),
+                    audio.len(),
                 )));
                 return;
             }
@@ -108,7 +109,7 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
             let mut tokenization_error = None;
             let prepared = crate::phi4mm_prompt::prepare_phi4mm_prompt_tokens(
                 &prompt,
-                0,
+                images.len(),
                 audio.len(),
                 |text, add_special| match self.tokenizer.encode(text, add_special) {
                     Ok(tokens) => tokens.into_iter().map(|token| token as i32).collect(),
@@ -134,7 +135,8 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
             }
         };
         #[cfg(feature = "xla-diagnostics")]
-        if !images.is_empty()
+        if !uses_phi4mm_media
+            && !images.is_empty()
             && let Err(error) = validate_reference_prompt_tokens_from_env(&prompt_tokens)
         {
             let _ = response_tx.send(GenerateEvent::Error(error));
@@ -144,10 +146,10 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
         let stop_sequences = options.stop_sequences.unwrap_or_default();
         let start = Instant::now();
 
-        if !audio.is_empty() {
+        if uses_phi4mm_media {
             let Some(stage) = self.audio_preprocessor.as_ref() else {
                 let _ = response_tx.send(GenerateEvent::Error(
-                    "the loaded OpenXLA model/runtime bundle does not support audio input"
+                    "the loaded OpenXLA model/runtime bundle does not support Phi4MM media input"
                         .to_string(),
                 ));
                 return;
@@ -179,6 +181,8 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                 job_id,
                 token_ids: prompt_tokens.clone(),
                 max_prefill_tokens: self.context_capacity,
+                expected_image_count: media.declared_images,
+                images,
                 clips,
                 policy,
                 cancelled: cancelled.clone(),
