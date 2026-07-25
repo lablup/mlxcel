@@ -98,9 +98,9 @@ pub use multimodal::{
 // fold to the single MLX variant with no runtime dispatch.
 pub use backend::{Backend, ComputeBackend, MlxBackend, Session, select_backend};
 pub use mlxcel_core::session::{
-    InferenceSession, MlxInferenceSession, OwnedTensor, PreparedAttentionBias, PreparedModality,
-    PreparedPositions, PreparedPrefill, PreparedPrefillError, PreparedTensorDType,
-    SessionCapabilities,
+    InferenceSession, MlxInferenceSession, OwnedTensor, PreparedAdapterMode, PreparedAttentionBias,
+    PreparedModality, PreparedPositions, PreparedPrefill, PreparedPrefillError,
+    PreparedTensorDType, SessionCapabilities,
 };
 pub use server::ImageInputLimits;
 

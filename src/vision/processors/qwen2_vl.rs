@@ -71,7 +71,7 @@ impl Qwen2VLProcessor {
 
     /// Compute target size that satisfies constraints
     /// Returns (height, width) padded to multiples of factor
-    fn smart_resize(&self, orig_h: u32, orig_w: u32) -> (u32, u32) {
+    pub(crate) fn smart_resize(&self, orig_h: u32, orig_w: u32) -> (u32, u32) {
         let factor = (self.patch_size * self.spatial_merge_size) as u32; // 28
 
         // Start with original size, round to factor
@@ -120,6 +120,30 @@ impl Qwen2VLProcessor {
         &self,
         images: &[image::DynamicImage],
     ) -> (UniquePtr<MlxArray>, Vec<(i32, i32, i32)>) {
+        let (all_patches, grid_thw) = self.preprocess_values_with_grid(images);
+        let in_channels = 3usize;
+        let patch_area = self.patch_size * self.patch_size;
+        let features_per_pixel = in_channels * patch_area;
+        let total_rows: usize = grid_thw
+            .iter()
+            .map(|&(t, h, w)| (t as usize) * (h as usize) * (w as usize) * self.temporal_patch_size)
+            .sum();
+        let pixel_values = mlxcel_core::from_slice_f32(
+            &all_patches,
+            &[total_rows as i32, features_per_pixel as i32],
+        );
+        (pixel_values, grid_thw)
+    }
+
+    /// Pure host form of [`Self::preprocess_with_grid`].
+    ///
+    /// The OpenXLA path consumes these owned F32 values directly, while the MLX
+    /// path wraps the exact same values in an `MlxArray`. Keeping one processor
+    /// implementation prevents resize/normalize/patch-order drift.
+    pub fn preprocess_values_with_grid(
+        &self,
+        images: &[image::DynamicImage],
+    ) -> (Vec<f32>, Vec<(i32, i32, i32)>) {
         let grid_thw = self.compute_grid_thw(images);
         let mut all_patches: Vec<f32> = Vec::new();
         let in_channels = 3usize;
@@ -150,49 +174,54 @@ impl Qwen2VLProcessor {
                 }
             }
 
-            // Convert to patch format:
-            // For each spatial patch, extract [C, patch_size, patch_size] -> flatten to [C*P*P]
-            // Then duplicate for temporal_patch_size (2 frames for single image)
-            let total_patches = (h_patches * w_patches) as usize;
+            // Convert to the reference merger-grouped patch order:
+            // [grid_h/merge, grid_w/merge, merge_h, merge_w, temporal, C, P, P].
+            // The vision tower preserves this order and PatchMerger reshapes
+            // each consecutive merge² group into one language token.
             let temporal = t as usize;
-
             for _t in 0..temporal {
-                for patch_idx in 0..total_patches {
-                    let py = patch_idx / w_patches as usize;
-                    let px = patch_idx % w_patches as usize;
-                    let y_start = py * self.patch_size;
-                    let x_start = px * self.patch_size;
-
-                    // For temporal_patch_size=2, we output 2 rows per spatial patch
-                    for _tp in 0..self.temporal_patch_size {
-                        let mut patch_data = Vec::with_capacity(features_per_pixel);
-                        for c in 0..in_channels {
-                            for dy in 0..self.patch_size {
-                                for dx in 0..self.patch_size {
-                                    let y = y_start + dy;
-                                    let x = x_start + dx;
-                                    patch_data.push(normalized[c * h * w + y * w + x]);
+                for block_y in 0..h_patches as usize / self.spatial_merge_size {
+                    for block_x in 0..w_patches as usize / self.spatial_merge_size {
+                        for inner_y in 0..self.spatial_merge_size {
+                            for inner_x in 0..self.spatial_merge_size {
+                                let py = block_y * self.spatial_merge_size + inner_y;
+                                let px = block_x * self.spatial_merge_size + inner_x;
+                                let y_start = py * self.patch_size;
+                                let x_start = px * self.patch_size;
+                                // For temporal_patch_size=2, emit two contiguous
+                                // rows per spatial patch. The Conv3d-degenerated
+                                // projection concatenates the pair.
+                                for _tp in 0..self.temporal_patch_size {
+                                    for c in 0..in_channels {
+                                        for dy in 0..self.patch_size {
+                                            for dx in 0..self.patch_size {
+                                                let y = y_start + dy;
+                                                let x = x_start + dx;
+                                                all_patches.push(normalized[c * h * w + y * w + x]);
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
-                        all_patches.extend_from_slice(&patch_data);
                     }
                 }
             }
         }
-
-        // Total rows: sum over all images of (t * h_patches * w_patches * temporal_patch_size)
-        let total_rows: usize = grid_thw
-            .iter()
-            .map(|&(t, h, w)| (t as usize) * (h as usize) * (w as usize) * self.temporal_patch_size)
-            .sum();
-
-        let pixel_values = mlxcel_core::from_slice_f32(
-            &all_patches,
-            &[total_rows as i32, features_per_pixel as i32],
+        debug_assert_eq!(
+            all_patches.len(),
+            grid_thw
+                .iter()
+                .map(|&(t, h, w)| {
+                    t as usize
+                        * h as usize
+                        * w as usize
+                        * self.temporal_patch_size
+                        * features_per_pixel
+                })
+                .sum::<usize>()
         );
-
-        (pixel_values, grid_thw)
+        (all_patches, grid_thw)
     }
 }
 
@@ -200,5 +229,43 @@ impl ImageProcessor for Qwen2VLProcessor {
     fn preprocess(&self, images: &[image::DynamicImage]) -> UniquePtr<MlxArray> {
         let (pixel_values, _) = self.preprocess_with_grid(images);
         pixel_values
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use image::{DynamicImage, Rgb, RgbImage};
+
+    use super::*;
+
+    #[test]
+    fn owned_and_mlx_paths_share_spatial_merge_grouped_patch_order() {
+        let processor = Qwen2VLProcessor::new(14, 2, 2);
+        let mut image = RgbImage::new(56, 56);
+        for patch_y in 0..4u32 {
+            for patch_x in 0..4u32 {
+                let value = (patch_y * 4 + patch_x) as u8 * 10;
+                for y in patch_y * 14..(patch_y + 1) * 14 {
+                    for x in patch_x * 14..(patch_x + 1) * 14 {
+                        image.put_pixel(x, y, Rgb([value, 0, 0]));
+                    }
+                }
+            }
+        }
+        let image = DynamicImage::ImageRgb8(image);
+        let (values, grids) = processor.preprocess_values_with_grid(&[image]);
+        assert_eq!(grids, vec![(1, 4, 4)]);
+        let row_width = 3 * 14 * 14;
+        let observed = (0..16)
+            .map(|patch| values[patch * 2 * row_width])
+            .collect::<Vec<_>>();
+        let grouped_patch_ids = [0u8, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15];
+        for (actual, patch_id) in observed.into_iter().zip(grouped_patch_ids) {
+            let expected = (patch_id as f32 * 10.0 / 255.0 - processor.mean[0]) / processor.std[0];
+            assert!((actual - expected).abs() < 1e-6);
+        }
+        let (mlx, mlx_grids) = processor.preprocess_with_grid(&[DynamicImage::new_rgb8(56, 56)]);
+        assert_eq!(mlx_grids, grids);
+        assert_eq!(mlxcel_core::array_shape(&mlx), vec![32, row_width as i32]);
     }
 }

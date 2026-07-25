@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "xla-backend")]
+use super::decode_xla_cli_images;
 use super::{
     apply_user_chat_template, apply_vlm_chat_template, cli_pipeline_requested,
     estimate_delta_label_and_bytes, generated_suffix, generation_stats_from_duration,
@@ -54,6 +56,12 @@ fn xla_cli_rejects_partial_multi_image_decode() {
     assert!(error.contains("1 decoded"));
     assert!(error.contains("refusing partial image execution"));
     assert!(validate_xla_cli_image_cardinality(1, images.len()).is_ok());
+}
+
+#[cfg(feature = "xla-backend")]
+#[test]
+fn xla_cli_accepts_empty_image_list_for_audio_only_requests() {
+    assert!(decode_xla_cli_images(&[]).unwrap().is_empty());
 }
 
 // issue #166: the offline MTP loop is constructed only when the operator

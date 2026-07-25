@@ -65,6 +65,10 @@ mod aux_smoke;
 #[cfg(feature = "iree")]
 mod iree;
 #[cfg(feature = "iree")]
+mod phi4_audio;
+#[cfg(feature = "iree")]
+mod qwen2_vl_runtime;
+#[cfg(feature = "iree")]
 mod vision_runtime;
 
 // The continuous-batching engine (#449 M3 Stage 2b). Present under `iree` (real
@@ -139,6 +143,18 @@ pub use emitter::{
 };
 #[cfg(feature = "diagnostics")]
 pub use iree::PreparedPrefillDiagnostics;
+#[cfg(feature = "iree")]
+pub use phi4_audio::{
+    PHI4MM_AUDIO_CHECKPOINT_REVISION, PHI4MM_AUDIO_FRAME_BUCKETS, Phi4AudioOutput,
+    Phi4AudioProjectionMode, Phi4AudioRuntime, phi4_audio_bucket_for_frames,
+};
+#[cfg(feature = "iree")]
+#[doc(hidden)]
+pub use phi4_audio::{Phi4AudioCheckpoint, Phi4AudioDiagnosticRuntime, Phi4AudioDiagnostics};
+#[cfg(feature = "iree")]
+pub use qwen2_vl_runtime::{
+    IreeQwen2VlProjector, Qwen2VlVisionExecutionMetrics, Qwen2VlVisionProjection,
+};
 #[cfg(feature = "diagnostics")]
 pub use vision_runtime::{IreeVisionDiagnosticProjector, VisionDiagnosticProjection};
 #[cfg(feature = "iree")]

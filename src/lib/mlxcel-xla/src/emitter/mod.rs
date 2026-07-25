@@ -57,6 +57,8 @@ mod gemma3n_schema;
 mod gemma3n_weights;
 mod model;
 mod moe;
+mod phi4_audio;
+mod qwen2_vl;
 mod rope;
 mod vision;
 mod vision_config;
@@ -66,7 +68,8 @@ mod context_tests;
 
 #[allow(unused_imports)]
 pub(crate) use config::{
-    Config, DeepStackConfig, MropeConfig, MropeLayout, NormStyle, QkNorm, QuantConfig, WeightScheme,
+    Config, DeepStackConfig, MropeConfig, MropeLayout, NormStyle, Phi4LoraConfig, QkNorm,
+    QuantConfig, WeightScheme,
 };
 #[allow(unused_imports)]
 pub(crate) use gemma3n::{
@@ -111,6 +114,19 @@ pub use gemma3n_qmv::{
 };
 #[allow(unused_imports)]
 pub(crate) use gemma3n_weights::{Gemma3nWeightSpec, gemma3n_weight_specs};
+#[allow(unused_imports)]
+pub(crate) use phi4_audio::{
+    Phi4AudioConfig, Phi4AudioDiagnosticSpec, Phi4AudioWeightSpec, emit_phi4_audio,
+    emit_phi4_audio_diagnostic_with, emit_phi4_audio_with, phi4_audio_diagnostic_specs,
+    phi4_audio_weight_specs, validate_phi4_audio_weight_shapes,
+};
+#[allow(unused_imports)]
+pub(crate) use qwen2_vl::emit_qwen2_vl;
+#[allow(unused_imports)]
+pub(crate) use qwen2_vl::{
+    QWEN2_VL_PATCH_BUCKETS, Qwen2VlConfig, Qwen2VlGridPlan, Qwen2VlHostInputs, Qwen2VlWeightSpec,
+    prepare_qwen2_vl_host_inputs,
+};
 // MoE FFN config types (issue #500), read by the weight loader (`iree.rs`) and the
 // validation harness. `SharedExpertConfig` is only named in some build cfgs.
 #[allow(unused_imports)]
@@ -143,7 +159,7 @@ pub(crate) use vision_config::{LlavaVisionConfig, VisionActivation, VisionWeight
 
 #[cfg(test)]
 mod tests {
-    use super::config::{NormStyle, QkNorm, RopeScaling};
+    use super::config::{NormStyle, Phi4LoraConfig, QkNorm, RopeScaling};
     use super::*;
 
     const CONFIG_JSON: &str = include_str!("../../assets/llama-3.2-1b/config.json");
@@ -202,6 +218,69 @@ mod tests {
             // dense-arch-pack flags) from the reference Llama config.
             ..Config::llama_3_2_1b()
         }
+    }
+
+    fn phi4_like() -> Config {
+        Config {
+            context_capacity: 8,
+            hidden: 8,
+            inter: 16,
+            n_layers: 2,
+            n_q: 2,
+            n_kv: 1,
+            head_dim: 4,
+            rotary_dim: Some(4),
+            vocab: 32,
+            tie_word_embeddings: true,
+            fused_qkv: true,
+            fused_gate_up: true,
+            phi4_lora: Some(Phi4LoraConfig {
+                speech_rank: 3,
+                speech_scale: 2.0,
+                vision_rank: 2,
+                vision_scale: 2.5,
+            }),
+            ..Config::llama_3_2_1b()
+        }
+    }
+
+    #[test]
+    fn phi4mm_graphs_carry_explicit_scalar_and_per_row_adapter_modes() {
+        let config = phi4_like();
+        let prefill = emit_prefill(&config, false);
+        let decode = emit_decode(&config, false);
+        let ragged = emit_decode_ragged(&config, 4, false);
+        assert!(prefill.contains("tensor<i32> loc(\"adapter_mode\")"));
+        assert!(decode.contains("tensor<i32> loc(\"adapter_mode\")"));
+        assert!(ragged.contains("tensor<4xi32> loc(\"adapter_mode\")"));
+        for graph in [&prefill, &decode, &ragged] {
+            for adapter in ["speech", "vision"] {
+                for projection in ["qkv", "o", "gate_up", "down"] {
+                    assert!(
+                        graph.contains(&format!("{projection}.lora_A.{adapter}")),
+                        "missing {projection} A/{adapter}"
+                    );
+                    assert!(
+                        graph.contains(&format!("{projection}.lora_B.{adapter}")),
+                        "missing {projection} B/{adapter}"
+                    );
+                }
+            }
+            assert!(
+                graph.contains("stablehlo.compare"),
+                "mode gating must compare the request input"
+            );
+            assert!(
+                graph.contains("stablehlo.select"),
+                "mode gating must select adapter deltas without mutating base weights"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "Phi4MM requires per-row ragged decode")]
+    fn phi4mm_rejects_uniform_batched_decode() {
+        let _ = emit_decode_batched(&phi4_like(), 4, false);
     }
 
     fn mrope_qwen(layout: MropeLayout) -> Config {

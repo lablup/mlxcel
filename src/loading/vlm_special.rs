@@ -1327,6 +1327,171 @@ pub(crate) fn load_phi4mm_vlm(model_path: &Path) -> Result<LoadedModel> {
     }))
 }
 
+/// Load only Phi4MM's canonical text embedding table for the XLA audio
+/// producer. Decoder layers, LM head, vision tower, and MLX audio encoder are
+/// deliberately excluded.
+#[cfg(feature = "xla-iree")]
+pub(crate) fn load_phi4mm_xla_text_embeddings(
+    model_path: &Path,
+) -> Result<(mlxcel_core::layers::UnifiedEmbedding, usize, usize)> {
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+    if full_config.get("model_type").and_then(Value::as_str) != Some("phi4mm") {
+        return Err(anyhow::anyhow!(
+            "{} is not a Phi4MM checkpoint",
+            model_path.display()
+        ));
+    }
+    let mut text_config_value = phi4mm_text_config_value(&full_config)?;
+    inherit_quantization_if_missing(&mut text_config_value, &full_config)?;
+    let text_config: models::phi4mm::ModelArgs = serde_json::from_value(text_config_value)
+        .map_err(|error| anyhow::anyhow!("Failed to parse Phi4MM text config: {error}"))?;
+    let weights = super::load_vlm_weights_common_filtered_canonical(model_path, |name| {
+        name.starts_with("model.embed_tokens.")
+    })?;
+    let embeddings = mlxcel_core::layers::UnifiedEmbedding::from_weights(
+        &weights,
+        "model.embed_tokens",
+        text_config.group_size(),
+        text_config.bits(),
+    )
+    .map_err(|error| anyhow::anyhow!("invalid Phi4MM text embedding table: {error}"))?;
+    Ok((
+        embeddings,
+        text_config.hidden_size,
+        text_config.max_position_embeddings,
+    ))
+}
+
+/// Filtered Phi4MM host components used by the XLA prepared-prefill producer.
+///
+/// The struct deliberately contains no text decoder, LM head, audio encoder, or
+/// decoder LoRA tensors. The latter are owned by the IREE runtime bundle.
+#[cfg(feature = "xla-iree")]
+pub(crate) struct Phi4MMXlaVisionComponents {
+    pub vision_tower: vision::encoders::phi4_siglip::Phi4SigLipVisionEncoder,
+    pub mm_projector_linear1: mlxcel_core::layers::UnifiedLinear,
+    pub mm_projector_linear2: mlxcel_core::layers::UnifiedLinear,
+    pub processor: vision::processors::phi4mm::Phi4MMProcessor,
+    pub select_layer: isize,
+    pub glb_gn: mlxcel_core::UniquePtr<mlxcel_core::MlxArray>,
+    pub sub_gn: mlxcel_core::UniquePtr<mlxcel_core::MlxArray>,
+    pub hd_transform_order: String,
+}
+
+/// Load the canonical Phi4MM embedding lookup and image encoder/projector
+/// without constructing any MLX language or audio inference layers.
+#[cfg(feature = "xla-iree")]
+pub(crate) fn load_phi4mm_xla_media_components(
+    model_path: &Path,
+) -> Result<(
+    mlxcel_core::layers::UnifiedEmbedding,
+    usize,
+    usize,
+    Phi4MMXlaVisionComponents,
+)> {
+    use vision::encoders::phi4_siglip::{Phi4SigLipVisionConfig, Phi4SigLipVisionEncoder};
+    use vision::processors::phi4mm::Phi4MMProcessor;
+
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+    if full_config.get("model_type").and_then(Value::as_str) != Some("phi4mm") {
+        return Err(anyhow::anyhow!(
+            "{} is not a Phi4MM checkpoint",
+            model_path.display()
+        ));
+    }
+    let mut text_config_value = phi4mm_text_config_value(&full_config)?;
+    inherit_quantization_if_missing(&mut text_config_value, &full_config)?;
+    let text_config: models::phi4mm::ModelArgs = serde_json::from_value(text_config_value)
+        .map_err(|error| anyhow::anyhow!("Failed to parse Phi4MM text config: {error}"))?;
+    let vision_config: Phi4SigLipVisionConfig =
+        serde_json::from_value(phi4mm_vision_config_value(&full_config))
+            .map_err(|error| anyhow::anyhow!("Failed to parse Phi4MM vision config: {error}"))?;
+
+    let image_prefix = "model.embed_tokens_extend.image_embed.";
+    let raw_weights = super::load_vlm_weights_common_filtered_canonical(model_path, |name| {
+        name.starts_with("model.embed_tokens.") || name.starts_with(image_prefix)
+    })?;
+    let (mut weights, lora_pairs) = remap_phi4mm_weights(raw_weights)?;
+    if !lora_pairs.is_empty() {
+        return Err(anyhow::anyhow!(
+            "filtered Phi4MM XLA media loader unexpectedly retained decoder LoRA tensors"
+        ));
+    }
+    models::sanitize_tied_embeddings(&mut weights, &full_config);
+
+    let text_embeddings = mlxcel_core::layers::UnifiedEmbedding::from_weights(
+        &weights,
+        "model.embed_tokens",
+        text_config.group_size(),
+        text_config.bits(),
+    )
+    .map_err(|error| anyhow::anyhow!("invalid Phi4MM text embedding table: {error}"))?;
+    let vision_tower = Phi4SigLipVisionEncoder::from_weights(
+        &weights,
+        &vision_config,
+        "vision_tower.vision_tower.vision_model",
+        text_config.group_size(),
+        text_config.bits(),
+    )
+    .map_err(|error| anyhow::anyhow!("Failed to load Phi4MM vision tower: {error}"))?;
+    let mm_projector_linear1 = mlxcel_core::layers::UnifiedLinear::from_weights(
+        &weights,
+        "mm_projector_linear1",
+        text_config.group_size(),
+        text_config.bits(),
+    )
+    .map_err(|error| anyhow::anyhow!("Failed to load Phi4MM mm_projector_linear1: {error}"))?;
+    let mm_projector_linear2 = mlxcel_core::layers::UnifiedLinear::from_weights(
+        &weights,
+        "mm_projector_linear2",
+        text_config.group_size(),
+        text_config.bits(),
+    )
+    .map_err(|error| anyhow::anyhow!("Failed to load Phi4MM mm_projector_linear2: {error}"))?;
+    let glb_gn = weights
+        .get("glb_GN")
+        .map(|weight| mlxcel_core::copy(weight))
+        .ok_or_else(|| anyhow::anyhow!("Phi4MM glb_GN weight not found"))?;
+    let sub_gn = weights
+        .get("sub_GN")
+        .map(|weight| mlxcel_core::copy(weight))
+        .ok_or_else(|| anyhow::anyhow!("Phi4MM sub_GN weight not found"))?;
+
+    let image_embd_layer = full_config
+        .get("embd_layer")
+        .and_then(|layer| layer.get("image_embd_layer"));
+    let crop_size = image_embd_layer
+        .and_then(|config| config.get("crop_size"))
+        .and_then(Value::as_u64)
+        .unwrap_or(448) as usize;
+    let hd_transform_order = image_embd_layer
+        .and_then(|config| config.get("hd_transform_order"))
+        .and_then(Value::as_str)
+        .unwrap_or("glb_sub")
+        .to_string();
+    let dynamic_hd = read_optional_model_json(model_path, "preprocessor_config.json")
+        .as_ref()
+        .and_then(|config| config.get("dynamic_hd"))
+        .and_then(Value::as_u64)
+        .unwrap_or(36) as usize;
+
+    Ok((
+        text_embeddings,
+        text_config.hidden_size,
+        text_config.max_position_embeddings,
+        Phi4MMXlaVisionComponents {
+            vision_tower,
+            mm_projector_linear1,
+            mm_projector_linear2,
+            processor: Phi4MMProcessor::new(crop_size, vision_config.patch_size, dynamic_hd),
+            select_layer: -2,
+            glb_gn,
+            sub_gn,
+            hd_transform_order,
+        },
+    ))
+}
+
 pub(crate) fn load_phi4_siglip_vlm(model_path: &Path) -> Result<LoadedModel> {
     use vision::encoders::phi4_siglip::{Phi4SigLipVisionConfig, Phi4SigLipVisionEncoder};
     use vision::processors::phi4_siglip::Phi4SigLipProcessor;

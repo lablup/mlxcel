@@ -55,6 +55,7 @@ use mlxcel_xla::{EngineEvent, FinishReason as XlaFinishReason, SampleParams, Xla
 use super::BatchEngine;
 use super::observability::BatchObservability;
 use super::stop_matcher::StopMatcher;
+use super::xla_audio_preprocess::{AudioPreprocessLimits, AudioPreprocessStage};
 use super::xla_preprocess::ImagePreprocessStage;
 use crate::server::ServerGenerateOptions;
 use crate::server::media::MediaRequestMetadata;
@@ -167,6 +168,16 @@ struct PendingImageState {
     start: Instant,
 }
 
+struct PendingAudioState {
+    response_tx: mpsc::Sender<GenerateEvent>,
+    cancelled: Arc<AtomicBool>,
+    prompt_tokens: Vec<i32>,
+    params: SampleParams,
+    stop_sequences: Vec<String>,
+    max_tokens: usize,
+    start: Instant,
+}
+
 /// Server-side worker that serves requests through the OpenXLA continuous-batching
 /// engine. Built and run on a single worker thread (see
 /// `model_worker::spawn_xla_model_worker`).
@@ -187,6 +198,14 @@ pub(crate) struct XlaServeWorker<E = XlaBatchEngine> {
     image_preprocessor: Option<ImagePreprocessStage>,
     pending_images: HashMap<u64, PendingImageState>,
     next_image_job_id: u64,
+    audio_preprocessor: Option<AudioPreprocessStage>,
+    /// The audio stage is the unified Phi4MM image/audio producer rather than
+    /// an audio-only family producer.
+    phi4mm_media_preprocessor: bool,
+    audio_policy: Option<crate::audio::AudioFamilyPolicy>,
+    pending_audio: HashMap<u64, PendingAudioState>,
+    next_audio_job_id: u64,
+    context_capacity: usize,
     shutdown: bool,
 }
 
@@ -195,11 +214,36 @@ impl XlaServeWorker<XlaBatchEngine> {
         engine: XlaBatchEngine,
         tokenizer: MlxcelTokenizer,
         model_path: std::path::PathBuf,
+        device: String,
         request_rx: mpsc::Receiver<ModelRequest>,
         batch_metrics: Arc<BatchMetrics>,
         batch_observability: Arc<BatchObservability>,
     ) -> Result<Self, String> {
-        let image_preprocessor = ImagePreprocessStage::spawn_for_model(model_path, engine.b_max())?;
+        let context_capacity = engine.context_capacity();
+        let image_preprocessor =
+            ImagePreprocessStage::spawn_for_model(model_path.clone(), engine.b_max())?;
+        let phi4mm_media_preprocessor = crate::models::get_model_type(&model_path)
+            .map_err(|error| error.to_string())?
+            == crate::models::ModelType::Phi4MMVLM;
+        let (audio_preprocessor, audio_policy) = if phi4mm_media_preprocessor {
+            let policy =
+                crate::multimodal::phi4mm_xla_audio::load_phi4mm_audio_policy(&model_path)?;
+            let producer_path = model_path.clone();
+            let stage = AudioPreprocessStage::spawn_with_loader(
+                AudioPreprocessLimits::default(),
+                batch_observability.clone(),
+                move || {
+                    crate::multimodal::phi4mm_xla_audio::Phi4MmXlaAudioProducer::load_multimodal(
+                        &producer_path,
+                        &device,
+                        context_capacity,
+                    )
+                },
+            )?;
+            (Some(stage), Some(policy))
+        } else {
+            (None, None)
+        };
         Ok(Self {
             engine,
             tokenizer,
@@ -210,6 +254,12 @@ impl XlaServeWorker<XlaBatchEngine> {
             image_preprocessor,
             pending_images: HashMap::new(),
             next_image_job_id: 0,
+            audio_preprocessor,
+            phi4mm_media_preprocessor,
+            audio_policy,
+            pending_audio: HashMap::new(),
+            next_audio_job_id: 0,
+            context_capacity,
             shutdown: false,
         })
     }
@@ -247,6 +297,15 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
             .collect();
         for job_id in jobs {
             self.pending_images.remove(&job_id);
+        }
+        let audio_jobs: Vec<u64> = self
+            .pending_audio
+            .iter()
+            .filter(|(_, state)| state.cancelled.load(Ordering::Relaxed))
+            .map(|(&job_id, _)| job_id)
+            .collect();
+        for job_id in audio_jobs {
+            self.pending_audio.remove(&job_id);
         }
     }
 
@@ -371,6 +430,11 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                 .send(GenerateEvent::Error(msg.to_string()));
         }
         for (_, state) in self.pending_images.drain() {
+            let _ = state
+                .response_tx
+                .send(GenerateEvent::Error(msg.to_string()));
+        }
+        for (_, state) in self.pending_audio.drain() {
             let _ = state
                 .response_tx
                 .send(GenerateEvent::Error(msg.to_string()));

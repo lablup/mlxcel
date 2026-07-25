@@ -2596,8 +2596,8 @@ pub use sampling::TokenBiasMap;
 // Re-export the inference-session contract (issue #448, ADR 0004) so the root
 // crate's compute-backend seam can construct and dispatch MLX sessions.
 pub use multimodal::{
-    OwnedTensor, PreparedAttentionBias, PreparedModality, PreparedPositions, PreparedPrefill,
-    PreparedPrefillError, PreparedTensorDType,
+    OwnedTensor, PreparedAdapterMode, PreparedAttentionBias, PreparedModality, PreparedPositions,
+    PreparedPrefill, PreparedPrefillError, PreparedTensorDType,
 };
 pub use session::{InferenceSession, MlxInferenceSession, SessionCapabilities};
 // Re-export N-gram loop-detection so the server control plane and CLI decode

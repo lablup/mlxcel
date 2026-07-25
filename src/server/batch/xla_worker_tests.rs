@@ -19,9 +19,16 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use image::{DynamicImage, ImageFormat};
+use mlxcel_core::session::{
+    OwnedTensor, PreparedAdapterMode, PreparedAttentionBias, PreparedPositions, PreparedTensorDType,
+};
 
 use super::*;
 use crate::FakeHostMultimodalPreprocessor;
+use crate::audio::{AudioFamilyPolicy, AudioWaveformBatch};
+use crate::server::batch::xla_audio_preprocess::{
+    AudioFeatureProducer, AudioPreprocessLimits, AudioPreprocessStage,
+};
 use crate::server::request_options::{RequestOptionOverrides, build_server_generate_options};
 use crate::server::{GenerationResult, ServerConfig};
 
@@ -31,6 +38,7 @@ struct FakeServingEngine {
     active: BTreeSet<u64>,
     text_submissions: Vec<Vec<i32>>,
     prepared_submissions: Vec<(Vec<i32>, usize)>,
+    prepared_modes: Vec<PreparedAdapterMode>,
 }
 
 impl XlaServingEngine for FakeServingEngine {
@@ -66,6 +74,7 @@ impl XlaServingEngine for FakeServingEngine {
         _max_new_tokens: usize,
         _params: SampleParams,
     ) -> Result<u64, String> {
+        self.prepared_modes.push(prepared.adapter_mode);
         self.prepared_submissions
             .push((prepared.token_ids, prepared.sequence_len));
         Ok(self.activate())
@@ -107,6 +116,28 @@ fn png_bytes() -> Vec<u8> {
     bytes
 }
 
+fn wav_bytes() -> Vec<u8> {
+    let samples = [0i16; 320];
+    let data_len = samples.len() * 2;
+    let mut wav = Vec::with_capacity(44 + data_len);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36u32 + data_len as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&16_000u32.to_le_bytes());
+    wav.extend_from_slice(&32_000u32.to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(data_len as u32).to_le_bytes());
+    for sample in samples {
+        wav.extend_from_slice(&sample.to_le_bytes());
+    }
+    wav
+}
+
 fn options(max_tokens: usize) -> ServerGenerateOptions {
     build_server_generate_options(
         &ServerConfig::default(),
@@ -146,6 +177,89 @@ fn worker(image_preprocessor: Option<ImagePreprocessStage>) -> XlaServeWorker<Fa
         image_preprocessor,
         pending_images: HashMap::new(),
         next_image_job_id: 0,
+        audio_preprocessor: None,
+        phi4mm_media_preprocessor: false,
+        audio_policy: None,
+        pending_audio: HashMap::new(),
+        next_audio_job_id: 0,
+        context_capacity: 32,
+        shutdown: false,
+    }
+}
+
+struct FakePhi4MediaProducer;
+
+impl AudioFeatureProducer for FakePhi4MediaProducer {
+    fn prepare(
+        &mut self,
+        waveforms: AudioWaveformBatch,
+        token_ids: Vec<i32>,
+        images: Vec<DynamicImage>,
+        _cancelled: &AtomicBool,
+    ) -> Result<PreparedPrefill, String> {
+        let sequence = token_ids.len();
+        let embeddings = OwnedTensor::new(
+            vec![0; sequence * 2 * std::mem::size_of::<f32>()],
+            PreparedTensorDType::Float32,
+            vec![1, sequence, 2],
+        )
+        .map_err(|error| error.to_string())?;
+        let bias = OwnedTensor::new(
+            vec![0; sequence * std::mem::size_of::<f32>()],
+            PreparedTensorDType::Float32,
+            vec![1, 1, 1, sequence],
+        )
+        .map_err(|error| error.to_string())?;
+        let mode = if !images.is_empty() {
+            PreparedAdapterMode::Vision
+        } else if !waveforms.clips.is_empty() {
+            PreparedAdapterMode::Speech
+        } else {
+            PreparedAdapterMode::Language
+        };
+        PreparedPrefill::new(
+            token_ids,
+            embeddings,
+            PreparedPositions::Sequential {
+                start: 0,
+                length: sequence,
+            },
+            PreparedAttentionBias {
+                tensor: bias,
+                causal: true,
+            },
+            Vec::new(),
+        )
+        .map(|prepared| prepared.with_adapter_mode(mode))
+        .map_err(|error| error.to_string())
+    }
+}
+
+fn phi4mm_worker() -> XlaServeWorker<FakeServingEngine> {
+    let (_request_tx, request_rx) = mpsc::channel();
+    let observability = Arc::new(BatchObservability::new());
+    let stage = AudioPreprocessStage::spawn(
+        FakePhi4MediaProducer,
+        AudioPreprocessLimits::default(),
+        observability.clone(),
+    )
+    .unwrap();
+    XlaServeWorker {
+        engine: FakeServingEngine::default(),
+        tokenizer: MlxcelTokenizer::stub(),
+        request_rx,
+        states: HashMap::new(),
+        batch_metrics: Arc::new(BatchMetrics::new()),
+        batch_observability: observability,
+        image_preprocessor: None,
+        pending_images: HashMap::new(),
+        next_image_job_id: 0,
+        audio_preprocessor: Some(stage),
+        phi4mm_media_preprocessor: true,
+        audio_policy: Some(AudioFamilyPolicy::phi4mm()),
+        pending_audio: HashMap::new(),
+        next_audio_job_id: 0,
+        context_capacity: 32,
         shutdown: false,
     }
 }
@@ -153,12 +267,67 @@ fn worker(image_preprocessor: Option<ImagePreprocessStage>) -> XlaServeWorker<Fa
 fn wait_for_preprocessing(worker: &mut XlaServeWorker<FakeServingEngine>) {
     for _ in 0..500 {
         worker.drain_preprocessed();
-        if worker.pending_images.is_empty() {
+        if worker.pending_images.is_empty() && worker.pending_audio.is_empty() {
             return;
         }
         std::thread::sleep(Duration::from_millis(1));
     }
     panic!("timed out waiting for image preprocessing");
+}
+
+#[test]
+fn phi4mm_media_admission_selects_speech_or_vision_per_request() {
+    let mut worker = phi4mm_worker();
+    let requests = [
+        (
+            vec![crate::phi4mm_prompt::PHI4MM_AUDIO_TOKEN_ID],
+            Vec::new(),
+            vec![wav_bytes()],
+            PreparedAdapterMode::Speech,
+        ),
+        (
+            vec![crate::phi4_siglip_prompt::PHI4_SIGLIP_IMAGE_TOKEN_INDEX],
+            vec![png_bytes()],
+            Vec::new(),
+            PreparedAdapterMode::Vision,
+        ),
+        (
+            vec![
+                crate::phi4_siglip_prompt::PHI4_SIGLIP_IMAGE_TOKEN_INDEX,
+                crate::phi4mm_prompt::PHI4MM_AUDIO_TOKEN_ID,
+            ],
+            vec![png_bytes()],
+            vec![wav_bytes()],
+            PreparedAdapterMode::Vision,
+        ),
+    ];
+    let mut receivers = Vec::new();
+    for (tokens, images, audio, _mode) in &requests {
+        let (tx, rx) = mpsc::channel();
+        worker.admit(
+            String::new(),
+            Some(tokens.clone()),
+            options(1),
+            images.clone(),
+            audio.clone(),
+            Vec::new(),
+            media(images.len(), audio.len(), 0),
+            tx,
+            Arc::new(AtomicBool::new(false)),
+        );
+        wait_for_preprocessing(&mut worker);
+        receivers.push(rx);
+    }
+    assert_eq!(
+        worker.engine.prepared_modes,
+        requests.iter().map(|request| request.3).collect::<Vec<_>>()
+    );
+    assert_eq!(worker.states.len(), 3);
+    let events = worker.engine.pump().unwrap();
+    worker.dispatch(events);
+    for receiver in receivers {
+        assert_eq!(receive_done(&receiver).completion_tokens, 1);
+    }
 }
 
 fn receive_done(rx: &mpsc::Receiver<GenerateEvent>) -> GenerationResult {
@@ -470,6 +639,12 @@ fn pending_preprocess_poll_timeout_does_not_shutdown_worker() {
         image_preprocessor: Some(image_stage()),
         pending_images: HashMap::new(),
         next_image_job_id: 0,
+        audio_preprocessor: None,
+        phi4mm_media_preprocessor: false,
+        audio_policy: None,
+        pending_audio: HashMap::new(),
+        next_audio_job_id: 0,
+        context_capacity: 32,
         shutdown: false,
     };
     let (response_tx, _response_rx) = mpsc::channel();

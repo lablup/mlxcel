@@ -131,6 +131,8 @@ pub enum EngineEvent {
 /// An active slot's running state.
 struct Slot {
     req_id: u64,
+    /// Request-scoped Phi4MM language/speech/vision LoRA selector.
+    adapter_mode: i32,
     /// Last emitted token; the next decode input for this row.
     cur: i32,
     /// Tokens currently in this slot's KV (== the next write position).
@@ -193,6 +195,13 @@ impl PendingInput {
             Self::Prepared(prepared) | Self::DeepStackPrepared { prepared, .. } => {
                 prepared.positions.rope_delta()
             }
+        }
+    }
+
+    fn adapter_mode(&self) -> i32 {
+        match self {
+            Self::Prepared(prepared) => prepared.adapter_mode,
+            Self::Tokens(_) | Self::Gemma3nPrepared { .. } | Self::DeepStackPrepared { .. } => 0,
         }
     }
 }
@@ -680,6 +689,7 @@ impl XlaBatchEngine {
             });
             let slot = Slot {
                 req_id: p.req_id,
+                adapter_mode: p.input.adapter_mode(),
                 cur: first,
                 cache_len: p.input.effective_len() as i32,
                 rope_delta: p.input.rope_delta(),
@@ -708,22 +718,31 @@ impl XlaBatchEngine {
         // zeros (masked no-ops) and their logits are discarded.
         let b = self.sched.b_max;
         let mut tok = vec![0i32; b];
+        let mut adapter_modes = vec![0i32; b];
         let mut clen = vec![0i32; b];
         let mut pos = vec![0i32; b];
         for (s, slot) in self.sched.slots.iter().enumerate() {
             if let Some(st) = slot {
+                adapter_modes[s] = st.adapter_mode;
                 tok[s] = st.cur;
                 clen[s] = st.cache_len;
                 pos[s] = st.cache_len;
             }
         }
         let logits = match self.engine.position_mode() {
-            PreparedPositionMode::OneD => self.engine.decode_ragged_logits(&tok, &pos, &clen)?,
+            PreparedPositionMode::OneD => {
+                self.engine
+                    .decode_ragged_logits_with_modes(&adapter_modes, &tok, &pos, &clen)?
+            }
             PreparedPositionMode::Mrope3D => {
                 let mrope_positions =
                     mrope_slot_coordinates(&self.sched.slots).map_err(|error| error.to_string())?;
-                self.engine
-                    .decode_ragged_mrope_logits(&tok, &mrope_positions, &clen)?
+                self.engine.decode_ragged_mrope_logits_with_modes(
+                    &adapter_modes,
+                    &tok,
+                    &mrope_positions,
+                    &clen,
+                )?
             }
         };
         let vocab = self.engine.vocab();
@@ -1253,8 +1272,8 @@ impl XlaReferenceEngine {
 mod tests {
     use super::*;
     use mlxcel_core::session::{
-        OwnedTensor, PreparedAttentionBias, PreparedModality, PreparedPositions,
-        PreparedTensorDType,
+        OwnedTensor, PreparedAdapterMode, PreparedAttentionBias, PreparedModality,
+        PreparedPositions, PreparedTensorDType,
     };
 
     const EOS: [i32; 1] = [42];
@@ -1273,6 +1292,15 @@ mod tests {
     }
 
     fn prepared_input(tokens: Vec<i32>, hidden: usize, capacity: usize) -> PreparedIreePrefill {
+        prepared_input_with_mode(tokens, hidden, capacity, PreparedAdapterMode::Language)
+    }
+
+    fn prepared_input_with_mode(
+        tokens: Vec<i32>,
+        hidden: usize,
+        capacity: usize,
+        adapter_mode: PreparedAdapterMode,
+    ) -> PreparedIreePrefill {
         let sequence = tokens.len();
         let embedding_bytes = vec![0; sequence * hidden * std::mem::size_of::<f32>()];
         let bias_bytes = vec![0; sequence * std::mem::size_of::<f32>()];
@@ -1303,7 +1331,8 @@ mod tests {
                 token_count: 1,
             }],
         )
-        .unwrap();
+        .unwrap()
+        .with_adapter_mode(adapter_mode);
         PreparedIreePrefill::prepare(&value, hidden, capacity).unwrap()
     }
 
@@ -1381,6 +1410,7 @@ mod tests {
         let req_id = pending.req_id;
         scheduler.slots[slot_index] = Some(Slot {
             req_id,
+            adapter_mode: pending.input.adapter_mode(),
             cur: 7,
             cache_len: pending.input.effective_len() as i32,
             rope_delta: pending.input.rope_delta(),
@@ -1448,6 +1478,7 @@ mod tests {
         let mut s = Scheduler::new(2, EOS.to_vec());
         s.slots[0] = Some(Slot {
             req_id: 41,
+            adapter_mode: 0,
             cur: 7,
             cache_len: 300,
             rope_delta: 0,
@@ -1601,6 +1632,7 @@ mod tests {
 
         s.slots[0] = Some(Slot {
             req_id: queued_prepared,
+            adapter_mode: 0,
             cur: 7,
             cache_len: effective_len as i32,
             rope_delta: 0,
@@ -1632,6 +1664,44 @@ mod tests {
         let replacement = s.submit(vec![9], 2, g());
         assert_eq!(s.pop_next_pending().unwrap().req_id, replacement);
         assert_eq!(s.free_slots(), vec![0]);
+    }
+
+    #[test]
+    fn adapter_mode_is_request_scoped_and_cleared_on_slot_reuse() {
+        let mut scheduler = Scheduler::new(2, EOS.to_vec());
+        let speech = prepared_input_with_mode(vec![4, 5, 6], 2, 8, PreparedAdapterMode::Speech);
+        let speech_id =
+            scheduler.submit_input(PendingInput::Prepared(speech), 8, SampleParams::greedy());
+        assert_eq!(admit_next(&mut scheduler, 0), speech_id);
+        assert_eq!(
+            scheduler.slots[0].as_ref().unwrap().adapter_mode,
+            PreparedAdapterMode::Speech.code()
+        );
+
+        assert!(scheduler.cancel(speech_id));
+        let language_id = scheduler.submit(vec![9, 10], 4, g());
+        assert_eq!(admit_next(&mut scheduler, 0), language_id);
+        assert_eq!(
+            scheduler.slots[0].as_ref().unwrap().adapter_mode,
+            PreparedAdapterMode::Language.code(),
+            "slot reuse must not leak the cancelled request's adapter"
+        );
+
+        let vision = prepared_input_with_mode(vec![7, 8], 2, 8, PreparedAdapterMode::Vision);
+        let vision_id =
+            scheduler.submit_input(PendingInput::Prepared(vision), 8, SampleParams::greedy());
+        assert_eq!(admit_next(&mut scheduler, 1), vision_id);
+        assert_eq!(
+            scheduler
+                .slots
+                .iter()
+                .map(|slot| slot.as_ref().map_or(0, |slot| slot.adapter_mode))
+                .collect::<Vec<_>>(),
+            vec![
+                PreparedAdapterMode::Language.code(),
+                PreparedAdapterMode::Vision.code()
+            ]
+        );
     }
 
     #[test]
@@ -1669,6 +1739,7 @@ mod tests {
         let p = s.pop_next_pending().unwrap();
         s.slots[0] = Some(Slot {
             req_id: p.req_id,
+            adapter_mode: 0,
             cur: 5,
             cache_len: 1,
             rope_delta: 0,

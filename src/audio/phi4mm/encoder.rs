@@ -170,6 +170,18 @@ struct Subsampler {
     out: UnifiedLinear,
 }
 
+#[doc(hidden)]
+pub struct Phi4MMAudioSubsampleDiagnostics {
+    pub conv0: UniquePtr<MlxArray>,
+    pub conv1_depthwise: UniquePtr<MlxArray>,
+    pub conv1_pointwise: UniquePtr<MlxArray>,
+    pub conv1: UniquePtr<MlxArray>,
+    pub conv2_depthwise: UniquePtr<MlxArray>,
+    pub conv2_pointwise: UniquePtr<MlxArray>,
+    pub conv2: UniquePtr<MlxArray>,
+    pub projected: UniquePtr<MlxArray>,
+}
+
 impl Subsampler {
     fn load(weights: &WeightMap, prefix: &str, channels: i32) -> Result<Self, String> {
         Ok(Self {
@@ -228,23 +240,36 @@ impl Subsampler {
     }
 
     fn forward(&self, x: &MlxArray) -> Result<UniquePtr<MlxArray>, String> {
+        Ok(self.forward_diagnostics(x)?.projected)
+    }
+
+    fn forward_diagnostics(&self, x: &MlxArray) -> Result<Phi4MMAudioSubsampleDiagnostics, String> {
         let shape = mlxcel_core::array_shape(x);
         let x = mlxcel_core::reshape(x, &[shape[0], shape[1], shape[2], 1]);
         let x = self.conv0.forward(&x)?;
-        let x = relu(&x);
-        let x = self.conv1_depthwise.forward(&x)?;
-        let x = self.conv1_pointwise.forward(&x)?;
-        let x = relu(&x);
-        let x = self.conv2_depthwise.forward(&x)?;
-        let x = self.conv2_pointwise.forward(&x)?;
-        let x = relu(&x);
+        let conv0 = relu(&x);
+        let conv1_depthwise = self.conv1_depthwise.forward(&conv0)?;
+        let conv1_pointwise = self.conv1_pointwise.forward(&conv1_depthwise)?;
+        let conv1 = relu(&conv1_pointwise);
+        let conv2_depthwise = self.conv2_depthwise.forward(&conv1)?;
+        let conv2_pointwise = self.conv2_pointwise.forward(&conv2_depthwise)?;
+        let conv2 = relu(&conv2_pointwise);
         // PyTorch keeps convolution output as [B,C,T,F] and flattens after
         // transpose(1,2), so channel must precede frequency for embed.out.
-        let x = mlxcel_core::transpose_axes(&x, &[0, 1, 3, 2]);
+        let x = mlxcel_core::transpose_axes(&conv2, &[0, 1, 3, 2]);
         let shape = mlxcel_core::array_shape(&x);
         let x = mlxcel_core::reshape(&x, &[shape[0], shape[1], shape[2] * shape[3]]);
-        let x = self.out.forward(&x);
-        Ok(x)
+        let projected = self.out.forward(&x);
+        Ok(Phi4MMAudioSubsampleDiagnostics {
+            conv0,
+            conv1_depthwise,
+            conv1_pointwise,
+            conv1,
+            conv2_depthwise,
+            conv2_pointwise,
+            conv2,
+            projected,
+        })
     }
 }
 
@@ -415,6 +440,17 @@ struct ConformerBlock {
     output_norm: LayerNorm,
 }
 
+#[doc(hidden)]
+pub struct Phi4MMAudioBlockDiagnostics {
+    pub after_ff_in: UniquePtr<MlxArray>,
+    pub attention: UniquePtr<MlxArray>,
+    pub after_attention: UniquePtr<MlxArray>,
+    pub convolution: UniquePtr<MlxArray>,
+    pub after_convolution: UniquePtr<MlxArray>,
+    pub ff_out: UniquePtr<MlxArray>,
+    pub output: UniquePtr<MlxArray>,
+}
+
 impl ConformerBlock {
     fn load(
         weights: &WeightMap,
@@ -443,20 +479,44 @@ impl ConformerBlock {
         x: &MlxArray,
         relative_bias: &MlxArray,
     ) -> Result<UniquePtr<MlxArray>, String> {
-        let h = mlxcel_core::add(
+        Ok(self.forward_diagnostics(x, relative_bias)?.output)
+    }
+
+    fn forward_diagnostics(
+        &self,
+        x: &MlxArray,
+        relative_bias: &MlxArray,
+    ) -> Result<Phi4MMAudioBlockDiagnostics, String> {
+        let after_ff_in = mlxcel_core::add(
             x,
             &mlxcel_core::multiply_scalar(&self.ff_in.forward(x), 0.5),
         );
-        let attention_input = self.attention_norm.forward(&h);
-        let attn = self.attention.forward(&attention_input, relative_bias);
-        let h = mlxcel_core::add(&h, &attn);
-        let conv = self.conv.forward(&h)?;
-        let h = mlxcel_core::add(&h, &conv);
-        let ff = mlxcel_core::multiply_scalar(&self.ff_out.forward(&h), 0.5);
-        let h = mlxcel_core::add(&h, &ff);
-        let h = self.output_norm.forward(&h);
-        Ok(h)
+        let attention_input = self.attention_norm.forward(&after_ff_in);
+        let attention = self.attention.forward(&attention_input, relative_bias);
+        let after_attention = mlxcel_core::add(&after_ff_in, &attention);
+        let convolution = self.conv.forward(&after_attention)?;
+        let after_convolution = mlxcel_core::add(&after_attention, &convolution);
+        let ff_out = mlxcel_core::multiply_scalar(&self.ff_out.forward(&after_convolution), 0.5);
+        let pre_norm = mlxcel_core::add(&after_convolution, &ff_out);
+        let output = self.output_norm.forward(&pre_norm);
+        Ok(Phi4MMAudioBlockDiagnostics {
+            after_ff_in,
+            attention,
+            after_attention,
+            convolution,
+            after_convolution,
+            ff_out,
+            output,
+        })
     }
+}
+
+#[doc(hidden)]
+pub struct Phi4MMAudioEncoderDiagnostics {
+    pub subsample: Phi4MMAudioSubsampleDiagnostics,
+    pub block0: Phi4MMAudioBlockDiagnostics,
+    pub selected_blocks: Vec<(usize, UniquePtr<MlxArray>)>,
+    pub encoded: UniquePtr<MlxArray>,
 }
 
 pub struct Phi4MMAudioEncoder {
@@ -539,6 +599,44 @@ impl Phi4MMAudioEncoder {
         Ok(crate::vision::encoders::qwen2_vl::concat_many(&chunks, 1))
     }
 
+    /// Real-checkpoint parity checkpoints used by the independent IREE audio
+    /// diagnostic. This is deliberately not part of the production inference
+    /// path and only accepts the single <=500-row Conformer chunk exercised by
+    /// the pinned #874 fixture.
+    #[doc(hidden)]
+    pub fn forward_diagnostics(
+        &self,
+        features: &MlxArray,
+    ) -> Result<Phi4MMAudioEncoderDiagnostics, String> {
+        let features = mlxcel_core::astype(features, mlxcel_core::array_dtype(&self.mean));
+        let normalized =
+            mlxcel_core::multiply(&mlxcel_core::subtract(&features, &self.mean), &self.invstd);
+        let subsample = self.subsampler.forward_diagnostics(&normalized)?;
+        let shape = mlxcel_core::array_shape(&subsample.projected);
+        if shape[1] > 500 {
+            return Err(format!(
+                "Phi4MM audio diagnostic requires one <=500-row chunk, got {}",
+                shape[1]
+            ));
+        }
+        let bias = self.relative_bias(shape[1]);
+        let block0 = self.blocks[0].forward_diagnostics(&subsample.projected, &bias)?;
+        let mut h = mlxcel_core::copy(&block0.output);
+        let mut selected_blocks = Vec::new();
+        for (index, block) in self.blocks.iter().enumerate().skip(1) {
+            h = block.forward(&h, &bias)?;
+            if matches!(index, 1 | 5 | 11 | 17 | 23) {
+                selected_blocks.push((index, mlxcel_core::copy(&h)));
+            }
+        }
+        Ok(Phi4MMAudioEncoderDiagnostics {
+            subsample,
+            block0,
+            selected_blocks,
+            encoded: h,
+        })
+    }
+
     fn relative_bias(&self, length: i32) -> UniquePtr<MlxArray> {
         let mut indices = Vec::with_capacity((length * length) as usize);
         for query in 0..length {
@@ -563,6 +661,12 @@ pub struct Phi4MMAudioProjection {
     vision_2: UnifiedLinear,
 }
 
+#[doc(hidden)]
+pub struct Phi4MMAudioProjectionDiagnostics {
+    pub first: UniquePtr<MlxArray>,
+    pub output: UniquePtr<MlxArray>,
+}
+
 impl Phi4MMAudioProjection {
     pub fn from_weights(weights: &WeightMap, prefix: &str) -> Result<Self, String> {
         Ok(Self {
@@ -574,11 +678,22 @@ impl Phi4MMAudioProjection {
     }
 
     pub fn forward(&self, encoded: &MlxArray, vision_mode: bool) -> UniquePtr<MlxArray> {
+        self.forward_diagnostics(encoded, vision_mode).output
+    }
+
+    #[doc(hidden)]
+    pub fn forward_diagnostics(
+        &self,
+        encoded: &MlxArray,
+        vision_mode: bool,
+    ) -> Phi4MMAudioProjectionDiagnostics {
         let (first, second) = if vision_mode {
             (&self.vision_1, &self.vision_2)
         } else {
             (&self.speech_1, &self.speech_2)
         };
-        second.forward(&mlxcel_core::gelu(&first.forward(encoded)))
+        let first = first.forward(encoded);
+        let output = second.forward(&mlxcel_core::gelu(&first));
+        Phi4MMAudioProjectionDiagnostics { first, output }
     }
 }

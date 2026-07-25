@@ -16,6 +16,9 @@
 
 use std::time::Duration;
 
+use super::super::xla_audio_preprocess::{
+    AudioPreprocessJob, AudioPreprocessOutcome, AudioPreprocessResult, AudioQueueError,
+};
 use super::super::xla_preprocess::{
     ImagePreprocessJob, ImagePreprocessOutcome, ImagePreprocessResult,
 };
@@ -51,7 +54,12 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
         response_tx: mpsc::Sender<GenerateEvent>,
         cancelled: Arc<AtomicBool>,
     ) {
-        if let Err(error) = media.validate_xla_raw_counts(images.len(), audio.len(), videos.len()) {
+        if let Err(error) = media.validate_xla_raw_counts_with_audio(
+            images.len(),
+            audio.len(),
+            videos.len(),
+            self.audio_preprocessor.is_some(),
+        ) {
             let _ = response_tx.send(GenerateEvent::Error(error));
             return;
         }
@@ -61,22 +69,74 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
             let _ = response_tx.send(GenerateEvent::Error(error));
             return;
         }
-        let prompt_tokens = match prompt_token_ids {
-            Some(tokens) => tokens,
-            None => {
-                let add_special = !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
-                match self.tokenizer.encode(&prompt, add_special) {
-                    Ok(ids) => ids.into_iter().map(|token| token as i32).collect(),
-                    Err(error) => {
-                        let _ = response_tx
-                            .send(GenerateEvent::Error(format!("Tokenization error: {error}")));
-                        return;
+        let uses_phi4mm_media =
+            self.phi4mm_media_preprocessor && (!images.is_empty() || !audio.is_empty());
+        let prompt_tokens = if !uses_phi4mm_media {
+            match prompt_token_ids {
+                Some(tokens) => tokens,
+                None => {
+                    let add_special = !prompt.starts_with("<bos>") && !prompt.starts_with("<s>");
+                    match self.tokenizer.encode(&prompt, add_special) {
+                        Ok(ids) => ids.into_iter().map(|token| token as i32).collect(),
+                        Err(error) => {
+                            let _ = response_tx
+                                .send(GenerateEvent::Error(format!("Tokenization error: {error}")));
+                            return;
+                        }
                     }
+                }
+            }
+        } else if let Some(tokens) = prompt_token_ids {
+            let image_placeholders = tokens
+                .iter()
+                .filter(|&&token| token == crate::phi4_siglip_prompt::PHI4_SIGLIP_IMAGE_TOKEN_INDEX)
+                .count();
+            let audio_placeholders = tokens
+                .iter()
+                .filter(|&&token| token == crate::phi4mm_prompt::PHI4MM_AUDIO_TOKEN_ID)
+                .count();
+            if image_placeholders != images.len() || audio_placeholders != audio.len() {
+                let _ = response_tx.send(GenerateEvent::Error(format!(
+                    "Phi4MM token ids contain {image_placeholders} image/{audio_placeholders} \
+                     audio placeholders for {}/{} inputs",
+                    images.len(),
+                    audio.len(),
+                )));
+                return;
+            }
+            tokens
+        } else {
+            let mut tokenization_error = None;
+            let prepared = crate::phi4mm_prompt::prepare_phi4mm_prompt_tokens(
+                &prompt,
+                images.len(),
+                audio.len(),
+                |text, add_special| match self.tokenizer.encode(text, add_special) {
+                    Ok(tokens) => tokens.into_iter().map(|token| token as i32).collect(),
+                    Err(error) => {
+                        tokenization_error = Some(error.to_string());
+                        Vec::new()
+                    }
+                },
+            );
+            if let Some(error) = tokenization_error {
+                let _ =
+                    response_tx.send(GenerateEvent::Error(format!("Tokenization error: {error}")));
+                return;
+            }
+            match prepared {
+                Ok(prepared) => prepared.tokens,
+                Err(error) => {
+                    let _ = response_tx.send(GenerateEvent::Error(format!(
+                        "Phi4MM prompt normalization failed: {error}"
+                    )));
+                    return;
                 }
             }
         };
         #[cfg(feature = "xla-diagnostics")]
-        if !images.is_empty()
+        if !uses_phi4mm_media
+            && !images.is_empty()
             && let Err(error) = validate_reference_prompt_tokens_from_env(&prompt_tokens)
         {
             let _ = response_tx.send(GenerateEvent::Error(error));
@@ -85,6 +145,72 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
         let params = sample_params(&options);
         let stop_sequences = options.stop_sequences.unwrap_or_default();
         let start = Instant::now();
+
+        if uses_phi4mm_media {
+            let Some(stage) = self.audio_preprocessor.as_ref() else {
+                let _ = response_tx.send(GenerateEvent::Error(
+                    "the loaded OpenXLA model/runtime bundle does not support Phi4MM media input"
+                        .to_string(),
+                ));
+                return;
+            };
+            let Some(policy) = self.audio_policy else {
+                let _ = response_tx.send(GenerateEvent::Error(
+                    "the OpenXLA audio preprocessing policy is unavailable".to_string(),
+                ));
+                return;
+            };
+            let Some(next_job_id) = self.next_audio_job_id.checked_add(1) else {
+                let _ = response_tx.send(GenerateEvent::Error(
+                    "OpenXLA audio preprocessing request id overflowed".to_string(),
+                ));
+                return;
+            };
+            let job_id = self.next_audio_job_id;
+            self.next_audio_job_id = next_job_id;
+            let clips = audio
+                .into_iter()
+                .enumerate()
+                .map(|(index, bytes)| crate::audio::AudioEncodedClip {
+                    bytes,
+                    source: crate::audio::AudioSourceKind::ServerInline,
+                    placeholder_ordinal: index + 1,
+                })
+                .collect();
+            let job = AudioPreprocessJob {
+                job_id,
+                token_ids: prompt_tokens.clone(),
+                max_prefill_tokens: self.context_capacity,
+                expected_image_count: media.declared_images,
+                images,
+                clips,
+                policy,
+                cancelled: cancelled.clone(),
+            };
+            match stage.try_submit(job) {
+                Ok(()) => {
+                    self.pending_audio.insert(
+                        job_id,
+                        PendingAudioState {
+                            response_tx,
+                            cancelled,
+                            prompt_tokens,
+                            params,
+                            stop_sequences,
+                            max_tokens: options.max_tokens,
+                            start,
+                        },
+                    );
+                }
+                Err(AudioQueueError::Cancelled { .. }) => {}
+                Err(error) => {
+                    let _ = response_tx.send(GenerateEvent::Error(format!(
+                        "OpenXLA audio preprocessing admission failed: {error}"
+                    )));
+                }
+            }
+            return;
+        }
 
         if images.is_empty() {
             self.submit_text(
@@ -257,20 +383,93 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
         }
     }
 
+    fn handle_audio_preprocessed(&mut self, result: AudioPreprocessResult) {
+        let Some(state) = self.pending_audio.remove(&result.job_id) else {
+            return;
+        };
+        if state.cancelled.load(Ordering::Acquire) {
+            return;
+        }
+        let prepared = match result.outcome {
+            AudioPreprocessOutcome::Prepared(prepared) => prepared,
+            AudioPreprocessOutcome::Cancelled(_) => return,
+            AudioPreprocessOutcome::Failed(error) => {
+                let _ = state.response_tx.send(GenerateEvent::Error(format!(
+                    "OpenXLA audio preprocessing failed: {error}"
+                )));
+                return;
+            }
+        };
+        if state.max_tokens == 0 {
+            self.finish_zero_budget(state.prompt_tokens, state.start, state.response_tx);
+            return;
+        }
+        let effective_prefill_len = prepared.sequence_len;
+        let prompt_token_count = state.prompt_tokens.len();
+        match self
+            .engine
+            .submit_prepared(prepared, state.max_tokens, state.params)
+        {
+            Ok(req_id) => {
+                self.batch_observability
+                    .record_prefill_start(effective_prefill_len);
+                self.states.insert(
+                    req_id,
+                    ServeState {
+                        response_tx: state.response_tx,
+                        cancelled: state.cancelled,
+                        detok: StreamingDecodeState::new(&self.tokenizer, &state.prompt_tokens),
+                        stop: StopMatcher::new(state.stop_sequences),
+                        start: state.start,
+                        prompt_token_count,
+                        effective_prefill_len,
+                        max_tokens: state.max_tokens,
+                        generated_tokens: 0,
+                    },
+                );
+            }
+            Err(error) => {
+                let _ = state.response_tx.send(GenerateEvent::Error(format!(
+                    "OpenXLA audio prepared-prefill admission failed: {error}"
+                )));
+            }
+        }
+    }
+
     pub(super) fn drain_preprocessed(&mut self) {
         loop {
             let received = match self.image_preprocessor.as_ref() {
                 Some(stage) => stage.try_recv(),
-                None => return,
+                None => break,
             };
             match received {
                 Ok(result) => self.handle_preprocessed(result),
-                Err(mpsc::TryRecvError::Empty) => return,
+                Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.image_preprocessor = None;
                     for (_, state) in self.pending_images.drain() {
                         let _ = state.response_tx.send(GenerateEvent::Error(
                             "OpenXLA image preprocessor stopped unexpectedly".to_string(),
+                        ));
+                    }
+                    break;
+                }
+            }
+        }
+        loop {
+            let received = match self.audio_preprocessor.as_ref() {
+                Some(stage) => stage.try_recv(),
+                None => return,
+            };
+            match received {
+                Ok(result) => self.handle_audio_preprocessed(result),
+                Err(mpsc::TryRecvError::Empty) => return,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.audio_preprocessor = None;
+                    self.audio_policy = None;
+                    for (_, state) in self.pending_audio.drain() {
+                        let _ = state.response_tx.send(GenerateEvent::Error(
+                            "OpenXLA audio preprocessor stopped unexpectedly".to_string(),
                         ));
                     }
                     return;
@@ -308,6 +507,10 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                     state.cancelled.store(true, Ordering::Release);
                 }
                 self.pending_images.clear();
+                for state in self.pending_audio.values() {
+                    state.cancelled.store(true, Ordering::Release);
+                }
+                self.pending_audio.clear();
             }
         }
     }
@@ -317,7 +520,7 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
     /// without delaying completion or active decode rows.
     pub(super) fn drain_incoming(&mut self, block: bool) {
         if block {
-            let request = if self.pending_images.is_empty() {
+            let request = if self.pending_images.is_empty() && self.pending_audio.is_empty() {
                 match self.request_rx.recv() {
                     Ok(request) => request,
                     Err(_) => {

@@ -728,6 +728,31 @@ impl Builder {
         Val { name: r, ty }
     }
 
+    /// Dense i32 constant tensor from row-major values.
+    pub fn const_tensor_i32(&mut self, data: &[i32], shape: Vec<usize>) -> Val {
+        assert_eq!(data.len(), shape.iter().product::<usize>());
+        let flat_ty = Ty::new(vec![data.len()], "i32");
+        let values = data
+            .iter()
+            .map(i32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let r = self.fresh();
+        self.line(format!(
+            "{r} = stablehlo.constant dense<[{values}]> : {}",
+            flat_ty.render()
+        ));
+        let flat = Val {
+            name: r,
+            ty: flat_ty,
+        };
+        if shape == flat.ty.shape {
+            flat
+        } else {
+            self.reshape(&flat, shape)
+        }
+    }
+
     // --- structural --------------------------------------------------------
 
     pub fn iota(&mut self, n: usize) -> Val {
@@ -1040,6 +1065,179 @@ impl Builder {
         Val { name: r, ty }
     }
 
+    /// Gather rows from `[N, M]` with an arbitrary-rank index tensor whose final
+    /// dimension is the one-element index vector. The output is the leading
+    /// index shape followed by `M`.
+    pub fn gather_rows_nd(&mut self, operand: &Val, indices: &Val) -> Val {
+        assert_eq!(operand.ty.shape.len(), 2);
+        assert_eq!(indices.ty.elt, "i32");
+        assert_eq!(indices.ty.shape.last(), Some(&1));
+        let mut shape = indices.ty.shape[..indices.ty.shape.len() - 1].to_vec();
+        shape.push(operand.ty.shape[1]);
+        let ty = Ty::new(shape.clone(), operand.ty.elt);
+        let offset_dim = shape.len() - 1;
+        let index_vector_dim = indices.ty.shape.len() - 1;
+        let r = self.fresh();
+        self.line(format!(
+            "{r} = \"stablehlo.gather\"({}, {}) <{{dimension_numbers = #stablehlo.gather<offset_dims = [{offset_dim}], collapsed_slice_dims = [0], start_index_map = [0], index_vector_dim = {index_vector_dim}>, slice_sizes = array<i64: 1, {}>}}> : ({}, {}) -> {}",
+            operand.name,
+            indices.name,
+            operand.ty.shape[1],
+            operand.ty.render(),
+            indices.ty.render(),
+            ty.render()
+        ));
+        Val { name: r, ty }
+    }
+
+    /// Positive-edge padding with a scalar value. Interior padding is zero.
+    pub fn pad(&mut self, operand: &Val, value: &Val, low: &[usize], high: &[usize]) -> Val {
+        assert_eq!(low.len(), operand.ty.shape.len());
+        assert_eq!(high.len(), operand.ty.shape.len());
+        assert!(value.ty.shape.is_empty());
+        assert_eq!(value.ty.elt, operand.ty.elt);
+        let shape = operand
+            .ty
+            .shape
+            .iter()
+            .zip(low)
+            .zip(high)
+            .map(|((&dim, &low), &high)| dim + low + high)
+            .collect::<Vec<_>>();
+        let ty = Ty::new(shape, operand.ty.elt);
+        let render = |values: &[usize]| {
+            values
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let interior = vec![0; low.len()];
+        let r = self.fresh();
+        self.line(format!(
+            "{r} = \"stablehlo.pad\"({}, {}) {{edge_padding_low = array<i64: {}>, edge_padding_high = array<i64: {}>, interior_padding = array<i64: {}>}} : ({}, {}) -> {}",
+            operand.name,
+            value.name,
+            render(low),
+            render(high),
+            render(&interior),
+            operand.ty.render(),
+            value.ty.render(),
+            ty.render()
+        ));
+        Val { name: r, ty }
+    }
+
+    /// Channels-last 1-D/2-D convolution. `kernel` is
+    /// `[spatial..., input_per_group, output]`.
+    pub fn convolution(
+        &mut self,
+        input: &Val,
+        kernel: &Val,
+        strides: &[usize],
+        padding: &[(usize, usize)],
+        feature_groups: usize,
+    ) -> Val {
+        assert!(feature_groups > 0);
+        assert_eq!(
+            input.ty.elt, kernel.ty.elt,
+            "convolution input/kernel dtypes must match"
+        );
+        let spatial_rank = input.ty.shape.len() - 2;
+        assert!(matches!(spatial_rank, 1 | 2));
+        assert_eq!(kernel.ty.shape.len(), input.ty.shape.len());
+        assert_eq!(strides.len(), spatial_rank);
+        assert!(strides.iter().all(|stride| *stride > 0));
+        assert_eq!(padding.len(), spatial_rank);
+        assert_eq!(input.ty.shape[spatial_rank + 1] % feature_groups, 0);
+        assert_eq!(
+            kernel.ty.shape[spatial_rank],
+            input.ty.shape[spatial_rank + 1] / feature_groups
+        );
+        assert!(kernel.ty.shape[spatial_rank + 1] > 0);
+        let mut shape = Vec::with_capacity(input.ty.shape.len());
+        shape.push(input.ty.shape[0]);
+        for axis in 0..spatial_rank {
+            let padded = input.ty.shape[axis + 1] + padding[axis].0 + padding[axis].1;
+            let kernel_size = kernel.ty.shape[axis];
+            assert!(
+                padded >= kernel_size,
+                "convolution kernel exceeds padded input on spatial axis {axis}"
+            );
+            shape.push((padded - kernel_size) / strides[axis] + 1);
+        }
+        shape.push(kernel.ty.shape[spatial_rank + 1]);
+        let output_ty = Ty::new(shape, input.ty.elt);
+        let input_demoted;
+        let kernel_demoted;
+        let (input, kernel) = match self.precision.dot_elt() {
+            Some(elt) => {
+                input_demoted = if input.ty.elt == "f32" {
+                    self.convert(input, elt)
+                } else {
+                    input.clone()
+                };
+                kernel_demoted = if kernel.ty.elt == "f32" {
+                    self.convert(kernel, elt)
+                } else {
+                    kernel.clone()
+                };
+                (&input_demoted, &kernel_demoted)
+            }
+            None => (input, kernel),
+        };
+        let convolution_ty = Ty::new(output_ty.shape.clone(), input.ty.elt);
+        let array = |values: &[usize]| {
+            values
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let padding = padding
+            .iter()
+            .map(|&(low, high)| format!("[{low}, {high}]"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let spatial = (0..spatial_rank)
+            .map(|axis| axis.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let input_dims = format!("[b, {spatial}, f]");
+        let kernel_dims = format!("[{spatial}, i, o]");
+        let output_dims = input_dims.clone();
+        let dilation = vec![1; spatial_rank];
+        let reversal = vec!["false"; spatial_rank].join(", ");
+        let r = self.fresh();
+        self.line(format!(
+            "{r} = \"stablehlo.convolution\"({}, {}) {{window_strides = array<i64: {}>, padding = dense<[{}]> : tensor<{}x2xi64>, lhs_dilation = array<i64: {}>, rhs_dilation = array<i64: {}>, window_reversal = array<i1: {}>, dimension_numbers = #stablehlo.conv<{}x{}->{}>, batch_group_count = 1 : i64, feature_group_count = {} : i64, precision_config = [#stablehlo<precision DEFAULT>, #stablehlo<precision DEFAULT>]}} : ({}, {}) -> {}",
+            input.name,
+            kernel.name,
+            array(strides),
+            padding,
+            spatial_rank,
+            array(&dilation),
+            array(&dilation),
+            reversal,
+            input_dims,
+            kernel_dims,
+            output_dims,
+            feature_groups,
+            input.ty.render(),
+            kernel.ty.render(),
+            convolution_ty.render()
+        ));
+        let convolved = Val {
+            name: r,
+            ty: convolution_ty,
+        };
+        if convolved.ty.elt == output_ty.elt {
+            convolved
+        } else {
+            self.convert(&convolved, output_ty.elt)
+        }
+    }
+
     // --- elementwise -------------------------------------------------------
 
     fn binary(&mut self, op: &str, a: &Val, b: &Val) -> Val {
@@ -1064,6 +1262,9 @@ impl Builder {
     }
     pub fn multiply(&mut self, a: &Val, b: &Val) -> Val {
         self.binary("multiply", a, b)
+    }
+    pub fn maximum(&mut self, a: &Val, b: &Val) -> Val {
+        self.binary("maximum", a, b)
     }
     pub fn divide(&mut self, a: &Val, b: &Val) -> Val {
         self.binary("divide", a, b)

@@ -114,6 +114,8 @@ pub(crate) use mllama::load_mllama_vlm;
 pub(crate) use nemotron_h_nano_omni::load_nemotron_h_nano_omni_vlm;
 pub(crate) use paddleocr::load_paddleocr_vl;
 pub(crate) use pixtral::{load_mistral3_vlm, load_pixtral_vlm};
+#[cfg(feature = "xla-iree")]
+pub(crate) use qwen::load_qwen2_vl_iree_host_preprocessor;
 pub(crate) use qwen::{
     load_glm_ocr, load_glm4v, load_glm4v_moe, load_qwen2_5_vl, load_qwen2_vl, load_qwen3_5_moe_vlm,
     load_qwen3_5_vlm, load_qwen3_omni_moe, load_qwen3_vl, load_qwen3_vl_moe,
@@ -123,6 +125,10 @@ pub(crate) use qwen::{
 pub use qwen::load_qwen3_omni_speech;
 pub(crate) use siglip::{load_aya_vision_vlm, load_paligemma_vlm};
 pub(crate) use smolvlm::load_smolvlm_vlm;
+#[cfg(feature = "xla-iree")]
+pub(crate) use special::{
+    Phi4MMXlaVisionComponents, load_phi4mm_xla_media_components, load_phi4mm_xla_text_embeddings,
+};
 pub(crate) use special::{
     load_llama4_vlm, load_minicpmo_vlm, load_minicpmv4_6_vlm, load_molmo_point_vlm, load_molmo_vlm,
     load_molmo2_vlm, load_moondream2_vlm, load_moondream3_vlm, load_phi3_vlm, load_phi4_siglip_vlm,

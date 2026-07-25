@@ -329,3 +329,8 @@ required-features = ["xla-diagnostics"]
 [[example]]
 name = "xla_aux_smoke"
 required-features = ["xla-iree"]
+
+# Pinned #874 MLX-vs-IREE Phi4MM Conformer and speech/vision projection parity.
+[[example]]
+name = "xla_phi4_audio_check"
+required-features = ["xla-iree"]

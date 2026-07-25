@@ -80,6 +80,7 @@ impl PreparedIreePositions {
 #[derive(Debug)]
 pub(crate) struct PreparedIreePrefill {
     pub(crate) token_ids: Vec<i32>,
+    pub(crate) adapter_mode: i32,
     pub(crate) embeddings: Vec<f32>,
     pub(crate) positions: PreparedIreePositions,
     pub(crate) attention_bias: Vec<f32>,
@@ -581,6 +582,7 @@ impl PreparedIreePrefill {
 
         Ok(Self {
             token_ids: value.token_ids.clone(),
+            adapter_mode: value.adapter_mode.code(),
             embeddings,
             positions,
             attention_bias,

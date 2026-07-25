@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Bounded host audio preprocessing outside the XLA scheduling loop.
+//! Bounded Phi4MM media preprocessing outside the XLA scheduling loop.
 //!
-//! This stage owns encoded request buffers, waveform decode/resampling, and a
-//! future family feature producer. It intentionally has no production
-//! Phi4MM/Gemma3n producer yet; therefore XLA admission remains audio-false.
+//! This stage owns encoded image/audio request buffers, image and waveform
+//! decoding, resampling, host feature extraction, and prepared-prefill export.
+//! A single thread-confined producer handles image-only, audio-only, and mixed
+//! Phi4MM requests so request mode selection cannot split across workers.
 
 use std::mem::size_of;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -38,6 +39,8 @@ pub(crate) struct AudioPreprocessJob {
     pub job_id: u64,
     pub token_ids: Vec<i32>,
     pub max_prefill_tokens: usize,
+    pub expected_image_count: usize,
+    pub images: Vec<Vec<u8>>,
     pub clips: Vec<AudioEncodedClip>,
     pub policy: AudioFamilyPolicy,
     pub cancelled: Arc<AtomicBool>,
@@ -66,6 +69,11 @@ pub(crate) enum AudioStageError {
     },
     #[error("audio feature preprocessing panicked for {family}")]
     FeaturePanic { family: &'static str },
+    #[error("media image preprocessing failed for {family}: {reason}")]
+    Image {
+        family: &'static str,
+        reason: String,
+    },
     #[error(
         "audio prepared-prefill context limit exceeded for {family}: actual {actual}, maximum {maximum}"
     )]
@@ -114,13 +122,27 @@ pub(crate) enum AudioQueueError {
     Overflow,
 }
 
-pub(crate) trait AudioFeatureProducer: Send + 'static {
+pub(crate) trait AudioFeatureProducer: 'static {
     fn prepare(
         &mut self,
         waveforms: AudioWaveformBatch,
         token_ids: Vec<i32>,
+        images: Vec<image::DynamicImage>,
         cancelled: &AtomicBool,
     ) -> Result<PreparedPrefill, String>;
+}
+
+#[cfg(feature = "xla-iree")]
+impl AudioFeatureProducer for crate::multimodal::phi4mm_xla_audio::Phi4MmXlaAudioProducer {
+    fn prepare(
+        &mut self,
+        waveforms: AudioWaveformBatch,
+        token_ids: Vec<i32>,
+        images: Vec<image::DynamicImage>,
+        cancelled: &AtomicBool,
+    ) -> Result<PreparedPrefill, String> {
+        self.prepare_media(waveforms, token_ids, &images, cancelled)
+    }
 }
 
 pub(crate) struct AudioPreprocessLimits {
@@ -394,13 +416,29 @@ pub(crate) struct AudioPreprocessStage {
 }
 
 impl AudioPreprocessStage {
-    pub fn spawn<P: AudioFeatureProducer>(
-        mut producer: P,
+    pub fn spawn<P: AudioFeatureProducer + Send>(
+        producer: P,
         limits: AudioPreprocessLimits,
         observability: Arc<BatchObservability>,
     ) -> Result<Self, String> {
+        Self::spawn_with_loader(limits, observability, move || Ok(producer))
+    }
+
+    /// Construct MLX-backed feature producers inside their owning worker
+    /// thread. This keeps MLX handles thread-confined without imposing an
+    /// artificial `Send` contract on the producer.
+    pub fn spawn_with_loader<P, F>(
+        limits: AudioPreprocessLimits,
+        observability: Arc<BatchObservability>,
+        loader: F,
+    ) -> Result<Self, String>
+    where
+        P: AudioFeatureProducer,
+        F: FnOnce() -> Result<P, String> + Send + 'static,
+    {
         let (sender, receiver) = mpsc::sync_channel::<QueuedJob>(limits.queue_depth.max(1));
         let (result_tx, result_rx) = mpsc::sync_channel(limits.result_queue_depth.max(1));
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let metrics = Arc::new(AudioPreprocessMetrics::new(observability));
         let worker_metrics = metrics.clone();
         let healthy = Arc::new(AtomicBool::new(true));
@@ -408,6 +446,24 @@ impl AudioPreprocessStage {
         let worker = thread::Builder::new()
             .name("mlxcel-xla-audio-preprocess".to_string())
             .spawn(move || {
+                let mut producer = match catch_unwind(AssertUnwindSafe(loader)) {
+                    Ok(Ok(producer)) => {
+                        let _ = ready_tx.send(Ok(()));
+                        producer
+                    }
+                    Ok(Err(error)) => {
+                        let _ = ready_tx.send(Err(error));
+                        worker_healthy.store(false, Ordering::Release);
+                        return;
+                    }
+                    Err(_) => {
+                        let _ = ready_tx.send(Err(
+                            "audio feature producer panicked during startup".to_string(),
+                        ));
+                        worker_healthy.store(false, Ordering::Release);
+                        return;
+                    }
+                };
                 while let Ok(queued) = receiver.recv() {
                     let Some((job, reservation)) = queued.dequeue() else {
                         continue;
@@ -420,6 +476,19 @@ impl AudioPreprocessStage {
                 worker_healthy.store(false, Ordering::Release);
             })
             .map_err(|error| format!("failed to spawn audio preprocessing worker: {error}"))?;
+        match ready_rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                let _ = worker.join();
+                return Err(error);
+            }
+            Err(_) => {
+                let _ = worker.join();
+                return Err(
+                    "audio preprocessing worker exited before reporting startup status".to_string(),
+                );
+            }
+        }
         Ok(Self {
             sender: Some(sender),
             result_rx: Some(result_rx),
@@ -442,8 +511,29 @@ impl AudioPreprocessStage {
                 checkpoint: AudioPreprocessCheckpoint::Queue,
             });
         }
-        let request_bytes = job.clips.iter().try_fold(0usize, |sum, clip| {
+        let audio_bytes = job.clips.iter().try_fold(0usize, |sum, clip| {
             sum.checked_add(clip.bytes.len())
+                .ok_or(AudioQueueError::Overflow)
+        });
+        let audio_bytes = match audio_bytes {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.metrics
+                    .record_rejection(AudioRejectionReason::Overflow);
+                return Err(error);
+            }
+        };
+        if audio_bytes > job.policy.max_encoded_bytes_per_request {
+            self.metrics
+                .record_rejection(AudioRejectionReason::MemoryLimit);
+            return Err(AudioQueueError::MemoryLimit {
+                request_bytes: audio_bytes,
+                queued_bytes: self.metrics.queued_encoded_bytes.load(Ordering::Acquire),
+                maximum_bytes: job.policy.max_encoded_bytes_per_request,
+            });
+        }
+        let request_bytes = job.images.iter().try_fold(audio_bytes, |sum, image| {
+            sum.checked_add(image.len())
                 .ok_or(AudioQueueError::Overflow)
         });
         let request_bytes = match request_bytes {
@@ -454,15 +544,6 @@ impl AudioPreprocessStage {
                 return Err(error);
             }
         };
-        if request_bytes > job.policy.max_encoded_bytes_per_request {
-            self.metrics
-                .record_rejection(AudioRejectionReason::MemoryLimit);
-            return Err(AudioQueueError::MemoryLimit {
-                request_bytes,
-                queued_bytes: self.metrics.queued_encoded_bytes.load(Ordering::Acquire),
-                maximum_bytes: job.policy.max_encoded_bytes_per_request,
-            });
-        }
         let host_reservation_bytes = job_envelope_host_bytes(&job)
             .and_then(|bytes| bytes.checked_add(job.policy.max_waveform_working_bytes_per_request))
             .and_then(|bytes| bytes.checked_add(job.policy.max_prepared_result_bytes_per_request));
@@ -587,7 +668,21 @@ fn process_job<P: AudioFeatureProducer>(
     let family = job.policy.family;
     let max_prefill_tokens = job.max_prefill_tokens;
     let max_result_bytes = job.policy.max_prepared_result_bytes_per_request;
-    let outcome = match preprocess_wav_batch(&job.clips, job.policy, job.cancelled.as_ref()) {
+    let waveforms = if job.clips.is_empty() {
+        Ok(AudioWaveformBatch {
+            family: job.policy.family,
+            clips: Vec::new(),
+            boundaries: Vec::new(),
+            total_source_samples: 0,
+            total_samples: 0,
+            total_source_duration_micros: 0,
+            estimated_frames: 0,
+            effective_audio_tokens: 0,
+        })
+    } else {
+        preprocess_wav_batch(&job.clips, job.policy, job.cancelled.as_ref())
+    };
+    let outcome = match waveforms {
         Err(AudioPreprocessError::Cancelled { checkpoint, .. }) => {
             AudioPreprocessOutcome::Cancelled(checkpoint)
         }
@@ -597,39 +692,76 @@ fn process_job<P: AudioFeatureProducer>(
             if job.cancelled.load(Ordering::Acquire) {
                 AudioPreprocessOutcome::Cancelled(AudioPreprocessCheckpoint::Feature)
             } else {
-                let prepared = catch_unwind(AssertUnwindSafe(|| {
-                    producer.prepare(waveforms, job.token_ids, job.cancelled.as_ref())
-                }));
-                match prepared {
-                    Ok(Ok(_prepared)) if job.cancelled.load(Ordering::Acquire) => {
-                        AudioPreprocessOutcome::Cancelled(AudioPreprocessCheckpoint::Feature)
-                    }
-                    Ok(Ok(prepared)) if prepared.sequence_len > max_prefill_tokens => {
-                        AudioPreprocessOutcome::Failed(AudioStageError::ContextLimit {
+                let decoded_images = if job.images.is_empty() && job.expected_image_count == 0 {
+                    Ok(Vec::new())
+                } else {
+                    crate::server::model_provider::model_worker::decode_request_images(&job.images)
+                };
+                match decoded_images {
+                    Ok(images) if images.len() != job.expected_image_count => {
+                        AudioPreprocessOutcome::Failed(AudioStageError::Image {
                             family,
-                            actual: prepared.sequence_len,
-                            maximum: max_prefill_tokens,
+                            reason: format!(
+                                "decoded image cardinality mismatch: expected {}, decoded {}",
+                                job.expected_image_count,
+                                images.len()
+                            ),
                         })
                     }
-                    Ok(Ok(prepared)) => {
-                        let result_bytes =
-                            prepared_prefill_host_bytes(&prepared).unwrap_or(usize::MAX);
-                        if result_bytes > max_result_bytes {
-                            AudioPreprocessOutcome::Failed(AudioStageError::ResultMemoryLimit {
-                                family,
-                                actual: result_bytes,
-                                maximum: max_result_bytes,
-                            })
-                        } else {
-                            metrics.record_effective_prefill(prepared.sequence_len);
-                            AudioPreprocessOutcome::Prepared(prepared)
+                    Err(error) => AudioPreprocessOutcome::Failed(AudioStageError::Image {
+                        family,
+                        reason: error.to_string(),
+                    }),
+                    Ok(images) => {
+                        let prepared = catch_unwind(AssertUnwindSafe(|| {
+                            producer.prepare(
+                                waveforms,
+                                job.token_ids,
+                                images,
+                                job.cancelled.as_ref(),
+                            )
+                        }));
+                        match prepared {
+                            Ok(Ok(_prepared)) if job.cancelled.load(Ordering::Acquire) => {
+                                AudioPreprocessOutcome::Cancelled(
+                                    AudioPreprocessCheckpoint::Feature,
+                                )
+                            }
+                            Ok(Ok(prepared)) if prepared.sequence_len > max_prefill_tokens => {
+                                AudioPreprocessOutcome::Failed(AudioStageError::ContextLimit {
+                                    family,
+                                    actual: prepared.sequence_len,
+                                    maximum: max_prefill_tokens,
+                                })
+                            }
+                            Ok(Ok(prepared)) => {
+                                let result_bytes =
+                                    prepared_prefill_host_bytes(&prepared).unwrap_or(usize::MAX);
+                                if result_bytes > max_result_bytes {
+                                    AudioPreprocessOutcome::Failed(
+                                        AudioStageError::ResultMemoryLimit {
+                                            family,
+                                            actual: result_bytes,
+                                            maximum: max_result_bytes,
+                                        },
+                                    )
+                                } else {
+                                    metrics.record_effective_prefill(prepared.sequence_len);
+                                    AudioPreprocessOutcome::Prepared(prepared)
+                                }
+                            }
+                            Ok(Err(reason)) => {
+                                AudioPreprocessOutcome::Failed(AudioStageError::Feature {
+                                    family,
+                                    reason,
+                                })
+                            }
+                            Err(_) => {
+                                AudioPreprocessOutcome::Failed(AudioStageError::FeaturePanic {
+                                    family,
+                                })
+                            }
                         }
-                    }
-                    Ok(Err(reason)) => {
-                        AudioPreprocessOutcome::Failed(AudioStageError::Feature { family, reason })
-                    }
-                    Err(_) => {
-                        AudioPreprocessOutcome::Failed(AudioStageError::FeaturePanic { family })
                     }
                 }
             }
@@ -659,6 +791,7 @@ fn process_job<P: AudioFeatureProducer>(
                 AudioStageError::Waveform(_) => AudioRejectionReason::Waveform,
                 AudioStageError::Feature { .. } => AudioRejectionReason::Feature,
                 AudioStageError::FeaturePanic { .. } => AudioRejectionReason::FeaturePanic,
+                AudioStageError::Image { .. } => AudioRejectionReason::Feature,
                 AudioStageError::ContextLimit { .. } => AudioRejectionReason::ContextLimit,
                 AudioStageError::ResultMemoryLimit { .. } => AudioRejectionReason::MemoryLimit,
             });
@@ -714,6 +847,10 @@ fn job_envelope_host_bytes(job: &AudioPreprocessJob) -> Option<usize> {
     )?;
     for clip in &job.clips {
         total = total.checked_add(clip.bytes.capacity())?;
+    }
+    total = total.checked_add(job.images.capacity().checked_mul(size_of::<Vec<u8>>())?)?;
+    for image in &job.images {
+        total = total.checked_add(image.capacity())?;
     }
     Some(total)
 }

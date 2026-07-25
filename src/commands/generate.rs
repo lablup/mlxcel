@@ -1054,6 +1054,9 @@ fn validate_xla_cli_image_cardinality(declared: usize, decoded: usize) -> Result
 
 #[cfg(feature = "xla-backend")]
 fn decode_xla_cli_images(paths: &[std::path::PathBuf]) -> Result<Vec<image::DynamicImage>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
     let limits = mlxcel::current_image_input_limits();
     ensure!(
         paths.len() <= limits.max_images_per_request,
@@ -1098,18 +1101,16 @@ fn decode_xla_cli_images(paths: &[std::path::PathBuf]) -> Result<Vec<image::Dyna
 fn generate_xla(
     model_path: &Path,
     num_layers: usize,
+    prompt: &str,
     prompt_tokens: &[i32],
+    tokenizer: &mlxcel::tokenizer::MlxcelTokenizer,
     image_paths: &[std::path::PathBuf],
-    has_audio: bool,
+    audio_path: Option<&Path>,
     has_video: bool,
     max_tokens: usize,
     kv_cache_mode: KVCacheMode,
     token_bias: TokenBiasMap,
 ) -> Result<(Vec<i32>, GenerationStats)> {
-    ensure!(
-        !has_audio,
-        "the OpenXLA backend does not support audio input yet"
-    );
     ensure!(
         !has_video,
         "the OpenXLA backend does not support video input yet"
@@ -1120,7 +1121,82 @@ fn generate_xla(
     let tokens = match &mut session {
         mlxcel::Session::Xla(s) => {
             let eos = s.eos_token_ids().to_vec();
-            if image_paths.is_empty() {
+            let phi4mm_media = mlxcel::models::get_model_type(model_path)?
+                == mlxcel::models::ModelType::Phi4MMVLM
+                && (audio_path.is_some() || !image_paths.is_empty());
+            if phi4mm_media {
+                #[cfg(not(feature = "xla-iree"))]
+                {
+                    let _ = (audio_path, prompt, tokenizer, image_paths);
+                    anyhow::bail!(
+                        "OpenXLA Phi4MM media input requires a build with the xla-iree feature"
+                    );
+                }
+                #[cfg(feature = "xla-iree")]
+                {
+                    let mut tokenization_error = None;
+                    let normalized = mlxcel::phi4mm_prompt::prepare_phi4mm_prompt_tokens(
+                        prompt,
+                        image_paths.len(),
+                        usize::from(audio_path.is_some()),
+                        |text, add_special| match tokenizer.encode(text, add_special) {
+                            Ok(tokens) => tokens.into_iter().map(|token| token as i32).collect(),
+                            Err(error) => {
+                                tokenization_error = Some(error.to_string());
+                                Vec::new()
+                            }
+                        },
+                    )
+                    .map_err(|error| anyhow!("Phi4MM prompt normalization failed: {error}"))?;
+                    if let Some(error) = tokenization_error {
+                        return Err(anyhow!("Phi4MM tokenization failed: {error}"));
+                    }
+                    let cancelled = std::sync::atomic::AtomicBool::new(false);
+                    let images = decode_xla_cli_images(image_paths)?;
+                    let device = std::env::var("MLXCEL_XLA_DEVICE")
+                        .unwrap_or_else(|_| mlxcel_xla::default_device().to_string());
+                    let mut producer = if images.is_empty() {
+                        mlxcel::multimodal::phi4mm_xla_audio::Phi4MmXlaAudioProducer::load(
+                            model_path,
+                            &device,
+                            s.context_capacity(),
+                        )
+                    } else {
+                        mlxcel::multimodal::phi4mm_xla_audio::Phi4MmXlaAudioProducer::load_multimodal(
+                            model_path,
+                            &device,
+                            s.context_capacity(),
+                        )
+                    }
+                    .map_err(anyhow::Error::msg)?;
+                    let prepared = if let Some(audio_path) = audio_path {
+                        let policy =
+                            mlxcel::multimodal::phi4mm_xla_audio::load_phi4mm_audio_policy(
+                                model_path,
+                            )
+                            .map_err(anyhow::Error::msg)?;
+                        let waveforms =
+                            mlxcel::audio::preprocess_wav_file(audio_path, policy, &cancelled)
+                                .map_err(|error| {
+                                    anyhow!("OpenXLA audio waveform preprocessing failed: {error}")
+                                })?;
+                        producer.prepare_media(waveforms, normalized.tokens, &images, &cancelled)
+                    } else {
+                        producer.prepare_images(normalized.tokens, &images, &cancelled)
+                    }
+                    .map_err(|error| {
+                        anyhow!("OpenXLA Phi4MM media preprocessing failed: {error}")
+                    })?;
+                    s.generate_prepared_greedy(&prepared, max_tokens, &eos)
+                        .map_err(|error| {
+                            anyhow!("OpenXLA Phi4MM media generation failed: {error}")
+                        })?
+                }
+            } else if audio_path.is_some() {
+                anyhow::bail!(
+                    "the loaded OpenXLA model/runtime bundle does not support audio input"
+                );
+            } else if image_paths.is_empty() {
                 s.generate_greedy(prompt_tokens, max_tokens, &eos)
                     .map_err(|e| anyhow!("OpenXLA generation failed: {e}"))?
             } else {
@@ -1902,9 +1978,11 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
         let (generated_tokens, stats) = generate_xla(
             &args.model.model,
             num_layers,
+            &prompt,
             &prompt_tokens,
+            &tokenizer,
             &args.generation.image,
-            args.generation.audio.is_some(),
+            args.generation.audio.as_deref(),
             !args.generation.video.is_empty(),
             args.generation.max_tokens,
             kv_cache_mode,
