@@ -232,12 +232,20 @@ fn hf_repo_folder(repo_id: &str) -> String {
     format!("models--{}", repo_id.replace('/', "--"))
 }
 
-/// Probe an existing HuggingFace Hub cache for a complete snapshot of
+/// Probe an existing HuggingFace Hub cache for a *materialized* snapshot of
 /// `repo_id` at `revision` (defaulting to `main`).
 ///
 /// Returns the snapshot directory (`.../models--<owner>--<name>/snapshots/<sha>`)
-/// only when it exists and looks complete (contains a `config.json`). The
-/// lookup is **read-only** — nothing is written into the HF cache.
+/// as soon as it exists and carries a `config.json` — the weak "this is a
+/// snapshot directory at all" gate. The lookup is **read-only** — nothing is
+/// written into the HF cache.
+///
+/// Callers that are about to *load* the result must use
+/// [`hf_cache_snapshot_complete`] instead: a `config.json` says a download
+/// started, not that it finished. This weak variant exists for the surfaces
+/// that want to see a partial snapshot — `mlxcel list` and `mlxcel remove`, so
+/// an interrupted download stays visible and deletable rather than silently
+/// disappearing from the tooling that could clean it up.
 ///
 /// # Revision resolution
 /// HuggingFace names snapshot directories by commit SHA, not by branch/tag.
@@ -247,6 +255,36 @@ fn hf_repo_folder(repo_id: &str) -> String {
 /// 2. The SHA recorded in `refs/<revision>` (works for branch/tag names like
 ///    `main`), then the snapshot directory named by that SHA.
 pub fn hf_cache_snapshot(repo_id: &str, revision: Option<&str>) -> Option<PathBuf> {
+    hf_cache_snapshot_gated(repo_id, revision, snapshot_is_materialized)
+}
+
+/// [`hf_cache_snapshot`] with the full-weight completeness gate — the variant
+/// every *reuse* decision must use.
+///
+/// Same revision resolution, but a candidate only counts when
+/// [`completeness::classify_snapshot`] reports it
+/// [`Complete`](super::completeness::SnapshotState::Complete): `config.json`
+/// plus every weight shard its own `model.safetensors.index.json` names.
+///
+/// This is the gate the load path needs. An interrupted `hf download` leaves a
+/// `config.json` next to zero-byte `.incomplete` blobs, which the weak gate
+/// happily accepts; because the HF cache is probed *before* the mlxcel store,
+/// such a partial would shadow a perfectly good store copy and the server would
+/// boot only to die at load with "Missing shard file(s) referenced in
+/// model.safetensors.index.json". Skipping it here lets resolution fall through
+/// to the store, matching the gate the legacy-dir and store branches already
+/// apply.
+pub fn hf_cache_snapshot_complete(repo_id: &str, revision: Option<&str>) -> Option<PathBuf> {
+    hf_cache_snapshot_gated(repo_id, revision, super::completeness::is_complete)
+}
+
+/// Shared revision resolution for both HF-cache probes; `gate` decides whether
+/// a resolved candidate directory counts as a hit.
+fn hf_cache_snapshot_gated(
+    repo_id: &str,
+    revision: Option<&str>,
+    gate: fn(&Path) -> bool,
+) -> Option<PathBuf> {
     let hub = hf_hub_cache_dir()?;
     let repo_dir = hub.join(hf_repo_folder(repo_id));
     if !repo_dir.is_dir() {
@@ -257,7 +295,7 @@ pub fn hf_cache_snapshot(repo_id: &str, revision: Option<&str>) -> Option<PathBu
 
     // 1. Direct: revision is already a snapshot dir name (commit hash).
     let direct = snapshots.join(revision);
-    if snapshot_is_complete(&direct) {
+    if gate(&direct) {
         return Some(direct);
     }
 
@@ -267,7 +305,7 @@ pub fn hf_cache_snapshot(repo_id: &str, revision: Option<&str>) -> Option<PathBu
         let sha = sha.trim();
         if !sha.is_empty() {
             let by_sha = snapshots.join(sha);
-            if snapshot_is_complete(&by_sha) {
+            if gate(&by_sha) {
                 return Some(by_sha);
             }
         }
@@ -278,12 +316,13 @@ pub fn hf_cache_snapshot(repo_id: &str, revision: Option<&str>) -> Option<PathBu
 
 /// True when `dir` is an existing directory that contains a `config.json`.
 ///
-/// Mirrors the downloader's own completeness gate (`snapshot_complete`), which
-/// also keys on `config.json` presence. Snapshot entries in the HF cache are
-/// symlinks into the content-addressed `blobs/` store; `Path::exists` follows
-/// symlinks, so a present-and-non-dangling `config.json` is a good signal that
-/// the snapshot was fully materialized.
-fn snapshot_is_complete(dir: &Path) -> bool {
+/// Snapshot entries in the HF cache are symlinks into the content-addressed
+/// `blobs/` store; `Path::exists` follows symlinks, so a present-and-non-dangling
+/// `config.json` means the snapshot directory was populated at least once.
+///
+/// This says a download *started*, not that it *finished* — see
+/// [`hf_cache_snapshot_complete`] for the gate that reuse decisions need.
+fn snapshot_is_materialized(dir: &Path) -> bool {
     dir.is_dir() && dir.join("config.json").exists()
 }
 
@@ -311,12 +350,14 @@ pub struct StoredModel {
     pub modified: Option<std::time::SystemTime>,
 }
 
-/// Enumerate complete model snapshots in the mlxcel global store.
+/// Enumerate model snapshots in the mlxcel global store.
 ///
 /// Walks `store_root()/models/` and returns one [`StoredModel`] per directory
 /// that looks like a materialized snapshot (contains a `config.json`, the same
-/// completeness gate used by the downloader and [`hf_cache_snapshot`]). Both
-/// layouts written by issue #93 are recognized:
+/// weak gate [`hf_cache_snapshot`] uses). Deliberately *not* the full-weight
+/// gate: an interrupted download must stay listable so `mlxcel list` can show
+/// the disk it is holding and `mlxcel remove` can reclaim it. Both layouts
+/// written by issue #93 are recognized:
 ///
 /// - `models/<owner>/<name>/` — the standard HuggingFace namespacing; the
 ///   reconstructed `repo_id` is `<owner>/<name>`.
@@ -393,7 +434,7 @@ fn list_models_under(models_root: &Path) -> Vec<StoredModel> {
         };
 
         // Case 1: a bare-id snapshot stored directly at models/<name>.
-        if snapshot_is_complete(&top_path) {
+        if snapshot_is_materialized(&top_path) {
             out.push(StoredModel {
                 repo_id: top_name.clone(),
                 modified: std::fs::metadata(&top_path).and_then(|m| m.modified()).ok(),
@@ -414,7 +455,7 @@ fn list_models_under(models_root: &Path) -> Vec<StoredModel> {
             if !inner_path.is_dir() || inner_path.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
                 continue;
             }
-            if !snapshot_is_complete(&inner_path) {
+            if !snapshot_is_materialized(&inner_path) {
                 continue;
             }
             let Some(inner_name) = inner.file_name().to_str().map(str::to_owned) else {
@@ -878,19 +919,20 @@ mod tests {
     // ── hf_cache_snapshot ────────────────────────────────────────────────────
 
     /// Build a fake HF hub cache for `repo_id` with a single snapshot named by
-    /// `sha`, a `refs/<branch>` pointer, and a `config.json` inside the
-    /// snapshot. Returns the hub root.
+    /// `sha`, a `refs/<branch>` pointer, and (when `with_config`) a
+    /// `config.json` inside the snapshot. No weight files — that is what the
+    /// weak [`hf_cache_snapshot`] gate keys on. Returns the repo directory.
     fn make_hf_cache(
         hub: &Path,
         repo_id: &str,
         sha: &str,
         branch: &str,
-        complete: bool,
+        with_config: bool,
     ) -> PathBuf {
         let repo_dir = hub.join(hf_repo_folder(repo_id));
         let snap = repo_dir.join("snapshots").join(sha);
         std::fs::create_dir_all(&snap).unwrap();
-        if complete {
+        if with_config {
             std::fs::write(snap.join("config.json"), b"{}").unwrap();
         }
         let refs = repo_dir.join("refs");
@@ -991,7 +1033,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let hub = tmp.path().join("hub");
         let sha = "2222222222222222222222222222222222222222";
-        // complete=false → no config.json inside the snapshot.
+        // with_config=false → no config.json inside the snapshot.
         make_hf_cache(&hub, "owner/model", sha, "main", false);
 
         let _guard = env_lock();
@@ -1004,6 +1046,106 @@ mod tests {
         let found = hf_cache_snapshot("owner/model", None);
         restore_env("HF_HUB_CACHE", prev_cache);
         restore_env("HF_HOME", prev_home);
+
+        assert_eq!(found, None);
+    }
+
+    // ── hf_cache_snapshot_complete (full-weight gate) ────────────────────────
+
+    /// Add a sharded-weight index naming `shards` to an existing HF snapshot
+    /// directory, without creating the shard files themselves.
+    fn write_shard_index(snap: &Path, shards: &[&str]) {
+        let entries: Vec<String> = shards
+            .iter()
+            .enumerate()
+            .map(|(i, s)| format!("\"tensor.{i}\": \"{s}\""))
+            .collect();
+        let json = format!("{{\"weight_map\": {{{}}}}}", entries.join(", "));
+        std::fs::write(snap.join("model.safetensors.index.json"), json).unwrap();
+    }
+
+    /// Run `probe` with the HF hub cache env pointed at `hub`, serialized
+    /// through the crate-wide env lock and restored afterwards.
+    fn with_hf_hub<T>(hub: &Path, probe: impl FnOnce() -> T) -> T {
+        let _guard = env_lock();
+        let prev_cache = std::env::var("HF_HUB_CACHE").ok();
+        let prev_home = std::env::var("HF_HOME").ok();
+        unsafe {
+            std::env::set_var("HF_HUB_CACHE", hub);
+            std::env::remove_var("HF_HOME");
+        }
+        let out = probe();
+        restore_env("HF_HUB_CACHE", prev_cache);
+        restore_env("HF_HOME", prev_home);
+        out
+    }
+
+    #[test]
+    fn hf_cache_snapshot_complete_skips_snapshot_missing_index_shards() {
+        // The reported bug: an interrupted `hf download` leaves `config.json`
+        // and a `model.safetensors.index.json` whose shards were never
+        // materialized (zero-byte `.incomplete` blobs in their place). The weak
+        // gate accepts it and the loader dies on "Missing shard file(s)"; the
+        // full-weight gate must skip it so resolution falls through to the
+        // mlxcel store.
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = tmp.path().join("hub");
+        let sha = "3333333333333333333333333333333333333333";
+        let repo_dir = make_hf_cache(&hub, "owner/model", sha, "main", true);
+        let snap = repo_dir.join("snapshots").join(sha);
+        write_shard_index(
+            &snap,
+            &[
+                "model-00001-of-00002.safetensors",
+                "model-00002-of-00002.safetensors",
+            ],
+        );
+        // Neither shard exists on disk.
+
+        let (weak, strong) = with_hf_hub(&hub, || {
+            (
+                hf_cache_snapshot("owner/model", None),
+                hf_cache_snapshot_complete("owner/model", None),
+            )
+        });
+
+        // The weak probe still sees it — `list`/`remove` need partials visible.
+        assert_eq!(weak, Some(snap));
+        // The reuse gate must not.
+        assert_eq!(strong, None);
+    }
+
+    #[test]
+    fn hf_cache_snapshot_complete_accepts_fully_materialized_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = tmp.path().join("hub");
+        let sha = "4444444444444444444444444444444444444444";
+        let repo_dir = make_hf_cache(&hub, "owner/model", sha, "main", true);
+        let snap = repo_dir.join("snapshots").join(sha);
+        write_shard_index(
+            &snap,
+            &[
+                "model-00001-of-00002.safetensors",
+                "model-00002-of-00002.safetensors",
+            ],
+        );
+        std::fs::write(snap.join("model-00001-of-00002.safetensors"), b"a").unwrap();
+        std::fs::write(snap.join("model-00002-of-00002.safetensors"), b"b").unwrap();
+
+        let found = with_hf_hub(&hub, || hf_cache_snapshot_complete("owner/model", None));
+
+        assert_eq!(found, Some(snap));
+    }
+
+    #[test]
+    fn hf_cache_snapshot_complete_skips_config_only_snapshot() {
+        // Stopped right after config.json: no index, no weights at all.
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = tmp.path().join("hub");
+        let sha = "5555555555555555555555555555555555555555";
+        make_hf_cache(&hub, "owner/model", sha, "main", true);
+
+        let found = with_hf_hub(&hub, || hf_cache_snapshot_complete("owner/model", None));
 
         assert_eq!(found, None);
     }

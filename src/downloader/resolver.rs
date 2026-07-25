@@ -33,7 +33,7 @@
 //!    treated as a HuggingFace repo-id and resolved in this sub-order: (a)
 //!    legacy per-CWD `./models/<basename>` snapshot if complete (bridges the
 //!    pre-#93 default download location); (b) an existing HuggingFace Hub cache
-//!    snapshot ([`store::hf_cache_snapshot`], read-only reuse); (c) the mlxcel
+//!    snapshot ([`store::hf_cache_snapshot_complete`], read-only reuse); (c) the mlxcel
 //!    global store ([`store::model_dir`]) if complete; (d) on a miss, download
 //!    the snapshot into the mlxcel global store via the shared hardened
 //!    downloader ([`download_repo`]) and use it. Steps 1 and 2 take precedence
@@ -51,17 +51,23 @@
 //! 4. **Neither** — a clear, actionable error (not an existing path, not a
 //!    valid `owner/name` repo-id, and not a bare single segment).
 //!
-//! The "completeness" gate for the legacy and store directories verifies the
-//! full weight set, not just `config.json` (issue #465): every shard named by a
-//! local `model.safetensors.index.json` (or, for a single-file / repackaged
-//! layout, at least one non-zero `*.safetensors`) must be present and non-zero.
-//! An interrupted download that fetched `config.json` and only some shards is
-//! therefore treated as a miss, and the resolver re-fetches it — resuming the
-//! partial snapshot through the shared downloader — instead of handing the
-//! loader a path that dies with `Weight not found`. See [`super::completeness`]
-//! for the classifier. The read-only HuggingFace cache reuse
-//! ([`store::hf_cache_snapshot`]) keeps its own `config.json` gate since mlxcel
-//! never writes into that externally-managed layout.
+//! The "completeness" gate verifies the full weight set, not just `config.json`
+//! (issue #465): every shard named by a local `model.safetensors.index.json`
+//! (or, for a single-file / repackaged layout, at least one non-zero
+//! `*.safetensors`) must be present and non-zero. An interrupted download that
+//! fetched `config.json` and only some shards is therefore treated as a miss,
+//! and the resolver re-fetches it — resuming the partial snapshot through the
+//! shared downloader — instead of handing the loader a path that dies with
+//! `Weight not found`. See [`super::completeness`] for the classifier.
+//!
+//! All three reuse branches apply that gate, including the read-only
+//! HuggingFace cache probe ([`store::hf_cache_snapshot_complete`]). #465
+//! originally exempted the HF branch on the reasoning that the layout is
+//! externally managed — but the exemption is what makes it dangerous: the HF
+//! cache is consulted *before* the mlxcel store, so a partial `hf download`
+//! (config.json + zero-byte `.incomplete` blobs) shadowed a complete store copy
+//! and the server started only to fail at load. Being read-only means mlxcel
+//! cannot repair such a snapshot, which is a reason to skip it, not to trust it.
 
 use std::path::{Path, PathBuf};
 
@@ -241,10 +247,15 @@ fn locate_cached_snapshot(
         return Some(legacy);
     }
 
-    // 2b. Existing HuggingFace Hub cache snapshot (read-only reuse). Its own
-    //     completeness gate keys on `config.json`; mlxcel never writes into that
-    //     externally-managed layout, so it is left to HuggingFace tooling.
-    if let Some(hf) = store::hf_cache_snapshot(repo_id, revision) {
+    // 2b. Existing HuggingFace Hub cache snapshot (read-only reuse). Same
+    //     full-weight gate as 2a/2c: an interrupted `hf download` leaves a
+    //     `config.json` beside zero-byte `.incomplete` blobs, and because this
+    //     branch is probed *before* the store, a weaker gate here would let that
+    //     partial shadow a complete store copy — the server boots and then dies
+    //     at load on the shards its own index names. Skipping it falls through
+    //     to 2c. The reuse stays read-only; mlxcel never writes into the HF
+    //     content-addressed layout.
+    if let Some(hf) = store::hf_cache_snapshot_complete(repo_id, revision) {
         return Some(hf);
     }
 

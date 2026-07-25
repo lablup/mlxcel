@@ -249,6 +249,111 @@ fn locate_reuses_hf_cache_snapshot() {
     assert_eq!(hit, Some(snap));
 }
 
+/// Regression: an interrupted `hf download` leaves an HF-cache snapshot with
+/// `config.json` and a `model.safetensors.index.json` whose shards were never
+/// materialized. Because 2b is probed *before* the mlxcel store, the old
+/// `config.json`-only gate let that partial shadow a complete store copy — the
+/// server started and then died at load with "Missing shard file(s) referenced
+/// in model.safetensors.index.json". Branch 2b must apply the same full-weight
+/// gate as 2a/2c and fall through to the store.
+///
+/// Observed with `lmstudio-community/Qwen3.5-9B-MLX-4bit`: a 26 MB partial HF
+/// snapshot masked a complete 5.6 GB store copy.
+#[test]
+fn locate_skips_incomplete_hf_snapshot_and_falls_through_to_store() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    // A partial HF-cache snapshot: config.json + an index naming two shards,
+    // neither of which exists on disk.
+    let hub = tmp.path().join("hf");
+    let sha = "89abcdef89abcdef89abcdef89abcdef89abcdef";
+    let repo_dir = hub.join("models--owner--model");
+    let hf_snap = repo_dir.join("snapshots").join(sha);
+    fs::create_dir_all(&hf_snap).unwrap();
+    fs::write(hf_snap.join("config.json"), b"{}").unwrap();
+    fs::write(
+        hf_snap.join("model.safetensors.index.json"),
+        br#"{"weight_map": {"a": "model-00001-of-00002.safetensors", "b": "model-00002-of-00002.safetensors"}}"#,
+    )
+    .unwrap();
+    let refs = repo_dir.join("refs");
+    fs::create_dir_all(&refs).unwrap();
+    fs::write(refs.join("main"), sha).unwrap();
+
+    // A complete copy sitting in the mlxcel store, which 2b was shadowing.
+    let store_root = tmp.path().join("store");
+    let store_dir = store_root.join("models").join("owner").join("model");
+    make_complete_snapshot(&store_dir);
+
+    let cwd_models = tmp.path().join("no-models");
+
+    let _guard = env_lock();
+    let prev_cache_dir = std::env::var("MLXCEL_CACHE_DIR").ok();
+    let prev_hf_cache = std::env::var("HF_HUB_CACHE").ok();
+    let prev_hf_home = std::env::var("HF_HOME").ok();
+    unsafe {
+        std::env::set_var("MLXCEL_CACHE_DIR", &store_root);
+        std::env::set_var("HF_HUB_CACHE", &hub);
+        std::env::remove_var("HF_HOME");
+    }
+
+    let hit = locate_cached_snapshot("owner/model", None, &cwd_models, None);
+
+    restore_env("MLXCEL_CACHE_DIR", prev_cache_dir);
+    restore_env("HF_HUB_CACHE", prev_hf_cache);
+    restore_env("HF_HOME", prev_hf_home);
+
+    assert_ne!(
+        hit.as_ref(),
+        Some(&hf_snap),
+        "returned the partial HF snapshot"
+    );
+    assert_eq!(hit, Some(store_dir));
+}
+
+/// The same partial HF snapshot with nothing else on disk must be a clean miss
+/// (driving branch 2d's re-fetch), not a hit the loader will choke on.
+#[test]
+fn locate_returns_none_for_incomplete_hf_snapshot_with_no_fallback() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let hub = tmp.path().join("hf");
+    let sha = "76543210765432107654321076543210fedcba98";
+    let repo_dir = hub.join("models--owner--model");
+    let hf_snap = repo_dir.join("snapshots").join(sha);
+    fs::create_dir_all(&hf_snap).unwrap();
+    fs::write(hf_snap.join("config.json"), b"{}").unwrap();
+    fs::write(
+        hf_snap.join("model.safetensors.index.json"),
+        br#"{"weight_map": {"a": "model-00001-of-00002.safetensors"}}"#,
+    )
+    .unwrap();
+    let refs = repo_dir.join("refs");
+    fs::create_dir_all(&refs).unwrap();
+    fs::write(refs.join("main"), sha).unwrap();
+
+    let cwd_models = tmp.path().join("no-models");
+    let empty_store = tmp.path().join("store");
+
+    let _guard = env_lock();
+    let prev_cache_dir = std::env::var("MLXCEL_CACHE_DIR").ok();
+    let prev_hf_cache = std::env::var("HF_HUB_CACHE").ok();
+    let prev_hf_home = std::env::var("HF_HOME").ok();
+    unsafe {
+        std::env::set_var("MLXCEL_CACHE_DIR", &empty_store);
+        std::env::set_var("HF_HUB_CACHE", &hub);
+        std::env::remove_var("HF_HOME");
+    }
+
+    let hit = locate_cached_snapshot("owner/model", None, &cwd_models, None);
+
+    restore_env("MLXCEL_CACHE_DIR", prev_cache_dir);
+    restore_env("HF_HUB_CACHE", prev_hf_cache);
+    restore_env("HF_HOME", prev_hf_home);
+
+    assert_eq!(hit, None);
+}
+
 // ── locate_cached_snapshot: branch 2c (mlxcel global store) ──────────────────
 
 #[test]
