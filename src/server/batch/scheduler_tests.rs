@@ -27,7 +27,8 @@ use mlxcel_core::generate::SamplingConfig;
 
 use super::{
     MAX_CONSECUTIVE_EVAL_FAILURES, advance_eval_failure_count, effective_decode_storage_backend,
-    eval_failures_reached_limit, resolve_max_batch_prefill_tokens, vlm_prefix_sharing_allowed,
+    eval_failures_reached_limit, prefill_padding_allowed, resolve_max_batch_prefill_tokens,
+    vlm_prefix_sharing_allowed,
 };
 use crate::server::batch::active::ActiveBatch;
 use crate::server::batch::queue::PrefillQueue;
@@ -1658,4 +1659,60 @@ fn a_single_success_prevents_the_guard_from_tripping() {
     // A fresh single failure is nowhere near the threshold.
     count = advance_eval_failure_count(count, false);
     assert!(!eval_failures_reached_limit(count));
+}
+
+// ---------------------------------------------------------------------------
+// Tile-aligned prefill padding must honour the model's own refusal.
+//
+// Regression cover for the Qwen3.5 decode collapse: padded prefill appends
+// literal token id 0 and constrains it with an ATTENTION mask only. Recurrent
+// layers (Mamba/Mamba2 SSM state, Qwen3.5 / Qwen3-Next GatedDeltaNet state and
+// its conv-state tail slice) get no mask, so padding is folded into their state
+// and decode resumes from a corrupted one — Qwen3.5 degenerated into repeated
+// "!" (token 0) after ~8 tokens. Those families all declare
+// `supports_padded_prefill() == false`; three of the four scheduler padding
+// sites ignored that and padded them anyway.
+// ---------------------------------------------------------------------------
+
+/// The bug itself: alignment available, but the model declines padding.
+#[test]
+fn prefill_padding_declined_when_model_does_not_support_it() {
+    assert!(
+        !prefill_padding_allowed(true, false, false),
+        "a model declaring supports_padded_prefill()==false must never be padded: \
+         padding tokens are unmasked on the recurrent path and corrupt SSM/GDN state"
+    );
+}
+
+/// The happy path stays intact — plain transformers still get NA-tile padding.
+#[test]
+fn prefill_padding_allowed_for_supporting_model() {
+    assert!(prefill_padding_allowed(true, true, false));
+}
+
+/// Non-M5 hardware: no alignment regardless of model capability.
+#[test]
+fn prefill_padding_declined_when_alignment_unavailable() {
+    assert!(!prefill_padding_allowed(false, true, false));
+    assert!(!prefill_padding_allowed(false, false, false));
+}
+
+/// Injected VLM embeddings are unpadded, so a padded mask could not broadcast
+/// against them; the text backbone builds its own causal mask instead.
+#[test]
+fn prefill_padding_declined_when_vlm_embeddings_present() {
+    assert!(!prefill_padding_allowed(true, true, true));
+}
+
+/// The model flag is decisive: it must veto padding no matter what else is set.
+#[test]
+fn model_refusal_vetoes_every_other_condition() {
+    for align in [true, false] {
+        for embeds in [true, false] {
+            assert!(
+                !prefill_padding_allowed(align, false, embeds),
+                "model refusal must veto (align={align}, vlm_embeddings={embeds})"
+            );
+        }
+    }
 }

@@ -135,7 +135,12 @@ pub fn gated_delta_step(
 ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
     // Fast path: no mask (common during decode) — use fused C++ kernel
     // Replaces ~26 FFI round-trips with a single call.
-    if mask.is_none() {
+    //
+    // MLXCEL_DISABLE_FUSED_GDN_DECODE=1 forces the equivalent ops path below,
+    // for bisecting the fused kernel against the primitive-op reference.
+    let fused_disabled = std::env::var("MLXCEL_DISABLE_FUSED_GDN_DECODE")
+        .is_ok_and(|v| matches!(v.as_str(), "1" | "true" | "yes"));
+    if mask.is_none() && !fused_disabled {
         let q_dtype = mlxcel_core::array_dtype(q);
         let mut output = mlxcel_core::UniquePtr::null();
         let mut new_state = mlxcel_core::UniquePtr::null();
@@ -183,12 +188,21 @@ pub fn gated_delta_step(
     let q_exp = mlxcel_core::expand_dims(q, -2);
     let y = mlxcel_core::sum_axis(&mlxcel_core::multiply(&new_state, &q_exp), -1, false);
 
-    // Apply mask
-    let m = mask.unwrap();
-    let m1 = mlxcel_core::expand_dims(m, 1);
-    let m2 = mlxcel_core::expand_dims(&m1, 2);
-    let m3 = mlxcel_core::expand_dims(&m2, 3);
-    let new_state = mlxcel_core::where_cond(&m3, &new_state, &old_state);
+    // Apply mask. Reachable with `mask == None` only via
+    // MLXCEL_DISABLE_FUSED_GDN_DECODE, where every row is active and the
+    // select would be a no-op, so skip it rather than unwrap.
+    let new_state = match mask {
+        Some(m) => {
+            let m1 = mlxcel_core::expand_dims(m, 1);
+            let m2 = mlxcel_core::expand_dims(&m1, 2);
+            let m3 = mlxcel_core::expand_dims(&m2, 3);
+            mlxcel_core::where_cond(&m3, &new_state, &old_state)
+        }
+        None => {
+            let _ = &old_state;
+            new_state
+        }
+    };
 
     let q_dtype = mlxcel_core::array_dtype(q);
     let y = if mlxcel_core::array_dtype(&y) != q_dtype {
@@ -640,6 +654,15 @@ fn gated_delta_chunked(
 ///
 /// Used by: Qwen3Next, Qwen3.5, KimiLinear
 fn supports_metal_gated_delta_kernel(hk: i32, hv: i32, dk: i32, dv: i32) -> bool {
+    // MLXCEL_DISABLE_GATED_DELTA_KERNEL=1 forces the ops fallback below, which
+    // is the same math in primitive ops. Pairs with
+    // MLXCEL_DISABLE_FUSED_GDN_DECODE (decode step) to bisect the two custom
+    // GDN kernels independently against the reference path.
+    if std::env::var("MLXCEL_DISABLE_GATED_DELTA_KERNEL")
+        .is_ok_and(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+    {
+        return false;
+    }
     hk > 0 && hv > 0 && dv > 0 && dk >= 32 && dk % 32 == 0 && hv >= hk && hv % hk == 0
 }
 

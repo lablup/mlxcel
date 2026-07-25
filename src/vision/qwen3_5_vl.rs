@@ -313,6 +313,18 @@ impl mlxcel_core::drafter::dflash::SpeculativeTarget for Qwen35VLModel {
 }
 
 impl LanguageModel for Qwen35VLModel {
+    /// Forward the text backbone's refusal to be padded.
+    ///
+    /// The trait default is `true`, so without this the VLM wrapper opted into
+    /// tile-aligned padded prefill even though its own `Qwen35Model` backbone
+    /// declares `false`. Padding tokens have no mask on the GatedDeltaNet path,
+    /// so they were folded into the recurrent state and the conv-state tail
+    /// slice captured padding instead of real tokens — decode then started from
+    /// a corrupted state and drifted into repeated token 0 ("!").
+    fn supports_padded_prefill(&self) -> bool {
+        self.text_model.supports_padded_prefill()
+    }
+
     fn forward(
         &self,
         input_ids: &MlxArray,

@@ -98,6 +98,32 @@ fn should_align_prefill() -> bool {
     hw.has_neural_accelerator && hw.macos_supports_na
 }
 
+/// Whether tile-aligned prefill padding may be applied to this forward.
+///
+/// `model_supports_padding` is a REQUIRED parameter rather than something each
+/// call site reads for itself, because forgetting it was a real bug: three of
+/// the four padding sites gated only on `should_align_prefill()` and never
+/// consulted [`LanguageModel::supports_padded_prefill`]. Padded prefill appends
+/// literal token id `0` and constrains it with an *attention* mask only —
+/// recurrent layers (Mamba/Mamba2 SSM state, Qwen3.5/Qwen3-Next GatedDeltaNet
+/// state, and the conv-state tail slice) have no mask plumbed through, so the
+/// padding is folded into their state and decode resumes from a corrupted one.
+/// Models in those families correctly declare `false`; the scheduler simply
+/// ignored them, and Qwen3.5 output degenerated into repeated `"!"` (token 0).
+///
+/// Keep this a pure function of its inputs so it stays unit-testable without a
+/// model or Metal device.
+#[inline]
+fn prefill_padding_allowed(
+    align_enabled: bool,
+    model_supports_padding: bool,
+    has_vlm_embeddings: bool,
+) -> bool {
+    // VLM embedding injection is unpadded, so a padded mask could not broadcast
+    // against it; the text backbone builds its own causal mask in that case.
+    align_enabled && model_supports_padding && !has_vlm_embeddings
+}
+
 pub(crate) const DEFAULT_PAGED_BLOCK_SIZE: usize = 32;
 
 /// Number of leading tokens pinned as an attention sink when `--max-kv-size`
@@ -4858,7 +4884,8 @@ impl BatchScheduler {
             return;
         }
 
-        let padded_len = if can_pad_prefill && should_align_prefill() {
+        // Batched prefill never carries injected VLM embeddings, hence `false`.
+        let padded_len = if prefill_padding_allowed(should_align_prefill(), can_pad_prefill, false) {
             align_to_na_tile(max_len)
         } else {
             max_len
@@ -5037,8 +5064,19 @@ impl BatchScheduler {
         // text backbone then builds a causal mask sized to the embeddings,
         // matching the CLI generate path. Token-id (text-only) prefill — for
         // VLMs and plain text models alike — is unaffected.
-        let (effective_tokens, pad_mask_opt) =
-            if should_align_prefill() && seq.vlm_embeddings.is_none() {
+        // `supports_padded_prefill()` is load-bearing here, not just an
+        // optimization hint: the padded mask below constrains ATTENTION only.
+        // Recurrent layers (Mamba/Mamba2/GatedDeltaNet) have no mask plumbed
+        // through, so padding tokens are folded into their state and the
+        // conv-state tail slice captures padding rather than real tokens. The
+        // batched path above already gates on this; these single-sequence and
+        // chunked paths did not, so hybrid models that correctly declare
+        // `false` were padded anyway.
+        let (effective_tokens, pad_mask_opt) = if prefill_padding_allowed(
+            should_align_prefill(),
+            self.model.supports_padded_prefill(),
+            seq.vlm_embeddings.is_some(),
+        ) {
                 let padded_len = align_to_na_tile(actual_len);
                 if padded_len > actual_len {
                     let mut padded = suffix_tokens.clone();
@@ -5201,7 +5239,11 @@ impl BatchScheduler {
 
         // Align the first chunk to a 32-token tile boundary on M5+ hardware.
         let actual_chunk_len = chunk.len();
-        let (eff_chunk, pad_mask_opt) = if should_align_prefill() {
+        let (eff_chunk, pad_mask_opt) = if prefill_padding_allowed(
+            should_align_prefill(),
+            self.model.supports_padded_prefill(),
+            false,
+        ) {
             let padded_len = align_to_na_tile(actual_chunk_len);
             if padded_len > actual_chunk_len {
                 let mut padded = chunk.to_vec();
@@ -5387,7 +5429,11 @@ impl BatchScheduler {
                 offset as i32
             }
         };
-        let (eff_chunk, pad_mask_opt) = if should_align_prefill() {
+        let (eff_chunk, pad_mask_opt) = if prefill_padding_allowed(
+            should_align_prefill(),
+            self.model.supports_padded_prefill(),
+            false,
+        ) {
             let padded_len = align_to_na_tile(actual_chunk_len);
             if padded_len > actual_chunk_len {
                 let mut padded = chunk.to_vec();
