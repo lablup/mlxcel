@@ -215,6 +215,12 @@ async fn non_stream_create_response(
             return ErrorResponse::new(err.to_string(), "invalid_request_error").into_response();
         }
     };
+    // Whether the rendered prompt left a thinking block open. Captured before
+    // `prepared.prompt` is moved into the generate call below. A bare close
+    // marker in the output may only be treated as the close of an implicit open
+    // when this is true — otherwise it is literal text the user asked for.
+    let primed_open_thinking =
+        crate::server::routes::chat::is_prompt_primed_open_thinking(&prepared.prompt);
     let mut options = build_generate_options(&translated.chat_request.params, &state.config);
     options.priority = priority;
     // per-request Gemma 4 image soft-token budget, resolved and validated from
@@ -264,11 +270,13 @@ async fn non_stream_create_response(
         Some(tool_calls::parse_tool_calls(
             &result.text,
             translated.chat_request.tools.as_deref(),
+            primed_open_thinking,
         ))
     } else {
         None
     };
-    let (visible_text, _reasoning_text) = split_reasoning(&result.text, parsed_tools.as_ref());
+    let (visible_text, _reasoning_text) =
+        split_reasoning(&result.text, parsed_tools.as_ref(), primed_open_thinking);
 
     let completed_at = chrono::Utc::now().timestamp() as f64;
     let response = build_response_object(OutboundContext {
@@ -329,6 +337,12 @@ async fn stream_create_response(
             return ErrorResponse::new(err.to_string(), "invalid_request_error").into_response();
         }
     };
+    // Whether the rendered prompt left a thinking block open. Captured before
+    // `prepared.prompt` is moved into the generate call below. A bare close
+    // marker in the output may only be treated as the close of an implicit open
+    // when this is true — otherwise it is literal text the user asked for.
+    let primed_open_thinking =
+        crate::server::routes::chat::is_prompt_primed_open_thinking(&prepared.prompt);
     let mut options = build_generate_options(&translated.chat_request.params, &state.config);
     options.priority = priority;
     // per-request Gemma 4 image soft-token budget, resolved and validated from
@@ -608,6 +622,7 @@ async fn stream_create_response(
             Some(tool_calls::parse_tool_calls(
                 &full_raw,
                 tools_for_parser.as_deref(),
+                primed_open_thinking,
             ))
         } else {
             None
@@ -895,25 +910,29 @@ fn translate_error_to_response(err: ResponsesTranslateError) -> ErrorResponse {
 fn split_reasoning(
     raw: &str,
     parsed: Option<&crate::server::tool_calls::types::ToolCallParseResult>,
+    primed: bool,
 ) -> (String, Option<String>) {
     // Recover the reasoning chunk from the *raw* output before any
     // thinking-block stripping. `clean_structural_tokens` (and the tool
     // parser's internal `strip_thinking`) erase `<think>...</think>`
     // entirely, which would otherwise mask reasoning from this helper.
-    let reasoning = extract_reasoning_from_raw(raw);
+    let reasoning = extract_reasoning_from_raw(raw, primed);
     let visible_source = match parsed {
         Some(p) => p.content.clone(),
-        None => tool_calls::clean_structural_tokens(raw),
+        None => tool_calls::clean_structural_tokens(raw, primed),
     };
     // If the visible source still carries a `</think>` close tag (the
     // open-primed-close-only case — `clean_structural_tokens` does not
     // strip a bare close marker), keep only the chunk after it. Any
     // reasoning before the close tag was already captured by
     // `extract_reasoning_from_raw`.
-    let visible = if let Some(after_close) = visible_source.split_once("</think>") {
-        after_close.1.trim_start().to_string()
-    } else {
-        visible_source.trim_start().to_string()
+    //
+    // Gated on `primed`: without an open marker in the prompt, a `</think>`
+    // in the output is literal text (a user can legitimately ask the model to
+    // quote the marker), and splitting on it would delete the answer's front.
+    let visible = match visible_source.split_once("</think>") {
+        Some(after_close) if primed => after_close.1.trim_start().to_string(),
+        _ => visible_source.trim_start().to_string(),
     };
     (visible, reasoning)
 }
@@ -922,7 +941,11 @@ fn split_reasoning(
 /// inline `<think>...</think>` form and the open-primed close-only
 /// `<reasoning text></think>...` form. Returns `None` if no reasoning
 /// can be recovered.
-fn extract_reasoning_from_raw(raw: &str) -> Option<String> {
+///
+/// `primed` gates the close-only branch: only a prompt that actually left a
+/// thinking block open makes a bare `</think>` a close marker rather than
+/// literal text.
+fn extract_reasoning_from_raw(raw: &str, primed: bool) -> Option<String> {
     // Inline `<think>...</think>` block.
     if let Some(rest) = raw.strip_prefix("<think>")
         && let Some(end) = rest.find("</think>")
@@ -938,7 +961,7 @@ fn extract_reasoning_from_raw(raw: &str) -> Option<String> {
     // emitted text begins with the reasoning trace followed by
     // `</think>`. Anything before the close tag is the reasoning chunk;
     // we ignore content past the tag (the visible text path handles it).
-    if let Some(end) = raw.find("</think>") {
+    if primed && let Some(end) = raw.find("</think>") {
         let reason = raw[..end].trim();
         return if reason.is_empty() {
             None
@@ -995,7 +1018,8 @@ mod tests {
 
     #[test]
     fn split_reasoning_inline_block_separates_content() {
-        let (visible, reasoning) = split_reasoning("<think>some thoughts</think>hi there", None);
+        let (visible, reasoning) =
+            split_reasoning("<think>some thoughts</think>hi there", None, false);
         assert_eq!(visible, "hi there");
         assert_eq!(reasoning.as_deref(), Some("some thoughts"));
     }
@@ -1005,21 +1029,21 @@ mod tests {
         // Qwen3 primed-open scenario: prompt injected `<think>\n`, the
         // model's emitted text begins with the reasoning trace followed
         // by `</think>` and the real reply.
-        let (visible, reasoning) = split_reasoning("reasoning text</think>\n\nHello!", None);
+        let (visible, reasoning) = split_reasoning("reasoning text</think>\n\nHello!", None, true);
         assert_eq!(visible, "Hello!");
         assert_eq!(reasoning.as_deref(), Some("reasoning text"));
     }
 
     #[test]
     fn split_reasoning_close_only_empty_reasoning_yields_none() {
-        let (visible, reasoning) = split_reasoning("</think>\n\nGreetings.", None);
+        let (visible, reasoning) = split_reasoning("</think>\n\nGreetings.", None, true);
         assert_eq!(visible, "Greetings.");
         assert!(reasoning.is_none());
     }
 
     #[test]
     fn split_reasoning_no_think_block_returns_raw() {
-        let (visible, reasoning) = split_reasoning("just text", None);
+        let (visible, reasoning) = split_reasoning("just text", None, false);
         assert_eq!(visible, "just text");
         assert!(reasoning.is_none());
     }

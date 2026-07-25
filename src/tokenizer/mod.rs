@@ -1786,7 +1786,7 @@ mod tests {
             },
         }];
 
-        let result = parse_tool_calls(SYNTHETIC_GEMMA4_TOOL_CALL, Some(&tools));
+        let result = parse_tool_calls(SYNTHETIC_GEMMA4_TOOL_CALL, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].name, "get_weather");
@@ -1829,7 +1829,7 @@ mod tests {
             "demoted channel markers must survive skip_special_tokens=true decode"
         );
 
-        let result = crate::server::tool_calls::parse_tool_calls(&decoded, None);
+        let result = crate::server::tool_calls::parse_tool_calls(&decoded, None, false);
         assert!(!result.has_tool_calls());
         assert_eq!(result.content, "The weather is sunny.");
     }

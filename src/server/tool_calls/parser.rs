@@ -37,8 +37,18 @@ use crate::server::types::request::Tool;
 /// user-visible content. Treat a leading (pre-first-`<|channel>`) `<channel|>`
 /// as the close of an implicit open.
 ///
+/// `primed` gates that recovery pass and **must** come from
+/// [`is_prompt_primed_open_thinking`](crate::server::routes::chat::is_prompt_primed_open_thinking)
+/// on the rendered prompt — never inferred from the output text. A bare close
+/// marker is only evidence of an implicit open when the prompt actually left
+/// one open. When it did not (`enable_thinking=false` renders a *closed*
+/// `<think>\n\n</think>` block into the prompt, so the model emits no markers
+/// of its own), a `</think>` in the output is ordinary literal text the user
+/// asked for, and stripping up to it silently deletes the front of a correct
+/// answer.
+///
 /// Used by: tool_calls::parser
-fn strip_thinking(text: &str) -> String {
+fn strip_thinking(text: &str, primed: bool) -> String {
     // (open, close) marker pairs by family: Qwen-style `<think>...</think>`
     // and Gemma 4 `<|channel>...<channel|>`.
     let pairs: &[(&str, &str)] = &[("<think>", "</think>"), ("<|channel>", "<channel|>")];
@@ -53,11 +63,13 @@ fn strip_thinking(text: &str) -> String {
     // non-streaming path the same way `/v1/responses`, `/v1/anthropic`, and the
     // streaming filter already handle it.
     let mut result = text.to_string();
-    for &(open, close) in pairs {
-        if let Some(close_pos) = result.find(close)
-            && !result[..close_pos].contains(open)
-        {
-            result = result[close_pos + close.len()..].to_string();
+    if primed {
+        for &(open, close) in pairs {
+            if let Some(close_pos) = result.find(close)
+                && !result[..close_pos].contains(open)
+            {
+                result = result[close_pos + close.len()..].to_string();
+            }
         }
     }
     for &(open, close) in pairs {
@@ -111,9 +123,13 @@ fn clean_content_markers(text: &str) -> String {
 /// of whether tool-call parsing is enabled.  Without this pass, Gemma 4 leaks
 /// `<channel|>`, `<turn|>`, and related markers into plain chat content when
 /// no tools are present in the request.
+///
+/// `primed` is forwarded to [`strip_thinking`]; see its docs for why a bare
+/// close marker may only be treated as an implicit open when the *prompt* says
+/// so.
 // Used by: routes/chat (non-streaming path)
-pub fn clean_structural_tokens(raw: &str) -> String {
-    clean_content_markers(&strip_thinking(raw))
+pub fn clean_structural_tokens(raw: &str, primed: bool) -> String {
+    clean_content_markers(&strip_thinking(raw, primed))
 }
 
 /// Parse model output for tool calls, trying each known format in order.
@@ -122,11 +138,19 @@ pub fn clean_structural_tokens(raw: &str) -> String {
 /// provided, the parser will filter out any calls to functions not in
 /// the tool set.
 ///
+/// `primed` is forwarded to [`strip_thinking`]; see its docs for why a bare
+/// close marker may only be treated as an implicit open when the *prompt* says
+/// so.
+///
 /// Returns a `ToolCallParseResult` which may contain zero or more parsed
 /// calls.
-pub fn parse_tool_calls(raw_output: &str, tools: Option<&[Tool]>) -> ToolCallParseResult {
+pub fn parse_tool_calls(
+    raw_output: &str,
+    tools: Option<&[Tool]>,
+    primed: bool,
+) -> ToolCallParseResult {
     // Strip thinking blocks first
-    let cleaned = strip_thinking(raw_output);
+    let cleaned = strip_thinking(raw_output, primed);
     let text = cleaned.trim();
 
     if text.is_empty() {
@@ -308,7 +332,7 @@ mod tests {
         let output =
             r#"<tool_call>{"name": "get_weather", "arguments": {"location": "Paris"}}</tool_call>"#;
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].name, "get_weather");
@@ -319,7 +343,7 @@ mod tests {
         let output = r#"<think>Let me check the weather API.</think>
 <tool_call>{"name": "get_weather", "arguments": {"location": "Tokyo"}}</tool_call>"#;
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls[0].name, "get_weather");
     }
@@ -328,14 +352,14 @@ mod tests {
     fn parse_filters_unknown_tools() {
         let output = r#"<tool_call>{"name": "unknown_fn", "arguments": {}}</tool_call>"#;
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(!result.has_tool_calls());
     }
 
     #[test]
     fn parse_no_tools_provided_accepts_all() {
         let output = r#"<tool_call>{"name": "any_fn", "arguments": {"x": 1}}</tool_call>"#;
-        let result = parse_tool_calls(output, None);
+        let result = parse_tool_calls(output, None, false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls[0].name, "any_fn");
     }
@@ -343,7 +367,7 @@ mod tests {
     #[test]
     fn parse_plain_text_returns_none() {
         let output = "Hello, how can I help you?";
-        let result = parse_tool_calls(output, None);
+        let result = parse_tool_calls(output, None, false);
         assert!(!result.has_tool_calls());
         assert_eq!(result.content, output);
     }
@@ -352,7 +376,7 @@ mod tests {
     fn parse_mistral_nemo_format() {
         let output = r#"[TOOL_CALLS] [{"name": "search", "arguments": {"query": "rust"}}]"#;
         let tools = vec![make_tool("search")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls[0].name, "search");
         // Regression: the old JSON-array format must still resolve to
@@ -367,7 +391,7 @@ mod tests {
     fn parse_mistral_bracket_format() {
         let output = r#"[TOOL_CALLS]get_weather[ARGS]{"city": "Paris"}"#;
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].name, "get_weather");
@@ -384,7 +408,7 @@ mod tests {
     fn parse_mistral_bracket_filters_unknown_tools() {
         let output = r#"[TOOL_CALLS]unknown_fn[ARGS]{}"#;
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(!result.has_tool_calls());
     }
 
@@ -392,7 +416,7 @@ mod tests {
     fn parse_functionary_v31_format() {
         let output = r#"<function=get_weather>{"location": "Berlin"}</function>"#;
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls[0].name, "get_weather");
     }
@@ -401,7 +425,7 @@ mod tests {
     fn parse_generic_json_format() {
         let output = r#"{"name": "calc", "arguments": {"expr": "2+2"}}"#;
         let tools = vec![make_tool("calc")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls[0].name, "calc");
     }
@@ -410,7 +434,7 @@ mod tests {
     fn parse_command_r_format() {
         let output = "Action: search\nAction Input: {\"query\": \"rust\"}";
         let tools = vec![make_tool("search")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls[0].name, "search");
     }
@@ -419,7 +443,7 @@ mod tests {
     fn parse_granite_format() {
         let output = r#"<response><tool_call>{"name": "get_info", "arguments": {"id": 42}}</tool_call></response>"#;
         let tools = vec![make_tool("get_info")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls[0].name, "get_info");
     }
@@ -429,7 +453,7 @@ mod tests {
         // DeepSeek uses <tool_call> (Hermes style) after <think> blocks
         let output = "<think>Reasoning step.</think>\n<tool_call>{\"name\": \"fn\", \"arguments\": {\"k\": \"v\"}}</tool_call>";
         let tools = vec![make_tool("fn")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls[0].name, "fn");
     }
@@ -438,7 +462,7 @@ mod tests {
     fn parse_gemma4_format() {
         let output = "<|tool_call>call:get_weather{location:<|\"|>Tokyo<|\"|>}<tool_call|>";
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].name, "get_weather");
@@ -455,7 +479,7 @@ mod tests {
     fn parse_gemma4_filters_unknown_tools() {
         let output = "<|tool_call>call:unknown_fn{key:<|\"|>val<|\"|>}<tool_call|>";
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(!result.has_tool_calls());
     }
 
@@ -465,7 +489,7 @@ mod tests {
     fn parse_function_gemma_format() {
         let output = "<start_function_call>call:get_weather{location:<escape>Tokyo<escape>}<end_function_call>";
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].name, "get_weather");
@@ -483,7 +507,7 @@ mod tests {
         let output =
             "<start_function_call>call:unknown_fn{key:<escape>val<escape>}<end_function_call>";
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(!result.has_tool_calls());
     }
 
@@ -494,7 +518,7 @@ mod tests {
         // neither parser must claim the other's output.
         let gemma4_output = "<|tool_call>call:get_weather{location:<|\"|>Tokyo<|\"|>}<tool_call|>";
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(gemma4_output, Some(&tools));
+        let result = parse_tool_calls(gemma4_output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(
             result.format,
@@ -502,7 +526,7 @@ mod tests {
         );
 
         let function_gemma_output = "<start_function_call>call:get_weather{location:<escape>Tokyo<escape>}<end_function_call>";
-        let result = parse_tool_calls(function_gemma_output, Some(&tools));
+        let result = parse_tool_calls(function_gemma_output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(
             result.format,
@@ -516,7 +540,7 @@ mod tests {
         let output =
             r#"<response><tool_call>{"name": "fn", "arguments": {}}</tool_call></response>"#;
         let tools = vec![make_tool("fn")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(
             result.format,
@@ -534,28 +558,28 @@ mod tests {
     #[test]
     fn strip_thinking_removes_think_blocks() {
         let input = "<think>reasoning here</think>actual content";
-        let result = strip_thinking(input);
+        let result = strip_thinking(input, false);
         assert_eq!(result, "actual content");
     }
 
     #[test]
     fn strip_thinking_handles_multiple_blocks() {
         let input = "<think>first</think>middle<think>second</think>end";
-        let result = strip_thinking(input);
+        let result = strip_thinking(input, false);
         assert_eq!(result, "middleend");
     }
 
     #[test]
     fn strip_thinking_handles_unclosed_tag() {
         let input = "<think>unclosed thinking";
-        let result = strip_thinking(input);
+        let result = strip_thinking(input, false);
         assert_eq!(result, "");
     }
 
     #[test]
     fn strip_thinking_passes_through_no_tags() {
         let input = "no thinking tags here";
-        let result = strip_thinking(input);
+        let result = strip_thinking(input, false);
         assert_eq!(result, input);
     }
 
@@ -564,21 +588,21 @@ mod tests {
     #[test]
     fn strip_thinking_removes_gemma4_channel() {
         let input = "<|channel>thought\nI should search.<channel|>actual content";
-        let result = strip_thinking(input);
+        let result = strip_thinking(input, false);
         assert_eq!(result, "actual content");
     }
 
     #[test]
     fn strip_thinking_handles_unclosed_channel() {
         let input = "<|channel>thought\nunclosed channel";
-        let result = strip_thinking(input);
+        let result = strip_thinking(input, false);
         assert_eq!(result, "");
     }
 
     #[test]
     fn strip_thinking_handles_both_think_and_channel() {
         let input = "<think>think block</think><|channel>thought\nchannel block<channel|>final";
-        let result = strip_thinking(input);
+        let result = strip_thinking(input, false);
         assert_eq!(result, "final");
     }
 
@@ -589,7 +613,7 @@ mod tests {
         // stripped the same way the primed Gemma 4 `<channel|>` case is. This
         // matches the responses/anthropic split and chat's streaming filter.
         let input = "reasoning text</think>\n\nHello!";
-        let result = strip_thinking(input);
+        let result = strip_thinking(input, true);
         assert_eq!(result, "\n\nHello!");
     }
 
@@ -597,8 +621,39 @@ mod tests {
     fn clean_structural_tokens_primed_qwen_close_only() {
         // The full non-streaming content path: a primed `<think>` close-only
         // output yields the clean answer, not the leaked reasoning + marker.
-        let cleaned = clean_structural_tokens("reasoning text</think>\n\nHello!");
+        let cleaned = clean_structural_tokens("reasoning text</think>\n\nHello!", true);
         assert_eq!(cleaned, "Hello!");
+    }
+
+    #[test]
+    fn strip_thinking_keeps_literal_close_marker_when_not_primed() {
+        // Regression: `enable_thinking=false` renders a *closed* `<think>\n\n
+        // </think>` block into the prompt, so nothing is left open and the
+        // model emits no markers of its own. A `</think>` in the output is then
+        // literal text — here the user explicitly asked the model to quote it.
+        // Treating it as the close of an implicit open deleted every token
+        // before it, silently truncating a correct answer to its tail.
+        let input = "In an API context, <tool_call> starts a call, distinct from \
+                     the string </think> which ends the model's reasoning.";
+        assert_eq!(strip_thinking(input, false), input);
+    }
+
+    #[test]
+    fn strip_thinking_keeps_literal_gemma_close_marker_when_not_primed() {
+        // Same rule for the Gemma 4 family's `<channel|>` close marker.
+        let input = "The marker <channel|> closes a Gemma 4 thinking channel.";
+        assert_eq!(strip_thinking(input, false), input);
+    }
+
+    #[test]
+    fn strip_thinking_balanced_block_does_not_need_priming() {
+        // A model-emitted balanced block is still stripped with `primed=false`:
+        // gating only removes the *implicit-open* recovery, never the ordinary
+        // paired-marker pass.
+        assert_eq!(
+            strip_thinking("<think>scratch</think>answer", false),
+            "answer"
+        );
     }
 
     // -- Gemma 4 full-path parse tests --
@@ -606,7 +661,7 @@ mod tests {
     #[test]
     fn gemma4_thinking_only() {
         let output = "<|channel>thought\nI should search.<channel|><turn|>";
-        let result = parse_tool_calls(output, None);
+        let result = parse_tool_calls(output, None, false);
         assert!(!result.has_tool_calls());
         assert_eq!(result.content, "");
     }
@@ -614,7 +669,7 @@ mod tests {
     #[test]
     fn gemma4_thinking_then_content() {
         let output = "<|channel>thought\nPlanning.<channel|>Here is the answer.<turn|>";
-        let result = parse_tool_calls(output, None);
+        let result = parse_tool_calls(output, None, false);
         assert!(!result.has_tool_calls());
         assert_eq!(result.content, "Here is the answer.");
     }
@@ -624,7 +679,7 @@ mod tests {
         let output = "<|channel>thought\nI need to search.<channel|>\
                        <|tool_call>call:web_search{query:<|\"|>rust<|\"|>}<tool_call|><turn|>";
         let tools = vec![make_tool("web_search")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].name, "web_search");
@@ -636,7 +691,7 @@ mod tests {
         let output = "Let me search.\
                        <|tool_call>call:web_search{query:<|\"|>rust<|\"|>}<tool_call|><turn|>";
         let tools = vec![make_tool("web_search")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.content, "Let me search.");
@@ -647,7 +702,7 @@ mod tests {
         let output = "<|tool_call>call:search{query:<|\"|>rust<|\"|>}<tool_call|>\
                        <|tool_call>call:calc{expr:<|\"|>2+2<|\"|>}<tool_call|><turn|>";
         let tools = vec![make_tool("search"), make_tool("calc")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls.len(), 2);
         assert_eq!(result.tool_calls[0].name, "search");
@@ -658,7 +713,7 @@ mod tests {
     fn gemma4_strips_trailing_turn() {
         // Content followed by <turn|> with no tool calls
         let output = "Here is the answer.<turn|>";
-        let result = parse_tool_calls(output, None);
+        let result = parse_tool_calls(output, None, false);
         assert!(!result.content.contains("<turn|>"));
         assert_eq!(result.content, "Here is the answer.");
     }
@@ -668,7 +723,7 @@ mod tests {
         // Content + tool call + <turn|> — content must not contain <turn|>
         let output = "Content<|tool_call>call:fn{key:<|\"|>v<|\"|>}<tool_call|><turn|>";
         let tools = vec![make_tool("fn")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert!(!result.content.contains("<turn|>"));
         assert_eq!(result.content, "Content");
@@ -695,7 +750,7 @@ mod tests {
         // primed, then wrote its real answer. The scratchpad has no matching
         // `<|channel>` in the generated text (the open was in the prompt).
         let input = "*   Goal: …\n    *   Steps …<channel|>Here is the answer.";
-        let result = strip_thinking(input);
+        let result = strip_thinking(input, true);
         assert_eq!(result, "Here is the answer.");
     }
 
@@ -705,7 +760,7 @@ mod tests {
         // The parser below extracts the call; strip_thinking is only
         // responsible for dropping the prompt-primed thinking prefix.
         let input = "thinking about it<channel|><|tool_call>call:fn{k:<|\"|>v<|\"|>}<tool_call|>";
-        let result = strip_thinking(input);
+        let result = strip_thinking(input, true);
         assert_eq!(result, "<|tool_call>call:fn{k:<|\"|>v<|\"|>}<tool_call|>");
     }
 
@@ -714,7 +769,7 @@ mod tests {
         // A close without a preceding open strips; a second balanced
         // `<|channel>…<channel|>` block afterwards strips normally too.
         let input = "prompt thinking<channel|>middle<|channel>more thought<channel|>tail";
-        let result = strip_thinking(input);
+        let result = strip_thinking(input, true);
         assert_eq!(result, "middletail");
     }
 
@@ -724,7 +779,7 @@ mod tests {
     fn parse_minimax_m2_single_call() {
         let output = "<invoke name=\"get_weather\">\n<parameter name=\"location\">Paris</parameter>\n</invoke>";
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].name, "get_weather");
@@ -742,7 +797,7 @@ mod tests {
         // Multiple <invoke> blocks = parallel tool calls (the fix in PR #1171)
         let output = "<invoke name=\"search\">\n<parameter name=\"query\">weather</parameter>\n</invoke>\n<invoke name=\"read_file\">\n<parameter name=\"path\">/tmp/test.txt</parameter>\n</invoke>";
         let tools = vec![make_tool("search"), make_tool("read_file")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls.len(), 2);
         assert_eq!(result.tool_calls[0].name, "search");
@@ -753,7 +808,7 @@ mod tests {
     fn parse_minimax_m2_filters_unknown_tools() {
         let output = "<invoke name=\"unknown_fn\">\n<parameter name=\"k\">v</parameter>\n</invoke>";
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(!result.has_tool_calls());
     }
 
@@ -767,7 +822,7 @@ mod tests {
             "{M3_NS}<tool_call>{M3_NS}<invoke name=\"get_weather\">{M3_NS}<location>Paris{M3_NS}</location>{M3_NS}</invoke>{M3_NS}</tool_call>"
         );
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(&output, Some(&tools));
+        let result = parse_tool_calls(&output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].name, "get_weather");
@@ -791,7 +846,7 @@ mod tests {
              {M3_NS}</tool_call>"
         );
         let tools = vec![make_tool("search"), make_tool("read_file")];
-        let result = parse_tool_calls(&output, Some(&tools));
+        let result = parse_tool_calls(&output, Some(&tools), false);
         assert_eq!(result.tool_calls.len(), 2);
         assert_eq!(result.tool_calls[0].name, "search");
         assert_eq!(result.tool_calls[1].name, "read_file");
@@ -803,7 +858,7 @@ mod tests {
             "{M3_NS}<tool_call>{M3_NS}<invoke name=\"unknown_fn\">{M3_NS}<x>1{M3_NS}</x>{M3_NS}</invoke>{M3_NS}</tool_call>"
         );
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(&output, Some(&tools));
+        let result = parse_tool_calls(&output, Some(&tools), false);
         assert!(!result.has_tool_calls());
     }
 
@@ -814,7 +869,7 @@ mod tests {
         let hermes =
             r#"<tool_call>{"name": "get_weather", "arguments": {"location": "Paris"}}</tool_call>"#;
         let tools = vec![make_tool("get_weather")];
-        let r = parse_tool_calls(hermes, Some(&tools));
+        let r = parse_tool_calls(hermes, Some(&tools), false);
         assert_eq!(
             r.format,
             Some(crate::server::tool_calls::ToolCallFormat::Hermes)
@@ -825,7 +880,7 @@ mod tests {
         // pre-existing order). The M3 parser must not steal it or change this.
         let generic = r#"{"name": "calc", "arguments": {"expr": "2+2"}}"#;
         let tools2 = vec![make_tool("calc")];
-        let r2 = parse_tool_calls(generic, Some(&tools2));
+        let r2 = parse_tool_calls(generic, Some(&tools2), false);
         assert!(r2.has_tool_calls());
         assert_eq!(r2.tool_calls[0].name, "calc");
         assert_ne!(
@@ -843,7 +898,7 @@ mod tests {
                        <|tool_call_begin|>functions.get_weather:0<|tool_call_argument_begin|>{\"location\": \"Paris\"}<|tool_call_end|>\
                        <|tool_calls_section_end|>";
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].name, "get_weather");
@@ -863,7 +918,7 @@ mod tests {
                        <|tool_call_begin|>functions.read_file:1<|tool_call_argument_begin|>{\"path\": \"/tmp/test.txt\"}<|tool_call_end|>\
                        <|tool_calls_section_end|>";
         let tools = vec![make_tool("search"), make_tool("read_file")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert_eq!(result.tool_calls.len(), 2);
         assert_eq!(result.tool_calls[0].name, "search");
         assert_eq!(result.tool_calls[1].name, "read_file");
@@ -875,7 +930,7 @@ mod tests {
                        <|tool_call_begin|>functions.unknown_fn:0<|tool_call_argument_begin|>{}<|tool_call_end|>\
                        <|tool_calls_section_end|>";
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(!result.has_tool_calls());
     }
 
@@ -885,7 +940,7 @@ mod tests {
     fn parse_pythonic_format() {
         let output = r#"<|tool_call_start|>[get_weather(city="Paris", days=2)]<|tool_call_end|>"#;
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].name, "get_weather");
@@ -903,7 +958,7 @@ mod tests {
     fn parse_pythonic_filters_unknown_tools() {
         let output = "<|tool_call_start|>[unknown_fn(x=1)]<|tool_call_end|>";
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(!result.has_tool_calls());
     }
 
@@ -917,7 +972,7 @@ mod tests {
         // also a registered tool, so the parser must still return `search`.
         let output = r#"{"name": "search", "arguments": {"query": "[calc(x=1)]"}}"#;
         let tools = vec![make_tool("search"), make_tool("calc")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(
@@ -939,7 +994,7 @@ mod tests {
         // than a wall of thinking markers when the model ran past budget
         // inside a primed channel.
         let raw = "thinking that never closes the channel";
-        let result = parse_tool_calls(raw, None);
+        let result = parse_tool_calls(raw, None, true);
         // The prep-step in strip_thinking finds no `<channel|>` and leaves
         // text as-is, so for this specific input nothing is stripped.
         assert_eq!(result.content, "thinking that never closes the channel");
@@ -947,7 +1002,7 @@ mod tests {
         // But when the prompt-primed orphan close IS present and consumes
         // everything, content stays empty (no fallback to raw).
         let raw2 = "all thinking<channel|>";
-        let result2 = parse_tool_calls(raw2, None);
+        let result2 = parse_tool_calls(raw2, None, true);
         assert_eq!(result2.content, "");
     }
 
@@ -964,7 +1019,7 @@ mod tests {
     fn qwen3_coder_single_call_single_param() {
         let output = "<tool_call>\n<function=get_weather>\n<parameter=location>\nSan Francisco\n</parameter>\n</function>\n</tool_call>";
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].name, "get_weather");
@@ -977,7 +1032,7 @@ mod tests {
     fn qwen3_coder_single_call_multiple_params_with_type_coercion() {
         let output = "<tool_call><function=search><parameter=query>rust async</parameter><parameter=limit>5</parameter><parameter=fuzzy>true</parameter></function></tool_call>";
         let tools = vec![make_tool("search")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         let args = arg_obj(&result.tool_calls[0]);
         assert_eq!(args["query"], "rust async");
@@ -989,7 +1044,7 @@ mod tests {
     fn qwen3_coder_multiple_calls_in_one_response() {
         let output = "<tool_call><function=read_file><parameter=path>a.rs</parameter></function></tool_call><tool_call><function=read_file><parameter=path>b.rs</parameter></function></tool_call>";
         let tools = vec![make_tool("read_file")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert_eq!(result.tool_calls.len(), 2);
         assert_eq!(arg_obj(&result.tool_calls[0])["path"], "a.rs");
         assert_eq!(arg_obj(&result.tool_calls[1])["path"], "b.rs");
@@ -1001,7 +1056,7 @@ mod tests {
         // must survive into a valid JSON string.
         let output = "<tool_call><function=write_file><parameter=path>main.rs</parameter><parameter=content>\nfn main() {\n    println!(\"hi\");\n}\n</parameter></function></tool_call>";
         let tools = vec![make_tool("write_file")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         let args = arg_obj(&result.tool_calls[0]);
         assert_eq!(args["path"], "main.rs");
@@ -1013,7 +1068,7 @@ mod tests {
         let output =
             "<tool_call><function=set_note><parameter=text></parameter></function></tool_call>";
         let tools = vec![make_tool("set_note")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(arg_obj(&result.tool_calls[0])["text"], "");
     }
@@ -1024,7 +1079,7 @@ mod tests {
         // The good call must still be returned (no panic, no total discard).
         let output = "<tool_call><function=read_file><parameter=path>a.rs</parameter></function></tool_call><tool_call><function=read_file";
         let tools = vec![make_tool("read_file")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(arg_obj(&result.tool_calls[0])["path"], "a.rs");
     }
@@ -1035,7 +1090,7 @@ mod tests {
         // not fall through to raw content.
         let output = "<tool_call><function=list_files></function></tool_call>";
         let tools = vec![make_tool("list_files")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls[0].name, "list_files");
         assert_eq!(result.tool_calls[0].arguments, "{}");
@@ -1048,7 +1103,7 @@ mod tests {
         // by the Qwen3-Coder parser into empty args.
         let output = r#"<function=get_weather>{"location": "Berlin"}</function>"#;
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(arg_obj(&result.tool_calls[0])["location"], "Berlin");
     }
@@ -1064,7 +1119,7 @@ mod tests {
         let output =
             "<|tool_call>call:functions.get_weather{location:<|\"|>Paris<|\"|>}<tool_call|>";
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(
             result.has_tool_calls(),
             "namespaced call should pass the filter"
@@ -1084,7 +1139,7 @@ mod tests {
         // Bare names (no dot) must continue to work as before.
         let output = "<|tool_call>call:get_weather{location:<|\"|>Tokyo<|\"|>}<tool_call|>";
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls[0].name, "get_weather");
     }
@@ -1095,7 +1150,7 @@ mod tests {
         // stripping, so it must be dropped.
         let output = "<|tool_call>call:functions.unknown_fn{key:<|\"|>val<|\"|>}<tool_call|>";
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(
             !result.has_tool_calls(),
             "unknown namespaced call must be dropped"
@@ -1110,7 +1165,7 @@ mod tests {
                       <|start|>assistant<|channel|>commentary to=functions.read_file \
                       <|constrain|>json<|message|>{\"path\": \"/etc/hosts\"}<|call|>";
         let tools = vec![make_tool("read_file")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].name, "read_file");
@@ -1134,7 +1189,7 @@ mod tests {
         let output = "<|channel|>commentary to=functions.unknown_fn \
                       <|constrain|>json<|message|>{}<|call|>";
         let tools = vec![make_tool("read_file")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(!result.has_tool_calls());
     }
 
@@ -1142,7 +1197,7 @@ mod tests {
     fn parse_harmony_no_tools_accepts_all() {
         let output = "<|channel|>commentary to=functions.any_fn \
                       <|constrain|>json<|message|>{\"x\": 1}<|call|>";
-        let result = parse_tool_calls(output, None);
+        let result = parse_tool_calls(output, None, false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls[0].name, "any_fn");
     }
@@ -1153,7 +1208,7 @@ mod tests {
                       <|message|>{\"x\": 1}<|call|><|start|>assistant<|channel|>\
                       commentary to=functions.b <|constrain|>json<|message|>{\"y\": 2}<|call|>";
         let tools = vec![make_tool("a"), make_tool("b")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert_eq!(result.tool_calls.len(), 2);
         assert_eq!(result.tool_calls[0].name, "a");
         assert_eq!(result.tool_calls[1].name, "b");
@@ -1167,7 +1222,7 @@ mod tests {
         let output = "<|channel|>analysis<|message|>Thinking.<|end|><|start|>assistant\
                       <|channel|>final<|message|>Hello there!<|return|>";
         let tools = vec![make_tool("read_file")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(!result.has_tool_calls());
         assert_eq!(result.content, "Hello there!");
         assert_eq!(result.reasoning_content.as_deref(), Some("Thinking."));
@@ -1192,7 +1247,7 @@ mod tests {
         let output = "<tool_call>get_weather\
                       <arg_key>location</arg_key>\n<arg_value>Paris</arg_value>\n</tool_call>";
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls.len(), 1);
         assert_eq!(result.tool_calls[0].name, "get_weather");
@@ -1216,7 +1271,7 @@ mod tests {
             "properties": {"zip": {"type": "string"}}
         });
         let tools = vec![make_tool_with_schema("lookup", schema)];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         let args: serde_json::Value =
             serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
@@ -1229,7 +1284,7 @@ mod tests {
         let output = "<tool_call>unknown_fn\
                       <arg_key>k</arg_key>\n<arg_value>v</arg_value>\n</tool_call>";
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(!result.has_tool_calls());
     }
 
@@ -1241,7 +1296,7 @@ mod tests {
         let output =
             r#"<tool_call>{"name": "get_weather", "arguments": {"location": "Paris"}}</tool_call>"#;
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls[0].name, "get_weather");
         assert_eq!(
@@ -1257,7 +1312,7 @@ mod tests {
                       <longcat_arg_key>location</longcat_arg_key>\n\
                       <longcat_arg_value>Paris</longcat_arg_value>\n</longcat_tool_call>";
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls[0].name, "get_weather");
         assert_eq!(
@@ -1275,7 +1330,7 @@ mod tests {
         // must decline it so the Qwen3-Coder parser in the loop still claims it.
         let output = "<tool_call><function=get_weather><parameter=location>Paris</parameter></function></tool_call>";
         let tools = vec![make_tool("get_weather")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls[0].name, "get_weather");
         assert_eq!(
@@ -1290,7 +1345,7 @@ mod tests {
         // JSON parser, not the GLM parser.
         let output = r#"{"name": "calc", "arguments": {"expr": "2+2"}}"#;
         let tools = vec![make_tool("calc")];
-        let result = parse_tool_calls(output, Some(&tools));
+        let result = parse_tool_calls(output, Some(&tools), false);
         assert!(result.has_tool_calls());
         assert_eq!(result.tool_calls[0].name, "calc");
         assert_ne!(

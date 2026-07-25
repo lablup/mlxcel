@@ -436,12 +436,11 @@ async fn non_stream_chat_completion(
                 .map(|e| e.get_ids().to_vec())
                 .unwrap_or_default();
             if trigger_tokens.len() == 1 && end_tokens.len() == 1 {
-                options.tool_trigger =
-                    Some(crate::server::structured::ToolTriggerConfig {
-                        schema: tool_schema.clone(),
-                        trigger_token_id: trigger_tokens[0],
-                        end_token_id: end_tokens[0],
-                    });
+                options.tool_trigger = Some(crate::server::structured::ToolTriggerConfig {
+                    schema: tool_schema.clone(),
+                    trigger_token_id: trigger_tokens[0],
+                    end_token_id: end_tokens[0],
+                });
             } else {
                 tracing::warn!(
                     "tool_schema present but <tool_call>/</tool_call> not \
@@ -522,7 +521,7 @@ async fn non_stream_chat_completion(
     // Try to parse tool calls from the output
     if tool_calls::should_parse_tool_calls(&request) {
         let tools = request.tools.as_deref();
-        let parsed = tool_calls::parse_tool_calls(&result.text, tools);
+        let parsed = tool_calls::parse_tool_calls(&result.text, tools, primed_open_thinking);
 
         // Harmony (GPT-OSS) carries its `analysis` channel as reasoning inside
         // the parse result; prefer it over the StreamFilter-derived `reasoning`,
@@ -582,7 +581,7 @@ async fn non_stream_chat_completion(
     // (and similar) markers like `<channel|>` / `<turn|>` never leak into
     // plain chat responses.
     let cleaned_text = strip_unclosed_primed_thinking(
-        tool_calls::clean_structural_tokens(&result.text),
+        tool_calls::clean_structural_tokens(&result.text, primed_open_thinking),
         &result.text,
         primed_open_thinking,
     );
@@ -699,12 +698,11 @@ async fn stream_chat_completion(
                 .map(|e| e.get_ids().to_vec())
                 .unwrap_or_default();
             if trigger_tokens.len() == 1 && end_tokens.len() == 1 {
-                options.tool_trigger =
-                    Some(crate::server::structured::ToolTriggerConfig {
-                        schema: tool_schema.clone(),
-                        trigger_token_id: trigger_tokens[0],
-                        end_token_id: end_tokens[0],
-                    });
+                options.tool_trigger = Some(crate::server::structured::ToolTriggerConfig {
+                    schema: tool_schema.clone(),
+                    trigger_token_id: trigger_tokens[0],
+                    end_token_id: end_tokens[0],
+                });
             }
         }
     }
@@ -948,7 +946,8 @@ async fn stream_chat_completion(
 
         if parse_tools && let Ok(cb) = cb_state.lock() {
             let tools_ref = tools_for_parser.as_deref();
-            let parsed = tool_calls::parse_tool_calls(&cb.accumulated, tools_ref);
+            let parsed =
+                tool_calls::parse_tool_calls(&cb.accumulated, tools_ref, primed_open_thinking);
 
             if parsed.has_tool_calls() {
                 // Emit tool call deltas
