@@ -903,7 +903,10 @@ mod tests {
         // SSE chunks. Content after the close stays in `content`.
         let mut f = StreamFilter::new();
         let out = f.feed("<|channel>thought\nReasoning text<channel|>Answer text");
-        assert_eq!(out.reasoning.as_deref(), Some("<|channel>thought\nReasoning text<channel|>"));
+        assert_eq!(
+            out.reasoning.as_deref(),
+            Some("<|channel>thought\nReasoning text<channel|>")
+        );
         assert_eq!(out.content.as_deref(), Some("Answer text"));
     }
 
@@ -978,7 +981,10 @@ mod tests {
         // Content after the close surfaces as `content`.
         let mut f = StreamFilter::new();
         let out = f.feed("<think>reasoning here</think>content");
-        assert_eq!(out.reasoning.as_deref(), Some("<think>reasoning here</think>"));
+        assert_eq!(
+            out.reasoning.as_deref(),
+            Some("<think>reasoning here</think>")
+        );
         assert_eq!(out.content.as_deref(), Some("content"));
         // Markers are preserved in reasoning, absent from content
         assert!(out.reasoning.as_deref().unwrap_or("").contains("<think>"));
@@ -1075,7 +1081,10 @@ mod tests {
         // Gemma 4 will be caught here.
         let mut f = StreamFilter::new();
         let out = f.feed("<|channel>thought\nReasoning text<channel|>Answer text");
-        assert_eq!(out.reasoning.as_deref(), Some("<|channel>thought\nReasoning text<channel|>"));
+        assert_eq!(
+            out.reasoning.as_deref(),
+            Some("<|channel>thought\nReasoning text<channel|>")
+        );
         assert_eq!(out.content.as_deref(), Some("Answer text"));
         assert!(!out.content.as_deref().unwrap_or("").contains("<|channel>"));
         assert!(!out.content.as_deref().unwrap_or("").contains("<channel|>"));
@@ -2026,26 +2035,26 @@ mod tests {
     }
 }
 
-    #[test]
-    fn ds14b_leading_newline_think_close() {
-        // ds-14b scenario: model emits "\n\n</think>The three primary colors..."
-        // with a non-primed filter (Content state). Leading whitespace and
-        // bare </think> should both be suppressed, matching non-stream behavior.
-        let mut f = StreamFilter::new();
-        // Simulate token-by-token delivery
-        let out1 = f.feed("\n");
-        assert_eq!(out1.content, None, "leading \\n trimmed");
-        assert_eq!(out1.reasoning, None);
+#[test]
+fn ds14b_leading_newline_think_close() {
+    // ds-14b scenario: model emits "\n\n</think>The three primary colors..."
+    // with a non-primed filter (Content state). Leading whitespace and
+    // bare </think> should both be suppressed, matching non-stream behavior.
+    let mut f = StreamFilter::new();
+    // Simulate token-by-token delivery
+    let out1 = f.feed("\n");
+    assert_eq!(out1.content, None, "leading \\n trimmed");
+    assert_eq!(out1.reasoning, None);
 
-        let out2 = f.feed("\n");
-        assert_eq!(out2.content, None, "second \\n trimmed");
-        assert_eq!(out2.reasoning, None);
+    let out2 = f.feed("\n");
+    assert_eq!(out2.content, None, "second \\n trimmed");
+    assert_eq!(out2.reasoning, None);
 
-        let out3 = f.feed("</think>");
-        assert_eq!(out3.content, None, "</think> suppressed in Content state");
-        assert_eq!(out3.reasoning, None, "</think> not routed to reasoning");
+    let out3 = f.feed("</think>");
+    assert_eq!(out3.content, None, "</think> suppressed in Content state");
+    assert_eq!(out3.reasoning, None, "</think> not routed to reasoning");
 
-        let out4 = f.feed("The three primary colors");
-        assert_eq!(out4.content.as_deref(), Some("The three primary colors"));
-        assert_eq!(out4.reasoning, None);
-    }
+    let out4 = f.feed("The three primary colors");
+    assert_eq!(out4.content.as_deref(), Some("The three primary colors"));
+    assert_eq!(out4.reasoning, None);
+}

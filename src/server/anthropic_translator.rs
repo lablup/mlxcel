@@ -152,7 +152,7 @@ pub fn anthropic_request_to_chat(request: &AnthropicRequest) -> AnthropicTransla
             .map(|s| s.to_string()),
         extra_body_fields: serde_json::Map::new(),
         response_format: None,
-            tool_schema: None,
+        tool_schema: None,
         params,
     };
 

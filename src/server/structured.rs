@@ -796,10 +796,8 @@ pub fn apply_structured_mask_to_logits(
                 );
                 constraint.bias_buf.clear();
                 constraint.bias_buf.resize(vocab_size, f32::NEG_INFINITY);
-                let bias_arr = mlxcel_core::from_slice_f32(
-                    &constraint.bias_buf,
-                    &[1, vocab_size as i32],
-                );
+                let bias_arr =
+                    mlxcel_core::from_slice_f32(&constraint.bias_buf, &[1, vocab_size as i32]);
                 return Ok(mlxcel_core::add(logits, &bias_arr));
             }
             // Diagnostic: log matcher state when it dead-ends (not stopped).

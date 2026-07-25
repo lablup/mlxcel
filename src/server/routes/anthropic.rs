@@ -175,6 +175,12 @@ async fn non_stream_messages(
         Err(err) => return AnthropicErrorResponse::bad_request(err.to_string()).into_response(),
     };
 
+    // Whether the rendered prompt left a thinking block open. Captured before
+    // `prepared.prompt` is moved into the generate call below. A bare close
+    // marker in the output may only be treated as the close of an implicit open
+    // when this is true — otherwise it is literal text the user asked for.
+    let primed_open_thinking =
+        crate::server::routes::chat::is_prompt_primed_open_thinking(&prepared.prompt);
     let mut options = build_generate_options(&translated.chat_request.params, &state.config);
     options.priority = priority;
     // per-request Gemma 4 image soft-token budget, resolved and validated from
@@ -222,6 +228,7 @@ async fn non_stream_messages(
         Some(tool_calls::parse_tool_calls(
             &result.text,
             translated.chat_request.tools.as_deref(),
+            primed_open_thinking,
         ))
     } else {
         None
@@ -232,7 +239,7 @@ async fn non_stream_messages(
         .map(|p| p.tool_calls.clone());
 
     let (visible_text, reasoning_text) =
-        split_visible_reasoning(&result.text, parsed_tools.as_ref());
+        split_visible_reasoning(&result.text, parsed_tools.as_ref(), primed_open_thinking);
 
     // Anthropic stop sequences: truncate visible text defensively (the
     // scheduler already halts on native stop sequences, but a match may
@@ -297,6 +304,10 @@ async fn stream_messages(
         Err(err) => return AnthropicErrorResponse::bad_request(err.to_string()).into_response(),
     };
 
+    // Whether the rendered prompt left a thinking block open; see the
+    // non-streaming handler above.
+    let primed_open_thinking =
+        crate::server::routes::chat::is_prompt_primed_open_thinking(&prepared.prompt);
     let mut options = build_generate_options(&translated.chat_request.params, &state.config);
     options.priority = priority;
     // per-request Gemma 4 image soft-token budget, resolved and validated from
@@ -460,6 +471,7 @@ async fn stream_messages(
             Some(tool_calls::parse_tool_calls(
                 &full_raw,
                 tools_for_parser.as_deref(),
+                primed_open_thinking,
             ))
         } else {
             None
@@ -575,28 +587,31 @@ pub async fn anthropic_count_tokens(
 fn split_visible_reasoning(
     raw: &str,
     parsed: Option<&tool_calls::ToolCallParseResult>,
+    primed: bool,
 ) -> (String, Option<String>) {
     // Harmony (GPT-OSS) carries its `analysis` channel as reasoning inside the
     // parse result; prefer it, falling back to the raw `<think>` scan for
     // families whose reasoning is a separable block.
     let reasoning = parsed
         .and_then(|p| p.reasoning_content.clone())
-        .or_else(|| extract_reasoning_from_raw(raw));
+        .or_else(|| extract_reasoning_from_raw(raw, primed));
     let visible_source = match parsed {
         Some(p) => p.content.clone(),
-        None => tool_calls::clean_structural_tokens(raw),
+        None => tool_calls::clean_structural_tokens(raw, primed),
     };
-    let visible = if let Some((_, after_close)) = visible_source.split_once("</think>") {
-        after_close.trim_start().to_string()
-    } else {
-        visible_source.trim_start().to_string()
+    // Gated on `primed`: without an open marker in the prompt a `</think>` in
+    // the output is literal text the user asked the model to quote, and
+    // splitting on it would delete the front of the answer.
+    let visible = match visible_source.split_once("</think>") {
+        Some((_, after_close)) if primed => after_close.trim_start().to_string(),
+        _ => visible_source.trim_start().to_string(),
     };
     (visible, reasoning)
 }
 
 /// Recover the reasoning chunk from raw output (inline `<think>...</think>`
 /// or open-primed close-only `...</think>`). Returns `None` when empty.
-fn extract_reasoning_from_raw(raw: &str) -> Option<String> {
+fn extract_reasoning_from_raw(raw: &str, primed: bool) -> Option<String> {
     if let Some(rest) = raw.strip_prefix("<think>")
         && let Some(end) = rest.find("</think>")
     {
@@ -607,7 +622,7 @@ fn extract_reasoning_from_raw(raw: &str) -> Option<String> {
             Some(reason.to_string())
         };
     }
-    if let Some(end) = raw.find("</think>") {
+    if primed && let Some(end) = raw.find("</think>") {
         let reason = raw[..end].trim();
         return if reason.is_empty() {
             None
@@ -624,29 +639,30 @@ mod tests {
 
     #[test]
     fn split_no_think_returns_cleaned() {
-        let (visible, reasoning) = split_visible_reasoning("hello world", None);
+        let (visible, reasoning) = split_visible_reasoning("hello world", None, false);
         assert_eq!(visible, "hello world");
         assert_eq!(reasoning, None);
     }
 
     #[test]
     fn split_inline_think_block() {
-        let (visible, reasoning) = split_visible_reasoning("<think>reasoning</think>answer", None);
+        let (visible, reasoning) =
+            split_visible_reasoning("<think>reasoning</think>answer", None, false);
         assert_eq!(visible, "answer");
         assert_eq!(reasoning.as_deref(), Some("reasoning"));
     }
 
     #[test]
     fn split_open_primed_close_only() {
-        let (visible, reasoning) = split_visible_reasoning("trace text</think>final", None);
+        let (visible, reasoning) = split_visible_reasoning("trace text</think>final", None, true);
         assert_eq!(visible, "final");
         assert_eq!(reasoning.as_deref(), Some("trace text"));
     }
 
     #[test]
     fn extract_reasoning_empty_yields_none() {
-        assert_eq!(extract_reasoning_from_raw("</think>x"), None);
-        assert_eq!(extract_reasoning_from_raw("<think></think>x"), None);
+        assert_eq!(extract_reasoning_from_raw("</think>x", true), None);
+        assert_eq!(extract_reasoning_from_raw("<think></think>x", false), None);
     }
 
     #[test]
@@ -663,7 +679,7 @@ mod tests {
             reasoning_content: Some("analysis scratchpad".to_string()),
         };
         let (visible, reasoning) =
-            split_visible_reasoning("<|channel|>analysis<|message|>x", Some(&parsed));
+            split_visible_reasoning("<|channel|>analysis<|message|>x", Some(&parsed), false);
         assert_eq!(visible, "");
         assert_eq!(reasoning.as_deref(), Some("analysis scratchpad"));
     }

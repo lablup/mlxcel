@@ -131,7 +131,7 @@ fn make_test_sequence() -> (SequenceInfo, mpsc::Receiver<GenerateEvent>) {
         merged_eos: Vec::new(),
         thinking: ThinkingState::disabled(),
         structured: None,
-            tool_trigger: None,
+        tool_trigger: None,
     };
 
     (seq, rx)

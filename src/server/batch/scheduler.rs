@@ -4885,7 +4885,8 @@ impl BatchScheduler {
         }
 
         // Batched prefill never carries injected VLM embeddings, hence `false`.
-        let padded_len = if prefill_padding_allowed(should_align_prefill(), can_pad_prefill, false) {
+        let padded_len = if prefill_padding_allowed(should_align_prefill(), can_pad_prefill, false)
+        {
             align_to_na_tile(max_len)
         } else {
             max_len
@@ -5077,25 +5078,25 @@ impl BatchScheduler {
             self.model.supports_padded_prefill(),
             seq.vlm_embeddings.is_some(),
         ) {
-                let padded_len = align_to_na_tile(actual_len);
-                if padded_len > actual_len {
-                    let mut padded = suffix_tokens.clone();
-                    padded.resize(padded_len, 0);
-                    // The padding mask anchors to the adopted cache offset so
-                    // the newly-prefilled positions see the correct KV-history
-                    // positions on M5+ hardware.
-                    let mask = create_padded_prefill_mask(
-                        actual_len as i32,
-                        padded_len as i32,
-                        seq.prefill_start_offset as i32,
-                    );
-                    (padded, Some(mask))
-                } else {
-                    (suffix_tokens.clone(), None)
-                }
+            let padded_len = align_to_na_tile(actual_len);
+            if padded_len > actual_len {
+                let mut padded = suffix_tokens.clone();
+                padded.resize(padded_len, 0);
+                // The padding mask anchors to the adopted cache offset so
+                // the newly-prefilled positions see the correct KV-history
+                // positions on M5+ hardware.
+                let mask = create_padded_prefill_mask(
+                    actual_len as i32,
+                    padded_len as i32,
+                    seq.prefill_start_offset as i32,
+                );
+                (padded, Some(mask))
             } else {
                 (suffix_tokens.clone(), None)
-            };
+            }
+        } else {
+            (suffix_tokens.clone(), None)
+        };
 
         let eff_len = effective_tokens.len() as i32;
         let input = mlxcel_core::from_slice_i32(&effective_tokens, &[1, eff_len]);
