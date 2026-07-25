@@ -1070,6 +1070,76 @@ pub struct VerifyOutput {
     pub gdn_states: Vec<GdnRollbackSnapshot>,
 }
 
+/// Whether MLXCEL_QWEN35_NAN_PROBE=1 asked for per-layer finiteness logging.
+///
+/// Diagnostic for the Qwen3.5 decode collapse: correct output for ~10 tokens,
+/// then every logit goes NaN and argmax pins to token 0 ("!"). Reports the
+/// first `(step, layer)` whose hidden state stops being finite, which names the
+/// layer family responsible without a full differential against mlx-vlm.
+fn nan_probe_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("MLXCEL_QWEN35_NAN_PROBE")
+            .is_ok_and(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+    })
+}
+
+/// Forward-pass counter, so the probe can label decode steps.
+static NAN_PROBE_STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Log `sum(|h|)` and stop the run at the first non-finite hidden state.
+///
+/// `sum(|h|)` is deliberately a whole-tensor reduction: any single NaN/Inf
+/// element poisons the sum, so one scalar per layer is enough to localize the
+/// first bad layer. Only compiled into the hot path behind `nan_probe_enabled`.
+fn nan_probe_report(layer_idx: usize, kind: &str, h: &MlxArray) {
+    // Reduce over the LAST POSITION ONLY. A whole-tensor sum is not comparable
+    // between a T-token prefill and a 1-token decode step, which is exactly the
+    // comparison this probe exists to make: prefill "<ctx> X" and
+    // prefill "<ctx>" + decode "X" must produce identical hidden states at the
+    // position holding X. The first layer where they differ is the bug.
+    // NOTE: prefill is PADDED (a 5-token prompt arrives as [1, 32, H]), so the
+    // final position is padding, not the last real token. Set
+    // MLXCEL_QWEN35_PROBE_POS=<i> to pin the probe to a known content position;
+    // otherwise fall back to the last position (correct for T=1 decode).
+    let shape = mlxcel_core::array_shape(h);
+    let last = if shape.len() == 3 && shape[1] > 1 {
+        let (b, s, hidden) = (shape[0], shape[1], shape[2]);
+        let pos = std::env::var("MLXCEL_QWEN35_PROBE_POS")
+            .ok()
+            .and_then(|v| v.parse::<i32>().ok())
+            .filter(|p| *p >= 0 && *p < s)
+            .unwrap_or(s - 1);
+        mlxcel_core::slice(h, &[0, pos, 0], &[b, pos + 1, hidden])
+    } else {
+        mlxcel_core::copy(h)
+    };
+    // Promote to f32 BEFORE reducing: `item_f32` reinterprets the scalar's
+    // bits, so summing in bf16 and reading as f32 yields denormal garbage
+    // (~1e-41) and unreliable NaN detection. Also avoids bf16 overflow to Inf
+    // on a sum, which would be a false positive.
+    let h32 = mlxcel_core::astype(&last, dtype::FLOAT32);
+    let total = mlxcel_core::item_f32(&mlxcel_core::sum_all(&mlxcel_core::abs(&h32)));
+    let step = if layer_idx == usize::MAX {
+        NAN_PROBE_STEP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    } else {
+        NAN_PROBE_STEP
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .saturating_sub(1)
+    };
+    let label = if layer_idx == usize::MAX {
+        "embed".to_string()
+    } else {
+        format!("layer{layer_idx:02}/{kind}")
+    };
+    let shape_str = format!("{shape:?}");
+    if !total.is_finite() {
+        eprintln!("[nan-probe] step={step} {label} shape={shape_str} sum|h|={total} <-- NON-FINITE");
+    } else {
+        eprintln!("[nan-probe] step={step} {label} shape={shape_str} sum|h|={total:.4e}");
+    }
+}
+
 // Qwen3.5 Model.
 pub struct Qwen35Model {
     pub(crate) embed_tokens: UnifiedEmbedding,
@@ -1122,13 +1192,20 @@ impl Qwen35Model {
         // The only case needing a non-None SSM mask is resuming prefill after
         // partial generation, which is rare and can be added later.
 
-        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
+        let probe = nan_probe_enabled();
+        if probe {
+            nan_probe_report(usize::MAX, "embed", &h);
+        }
+        for (idx, (layer, cache)) in self.layers.iter().zip(caches.iter_mut()).enumerate() {
             let mask = if layer.is_linear {
                 None
             } else {
                 fa_mask.as_deref()
             };
             h = layer.forward(&h, mask, cache, position_ids);
+            if probe {
+                nan_probe_report(idx, if layer.is_linear { "gdn" } else { "attn" }, &h);
+            }
         }
 
         let h = self.norm.forward(&h);
