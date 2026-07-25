@@ -287,7 +287,7 @@ fn make_slice_sequence_with_id(
         merged_eos: Vec::new(),
         thinking: ThinkingState::disabled(),
         structured: None,
-            tool_trigger: None,
+        tool_trigger: None,
     };
     (seq, rx)
 }

@@ -1134,7 +1134,9 @@ fn nan_probe_report(layer_idx: usize, kind: &str, h: &MlxArray) {
     };
     let shape_str = format!("{shape:?}");
     if !total.is_finite() {
-        eprintln!("[nan-probe] step={step} {label} shape={shape_str} sum|h|={total} <-- NON-FINITE");
+        eprintln!(
+            "[nan-probe] step={step} {label} shape={shape_str} sum|h|={total} <-- NON-FINITE"
+        );
     } else {
         eprintln!("[nan-probe] step={step} {label} shape={shape_str} sum|h|={total:.4e}");
     }

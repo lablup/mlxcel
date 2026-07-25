@@ -39,7 +39,7 @@ fn request_with_messages(messages: Vec<Message>) -> ChatCompletionRequest {
         user: None,
         extra_body_fields: serde_json::Map::new(),
         response_format: None,
-            tool_schema: None,
+        tool_schema: None,
         params: SamplingParams::default(),
     }
 }
@@ -553,7 +553,7 @@ fn build_raw_json_messages_includes_tool_fields() {
         user: None,
         extra_body_fields: serde_json::Map::new(),
         response_format: None,
-            tool_schema: None,
+        tool_schema: None,
         params: SamplingParams::default(),
     };
 
@@ -604,7 +604,7 @@ fn req_with_tool_call_arguments(arguments: &str) -> ChatCompletionRequest {
         user: None,
         extra_body_fields: serde_json::Map::new(),
         response_format: None,
-            tool_schema: None,
+        tool_schema: None,
         params: SamplingParams::default(),
     }
 }
@@ -1090,7 +1090,7 @@ async fn prefix_stability_across_turns_when_preserve_thinking_true() {
         user: None,
         extra_body_fields: serde_json::Map::new(),
         response_format: None,
-            tool_schema: None,
+        tool_schema: None,
         params: SamplingParams::default(),
     };
     let request_t3 = ChatCompletionRequest {
@@ -1109,7 +1109,7 @@ async fn prefix_stability_across_turns_when_preserve_thinking_true() {
         user: None,
         extra_body_fields: serde_json::Map::new(),
         response_format: None,
-            tool_schema: None,
+        tool_schema: None,
         params: SamplingParams::default(),
     };
 
@@ -1790,7 +1790,7 @@ async fn chat_request_drops_temp_files_on_completion() {
         user: None,
         extra_body_fields: serde_json::Map::new(),
         response_format: None,
-            tool_schema: None,
+        tool_schema: None,
         params: SamplingParams::default(),
     };
 
