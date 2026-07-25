@@ -101,6 +101,16 @@ pub(super) fn classify_snapshot(dir: &Path) -> SnapshotState {
     }
 }
 
+/// Boolean shorthand for "[`classify_snapshot`] says this directory is safe to
+/// hand to the model loader".
+///
+/// Exists so reuse gates that only need a yes/no answer — notably the
+/// HuggingFace-cache probe in [`super::store::hf_cache_snapshot_complete`] —
+/// can share the one full-weight gate instead of re-deriving a weaker one.
+pub(super) fn is_complete(dir: &Path) -> bool {
+    matches!(classify_snapshot(dir), SnapshotState::Complete)
+}
+
 /// Completeness verdict for a sharded snapshot given the shard names its index
 /// references.
 fn classify_sharded(dir: &Path, shards: &[String]) -> SnapshotState {

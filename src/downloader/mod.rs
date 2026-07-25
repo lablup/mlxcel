@@ -92,9 +92,9 @@ pub use resolver::normalize_repo_id;
 pub use resolver::resolve_model_source;
 pub use resolver::resolve_model_source_with_override;
 pub use store::{
-    RemoveError, RemoveOutcome, StoredModel, dir_size, hf_cache_snapshot, list_models,
-    list_models_with_override, model_dir, model_dir_with_override, models_root, remove_model,
-    remove_model_with_override, store_root,
+    RemoveError, RemoveOutcome, StoredModel, dir_size, hf_cache_snapshot,
+    hf_cache_snapshot_complete, list_models, list_models_with_override, model_dir,
+    model_dir_with_override, models_root, remove_model, remove_model_with_override, store_root,
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -637,9 +637,15 @@ fn download_repo_blocking(opts: DownloadOptions) -> Result<()> {
     // The reuse is strictly read-only — we never write into the HF
     // content-addressed layout. An explicit `--local-dir` keeps "write here"
     // semantics and bypasses this short-circuit entirely.
+    //
+    // "Complete" here means the full-weight gate, not merely `config.json`: a
+    // partial HF snapshot must not make `download` report success and skip the
+    // fetch, leaving the user a broken model and no way to repair it short of
+    // `--force`.
     if opts.local_dir.is_none()
         && !opts.force
-        && let Some(hf_snapshot) = store::hf_cache_snapshot(&opts.repo_id, opts.revision.as_deref())
+        && let Some(hf_snapshot) =
+            store::hf_cache_snapshot_complete(&opts.repo_id, opts.revision.as_deref())
     {
         println!(
             "[mlxcel download] repo={} revision={} already present in HuggingFace cache; \
