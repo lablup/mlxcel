@@ -2038,6 +2038,24 @@ fn read_clip_triple(config: Option<&Value>, key: &str) -> Option<[f32; 3]> {
         })
 }
 
+fn molmo2_vision_config_sections(full_config: &Value) -> (&Value, &Value) {
+    // Official Molmo2 exports carry an empty `vision_config` compatibility
+    // object alongside the authoritative top-level sections. Prefer those
+    // explicit sections so the empty wrapper cannot trigger fallback depths.
+    let nested = full_config.get("vision_config");
+    let vit_config = full_config
+        .get("vit_config")
+        .or_else(|| nested.and_then(|config| config.get("vit_config")))
+        .or_else(|| nested.filter(|config| config.get("num_hidden_layers").is_some()))
+        .unwrap_or(full_config);
+    let adapter_config = full_config
+        .get("adapter_config")
+        .or_else(|| nested.and_then(|config| config.get("adapter_config")))
+        .or_else(|| nested.filter(|config| config.get("vit_layers").is_some()))
+        .unwrap_or(full_config);
+    (vit_config, adapter_config)
+}
+
 fn build_molmo2_vision_model(
     weights: &WeightMap,
     full_config: &Value,
@@ -2045,9 +2063,7 @@ fn build_molmo2_vision_model(
 ) -> Result<vision::encoders::molmo2::Molmo2VisionModel> {
     use vision::encoders::molmo2::Molmo2VisionModel;
 
-    let vision_config = full_config.get("vision_config").unwrap_or(full_config);
-    let vit_config = vision_config.get("vit_config").unwrap_or(vision_config);
-    let adapter_config = vision_config.get("adapter_config").unwrap_or(vision_config);
+    let (vit_config, adapter_config) = molmo2_vision_config_sections(full_config);
     let vit_hidden_act = vit_config
         .get("hidden_act")
         .and_then(Value::as_str)
