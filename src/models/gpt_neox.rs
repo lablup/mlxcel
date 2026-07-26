@@ -294,16 +294,26 @@ impl ModelArgs {
         self.validate_rope()
     }
 
-    /// Reject RoPE parameters that MLX would accept and then read out of bounds
-    /// on, or that would poison every rotated channel with NaN.
+    /// Reject RoPE parameters that would abort the process at the first forward
+    /// pass, or that would poison every rotated channel with NaN.
     ///
-    /// `mlx::core::fast::rope` checks the input rank, dtype and offset but does
-    /// **not** check `dims` against the size of the last axis, so a `dims`
-    /// larger than `head_dim` reaches the Metal kernel and indexes past the end
-    /// of each head, and a negative `dims` reaches it as a negative extent.
-    /// Neither is a Rust-side error: an MLX C++ exception crossing the cxx
-    /// bridge is an uncatchable `std::terminate`, and the out-of-range read does
-    /// not throw at all.
+    /// `mlx::core::fast::rope` does validate its `dims` argument: it throws when
+    /// `dims` is not positive, when `dims` is odd, and when `dims` exceeds the
+    /// size of the input's last axis. None of that is usable as a Rust-side
+    /// error. The throw is a C++ `std::invalid_argument`, and `fast_rope` is
+    /// declared across the cxx bridge as returning `UniquePtr<MlxArray>` rather
+    /// than a `Result`, so it becomes an uncatchable `std::terminate` (SIGABRT).
+    /// It also fires at the first forward pass rather than at load, so an
+    /// unchecked config loads cleanly and then takes the whole process down on
+    /// the first request. Every value MLX would throw on is therefore rejected
+    /// here instead, at load, by a message that names `rotary_pct`.
+    ///
+    /// Evenness is part of that contract and is not a formality: RoPE rotates
+    /// channel *pairs*, so an odd `dims` has no meaning. HuggingFace
+    /// `GPTNeoXRotaryEmbedding` splits at `dims // 2` and silently drops the odd
+    /// channel; MLX refuses outright. No published checkpoint produces one,
+    /// since every `head_dim` and `rotary_pct` in this family multiplies out
+    /// even, so rejecting costs nothing a real checkpoint needs.
     ///
     /// `rotary_pct` is a float, which widens what a hostile config can express
     /// beyond the integer fields. The `as i32` cast in [`ModelArgs::rope_dims`]
@@ -326,13 +336,27 @@ impl ModelArgs {
         }
         let head_dim = self.head_dim();
         let rope_dims = self.rope_dims();
-        let in_range = usize::try_from(rope_dims).is_ok_and(|dims| dims >= 1 && dims <= head_dim);
-        if !in_range {
+        // A negative `rope_dims` fails the conversion; folding it to zero puts
+        // it in the same arm as a zero one, which MLX refuses for the same
+        // reason.
+        let dims = usize::try_from(rope_dims).unwrap_or(0);
+        if dims == 0 || dims > head_dim {
             return Err(format!(
                 "GPT-NeoX rotary_pct ({}) gives {rope_dims} rotary dimensions for a head of width \
-                 {head_dim}; it must be between 1 and {head_dim}. MLX does not range-check the \
-                 rope `dims` argument against the last axis, so an out-of-range value reads past \
-                 the end of each head instead of faulting.",
+                 {head_dim}; it must be an even number between 2 and {head_dim}. MLX throws on a \
+                 rope `dims` outside that range, and an MLX C++ exception crossing the cxx bridge \
+                 is an uncatchable `std::terminate` at the first forward pass rather than a load \
+                 error.",
+                self.rotary_pct
+            ));
+        }
+        if !dims.is_multiple_of(2) {
+            return Err(format!(
+                "GPT-NeoX rotary_pct ({}) gives an odd rotary dimension count ({rope_dims}) for a \
+                 head of width {head_dim}; RoPE rotates channel pairs, so the rope `dims` must be \
+                 even. MLX throws on an odd `dims`, and an MLX C++ exception crossing the cxx \
+                 bridge is an uncatchable `std::terminate` at the first forward pass rather than a \
+                 load error.",
                 self.rotary_pct
             ));
         }
@@ -352,8 +376,8 @@ impl ModelArgs {
     /// copies the remainder through.
     ///
     /// The cast saturates rather than wrapping, and
-    /// [`ModelArgs::validate_rope`] rejects everything outside `1..=head_dim`
-    /// before the value can reach a kernel.
+    /// [`ModelArgs::validate_rope`] rejects everything that is not an even value
+    /// in `2..=head_dim` before it can reach a kernel.
     pub fn rope_dims(&self) -> i32 {
         (self.rotary_pct * self.head_dim() as f32) as i32
     }
@@ -686,7 +710,7 @@ pub struct Attention {
     pub num_heads: i32,
     pub head_dim: i32,
     pub scale: f32,
-    /// Channels per head that RoPE rotates. Strictly between 1 and `head_dim`;
+    /// Channels per head that RoPE rotates. An even value in `2..=head_dim`;
     /// see [`ModelArgs::rope_dims`].
     pub rope_dims: i32,
     pub rope_base: f32,

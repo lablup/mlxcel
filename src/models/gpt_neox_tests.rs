@@ -287,11 +287,14 @@ fn config_validation_rejects_hostile_scalars() {
 
 #[test]
 fn config_validation_rejects_out_of_range_rope_parameters() {
-    // `rotary_pct` is the first float this family lets a config author control,
-    // and MLX does not range-check `rope`'s `dims` argument against the last
-    // axis: an out-of-range value reads past the end of each head rather than
-    // faulting, and the result reaches the logits.
-    let float_cases: [(&str, &str); 4] = [
+    // `rotary_pct` is the first float this family lets a config author control.
+    // MLX does check `rope`'s `dims` (positive, even, and no larger than the
+    // last axis), but it checks by throwing, and an MLX C++ exception crossing
+    // the cxx bridge is an uncatchable `std::terminate`: the process dies with
+    // SIGABRT at the first forward pass, after the model has already loaded and
+    // a server has already accepted it. Every value MLX would throw on has to be
+    // rejected here instead, at load.
+    let float_cases: [(&str, &str); 6] = [
         // int(256 * 0.0) == 0 rotary dimensions.
         (
             r#"{"model_type": "gpt_neox", "rotary_pct": 0.0}"#,
@@ -310,6 +313,18 @@ fn config_validation_rejects_out_of_range_rope_parameters() {
         (
             r#"{"model_type": "gpt_neox", "rotary_pct": 1.5}"#,
             "rotary_pct",
+        ),
+        // Odd, which MLX refuses outright ("[rope] dims must be even"): RoPE
+        // rotates channel pairs. On a 4-wide head int(4 * 0.75) == 3.
+        (
+            r#"{"model_type": "gpt_neox", "hidden_size": 8, "num_attention_heads": 2,
+                "rotary_pct": 0.75}"#,
+            "even",
+        ),
+        // The same at Pythia's head width: int(256 * (3 / 256)) == 3.
+        (
+            r#"{"model_type": "gpt_neox", "rotary_pct": 0.01171875}"#,
+            "even",
         ),
     ];
     for (config, expected) in float_cases {
@@ -353,14 +368,88 @@ fn config_validation_rejects_out_of_range_rope_parameters() {
         );
     }
 
-    // The exact boundaries stay accepted.
+    // The exact boundaries stay accepted. The floor is two rotary dimensions,
+    // not one: a single dimension is odd, and MLX refuses an odd `dims`.
     let mut args: ModelArgs = serde_json::from_str(PYTHIA_1B_CONFIG).expect("parses");
     args.rotary_pct = 1.0;
     assert_eq!(args.rope_dims(), 256);
     assert!(args.validate().is_ok());
+    args.rotary_pct = 2.0 / 256.0;
+    assert_eq!(args.rope_dims(), 2);
+    assert!(args.validate().is_ok());
+
     args.rotary_pct = 1.0 / 256.0;
     assert_eq!(args.rope_dims(), 1);
-    assert!(args.validate().is_ok());
+    let err = args
+        .validate()
+        .expect_err("one rotary dimension is odd, and MLX refuses an odd rope `dims`");
+    assert!(err.contains("even"), "unhelpful error: {err}");
+}
+
+#[test]
+fn every_accepted_rotary_pct_survives_a_real_rope_call() {
+    // `validate_rope` exists because MLX enforces its `dims` contract by
+    // throwing, and a throw crossing the cxx bridge is an uncatchable
+    // `std::terminate` rather than a Rust error. That makes the guard's
+    // agreement with MLX load-bearing in a way an ordinary range check is not:
+    // if it ever accepts a value MLX refuses, the production failure is a
+    // SIGABRT on the first request, not a rejected load.
+    //
+    // So sweep `rotary_pct` and put every accepted value through a real
+    // `fast_rope` call on a head-shaped array. Accepting too much aborts this
+    // test binary, which is the loudest possible signal; accepting too little
+    // trips the count assertions below.
+    let mut args = tiny_args();
+    let head_dim = args.head_dim() as i32;
+    assert_eq!(head_dim, 4);
+
+    let mut accepted = Vec::new();
+    for step in 0..=400 {
+        args.rotary_pct = step as f32 / 100.0;
+        if args.validate().is_err() {
+            continue;
+        }
+        accepted.push(args.rope_dims());
+        let q = counting(&[1, 2, 1, head_dim]);
+        let rotated =
+            mlxcel_core::fast_rope(&q, args.rope_dims(), false, args.rotary_emb_base, 1.0, 3);
+        assert_eq!(mlxcel_core::array_shape(&rotated), vec![1, 2, 1, head_dim]);
+    }
+    assert!(
+        accepted.iter().all(|d| *d == 2 || *d == 4),
+        "a 4-wide head admits exactly the even counts 2 and 4, got {accepted:?}"
+    );
+    assert!(accepted.contains(&2) && accepted.contains(&4));
+
+    // The same sweep at Pythia's head width, walking the derived dimension
+    // count one at a time so every odd value is actually offered to the guard.
+    let mut pythia: ModelArgs = serde_json::from_str(PYTHIA_1B_CONFIG).expect("parses");
+    let head_dim = pythia.head_dim() as i32;
+    assert_eq!(head_dim, 256);
+    let mut accepted = 0;
+    for dims in 1..=head_dim {
+        pythia.rotary_pct = dims as f32 / head_dim as f32;
+        if pythia.validate().is_err() {
+            continue;
+        }
+        assert_eq!(
+            pythia.rope_dims() % 2,
+            0,
+            "an odd dims must never be accepted"
+        );
+        accepted += 1;
+        let q = counting(&[1, 1, 1, head_dim]);
+        let rotated = mlxcel_core::fast_rope(
+            &q,
+            pythia.rope_dims(),
+            false,
+            pythia.rotary_emb_base,
+            1.0,
+            0,
+        );
+        assert_eq!(mlxcel_core::array_shape(&rotated), vec![1, 1, 1, head_dim]);
+    }
+    assert_eq!(accepted, 128, "exactly the even counts 2..=256 are legal");
 }
 
 // Synthetic checkpoints.
