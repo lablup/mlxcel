@@ -18,6 +18,7 @@ pub(super) struct SscpOutput {
     pub conv0_norm_variance: Val,
     pub conv0_norm_stabilized_variance: Val,
     pub conv0_norm_inverse_stddev: Val,
+    pub conv0_norm_inverse_stddev_sqrt_reciprocal: Val,
     pub conv0_norm: Val,
     pub conv0: Val,
     pub conv1_convolution: Val,
@@ -37,6 +38,7 @@ struct SscpConvStages {
     norm_variance: Val,
     norm_stabilized_variance: Val,
     norm_inverse_stddev: Val,
+    norm_inverse_stddev_sqrt_reciprocal: Val,
     norm: Val,
     activated: Val,
 }
@@ -50,6 +52,7 @@ struct CumulativeGroupNormStages {
     variance: Val,
     stabilized_variance: Val,
     inverse_stddev: Val,
+    inverse_stddev_sqrt_reciprocal: Val,
     output: Val,
 }
 
@@ -97,6 +100,14 @@ fn cumulative_group_norm(
     let epsilon = super::gemma3n_audio_math::scalar_like(b, eps, &variance);
     let stabilized_variance = b.add(&variance, &epsilon);
     let inverse_stddev = b.rsqrt(&stabilized_variance);
+    // CUDA MLX lowers `rsqrtf(f32)` to the target-specific
+    // `rsqrt.approx.f32` instruction. StableHLO has no portable spelling for
+    // that approximation. Keep the production path on `stablehlo.rsqrt`, and
+    // expose the precise sqrt-then-reciprocal ordering as a diagnostic
+    // candidate so one actual run can distinguish the two lowering semantics.
+    let sqrt = b.sqrt(&stabilized_variance);
+    let one = super::gemma3n_audio_math::scalar_like(b, 1.0, &sqrt);
+    let inverse_stddev_sqrt_reciprocal = b.divide(&one, &sqrt);
     let inverse = b.broadcast(&inverse_stddev, &[0, 1, 2, 3], x.ty.shape.clone());
     let normalized = b.multiply(&centered, &inverse);
     let weight = b.broadcast(weight, &[3], x.ty.shape.clone());
@@ -111,6 +122,7 @@ fn cumulative_group_norm(
         variance,
         stabilized_variance,
         inverse_stddev,
+        inverse_stddev_sqrt_reciprocal,
         output,
     }
 }
@@ -149,6 +161,7 @@ fn sscp_conv(
         norm_variance: normalized.variance,
         norm_stabilized_variance: normalized.stabilized_variance,
         norm_inverse_stddev: normalized.inverse_stddev,
+        norm_inverse_stddev_sqrt_reciprocal: normalized.inverse_stddev_sqrt_reciprocal,
         norm: normalized.output,
         activated,
     }
@@ -245,6 +258,7 @@ pub(super) fn subsample_with_stages(
         conv0_norm_variance: conv0.norm_variance,
         conv0_norm_stabilized_variance: conv0.norm_stabilized_variance,
         conv0_norm_inverse_stddev: conv0.norm_inverse_stddev,
+        conv0_norm_inverse_stddev_sqrt_reciprocal: conv0.norm_inverse_stddev_sqrt_reciprocal,
         conv0_norm: conv0.norm,
         conv0: conv0.activated,
         conv1_convolution: conv1.convolution,

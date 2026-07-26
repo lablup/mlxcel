@@ -115,6 +115,10 @@ fn audio_encoder(
         "sscp_conv_0_norm_inverse_stddev",
         &subsampled.conv0_norm_inverse_stddev,
     );
+    trace.push(
+        "sscp_conv_0_norm_inverse_stddev_sqrt_reciprocal",
+        &subsampled.conv0_norm_inverse_stddev_sqrt_reciprocal,
+    );
     trace.push("sscp_conv_0_norm", &subsampled.conv0_norm);
     trace.push("sscp_conv_0", &subsampled.conv0);
     trace.push("sscp_conv_1_convolution", &subsampled.conv1_convolution);
@@ -354,6 +358,7 @@ fn build_encode(
         "sscp_conv_0_norm_variance",
         "sscp_conv_0_norm_stabilized_variance",
         "sscp_conv_0_norm_inverse_stddev",
+        "sscp_conv_0_norm_inverse_stddev_sqrt_reciprocal",
         "sscp_conv_0_norm",
         "sscp_conv_0",
         "sscp_conv_1_convolution",

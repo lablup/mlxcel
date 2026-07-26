@@ -361,6 +361,10 @@ fn main() -> Result<(), String> {
             "sscp_conv_0_norm_inverse_stddev",
             mlx.sscp_conv_0_norm_inverse_stddev.as_slice(),
         ),
+        (
+            "sscp_conv_0_norm_inverse_stddev_sqrt_reciprocal",
+            mlx.sscp_conv_0_norm_inverse_stddev.as_slice(),
+        ),
         ("sscp_conv_0_norm", mlx.sscp_conv_0_norm.as_slice()),
         ("sscp_conv_0", mlx.sscp_conv_0.as_slice()),
         (

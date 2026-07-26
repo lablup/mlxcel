@@ -44,7 +44,7 @@ fn split_audio_graphs_preserve_stage_and_weight_boundaries() {
     );
     assert!(!encode.contains("loc(\"audio.hard_embeddings\")"));
     assert!(!encode.contains("model.language_model."));
-    assert_eq!(encode_layout.stages.len(), 3 + 4 + 12 * 5 + 10 + 8);
+    assert_eq!(encode_layout.stages.len(), 3 + 4 + 12 * 5 + 11 + 8);
     for name in [
         "sscp_conv_0_convolution",
         "sscp_conv_0_norm_sum_at_time",
@@ -55,6 +55,7 @@ fn split_audio_graphs_preserve_stage_and_weight_boundaries() {
         "sscp_conv_0_norm_variance",
         "sscp_conv_0_norm_stabilized_variance",
         "sscp_conv_0_norm_inverse_stddev",
+        "sscp_conv_0_norm_inverse_stddev_sqrt_reciprocal",
         "sscp_conv_0_norm",
         "sscp_conv_0",
         "sscp_conv_1_convolution",

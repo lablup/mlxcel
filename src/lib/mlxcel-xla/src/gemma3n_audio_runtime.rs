@@ -660,6 +660,7 @@ impl Gemma3nAudioIreeRuntime {
             "sscp_conv_0_norm_variance",
             "sscp_conv_0_norm_stabilized_variance",
             "sscp_conv_0_norm_inverse_stddev",
+            "sscp_conv_0_norm_inverse_stddev_sqrt_reciprocal",
             "sscp_conv_0_norm",
             "sscp_conv_0",
             "sscp_conv_1_convolution",
