@@ -35,6 +35,8 @@ pub(crate) const QWEN3_VL_PATCH_BUCKETS: [usize; 4] = [16, 64, 256, 512];
 
 /// Compact DeepStack side-input capacity after the required 2x2 merge.
 pub(crate) const QWEN3_VL_MAX_MERGED_VISUAL_POSITIONS: usize = 512 / 4;
+pub(crate) const QWEN3_VL_DIAGNOSTIC_BLOCK: usize = 2;
+pub(crate) const QWEN3_VL_BLOCK_DIAGNOSTIC_STAGES: usize = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Qwen3VlWeightSpec {
@@ -829,6 +831,30 @@ fn attention(
     linear_2d(builder, &context, &args.take(), &args.take())
 }
 
+struct EncoderLayerDiagnostics {
+    input: Val,
+    norm1: Val,
+    attention: Val,
+    post_attention_residual: Val,
+    norm2: Val,
+    mlp: Val,
+    output: Val,
+}
+
+impl EncoderLayerDiagnostics {
+    fn into_values(self) -> [Val; QWEN3_VL_BLOCK_DIAGNOSTIC_STAGES] {
+        [
+            self.input,
+            self.norm1,
+            self.attention,
+            self.post_attention_residual,
+            self.norm2,
+            self.mlp,
+            self.output,
+        ]
+    }
+}
+
 fn encoder_layer(
     builder: &mut Builder,
     hidden: &Val,
@@ -836,7 +862,8 @@ fn encoder_layer(
     config: &Qwen3VlConfig,
     freqs: &Val,
     attention_bias: &Val,
-) -> Val {
+    diagnostics: bool,
+) -> (Val, Option<EncoderLayerDiagnostics>) {
     let norm1 = layer_norm(
         builder,
         hidden,
@@ -855,8 +882,18 @@ fn encoder_layer(
     );
     let fc1 = linear_2d(builder, &norm2, &args.take(), &args.take());
     let activated = tanh_gelu(builder, &fc1);
-    let fc2 = linear_2d(builder, &activated, &args.take(), &args.take());
-    builder.add(&residual, &fc2)
+    let mlp = linear_2d(builder, &activated, &args.take(), &args.take());
+    let output = builder.add(&residual, &mlp);
+    let diagnostic_values = diagnostics.then(|| EncoderLayerDiagnostics {
+        input: hidden.clone(),
+        norm1,
+        attention,
+        post_attention_residual: residual,
+        norm2,
+        mlp,
+        output: output.clone(),
+    });
+    (output, diagnostic_values)
 }
 
 fn interpolated_position_embeddings(
@@ -957,15 +994,22 @@ fn emit_qwen3_vl_impl(config: &Qwen3VlConfig, patch_bucket: usize, diagnostics: 
     let positioned_embeddings = diagnostics.then(|| hidden.clone());
     let mut deepstack_hidden = Vec::with_capacity(config.deepstack_visual_indexes.len());
     let mut block_hidden = diagnostics.then(|| Vec::with_capacity(config.depth));
+    let mut block_2_diagnostics = None;
     for layer in 0..config.depth {
-        hidden = encoder_layer(
+        let (next_hidden, layer_diagnostics) = encoder_layer(
             &mut builder,
             &hidden,
             &mut args,
             config,
             &freqs,
             &attention_bias,
+            diagnostics && layer == QWEN3_VL_DIAGNOSTIC_BLOCK,
         );
+        hidden = next_hidden;
+        if layer_diagnostics.is_some() {
+            debug_assert!(block_2_diagnostics.is_none());
+            block_2_diagnostics = layer_diagnostics;
+        }
         if let Some(outputs) = &mut block_hidden {
             outputs.push(hidden.clone());
         }
@@ -994,6 +1038,9 @@ fn emit_qwen3_vl_impl(config: &Qwen3VlConfig, patch_bucket: usize, diagnostics: 
         );
         outputs.push(positioned_embeddings.expect("diagnostics includes positioned embeddings"));
         outputs.extend(block_hidden);
+        if let Some(block_2_diagnostics) = block_2_diagnostics {
+            outputs.extend(block_2_diagnostics.into_values());
+        }
         outputs.extend(main_merger_diagnostics.expect("diagnostics includes main merger stages"));
         outputs.extend(
             deepstack_merger_diagnostics
@@ -1163,6 +1210,21 @@ mod tests {
         output_types.extend(vec!["tensor<4x32xf32>"; 9]);
         assert!(mlir.contains(&format!("-> ({})", output_types.join(", "))));
         assert_eq!(mlir.matches("chlo.erf").count(), 3);
+    }
+
+    #[test]
+    fn diagnostic_bucket_appends_all_block_2_substages_in_order() {
+        let mut config = config();
+        config.depth = 3;
+        let diagnostic = emit_qwen3_vl_impl(&config, 16, true);
+        let mut output_types = vec!["tensor<4x12xf32>"; 3];
+        output_types.extend(vec!["tensor<16x8xf32>"; 3 + 3 + 7]);
+        output_types.extend(vec!["tensor<4x32xf32>"; 9]);
+        assert!(diagnostic.contains(&format!("-> ({})", output_types.join(", "))));
+
+        let production = emit_qwen3_vl_impl(&config, 16, false);
+        assert!(production.contains("-> (tensor<4x12xf32>, tensor<4x12xf32>, tensor<4x12xf32>)"));
+        assert!(!production.contains(&format!("-> ({})", output_types.join(", "))));
     }
 
     #[test]

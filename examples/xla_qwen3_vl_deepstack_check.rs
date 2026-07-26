@@ -156,6 +156,22 @@ fn compare_stage(
     }
 }
 
+fn record_comparison(failures: &mut Vec<String>, result: Result<(), String>) {
+    if let Err(error) = result {
+        failures.push(error);
+    }
+}
+
+fn render_and_persist_report(report: &Value, report_path: Option<&Path>) -> String {
+    let rendered = serde_json::to_string_pretty(report).expect("serialize oracle report");
+    if let Some(path) = report_path {
+        fs::write(path, &rendered)
+            .unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+    }
+    println!("{rendered}");
+    rendered
+}
+
 fn compare_vision_branches(
     reports: &mut Vec<Value>,
     actual: &[Vec<f32>],
@@ -243,50 +259,95 @@ fn main() {
         .collect::<Vec<_>>();
 
     let mut reports = Vec::new();
+    let mut failures = Vec::new();
     let iree_diagnostics = &vision_capture.projection.diagnostics;
     assert_eq!(
         iree_diagnostics.block_hidden_states.len(),
         eager_vision.block_hidden_states.len(),
         "eager and IREE vision block capture counts differ"
     );
-    compare_stage(
-        &mut reports,
-        "vision.patch_embedding",
-        &iree_diagnostics.patch_embeddings,
-        &mlx_f32(&eager_vision.patch_embeddings),
-        tolerance,
-    )
-    .unwrap_or_else(|error| panic!("{error}"));
-    compare_stage(
-        &mut reports,
-        "vision.position_embedding",
-        &iree_diagnostics.position_embeddings,
-        &mlx_f32(&eager_vision.position_embeddings),
-        tolerance,
-    )
-    .unwrap_or_else(|error| panic!("{error}"));
-    compare_stage(
-        &mut reports,
-        "vision.positioned_embedding",
-        &iree_diagnostics.positioned_embeddings,
-        &mlx_f32(&eager_vision.positioned_embeddings),
-        tolerance,
-    )
-    .unwrap_or_else(|error| panic!("{error}"));
+    record_comparison(
+        &mut failures,
+        compare_stage(
+            &mut reports,
+            "vision.patch_embedding",
+            &iree_diagnostics.patch_embeddings,
+            &mlx_f32(&eager_vision.patch_embeddings),
+            tolerance,
+        ),
+    );
+    record_comparison(
+        &mut failures,
+        compare_stage(
+            &mut reports,
+            "vision.position_embedding",
+            &iree_diagnostics.position_embeddings,
+            &mlx_f32(&eager_vision.position_embeddings),
+            tolerance,
+        ),
+    );
+    record_comparison(
+        &mut failures,
+        compare_stage(
+            &mut reports,
+            "vision.positioned_embedding",
+            &iree_diagnostics.positioned_embeddings,
+            &mlx_f32(&eager_vision.positioned_embeddings),
+            tolerance,
+        ),
+    );
     for (layer, (actual, expected)) in iree_diagnostics
         .block_hidden_states
         .iter()
         .zip(&eager_vision.block_hidden_states)
         .enumerate()
     {
-        compare_stage(
-            &mut reports,
-            &format!("vision.block_{layer}"),
-            actual,
-            &mlx_f32(expected),
-            tolerance,
-        )
-        .unwrap_or_else(|error| panic!("{error}"));
+        record_comparison(
+            &mut failures,
+            compare_stage(
+                &mut reports,
+                &format!("vision.block_{layer}"),
+                actual,
+                &mlx_f32(expected),
+                tolerance,
+            ),
+        );
+    }
+    let block_2_stage_names = [
+        "input",
+        "norm1",
+        "attention",
+        "post_attention_residual",
+        "norm2",
+        "mlp",
+        "output",
+    ];
+    assert_eq!(
+        iree_diagnostics.block_2_states.len(),
+        eager_vision.block_2_states.len(),
+        "eager and IREE block 2 substage capture counts differ"
+    );
+    assert_eq!(
+        iree_diagnostics.block_2_states.len(),
+        block_2_stage_names.len(),
+        "actual Qwen3-VL diagnostics must capture every block 2 substage"
+    );
+    for ((actual, expected), name) in iree_diagnostics
+        .block_2_states
+        .iter()
+        .zip(&eager_vision.block_2_states)
+        .zip(block_2_stage_names)
+    {
+        record_comparison(
+            &mut failures,
+            compare_stage(
+                &mut reports,
+                &format!("vision.block_2.{name}"),
+                actual,
+                &mlx_f32(expected),
+                tolerance,
+            ),
+        );
     }
     let merger_stage_names = ["normalized_shuffled", "fc1", "activation"];
     assert_eq!(
@@ -300,23 +361,27 @@ fn main() {
         .zip(&eager_vision.main_merger_states)
         .zip(merger_stage_names)
     {
+        record_comparison(
+            &mut failures,
+            compare_stage(
+                &mut reports,
+                &format!("vision.main_merger.{name}"),
+                actual,
+                &mlx_f32(expected),
+                tolerance,
+            ),
+        );
+    }
+    record_comparison(
+        &mut failures,
         compare_stage(
             &mut reports,
-            &format!("vision.main_merger.{name}"),
-            actual,
-            &mlx_f32(expected),
+            "vision.main_merger",
+            &vision_capture.projection.values,
+            &eager_main,
             tolerance,
-        )
-        .unwrap_or_else(|error| panic!("{error}"));
-    }
-    compare_stage(
-        &mut reports,
-        "vision.main_merger",
-        &vision_capture.projection.values,
-        &eager_main,
-        tolerance,
-    )
-    .unwrap_or_else(|error| panic!("{error}"));
+        ),
+    );
     assert_eq!(
         iree_diagnostics.deepstack_merger_states.len(),
         eager_vision.deepstack_merger_states.len(),
@@ -338,23 +403,27 @@ fn main() {
             .zip(expected_stages)
             .zip(merger_stage_names)
         {
-            compare_stage(
-                &mut reports,
-                &format!("vision.deepstack_merger_{branch}.{name}"),
-                actual,
-                &mlx_f32(expected),
-                tolerance,
-            )
-            .unwrap_or_else(|error| panic!("{error}"));
+            record_comparison(
+                &mut failures,
+                compare_stage(
+                    &mut reports,
+                    &format!("vision.deepstack_merger_{branch}.{name}"),
+                    actual,
+                    &mlx_f32(expected),
+                    tolerance,
+                ),
+            );
         }
     }
-    compare_vision_branches(
-        &mut reports,
-        &vision_capture.projection.deepstack_values,
-        &eager_branches,
-        tolerance,
-    )
-    .unwrap_or_else(|error| panic!("{error}"));
+    record_comparison(
+        &mut failures,
+        compare_vision_branches(
+            &mut reports,
+            &vision_capture.projection.deepstack_values,
+            &eager_branches,
+            tolerance,
+        ),
+    );
 
     let mut dropped = vision_capture.projection.deepstack_values.clone();
     dropped
@@ -370,6 +439,26 @@ fn main() {
         compare_vision_branches(&mut Vec::new(), &zeroed, &eager_branches, tolerance).is_err(),
         "negative oracle accepted a zeroed actual-checkpoint DeepStack branch"
     );
+    if let Some(first_failure) = failures.first().cloned() {
+        let report = json!({
+            "schema": 1,
+            "model": model_path,
+            "image": image_path,
+            "device": device,
+            "context_capacity": context_capacity,
+            "completed_phase": "vision",
+            "grid_thw": vision_capture.grids,
+            "vision_shape": vision_capture.projection.shape,
+            "deepstack_branches": eager_branches.len(),
+            "negative_dropped_branch_detected": true,
+            "negative_zeroed_branch_detected": true,
+            "comparisons": reports,
+            "comparison_failures": failures,
+            "passed": false,
+        });
+        render_and_persist_report(&report, report_path.as_deref());
+        panic!("Qwen3-VL DeepStack oracle failed after rendering its report: {first_failure}");
+    }
 
     let unexpanded_tokens = vec![1, model.vision_start_token_id, model.image_token_id, 2];
     let prepared = production_preprocessor
@@ -417,34 +506,40 @@ fn main() {
         let layer_start = layer * iree_language.context_capacity * hidden_size;
         let actual = &iree_language.post_injection_hidden_states
             [layer_start..layer_start + sequence_len * hidden_size];
-        compare_stage(
-            &mut reports,
-            &format!("language.post_injection_layer_{target_layer}"),
-            actual,
-            &eager,
-            tolerance,
-        )
-        .unwrap_or_else(|error| panic!("{error}"));
+        record_comparison(
+            &mut failures,
+            compare_stage(
+                &mut reports,
+                &format!("language.post_injection_layer_{target_layer}"),
+                actual,
+                &eager,
+                tolerance,
+            ),
+        );
     }
 
     let eager_logits = mlx_f32(&eager_language.logits);
     let vocab = iree_language.logits.len();
     let eager_last = &eager_logits[(sequence_len - 1) * vocab..sequence_len * vocab];
-    compare_stage(
-        &mut reports,
-        "language.final_position_logits",
-        &iree_language.logits,
-        eager_last,
-        tolerance,
-    )
-    .unwrap_or_else(|error| panic!("{error}"));
+    record_comparison(
+        &mut failures,
+        compare_stage(
+            &mut reports,
+            "language.final_position_logits",
+            &iree_language.logits,
+            eager_last,
+            tolerance,
+        ),
+    );
 
+    let first_failure = failures.first().cloned();
     let report = json!({
         "schema": 1,
         "model": model_path,
         "image": image_path,
         "device": device,
         "context_capacity": context_capacity,
+        "completed_phase": "language",
         "grid_thw": vision_capture.grids,
         "vision_shape": vision_capture.projection.shape,
         "deepstack_branches": eager_branches.len(),
@@ -452,12 +547,55 @@ fn main() {
         "negative_dropped_branch_detected": true,
         "negative_zeroed_branch_detected": true,
         "comparisons": reports,
-        "passed": true,
+        "comparison_failures": failures,
+        "passed": first_failure.is_none(),
     });
-    let rendered = serde_json::to_string_pretty(&report).expect("serialize oracle report");
-    if let Some(path) = report_path {
-        fs::write(&path, &rendered)
-            .unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+    render_and_persist_report(&report, report_path.as_deref());
+    if let Some(error) = first_failure {
+        panic!("Qwen3-VL DeepStack oracle failed after rendering its report: {error}");
     }
-    println!("{rendered}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn comparisons_continue_after_failure_and_persist_the_report() {
+        let mut reports = Vec::new();
+        let mut failures = Vec::new();
+        let tolerance = Tolerance {
+            atol: 0.0,
+            rtol: 0.0,
+        };
+        record_comparison(
+            &mut failures,
+            compare_stage(&mut reports, "first", &[1.0], &[0.0], tolerance),
+        );
+        record_comparison(
+            &mut failures,
+            compare_stage(&mut reports, "second", &[2.0], &[2.0], tolerance),
+        );
+        assert_eq!(reports.len(), 2);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(reports[0]["passed"], false);
+        assert_eq!(reports[1]["passed"], true);
+
+        let path = std::env::temp_dir().join(format!(
+            "mlxcel-qwen3-vl-report-persistence-{}.json",
+            std::process::id()
+        ));
+        let report = json!({
+            "comparisons": reports,
+            "comparison_failures": failures,
+            "passed": false,
+        });
+        render_and_persist_report(&report, Some(&path));
+        let persisted: Value =
+            serde_json::from_slice(&fs::read(&path).expect("read persisted report"))
+                .expect("parse persisted report");
+        let _ = fs::remove_file(path);
+        assert_eq!(persisted["comparisons"].as_array().unwrap().len(), 2);
+        assert_eq!(persisted["passed"], false);
+    }
 }
