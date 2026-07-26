@@ -330,27 +330,8 @@ pub(crate) fn load_gemma3_iree_host_preprocessor(
 }
 
 #[cfg(all(test, feature = "xla-iree"))]
-mod xla_tests {
-    use super::*;
-
-    #[test]
-    fn pinned_gemma3_projector_loads_and_returns_finite_features() {
-        let Ok(model) = std::env::var("MLXCEL_GEMMA3_FIXTURE") else {
-            return;
-        };
-        let device = std::env::var("MLXCEL_XLA_DEVICE").unwrap_or_else(|_| "cuda".to_string());
-        let mut projector = mlxcel_xla::IreeVisionProjector::load(Path::new(&model), &device)
-            .expect("load pinned Gemma3 IREE vision projector");
-        assert_eq!(projector.input_shape(), [1, 3, 896, 896]);
-        assert_eq!(projector.output_shape(), [256, 2560]);
-        let pixels = vec![0.0; projector.input_shape().into_iter().product()];
-        let projection = projector
-            .project(&pixels)
-            .expect("execute pinned Gemma3 IREE vision projector");
-        assert_eq!(projection.shape, [256, 2560]);
-        assert!(projection.values.iter().all(|value| value.is_finite()));
-    }
-}
+#[path = "vlm_gemma_xla_tests.rs"]
+mod xla_tests;
 
 /// Load a Gemma3n VLM model.
 pub(crate) fn load_gemma3n_vlm(model_path: &Path) -> Result<LoadedModel> {

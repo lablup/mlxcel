@@ -227,7 +227,16 @@ mod tests {
             }
         );
         assert!(config.fingerprint().contains("image_token_id: 99"));
+        assert!(config.fingerprint().starts_with("iree-vision-v3:"));
         let specs = config.weight_specs();
+        assert_eq!(
+            specs[specs.len() - 4].name,
+            "vision_tower.vision_model.post_layernorm.weight"
+        );
+        assert_eq!(
+            specs[specs.len() - 3].name,
+            "vision_tower.vision_model.post_layernorm.bias"
+        );
         assert_eq!(
             specs[specs.len() - 2].name,
             "multi_modal_projector.mm_soft_emb_norm.weight"
@@ -505,8 +514,13 @@ impl LlavaVisionConfig {
 
     #[must_use]
     pub(crate) fn fingerprint(&self) -> String {
+        let schema = if matches!(self.projector, VisionProjector::Gemma3AvgPool { .. }) {
+            "iree-vision-v3"
+        } else {
+            "iree-vision-v2"
+        };
         format!(
-            "iree-vision-v2:image={}:patch={}:channels={}:hidden={}:intermediate={}:layers={}:\
+            "{schema}:image={}:patch={}:channels={}:hidden={}:intermediate={}:layers={}:\
              heads={}:eps={:08x}:activation={:?}:class={}:feature={}:drop_first={}:text={}:projector={:?}",
             self.image_size,
             self.patch_size,
@@ -580,6 +594,18 @@ impl LlavaVisionConfig {
                     shape,
                 });
             }
+        }
+        if matches!(self.projector, VisionProjector::Gemma3AvgPool { .. }) {
+            specs.extend([
+                self.spec(
+                    "vision_tower.vision_model.post_layernorm.weight",
+                    [self.hidden],
+                ),
+                self.spec(
+                    "vision_tower.vision_model.post_layernorm.bias",
+                    [self.hidden],
+                ),
+            ]);
         }
         match self.projector {
             VisionProjector::LlavaMlp => specs.extend([

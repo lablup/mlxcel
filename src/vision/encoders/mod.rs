@@ -65,7 +65,7 @@ pub trait VisionEncoder {
 
     /// Run the exact encoder path while retaining ordered hidden states for a
     /// reference-oracle first-divergence report.
-    #[cfg(feature = "xla-diagnostics")]
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-reference-diagnostics"))]
     fn forward_with_hidden_state_diagnostics(
         &self,
         pixel_values: &MlxArray,

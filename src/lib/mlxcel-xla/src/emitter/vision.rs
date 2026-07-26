@@ -82,6 +82,8 @@ mod tests {
         )
         .unwrap();
         let mlir = emit_vision(&config);
+        assert!(mlir.contains("vision_tower.vision_model.post_layernorm.weight"));
+        assert!(mlir.contains("vision_tower.vision_model.post_layernorm.bias"));
         assert!(mlir.contains("multi_modal_projector.mm_soft_emb_norm.weight"));
         assert!(mlir.contains("multi_modal_projector.mm_input_projection_weight"));
         assert!(!mlir.contains("multi_modal_projector.linear_1"));
@@ -410,6 +412,15 @@ fn emit_vision_impl(config: &LlavaVisionConfig, diagnostics: bool) -> String {
         if let Some(outputs) = &mut diagnostic_values {
             outputs.push(hidden.clone());
         }
+    }
+    if matches!(config.projector, VisionProjector::Gemma3AvgPool { .. }) {
+        hidden = layer_norm(
+            &mut builder,
+            &hidden,
+            &args.take(),
+            &args.take(),
+            config.layer_norm_eps,
+        );
     }
     if config.drop_first_token {
         hidden = builder.slice(&hidden, &[(1, config.position_count()), (0, config.hidden)]);
