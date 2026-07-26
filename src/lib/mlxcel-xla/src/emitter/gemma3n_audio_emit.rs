@@ -88,7 +88,11 @@ fn audio_encoder(
     trace: &mut Trace,
 ) -> (Val, Val, Val) {
     let subsampled = subsample_with_stages(b, args, audio);
+    trace.push("sscp_conv_0_convolution", &subsampled.conv0_convolution);
+    trace.push("sscp_conv_0_norm", &subsampled.conv0_norm);
     trace.push("sscp_conv_0", &subsampled.conv0);
+    trace.push("sscp_conv_1_convolution", &subsampled.conv1_convolution);
+    trace.push("sscp_conv_1_norm", &subsampled.conv1_norm);
     trace.push("sscp_conv_1", &subsampled.conv1);
     trace.push("input_projection", &subsampled.hidden);
     let mut hidden = subsampled.hidden;
@@ -315,7 +319,14 @@ fn build_encode(
     trace.push("hard_projection", &hard_audio);
     #[cfg(feature = "diagnostics")]
     let diagnostics = [
+        "sscp_conv_0_convolution",
+        "sscp_conv_0_norm",
         "sscp_conv_0",
+        "sscp_conv_1_convolution",
+        "sscp_conv_1_norm",
+        "sscp_conv_1",
+        "input_projection",
+        "conformer.0.feed_forward_start",
         "encoded_reduced",
         "soft_norm",
         "soft_linear",

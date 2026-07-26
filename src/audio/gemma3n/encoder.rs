@@ -123,6 +123,13 @@ struct SscpConvBlock {
     stride_frequency: i32,
 }
 
+#[cfg(feature = "xla-diagnostics")]
+struct SscpConvDiagnosticStages {
+    convolution: UniquePtr<MlxArray>,
+    norm: UniquePtr<MlxArray>,
+    activated: UniquePtr<MlxArray>,
+}
+
 impl SscpConvBlock {
     fn from_weights(
         weights: &WeightMap,
@@ -157,7 +164,7 @@ impl SscpConvBlock {
         })
     }
 
-    fn forward(&self, x: &MlxArray) -> Result<UniquePtr<MlxArray>, String> {
+    fn convolution(&self, x: &MlxArray) -> Result<UniquePtr<MlxArray>, String> {
         // Match the maintained reference's explicit
         // `audio_encodings_padded.to(self.conv.weight.dtype)` boundary. The
         // processor emits float32 mel features, while released checkpoints use
@@ -167,7 +174,7 @@ impl SscpConvBlock {
         // Reverse-causal time padding `(0, kernel-1)` and SAME-like frequency
         // padding `(1,1)`, in MLX's NHWC layout.
         let x = mlxcel_core::pad(&x, &[0, 0, 0, self.time_padding_after, 1, 1, 0, 0], 0.0);
-        let x = mlxcel_core::try_conv2d(
+        mlxcel_core::try_conv2d(
             &x,
             &self.conv_weight,
             self.stride_time,
@@ -178,8 +185,24 @@ impl SscpConvBlock {
             1,
             1,
         )
-        .map_err(|error| format!("Gemma3n SSCP conv2d failed: {error}"))?;
-        Ok(mlxcel_core::relu(&self.norm.forward(&x)))
+        .map_err(|error| format!("Gemma3n SSCP conv2d failed: {error}"))
+    }
+
+    fn forward(&self, x: &MlxArray) -> Result<UniquePtr<MlxArray>, String> {
+        let convolution = self.convolution(x)?;
+        Ok(mlxcel_core::relu(&self.norm.forward(&convolution)))
+    }
+
+    #[cfg(feature = "xla-diagnostics")]
+    fn forward_with_diagnostics(&self, x: &MlxArray) -> Result<SscpConvDiagnosticStages, String> {
+        let convolution = self.convolution(x)?;
+        let norm = self.norm.forward(&convolution);
+        let activated = mlxcel_core::relu(&norm);
+        Ok(SscpConvDiagnosticStages {
+            convolution,
+            norm,
+            activated,
+        })
     }
 }
 
@@ -187,6 +210,13 @@ struct SubSampleConvProjection {
     conv0: SscpConvBlock,
     conv1: SscpConvBlock,
     input_projection: UnifiedLinear,
+}
+
+#[cfg(feature = "xla-diagnostics")]
+struct SubsampleDiagnosticStages {
+    conv0: SscpConvDiagnosticStages,
+    conv1: SscpConvDiagnosticStages,
+    input_projection: UniquePtr<MlxArray>,
 }
 
 fn final_frequency_size(config: &Gemma3nAudioConfig) -> usize {
@@ -248,16 +278,22 @@ impl SubSampleConvProjection {
     }
 
     #[cfg(feature = "xla-diagnostics")]
-    fn forward_with_conv0(
+    fn forward_with_diagnostics(
         &self,
         audio_mel: &MlxArray,
-    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>), String> {
+    ) -> Result<SubsampleDiagnosticStages, String> {
         let x = mlxcel_core::expand_dims(audio_mel, -1);
-        let conv0 = self.conv0.forward(&x)?;
-        let x = self.conv1.forward(&conv0)?;
-        let shape = mlxcel_core::array_shape(&x);
-        let x = mlxcel_core::reshape(&x, &[shape[0], shape[1], shape[2] * shape[3]]);
-        Ok((self.input_projection.forward(&x), conv0))
+        let conv0 = self.conv0.forward_with_diagnostics(&x)?;
+        let conv1 = self.conv1.forward_with_diagnostics(&conv0.activated)?;
+        let shape = mlxcel_core::array_shape(&conv1.activated);
+        let flattened =
+            mlxcel_core::reshape(&conv1.activated, &[shape[0], shape[1], shape[2] * shape[3]]);
+        let input_projection = self.input_projection.forward(&flattened);
+        Ok(SubsampleDiagnosticStages {
+            conv0,
+            conv1,
+            input_projection,
+        })
     }
 }
 
@@ -542,14 +578,13 @@ impl ConformerBlock {
         })
     }
 
-    fn forward(
+    fn forward_after_feed_forward_start(
         &self,
         x: &MlxArray,
         invalid_mask: &MlxArray,
         causal_valid_mask: &MlxArray,
     ) -> Result<UniquePtr<MlxArray>, String> {
-        let x = self.feed_forward_start.forward(x);
-        let x = self.attention.forward(&x, invalid_mask, causal_valid_mask);
+        let x = self.attention.forward(x, invalid_mask, causal_valid_mask);
         let valid = mlxcel_core::astype(
             &mlxcel_core::reshape(
                 &mlxcel_core::logical_not(invalid_mask),
@@ -567,12 +602,50 @@ impl ConformerBlock {
         let x = self.feed_forward_end.forward(&x);
         Ok(self.norm.forward(&clip_gradient(&x, self.clipping)))
     }
+
+    fn forward(
+        &self,
+        x: &MlxArray,
+        invalid_mask: &MlxArray,
+        causal_valid_mask: &MlxArray,
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        let feed_forward_start = self.feed_forward_start.forward(x);
+        self.forward_after_feed_forward_start(&feed_forward_start, invalid_mask, causal_valid_mask)
+    }
+
+    #[cfg(feature = "xla-diagnostics")]
+    fn forward_with_feed_forward_start(
+        &self,
+        x: &MlxArray,
+        invalid_mask: &MlxArray,
+        causal_valid_mask: &MlxArray,
+    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>), String> {
+        let feed_forward_start = self.feed_forward_start.forward(x);
+        let output = self.forward_after_feed_forward_start(
+            &feed_forward_start,
+            invalid_mask,
+            causal_valid_mask,
+        )?;
+        Ok((output, feed_forward_start))
+    }
 }
 
 pub struct Gemma3nAudioEncoder {
     config: Gemma3nAudioConfig,
     subsample: SubSampleConvProjection,
     conformer: Vec<ConformerBlock>,
+}
+
+#[cfg(feature = "xla-diagnostics")]
+pub(super) struct Gemma3nAudioEncoderDiagnosticStages {
+    pub sscp_conv_0_convolution: UniquePtr<MlxArray>,
+    pub sscp_conv_0_norm: UniquePtr<MlxArray>,
+    pub sscp_conv_0: UniquePtr<MlxArray>,
+    pub sscp_conv_1_convolution: UniquePtr<MlxArray>,
+    pub sscp_conv_1_norm: UniquePtr<MlxArray>,
+    pub sscp_conv_1: UniquePtr<MlxArray>,
+    pub input_projection: UniquePtr<MlxArray>,
+    pub conformer_0_feed_forward_start: UniquePtr<MlxArray>,
 }
 
 impl Gemma3nAudioEncoder {
@@ -656,21 +729,23 @@ impl Gemma3nAudioEncoder {
         Ok(())
     }
 
-    fn finish_forward(
+    fn initial_invalid_mask(
         &self,
-        mut encodings: UniquePtr<MlxArray>,
+        encodings: &MlxArray,
         invalid_mel_mask: &MlxArray,
-    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>), String> {
-        let mut invalid_mask = Self::stride_mask(
+    ) -> UniquePtr<MlxArray> {
+        Self::stride_mask(
             invalid_mel_mask,
             self.config.time_stride_product(),
-            mlxcel_core::array_shape(&encodings)[1],
-        );
-        let causal_valid_mask = self.causal_valid_mask();
-        for block in &self.conformer {
-            encodings = block.forward(&encodings, &invalid_mask, &causal_valid_mask)?;
-        }
+            mlxcel_core::array_shape(encodings)[1],
+        )
+    }
 
+    fn reduce_and_mask(
+        &self,
+        mut encodings: UniquePtr<MlxArray>,
+        mut invalid_mask: UniquePtr<MlxArray>,
+    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>), String> {
         if self.config.conf_reduction_factor > 1 {
             let reduced_len = (mlxcel_core::array_shape(&encodings)[1]
                 + self.config.conf_reduction_factor as i32
@@ -694,6 +769,19 @@ impl Gemma3nAudioEncoder {
         Ok((encodings, invalid_mask))
     }
 
+    fn finish_forward(
+        &self,
+        mut encodings: UniquePtr<MlxArray>,
+        invalid_mel_mask: &MlxArray,
+    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>), String> {
+        let invalid_mask = self.initial_invalid_mask(&encodings, invalid_mel_mask);
+        let causal_valid_mask = self.causal_valid_mask();
+        for block in &self.conformer {
+            encodings = block.forward(&encodings, &invalid_mask, &causal_valid_mask)?;
+        }
+        self.reduce_and_mask(encodings, invalid_mask)
+    }
+
     pub fn forward(
         &self,
         audio_mel: &MlxArray,
@@ -705,7 +793,7 @@ impl Gemma3nAudioEncoder {
     }
 
     #[cfg(feature = "xla-diagnostics")]
-    pub(super) fn forward_with_sscp_conv0_diagnostic(
+    pub(super) fn forward_with_audio_diagnostics(
         &self,
         audio_mel: &MlxArray,
         invalid_mel_mask: &MlxArray,
@@ -713,14 +801,40 @@ impl Gemma3nAudioEncoder {
         (
             UniquePtr<MlxArray>,
             UniquePtr<MlxArray>,
-            UniquePtr<MlxArray>,
+            Gemma3nAudioEncoderDiagnosticStages,
         ),
         String,
     > {
         self.validate_input_shapes(audio_mel, invalid_mel_mask)?;
-        let (encodings, sscp_conv0) = self.subsample.forward_with_conv0(audio_mel)?;
-        let (encoded, invalid) = self.finish_forward(encodings, invalid_mel_mask)?;
-        Ok((encoded, invalid, sscp_conv0))
+        let subsample = self.subsample.forward_with_diagnostics(audio_mel)?;
+        let mut encodings = mlxcel_core::copy(&subsample.input_projection);
+        let invalid_mask = self.initial_invalid_mask(&encodings, invalid_mel_mask);
+        let causal_valid_mask = self.causal_valid_mask();
+        let first = self
+            .conformer
+            .first()
+            .ok_or_else(|| "Gemma3n audio diagnostic requires a Conformer block".to_string())?;
+        let (first_output, conformer_0_feed_forward_start) =
+            first.forward_with_feed_forward_start(&encodings, &invalid_mask, &causal_valid_mask)?;
+        encodings = first_output;
+        for block in &self.conformer[1..] {
+            encodings = block.forward(&encodings, &invalid_mask, &causal_valid_mask)?;
+        }
+        let (encoded, invalid) = self.reduce_and_mask(encodings, invalid_mask)?;
+        Ok((
+            encoded,
+            invalid,
+            Gemma3nAudioEncoderDiagnosticStages {
+                sscp_conv_0_convolution: subsample.conv0.convolution,
+                sscp_conv_0_norm: subsample.conv0.norm,
+                sscp_conv_0: subsample.conv0.activated,
+                sscp_conv_1_convolution: subsample.conv1.convolution,
+                sscp_conv_1_norm: subsample.conv1.norm,
+                sscp_conv_1: subsample.conv1.activated,
+                input_projection: subsample.input_projection,
+                conformer_0_feed_forward_start,
+            },
+        ))
     }
 }
 

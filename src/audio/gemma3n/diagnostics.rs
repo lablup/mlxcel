@@ -25,7 +25,14 @@ use crate::models::gemma3n::{Gemma3nAudioEmbedder, ModelArgs, TextConfig};
 
 #[derive(Debug, Clone)]
 pub struct Gemma3nAudioMlxDiagnosticOutput {
+    pub sscp_conv_0_convolution: Vec<f32>,
+    pub sscp_conv_0_norm: Vec<f32>,
     pub sscp_conv_0: Vec<f32>,
+    pub sscp_conv_1_convolution: Vec<f32>,
+    pub sscp_conv_1_norm: Vec<f32>,
+    pub sscp_conv_1: Vec<f32>,
+    pub input_projection: Vec<f32>,
+    pub conformer_0_feed_forward_start: Vec<f32>,
     pub encoded_reduced: Vec<f32>,
     pub soft_norm: Vec<f32>,
     pub soft_linear: Vec<f32>,
@@ -185,8 +192,8 @@ pub fn run_gemma3n_audio_mlx_diagnostics(
         .collect::<Vec<_>>();
     let invalid = mlxcel_core::from_slice_i32(&invalid, &[clips as i32, frame_bucket as i32]);
     let invalid = mlxcel_core::astype(&invalid, mlxcel_core::dtype::BOOL);
-    let (encoded, encoded_invalid, sscp_conv_0) =
-        tower.forward_with_sscp_conv0_diagnostic(&mel, &invalid)?;
+    let (encoded, encoded_invalid, encoder_stages) =
+        tower.forward_with_audio_diagnostics(&mel, &invalid)?;
     let encoded_shape = mlxcel_core::array_shape(&encoded);
     let projected_lengths = (0..clips)
         .map(|clip| {
@@ -316,7 +323,14 @@ pub fn run_gemma3n_audio_mlx_diagnostics(
         .fill(0.0);
 
     Ok(Gemma3nAudioMlxDiagnosticOutput {
-        sscp_conv_0: array_f32(&sscp_conv_0),
+        sscp_conv_0_convolution: array_f32(&encoder_stages.sscp_conv_0_convolution),
+        sscp_conv_0_norm: array_f32(&encoder_stages.sscp_conv_0_norm),
+        sscp_conv_0: array_f32(&encoder_stages.sscp_conv_0),
+        sscp_conv_1_convolution: array_f32(&encoder_stages.sscp_conv_1_convolution),
+        sscp_conv_1_norm: array_f32(&encoder_stages.sscp_conv_1_norm),
+        sscp_conv_1: array_f32(&encoder_stages.sscp_conv_1),
+        input_projection: array_f32(&encoder_stages.input_projection),
+        conformer_0_feed_forward_start: array_f32(&encoder_stages.conformer_0_feed_forward_start),
         encoded_reduced: array_f32(&encoded),
         soft_norm: array_f32(&soft_norm),
         soft_linear: array_f32(&soft_linear),

@@ -8,10 +8,20 @@ use super::gemma3n_audio_schema::EncoderArgs;
 use crate::Gemma3nXlaAudioConfig;
 
 pub(super) struct SscpOutput {
+    pub conv0_convolution: Val,
+    pub conv0_norm: Val,
     pub conv0: Val,
+    pub conv1_convolution: Val,
+    pub conv1_norm: Val,
     pub conv1: Val,
     pub hidden: Val,
     pub valid: Val,
+}
+
+struct SscpConvStages {
+    convolution: Val,
+    norm: Val,
+    activated: Val,
 }
 
 pub(super) struct ConformerStages {
@@ -71,7 +81,7 @@ fn sscp_conv(
     stride: [usize; 2],
     groups: usize,
     eps: f32,
-) -> Val {
+) -> SscpConvStages {
     let zero = b.const_f32(0.0);
     let padded = b.pad(x, &zero, &[0, 0, 1, 0], &[0, kernel[0] - 1, 1, 0]);
     let weight = b.transpose(weight, &[1, 2, 3, 0]);
@@ -84,14 +94,19 @@ fn sscp_conv(
     let convolved = round_bf16(b, &convolved);
     let normalized = cumulative_group_norm(b, &convolved, norm, eps);
     let activated = relu(b, &normalized);
-    round_bf16(b, &activated)
+    let activated = round_bf16(b, &activated);
+    SscpConvStages {
+        convolution: convolved,
+        norm: normalized,
+        activated,
+    }
 }
 
 fn subsample_convs(
     b: &mut Builder,
     args: &EncoderArgs,
     config: &Gemma3nXlaAudioConfig,
-) -> (Val, Val) {
+) -> (SscpConvStages, SscpConvStages) {
     let batch = args.mel.ty.shape[0];
     let time = args.mel.ty.shape[1];
     let frequency = args.mel.ty.shape[2];
@@ -116,7 +131,7 @@ fn subsample_convs(
     );
     let conv1 = sscp_conv(
         b,
-        &conv0,
+        &conv0.activated,
         args.weight(&format!("{root}.conv_1.conv.weight")),
         args.weight(&format!("{root}.conv_1.norm.weight")),
         config.sscp_conv_kernel_size[1],
@@ -134,8 +149,11 @@ pub(super) fn subsample(
 ) -> Val {
     let (_, conv1) = subsample_convs(b, args, config);
     let root = "audio_tower.subsample_conv_projection";
-    let shape = &conv1.ty.shape;
-    let flattened = b.reshape(&conv1, vec![shape[0], shape[1], shape[2] * shape[3]]);
+    let shape = &conv1.activated.ty.shape;
+    let flattened = b.reshape(
+        &conv1.activated,
+        vec![shape[0], shape[1], shape[2] * shape[3]],
+    );
     let projected = b.linear_last(
         &flattened,
         args.weight(&format!("{root}.input_proj_linear.weight")),
@@ -150,8 +168,11 @@ pub(super) fn subsample_with_stages(
 ) -> SscpOutput {
     let (conv0, conv1) = subsample_convs(b, args, config);
     let root = "audio_tower.subsample_conv_projection";
-    let shape = &conv1.ty.shape;
-    let flattened = b.reshape(&conv1, vec![shape[0], shape[1], shape[2] * shape[3]]);
+    let shape = &conv1.activated.ty.shape;
+    let flattened = b.reshape(
+        &conv1.activated,
+        vec![shape[0], shape[1], shape[2] * shape[3]],
+    );
     let projected = b.linear_last(
         &flattened,
         args.weight(&format!("{root}.input_proj_linear.weight")),
@@ -163,8 +184,12 @@ pub(super) fn subsample_with_stages(
         config.time_stride_product().expect("validated stride"),
     );
     SscpOutput {
-        conv0,
-        conv1,
+        conv0_convolution: conv0.convolution,
+        conv0_norm: conv0.norm,
+        conv0: conv0.activated,
+        conv1_convolution: conv1.convolution,
+        conv1_norm: conv1.norm,
+        conv1: conv1.activated,
         hidden,
         valid,
     }

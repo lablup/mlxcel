@@ -30,6 +30,7 @@ const AUDIO_TOKEN_ID: i32 = 262_273;
 const BOA_TOKEN_ID: i32 = 256_000;
 const EOA_TOKEN_ID: i32 = 262_272;
 const CONTEXT_CAPACITY: usize = 256;
+const MAX_BF16_OUTLIER_PROBES: usize = 32;
 
 fn path_env(name: &str, default: &str) -> PathBuf {
     std::env::var_os(name)
@@ -134,6 +135,14 @@ struct Diff {
     max_bf16_ulp: u32,
     non_bf16_values: usize,
     over_one_bf16_ulp: usize,
+    bf16_outliers: Vec<Bf16Outlier>,
+}
+
+struct Bf16Outlier {
+    index: usize,
+    reference: f32,
+    actual: f32,
+    distance: u32,
 }
 
 fn bf16_bits(value: f32) -> Option<u16> {
@@ -175,6 +184,7 @@ fn compare(name: &str, reference: &[f32], actual: &[f32]) -> Result<Diff, String
     let mut max_bf16_ulp = 0u32;
     let mut non_bf16_values = 0usize;
     let mut over_one_bf16_ulp = 0usize;
+    let mut bf16_outliers = Vec::new();
     for (index, (reference, actual)) in reference.iter().zip(actual).enumerate() {
         let difference = f64::from(*actual) - f64::from(*reference);
         squared += difference * difference;
@@ -185,7 +195,17 @@ fn compare(name: &str, reference: &[f32], actual: &[f32]) -> Result<Diff, String
         match bf16_ulp_distance(*reference, *actual) {
             Some(distance) => {
                 max_bf16_ulp = max_bf16_ulp.max(distance);
-                over_one_bf16_ulp += usize::from(distance > 1);
+                if distance > 1 {
+                    over_one_bf16_ulp += 1;
+                    if bf16_outliers.len() < MAX_BF16_OUTLIER_PROBES {
+                        bf16_outliers.push(Bf16Outlier {
+                            index,
+                            reference: *reference,
+                            actual: *actual,
+                            distance,
+                        });
+                    }
+                }
             }
             None => non_bf16_values += 1,
         }
@@ -218,6 +238,26 @@ fn compare(name: &str, reference: &[f32], actual: &[f32]) -> Result<Diff, String
             (actual[index] - reference[index]).abs()
         );
     }
+    for outlier in &bf16_outliers {
+        eprintln!(
+            "gemma3n-audio-reference: bf16-outlier stage={name} index={} mlx={:.9e} \
+             iree={:.9e} abs={:.9e} mlx_bf16={} iree_bf16={} bf16_ulp={}",
+            outlier.index,
+            outlier.reference,
+            outlier.actual,
+            (outlier.actual - outlier.reference).abs(),
+            display_bf16_bits(outlier.reference),
+            display_bf16_bits(outlier.actual),
+            outlier.distance,
+        );
+    }
+    if bf16_outliers.len() < over_one_bf16_ulp {
+        eprintln!(
+            "gemma3n-audio-reference: bf16-outlier stage={name} captured={} total={} truncated=true",
+            bf16_outliers.len(),
+            over_one_bf16_ulp,
+        );
+    }
     Ok(Diff {
         max_abs,
         rms,
@@ -225,6 +265,7 @@ fn compare(name: &str, reference: &[f32], actual: &[f32]) -> Result<Diff, String
         max_bf16_ulp,
         non_bf16_values,
         over_one_bf16_ulp,
+        bf16_outliers,
     })
 }
 
@@ -284,7 +325,23 @@ fn main() -> Result<(), String> {
     }
 
     let stage_values = [
+        (
+            "sscp_conv_0_convolution",
+            mlx.sscp_conv_0_convolution.as_slice(),
+        ),
+        ("sscp_conv_0_norm", mlx.sscp_conv_0_norm.as_slice()),
         ("sscp_conv_0", mlx.sscp_conv_0.as_slice()),
+        (
+            "sscp_conv_1_convolution",
+            mlx.sscp_conv_1_convolution.as_slice(),
+        ),
+        ("sscp_conv_1_norm", mlx.sscp_conv_1_norm.as_slice()),
+        ("sscp_conv_1", mlx.sscp_conv_1.as_slice()),
+        ("input_projection", mlx.input_projection.as_slice()),
+        (
+            "conformer.0.feed_forward_start",
+            mlx.conformer_0_feed_forward_start.as_slice(),
+        ),
         ("encoded_reduced", mlx.encoded_reduced.as_slice()),
         ("soft_norm", mlx.soft_norm.as_slice()),
         ("soft_linear", mlx.soft_linear.as_slice()),
@@ -326,7 +383,8 @@ fn main() -> Result<(), String> {
     match first {
         Some((index, diff)) => Err(format!(
             "first divergent stage={} max_abs={:.9e} rms={:.9e} max_index={} \
-             max_bf16_ulp={} non_bf16_values={} over_one_bf16_ulp={}",
+             max_bf16_ulp={} non_bf16_values={} over_one_bf16_ulp={} \
+             captured_bf16_outliers={}",
             names[index],
             diff.max_abs,
             diff.rms,
@@ -334,6 +392,7 @@ fn main() -> Result<(), String> {
             diff.max_bf16_ulp,
             diff.non_bf16_values,
             diff.over_one_bf16_ulp,
+            diff.bf16_outliers.len(),
         )),
         None => {
             println!("Gemma3n audio-only MLX↔IREE intermediate gate PASS");
@@ -363,5 +422,21 @@ mod tests {
         assert_eq!(diff.max_bf16_ulp, 2);
         assert_eq!(diff.non_bf16_values, 0);
         assert_eq!(diff.over_one_bf16_ulp, 1);
+        assert_eq!(diff.bf16_outliers.len(), 1);
+        assert_eq!(diff.bf16_outliers[0].index, 1);
+        assert_eq!(diff.bf16_outliers[0].distance, 2);
+    }
+
+    #[test]
+    fn compare_bounds_detailed_bf16_outlier_reporting() {
+        let reference = vec![128.0; MAX_BF16_OUTLIER_PROBES + 8];
+        let actual = vec![130.0; reference.len()];
+        let diff = compare("bounded-outliers", &reference, &actual).unwrap();
+        assert_eq!(diff.over_one_bf16_ulp, reference.len());
+        assert_eq!(diff.bf16_outliers.len(), MAX_BF16_OUTLIER_PROBES);
+        assert_eq!(
+            diff.bf16_outliers.last().map(|outlier| outlier.index),
+            Some(MAX_BF16_OUTLIER_PROBES - 1),
+        );
     }
 }
