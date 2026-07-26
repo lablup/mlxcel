@@ -144,21 +144,6 @@ fn linear_2d(builder: &mut Builder, value: &Val, weight: &Val, bias: &Val) -> Va
     bias_2d(builder, &value, bias)
 }
 
-/// Preserve the eager MLX F16 activation boundary while carrying tensors
-/// through the IREE ABI as F32.
-///
-/// Qwen2.5-VL checkpoint weights and eager block states are F16. The IREE
-/// precision policy intentionally computes normalization in F32, but the eager
-/// result is rounded back to the activation dtype before the next operation.
-/// Keep that observable boundary explicit without demoting the sensitive math.
-fn round_f16_activation_boundary(builder: &mut Builder, value: &Val) -> Val {
-    if builder.precision() != Precision::F16 {
-        return value.clone();
-    }
-    let narrowed = builder.convert(value, "f16");
-    builder.convert(&narrowed, "f32")
-}
-
 fn rms_norm(builder: &mut Builder, value: &Val, weight: &Val, epsilon: f32) -> Val {
     let rows = value.ty.shape[0];
     let width = value.ty.shape[1];
@@ -175,8 +160,7 @@ fn rms_norm(builder: &mut Builder, value: &Val, weight: &Val, epsilon: f32) -> V
     let inverse = builder.broadcast(&inverse, &[0], vec![rows, width]);
     let normalized = builder.multiply(value, &inverse);
     let weight = builder.broadcast(weight, &[1], vec![rows, width]);
-    let normalized = builder.multiply(&normalized, &weight);
-    round_f16_activation_boundary(builder, &normalized)
+    builder.multiply(&normalized, &weight)
 }
 
 fn silu(builder: &mut Builder, value: &Val) -> Val {
@@ -318,15 +302,13 @@ fn encoder_layer(
     let norm1 = rms_norm(builder, hidden, &args.take(), config.layer_norm_eps);
     let attention = attention(builder, &norm1, args, config, freqs, attention_bias);
     let residual = builder.add(hidden, &attention.output);
-    let residual = round_f16_activation_boundary(builder, &residual);
     let norm2 = rms_norm(builder, &residual, &args.take(), config.layer_norm_eps);
     let gate = linear_2d(builder, &norm2, &args.take(), &args.take());
     let gate = silu(builder, &gate);
     let up = linear_2d(builder, &norm2, &args.take(), &args.take());
     let activated = builder.multiply(&gate, &up);
     let down = linear_2d(builder, &activated, &args.take(), &args.take());
-    let output = builder.add(&residual, &down);
-    round_f16_activation_boundary(builder, &output)
+    builder.add(&residual, &down)
 }
 
 #[cfg(feature = "diagnostics")]
@@ -341,7 +323,6 @@ fn encoder_layer_with_diagnostics(
     let norm1 = rms_norm(builder, hidden, &args.take(), config.layer_norm_eps);
     let attention = attention(builder, &norm1, args, config, freqs, attention_bias);
     let post_attention_residual = builder.add(hidden, &attention.output);
-    let post_attention_residual = round_f16_activation_boundary(builder, &post_attention_residual);
     let norm2 = rms_norm(
         builder,
         &post_attention_residual,
@@ -354,7 +335,6 @@ fn encoder_layer_with_diagnostics(
     let mlp_gated_product = builder.multiply(&mlp_gate_activation, &mlp_up_projection);
     let mlp_down_projection = linear_2d(builder, &mlp_gated_product, &args.take(), &args.take());
     let output = builder.add(&post_attention_residual, &mlp_down_projection);
-    let output = round_f16_activation_boundary(builder, &output);
     Qwen25VlBlockDiagnostics {
         input: hidden.clone(),
         norm1,
@@ -411,8 +391,7 @@ fn emit_qwen2_5_vl_inner(
         Ty::f32(vec![patch_bucket, patch_bucket]),
         "window_attention.bias",
     );
-    let hidden = builder.linear_seq(&patches, &patch_weight);
-    let mut hidden = round_f16_activation_boundary(&mut builder, &hidden);
+    let mut hidden = builder.linear_seq(&patches, &patch_weight);
     #[cfg(feature = "diagnostics")]
     let reordered_patch_embedding = diagnostic_layout.map(|_| hidden.clone());
     #[cfg(feature = "diagnostics")]
