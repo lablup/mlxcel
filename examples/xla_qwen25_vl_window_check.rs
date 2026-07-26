@@ -43,6 +43,9 @@ struct Tolerance {
 #[derive(Debug, Clone, Copy)]
 struct ComparisonStats {
     max_absolute: f32,
+    max_absolute_index: Option<usize>,
+    actual_at_max_absolute: Option<f32>,
+    expected_at_max_absolute: Option<f32>,
     max_relative: f32,
     actual_rms: f64,
     expected_rms: f64,
@@ -190,6 +193,9 @@ fn comparison_stats(
     }
     let mut stats = ComparisonStats {
         max_absolute: 0.0,
+        max_absolute_index: None,
+        actual_at_max_absolute: None,
+        expected_at_max_absolute: None,
         max_relative: 0.0,
         actual_rms: 0.0,
         expected_rms: 0.0,
@@ -198,7 +204,7 @@ fn comparison_stats(
         non_finite: 0,
     };
     let mut finite = 0usize;
-    for (&observed, &reference) in actual.iter().zip(expected) {
+    for (index, (&observed, &reference)) in actual.iter().zip(expected).enumerate() {
         if !observed.is_finite() || !reference.is_finite() {
             stats.failures += 1;
             stats.non_finite += 1;
@@ -210,7 +216,12 @@ fn comparison_stats(
         stats.expected_rms += f64::from(reference).powi(2);
         stats.error_rms += f64::from(observed - reference).powi(2);
         finite += 1;
-        stats.max_absolute = stats.max_absolute.max(absolute);
+        if stats.max_absolute_index.is_none() || absolute > stats.max_absolute {
+            stats.max_absolute = absolute;
+            stats.max_absolute_index = Some(index);
+            stats.actual_at_max_absolute = Some(observed);
+            stats.expected_at_max_absolute = Some(reference);
+        }
         stats.max_relative = stats.max_relative.max(relative);
         if absolute > tolerance.atol + tolerance.rtol * reference.abs() {
             stats.failures += 1;
@@ -240,6 +251,9 @@ fn compare_stage(
         "atol": tolerance.atol,
         "rtol": tolerance.rtol,
         "max_absolute": stats.max_absolute,
+        "max_absolute_index": stats.max_absolute_index,
+        "actual_at_max_absolute": stats.actual_at_max_absolute,
+        "expected_at_max_absolute": stats.expected_at_max_absolute,
         "max_relative": stats.max_relative,
         "actual_rms": stats.actual_rms,
         "expected_rms": stats.expected_rms,
@@ -387,6 +401,12 @@ fn main() {
     let eager_vision = model
         .vision_encoder
         .forward_with_grid_diagnostics(&pixels, &processor.grids);
+    let eager_mlp_gate_projection_dense_f32_control = eager_vision
+        .substage_probe_layer_mlp_gate_projection_dense_f32_control
+        .as_slice();
+    let eager_mlp_up_projection_dense_f32_control = eager_vision
+        .substage_probe_layer_mlp_up_projection_dense_f32_control
+        .as_slice();
     // The producer exports host-owned F32 values at each substage boundary.
     // Reject a vacuous capture immediately so the strict oracle cannot report
     // a numeric false positive.
@@ -712,6 +732,22 @@ fn main() {
             tolerance,
         );
     }
+    record_stage(
+        &mut reports,
+        &mut comparison_failures,
+        &format!("vision.layer_{substage_probe_layer_index}.mlp_gate_projection_dense_f32_control"),
+        &iree_vision.substage_probe_layer_mlp_gate_projection,
+        eager_mlp_gate_projection_dense_f32_control,
+        tolerance,
+    );
+    record_stage(
+        &mut reports,
+        &mut comparison_failures,
+        &format!("vision.layer_{substage_probe_layer_index}.mlp_up_projection_dense_f32_control"),
+        &iree_vision.substage_probe_layer_mlp_up_projection,
+        eager_mlp_up_projection_dense_f32_control,
+        tolerance,
+    );
     let target_capture_index = iree_vision
         .full_layer_indices
         .iter()
@@ -768,6 +804,13 @@ fn main() {
             "diagnostic_layers": iree_vision.diagnostic_layer_indices,
             "target_full_layer": target_full_layer_index,
             "substage_probe_layer": substage_probe_layer_index,
+            "mlp_projection_control": {
+                "runtime": "eager_mlx",
+                "input": "same_eager_norm2",
+                "weight": "same_checkpoint_weight_cast_to_f32",
+                "operation": "dense_f32_matmul_then_f32_bias",
+                "purpose": "distinguish native_f16_projection_from_f32_accumulation_contract",
+            },
             "failed_phase": "vision",
             "failures": comparison_failures,
             "comparisons": reports,

@@ -410,6 +410,41 @@ impl VisionMLP {
     }
 
     #[cfg(feature = "xla-diagnostics")]
+    fn dense_f32_projection(linear: &UnifiedLinear, x: &MlxArray) -> UniquePtr<MlxArray> {
+        let x = mlxcel_core::astype(x, mlxcel_core::dtype::FLOAT32);
+        let weight = linear.dequantized_weight();
+        let weight = mlxcel_core::astype(&weight, mlxcel_core::dtype::FLOAT32);
+        let weight = mlxcel_core::transpose(&weight);
+        let mut output = mlxcel_core::matmul(&x, &weight);
+        let (global_scale, bias) = match linear {
+            UnifiedLinear::Quantized { weight, bias } => {
+                (weight.global_scale.as_ref(), bias.as_ref())
+            }
+            UnifiedLinear::Regular(linear) => (None, linear.bias.as_ref()),
+        };
+        if let Some(global_scale) = global_scale {
+            let global_scale = mlxcel_core::astype(global_scale, mlxcel_core::dtype::FLOAT32);
+            output = mlxcel_core::multiply(&output, &global_scale);
+        }
+        if let Some(bias) = bias {
+            let bias = mlxcel_core::astype(bias, mlxcel_core::dtype::FLOAT32);
+            output = mlxcel_core::add(&output, &bias);
+        }
+        output
+    }
+
+    #[cfg(feature = "xla-diagnostics")]
+    fn dense_f32_gate_up_controls(
+        &self,
+        x: &MlxArray,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        (
+            Self::dense_f32_projection(&self.gate_proj, x),
+            Self::dense_f32_projection(&self.up_proj, x),
+        )
+    }
+
+    #[cfg(feature = "xla-diagnostics")]
     fn forward_with_observer<F>(&self, x: &MlxArray, mut observe: F) -> UniquePtr<MlxArray>
     where
         F: FnMut(VisionMLPDiagnosticStage, &MlxArray),
@@ -446,8 +481,10 @@ struct Qwen25VLBlockDiagnostics {
     post_attention_residual: Vec<f32>,
     norm2: Vec<f32>,
     mlp_gate_projection: Vec<f32>,
+    mlp_gate_projection_dense_f32_control: Vec<f32>,
     mlp_gate_activation: Vec<f32>,
     mlp_up_projection: Vec<f32>,
+    mlp_up_projection_dense_f32_control: Vec<f32>,
     mlp_gated_product: Vec<f32>,
     mlp_down_projection: Vec<f32>,
 }
@@ -534,6 +571,12 @@ impl VisionBlock {
             host_f32_diagnostic_snapshot(&post_attention_residual);
         let norm2 = self.norm2.forward(&post_attention_residual);
         let norm2_snapshot = host_f32_diagnostic_snapshot(&norm2);
+        let (mlp_gate_projection_dense_f32_control, mlp_up_projection_dense_f32_control) =
+            self.mlp.dense_f32_gate_up_controls(&norm2);
+        let mlp_gate_projection_dense_f32_control =
+            host_f32_diagnostic_snapshot(&mlp_gate_projection_dense_f32_control);
+        let mlp_up_projection_dense_f32_control =
+            host_f32_diagnostic_snapshot(&mlp_up_projection_dense_f32_control);
         let mut mlp_gate_projection = None;
         let mut mlp_gate_activation = None;
         let mut mlp_up_projection = None;
@@ -564,10 +607,12 @@ impl VisionBlock {
                 norm2: norm2_snapshot,
                 mlp_gate_projection: mlp_gate_projection
                     .expect("diagnostics capture MLP gate projection"),
+                mlp_gate_projection_dense_f32_control,
                 mlp_gate_activation: mlp_gate_activation
                     .expect("diagnostics capture MLP gate activation"),
                 mlp_up_projection: mlp_up_projection
                     .expect("diagnostics capture MLP up projection"),
+                mlp_up_projection_dense_f32_control,
                 mlp_gated_product: mlp_gated_product
                     .expect("diagnostics capture MLP gated product"),
                 mlp_down_projection: mlp_down_projection_snapshot,
@@ -652,8 +697,10 @@ pub struct Qwen25VLVisionDiagnostics {
     pub substage_probe_layer_post_attention_residual: Vec<f32>,
     pub substage_probe_layer_norm2: Vec<f32>,
     pub substage_probe_layer_mlp_gate_projection: Vec<f32>,
+    pub substage_probe_layer_mlp_gate_projection_dense_f32_control: Vec<f32>,
     pub substage_probe_layer_mlp_gate_activation: Vec<f32>,
     pub substage_probe_layer_mlp_up_projection: Vec<f32>,
+    pub substage_probe_layer_mlp_up_projection_dense_f32_control: Vec<f32>,
     pub substage_probe_layer_mlp_gated_product: Vec<f32>,
     pub substage_probe_layer_mlp_down_projection: Vec<f32>,
     pub merger_window_ordered: UniquePtr<MlxArray>,
@@ -1133,10 +1180,14 @@ impl Qwen25VLVisionEncoder {
                     substage_probe_layer_norm2: substage_probe_layer_state.norm2,
                     substage_probe_layer_mlp_gate_projection: substage_probe_layer_state
                         .mlp_gate_projection,
+                    substage_probe_layer_mlp_gate_projection_dense_f32_control:
+                        substage_probe_layer_state.mlp_gate_projection_dense_f32_control,
                     substage_probe_layer_mlp_gate_activation: substage_probe_layer_state
                         .mlp_gate_activation,
                     substage_probe_layer_mlp_up_projection: substage_probe_layer_state
                         .mlp_up_projection,
+                    substage_probe_layer_mlp_up_projection_dense_f32_control:
+                        substage_probe_layer_state.mlp_up_projection_dense_f32_control,
                     substage_probe_layer_mlp_gated_product: substage_probe_layer_state
                         .mlp_gated_product,
                     substage_probe_layer_mlp_down_projection: substage_probe_layer_state
@@ -1167,6 +1218,8 @@ impl super::VisionEncoder for Qwen25VLVisionEncoder {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "xla-diagnostics")]
+    use super::VisionMLP;
     use super::{host_f32_diagnostic_snapshot, restoration_indices};
 
     #[test]
@@ -1180,6 +1233,28 @@ mod tests {
             .map(|index| window_ordered[index as usize])
             .collect::<Vec<_>>();
         assert_eq!(original, vec!["zero", "one", "two", "three"]);
+    }
+
+    #[cfg(feature = "xla-diagnostics")]
+    #[test]
+    fn dense_f32_projection_control_preserves_linear_order_and_dtype() {
+        use mlxcel_core::layers::{Linear, UnifiedLinear};
+
+        let input = mlxcel_core::from_slice_f32(&[1.0, 2.0, -1.0, 0.5], &[2, 2]);
+        let input = mlxcel_core::astype(&input, mlxcel_core::dtype::FLOAT16);
+        let weight = mlxcel_core::from_slice_f32(&[3.0, 4.0, -2.0, 5.0], &[2, 2]);
+        let weight = mlxcel_core::astype(&weight, mlxcel_core::dtype::FLOAT16);
+        let bias = mlxcel_core::from_slice_f32(&[0.5, -1.0], &[2]);
+        let bias = mlxcel_core::astype(&bias, mlxcel_core::dtype::FLOAT16);
+        let linear = UnifiedLinear::Regular(Linear::new(weight, Some(bias)));
+
+        let output = VisionMLP::dense_f32_projection(&linear, &input);
+        assert_eq!(
+            mlxcel_core::array_dtype(&output),
+            mlxcel_core::dtype::FLOAT32
+        );
+        let output = host_f32_diagnostic_snapshot(&output);
+        assert_eq!(output, vec![11.5, 7.0, -0.5, 3.5]);
     }
 
     #[test]
