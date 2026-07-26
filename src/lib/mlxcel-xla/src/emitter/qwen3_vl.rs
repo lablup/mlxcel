@@ -876,13 +876,14 @@ fn interpolated_position_embeddings(
     builder.reduce_add(&weighted, 0, &zero)
 }
 
-fn patch_merger(
+fn patch_merger_impl(
     builder: &mut Builder,
     hidden: &Val,
     args: &mut Args,
     config: &Qwen3VlConfig,
     postshuffle_norm: bool,
-) -> Val {
+    diagnostics: bool,
+) -> (Val, Option<[Val; 3]>) {
     let merge_width = config.hidden * config.spatial_merge_size * config.spatial_merge_size;
     let merged_tokens =
         hidden.ty.shape[0] / (config.spatial_merge_size * config.spatial_merge_size);
@@ -905,16 +906,18 @@ fn patch_merger(
         );
         builder.reshape(&normalized, vec![merged_tokens, merge_width])
     };
-    let merged = linear_2d(builder, &merged, &args.take(), &args.take());
-    let merged = exact_gelu(builder, &merged);
-    linear_2d(builder, &merged, &args.take(), &args.take())
+    let fc1 = linear_2d(builder, &merged, &args.take(), &args.take());
+    let activated = exact_gelu(builder, &fc1);
+    let projected = linear_2d(builder, &activated, &args.take(), &args.take());
+    let diagnostic_values = diagnostics.then(|| [merged.clone(), fc1.clone(), activated.clone()]);
+    (projected, diagnostic_values)
 }
 
 /// Emit one Qwen3-VL bucket. `patches` are already in the processor's
 /// post-smart-resize, spatial-merge-grouped order. `vision_rope` and
 /// `attention_bias` are host-built from `grid_thw`/packed boundaries, keeping
 /// cross-image isolation explicit while preserving one finite static graph.
-pub(crate) fn emit_qwen3_vl(config: &Qwen3VlConfig, patch_bucket: usize) -> String {
+fn emit_qwen3_vl_impl(config: &Qwen3VlConfig, patch_bucket: usize, diagnostics: bool) -> String {
     assert!(
         QWEN3_VL_PATCH_BUCKETS.contains(&patch_bucket),
         "unqualified Qwen3-VL patch bucket"
@@ -942,14 +945,18 @@ pub(crate) fn emit_qwen3_vl(config: &Qwen3VlConfig, patch_bucket: usize) -> Stri
     let position_weights = args.push_input(Ty::f32(vec![4, patch_bucket]), "position.weights");
     let mut hidden = builder.linear_seq(&patches, &patch_weight);
     hidden = bias_2d(&mut builder, &hidden, &patch_bias);
+    let patch_embeddings = diagnostics.then(|| hidden.clone());
     let position_embeddings = interpolated_position_embeddings(
         &mut builder,
         &position_table,
         &position_indices,
         &position_weights,
     );
+    let diagnostic_position_embeddings = diagnostics.then(|| position_embeddings.clone());
     hidden = builder.add(&hidden, &position_embeddings);
+    let positioned_embeddings = diagnostics.then(|| hidden.clone());
     let mut deepstack_hidden = Vec::with_capacity(config.deepstack_visual_indexes.len());
+    let mut block_hidden = diagnostics.then(|| Vec::with_capacity(config.depth));
     for layer in 0..config.depth {
         hidden = encoder_layer(
             &mut builder,
@@ -959,14 +966,41 @@ pub(crate) fn emit_qwen3_vl(config: &Qwen3VlConfig, patch_bucket: usize) -> Stri
             &freqs,
             &attention_bias,
         );
+        if let Some(outputs) = &mut block_hidden {
+            outputs.push(hidden.clone());
+        }
         if config.deepstack_visual_indexes.contains(&layer) {
             deepstack_hidden.push(hidden.clone());
         }
     }
-    let projected = patch_merger(&mut builder, &hidden, &mut args, config, false);
+    let (projected, main_merger_diagnostics) =
+        patch_merger_impl(&mut builder, &hidden, &mut args, config, false, diagnostics);
     let mut outputs = vec![projected];
+    let mut deepstack_merger_diagnostics =
+        diagnostics.then(|| Vec::with_capacity(deepstack_hidden.len()));
     for branch in deepstack_hidden {
-        outputs.push(patch_merger(&mut builder, &branch, &mut args, config, true));
+        let (projected, branch_diagnostics) =
+            patch_merger_impl(&mut builder, &branch, &mut args, config, true, diagnostics);
+        outputs.push(projected);
+        if let Some(all_diagnostics) = &mut deepstack_merger_diagnostics {
+            all_diagnostics.push(branch_diagnostics.expect("diagnostics includes merger stages"));
+        }
+    }
+    if let Some(block_hidden) = block_hidden {
+        outputs.push(patch_embeddings.expect("diagnostics includes patch embeddings"));
+        outputs.push(
+            diagnostic_position_embeddings
+                .expect("diagnostics includes interpolated position embeddings"),
+        );
+        outputs.push(positioned_embeddings.expect("diagnostics includes positioned embeddings"));
+        outputs.extend(block_hidden);
+        outputs.extend(main_merger_diagnostics.expect("diagnostics includes main merger stages"));
+        outputs.extend(
+            deepstack_merger_diagnostics
+                .expect("diagnostics includes DeepStack merger stages")
+                .into_iter()
+                .flatten(),
+        );
     }
     assert_eq!(args.cursor, specs.len(), "Qwen3-VL weight schema drifted");
     let result_types = outputs
@@ -984,6 +1018,15 @@ pub(crate) fn emit_qwen3_vl(config: &Qwen3VlConfig, patch_bucket: usize) -> Stri
         signature = args.declarations.join(", "),
         body = builder.body(),
     )
+}
+
+pub(crate) fn emit_qwen3_vl(config: &Qwen3VlConfig, patch_bucket: usize) -> String {
+    emit_qwen3_vl_impl(config, patch_bucket, false)
+}
+
+#[cfg(feature = "diagnostics")]
+pub(crate) fn emit_qwen3_vl_diagnostics(config: &Qwen3VlConfig, patch_bucket: usize) -> String {
+    emit_qwen3_vl_impl(config, patch_bucket, true)
 }
 
 #[cfg(test)]
@@ -1107,6 +1150,17 @@ mod tests {
             two_image_mlir
                 .contains("-> (tensor<128x12xf32>, tensor<128x12xf32>, tensor<128x12xf32>)")
         );
+    }
+
+    #[test]
+    fn diagnostic_bucket_appends_ordered_pre_merger_stages() {
+        let config = config();
+        let mlir = emit_qwen3_vl_impl(&config, 16, true);
+        let mut output_types = vec!["tensor<4x12xf32>"; 3];
+        output_types.extend(vec!["tensor<16x8xf32>"; 5]);
+        output_types.extend(vec!["tensor<4x32xf32>"; 9]);
+        assert!(mlir.contains(&format!("-> ({})", output_types.join(", "))));
+        assert_eq!(mlir.matches("chlo.erf").count(), 3);
     }
 
     #[test]
