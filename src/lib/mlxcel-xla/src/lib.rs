@@ -171,6 +171,8 @@ pub use emitter::{
 };
 #[cfg(feature = "diagnostics")]
 pub use iree::PreparedPrefillDiagnostics;
+#[cfg(feature = "diagnostics")]
+pub use molmo_vision_runtime::{IreeMolmoVisionDiagnosticProjector, MolmoVisionDiagnostics};
 #[cfg(feature = "iree")]
 pub use molmo_vision_runtime::{IreeMolmoVisionProjector, MolmoVisionProjection};
 #[cfg(feature = "iree")]

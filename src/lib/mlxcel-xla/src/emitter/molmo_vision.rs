@@ -18,6 +18,7 @@ use super::builder::{Builder, Ty, Val};
 use super::molmo_vision_config::{
     MolmoVisionConfig, MolmoVisionWeightDType, MolmoVisionWeightSpec,
 };
+use super::molmo_vision_ops::{scalar_broadcast, silu, softmax_last, tanh_gelu};
 
 struct Args {
     values: Vec<Val>,
@@ -117,47 +118,6 @@ fn layer_norm(builder: &mut Builder, value: &Val, weight: &Val, bias: &Val, epsi
     let bias = builder.broadcast(bias, &[1], vec![rows, width]);
     let normalized = builder.multiply(&normalized, &weight);
     builder.add(&normalized, &bias)
-}
-
-fn scalar_broadcast(builder: &mut Builder, value: f32, shape: Vec<usize>) -> Val {
-    let scalar = builder.const_f32(value);
-    builder.broadcast(&scalar, &[], shape)
-}
-
-fn tanh_gelu(builder: &mut Builder, value: &Val) -> Val {
-    let shape = value.ty.shape.clone();
-    let half = scalar_broadcast(builder, 0.5, shape.clone());
-    let one = scalar_broadcast(builder, 1.0, shape.clone());
-    let coefficient = scalar_broadcast(builder, 0.044_715, shape.clone());
-    let scale = scalar_broadcast(builder, 0.797_884_6, shape);
-    let squared = builder.multiply(value, value);
-    let cubed = builder.multiply(&squared, value);
-    let nonlinear = builder.multiply(&coefficient, &cubed);
-    let inner = builder.add(value, &nonlinear);
-    let scaled = builder.multiply(&scale, &inner);
-    let tanh = builder.tanh(&scaled);
-    let cdf = builder.add(&one, &tanh);
-    let half_value = builder.multiply(value, &half);
-    builder.multiply(&half_value, &cdf)
-}
-
-fn softmax_last(builder: &mut Builder, scores: &Val) -> Val {
-    let last = scores.ty.shape.len() - 1;
-    let negative_infinity = builder.const_f32(f32::NEG_INFINITY);
-    let maximum = builder.reduce_max(scores, last, &negative_infinity);
-    let mut broadcast_shape = maximum.ty.shape.clone();
-    broadcast_shape.push(scores.ty.shape[last]);
-    let dimensions = (0..maximum.ty.shape.len()).collect::<Vec<_>>();
-    let maximum = builder.broadcast(&maximum, &dimensions, broadcast_shape);
-    let shifted = builder.subtract(scores, &maximum);
-    let exponentials = builder.exponential(&shifted);
-    let zero = builder.const_f32(0.0);
-    let denominator = builder.reduce_add(&exponentials, last, &zero);
-    let mut broadcast_shape = denominator.ty.shape.clone();
-    broadcast_shape.push(scores.ty.shape[last]);
-    let dimensions = (0..denominator.ty.shape.len()).collect::<Vec<_>>();
-    let denominator = builder.broadcast(&denominator, &dimensions, broadcast_shape);
-    builder.divide(&exponentials, &denominator)
 }
 
 fn self_attention(
@@ -366,15 +326,7 @@ fn attention_pool(
     )
 }
 
-fn silu(builder: &mut Builder, value: &Val) -> Val {
-    let negated = builder.negate(value);
-    let exponential = builder.exponential(&negated);
-    let one = scalar_broadcast(builder, 1.0, value.ty.shape.clone());
-    let denominator = builder.add(&one, &exponential);
-    builder.divide(value, &denominator)
-}
-
-pub(crate) fn emit_molmo_vision(config: &MolmoVisionConfig) -> String {
+fn emit_molmo_vision_impl(config: &MolmoVisionConfig, diagnostics: bool) -> String {
     let specs = config.weight_specs();
     let mut args = Args::new(&specs);
     let mut builder = Builder::new();
@@ -402,6 +354,7 @@ pub(crate) fn emit_molmo_vision(config: &MolmoVisionConfig) -> String {
         &patches,
         vec![config.max_crops, config.patches_per_crop, config.hidden],
     );
+    let diagnostic_patches = diagnostics.then(|| patches.clone());
     let class_embedding = builder.reshape(&class_embedding, vec![1, 1, config.hidden]);
     let class_embedding = builder.broadcast(
         &class_embedding,
@@ -435,6 +388,16 @@ pub(crate) fn emit_molmo_vision(config: &MolmoVisionConfig) -> String {
             }
         }
     }
+    let diagnostic_selected = diagnostics.then(|| {
+        selected
+            .iter()
+            .map(|value| {
+                value
+                    .clone()
+                    .expect("selected Molmo diagnostic layer was emitted")
+            })
+            .collect::<Vec<_>>()
+    });
     let mut selected_values = Vec::with_capacity(selected.len());
     for value in selected {
         let value = value.expect("selected layer was emitted");
@@ -475,14 +438,46 @@ pub(crate) fn emit_molmo_vision(config: &MolmoVisionConfig) -> String {
         ],
     );
     assert_eq!(args.cursor, specs.len(), "Molmo vision schema drifted");
+    let outputs =
+        if let (Some(patches), Some(mut selected)) = (diagnostic_patches, diagnostic_selected) {
+            let mut outputs = Vec::with_capacity(selected.len() + 2);
+            outputs.push(patches);
+            outputs.append(&mut selected);
+            outputs.push(projected);
+            outputs
+        } else {
+            vec![projected]
+        };
+    let output_types = outputs
+        .iter()
+        .map(|value| value.ty.render())
+        .collect::<Vec<_>>();
+    let result_type = if output_types.len() == 1 {
+        output_types[0].clone()
+    } else {
+        format!("({})", output_types.join(", "))
+    };
+    let result_values = outputs
+        .iter()
+        .map(|value| value.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
-        "module @molmo_vision {{\n  func.func public @main({signature}) -> {result} {{\n{body}    \
-         return {value} : {result}\n  }}\n}}\n",
+        "module @molmo_vision {{\n  func.func public @main({signature}) -> {result_type} {{\n{body}    \
+         return {result_values} : {return_types}\n  }}\n}}\n",
         signature = args.declarations.join(", "),
-        result = projected.ty.render(),
         body = builder.body(),
-        value = projected.name,
+        return_types = output_types.join(", "),
     )
+}
+
+pub(crate) fn emit_molmo_vision(config: &MolmoVisionConfig) -> String {
+    emit_molmo_vision_impl(config, false)
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+pub(crate) fn emit_molmo_vision_diagnostics(config: &MolmoVisionConfig) -> String {
+    emit_molmo_vision_impl(config, true)
 }
 
 #[cfg(test)]

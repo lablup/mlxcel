@@ -291,7 +291,11 @@ impl MolmoVisionTransformer {
         mlxcel_core::add(x, &pe)
     }
 
-    fn forward(&self, x: &MlxArray) -> Vec<UniquePtr<MlxArray>> {
+    fn forward_internal(
+        &self,
+        x: &MlxArray,
+        capture_patch_embedding: bool,
+    ) -> (Vec<UniquePtr<MlxArray>>, Option<UniquePtr<MlxArray>>) {
         // x: [B, num_patch, n_pixels]. Pad last dim up to intermediate_size if
         // the processor produced a narrower patch (quantization padding).
         let shape = mlxcel_core::array_shape(x);
@@ -313,6 +317,8 @@ impl MolmoVisionTransformer {
         };
 
         let x = self.patch_embedding.forward(&x);
+        let patch_embedding =
+            capture_patch_embedding.then(|| mlxcel_core::copy(x.as_ref().unwrap()));
         let bsz = mlxcel_core::array_shape(&x)[0];
 
         // Prepend class embedding: broadcast [emb] -> [B, 1, emb].
@@ -330,7 +336,23 @@ impl MolmoVisionTransformer {
             x = block.forward(&x);
             hidden_states.push(mlxcel_core::copy(&x));
         }
-        hidden_states
+        (hidden_states, patch_embedding)
+    }
+
+    fn forward(&self, x: &MlxArray) -> Vec<UniquePtr<MlxArray>> {
+        self.forward_internal(x, false).0
+    }
+
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-reference-diagnostics"))]
+    fn forward_with_patch_embedding(
+        &self,
+        x: &MlxArray,
+    ) -> (Vec<UniquePtr<MlxArray>>, UniquePtr<MlxArray>) {
+        let (hidden_states, patch_embedding) = self.forward_internal(x, true);
+        (
+            hidden_states,
+            patch_embedding.expect("diagnostic patch embedding was requested"),
+        )
     }
 
     fn from_weights(
@@ -413,11 +435,26 @@ pub struct MolmoVisionModel {
     num_prefix_tokens: usize,
 }
 
+#[allow(dead_code)]
+pub(crate) struct MolmoHostVisionDiagnostics {
+    pub(crate) patch_embeddings: UniquePtr<MlxArray>,
+    pub(crate) selected_hidden_states: Vec<UniquePtr<MlxArray>>,
+    pub(crate) projected_features: UniquePtr<MlxArray>,
+}
+
 impl MolmoVisionModel {
     /// Run the ViT over `[B, T, N, D]` crops, select+concat `vit_layers`, strip
     /// the cls token, and mask all-padding crops. Returns `[B, T, N_patch,
     /// feat_dim]` where `feat_dim = image_emb_dim * len(vit_layers)`.
-    fn encode_image(&self, images: &MlxArray) -> UniquePtr<MlxArray> {
+    fn encode_image_internal(
+        &self,
+        images: &MlxArray,
+        capture_diagnostics: bool,
+    ) -> (
+        UniquePtr<MlxArray>,
+        Option<UniquePtr<MlxArray>>,
+        Vec<UniquePtr<MlxArray>>,
+    ) {
         let shape = mlxcel_core::array_shape(images);
         let b = shape[0];
         let t = shape[1];
@@ -441,7 +478,27 @@ impl MolmoVisionModel {
             mlxcel_core::subtract(&one, &all_pad_i) // 1 if valid, 0 if padding
         };
 
-        let hidden_states = self.image_vit.forward(&flat);
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-reference-diagnostics"))]
+        let (hidden_states, patch_embeddings) = if capture_diagnostics {
+            let (hidden_states, patch_embeddings) =
+                self.image_vit.forward_with_patch_embedding(&flat);
+            (hidden_states, Some(patch_embeddings))
+        } else {
+            (self.image_vit.forward(&flat), None)
+        };
+        #[cfg(not(any(feature = "xla-diagnostics", feature = "xla-reference-diagnostics")))]
+        let (hidden_states, patch_embeddings) = {
+            debug_assert!(!capture_diagnostics);
+            (self.image_vit.forward(&flat), None)
+        };
+        let selected_hidden_states = if capture_diagnostics {
+            self.vit_layers
+                .iter()
+                .map(|&layer| mlxcel_core::copy(hidden_states[layer].as_ref().unwrap()))
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         // Select and concat the requested ViT layers along the feature dim.
         let mut image_features =
@@ -473,7 +530,11 @@ impl MolmoVisionModel {
         let not_pad_f = mlxcel_core::reshape(&not_pad_f, &[b * t, 1, 1]);
         let image_features = mlxcel_core::multiply(&image_features, &not_pad_f);
 
-        mlxcel_core::reshape(&image_features, &[b, t, n, feat_dim])
+        (
+            mlxcel_core::reshape(&image_features, &[b, t, n, feat_dim]),
+            patch_embeddings,
+            selected_hidden_states,
+        )
     }
 
     /// Apply `pad_and_partial_pad` learned pad embeddings using `image_masks`.
@@ -519,13 +580,19 @@ impl MolmoVisionModel {
 
     /// Full forward: encode -> pad_embed -> spatial 2x2 pool (attention-meanq)
     /// -> projector. Returns `[B, num_image, h*w, text_hidden]`.
-    pub fn forward(&self, images: &MlxArray, image_masks: &MlxArray) -> UniquePtr<MlxArray> {
+    fn forward_internal(
+        &self,
+        images: &MlxArray,
+        image_masks: &MlxArray,
+        capture_diagnostics: bool,
+    ) -> (UniquePtr<MlxArray>, Option<MolmoHostVisionDiagnostics>) {
         let shape = mlxcel_core::array_shape(images);
         let batch_size = shape[0];
         let num_image = shape[1];
 
         let cfg = &self.config;
-        let mut image_features = self.encode_image(images);
+        let (mut image_features, patch_embeddings, selected_hidden_states) =
+            self.encode_image_internal(images, capture_diagnostics);
         image_features = self.apply_pad_embed(image_features, image_masks);
 
         let feat_dim = mlxcel_core::array_shape(&image_features);
@@ -585,7 +652,31 @@ impl MolmoVisionModel {
         let pooled = mlxcel_core::reshape(&pooled, &[batch_size, num_image, lh * lw, pooled_dim]);
 
         // Project to the text hidden dim.
-        self.image_projector.forward(&pooled)
+        let projected = self.image_projector.forward(&pooled);
+        let diagnostics = capture_diagnostics.then(|| MolmoHostVisionDiagnostics {
+            patch_embeddings: patch_embeddings.expect("diagnostic patch embedding was requested"),
+            selected_hidden_states,
+            projected_features: mlxcel_core::copy(projected.as_ref().unwrap()),
+        });
+        (projected, diagnostics)
+    }
+
+    pub fn forward(&self, images: &MlxArray, image_masks: &MlxArray) -> UniquePtr<MlxArray> {
+        self.forward_internal(images, image_masks, false).0
+    }
+
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-reference-diagnostics"))]
+    #[allow(dead_code)]
+    pub(crate) fn forward_with_diagnostics(
+        &self,
+        images: &MlxArray,
+        image_masks: &MlxArray,
+    ) -> (UniquePtr<MlxArray>, MolmoHostVisionDiagnostics) {
+        let (projected, diagnostics) = self.forward_internal(images, image_masks, true);
+        (
+            projected,
+            diagnostics.expect("Molmo host diagnostics were requested"),
+        )
     }
 
     pub fn from_weights(

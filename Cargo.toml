@@ -71,11 +71,18 @@ xla-backend = ["dep:mlxcel-xla"]
 # StableHLO prefill / decode_step graphs. Needs IREE_DIST at build time (the
 # extracted iree dist), so it is a local / opt-in build, not a CI default.
 xla-iree = ["xla-backend", "mlxcel-xla/iree"]
+# Device-neutral eager MLX/IREE reference capture for CPU `local-task`
+# qualification without requiring an IREE CUDA source/build tree.
+xla-reference-diagnostics = ["xla-iree", "mlxcel-xla/diagnostics"]
 # Explicit test-only forwarding for Gemma3n intermediate oracle validation.
 # Its pinned reference is the production CUDA runtime, so enabling diagnostics
 # also enables the root MLX CUDA backend. This is not part of `xla-iree`; normal
 # production bundles remain unchanged.
-xla-diagnostics = ["cuda", "xla-iree", "mlxcel-xla/diagnostics"]
+#
+# Device-neutral eager MLX/IREE reference capture for CPU `local-task`
+# qualification without requiring an IREE CUDA source/build tree.
+xla-reference-diagnostics = ["xla-iree", "mlxcel-xla/diagnostics"]
+xla-diagnostics = ["cuda", "xla-reference-diagnostics"]
 # CPU-capable bounded MLX/IREE operator-oracle harness. CUDA-specific production
 # probes may add `cuda`, but the shared report/comparison layer does not require it.
 xla-micro-oracle = ["xla-iree", "mlxcel-xla/micro-oracle"]

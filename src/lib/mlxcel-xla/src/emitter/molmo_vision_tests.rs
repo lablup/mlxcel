@@ -25,6 +25,17 @@ fn pinned_graph_contains_vit_pool_projector_and_static_output() {
     assert!(mlir.contains("molmo.image_masks"));
 }
 
+#[test]
+fn diagnostics_return_patch_selected_layer_and_projector_boundaries() {
+    let diagnostic = emit_molmo_vision_diagnostics(&config());
+    assert!(diagnostic.contains(
+        "-> (tensor<13x576x1024xf32>, tensor<7501x1024xf32>, \
+         tensor<7501x1024xf32>, tensor<13x144x3584xf32>)"
+    ));
+    let production = emit_molmo_vision(&config());
+    assert!(!production.contains("tensor<7501x1024xf32>, tensor<7501x1024xf32>"));
+}
+
 #[cfg(feature = "iree")]
 #[test]
 fn pinned_graph_compiles_for_cpu() {
@@ -38,6 +49,25 @@ fn pinned_graph_compiles_for_cpu() {
         crate::iree::target_flags("local-task").unwrap(),
         &cache,
         "pinned-molmo-v1-vision",
+        0,
+    )
+    .unwrap();
+    assert!(vmfb.metadata().unwrap().len() > 0);
+}
+
+#[cfg(feature = "iree")]
+#[test]
+fn diagnostic_graph_compiles_for_cpu() {
+    let mlir = emit_molmo_vision_diagnostics(&config());
+    let compiler = crate::iree::iree_compile_bin().unwrap();
+    let cache = std::env::temp_dir().join("mlxcel-xla-molmo-vision-emitter-test");
+    std::fs::create_dir_all(&cache).unwrap();
+    let vmfb = crate::iree::compile_one(
+        &compiler,
+        &mlir,
+        crate::iree::target_flags("local-task").unwrap(),
+        &cache,
+        "pinned-molmo-v1-vision-diagnostics",
         0,
     )
     .unwrap();

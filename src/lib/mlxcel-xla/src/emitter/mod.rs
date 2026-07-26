@@ -60,6 +60,7 @@ mod moe;
 pub(crate) mod numeric_ops;
 mod molmo_vision;
 mod molmo_vision_config;
+mod molmo_vision_ops;
 mod phi4_audio;
 mod qwen2_vl;
 mod rope;
@@ -155,6 +156,8 @@ pub(crate) use model::{
 };
 #[allow(unused_imports)]
 pub(crate) use molmo_vision::emit_molmo_vision;
+#[cfg(feature = "diagnostics")]
+pub(crate) use molmo_vision::emit_molmo_vision_diagnostics;
 #[allow(unused_imports)]
 pub(crate) use molmo_vision_config::{
     MolmoVisionConfig, MolmoVisionWeightDType, MolmoVisionWeightSpec,

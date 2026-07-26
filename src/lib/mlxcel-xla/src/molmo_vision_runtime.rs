@@ -203,6 +203,7 @@ fn compile_and_load(
     device: &str,
     config: &MolmoVisionConfig,
     mlir: &str,
+    tag: &str,
 ) -> Result<IreeAuxiliaryModule, String> {
     let compiler = iree_compile_bin()?;
     let flags = target_flags(device)?;
@@ -224,19 +225,85 @@ fn compile_and_load(
         ),
         compiler_generation_identity(&compiler, flags, mlir)?,
     )?;
-    let vmfb = cached_vmfb_path(&compiler, mlir, flags, &cache, "molmo-v1-vision", 0);
+    let vmfb = cached_vmfb_path(&compiler, mlir, flags, &cache, tag, 0);
     ensure_qualified_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
-        compile_one_to(
-            &compiler,
-            mlir,
-            flags,
-            &cache,
-            "molmo-v1-vision",
-            0,
-            temporary,
-        )
+        compile_one_to(&compiler, mlir, flags, &cache, tag, 0, temporary)
     })?;
     IreeAuxiliaryModule::load(device, &vmfb, &contract, weights)
+}
+
+struct ValidatedMolmoVisionInput {
+    padded_pixels: Vec<f32>,
+    padded_masks: Vec<f32>,
+    pixel_shape: [usize; 3],
+    mask_shape: [usize; 2],
+    crop_count: usize,
+    upload_bytes: usize,
+}
+
+fn validate_and_pad_input(
+    config: &MolmoVisionConfig,
+    pixels: &[f32],
+    masks: &[f32],
+    crop_count: usize,
+) -> Result<ValidatedMolmoVisionInput, String> {
+    if crop_count == 0 || crop_count > config.max_crops {
+        return Err(format!(
+            "Molmo crop count {crop_count} is outside 1..={}",
+            config.max_crops
+        ));
+    }
+    let pixel_count = crop_count
+        .checked_mul(config.patches_per_crop)
+        .and_then(|count| count.checked_mul(config.patch_width))
+        .ok_or_else(|| "Molmo pixel shape overflowed".to_string())?;
+    let mask_count = crop_count
+        .checked_mul(config.patches_per_crop)
+        .ok_or_else(|| "Molmo mask shape overflowed".to_string())?;
+    if pixels.len() != pixel_count || masks.len() != mask_count {
+        return Err(format!(
+            "Molmo processor counts pixels={}/{} masks={}/{}",
+            pixels.len(),
+            pixel_count,
+            masks.len(),
+            mask_count
+        ));
+    }
+    validate_finite_values("Molmo pixel_values", pixels)?;
+    validate_finite_values("Molmo image_masks", masks)?;
+    if let Some((index, value)) = masks
+        .iter()
+        .enumerate()
+        .find(|(_, value)| !(**value >= -1.0 && **value <= 1.0))
+    {
+        return Err(format!(
+            "Molmo image_masks[{index}]={value} is outside [-1,1]"
+        ));
+    }
+    let pixel_shape = [
+        config.max_crops,
+        config.patches_per_crop,
+        config.patch_width,
+    ];
+    let mask_shape = [config.max_crops, config.patches_per_crop];
+    let static_pixels = checked_product(&pixel_shape, "static pixel")?;
+    let static_masks = checked_product(&mask_shape, "static mask")?;
+    let mut padded_pixels = vec![-1.0f32; static_pixels];
+    padded_pixels[..pixels.len()].copy_from_slice(pixels);
+    let mut padded_masks = vec![-1.0f32; static_masks];
+    padded_masks[..masks.len()].copy_from_slice(masks);
+    let upload_bytes = static_pixels
+        .checked_add(static_masks)
+        .and_then(|count| count.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "Molmo invocation upload byte count overflows usize".to_string())?;
+    Ok(ValidatedMolmoVisionInput {
+        padded_pixels,
+        padded_masks,
+        pixel_shape,
+        mask_shape,
+        crop_count,
+        upload_bytes,
+    })
 }
 
 pub struct IreeMolmoVisionProjector {
@@ -248,7 +315,7 @@ impl IreeMolmoVisionProjector {
     pub fn load(model_dir: &Path, device: &str) -> Result<Self, String> {
         let config = MolmoVisionConfig::from_model_dir(model_dir)?;
         let mlir = emit_molmo_vision(&config);
-        let module = compile_and_load(model_dir, device, &config, &mlir)?;
+        let module = compile_and_load(model_dir, device, &config, &mlir, "molmo-v1-vision")?;
         Ok(Self { module, config })
     }
 
@@ -288,55 +355,7 @@ impl IreeMolmoVisionProjector {
         masks: &[f32],
         crop_count: usize,
     ) -> Result<MolmoVisionProjection, String> {
-        if crop_count == 0 || crop_count > self.config.max_crops {
-            return Err(format!(
-                "Molmo crop count {crop_count} is outside 1..={}",
-                self.config.max_crops
-            ));
-        }
-        let pixel_count = crop_count
-            .checked_mul(self.config.patches_per_crop)
-            .and_then(|count| count.checked_mul(self.config.patch_width))
-            .ok_or_else(|| "Molmo pixel shape overflowed".to_string())?;
-        let mask_count = crop_count
-            .checked_mul(self.config.patches_per_crop)
-            .ok_or_else(|| "Molmo mask shape overflowed".to_string())?;
-        if pixels.len() != pixel_count || masks.len() != mask_count {
-            return Err(format!(
-                "Molmo processor counts pixels={}/{} masks={}/{}",
-                pixels.len(),
-                pixel_count,
-                masks.len(),
-                mask_count
-            ));
-        }
-        validate_finite_values("Molmo pixel_values", pixels)?;
-        validate_finite_values("Molmo image_masks", masks)?;
-        if let Some((index, value)) = masks
-            .iter()
-            .enumerate()
-            .find(|(_, value)| !(**value >= -1.0 && **value <= 1.0))
-        {
-            return Err(format!(
-                "Molmo image_masks[{index}]={value} is outside [-1,1]"
-            ));
-        }
-        let static_pixels = checked_product(
-            &[
-                self.config.max_crops,
-                self.config.patches_per_crop,
-                self.config.patch_width,
-            ],
-            "static pixel",
-        )?;
-        let static_masks = checked_product(
-            &[self.config.max_crops, self.config.patches_per_crop],
-            "static mask",
-        )?;
-        let mut padded_pixels = vec![-1.0f32; static_pixels];
-        padded_pixels[..pixels.len()].copy_from_slice(pixels);
-        let mut padded_masks = vec![-1.0f32; static_masks];
-        padded_masks[..masks.len()].copy_from_slice(masks);
+        let input = validate_and_pad_input(&self.config, pixels, masks, crop_count)?;
         let output_shape = [
             self.config.max_crops,
             self.config.projected_rows_per_crop(),
@@ -347,24 +366,18 @@ impl IreeMolmoVisionProjector {
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| "Molmo projected output byte count overflows usize".to_string())?;
         let mut output = vec![0u8; output_bytes];
-        let pixel_shape = [
-            self.config.max_crops,
-            self.config.patches_per_crop,
-            self.config.patch_width,
-        ];
-        let mask_shape = [self.config.max_crops, self.config.patches_per_crop];
         let started = Instant::now();
         self.module.invoke(
             &[
                 AuxiliaryInput {
-                    bytes: f32_as_bytes(&padded_pixels),
+                    bytes: f32_as_bytes(&input.padded_pixels),
                     dtype: AuxiliaryTensorDType::Float32,
-                    shape: &pixel_shape,
+                    shape: &input.pixel_shape,
                 },
                 AuxiliaryInput {
-                    bytes: f32_as_bytes(&padded_masks),
+                    bytes: f32_as_bytes(&input.padded_masks),
                     dtype: AuxiliaryTensorDType::Float32,
-                    shape: &mask_shape,
+                    shape: &input.mask_shape,
                 },
             ],
             &mut [AuxiliaryOutput {
@@ -377,30 +390,32 @@ impl IreeMolmoVisionProjector {
         let mut values = checked_f32_output("IREE Molmo projected output", output)?;
         let active_count = checked_product(
             &[
-                crop_count,
+                input.crop_count,
                 self.config.projected_rows_per_crop(),
                 self.config.text_hidden,
             ],
             "active projected output",
         )?;
         values.truncate(active_count);
-        let upload_bytes = static_pixels
-            .checked_add(static_masks)
-            .and_then(|count| count.checked_mul(std::mem::size_of::<f32>()))
-            .ok_or_else(|| "Molmo invocation upload byte count overflows usize".to_string())?;
         let transfer_bytes = active_count
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| "Molmo invocation transfer byte count overflows usize".to_string())?;
         Ok(MolmoVisionProjection {
             values,
             shape: [
-                crop_count,
+                input.crop_count,
                 self.config.projected_rows_per_crop(),
                 self.config.text_hidden,
             ],
             elapsed_seconds,
-            upload_bytes,
+            upload_bytes: input.upload_bytes,
             transfer_bytes,
         })
     }
 }
+
+#[cfg(feature = "diagnostics")]
+#[path = "molmo_vision_diagnostics.rs"]
+mod diagnostics;
+#[cfg(feature = "diagnostics")]
+pub use diagnostics::{IreeMolmoVisionDiagnosticProjector, MolmoVisionDiagnostics};
