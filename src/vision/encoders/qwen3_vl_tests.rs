@@ -17,6 +17,7 @@ use super::{
     sdpa_pad_width,
 };
 use mlxcel_core::dtype;
+use mlxcel_core::layers::LayerNorm;
 
 #[test]
 fn fused_sdpa_target_dim_uses_next_supported_kernel_width() {
@@ -61,6 +62,47 @@ fn block_gelu_matches_qwen3_vl_pytorch_tanh_contract() {
             (mlxcel_core::item_f32(&value) - expected).abs() <= 2.0e-6,
             "Qwen3-VL tanh GELU mismatch at {index}"
         );
+    }
+}
+
+#[test]
+fn block_layer_norm_matches_centered_variance_f32_contract() {
+    let values = [3.5_f32, -2.0, 0.25, 7.0, -4.0, 1.5, 8.0, -0.75];
+    let weights = [1.25_f32, 0.5, -0.75, 2.0];
+    let biases = [-0.25_f32, 0.125, 0.5, -1.0];
+    let input = mlxcel_core::from_slice_f32(&values, &[2, 4]);
+    let layer = LayerNorm::new(
+        mlxcel_core::from_slice_f32(&weights, &[4]),
+        Some(mlxcel_core::from_slice_f32(&biases, &[4])),
+        1.0e-6,
+    );
+    let output = layer.forward(&input);
+    mlxcel_core::eval(&output);
+
+    for row in 0..2 {
+        let row_values = &values[row * 4..row * 4 + 4];
+        let mean = row_values.iter().sum::<f32>() / 4.0;
+        let variance = row_values
+            .iter()
+            .map(|value| {
+                let centered = value - mean;
+                centered * centered
+            })
+            .sum::<f32>()
+            / 4.0;
+        let inv_std = (variance + 1.0e-6).sqrt().recip();
+        for column in 0..4 {
+            let expected = (row_values[column] - mean) * inv_std * weights[column] + biases[column];
+            let actual = mlxcel_core::slice(
+                &output,
+                &[row as i32, column as i32],
+                &[row as i32 + 1, column as i32 + 1],
+            );
+            assert!(
+                (mlxcel_core::item_f32(&actual) - expected).abs() <= 2.0e-5,
+                "Qwen3-VL LayerNorm mismatch at row {row}, column {column}"
+            );
+        }
     }
 }
 
