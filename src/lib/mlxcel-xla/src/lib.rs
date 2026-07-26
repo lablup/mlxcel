@@ -214,6 +214,31 @@ pub fn dequantize_gemma3n_affine_diagnostic(
 ) -> Result<Vec<f32>, String> {
     weights::dequantize_affine_bf16_fused(packed, scales, biases, out, in_packed, bits, group_size)
 }
+
+/// Expose the exact host-side affine widening used by the Qwen3-VL IREE
+/// checkpoint loader to diagnostics without making it part of the runtime API.
+#[cfg(feature = "diagnostics")]
+pub fn dequantize_affine_f32_diagnostic(
+    packed: &[u8],
+    scales: &[u8],
+    biases: &[u8],
+    out: usize,
+    in_packed: usize,
+    bits: usize,
+    group_size: usize,
+    scales_bf16: bool,
+) -> Result<Vec<f32>, String> {
+    weights::dequantize_affine(
+        packed,
+        scales,
+        biases,
+        out,
+        in_packed,
+        bits,
+        group_size,
+        scales_bf16,
+    )
+}
 #[cfg(feature = "diagnostics")]
 pub use emitter::{Gemma3nDiagnosticLayout, Gemma3nDiagnosticSegment};
 #[cfg(feature = "iree")]

@@ -402,6 +402,111 @@ struct VisionAttention {
     scale: f32,
 }
 
+#[cfg(any(test, feature = "xla-diagnostics"))]
+fn diagnostic_dense_linear_from_weight_f32(
+    input: &MlxArray,
+    weight: &MlxArray,
+    bias: Option<&MlxArray>,
+) -> UniquePtr<MlxArray> {
+    let input = mlxcel_core::astype(input, mlxcel_core::dtype::FLOAT32);
+    let weight = mlxcel_core::astype(weight, mlxcel_core::dtype::FLOAT32);
+    let weight = mlxcel_core::transpose(&weight);
+    let output = mlxcel_core::matmul(&input, &weight);
+    match bias {
+        Some(bias) => {
+            let bias = mlxcel_core::astype(bias, mlxcel_core::dtype::FLOAT32);
+            mlxcel_core::add(&output, &bias)
+        }
+        None => output,
+    }
+}
+
+/// Run one checkpoint projection with the exact affine-to-F32 host widening
+/// used by the IREE loader, followed by an MLX dense F32 matmul. This is
+/// diagnostics-only: production eager inference keeps its fused QMM path.
+#[cfg(feature = "xla-diagnostics")]
+fn diagnostic_dense_linear_f32(
+    linear: &UnifiedLinear,
+    input: &MlxArray,
+) -> Result<UniquePtr<MlxArray>, String> {
+    let (weight, bias) = match linear {
+        UnifiedLinear::Quantized { weight, bias } => {
+            if weight.mode != "affine" {
+                return Err(format!(
+                    "Qwen3-VL host-dequant control requires affine weights, got {}",
+                    weight.mode
+                ));
+            }
+            if weight.global_scale.is_some() {
+                return Err(
+                    "Qwen3-VL IREE host-dequant control does not accept a global-scale sidecar"
+                        .to_string(),
+                );
+            }
+            let weight_shape = mlxcel_core::array_shape(&weight.weight);
+            let [out, in_packed] = weight_shape.as_slice() else {
+                return Err(format!(
+                    "Qwen3-VL packed projection must be rank 2, got {weight_shape:?}"
+                ));
+            };
+            let out = usize::try_from(*out)
+                .map_err(|_| "Qwen3-VL packed projection rows must be non-negative".to_string())?;
+            let in_packed = usize::try_from(*in_packed)
+                .map_err(|_| "Qwen3-VL packed projection width must be non-negative".to_string())?;
+            let bits = usize::try_from(weight.bits)
+                .map_err(|_| "Qwen3-VL quantization bits must be non-negative".to_string())?;
+            let group_size = usize::try_from(weight.group_size)
+                .map_err(|_| "Qwen3-VL quantization group size must be non-negative".to_string())?;
+            let biases = weight.biases.as_deref().ok_or_else(|| {
+                "Qwen3-VL affine projection is missing quantization biases".to_string()
+            })?;
+            let scales_dtype = mlxcel_core::array_dtype(&weight.scales);
+            let biases_dtype = mlxcel_core::array_dtype(biases);
+            let scales_bf16 = match (scales_dtype, biases_dtype) {
+                (mlxcel_core::dtype::BFLOAT16, mlxcel_core::dtype::BFLOAT16) => true,
+                (mlxcel_core::dtype::FLOAT16, mlxcel_core::dtype::FLOAT16) => false,
+                _ => {
+                    return Err(format!(
+                        "Qwen3-VL affine metadata must use matching F16 or BF16, got {scales_dtype}/{biases_dtype}"
+                    ));
+                }
+            };
+            let values = mlxcel_xla::dequantize_affine_f32_diagnostic(
+                &mlxcel_core::array_to_raw_bytes(&weight.weight),
+                &mlxcel_core::array_to_raw_bytes(&weight.scales),
+                &mlxcel_core::array_to_raw_bytes(biases),
+                out,
+                in_packed,
+                bits,
+                group_size,
+                scales_bf16,
+            )?;
+            let values_per_word = 32usize
+                .checked_div(bits)
+                .filter(|value| *value > 0)
+                .ok_or_else(|| format!("invalid Qwen3-VL affine bit width {bits}"))?;
+            let width = in_packed
+                .checked_mul(values_per_word)
+                .ok_or_else(|| "Qwen3-VL dequantized projection width overflowed".to_string())?;
+            let out_i32 = i32::try_from(out)
+                .map_err(|_| "Qwen3-VL projection rows do not fit i32".to_string())?;
+            let width_i32 = i32::try_from(width)
+                .map_err(|_| "Qwen3-VL projection width does not fit i32".to_string())?;
+            (
+                mlxcel_core::from_slice_f32(&values, &[out_i32, width_i32]),
+                bias.as_deref(),
+            )
+        }
+        UnifiedLinear::Regular(linear) => (
+            mlxcel_core::astype(&linear.weight, mlxcel_core::dtype::FLOAT32),
+            linear.bias.as_deref(),
+        ),
+    };
+    Ok(diagnostic_dense_linear_from_weight_f32(
+        input, &weight, bias,
+    ))
+}
+
 impl VisionAttention {
     fn from_weights(
         weights: &WeightMap,
@@ -507,6 +612,84 @@ impl VisionAttention {
 
         self.proj.forward(&output)
     }
+
+    #[cfg(feature = "xla-diagnostics")]
+    fn forward_dequantized_f32(
+        &self,
+        x: &MlxArray,
+        cu_seqlens: &[i32],
+        rotary_pos_emb: &MlxArray,
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        let shape = mlxcel_core::array_shape(x);
+        let seq_length = shape[0];
+
+        let qkv = diagnostic_dense_linear_f32(&self.qkv, x)?;
+        let qkv = mlxcel_core::reshape(&qkv, &[seq_length, 3, self.num_heads, self.head_dim]);
+        let qkv = mlxcel_core::transpose_axes(&qkv, &[1, 0, 2, 3]);
+
+        let q = mlxcel_core::slice(
+            &qkv,
+            &[0, 0, 0, 0],
+            &[1, seq_length, self.num_heads, self.head_dim],
+        );
+        let k = mlxcel_core::slice(
+            &qkv,
+            &[1, 0, 0, 0],
+            &[2, seq_length, self.num_heads, self.head_dim],
+        );
+        let v = mlxcel_core::slice(
+            &qkv,
+            &[2, 0, 0, 0],
+            &[3, seq_length, self.num_heads, self.head_dim],
+        );
+        let q = mlxcel_core::squeeze_axis(&q, 0);
+        let k = mlxcel_core::squeeze_axis(&k, 0);
+        let v = mlxcel_core::squeeze_axis(&v, 0);
+
+        let q = apply_rotary_pos_emb_vision(&q, rotary_pos_emb);
+        let k = apply_rotary_pos_emb_vision(&k, rotary_pos_emb);
+
+        let q = mlxcel_core::expand_dims(&mlxcel_core::transpose_axes(&q, &[1, 0, 2]), 0);
+        let k = mlxcel_core::expand_dims(&mlxcel_core::transpose_axes(&k, &[1, 0, 2]), 0);
+        let v = mlxcel_core::expand_dims(&mlxcel_core::transpose_axes(&v, &[1, 0, 2]), 0);
+        let mut attn_outputs = Vec::with_capacity(cu_seqlens.len().saturating_sub(1));
+        for segment in cu_seqlens.windows(2) {
+            let [start, end] = segment else {
+                unreachable!("windows(2) always yields two boundaries");
+            };
+            let q_segment = mlxcel_core::slice(
+                &q,
+                &[0, 0, *start, 0],
+                &[1, self.num_heads, *end, self.head_dim],
+            );
+            let k_segment = mlxcel_core::slice(
+                &k,
+                &[0, 0, *start, 0],
+                &[1, self.num_heads, *end, self.head_dim],
+            );
+            let v_segment = mlxcel_core::slice(
+                &v,
+                &[0, 0, *start, 0],
+                &[1, self.num_heads, *end, self.head_dim],
+            );
+            attn_outputs.push(ensure_fused_sdpa(
+                &q_segment, &k_segment, &v_segment, self.scale, None,
+            ));
+        }
+
+        let output = if attn_outputs.len() == 1 {
+            attn_outputs
+                .into_iter()
+                .next()
+                .expect("one attention segment")
+        } else {
+            concat_many(&attn_outputs, 2)
+        };
+        let output = mlxcel_core::squeeze_axis(&output, 0);
+        let output = mlxcel_core::transpose_axes(&output, &[1, 0, 2]);
+        let output = mlxcel_core::reshape(&output, &[seq_length, -1]);
+        diagnostic_dense_linear_f32(&self.proj, &output)
+    }
 }
 
 #[cfg(test)]
@@ -569,6 +752,13 @@ impl VisionMLP {
         let h = gelu_pytorch_tanh(&h);
         self.linear_fc2.forward(&h)
     }
+
+    #[cfg(feature = "xla-diagnostics")]
+    fn forward_dequantized_f32(&self, x: &MlxArray) -> Result<UniquePtr<MlxArray>, String> {
+        let hidden = diagnostic_dense_linear_f32(&self.linear_fc1, x)?;
+        let hidden = gelu_pytorch_tanh(&hidden);
+        diagnostic_dense_linear_f32(&self.linear_fc2, &hidden)
+    }
 }
 
 // VisionBlock - LayerNorm + GELU MLP.
@@ -628,6 +818,23 @@ impl VisionBlock {
         let output = mlxcel_core::add(&residual, &mlp);
         observe(VisionBlockDiagnosticStage::Output, &output);
         output
+    }
+
+    #[cfg(feature = "xla-diagnostics")]
+    fn forward_dequantized_f32(
+        &self,
+        hidden_states: &MlxArray,
+        cu_seqlens: &[i32],
+        rotary_pos_emb: &MlxArray,
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        let norm1 = self.norm1.forward(hidden_states);
+        let attention = self
+            .attn
+            .forward_dequantized_f32(&norm1, cu_seqlens, rotary_pos_emb)?;
+        let residual = mlxcel_core::add(hidden_states, &attention);
+        let norm2 = self.norm2.forward(&residual);
+        let mlp = self.mlp.forward_dequantized_f32(&norm2)?;
+        Ok(mlxcel_core::add(&residual, &mlp))
     }
 }
 
@@ -769,6 +976,14 @@ pub struct Qwen3VLVisionEncoderDiagnosticOutput {
     pub main_merger_states: Vec<UniquePtr<MlxArray>>,
     /// The same ordered merger stages for each DeepStack branch.
     pub deepstack_merger_states: Vec<Vec<UniquePtr<MlxArray>>>,
+}
+
+/// Same-input eager controls for distinguishing fused QMM accumulation from
+/// explicitly dequantized dense F32 projection arithmetic.
+#[cfg(feature = "xla-diagnostics")]
+pub struct Qwen3VLVisionBlockProjectionControls {
+    pub fused_qmm: UniquePtr<MlxArray>,
+    pub host_dequant_dense_f32: UniquePtr<MlxArray>,
 }
 
 #[derive(Clone, Copy)]
@@ -1070,6 +1285,62 @@ impl Qwen3VLVisionEncoder {
             block.norm1.forward(&norm1_input),
             block.norm2.forward(&norm2_input),
         ])
+    }
+
+    /// Re-run one vision block on an exact supplied F32 input through both the
+    /// production eager fused-QMM path and a diagnostics-only host-dequantized
+    /// dense-F32 path. All non-linear operators are shared, so the two outputs
+    /// isolate the block's four checkpoint projections.
+    #[cfg(feature = "xla-diagnostics")]
+    pub fn block_projection_controls_from_f32(
+        &self,
+        layer: usize,
+        input: &[f32],
+        grid_thw: &[(i32, i32, i32)],
+    ) -> Result<Qwen3VLVisionBlockProjectionControls, String> {
+        let block = self
+            .blocks
+            .get(layer)
+            .ok_or_else(|| format!("Qwen3-VL diagnostic block {layer} is out of range"))?;
+        let weight_shape = mlxcel_core::array_shape(&block.norm1.weight);
+        let [width] = weight_shape.as_slice() else {
+            return Err(format!(
+                "Qwen3-VL block {layer} norm1 weight must be rank 1, got {weight_shape:?}"
+            ));
+        };
+        let width = usize::try_from(*width)
+            .map_err(|_| format!("Qwen3-VL block {layer} width must be non-negative"))?;
+        if width == 0 || !input.len().is_multiple_of(width) {
+            return Err(format!(
+                "Qwen3-VL block {layer} diagnostic input has {} values, not complete rows of width {width}",
+                input.len()
+            ));
+        }
+        let rows = input.len() / width;
+        let rows_i32 = i32::try_from(rows)
+            .map_err(|_| "Qwen3-VL diagnostic block row count does not fit i32".to_string())?;
+        let width_i32 = i32::try_from(width)
+            .map_err(|_| "Qwen3-VL diagnostic block width does not fit i32".to_string())?;
+        let cu_seqlens = Self::compute_cu_seqlens(grid_thw);
+        let grid_rows = cu_seqlens.last().copied().unwrap_or_default();
+        if grid_rows != rows_i32 {
+            return Err(format!(
+                "Qwen3-VL block {layer} diagnostic grid covers {grid_rows} rows, input has {rows}"
+            ));
+        }
+        let rotary_pos_emb = self.rot_pos_emb(grid_thw);
+        let rotary_shape = mlxcel_core::array_shape(&rotary_pos_emb);
+        let rotary_pos_emb = mlxcel_core::reshape(&rotary_pos_emb, &[rotary_shape[0], -1]);
+        let input = mlxcel_core::from_slice_f32(input, &[rows_i32, width_i32]);
+
+        Ok(Qwen3VLVisionBlockProjectionControls {
+            fused_qmm: block.forward(&input, &cu_seqlens, &rotary_pos_emb),
+            host_dequant_dense_f32: block.forward_dequantized_f32(
+                &input,
+                &cu_seqlens,
+                &rotary_pos_emb,
+            )?,
+        })
     }
 
     fn forward_with_grid_observer<F>(

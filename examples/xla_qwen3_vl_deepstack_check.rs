@@ -376,6 +376,33 @@ fn main() {
             ),
         );
     }
+    for (layer, input) in [
+        (0, &iree_diagnostics.block_0_states[0]),
+        (1, &iree_diagnostics.block_hidden_states[0]),
+    ] {
+        let controls = model
+            .vision_encoder
+            .block_projection_controls_from_f32(layer, input, &vision_capture.grids)
+            .unwrap_or_else(|error| {
+                panic!("run Qwen3-VL block {layer} same-input projection controls: {error}")
+            });
+        let actual = &iree_diagnostics.block_hidden_states[layer];
+        for (name, expected) in [
+            ("fused_qmm", &controls.fused_qmm),
+            ("host_dequant_dense_f32", &controls.host_dequant_dense_f32),
+        ] {
+            record_comparison(
+                &mut failures,
+                compare_stage(
+                    &mut reports,
+                    &format!("vision.block_{layer}.output.same_input.{name}"),
+                    actual,
+                    &mlx_f32(expected),
+                    tolerance,
+                ),
+            );
+        }
+    }
     let same_input_norms = model
         .vision_encoder
         .block_layer_norms_from_f32(
