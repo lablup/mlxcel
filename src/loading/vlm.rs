@@ -99,6 +99,8 @@ pub(crate) use ernie4_5_vl::load_ernie4_5_moe_vlm;
 pub(crate) use fastvlm::load_fastvlm_vlm;
 #[cfg(feature = "xla-iree")]
 pub(crate) use gemma::load_gemma3_iree_host_preprocessor;
+#[cfg(feature = "xla-reference-diagnostics")]
+pub use gemma::run_gemma3_eager_mlx_iree_prepared_boundary;
 pub(crate) use gemma::{load_gemma3_vlm, load_gemma3n_vlm, load_gemma4_vlm};
 pub(crate) use gemma_unified::load_gemma4_unified;
 pub(crate) use granite_vision::load_granite_vision_vlm;

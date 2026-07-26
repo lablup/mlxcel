@@ -123,6 +123,8 @@ pub fn decode_image_payloads_with_limits(
 // Re-export split modules
 pub use loaded_model::LoadedModel;
 pub use loaded_model_capabilities::VlmRuntimeRef;
+#[cfg(feature = "xla-reference-diagnostics")]
+pub use loading::run_gemma3_eager_mlx_iree_prepared_boundary;
 pub use loading::{
     context_window_from_config, load_model, load_model_with_adapter,
     load_model_with_tensor_parallel, load_qwen3_omni_speech, read_eos_token_ids,

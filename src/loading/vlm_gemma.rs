@@ -329,9 +329,12 @@ pub(crate) fn load_gemma3_iree_host_preprocessor(
     )
 }
 
-#[cfg(all(test, feature = "xla-iree"))]
+#[cfg(all(feature = "xla-iree", any(test, feature = "xla-reference-diagnostics")))]
 #[path = "vlm_gemma_xla_tests.rs"]
 mod xla_tests;
+
+#[cfg(feature = "xla-reference-diagnostics")]
+pub use xla_tests::reference_boundary::run_gemma3_eager_mlx_iree_prepared_boundary;
 
 /// Load a Gemma3n VLM model.
 pub(crate) fn load_gemma3n_vlm(model_path: &Path) -> Result<LoadedModel> {

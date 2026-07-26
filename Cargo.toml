@@ -348,3 +348,9 @@ required-features = ["xla-micro-oracle"]
 [[example]]
 name = "xla_phi4_audio_check"
 required-features = ["xla-iree"]
+
+# Pinned #869 eager MLX CUDA versus IREE local-task Gemma3 boundary gate.
+# This is a standalone executable so running it does not link libtest.
+[[example]]
+name = "xla_gemma3_reference_check"
+required-features = ["cuda", "xla-reference-diagnostics"]

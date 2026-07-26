@@ -33,10 +33,15 @@ fn pinned_gemma3_projector_loads_and_returns_finite_features() {
 }
 
 #[cfg(feature = "xla-reference-diagnostics")]
-mod reference_boundary {
+pub mod reference_boundary {
     use std::fs;
     use std::io::{self, Write};
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
+    #[cfg(test)]
+    use std::path::PathBuf;
+    use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration, Instant};
 
     use mlxcel_core::layers::UnifiedEmbedding;
     use mlxcel_core::session::{OwnedTensor, PreparedPrefill, PreparedTensorDType};
@@ -149,6 +154,45 @@ mod reference_boundary {
     fn progress(stage: &str) {
         eprintln!("[gemma3-vlm-boundary] {stage}");
         io::stderr().flush().expect("flush diagnostic progress");
+    }
+
+    struct ProgressHeartbeat {
+        stop: Option<Sender<()>>,
+        worker: Option<JoinHandle<()>>,
+    }
+
+    impl ProgressHeartbeat {
+        fn start(stage: &str) -> Self {
+            progress(stage);
+            let (stop, receiver) = mpsc::channel();
+            let stage = stage.to_string();
+            let started = Instant::now();
+            let worker = thread::spawn(move || {
+                while let Err(RecvTimeoutError::Timeout) =
+                    receiver.recv_timeout(Duration::from_secs(60))
+                {
+                    progress(&format!(
+                        "heartbeat stage={stage} elapsed={}s",
+                        started.elapsed().as_secs()
+                    ));
+                }
+            });
+            Self {
+                stop: Some(stop),
+                worker: Some(worker),
+            }
+        }
+    }
+
+    impl Drop for ProgressHeartbeat {
+        fn drop(&mut self) {
+            if let Some(stop) = self.stop.take() {
+                let _ = stop.send(());
+            }
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
     }
 
     fn compare_stage(
@@ -326,6 +370,7 @@ mod reference_boundary {
         expected
     }
 
+    #[cfg(test)]
     #[test]
     fn comparison_reports_the_first_failed_element() {
         let stats = comparison_stats(
@@ -341,40 +386,29 @@ mod reference_boundary {
         assert_eq!(stats.first_failure, Some(1));
     }
 
-    /// Pinned mixed-runtime boundary gate for #869.
+    /// Run the pinned mixed-runtime boundary gate for #869.
     ///
-    /// This deliberately remains ignored. Run it from the repository root only
-    /// when the pinned checkpoint and local IREE distribution are installed:
+    /// This entry point loads only the eager MLX SigLIP/projector/text embedding
+    /// weights and the resident IREE vision projector. The caller selects the
+    /// MLX runtime at build time; the dedicated example requires CUDA while the
+    /// IREE side remains pinned to `local-task`.
     ///
-    /// ```text
-    /// IREE_DIST=/path/to/iree-dist \
-    /// MLXCEL_GEMMA3_FIXTURE=/path/to/gemma-3-4b-it-4bit \
-    /// cargo test --features xla-reference-diagnostics --lib \
-    ///   pinned_gemma3_eager_mlx_matches_iree_prepared_boundary -- \
-    ///   --ignored --nocapture
-    /// ```
+    /// # Panics
     ///
-    /// Both eager MLX and IREE execute on CPU; no language decoder is constructed.
-    #[test]
-    #[ignore = "requires pinned Gemma3 checkpoint, image, and IREE local-task"]
-    fn pinned_gemma3_eager_mlx_matches_iree_prepared_boundary() {
-        let model = PathBuf::from(
-            std::env::var("MLXCEL_GEMMA3_FIXTURE")
-                .expect("MLXCEL_GEMMA3_FIXTURE must name the pinned checkpoint"),
-        );
-        let image_path = std::env::var("MLXCEL_GEMMA3_IMAGE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("tests/fixtures/test_image.png"));
-        let device =
-            std::env::var("MLXCEL_XLA_DEVICE").unwrap_or_else(|_| "local-task".to_string());
+    /// Panics if the pinned fixture identity or any ordered comparison differs.
+    pub fn run_gemma3_eager_mlx_iree_prepared_boundary(
+        model: &Path,
+        image_path: &Path,
+        device: &str,
+    ) {
         assert_eq!(
             device, "local-task",
             "the pinned #869 mixed-runtime gate qualifies IREE local-task only"
         );
 
-        progress("validate pinned checkpoint and image");
+        let _heartbeat = ProgressHeartbeat::start("validate pinned checkpoint and image");
         assert_eq!(
-            pinned_revision(&model),
+            pinned_revision(model),
             PINNED_REVISION,
             "checkpoint revision differs from pinned mlx-community/gemma-3-4b-it-4bit"
         );
@@ -393,17 +427,19 @@ mod reference_boundary {
             PINNED_PROCESSOR_SHA256,
             "checkpoint processor",
         );
-        assert_sha256(&image_path, PINNED_IMAGE_SHA256, "image");
+        assert_sha256(image_path, PINNED_IMAGE_SHA256, "image");
+        drop(_heartbeat);
 
-        progress("load filtered MLX SigLIP/projector/text embedding weights");
+        let _heartbeat =
+            ProgressHeartbeat::start("load filtered MLX SigLIP/projector/text embedding weights");
         let (_config_str, full_config) =
-            read_sanitized_vlm_config(&model).expect("read pinned Gemma3 config");
+            read_sanitized_vlm_config(model).expect("read pinned Gemma3 config");
         let config: VLMConfig =
             serde_json::from_value(full_config.clone()).expect("parse pinned Gemma3 VLM config");
         let text_config: models::gemma3::ModelArgs =
             serde_json::from_value(config.text_config.clone())
                 .expect("parse pinned Gemma3 text config");
-        let weights = load_vlm_weights_common_filtered_canonical(&model, reference_weight)
+        let weights = load_vlm_weights_common_filtered_canonical(model, reference_weight)
             .map(strip_language_model_prefix)
             .expect("load only Gemma3 vision/projector/embedding weights");
         let quant_group_size = full_config
@@ -438,9 +474,10 @@ mod reference_boundary {
             config.vision_config.layer_norm_eps,
         )
         .expect("load filtered Gemma3 average-pool projector");
-        let image = image::open(&image_path)
+        let image = image::open(image_path)
             .unwrap_or_else(|error| panic!("decode {}: {error}", image_path.display()));
         let images = vec![image];
+        drop(_heartbeat);
 
         progress("compare independently constructed processor pixels");
         let mlx_processor = SigLipProcessor::new(config.vision_config.image_size);
@@ -483,7 +520,8 @@ mod reference_boundary {
         let embed_dtype = mlxcel_core::array_dtype(&raw_text_array);
         let raw_text = mlx_f32(&raw_text_array, "raw text embeddings");
 
-        progress("capture eager MLX SigLIP hidden and projector stages");
+        let _heartbeat =
+            ProgressHeartbeat::start("capture eager MLX SigLIP hidden and projector stages");
         let mlx_vision_input = mlxcel_core::astype(
             &mlxcel_core::transpose_axes(&mlx_pixels, &[0, 2, 3, 1]),
             embed_dtype,
@@ -506,9 +544,11 @@ mod reference_boundary {
             .map(|stage| mlx_f32(stage, "MLX SigLIP block 0 stage"))
             .collect::<Vec<_>>();
         assert_eq!(mlx_block0_values.len(), BLOCK0_STAGES.len());
+        drop(_heartbeat);
 
-        progress("run IREE diagnostic SigLIP and average-pool projector");
-        let mut diagnostic = mlxcel_xla::IreeVisionDiagnosticProjector::load(&model, &device)
+        let _heartbeat =
+            ProgressHeartbeat::start("run IREE diagnostic SigLIP and average-pool projector");
+        let mut diagnostic = mlxcel_xla::IreeVisionDiagnosticProjector::load(model, device)
             .expect("load Gemma3 IREE diagnostic projector");
         let iree = diagnostic
             .project(&iree_pixel_values)
@@ -557,8 +597,11 @@ mod reference_boundary {
             VISION_TOLERANCE,
             &mut first_divergence,
         );
+        drop(_heartbeat);
 
-        progress("construct MLX-reference and production IREE prepared prefills");
+        let _heartbeat = ProgressHeartbeat::start(
+            "construct MLX-reference and production IREE prepared prefills",
+        );
         let attention_mask = logical_tokens
             .iter()
             .map(|token| i32::from(*token != config.pad_token_id))
@@ -575,7 +618,7 @@ mod reference_boundary {
             images.len(),
         )
         .expect("construct eager MLX reference prepared prefill");
-        let production = Gemma3IreeHostPreprocessor::load(&model, &device)
+        let production = Gemma3IreeHostPreprocessor::load(model, device)
             .expect("load production Gemma3 IREE host preprocessor")
             .prepare(
                 &[
@@ -591,6 +634,7 @@ mod reference_boundary {
         assert_eq!(production.token_ids, logical_tokens);
         assert_eq!(production.positions, mlx_prepared.positions);
         assert_eq!(production.modalities, mlx_prepared.modalities);
+        drop(_heartbeat);
 
         progress("compare final projected image rows and one-time scaling");
         let mlx_image_rows = image_rows(
@@ -693,5 +737,23 @@ mod reference_boundary {
             panic!("Gemma3 eager MLX/IREE first divergence: {first_divergence}");
         }
         progress("PASS all pinned Gemma3 eager MLX/IREE boundary stages");
+    }
+
+    /// Retained libtest wrapper for developers who already use the historical
+    /// ignored gate. The dedicated example avoids linking the libtest harness.
+    #[cfg(test)]
+    #[test]
+    #[ignore = "requires pinned Gemma3 checkpoint, image, MLX CUDA, and IREE local-task"]
+    fn pinned_gemma3_eager_mlx_matches_iree_prepared_boundary() {
+        let model = PathBuf::from(
+            std::env::var("MLXCEL_GEMMA3_FIXTURE")
+                .expect("MLXCEL_GEMMA3_FIXTURE must name the pinned checkpoint"),
+        );
+        let image_path = std::env::var("MLXCEL_GEMMA3_IMAGE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("tests/fixtures/test_image.png"));
+        let device =
+            std::env::var("MLXCEL_XLA_DEVICE").unwrap_or_else(|_| "local-task".to_string());
+        run_gemma3_eager_mlx_iree_prepared_boundary(&model, &image_path, &device);
     }
 }
