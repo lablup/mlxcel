@@ -244,7 +244,15 @@ fn layer(
     builder.add(&residual, &down)
 }
 
-pub(crate) fn emit_youtu_vl(config: &YoutuVlVisionConfig, patch_bucket: usize) -> String {
+struct YoutuVlGraph {
+    args: Args,
+    builder: Builder,
+    patch_projection: Val,
+    layer_outputs: Vec<Val>,
+    projected: Val,
+}
+
+fn build_youtu_vl(config: &YoutuVlVisionConfig, patch_bucket: usize) -> YoutuVlGraph {
     assert!(
         YOUTU_VL_PATCH_BUCKETS.contains(&patch_bucket),
         "unqualified Youtu-VL patch bucket"
@@ -271,6 +279,8 @@ pub(crate) fn emit_youtu_vl(config: &YoutuVlVisionConfig, patch_bucket: usize) -
         "full_attention.bias",
     );
     let mut hidden = linear(&mut builder, &patches, &args.take(), &args.take());
+    let patch_projection = hidden.clone();
+    let mut layer_outputs = Vec::with_capacity(config.depth);
     for layer_index in 0..config.depth {
         let bias = if config.full_attention_layers.contains(&layer_index) {
             &full_bias
@@ -278,6 +288,7 @@ pub(crate) fn emit_youtu_vl(config: &YoutuVlVisionConfig, patch_bucket: usize) -
             &window_bias
         };
         hidden = layer(&mut builder, &hidden, &mut args, config, &freqs, bias);
+        layer_outputs.push(hidden.clone());
     }
     hidden = layer_norm(
         &mut builder,
@@ -293,13 +304,65 @@ pub(crate) fn emit_youtu_vl(config: &YoutuVlVisionConfig, patch_bucket: usize) -
     let merged = gelu_tanh(&mut builder, &merged);
     let projected = linear(&mut builder, &merged, &args.take(), &args.take());
     assert_eq!(args.cursor, specs.len(), "Youtu-VL weight schema drifted");
+    YoutuVlGraph {
+        args,
+        builder,
+        patch_projection,
+        layer_outputs,
+        projected,
+    }
+}
+
+pub(crate) fn emit_youtu_vl(config: &YoutuVlVisionConfig, patch_bucket: usize) -> String {
+    let graph = build_youtu_vl(config, patch_bucket);
     format!(
         "module @youtu_vl_vision {{\n  func.func public @main({signature}) -> {result_type} {{\n{body}    return {result} : {result_type}\n  }}\n}}\n",
-        signature = args.declarations.join(", "),
-        result_type = projected.ty.render(),
-        body = builder.body(),
-        result = projected.name,
+        signature = graph.args.declarations.join(", "),
+        result_type = graph.projected.ty.render(),
+        body = graph.builder.body(),
+        result = graph.projected.name,
     )
+}
+
+#[cfg(feature = "diagnostics")]
+pub(crate) fn emit_youtu_vl_diagnostics(
+    config: &YoutuVlVisionConfig,
+    patch_bucket: usize,
+) -> Result<String, String> {
+    let graph = build_youtu_vl(config, patch_bucket);
+    if graph.layer_outputs.len() != 2 {
+        return Err(format!(
+            "Youtu-VL diagnostic oracle requires exactly two vision layers, got {}",
+            graph.layer_outputs.len()
+        ));
+    }
+    if config.full_attention_layers != [1] {
+        return Err(format!(
+            "Youtu-VL diagnostic oracle requires window layer 0 and full layer 1, got full layers {:?}",
+            config.full_attention_layers
+        ));
+    }
+    let outputs = [
+        &graph.patch_projection,
+        &graph.layer_outputs[0],
+        &graph.layer_outputs[1],
+        &graph.projected,
+    ];
+    let return_values = outputs
+        .iter()
+        .map(|value| value.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let return_types = outputs
+        .iter()
+        .map(|value| value.ty.render())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(format!(
+        "module @youtu_vl_vision_diagnostics {{\n  func.func public @main({signature}) -> ({return_types}) {{\n{body}    return {return_values} : {return_types} loc(\"Youtu-VL diagnostic checkpoints\")\n  }}\n}}\n",
+        signature = graph.args.declarations.join(", "),
+        body = graph.builder.body(),
+    ))
 }
 
 #[cfg(test)]
@@ -317,5 +380,20 @@ mod tests {
         assert!(ir.contains("full_attention.bias"));
         assert!(ir.contains("merger.mlp.2.weight"));
         assert!(ir.contains("tensor<4x12xf32>"));
+    }
+
+    #[cfg(feature = "diagnostics")]
+    #[test]
+    fn diagnostic_emitter_exposes_two_layer_oracle_stages() {
+        let config = YoutuVlVisionConfig::from_json_str(
+            r#"{"model_type":"youtu_vl","hidden_size":12,"vision_config":{"num_hidden_layers":2,"hidden_size":16,"intermediate_size":32,"num_attention_heads":4,"num_channels":3,"patch_size":2,"spatial_merge_size":2,"window_size":12,"fullatt_block_indexes":[1],"out_hidden_size":12,"num_patches":256}}"#,
+        )
+        .unwrap();
+        let ir = emit_youtu_vl_diagnostics(&config, 64).unwrap();
+        assert!(ir.contains("module @youtu_vl_vision_diagnostics"));
+        assert!(ir.contains(
+            "tensor<64x16xf32>, tensor<64x16xf32>, tensor<64x16xf32>, tensor<16x12xf32>"
+        ));
+        assert!(ir.contains("Youtu-VL diagnostic checkpoints"));
     }
 }

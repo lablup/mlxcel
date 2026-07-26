@@ -18,6 +18,8 @@ use crate::aux::{
     IreeAuxiliaryModule,
 };
 use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
+#[cfg(feature = "diagnostics")]
+use crate::emitter::emit_youtu_vl_diagnostics;
 use crate::emitter::{
     YoutuVlHostInputs, YoutuVlVisionConfig, emit_youtu_vl, prepare_youtu_vl_host_inputs,
 };
@@ -28,6 +30,8 @@ use crate::qwen2_vl_runtime::{
 };
 
 const ENTRY_NAME: &str = "youtu_vl_vision.main";
+#[cfg(feature = "diagnostics")]
+const DIAGNOSTIC_ENTRY_NAME: &str = "youtu_vl_vision_diagnostics.main";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct YoutuVlVisionExecutionMetrics {
@@ -45,6 +49,25 @@ pub struct YoutuVlVisionProjection {
     pub window_cu_seqlens: Vec<usize>,
     pub full_cu_seqlens: Vec<usize>,
     pub metrics: YoutuVlVisionExecutionMetrics,
+}
+
+#[cfg(feature = "diagnostics")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct YoutuVlVisionDiagnosticProjection {
+    /// Linear patch projection in IREE's window order.
+    pub patch_projection: Vec<f32>,
+    /// Output of window-attention layer 0 in IREE's window order.
+    pub window_layer0: Vec<f32>,
+    /// Output of full-attention layer 1 in IREE's window order.
+    pub full_layer1: Vec<f32>,
+    /// Built-in merger output before the host restores original group order.
+    pub merger_window_order: Vec<f32>,
+    /// Built-in merger output after restoring original per-image group order.
+    pub restored_output: Vec<f32>,
+    pub patch_shape: [usize; 2],
+    pub merged_shape: [usize; 2],
+    pub window_group_index: Vec<usize>,
+    pub reverse_group_index: Vec<usize>,
 }
 
 struct ActiveModule {
@@ -235,6 +258,42 @@ fn compile_and_load(
     IreeAuxiliaryModule::load(device, &vmfb, &contract, weights)
 }
 
+#[cfg(feature = "diagnostics")]
+fn compile_and_load_diagnostics(
+    model_dir: &Path,
+    device: &str,
+    config: &YoutuVlVisionConfig,
+    processor_identity: &str,
+    patch_bucket: usize,
+) -> Result<IreeAuxiliaryModule, String> {
+    let mlir = emit_youtu_vl_diagnostics(config, patch_bucket)?;
+    let compiler = iree_compile_bin()?;
+    if !compiler.is_file() {
+        return Err(format!("iree-compile not found at {}", compiler.display()));
+    }
+    let flags = target_flags(device)?;
+    let cache = std::env::temp_dir().join("mlxcel-xla-youtu-vl-vmfb");
+    std::fs::create_dir_all(&cache)
+        .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
+    let (weights, checkpoint_schema) = load_weights(model_dir, config)?;
+    let contract = AuxiliaryArtifactContract::new(
+        DIAGNOSTIC_ENTRY_NAME,
+        format!(
+            "{};diagnostic_stages=patch,window0,full1,merger;{};checkpoint_schema_sha256={}",
+            config.fingerprint(patch_bucket),
+            processor_identity,
+            sha256_hex(checkpoint_schema.as_bytes())
+        ),
+        compiler_generation_identity(&compiler, flags, &mlir)?,
+    )?;
+    let tag = format!("youtu-vl-vision-diagnostics-{patch_bucket}");
+    let vmfb = cached_vmfb_path(&compiler, &mlir, flags, &cache, &tag, 0);
+    ensure_qualified_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
+        compile_one_to(&compiler, &mlir, flags, &cache, &tag, 0, temporary)
+    })?;
+    IreeAuxiliaryModule::load(device, &vmfb, &contract, weights)
+}
+
 impl IreeYoutuVlProjector {
     pub fn load(model_dir: &Path, device: &str) -> Result<Self, String> {
         let config = YoutuVlVisionConfig::from_model_dir(model_dir)?;
@@ -351,6 +410,147 @@ impl IreeYoutuVlProjector {
                 projected_transfer_bytes: std::mem::size_of_val(all_values.as_slice()),
                 elapsed_seconds,
             },
+        })
+    }
+}
+
+#[cfg(feature = "diagnostics")]
+pub struct IreeYoutuVlDiagnosticProjector {
+    model_dir: PathBuf,
+    device: String,
+    config: YoutuVlVisionConfig,
+    processor_identity: String,
+    active: Option<ActiveModule>,
+}
+
+#[cfg(feature = "diagnostics")]
+impl IreeYoutuVlDiagnosticProjector {
+    pub fn load(model_dir: &Path, device: &str) -> Result<Self, String> {
+        let config = YoutuVlVisionConfig::from_model_dir(model_dir)?;
+        let processor_identity = processor_identity(model_dir, &config)?;
+        Ok(Self {
+            model_dir: model_dir.to_path_buf(),
+            device: device.to_string(),
+            config,
+            processor_identity,
+            active: None,
+        })
+    }
+
+    fn ensure_bucket(&mut self, bucket: usize) -> Result<&mut IreeAuxiliaryModule, String> {
+        if self.active.as_ref().map(|active| active.patch_bucket) != Some(bucket) {
+            let module = compile_and_load_diagnostics(
+                &self.model_dir,
+                &self.device,
+                &self.config,
+                &self.processor_identity,
+                bucket,
+            )?;
+            self.active = Some(ActiveModule {
+                patch_bucket: bucket,
+                module,
+            });
+        }
+        Ok(&mut self.active.as_mut().expect("active module").module)
+    }
+
+    pub fn capture(
+        &mut self,
+        patch_rows: &[f32],
+        shapes: &[(i32, i32)],
+    ) -> Result<YoutuVlVisionDiagnosticProjection, String> {
+        let YoutuVlHostInputs {
+            plan,
+            patches,
+            rope_freqs,
+            window_attention_bias,
+            full_attention_bias,
+        } = prepare_youtu_vl_host_inputs(&self.config, shapes, patch_rows)?;
+        let patch_input_shape = [
+            plan.patch_bucket,
+            self.config.channels * self.config.patch_size * self.config.patch_size,
+        ];
+        let rope_shape = [
+            plan.patch_bucket,
+            self.config.hidden / self.config.heads / 2,
+        ];
+        let bias_shape = [plan.patch_bucket, plan.patch_bucket];
+        let patch_shape = [plan.patch_bucket, self.config.hidden];
+        let merged_bucket_shape = [plan.patch_bucket / 4, self.config.text_hidden];
+        let mut buffers = [
+            vec![0u8; patch_shape.iter().product::<usize>() * std::mem::size_of::<f32>()],
+            vec![0u8; patch_shape.iter().product::<usize>() * std::mem::size_of::<f32>()],
+            vec![0u8; patch_shape.iter().product::<usize>() * std::mem::size_of::<f32>()],
+            vec![0u8; merged_bucket_shape.iter().product::<usize>() * std::mem::size_of::<f32>()],
+        ];
+        let output_shapes = [patch_shape, patch_shape, patch_shape, merged_bucket_shape];
+        let mut outputs = buffers
+            .iter_mut()
+            .zip(&output_shapes)
+            .map(|(bytes, shape)| AuxiliaryOutput {
+                bytes,
+                dtype: AuxiliaryTensorDType::Float32,
+                shape,
+            })
+            .collect::<Vec<_>>();
+        self.ensure_bucket(plan.patch_bucket)?.invoke(
+            &[
+                AuxiliaryInput {
+                    bytes: f32_as_bytes(&patches),
+                    dtype: AuxiliaryTensorDType::Float32,
+                    shape: &patch_input_shape,
+                },
+                AuxiliaryInput {
+                    bytes: f32_as_bytes(&rope_freqs),
+                    dtype: AuxiliaryTensorDType::Float32,
+                    shape: &rope_shape,
+                },
+                AuxiliaryInput {
+                    bytes: f32_as_bytes(&window_attention_bias),
+                    dtype: AuxiliaryTensorDType::Float32,
+                    shape: &bias_shape,
+                },
+                AuxiliaryInput {
+                    bytes: f32_as_bytes(&full_attention_bias),
+                    dtype: AuxiliaryTensorDType::Float32,
+                    shape: &bias_shape,
+                },
+            ],
+            &mut outputs,
+        )?;
+        drop(outputs);
+        let mut values = buffers
+            .into_iter()
+            .enumerate()
+            .map(|(index, bytes)| {
+                checked_f32_output(&format!("Youtu-VL IREE diagnostic output {index}"), bytes)
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter();
+        let patch_projection = values.next().expect("four diagnostic outputs");
+        let window_layer0 = values.next().expect("four diagnostic outputs");
+        let full_layer1 = values.next().expect("four diagnostic outputs");
+        let merger_bucket = values.next().expect("four diagnostic outputs");
+        debug_assert!(values.next().is_none());
+        let actual_tokens = plan.reverse_group_index.len();
+        let actual_values = actual_tokens * self.config.text_hidden;
+        let merger_window_order = merger_bucket[..actual_values].to_vec();
+        let mut restored_output = Vec::with_capacity(actual_values);
+        for &window_position in &plan.reverse_group_index {
+            let start = window_position * self.config.text_hidden;
+            restored_output
+                .extend_from_slice(&merger_window_order[start..start + self.config.text_hidden]);
+        }
+        Ok(YoutuVlVisionDiagnosticProjection {
+            patch_projection,
+            window_layer0,
+            full_layer1,
+            merger_window_order,
+            restored_output,
+            patch_shape,
+            merged_shape: [actual_tokens, self.config.text_hidden],
+            window_group_index: plan.window_group_index,
+            reverse_group_index: plan.reverse_group_index,
         })
     }
 }

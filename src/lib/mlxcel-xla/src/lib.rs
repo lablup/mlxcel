@@ -147,8 +147,9 @@ pub use batch::{EngineEvent, FinishReason, XlaAdmissionError, XlaBatchEngine, Xl
 #[cfg(feature = "diagnostics")]
 pub use batch::{
     Gemma3nAllLayerDiagnosticRun, Gemma3nCanonicalDiagnosticRun, Gemma3nPrefixDecodeDiagnosticRun,
-    LlavaReferenceDiagnosticEngine, LlavaReferenceDiagnosticRun, run_gemma3n_all_layer_diagnostics,
-    run_gemma3n_canonical_diagnostics, run_gemma3n_prefix_decode_diagnostic,
+    LlavaReferenceDiagnosticEngine, LlavaReferenceDiagnosticRun, YoutuVlReferenceDiagnosticEngine,
+    run_gemma3n_all_layer_diagnostics, run_gemma3n_canonical_diagnostics,
+    run_gemma3n_prefix_decode_diagnostic,
 };
 pub use context::{
     CONTEXT_CAPACITY_ENV, ContextCapacityError, DEFAULT_CONTEXT_CAPACITY,
@@ -186,6 +187,8 @@ pub use qwen2_vl_runtime::{
 pub use vision_runtime::{IreeVisionDiagnosticProjector, VisionDiagnosticProjection};
 #[cfg(feature = "iree")]
 pub use vision_runtime::{IreeVisionProjector, VisionExecutionMetrics, VisionProjection};
+#[cfg(feature = "diagnostics")]
+pub use youtu_vl_runtime::{IreeYoutuVlDiagnosticProjector, YoutuVlVisionDiagnosticProjection};
 #[cfg(feature = "iree")]
 pub use youtu_vl_runtime::{
     IreeYoutuVlProjector, YoutuVlVisionExecutionMetrics, YoutuVlVisionProjection,

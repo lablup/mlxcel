@@ -179,6 +179,28 @@ pub struct YoutuVLVisionEncoder {
     hidden_size: i32,
 }
 
+#[cfg_attr(not(any(test, feature = "xla-diagnostics")), allow(dead_code))]
+struct YoutuVlVisionForward {
+    restored_output: UniquePtr<MlxArray>,
+    patch_projection: Option<UniquePtr<MlxArray>>,
+    layer_outputs: Vec<UniquePtr<MlxArray>>,
+    merger_window_order: Option<UniquePtr<MlxArray>>,
+    window_index: Vec<i32>,
+    reverse_indices: Vec<i32>,
+}
+
+/// Diagnostics-only eager checkpoints for the deterministic two-layer oracle.
+#[cfg(any(test, feature = "xla-diagnostics"))]
+pub struct YoutuVlVisionDiagnostics {
+    pub patch_projection: UniquePtr<MlxArray>,
+    pub window_layer0: UniquePtr<MlxArray>,
+    pub full_layer1: UniquePtr<MlxArray>,
+    pub merger_window_order: UniquePtr<MlxArray>,
+    pub restored_output: UniquePtr<MlxArray>,
+    pub window_index: Vec<i32>,
+    pub reverse_indices: Vec<i32>,
+}
+
 impl YoutuVLVisionEncoder {
     pub fn from_weights(
         weights: &WeightMap,
@@ -350,14 +372,12 @@ impl YoutuVLVisionEncoder {
         )
     }
 
-    /// Forward pass with explicit `spatial_shapes`. Each entry is `(h, w)` —
-    /// number of patches along the height and width dimensions for one image
-    /// (this corresponds to upstream's `spatial_shapes[:, 0]`, `spatial_shapes[:, 1]`).
-    pub fn forward_with_spatial(
+    fn forward_internal(
         &self,
         pixel_values: &MlxArray,
         spatial_shapes: &[(i32, i32)],
-    ) -> VisionEncoderOutput {
+        capture_diagnostics: bool,
+    ) -> YoutuVlVisionForward {
         // Embed → [total_tokens, hidden]
         let mut h = self.embeddings.forward(pixel_values);
 
@@ -377,6 +397,7 @@ impl YoutuVLVisionEncoder {
         let win_idx_arr = mlxcel_core::from_slice_i32(&window_index, &[window_index.len() as i32]);
         let h_reordered = mlxcel_core::take(&h_grouped, &win_idx_arr, 0);
         h = mlxcel_core::reshape(&h_reordered, &[-1, dim]);
+        let patch_projection = capture_diagnostics.then(|| mlxcel_core::copy(&h));
 
         // Reorder rotary frequencies the same way.
         let rope_shape = mlxcel_core::array_shape(&rotary_pos_emb);
@@ -405,6 +426,11 @@ impl YoutuVLVisionEncoder {
         }
 
         // Run encoder blocks, swapping cu_seqlens for the windowed/full layers.
+        let mut layer_outputs = Vec::with_capacity(if capture_diagnostics {
+            self.layers.len()
+        } else {
+            0
+        });
         for (layer_num, layer) in self.layers.iter().enumerate() {
             let cu_seqlens_now = if self.fullatt_block_indexes.contains(&layer_num) {
                 full_cu.as_slice()
@@ -412,11 +438,15 @@ impl YoutuVLVisionEncoder {
                 cu_window_seqlens.as_slice()
             };
             h = layer.forward(&h, cu_seqlens_now, &cos, &sin);
+            if capture_diagnostics {
+                layer_outputs.push(mlxcel_core::copy(&h));
+            }
         }
 
         // Post-LN over the encoder output, then run the patch merger.
         h = self.post_layernorm.forward(&h);
         h = self.merger.forward(&h);
+        let merger_window_order = capture_diagnostics.then(|| mlxcel_core::copy(&h));
 
         // Reverse the window reordering. Equivalent to `argsort(window_index)`
         // (Python upstream); we compute the inverse permutation directly so we
@@ -427,7 +457,73 @@ impl YoutuVLVisionEncoder {
             mlxcel_core::from_slice_i32(&reverse_indices, &[reverse_indices.len() as i32]);
         h = mlxcel_core::take(&h, &reverse_arr, 0);
 
-        VisionEncoderOutput { hidden_states: h }
+        YoutuVlVisionForward {
+            restored_output: h,
+            patch_projection,
+            layer_outputs,
+            merger_window_order,
+            window_index,
+            reverse_indices,
+        }
+    }
+
+    /// Forward pass with explicit `spatial_shapes`. Each entry is `(h, w)` —
+    /// number of patches along the height and width dimensions for one image
+    /// (this corresponds to upstream's `spatial_shapes[:, 0]`, `spatial_shapes[:, 1]`).
+    pub fn forward_with_spatial(
+        &self,
+        pixel_values: &MlxArray,
+        spatial_shapes: &[(i32, i32)],
+    ) -> VisionEncoderOutput {
+        VisionEncoderOutput {
+            hidden_states: self
+                .forward_internal(pixel_values, spatial_shapes, false)
+                .restored_output,
+        }
+    }
+
+    /// Capture the eager stages used by the two-layer Youtu-VL MLX/IREE oracle.
+    ///
+    /// This path is excluded from production builds. It rejects deeper or
+    /// differently-routed towers so stage names cannot silently describe the
+    /// wrong layer semantics.
+    #[cfg(any(test, feature = "xla-diagnostics"))]
+    pub fn forward_with_spatial_diagnostics(
+        &self,
+        pixel_values: &MlxArray,
+        spatial_shapes: &[(i32, i32)],
+    ) -> Result<YoutuVlVisionDiagnostics, String> {
+        if self.layers.len() != 2 || self.fullatt_block_indexes != [1] {
+            return Err(format!(
+                "Youtu-VL eager diagnostic oracle requires two layers with fullatt_block_indexes=[1], got depth={} and {:?}",
+                self.layers.len(),
+                self.fullatt_block_indexes
+            ));
+        }
+        let forward = self.forward_internal(pixel_values, spatial_shapes, true);
+        let mut layers = forward.layer_outputs.into_iter();
+        let window_layer0 = layers
+            .next()
+            .ok_or_else(|| "Youtu-VL diagnostic omitted window layer 0".to_string())?;
+        let full_layer1 = layers
+            .next()
+            .ok_or_else(|| "Youtu-VL diagnostic omitted full layer 1".to_string())?;
+        if layers.next().is_some() {
+            return Err("Youtu-VL diagnostic produced unexpected extra layers".to_string());
+        }
+        Ok(YoutuVlVisionDiagnostics {
+            patch_projection: forward
+                .patch_projection
+                .ok_or_else(|| "Youtu-VL diagnostic omitted patch projection".to_string())?,
+            window_layer0,
+            full_layer1,
+            merger_window_order: forward
+                .merger_window_order
+                .ok_or_else(|| "Youtu-VL diagnostic omitted merger output".to_string())?,
+            restored_output: forward.restored_output,
+            window_index: forward.window_index,
+            reverse_indices: forward.reverse_indices,
+        })
     }
 }
 

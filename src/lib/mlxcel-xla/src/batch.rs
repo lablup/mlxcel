@@ -816,6 +816,11 @@ pub struct LlavaReferenceDiagnosticEngine {
     engine: IreeRaggedLlama,
 }
 
+/// Youtu-VL uses the same production prepared-embedding diagnostic decoder;
+/// the architecture-specific comparison maps its padded MLA K/V rows.
+#[cfg(feature = "diagnostics")]
+pub type YoutuVlReferenceDiagnosticEngine = LlavaReferenceDiagnosticEngine;
+
 #[cfg(feature = "diagnostics")]
 impl LlavaReferenceDiagnosticEngine {
     /// Compile and load the smallest production serve bundle at an explicit

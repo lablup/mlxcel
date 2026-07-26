@@ -161,6 +161,8 @@ pub(crate) use vision::emit_vision_diagnostics;
 pub(crate) use vision_config::{LlavaVisionConfig, VisionActivation, VisionWeightSpec};
 #[allow(unused_imports)]
 pub(crate) use youtu_vl::emit_youtu_vl;
+#[cfg(feature = "diagnostics")]
+pub(crate) use youtu_vl::emit_youtu_vl_diagnostics;
 #[allow(unused_imports)]
 pub(crate) use youtu_vl_plan::{
     YoutuVlHostInputs, YoutuVlVisionConfig, prepare_youtu_vl_host_inputs,
