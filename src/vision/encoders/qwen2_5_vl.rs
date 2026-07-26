@@ -590,6 +590,8 @@ pub struct Qwen25VLVisionDiagnostics {
     pub post_full_layers: Vec<UniquePtr<MlxArray>>,
     pub final_interval_layer_indices: Vec<usize>,
     pub post_final_interval_layers: Vec<UniquePtr<MlxArray>>,
+    pub pre_probe_layer_indices: Vec<usize>,
+    pub post_pre_probe_layers: Vec<UniquePtr<MlxArray>>,
     pub substage_probe_layer_index: usize,
     pub substage_probe_layer_input: Vec<f32>,
     pub substage_probe_layer_norm1: Vec<f32>,
@@ -949,7 +951,20 @@ impl Qwen25VLVisionEncoder {
             .copied()
             .or(target_full_layer_index);
         #[cfg(feature = "xla-diagnostics")]
+        let pre_probe_layer_indices = substage_probe_layer_index
+            .and_then(|probe| {
+                full_layer_indices
+                    .iter()
+                    .copied()
+                    .take_while(|&layer| layer < probe)
+                    .last()
+                    .map(|previous_full| ((previous_full + 1)..probe).collect::<Vec<_>>())
+            })
+            .unwrap_or_default();
+        #[cfg(feature = "xla-diagnostics")]
         let mut post_final_interval_layers = Vec::new();
+        #[cfg(feature = "xla-diagnostics")]
+        let mut post_pre_probe_layers = Vec::new();
         #[cfg(feature = "xla-diagnostics")]
         let mut substage_probe_layer_state = None;
         for (layer_num, block) in self.blocks.iter().enumerate() {
@@ -986,6 +1001,11 @@ impl Qwen25VLVisionEncoder {
                 if final_interval_layer_indices.contains(&layer_num) {
                     post_final_interval_layers.push(mlxcel_core::copy(
                         h.as_ref().expect("Qwen2.5-VL final interval layer state"),
+                    ));
+                }
+                if pre_probe_layer_indices.contains(&layer_num) {
+                    post_pre_probe_layers.push(mlxcel_core::copy(
+                        h.as_ref().expect("Qwen2.5-VL pre-probe layer state"),
                     ));
                 }
             }
@@ -1034,6 +1054,8 @@ impl Qwen25VLVisionEncoder {
                     post_full_layers,
                     final_interval_layer_indices,
                     post_final_interval_layers,
+                    pre_probe_layer_indices,
+                    post_pre_probe_layers,
                     substage_probe_layer_index,
                     substage_probe_layer_input: substage_probe_layer_state.input,
                     substage_probe_layer_norm1: substage_probe_layer_state.norm1,

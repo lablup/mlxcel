@@ -94,6 +94,8 @@ pub struct Qwen25VlVisionDiagnostics {
     pub post_full_layers: Vec<Vec<f32>>,
     pub final_interval_layer_indices: Vec<usize>,
     pub post_final_interval_layers: Vec<Vec<f32>>,
+    pub pre_probe_layer_indices: Vec<usize>,
+    pub post_pre_probe_layers: Vec<Vec<f32>>,
     pub substage_probe_layer_index: usize,
     pub substage_probe_layer_input: Vec<f32>,
     pub substage_probe_layer_norm1: Vec<f32>,
@@ -160,6 +162,12 @@ fn qwen25_diagnostic_output_specs(
             .final_interval_layer_indices
             .iter()
             .map(|layer| state(format!("post_final_interval_layer.{layer}"))),
+    );
+    specs.extend(
+        layout
+            .pre_probe_layer_indices
+            .iter()
+            .map(|layer| state(format!("post_pre_probe_layer.{layer}"))),
     );
     let probe = layout.substage_probe_layer_index;
     specs.extend([
@@ -1107,6 +1115,7 @@ impl IreeQwen25VlDiagnosticProjector {
         let layout = active.layout.clone();
         let full_layer_count = layout.full_layer_indices.len();
         let final_interval_layer_count = layout.final_interval_layer_indices.len();
+        let pre_probe_layer_count = layout.pre_probe_layer_indices.len();
         let output_specs =
             qwen25_diagnostic_output_specs(&diagnostic_config, &layout, plan.patch_bucket);
         let merger_output_index = output_specs.len() - 1;
@@ -1198,6 +1207,7 @@ impl IreeQwen25VlDiagnosticProjector {
         let post_final_interval_layers = decoded
             .drain(..final_interval_layer_count)
             .collect::<Vec<_>>();
+        let post_pre_probe_layers = decoded.drain(..pre_probe_layer_count).collect::<Vec<_>>();
         let mut substage_probe_layer_substages = decoded.into_iter();
         let substage_probe_layer_input = substage_probe_layer_substages
             .next()
@@ -1244,6 +1254,8 @@ impl IreeQwen25VlDiagnosticProjector {
             post_full_layers,
             final_interval_layer_indices: layout.final_interval_layer_indices,
             post_final_interval_layers,
+            pre_probe_layer_indices: layout.pre_probe_layer_indices,
+            post_pre_probe_layers,
             substage_probe_layer_index: layout.substage_probe_layer_index,
             substage_probe_layer_input,
             substage_probe_layer_norm1,
@@ -1349,6 +1361,13 @@ mod tests {
                 "post_final_interval_layer.29",
                 "post_final_interval_layer.30",
                 "post_final_interval_layer.31",
+                "post_pre_probe_layer.16",
+                "post_pre_probe_layer.17",
+                "post_pre_probe_layer.18",
+                "post_pre_probe_layer.19",
+                "post_pre_probe_layer.20",
+                "post_pre_probe_layer.21",
+                "post_pre_probe_layer.22",
                 "substage_probe_layer.23.input",
                 "substage_probe_layer.23.norm1",
                 "substage_probe_layer.23.query",
@@ -1367,14 +1386,14 @@ mod tests {
                 .iter()
                 .map(|spec| spec.shape.len())
                 .collect::<Vec<_>>(),
-            [vec![2; 16], vec![3; 3], vec![2; 6],].concat()
+            [vec![2; 23], vec![3; 3], vec![2; 6],].concat()
         );
-        for spec in &specs[16..=18] {
+        for spec in &specs[23..=25] {
             assert_eq!(spec.shape, vec![256, 16, 80]);
         }
-        assert_eq!(specs[15].shape, vec![256, 1280]);
-        assert_eq!(specs[19].shape, vec![256, 1280]);
-        assert_eq!(specs[24].shape, vec![64, 1536]);
+        assert_eq!(specs[22].shape, vec![256, 1280]);
+        assert_eq!(specs[26].shape, vec![256, 1280]);
+        assert_eq!(specs[31].shape, vec![64, 1536]);
     }
 
     fn tiny_config() -> Qwen2VlConfig {
