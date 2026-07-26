@@ -1286,6 +1286,46 @@ mod tests {
         assert_eq!(original, vec!["zero", "one", "two", "three"]);
     }
 
+    #[test]
+    fn eager_f16_block_state_norm_and_residual_dtypes_hold_through_layer17() {
+        let input = mlxcel_core::from_slice_f32(&[1.0, -2.0, 3.0, -4.0], &[1, 4]);
+        let mut state = mlxcel_core::astype(&input, mlxcel_core::dtype::FLOAT16);
+        let weight = mlxcel_core::ones(&[4], mlxcel_core::dtype::FLOAT16);
+        let branch = mlxcel_core::zeros(&[1, 4], mlxcel_core::dtype::FLOAT16);
+
+        for layer in 0..=17 {
+            assert_eq!(
+                mlxcel_core::array_dtype(&state),
+                mlxcel_core::dtype::FLOAT16,
+                "block {layer} input must remain F16"
+            );
+            let norm1 = mlxcel_core::fast_rms_norm(&state, &weight, 1e-6);
+            assert_eq!(
+                mlxcel_core::array_dtype(&norm1),
+                mlxcel_core::dtype::FLOAT16,
+                "block {layer} norm1 must restore the activation dtype"
+            );
+            let post_attention_residual = mlxcel_core::add(&state, &branch);
+            assert_eq!(
+                mlxcel_core::array_dtype(&post_attention_residual),
+                mlxcel_core::dtype::FLOAT16,
+                "block {layer} attention residual must remain F16"
+            );
+            let norm2 = mlxcel_core::fast_rms_norm(&post_attention_residual, &weight, 1e-6);
+            assert_eq!(
+                mlxcel_core::array_dtype(&norm2),
+                mlxcel_core::dtype::FLOAT16,
+                "block {layer} norm2 must restore the activation dtype"
+            );
+            state = mlxcel_core::add(&post_attention_residual, &branch);
+            assert_eq!(
+                mlxcel_core::array_dtype(&state),
+                mlxcel_core::dtype::FLOAT16,
+                "block {layer} output must remain F16"
+            );
+        }
+    }
+
     #[cfg(feature = "xla-diagnostics")]
     #[test]
     fn dense_f32_projection_control_preserves_linear_order_and_dtype() {
