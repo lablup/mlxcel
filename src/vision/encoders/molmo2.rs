@@ -27,6 +27,64 @@ use mlxcel_core::layers::{LayerNorm, Linear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+const MOLMO2_VIT_PROBE_LAYER: usize = 24;
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+// The pinned actual failure was flat index 591490 at hidden width 1152:
+// 591490 = 513 * 1152 + 514. Snapshot the whole row at producer boundaries.
+const MOLMO2_VIT_PROBE_FLAT_ROW: usize = 513;
+
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+fn diagnostic_flat_row_snapshot(
+    value: &MlxArray,
+    tokens_per_crop: usize,
+    flat_row: usize,
+) -> UniquePtr<MlxArray> {
+    let shape = mlxcel_core::array_shape(value);
+    assert_eq!(
+        shape.len(),
+        3,
+        "Molmo2 ViT probe requires [crop, token, hidden]"
+    );
+    let crop = flat_row / tokens_per_crop;
+    let token = flat_row % tokens_per_crop;
+    assert!(
+        crop < usize::try_from(shape[0]).expect("non-negative Molmo2 crop count"),
+        "Molmo2 ViT probe row is outside the active crops"
+    );
+    let hidden = shape[2];
+    let row = mlxcel_core::slice(
+        value,
+        &[crop as i32, token as i32, 0],
+        &[crop as i32 + 1, token as i32 + 1, hidden],
+    );
+    let row = mlxcel_core::reshape(&row, &[1, hidden]);
+    let row = mlxcel_core::astype(&row, mlxcel_core::dtype::FLOAT32);
+    mlxcel_core::eval(&row);
+    let raw = mlxcel_core::array_to_raw_bytes(&row);
+    let values = raw
+        .chunks_exact(std::mem::size_of::<f32>())
+        .map(|chunk| f32::from_ne_bytes(chunk.try_into().expect("four-byte f32 probe value")))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        values.len(),
+        usize::try_from(hidden).expect("non-negative Molmo2 hidden width")
+    );
+    mlxcel_core::from_slice_f32(&values, &[1, hidden])
+}
+
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+fn diagnostic_probe_stage(
+    stage: &'static str,
+    value: &MlxArray,
+    tokens_per_crop: usize,
+) -> (&'static str, UniquePtr<MlxArray>) {
+    (
+        stage,
+        diagnostic_flat_row_snapshot(value, tokens_per_crop, MOLMO2_VIT_PROBE_FLAT_ROW),
+    )
+}
+
 /// Hugging Face's `gelu_pytorch_tanh`, evaluated in F32 so the eager Molmo2
 /// reference matches both the checkpoint's declared activation and StableHLO.
 fn gelu_pytorch_tanh(x: &MlxArray) -> UniquePtr<MlxArray> {
@@ -202,6 +260,43 @@ impl Molmo2VisionBlock {
         mlxcel_core::add(&h, &mlp_out)
     }
 
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+    fn forward_probe(
+        &self,
+        x: &MlxArray,
+        tokens_per_crop: usize,
+    ) -> (
+        UniquePtr<MlxArray>,
+        Vec<(&'static str, UniquePtr<MlxArray>)>,
+    ) {
+        let mut stages = vec![diagnostic_probe_stage("input", x, tokens_per_crop)];
+        let normed = self.attention_norm.forward(x);
+        stages.push(diagnostic_probe_stage(
+            "attention_norm",
+            &normed,
+            tokens_per_crop,
+        ));
+        let attn_out = self.attention.forward(&normed, None, None);
+        stages.push(diagnostic_probe_stage(
+            "attention",
+            &attn_out,
+            tokens_per_crop,
+        ));
+        let residual = mlxcel_core::add(x, &attn_out);
+        stages.push(diagnostic_probe_stage(
+            "post_attention_residual",
+            &residual,
+            tokens_per_crop,
+        ));
+        let normed = self.ffn_norm.forward(&residual);
+        stages.push(diagnostic_probe_stage("ffn_norm", &normed, tokens_per_crop));
+        let mlp_out = self.feed_forward.forward(&normed);
+        stages.push(diagnostic_probe_stage("mlp", &mlp_out, tokens_per_crop));
+        let output = mlxcel_core::add(&residual, &mlp_out);
+        stages.push(diagnostic_probe_stage("output", &output, tokens_per_crop));
+        (output, stages)
+    }
+
     fn from_weights(
         weights: &WeightMap,
         prefix: &str,
@@ -259,6 +354,7 @@ struct Molmo2VitDiagnostics {
     patch_embedding: UniquePtr<MlxArray>,
     position_embedding: UniquePtr<MlxArray>,
     positioned_embedding: UniquePtr<MlxArray>,
+    probe_rows: Vec<(&'static str, UniquePtr<MlxArray>)>,
 }
 
 #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
@@ -325,7 +421,7 @@ impl Molmo2VisionTransformer {
         let position_embedding = self.position_embedding(&patch_embedding, patch_h, patch_w);
         let mut x = mlxcel_core::add(&patch_embedding, &position_embedding);
         #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
-        let capture = CAPTURE.then(|| Molmo2VitDiagnostics {
+        let mut capture = CAPTURE.then(|| Molmo2VitDiagnostics {
             patch_embedding: mlxcel_core::copy(
                 patch_embedding
                     .as_ref()
@@ -349,11 +445,37 @@ impl Molmo2VisionTransformer {
                 x.as_ref()
                     .expect("Molmo2 positioned embedding must be materialized"),
             ),
+            probe_rows: Vec::new(),
         });
 
         let mut hidden_states = Vec::with_capacity(self.blocks.len());
-        for block in &self.blocks {
-            x = block.forward(&x);
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+        let tokens_per_crop =
+            usize::try_from(patch_h * patch_w).expect("positive Molmo2 patch grid");
+        for (layer, block) in self.blocks.iter().enumerate() {
+            #[cfg(not(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu")))]
+            let _ = layer;
+            #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+            if CAPTURE
+                && layer == MOLMO2_VIT_PROBE_LAYER
+                && usize::try_from(mlxcel_core::array_shape(&x)[0])
+                    .expect("non-negative Molmo2 crop count")
+                    * tokens_per_crop
+                    > MOLMO2_VIT_PROBE_FLAT_ROW
+            {
+                let (output, probe_rows) = block.forward_probe(&x, tokens_per_crop);
+                x = output;
+                capture
+                    .as_mut()
+                    .expect("Molmo2 probe requires diagnostics capture")
+                    .probe_rows = probe_rows;
+            } else {
+                x = block.forward(&x);
+            }
+            #[cfg(not(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu")))]
+            {
+                x = block.forward(&x);
+            }
             hidden_states.push(mlxcel_core::copy(&x));
         }
         #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
@@ -785,7 +907,26 @@ impl Molmo2VisionModel {
                     tensor: encode.early_block,
                 },
             ];
-            stages.extend(encode.selected_layers.into_iter().map(|(layer, tensor)| {
+            let mut selected_layers = encode.selected_layers;
+            selected_layers.sort_by_key(|(layer, _)| *layer);
+            let probe_split =
+                selected_layers.partition_point(|(layer, _)| *layer < MOLMO2_VIT_PROBE_LAYER);
+            stages.extend(selected_layers.drain(..probe_split).map(|(layer, tensor)| {
+                Molmo2VisionDiagnosticTensor {
+                    name: format!("vit.selected.{layer}"),
+                    tensor,
+                }
+            }));
+            stages.extend(encode.vit.probe_rows.into_iter().map(|(stage, tensor)| {
+                Molmo2VisionDiagnosticTensor {
+                    name: format!(
+                        "vit.probe.{}.row.{}.{}",
+                        MOLMO2_VIT_PROBE_LAYER, MOLMO2_VIT_PROBE_FLAT_ROW, stage
+                    ),
+                    tensor,
+                }
+            }));
+            stages.extend(selected_layers.into_iter().map(|(layer, tensor)| {
                 Molmo2VisionDiagnosticTensor {
                     name: format!("vit.selected.{layer}"),
                     tensor,
@@ -971,6 +1112,8 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 #[cfg(test)]
 mod tests {
     use super::gelu_pytorch_tanh;
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+    use super::{MOLMO2_VIT_PROBE_FLAT_ROW, diagnostic_flat_row_snapshot};
 
     #[test]
     fn molmo2_uses_the_checkpoint_pytorch_tanh_gelu() {
@@ -985,5 +1128,33 @@ mod tests {
                 "Molmo2 GELU mismatch at {index}"
             );
         }
+    }
+
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+    #[test]
+    fn diagnostic_probe_snapshots_the_row_containing_the_actual_failure() {
+        let values = (0..(MOLMO2_VIT_PROBE_FLAT_ROW + 1) * 2)
+            .map(|value| value as f32)
+            .collect::<Vec<_>>();
+        let input =
+            mlxcel_core::from_slice_f32(&values, &[1, (MOLMO2_VIT_PROBE_FLAT_ROW + 1) as i32, 2]);
+        let row = diagnostic_flat_row_snapshot(
+            &input,
+            MOLMO2_VIT_PROBE_FLAT_ROW + 1,
+            MOLMO2_VIT_PROBE_FLAT_ROW,
+        );
+        assert_eq!(mlxcel_core::array_shape(&row), vec![1, 2]);
+        let bytes = mlxcel_core::array_to_raw_bytes(&row);
+        let actual = bytes
+            .chunks_exact(4)
+            .map(|chunk| f32::from_ne_bytes(chunk.try_into().expect("four-byte f32")))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            vec![
+                (MOLMO2_VIT_PROBE_FLAT_ROW * 2) as f32,
+                (MOLMO2_VIT_PROBE_FLAT_ROW * 2 + 1) as f32,
+            ]
+        );
     }
 }

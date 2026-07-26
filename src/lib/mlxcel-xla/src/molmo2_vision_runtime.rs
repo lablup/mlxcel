@@ -36,6 +36,11 @@ use crate::molmo2::Molmo2SafePooling;
 use crate::weights::{bf16_to_f32, f16_to_f32, f32_le_to_f32};
 
 const ENTRY_NAME: &str = "molmo2_vision.main";
+#[cfg(feature = "diagnostics")]
+const MOLMO2_VIT_PROBE_LAYER: usize = 24;
+#[cfg(feature = "diagnostics")]
+// 591490 = 513 * checkpoint hidden width 1152 + component 514.
+const MOLMO2_VIT_PROBE_FLAT_ROW: usize = 513;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Molmo2VisionProjection {
@@ -572,9 +577,44 @@ fn diagnostic_stage_specs(
             active_shape: hidden_active.clone(),
         },
     ];
+    let mut selected_layers = config.selected_layers.clone();
+    selected_layers.sort_unstable();
+    let probe_split = selected_layers.partition_point(|layer| *layer < MOLMO2_VIT_PROBE_LAYER);
     specs.extend(
-        config
-            .selected_layers
+        selected_layers[..probe_split]
+            .iter()
+            .map(|layer| Molmo2DiagnosticStageSpec {
+                name: format!("vit.selected.{layer}"),
+                static_shape: hidden_static.clone(),
+                active_shape: hidden_active.clone(),
+            }),
+    );
+    if config.emitted_layers > MOLMO2_VIT_PROBE_LAYER
+        && config.static_crops * config.patches_per_crop > MOLMO2_VIT_PROBE_FLAT_ROW
+    {
+        specs.extend(
+            [
+                "input",
+                "attention_norm",
+                "attention",
+                "post_attention_residual",
+                "ffn_norm",
+                "mlp",
+                "output",
+            ]
+            .into_iter()
+            .map(|stage| Molmo2DiagnosticStageSpec {
+                name: format!(
+                    "vit.probe.{}.row.{}.{}",
+                    MOLMO2_VIT_PROBE_LAYER, MOLMO2_VIT_PROBE_FLAT_ROW, stage
+                ),
+                static_shape: vec![1, config.hidden],
+                active_shape: vec![1, config.hidden],
+            }),
+        );
+    }
+    specs.extend(
+        selected_layers[probe_split..]
             .iter()
             .map(|layer| Molmo2DiagnosticStageSpec {
                 name: format!("vit.selected.{layer}"),
@@ -661,7 +701,7 @@ impl IreeMolmo2VisionDiagnosticProjector {
             &config,
             &mlir,
             "molmo2-vision-diagnostics",
-            Some("first-divergence-v2-projector-stages"),
+            Some("first-divergence-v3-layer24-row513"),
         )?;
         Ok(Self { module, config })
     }

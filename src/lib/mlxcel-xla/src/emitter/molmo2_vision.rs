@@ -17,6 +17,10 @@
 use super::builder::{Builder, Ty, Val};
 use super::molmo2_config::{Molmo2VisionConfig, Molmo2VisionWeightSpec};
 
+const MOLMO2_VIT_PROBE_LAYER: usize = 24;
+// 591490 = 513 * checkpoint hidden width 1152 + component 514.
+const MOLMO2_VIT_PROBE_FLAT_ROW: usize = 513;
+
 struct Args {
     values: Vec<Val>,
     declarations: Vec<String>,
@@ -171,6 +175,16 @@ fn selected_slot(selected_layers: &[usize], layer: usize) -> Option<usize> {
     selected_layers
         .iter()
         .position(|&selected| selected == layer)
+}
+
+fn diagnostic_probe_row(builder: &mut Builder, value: &Val, config: &Molmo2VisionConfig) -> Val {
+    let crop = MOLMO2_VIT_PROBE_FLAT_ROW / config.patches_per_crop;
+    let token = MOLMO2_VIT_PROBE_FLAT_ROW % config.patches_per_crop;
+    let row = builder.slice(
+        value,
+        &[(crop, crop + 1), (token, token + 1), (0, config.hidden)],
+    );
+    builder.reshape(&row, vec![1, config.hidden])
 }
 
 fn self_attention(
@@ -358,6 +372,7 @@ fn emit_molmo2_vision_inner(config: &Molmo2VisionConfig, diagnostics: bool) -> S
     let positioned_embedding = diagnostics.then(|| hidden.clone());
     let mut early_block = None;
     let mut selected = vec![None::<Val>; config.selected_layers.len()];
+    let mut probe_rows = Vec::new();
     for layer in 0..config.emitted_layers {
         // Norm weights follow attention projection weights in the persisted
         // schema. Pull them before emitting the attention and pass normalized
@@ -365,6 +380,12 @@ fn emit_molmo2_vision_inner(config: &Molmo2VisionConfig, diagnostics: bool) -> S
         let block_start = args.cursor;
         let norm_weight = args.values[block_start + 8].clone();
         let norm_bias = args.values[block_start + 9].clone();
+        let capture_probe = diagnostics
+            && layer == MOLMO2_VIT_PROBE_LAYER
+            && config.static_crops * config.patches_per_crop > MOLMO2_VIT_PROBE_FLAT_ROW;
+        if capture_probe {
+            probe_rows.push(diagnostic_probe_row(&mut builder, &hidden, config));
+        }
         let normalized = layer_norm(
             &mut builder,
             &hidden,
@@ -372,7 +393,13 @@ fn emit_molmo2_vision_inner(config: &Molmo2VisionConfig, diagnostics: bool) -> S
             &norm_bias,
             config.layer_norm_eps,
         );
+        if capture_probe {
+            probe_rows.push(diagnostic_probe_row(&mut builder, &normalized, config));
+        }
         let attention = self_attention(&mut builder, &normalized, &mut args, config);
+        if capture_probe {
+            probe_rows.push(diagnostic_probe_row(&mut builder, &attention, config));
+        }
         // encoder_block consumes the already-taken attention schema, so finish
         // this block explicitly.
         let _attention_norm_weight = args.take();
@@ -380,6 +407,9 @@ fn emit_molmo2_vision_inner(config: &Molmo2VisionConfig, diagnostics: bool) -> S
         let ffn_norm_weight = args.take();
         let ffn_norm_bias = args.take();
         let residual = builder.add(&hidden, &attention);
+        if capture_probe {
+            probe_rows.push(diagnostic_probe_row(&mut builder, &residual, config));
+        }
         let normalized = layer_norm(
             &mut builder,
             &residual,
@@ -387,6 +417,9 @@ fn emit_molmo2_vision_inner(config: &Molmo2VisionConfig, diagnostics: bool) -> S
             &ffn_norm_bias,
             config.layer_norm_eps,
         );
+        if capture_probe {
+            probe_rows.push(diagnostic_probe_row(&mut builder, &normalized, config));
+        }
         let w1 = args.take();
         let b1 = args.take();
         let w2 = args.take();
@@ -394,7 +427,13 @@ fn emit_molmo2_vision_inner(config: &Molmo2VisionConfig, diagnostics: bool) -> S
         let mlp = linear(&mut builder, &normalized, &w1, Some(&b1));
         let mlp = tanh_gelu(&mut builder, &mlp);
         let mlp = linear(&mut builder, &mlp, &w2, Some(&b2));
+        if capture_probe {
+            probe_rows.push(diagnostic_probe_row(&mut builder, &mlp, config));
+        }
         hidden = builder.add(&residual, &mlp);
+        if capture_probe {
+            probe_rows.push(diagnostic_probe_row(&mut builder, &hidden, config));
+        }
         if diagnostics && layer == 0 {
             early_block = Some(hidden.clone());
         }
@@ -450,7 +489,26 @@ fn emit_molmo2_vision_inner(config: &Molmo2VisionConfig, diagnostics: bool) -> S
             positioned_embedding.expect("Molmo2 diagnostic positioned embedding"),
             early_block.expect("Molmo2 diagnostics require an early block"),
         ];
-        outputs.extend(selected);
+        let mut diagnostic_selected = config
+            .selected_layers
+            .iter()
+            .copied()
+            .zip(selected.iter().cloned())
+            .collect::<Vec<_>>();
+        diagnostic_selected.sort_by_key(|(layer, _)| *layer);
+        let probe_split =
+            diagnostic_selected.partition_point(|(layer, _)| *layer < MOLMO2_VIT_PROBE_LAYER);
+        outputs.extend(
+            diagnostic_selected[..probe_split]
+                .iter()
+                .map(|(_, value)| value.clone()),
+        );
+        outputs.extend(probe_rows);
+        outputs.extend(
+            diagnostic_selected[probe_split..]
+                .iter()
+                .map(|(_, value)| value.clone()),
+        );
         outputs.extend([
             selected_features,
             pool.gathered_masked,
@@ -577,6 +635,39 @@ mod tests {
             return_values.split(',').count(),
             16,
             "diagnostics must include w1, SiLU, w3, and product before projector output"
+        );
+    }
+
+    #[test]
+    fn diagnostic_graph_probes_only_the_known_layer24_failure_row() {
+        let mut config = test_config(true);
+        config.layers = 25;
+        config.emitted_layers = 25;
+        config.selected_layers = vec![24, 18];
+        config.static_crops = 1;
+        config.patches_per_crop = MOLMO2_VIT_PROBE_FLAT_ROW + 1;
+        config.position_count = config.patches_per_crop;
+
+        let diagnostics = emit_molmo2_vision_diagnostics(&config);
+        assert_eq!(
+            diagnostics.matches("stablehlo.slice").count(),
+            7,
+            "input, two norms, attention, residual, MLP, and output must each expose one row"
+        );
+        assert_eq!(
+            diagnostics.matches("[0:1, 513:514, 0:8]").count(),
+            7,
+            "the probe must stay bounded to the row containing flat failure index 591490"
+        );
+        let return_values = diagnostics
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("return "))
+            .and_then(|line| line.split_once(" : ").map(|(values, _)| values))
+            .expect("Molmo2 diagnostic graph must return named stage values");
+        assert_eq!(
+            return_values.split(',').count(),
+            23,
+            "the seven row probes must be the only new diagnostic transfers"
         );
     }
 
