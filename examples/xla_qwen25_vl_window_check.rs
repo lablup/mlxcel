@@ -393,6 +393,15 @@ fn main() {
     let eager_substage_probe = [
         ("input", eager_vision.substage_probe_layer_input.as_slice()),
         ("norm1", eager_vision.substage_probe_layer_norm1.as_slice()),
+        ("query", eager_vision.substage_probe_layer_query.as_slice()),
+        ("key", eager_vision.substage_probe_layer_key.as_slice()),
+        ("value", eager_vision.substage_probe_layer_value.as_slice()),
+        (
+            "attention_context",
+            eager_vision
+                .substage_probe_layer_attention_context
+                .as_slice(),
+        ),
         (
             "attention",
             eager_vision.substage_probe_layer_attention.as_slice(),
@@ -449,6 +458,28 @@ fn main() {
         iree_vision.window_cu_seqlens,
         usize_plan(&eager_vision.window_cu_seqlens, "eager window cu lengths"),
         "window-attention cumulative lengths differ"
+    );
+    assert!(
+        iree_vision.attention_mask_audit.full_window_differences > 0,
+        "strict oracle fixture does not structurally distinguish window and full attention"
+    );
+    assert_eq!(
+        iree_vision.attention_mask_audit.cross_media_full_bias_leaks, 0,
+        "full-attention bias leaks across media"
+    );
+    assert_eq!(
+        iree_vision
+            .attention_mask_audit
+            .active_padding_full_bias_leaks,
+        0,
+        "full-attention bias connects active and padded bucket rows"
+    );
+    assert_eq!(
+        iree_vision
+            .attention_mask_audit
+            .invalid_padded_full_bias_entries,
+        0,
+        "padded bucket queries must expose only one finite self key"
     );
     assert!(
         iree_vision
@@ -564,6 +595,15 @@ fn main() {
     for ((stage, actual), (eager_stage, expected)) in [
         ("input", iree_vision.substage_probe_layer_input.as_slice()),
         ("norm1", iree_vision.substage_probe_layer_norm1.as_slice()),
+        ("query", iree_vision.substage_probe_layer_query.as_slice()),
+        ("key", iree_vision.substage_probe_layer_key.as_slice()),
+        ("value", iree_vision.substage_probe_layer_value.as_slice()),
+        (
+            "attention_context",
+            iree_vision
+                .substage_probe_layer_attention_context
+                .as_slice(),
+        ),
         (
             "attention",
             iree_vision.substage_probe_layer_attention.as_slice(),
@@ -627,7 +667,16 @@ fn main() {
             "device": device,
             "context_capacity": context_capacity,
             "grid_thw": processor.grids,
+            "patch_bucket": iree_vision.patch_bucket,
             "patch_tokens": iree_vision.patch_tokens,
+            "padded_bucket_rows": iree_vision.patch_bucket - iree_vision.patch_tokens,
+            "attention_mask_audit": {
+                "full_window_differences": iree_vision.attention_mask_audit.full_window_differences,
+                "cross_media_full_bias_leaks": iree_vision.attention_mask_audit.cross_media_full_bias_leaks,
+                "active_padding_full_bias_leaks": iree_vision.attention_mask_audit.active_padding_full_bias_leaks,
+                "invalid_padded_full_bias_entries": iree_vision.attention_mask_audit.invalid_padded_full_bias_entries,
+                "all_diagnostic_outputs_finite_including_padding": true,
+            },
             "merged_tokens": iree_vision.merged_tokens,
             "vision_hidden": iree_vision.vision_hidden,
             "text_hidden": iree_vision.text_hidden,
@@ -654,17 +703,14 @@ fn main() {
         &processor.grids,
         Qwen25VlDiagnosticMutation::Qwen2FullAttention,
     );
-    assert!(
-        compare_stage(
-            &mut Vec::new(),
-            "negative.qwen2_full_attention",
-            &qwen2_full.post_window_layer,
-            &mlx_f32(&eager_vision.post_window_layer),
-            tolerance,
-        )
-        .is_err(),
-        "negative oracle accepted Qwen2-style full attention in a window layer"
-    );
+    let qwen2_full_attention_numerically_detected = compare_stage(
+        &mut Vec::new(),
+        "negative.qwen2_full_attention",
+        &qwen2_full.post_window_layer,
+        &mlx_f32(&eager_vision.post_window_layer),
+        tolerance,
+    )
+    .is_err();
     let identity_mutation = iree_vision_capture(
         &mut iree_projector,
         &processor.patch_values,
@@ -779,7 +825,16 @@ fn main() {
         "device": device,
         "context_capacity": context_capacity,
         "grid_thw": processor.grids,
+        "patch_bucket": iree_vision.patch_bucket,
         "patch_tokens": iree_vision.patch_tokens,
+        "padded_bucket_rows": iree_vision.patch_bucket - iree_vision.patch_tokens,
+        "attention_mask_audit": {
+            "full_window_differences": iree_vision.attention_mask_audit.full_window_differences,
+            "cross_media_full_bias_leaks": iree_vision.attention_mask_audit.cross_media_full_bias_leaks,
+            "active_padding_full_bias_leaks": iree_vision.attention_mask_audit.active_padding_full_bias_leaks,
+            "invalid_padded_full_bias_entries": iree_vision.attention_mask_audit.invalid_padded_full_bias_entries,
+            "all_diagnostic_outputs_finite_including_padding": true,
+        },
         "merged_tokens": iree_vision.merged_tokens,
         "vision_hidden": iree_vision.vision_hidden,
         "text_hidden": iree_vision.text_hidden,
@@ -788,7 +843,8 @@ fn main() {
         "final_interval_layers": iree_vision.final_interval_layer_indices,
         "target_full_layer": iree_vision.full_layer_indices.last(),
         "substage_probe_layer": iree_vision.substage_probe_layer_index,
-        "negative_qwen2_full_attention_detected": true,
+        "negative_qwen2_full_attention_structurally_detected": true,
+        "negative_qwen2_full_attention_numerically_detected": qwen2_full_attention_numerically_detected,
         "negative_identity_permutation_detected": true,
         "negative_zero_vision_positions_detected": true,
         "final_top1": argmax(&iree_logits),

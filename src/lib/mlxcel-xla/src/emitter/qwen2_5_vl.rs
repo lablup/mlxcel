@@ -37,6 +37,10 @@ pub(crate) struct Qwen25VlVisionDiagnosticLayout {
 struct Qwen25VlBlockDiagnostics {
     input: Val,
     norm1: Val,
+    query: Val,
+    key: Val,
+    value: Val,
+    attention_context: Val,
     attention: Val,
     post_attention_residual: Val,
     norm2: Val,
@@ -45,13 +49,21 @@ struct Qwen25VlBlockDiagnostics {
 }
 
 #[cfg(feature = "diagnostics")]
-fn substage_probe_layer(final_interval_layer_indices: &[usize]) -> Option<usize> {
-    final_interval_layer_indices
+fn substage_probe_layer(full_layer_indices: &[usize]) -> Option<usize> {
+    full_layer_indices
         .iter()
         .rev()
-        .nth(2)
-        .or_else(|| final_interval_layer_indices.last())
+        .nth(1)
+        .or_else(|| full_layer_indices.last())
         .copied()
+}
+
+struct Qwen25VlAttentionValues {
+    query: Val,
+    key: Val,
+    value: Val,
+    context: Val,
+    output: Val,
 }
 
 struct Args {
@@ -185,7 +197,7 @@ fn attention(
     config: &Qwen2VlConfig,
     freqs: &Val,
     attention_bias: &Val,
-) -> Val {
+) -> Qwen25VlAttentionValues {
     let tokens = hidden.ty.shape[0];
     let head_dim = config.hidden / config.heads;
     let qkv = linear_2d(builder, hidden, &args.take(), &args.take());
@@ -205,11 +217,12 @@ fn attention(
     let q = builder.reshape(&q, vec![tokens, config.heads, head_dim]);
     let k = builder.reshape(&k, vec![tokens, config.heads, head_dim]);
     let v = builder.reshape(&v, vec![tokens, config.heads, head_dim]);
-    let q = apply_vision_rope(builder, &q, freqs);
-    let k = apply_vision_rope(builder, &k, freqs);
-    let q = builder.transpose(&q, &[1, 0, 2]);
-    let k = builder.transpose(&k, &[1, 0, 2]);
-    let v = builder.transpose(&v, &[1, 0, 2]);
+    let query = apply_vision_rope(builder, &q, freqs);
+    let key = apply_vision_rope(builder, &k, freqs);
+    let value = v;
+    let q = builder.transpose(&query, &[1, 0, 2]);
+    let k = builder.transpose(&key, &[1, 0, 2]);
+    let v = builder.transpose(&value, &[1, 0, 2]);
     let scores = builder.dot_general(
         &q,
         &k,
@@ -244,7 +257,14 @@ fn attention(
     );
     let context = builder.transpose(&context, &[1, 0, 2]);
     let context = builder.reshape(&context, vec![tokens, config.hidden]);
-    linear_2d(builder, &context, &args.take(), &args.take())
+    let output = linear_2d(builder, &context, &args.take(), &args.take());
+    Qwen25VlAttentionValues {
+        query,
+        key,
+        value,
+        context,
+        output,
+    }
 }
 
 fn encoder_layer(
@@ -257,7 +277,7 @@ fn encoder_layer(
 ) -> Val {
     let norm1 = rms_norm(builder, hidden, &args.take(), config.layer_norm_eps);
     let attention = attention(builder, &norm1, args, config, freqs, attention_bias);
-    let residual = builder.add(hidden, &attention);
+    let residual = builder.add(hidden, &attention.output);
     let norm2 = rms_norm(builder, &residual, &args.take(), config.layer_norm_eps);
     let gate = linear_2d(builder, &norm2, &args.take(), &args.take());
     let gate = silu(builder, &gate);
@@ -278,7 +298,7 @@ fn encoder_layer_with_diagnostics(
 ) -> Qwen25VlBlockDiagnostics {
     let norm1 = rms_norm(builder, hidden, &args.take(), config.layer_norm_eps);
     let attention = attention(builder, &norm1, args, config, freqs, attention_bias);
-    let post_attention_residual = builder.add(hidden, &attention);
+    let post_attention_residual = builder.add(hidden, &attention.output);
     let norm2 = rms_norm(
         builder,
         &post_attention_residual,
@@ -294,7 +314,11 @@ fn encoder_layer_with_diagnostics(
     Qwen25VlBlockDiagnostics {
         input: hidden.clone(),
         norm1,
-        attention,
+        query: attention.query,
+        key: attention.key,
+        value: attention.value,
+        attention_context: attention.context,
+        attention: attention.output,
         post_attention_residual,
         norm2,
         mlp,
@@ -426,6 +450,10 @@ fn emit_qwen2_5_vl_inner(
         outputs.extend([
             probe.input,
             probe.norm1,
+            probe.query,
+            probe.key,
+            probe.value,
+            probe.attention_context,
             probe.attention,
             probe.post_attention_residual,
             probe.norm2,
@@ -508,8 +536,8 @@ pub(crate) fn emit_qwen2_5_vl_diagnostics(
         .map_or(0, |layer| layer + 1);
     let final_interval_layer_indices =
         (final_interval_start..=target_full_layer_index).collect::<Vec<_>>();
-    let substage_probe_layer_index = substage_probe_layer(&final_interval_layer_indices)
-        .expect("diagnostic final interval contains the target full-attention layer");
+    let substage_probe_layer_index = substage_probe_layer(&full_layer_indices)
+        .expect("diagnostics contain a configured full-attention layer");
     let layout = Qwen25VlVisionDiagnosticLayout {
         window_layer_index,
         full_layer_indices,
@@ -528,11 +556,9 @@ mod tests {
 
     #[test]
     fn substage_probe_selects_the_first_observed_actual_divergence_boundary() {
-        assert_eq!(
-            substage_probe_layer(&(24..=31).collect::<Vec<_>>()),
-            Some(29)
-        );
-        assert_eq!(substage_probe_layer(&[0, 1]), Some(1));
+        assert_eq!(substage_probe_layer(&[7, 15, 23, 31]), Some(23));
+        assert_eq!(substage_probe_layer(&[0, 1]), Some(0));
+        assert_eq!(substage_probe_layer(&[0]), Some(0));
         assert_eq!(substage_probe_layer(&[]), None);
     }
 }
