@@ -401,12 +401,14 @@ fn format_prompt(prompt: &str) -> String {
     }
 }
 
-#[cfg(all(
-    test,
-    any(feature = "xla-diagnostics", feature = "xla-reference-diagnostics")
+#[cfg(any(
+    all(test, feature = "xla-diagnostics"),
+    feature = "xla-reference-diagnostics"
 ))]
 #[path = "host_preprocessor_molmo_diagnostics_tests.rs"]
 mod diagnostics_tests;
+#[cfg(feature = "xla-reference-diagnostics")]
+pub use diagnostics_tests::run_pinned_molmo_eager_mlx_iree_boundaries;
 #[cfg(test)]
 #[path = "host_preprocessor_molmo_tests.rs"]
 mod tests;

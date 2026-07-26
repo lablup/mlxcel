@@ -14,8 +14,12 @@
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use super::*;
+#[cfg(test)]
 use crate::vision::processors::molmo::MolmoImageTokens;
 
 #[path = "host_preprocessor_molmo_diagnostics_support.rs"]
@@ -80,19 +84,31 @@ fn strict_oracle_rejects_molmo2_token_scan_and_replacement() {
 /// Run from the repository root only with the pinned 5.3 GB checkpoint:
 ///
 /// ```text
-/// IREE_DIST=/path/to/iree-dist \
-/// MLXCEL_MOLMO_FIXTURE=/path/to/Molmo-7B-D-0924-4bit \
-/// cargo test --features xla-reference-diagnostics --lib \
-///   pinned_molmo_eager_mlx_matches_iree_boundaries -- --ignored --nocapture
+/// IREE_DIST=/home/inureyes/Development/mlxcel/spike/iree-ffi/iree-dist \
+/// cargo build --release --example xla_molmo_reference_check \
+///   --features cuda,xla-reference-diagnostics
+///
+/// MLXCEL_DEVICE=gpu \
+/// MLXCEL_MOLMO_FIXTURE=/home/inureyes/models/molmo-7b \
+/// MLXCEL_MOLMO_IMAGE=tests/fixtures/test_image.png \
+/// MLXCEL_MOLMO_IREE_DEVICE=local-task \
+/// MLXCEL_MOLMO_HEARTBEAT_SECS=30 \
+/// ./target/release/examples/xla_molmo_reference_check
 /// ```
 ///
 /// The gate uses one resident IREE decoder for both prepared payloads. It
 /// captures K/V and logits propagation but does not claim an independent
 /// decoder oracle.
-#[test]
-#[ignore = "requires pinned Molmo checkpoint and IREE local-task"]
-fn pinned_molmo_eager_mlx_matches_iree_boundaries() {
-    mlxcel_core::set_default_device(false);
+pub fn run_pinned_molmo_eager_mlx_iree_boundaries() {
+    assert!(
+        cfg!(feature = "cuda"),
+        "the Molmo actual-checkpoint reference binary must be built with --features cuda"
+    );
+    mlxcel_core::set_default_device(true);
+    assert!(
+        mlxcel_core::is_gpu_available(),
+        "the Molmo eager reference must run on the MLX GPU device"
+    );
     let model = PathBuf::from(
         std::env::var_os("MLXCEL_MOLMO_FIXTURE")
             .expect("MLXCEL_MOLMO_FIXTURE must name the pinned checkpoint"),
@@ -102,10 +118,13 @@ fn pinned_molmo_eager_mlx_matches_iree_boundaries() {
         .unwrap_or_else(|| PathBuf::from("tests/fixtures/test_image.png"));
     let device =
         std::env::var("MLXCEL_MOLMO_IREE_DEVICE").unwrap_or_else(|_| "local-task".to_string());
-    assert_eq!(
-        device, "local-task",
-        "the #870 reference gate qualifies IREE local-task only"
+    assert!(
+        matches!(device.as_str(), "local-task" | "local-sync"),
+        "the #870 reference gate requires IREE local-task or local-sync"
     );
+    progress(&format!(
+        "runtime split ready: eager MLX=CUDA, IREE={device}"
+    ));
     progress("validate pinned checkpoint and image");
     assert_eq!(pinned_revision(&model), PINNED_REVISION);
     assert_sha256(
@@ -194,27 +213,35 @@ fn pinned_molmo_eager_mlx_matches_iree_boundaries() {
     let MolmoVision::Host(vision) = &host.vision else {
         panic!("host preprocessor must retain the eager MLX vision tower");
     };
+    let mut heartbeat = DiagnosticHeartbeat::from_env();
     let (_, host_diagnostics) =
         vision.forward_with_diagnostics(&pixels, &masks, &mut |stage| match stage {
             crate::vision::encoders::molmo::MolmoHostVisionDiagnosticStage::PatchEmbeddingStarted => {
                 progress("eager MLX patch embedding materialization started");
+                heartbeat.start("eager MLX patch embedding");
             }
             crate::vision::encoders::molmo::MolmoHostVisionDiagnosticStage::PatchEmbeddingCompleted => {
+                heartbeat.stop();
                 progress("eager MLX patch embedding materialized");
             }
             crate::vision::encoders::molmo::MolmoHostVisionDiagnosticStage::SelectedLayerStarted(layer) => {
                 progress(&format!("eager MLX selected ViT layer {layer} materialization started"));
+                heartbeat.start(format!("eager MLX selected ViT layer {layer}"));
             }
             crate::vision::encoders::molmo::MolmoHostVisionDiagnosticStage::SelectedLayerCompleted(layer) => {
+                heartbeat.stop();
                 progress(&format!("eager MLX selected ViT layer {layer} materialized"));
             }
             crate::vision::encoders::molmo::MolmoHostVisionDiagnosticStage::ProjectorStarted => {
                 progress("eager MLX pool/projector materialization started");
+                heartbeat.start("eager MLX pool/projector");
             }
             crate::vision::encoders::molmo::MolmoHostVisionDiagnosticStage::ProjectorCompleted => {
+                heartbeat.stop();
                 progress("eager MLX pool/projector materialized");
             }
         });
+    heartbeat.stop();
     let host_patch = mlx_f32(host_diagnostics.patch_embeddings.as_ref().unwrap());
     let host_selected = host_diagnostics
         .selected_hidden_states
@@ -368,4 +395,67 @@ fn pinned_molmo_eager_mlx_matches_iree_boundaries() {
     if let Some(first_divergence) = first_divergence {
         panic!("Molmo v1 eager MLX/IREE first divergence: {first_divergence}");
     }
+}
+
+struct DiagnosticHeartbeat {
+    interval: Duration,
+    stop_sender: Option<Sender<()>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl DiagnosticHeartbeat {
+    fn from_env() -> Self {
+        let seconds = std::env::var("MLXCEL_MOLMO_HEARTBEAT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|seconds| *seconds > 0)
+            .unwrap_or(30);
+        Self {
+            interval: Duration::from_secs(seconds),
+            stop_sender: None,
+            worker: None,
+        }
+    }
+
+    fn start(&mut self, stage: impl Into<String>) {
+        self.stop();
+        let stage = stage.into();
+        let interval = self.interval;
+        let (stop_sender, stop_receiver) = mpsc::channel();
+        self.stop_sender = Some(stop_sender);
+        self.worker = Some(thread::spawn(move || {
+            let started = Instant::now();
+            loop {
+                match stop_receiver.recv_timeout(interval) {
+                    Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+                    Err(RecvTimeoutError::Timeout) => progress(&format!(
+                        "heartbeat stage={stage} elapsed={}s",
+                        started.elapsed().as_secs()
+                    )),
+                }
+            }
+        }));
+    }
+
+    fn stop(&mut self) {
+        if let Some(stop_sender) = self.stop_sender.take() {
+            let _ = stop_sender.send(());
+        }
+        if let Some(worker) = self.worker.take() {
+            worker.join().expect("Molmo diagnostic heartbeat panicked");
+        }
+    }
+}
+
+impl Drop for DiagnosticHeartbeat {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+#[cfg(test)]
+#[test]
+#[ignore = "requires pinned Molmo checkpoint, MLX CUDA, and IREE local-task"]
+fn pinned_molmo_eager_mlx_matches_iree_boundaries() {
+    run_pinned_molmo_eager_mlx_iree_boundaries();
 }

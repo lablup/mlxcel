@@ -2,10 +2,12 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
+#[cfg(test)]
 use image::DynamicImage;
 use mlxcel_core::session::{PreparedPrefill, PreparedTensorDType};
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
 use crate::vision::processors::molmo::{MolmoImageTokens, MolmoProcessor, MolmoProcessorOutput};
 
 pub(super) const PINNED_REVISION: &str = "5c04b3a418979597b1968e41414ad799c87533e8";
@@ -21,10 +23,12 @@ pub(super) const PINNED_PIXEL_VALUES_SHA256: &str =
     "0a1bef503b209de9b4454f636f03c55f4d84309cb7fd6bbf573750dd499799aa";
 pub(super) const PINNED_IMAGE_MASKS_SHA256: &str =
     "5a0de017af320127aa8685a4671487960f2aa498b541d5445a0962410bf3b92a";
+#[cfg(test)]
 pub(super) const PINNED_IMAGE_TOKEN_IDS_SHA256: &str =
     "23a0878a6a2818f113460cc9a116f3d68f4d3d4b1a34b1f34dfe7805395562fa";
 pub(super) const PINNED_IMAGE_INPUT_IDX_SHA256: &str =
     "243da1bc98ebb61f5d98696623b41ade1d643994db6fcfb764392452d3f9c1b4";
+#[cfg(test)]
 pub(super) const PINNED_GRID_SHA256: &str =
     "29c898799e5d25bb6fa02a097a3878d280419aeab84e720cab55d889c6821bd5";
 
@@ -166,6 +170,7 @@ pub(super) fn digest_i32(values: &[i32]) -> String {
     format!("{:x}", digest.finalize())
 }
 
+#[cfg(test)]
 pub(super) fn digest_grid(output: &MolmoProcessorOutput) -> String {
     let mut values = Vec::new();
     values.extend(output.pixel_values_shape);
@@ -193,10 +198,12 @@ pub(super) fn pinned_revision(model: &Path) -> String {
         .to_string()
 }
 
+#[cfg(test)]
 fn fixture_image() -> DynamicImage {
     image::open("tests/fixtures/test_image.png").expect("load pinned Molmo image fixture")
 }
 
+#[cfg(test)]
 pub(super) fn pinned_processor_output() -> MolmoProcessorOutput {
     MolmoProcessor::new(
         12,

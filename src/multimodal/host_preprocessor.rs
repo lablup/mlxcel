@@ -52,6 +52,9 @@ use export::{
 #[cfg(feature = "xla-backend")]
 #[path = "host_preprocessor_molmo.rs"]
 mod molmo;
+#[cfg(feature = "xla-reference-diagnostics")]
+#[doc(hidden)]
+pub use molmo::run_pinned_molmo_eager_mlx_iree_boundaries;
 #[cfg(feature = "xla-backend")]
 pub use molmo::MolmoHostPreprocessor;
 
