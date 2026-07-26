@@ -1123,7 +1123,9 @@ mod tests {
         );
         let result_signature = std::iter::repeat_n("tensor<16x1280xf32>", 7)
             .chain(std::iter::repeat_n("tensor<16x16x80xf32>", 3))
-            .chain(std::iter::repeat_n("tensor<16x1280xf32>", 5))
+            .chain(std::iter::repeat_n("tensor<16x1280xf32>", 4))
+            .chain(std::iter::repeat_n("tensor<16x3420xf32>", 4))
+            .chain(std::iter::once("tensor<16x1280xf32>"))
             .chain(std::iter::once("tensor<4x1536xf32>"))
             .collect::<Vec<_>>()
             .join(", ");

@@ -106,7 +106,11 @@ pub struct Qwen25VlVisionDiagnostics {
     pub substage_probe_layer_attention: Vec<f32>,
     pub substage_probe_layer_post_attention_residual: Vec<f32>,
     pub substage_probe_layer_norm2: Vec<f32>,
-    pub substage_probe_layer_mlp: Vec<f32>,
+    pub substage_probe_layer_mlp_gate_projection: Vec<f32>,
+    pub substage_probe_layer_mlp_gate_activation: Vec<f32>,
+    pub substage_probe_layer_mlp_up_projection: Vec<f32>,
+    pub substage_probe_layer_mlp_gated_product: Vec<f32>,
+    pub substage_probe_layer_mlp_down_projection: Vec<f32>,
     pub merger_window_ordered: Vec<f32>,
     pub restored_projection: Vec<f32>,
     pub patch_bucket: usize,
@@ -146,6 +150,10 @@ fn qwen25_diagnostic_output_specs(
     let state = |label: String| Qwen25VlDiagnosticOutputSpec {
         label,
         shape: state_shape(),
+    };
+    let intermediate = |label: String| Qwen25VlDiagnosticOutputSpec {
+        label,
+        shape: vec![patch_bucket, config.intermediate],
     };
     let mut specs = vec![
         state("reordered_patch_embedding".to_string()),
@@ -191,7 +199,11 @@ fn qwen25_diagnostic_output_specs(
             "substage_probe_layer.{probe}.post_attention_residual"
         )),
         state(format!("substage_probe_layer.{probe}.norm2")),
-        state(format!("substage_probe_layer.{probe}.mlp")),
+        intermediate(format!("substage_probe_layer.{probe}.mlp_gate_projection")),
+        intermediate(format!("substage_probe_layer.{probe}.mlp_gate_activation")),
+        intermediate(format!("substage_probe_layer.{probe}.mlp_up_projection")),
+        intermediate(format!("substage_probe_layer.{probe}.mlp_gated_product")),
+        state(format!("substage_probe_layer.{probe}.mlp_down_projection")),
     ]);
     specs.push(Qwen25VlDiagnosticOutputSpec {
         label: "merger_window_ordered".to_string(),
@@ -1167,15 +1179,28 @@ impl IreeQwen25VlDiagnosticProjector {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let actual_state_values = plan
-            .actual_patches
-            .checked_mul(self.config.hidden)
-            .ok_or_else(|| "Qwen2.5-VL diagnostic state size overflowed".to_string())?;
         // The public diagnostics API intentionally owns flat comparison
         // vectors, but the IREE descriptors above retain the emitted rank-3
-        // [patch, head, head_dim] axes for Q/K/V.
-        for state in decoded.iter_mut().take(merger_output_index) {
-            state.truncate(actual_state_values);
+        // [patch, head, head_dim] axes for Q/K/V and the wider MLP
+        // intermediate axis until after validated device transfer.
+        for (output, spec) in decoded
+            .iter_mut()
+            .zip(&output_specs)
+            .take(merger_output_index)
+        {
+            let actual_values = spec
+                .shape
+                .iter()
+                .skip(1)
+                .try_fold(plan.actual_patches, |values, dimension| {
+                    values.checked_mul(*dimension)
+                });
+            output.truncate(actual_values.ok_or_else(|| {
+                format!(
+                    "Qwen2.5-VL diagnostic output {} size overflowed",
+                    spec.label
+                )
+            })?);
         }
         let all_projected = decoded
             .pop()
@@ -1236,9 +1261,21 @@ impl IreeQwen25VlDiagnosticProjector {
         let substage_probe_layer_norm2 = substage_probe_layer_substages
             .next()
             .expect("diagnostic substage probe layer norm2 output");
-        let substage_probe_layer_mlp = substage_probe_layer_substages
+        let substage_probe_layer_mlp_gate_projection = substage_probe_layer_substages
             .next()
-            .expect("diagnostic substage probe layer MLP output");
+            .expect("diagnostic substage probe layer MLP gate projection output");
+        let substage_probe_layer_mlp_gate_activation = substage_probe_layer_substages
+            .next()
+            .expect("diagnostic substage probe layer MLP gate activation output");
+        let substage_probe_layer_mlp_up_projection = substage_probe_layer_substages
+            .next()
+            .expect("diagnostic substage probe layer MLP up projection output");
+        let substage_probe_layer_mlp_gated_product = substage_probe_layer_substages
+            .next()
+            .expect("diagnostic substage probe layer MLP gated product output");
+        let substage_probe_layer_mlp_down_projection = substage_probe_layer_substages
+            .next()
+            .expect("diagnostic substage probe layer MLP down projection output");
         debug_assert!(substage_probe_layer_substages.next().is_none());
         Ok(Qwen25VlVisionDiagnostics {
             window_index: plan.window_index,
@@ -1266,7 +1303,11 @@ impl IreeQwen25VlDiagnosticProjector {
             substage_probe_layer_attention,
             substage_probe_layer_post_attention_residual,
             substage_probe_layer_norm2,
-            substage_probe_layer_mlp,
+            substage_probe_layer_mlp_gate_projection,
+            substage_probe_layer_mlp_gate_activation,
+            substage_probe_layer_mlp_up_projection,
+            substage_probe_layer_mlp_gated_product,
+            substage_probe_layer_mlp_down_projection,
             merger_window_ordered,
             restored_projection,
             patch_bucket: plan.patch_bucket,
@@ -1372,7 +1413,11 @@ mod tests {
                 "substage_probe_layer.17.attention",
                 "substage_probe_layer.17.post_attention_residual",
                 "substage_probe_layer.17.norm2",
-                "substage_probe_layer.17.mlp",
+                "substage_probe_layer.17.mlp_gate_projection",
+                "substage_probe_layer.17.mlp_gate_activation",
+                "substage_probe_layer.17.mlp_up_projection",
+                "substage_probe_layer.17.mlp_gated_product",
+                "substage_probe_layer.17.mlp_down_projection",
                 "merger_window_ordered",
             ]
         );
@@ -1381,14 +1426,18 @@ mod tests {
                 .iter()
                 .map(|spec| spec.shape.len())
                 .collect::<Vec<_>>(),
-            [vec![2; 18], vec![3; 3], vec![2; 6],].concat()
+            [vec![2; 18], vec![3; 3], vec![2; 10],].concat()
         );
         for spec in &specs[18..=20] {
             assert_eq!(spec.shape, vec![256, 16, 80]);
         }
         assert_eq!(specs[17].shape, vec![256, 1280]);
         assert_eq!(specs[21].shape, vec![256, 1280]);
-        assert_eq!(specs[26].shape, vec![64, 1536]);
+        for spec in &specs[25..=28] {
+            assert_eq!(spec.shape, vec![256, 3420]);
+        }
+        assert_eq!(specs[29].shape, vec![256, 1280]);
+        assert_eq!(specs[30].shape, vec![64, 1536]);
     }
 
     fn tiny_config() -> Qwen2VlConfig {

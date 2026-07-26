@@ -413,7 +413,36 @@ fn main() {
                 .as_slice(),
         ),
         ("norm2", eager_vision.substage_probe_layer_norm2.as_slice()),
-        ("mlp", eager_vision.substage_probe_layer_mlp.as_slice()),
+        (
+            "mlp_gate_projection",
+            eager_vision
+                .substage_probe_layer_mlp_gate_projection
+                .as_slice(),
+        ),
+        (
+            "mlp_gate_activation",
+            eager_vision
+                .substage_probe_layer_mlp_gate_activation
+                .as_slice(),
+        ),
+        (
+            "mlp_up_projection",
+            eager_vision
+                .substage_probe_layer_mlp_up_projection
+                .as_slice(),
+        ),
+        (
+            "mlp_gated_product",
+            eager_vision
+                .substage_probe_layer_mlp_gated_product
+                .as_slice(),
+        ),
+        (
+            "mlp_down_projection",
+            eager_vision
+                .substage_probe_layer_mlp_down_projection
+                .as_slice(),
+        ),
     ];
     for (stage, values) in eager_substage_probe
         .iter()
@@ -639,7 +668,36 @@ fn main() {
                 .as_slice(),
         ),
         ("norm2", iree_vision.substage_probe_layer_norm2.as_slice()),
-        ("mlp", iree_vision.substage_probe_layer_mlp.as_slice()),
+        (
+            "mlp_gate_projection",
+            iree_vision
+                .substage_probe_layer_mlp_gate_projection
+                .as_slice(),
+        ),
+        (
+            "mlp_gate_activation",
+            iree_vision
+                .substage_probe_layer_mlp_gate_activation
+                .as_slice(),
+        ),
+        (
+            "mlp_up_projection",
+            iree_vision
+                .substage_probe_layer_mlp_up_projection
+                .as_slice(),
+        ),
+        (
+            "mlp_gated_product",
+            iree_vision
+                .substage_probe_layer_mlp_gated_product
+                .as_slice(),
+        ),
+        (
+            "mlp_down_projection",
+            iree_vision
+                .substage_probe_layer_mlp_down_projection
+                .as_slice(),
+        ),
     ]
     .into_iter()
     .zip(&eager_substage_probe)
