@@ -148,6 +148,41 @@ fn gpt_bigcode_model_type_is_detected() {
 }
 
 #[test]
+fn gpt_neox_model_type_is_detected() {
+    // GPT-NeoX shares the `GPT` prefix in `architectures` with GPT-2 and
+    // GPT-BigCode but uses the modern `hidden_size` / `num_attention_heads`
+    // config naming, so detection must key off `model_type` alone and must not
+    // fall through to either GPT-2-lineage arm.
+    let model_dir = temp_path("gpt_neox_text");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "gpt_neox",
+            "architectures": ["GPTNeoXForCausalLM"],
+            "hidden_size": 2048,
+            "num_attention_heads": 8,
+            "num_hidden_layers": 16,
+            "intermediate_size": 8192,
+            "max_position_embeddings": 2048,
+            "layer_norm_eps": 1e-05,
+            "vocab_size": 50304,
+            "rotary_emb_base": 10000,
+            "rotary_pct": 0.25,
+            "use_parallel_residual": true,
+            "tie_word_embeddings": false,
+            "hidden_act": "gelu"
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::GptNeoX);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn fastvlm_model_type_is_detected() {
     for model_type in ["fastvlm", "llava_qwen2"] {
         let model_dir = temp_path(&format!("fastvlm_{model_type}"));

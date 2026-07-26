@@ -228,6 +228,18 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // unsupported-architecture error before any TP load is attempted.
         // This arm keeps the dispatch table total.
         ModelType::GptBigCode => "gpt_bigcode",
+        // GPT-NeoX is in the same position as GPT-BigCode above:
+        // `generate_shard_plan` has no `gpt_neox` arm and falls into its
+        // generic `_ =>` case, and the refusal comes from
+        // `validate_supported_runtime`, whose `runtime_kind_for` match has no
+        // arm for `ModelType::GptNeoX` and so returns `None`. Sharding this
+        // family would need its own rules regardless: the fused
+        // `query_key_value` projection is laid out head-major
+        // (`[q_i | k_i | v_i]` per head), so a row split at any offset a
+        // generic plan would pick cuts through the middle of a head's Q, K and
+        // V rather than between whole heads. This arm keeps the dispatch table
+        // total.
+        ModelType::GptNeoX => "gpt_neox",
         ModelType::StarCoder2 => "starcoder2",
         ModelType::Mellum => "mellum",
         ModelType::MiniCPM | ModelType::MiniCPMOVLM => "minicpm",

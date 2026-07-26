@@ -777,7 +777,14 @@ impl Gpt2Model {
         let wte = UnifiedEmbedding::from_weights(weights, &layout.key("wte"), group_size, bits)?;
         let wpe_key = layout.key("wpe");
         let wpe = UnifiedEmbedding::from_weights(weights, &wpe_key, group_size, bits)?;
-        validate_embedding_table(&wpe, &wpe_key, args.n_positions, "n_positions", args.n_embd)?;
+        validate_embedding_table(
+            &wpe,
+            &wpe_key,
+            args.n_positions,
+            "n_positions",
+            args.n_embd,
+            "n_embd",
+        )?;
 
         let mut h = Vec::with_capacity(args.n_layer);
         for i in 0..args.n_layer {
@@ -809,7 +816,7 @@ impl Gpt2Model {
 /// `array_shape` returns `i32`; a negative or oversized value can never match a
 /// real extent, so the conversion failing is itself a mismatch.
 ///
-/// Used by: Gpt2, GptBigCode
+/// Used by: Gpt2, GptBigCode, GptNeoX
 pub(crate) fn dim_eq(dim: i32, expected: usize) -> bool {
     usize::try_from(dim).is_ok_and(|d| d == expected)
 }
@@ -826,20 +833,25 @@ pub(crate) fn dim_eq(dim: i32, expected: usize) -> bool {
 /// therefore turns an ordinary prompt into an out-of-bounds read whose result
 /// reaches the logits, and the row count is the only place that can be caught.
 ///
-/// `claimed_rows_field` names the config field in the rejection message
-/// (`n_positions` for `wpe`, `vocab_size` for `wte`).
+/// `claimed_rows_field` names the config field that bounds the lookup in the
+/// rejection message (`n_positions` for `wpe`, `vocab_size` for `wte`), and
+/// `width_field` names the config field that gives the model width (`n_embd` in
+/// the GPT-2 lineage, `hidden_size` in the families that use the modern naming).
+/// Both are message-only; naming the field the reader will actually find in
+/// their `config.json` is the whole point of passing them.
 ///
 /// A quantized table is packed along the last axis only, so its row count is
 /// still dimension 0; the width check is skipped for it because the packed width
-/// is a function of the bit depth rather than `n_embd`.
+/// is a function of the bit depth rather than the model width.
 ///
-/// Used by: Gpt2, GptBigCode
+/// Used by: Gpt2, GptBigCode, GptNeoX
 pub(crate) fn validate_embedding_table(
     table: &UnifiedEmbedding,
     key: &str,
     claimed_rows: usize,
     claimed_rows_field: &str,
     expected_cols: usize,
+    width_field: &str,
 ) -> Result<usize, String> {
     let shape = mlxcel_core::array_shape(table.weight());
     let [rows, cols] = shape.as_slice() else {
@@ -861,8 +873,8 @@ pub(crate) fn validate_embedding_table(
     }
     if !table.is_quantized() && !dim_eq(*cols, expected_cols) {
         return Err(format!(
-            "{key}.weight is [{rows}, {cols}] but n_embd is {expected_cols}; every embedding \
-             table must be the model width"
+            "{key}.weight is [{rows}, {cols}] but {width_field} is {expected_cols}; every \
+             embedding table must be the model width"
         ));
     }
     Ok(rows)
@@ -875,7 +887,7 @@ pub(crate) fn validate_embedding_table(
 /// crossing the cxx bridge is an uncatchable `std::terminate` rather than a
 /// load error.
 ///
-/// Used by: Gpt2, GptBigCode
+/// Used by: Gpt2, GptBigCode, GptNeoX
 pub(crate) fn layer_norm_from_weights(
     weights: &WeightMap,
     prefix: &str,

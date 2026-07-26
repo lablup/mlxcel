@@ -758,11 +758,25 @@ impl GptBigCodeModel {
 
         let wte_key = format!("{prefix}wte");
         let wte = UnifiedEmbedding::from_weights(weights, &wte_key, group_size, bits)?;
-        validate_embedding_table(&wte, &wte_key, args.vocab_size, "vocab_size", args.n_embd)?;
+        validate_embedding_table(
+            &wte,
+            &wte_key,
+            args.vocab_size,
+            "vocab_size",
+            args.n_embd,
+            "n_embd",
+        )?;
 
         let wpe_key = format!("{prefix}wpe");
         let wpe = UnifiedEmbedding::from_weights(weights, &wpe_key, group_size, bits)?;
-        validate_embedding_table(&wpe, &wpe_key, args.n_positions, "n_positions", args.n_embd)?;
+        validate_embedding_table(
+            &wpe,
+            &wpe_key,
+            args.n_positions,
+            "n_positions",
+            args.n_embd,
+            "n_embd",
+        )?;
 
         let mut h = Vec::with_capacity(args.n_layer);
         for i in 0..args.n_layer {
