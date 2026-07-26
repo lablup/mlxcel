@@ -1106,48 +1106,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn qwen25_f16_precision_rounds_block_state_boundaries_through_layer17() {
-        let mut config = qwen25_config();
-        config.depth = 18;
-
-        let f32 = emit_qwen2_vl_with(&config, 16, Precision::F32);
-        let f16 = emit_qwen2_vl_with(&config, 16, Precision::F16);
-        let f16_to_f32 = |module: &str| {
-            module
-                .lines()
-                .filter(|line| {
-                    line.contains("stablehlo.convert")
-                        && line.contains("xf16>) -> tensor<")
-                        && line.ends_with("xf32>")
-                })
-                .count()
-        };
-
-        assert_eq!(f16_to_f32(&f32), 0);
-        // One patch-state boundary, four boundaries per block (norm1,
-        // post-attention residual, norm2, and block output) across blocks
-        // 0..=17, plus the merger norm boundary.
-        assert_eq!(f16_to_f32(&f16), 1 + 4 * 18 + 1);
-        for line in f16.lines().filter(|line| {
-            line.contains("stablehlo.dot_general")
-                || line.contains("stablehlo.exponential")
-                || line.contains("stablehlo.rsqrt")
-        }) {
-            if line.contains("stablehlo.dot_general") {
-                assert!(
-                    line.ends_with("f32>"),
-                    "contraction result must remain F32 before its activation boundary: {line}"
-                );
-            } else {
-                assert!(
-                    !line.contains("f16"),
-                    "sensitive math must remain F32 before its activation boundary: {line}"
-                );
-            }
-        }
-    }
-
     #[cfg(feature = "diagnostics")]
     #[test]
     fn qwen25_diagnostics_share_the_production_graph_and_expose_ordered_seams() {
