@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{ensure_fused_sdpa, fused_sdpa_target_dim, sdpa_pad_width};
+use super::{ensure_fused_sdpa, fused_sdpa_target_dim, gelu_pytorch_tanh, sdpa_pad_width};
 use mlxcel_core::dtype;
 
 #[test]
@@ -43,4 +43,20 @@ fn ensure_fused_sdpa_restores_original_output_shape() {
 
     assert_eq!(mlxcel_core::array_shape(&output), vec![1, 2, 4, 96]);
     assert_eq!(mlxcel_core::array_dtype(&output), dtype::FLOAT32);
+}
+
+#[test]
+fn block_gelu_matches_qwen3_vl_pytorch_tanh_contract() {
+    let input = mlxcel_core::from_slice_f32(&[-3.0, -1.0, 0.0, 1.0, 3.0], &[5]);
+    let output = gelu_pytorch_tanh(&input);
+    mlxcel_core::eval(&output);
+
+    let expected = [-0.003_637_433, -0.158_808, 0.0, 0.841_192, 2.996_362_7];
+    for (index, expected) in expected.into_iter().enumerate() {
+        let value = mlxcel_core::slice(&output, &[index as i32], &[index as i32 + 1]);
+        assert!(
+            (mlxcel_core::item_f32(&value) - expected).abs() <= 2.0e-6,
+            "Qwen3-VL tanh GELU mismatch at {index}"
+        );
+    }
 }

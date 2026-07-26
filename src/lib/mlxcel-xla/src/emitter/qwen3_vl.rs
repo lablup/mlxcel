@@ -1052,7 +1052,8 @@ mod tests {
                     "spatial_merge_size": 2,
                     "temporal_patch_size": 2,
                     "num_position_embeddings": 16,
-                    "deepstack_visual_indexes": [0, 1]
+                    "deepstack_visual_indexes": [0, 1],
+                    "hidden_act": "gelu_pytorch_tanh"
                 }
             }"#,
         )
@@ -1141,6 +1142,7 @@ mod tests {
         assert!(mlir.contains("loc(\"position.indices\")"));
         assert!(mlir.contains("tensor<4x16x1xi32>"));
         assert!(mlir.contains("-> (tensor<4x12xf32>, tensor<4x12xf32>, tensor<4x12xf32>)"));
+        assert_eq!(mlir.matches("stablehlo.tanh").count(), config.depth);
         assert_eq!(mlir.matches("chlo.erf").count(), 3);
 
         let two_image_mlir = emit_qwen3_vl(&config, 512);
