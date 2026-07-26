@@ -590,8 +590,8 @@ pub struct Qwen25VLVisionDiagnostics {
     pub post_full_layers: Vec<UniquePtr<MlxArray>>,
     pub final_interval_layer_indices: Vec<usize>,
     pub post_final_interval_layers: Vec<UniquePtr<MlxArray>>,
-    pub pre_probe_layer_indices: Vec<usize>,
-    pub post_pre_probe_layers: Vec<UniquePtr<MlxArray>>,
+    pub diagnostic_layer_indices: Vec<usize>,
+    pub post_diagnostic_layers: Vec<UniquePtr<MlxArray>>,
     pub substage_probe_layer_index: usize,
     pub substage_probe_layer_input: Vec<f32>,
     pub substage_probe_layer_norm1: Vec<f32>,
@@ -938,33 +938,43 @@ impl Qwen25VLVisionEncoder {
         let final_interval_layer_indices = target_full_layer_index
             .map(|target| (final_interval_start..=target).collect::<Vec<_>>())
             .unwrap_or_default();
-        // The multi-media actual-checkpoint oracle passes full-attention layers
-        // 7 and 15 and first diverges at full-attention layer 23. Probe the
-        // penultimate configured full-attention layer so the next bounded run
+        // The two-media CUDA oracle passes layer 16 and first diverges at layer
+        // 17. Probe that first failing layer so the next bounded run
         // distinguishes Q/K/V, masked attention context, projection, residual,
         // norm, and MLP without changing production execution.
         #[cfg(feature = "xla-diagnostics")]
-        let substage_probe_layer_index = full_layer_indices
+        let target_probe_boundary = full_layer_indices
             .iter()
             .rev()
             .nth(1)
             .copied()
             .or(target_full_layer_index);
         #[cfg(feature = "xla-diagnostics")]
-        let pre_probe_layer_indices = substage_probe_layer_index
+        let substage_probe_layer_index = target_probe_boundary.map(|target| {
+            full_layer_indices
+                .iter()
+                .copied()
+                .take_while(|&layer| layer < target)
+                .last()
+                .and_then(|previous_full| previous_full.checked_add(2))
+                .filter(|&layer| layer <= target)
+                .unwrap_or(target)
+        });
+        #[cfg(feature = "xla-diagnostics")]
+        let diagnostic_layer_indices = substage_probe_layer_index
             .and_then(|probe| {
                 full_layer_indices
                     .iter()
                     .copied()
                     .take_while(|&layer| layer < probe)
                     .last()
-                    .map(|previous_full| ((previous_full + 1)..probe).collect::<Vec<_>>())
+                    .map(|previous_full| ((previous_full + 1)..=probe).collect::<Vec<_>>())
             })
             .unwrap_or_default();
         #[cfg(feature = "xla-diagnostics")]
         let mut post_final_interval_layers = Vec::new();
         #[cfg(feature = "xla-diagnostics")]
-        let mut post_pre_probe_layers = Vec::new();
+        let mut post_diagnostic_layers = Vec::new();
         #[cfg(feature = "xla-diagnostics")]
         let mut substage_probe_layer_state = None;
         for (layer_num, block) in self.blocks.iter().enumerate() {
@@ -1003,9 +1013,9 @@ impl Qwen25VLVisionEncoder {
                         h.as_ref().expect("Qwen2.5-VL final interval layer state"),
                     ));
                 }
-                if pre_probe_layer_indices.contains(&layer_num) {
-                    post_pre_probe_layers.push(mlxcel_core::copy(
-                        h.as_ref().expect("Qwen2.5-VL pre-probe layer state"),
+                if diagnostic_layer_indices.contains(&layer_num) {
+                    post_diagnostic_layers.push(mlxcel_core::copy(
+                        h.as_ref().expect("Qwen2.5-VL diagnostic layer state"),
                     ));
                 }
             }
@@ -1054,8 +1064,8 @@ impl Qwen25VLVisionEncoder {
                     post_full_layers,
                     final_interval_layer_indices,
                     post_final_interval_layers,
-                    pre_probe_layer_indices,
-                    post_pre_probe_layers,
+                    diagnostic_layer_indices,
+                    post_diagnostic_layers,
                     substage_probe_layer_index,
                     substage_probe_layer_input: substage_probe_layer_state.input,
                     substage_probe_layer_norm1: substage_probe_layer_state.norm1,
