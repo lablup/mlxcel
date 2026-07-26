@@ -348,6 +348,76 @@ fn main() {
     let eager_vision = model
         .vision_encoder
         .forward_with_grid_diagnostics(&pixels, &processor.grids);
+    // MLX arrays are lazy. Materialize the eager substage oracle before
+    // entering the IREE/CUDA runtime so the comparison cannot observe stale or
+    // vacuous intermediates after the mixed-runtime launch.
+    let eager_substage_probe = [
+        (
+            "input",
+            mlx_f32(
+                eager_vision
+                    .substage_probe_layer_input
+                    .as_ref()
+                    .expect("eager substage probe layer input"),
+            ),
+        ),
+        (
+            "norm1",
+            mlx_f32(
+                eager_vision
+                    .substage_probe_layer_norm1
+                    .as_ref()
+                    .expect("eager substage probe layer norm1"),
+            ),
+        ),
+        (
+            "attention",
+            mlx_f32(
+                eager_vision
+                    .substage_probe_layer_attention
+                    .as_ref()
+                    .expect("eager substage probe layer attention"),
+            ),
+        ),
+        (
+            "post_attention_residual",
+            mlx_f32(
+                eager_vision
+                    .substage_probe_layer_post_attention_residual
+                    .as_ref()
+                    .expect("eager substage probe layer post-attention residual"),
+            ),
+        ),
+        (
+            "norm2",
+            mlx_f32(
+                eager_vision
+                    .substage_probe_layer_norm2
+                    .as_ref()
+                    .expect("eager substage probe layer norm2"),
+            ),
+        ),
+        (
+            "mlp",
+            mlx_f32(
+                eager_vision
+                    .substage_probe_layer_mlp
+                    .as_ref()
+                    .expect("eager substage probe layer MLP"),
+            ),
+        ),
+    ];
+    for (stage, values) in eager_substage_probe
+        .iter()
+        .filter(|(stage, _)| matches!(*stage, "norm1" | "norm2"))
+    {
+        assert!(
+            values
+                .iter()
+                .any(|value| value.is_finite() && *value != 0.0),
+            "eager substage probe {stage} is vacuously zero before IREE launch"
+        );
+    }
 
     let mut iree_projector = IreeQwen25VlDiagnosticProjector::load(&model_path, &device)
         .unwrap_or_else(|error| panic!("load Qwen2.5-VL IREE diagnostics: {error}"));
@@ -490,64 +560,32 @@ fn main() {
             tolerance,
         );
     }
-    for (stage, actual, expected) in [
-        (
-            "input",
-            iree_vision.substage_probe_layer_input.as_slice(),
-            eager_vision
-                .substage_probe_layer_input
-                .as_ref()
-                .expect("eager substage probe layer input"),
-        ),
-        (
-            "norm1",
-            iree_vision.substage_probe_layer_norm1.as_slice(),
-            eager_vision
-                .substage_probe_layer_norm1
-                .as_ref()
-                .expect("eager substage probe layer norm1"),
-        ),
+    for ((stage, actual), (eager_stage, expected)) in [
+        ("input", iree_vision.substage_probe_layer_input.as_slice()),
+        ("norm1", iree_vision.substage_probe_layer_norm1.as_slice()),
         (
             "attention",
             iree_vision.substage_probe_layer_attention.as_slice(),
-            eager_vision
-                .substage_probe_layer_attention
-                .as_ref()
-                .expect("eager substage probe layer attention"),
         ),
         (
             "post_attention_residual",
             iree_vision
                 .substage_probe_layer_post_attention_residual
                 .as_slice(),
-            eager_vision
-                .substage_probe_layer_post_attention_residual
-                .as_ref()
-                .expect("eager substage probe layer post-attention residual"),
         ),
-        (
-            "norm2",
-            iree_vision.substage_probe_layer_norm2.as_slice(),
-            eager_vision
-                .substage_probe_layer_norm2
-                .as_ref()
-                .expect("eager substage probe layer norm2"),
-        ),
-        (
-            "mlp",
-            iree_vision.substage_probe_layer_mlp.as_slice(),
-            eager_vision
-                .substage_probe_layer_mlp
-                .as_ref()
-                .expect("eager substage probe layer MLP"),
-        ),
-    ] {
+        ("norm2", iree_vision.substage_probe_layer_norm2.as_slice()),
+        ("mlp", iree_vision.substage_probe_layer_mlp.as_slice()),
+    ]
+    .into_iter()
+    .zip(&eager_substage_probe)
+    {
+        assert_eq!(stage, *eager_stage, "substage probe order differs");
         record_stage(
             &mut reports,
             &mut comparison_failures,
             &format!("vision.layer_{substage_probe_layer_index}.{stage}"),
             actual,
-            &mlx_f32(expected),
+            expected,
             tolerance,
         );
     }
