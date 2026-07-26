@@ -212,7 +212,8 @@ pub use emitter::{Gemma3nDiagnosticLayout, Gemma3nDiagnosticSegment};
 pub use prepared::PreparedInputError;
 pub use prepared_deepstack::{DeepStackFeatures, DeepStackInputError, DeepStackPreparedPrefill};
 pub use prepared_gemma3::{
-    GEMMA3_VLM_MASK_MODE, GEMMA3_VLM_MASKED_VALUE, Gemma3VlmPreparedError,
+    GEMMA3_VLM_MASK_MODE, GEMMA3_VLM_MASKED_VALUE, GEMMA3_VLM_NEWLINE_WRAPPER_TOKEN_ID,
+    GEMMA3_VLM_POST_SCALE_POLICY, GEMMA3_VLM_PREPARED_PREFILL_CONTRACT, Gemma3VlmPreparedError,
     prepare_gemma3_vlm_prefill,
 };
 pub use prepared_gemma3n::{Gemma3nDensePle, Gemma3nDensePleError, Gemma3nPreparedPrefill};

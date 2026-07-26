@@ -24,6 +24,15 @@ pub(crate) enum VisionActivation {
     GeluPytorchTanh,
 }
 
+impl VisionActivation {
+    const fn stable_identity(self) -> &'static str {
+        match self {
+            Self::ExactGelu => "ExactGelu",
+            Self::GeluPytorchTanh => "GeluPytorchTanh",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum VisionProjector {
     LlavaMlp,
@@ -36,6 +45,28 @@ pub(crate) enum VisionProjector {
         eoi_token_id: i32,
         newline_token_id: i32,
     },
+}
+
+impl VisionProjector {
+    fn stable_identity(self) -> String {
+        match self {
+            Self::LlavaMlp => "LlavaMlp".to_string(),
+            Self::Gemma3AvgPool {
+                tokens_per_side,
+                kernel_size,
+                image_token_id,
+                pad_token_id,
+                boi_token_id,
+                eoi_token_id,
+                newline_token_id,
+            } => format!(
+                "Gemma3AvgPool {{ tokens_per_side: {tokens_per_side}, kernel_size: {kernel_size}, \
+                 image_token_id: {image_token_id}, pad_token_id: {pad_token_id}, \
+                 boi_token_id: {boi_token_id}, eoi_token_id: {eoi_token_id}, \
+                 newline_token_id: {newline_token_id} }}"
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -227,6 +258,7 @@ mod tests {
             }
         );
         assert!(config.fingerprint().contains("image_token_id: 99"));
+        assert!(config.fingerprint().contains("newline_token_id: 108"));
         assert!(config.fingerprint().starts_with("iree-vision-v3:"));
         let specs = config.weight_specs();
         assert_eq!(
@@ -521,7 +553,7 @@ impl LlavaVisionConfig {
         };
         format!(
             "{schema}:image={}:patch={}:channels={}:hidden={}:intermediate={}:layers={}:\
-             heads={}:eps={:08x}:activation={:?}:class={}:feature={}:drop_first={}:text={}:projector={:?}",
+             heads={}:eps={:08x}:activation={}:class={}:feature={}:drop_first={}:text={}:projector={}",
             self.image_size,
             self.patch_size,
             self.channels,
@@ -530,12 +562,12 @@ impl LlavaVisionConfig {
             self.layers,
             self.heads,
             self.layer_norm_eps.to_bits(),
-            self.activation,
+            self.activation.stable_identity(),
             self.class_token,
             self.feature_layer,
             self.drop_first_token,
             self.text_hidden,
-            self.projector,
+            self.projector.stable_identity(),
         )
     }
 

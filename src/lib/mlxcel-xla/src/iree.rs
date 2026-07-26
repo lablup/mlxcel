@@ -58,9 +58,9 @@ use mlxcel_core::session::PreparedPrefill;
 use safetensors::{Dtype, SafeTensors};
 
 use crate::emitter::{
-    Config, DeepStackConfig, Gemma3nConfig, Gemma3nWeightSpec, Precision, QuantConfig,
-    check_packed_supported, emit_decode_ragged_with, emit_decode_with,
-    emit_gemma3n_decode_ragged_with_qmv, emit_gemma3n_decode_with_qmv,
+    Config, DeepStackConfig, Gemma3nConfig, Gemma3nWeightSpec, LlavaVisionConfig, Precision,
+    QuantConfig, VisionProjector, check_packed_supported, emit_decode_ragged_with,
+    emit_decode_with, emit_gemma3n_decode_ragged_with_qmv, emit_gemma3n_decode_with_qmv,
     emit_gemma3n_prefill_embeddings_ple_with_qmv, emit_gemma3n_prefill_with_qmv,
     emit_prefill_embeddings_deepstack_with, emit_prefill_embeddings_with, emit_prefill_with,
     gemma3n_qmv_artifact_identity, gemma3n_qmv_is_available, gemma3n_weight_specs, quant_in_graph,
@@ -76,6 +76,10 @@ use crate::prepared::{
     validate_slot,
 };
 use crate::prepared_deepstack::PreparedDeepStack;
+use crate::prepared_gemma3::{
+    GEMMA3_VLM_NEWLINE_WRAPPER_TOKEN_ID, Gemma3VlmCompatibilityContract,
+    bind_gemma3_vlm_compatibility,
+};
 use crate::{DeepStackFeatures, DeepStackPreparedPrefill, Gemma3nDensePle, Gemma3nPreparedPrefill};
 // The loader reads the per-architecture checkpoint-weight order from
 // `weights::weight_specs`, which sources its names from `weight_names::scheme_names`
@@ -582,6 +586,177 @@ impl RuntimeConfig {
     }
 }
 
+fn gemma3_vlm_compatibility_from_json(
+    config_json: &str,
+    cfg: &RuntimeConfig,
+) -> Result<Option<Gemma3VlmCompatibilityContract>, String> {
+    let root: serde_json::Value =
+        serde_json::from_str(config_json).map_err(|error| format!("parse config.json: {error}"))?;
+    let is_vlm = root.get("model_type").and_then(serde_json::Value::as_str) == Some("gemma3")
+        && root
+            .get("vision_config")
+            .is_some_and(serde_json::Value::is_object);
+    if !is_vlm {
+        return Ok(None);
+    }
+    let RuntimeConfig::Dense(text) = cfg else {
+        return Err("Gemma3 VLM requires the dense Gemma3 text runtime".to_string());
+    };
+    if !text.embed_scale || !text.embeddings_prefill_uses_authoritative_mask {
+        return Err(
+            "Gemma3 VLM requires sqrt(hidden) token scaling and an authoritative embeddings-prefill mask"
+                .to_string(),
+        );
+    }
+    let vision = LlavaVisionConfig::from_json_str(config_json)?;
+    let VisionProjector::Gemma3AvgPool {
+        image_token_id,
+        pad_token_id,
+        boi_token_id,
+        eoi_token_id,
+        newline_token_id,
+        ..
+    } = vision.projector
+    else {
+        return Err("Gemma3 VLM requires the average-pool vision projector".to_string());
+    };
+    if newline_token_id != GEMMA3_VLM_NEWLINE_WRAPPER_TOKEN_ID {
+        return Err(format!(
+            "Gemma3 VLM newline wrapper token {newline_token_id} does not match the prepared-prefill contract {}",
+            GEMMA3_VLM_NEWLINE_WRAPPER_TOKEN_ID
+        ));
+    }
+    if vision.text_hidden != text.hidden {
+        return Err(format!(
+            "Gemma3 VLM projector hidden size {} does not match language hidden size {}",
+            vision.text_hidden, text.hidden
+        ));
+    }
+    Ok(Some(Gemma3VlmCompatibilityContract::new(
+        image_token_id,
+        pad_token_id,
+        boi_token_id,
+        eoi_token_id,
+        vision.image_tokens(),
+        text.hidden,
+        text.sliding_window,
+        text.sliding_pattern,
+        text.rope_theta,
+        text.rope_local_base,
+        vision.fingerprint(),
+    )))
+}
+
+fn gemma3_vlm_compatibility(
+    model_dir: &Path,
+    cfg: &RuntimeConfig,
+) -> Result<Option<Gemma3VlmCompatibilityContract>, String> {
+    let path = model_dir.join("config.json");
+    let config_json = std::fs::read_to_string(&path)
+        .map_err(|error| format!("read {}: {error}", path.display()))?;
+    gemma3_vlm_compatibility_from_json(&config_json, cfg)
+        .map_err(|error| format!("{}: {error}", path.display()))
+}
+
+#[cfg(test)]
+mod gemma3_vlm_compatibility_tests {
+    use super::*;
+
+    fn gemma3_text_config() -> serde_json::Value {
+        serde_json::json!({
+            "model_type": "gemma3_text",
+            "hidden_size": 12,
+            "intermediate_size": 24,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "head_dim": 6,
+            "rms_norm_eps": 1e-6,
+            "rope_theta": 1_000_000.0,
+            "rope_local_base_freq": 10_000.0,
+            "sliding_window": 4,
+            "sliding_window_pattern": 2,
+            "vocab_size": 128,
+            "hidden_activation": "gelu_pytorch_tanh"
+        })
+    }
+
+    fn runtime(config_json: &str) -> RuntimeConfig {
+        RuntimeConfig::Dense(Box::new(
+            Config::from_json_str(config_json)
+                .unwrap()
+                .with_context_capacity(8)
+                .unwrap(),
+        ))
+    }
+
+    #[test]
+    fn gemma3_wrapper_binds_prepared_and_vision_contracts() {
+        let config_json = serde_json::json!({
+            "model_type": "gemma3",
+            "image_token_index": 99,
+            "pad_token_id": 0,
+            "boi_token_index": 97,
+            "eoi_token_index": 98,
+            "mm_tokens_per_image": 1,
+            "vision_config": {
+                "model_type": "siglip_vision_model",
+                "image_size": 28,
+                "patch_size": 14,
+                "num_channels": 3,
+                "hidden_size": 8,
+                "intermediate_size": 16,
+                "num_hidden_layers": 2,
+                "num_attention_heads": 2
+            },
+            "text_config": gemma3_text_config()
+        })
+        .to_string();
+        let runtime = runtime(&config_json);
+        let contract = gemma3_vlm_compatibility_from_json(&config_json, &runtime)
+            .unwrap()
+            .unwrap();
+        let identity = contract.stable_identity();
+
+        for component in [
+            "prepared_prefill=gemma3-vlm-owned-f32-embeddings",
+            "mask_mode=gemma3-vlm-bidirectional-padding-f32-min-v1",
+            "post_scale_policy=gemma3-vlm-post-scale-text-sqrt-hidden-image-identity-pad-zero-v1",
+            "newline_wrapper_token_id=108",
+            "image_token_id=99",
+            "pad_token_id=0",
+            "boi_token_id=97",
+            "eoi_token_id=98",
+            "sliding_window=4",
+            "sliding_pattern=2",
+            "vision_identity=iree-vision-v3:",
+        ] {
+            assert!(
+                identity.contains(component),
+                "missing {component}: {identity}"
+            );
+        }
+        assert_ne!(
+            bind_gemma3_vlm_compatibility(runtime.artifact_identity(), Some(&contract)),
+            runtime.artifact_identity()
+        );
+    }
+
+    #[test]
+    fn direct_root_gemma3_text_keeps_existing_runtime_identity() {
+        let config_json = gemma3_text_config().to_string();
+        let runtime = runtime(&config_json);
+        let contract = gemma3_vlm_compatibility_from_json(&config_json, &runtime).unwrap();
+        assert!(contract.is_none());
+
+        let existing = runtime.artifact_identity();
+        assert_eq!(
+            bind_gemma3_vlm_compatibility(existing.clone(), contract.as_ref()),
+            existing
+        );
+    }
+}
+
 fn effective_precision(device: &str, cfg: &RuntimeConfig) -> Result<Precision, String> {
     match cfg {
         RuntimeConfig::Dense(_) => resolve_precision_checked(device),
@@ -882,6 +1057,7 @@ struct CompiledBundle {
 fn compile_bundle(
     device: &str,
     cfg: &RuntimeConfig,
+    gemma3_vlm_contract: Option<&Gemma3VlmCompatibilityContract>,
     gemma3n_qmv: bool,
     prefill_mlir: &str,
     prefill_tag: &str,
@@ -942,7 +1118,8 @@ fn compile_bundle(
     )?;
     let mut fingerprint = std::collections::hash_map::DefaultHasher::new();
     "mlxcel-xla-runtime-bundle-v2-explicit-position-mode".hash(&mut fingerprint);
-    cfg.artifact_identity().hash(&mut fingerprint);
+    bind_gemma3_vlm_compatibility(cfg.artifact_identity(), gemma3_vlm_contract)
+        .hash(&mut fingerprint);
     format!("{:?}", cfg.weight_specs()).hash(&mut fingerprint);
     format!("{:?}", effective_precision(device, cfg)?).hash(&mut fingerprint);
     if gemma3n_qmv {
@@ -965,7 +1142,11 @@ fn compile_bundle(
 }
 
 /// Emit and compile the argmax prefill bundle for a single-sequence engine.
-fn compile_vmfbs(device: &str, cfg: &RuntimeConfig) -> Result<CompiledBundle, String> {
+fn compile_vmfbs(
+    device: &str,
+    cfg: &RuntimeConfig,
+    gemma3_vlm_contract: Option<&Gemma3VlmCompatibilityContract>,
+) -> Result<CompiledBundle, String> {
     let precision = effective_precision(device, cfg)?;
     let native_qmv = match cfg {
         RuntimeConfig::Dense(_) => false,
@@ -994,6 +1175,7 @@ fn compile_vmfbs(device: &str, cfg: &RuntimeConfig) -> Result<CompiledBundle, St
     compile_bundle(
         device,
         cfg,
+        gemma3_vlm_contract,
         native_qmv,
         &prefill,
         "prefill",
@@ -1835,7 +2017,8 @@ impl IreeLlama {
     pub fn load(model_dir: &Path, device: &str, context_capacity: usize) -> Result<Self, String> {
         let cfg = RuntimeConfig::from_json(model_dir, context_capacity)?;
         runtime_ffi_dimensions(&cfg, cfg.weight_specs().len())?;
-        let bundle = compile_vmfbs(device, &cfg)?;
+        let gemma3_vlm_contract = gemma3_vlm_compatibility(model_dir, &cfg)?;
+        let bundle = compile_vmfbs(device, &cfg, gemma3_vlm_contract.as_ref())?;
         let ctx = create_ctx(model_dir, &cfg, device, &bundle)?;
         Ok(Self {
             ctx,
@@ -2265,6 +2448,7 @@ impl IreeRaggedLlama {
         let bundle = compile_bundle(
             device,
             &cfg,
+            gemma3_vlm_compatibility(model_dir, &cfg)?.as_ref(),
             native_qmv,
             &prefill_mlir,
             "prefill_logits",

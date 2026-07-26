@@ -600,8 +600,8 @@ impl Gemma3IreeHostPreprocessor {
             has_bos: true,
             separator_token_id: None,
             suffix_tokens: Vec::new(),
-            block_prefix_tokens: vec![108],
-            block_suffix_tokens: vec![108],
+            block_prefix_tokens: vec![mlxcel_xla::GEMMA3_VLM_NEWLINE_WRAPPER_TOKEN_ID],
+            block_suffix_tokens: vec![mlxcel_xla::GEMMA3_VLM_NEWLINE_WRAPPER_TOKEN_ID],
         }
     }
 

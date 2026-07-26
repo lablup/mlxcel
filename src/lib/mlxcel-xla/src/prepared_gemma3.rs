@@ -33,6 +33,145 @@ pub const GEMMA3_VLM_MASKED_VALUE: f32 = f32::MIN;
 /// Stable identity component for the qualified external-mask behavior.
 pub const GEMMA3_VLM_MASK_MODE: &str = "gemma3-vlm-bidirectional-padding-f32-min-v1";
 
+/// Stable identity for the embedding values handed to embeddings-prefill.
+///
+/// Text rows have already received Gemma's `sqrt(hidden_size)` scale, projected
+/// image rows stay at projector magnitude, and padding rows are zero.
+pub const GEMMA3_VLM_POST_SCALE_POLICY: &str =
+    "gemma3-vlm-post-scale-text-sqrt-hidden-image-identity-pad-zero-v1";
+
+/// Gemma3Processor wraps every expanded image block with this newline token.
+pub const GEMMA3_VLM_NEWLINE_WRAPPER_TOKEN_ID: i32 = 108;
+
+/// Stable schema for the owned payload consumed by the authoritative
+/// embeddings-prefill entry.
+pub const GEMMA3_VLM_PREPARED_PREFILL_CONTRACT: &str =
+    "gemma3-vlm-owned-f32-embeddings-sequential-1d-additive-f32-1x1xlxl-noncausal-v1";
+
+/// Cross-runtime compatibility contract for a Gemma3 VLM bundle.
+///
+/// The language graphs, resident SigLIP/projector module, and host producer are
+/// separate runtime components. This explicit identity prevents their semantic
+/// boundary from depending on derived `Debug` output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Gemma3VlmCompatibilityContract {
+    pub(crate) prepared_prefill: String,
+    pub(crate) mask_mode: String,
+    pub(crate) masked_value_bits: u32,
+    pub(crate) post_scale_policy: String,
+    pub(crate) newline_wrapper_token_id: i32,
+    pub(crate) image_token_id: i32,
+    pub(crate) pad_token_id: i32,
+    pub(crate) boi_token_id: i32,
+    pub(crate) eoi_token_id: i32,
+    pub(crate) tokens_per_image: usize,
+    pub(crate) hidden_size: usize,
+    pub(crate) sliding_window: Option<usize>,
+    pub(crate) sliding_pattern: usize,
+    pub(crate) global_rope_theta_bits: u64,
+    pub(crate) local_rope_base_bits: Option<u64>,
+    pub(crate) vision_identity: String,
+}
+
+impl Gemma3VlmCompatibilityContract {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        image_token_id: i32,
+        pad_token_id: i32,
+        boi_token_id: i32,
+        eoi_token_id: i32,
+        tokens_per_image: usize,
+        hidden_size: usize,
+        sliding_window: Option<usize>,
+        sliding_pattern: usize,
+        global_rope_theta: f64,
+        local_rope_base: Option<f64>,
+        vision_identity: String,
+    ) -> Self {
+        Self {
+            prepared_prefill: GEMMA3_VLM_PREPARED_PREFILL_CONTRACT.to_string(),
+            mask_mode: GEMMA3_VLM_MASK_MODE.to_string(),
+            masked_value_bits: GEMMA3_VLM_MASKED_VALUE.to_bits(),
+            post_scale_policy: GEMMA3_VLM_POST_SCALE_POLICY.to_string(),
+            newline_wrapper_token_id: GEMMA3_VLM_NEWLINE_WRAPPER_TOKEN_ID,
+            image_token_id,
+            pad_token_id,
+            boi_token_id,
+            eoi_token_id,
+            tokens_per_image,
+            hidden_size,
+            sliding_window,
+            sliding_pattern,
+            global_rope_theta_bits: global_rope_theta.to_bits(),
+            local_rope_base_bits: local_rope_base.map(f64::to_bits),
+            vision_identity,
+        }
+    }
+
+    /// Canonical, field-labelled identity. Integer bit patterns avoid
+    /// locale/toolchain-dependent float formatting.
+    pub(crate) fn stable_identity(&self) -> String {
+        let sliding_window = self
+            .sliding_window
+            .map_or_else(|| "none".to_string(), |value| value.to_string());
+        let local_rope_base = self
+            .local_rope_base_bits
+            .map_or_else(|| "none".to_string(), |bits| format!("{bits:016x}"));
+        format!(
+            "gemma3-vlm-runtime-bundle-v1\
+             ;prepared_prefill={}\
+             ;mask_mode={}\
+             ;masked_value_bits={:08x}\
+             ;post_scale_policy={}\
+             ;newline_wrapper_token_id={}\
+             ;image_token_id={}\
+             ;pad_token_id={}\
+             ;boi_token_id={}\
+             ;eoi_token_id={}\
+             ;tokens_per_image={}\
+             ;hidden_size={}\
+             ;sliding_window={}\
+             ;sliding_pattern={}\
+             ;global_rope_theta_bits={:016x}\
+             ;local_rope_base_bits={}\
+             ;vision_identity={}",
+            self.prepared_prefill,
+            self.mask_mode,
+            self.masked_value_bits,
+            self.post_scale_policy,
+            self.newline_wrapper_token_id,
+            self.image_token_id,
+            self.pad_token_id,
+            self.boi_token_id,
+            self.eoi_token_id,
+            self.tokens_per_image,
+            self.hidden_size,
+            sliding_window,
+            self.sliding_pattern,
+            self.global_rope_theta_bits,
+            local_rope_base,
+            self.vision_identity,
+        )
+    }
+}
+
+/// Add the prepared-prefill identity only for a qualified multimodal runtime.
+///
+/// Returning the input verbatim for `None` is intentional: ordinary text-only
+/// bundle identities must not move when this VLM-only contract evolves.
+pub(crate) fn bind_gemma3_vlm_compatibility(
+    runtime_identity: String,
+    contract: Option<&Gemma3VlmCompatibilityContract>,
+) -> String {
+    match contract {
+        Some(contract) => format!(
+            "{runtime_identity};prepared_prefill_contract={}",
+            contract.stable_identity()
+        ),
+        None => runtime_identity,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Gemma3VlmPreparedError {
     Empty,
@@ -344,6 +483,71 @@ mod tests {
             .chunks_exact(4)
             .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
             .collect()
+    }
+
+    fn compatibility_contract() -> Gemma3VlmCompatibilityContract {
+        Gemma3VlmCompatibilityContract::new(
+            262_144,
+            0,
+            255_999,
+            256_000,
+            256,
+            2_560,
+            Some(1_024),
+            6,
+            1_000_000.0,
+            Some(10_000.0),
+            "iree-vision-v3:fixture".to_string(),
+        )
+    }
+
+    #[test]
+    fn compatibility_identity_binds_every_cross_runtime_field() {
+        let base = compatibility_contract();
+        let identity = base.stable_identity();
+        let mut variants = Vec::new();
+
+        macro_rules! changed {
+            ($field:ident, $value:expr) => {{
+                let mut variant = base.clone();
+                variant.$field = $value;
+                variants.push(variant);
+            }};
+        }
+
+        changed!(prepared_prefill, "prepared-v2".to_string());
+        changed!(mask_mode, "causal-mask".to_string());
+        changed!(masked_value_bits, 0);
+        changed!(post_scale_policy, "double-scale".to_string());
+        changed!(newline_wrapper_token_id, 109);
+        changed!(image_token_id, 262_145);
+        changed!(pad_token_id, 1);
+        changed!(boi_token_id, 255_998);
+        changed!(eoi_token_id, 256_001);
+        changed!(tokens_per_image, 255);
+        changed!(hidden_size, 2_561);
+        changed!(sliding_window, Some(2_048));
+        changed!(sliding_pattern, 5);
+        changed!(global_rope_theta_bits, 1_000_001.0f64.to_bits());
+        changed!(local_rope_base_bits, Some(10_001.0f64.to_bits()));
+        changed!(vision_identity, "iree-vision-v3:changed".to_string());
+
+        for variant in variants {
+            assert_ne!(variant.stable_identity(), identity);
+        }
+    }
+
+    #[test]
+    fn text_only_runtime_identity_is_byte_for_byte_unchanged() {
+        let identity = "dense:ordinary-text-config".to_string();
+        assert_eq!(
+            bind_gemma3_vlm_compatibility(identity.clone(), None),
+            identity
+        );
+        assert_ne!(
+            bind_gemma3_vlm_compatibility(identity.clone(), Some(&compatibility_contract())),
+            identity
+        );
     }
 
     #[test]
