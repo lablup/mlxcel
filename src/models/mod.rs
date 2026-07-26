@@ -62,6 +62,7 @@ pub mod glm4_moe_lite;
 pub mod glm4v;
 pub mod glm4v_moe;
 pub mod glm_moe_dsa;
+pub mod gpt2;
 pub mod gpt_oss;
 pub mod granite;
 pub mod granitemoehybrid;
@@ -164,6 +165,7 @@ pub use glm4_moe_lite::Glm4MoeLiteModel;
 pub use glm4v::Glm4vTextModel;
 pub use glm4v_moe::Glm4vMoeTextModel;
 pub use gpt_oss::{GptOssModel, GptOssWrapper};
+pub use gpt2::Gpt2Model;
 pub use granite::GraniteModel;
 pub use granitemoehybrid::GraniteMoeHybridModel;
 pub use hunyuan_moe::HunyuanMoeModel;
@@ -369,6 +371,9 @@ pub enum ModelType {
     Olmo2,
     Olmo3,
 
+    // GPT-2 lineage
+    Gpt2, // GPT-2 (learned absolute position embeddings, Conv1D weight layout)
+
     // Code models
     StarCoder2,
     Mellum, // Mellum 2 (JetBrains hybrid-attention MoE code model)
@@ -553,6 +558,8 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Olmo,
     ModelType::Olmo2,
     ModelType::Olmo3,
+    // GPT-2 lineage
+    ModelType::Gpt2,
     // Code models
     ModelType::StarCoder2,
     ModelType::Mellum,
@@ -806,6 +813,10 @@ impl ModelType {
             ModelType::Kokoro => ("Kokoro (StyleTTS2 + iSTFTNet)", "Text-to-speech"),
 
             // ----- Specialized / other small/text -----
+            ModelType::Gpt2 => (
+                "GPT-2 (learned absolute positions, Conv1D weights)",
+                "Specialized",
+            ),
             ModelType::StarCoder2 => ("StarCoder 2", "Specialized"),
             ModelType::Mellum => ("Mellum 2 (JetBrains code)", "Specialized"),
             ModelType::StableLM => ("StableLM", "Specialized"),
@@ -1019,6 +1030,7 @@ mod metadata_tests {
             Olmo,
             Olmo2,
             Olmo3,
+            Gpt2,
             StarCoder2,
             Mellum,
             MiniCPM,

@@ -161,6 +161,7 @@ pub enum LoadedModel {
     Olmo(models::OlmoModel),
     Olmo2(models::OLMo2Model),
     Olmo3(models::OLMo3Model),
+    Gpt2(models::Gpt2Model),
     StarCoder2(models::StarCoder2Model),
     // Mixed full/sliding caches use a wrapper
     Mellum(models::MellumWrapper),
@@ -307,6 +308,7 @@ macro_rules! delegate_language_model {
             LoadedModel::Olmo(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Olmo2(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Olmo3(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::Gpt2(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::StarCoder2(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Mellum(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::MiniCPM(inner) => LanguageModel::$method(inner, $($arg),*),

@@ -88,6 +88,35 @@ fn whisper_model_type_is_detected() {
 }
 
 #[test]
+fn gpt2_model_type_is_detected() {
+    // GPT-2 configs use the original OpenAI field names (`n_embd` / `n_head` /
+    // `n_layer`), so detection must key off `model_type` alone.
+    let model_dir = temp_path("gpt2_text");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "gpt2",
+            "architectures": ["GPT2LMHeadModel"],
+            "n_embd": 768,
+            "n_head": 12,
+            "n_layer": 12,
+            "n_positions": 1024,
+            "n_ctx": 1024,
+            "layer_norm_epsilon": 1e-05,
+            "vocab_size": 50257,
+            "activation_function": "gelu_new"
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::Gpt2);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn fastvlm_model_type_is_detected() {
     for model_type in ["fastvlm", "llava_qwen2"] {
         let model_dir = temp_path(&format!("fastvlm_{model_type}"));
