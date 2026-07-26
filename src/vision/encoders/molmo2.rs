@@ -18,13 +18,36 @@
 //! - ViT: 25 transformer blocks, Linear patch embedding (not Conv2d),
 //!   positional embedding with bicubic interpolation
 //! - Adapter: Attention pooling 2D + SwiGLU image projector
-//! - Layer selection: [-3, -9] = [22, 16] → concatenate → pool_dim = 2*1152
+//! - Layer selection: [-3, -9] over the declared 27 layers = [24, 18],
+//!   then concatenate → pool_dim = 2*1152
 //!
 //! Reference: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/molmo2/vision.py
 
 use mlxcel_core::layers::{LayerNorm, Linear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
+
+/// Hugging Face's `gelu_pytorch_tanh`, evaluated in F32 so the eager Molmo2
+/// reference matches both the checkpoint's declared activation and StableHLO.
+fn gelu_pytorch_tanh(x: &MlxArray) -> UniquePtr<MlxArray> {
+    let output_dtype = mlxcel_core::array_dtype(x);
+    let x = mlxcel_core::astype(x, mlxcel_core::dtype::FLOAT32);
+    let half = mlxcel_core::full_f32(&[1], 0.5, mlxcel_core::dtype::FLOAT32);
+    let one = mlxcel_core::full_f32(&[1], 1.0, mlxcel_core::dtype::FLOAT32);
+    let sqrt_two_over_pi = mlxcel_core::full_f32(&[1], 0.797_884_6, mlxcel_core::dtype::FLOAT32);
+    let cubic_coefficient = mlxcel_core::full_f32(&[1], 0.044_715, mlxcel_core::dtype::FLOAT32);
+    let squared = mlxcel_core::multiply(&x, &x);
+    let cubed = mlxcel_core::multiply(&squared, &x);
+    let cubic = mlxcel_core::multiply(&cubic_coefficient, &cubed);
+    let inner = mlxcel_core::multiply(&sqrt_two_over_pi, &mlxcel_core::add(&x, &cubic));
+    let cdf = mlxcel_core::multiply(&half, &mlxcel_core::add(&one, &mlxcel_core::tanh(&inner)));
+    let activated = mlxcel_core::multiply(&x, &cdf);
+    if output_dtype == mlxcel_core::dtype::FLOAT32 {
+        activated
+    } else {
+        mlxcel_core::astype(&activated, output_dtype)
+    }
+}
 
 // ViT MLP.
 pub(crate) struct ViTMLP {
@@ -35,7 +58,7 @@ pub(crate) struct ViTMLP {
 impl ViTMLP {
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let h = self.w1.forward(x);
-        let h = mlxcel_core::gelu_approx(&h);
+        let h = gelu_pytorch_tanh(&h);
         self.w2.forward(&h)
     }
 
@@ -231,13 +254,20 @@ pub(crate) struct Molmo2VisionTransformer {
     image_num_pos: usize,
 }
 
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+struct Molmo2VitDiagnostics {
+    patch_embedding: UniquePtr<MlxArray>,
+    position_embedding: UniquePtr<MlxArray>,
+    positioned_embedding: UniquePtr<MlxArray>,
+}
+
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+type Molmo2VitCapture = Option<Molmo2VitDiagnostics>;
+#[cfg(not(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu")))]
+type Molmo2VitCapture = ();
+
 impl Molmo2VisionTransformer {
-    pub(crate) fn add_pos_emb(
-        &self,
-        x: &MlxArray,
-        patch_h: i32,
-        patch_w: i32,
-    ) -> UniquePtr<MlxArray> {
+    fn position_embedding(&self, x: &MlxArray, patch_h: i32, patch_w: i32) -> UniquePtr<MlxArray> {
         let num_pos = self.image_num_pos as i32;
         let hidden_size = mlxcel_core::array_shape(&self.positional_embedding)[1];
 
@@ -259,8 +289,7 @@ impl Molmo2VisionTransformer {
 
         // x + pos_emb[None, :, :]
         let pos_emb = mlxcel_core::reshape(&pos_emb, &[1, num_patches.min(num_pos), hidden_size]);
-        let pos_emb = mlxcel_core::astype(&pos_emb, mlxcel_core::array_dtype(x));
-        mlxcel_core::add(x, &pos_emb)
+        mlxcel_core::astype(&pos_emb, mlxcel_core::array_dtype(x))
     }
 
     pub(crate) fn forward(
@@ -268,18 +297,73 @@ impl Molmo2VisionTransformer {
         x: &MlxArray,
         patch_num: Option<(i32, i32)>,
     ) -> Vec<UniquePtr<MlxArray>> {
+        self.forward_inner::<false>(x, patch_num).0
+    }
+
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+    fn forward_diagnostics(
+        &self,
+        x: &MlxArray,
+        patch_num: Option<(i32, i32)>,
+    ) -> (Vec<UniquePtr<MlxArray>>, Molmo2VitDiagnostics) {
+        let (hidden_states, capture) = self.forward_inner::<true>(x, patch_num);
+        (
+            hidden_states,
+            capture.expect("Molmo2 ViT diagnostics requested a capture"),
+        )
+    }
+
+    fn forward_inner<const CAPTURE: bool>(
+        &self,
+        x: &MlxArray,
+        patch_num: Option<(i32, i32)>,
+    ) -> (Vec<UniquePtr<MlxArray>>, Molmo2VitCapture) {
         let default_patch_size = (self.image_num_pos as f64).sqrt() as i32;
         let (patch_h, patch_w) = patch_num.unwrap_or((default_patch_size, default_patch_size));
 
-        let x = self.patch_embedding.forward(x);
-        let mut x = self.add_pos_emb(&x, patch_h, patch_w);
+        let patch_embedding = self.patch_embedding.forward(x);
+        let position_embedding = self.position_embedding(&patch_embedding, patch_h, patch_w);
+        let mut x = mlxcel_core::add(&patch_embedding, &position_embedding);
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+        let capture = CAPTURE.then(|| Molmo2VitDiagnostics {
+            patch_embedding: mlxcel_core::copy(
+                patch_embedding
+                    .as_ref()
+                    .expect("Molmo2 patch embedding must be materialized"),
+            ),
+            position_embedding: mlxcel_core::copy(
+                mlxcel_core::reshape(
+                    &position_embedding,
+                    &[
+                        -1,
+                        mlxcel_core::array_shape(&position_embedding)
+                            .last()
+                            .copied()
+                            .expect("Molmo2 position embedding has a hidden dimension"),
+                    ],
+                )
+                .as_ref()
+                .expect("Molmo2 position embedding must be materialized"),
+            ),
+            positioned_embedding: mlxcel_core::copy(
+                x.as_ref()
+                    .expect("Molmo2 positioned embedding must be materialized"),
+            ),
+        });
 
         let mut hidden_states = Vec::with_capacity(self.blocks.len());
         for block in &self.blocks {
             x = block.forward(&x);
             hidden_states.push(mlxcel_core::copy(&x));
         }
-        hidden_states
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+        {
+            (hidden_states, capture)
+        }
+        #[cfg(not(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu")))]
+        {
+            (hidden_states, ())
+        }
     }
 
     pub(crate) fn from_weights(
@@ -360,9 +444,40 @@ pub struct Molmo2VisionModel {
     pooling_attention_mask: bool,
 }
 
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+pub struct Molmo2VisionDiagnosticTensor {
+    pub name: String,
+    pub tensor: UniquePtr<MlxArray>,
+}
+
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+pub struct Molmo2VisionDiagnostics {
+    pub stages: Vec<Molmo2VisionDiagnosticTensor>,
+}
+
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+struct Molmo2EncodeDiagnostics {
+    vit: Molmo2VitDiagnostics,
+    early_block: UniquePtr<MlxArray>,
+    selected_layers: Vec<(usize, UniquePtr<MlxArray>)>,
+    concatenated_features: UniquePtr<MlxArray>,
+}
+
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+type Molmo2EncodeCapture = Option<Molmo2EncodeDiagnostics>;
+#[cfg(not(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu")))]
+type Molmo2EncodeCapture = ();
+
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+type Molmo2ForwardCapture = Option<Molmo2VisionDiagnostics>;
+#[cfg(not(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu")))]
+type Molmo2ForwardCapture = ();
+
 impl Molmo2VisionModel {
-    /// Encode images through the ViT, extracting features from selected layers
-    fn encode_image(&self, images: &MlxArray) -> UniquePtr<MlxArray> {
+    fn encode_image_inner<const CAPTURE: bool>(
+        &self,
+        images: &MlxArray,
+    ) -> (UniquePtr<MlxArray>, Molmo2EncodeCapture) {
         let shape = mlxcel_core::array_shape(images);
         let batch_size = shape[0];
         let num_crops = shape[1];
@@ -371,6 +486,14 @@ impl Molmo2VisionModel {
 
         // Reshape to [B*num_crops, num_patch, patch_dim]
         let flat = mlxcel_core::reshape(images, &[batch_size * num_crops, num_patch, patch_dim]);
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+        let (hidden_states, vit_capture) = if CAPTURE {
+            let (hidden_states, capture) = self.image_vit.forward_diagnostics(&flat, None);
+            (hidden_states, Some(capture))
+        } else {
+            (self.image_vit.forward(&flat, None), None)
+        };
+        #[cfg(not(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu")))]
         let hidden_states = self.image_vit.forward(&flat, None);
 
         // Select and concatenate features from specified layers
@@ -394,18 +517,82 @@ impl Molmo2VisionModel {
         // Reshape back to [B, num_crops, num_patch, features_dim]
         let feat_dim = mlxcel_core::array_shape(&image_features);
         let last_dim = feat_dim[feat_dim.len() - 1];
-        mlxcel_core::reshape(
+        let output = mlxcel_core::reshape(
             &image_features,
             &[batch_size, num_crops, num_patch, last_dim],
-        )
+        );
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+        if CAPTURE {
+            let early_block = hidden_states
+                .first()
+                .and_then(|state| state.as_ref())
+                .map(mlxcel_core::copy)
+                .expect("Molmo2 diagnostics require at least one ViT block");
+            let selected_layers = self
+                .vit_layers
+                .iter()
+                .map(|&layer| {
+                    (
+                        layer,
+                        mlxcel_core::copy(
+                            hidden_states[layer]
+                                .as_ref()
+                                .expect("Molmo2 selected layer must be materialized"),
+                        ),
+                    )
+                })
+                .collect();
+            let concatenated_features = mlxcel_core::reshape(
+                &image_features,
+                &[batch_size * num_crops * num_patch, last_dim],
+            );
+            return (
+                output,
+                Some(Molmo2EncodeDiagnostics {
+                    vit: vit_capture.expect("Molmo2 ViT capture must exist"),
+                    early_block,
+                    selected_layers,
+                    concatenated_features,
+                }),
+            );
+        }
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+        {
+            (output, None)
+        }
+        #[cfg(not(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu")))]
+        {
+            (output, ())
+        }
     }
 
     /// Full forward: encode → pool → project
     pub fn forward(&self, images: &MlxArray, pooled_patches_idx: &MlxArray) -> UniquePtr<MlxArray> {
+        self.forward_inner::<false>(images, pooled_patches_idx).0
+    }
+
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+    pub fn forward_diagnostics(
+        &self,
+        images: &MlxArray,
+        pooled_patches_idx: &MlxArray,
+    ) -> (UniquePtr<MlxArray>, Molmo2VisionDiagnostics) {
+        let (projected, capture) = self.forward_inner::<true>(images, pooled_patches_idx);
+        (
+            projected,
+            capture.expect("Molmo2 vision diagnostics requested a capture"),
+        )
+    }
+
+    fn forward_inner<const CAPTURE: bool>(
+        &self,
+        images: &MlxArray,
+        pooled_patches_idx: &MlxArray,
+    ) -> (UniquePtr<MlxArray>, Molmo2ForwardCapture) {
         let shape = mlxcel_core::array_shape(images);
         let batch_size = shape[0];
 
-        let image_features = self.encode_image(images);
+        let (image_features, _encode_capture) = self.encode_image_inner::<CAPTURE>(images);
         let feat_shape = mlxcel_core::array_shape(&image_features);
         let dim = feat_shape[feat_shape.len() - 1];
 
@@ -421,6 +608,11 @@ impl Molmo2VisionModel {
         let valid = mlxcel_core::greater_equal(pooled_patches_idx, &zeros);
         // valid_token = any(valid, axis=-1)
         let valid_i32 = mlxcel_core::astype(&valid, mlxcel_core::dtype::INT32);
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+        let valid_counts = CAPTURE.then(|| {
+            let valid_f32 = mlxcel_core::astype(&valid, mlxcel_core::dtype::FLOAT32);
+            mlxcel_core::reshape(&mlxcel_core::sum_axis(&valid_f32, -1, false), &[-1])
+        });
 
         // Clip indices to >= 0
         let idx = mlxcel_core::maximum(pooled_patches_idx, &zeros);
@@ -440,6 +632,14 @@ impl Molmo2VisionModel {
 
         // Reshape for attention: [B * num_pooled, pool_size, dim]
         let to_pool = mlxcel_core::reshape(&to_pool, &[-1, pool_shape[2], dim]);
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+        let gathered_masked = CAPTURE.then(|| {
+            mlxcel_core::copy(
+                to_pool
+                    .as_ref()
+                    .expect("Molmo2 gathered features must be materialized"),
+            )
+        });
 
         // Build query: mean of valid patches per pooled position
         let (query, attn_mask) = if self.pooling_attention_mask {
@@ -461,6 +661,8 @@ impl Molmo2VisionModel {
             let query = mlxcel_core::mean_axis(&to_pool, -2, true);
             (query, None)
         };
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+        let pooling_query = CAPTURE.then(|| mlxcel_core::reshape(&query, &[-1, dim]));
 
         // Cross-attention pooling
         let pooled = self.image_pooling_2d.forward(
@@ -473,6 +675,8 @@ impl Molmo2VisionModel {
         let pooled_shape = mlxcel_core::array_shape(&pooled);
         let pooled_dim = pooled_shape[pooled_shape.len() - 1];
         let pooled = mlxcel_core::reshape(&pooled, &[batch_size, -1, pooled_dim]);
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+        let pooling_output = CAPTURE.then(|| mlxcel_core::reshape(&pooled, &[-1, pooled_dim]));
 
         // Project through SwiGLU MLP
         let projected = self.image_projector.forward(&pooled);
@@ -481,6 +685,14 @@ impl Molmo2VisionModel {
         let proj_shape = mlxcel_core::array_shape(&projected);
         let out_dim = proj_shape[proj_shape.len() - 1];
         let projected = mlxcel_core::reshape(&projected, &[-1, out_dim]);
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+        let projector_output = CAPTURE.then(|| {
+            mlxcel_core::copy(
+                projected
+                    .as_ref()
+                    .expect("Molmo2 projected features must be materialized"),
+            )
+        });
 
         // Filter valid tokens: valid_token = any(valid, axis=-1)
         // sum valid along pool_size axis, then check > 0
@@ -502,12 +714,77 @@ impl Molmo2VisionModel {
             }
         }
 
-        if valid_indices.is_empty() {
-            return mlxcel_core::zeros(&[0, out_dim], mlxcel_core::array_dtype(&projected));
-        }
+        let active_projected = if valid_indices.is_empty() {
+            mlxcel_core::zeros(&[0, out_dim], mlxcel_core::array_dtype(&projected))
+        } else {
+            let indices =
+                mlxcel_core::from_slice_i32(&valid_indices, &[valid_indices.len() as i32]);
+            mlxcel_core::take(&projected, &indices, 0)
+        };
 
-        let indices = mlxcel_core::from_slice_i32(&valid_indices, &[valid_indices.len() as i32]);
-        mlxcel_core::take(&projected, &indices, 0)
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+        if CAPTURE {
+            let encode = _encode_capture.expect("Molmo2 encode capture must exist");
+            let mut stages = vec![
+                Molmo2VisionDiagnosticTensor {
+                    name: "vit.patch_embedding".to_string(),
+                    tensor: encode.vit.patch_embedding,
+                },
+                Molmo2VisionDiagnosticTensor {
+                    name: "vit.position_embedding".to_string(),
+                    tensor: encode.vit.position_embedding,
+                },
+                Molmo2VisionDiagnosticTensor {
+                    name: "vit.positioned_embedding".to_string(),
+                    tensor: encode.vit.positioned_embedding,
+                },
+                Molmo2VisionDiagnosticTensor {
+                    name: "vit.block.0".to_string(),
+                    tensor: encode.early_block,
+                },
+            ];
+            stages.extend(encode.selected_layers.into_iter().map(|(layer, tensor)| {
+                Molmo2VisionDiagnosticTensor {
+                    name: format!("vit.selected.{layer}"),
+                    tensor,
+                }
+            }));
+            stages.extend([
+                Molmo2VisionDiagnosticTensor {
+                    name: "vit.concatenated".to_string(),
+                    tensor: encode.concatenated_features,
+                },
+                Molmo2VisionDiagnosticTensor {
+                    name: "pool.gathered_masked".to_string(),
+                    tensor: gathered_masked.expect("Molmo2 gather capture must exist"),
+                },
+                Molmo2VisionDiagnosticTensor {
+                    name: "pool.valid_counts".to_string(),
+                    tensor: valid_counts.expect("Molmo2 valid-count capture must exist"),
+                },
+                Molmo2VisionDiagnosticTensor {
+                    name: "pool.query".to_string(),
+                    tensor: pooling_query.expect("Molmo2 query capture must exist"),
+                },
+                Molmo2VisionDiagnosticTensor {
+                    name: "pool.output".to_string(),
+                    tensor: pooling_output.expect("Molmo2 pool output capture must exist"),
+                },
+                Molmo2VisionDiagnosticTensor {
+                    name: "projector.output_all".to_string(),
+                    tensor: projector_output.expect("Molmo2 projector capture must exist"),
+                },
+            ]);
+            return (active_projected, Some(Molmo2VisionDiagnostics { stages }));
+        }
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+        {
+            (active_projected, None)
+        }
+        #[cfg(not(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu")))]
+        {
+            (active_projected, ())
+        }
     }
 
     /// Batched gather: for each batch, gather from features using indices
@@ -631,4 +908,24 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
         .get(name)
         .map(|w| mlxcel_core::copy(w))
         .ok_or_else(|| format!("Weight not found: {}", name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gelu_pytorch_tanh;
+
+    #[test]
+    fn molmo2_uses_the_checkpoint_pytorch_tanh_gelu() {
+        let input = mlxcel_core::from_slice_f32(&[-3.0, -1.0, 0.0, 1.0, 3.0], &[5]);
+        let output = gelu_pytorch_tanh(&input);
+        mlxcel_core::eval(&output);
+        let expected = [-0.003_637_433, -0.158_808, 0.0, 0.841_192, 2.996_362_7];
+        for (index, expected) in expected.into_iter().enumerate() {
+            let value = mlxcel_core::slice(&output, &[index as i32], &[index as i32 + 1]);
+            assert!(
+                (mlxcel_core::item_f32(&value) - expected).abs() <= 2.0e-6,
+                "Molmo2 GELU mismatch at {index}"
+            );
+        }
+    }
 }

@@ -144,7 +144,8 @@ pub(crate) use siglip::{load_aya_vision_vlm, load_paligemma_vlm};
 pub(crate) use smolvlm::load_smolvlm_vlm;
 #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 pub use special::{
-    Molmo2XlaVisionReference, Molmo2XlaVisionReferenceProjection, load_molmo2_xla_vision_reference,
+    Molmo2XlaVisionReference, Molmo2XlaVisionReferenceProjection, Molmo2XlaVisionReferenceStage,
+    load_molmo2_xla_vision_reference,
 };
 #[cfg(feature = "xla-iree")]
 pub(crate) use special::{

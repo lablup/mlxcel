@@ -22,7 +22,8 @@ fn pinned_config() -> String {
             "hidden_size": 8, "intermediate_size": 16,
             "num_attention_heads": 2, "head_dim": 4,
             "num_hidden_layers": 27, "image_default_input_size": [28, 28],
-            "image_patch_size": 14, "image_num_pos": 4, "layer_norm_eps": 1e-6
+            "image_patch_size": 14, "image_num_pos": 4, "layer_norm_eps": 1e-6,
+            "hidden_act": "gelu_pytorch_tanh"
         },
         "adapter_config": {
             "hidden_size": 8, "intermediate_size": 12, "text_hidden_size": 10,
@@ -61,6 +62,11 @@ fn resolves_pinned_layers_and_static_bucket_identity() {
     assert_eq!(config.static_crops, 9);
     assert_eq!(config.static_pool_groups, 9);
     assert!(config.fingerprint().contains("position=exact-default"));
+    assert!(
+        config
+            .fingerprint()
+            .contains("activation=gelu-pytorch-tanh")
+    );
     assert!(config.fingerprint().contains("selected=[24, 18]"));
     assert!(config.fingerprint().contains("pool-mask=true"));
     assert!(config.fingerprint().contains("layers=27;emitted=25"));
@@ -111,5 +117,16 @@ fn rejects_position_grid_and_selected_layer_drift() {
         Molmo2VisionConfig::from_json_strs(&config.to_string(), &pinned_processor())
             .unwrap_err()
             .contains("outside")
+    );
+}
+
+#[test]
+fn rejects_noncanonical_vit_activation() {
+    let mut config: Value = serde_json::from_str(&pinned_config()).unwrap();
+    config["vit_config"]["hidden_act"] = Value::from("gelu");
+    assert!(
+        Molmo2VisionConfig::from_json_strs(&config.to_string(), &pinned_processor())
+            .unwrap_err()
+            .contains("gelu_pytorch_tanh")
     );
 }

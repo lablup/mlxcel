@@ -176,6 +176,10 @@ pub use iree::PreparedPrefillDiagnostics;
 pub use molmo2::{
     Molmo2InputError, Molmo2SafePooling, add_projected_features as add_molmo2_projected_features,
 };
+#[cfg(feature = "diagnostics")]
+pub use molmo2_vision_runtime::{
+    IreeMolmo2VisionDiagnosticProjector, Molmo2VisionDiagnosticStage, Molmo2VisionDiagnostics,
+};
 #[cfg(feature = "iree")]
 pub use molmo2_vision_runtime::{
     IreeMolmo2VisionProjector, Molmo2VisionInput, Molmo2VisionProjection,

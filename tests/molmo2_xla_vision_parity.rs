@@ -25,7 +25,7 @@ use anyhow::{Result, anyhow};
 use mlxcel::{initialize_runtime, load_molmo2_xla_vision_reference};
 use mlxcel_xla::add_molmo2_projected_features;
 #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
-use mlxcel_xla::{IreeMolmo2VisionProjector, Molmo2VisionInput};
+use mlxcel_xla::{IreeMolmo2VisionDiagnosticProjector, Molmo2VisionInput};
 
 #[derive(Debug, Clone, Copy)]
 struct Comparison {
@@ -176,6 +176,24 @@ fn synthetic_comparison_reports_max_and_rms() {
 }
 
 #[test]
+fn synthetic_negative_controls_detect_layer_denominator_and_clamped_index_drift() {
+    let canonical_layers = [24.0, 18.0, 240.0, 180.0];
+    let wrong_layers = [18.0, 24.0, 180.0, 240.0];
+    assert!(compare(&canonical_layers, &wrong_layers).unwrap().max_abs > 0.0);
+
+    let masked_values = [2.0, 6.0, 0.0, 0.0];
+    let valid_mean = masked_values.iter().sum::<f32>() / 2.0;
+    let wrong_fixed_window_mean = masked_values.iter().sum::<f32>() / 4.0;
+    assert_ne!(valid_mean, wrong_fixed_window_mean);
+
+    let patch_zero = 100.0;
+    let valid_patch = 2.0;
+    let masked_gather = valid_patch;
+    let unmasked_clamped_gather = valid_patch + patch_zero;
+    assert_ne!(masked_gather, unmasked_clamped_gather);
+}
+
+#[test]
 #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 #[ignore = "requires a Molmo2 checkpoint plus configured MLX and IREE runtimes"]
 fn real_checkpoint_mlx_iree_vision_and_scatter_parity() -> Result<()> {
@@ -215,7 +233,7 @@ fn real_checkpoint_mlx_iree_vision_and_scatter_parity() -> Result<()> {
     }
 
     let mut projector =
-        IreeMolmo2VisionProjector::load(&model, &device).map_err(anyhow::Error::msg)?;
+        IreeMolmo2VisionDiagnosticProjector::load(&model, &device).map_err(anyhow::Error::msg)?;
     if projector.image_patch_id() != reference.image_patch_id()
         || projector.text_hidden_size() != reference.text_hidden_size()
     {
@@ -232,22 +250,42 @@ fn real_checkpoint_mlx_iree_vision_and_scatter_parity() -> Result<()> {
             prompt_image_patch_count: independently_active.len(),
         })
         .map_err(anyhow::Error::msg)?;
-    let iree_active = iree
-        .valid_pooling_counts
-        .iter()
-        .enumerate()
-        .filter_map(|(group, &count)| (count > 0).then_some(group))
-        .collect::<Vec<_>>();
-    if iree_active != independently_active || iree.shape != eager.shape {
+    if iree.active_groups != independently_active || iree.projected_shape != eager.shape {
         return Err(anyhow!(
-            "active-row mismatch: processor={independently_active:?}, IREE={iree_active:?}, MLX shape={:?}, IREE shape={:?}",
+            "active-row mismatch: processor={independently_active:?}, IREE={:?}, MLX shape={:?}, IREE shape={:?}",
+            iree.active_groups,
             eager.shape,
-            iree.shape
+            iree.projected_shape
         ));
+    }
+    if iree.stages.len() != eager.stages.len() {
+        return Err(anyhow!(
+            "diagnostic stage count mismatch: MLX={}, IREE={}",
+            eager.stages.len(),
+            iree.stages.len()
+        ));
+    }
+    for (eager_stage, iree_stage) in eager.stages.iter().zip(&iree.stages) {
+        if eager_stage.name != iree_stage.name || eager_stage.shape != iree_stage.shape {
+            return Err(anyhow!(
+                "diagnostic stage layout mismatch: MLX {} {:?}, IREE {} {:?}",
+                eager_stage.name,
+                eager_stage.shape,
+                iree_stage.name,
+                iree_stage.shape
+            ));
+        }
+        assert_within(
+            &format!("first-divergence stage {}", eager_stage.name),
+            &iree_stage.values,
+            &eager_stage.values,
+            max_abs_limit,
+            rms_limit,
+        )?;
     }
     assert_within(
         "vision projection",
-        &iree.values,
+        &iree.projected_values,
         &eager.values,
         max_abs_limit,
         rms_limit,
@@ -275,7 +313,7 @@ fn real_checkpoint_mlx_iree_vision_and_scatter_parity() -> Result<()> {
         reference.image_patch_id(),
         &base,
         hidden,
-        &iree.values,
+        &iree.projected_values,
     )?;
     let mut production_iree_merged = base;
     add_molmo2_projected_features(
@@ -283,7 +321,7 @@ fn real_checkpoint_mlx_iree_vision_and_scatter_parity() -> Result<()> {
         reference.image_patch_id(),
         &mut production_iree_merged,
         hidden,
-        &iree.values,
+        &iree.projected_values,
     )
     .map_err(|error| anyhow!(error.to_string()))?;
     if production_iree_merged != independently_iree_merged {

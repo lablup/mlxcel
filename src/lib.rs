@@ -123,7 +123,8 @@ pub use loaded_model::LoadedModel;
 pub use loaded_model_capabilities::VlmRuntimeRef;
 #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 pub use loading::{
-    Molmo2XlaVisionReference, Molmo2XlaVisionReferenceProjection, load_molmo2_xla_vision_reference,
+    Molmo2XlaVisionReference, Molmo2XlaVisionReferenceProjection, Molmo2XlaVisionReferenceStage,
+    load_molmo2_xla_vision_reference,
 };
 pub use loading::{
     context_window_from_config, load_model, load_model_with_adapter,

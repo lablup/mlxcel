@@ -28,6 +28,8 @@ use crate::aux::{
     IreeAuxiliaryModule,
 };
 use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
+#[cfg(feature = "diagnostics")]
+use crate::emitter::emit_molmo2_vision_diagnostics;
 use crate::emitter::{Molmo2VisionConfig, Molmo2VisionWeightSpec, emit_molmo2_vision};
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
 use crate::molmo2::Molmo2SafePooling;
@@ -55,6 +57,40 @@ pub struct Molmo2VisionInput<'a> {
     pub image_grid: [i32; 4],
     pub image_num_crops: usize,
     pub prompt_image_patch_count: usize,
+}
+
+#[cfg(feature = "diagnostics")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct Molmo2VisionDiagnosticStage {
+    pub name: String,
+    pub values: Vec<f32>,
+    pub shape: Vec<usize>,
+}
+
+#[cfg(feature = "diagnostics")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct Molmo2VisionDiagnostics {
+    pub stages: Vec<Molmo2VisionDiagnosticStage>,
+    pub projected_values: Vec<f32>,
+    pub projected_shape: [usize; 2],
+    pub signed_pooling_indices: Vec<i32>,
+    pub valid_pooling_counts: Vec<i32>,
+    pub active_groups: Vec<usize>,
+    pub elapsed_seconds: f64,
+    pub upload_bytes: usize,
+    pub transfer_bytes: usize,
+}
+
+struct PreparedMolmo2VisionInput {
+    padded_patches: Vec<f32>,
+    padded_signed_indices: Vec<i32>,
+    signed_pooling_indices: Vec<i32>,
+    valid_pooling_counts: Vec<i32>,
+    active_groups: Vec<usize>,
+    #[cfg(feature = "diagnostics")]
+    crops: usize,
+    #[cfg(feature = "diagnostics")]
+    groups: usize,
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -293,6 +329,131 @@ fn decode_output(bytes: &[u8]) -> Result<Vec<f32>, String> {
     Ok(values)
 }
 
+fn prepare_vision_input(
+    config: &Molmo2VisionConfig,
+    input: Molmo2VisionInput<'_>,
+) -> Result<PreparedMolmo2VisionInput, String> {
+    let [crops, patches, patch_dim] = input.patches_shape;
+    if crops != input.image_num_crops
+        || crops == 0
+        || crops > config.static_crops
+        || patches != config.patches_per_crop
+        || patch_dim != config.patch_dim
+    {
+        return Err(format!(
+            "Molmo2 patch shape {:?}, image_num_crops={} disagrees with static [{},{},{}]",
+            input.patches_shape,
+            input.image_num_crops,
+            config.static_crops,
+            config.patches_per_crop,
+            config.patch_dim
+        ));
+    }
+    let patch_values = crops
+        .checked_mul(patches)
+        .and_then(|value| value.checked_mul(patch_dim))
+        .ok_or_else(|| "Molmo2 patch shape overflowed".to_string())?;
+    if input.patches.len() != patch_values {
+        return Err(format!(
+            "Molmo2 patch payload has {} values, expected {patch_values}",
+            input.patches.len()
+        ));
+    }
+    finite("Molmo2 patches", input.patches)?;
+    let [groups, group_size] = input.pooling_shape;
+    let grid = input
+        .image_grid
+        .iter()
+        .try_fold((), |(), value| {
+            (*value >= 0)
+                .then_some(())
+                .ok_or_else(|| "Molmo2 image grid contains a negative dimension".to_string())
+        })
+        .map(|()| input.image_grid.map(|value| value as usize))?;
+    if !config.valid_runtime_geometry(crops, grid) {
+        return Err(format!(
+            "Molmo2 crop count {crops} and image grid {:?} disagree with processor geometry",
+            input.image_grid
+        ));
+    }
+    let [lo_h, lo_w, hi_h, hi_w] = grid;
+    let grid_groups = lo_h
+        .checked_mul(lo_w)
+        .and_then(|low| {
+            hi_h.checked_mul(hi_w)
+                .and_then(|high| low.checked_add(high))
+        })
+        .ok_or_else(|| "Molmo2 image grid overflowed".to_string())?;
+    if groups != grid_groups || groups > config.static_pool_groups || group_size != config.pool_size
+    {
+        return Err(format!(
+            "Molmo2 pooling shape {:?} disagrees with grid {:?} and static [{},{}]",
+            input.pooling_shape, input.image_grid, config.static_pool_groups, config.pool_size
+        ));
+    }
+    let safe = Molmo2SafePooling::prepare(
+        input.image_token_pooling,
+        groups,
+        group_size,
+        crops * patches,
+    )
+    .map_err(|error| error.to_string())?;
+    let active_groups = safe
+        .active_groups_for_prompt(grid_groups, input.prompt_image_patch_count)
+        .map_err(|error| error.to_string())?;
+    let static_patch_values = config.static_crops * config.patches_per_crop * config.patch_dim;
+    let mut padded_patches = vec![0.0f32; static_patch_values];
+    padded_patches[..input.patches.len()].copy_from_slice(input.patches);
+    let mut padded_signed_indices = vec![-1i32; config.static_pool_groups * config.pool_size];
+    padded_signed_indices[..safe.signed_indices.len()].copy_from_slice(&safe.signed_indices);
+    Ok(PreparedMolmo2VisionInput {
+        padded_patches,
+        padded_signed_indices,
+        signed_pooling_indices: safe.signed_indices,
+        valid_pooling_counts: safe.valid_counts,
+        active_groups,
+        #[cfg(feature = "diagnostics")]
+        crops,
+        #[cfg(feature = "diagnostics")]
+        groups,
+    })
+}
+
+fn compile_vision_module(
+    model_dir: &Path,
+    device: &str,
+    config: &Molmo2VisionConfig,
+    mlir: &str,
+    tag: &str,
+    diagnostic_identity: Option<&str>,
+) -> Result<IreeAuxiliaryModule, String> {
+    let compiler = iree_compile_bin()?;
+    if !compiler.is_file() {
+        return Err(format!("iree-compile not found at {}", compiler.display()));
+    }
+    let flags = target_flags(device)?;
+    let cache = std::env::temp_dir().join("mlxcel-xla-molmo2-vision-vmfb");
+    std::fs::create_dir_all(&cache)
+        .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
+    let (weights, checkpoint_schema) = load_weights(model_dir, &config.weight_specs())?;
+    let graph_identity = diagnostic_identity
+        .map(|identity| format!("{};diagnostics={identity}", config.fingerprint()))
+        .unwrap_or_else(|| config.fingerprint());
+    let contract = AuxiliaryArtifactContract::new(
+        ENTRY_NAME,
+        format!(
+            "{graph_identity};checkpoint_schema_sha256={}",
+            sha256(checkpoint_schema.as_bytes())
+        ),
+        generation_identity(&compiler, flags, mlir)?,
+    )?;
+    let vmfb = cached_vmfb_path(&compiler, mlir, flags, &cache, tag, 0);
+    ensure_qualified_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
+        compile_one_to(&compiler, mlir, flags, &cache, tag, 0, temporary)
+    })?;
+    IreeAuxiliaryModule::load(device, &vmfb, &contract, weights)
+}
+
 pub struct IreeMolmo2VisionProjector {
     module: IreeAuxiliaryModule,
     config: Molmo2VisionConfig,
@@ -302,37 +463,8 @@ impl IreeMolmo2VisionProjector {
     pub fn load(model_dir: &Path, device: &str) -> Result<Self, String> {
         let config = Molmo2VisionConfig::from_model_dir(model_dir)?;
         let mlir = emit_molmo2_vision(&config);
-        let compiler = iree_compile_bin()?;
-        if !compiler.is_file() {
-            return Err(format!("iree-compile not found at {}", compiler.display()));
-        }
-        let flags = target_flags(device)?;
-        let cache = std::env::temp_dir().join("mlxcel-xla-molmo2-vision-vmfb");
-        std::fs::create_dir_all(&cache)
-            .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
-        let (weights, checkpoint_schema) = load_weights(model_dir, &config.weight_specs())?;
-        let contract = AuxiliaryArtifactContract::new(
-            ENTRY_NAME,
-            format!(
-                "{};checkpoint_schema_sha256={}",
-                config.fingerprint(),
-                sha256(checkpoint_schema.as_bytes())
-            ),
-            generation_identity(&compiler, flags, &mlir)?,
-        )?;
-        let vmfb = cached_vmfb_path(&compiler, &mlir, flags, &cache, "molmo2-vision", 0);
-        ensure_qualified_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
-            compile_one_to(
-                &compiler,
-                &mlir,
-                flags,
-                &cache,
-                "molmo2-vision",
-                0,
-                temporary,
-            )
-        })?;
-        let module = IreeAuxiliaryModule::load(device, &vmfb, &contract, weights)?;
+        let module =
+            compile_vision_module(model_dir, device, &config, &mlir, "molmo2-vision", None)?;
         Ok(Self { module, config })
     }
 
@@ -352,85 +484,7 @@ impl IreeMolmo2VisionProjector {
         &mut self,
         input: Molmo2VisionInput<'_>,
     ) -> Result<Molmo2VisionProjection, String> {
-        let [crops, patches, patch_dim] = input.patches_shape;
-        if crops != input.image_num_crops
-            || crops == 0
-            || crops > self.config.static_crops
-            || patches != self.config.patches_per_crop
-            || patch_dim != self.config.patch_dim
-        {
-            return Err(format!(
-                "Molmo2 patch shape {:?}, image_num_crops={} disagrees with static [{},{},{}]",
-                input.patches_shape,
-                input.image_num_crops,
-                self.config.static_crops,
-                self.config.patches_per_crop,
-                self.config.patch_dim
-            ));
-        }
-        let patch_values = crops
-            .checked_mul(patches)
-            .and_then(|value| value.checked_mul(patch_dim))
-            .ok_or_else(|| "Molmo2 patch shape overflowed".to_string())?;
-        if input.patches.len() != patch_values {
-            return Err(format!(
-                "Molmo2 patch payload has {} values, expected {patch_values}",
-                input.patches.len()
-            ));
-        }
-        finite("Molmo2 patches", input.patches)?;
-        let [groups, group_size] = input.pooling_shape;
-        let grid = input
-            .image_grid
-            .iter()
-            .try_fold((), |(), value| {
-                (*value >= 0)
-                    .then_some(())
-                    .ok_or_else(|| "Molmo2 image grid contains a negative dimension".to_string())
-            })
-            .map(|()| input.image_grid.map(|value| value as usize))?;
-        if !self.config.valid_runtime_geometry(crops, grid) {
-            return Err(format!(
-                "Molmo2 crop count {crops} and image grid {:?} disagree with processor geometry",
-                input.image_grid
-            ));
-        }
-        let [lo_h, lo_w, hi_h, hi_w] = grid;
-        let grid_groups = lo_h
-            .checked_mul(lo_w)
-            .and_then(|low| {
-                hi_h.checked_mul(hi_w)
-                    .and_then(|high| low.checked_add(high))
-            })
-            .ok_or_else(|| "Molmo2 image grid overflowed".to_string())?;
-        if groups != grid_groups
-            || groups > self.config.static_pool_groups
-            || group_size != self.config.pool_size
-        {
-            return Err(format!(
-                "Molmo2 pooling shape {:?} disagrees with grid {:?} and static [{},{}]",
-                input.pooling_shape,
-                input.image_grid,
-                self.config.static_pool_groups,
-                self.config.pool_size
-            ));
-        }
-        let safe = Molmo2SafePooling::prepare(
-            input.image_token_pooling,
-            groups,
-            group_size,
-            crops * patches,
-        )
-        .map_err(|error| error.to_string())?;
-        let active_groups = safe
-            .active_groups_for_prompt(grid_groups, input.prompt_image_patch_count)
-            .map_err(|error| error.to_string())?;
-        let static_patch_values =
-            self.config.static_crops * self.config.patches_per_crop * self.config.patch_dim;
-        let mut padded_patches = vec![0.0f32; static_patch_values];
-        padded_patches[..input.patches.len()].copy_from_slice(input.patches);
-        let mut signed = vec![-1i32; self.config.static_pool_groups * self.config.pool_size];
-        signed[..safe.signed_indices.len()].copy_from_slice(&safe.signed_indices);
+        let prepared = prepare_vision_input(&self.config, input)?;
         let output_shape = [self.config.static_pool_groups, self.config.text_hidden];
         let mut output = vec![0u8; output_shape.iter().product::<usize>() * 4];
         let patch_shape = [
@@ -443,12 +497,12 @@ impl IreeMolmo2VisionProjector {
         self.module.invoke(
             &[
                 AuxiliaryInput {
-                    bytes: f32_bytes(&padded_patches),
+                    bytes: f32_bytes(&prepared.padded_patches),
                     dtype: AuxiliaryTensorDType::Float32,
                     shape: &patch_shape,
                 },
                 AuxiliaryInput {
-                    bytes: i32_bytes(&signed),
+                    bytes: i32_bytes(&prepared.padded_signed_indices),
                     dtype: AuxiliaryTensorDType::Int32,
                     shape: &pooling_shape,
                 },
@@ -460,8 +514,8 @@ impl IreeMolmo2VisionProjector {
             }],
         )?;
         let all_values = decode_output(&output)?;
-        let mut values = Vec::with_capacity(active_groups.len() * self.config.text_hidden);
-        for group in active_groups {
+        let mut values = Vec::with_capacity(prepared.active_groups.len() * self.config.text_hidden);
+        for &group in &prepared.active_groups {
             let start = group * self.config.text_hidden;
             values.extend_from_slice(&all_values[start..start + self.config.text_hidden]);
         }
@@ -471,12 +525,226 @@ impl IreeMolmo2VisionProjector {
                 self.config.text_hidden,
             ],
             values,
-            signed_pooling_indices: safe.signed_indices,
-            valid_pooling_counts: safe.valid_counts,
+            signed_pooling_indices: prepared.signed_pooling_indices,
+            valid_pooling_counts: prepared.valid_pooling_counts,
             elapsed_seconds: started.elapsed().as_secs_f64(),
-            upload_bytes: std::mem::size_of_val(padded_patches.as_slice())
-                + std::mem::size_of_val(signed.as_slice()),
+            upload_bytes: std::mem::size_of_val(prepared.padded_patches.as_slice())
+                + std::mem::size_of_val(prepared.padded_signed_indices.as_slice()),
             transfer_bytes: output.len(),
+        })
+    }
+}
+
+#[cfg(feature = "diagnostics")]
+struct Molmo2DiagnosticStageSpec {
+    name: String,
+    static_shape: Vec<usize>,
+    active_shape: Vec<usize>,
+}
+
+#[cfg(feature = "diagnostics")]
+fn diagnostic_stage_specs(
+    config: &Molmo2VisionConfig,
+    crops: usize,
+    groups: usize,
+) -> Vec<Molmo2DiagnosticStageSpec> {
+    let hidden_static = vec![config.static_crops, config.patches_per_crop, config.hidden];
+    let hidden_active = vec![crops, config.patches_per_crop, config.hidden];
+    let mut specs = vec![
+        Molmo2DiagnosticStageSpec {
+            name: "vit.patch_embedding".to_string(),
+            static_shape: hidden_static.clone(),
+            active_shape: hidden_active.clone(),
+        },
+        Molmo2DiagnosticStageSpec {
+            name: "vit.position_embedding".to_string(),
+            static_shape: vec![config.position_count, config.hidden],
+            active_shape: vec![config.position_count, config.hidden],
+        },
+        Molmo2DiagnosticStageSpec {
+            name: "vit.positioned_embedding".to_string(),
+            static_shape: hidden_static.clone(),
+            active_shape: hidden_active.clone(),
+        },
+        Molmo2DiagnosticStageSpec {
+            name: "vit.block.0".to_string(),
+            static_shape: hidden_static.clone(),
+            active_shape: hidden_active.clone(),
+        },
+    ];
+    specs.extend(
+        config
+            .selected_layers
+            .iter()
+            .map(|layer| Molmo2DiagnosticStageSpec {
+                name: format!("vit.selected.{layer}"),
+                static_shape: hidden_static.clone(),
+                active_shape: hidden_active.clone(),
+            }),
+    );
+    specs.extend([
+        Molmo2DiagnosticStageSpec {
+            name: "vit.concatenated".to_string(),
+            static_shape: vec![
+                config.static_crops * config.patches_per_crop,
+                config.selected_width(),
+            ],
+            active_shape: vec![crops * config.patches_per_crop, config.selected_width()],
+        },
+        Molmo2DiagnosticStageSpec {
+            name: "pool.gathered_masked".to_string(),
+            static_shape: vec![
+                config.static_pool_groups,
+                config.pool_size,
+                config.selected_width(),
+            ],
+            active_shape: vec![groups, config.pool_size, config.selected_width()],
+        },
+        Molmo2DiagnosticStageSpec {
+            name: "pool.valid_counts".to_string(),
+            static_shape: vec![config.static_pool_groups],
+            active_shape: vec![groups],
+        },
+        Molmo2DiagnosticStageSpec {
+            name: "pool.query".to_string(),
+            static_shape: vec![config.static_pool_groups, config.selected_width()],
+            active_shape: vec![groups, config.selected_width()],
+        },
+        Molmo2DiagnosticStageSpec {
+            name: "pool.output".to_string(),
+            static_shape: vec![config.static_pool_groups, config.pool_hidden],
+            active_shape: vec![groups, config.pool_hidden],
+        },
+        Molmo2DiagnosticStageSpec {
+            name: "projector.output_all".to_string(),
+            static_shape: vec![config.static_pool_groups, config.text_hidden],
+            active_shape: vec![groups, config.text_hidden],
+        },
+    ]);
+    specs
+}
+
+#[cfg(feature = "diagnostics")]
+pub struct IreeMolmo2VisionDiagnosticProjector {
+    module: IreeAuxiliaryModule,
+    config: Molmo2VisionConfig,
+}
+
+#[cfg(feature = "diagnostics")]
+impl IreeMolmo2VisionDiagnosticProjector {
+    pub fn load(model_dir: &Path, device: &str) -> Result<Self, String> {
+        let config = Molmo2VisionConfig::from_model_dir(model_dir)?;
+        let mlir = emit_molmo2_vision_diagnostics(&config);
+        let module = compile_vision_module(
+            model_dir,
+            device,
+            &config,
+            &mlir,
+            "molmo2-vision-diagnostics",
+            Some("first-divergence-v1"),
+        )?;
+        Ok(Self { module, config })
+    }
+
+    #[must_use]
+    pub fn image_patch_id(&self) -> i32 {
+        self.config.image_patch_id
+    }
+
+    #[must_use]
+    pub fn text_hidden_size(&self) -> usize {
+        self.config.text_hidden
+    }
+
+    pub fn project(
+        &mut self,
+        input: Molmo2VisionInput<'_>,
+    ) -> Result<Molmo2VisionDiagnostics, String> {
+        let prepared = prepare_vision_input(&self.config, input)?;
+        let specs = diagnostic_stage_specs(&self.config, prepared.crops, prepared.groups);
+        let mut buffers = specs
+            .iter()
+            .map(|spec| {
+                vec![0u8; spec.static_shape.iter().product::<usize>() * std::mem::size_of::<f32>()]
+            })
+            .collect::<Vec<_>>();
+        let mut outputs = buffers
+            .iter_mut()
+            .zip(&specs)
+            .map(|(bytes, spec)| AuxiliaryOutput {
+                bytes,
+                dtype: AuxiliaryTensorDType::Float32,
+                shape: &spec.static_shape,
+            })
+            .collect::<Vec<_>>();
+        let patch_shape = [
+            self.config.static_crops,
+            self.config.patches_per_crop,
+            self.config.patch_dim,
+        ];
+        let pooling_shape = [self.config.static_pool_groups, self.config.pool_size];
+        let started = Instant::now();
+        self.module.invoke(
+            &[
+                AuxiliaryInput {
+                    bytes: f32_bytes(&prepared.padded_patches),
+                    dtype: AuxiliaryTensorDType::Float32,
+                    shape: &patch_shape,
+                },
+                AuxiliaryInput {
+                    bytes: i32_bytes(&prepared.padded_signed_indices),
+                    dtype: AuxiliaryTensorDType::Int32,
+                    shape: &pooling_shape,
+                },
+            ],
+            &mut outputs,
+        )?;
+        let elapsed_seconds = started.elapsed().as_secs_f64();
+        drop(outputs);
+        let transfer_bytes = buffers.iter().map(Vec::len).sum();
+        let stages = buffers
+            .into_iter()
+            .zip(specs)
+            .map(|(bytes, spec)| {
+                let mut values = decode_output(&bytes)?;
+                values.truncate(spec.active_shape.iter().product());
+                Ok(Molmo2VisionDiagnosticStage {
+                    name: spec.name,
+                    values,
+                    shape: spec.active_shape,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let projected_all = stages
+            .last()
+            .ok_or_else(|| "Molmo2 diagnostic projector output is missing".to_string())?;
+        let mut projected_values =
+            Vec::with_capacity(prepared.active_groups.len() * self.config.text_hidden);
+        for &group in &prepared.active_groups {
+            let start = group * self.config.text_hidden;
+            projected_values.extend_from_slice(
+                projected_all
+                    .values
+                    .get(start..start + self.config.text_hidden)
+                    .ok_or_else(|| {
+                        "Molmo2 diagnostic active projection row is truncated".to_string()
+                    })?,
+            );
+        }
+        Ok(Molmo2VisionDiagnostics {
+            projected_shape: [
+                projected_values.len() / self.config.text_hidden,
+                self.config.text_hidden,
+            ],
+            projected_values,
+            stages,
+            signed_pooling_indices: prepared.signed_pooling_indices,
+            valid_pooling_counts: prepared.valid_pooling_counts,
+            active_groups: prepared.active_groups,
+            elapsed_seconds,
+            upload_bytes: std::mem::size_of_val(prepared.padded_patches.as_slice())
+                + std::mem::size_of_val(prepared.padded_signed_indices.as_slice()),
+            transfer_bytes,
         })
     }
 }

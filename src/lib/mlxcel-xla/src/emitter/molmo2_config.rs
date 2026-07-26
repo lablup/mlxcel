@@ -150,6 +150,11 @@ impl Molmo2VisionConfig {
         }
         let vit = object(&root, "vit_config")?;
         let adapter = object(&root, "adapter_config")?;
+        if vit.get("hidden_act").and_then(Value::as_str) != Some("gelu_pytorch_tanh") {
+            return Err(
+                "Molmo2 XLA requires vit_config.hidden_act `gelu_pytorch_tanh`".to_string(),
+            );
+        }
         let processor: Value = serde_json::from_str(processor)
             .map_err(|error| format!("parse preprocessor_config.json: {error}"))?;
         let processor = processor
@@ -355,7 +360,7 @@ impl Molmo2VisionConfig {
 
     pub(crate) fn fingerprint(&self) -> String {
         format!(
-            "molmo2-vision-v1;position=exact-default;selected={:?};pool-mask={};patch-id={};crops={};overlap={:?};patches={};pool-groups={};pool={}x{};hidden={};inter={};layers={};emitted={};heads={};head-dim={};pool-hidden={};pool-heads={};pool-head-dim={};projector-inter={};text-hidden={}",
+            "molmo2-vision-v1;position=exact-default;activation=gelu-pytorch-tanh;selected={:?};pool-mask={};patch-id={};crops={};overlap={:?};patches={};pool-groups={};pool={}x{};hidden={};inter={};layers={};emitted={};heads={};head-dim={};pool-hidden={};pool-heads={};pool-head-dim={};projector-inter={};text-hidden={}",
             self.selected_layers,
             self.pooling_attention_mask,
             self.image_patch_id,

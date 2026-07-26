@@ -157,6 +157,8 @@ pub(crate) use model::{
 pub(crate) use molmo2_config::{Molmo2VisionConfig, Molmo2VisionWeightSpec};
 #[allow(unused_imports)]
 pub(crate) use molmo2_vision::emit_molmo2_vision;
+#[cfg(feature = "diagnostics")]
+pub(crate) use molmo2_vision::emit_molmo2_vision_diagnostics;
 #[allow(unused_imports)]
 pub(crate) use vision::emit_vision;
 // The only consumer is `IreeVisionDiagnosticProjector` in `vision_runtime`, which

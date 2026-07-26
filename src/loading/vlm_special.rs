@@ -2048,6 +2048,15 @@ fn build_molmo2_vision_model(
     let vision_config = full_config.get("vision_config").unwrap_or(full_config);
     let vit_config = vision_config.get("vit_config").unwrap_or(vision_config);
     let adapter_config = vision_config.get("adapter_config").unwrap_or(vision_config);
+    let vit_hidden_act = vit_config
+        .get("hidden_act")
+        .and_then(Value::as_str)
+        .unwrap_or("gelu_pytorch_tanh");
+    if vit_hidden_act != "gelu_pytorch_tanh" {
+        return Err(anyhow::anyhow!(
+            "Molmo2 vision hidden_act `{vit_hidden_act}` is unsupported; expected `gelu_pytorch_tanh`"
+        ));
+    }
 
     // Resolve negative adapter indices against the declared depth before
     // deriving the smaller prefix of blocks that the checkpoint must execute.
@@ -2184,6 +2193,15 @@ pub struct Molmo2XlaVisionReferenceProjection {
     pub values: Vec<f32>,
     pub shape: [usize; 2],
     pub active_groups: Vec<usize>,
+    pub stages: Vec<Molmo2XlaVisionReferenceStage>,
+}
+
+#[cfg(any(test, feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+#[cfg_attr(test, allow(dead_code))]
+pub struct Molmo2XlaVisionReferenceStage {
+    pub name: String,
+    pub values: Vec<f32>,
+    pub shape: Vec<usize>,
 }
 
 #[cfg(any(test, feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
@@ -2214,7 +2232,53 @@ impl Molmo2XlaVisionReference {
             mlxcel_core::from_slice_f32(&processed.pixel_values, &[1, crops, patches, patch_dim]);
         let pooling =
             mlxcel_core::from_slice_i32(&processed.image_token_pooling, &[1, groups, group_size]);
-        let projected = self.vision_tower.forward(&images, &pooling);
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+        let (projected, stages) = {
+            let (projected, diagnostics) = self.vision_tower.forward_diagnostics(&images, &pooling);
+            let stages = diagnostics
+                .stages
+                .into_iter()
+                .map(|stage| {
+                    let tensor = mlxcel_core::astype(&stage.tensor, mlxcel_core::dtype::FLOAT32);
+                    let shape = mlxcel_core::array_shape(&tensor)
+                        .into_iter()
+                        .map(|dimension| {
+                            usize::try_from(dimension).map_err(|_| {
+                                anyhow::anyhow!(
+                                    "Molmo2 MLX stage {} has a negative dimension",
+                                    stage.name
+                                )
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let raw = mlxcel_core::try_array_to_raw_bytes(&tensor).map_err(|error| {
+                        anyhow::anyhow!("Failed to export Molmo2 MLX stage {}: {error}", stage.name)
+                    })?;
+                    if raw.len() != shape.iter().product::<usize>() * std::mem::size_of::<f32>() {
+                        return Err(anyhow::anyhow!(
+                            "Molmo2 MLX stage {} byte count disagrees with shape {shape:?}",
+                            stage.name
+                        ));
+                    }
+                    Ok(Molmo2XlaVisionReferenceStage {
+                        name: stage.name,
+                        values: raw
+                            .chunks_exact(4)
+                            .map(|chunk| {
+                                f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                            })
+                            .collect(),
+                        shape,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            (projected, stages)
+        };
+        #[cfg(not(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu")))]
+        let (projected, stages) = (
+            self.vision_tower.forward(&images, &pooling),
+            Vec::<Molmo2XlaVisionReferenceStage>::new(),
+        );
         let projected = mlxcel_core::astype(&projected, mlxcel_core::dtype::FLOAT32);
         let raw = mlxcel_core::try_array_to_raw_bytes(&projected)
             .map_err(|error| anyhow::anyhow!("Failed to export Molmo2 MLX projection: {error}"))?;
@@ -2254,6 +2318,7 @@ impl Molmo2XlaVisionReference {
             values,
             shape,
             active_groups,
+            stages,
         })
     }
 }

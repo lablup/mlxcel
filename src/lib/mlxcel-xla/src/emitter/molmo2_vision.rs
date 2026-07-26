@@ -222,13 +222,20 @@ fn self_attention(
     linear(builder, &context, &o_weight, Some(&o_bias))
 }
 
+struct IndexedPoolValues {
+    gathered_masked: Val,
+    query: Val,
+    pooled: Val,
+    counts: Val,
+}
+
 fn indexed_pool(
     builder: &mut Builder,
     features: &Val,
     signed_indices: &Val,
     args: &mut Args,
     config: &Molmo2VisionConfig,
-) -> (Val, Val) {
+) -> IndexedPoolValues {
     let groups = config.static_pool_groups;
     let group_size = config.pool_size;
     let zero_i32 = builder.const_i32(0);
@@ -310,10 +317,15 @@ fn indexed_pool(
     let context = builder.transpose(&context, &[0, 2, 1, 3]);
     let context = builder.reshape(&context, vec![groups, config.pool_hidden]);
     let pooled = linear(builder, &context, &o_weight, Some(&o_bias));
-    (pooled, counts)
+    IndexedPoolValues {
+        gathered_masked: gathered,
+        query,
+        pooled,
+        counts,
+    }
 }
 
-pub(crate) fn emit_molmo2_vision(config: &Molmo2VisionConfig) -> String {
+fn emit_molmo2_vision_inner(config: &Molmo2VisionConfig, diagnostics: bool) -> String {
     let specs = config.weight_specs();
     let mut args = Args::new(&specs);
     let patch_weight = args.take();
@@ -333,12 +345,15 @@ pub(crate) fn emit_molmo2_vision(config: &Molmo2VisionConfig) -> String {
     );
     let mut builder = Builder::new();
     let mut hidden = linear(&mut builder, &patches, &patch_weight, Some(&patch_bias));
+    let patch_embedding = diagnostics.then(|| hidden.clone());
     let position = builder.broadcast(
         &position_embedding,
         &[1, 2],
         vec![config.static_crops, config.patches_per_crop, config.hidden],
     );
     hidden = builder.add(&hidden, &position);
+    let positioned_embedding = diagnostics.then(|| hidden.clone());
+    let mut early_block = None;
     let mut selected = vec![None::<Val>; config.selected_layers.len()];
     for layer in 0..config.emitted_layers {
         // Norm weights follow attention projection weights in the persisted
@@ -377,21 +392,26 @@ pub(crate) fn emit_molmo2_vision(config: &Molmo2VisionConfig) -> String {
         let mlp = tanh_gelu(&mut builder, &mlp);
         let mlp = linear(&mut builder, &mlp, &w2, Some(&b2));
         hidden = builder.add(&residual, &mlp);
+        if diagnostics && layer == 0 {
+            early_block = Some(hidden.clone());
+        }
         if let Some(slot) = selected_slot(&config.selected_layers, layer) {
             selected[slot] = Some(hidden.clone());
         }
     }
-    let mut selected = selected.into_iter();
-    let mut selected_features = match selected.next() {
-        Some(Some(feature)) => feature,
-        _ => unreachable!("validated Molmo2 selected layers must be emitted"),
-    };
-    for feature in selected {
-        let feature = match feature {
-            Some(feature) => feature,
-            None => unreachable!("validated Molmo2 selected layer must be emitted"),
-        };
-        selected_features = builder.concatenate(&selected_features, &feature, 2);
+    let selected = selected
+        .into_iter()
+        .map(|feature| {
+            feature
+                .unwrap_or_else(|| unreachable!("validated Molmo2 selected layer must be emitted"))
+        })
+        .collect::<Vec<_>>();
+    let mut selected_features = selected
+        .first()
+        .cloned()
+        .unwrap_or_else(|| unreachable!("validated Molmo2 selection must not be empty"));
+    for feature in &selected[1..] {
+        selected_features = builder.concatenate(&selected_features, feature, 2);
     }
     let selected_features = builder.reshape(
         &selected_features,
@@ -400,7 +420,7 @@ pub(crate) fn emit_molmo2_vision(config: &Molmo2VisionConfig) -> String {
             config.selected_width(),
         ],
     );
-    let (pooled, _counts) = indexed_pool(
+    let pool = indexed_pool(
         &mut builder,
         &selected_features,
         &signed_indices,
@@ -410,9 +430,9 @@ pub(crate) fn emit_molmo2_vision(config: &Molmo2VisionConfig) -> String {
     let w1 = args.take();
     let w2 = args.take();
     let w3 = args.take();
-    let gate = linear(&mut builder, &pooled, &w1, None);
+    let gate = linear(&mut builder, &pool.pooled, &w1, None);
     let gate = silu(&mut builder, &gate);
-    let up = linear(&mut builder, &pooled, &w3, None);
+    let up = linear(&mut builder, &pool.pooled, &w3, None);
     let projected = builder.multiply(&gate, &up);
     let projected = linear(&mut builder, &projected, &w2, None);
     assert_eq!(
@@ -420,13 +440,55 @@ pub(crate) fn emit_molmo2_vision(config: &Molmo2VisionConfig) -> String {
         specs.len(),
         "Molmo2 vision weight schema drifted"
     );
+    let outputs = if diagnostics {
+        let mut outputs = vec![
+            patch_embedding.expect("Molmo2 diagnostic patch embedding"),
+            position_embedding,
+            positioned_embedding.expect("Molmo2 diagnostic positioned embedding"),
+            early_block.expect("Molmo2 diagnostics require an early block"),
+        ];
+        outputs.extend(selected);
+        outputs.extend([
+            selected_features,
+            pool.gathered_masked,
+            pool.counts,
+            pool.query,
+            pool.pooled,
+            projected,
+        ]);
+        outputs
+    } else {
+        vec![projected]
+    };
+    let output_types = outputs
+        .iter()
+        .map(|output| output.ty.render())
+        .collect::<Vec<_>>();
+    let result_type = if output_types.len() == 1 {
+        output_types[0].clone()
+    } else {
+        format!("({})", output_types.join(", "))
+    };
+    let result_values = outputs
+        .iter()
+        .map(|output| output.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
-        "module @molmo2_vision {{\n  func.func public @main({signature}) -> {output} {{\n{body}    return {value} : {output}\n  }}\n}}\n",
+        "module @molmo2_vision {{\n  func.func public @main({signature}) -> {result_type} {{\n{body}    return {result_values} : {return_types}\n  }}\n}}\n",
         signature = args.declarations.join(", "),
-        output = projected.ty.render(),
         body = builder.body(),
-        value = projected.name,
+        return_types = output_types.join(", "),
     )
+}
+
+pub(crate) fn emit_molmo2_vision(config: &Molmo2VisionConfig) -> String {
+    emit_molmo2_vision_inner(config, false)
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+pub(crate) fn emit_molmo2_vision_diagnostics(config: &Molmo2VisionConfig) -> String {
+    emit_molmo2_vision_inner(config, true)
 }
 
 #[cfg(test)]
@@ -439,7 +501,8 @@ mod tests {
                 "model_type":"molmo2","image_patch_id":151938,
                 "vit_config":{"hidden_size":8,"intermediate_size":16,"num_attention_heads":2,
                     "head_dim":4,"num_hidden_layers":2,"image_default_input_size":[28,28],
-                    "image_patch_size":14,"image_num_pos":4,"layer_norm_eps":1e-6},
+                    "image_patch_size":14,"image_num_pos":4,"layer_norm_eps":1e-6,
+                    "hidden_act":"gelu_pytorch_tanh"},
                 "adapter_config":{"hidden_size":8,"intermediate_size":12,"text_hidden_size":10,
                     "num_attention_heads":2,"head_dim":4,"vit_layers":[0,1],
                     "pooling_attention_mask":pooling_attention_mask}
@@ -479,5 +542,24 @@ mod tests {
         assert_eq!(selected_slot(&[24, 4, 18], 4), Some(1));
         assert_eq!(selected_slot(&[24, 4, 18], 18), Some(2));
         assert_eq!(selected_slot(&[24, 4, 18], 22), None);
+    }
+
+    #[test]
+    fn diagnostic_graph_shares_production_math_and_orders_first_divergence_stages() {
+        let config = test_config(true);
+        let production = emit_molmo2_vision(&config);
+        let diagnostics = emit_molmo2_vision_diagnostics(&config);
+        assert_eq!(
+            production.matches("stablehlo.dot_general").count(),
+            diagnostics.matches("stablehlo.dot_general").count()
+        );
+        assert!(production.contains("stablehlo.tanh"));
+        assert!(
+            diagnostics.contains(
+                "tensor<2x4x8xf32>, tensor<4x8xf32>, tensor<2x4x8xf32>, tensor<2x4x8xf32>"
+            )
+        );
+        assert!(diagnostics.contains("tensor<2xf32>"));
+        assert!(diagnostics.contains("tensor<2x10xf32>"));
     }
 }

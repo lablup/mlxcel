@@ -107,7 +107,7 @@ xla-micro-oracle = ["xla-iree", "mlxcel-xla/micro-oracle"]
 # CPU-only companion for bounded host-reference checks on machines where the
 # CUDA driver is unavailable. This deliberately does not replace the qualified
 # `xla-diagnostics` production-target gate.
-xla-diagnostics-cpu = ["xla-iree"]
+xla-diagnostics-cpu = ["xla-iree", "mlxcel-xla/diagnostics"]
 # Axis A "weight-load surgery" framework.
 #
 # On by default so production `mlxcel` and `mlxcel-server` binaries expose
