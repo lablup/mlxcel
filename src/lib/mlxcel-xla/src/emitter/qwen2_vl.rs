@@ -1121,7 +1121,9 @@ mod tests {
             production.matches("stablehlo.dot_general").count(),
             diagnostics.matches("stablehlo.dot_general").count()
         );
-        let result_signature = std::iter::repeat_n("tensor<16x1280xf32>", 11)
+        let result_signature = std::iter::repeat_n("tensor<16x1280xf32>", 7)
+            .chain(std::iter::repeat_n("tensor<16x16x80xf32>", 3))
+            .chain(std::iter::repeat_n("tensor<16x1280xf32>", 5))
             .chain(std::iter::once("tensor<4x1536xf32>"))
             .collect::<Vec<_>>()
             .join(", ");
@@ -1152,7 +1154,7 @@ mod tests {
             f32::NEG_INFINITY
         );
         assert_eq!(inputs.packed_attention_bias[48 * 64 + 48], 0.0);
-        assert_eq!(inputs.packed_attention_bias[48 * 64 + 0], f32::NEG_INFINITY);
+        assert_eq!(inputs.packed_attention_bias[48 * 64], f32::NEG_INFINITY);
         let mut non_finite = values;
         non_finite[7] = f32::NAN;
         assert!(
@@ -1208,10 +1210,34 @@ mod tests {
         );
         let full = &inputs.packed_attention_bias;
         let window = inputs.window_attention_bias.as_ref().unwrap();
-        assert_eq!(full[0 * 256 + 80], 0.0);
-        assert_eq!(window[0 * 256 + 80], f32::NEG_INFINITY);
+        assert_eq!(full[80], 0.0);
+        assert_eq!(window[80], f32::NEG_INFINITY);
         assert_eq!(window[144 * 256 + 144], 0.0);
         assert_eq!(window[144 * 256], f32::NEG_INFINITY);
+    }
+
+    #[test]
+    fn qwen25_two_media_bucket_bias_isolates_media_and_padding() {
+        let config = qwen25_config();
+        let grids = [(1, 10, 10), (1, 10, 10)];
+        let patch_width = 3 * 2 * 14 * 14;
+        let inputs =
+            prepare_qwen2_vl_host_inputs(&config, &grids, &vec![0.0; 200 * patch_width]).unwrap();
+
+        assert_eq!(inputs.plan.actual_patches, 200);
+        assert_eq!(inputs.plan.patch_bucket, 256);
+        assert_eq!(inputs.plan.packed_cu_seqlens, vec![0, 100, 200]);
+        let full = &inputs.packed_attention_bias;
+        let window = inputs.window_attention_bias.as_ref().unwrap();
+
+        assert_eq!(full[99 * 256 + 100], f32::NEG_INFINITY);
+        assert_eq!(full[100 * 256 + 99], f32::NEG_INFINITY);
+        assert_eq!(full[199], f32::NEG_INFINITY);
+        assert_eq!(full[199 * 256 + 200], f32::NEG_INFINITY);
+        assert_eq!(full[200 * 256 + 199], f32::NEG_INFINITY);
+        assert_eq!(full[200 * 256 + 200], 0.0);
+        assert_eq!(full[200 * 256 + 201], f32::NEG_INFINITY);
+        assert_ne!(full, window);
     }
 
     #[test]

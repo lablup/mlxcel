@@ -219,6 +219,14 @@ struct VisionAttention {
     scale: f32,
 }
 
+#[derive(Clone, Copy)]
+enum VisionAttentionDiagnosticStage {
+    Query,
+    Key,
+    Value,
+    Context,
+}
+
 impl VisionAttention {
     fn from_weights(
         weights: &WeightMap,
@@ -247,6 +255,19 @@ impl VisionAttention {
         cu_seqlens: &[i32],
         rotary_pos_emb: &MlxArray,
     ) -> UniquePtr<MlxArray> {
+        self.forward_with_observer(x, cu_seqlens, rotary_pos_emb, |_, _| {})
+    }
+
+    fn forward_with_observer<F>(
+        &self,
+        x: &MlxArray,
+        cu_seqlens: &[i32],
+        rotary_pos_emb: &MlxArray,
+        mut observe: F,
+    ) -> UniquePtr<MlxArray>
+    where
+        F: FnMut(VisionAttentionDiagnosticStage, &MlxArray),
+    {
         let shape = mlxcel_core::array_shape(x);
         let seq_length = shape[0];
 
@@ -275,6 +296,9 @@ impl VisionAttention {
 
         let q = apply_rotary_pos_emb_vision(&q, rotary_pos_emb);
         let k = apply_rotary_pos_emb_vision(&k, rotary_pos_emb);
+        observe(VisionAttentionDiagnosticStage::Query, &q);
+        observe(VisionAttentionDiagnosticStage::Key, &k);
+        observe(VisionAttentionDiagnosticStage::Value, &v);
 
         // [seq, heads, head_dim] -> [1, heads, seq, head_dim]
         let q = mlxcel_core::transpose_axes(&q, &[1, 0, 2]);
@@ -331,6 +355,7 @@ impl VisionAttention {
         let output = mlxcel_core::squeeze_axis(&output, 0);
         let output = mlxcel_core::transpose_axes(&output, &[1, 0, 2]);
         let output = mlxcel_core::reshape(&output, &[seq_length, -1]);
+        observe(VisionAttentionDiagnosticStage::Context, &output);
 
         self.proj.forward(&output)
     }
@@ -388,6 +413,10 @@ struct VisionBlock {
 struct Qwen25VLBlockDiagnostics {
     input: Vec<f32>,
     norm1: Vec<f32>,
+    query: Vec<f32>,
+    key: Vec<f32>,
+    value: Vec<f32>,
+    attention_context: Vec<f32>,
     attention: Vec<f32>,
     post_attention_residual: Vec<f32>,
     norm2: Vec<f32>,
@@ -453,7 +482,23 @@ impl VisionBlock {
         let input = host_f32_diagnostic_snapshot(hidden_states);
         let norm1 = self.norm1.forward(hidden_states);
         let norm1_snapshot = host_f32_diagnostic_snapshot(&norm1);
-        let attention = self.attn.forward(&norm1, cu_seqlens, rotary_pos_emb);
+        let mut query = None;
+        let mut key = None;
+        let mut value = None;
+        let mut attention_context = None;
+        let attention =
+            self.attn
+                .forward_with_observer(&norm1, cu_seqlens, rotary_pos_emb, |stage, array| {
+                    let snapshot = host_f32_diagnostic_snapshot(array);
+                    match stage {
+                        VisionAttentionDiagnosticStage::Query => query = Some(snapshot),
+                        VisionAttentionDiagnosticStage::Key => key = Some(snapshot),
+                        VisionAttentionDiagnosticStage::Value => value = Some(snapshot),
+                        VisionAttentionDiagnosticStage::Context => {
+                            attention_context = Some(snapshot)
+                        }
+                    }
+                });
         let attention_snapshot = host_f32_diagnostic_snapshot(&attention);
         let post_attention_residual = mlxcel_core::add(hidden_states, &attention);
         let post_attention_residual_snapshot =
@@ -468,6 +513,11 @@ impl VisionBlock {
             Qwen25VLBlockDiagnostics {
                 input,
                 norm1: norm1_snapshot,
+                query: query.expect("diagnostics capture attention query"),
+                key: key.expect("diagnostics capture attention key"),
+                value: value.expect("diagnostics capture attention value"),
+                attention_context: attention_context
+                    .expect("diagnostics capture pre-projection attention context"),
                 attention: attention_snapshot,
                 post_attention_residual: post_attention_residual_snapshot,
                 norm2: norm2_snapshot,
@@ -543,6 +593,10 @@ pub struct Qwen25VLVisionDiagnostics {
     pub substage_probe_layer_index: usize,
     pub substage_probe_layer_input: Vec<f32>,
     pub substage_probe_layer_norm1: Vec<f32>,
+    pub substage_probe_layer_query: Vec<f32>,
+    pub substage_probe_layer_key: Vec<f32>,
+    pub substage_probe_layer_value: Vec<f32>,
+    pub substage_probe_layer_attention_context: Vec<f32>,
     pub substage_probe_layer_attention: Vec<f32>,
     pub substage_probe_layer_post_attention_residual: Vec<f32>,
     pub substage_probe_layer_norm2: Vec<f32>,
@@ -882,16 +936,16 @@ impl Qwen25VLVisionEncoder {
         let final_interval_layer_indices = target_full_layer_index
             .map(|target| (final_interval_start..=target).collect::<Vec<_>>())
             .unwrap_or_default();
-        // The pinned actual-checkpoint oracle first diverges at layer 29 while
-        // layer 28 still passes. Probe the third-to-last layer in the final
-        // interval (29 for the standard 32-layer checkpoint) so the substage
-        // capture localizes that boundary instead of reporting only the already
-        // divergent final full-attention block.
+        // The multi-media actual-checkpoint oracle passes full-attention layers
+        // 7 and 15 and first diverges at full-attention layer 23. Probe the
+        // penultimate configured full-attention layer so the next bounded run
+        // distinguishes Q/K/V, masked attention context, projection, residual,
+        // norm, and MLP without changing production execution.
         #[cfg(feature = "xla-diagnostics")]
-        let substage_probe_layer_index = final_interval_layer_indices
+        let substage_probe_layer_index = full_layer_indices
             .iter()
             .rev()
-            .nth(2)
+            .nth(1)
             .copied()
             .or(target_full_layer_index);
         #[cfg(feature = "xla-diagnostics")]
@@ -983,6 +1037,11 @@ impl Qwen25VLVisionEncoder {
                     substage_probe_layer_index,
                     substage_probe_layer_input: substage_probe_layer_state.input,
                     substage_probe_layer_norm1: substage_probe_layer_state.norm1,
+                    substage_probe_layer_query: substage_probe_layer_state.query,
+                    substage_probe_layer_key: substage_probe_layer_state.key,
+                    substage_probe_layer_value: substage_probe_layer_state.value,
+                    substage_probe_layer_attention_context: substage_probe_layer_state
+                        .attention_context,
                     substage_probe_layer_attention: substage_probe_layer_state.attention,
                     substage_probe_layer_post_attention_residual: substage_probe_layer_state
                         .post_attention_residual,

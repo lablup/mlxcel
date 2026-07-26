@@ -72,6 +72,15 @@ pub enum Qwen25VlDiagnosticMutation {
 }
 
 #[cfg(feature = "diagnostics")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Qwen25VlAttentionMaskAudit {
+    pub full_window_differences: usize,
+    pub cross_media_full_bias_leaks: usize,
+    pub active_padding_full_bias_leaks: usize,
+    pub invalid_padded_full_bias_entries: usize,
+}
+
+#[cfg(feature = "diagnostics")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Qwen25VlVisionDiagnostics {
     pub window_index: Vec<usize>,
@@ -88,16 +97,22 @@ pub struct Qwen25VlVisionDiagnostics {
     pub substage_probe_layer_index: usize,
     pub substage_probe_layer_input: Vec<f32>,
     pub substage_probe_layer_norm1: Vec<f32>,
+    pub substage_probe_layer_query: Vec<f32>,
+    pub substage_probe_layer_key: Vec<f32>,
+    pub substage_probe_layer_value: Vec<f32>,
+    pub substage_probe_layer_attention_context: Vec<f32>,
     pub substage_probe_layer_attention: Vec<f32>,
     pub substage_probe_layer_post_attention_residual: Vec<f32>,
     pub substage_probe_layer_norm2: Vec<f32>,
     pub substage_probe_layer_mlp: Vec<f32>,
     pub merger_window_ordered: Vec<f32>,
     pub restored_projection: Vec<f32>,
+    pub patch_bucket: usize,
     pub patch_tokens: usize,
     pub merged_tokens: usize,
     pub vision_hidden: usize,
     pub text_hidden: usize,
+    pub attention_mask_audit: Qwen25VlAttentionMaskAudit,
 }
 
 struct ActiveModule {
@@ -612,6 +627,54 @@ fn checked_f32_output(label: &str, bytes: Vec<u8>) -> Result<Vec<f32>, String> {
     Ok(values)
 }
 
+#[cfg(feature = "diagnostics")]
+fn audit_attention_masks(
+    patch_bucket: usize,
+    actual_patches: usize,
+    packed_cu_seqlens: &[usize],
+    full_bias: &[f32],
+    window_bias: &[f32],
+) -> Qwen25VlAttentionMaskAudit {
+    let media_for = |index: usize| {
+        packed_cu_seqlens
+            .windows(2)
+            .position(|range| range[0] <= index && index < range[1])
+    };
+    let mut audit = Qwen25VlAttentionMaskAudit {
+        full_window_differences: 0,
+        cross_media_full_bias_leaks: 0,
+        active_padding_full_bias_leaks: 0,
+        invalid_padded_full_bias_entries: 0,
+    };
+    for row in 0..patch_bucket {
+        for column in 0..patch_bucket {
+            let index = row * patch_bucket + column;
+            if full_bias[index] != window_bias[index] {
+                audit.full_window_differences += 1;
+            }
+            let finite = full_bias[index].is_finite();
+            match (row < actual_patches, column < actual_patches) {
+                (true, true) => {
+                    if media_for(row) != media_for(column) && finite {
+                        audit.cross_media_full_bias_leaks += 1;
+                    }
+                }
+                (true, false) | (false, true) => {
+                    if finite {
+                        audit.active_padding_full_bias_leaks += 1;
+                    }
+                }
+                (false, false) => {
+                    if finite != (row == column) {
+                        audit.invalid_padded_full_bias_entries += 1;
+                    }
+                }
+            }
+        }
+    }
+    audit
+}
+
 fn compile_and_load(
     model_dir: &Path,
     device: &str,
@@ -930,6 +993,15 @@ impl IreeQwen25VlDiagnosticProjector {
             * self.config.patch_size
             * self.config.patch_size;
         let frequency_width = self.config.hidden / self.config.heads / 2;
+        let attention_mask_audit = audit_attention_masks(
+            plan.patch_bucket,
+            plan.actual_patches,
+            &plan.packed_cu_seqlens,
+            &packed_attention_bias,
+            window_attention_bias.as_deref().ok_or_else(|| {
+                "Qwen2.5-VL diagnostics require a window-attention bias".to_string()
+            })?,
+        );
         match mutation {
             Qwen25VlDiagnosticMutation::None => {}
             Qwen25VlDiagnosticMutation::Qwen2FullAttention => {
@@ -970,7 +1042,7 @@ impl IreeQwen25VlDiagnosticProjector {
         let layout = active.layout.clone();
         let full_layer_count = layout.full_layer_indices.len();
         let final_interval_layer_count = layout.final_interval_layer_indices.len();
-        let block_substage_count = 6;
+        let block_substage_count = 10;
         let state_output_count =
             2 + full_layer_count + final_interval_layer_count + block_substage_count;
         let mut output_buffers = vec![vec![0u8; state_bytes]; state_output_count];
@@ -1062,6 +1134,18 @@ impl IreeQwen25VlDiagnosticProjector {
         let substage_probe_layer_norm1 = substage_probe_layer_substages
             .next()
             .expect("diagnostic substage probe layer norm1 output");
+        let substage_probe_layer_query = substage_probe_layer_substages
+            .next()
+            .expect("diagnostic substage probe layer query output");
+        let substage_probe_layer_key = substage_probe_layer_substages
+            .next()
+            .expect("diagnostic substage probe layer key output");
+        let substage_probe_layer_value = substage_probe_layer_substages
+            .next()
+            .expect("diagnostic substage probe layer value output");
+        let substage_probe_layer_attention_context = substage_probe_layer_substages
+            .next()
+            .expect("diagnostic substage probe layer attention context output");
         let substage_probe_layer_attention = substage_probe_layer_substages
             .next()
             .expect("diagnostic substage probe layer attention output");
@@ -1092,16 +1176,22 @@ impl IreeQwen25VlDiagnosticProjector {
             substage_probe_layer_index: layout.substage_probe_layer_index,
             substage_probe_layer_input,
             substage_probe_layer_norm1,
+            substage_probe_layer_query,
+            substage_probe_layer_key,
+            substage_probe_layer_value,
+            substage_probe_layer_attention_context,
             substage_probe_layer_attention,
             substage_probe_layer_post_attention_residual,
             substage_probe_layer_norm2,
             substage_probe_layer_mlp,
             merger_window_ordered,
             restored_projection,
+            patch_bucket: plan.patch_bucket,
             patch_tokens: plan.actual_patches,
             merged_tokens: actual_tokens,
             vision_hidden: self.config.hidden,
             text_hidden: self.config.text_hidden,
+            attention_mask_audit,
         })
     }
 }
@@ -1109,6 +1199,33 @@ impl IreeQwen25VlDiagnosticProjector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "diagnostics")]
+    #[test]
+    fn attention_mask_audit_pins_media_and_padding_isolation() {
+        let bucket = 8;
+        let actual = 4;
+        let boundaries = [0, 2, 4];
+        let mut full = vec![f32::NEG_INFINITY; bucket * bucket];
+        for range in boundaries.windows(2) {
+            for row in range[0]..range[1] {
+                for column in range[0]..range[1] {
+                    full[row * bucket + column] = 0.0;
+                }
+            }
+        }
+        for row in actual..bucket {
+            full[row * bucket + row] = 0.0;
+        }
+        let mut window = full.clone();
+        window[1] = f32::NEG_INFINITY;
+        window[bucket] = f32::NEG_INFINITY;
+        let audit = audit_attention_masks(bucket, actual, &boundaries, &full, &window);
+        assert_eq!(audit.full_window_differences, 2);
+        assert_eq!(audit.cross_media_full_bias_leaks, 0);
+        assert_eq!(audit.active_padding_full_bias_leaks, 0);
+        assert_eq!(audit.invalid_padded_full_bias_entries, 0);
+    }
 
     fn tiny_config() -> Qwen2VlConfig {
         Qwen2VlConfig::from_json_str(
