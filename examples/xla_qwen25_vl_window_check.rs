@@ -538,13 +538,13 @@ fn main() {
         "captured final diagnostic interval count differs"
     );
     assert_eq!(
-        iree_vision.pre_probe_layer_indices, eager_vision.pre_probe_layer_indices,
-        "pre-probe diagnostic interval differs"
+        iree_vision.diagnostic_layer_indices, eager_vision.diagnostic_layer_indices,
+        "diagnostic layer interval differs"
     );
     assert_eq!(
-        iree_vision.post_pre_probe_layers.len(),
-        eager_vision.post_pre_probe_layers.len(),
-        "captured pre-probe diagnostic interval count differs"
+        iree_vision.post_diagnostic_layers.len(),
+        eager_vision.post_diagnostic_layers.len(),
+        "captured diagnostic layer count differs"
     );
     let target_full_layer_index = *iree_vision
         .full_layer_indices
@@ -601,16 +601,16 @@ fn main() {
             tolerance,
         );
     }
-    for (&layer, (actual, expected)) in iree_vision.pre_probe_layer_indices.iter().zip(
+    for (&layer, (actual, expected)) in iree_vision.diagnostic_layer_indices.iter().zip(
         iree_vision
-            .post_pre_probe_layers
+            .post_diagnostic_layers
             .iter()
-            .zip(&eager_vision.post_pre_probe_layers),
+            .zip(&eager_vision.post_diagnostic_layers),
     ) {
         record_stage(
             &mut reports,
             &mut comparison_failures,
-            &format!("vision.post_layer_{layer}_pre_probe"),
+            &format!("vision.post_layer_{layer}_diagnostic"),
             actual,
             &mlx_f32(expected),
             tolerance,
@@ -707,7 +707,7 @@ fn main() {
             "window_layer": iree_vision.window_layer_index,
             "full_attention_layers": iree_vision.full_layer_indices,
             "final_interval_layers": iree_vision.final_interval_layer_indices,
-            "pre_probe_layers": iree_vision.pre_probe_layer_indices,
+            "diagnostic_layers": iree_vision.diagnostic_layer_indices,
             "target_full_layer": target_full_layer_index,
             "substage_probe_layer": substage_probe_layer_index,
             "failed_phase": "vision",
@@ -866,7 +866,7 @@ fn main() {
         "window_layer": iree_vision.window_layer_index,
         "full_attention_layers": iree_vision.full_layer_indices,
         "final_interval_layers": iree_vision.final_interval_layer_indices,
-        "pre_probe_layers": iree_vision.pre_probe_layer_indices,
+        "diagnostic_layers": iree_vision.diagnostic_layer_indices,
         "target_full_layer": iree_vision.full_layer_indices.last(),
         "substage_probe_layer": iree_vision.substage_probe_layer_index,
         "negative_qwen2_full_attention_structurally_detected": true,
