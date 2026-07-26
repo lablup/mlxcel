@@ -761,7 +761,9 @@ pub struct Qwen3VLVisionEncoderDiagnosticOutput {
     /// `deepstack_visual_indexes` entries.
     pub block_hidden_states: Vec<UniquePtr<MlxArray>>,
     /// Input, norm1, attention, post-attention residual, norm2, MLP, and
-    /// output for encoder block 2.
+    /// output for encoder block 0.
+    pub block_0_states: Vec<UniquePtr<MlxArray>>,
+    /// The same ordered stages for encoder block 2.
     pub block_2_states: Vec<UniquePtr<MlxArray>>,
     /// Normalized/shuffled input, first linear output, and GELU output.
     pub main_merger_states: Vec<UniquePtr<MlxArray>>,
@@ -775,6 +777,7 @@ enum VisionStage {
     PositionEmbedding,
     PositionedEmbedding,
     Block(usize),
+    Block0(VisionBlockDiagnosticStage),
     Block2(VisionBlockDiagnosticStage),
     MainMerger(PatchMergerStage),
     DeepStackMerger(usize, PatchMergerStage),
@@ -959,6 +962,7 @@ impl Qwen3VLVisionEncoder {
         let mut position_embeddings = None;
         let mut positioned_embeddings = None;
         let mut block_hidden_states = Vec::with_capacity(self.blocks.len());
+        let mut block_0_states = Vec::with_capacity(VisionBlockDiagnosticStage::COUNT);
         let mut block_2_states = Vec::with_capacity(VisionBlockDiagnosticStage::COUNT);
         let mut main_merger_states = Vec::with_capacity(3);
         let mut deepstack_merger_states = (0..self.deepstack_merger_list.len())
@@ -978,6 +982,12 @@ impl Qwen3VLVisionEncoder {
                 VisionStage::Block(layer) => {
                     debug_assert_eq!(layer, block_hidden_states.len());
                     block_hidden_states.push(mlxcel_core::copy(hidden));
+                }
+                VisionStage::Block0(stage) => {
+                    debug_assert_eq!(stage.index(), block_0_states.len());
+                    let snapshot = mlxcel_core::copy(hidden);
+                    mlxcel_core::eval(&snapshot);
+                    block_0_states.push(snapshot);
                 }
                 VisionStage::Block2(stage) => {
                     debug_assert_eq!(stage.index(), block_2_states.len());
@@ -1002,6 +1012,7 @@ impl Qwen3VLVisionEncoder {
             positioned_embeddings: positioned_embeddings
                 .expect("observer captures positioned embeddings"),
             block_hidden_states,
+            block_0_states,
             block_2_states,
             main_merger_states,
             deepstack_merger_states,
@@ -1099,12 +1110,20 @@ impl Qwen3VLVisionEncoder {
         let mut deepstack_features: Vec<UniquePtr<MlxArray>> = Vec::new();
 
         for (layer_num, block) in self.blocks.iter().enumerate() {
-            h = if layer_num == 2 {
-                block.forward_with_observer(&h, &cu_seqlens, &rotary_pos_emb, |stage, hidden| {
-                    observe(VisionStage::Block2(stage), hidden)
-                })
-            } else {
-                block.forward(&h, &cu_seqlens, &rotary_pos_emb)
+            h = match layer_num {
+                0 => block.forward_with_observer(
+                    &h,
+                    &cu_seqlens,
+                    &rotary_pos_emb,
+                    |stage, hidden| observe(VisionStage::Block0(stage), hidden),
+                ),
+                2 => block.forward_with_observer(
+                    &h,
+                    &cu_seqlens,
+                    &rotary_pos_emb,
+                    |stage, hidden| observe(VisionStage::Block2(stage), hidden),
+                ),
+                _ => block.forward(&h, &cu_seqlens, &rotary_pos_emb),
             };
             observe(VisionStage::Block(layer_num), &h);
 

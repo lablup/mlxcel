@@ -135,8 +135,8 @@ pub(crate) use qwen3_vl::emit_qwen3_vl;
 pub(crate) use qwen3_vl::emit_qwen3_vl_diagnostics;
 #[allow(unused_imports)]
 pub(crate) use qwen3_vl::{
-    QWEN3_VL_BLOCK_DIAGNOSTIC_STAGES, QWEN3_VL_DIAGNOSTIC_BLOCK, QWEN3_VL_PATCH_BUCKETS,
-    Qwen3VlConfig, Qwen3VlGridPlan, Qwen3VlHostInputs, Qwen3VlWeightSpec,
+    QWEN3_VL_BLOCK_DIAGNOSTIC_STAGES, QWEN3_VL_DIAGNOSTIC_BLOCK, QWEN3_VL_FIRST_DIAGNOSTIC_BLOCK,
+    QWEN3_VL_PATCH_BUCKETS, Qwen3VlConfig, Qwen3VlGridPlan, Qwen3VlHostInputs, Qwen3VlWeightSpec,
     prepare_qwen3_vl_host_inputs,
 };
 // MoE FFN config types (issue #500), read by the weight loader (`iree.rs`) and the

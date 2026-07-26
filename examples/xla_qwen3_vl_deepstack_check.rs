@@ -313,7 +313,7 @@ fn main() {
             ),
         );
     }
-    let block_2_stage_names = [
+    let block_stage_names = [
         "input",
         "norm1",
         "attention",
@@ -323,20 +323,47 @@ fn main() {
         "output",
     ];
     assert_eq!(
+        iree_diagnostics.block_0_states.len(),
+        eager_vision.block_0_states.len(),
+        "eager and IREE block 0 substage capture counts differ"
+    );
+    assert_eq!(
+        iree_diagnostics.block_0_states.len(),
+        block_stage_names.len(),
+        "actual Qwen3-VL diagnostics must capture every block 0 substage"
+    );
+    for ((actual, expected), name) in iree_diagnostics
+        .block_0_states
+        .iter()
+        .zip(&eager_vision.block_0_states)
+        .zip(block_stage_names)
+    {
+        record_comparison(
+            &mut failures,
+            compare_stage(
+                &mut reports,
+                &format!("vision.block_0.{name}"),
+                actual,
+                &mlx_f32(expected),
+                tolerance,
+            ),
+        );
+    }
+    assert_eq!(
         iree_diagnostics.block_2_states.len(),
         eager_vision.block_2_states.len(),
         "eager and IREE block 2 substage capture counts differ"
     );
     assert_eq!(
         iree_diagnostics.block_2_states.len(),
-        block_2_stage_names.len(),
+        block_stage_names.len(),
         "actual Qwen3-VL diagnostics must capture every block 2 substage"
     );
     for ((actual, expected), name) in iree_diagnostics
         .block_2_states
         .iter()
         .zip(&eager_vision.block_2_states)
-        .zip(block_2_stage_names)
+        .zip(block_stage_names)
     {
         record_comparison(
             &mut failures,
