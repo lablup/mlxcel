@@ -111,6 +111,45 @@ fn mlx_i32(array: &mlxcel_core::MlxArray) -> Vec<i32> {
         .collect()
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SnapshotStats {
+    max_abs: f32,
+    finite_nonzero: usize,
+    zero: usize,
+    non_finite: usize,
+    f16_square_overflow_candidates: usize,
+}
+
+fn snapshot_stats(values: &[f32]) -> SnapshotStats {
+    // Largest finite F16 value is 65,504, so squaring a value above its
+    // square root in F16 produces infinity before the RMS mean is evaluated.
+    const F16_SQRT_MAX: f32 = 255.9375;
+    let mut stats = SnapshotStats {
+        max_abs: 0.0,
+        finite_nonzero: 0,
+        zero: 0,
+        non_finite: 0,
+        f16_square_overflow_candidates: 0,
+    };
+    for &value in values {
+        if !value.is_finite() {
+            stats.non_finite += 1;
+            continue;
+        }
+        let absolute = value.abs();
+        stats.max_abs = stats.max_abs.max(absolute);
+        if value == 0.0 {
+            stats.zero += 1;
+        } else {
+            stats.finite_nonzero += 1;
+        }
+        if absolute > F16_SQRT_MAX {
+            stats.f16_square_overflow_candidates += 1;
+        }
+    }
+    stats
+}
+
 fn owned_f32(tensor: &OwnedTensor, label: &str) -> Vec<f32> {
     assert_eq!(
         tensor.dtype,
@@ -371,11 +410,13 @@ fn main() {
         .iter()
         .filter(|(stage, _)| matches!(*stage, "norm1" | "norm2"))
     {
+        let stats = snapshot_stats(values);
         assert!(
-            values
-                .iter()
-                .any(|value| value.is_finite() && *value != 0.0),
-            "eager substage probe {stage} is vacuously zero before IREE launch"
+            stats.finite_nonzero > 0,
+            "eager substage probe {stage} has no finite non-zero values before IREE launch: \
+             {stats:?}; layer input stats: {:?}. F16 RMSNorm squares values before its mean, \
+             so any input magnitude above sqrt(65504) can zero an entire normalized row",
+            snapshot_stats(eager_vision.substage_probe_layer_input.as_slice())
         );
     }
 

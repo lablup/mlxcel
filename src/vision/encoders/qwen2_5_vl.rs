@@ -1056,4 +1056,29 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn f16_manual_rms_norm_characterizes_square_overflow() {
+        let input = mlxcel_core::from_slice_f32(&[300.0, 1.0, -2.0, 3.0], &[1, 4]);
+        let input = mlxcel_core::astype(&input, mlxcel_core::dtype::FLOAT16);
+        let weight = mlxcel_core::ones(&[4], mlxcel_core::dtype::FLOAT16);
+
+        let manual = mlxcel_core::rms_norm(&input, &weight, 1e-6);
+        let manual = host_f32_diagnostic_snapshot(&manual);
+        assert!(
+            manual.iter().all(|value| *value == 0.0),
+            "the current F16 square/mean path should expose its overflow signature"
+        );
+
+        let promoted = mlxcel_core::astype(&input, mlxcel_core::dtype::FLOAT32);
+        let promoted_weight = mlxcel_core::astype(&weight, mlxcel_core::dtype::FLOAT32);
+        let promoted = mlxcel_core::rms_norm(&promoted, &promoted_weight, 1e-6);
+        let promoted = host_f32_diagnostic_snapshot(&promoted);
+        assert!(
+            promoted
+                .iter()
+                .any(|value| value.is_finite() && *value != 0.0),
+            "F32 square/mean must preserve a non-zero normalized row"
+        );
+    }
 }
