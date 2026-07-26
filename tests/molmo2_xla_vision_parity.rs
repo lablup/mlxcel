@@ -18,7 +18,13 @@
 //! the IREE vision projector. It never loads either text decoder.
 
 #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
-use std::path::PathBuf;
+use std::{
+    io::{self, Write},
+    path::PathBuf,
+    sync::mpsc::{self, Sender},
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
+};
 
 use anyhow::{Result, anyhow};
 #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
@@ -26,6 +32,74 @@ use mlxcel::{initialize_runtime, load_molmo2_xla_vision_reference};
 use mlxcel_xla::add_molmo2_projected_features;
 #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 use mlxcel_xla::{IreeMolmo2VisionDiagnosticProjector, Molmo2VisionInput};
+
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+const PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+fn write_progress(output: &mut impl Write, message: &str) -> io::Result<()> {
+    writeln!(output, "[molmo2-reference] {message}")?;
+    output.flush()
+}
+
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+fn emit_progress(message: &str) {
+    let stderr = io::stderr();
+    let mut stderr = stderr.lock();
+    let _ = write_progress(&mut stderr, message);
+}
+
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+struct ProgressHeartbeat {
+    stop: Sender<()>,
+    worker: Option<JoinHandle<()>>,
+}
+
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+impl Drop for ProgressHeartbeat {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+fn with_progress<T, E>(
+    label: &'static str,
+    operation: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    emit_progress(&format!("{label}: started"));
+    let started = Instant::now();
+    let (stop, receiver) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        while let Err(mpsc::RecvTimeoutError::Timeout) =
+            receiver.recv_timeout(PROGRESS_HEARTBEAT_INTERVAL)
+        {
+            emit_progress(&format!(
+                "{label}: still running (elapsed={}s)",
+                started.elapsed().as_secs()
+            ));
+        }
+    });
+    let progress = ProgressHeartbeat {
+        stop,
+        worker: Some(worker),
+    };
+    let result = operation();
+    drop(progress);
+    let outcome = if result.is_ok() {
+        "completed"
+    } else {
+        "failed"
+    };
+    emit_progress(&format!(
+        "{label}: {outcome} (elapsed={}s)",
+        started.elapsed().as_secs()
+    ));
+    result
+}
 
 #[derive(Debug, Clone, Copy)]
 struct Comparison {
@@ -77,6 +151,10 @@ fn assert_within(
     rms_limit: f32,
 ) -> Result<()> {
     let comparison = compare(actual, expected)?;
+    emit_progress(&format!(
+        "{label}: max_abs={} at {}, rms={}",
+        comparison.max_abs, comparison.max_index, comparison.rms
+    ));
     if comparison.max_abs > max_abs_limit || comparison.rms > rms_limit {
         return Err(anyhow!(
             "{label} parity failed: max_abs={} at {}, rms={}, limits=({}, {})",
@@ -87,10 +165,6 @@ fn assert_within(
             rms_limit
         ));
     }
-    eprintln!(
-        "{label}: max_abs={} at {}, rms={}",
-        comparison.max_abs, comparison.max_index, comparison.rms
-    );
     Ok(())
 }
 
@@ -195,6 +269,37 @@ fn synthetic_negative_controls_detect_layer_denominator_and_clamped_index_drift(
 
 #[test]
 #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+fn synthetic_progress_flushes_and_heartbeats_before_five_minutes() {
+    #[derive(Default)]
+    struct FlushProbe {
+        bytes: Vec<u8>,
+        flushes: usize,
+    }
+
+    impl Write for FlushProbe {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    let mut probe = FlushProbe::default();
+    write_progress(&mut probe, "MLX eager diagnostic projection: started").unwrap();
+    assert_eq!(probe.flushes, 1);
+    assert_eq!(
+        String::from_utf8(probe.bytes).unwrap(),
+        "[molmo2-reference] MLX eager diagnostic projection: started\n"
+    );
+    assert!(PROGRESS_HEARTBEAT_INTERVAL < Duration::from_secs(5 * 60));
+}
+
+#[test]
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 #[ignore = "requires a Molmo2 checkpoint plus configured MLX and IREE runtimes"]
 fn real_checkpoint_mlx_iree_vision_and_scatter_parity() -> Result<()> {
     let model = PathBuf::from(
@@ -211,10 +316,14 @@ fn real_checkpoint_mlx_iree_vision_and_scatter_parity() -> Result<()> {
     let rms_limit = tolerance("MLXCEL_MOLMO2_RMS", 0.01)?;
 
     let _runtime = initialize_runtime();
-    let reference = load_molmo2_xla_vision_reference(&model)?;
+    let reference = with_progress("MLX vision-only checkpoint load", || {
+        load_molmo2_xla_vision_reference(&model)
+    })?;
     let image = image::open(&image_path)
         .map_err(|error| anyhow!("open {}: {error}", image_path.display()))?;
-    let eager = reference.project(&image)?;
+    let eager = with_progress("MLX eager diagnostic projection", || {
+        reference.project(&image)
+    })?;
     let processed = &eager.processed;
     let pooling_shape = processed
         .image_token_pooling_shape
@@ -232,24 +341,27 @@ fn real_checkpoint_mlx_iree_vision_and_scatter_parity() -> Result<()> {
         ));
     }
 
-    let mut projector =
-        IreeMolmo2VisionDiagnosticProjector::load(&model, &device).map_err(anyhow::Error::msg)?;
+    let mut projector = with_progress("IREE diagnostic compile/load", || {
+        IreeMolmo2VisionDiagnosticProjector::load(&model, &device).map_err(anyhow::Error::msg)
+    })?;
     if projector.image_patch_id() != reference.image_patch_id()
         || projector.text_hidden_size() != reference.text_hidden_size()
     {
         return Err(anyhow!("MLX and IREE Molmo2 metadata disagree"));
     }
-    let iree = projector
-        .project(Molmo2VisionInput {
-            patches: &processed.pixel_values,
-            patches_shape: processed.pixel_values_shape.map(|value| value as usize),
-            image_token_pooling: &processed.image_token_pooling,
-            pooling_shape,
-            image_grid: processed.image_grid,
-            image_num_crops: processed.image_num_crops as usize,
-            prompt_image_patch_count: independently_active.len(),
-        })
-        .map_err(anyhow::Error::msg)?;
+    let iree = with_progress("IREE diagnostic invocation", || {
+        projector
+            .project(Molmo2VisionInput {
+                patches: &processed.pixel_values,
+                patches_shape: processed.pixel_values_shape.map(|value| value as usize),
+                image_token_pooling: &processed.image_token_pooling,
+                pooling_shape,
+                image_grid: processed.image_grid,
+                image_num_crops: processed.image_num_crops as usize,
+                prompt_image_patch_count: independently_active.len(),
+            })
+            .map_err(anyhow::Error::msg)
+    })?;
     if iree.active_groups != independently_active || iree.projected_shape != eager.shape {
         return Err(anyhow!(
             "active-row mismatch: processor={independently_active:?}, IREE={:?}, MLX shape={:?}, IREE shape={:?}",
