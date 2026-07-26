@@ -515,13 +515,13 @@ pub struct Qwen25VLVisionDiagnostics {
     pub post_full_layers: Vec<UniquePtr<MlxArray>>,
     pub final_interval_layer_indices: Vec<usize>,
     pub post_final_interval_layers: Vec<UniquePtr<MlxArray>>,
-    pub target_full_layer_index: usize,
-    pub target_full_layer_input: UniquePtr<MlxArray>,
-    pub target_full_layer_norm1: UniquePtr<MlxArray>,
-    pub target_full_layer_attention: UniquePtr<MlxArray>,
-    pub target_full_layer_post_attention_residual: UniquePtr<MlxArray>,
-    pub target_full_layer_norm2: UniquePtr<MlxArray>,
-    pub target_full_layer_mlp: UniquePtr<MlxArray>,
+    pub substage_probe_layer_index: usize,
+    pub substage_probe_layer_input: UniquePtr<MlxArray>,
+    pub substage_probe_layer_norm1: UniquePtr<MlxArray>,
+    pub substage_probe_layer_attention: UniquePtr<MlxArray>,
+    pub substage_probe_layer_post_attention_residual: UniquePtr<MlxArray>,
+    pub substage_probe_layer_norm2: UniquePtr<MlxArray>,
+    pub substage_probe_layer_mlp: UniquePtr<MlxArray>,
     pub merger_window_ordered: UniquePtr<MlxArray>,
     pub restored_projection: UniquePtr<MlxArray>,
 }
@@ -857,10 +857,22 @@ impl Qwen25VLVisionEncoder {
         let final_interval_layer_indices = target_full_layer_index
             .map(|target| (final_interval_start..=target).collect::<Vec<_>>())
             .unwrap_or_default();
+        // The pinned actual-checkpoint oracle first diverges at layer 29 while
+        // layer 28 still passes. Probe the third-to-last layer in the final
+        // interval (29 for the standard 32-layer checkpoint) so the substage
+        // capture localizes that boundary instead of reporting only the already
+        // divergent final full-attention block.
+        #[cfg(feature = "xla-diagnostics")]
+        let substage_probe_layer_index = final_interval_layer_indices
+            .iter()
+            .rev()
+            .nth(2)
+            .copied()
+            .or(target_full_layer_index);
         #[cfg(feature = "xla-diagnostics")]
         let mut post_final_interval_layers = Vec::new();
         #[cfg(feature = "xla-diagnostics")]
-        let mut target_full_layer_state = None;
+        let mut substage_probe_layer_state = None;
         for (layer_num, block) in self.blocks.iter().enumerate() {
             let cu_seqlens_now = if self.fullatt_block_indexes.contains(&layer_num) {
                 &cu_seqlens
@@ -868,11 +880,11 @@ impl Qwen25VLVisionEncoder {
                 &cu_window_seqlens
             };
             #[cfg(feature = "xla-diagnostics")]
-            if CAPTURE && Some(layer_num) == target_full_layer_index {
+            if CAPTURE && Some(layer_num) == substage_probe_layer_index {
                 let (output, capture) =
                     block.forward_with_diagnostics(&h, cu_seqlens_now, &rotary_pos_emb);
                 h = output;
-                target_full_layer_state = Some(capture);
+                substage_probe_layer_state = Some(capture);
             } else {
                 h = block.forward(&h, cu_seqlens_now, &rotary_pos_emb);
             }
@@ -920,10 +932,10 @@ impl Qwen25VLVisionEncoder {
 
         #[cfg(feature = "xla-diagnostics")]
         if CAPTURE {
-            let target_full_layer_index =
-                target_full_layer_index.expect("Qwen2.5-VL diagnostics require a full layer");
-            let target_full_layer_state =
-                target_full_layer_state.expect("Qwen2.5-VL target full layer capture");
+            let substage_probe_layer_index = substage_probe_layer_index
+                .expect("Qwen2.5-VL diagnostics require a substage probe layer");
+            let substage_probe_layer_state =
+                substage_probe_layer_state.expect("Qwen2.5-VL substage probe layer capture");
             let restored_projection =
                 mlxcel_core::copy(h.as_ref().expect("Qwen2.5-VL restored projection output"));
             let output = VisionEncoderOutput { hidden_states: h };
@@ -943,14 +955,14 @@ impl Qwen25VLVisionEncoder {
                     post_full_layers,
                     final_interval_layer_indices,
                     post_final_interval_layers,
-                    target_full_layer_index,
-                    target_full_layer_input: target_full_layer_state.input,
-                    target_full_layer_norm1: target_full_layer_state.norm1,
-                    target_full_layer_attention: target_full_layer_state.attention,
-                    target_full_layer_post_attention_residual: target_full_layer_state
+                    substage_probe_layer_index,
+                    substage_probe_layer_input: substage_probe_layer_state.input,
+                    substage_probe_layer_norm1: substage_probe_layer_state.norm1,
+                    substage_probe_layer_attention: substage_probe_layer_state.attention,
+                    substage_probe_layer_post_attention_residual: substage_probe_layer_state
                         .post_attention_residual,
-                    target_full_layer_norm2: target_full_layer_state.norm2,
-                    target_full_layer_mlp: target_full_layer_state.mlp,
+                    substage_probe_layer_norm2: substage_probe_layer_state.norm2,
+                    substage_probe_layer_mlp: substage_probe_layer_state.mlp,
                     merger_window_ordered: merger_window_ordered
                         .expect("Qwen2.5-VL merger capture"),
                     restored_projection,

@@ -30,7 +30,7 @@ pub(crate) struct Qwen25VlVisionDiagnosticLayout {
     pub(crate) window_layer_index: usize,
     pub(crate) full_layer_indices: Vec<usize>,
     pub(crate) final_interval_layer_indices: Vec<usize>,
-    pub(crate) target_full_layer_index: usize,
+    pub(crate) substage_probe_layer_index: usize,
 }
 
 #[cfg(feature = "diagnostics")]
@@ -42,6 +42,16 @@ struct Qwen25VlBlockDiagnostics {
     norm2: Val,
     mlp: Val,
     output: Val,
+}
+
+#[cfg(feature = "diagnostics")]
+fn substage_probe_layer(final_interval_layer_indices: &[usize]) -> Option<usize> {
+    final_interval_layer_indices
+        .iter()
+        .rev()
+        .nth(2)
+        .or_else(|| final_interval_layer_indices.last())
+        .copied()
 }
 
 struct Args {
@@ -339,7 +349,7 @@ fn emit_qwen2_5_vl_inner(
     #[cfg(feature = "diagnostics")]
     let mut final_interval_layer_states = Vec::new();
     #[cfg(feature = "diagnostics")]
-    let mut target_full_layer_state = None;
+    let mut substage_probe_layer_state = None;
     for layer in 0..config.depth {
         let bias = if full_attention_blocks.contains(&layer) {
             &full_bias
@@ -347,10 +357,10 @@ fn emit_qwen2_5_vl_inner(
             &window_bias
         };
         #[cfg(feature = "diagnostics")]
-        let is_target_full_layer =
-            diagnostic_layout.is_some_and(|layout| layer == layout.target_full_layer_index);
+        let is_substage_probe_layer =
+            diagnostic_layout.is_some_and(|layout| layer == layout.substage_probe_layer_index);
         #[cfg(feature = "diagnostics")]
-        if is_target_full_layer {
+        if is_substage_probe_layer {
             let capture = encoder_layer_with_diagnostics(
                 &mut builder,
                 &hidden,
@@ -360,7 +370,7 @@ fn emit_qwen2_5_vl_inner(
                 bias,
             );
             hidden = capture.output.clone();
-            target_full_layer_state = Some(capture);
+            substage_probe_layer_state = Some(capture);
         } else {
             hidden = encoder_layer(&mut builder, &hidden, &mut args, config, &freqs, bias);
         }
@@ -412,14 +422,14 @@ fn emit_qwen2_5_vl_inner(
             "diagnostics capture every layer after the penultimate full-attention boundary"
         );
         outputs.extend(final_interval_layer_states);
-        let target = target_full_layer_state.expect("diagnostics capture target full layer");
+        let probe = substage_probe_layer_state.expect("diagnostics capture substage probe layer");
         outputs.extend([
-            target.input,
-            target.norm1,
-            target.attention,
-            target.post_attention_residual,
-            target.norm2,
-            target.mlp,
+            probe.input,
+            probe.norm1,
+            probe.attention,
+            probe.post_attention_residual,
+            probe.norm2,
+            probe.mlp,
         ]);
         outputs.push(projected);
         let result_types = outputs
@@ -496,14 +506,33 @@ pub(crate) fn emit_qwen2_5_vl_diagnostics(
         .rev()
         .nth(1)
         .map_or(0, |layer| layer + 1);
+    let final_interval_layer_indices =
+        (final_interval_start..=target_full_layer_index).collect::<Vec<_>>();
+    let substage_probe_layer_index = substage_probe_layer(&final_interval_layer_indices)
+        .expect("diagnostic final interval contains the target full-attention layer");
     let layout = Qwen25VlVisionDiagnosticLayout {
         window_layer_index,
         full_layer_indices,
-        final_interval_layer_indices: (final_interval_start..=target_full_layer_index).collect(),
-        target_full_layer_index,
+        final_interval_layer_indices,
+        substage_probe_layer_index,
     };
     Ok((
         emit_qwen2_5_vl_inner(config, patch_bucket, precision, Some(&layout)),
         layout,
     ))
+}
+
+#[cfg(all(test, feature = "diagnostics"))]
+mod tests {
+    use super::substage_probe_layer;
+
+    #[test]
+    fn substage_probe_selects_the_first_observed_actual_divergence_boundary() {
+        assert_eq!(
+            substage_probe_layer(&(24..=31).collect::<Vec<_>>()),
+            Some(29)
+        );
+        assert_eq!(substage_probe_layer(&[0, 1]), Some(1));
+        assert_eq!(substage_probe_layer(&[]), None);
+    }
 }

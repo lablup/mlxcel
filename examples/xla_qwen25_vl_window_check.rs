@@ -435,11 +435,20 @@ fn main() {
         eager_vision.post_final_interval_layers.len(),
         "captured final diagnostic interval count differs"
     );
+    let target_full_layer_index = *iree_vision
+        .full_layer_indices
+        .last()
+        .expect("IREE diagnostics require a full-attention layer");
     assert_eq!(
-        iree_vision.target_full_layer_index, eager_vision.target_full_layer_index,
+        Some(&target_full_layer_index),
+        eager_vision.full_layer_indices.last(),
         "target full-attention layer differs"
     );
-    let target_full_layer_index = iree_vision.target_full_layer_index;
+    assert_eq!(
+        iree_vision.substage_probe_layer_index, eager_vision.substage_probe_layer_index,
+        "substage probe layer differs"
+    );
+    let substage_probe_layer_index = iree_vision.substage_probe_layer_index;
     for (capture_index, (&layer, (actual, expected))) in iree_vision
         .full_layer_indices
         .iter()
@@ -484,59 +493,59 @@ fn main() {
     for (stage, actual, expected) in [
         (
             "input",
-            iree_vision.target_full_layer_input.as_slice(),
+            iree_vision.substage_probe_layer_input.as_slice(),
             eager_vision
-                .target_full_layer_input
+                .substage_probe_layer_input
                 .as_ref()
-                .expect("eager target layer input"),
+                .expect("eager substage probe layer input"),
         ),
         (
             "norm1",
-            iree_vision.target_full_layer_norm1.as_slice(),
+            iree_vision.substage_probe_layer_norm1.as_slice(),
             eager_vision
-                .target_full_layer_norm1
+                .substage_probe_layer_norm1
                 .as_ref()
-                .expect("eager target layer norm1"),
+                .expect("eager substage probe layer norm1"),
         ),
         (
             "attention",
-            iree_vision.target_full_layer_attention.as_slice(),
+            iree_vision.substage_probe_layer_attention.as_slice(),
             eager_vision
-                .target_full_layer_attention
+                .substage_probe_layer_attention
                 .as_ref()
-                .expect("eager target layer attention"),
+                .expect("eager substage probe layer attention"),
         ),
         (
             "post_attention_residual",
             iree_vision
-                .target_full_layer_post_attention_residual
+                .substage_probe_layer_post_attention_residual
                 .as_slice(),
             eager_vision
-                .target_full_layer_post_attention_residual
+                .substage_probe_layer_post_attention_residual
                 .as_ref()
-                .expect("eager target layer post-attention residual"),
+                .expect("eager substage probe layer post-attention residual"),
         ),
         (
             "norm2",
-            iree_vision.target_full_layer_norm2.as_slice(),
+            iree_vision.substage_probe_layer_norm2.as_slice(),
             eager_vision
-                .target_full_layer_norm2
+                .substage_probe_layer_norm2
                 .as_ref()
-                .expect("eager target layer norm2"),
+                .expect("eager substage probe layer norm2"),
         ),
         (
             "mlp",
-            iree_vision.target_full_layer_mlp.as_slice(),
+            iree_vision.substage_probe_layer_mlp.as_slice(),
             eager_vision
-                .target_full_layer_mlp
+                .substage_probe_layer_mlp
                 .as_ref()
-                .expect("eager target layer MLP"),
+                .expect("eager substage probe layer MLP"),
         ),
     ] {
         record_stage(
             &mut reports,
             &mut comparison_failures,
-            &format!("vision.layer_{target_full_layer_index}.{stage}"),
+            &format!("vision.layer_{substage_probe_layer_index}.{stage}"),
             actual,
             &mlx_f32(expected),
             tolerance,
@@ -587,6 +596,7 @@ fn main() {
             "full_attention_layers": iree_vision.full_layer_indices,
             "final_interval_layers": iree_vision.final_interval_layer_indices,
             "target_full_layer": target_full_layer_index,
+            "substage_probe_layer": substage_probe_layer_index,
             "failed_phase": "vision",
             "failures": comparison_failures,
             "comparisons": reports,
@@ -737,7 +747,8 @@ fn main() {
         "window_layer": iree_vision.window_layer_index,
         "full_attention_layers": iree_vision.full_layer_indices,
         "final_interval_layers": iree_vision.final_interval_layer_indices,
-        "target_full_layer": iree_vision.target_full_layer_index,
+        "target_full_layer": iree_vision.full_layer_indices.last(),
+        "substage_probe_layer": iree_vision.substage_probe_layer_index,
         "negative_qwen2_full_attention_detected": true,
         "negative_identity_permutation_detected": true,
         "negative_zero_vision_positions_detected": true,
