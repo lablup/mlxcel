@@ -10,6 +10,14 @@ use crate::Gemma3nXlaAudioConfig;
 
 pub(super) struct SscpOutput {
     pub conv0_convolution: Val,
+    pub conv0_norm_sum_at_time: Val,
+    pub conv0_norm_cumulative_sum: Val,
+    pub conv0_norm_mean: Val,
+    pub conv0_norm_squared_at_time: Val,
+    pub conv0_norm_cumulative_squared: Val,
+    pub conv0_norm_variance: Val,
+    pub conv0_norm_stabilized_variance: Val,
+    pub conv0_norm_inverse_stddev: Val,
     pub conv0_norm: Val,
     pub conv0: Val,
     pub conv1_convolution: Val,
@@ -21,8 +29,28 @@ pub(super) struct SscpOutput {
 
 struct SscpConvStages {
     convolution: Val,
+    norm_sum_at_time: Val,
+    norm_cumulative_sum: Val,
+    norm_mean: Val,
+    norm_squared_at_time: Val,
+    norm_cumulative_squared: Val,
+    norm_variance: Val,
+    norm_stabilized_variance: Val,
+    norm_inverse_stddev: Val,
     norm: Val,
     activated: Val,
+}
+
+struct CumulativeGroupNormStages {
+    sum_at_time: Val,
+    cumulative_sum: Val,
+    mean: Val,
+    squared_at_time: Val,
+    cumulative_squared: Val,
+    variance: Val,
+    stabilized_variance: Val,
+    inverse_stddev: Val,
+    output: Val,
 }
 
 pub(super) struct ConformerStages {
@@ -33,7 +61,12 @@ pub(super) struct ConformerStages {
     pub final_norm: Val,
 }
 
-fn cumulative_group_norm(b: &mut Builder, x: &Val, weight: &Val, eps: f32) -> Val {
+fn cumulative_group_norm(
+    b: &mut Builder,
+    x: &Val,
+    weight: &Val,
+    eps: f32,
+) -> CumulativeGroupNormStages {
     let batch = x.ty.shape[0];
     let time = x.ty.shape[1];
     let frequency = x.ty.shape[2];
@@ -51,8 +84,8 @@ fn cumulative_group_norm(b: &mut Builder, x: &Val, weight: &Val, eps: f32) -> Va
     let count = b.multiply(&count, &width);
     let count = b.reshape(&count, vec![1, time, 1, 1]);
     let count = b.broadcast(&count, &[0, 1, 2, 3], vec![batch, time, 1, 1]);
-    let mean = b.divide(&cumulative_sum, &count);
-    let mean = b.broadcast(&mean, &[0, 1, 2, 3], x.ty.shape.clone());
+    let mean_at_time = b.divide(&cumulative_sum, &count);
+    let mean = b.broadcast(&mean_at_time, &[0, 1, 2, 3], x.ty.shape.clone());
     let centered = b.subtract(x, &mean);
 
     let squared = b.multiply(&centered, &centered);
@@ -62,13 +95,24 @@ fn cumulative_group_norm(b: &mut Builder, x: &Val, weight: &Val, eps: f32) -> Va
     let cumulative_squared = mlx_cuda_cumsum_time_f32(b, &squared_at_time);
     let variance = b.divide(&cumulative_squared, &count);
     let epsilon = super::gemma3n_audio_math::scalar_like(b, eps, &variance);
-    let variance = b.add(&variance, &epsilon);
-    let inverse = b.rsqrt(&variance);
-    let inverse = b.broadcast(&inverse, &[0, 1, 2, 3], x.ty.shape.clone());
+    let stabilized_variance = b.add(&variance, &epsilon);
+    let inverse_stddev = b.rsqrt(&stabilized_variance);
+    let inverse = b.broadcast(&inverse_stddev, &[0, 1, 2, 3], x.ty.shape.clone());
     let normalized = b.multiply(&centered, &inverse);
     let weight = b.broadcast(weight, &[3], x.ty.shape.clone());
     let weighted = b.multiply(&normalized, &weight);
-    round_bf16(b, &weighted)
+    let output = round_bf16(b, &weighted);
+    CumulativeGroupNormStages {
+        sum_at_time,
+        cumulative_sum,
+        mean: mean_at_time,
+        squared_at_time,
+        cumulative_squared,
+        variance,
+        stabilized_variance,
+        inverse_stddev,
+        output,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -93,11 +137,19 @@ fn sscp_conv(
         b.convolution_f32_accumulate(&padded, &weight, &stride, &[(0, 0), (0, 0)], groups);
     let convolved = round_bf16(b, &convolved);
     let normalized = cumulative_group_norm(b, &convolved, norm, eps);
-    let activated = relu(b, &normalized);
+    let activated = relu(b, &normalized.output);
     let activated = round_bf16(b, &activated);
     SscpConvStages {
         convolution: convolved,
-        norm: normalized,
+        norm_sum_at_time: normalized.sum_at_time,
+        norm_cumulative_sum: normalized.cumulative_sum,
+        norm_mean: normalized.mean,
+        norm_squared_at_time: normalized.squared_at_time,
+        norm_cumulative_squared: normalized.cumulative_squared,
+        norm_variance: normalized.variance,
+        norm_stabilized_variance: normalized.stabilized_variance,
+        norm_inverse_stddev: normalized.inverse_stddev,
+        norm: normalized.output,
         activated,
     }
 }
@@ -185,6 +237,14 @@ pub(super) fn subsample_with_stages(
     );
     SscpOutput {
         conv0_convolution: conv0.convolution,
+        conv0_norm_sum_at_time: conv0.norm_sum_at_time,
+        conv0_norm_cumulative_sum: conv0.norm_cumulative_sum,
+        conv0_norm_mean: conv0.norm_mean,
+        conv0_norm_squared_at_time: conv0.norm_squared_at_time,
+        conv0_norm_cumulative_squared: conv0.norm_cumulative_squared,
+        conv0_norm_variance: conv0.norm_variance,
+        conv0_norm_stabilized_variance: conv0.norm_stabilized_variance,
+        conv0_norm_inverse_stddev: conv0.norm_inverse_stddev,
         conv0_norm: conv0.norm,
         conv0: conv0.activated,
         conv1_convolution: conv1.convolution,

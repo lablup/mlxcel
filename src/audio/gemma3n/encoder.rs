@@ -69,6 +69,26 @@ struct CumulativeGroupNorm {
     eps: f32,
 }
 
+struct CumulativeGroupNormStages {
+    output: UniquePtr<MlxArray>,
+    #[cfg(feature = "xla-diagnostics")]
+    sum_at_time: UniquePtr<MlxArray>,
+    #[cfg(feature = "xla-diagnostics")]
+    cumulative_sum: UniquePtr<MlxArray>,
+    #[cfg(feature = "xla-diagnostics")]
+    mean: UniquePtr<MlxArray>,
+    #[cfg(feature = "xla-diagnostics")]
+    squared_at_time: UniquePtr<MlxArray>,
+    #[cfg(feature = "xla-diagnostics")]
+    cumulative_squared: UniquePtr<MlxArray>,
+    #[cfg(feature = "xla-diagnostics")]
+    variance: UniquePtr<MlxArray>,
+    #[cfg(feature = "xla-diagnostics")]
+    stabilized_variance: UniquePtr<MlxArray>,
+    #[cfg(feature = "xla-diagnostics")]
+    inverse_stddev: UniquePtr<MlxArray>,
+}
+
 impl CumulativeGroupNorm {
     fn from_weights(
         weights: &WeightMap,
@@ -85,6 +105,10 @@ impl CumulativeGroupNorm {
     /// Input and output are `[B, T, F, C]`. Statistics are float32 and are
     /// cumulative over time after reducing both frequency and channels.
     fn forward(&self, hidden_states: &MlxArray) -> UniquePtr<MlxArray> {
+        self.forward_stages(hidden_states).output
+    }
+
+    fn forward_stages(&self, hidden_states: &MlxArray) -> CumulativeGroupNormStages {
         let input_dtype = mlxcel_core::array_dtype(hidden_states);
         let x = mlxcel_core::astype(hidden_states, mlxcel_core::dtype::FLOAT32);
         let sum_at_time = mlxcel_core::sum_axis(&mlxcel_core::sum_axis(&x, 3, true), 2, true);
@@ -108,10 +132,30 @@ impl CumulativeGroupNorm {
         let cumulative_squared = mlxcel_core::cumsum(&squared_at_time, 1, false, true);
         let variance = mlxcel_core::divide(&cumulative_squared, &safe_count);
         let eps = mlxcel_core::full_f32(&[1], self.eps, mlxcel_core::dtype::FLOAT32);
-        let inverse_stddev = mlxcel_core::rsqrt(&mlxcel_core::add(&variance, &eps));
+        let stabilized_variance = mlxcel_core::add(&variance, &eps);
+        let inverse_stddev = mlxcel_core::rsqrt(&stabilized_variance);
         let normalized = mlxcel_core::multiply(&centered, &inverse_stddev);
         let normalized = mlxcel_core::multiply(&normalized, &self.weight);
-        mlxcel_core::astype(&normalized, input_dtype)
+        let output = mlxcel_core::astype(&normalized, input_dtype);
+        CumulativeGroupNormStages {
+            output,
+            #[cfg(feature = "xla-diagnostics")]
+            sum_at_time,
+            #[cfg(feature = "xla-diagnostics")]
+            cumulative_sum,
+            #[cfg(feature = "xla-diagnostics")]
+            mean: cumulative_mean,
+            #[cfg(feature = "xla-diagnostics")]
+            squared_at_time,
+            #[cfg(feature = "xla-diagnostics")]
+            cumulative_squared,
+            #[cfg(feature = "xla-diagnostics")]
+            variance,
+            #[cfg(feature = "xla-diagnostics")]
+            stabilized_variance,
+            #[cfg(feature = "xla-diagnostics")]
+            inverse_stddev,
+        }
     }
 }
 
@@ -126,6 +170,14 @@ struct SscpConvBlock {
 #[cfg(feature = "xla-diagnostics")]
 struct SscpConvDiagnosticStages {
     convolution: UniquePtr<MlxArray>,
+    norm_sum_at_time: UniquePtr<MlxArray>,
+    norm_cumulative_sum: UniquePtr<MlxArray>,
+    norm_mean: UniquePtr<MlxArray>,
+    norm_squared_at_time: UniquePtr<MlxArray>,
+    norm_cumulative_squared: UniquePtr<MlxArray>,
+    norm_variance: UniquePtr<MlxArray>,
+    norm_stabilized_variance: UniquePtr<MlxArray>,
+    norm_inverse_stddev: UniquePtr<MlxArray>,
     norm: UniquePtr<MlxArray>,
     activated: UniquePtr<MlxArray>,
 }
@@ -196,11 +248,19 @@ impl SscpConvBlock {
     #[cfg(feature = "xla-diagnostics")]
     fn forward_with_diagnostics(&self, x: &MlxArray) -> Result<SscpConvDiagnosticStages, String> {
         let convolution = self.convolution(x)?;
-        let norm = self.norm.forward(&convolution);
-        let activated = mlxcel_core::relu(&norm);
+        let norm = self.norm.forward_stages(&convolution);
+        let activated = mlxcel_core::relu(&norm.output);
         Ok(SscpConvDiagnosticStages {
             convolution,
-            norm,
+            norm_sum_at_time: norm.sum_at_time,
+            norm_cumulative_sum: norm.cumulative_sum,
+            norm_mean: norm.mean,
+            norm_squared_at_time: norm.squared_at_time,
+            norm_cumulative_squared: norm.cumulative_squared,
+            norm_variance: norm.variance,
+            norm_stabilized_variance: norm.stabilized_variance,
+            norm_inverse_stddev: norm.inverse_stddev,
+            norm: norm.output,
             activated,
         })
     }
@@ -639,6 +699,14 @@ pub struct Gemma3nAudioEncoder {
 #[cfg(feature = "xla-diagnostics")]
 pub(super) struct Gemma3nAudioEncoderDiagnosticStages {
     pub sscp_conv_0_convolution: UniquePtr<MlxArray>,
+    pub sscp_conv_0_norm_sum_at_time: UniquePtr<MlxArray>,
+    pub sscp_conv_0_norm_cumulative_sum: UniquePtr<MlxArray>,
+    pub sscp_conv_0_norm_mean: UniquePtr<MlxArray>,
+    pub sscp_conv_0_norm_squared_at_time: UniquePtr<MlxArray>,
+    pub sscp_conv_0_norm_cumulative_squared: UniquePtr<MlxArray>,
+    pub sscp_conv_0_norm_variance: UniquePtr<MlxArray>,
+    pub sscp_conv_0_norm_stabilized_variance: UniquePtr<MlxArray>,
+    pub sscp_conv_0_norm_inverse_stddev: UniquePtr<MlxArray>,
     pub sscp_conv_0_norm: UniquePtr<MlxArray>,
     pub sscp_conv_0: UniquePtr<MlxArray>,
     pub sscp_conv_1_convolution: UniquePtr<MlxArray>,
@@ -826,6 +894,14 @@ impl Gemma3nAudioEncoder {
             invalid,
             Gemma3nAudioEncoderDiagnosticStages {
                 sscp_conv_0_convolution: subsample.conv0.convolution,
+                sscp_conv_0_norm_sum_at_time: subsample.conv0.norm_sum_at_time,
+                sscp_conv_0_norm_cumulative_sum: subsample.conv0.norm_cumulative_sum,
+                sscp_conv_0_norm_mean: subsample.conv0.norm_mean,
+                sscp_conv_0_norm_squared_at_time: subsample.conv0.norm_squared_at_time,
+                sscp_conv_0_norm_cumulative_squared: subsample.conv0.norm_cumulative_squared,
+                sscp_conv_0_norm_variance: subsample.conv0.norm_variance,
+                sscp_conv_0_norm_stabilized_variance: subsample.conv0.norm_stabilized_variance,
+                sscp_conv_0_norm_inverse_stddev: subsample.conv0.norm_inverse_stddev,
                 sscp_conv_0_norm: subsample.conv0.norm,
                 sscp_conv_0: subsample.conv0.activated,
                 sscp_conv_1_convolution: subsample.conv1.convolution,

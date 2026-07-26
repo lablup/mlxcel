@@ -329,6 +329,38 @@ fn main() -> Result<(), String> {
             "sscp_conv_0_convolution",
             mlx.sscp_conv_0_convolution.as_slice(),
         ),
+        (
+            "sscp_conv_0_norm_sum_at_time",
+            mlx.sscp_conv_0_norm_sum_at_time.as_slice(),
+        ),
+        (
+            "sscp_conv_0_norm_cumulative_sum",
+            mlx.sscp_conv_0_norm_cumulative_sum.as_slice(),
+        ),
+        (
+            "sscp_conv_0_norm_mean",
+            mlx.sscp_conv_0_norm_mean.as_slice(),
+        ),
+        (
+            "sscp_conv_0_norm_squared_at_time",
+            mlx.sscp_conv_0_norm_squared_at_time.as_slice(),
+        ),
+        (
+            "sscp_conv_0_norm_cumulative_squared",
+            mlx.sscp_conv_0_norm_cumulative_squared.as_slice(),
+        ),
+        (
+            "sscp_conv_0_norm_variance",
+            mlx.sscp_conv_0_norm_variance.as_slice(),
+        ),
+        (
+            "sscp_conv_0_norm_stabilized_variance",
+            mlx.sscp_conv_0_norm_stabilized_variance.as_slice(),
+        ),
+        (
+            "sscp_conv_0_norm_inverse_stddev",
+            mlx.sscp_conv_0_norm_inverse_stddev.as_slice(),
+        ),
         ("sscp_conv_0_norm", mlx.sscp_conv_0_norm.as_slice()),
         ("sscp_conv_0", mlx.sscp_conv_0.as_slice()),
         (

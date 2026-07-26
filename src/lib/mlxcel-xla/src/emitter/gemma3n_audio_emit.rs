@@ -89,6 +89,32 @@ fn audio_encoder(
 ) -> (Val, Val, Val) {
     let subsampled = subsample_with_stages(b, args, audio);
     trace.push("sscp_conv_0_convolution", &subsampled.conv0_convolution);
+    trace.push(
+        "sscp_conv_0_norm_sum_at_time",
+        &subsampled.conv0_norm_sum_at_time,
+    );
+    trace.push(
+        "sscp_conv_0_norm_cumulative_sum",
+        &subsampled.conv0_norm_cumulative_sum,
+    );
+    trace.push("sscp_conv_0_norm_mean", &subsampled.conv0_norm_mean);
+    trace.push(
+        "sscp_conv_0_norm_squared_at_time",
+        &subsampled.conv0_norm_squared_at_time,
+    );
+    trace.push(
+        "sscp_conv_0_norm_cumulative_squared",
+        &subsampled.conv0_norm_cumulative_squared,
+    );
+    trace.push("sscp_conv_0_norm_variance", &subsampled.conv0_norm_variance);
+    trace.push(
+        "sscp_conv_0_norm_stabilized_variance",
+        &subsampled.conv0_norm_stabilized_variance,
+    );
+    trace.push(
+        "sscp_conv_0_norm_inverse_stddev",
+        &subsampled.conv0_norm_inverse_stddev,
+    );
     trace.push("sscp_conv_0_norm", &subsampled.conv0_norm);
     trace.push("sscp_conv_0", &subsampled.conv0);
     trace.push("sscp_conv_1_convolution", &subsampled.conv1_convolution);
@@ -320,6 +346,14 @@ fn build_encode(
     #[cfg(feature = "diagnostics")]
     let diagnostics = [
         "sscp_conv_0_convolution",
+        "sscp_conv_0_norm_sum_at_time",
+        "sscp_conv_0_norm_cumulative_sum",
+        "sscp_conv_0_norm_mean",
+        "sscp_conv_0_norm_squared_at_time",
+        "sscp_conv_0_norm_cumulative_squared",
+        "sscp_conv_0_norm_variance",
+        "sscp_conv_0_norm_stabilized_variance",
+        "sscp_conv_0_norm_inverse_stddev",
         "sscp_conv_0_norm",
         "sscp_conv_0",
         "sscp_conv_1_convolution",

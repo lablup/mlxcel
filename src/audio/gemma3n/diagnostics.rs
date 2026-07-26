@@ -26,6 +26,14 @@ use crate::models::gemma3n::{Gemma3nAudioEmbedder, ModelArgs, TextConfig};
 #[derive(Debug, Clone)]
 pub struct Gemma3nAudioMlxDiagnosticOutput {
     pub sscp_conv_0_convolution: Vec<f32>,
+    pub sscp_conv_0_norm_sum_at_time: Vec<f32>,
+    pub sscp_conv_0_norm_cumulative_sum: Vec<f32>,
+    pub sscp_conv_0_norm_mean: Vec<f32>,
+    pub sscp_conv_0_norm_squared_at_time: Vec<f32>,
+    pub sscp_conv_0_norm_cumulative_squared: Vec<f32>,
+    pub sscp_conv_0_norm_variance: Vec<f32>,
+    pub sscp_conv_0_norm_stabilized_variance: Vec<f32>,
+    pub sscp_conv_0_norm_inverse_stddev: Vec<f32>,
     pub sscp_conv_0_norm: Vec<f32>,
     pub sscp_conv_0: Vec<f32>,
     pub sscp_conv_1_convolution: Vec<f32>,
@@ -324,6 +332,20 @@ pub fn run_gemma3n_audio_mlx_diagnostics(
 
     Ok(Gemma3nAudioMlxDiagnosticOutput {
         sscp_conv_0_convolution: array_f32(&encoder_stages.sscp_conv_0_convolution),
+        sscp_conv_0_norm_sum_at_time: array_f32(&encoder_stages.sscp_conv_0_norm_sum_at_time),
+        sscp_conv_0_norm_cumulative_sum: array_f32(&encoder_stages.sscp_conv_0_norm_cumulative_sum),
+        sscp_conv_0_norm_mean: array_f32(&encoder_stages.sscp_conv_0_norm_mean),
+        sscp_conv_0_norm_squared_at_time: array_f32(
+            &encoder_stages.sscp_conv_0_norm_squared_at_time,
+        ),
+        sscp_conv_0_norm_cumulative_squared: array_f32(
+            &encoder_stages.sscp_conv_0_norm_cumulative_squared,
+        ),
+        sscp_conv_0_norm_variance: array_f32(&encoder_stages.sscp_conv_0_norm_variance),
+        sscp_conv_0_norm_stabilized_variance: array_f32(
+            &encoder_stages.sscp_conv_0_norm_stabilized_variance,
+        ),
+        sscp_conv_0_norm_inverse_stddev: array_f32(&encoder_stages.sscp_conv_0_norm_inverse_stddev),
         sscp_conv_0_norm: array_f32(&encoder_stages.sscp_conv_0_norm),
         sscp_conv_0: array_f32(&encoder_stages.sscp_conv_0),
         sscp_conv_1_convolution: array_f32(&encoder_stages.sscp_conv_1_convolution),

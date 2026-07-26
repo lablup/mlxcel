@@ -652,6 +652,14 @@ impl Gemma3nAudioIreeRuntime {
         #[cfg(feature = "diagnostics")]
         let diagnostic_shapes = [
             "sscp_conv_0_convolution",
+            "sscp_conv_0_norm_sum_at_time",
+            "sscp_conv_0_norm_cumulative_sum",
+            "sscp_conv_0_norm_mean",
+            "sscp_conv_0_norm_squared_at_time",
+            "sscp_conv_0_norm_cumulative_squared",
+            "sscp_conv_0_norm_variance",
+            "sscp_conv_0_norm_stabilized_variance",
+            "sscp_conv_0_norm_inverse_stddev",
             "sscp_conv_0_norm",
             "sscp_conv_0",
             "sscp_conv_1_convolution",
