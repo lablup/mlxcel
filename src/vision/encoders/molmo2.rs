@@ -417,6 +417,15 @@ pub(crate) struct ImageProjectorMLP {
     w3: Linear,
 }
 
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+struct ImageProjectorDiagnostics {
+    gate_linear: UniquePtr<MlxArray>,
+    gate_activation: UniquePtr<MlxArray>,
+    up_linear: UniquePtr<MlxArray>,
+    product: UniquePtr<MlxArray>,
+    output: UniquePtr<MlxArray>,
+}
+
 impl ImageProjectorMLP {
     pub(crate) fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         // silu(w1(x)) * w3(x) → w2(...)
@@ -425,6 +434,37 @@ impl ImageProjectorMLP {
         let up = self.w3.forward(x);
         let h = mlxcel_core::multiply(&gate, &up);
         self.w2.forward(&h)
+    }
+
+    #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+    fn forward_diagnostics(
+        &self,
+        x: &MlxArray,
+    ) -> (UniquePtr<MlxArray>, ImageProjectorDiagnostics) {
+        let gate_linear = self.w1.forward(x);
+        let gate_activation = mlxcel_core::silu(&gate_linear);
+        let up_linear = self.w3.forward(x);
+        let product = mlxcel_core::multiply(&gate_activation, &up_linear);
+        let output = self.w2.forward(&product);
+        let projector_width = mlxcel_core::array_shape(&gate_linear)
+            .last()
+            .copied()
+            .expect("Molmo2 projector gate must have a feature dimension");
+        let output_width = mlxcel_core::array_shape(&output)
+            .last()
+            .copied()
+            .expect("Molmo2 projector output must have a feature dimension");
+        let captured_output = mlxcel_core::reshape(&output, &[-1, output_width]);
+        (
+            output,
+            ImageProjectorDiagnostics {
+                gate_linear: mlxcel_core::reshape(&gate_linear, &[-1, projector_width]),
+                gate_activation: mlxcel_core::reshape(&gate_activation, &[-1, projector_width]),
+                up_linear: mlxcel_core::reshape(&up_linear, &[-1, projector_width]),
+                product: mlxcel_core::reshape(&product, &[-1, projector_width]),
+                output: captured_output,
+            },
+        )
     }
 
     pub(crate) fn from_weights(weights: &WeightMap, prefix: &str) -> Result<Self, String> {
@@ -678,21 +718,21 @@ impl Molmo2VisionModel {
         #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
         let pooling_output = CAPTURE.then(|| mlxcel_core::reshape(&pooled, &[-1, pooled_dim]));
 
-        // Project through SwiGLU MLP
+        // Project through SwiGLU MLP.
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+        let (projected, projector_capture) = if CAPTURE {
+            let (projected, diagnostics) = self.image_projector.forward_diagnostics(&pooled);
+            (projected, Some(diagnostics))
+        } else {
+            (self.image_projector.forward(&pooled), None)
+        };
+        #[cfg(not(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu")))]
         let projected = self.image_projector.forward(&pooled);
 
         // Flatten to [total_valid_tokens, output_dim]
         let proj_shape = mlxcel_core::array_shape(&projected);
         let out_dim = proj_shape[proj_shape.len() - 1];
         let projected = mlxcel_core::reshape(&projected, &[-1, out_dim]);
-        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
-        let projector_output = CAPTURE.then(|| {
-            mlxcel_core::copy(
-                projected
-                    .as_ref()
-                    .expect("Molmo2 projected features must be materialized"),
-            )
-        });
 
         // Filter valid tokens: valid_token = any(valid, axis=-1)
         // sum valid along pool_size axis, then check > 0
@@ -725,6 +765,8 @@ impl Molmo2VisionModel {
         #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
         if CAPTURE {
             let encode = _encode_capture.expect("Molmo2 encode capture must exist");
+            let projector =
+                projector_capture.expect("Molmo2 projector diagnostics must be captured");
             let mut stages = vec![
                 Molmo2VisionDiagnosticTensor {
                     name: "vit.patch_embedding".to_string(),
@@ -771,8 +813,24 @@ impl Molmo2VisionModel {
                     tensor: pooling_output.expect("Molmo2 pool output capture must exist"),
                 },
                 Molmo2VisionDiagnosticTensor {
+                    name: "projector.w1".to_string(),
+                    tensor: projector.gate_linear,
+                },
+                Molmo2VisionDiagnosticTensor {
+                    name: "projector.silu".to_string(),
+                    tensor: projector.gate_activation,
+                },
+                Molmo2VisionDiagnosticTensor {
+                    name: "projector.w3".to_string(),
+                    tensor: projector.up_linear,
+                },
+                Molmo2VisionDiagnosticTensor {
+                    name: "projector.product".to_string(),
+                    tensor: projector.product,
+                },
+                Molmo2VisionDiagnosticTensor {
                     name: "projector.output_all".to_string(),
-                    tensor: projector_output.expect("Molmo2 projector capture must exist"),
+                    tensor: projector.output,
                 },
             ]);
             return (active_projected, Some(Molmo2VisionDiagnostics { stages }));

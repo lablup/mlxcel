@@ -433,11 +433,11 @@ fn emit_molmo2_vision_inner(config: &Molmo2VisionConfig, diagnostics: bool) -> S
     let w1 = args.take();
     let w2 = args.take();
     let w3 = args.take();
-    let gate = linear(&mut builder, &pool.pooled, &w1, None);
-    let gate = silu(&mut builder, &gate);
-    let up = linear(&mut builder, &pool.pooled, &w3, None);
-    let projected = builder.multiply(&gate, &up);
-    let projected = linear(&mut builder, &projected, &w2, None);
+    let gate_linear = linear(&mut builder, &pool.pooled, &w1, None);
+    let gate_activation = silu(&mut builder, &gate_linear);
+    let up_linear = linear(&mut builder, &pool.pooled, &w3, None);
+    let projector_product = builder.multiply(&gate_activation, &up_linear);
+    let projected = linear(&mut builder, &projector_product, &w2, None);
     assert_eq!(
         args.cursor,
         specs.len(),
@@ -457,6 +457,10 @@ fn emit_molmo2_vision_inner(config: &Molmo2VisionConfig, diagnostics: bool) -> S
             pool.counts,
             pool.query,
             pool.pooled,
+            gate_linear,
+            gate_activation,
+            up_linear,
+            projector_product,
             projected,
         ]);
         outputs
@@ -564,6 +568,16 @@ mod tests {
         );
         assert!(diagnostics.contains("tensor<2xf32>"));
         assert!(diagnostics.contains("tensor<2x10xf32>"));
+        let return_values = diagnostics
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("return "))
+            .and_then(|line| line.split_once(" : ").map(|(values, _)| values))
+            .expect("Molmo2 diagnostic graph must return named stage values");
+        assert_eq!(
+            return_values.split(',').count(),
+            16,
+            "diagnostics must include w1, SiLU, w3, and product before projector output"
+        );
     }
 
     #[test]

@@ -616,6 +616,26 @@ fn diagnostic_stage_specs(
             active_shape: vec![groups, config.pool_hidden],
         },
         Molmo2DiagnosticStageSpec {
+            name: "projector.w1".to_string(),
+            static_shape: vec![config.static_pool_groups, config.projector_intermediate],
+            active_shape: vec![groups, config.projector_intermediate],
+        },
+        Molmo2DiagnosticStageSpec {
+            name: "projector.silu".to_string(),
+            static_shape: vec![config.static_pool_groups, config.projector_intermediate],
+            active_shape: vec![groups, config.projector_intermediate],
+        },
+        Molmo2DiagnosticStageSpec {
+            name: "projector.w3".to_string(),
+            static_shape: vec![config.static_pool_groups, config.projector_intermediate],
+            active_shape: vec![groups, config.projector_intermediate],
+        },
+        Molmo2DiagnosticStageSpec {
+            name: "projector.product".to_string(),
+            static_shape: vec![config.static_pool_groups, config.projector_intermediate],
+            active_shape: vec![groups, config.projector_intermediate],
+        },
+        Molmo2DiagnosticStageSpec {
             name: "projector.output_all".to_string(),
             static_shape: vec![config.static_pool_groups, config.text_hidden],
             active_shape: vec![groups, config.text_hidden],
@@ -641,7 +661,7 @@ impl IreeMolmo2VisionDiagnosticProjector {
             &config,
             &mlir,
             "molmo2-vision-diagnostics",
-            Some("first-divergence-v1"),
+            Some("first-divergence-v2-projector-stages"),
         )?;
         Ok(Self { module, config })
     }
