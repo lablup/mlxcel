@@ -131,6 +131,34 @@ struct Diff {
     max_abs: f64,
     rms: f64,
     max_index: usize,
+    max_bf16_ulp: u32,
+    non_bf16_values: usize,
+    over_one_bf16_ulp: usize,
+}
+
+fn bf16_bits(value: f32) -> Option<u16> {
+    let bits = value.to_bits();
+    (bits & 0xffff == 0).then_some((bits >> 16) as u16)
+}
+
+fn ordered_bf16(bits: u16) -> i32 {
+    if bits & 0x8000 == 0 {
+        0x8000 + i32::from(bits)
+    } else {
+        0x8000 - i32::from(bits & 0x7fff)
+    }
+}
+
+fn bf16_ulp_distance(left: f32, right: f32) -> Option<u32> {
+    let left = ordered_bf16(bf16_bits(left)?);
+    let right = ordered_bf16(bf16_bits(right)?);
+    Some(left.abs_diff(right))
+}
+
+fn display_bf16_bits(value: f32) -> String {
+    bf16_bits(value)
+        .map(|bits| format!("0x{bits:04x}"))
+        .unwrap_or_else(|| "not-bf16".to_string())
 }
 
 fn compare(name: &str, reference: &[f32], actual: &[f32]) -> Result<Diff, String> {
@@ -144,12 +172,22 @@ fn compare(name: &str, reference: &[f32], actual: &[f32]) -> Result<Diff, String
     let mut squared = 0.0f64;
     let mut max_abs = 0.0f64;
     let mut max_index = 0usize;
+    let mut max_bf16_ulp = 0u32;
+    let mut non_bf16_values = 0usize;
+    let mut over_one_bf16_ulp = 0usize;
     for (index, (reference, actual)) in reference.iter().zip(actual).enumerate() {
         let difference = f64::from(*actual) - f64::from(*reference);
         squared += difference * difference;
         if difference.abs() > max_abs {
             max_abs = difference.abs();
             max_index = index;
+        }
+        match bf16_ulp_distance(*reference, *actual) {
+            Some(distance) => {
+                max_bf16_ulp = max_bf16_ulp.max(distance);
+                over_one_bf16_ulp += usize::from(distance > 1);
+            }
+            None => non_bf16_values += 1,
         }
     }
     let rms = (squared / reference.len().max(1) as f64).sqrt();
@@ -161,8 +199,16 @@ fn compare(name: &str, reference: &[f32], actual: &[f32]) -> Result<Diff, String
         reference.len().saturating_sub(1),
         max_index,
     ];
+    let max_reference_bits = display_bf16_bits(reference[max_index]);
+    let max_actual_bits = display_bf16_bits(actual[max_index]);
+    let max_pair_ulp = bf16_ulp_distance(reference[max_index], actual[max_index]);
     eprintln!(
-        "gemma3n-audio-reference: stage={name} max_abs={max_abs:.9e} rms={rms:.9e} max_index={max_index}"
+        "gemma3n-audio-reference: stage={name} max_abs={max_abs:.9e} rms={rms:.9e} \
+         max_index={max_index} max_pair_mlx={:.9e} max_pair_iree={:.9e} \
+         max_pair_mlx_bf16={max_reference_bits} max_pair_iree_bf16={max_actual_bits} \
+         max_pair_bf16_ulp={max_pair_ulp:?} max_bf16_ulp={max_bf16_ulp} \
+         non_bf16_values={non_bf16_values} over_one_bf16_ulp={over_one_bf16_ulp}",
+        reference[max_index], actual[max_index]
     );
     for index in probes {
         eprintln!(
@@ -176,6 +222,9 @@ fn compare(name: &str, reference: &[f32], actual: &[f32]) -> Result<Diff, String
         max_abs,
         rms,
         max_index,
+        max_bf16_ulp,
+        non_bf16_values,
+        over_one_bf16_ulp,
     })
 }
 
@@ -276,12 +325,43 @@ fn main() -> Result<(), String> {
         .find(|(_, diff)| diff.max_abs > 5e-3 || diff.rms > 5e-4);
     match first {
         Some((index, diff)) => Err(format!(
-            "first divergent stage={} max_abs={:.9e} rms={:.9e} max_index={}",
-            names[index], diff.max_abs, diff.rms, diff.max_index
+            "first divergent stage={} max_abs={:.9e} rms={:.9e} max_index={} \
+             max_bf16_ulp={} non_bf16_values={} over_one_bf16_ulp={}",
+            names[index],
+            diff.max_abs,
+            diff.rms,
+            diff.max_index,
+            diff.max_bf16_ulp,
+            diff.non_bf16_values,
+            diff.over_one_bf16_ulp,
         )),
         None => {
             println!("Gemma3n audio-only MLX↔IREE intermediate gate PASS");
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bf16_ulp_distance_handles_sign_zero_and_one_unit_steps() {
+        assert_eq!(bf16_ulp_distance(0.0, -0.0), Some(0));
+        assert_eq!(bf16_ulp_distance(128.0, 129.0), Some(1));
+        assert_eq!(bf16_ulp_distance(-128.0, -129.0), Some(1));
+        assert_eq!(bf16_ulp_distance(128.0, 130.0), Some(2));
+        assert_eq!(bf16_ulp_distance(1.0, 1.003), None);
+    }
+
+    #[test]
+    fn compare_keeps_absolute_failure_data_and_bf16_drift_data_separate() {
+        let diff = compare("fixture", &[128.0, -128.0], &[129.0, -130.0]).unwrap();
+        assert_eq!(diff.max_abs, 2.0);
+        assert_eq!(diff.max_index, 1);
+        assert_eq!(diff.max_bf16_ulp, 2);
+        assert_eq!(diff.non_bf16_values, 0);
+        assert_eq!(diff.over_one_bf16_ulp, 1);
     }
 }
