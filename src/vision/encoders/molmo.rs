@@ -38,6 +38,17 @@ use mlxcel_core::layers::{LayerNorm, Linear, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
+/// Materialization boundaries reported by the pinned Molmo host diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MolmoHostVisionDiagnosticStage {
+    PatchEmbeddingStarted,
+    PatchEmbeddingCompleted,
+    SelectedLayerStarted(usize),
+    SelectedLayerCompleted(usize),
+    ProjectorStarted,
+    ProjectorCompleted,
+}
+
 /// Static configuration for the Molmo v1 vision tower.
 #[derive(Debug, Clone)]
 pub struct MolmoVisionConfig {
@@ -294,7 +305,8 @@ impl MolmoVisionTransformer {
     fn forward_internal(
         &self,
         x: &MlxArray,
-        capture_patch_embedding: bool,
+        selected_layers: &[usize],
+        mut diagnostic_progress: Option<&mut dyn FnMut(MolmoHostVisionDiagnosticStage)>,
     ) -> (Vec<UniquePtr<MlxArray>>, Option<UniquePtr<MlxArray>>) {
         // x: [B, num_patch, n_pixels]. Pad last dim up to intermediate_size if
         // the processor produced a narrower patch (quantization padding).
@@ -317,8 +329,17 @@ impl MolmoVisionTransformer {
         };
 
         let x = self.patch_embedding.forward(&x);
-        let patch_embedding =
-            capture_patch_embedding.then(|| mlxcel_core::copy(x.as_ref().unwrap()));
+        let patch_embedding = diagnostic_progress.as_mut().map(|progress| {
+            progress(MolmoHostVisionDiagnosticStage::PatchEmbeddingStarted);
+            let patch_embedding = mlxcel_core::copy(x.as_ref().unwrap());
+            mlxcel_core::eval(
+                patch_embedding
+                    .as_ref()
+                    .expect("diagnostic patch embedding must not be null"),
+            );
+            progress(MolmoHostVisionDiagnosticStage::PatchEmbeddingCompleted);
+            patch_embedding
+        });
         let bsz = mlxcel_core::array_shape(&x)[0];
 
         // Prepend class embedding: broadcast [emb] -> [B, 1, emb].
@@ -331,24 +352,75 @@ impl MolmoVisionTransformer {
         let x = self.add_pos_emb(&x);
         let mut x = self.pre_ln.forward(&x);
 
-        let mut hidden_states = Vec::with_capacity(self.blocks.len());
-        for block in &self.blocks {
-            x = block.forward(&x);
-            hidden_states.push(mlxcel_core::copy(&x));
+        let mut selected_hidden_states = (0..selected_layers.len())
+            .map(|_| None)
+            .collect::<Vec<Option<UniquePtr<MlxArray>>>>();
+        if let (Some(progress), Some(first_layer)) = (
+            diagnostic_progress.as_mut(),
+            selected_layers.iter().copied().min(),
+        ) {
+            progress(MolmoHostVisionDiagnosticStage::SelectedLayerStarted(
+                first_layer,
+            ));
         }
-        (hidden_states, patch_embedding)
+        for (layer, block) in self.blocks.iter().enumerate() {
+            x = block.forward(&x);
+            if selected_layers.contains(&layer) {
+                if let Some(progress) = diagnostic_progress.as_mut() {
+                    mlxcel_core::eval(&x);
+                    progress(MolmoHostVisionDiagnosticStage::SelectedLayerCompleted(
+                        layer,
+                    ));
+                    if let Some(next_layer) = selected_layers
+                        .iter()
+                        .copied()
+                        .filter(|&selected_layer| selected_layer > layer)
+                        .min()
+                    {
+                        progress(MolmoHostVisionDiagnosticStage::SelectedLayerStarted(
+                            next_layer,
+                        ));
+                    }
+                }
+                for (slot, &selected_layer) in selected_layers.iter().enumerate() {
+                    if selected_layer == layer {
+                        selected_hidden_states[slot] = Some(mlxcel_core::copy(&x));
+                    }
+                }
+            }
+        }
+        let selected_hidden_states = selected_hidden_states
+            .into_iter()
+            .zip(selected_layers)
+            .map(|(state, layer)| {
+                state.unwrap_or_else(|| {
+                    panic!(
+                        "selected Molmo ViT layer {layer} was not evaluated; loaded depth is {}",
+                        self.blocks.len()
+                    )
+                })
+            })
+            .collect();
+        (selected_hidden_states, patch_embedding)
     }
 
-    fn forward(&self, x: &MlxArray) -> Vec<UniquePtr<MlxArray>> {
-        self.forward_internal(x, false).0
+    fn forward_selected(
+        &self,
+        x: &MlxArray,
+        selected_layers: &[usize],
+    ) -> Vec<UniquePtr<MlxArray>> {
+        self.forward_internal(x, selected_layers, None).0
     }
 
     #[cfg(any(feature = "xla-diagnostics", feature = "xla-reference-diagnostics"))]
-    fn forward_with_patch_embedding(
+    fn forward_selected_with_diagnostics(
         &self,
         x: &MlxArray,
+        selected_layers: &[usize],
+        diagnostic_progress: &mut dyn FnMut(MolmoHostVisionDiagnosticStage),
     ) -> (Vec<UniquePtr<MlxArray>>, UniquePtr<MlxArray>) {
-        let (hidden_states, patch_embedding) = self.forward_internal(x, true);
+        let (hidden_states, patch_embedding) =
+            self.forward_internal(x, selected_layers, Some(diagnostic_progress));
         (
             hidden_states,
             patch_embedding.expect("diagnostic patch embedding was requested"),
@@ -449,12 +521,13 @@ impl MolmoVisionModel {
     fn encode_image_internal(
         &self,
         images: &MlxArray,
-        capture_diagnostics: bool,
+        diagnostic_progress: &mut Option<&mut dyn FnMut(MolmoHostVisionDiagnosticStage)>,
     ) -> (
         UniquePtr<MlxArray>,
         Option<UniquePtr<MlxArray>>,
         Vec<UniquePtr<MlxArray>>,
     ) {
+        let capture_diagnostics = diagnostic_progress.is_some();
         let shape = mlxcel_core::array_shape(images);
         let b = shape[0];
         let t = shape[1];
@@ -481,34 +554,43 @@ impl MolmoVisionModel {
         #[cfg(any(feature = "xla-diagnostics", feature = "xla-reference-diagnostics"))]
         let (hidden_states, patch_embeddings) = if capture_diagnostics {
             let (hidden_states, patch_embeddings) =
-                self.image_vit.forward_with_patch_embedding(&flat);
+                self.image_vit.forward_selected_with_diagnostics(
+                    &flat,
+                    &self.vit_layers,
+                    diagnostic_progress
+                        .as_mut()
+                        .map(|progress| &mut **progress)
+                        .expect("diagnostic progress callback must be present"),
+                );
             (hidden_states, Some(patch_embeddings))
         } else {
-            (self.image_vit.forward(&flat), None)
+            (
+                self.image_vit.forward_selected(&flat, &self.vit_layers),
+                None,
+            )
         };
         #[cfg(not(any(feature = "xla-diagnostics", feature = "xla-reference-diagnostics")))]
         let (hidden_states, patch_embeddings) = {
             debug_assert!(!capture_diagnostics);
-            (self.image_vit.forward(&flat), None)
+            (
+                self.image_vit.forward_selected(&flat, &self.vit_layers),
+                None,
+            )
         };
         let selected_hidden_states = if capture_diagnostics {
-            self.vit_layers
+            hidden_states
                 .iter()
-                .map(|&layer| mlxcel_core::copy(hidden_states[layer].as_ref().unwrap()))
+                .map(|state| mlxcel_core::copy(state.as_ref().unwrap()))
                 .collect()
         } else {
             Vec::new()
         };
 
         // Select and concat the requested ViT layers along the feature dim.
-        let mut image_features =
-            mlxcel_core::copy(hidden_states[self.vit_layers[0]].as_ref().unwrap());
-        for &layer in &self.vit_layers[1..] {
-            image_features = mlxcel_core::concatenate(
-                &image_features,
-                hidden_states[layer].as_ref().unwrap(),
-                -1,
-            );
+        let mut image_features = mlxcel_core::copy(hidden_states[0].as_ref().unwrap());
+        for hidden_state in &hidden_states[1..] {
+            image_features =
+                mlxcel_core::concatenate(&image_features, hidden_state.as_ref().unwrap(), -1);
         }
 
         // Strip cls token (num_prefix_tokens == 1).
@@ -584,15 +666,16 @@ impl MolmoVisionModel {
         &self,
         images: &MlxArray,
         image_masks: &MlxArray,
-        capture_diagnostics: bool,
+        mut diagnostic_progress: Option<&mut dyn FnMut(MolmoHostVisionDiagnosticStage)>,
     ) -> (UniquePtr<MlxArray>, Option<MolmoHostVisionDiagnostics>) {
         let shape = mlxcel_core::array_shape(images);
         let batch_size = shape[0];
         let num_image = shape[1];
+        let capture_diagnostics = diagnostic_progress.is_some();
 
         let cfg = &self.config;
         let (mut image_features, patch_embeddings, selected_hidden_states) =
-            self.encode_image_internal(images, capture_diagnostics);
+            self.encode_image_internal(images, &mut diagnostic_progress);
         image_features = self.apply_pad_embed(image_features, image_masks);
 
         let feat_dim = mlxcel_core::array_shape(&image_features);
@@ -653,6 +736,11 @@ impl MolmoVisionModel {
 
         // Project to the text hidden dim.
         let projected = self.image_projector.forward(&pooled);
+        if let Some(progress) = diagnostic_progress.as_mut() {
+            progress(MolmoHostVisionDiagnosticStage::ProjectorStarted);
+            mlxcel_core::eval(&projected);
+            progress(MolmoHostVisionDiagnosticStage::ProjectorCompleted);
+        }
         let diagnostics = capture_diagnostics.then(|| MolmoHostVisionDiagnostics {
             patch_embeddings: patch_embeddings.expect("diagnostic patch embedding was requested"),
             selected_hidden_states,
@@ -662,7 +750,7 @@ impl MolmoVisionModel {
     }
 
     pub fn forward(&self, images: &MlxArray, image_masks: &MlxArray) -> UniquePtr<MlxArray> {
-        self.forward_internal(images, image_masks, false).0
+        self.forward_internal(images, image_masks, None).0
     }
 
     #[cfg(any(feature = "xla-diagnostics", feature = "xla-reference-diagnostics"))]
@@ -671,8 +759,10 @@ impl MolmoVisionModel {
         &self,
         images: &MlxArray,
         image_masks: &MlxArray,
+        diagnostic_progress: &mut dyn FnMut(MolmoHostVisionDiagnosticStage),
     ) -> (UniquePtr<MlxArray>, MolmoHostVisionDiagnostics) {
-        let (projected, diagnostics) = self.forward_internal(images, image_masks, true);
+        let (projected, diagnostics) =
+            self.forward_internal(images, image_masks, Some(diagnostic_progress));
         (
             projected,
             diagnostics.expect("Molmo host diagnostics were requested"),

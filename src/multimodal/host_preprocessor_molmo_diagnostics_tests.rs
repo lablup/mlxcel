@@ -194,7 +194,27 @@ fn pinned_molmo_eager_mlx_matches_iree_boundaries() {
     let MolmoVision::Host(vision) = &host.vision else {
         panic!("host preprocessor must retain the eager MLX vision tower");
     };
-    let (_, host_diagnostics) = vision.forward_with_diagnostics(&pixels, &masks);
+    let (_, host_diagnostics) =
+        vision.forward_with_diagnostics(&pixels, &masks, &mut |stage| match stage {
+            crate::vision::encoders::molmo::MolmoHostVisionDiagnosticStage::PatchEmbeddingStarted => {
+                progress("eager MLX patch embedding materialization started");
+            }
+            crate::vision::encoders::molmo::MolmoHostVisionDiagnosticStage::PatchEmbeddingCompleted => {
+                progress("eager MLX patch embedding materialized");
+            }
+            crate::vision::encoders::molmo::MolmoHostVisionDiagnosticStage::SelectedLayerStarted(layer) => {
+                progress(&format!("eager MLX selected ViT layer {layer} materialization started"));
+            }
+            crate::vision::encoders::molmo::MolmoHostVisionDiagnosticStage::SelectedLayerCompleted(layer) => {
+                progress(&format!("eager MLX selected ViT layer {layer} materialized"));
+            }
+            crate::vision::encoders::molmo::MolmoHostVisionDiagnosticStage::ProjectorStarted => {
+                progress("eager MLX pool/projector materialization started");
+            }
+            crate::vision::encoders::molmo::MolmoHostVisionDiagnosticStage::ProjectorCompleted => {
+                progress("eager MLX pool/projector materialized");
+            }
+        });
     let host_patch = mlx_f32(host_diagnostics.patch_embeddings.as_ref().unwrap());
     let host_selected = host_diagnostics
         .selected_hidden_states
