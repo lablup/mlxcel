@@ -138,7 +138,10 @@ fn silu(builder: &mut Builder, value: &Val) -> Val {
     let negative = builder.negate(value);
     let exponential = builder.exponential(&negative);
     let denominator = builder.add(&one, &exponential);
-    builder.divide(value, &denominator)
+    // Preserve MLX's `x * sigmoid(x)` operation order. Reassociating this as
+    // `x / (1 + exp(-x))` changes F32 rounding before the wide w2 projection.
+    let sigmoid = builder.divide(&one, &denominator);
+    builder.multiply(value, &sigmoid)
 }
 
 fn softmax_last(builder: &mut Builder, scores: &Val) -> Val {
@@ -561,5 +564,49 @@ mod tests {
         );
         assert!(diagnostics.contains("tensor<2xf32>"));
         assert!(diagnostics.contains("tensor<2x10xf32>"));
+    }
+
+    #[test]
+    fn projector_silu_preserves_mlx_sigmoid_multiply_rounding_order() {
+        let mut builder = Builder::new();
+        let input = Builder::arg(0, Ty::f32(vec![3]));
+        let output = silu(&mut builder, &input);
+        let body = builder.body();
+        let lines = body.lines().collect::<Vec<_>>();
+        let broadcast = lines
+            .iter()
+            .find(|line| line.contains("stablehlo.broadcast_in_dim"))
+            .expect("SiLU must broadcast one");
+        let one = broadcast
+            .split_once(" = ")
+            .map(|(name, _)| name.trim())
+            .expect("broadcast result");
+        let divide = lines
+            .iter()
+            .find(|line| line.contains("stablehlo.divide"))
+            .expect("SiLU must compute sigmoid");
+        assert!(
+            divide.contains(&format!("stablehlo.divide {one}, ")),
+            "SiLU must divide one by the denominator instead of reassociating x / denominator: {divide}"
+        );
+        let sigmoid = divide
+            .split_once(" = ")
+            .map(|(name, _)| name.trim())
+            .expect("sigmoid result");
+        let multiply = lines
+            .iter()
+            .find(|line| line.contains("stablehlo.multiply"))
+            .expect("SiLU must multiply x by sigmoid");
+        assert!(
+            multiply.contains(&format!("stablehlo.multiply %arg0, {sigmoid}")),
+            "SiLU must preserve MLX x * sigmoid(x) order: {multiply}"
+        );
+        assert_eq!(
+            output.name,
+            multiply
+                .split_once(" = ")
+                .map(|(name, _)| name.trim())
+                .expect("SiLU output")
+        );
     }
 }
