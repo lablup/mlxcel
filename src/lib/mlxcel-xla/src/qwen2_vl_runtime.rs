@@ -35,8 +35,8 @@ use crate::aux::{
 };
 use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 use crate::emitter::{
-    Qwen2VlConfig, Qwen2VlHostInputs, QwenVlVisionVariant, emit_qwen2_vl,
-    prepare_qwen2_vl_host_inputs,
+    Qwen2VlConfig, Qwen2VlHostInputs, QwenVlVisionVariant, emit_qwen2_vl_with,
+    prepare_qwen2_vl_host_inputs, resolve_precision_checked,
 };
 #[cfg(feature = "diagnostics")]
 use crate::emitter::{Qwen25VlVisionDiagnosticLayout, emit_qwen2_5_vl_diagnostics};
@@ -83,6 +83,15 @@ pub struct Qwen25VlVisionDiagnostics {
     pub post_window_layer: Vec<f32>,
     pub full_layer_indices: Vec<usize>,
     pub post_full_layers: Vec<Vec<f32>>,
+    pub final_interval_layer_indices: Vec<usize>,
+    pub post_final_interval_layers: Vec<Vec<f32>>,
+    pub target_full_layer_index: usize,
+    pub target_full_layer_input: Vec<f32>,
+    pub target_full_layer_norm1: Vec<f32>,
+    pub target_full_layer_attention: Vec<f32>,
+    pub target_full_layer_post_attention_residual: Vec<f32>,
+    pub target_full_layer_norm2: Vec<f32>,
+    pub target_full_layer_mlp: Vec<f32>,
     pub merger_window_ordered: Vec<f32>,
     pub restored_projection: Vec<f32>,
     pub patch_tokens: usize,
@@ -610,7 +619,8 @@ fn compile_and_load(
     processor_identity: &str,
     patch_bucket: usize,
 ) -> Result<IreeAuxiliaryModule, String> {
-    let mlir = emit_qwen2_vl(config, patch_bucket);
+    let precision = resolve_precision_checked(device)?;
+    let mlir = emit_qwen2_vl_with(config, patch_bucket, precision);
     let compiler = iree_compile_bin()?;
     if !compiler.is_file() {
         return Err(format!("iree-compile not found at {}", compiler.display()));
@@ -623,7 +633,7 @@ fn compile_and_load(
     let contract = AuxiliaryArtifactContract::new_legacy_unqualified(
         ENTRY_NAME,
         format!(
-            "{};{};checkpoint_schema_sha256={}",
+            "{};{};precision={precision:?};checkpoint_schema_sha256={}",
             config.fingerprint(patch_bucket),
             processor_identity,
             sha256_hex(checkpoint_schema.as_bytes())
@@ -650,7 +660,8 @@ fn compile_and_load_diagnostics(
     processor_identity: &str,
     patch_bucket: usize,
 ) -> Result<(IreeAuxiliaryModule, Qwen25VlVisionDiagnosticLayout), String> {
-    let (mlir, layout) = emit_qwen2_5_vl_diagnostics(config, patch_bucket)?;
+    let precision = resolve_precision_checked(device)?;
+    let (mlir, layout) = emit_qwen2_5_vl_diagnostics(config, patch_bucket, precision)?;
     let compiler = iree_compile_bin()?;
     if !compiler.is_file() {
         return Err(format!("iree-compile not found at {}", compiler.display()));
@@ -663,7 +674,7 @@ fn compile_and_load_diagnostics(
     let contract = AuxiliaryArtifactContract::new(
         ENTRY_NAME,
         format!(
-            "{};{};diagnostics=window-full-restoration;checkpoint_schema_sha256={}",
+            "{};{};precision={precision:?};diagnostics=window-full-restoration;checkpoint_schema_sha256={}",
             config.fingerprint(patch_bucket),
             processor_identity,
             sha256_hex(checkpoint_schema.as_bytes())
@@ -955,14 +966,14 @@ impl IreeQwen25VlDiagnosticProjector {
         let merger_shape = [plan.patch_bucket / merge_unit, self.config.text_hidden];
         let state_bytes = state_shape.iter().product::<usize>() * std::mem::size_of::<f32>();
         let merger_bytes = merger_shape.iter().product::<usize>() * std::mem::size_of::<f32>();
-        let full_layer_count = match &self.config.variant {
-            QwenVlVisionVariant::Qwen25 {
-                full_attention_blocks,
-                ..
-            } => full_attention_blocks.len(),
-            QwenVlVisionVariant::Qwen2 => 0,
-        };
-        let mut output_buffers = vec![vec![0u8; state_bytes]; 2 + full_layer_count];
+        let active = self.ensure_bucket(plan.patch_bucket)?;
+        let layout = active.layout.clone();
+        let full_layer_count = layout.full_layer_indices.len();
+        let final_interval_layer_count = layout.final_interval_layer_indices.len();
+        let block_substage_count = 6;
+        let state_output_count =
+            2 + full_layer_count + final_interval_layer_count + block_substage_count;
+        let mut output_buffers = vec![vec![0u8; state_bytes]; state_output_count];
         output_buffers.push(vec![0u8; merger_bytes]);
         let inputs = [
             AuxiliaryInput {
@@ -992,16 +1003,14 @@ impl IreeQwen25VlDiagnosticProjector {
             .map(|(index, bytes)| AuxiliaryOutput {
                 bytes,
                 dtype: AuxiliaryTensorDType::Float32,
-                shape: if index + 1 == 3 + full_layer_count {
+                shape: if index == state_output_count {
                     &merger_shape
                 } else {
                     &state_shape
                 },
             })
             .collect::<Vec<_>>();
-        let active = self.ensure_bucket(plan.patch_bucket)?;
         active.module.invoke(&inputs, &mut outputs)?;
-        let layout = active.layout.clone();
         let mut decoded = output_buffers
             .into_iter()
             .enumerate()
@@ -1013,7 +1022,7 @@ impl IreeQwen25VlDiagnosticProjector {
             .actual_patches
             .checked_mul(self.config.hidden)
             .ok_or_else(|| "Qwen2.5-VL diagnostic state size overflowed".to_string())?;
-        for state in decoded.iter_mut().take(2 + full_layer_count) {
+        for state in decoded.iter_mut().take(state_output_count) {
             state.truncate(actual_state_values);
         }
         let all_projected = decoded
@@ -1042,6 +1051,30 @@ impl IreeQwen25VlDiagnosticProjector {
         }
         let reordered_patch_embedding = decoded.remove(0);
         let post_window_layer = decoded.remove(0);
+        let post_full_layers = decoded.drain(..full_layer_count).collect::<Vec<_>>();
+        let post_final_interval_layers = decoded
+            .drain(..final_interval_layer_count)
+            .collect::<Vec<_>>();
+        let mut target_full_layer_substages = decoded.into_iter();
+        let target_full_layer_input = target_full_layer_substages
+            .next()
+            .expect("diagnostic target full layer input output");
+        let target_full_layer_norm1 = target_full_layer_substages
+            .next()
+            .expect("diagnostic target full layer norm1 output");
+        let target_full_layer_attention = target_full_layer_substages
+            .next()
+            .expect("diagnostic target full layer attention output");
+        let target_full_layer_post_attention_residual = target_full_layer_substages
+            .next()
+            .expect("diagnostic target full layer residual output");
+        let target_full_layer_norm2 = target_full_layer_substages
+            .next()
+            .expect("diagnostic target full layer norm2 output");
+        let target_full_layer_mlp = target_full_layer_substages
+            .next()
+            .expect("diagnostic target full layer MLP output");
+        debug_assert!(target_full_layer_substages.next().is_none());
         Ok(Qwen25VlVisionDiagnostics {
             window_index: plan.window_index,
             restore_indices: plan.restore_indices,
@@ -1053,7 +1086,16 @@ impl IreeQwen25VlDiagnosticProjector {
             window_layer_index: layout.window_layer_index,
             post_window_layer,
             full_layer_indices: layout.full_layer_indices,
-            post_full_layers: decoded,
+            post_full_layers,
+            final_interval_layer_indices: layout.final_interval_layer_indices,
+            post_final_interval_layers,
+            target_full_layer_index: layout.target_full_layer_index,
+            target_full_layer_input,
+            target_full_layer_norm1,
+            target_full_layer_attention,
+            target_full_layer_post_attention_residual,
+            target_full_layer_norm2,
+            target_full_layer_mlp,
             merger_window_ordered,
             restored_projection,
             patch_tokens: plan.actual_patches,

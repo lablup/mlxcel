@@ -24,7 +24,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::builder::{Builder, Ty, Val};
+use super::builder::{Builder, Precision, Ty, Val};
 use super::numeric_ops::{exact_gelu, layer_norm_2d as layer_norm, stable_softmax, tanh_gelu};
 
 /// Qualified flattened-patch capacities for the pinned Qwen2-VL image path.
@@ -886,8 +886,16 @@ fn encoder_layer(
 /// `attention_bias` are host-built from `grid_thw`/packed boundaries, keeping
 /// cross-image isolation explicit while preserving one finite static graph.
 pub(crate) fn emit_qwen2_vl(config: &Qwen2VlConfig, patch_bucket: usize) -> String {
+    emit_qwen2_vl_with(config, patch_bucket, Precision::F32)
+}
+
+pub(crate) fn emit_qwen2_vl_with(
+    config: &Qwen2VlConfig,
+    patch_bucket: usize,
+    precision: Precision,
+) -> String {
     if matches!(&config.variant, QwenVlVisionVariant::Qwen25 { .. }) {
-        return super::qwen2_5_vl::emit_qwen2_5_vl(config, patch_bucket);
+        return super::qwen2_5_vl::emit_qwen2_5_vl(config, patch_bucket, precision);
     }
     assert!(
         QWEN2_VL_PATCH_BUCKETS.contains(&patch_bucket),
@@ -895,7 +903,7 @@ pub(crate) fn emit_qwen2_vl(config: &Qwen2VlConfig, patch_bucket: usize) -> Stri
     );
     let specs = config.weight_specs();
     let mut args = Args::new(&specs);
-    let mut builder = Builder::new();
+    let mut builder = Builder::new().with_precision(precision);
     let patch_weight = args.take();
     let patch_width =
         config.channels * config.temporal_patch_size * config.patch_size * config.patch_size;
@@ -1071,22 +1079,53 @@ mod tests {
         assert_eq!(mlir.matches("chlo.erf").count(), 1);
     }
 
+    #[test]
+    fn qwen25_gpu_precision_demotes_contractions_but_keeps_sensitive_math_f32() {
+        let config = qwen25_config();
+        let f32 = emit_qwen2_vl_with(&config, 16, Precision::F32);
+        let f16 = emit_qwen2_vl_with(&config, 16, Precision::F16);
+        assert!(!f32.contains("xf16"));
+        assert!(f16.contains("xf16"), "f16 graph emitted no demotion");
+        for line in f16.lines().filter(|line| {
+            line.contains("stablehlo.dot_general")
+                || line.contains("stablehlo.exponential")
+                || line.contains("stablehlo.rsqrt")
+        }) {
+            if line.contains("stablehlo.dot_general") {
+                assert!(line.contains("f16>"), "matmul was not demoted: {line}");
+                assert!(
+                    line.ends_with("f32>"),
+                    "matmul must accumulate to f32: {line}"
+                );
+            } else {
+                assert!(
+                    !line.contains("f16"),
+                    "norm/softmax sensitive math was demoted: {line}"
+                );
+            }
+        }
+    }
+
     #[cfg(feature = "diagnostics")]
     #[test]
     fn qwen25_diagnostics_share_the_production_graph_and_expose_ordered_seams() {
         let config = qwen25_config();
         let production = emit_qwen2_vl(&config, 16);
         let (diagnostics, layout) =
-            crate::emitter::emit_qwen2_5_vl_diagnostics(&config, 16).unwrap();
+            crate::emitter::emit_qwen2_5_vl_diagnostics(&config, 16, Precision::F32).unwrap();
         assert_eq!(layout.window_layer_index, 0);
         assert_eq!(layout.full_layer_indices, vec![1]);
+        assert_eq!(layout.final_interval_layer_indices, vec![0, 1]);
+        assert_eq!(layout.target_full_layer_index, 1);
         assert_eq!(
             production.matches("stablehlo.dot_general").count(),
             diagnostics.matches("stablehlo.dot_general").count()
         );
-        assert!(diagnostics.contains(
-            "-> (tensor<16x1280xf32>, tensor<16x1280xf32>, tensor<16x1280xf32>, tensor<4x1536xf32>)"
-        ));
+        let result_signature = std::iter::repeat_n("tensor<16x1280xf32>", 11)
+            .chain(std::iter::once("tensor<4x1536xf32>"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert!(diagnostics.contains(&format!("-> ({result_signature})")));
         assert!(diagnostics.contains("return %"));
         assert!(diagnostics.contains("loc(\"window_attention.bias\")"));
         assert!(diagnostics.contains("loc(\"full_attention.bias\")"));

@@ -19,7 +19,7 @@
 //! static for one bucket while selecting the checkpoint-declared full
 //! attention layers during emission.
 
-use super::builder::{Builder, Ty, Val};
+use super::builder::{Builder, Precision, Ty, Val};
 use super::qwen2_vl::{
     QWEN2_VL_PATCH_BUCKETS, Qwen2VlConfig, Qwen2VlWeightSpec, QwenVlVisionVariant,
 };
@@ -29,6 +29,19 @@ use super::qwen2_vl::{
 pub(crate) struct Qwen25VlVisionDiagnosticLayout {
     pub(crate) window_layer_index: usize,
     pub(crate) full_layer_indices: Vec<usize>,
+    pub(crate) final_interval_layer_indices: Vec<usize>,
+    pub(crate) target_full_layer_index: usize,
+}
+
+#[cfg(feature = "diagnostics")]
+struct Qwen25VlBlockDiagnostics {
+    input: Val,
+    norm1: Val,
+    attention: Val,
+    post_attention_residual: Val,
+    norm2: Val,
+    mlp: Val,
+    output: Val,
 }
 
 struct Args {
@@ -244,9 +257,45 @@ fn encoder_layer(
     builder.add(&residual, &down)
 }
 
+#[cfg(feature = "diagnostics")]
+fn encoder_layer_with_diagnostics(
+    builder: &mut Builder,
+    hidden: &Val,
+    args: &mut Args,
+    config: &Qwen2VlConfig,
+    freqs: &Val,
+    attention_bias: &Val,
+) -> Qwen25VlBlockDiagnostics {
+    let norm1 = rms_norm(builder, hidden, &args.take(), config.layer_norm_eps);
+    let attention = attention(builder, &norm1, args, config, freqs, attention_bias);
+    let post_attention_residual = builder.add(hidden, &attention);
+    let norm2 = rms_norm(
+        builder,
+        &post_attention_residual,
+        &args.take(),
+        config.layer_norm_eps,
+    );
+    let gate = linear_2d(builder, &norm2, &args.take(), &args.take());
+    let gate = silu(builder, &gate);
+    let up = linear_2d(builder, &norm2, &args.take(), &args.take());
+    let activated = builder.multiply(&gate, &up);
+    let mlp = linear_2d(builder, &activated, &args.take(), &args.take());
+    let output = builder.add(&post_attention_residual, &mlp);
+    Qwen25VlBlockDiagnostics {
+        input: hidden.clone(),
+        norm1,
+        attention,
+        post_attention_residual,
+        norm2,
+        mlp,
+        output,
+    }
+}
+
 fn emit_qwen2_5_vl_inner(
     config: &Qwen2VlConfig,
     patch_bucket: usize,
+    precision: Precision,
     #[cfg(feature = "diagnostics")] diagnostic_layout: Option<&Qwen25VlVisionDiagnosticLayout>,
 ) -> String {
     assert!(
@@ -262,7 +311,7 @@ fn emit_qwen2_5_vl_inner(
     };
     let specs = config.weight_specs();
     let mut args = Args::new(&specs);
-    let mut builder = Builder::new();
+    let mut builder = Builder::new().with_precision(precision);
     let patch_weight = args.take();
     let patch_width =
         config.channels * config.temporal_patch_size * config.patch_size * config.patch_size;
@@ -287,13 +336,38 @@ fn emit_qwen2_5_vl_inner(
     let mut window_layer_state = None;
     #[cfg(feature = "diagnostics")]
     let mut full_layer_states = Vec::new();
+    #[cfg(feature = "diagnostics")]
+    let mut final_interval_layer_states = Vec::new();
+    #[cfg(feature = "diagnostics")]
+    let mut target_full_layer_state = None;
     for layer in 0..config.depth {
         let bias = if full_attention_blocks.contains(&layer) {
             &full_bias
         } else {
             &window_bias
         };
-        hidden = encoder_layer(&mut builder, &hidden, &mut args, config, &freqs, bias);
+        #[cfg(feature = "diagnostics")]
+        let is_target_full_layer =
+            diagnostic_layout.is_some_and(|layout| layer == layout.target_full_layer_index);
+        #[cfg(feature = "diagnostics")]
+        if is_target_full_layer {
+            let capture = encoder_layer_with_diagnostics(
+                &mut builder,
+                &hidden,
+                &mut args,
+                config,
+                &freqs,
+                bias,
+            );
+            hidden = capture.output.clone();
+            target_full_layer_state = Some(capture);
+        } else {
+            hidden = encoder_layer(&mut builder, &hidden, &mut args, config, &freqs, bias);
+        }
+        #[cfg(not(feature = "diagnostics"))]
+        {
+            hidden = encoder_layer(&mut builder, &hidden, &mut args, config, &freqs, bias);
+        }
         #[cfg(feature = "diagnostics")]
         if let Some(layout) = diagnostic_layout {
             if layer == layout.window_layer_index {
@@ -301,6 +375,9 @@ fn emit_qwen2_5_vl_inner(
             }
             if layout.full_layer_indices.contains(&layer) {
                 full_layer_states.push(hidden.clone());
+            }
+            if layout.final_interval_layer_indices.contains(&layer) {
+                final_interval_layer_states.push(hidden.clone());
             }
         }
     }
@@ -329,6 +406,21 @@ fn emit_qwen2_5_vl_inner(
             "diagnostics capture every configured full-attention layer"
         );
         outputs.extend(full_layer_states);
+        assert_eq!(
+            final_interval_layer_states.len(),
+            layout.final_interval_layer_indices.len(),
+            "diagnostics capture every layer after the penultimate full-attention boundary"
+        );
+        outputs.extend(final_interval_layer_states);
+        let target = target_full_layer_state.expect("diagnostics capture target full layer");
+        outputs.extend([
+            target.input,
+            target.norm1,
+            target.attention,
+            target.post_attention_residual,
+            target.norm2,
+            target.mlp,
+        ]);
         outputs.push(projected);
         let result_types = outputs
             .iter()
@@ -355,10 +447,15 @@ fn emit_qwen2_5_vl_inner(
     )
 }
 
-pub(super) fn emit_qwen2_5_vl(config: &Qwen2VlConfig, patch_bucket: usize) -> String {
+pub(super) fn emit_qwen2_5_vl(
+    config: &Qwen2VlConfig,
+    patch_bucket: usize,
+    precision: Precision,
+) -> String {
     emit_qwen2_5_vl_inner(
         config,
         patch_bucket,
+        precision,
         #[cfg(feature = "diagnostics")]
         None,
     )
@@ -368,6 +465,7 @@ pub(super) fn emit_qwen2_5_vl(config: &Qwen2VlConfig, patch_bucket: usize) -> St
 pub(crate) fn emit_qwen2_5_vl_diagnostics(
     config: &Qwen2VlConfig,
     patch_bucket: usize,
+    precision: Precision,
 ) -> Result<(String, Qwen25VlVisionDiagnosticLayout), String> {
     let QwenVlVisionVariant::Qwen25 {
         full_attention_blocks,
@@ -387,14 +485,25 @@ pub(crate) fn emit_qwen2_5_vl_diagnostics(
                 .to_string(),
         );
     }
+    let full_layer_indices = (0..config.depth)
+        .filter(|layer| full_attention_blocks.contains(layer))
+        .collect::<Vec<_>>();
+    let target_full_layer_index = *full_layer_indices
+        .last()
+        .expect("non-empty full-attention layers checked above");
+    let final_interval_start = full_layer_indices
+        .iter()
+        .rev()
+        .nth(1)
+        .map_or(0, |layer| layer + 1);
     let layout = Qwen25VlVisionDiagnosticLayout {
         window_layer_index,
-        full_layer_indices: (0..config.depth)
-            .filter(|layer| full_attention_blocks.contains(layer))
-            .collect(),
+        full_layer_indices,
+        final_interval_layer_indices: (final_interval_start..=target_full_layer_index).collect(),
+        target_full_layer_index,
     };
     Ok((
-        emit_qwen2_5_vl_inner(config, patch_bucket, Some(&layout)),
+        emit_qwen2_5_vl_inner(config, patch_bucket, precision, Some(&layout)),
         layout,
     ))
 }

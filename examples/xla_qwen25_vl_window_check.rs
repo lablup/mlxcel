@@ -44,6 +44,9 @@ struct Tolerance {
 struct ComparisonStats {
     max_absolute: f32,
     max_relative: f32,
+    actual_rms: f64,
+    expected_rms: f64,
+    error_rms: f64,
     failures: usize,
     non_finite: usize,
 }
@@ -149,9 +152,13 @@ fn comparison_stats(
     let mut stats = ComparisonStats {
         max_absolute: 0.0,
         max_relative: 0.0,
+        actual_rms: 0.0,
+        expected_rms: 0.0,
+        error_rms: 0.0,
         failures: 0,
         non_finite: 0,
     };
+    let mut finite = 0usize;
     for (&observed, &reference) in actual.iter().zip(expected) {
         if !observed.is_finite() || !reference.is_finite() {
             stats.failures += 1;
@@ -160,11 +167,21 @@ fn comparison_stats(
         }
         let absolute = (observed - reference).abs();
         let relative = absolute / reference.abs().max(f32::MIN_POSITIVE);
+        stats.actual_rms += f64::from(observed).powi(2);
+        stats.expected_rms += f64::from(reference).powi(2);
+        stats.error_rms += f64::from(observed - reference).powi(2);
+        finite += 1;
         stats.max_absolute = stats.max_absolute.max(absolute);
         stats.max_relative = stats.max_relative.max(relative);
         if absolute > tolerance.atol + tolerance.rtol * reference.abs() {
             stats.failures += 1;
         }
+    }
+    if finite > 0 {
+        let denominator = finite as f64;
+        stats.actual_rms = (stats.actual_rms / denominator).sqrt();
+        stats.expected_rms = (stats.expected_rms / denominator).sqrt();
+        stats.error_rms = (stats.error_rms / denominator).sqrt();
     }
     Ok(stats)
 }
@@ -185,6 +202,9 @@ fn compare_stage(
         "rtol": tolerance.rtol,
         "max_absolute": stats.max_absolute,
         "max_relative": stats.max_relative,
+        "actual_rms": stats.actual_rms,
+        "expected_rms": stats.expected_rms,
+        "error_rms": stats.error_rms,
         "failures": stats.failures,
         "non_finite": stats.non_finite,
         "passed": stats.failures == 0,
@@ -197,6 +217,28 @@ fn compare_stage(
             stats.failures, stats.max_absolute, stats.max_relative
         ))
     }
+}
+
+fn record_stage(
+    reports: &mut Vec<Value>,
+    failures: &mut Vec<String>,
+    stage: &str,
+    actual: &[f32],
+    expected: &[f32],
+    tolerance: Tolerance,
+) {
+    if let Err(error) = compare_stage(reports, stage, actual, expected, tolerance) {
+        failures.push(error);
+    }
+}
+
+fn emit_report(path: Option<&Path>, report: &Value) {
+    let rendered = serde_json::to_string_pretty(report).expect("serialize oracle report");
+    if let Some(path) = path {
+        fs::write(path, &rendered)
+            .unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+    }
+    println!("{rendered}");
 }
 
 fn vision_patch_shape(model: &Path, values: &[f32], grids: &[(i32, i32, i32)]) -> [i32; 2] {
@@ -351,20 +393,22 @@ fn main() {
     );
 
     let mut reports = Vec::new();
-    compare_stage(
+    let mut comparison_failures = Vec::new();
+    record_stage(
         &mut reports,
+        &mut comparison_failures,
         "vision.reordered_patch_embedding",
         &iree_vision.reordered_patch_embedding,
         &mlx_f32(&eager_vision.reordered_patch_embedding),
         tolerance,
-    )
-    .unwrap_or_else(|error| panic!("{error}"));
+    );
     assert_eq!(
         iree_vision.window_layer_index, eager_vision.window_layer_index,
         "representative window layer differs"
     );
-    compare_stage(
+    record_stage(
         &mut reports,
+        &mut comparison_failures,
         &format!(
             "vision.post_window_layer_{}",
             iree_vision.window_layer_index
@@ -372,8 +416,7 @@ fn main() {
         &iree_vision.post_window_layer,
         &mlx_f32(&eager_vision.post_window_layer),
         tolerance,
-    )
-    .unwrap_or_else(|error| panic!("{error}"));
+    );
     assert_eq!(
         iree_vision.full_layer_indices, eager_vision.full_layer_indices,
         "configured full-attention layers differ"
@@ -383,6 +426,20 @@ fn main() {
         eager_vision.post_full_layers.len(),
         "captured full-attention layer count differs"
     );
+    assert_eq!(
+        iree_vision.final_interval_layer_indices, eager_vision.final_interval_layer_indices,
+        "final diagnostic interval differs"
+    );
+    assert_eq!(
+        iree_vision.post_final_interval_layers.len(),
+        eager_vision.post_final_interval_layers.len(),
+        "captured final diagnostic interval count differs"
+    );
+    assert_eq!(
+        iree_vision.target_full_layer_index, eager_vision.target_full_layer_index,
+        "target full-attention layer differs"
+    );
+    let target_full_layer_index = iree_vision.target_full_layer_index;
     for (capture_index, (&layer, (actual, expected))) in iree_vision
         .full_layer_indices
         .iter()
@@ -393,32 +450,154 @@ fn main() {
                 .zip(&eager_vision.post_full_layers),
         )
         .enumerate()
+        .filter(|&(_, (&layer, _))| layer != target_full_layer_index)
     {
-        compare_stage(
+        record_stage(
             &mut reports,
+            &mut comparison_failures,
             &format!("vision.post_full_layer_{layer}_capture_{capture_index}"),
             actual,
             &mlx_f32(expected),
             tolerance,
-        )
-        .unwrap_or_else(|error| panic!("{error}"));
+        );
     }
-    compare_stage(
+    for (&layer, (actual, expected)) in iree_vision
+        .final_interval_layer_indices
+        .iter()
+        .zip(
+            iree_vision
+                .post_final_interval_layers
+                .iter()
+                .zip(&eager_vision.post_final_interval_layers),
+        )
+        .filter(|&(&layer, _)| layer != target_full_layer_index)
+    {
+        record_stage(
+            &mut reports,
+            &mut comparison_failures,
+            &format!("vision.post_layer_{layer}_final_interval"),
+            actual,
+            &mlx_f32(expected),
+            tolerance,
+        );
+    }
+    for (stage, actual, expected) in [
+        (
+            "input",
+            iree_vision.target_full_layer_input.as_slice(),
+            eager_vision
+                .target_full_layer_input
+                .as_ref()
+                .expect("eager target layer input"),
+        ),
+        (
+            "norm1",
+            iree_vision.target_full_layer_norm1.as_slice(),
+            eager_vision
+                .target_full_layer_norm1
+                .as_ref()
+                .expect("eager target layer norm1"),
+        ),
+        (
+            "attention",
+            iree_vision.target_full_layer_attention.as_slice(),
+            eager_vision
+                .target_full_layer_attention
+                .as_ref()
+                .expect("eager target layer attention"),
+        ),
+        (
+            "post_attention_residual",
+            iree_vision
+                .target_full_layer_post_attention_residual
+                .as_slice(),
+            eager_vision
+                .target_full_layer_post_attention_residual
+                .as_ref()
+                .expect("eager target layer post-attention residual"),
+        ),
+        (
+            "norm2",
+            iree_vision.target_full_layer_norm2.as_slice(),
+            eager_vision
+                .target_full_layer_norm2
+                .as_ref()
+                .expect("eager target layer norm2"),
+        ),
+        (
+            "mlp",
+            iree_vision.target_full_layer_mlp.as_slice(),
+            eager_vision
+                .target_full_layer_mlp
+                .as_ref()
+                .expect("eager target layer MLP"),
+        ),
+    ] {
+        record_stage(
+            &mut reports,
+            &mut comparison_failures,
+            &format!("vision.layer_{target_full_layer_index}.{stage}"),
+            actual,
+            &mlx_f32(expected),
+            tolerance,
+        );
+    }
+    let target_capture_index = iree_vision
+        .full_layer_indices
+        .iter()
+        .position(|&layer| layer == target_full_layer_index)
+        .expect("target full layer is present in configured captures");
+    record_stage(
         &mut reports,
+        &mut comparison_failures,
+        &format!("vision.post_full_layer_{target_full_layer_index}_capture_{target_capture_index}"),
+        &iree_vision.post_full_layers[target_capture_index],
+        &mlx_f32(&eager_vision.post_full_layers[target_capture_index]),
+        tolerance,
+    );
+    record_stage(
+        &mut reports,
+        &mut comparison_failures,
         "vision.merger_window_ordered",
         &iree_vision.merger_window_ordered,
         &mlx_f32(&eager_vision.merger_window_ordered),
         tolerance,
-    )
-    .unwrap_or_else(|error| panic!("{error}"));
-    compare_stage(
+    );
+    record_stage(
         &mut reports,
+        &mut comparison_failures,
         "vision.restored_projection",
         &iree_vision.restored_projection,
         &mlx_f32(&eager_vision.restored_projection),
         tolerance,
-    )
-    .unwrap_or_else(|error| panic!("{error}"));
+    );
+    if !comparison_failures.is_empty() {
+        let report = json!({
+            "schema": 2,
+            "model": model_path,
+            "images": image_paths,
+            "device": device,
+            "context_capacity": context_capacity,
+            "grid_thw": processor.grids,
+            "patch_tokens": iree_vision.patch_tokens,
+            "merged_tokens": iree_vision.merged_tokens,
+            "vision_hidden": iree_vision.vision_hidden,
+            "text_hidden": iree_vision.text_hidden,
+            "window_layer": iree_vision.window_layer_index,
+            "full_attention_layers": iree_vision.full_layer_indices,
+            "final_interval_layers": iree_vision.final_interval_layer_indices,
+            "target_full_layer": target_full_layer_index,
+            "failed_phase": "vision",
+            "failures": comparison_failures,
+            "comparisons": reports,
+            "passed": false,
+        });
+        emit_report(report_path.as_deref(), &report);
+        panic!(
+            "strict oracle vision comparison failed: {}",
+            report["failures"]
+        );
+    }
 
     let qwen2_full = iree_vision_capture(
         &mut iree_projector,
@@ -545,7 +724,7 @@ fn main() {
     .unwrap_or_else(|error| panic!("{error}"));
 
     let report = json!({
-        "schema": 1,
+        "schema": 2,
         "model": model_path,
         "images": image_paths,
         "device": device,
@@ -557,6 +736,8 @@ fn main() {
         "text_hidden": iree_vision.text_hidden,
         "window_layer": iree_vision.window_layer_index,
         "full_attention_layers": iree_vision.full_layer_indices,
+        "final_interval_layers": iree_vision.final_interval_layer_indices,
+        "target_full_layer": iree_vision.target_full_layer_index,
         "negative_qwen2_full_attention_detected": true,
         "negative_identity_permutation_detected": true,
         "negative_zero_vision_positions_detected": true,
@@ -564,12 +745,7 @@ fn main() {
         "comparisons": reports,
         "passed": true,
     });
-    let rendered = serde_json::to_string_pretty(&report).expect("serialize oracle report");
-    if let Some(path) = report_path {
-        fs::write(&path, &rendered)
-            .unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
-    }
-    println!("{rendered}");
+    emit_report(report_path.as_deref(), &report);
 }
 
 fn iree_vision_capture(

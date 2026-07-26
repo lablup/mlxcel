@@ -384,6 +384,16 @@ struct VisionBlock {
     mlp: VisionMLP,
 }
 
+#[cfg(feature = "xla-diagnostics")]
+struct Qwen25VLBlockDiagnostics {
+    input: UniquePtr<MlxArray>,
+    norm1: UniquePtr<MlxArray>,
+    attention: UniquePtr<MlxArray>,
+    post_attention_residual: UniquePtr<MlxArray>,
+    norm2: UniquePtr<MlxArray>,
+    mlp: UniquePtr<MlxArray>,
+}
+
 impl VisionBlock {
     fn from_weights(
         weights: &WeightMap,
@@ -412,6 +422,33 @@ impl VisionBlock {
         let normed = self.norm2.forward(&h);
         let mlp_out = self.mlp.forward(&normed);
         mlxcel_core::add(&h, &mlp_out)
+    }
+
+    #[cfg(feature = "xla-diagnostics")]
+    fn forward_with_diagnostics(
+        &self,
+        hidden_states: &MlxArray,
+        cu_seqlens: &[i32],
+        rotary_pos_emb: &MlxArray,
+    ) -> (UniquePtr<MlxArray>, Qwen25VLBlockDiagnostics) {
+        let input = mlxcel_core::copy(hidden_states);
+        let norm1 = self.norm1.forward(hidden_states);
+        let attention = self.attn.forward(&norm1, cu_seqlens, rotary_pos_emb);
+        let post_attention_residual = mlxcel_core::add(hidden_states, &attention);
+        let norm2 = self.norm2.forward(&post_attention_residual);
+        let mlp = self.mlp.forward(&norm2);
+        let output = mlxcel_core::add(&post_attention_residual, &mlp);
+        (
+            output,
+            Qwen25VLBlockDiagnostics {
+                input,
+                norm1,
+                attention,
+                post_attention_residual,
+                norm2,
+                mlp,
+            },
+        )
     }
 }
 
@@ -476,6 +513,15 @@ pub struct Qwen25VLVisionDiagnostics {
     pub post_window_layer: UniquePtr<MlxArray>,
     pub full_layer_indices: Vec<usize>,
     pub post_full_layers: Vec<UniquePtr<MlxArray>>,
+    pub final_interval_layer_indices: Vec<usize>,
+    pub post_final_interval_layers: Vec<UniquePtr<MlxArray>>,
+    pub target_full_layer_index: usize,
+    pub target_full_layer_input: UniquePtr<MlxArray>,
+    pub target_full_layer_norm1: UniquePtr<MlxArray>,
+    pub target_full_layer_attention: UniquePtr<MlxArray>,
+    pub target_full_layer_post_attention_residual: UniquePtr<MlxArray>,
+    pub target_full_layer_norm2: UniquePtr<MlxArray>,
+    pub target_full_layer_mlp: UniquePtr<MlxArray>,
     pub merger_window_ordered: UniquePtr<MlxArray>,
     pub restored_projection: UniquePtr<MlxArray>,
 }
@@ -795,13 +841,45 @@ impl Qwen25VLVisionEncoder {
         let mut post_window_layer = None;
         #[cfg(feature = "xla-diagnostics")]
         let mut post_full_layers = Vec::new();
+        #[cfg(feature = "xla-diagnostics")]
+        let full_layer_indices = (0..self.blocks.len())
+            .filter(|layer| self.fullatt_block_indexes.contains(layer))
+            .collect::<Vec<_>>();
+        #[cfg(feature = "xla-diagnostics")]
+        let target_full_layer_index = full_layer_indices.last().copied();
+        #[cfg(feature = "xla-diagnostics")]
+        let final_interval_start = full_layer_indices
+            .iter()
+            .rev()
+            .nth(1)
+            .map_or(0, |layer| layer + 1);
+        #[cfg(feature = "xla-diagnostics")]
+        let final_interval_layer_indices = target_full_layer_index
+            .map(|target| (final_interval_start..=target).collect::<Vec<_>>())
+            .unwrap_or_default();
+        #[cfg(feature = "xla-diagnostics")]
+        let mut post_final_interval_layers = Vec::new();
+        #[cfg(feature = "xla-diagnostics")]
+        let mut target_full_layer_state = None;
         for (layer_num, block) in self.blocks.iter().enumerate() {
             let cu_seqlens_now = if self.fullatt_block_indexes.contains(&layer_num) {
                 &cu_seqlens
             } else {
                 &cu_window_seqlens
             };
-            h = block.forward(&h, cu_seqlens_now, &rotary_pos_emb);
+            #[cfg(feature = "xla-diagnostics")]
+            if CAPTURE && Some(layer_num) == target_full_layer_index {
+                let (output, capture) =
+                    block.forward_with_diagnostics(&h, cu_seqlens_now, &rotary_pos_emb);
+                h = output;
+                target_full_layer_state = Some(capture);
+            } else {
+                h = block.forward(&h, cu_seqlens_now, &rotary_pos_emb);
+            }
+            #[cfg(not(feature = "xla-diagnostics"))]
+            {
+                h = block.forward(&h, cu_seqlens_now, &rotary_pos_emb);
+            }
             #[cfg(feature = "xla-diagnostics")]
             if CAPTURE {
                 if Some(layer_num) == window_layer_index {
@@ -812,6 +890,11 @@ impl Qwen25VLVisionEncoder {
                 if self.fullatt_block_indexes.contains(&layer_num) {
                     post_full_layers.push(mlxcel_core::copy(
                         h.as_ref().expect("Qwen2.5-VL full layer state"),
+                    ));
+                }
+                if final_interval_layer_indices.contains(&layer_num) {
+                    post_final_interval_layers.push(mlxcel_core::copy(
+                        h.as_ref().expect("Qwen2.5-VL final interval layer state"),
                     ));
                 }
             }
@@ -837,6 +920,10 @@ impl Qwen25VLVisionEncoder {
 
         #[cfg(feature = "xla-diagnostics")]
         if CAPTURE {
+            let target_full_layer_index =
+                target_full_layer_index.expect("Qwen2.5-VL diagnostics require a full layer");
+            let target_full_layer_state =
+                target_full_layer_state.expect("Qwen2.5-VL target full layer capture");
             let restored_projection =
                 mlxcel_core::copy(h.as_ref().expect("Qwen2.5-VL restored projection output"));
             let output = VisionEncoderOutput { hidden_states: h };
@@ -852,10 +939,18 @@ impl Qwen25VLVisionEncoder {
                     window_layer_index: window_layer_index
                         .expect("Qwen2.5-VL diagnostics require a window layer"),
                     post_window_layer: post_window_layer.expect("Qwen2.5-VL window layer capture"),
-                    full_layer_indices: (0..self.blocks.len())
-                        .filter(|layer| self.fullatt_block_indexes.contains(layer))
-                        .collect(),
+                    full_layer_indices,
                     post_full_layers,
+                    final_interval_layer_indices,
+                    post_final_interval_layers,
+                    target_full_layer_index,
+                    target_full_layer_input: target_full_layer_state.input,
+                    target_full_layer_norm1: target_full_layer_state.norm1,
+                    target_full_layer_attention: target_full_layer_state.attention,
+                    target_full_layer_post_attention_residual: target_full_layer_state
+                        .post_attention_residual,
+                    target_full_layer_norm2: target_full_layer_state.norm2,
+                    target_full_layer_mlp: target_full_layer_state.mlp,
                     merger_window_ordered: merger_window_ordered
                         .expect("Qwen2.5-VL merger capture"),
                     restored_projection,
