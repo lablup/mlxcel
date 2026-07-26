@@ -206,6 +206,107 @@ pub(super) fn rms_last_bf16(
     }
 }
 
+fn slice_axis(b: &mut Builder, x: &Val, axis: usize, start: usize, limit: usize) -> Val {
+    let ranges =
+        x.ty.shape
+            .iter()
+            .enumerate()
+            .map(|(current, &size)| {
+                if current == axis {
+                    (start, limit)
+                } else {
+                    (0, size)
+                }
+            })
+            .collect::<Vec<_>>();
+    b.slice(x, &ranges)
+}
+
+fn gather_axis(b: &mut Builder, x: &Val, axis: usize, indices: &[usize]) -> Val {
+    assert_eq!(indices.len(), x.ty.shape[axis]);
+    let mut permutation = vec![axis];
+    permutation.extend((0..x.ty.shape.len()).filter(|&current| current != axis));
+    let transposed = b.transpose(x, &permutation);
+    let width = transposed.ty.shape[0];
+    let remainder = transposed.ty.shape[1..].iter().product::<usize>();
+    let flattened = b.reshape(&transposed, vec![width, remainder]);
+    let indices = indices
+        .iter()
+        .map(|&index| i32::try_from(index).expect("static axis index must fit i32"))
+        .collect::<Vec<_>>();
+    let indices = b.const_tensor_i32(&indices, vec![width, 1]);
+    let gathered = b.gather(&flattened, &indices);
+    let gathered = b.reshape(&gathered, transposed.ty.shape);
+    let mut inverse = vec![0; permutation.len()];
+    for (transposed_axis, original_axis) in permutation.into_iter().enumerate() {
+        inverse[original_axis] = transposed_axis;
+    }
+    b.transpose(&gathered, &inverse)
+}
+
+/// Match the maintained MLX CUDA BF16 RMSNorm reduction for the released
+/// Gemma3n per-layer input width. CUDA assigns eight adjacent BF16 values to
+/// each of 32 lanes, accumulates their F32 squares serially, then broadcasts
+/// the warp sum through XOR shuffles (16, 8, 4, 2, 1).
+///
+/// Besides pinning the reference association order, spelling out the 32-lane
+/// tree avoids IREE v3.11 CUDA's `LLVMGPUVectorDistribute` failure on the
+/// otherwise generated 256-wide `stablehlo.reduce`.
+fn mlx_cuda_rms_sum_256(b: &mut Builder, x: &Val) -> Val {
+    const LANES: usize = 32;
+    const READS: usize = 8;
+
+    assert_eq!(x.ty.elt, "f32");
+    let axis = x.ty.shape.len() - 1;
+    assert_eq!(x.ty.shape[axis], LANES * READS);
+
+    let mut grouped_shape = x.ty.shape.clone();
+    grouped_shape[axis] = LANES;
+    grouped_shape.insert(axis + 1, READS);
+    let grouped = b.reshape(x, grouped_shape);
+    let first = slice_axis(b, &grouped, axis + 1, 0, 1);
+    let zero = b.const_f32(0.0);
+    let mut partial = b.broadcast(&zero, &[], first.ty.shape.clone());
+    for read in 0..READS {
+        let value = slice_axis(b, &grouped, axis + 1, read, read + 1);
+        let square = b.multiply(&value, &value);
+        partial = b.add(&partial, &square);
+    }
+
+    let mut lane_shape = x.ty.shape.clone();
+    lane_shape[axis] = LANES;
+    let mut partial = b.reshape(&partial, lane_shape);
+    for mask in [16, 8, 4, 2, 1] {
+        let shuffled_indices = (0..LANES).map(|lane| lane ^ mask).collect::<Vec<_>>();
+        let shuffled = gather_axis(b, &partial, axis, &shuffled_indices);
+        partial = b.add(&partial, &shuffled);
+    }
+
+    let reduced = slice_axis(b, &partial, axis, 0, 1);
+    let mut reduced_shape = x.ty.shape.clone();
+    reduced_shape.remove(axis);
+    b.reshape(&reduced, reduced_shape)
+}
+
+fn rms_last_bf16_mlx_cuda_256(b: &mut Builder, x: &Val, weight: &Val, eps: &Val) -> Val {
+    let axis = x.ty.shape.len() - 1;
+    let reduced_shape = x.ty.shape[..axis].to_vec();
+    let width = b.const_f32(256.0);
+    let width = b.broadcast(&width, &[], reduced_shape.clone());
+    let sum = mlx_cuda_rms_sum_256(b, x);
+    let mean = b.divide(&sum, &width);
+    let eps = b.broadcast(eps, &[], reduced_shape);
+    let stabilized = b.add(&mean, &eps);
+    let inverse = b.rsqrt(&stabilized);
+    let keep = (0..axis).collect::<Vec<_>>();
+    let inverse = b.broadcast(&inverse, &keep, x.ty.shape.clone());
+    let normalized = b.multiply(x, &inverse);
+    let normalized = round_bf16(b, &normalized);
+    let weight = b.broadcast(weight, &[axis], x.ty.shape.clone());
+    let weighted = b.multiply(&normalized, &weight);
+    round_bf16(b, &weighted)
+}
+
 /// Build the dense per-layer embedding stream from post-scale model
 /// embeddings. Token prefill and audio prefill must use this exact shared
 /// sequence: the BF16 rounding boundaries are part of Gemma3n's numerical
@@ -249,7 +350,11 @@ pub(super) fn dense_ple_input_head(
     let projected = b.multiply(&projected, &model_scale);
     let projected = round_bf16(b, &projected);
     let projected = b.reshape(&projected, vec![rows, c.n_layers, c.hidden_per_layer_input]);
-    let projected = rms_last_bf16(b, &projected, Some(projection_norm_weight), eps, zero);
+    let projected = if c.hidden_per_layer_input == 256 {
+        rms_last_bf16_mlx_cuda_256(b, &projected, projection_norm_weight, eps)
+    } else {
+        rms_last_bf16(b, &projected, Some(projection_norm_weight), eps, zero)
+    };
     let token_ple = b.reshape(&token_ple, vec![rows, c.n_layers, c.hidden_per_layer_input]);
     let inv = b.broadcast(
         inv_sqrt2,

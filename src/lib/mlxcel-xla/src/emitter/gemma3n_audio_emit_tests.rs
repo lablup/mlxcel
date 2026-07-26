@@ -26,6 +26,14 @@ fn text() -> Gemma3nConfig {
     .unwrap()
 }
 
+fn released_merge_shape() -> Gemma3nConfig {
+    let mut text = text();
+    text.context_capacity = 256;
+    text.n_layers = 35;
+    text.hidden_per_layer_input = 256;
+    text
+}
+
 #[test]
 fn split_audio_graphs_preserve_stage_and_weight_boundaries() {
     let text = text();
@@ -91,6 +99,30 @@ fn split_audio_graphs_preserve_stage_and_weight_boundaries() {
             .map(|stage| stage.name.as_str())
             .collect::<Vec<_>>(),
         ["merged_embeddings", "dense_ple"]
+    );
+}
+
+#[test]
+fn merge_ple_pins_released_cuda_rms_reduction_tree() {
+    let (merge, _) = emit_gemma3n_audio_merge_ple(
+        &released_merge_shape(),
+        &Gemma3nXlaAudioConfig::default(),
+        1,
+        Precision::Bf16,
+    )
+    .unwrap();
+
+    assert!(
+        !merge.contains("stablehlo.reduce("),
+        "audio merge-PLE must not emit the IREE v3.11 CUDA-blocking reduction"
+    );
+    assert!(
+        merge.contains("tensor<256x35x32x8xf32>"),
+        "the released dense-PLE RMSNorm must group eight BF16 values per CUDA lane"
+    );
+    assert!(
+        merge.matches("\"stablehlo.gather\"").count() >= 5,
+        "the released dense-PLE RMSNorm must pin the five 32-lane XOR stages"
     );
 }
 
@@ -284,4 +316,19 @@ fn iree_compiles_split_real_audio_artifacts() {
     );
     compile(&compiler, &device, &stem, "encode", encode);
     compile(&compiler, &device, &stem, "merge-ple", merge);
+}
+
+#[test]
+#[ignore = "requires the version-matched IREE v3.11 CUDA compiler"]
+fn iree_v311_cuda_compiles_released_audio_merge_ple() {
+    let compiler = std::env::var_os("MLXCEL_XLA_IREE_COMPILE").expect("IREE compiler");
+    let (merge, _) = emit_gemma3n_audio_merge_ple(
+        &released_merge_shape(),
+        &Gemma3nXlaAudioConfig::default(),
+        1,
+        Precision::Bf16,
+    )
+    .unwrap();
+    let stem = format!("mlxcel-gemma3n-audio-merge-cuda-{}", std::process::id());
+    compile(&compiler, "cuda", &stem, "merge-ple", merge);
 }
