@@ -30,6 +30,7 @@ pub(crate) struct Qwen25VlVisionDiagnosticLayout {
     pub(crate) window_layer_index: usize,
     pub(crate) full_layer_indices: Vec<usize>,
     pub(crate) final_interval_layer_indices: Vec<usize>,
+    pub(crate) pre_probe_layer_indices: Vec<usize>,
     pub(crate) substage_probe_layer_index: usize,
 }
 
@@ -56,6 +57,17 @@ fn substage_probe_layer(full_layer_indices: &[usize]) -> Option<usize> {
         .nth(1)
         .or_else(|| full_layer_indices.last())
         .copied()
+}
+
+#[cfg(feature = "diagnostics")]
+fn pre_probe_layers(full_layer_indices: &[usize], probe: usize) -> Vec<usize> {
+    full_layer_indices
+        .iter()
+        .copied()
+        .take_while(|&layer| layer < probe)
+        .last()
+        .map(|previous_full| ((previous_full + 1)..probe).collect())
+        .unwrap_or_default()
 }
 
 struct Qwen25VlAttentionValues {
@@ -373,6 +385,8 @@ fn emit_qwen2_5_vl_inner(
     #[cfg(feature = "diagnostics")]
     let mut final_interval_layer_states = Vec::new();
     #[cfg(feature = "diagnostics")]
+    let mut pre_probe_layer_states = Vec::new();
+    #[cfg(feature = "diagnostics")]
     let mut substage_probe_layer_state = None;
     for layer in 0..config.depth {
         let bias = if full_attention_blocks.contains(&layer) {
@@ -413,6 +427,9 @@ fn emit_qwen2_5_vl_inner(
             if layout.final_interval_layer_indices.contains(&layer) {
                 final_interval_layer_states.push(hidden.clone());
             }
+            if layout.pre_probe_layer_indices.contains(&layer) {
+                pre_probe_layer_states.push(hidden.clone());
+            }
         }
     }
     hidden = rms_norm(&mut builder, &hidden, &args.take(), config.layer_norm_eps);
@@ -446,6 +463,13 @@ fn emit_qwen2_5_vl_inner(
             "diagnostics capture every layer after the penultimate full-attention boundary"
         );
         outputs.extend(final_interval_layer_states);
+        assert_eq!(
+            pre_probe_layer_states.len(),
+            layout.pre_probe_layer_indices.len(),
+            "diagnostics capture every layer between the preceding full-attention boundary and \
+             the substage probe"
+        );
+        outputs.extend(pre_probe_layer_states);
         let probe = substage_probe_layer_state.expect("diagnostics capture substage probe layer");
         outputs.extend([
             probe.input,
@@ -538,10 +562,12 @@ pub(crate) fn emit_qwen2_5_vl_diagnostics(
         (final_interval_start..=target_full_layer_index).collect::<Vec<_>>();
     let substage_probe_layer_index = substage_probe_layer(&full_layer_indices)
         .expect("diagnostics contain a configured full-attention layer");
+    let pre_probe_layer_indices = pre_probe_layers(&full_layer_indices, substage_probe_layer_index);
     let layout = Qwen25VlVisionDiagnosticLayout {
         window_layer_index,
         full_layer_indices,
         final_interval_layer_indices,
+        pre_probe_layer_indices,
         substage_probe_layer_index,
     };
     Ok((
@@ -552,7 +578,7 @@ pub(crate) fn emit_qwen2_5_vl_diagnostics(
 
 #[cfg(all(test, feature = "diagnostics"))]
 mod tests {
-    use super::substage_probe_layer;
+    use super::{pre_probe_layers, substage_probe_layer};
 
     #[test]
     fn substage_probe_selects_the_first_observed_actual_divergence_boundary() {
@@ -560,5 +586,15 @@ mod tests {
         assert_eq!(substage_probe_layer(&[0, 1]), Some(0));
         assert_eq!(substage_probe_layer(&[0]), Some(0));
         assert_eq!(substage_probe_layer(&[]), None);
+    }
+
+    #[test]
+    fn pre_probe_layers_cover_only_the_gap_after_the_preceding_full_layer() {
+        assert_eq!(
+            pre_probe_layers(&[7, 15, 23, 31], 23),
+            (16..23).collect::<Vec<_>>()
+        );
+        assert_eq!(pre_probe_layers(&[0, 1], 0), Vec::<usize>::new());
+        assert_eq!(pre_probe_layers(&[0], 0), Vec::<usize>::new());
     }
 }
