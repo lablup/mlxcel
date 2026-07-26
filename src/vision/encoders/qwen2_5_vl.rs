@@ -368,6 +368,15 @@ struct VisionMLP {
     down_proj: UnifiedLinear,
 }
 
+#[cfg(feature = "xla-diagnostics")]
+#[derive(Clone, Copy)]
+enum VisionMLPDiagnosticStage {
+    GateProjection,
+    GateActivation,
+    UpProjection,
+    GatedProduct,
+}
+
 impl VisionMLP {
     fn from_weights(weights: &WeightMap, prefix: &str, gs: i32, bits: i32) -> Result<Self, String> {
         Ok(Self {
@@ -399,6 +408,22 @@ impl VisionMLP {
         let h = mlxcel_core::multiply(&gate, &up);
         self.down_proj.forward(&h)
     }
+
+    #[cfg(feature = "xla-diagnostics")]
+    fn forward_with_observer<F>(&self, x: &MlxArray, mut observe: F) -> UniquePtr<MlxArray>
+    where
+        F: FnMut(VisionMLPDiagnosticStage, &MlxArray),
+    {
+        let gate = self.gate_proj.forward(x);
+        observe(VisionMLPDiagnosticStage::GateProjection, &gate);
+        let gate = mlxcel_core::silu(&gate);
+        observe(VisionMLPDiagnosticStage::GateActivation, &gate);
+        let up = self.up_proj.forward(x);
+        observe(VisionMLPDiagnosticStage::UpProjection, &up);
+        let gated_product = mlxcel_core::multiply(&gate, &up);
+        observe(VisionMLPDiagnosticStage::GatedProduct, &gated_product);
+        self.down_proj.forward(&gated_product)
+    }
 }
 
 // VisionBlock - RMSNorm + SwiGLU MLP.
@@ -420,7 +445,11 @@ struct Qwen25VLBlockDiagnostics {
     attention: Vec<f32>,
     post_attention_residual: Vec<f32>,
     norm2: Vec<f32>,
-    mlp: Vec<f32>,
+    mlp_gate_projection: Vec<f32>,
+    mlp_gate_activation: Vec<f32>,
+    mlp_up_projection: Vec<f32>,
+    mlp_gated_product: Vec<f32>,
+    mlp_down_projection: Vec<f32>,
 }
 
 #[cfg(any(test, feature = "xla-diagnostics"))]
@@ -505,9 +534,21 @@ impl VisionBlock {
             host_f32_diagnostic_snapshot(&post_attention_residual);
         let norm2 = self.norm2.forward(&post_attention_residual);
         let norm2_snapshot = host_f32_diagnostic_snapshot(&norm2);
-        let mlp = self.mlp.forward(&norm2);
-        let mlp_snapshot = host_f32_diagnostic_snapshot(&mlp);
-        let output = mlxcel_core::add(&post_attention_residual, &mlp);
+        let mut mlp_gate_projection = None;
+        let mut mlp_gate_activation = None;
+        let mut mlp_up_projection = None;
+        let mut mlp_gated_product = None;
+        let mlp_down_projection = self.mlp.forward_with_observer(&norm2, |stage, array| {
+            let snapshot = host_f32_diagnostic_snapshot(array);
+            match stage {
+                VisionMLPDiagnosticStage::GateProjection => mlp_gate_projection = Some(snapshot),
+                VisionMLPDiagnosticStage::GateActivation => mlp_gate_activation = Some(snapshot),
+                VisionMLPDiagnosticStage::UpProjection => mlp_up_projection = Some(snapshot),
+                VisionMLPDiagnosticStage::GatedProduct => mlp_gated_product = Some(snapshot),
+            }
+        });
+        let mlp_down_projection_snapshot = host_f32_diagnostic_snapshot(&mlp_down_projection);
+        let output = mlxcel_core::add(&post_attention_residual, &mlp_down_projection);
         (
             output,
             Qwen25VLBlockDiagnostics {
@@ -521,7 +562,15 @@ impl VisionBlock {
                 attention: attention_snapshot,
                 post_attention_residual: post_attention_residual_snapshot,
                 norm2: norm2_snapshot,
-                mlp: mlp_snapshot,
+                mlp_gate_projection: mlp_gate_projection
+                    .expect("diagnostics capture MLP gate projection"),
+                mlp_gate_activation: mlp_gate_activation
+                    .expect("diagnostics capture MLP gate activation"),
+                mlp_up_projection: mlp_up_projection
+                    .expect("diagnostics capture MLP up projection"),
+                mlp_gated_product: mlp_gated_product
+                    .expect("diagnostics capture MLP gated product"),
+                mlp_down_projection: mlp_down_projection_snapshot,
             },
         )
     }
@@ -602,7 +651,11 @@ pub struct Qwen25VLVisionDiagnostics {
     pub substage_probe_layer_attention: Vec<f32>,
     pub substage_probe_layer_post_attention_residual: Vec<f32>,
     pub substage_probe_layer_norm2: Vec<f32>,
-    pub substage_probe_layer_mlp: Vec<f32>,
+    pub substage_probe_layer_mlp_gate_projection: Vec<f32>,
+    pub substage_probe_layer_mlp_gate_activation: Vec<f32>,
+    pub substage_probe_layer_mlp_up_projection: Vec<f32>,
+    pub substage_probe_layer_mlp_gated_product: Vec<f32>,
+    pub substage_probe_layer_mlp_down_projection: Vec<f32>,
     pub merger_window_ordered: UniquePtr<MlxArray>,
     pub restored_projection: UniquePtr<MlxArray>,
 }
@@ -1078,7 +1131,16 @@ impl Qwen25VLVisionEncoder {
                     substage_probe_layer_post_attention_residual: substage_probe_layer_state
                         .post_attention_residual,
                     substage_probe_layer_norm2: substage_probe_layer_state.norm2,
-                    substage_probe_layer_mlp: substage_probe_layer_state.mlp,
+                    substage_probe_layer_mlp_gate_projection: substage_probe_layer_state
+                        .mlp_gate_projection,
+                    substage_probe_layer_mlp_gate_activation: substage_probe_layer_state
+                        .mlp_gate_activation,
+                    substage_probe_layer_mlp_up_projection: substage_probe_layer_state
+                        .mlp_up_projection,
+                    substage_probe_layer_mlp_gated_product: substage_probe_layer_state
+                        .mlp_gated_product,
+                    substage_probe_layer_mlp_down_projection: substage_probe_layer_state
+                        .mlp_down_projection,
                     merger_window_ordered: merger_window_ordered
                         .expect("Qwen2.5-VL merger capture"),
                     restored_projection,

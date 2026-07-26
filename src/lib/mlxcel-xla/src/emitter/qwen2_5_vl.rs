@@ -45,7 +45,11 @@ struct Qwen25VlBlockDiagnostics {
     attention: Val,
     post_attention_residual: Val,
     norm2: Val,
-    mlp: Val,
+    mlp_gate_projection: Val,
+    mlp_gate_activation: Val,
+    mlp_up_projection: Val,
+    mlp_gated_product: Val,
+    mlp_down_projection: Val,
     output: Val,
 }
 
@@ -325,12 +329,12 @@ fn encoder_layer_with_diagnostics(
         &args.take(),
         config.layer_norm_eps,
     );
-    let gate = linear_2d(builder, &norm2, &args.take(), &args.take());
-    let gate = silu(builder, &gate);
-    let up = linear_2d(builder, &norm2, &args.take(), &args.take());
-    let activated = builder.multiply(&gate, &up);
-    let mlp = linear_2d(builder, &activated, &args.take(), &args.take());
-    let output = builder.add(&post_attention_residual, &mlp);
+    let mlp_gate_projection = linear_2d(builder, &norm2, &args.take(), &args.take());
+    let mlp_gate_activation = silu(builder, &mlp_gate_projection);
+    let mlp_up_projection = linear_2d(builder, &norm2, &args.take(), &args.take());
+    let mlp_gated_product = builder.multiply(&mlp_gate_activation, &mlp_up_projection);
+    let mlp_down_projection = linear_2d(builder, &mlp_gated_product, &args.take(), &args.take());
+    let output = builder.add(&post_attention_residual, &mlp_down_projection);
     Qwen25VlBlockDiagnostics {
         input: hidden.clone(),
         norm1,
@@ -341,7 +345,11 @@ fn encoder_layer_with_diagnostics(
         attention: attention.output,
         post_attention_residual,
         norm2,
-        mlp,
+        mlp_gate_projection,
+        mlp_gate_activation,
+        mlp_up_projection,
+        mlp_gated_product,
+        mlp_down_projection,
         output,
     }
 }
@@ -488,7 +496,11 @@ fn emit_qwen2_5_vl_inner(
             probe.attention,
             probe.post_attention_residual,
             probe.norm2,
-            probe.mlp,
+            probe.mlp_gate_projection,
+            probe.mlp_gate_activation,
+            probe.mlp_up_projection,
+            probe.mlp_gated_product,
+            probe.mlp_down_projection,
         ]);
         outputs.push(projected);
         let result_types = outputs
