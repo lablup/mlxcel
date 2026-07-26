@@ -163,6 +163,8 @@ pub(crate) use vision_config::{LlavaVisionConfig, VisionActivation, VisionWeight
 pub(crate) use youtu_vl::emit_youtu_vl;
 #[cfg(feature = "diagnostics")]
 pub(crate) use youtu_vl::emit_youtu_vl_diagnostics;
+#[cfg(feature = "diagnostics")]
+pub use youtu_vl_plan::YOUTU_VL_DIAGNOSTIC_ABI_VERSION;
 #[allow(unused_imports)]
 pub(crate) use youtu_vl_plan::{
     YoutuVlHostInputs, YoutuVlVisionConfig, prepare_youtu_vl_host_inputs,

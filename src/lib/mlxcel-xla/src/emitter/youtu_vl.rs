@@ -6,6 +6,8 @@
 //! StableHLO Youtu-VL windowed vision tower and built-in patch merger.
 
 use super::builder::{Builder, Ty, Val};
+#[cfg(any(test, feature = "diagnostics"))]
+use super::youtu_vl_plan::YoutuVlDiagnosticStage;
 use super::youtu_vl_plan::{YOUTU_VL_PATCH_BUCKETS, YoutuVlVisionConfig, YoutuVlWeightSpec};
 
 struct Args {
@@ -249,6 +251,7 @@ struct YoutuVlGraph {
     builder: Builder,
     patch_projection: Val,
     layer_outputs: Vec<Val>,
+    post_layernorm: Val,
     projected: Val,
 }
 
@@ -297,6 +300,7 @@ fn build_youtu_vl(config: &YoutuVlVisionConfig, patch_bucket: usize) -> YoutuVlG
         &args.take(),
         config.layer_norm_eps,
     );
+    let post_layernorm = hidden.clone();
     hidden = rms_norm(&mut builder, &hidden, &args.take(), 1e-6);
     let merged_width = config.hidden * config.spatial_merge_size * config.spatial_merge_size;
     let merged = builder.reshape(&hidden, vec![patch_bucket / 4, merged_width]);
@@ -309,6 +313,7 @@ fn build_youtu_vl(config: &YoutuVlVisionConfig, patch_bucket: usize) -> YoutuVlG
         builder,
         patch_projection,
         layer_outputs,
+        post_layernorm,
         projected,
     }
 }
@@ -324,30 +329,22 @@ pub(crate) fn emit_youtu_vl(config: &YoutuVlVisionConfig, patch_bucket: usize) -
     )
 }
 
-#[cfg(feature = "diagnostics")]
+#[cfg(any(test, feature = "diagnostics"))]
 pub(crate) fn emit_youtu_vl_diagnostics(
     config: &YoutuVlVisionConfig,
     patch_bucket: usize,
 ) -> Result<String, String> {
     let graph = build_youtu_vl(config, patch_bucket);
-    if graph.layer_outputs.len() != 2 {
-        return Err(format!(
-            "Youtu-VL diagnostic oracle requires exactly two vision layers, got {}",
-            graph.layer_outputs.len()
-        ));
-    }
-    if config.full_attention_layers != [1] {
-        return Err(format!(
-            "Youtu-VL diagnostic oracle requires window layer 0 and full layer 1, got full layers {:?}",
-            config.full_attention_layers
-        ));
-    }
-    let outputs = [
-        &graph.patch_projection,
-        &graph.layer_outputs[0],
-        &graph.layer_outputs[1],
-        &graph.projected,
-    ];
+    let stages = config.diagnostic_stages();
+    let outputs = stages
+        .iter()
+        .map(|stage| match stage {
+            YoutuVlDiagnosticStage::PatchProjection => &graph.patch_projection,
+            YoutuVlDiagnosticStage::Layer { index, .. } => &graph.layer_outputs[*index],
+            YoutuVlDiagnosticStage::PostLayerNorm => &graph.post_layernorm,
+            YoutuVlDiagnosticStage::MergerWindowOrder => &graph.projected,
+        })
+        .collect::<Vec<_>>();
     let return_values = outputs
         .iter()
         .map(|value| value.name.as_str())
@@ -369,6 +366,13 @@ pub(crate) fn emit_youtu_vl_diagnostics(
 mod tests {
     use super::*;
 
+    fn actual_schedule_config() -> YoutuVlVisionConfig {
+        YoutuVlVisionConfig::from_json_str(
+            r#"{"model_type":"youtu_vl","hidden_size":2560,"vision_config":{"num_hidden_layers":27,"hidden_size":1152,"intermediate_size":4304,"num_attention_heads":16,"num_channels":3,"patch_size":16,"spatial_merge_size":2,"window_size":256,"fullatt_block_indexes":[7,15,23,26],"out_hidden_size":2560,"num_patches":256}}"#,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn emits_window_and_full_attention_inputs() {
         let config = YoutuVlVisionConfig::from_json_str(
@@ -382,7 +386,6 @@ mod tests {
         assert!(ir.contains("tensor<4x12xf32>"));
     }
 
-    #[cfg(feature = "diagnostics")]
     #[test]
     fn diagnostic_emitter_exposes_two_layer_oracle_stages() {
         let config = YoutuVlVisionConfig::from_json_str(
@@ -392,8 +395,78 @@ mod tests {
         let ir = emit_youtu_vl_diagnostics(&config, 64).unwrap();
         assert!(ir.contains("module @youtu_vl_vision_diagnostics"));
         assert!(ir.contains(
-            "tensor<64x16xf32>, tensor<64x16xf32>, tensor<64x16xf32>, tensor<16x12xf32>"
+            "tensor<64x16xf32>, tensor<64x16xf32>, tensor<64x16xf32>, tensor<64x16xf32>, tensor<16x12xf32>"
         ));
         assert!(ir.contains("Youtu-VL diagnostic checkpoints"));
+        assert_eq!(
+            config.diagnostic_contract_identity(),
+            "youtu-vl-vision-diagnostics-v2:module=[patch_projection,layer.0.window,layer.1.full,post_layernorm,merger.window_order]:host=[merger.restored_order]"
+        );
+    }
+
+    #[test]
+    fn diagnostic_emitter_accepts_actual_youtu_vl_schedule() {
+        let config = actual_schedule_config();
+        let stages = config
+            .diagnostic_stages()
+            .iter()
+            .map(YoutuVlDiagnosticStage::name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stages,
+            [
+                "patch_projection",
+                "layer.0.window",
+                "layer.7.full",
+                "layer.15.full",
+                "layer.23.full",
+                "layer.26.full",
+                "post_layernorm",
+                "merger.window_order",
+            ]
+        );
+        let ir = emit_youtu_vl_diagnostics(&config, 16).unwrap();
+        let result_signature = stages
+            .iter()
+            .take(stages.len() - 1)
+            .map(|_| "tensor<16x1152xf32>")
+            .chain(std::iter::once("tensor<4x2560xf32>"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert!(ir.contains(&result_signature));
+        assert!(
+            config
+                .diagnostic_contract_identity()
+                .contains("layer.26.full")
+        );
+    }
+
+    #[test]
+    #[ignore = "requires MLXCEL_XLA_IREE_COMPILE pointing at the pinned iree-compile"]
+    fn actual_schedule_diagnostic_graph_compiles_with_iree_cpu() {
+        let compiler =
+            std::env::var("MLXCEL_XLA_IREE_COMPILE").expect("set MLXCEL_XLA_IREE_COMPILE");
+        let graph = emit_youtu_vl_diagnostics(&actual_schedule_config(), 16).unwrap();
+        let stem = format!("mlxcel-youtu-vl-diagnostics-v2-{}", std::process::id());
+        let input = std::env::temp_dir().join(format!("{stem}.mlir"));
+        let output = std::env::temp_dir().join(format!("{stem}.vmfb"));
+        std::fs::write(&input, graph).expect("write temporary StableHLO");
+        let result = std::process::Command::new(compiler)
+            .arg("--iree-input-type=stablehlo")
+            .arg("--iree-hal-target-device=local")
+            .arg("--iree-hal-local-target-device-backends=llvm-cpu")
+            .arg(&input)
+            .arg("-o")
+            .arg(&output)
+            .output()
+            .expect("run iree-compile");
+        let _ = std::fs::remove_file(&input);
+        let _ = std::fs::remove_file(&output);
+        assert!(
+            result.status.success(),
+            "iree-compile failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
     }
 }

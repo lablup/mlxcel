@@ -14,6 +14,8 @@ use std::path::Path;
 use serde_json::Value;
 
 pub(crate) const YOUTU_VL_PATCH_BUCKETS: [usize; 3] = [16, 64, 256];
+#[cfg(any(test, feature = "diagnostics"))]
+pub const YOUTU_VL_DIAGNOSTIC_ABI_VERSION: u32 = 2;
 const MAX_IMAGES: usize = 4;
 const DEFAULT_IMAGE_TOKEN_ID: i32 = 128_264;
 const DEFAULT_VIDEO_TOKEN_ID: i32 = 128_265;
@@ -45,6 +47,52 @@ pub(crate) struct YoutuVlVisionConfig {
     pub(crate) video_token_id: i32,
     pub(crate) vision_start_token_id: i32,
     pub(crate) vision_end_token_id: i32,
+}
+
+/// Ordered module outputs for the diagnostics-only Youtu-VL vision ABI.
+///
+/// ABI v2 selects layers from the checkpoint configuration instead of assuming
+/// the original two-layer synthetic fixture. Layer zero is always captured as
+/// the first encoder seam; every configured full-attention layer is captured in
+/// execution order, without duplicating layer zero when it is itself full.
+#[cfg(any(test, feature = "diagnostics"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum YoutuVlDiagnosticStage {
+    PatchProjection,
+    Layer { index: usize, full_attention: bool },
+    PostLayerNorm,
+    MergerWindowOrder,
+}
+
+#[cfg(any(test, feature = "diagnostics"))]
+impl YoutuVlDiagnosticStage {
+    pub(crate) fn name(&self) -> String {
+        match self {
+            Self::PatchProjection => "patch_projection".to_string(),
+            Self::Layer {
+                index,
+                full_attention,
+            } => format!(
+                "layer.{index}.{}",
+                if *full_attention { "full" } else { "window" }
+            ),
+            Self::PostLayerNorm => "post_layernorm".to_string(),
+            Self::MergerWindowOrder => "merger.window_order".to_string(),
+        }
+    }
+
+    pub(crate) fn shape(&self, config: &YoutuVlVisionConfig, patch_bucket: usize) -> [usize; 2] {
+        match self {
+            Self::MergerWindowOrder => [patch_bucket / 4, config.text_hidden],
+            Self::PatchProjection | Self::Layer { .. } | Self::PostLayerNorm => {
+                [patch_bucket, config.hidden]
+            }
+        }
+    }
+
+    pub(crate) fn is_merger_window_order(&self) -> bool {
+        matches!(self, Self::MergerWindowOrder)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,6 +266,42 @@ impl YoutuVlVisionConfig {
             self.video_token_id,
             self.vision_start_token_id,
             self.vision_end_token_id,
+        )
+    }
+
+    #[cfg(any(test, feature = "diagnostics"))]
+    pub(crate) fn diagnostic_stages(&self) -> Vec<YoutuVlDiagnosticStage> {
+        let mut stages = Vec::with_capacity(self.full_attention_layers.len() + 4);
+        stages.push(YoutuVlDiagnosticStage::PatchProjection);
+        for index in 0..self.depth {
+            let full_attention = self.full_attention_layers.contains(&index);
+            if index == 0 || full_attention {
+                stages.push(YoutuVlDiagnosticStage::Layer {
+                    index,
+                    full_attention,
+                });
+            }
+        }
+        stages.push(YoutuVlDiagnosticStage::PostLayerNorm);
+        stages.push(YoutuVlDiagnosticStage::MergerWindowOrder);
+        stages
+    }
+
+    /// Stable diagnostics-only ABI identity.
+    ///
+    /// The final restored merger value is produced by the host from the
+    /// module's window-order output and the captured reverse permutation, so it
+    /// participates in the contract even though it is not an IREE result.
+    #[cfg(any(test, feature = "diagnostics"))]
+    pub(crate) fn diagnostic_contract_identity(&self) -> String {
+        let module_stages = self
+            .diagnostic_stages()
+            .iter()
+            .map(YoutuVlDiagnosticStage::name)
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "youtu-vl-vision-diagnostics-v{YOUTU_VL_DIAGNOSTIC_ABI_VERSION}:module=[{module_stages}]:host=[merger.restored_order]"
         )
     }
 

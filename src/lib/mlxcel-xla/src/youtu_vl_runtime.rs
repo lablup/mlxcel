@@ -19,6 +19,8 @@ use crate::aux::{
 };
 use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 #[cfg(feature = "diagnostics")]
+use crate::emitter::YOUTU_VL_DIAGNOSTIC_ABI_VERSION;
+#[cfg(feature = "diagnostics")]
 use crate::emitter::emit_youtu_vl_diagnostics;
 use crate::emitter::{
     YoutuVlHostInputs, YoutuVlVisionConfig, emit_youtu_vl, prepare_youtu_vl_host_inputs,
@@ -53,17 +55,22 @@ pub struct YoutuVlVisionProjection {
 
 #[cfg(feature = "diagnostics")]
 #[derive(Debug, Clone, PartialEq)]
+pub struct YoutuVlVisionDiagnosticStageOutput {
+    /// Stable ABI v2 stage name, such as `layer.7.full`.
+    pub name: String,
+    pub values: Vec<f32>,
+    pub shape: [usize; 2],
+}
+
+#[cfg(feature = "diagnostics")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct YoutuVlVisionDiagnosticProjection {
-    /// Linear patch projection in IREE's window order.
-    pub patch_projection: Vec<f32>,
-    /// Output of window-attention layer 0 in IREE's window order.
-    pub window_layer0: Vec<f32>,
-    /// Output of full-attention layer 1 in IREE's window order.
-    pub full_layer1: Vec<f32>,
-    /// Built-in merger output before the host restores original group order.
-    pub merger_window_order: Vec<f32>,
-    /// Built-in merger output after restoring original per-image group order.
-    pub restored_output: Vec<f32>,
+    /// Explicitly versioned because ABI v1 exposed four hard-coded fields for a
+    /// two-layer synthetic tower. ABI v2 is an ordered, config-selected stage
+    /// vector and additionally captures post-layernorm plus restored merger
+    /// output.
+    pub abi_version: u32,
+    pub stages: Vec<YoutuVlVisionDiagnosticStageOutput>,
     pub patch_shape: [usize; 2],
     pub merged_shape: [usize; 2],
     pub window_group_index: Vec<usize>,
@@ -279,14 +286,16 @@ fn compile_and_load_diagnostics(
     let contract = AuxiliaryArtifactContract::new(
         DIAGNOSTIC_ENTRY_NAME,
         format!(
-            "{};diagnostic_stages=patch,window0,full1,merger;{};checkpoint_schema_sha256={}",
+            "{};diagnostic_contract={};{};checkpoint_schema_sha256={}",
             config.fingerprint(patch_bucket),
+            config.diagnostic_contract_identity(),
             processor_identity,
             sha256_hex(checkpoint_schema.as_bytes())
         ),
         compiler_generation_identity(&compiler, flags, &mlir)?,
     )?;
-    let tag = format!("youtu-vl-vision-diagnostics-{patch_bucket}");
+    let tag =
+        format!("youtu-vl-vision-diagnostics-v{YOUTU_VL_DIAGNOSTIC_ABI_VERSION}-{patch_bucket}");
     let vmfb = cached_vmfb_path(&compiler, &mlir, flags, &cache, &tag, 0);
     ensure_qualified_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
         compile_one_to(&compiler, &mlir, flags, &cache, &tag, 0, temporary)
@@ -476,14 +485,15 @@ impl IreeYoutuVlDiagnosticProjector {
         ];
         let bias_shape = [plan.patch_bucket, plan.patch_bucket];
         let patch_shape = [plan.patch_bucket, self.config.hidden];
-        let merged_bucket_shape = [plan.patch_bucket / 4, self.config.text_hidden];
-        let mut buffers = [
-            vec![0u8; patch_shape.iter().product::<usize>() * std::mem::size_of::<f32>()],
-            vec![0u8; patch_shape.iter().product::<usize>() * std::mem::size_of::<f32>()],
-            vec![0u8; patch_shape.iter().product::<usize>() * std::mem::size_of::<f32>()],
-            vec![0u8; merged_bucket_shape.iter().product::<usize>() * std::mem::size_of::<f32>()],
-        ];
-        let output_shapes = [patch_shape, patch_shape, patch_shape, merged_bucket_shape];
+        let module_stages = self.config.diagnostic_stages();
+        let output_shapes = module_stages
+            .iter()
+            .map(|stage| stage.shape(&self.config, plan.patch_bucket))
+            .collect::<Vec<_>>();
+        let mut buffers = output_shapes
+            .iter()
+            .map(|shape| vec![0u8; shape.iter().product::<usize>() * std::mem::size_of::<f32>()])
+            .collect::<Vec<_>>();
         let mut outputs = buffers
             .iter_mut()
             .zip(&output_shapes)
@@ -519,34 +529,49 @@ impl IreeYoutuVlDiagnosticProjector {
             &mut outputs,
         )?;
         drop(outputs);
-        let mut values = buffers
+        let values = buffers
             .into_iter()
             .enumerate()
             .map(|(index, bytes)| {
                 checked_f32_output(&format!("Youtu-VL IREE diagnostic output {index}"), bytes)
             })
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter();
-        let patch_projection = values.next().expect("four diagnostic outputs");
-        let window_layer0 = values.next().expect("four diagnostic outputs");
-        let full_layer1 = values.next().expect("four diagnostic outputs");
-        let merger_bucket = values.next().expect("four diagnostic outputs");
-        debug_assert!(values.next().is_none());
+            .collect::<Result<Vec<_>, _>>()?;
         let actual_tokens = plan.reverse_group_index.len();
         let actual_values = actual_tokens * self.config.text_hidden;
-        let merger_window_order = merger_bucket[..actual_values].to_vec();
+        let mut stages = module_stages
+            .iter()
+            .zip(values)
+            .zip(output_shapes)
+            .map(|((stage, mut values), mut shape)| {
+                if stage.is_merger_window_order() {
+                    values.truncate(actual_values);
+                    shape[0] = actual_tokens;
+                }
+                YoutuVlVisionDiagnosticStageOutput {
+                    name: stage.name(),
+                    values,
+                    shape,
+                }
+            })
+            .collect::<Vec<_>>();
+        let merger_window_order = &stages
+            .last()
+            .expect("diagnostic ABI always ends with merger.window_order")
+            .values;
         let mut restored_output = Vec::with_capacity(actual_values);
         for &window_position in &plan.reverse_group_index {
             let start = window_position * self.config.text_hidden;
             restored_output
                 .extend_from_slice(&merger_window_order[start..start + self.config.text_hidden]);
         }
+        stages.push(YoutuVlVisionDiagnosticStageOutput {
+            name: "merger.restored_order".to_string(),
+            values: restored_output,
+            shape: [actual_tokens, self.config.text_hidden],
+        });
         Ok(YoutuVlVisionDiagnosticProjection {
-            patch_projection,
-            window_layer0,
-            full_layer1,
-            merger_window_order,
-            restored_output,
+            abi_version: YOUTU_VL_DIAGNOSTIC_ABI_VERSION,
+            stages,
             patch_shape,
             merged_shape: [actual_tokens, self.config.text_hidden],
             window_group_index: plan.window_group_index,

@@ -159,6 +159,8 @@ pub use context::{
 pub use diagnostic_flags::{
     configure_diagnostic_local_task_threads, diagnostic_local_task_threads_are_configured,
 };
+#[cfg(feature = "diagnostics")]
+pub use emitter::YOUTU_VL_DIAGNOSTIC_ABI_VERSION;
 #[cfg(all(feature = "diagnostics", xla_iree_cuda))]
 pub use emitter::{
     run_gemma3n_altup_correct_diagnostic_probe, run_gemma3n_altup_predict_diagnostic_probe,
@@ -188,7 +190,10 @@ pub use vision_runtime::{IreeVisionDiagnosticProjector, VisionDiagnosticProjecti
 #[cfg(feature = "iree")]
 pub use vision_runtime::{IreeVisionProjector, VisionExecutionMetrics, VisionProjection};
 #[cfg(feature = "diagnostics")]
-pub use youtu_vl_runtime::{IreeYoutuVlDiagnosticProjector, YoutuVlVisionDiagnosticProjection};
+pub use youtu_vl_runtime::{
+    IreeYoutuVlDiagnosticProjector, YoutuVlVisionDiagnosticProjection,
+    YoutuVlVisionDiagnosticStageOutput,
+};
 #[cfg(feature = "iree")]
 pub use youtu_vl_runtime::{
     IreeYoutuVlProjector, YoutuVlVisionExecutionMetrics, YoutuVlVisionProjection,
