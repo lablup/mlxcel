@@ -84,7 +84,9 @@ pub use mlxcel_core::speculative::prompt_lookup::{
 };
 pub use mlxcel_core::speculative::prompt_lookup_drafter::PromptLookupDrafter;
 #[cfg(feature = "xla-diagnostics")]
-pub use multimodal::host_preprocessor::LlavaHostReferenceCapture;
+pub use multimodal::host_preprocessor::{
+    LlavaHostReferenceCapture, Qwen3VlIreeHostPreprocessor, Qwen3VlIreeVisionCapture,
+};
 #[cfg(feature = "xla-iree")]
 pub use multimodal::host_preprocessor::LlavaIreeHostPreprocessor;
 pub use multimodal::host_preprocessor::{

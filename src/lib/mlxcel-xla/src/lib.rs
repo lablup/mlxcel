@@ -153,9 +153,9 @@ pub use batch::{EngineEvent, FinishReason, XlaAdmissionError, XlaBatchEngine, Xl
 #[cfg(feature = "diagnostics")]
 pub use batch::{
     Gemma3nAllLayerDiagnosticRun, Gemma3nCanonicalDiagnosticRun, Gemma3nPrefixDecodeDiagnosticRun,
-    LlavaReferenceDiagnosticEngine, LlavaReferenceDiagnosticRun, Qwen25VlLanguageDiagnosticEngine,
-    run_gemma3n_all_layer_diagnostics, run_gemma3n_canonical_diagnostics,
-    run_gemma3n_prefix_decode_diagnostic,
+    LlavaReferenceDiagnosticEngine, LlavaReferenceDiagnosticRun, Qwen3VlDeepStackDiagnosticEngine,
+    Qwen25VlLanguageDiagnosticEngine, run_gemma3n_all_layer_diagnostics,
+    run_gemma3n_canonical_diagnostics, run_gemma3n_prefix_decode_diagnostic,
 };
 pub use context::{
     CONTEXT_BUCKETS_ENV, CONTEXT_CAPACITY_ENV, ContextCapacityError, DEFAULT_CONTEXT_CAPACITY,
@@ -177,7 +177,7 @@ pub use emitter::{
     run_gemma3n_sdpa_vector_context_diagnostic_probe,
 };
 #[cfg(feature = "diagnostics")]
-pub use iree::PreparedPrefillDiagnostics;
+pub use iree::{DeepStackPrefillDiagnostics, PreparedPrefillDiagnostics};
 #[cfg(any(feature = "iree", test))]
 pub use molmo2::{
     Molmo2InputError, Molmo2SafePooling, add_projected_features as add_molmo2_projected_features,
