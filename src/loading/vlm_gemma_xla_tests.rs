@@ -156,6 +156,14 @@ pub mod reference_boundary {
         io::stderr().flush().expect("flush diagnostic progress");
     }
 
+    fn create_after_diagnostic_iree_configuration<T>(
+        configure: impl FnOnce() -> Result<(), String>,
+        create: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        configure()?;
+        create()
+    }
+
     struct ProgressHeartbeat {
         stop: Option<Sender<()>>,
         worker: Option<JoinHandle<()>>,
@@ -548,8 +556,11 @@ pub mod reference_boundary {
 
         let _heartbeat =
             ProgressHeartbeat::start("run IREE diagnostic SigLIP and average-pool projector");
-        let mut diagnostic = mlxcel_xla::IreeVisionDiagnosticProjector::load(model, device)
-            .expect("load Gemma3 IREE diagnostic projector");
+        let mut diagnostic = create_after_diagnostic_iree_configuration(
+            mlxcel_xla::configure_diagnostic_local_task_single_group,
+            || mlxcel_xla::IreeVisionDiagnosticProjector::load(model, device),
+        )
+        .expect("configure and load Gemma3 IREE diagnostic projector");
         let iree = diagnostic
             .project(&iree_pixel_values)
             .expect("execute Gemma3 IREE diagnostic projector");
@@ -755,5 +766,61 @@ pub mod reference_boundary {
         let device =
             std::env::var("MLXCEL_XLA_DEVICE").unwrap_or_else(|_| "local-task".to_string());
         run_gemma3_eager_mlx_iree_prepared_boundary(&model, &image_path, &device);
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn diagnostic_runner_configures_topology_before_creating_iree() {
+        use std::cell::Cell;
+
+        let configured = Cell::new(false);
+        let result = create_after_diagnostic_iree_configuration(
+            || {
+                configured.set(true);
+                Ok(())
+            },
+            || {
+                assert!(configured.get());
+                Ok("created")
+            },
+        );
+        assert_eq!(result.as_deref(), Ok("created"));
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn diagnostic_runner_propagates_configuration_failure_before_creation() {
+        let created = std::cell::Cell::new(false);
+        let result = create_after_diagnostic_iree_configuration(
+            || Err("configuration failed".to_string()),
+            || {
+                created.set(true);
+                Ok(())
+            },
+        );
+        assert_eq!(result, Err("configuration failed".to_string()));
+        assert!(!created.get());
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn diagnostics_topology_override_stays_out_of_production_iree_paths() {
+        let production_rust = include_str!("../lib/mlxcel-xla/src/aux.rs");
+        let production_aux_c = include_str!("../lib/mlxcel-xla/csrc/xla_aux.c");
+        let production_iree_c = include_str!("../lib/mlxcel-xla/csrc/xla_iree.c");
+        for source in [production_rust, production_aux_c, production_iree_c] {
+            assert!(!source.contains("task_topology_group_count"));
+            assert!(!source.contains("configure_diagnostic_local_task_single_group"));
+        }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn native_diagnostic_topology_configuration_is_reusable() {
+        mlxcel_xla::configure_diagnostic_local_task_single_group()
+            .expect("configure diagnostics-only IREE topology");
+        assert!(mlxcel_xla::diagnostic_local_task_single_group_is_configured());
+        mlxcel_xla::configure_diagnostic_local_task_single_group()
+            .expect("reuse diagnostics-only IREE topology configuration");
     }
 }
