@@ -1116,7 +1116,7 @@ mod tests {
         assert_eq!(layout.window_layer_index, 0);
         assert_eq!(layout.full_layer_indices, vec![1]);
         assert_eq!(layout.final_interval_layer_indices, vec![0, 1]);
-        assert_eq!(layout.target_full_layer_index, 1);
+        assert_eq!(layout.substage_probe_layer_index, 1);
         assert_eq!(
             production.matches("stablehlo.dot_general").count(),
             diagnostics.matches("stablehlo.dot_general").count()

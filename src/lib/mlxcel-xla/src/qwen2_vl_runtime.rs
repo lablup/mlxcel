@@ -85,13 +85,13 @@ pub struct Qwen25VlVisionDiagnostics {
     pub post_full_layers: Vec<Vec<f32>>,
     pub final_interval_layer_indices: Vec<usize>,
     pub post_final_interval_layers: Vec<Vec<f32>>,
-    pub target_full_layer_index: usize,
-    pub target_full_layer_input: Vec<f32>,
-    pub target_full_layer_norm1: Vec<f32>,
-    pub target_full_layer_attention: Vec<f32>,
-    pub target_full_layer_post_attention_residual: Vec<f32>,
-    pub target_full_layer_norm2: Vec<f32>,
-    pub target_full_layer_mlp: Vec<f32>,
+    pub substage_probe_layer_index: usize,
+    pub substage_probe_layer_input: Vec<f32>,
+    pub substage_probe_layer_norm1: Vec<f32>,
+    pub substage_probe_layer_attention: Vec<f32>,
+    pub substage_probe_layer_post_attention_residual: Vec<f32>,
+    pub substage_probe_layer_norm2: Vec<f32>,
+    pub substage_probe_layer_mlp: Vec<f32>,
     pub merger_window_ordered: Vec<f32>,
     pub restored_projection: Vec<f32>,
     pub patch_tokens: usize,
@@ -1055,26 +1055,26 @@ impl IreeQwen25VlDiagnosticProjector {
         let post_final_interval_layers = decoded
             .drain(..final_interval_layer_count)
             .collect::<Vec<_>>();
-        let mut target_full_layer_substages = decoded.into_iter();
-        let target_full_layer_input = target_full_layer_substages
+        let mut substage_probe_layer_substages = decoded.into_iter();
+        let substage_probe_layer_input = substage_probe_layer_substages
             .next()
-            .expect("diagnostic target full layer input output");
-        let target_full_layer_norm1 = target_full_layer_substages
+            .expect("diagnostic substage probe layer input output");
+        let substage_probe_layer_norm1 = substage_probe_layer_substages
             .next()
-            .expect("diagnostic target full layer norm1 output");
-        let target_full_layer_attention = target_full_layer_substages
+            .expect("diagnostic substage probe layer norm1 output");
+        let substage_probe_layer_attention = substage_probe_layer_substages
             .next()
-            .expect("diagnostic target full layer attention output");
-        let target_full_layer_post_attention_residual = target_full_layer_substages
+            .expect("diagnostic substage probe layer attention output");
+        let substage_probe_layer_post_attention_residual = substage_probe_layer_substages
             .next()
-            .expect("diagnostic target full layer residual output");
-        let target_full_layer_norm2 = target_full_layer_substages
+            .expect("diagnostic substage probe layer residual output");
+        let substage_probe_layer_norm2 = substage_probe_layer_substages
             .next()
-            .expect("diagnostic target full layer norm2 output");
-        let target_full_layer_mlp = target_full_layer_substages
+            .expect("diagnostic substage probe layer norm2 output");
+        let substage_probe_layer_mlp = substage_probe_layer_substages
             .next()
-            .expect("diagnostic target full layer MLP output");
-        debug_assert!(target_full_layer_substages.next().is_none());
+            .expect("diagnostic substage probe layer MLP output");
+        debug_assert!(substage_probe_layer_substages.next().is_none());
         Ok(Qwen25VlVisionDiagnostics {
             window_index: plan.window_index,
             restore_indices: plan.restore_indices,
@@ -1089,13 +1089,13 @@ impl IreeQwen25VlDiagnosticProjector {
             post_full_layers,
             final_interval_layer_indices: layout.final_interval_layer_indices,
             post_final_interval_layers,
-            target_full_layer_index: layout.target_full_layer_index,
-            target_full_layer_input,
-            target_full_layer_norm1,
-            target_full_layer_attention,
-            target_full_layer_post_attention_residual,
-            target_full_layer_norm2,
-            target_full_layer_mlp,
+            substage_probe_layer_index: layout.substage_probe_layer_index,
+            substage_probe_layer_input,
+            substage_probe_layer_norm1,
+            substage_probe_layer_attention,
+            substage_probe_layer_post_attention_residual,
+            substage_probe_layer_norm2,
+            substage_probe_layer_mlp,
             merger_window_ordered,
             restored_projection,
             patch_tokens: plan.actual_patches,
