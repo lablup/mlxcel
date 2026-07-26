@@ -2,7 +2,8 @@
 
 use super::builder::{Builder, Val};
 use super::gemma3n_audio_math::{
-    clip, cumsum_time_f32, relu, rms_norm, round_bf16, sigmoid, silu, stride_time,
+    clip, mlx_cuda_cumsum_time_f32, mlx_cuda_row_sum_f32, relu, rms_norm, round_bf16, sigmoid,
+    silu, stride_time,
 };
 use super::gemma3n_audio_schema::EncoderArgs;
 use crate::Gemma3nXlaAudioConfig;
@@ -37,11 +38,10 @@ fn cumulative_group_norm(b: &mut Builder, x: &Val, weight: &Val, eps: f32) -> Va
     let time = x.ty.shape[1];
     let frequency = x.ty.shape[2];
     let channels = x.ty.shape[3];
-    let zero = b.const_f32(0.0);
-    let sum_channels = b.reduce_add(x, 3, &zero);
-    let sum_frequency = b.reduce_add(&sum_channels, 2, &zero);
+    let sum_channels = mlx_cuda_row_sum_f32(b, x, 3);
+    let sum_frequency = mlx_cuda_row_sum_f32(b, &sum_channels, 2);
     let sum_at_time = b.reshape(&sum_frequency, vec![batch, time, 1, 1]);
-    let cumulative_sum = cumsum_time_f32(b, &sum_at_time);
+    let cumulative_sum = mlx_cuda_cumsum_time_f32(b, &sum_at_time);
 
     let index = b.iota(time);
     let index = b.convert(&index, "f32");
@@ -56,10 +56,10 @@ fn cumulative_group_norm(b: &mut Builder, x: &Val, weight: &Val, eps: f32) -> Va
     let centered = b.subtract(x, &mean);
 
     let squared = b.multiply(&centered, &centered);
-    let squared_channels = b.reduce_add(&squared, 3, &zero);
-    let squared_frequency = b.reduce_add(&squared_channels, 2, &zero);
+    let squared_channels = mlx_cuda_row_sum_f32(b, &squared, 3);
+    let squared_frequency = mlx_cuda_row_sum_f32(b, &squared_channels, 2);
     let squared_at_time = b.reshape(&squared_frequency, vec![batch, time, 1, 1]);
-    let cumulative_squared = cumsum_time_f32(b, &squared_at_time);
+    let cumulative_squared = mlx_cuda_cumsum_time_f32(b, &squared_at_time);
     let variance = b.divide(&cumulative_squared, &count);
     let epsilon = super::gemma3n_audio_math::scalar_like(b, eps, &variance);
     let variance = b.add(&variance, &epsilon);

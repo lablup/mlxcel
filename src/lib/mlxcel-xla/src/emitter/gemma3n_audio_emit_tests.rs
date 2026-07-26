@@ -37,7 +37,11 @@ fn split_audio_graphs_preserve_stage_and_weight_boundaries() {
 
     assert!(encode.starts_with("module @audio_encode {"));
     assert!(encode.contains("stablehlo.convolution"));
-    assert!(encode.contains("\"stablehlo.reduce_window\""));
+    assert!(!encode.contains("\"stablehlo.reduce_window\""));
+    assert!(
+        encode.matches("\"stablehlo.gather\"").count() >= 40,
+        "both SSCP norms must pin four MLX CUDA XOR reduction trees"
+    );
     assert!(!encode.contains("loc(\"audio.hard_embeddings\")"));
     assert!(!encode.contains("model.language_model."));
     assert_eq!(encode_layout.stages.len(), 3 + 4 + 12 * 5 + 10);
@@ -185,6 +189,31 @@ fn sscp_f32_accumulator_contract_compiles_for_cpu() {
     let compiler = std::path::PathBuf::from(std::env::var_os("IREE_DIST").expect("IREE_DIST"))
         .join("bin/iree-compile");
     let stem = format!("mlxcel-gemma3n-sscp-f32-accumulator-{}", std::process::id());
+    compile(compiler.as_os_str(), "local", &stem, "contract", mlir);
+}
+
+#[test]
+#[ignore = "requires IREE_DIST"]
+fn sscp_cuda_norm_schedule_compiles_for_cpu() {
+    use crate::emitter::gemma3n_audio_math::{mlx_cuda_cumsum_time_f32, mlx_cuda_row_sum_f32};
+
+    let mut builder = Builder::new().with_precision(Precision::Bf16);
+    let input = Builder::arg(0, Ty::f32(vec![1, 8, 64, 128]));
+    let channels = mlx_cuda_row_sum_f32(&mut builder, &input, 3);
+    let frequency = mlx_cuda_row_sum_f32(&mut builder, &channels, 2);
+    let per_time = builder.reshape(&frequency, vec![1, 8, 1, 1]);
+    let output = mlx_cuda_cumsum_time_f32(&mut builder, &per_time);
+    let output_ty = output.ty.render();
+    let mlir = format!(
+        "module @sscp_cuda_norm_schedule {{\n  func.func public @main(%arg0: \
+         tensor<1x8x64x128xf32>) -> {output_ty} {{\n{}    return {} : {output_ty}\n  \
+         }}\n}}\n",
+        builder.body(),
+        output.name,
+    );
+    let compiler = std::path::PathBuf::from(std::env::var_os("IREE_DIST").expect("IREE_DIST"))
+        .join("bin/iree-compile");
+    let stem = format!("mlxcel-gemma3n-sscp-cuda-norm-{}", std::process::id());
     compile(compiler.as_os_str(), "local", &stem, "contract", mlir);
 }
 
