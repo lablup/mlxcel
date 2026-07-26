@@ -218,9 +218,15 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // before any TP load is attempted. It keeps the dispatch table total.
         ModelType::Gpt2 => "gpt2",
         // GPT-BigCode shares GPT-2's fused `c_attn` key names, and its
-        // multi-query KV block cannot be split across ranks anyway, so the
-        // planner's supported-architecture validation rejects this string
-        // before any TP load is attempted. It keeps the dispatch table total.
+        // multi-query KV block cannot be split across ranks anyway, but this
+        // string is not rejected here: `generate_shard_plan`'s architecture
+        // match has no `gpt_bigcode` arm, so it falls into the `_ =>` case
+        // and still produces a generic transformer plan. The actual refusal
+        // happens later, in `validate_supported_runtime`, whose
+        // `runtime_kind_for` match has no arm for `ModelType::GptBigCode`
+        // and so returns `None`, which that function turns into an
+        // unsupported-architecture error before any TP load is attempted.
+        // This arm keeps the dispatch table total.
         ModelType::GptBigCode => "gpt_bigcode",
         ModelType::StarCoder2 => "starcoder2",
         ModelType::Mellum => "mellum",

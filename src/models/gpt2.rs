@@ -26,8 +26,11 @@
 //! - One fused `c_attn` projection that is split three ways on the last axis
 //!   into Q, K and V. Multi-head attention: `n_kv_heads == n_head`.
 //! - Simple MLP `c_proj(gelu_approx(c_fc(x)))` with an intermediate width of
-//!   `4 * n_embd`. `gelu_approx` is the tanh approximation, which is what the
-//!   `gelu_new` activation in the checkpoint config means.
+//!   `4 * n_embd`. `mlxcel_core::utils::gelu_approx` is the erf-based exact
+//!   GELU in this tree despite its name (see its own doc comment), not the
+//!   tanh approximation that upstream's `nn.gelu_approx` evaluates for the
+//!   checkpoint's `gelu_new` activation; the erf/tanh difference is under
+//!   1e-3 and produces identical generated tokens.
 //! - Tied output head: logits come from `wte.as_linear`, there is no separate
 //!   `lm_head` tensor in the checkpoint.
 //!
@@ -563,7 +566,7 @@ impl Attention {
     }
 }
 
-// MLP (tanh-approximate GELU, no gate/up pattern).
+// MLP (erf-based exact GELU via `gelu_approx`, no gate/up pattern).
 
 pub struct MLP {
     pub c_fc: UnifiedLinear,
