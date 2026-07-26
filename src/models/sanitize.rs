@@ -1253,7 +1253,14 @@ where
     Ok(())
 }
 
-fn load_weights_from_dir_with_filter<P, F>(
+/// Load a selected subset of checkpoint tensors through the safetensors parser.
+///
+/// Unlike MLX's native whole-shard loader, this path parses the shard table
+/// first and materializes only names accepted by `keep`. It is therefore the
+/// canonical boundary for host-only sub-stacks paired with an independent
+/// backend: unrelated quantized tensors in the same shard cannot make the host
+/// reference fail before filtering is applied.
+pub(crate) fn load_weights_from_dir_with_filter<P, F>(
     model_dir: P,
     keep: F,
     prefer_native_full_shard_load: bool,

@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::sanitize::{load_text_weights, sanitize_config_json, sanitize_tied_embeddings};
+use super::sanitize::{
+    load_text_weights, load_weights_from_dir_with_filter, sanitize_config_json,
+    sanitize_tied_embeddings,
+};
 use crate::test_support::env_lock::env_lock;
 use mlxcel_core::weights::{WeightMap, WeightTransform};
 use mlxcel_core::{self, dtype};
@@ -87,6 +90,57 @@ fn write_safetensors(path: &Path, tensors: &[(&str, OwnedTensor)]) {
         views.insert((*name).to_string(), tensor.clone());
     }
     safetensors::serialize_to_file(&views, None, path).unwrap();
+}
+
+#[test]
+fn selective_loader_materializes_only_retained_names_across_mixed_shards() {
+    let dir = temp_model_dir("selective_mixed_shards");
+    std::fs::create_dir_all(&dir).unwrap();
+    write_safetensors(
+        &dir.join("model-00001-of-00002.safetensors"),
+        &[(
+            "language_model.quantized.weight",
+            OwnedTensor {
+                dtype: SafeTensorDtype::U32,
+                shape: vec![1],
+                data: 7_u32.to_le_bytes().to_vec(),
+            },
+        )],
+    );
+    write_safetensors(
+        &dir.join("model-00002-of-00002.safetensors"),
+        &[
+            (
+                "vision_tower.projector.weight",
+                OwnedTensor {
+                    dtype: SafeTensorDtype::F32,
+                    shape: vec![2],
+                    data: [1.0_f32, 2.0_f32]
+                        .into_iter()
+                        .flat_map(f32::to_le_bytes)
+                        .collect(),
+                },
+            ),
+            (
+                "language_model.quantized.scales",
+                OwnedTensor {
+                    dtype: SafeTensorDtype::U32,
+                    shape: vec![1],
+                    data: 11_u32.to_le_bytes().to_vec(),
+                },
+            ),
+        ],
+    );
+
+    let weights =
+        load_weights_from_dir_with_filter(&dir, |name| name.starts_with("vision_tower."), false)
+            .unwrap();
+    assert_eq!(
+        weights.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["vision_tower.projector.weight"]
+    );
+    drop(weights);
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 const NVFP4_REPACK_ENV_KEYS: &[&str] = &["MLXCEL_NVFP4_DENSE_REPACK", "MLXCEL_NVFP4_NATIVE_REPACK"];

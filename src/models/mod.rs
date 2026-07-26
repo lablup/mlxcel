@@ -277,7 +277,8 @@ pub use rwkv7::Rwkv7;
 pub(crate) use sanitize::{
     Gemma4WeightBacking, load_gemma4_text_weights_with_backing,
     load_gemma4_unified_weights_with_backing, load_gemma4_vlm_weights_with_backing,
-    sanitize_gemma4_nvfp4_weights, strip_gemma4_kv_shared_weights,
+    load_weights_from_dir_with_filter, sanitize_gemma4_nvfp4_weights,
+    strip_gemma4_kv_shared_weights,
 };
 pub use sanitize::{
     convert_bf16_weights, convert_bf16_weights_with_keep, gemma3n_language_mlp_bf16_key,

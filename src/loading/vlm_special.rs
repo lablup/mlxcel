@@ -2167,7 +2167,7 @@ fn build_molmo2_processor(model_path: &Path) -> vision::processors::molmo2::Molm
 ///
 /// This diagnostics surface filters the checkpoint before loading and never
 /// constructs the text decoder, LM head, or text embedding tables.
-#[cfg(any(test, feature = "xla-diagnostics"))]
+#[cfg(any(test, feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 #[cfg_attr(test, allow(dead_code))]
 pub struct Molmo2XlaVisionReference {
     vision_tower: vision::encoders::molmo2::Molmo2VisionModel,
@@ -2177,7 +2177,7 @@ pub struct Molmo2XlaVisionReference {
 }
 
 /// Eager MLX projection and the exact processor payload that produced it.
-#[cfg(any(test, feature = "xla-diagnostics"))]
+#[cfg(any(test, feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 #[cfg_attr(test, allow(dead_code))]
 pub struct Molmo2XlaVisionReferenceProjection {
     pub processed: vision::processors::molmo2::Molmo2ProcessorOutput,
@@ -2186,7 +2186,7 @@ pub struct Molmo2XlaVisionReferenceProjection {
     pub active_groups: Vec<usize>,
 }
 
-#[cfg(any(test, feature = "xla-diagnostics"))]
+#[cfg(any(test, feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 #[cfg_attr(test, allow(dead_code))]
 impl Molmo2XlaVisionReference {
     pub fn image_patch_id(&self) -> i32 {
@@ -2259,7 +2259,7 @@ impl Molmo2XlaVisionReference {
 }
 
 /// Load only Molmo2's eager vision encoder/projector for diagnostics.
-#[cfg(any(test, feature = "xla-diagnostics"))]
+#[cfg(any(test, feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 #[cfg_attr(test, allow(dead_code))]
 pub fn load_molmo2_xla_vision_reference(model_path: &Path) -> Result<Molmo2XlaVisionReference> {
     let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
@@ -2275,9 +2275,13 @@ pub fn load_molmo2_xla_vision_reference(model_path: &Path) -> Result<Molmo2XlaVi
         .and_then(Value::as_u64)
         .ok_or_else(|| anyhow::anyhow!("Molmo2 text_config.hidden_size is required"))?
         as usize;
-    let raw_weights = super::load_vlm_weights_common_filtered_canonical(model_path, |name| {
-        name.starts_with("vision_tower.") || name.starts_with("model.vision_backbone.")
-    })?;
+    let mut raw_weights = models::load_weights_from_dir_with_filter(
+        model_path,
+        |name| name.starts_with("vision_tower.") || name.starts_with("model.vision_backbone."),
+        false,
+    )
+    .map_err(anyhow::Error::msg)?;
+    super::finish_vlm_weights_common(model_path, &mut raw_weights, None, false)?;
     let weights = remap_molmo2_weights(raw_weights);
     let vision_tower = build_molmo2_vision_model(&weights, &full_config, text_hidden_size)?;
     let image_patch_id = full_config

@@ -121,7 +121,7 @@ pub fn decode_image_payloads_with_limits(
 // Re-export split modules
 pub use loaded_model::LoadedModel;
 pub use loaded_model_capabilities::VlmRuntimeRef;
-#[cfg(feature = "xla-diagnostics")]
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 pub use loading::{
     Molmo2XlaVisionReference, Molmo2XlaVisionReferenceProjection, load_molmo2_xla_vision_reference,
 };

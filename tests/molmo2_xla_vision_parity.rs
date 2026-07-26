@@ -17,14 +17,14 @@
 //! This intentionally compares only the filtered eager MLX vision path with
 //! the IREE vision projector. It never loads either text decoder.
 
-#[cfg(feature = "xla-diagnostics")]
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
-#[cfg(feature = "xla-diagnostics")]
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 use mlxcel::{initialize_runtime, load_molmo2_xla_vision_reference};
 use mlxcel_xla::add_molmo2_projected_features;
-#[cfg(feature = "xla-diagnostics")]
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 use mlxcel_xla::{IreeMolmo2VisionProjector, Molmo2VisionInput};
 
 #[derive(Debug, Clone, Copy)]
@@ -68,7 +68,7 @@ fn compare(actual: &[f32], expected: &[f32]) -> Result<Comparison> {
     })
 }
 
-#[cfg(feature = "xla-diagnostics")]
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 fn assert_within(
     label: &str,
     actual: &[f32],
@@ -137,7 +137,7 @@ fn independent_scatter_add(
     Ok(merged)
 }
 
-#[cfg(feature = "xla-diagnostics")]
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 fn tolerance(name: &str, default: f32) -> Result<f32> {
     match std::env::var(name) {
         Ok(value) => value
@@ -176,7 +176,7 @@ fn synthetic_comparison_reports_max_and_rms() {
 }
 
 #[test]
-#[cfg(feature = "xla-diagnostics")]
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 #[ignore = "requires a Molmo2 checkpoint plus configured MLX and IREE runtimes"]
 fn real_checkpoint_mlx_iree_vision_and_scatter_parity() -> Result<()> {
     let model = PathBuf::from(
