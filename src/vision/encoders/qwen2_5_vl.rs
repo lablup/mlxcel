@@ -207,13 +207,13 @@ impl VisionRMSNorm {
     /// running in the tower's own float16, so this costs two casts per norm on
     /// the image prefill and nothing on decode.
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        if mlxcel_core::array_dtype(x) != mlxcel_core::dtype::FLOAT16 {
-            return mlxcel_core::rms_norm(x, &self.weight, self.eps);
+        let x_dtype = mlxcel_core::array_dtype(x);
+        if mlxcel_core::array_dtype(&self.weight) == x_dtype {
+            mlxcel_core::fast_rms_norm(x, &self.weight, self.eps)
+        } else {
+            let w = mlxcel_core::astype(&self.weight, x_dtype);
+            mlxcel_core::fast_rms_norm(x, &w, self.eps)
         }
-        let x32 = mlxcel_core::astype(x, mlxcel_core::dtype::FLOAT32);
-        let w32 = mlxcel_core::astype(&self.weight, mlxcel_core::dtype::FLOAT32);
-        let normed = mlxcel_core::rms_norm(&x32, &w32, self.eps);
-        mlxcel_core::astype(&normed, mlxcel_core::dtype::FLOAT16)
     }
 }
 
@@ -1210,6 +1210,13 @@ mod tests {
             "the current F16 square/mean path should expose its overflow signature"
         );
 
+        let fast = mlxcel_core::fast_rms_norm(&input, &weight, 1e-6);
+        let fast = host_f32_diagnostic_snapshot(&fast);
+        assert!(
+            fast.iter().any(|value| value.is_finite() && *value != 0.0),
+            "the production fast RMSNorm must accumulate F16 squares in F32"
+        );
+
         let promoted = mlxcel_core::astype(&input, mlxcel_core::dtype::FLOAT32);
         let promoted_weight = mlxcel_core::astype(&weight, mlxcel_core::dtype::FLOAT32);
         let promoted = mlxcel_core::rms_norm(&promoted, &promoted_weight, 1e-6);
@@ -1220,5 +1227,11 @@ mod tests {
                 .any(|value| value.is_finite() && *value != 0.0),
             "F32 square/mean must preserve a non-zero normalized row"
         );
+        for (index, (fast, promoted)) in fast.iter().zip(promoted).enumerate() {
+            assert!(
+                (*fast - promoted).abs() <= 2.0e-3,
+                "production fast RMSNorm diverged from F32 accumulation at {index}: fast={fast}, promoted={promoted}"
+            );
+        }
     }
 }
