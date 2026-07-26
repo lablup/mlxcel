@@ -75,13 +75,15 @@ pub use mlxcel_core::generate::{
     SamplingConfig,
 };
 pub use mlxcel_core::speculative::SpeculativeGenerator;
-#[cfg(feature = "xla-diagnostics")]
-pub use multimodal::host_preprocessor::LlavaHostReferenceCapture;
 #[cfg(feature = "xla-iree")]
 pub use multimodal::host_preprocessor::LlavaIreeHostPreprocessor;
 pub use multimodal::host_preprocessor::{
     FakeHostMultimodalPreprocessor, HostMultimodalPreprocessor, HostPreprocessorError,
     LlavaHostPreprocessor, XlaVisionBackend, load_xla_image_preprocessor,
+};
+#[cfg(feature = "xla-diagnostics")]
+pub use multimodal::host_preprocessor::{
+    LlavaHostReferenceCapture, Qwen2VlIreeHostPreprocessor, QwenVlProcessorCapture,
 };
 pub use multimodal::{
     internvl_prompt, kimi_vl_prompt, minicpmo_prompt, moondream2_prompt, moondream3_prompt,

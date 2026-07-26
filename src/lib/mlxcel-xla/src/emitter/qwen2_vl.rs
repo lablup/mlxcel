@@ -1071,6 +1071,27 @@ mod tests {
         assert_eq!(mlir.matches("chlo.erf").count(), 1);
     }
 
+    #[cfg(feature = "diagnostics")]
+    #[test]
+    fn qwen25_diagnostics_share_the_production_graph_and_expose_ordered_seams() {
+        let config = qwen25_config();
+        let production = emit_qwen2_vl(&config, 16);
+        let (diagnostics, layout) =
+            crate::emitter::emit_qwen2_5_vl_diagnostics(&config, 16).unwrap();
+        assert_eq!(layout.window_layer_index, 0);
+        assert_eq!(layout.full_layer_indices, vec![1]);
+        assert_eq!(
+            production.matches("stablehlo.dot_general").count(),
+            diagnostics.matches("stablehlo.dot_general").count()
+        );
+        assert!(diagnostics.contains(
+            "-> (tensor<16x1280xf32>, tensor<16x1280xf32>, tensor<16x1280xf32>, tensor<4x1536xf32>)"
+        ));
+        assert!(diagnostics.contains("return %"));
+        assert!(diagnostics.contains("loc(\"window_attention.bias\")"));
+        assert!(diagnostics.contains("loc(\"full_attention.bias\")"));
+    }
+
     #[test]
     fn host_inputs_preserve_packed_media_isolation_and_finite_padding_rows() {
         let config = config();

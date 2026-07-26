@@ -299,6 +299,13 @@ pub struct Qwen2VlIreeHostPreprocessor {
     device: String,
 }
 
+#[cfg(feature = "xla-diagnostics")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct QwenVlProcessorCapture {
+    pub patch_values: Vec<f32>,
+    pub grids: Vec<(i32, i32, i32)>,
+}
+
 #[cfg(feature = "xla-iree")]
 impl Qwen2VlIreeHostPreprocessor {
     pub fn load(model_path: &Path, device: &str) -> Result<Self, HostPreprocessorError> {
@@ -315,6 +322,23 @@ impl Qwen2VlIreeHostPreprocessor {
                 actual: format!("{actual:?}"),
             }),
         }
+    }
+
+    #[cfg(feature = "xla-diagnostics")]
+    pub fn capture_processor_inputs(
+        &self,
+        images: &[DynamicImage],
+    ) -> Result<QwenVlProcessorCapture, HostPreprocessorError> {
+        if images.is_empty() {
+            return Err(HostPreprocessorError::InvalidConfig(
+                "Qwen-VL vision diagnostics require at least one image".to_string(),
+            ));
+        }
+        let (patch_values, grids) = self.processor.preprocess_values_with_grid(images);
+        Ok(QwenVlProcessorCapture {
+            patch_values,
+            grids,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]

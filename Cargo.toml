@@ -329,6 +329,11 @@ required-features = ["xla-diagnostics"]
 name = "xla_vision_reference_check"
 required-features = ["xla-diagnostics"]
 
+# Actual-checkpoint eager MLX vs IREE Qwen2.5-VL window-attention oracle.
+[[example]]
+name = "xla_qwen25_vl_window_check"
+required-features = ["xla-diagnostics"]
+
 [[example]]
 name = "xla_aux_smoke"
 required-features = ["xla-iree"]

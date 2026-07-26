@@ -901,6 +901,36 @@ pub struct LlavaReferenceDiagnosticRun {
     pub decode_seconds: f64,
 }
 
+/// Diagnostics-only Qwen2.5-VL language runner that invokes the ordinary
+/// embeddings-seeded M-RoPE prefill and reads its final-position logits.
+#[cfg(feature = "diagnostics")]
+pub struct Qwen25VlLanguageDiagnosticEngine {
+    engine: IreeRaggedLlama,
+}
+
+#[cfg(feature = "diagnostics")]
+impl Qwen25VlLanguageDiagnosticEngine {
+    pub fn load(model_path: &Path, device: &str, context_capacity: usize) -> Result<Self, String> {
+        Ok(Self {
+            engine: IreeRaggedLlama::load(model_path, device, 4, context_capacity)?,
+        })
+    }
+
+    pub fn capture(&mut self, prepared: &PreparedPrefill) -> Result<Vec<f32>, String> {
+        self.engine.reset_slots_for_diagnostics()?;
+        let prepared_iree = PreparedIreePrefill::prepare(
+            prepared,
+            self.engine.hidden_size(),
+            self.engine.context_capacity(),
+        )
+        .map_err(|error| error.to_string())?;
+        if prepared_iree.positions.mode() != PreparedPositionMode::Mrope3D {
+            return Err("Qwen2.5-VL diagnostics require prepared M-RoPE positions".to_string());
+        }
+        self.engine.prefill_prepared_slot_logits(0, &prepared_iree)
+    }
+}
+
 #[cfg(feature = "diagnostics")]
 pub fn run_gemma3n_all_layer_diagnostics(
     model_dir: &Path,

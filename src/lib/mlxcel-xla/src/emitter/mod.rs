@@ -122,6 +122,8 @@ pub(crate) use phi4_audio::{
     emit_phi4_audio_diagnostic_with, emit_phi4_audio_with, phi4_audio_diagnostic_specs,
     phi4_audio_weight_specs, validate_phi4_audio_weight_shapes,
 };
+#[cfg(feature = "diagnostics")]
+pub(crate) use qwen2_5_vl::{Qwen25VlVisionDiagnosticLayout, emit_qwen2_5_vl_diagnostics};
 #[allow(unused_imports)]
 pub(crate) use qwen2_vl::emit_qwen2_vl;
 #[allow(unused_imports)]

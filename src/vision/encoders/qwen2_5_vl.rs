@@ -465,6 +465,26 @@ pub struct Qwen25VLVisionEncoder {
     fullatt_block_indexes: Vec<usize>,
 }
 
+#[cfg(feature = "xla-diagnostics")]
+pub struct Qwen25VLVisionDiagnostics {
+    pub window_index: Vec<i32>,
+    pub restore_indices: Vec<i32>,
+    pub packed_cu_seqlens: Vec<i32>,
+    pub window_cu_seqlens: Vec<i32>,
+    pub reordered_patch_embedding: UniquePtr<MlxArray>,
+    pub window_layer_index: usize,
+    pub post_window_layer: UniquePtr<MlxArray>,
+    pub full_layer_indices: Vec<usize>,
+    pub post_full_layers: Vec<UniquePtr<MlxArray>>,
+    pub merger_window_ordered: UniquePtr<MlxArray>,
+    pub restored_projection: UniquePtr<MlxArray>,
+}
+
+#[cfg(feature = "xla-diagnostics")]
+type Qwen25VLCapture = Option<Qwen25VLVisionDiagnostics>;
+#[cfg(not(feature = "xla-diagnostics"))]
+type Qwen25VLCapture = ();
+
 impl Qwen25VLVisionEncoder {
     pub fn from_weights(
         weights: &WeightMap,
@@ -712,6 +732,26 @@ impl Qwen25VLVisionEncoder {
         hidden_states: &MlxArray,
         grid_thw: &[(i32, i32, i32)],
     ) -> VisionEncoderOutput {
+        self.forward_with_grid_inner::<false>(hidden_states, grid_thw)
+            .0
+    }
+
+    #[cfg(feature = "xla-diagnostics")]
+    pub fn forward_with_grid_diagnostics(
+        &self,
+        hidden_states: &MlxArray,
+        grid_thw: &[(i32, i32, i32)],
+    ) -> Qwen25VLVisionDiagnostics {
+        self.forward_with_grid_inner::<true>(hidden_states, grid_thw)
+            .1
+            .expect("Qwen2.5-VL diagnostics requested a capture")
+    }
+
+    fn forward_with_grid_inner<const CAPTURE: bool>(
+        &self,
+        hidden_states: &MlxArray,
+        grid_thw: &[(i32, i32, i32)],
+    ) -> (VisionEncoderOutput, Qwen25VLCapture) {
         let mut h = self.patch_embed.forward(hidden_states);
         let rotary_pos_emb = self.rot_pos_emb(grid_thw);
 
@@ -730,6 +770,9 @@ impl Qwen25VLVisionEncoder {
             mlxcel_core::from_slice_i32(&window_index, &[window_index.len() as i32]);
         let h_reordered = mlxcel_core::take(&h_grouped, &window_idx_arr, 0);
         h = mlxcel_core::reshape(&h_reordered, &[-1, dim]);
+        #[cfg(feature = "xla-diagnostics")]
+        let reordered_patch_embedding = CAPTURE
+            .then(|| mlxcel_core::copy(h.as_ref().expect("Qwen2.5-VL reordered patch embedding")));
 
         // Reorder rotary_pos_emb similarly
         let rope_shape = mlxcel_core::array_shape(&rotary_pos_emb);
@@ -745,6 +788,13 @@ impl Qwen25VLVisionEncoder {
         let cu_seqlens = Self::compute_cu_seqlens(grid_thw, self.spatial_merge_size as i32);
 
         // Run blocks with windowed or full attention
+        #[cfg(feature = "xla-diagnostics")]
+        let window_layer_index =
+            (0..self.blocks.len()).find(|layer| !self.fullatt_block_indexes.contains(layer));
+        #[cfg(feature = "xla-diagnostics")]
+        let mut post_window_layer = None;
+        #[cfg(feature = "xla-diagnostics")]
+        let mut post_full_layers = Vec::new();
         for (layer_num, block) in self.blocks.iter().enumerate() {
             let cu_seqlens_now = if self.fullatt_block_indexes.contains(&layer_num) {
                 &cu_seqlens
@@ -752,10 +802,27 @@ impl Qwen25VLVisionEncoder {
                 &cu_window_seqlens
             };
             h = block.forward(&h, cu_seqlens_now, &rotary_pos_emb);
+            #[cfg(feature = "xla-diagnostics")]
+            if CAPTURE {
+                if Some(layer_num) == window_layer_index {
+                    post_window_layer = Some(mlxcel_core::copy(
+                        h.as_ref().expect("Qwen2.5-VL window layer state"),
+                    ));
+                }
+                if self.fullatt_block_indexes.contains(&layer_num) {
+                    post_full_layers.push(mlxcel_core::copy(
+                        h.as_ref().expect("Qwen2.5-VL full layer state"),
+                    ));
+                }
+            }
         }
 
         // Merge patches
         h = self.merger.forward(&h);
+        #[cfg(feature = "xla-diagnostics")]
+        let merger_window_ordered = CAPTURE.then(|| {
+            mlxcel_core::copy(h.as_ref().expect("Qwen2.5-VL window-ordered merger output"))
+        });
 
         // Un-reorder: destination original_position reads its corresponding
         // window_position. This is the inverse permutation, not window_index
@@ -768,7 +835,41 @@ impl Qwen25VLVisionEncoder {
             mlxcel_core::from_slice_i32(&reverse_indices, &[reverse_indices.len() as i32]);
         h = mlxcel_core::take(&h, &reverse_arr, 0);
 
-        VisionEncoderOutput { hidden_states: h }
+        #[cfg(feature = "xla-diagnostics")]
+        if CAPTURE {
+            let restored_projection =
+                mlxcel_core::copy(h.as_ref().expect("Qwen2.5-VL restored projection output"));
+            let output = VisionEncoderOutput { hidden_states: h };
+            return (
+                output,
+                Some(Qwen25VLVisionDiagnostics {
+                    window_index,
+                    restore_indices: reverse_indices,
+                    packed_cu_seqlens: cu_seqlens,
+                    window_cu_seqlens: cu_window_seqlens,
+                    reordered_patch_embedding: reordered_patch_embedding
+                        .expect("Qwen2.5-VL patch capture"),
+                    window_layer_index: window_layer_index
+                        .expect("Qwen2.5-VL diagnostics require a window layer"),
+                    post_window_layer: post_window_layer.expect("Qwen2.5-VL window layer capture"),
+                    full_layer_indices: (0..self.blocks.len())
+                        .filter(|layer| self.fullatt_block_indexes.contains(layer))
+                        .collect(),
+                    post_full_layers,
+                    merger_window_ordered: merger_window_ordered
+                        .expect("Qwen2.5-VL merger capture"),
+                    restored_projection,
+                }),
+            );
+        }
+        #[cfg(not(feature = "xla-diagnostics"))]
+        {
+            (VisionEncoderOutput { hidden_states: h }, ())
+        }
+        #[cfg(feature = "xla-diagnostics")]
+        {
+            (VisionEncoderOutput { hidden_states: h }, None)
+        }
     }
 }
 
