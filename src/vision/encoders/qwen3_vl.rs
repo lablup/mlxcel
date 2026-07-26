@@ -520,6 +520,32 @@ struct VisionMLP {
     linear_fc2: UnifiedLinear,
 }
 
+/// Hugging Face's `gelu_pytorch_tanh`, which Qwen3-VL vision checkpoints use
+/// inside transformer blocks. The patch mergers intentionally keep exact GELU.
+///
+/// Evaluate in F32 to match the qualified IREE graph and cast back so the eager
+/// encoder preserves its caller-visible dtype.
+fn gelu_pytorch_tanh(x: &MlxArray) -> UniquePtr<MlxArray> {
+    let output_dtype = mlxcel_core::array_dtype(x);
+    let x = mlxcel_core::astype(x, mlxcel_core::dtype::FLOAT32);
+    let half = mlxcel_core::full_f32(&[1], 0.5, mlxcel_core::dtype::FLOAT32);
+    let one = mlxcel_core::full_f32(&[1], 1.0, mlxcel_core::dtype::FLOAT32);
+    let sqrt_two_over_pi = mlxcel_core::full_f32(&[1], 0.797_884_6, mlxcel_core::dtype::FLOAT32);
+    let cubic_coefficient = mlxcel_core::full_f32(&[1], 0.044_715, mlxcel_core::dtype::FLOAT32);
+
+    let squared = mlxcel_core::multiply(&x, &x);
+    let cubed = mlxcel_core::multiply(&squared, &x);
+    let cubic = mlxcel_core::multiply(&cubic_coefficient, &cubed);
+    let inner = mlxcel_core::multiply(&sqrt_two_over_pi, &mlxcel_core::add(&x, &cubic));
+    let cdf = mlxcel_core::multiply(&half, &mlxcel_core::add(&one, &mlxcel_core::tanh(&inner)));
+    let activated = mlxcel_core::multiply(&x, &cdf);
+    if output_dtype == mlxcel_core::dtype::FLOAT32 {
+        activated
+    } else {
+        mlxcel_core::astype(&activated, output_dtype)
+    }
+}
+
 impl VisionMLP {
     fn from_weights(weights: &WeightMap, prefix: &str, gs: i32, bits: i32) -> Result<Self, String> {
         Ok(Self {
@@ -540,7 +566,7 @@ impl VisionMLP {
 
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let h = self.linear_fc1.forward(x);
-        let h = mlxcel_core::gelu_approx(&h);
+        let h = gelu_pytorch_tanh(&h);
         self.linear_fc2.forward(&h)
     }
 }
