@@ -38,6 +38,8 @@ use crate::emitter::{
     Qwen2VlConfig, Qwen2VlHostInputs, QwenVlVisionVariant, emit_qwen2_vl,
     prepare_qwen2_vl_host_inputs,
 };
+#[cfg(feature = "diagnostics")]
+use crate::emitter::{Qwen25VlVisionDiagnosticLayout, emit_qwen2_5_vl_diagnostics};
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
 use crate::weights::{bf16_to_f32, dequantize_affine, f16_to_f32, f32_le_to_f32};
 
@@ -60,9 +62,45 @@ pub struct Qwen2VlVisionProjection {
     pub metrics: Qwen2VlVisionExecutionMetrics,
 }
 
+#[cfg(feature = "diagnostics")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Qwen25VlDiagnosticMutation {
+    None,
+    Qwen2FullAttention,
+    IdentityPermutation,
+    ZeroVisionPositions,
+}
+
+#[cfg(feature = "diagnostics")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct Qwen25VlVisionDiagnostics {
+    pub window_index: Vec<usize>,
+    pub restore_indices: Vec<usize>,
+    pub packed_cu_seqlens: Vec<usize>,
+    pub window_cu_seqlens: Vec<usize>,
+    pub reordered_patch_embedding: Vec<f32>,
+    pub window_layer_index: usize,
+    pub post_window_layer: Vec<f32>,
+    pub full_layer_indices: Vec<usize>,
+    pub post_full_layers: Vec<Vec<f32>>,
+    pub merger_window_ordered: Vec<f32>,
+    pub restored_projection: Vec<f32>,
+    pub patch_tokens: usize,
+    pub merged_tokens: usize,
+    pub vision_hidden: usize,
+    pub text_hidden: usize,
+}
+
 struct ActiveModule {
     patch_bucket: usize,
     module: IreeAuxiliaryModule,
+}
+
+#[cfg(feature = "diagnostics")]
+struct ActiveDiagnosticModule {
+    patch_bucket: usize,
+    module: IreeAuxiliaryModule,
+    layout: Qwen25VlVisionDiagnosticLayout,
 }
 
 pub struct IreeQwen2VlProjector {
@@ -71,6 +109,15 @@ pub struct IreeQwen2VlProjector {
     config: Qwen2VlConfig,
     processor_identity: String,
     active: Option<ActiveModule>,
+}
+
+#[cfg(feature = "diagnostics")]
+pub struct IreeQwen25VlDiagnosticProjector {
+    model_dir: PathBuf,
+    device: String,
+    config: Qwen2VlConfig,
+    processor_identity: String,
+    active: Option<ActiveDiagnosticModule>,
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {
@@ -595,6 +642,45 @@ fn compile_and_load(
     IreeAuxiliaryModule::load(device, &vmfb, &contract, weights)
 }
 
+#[cfg(feature = "diagnostics")]
+fn compile_and_load_diagnostics(
+    model_dir: &Path,
+    device: &str,
+    config: &Qwen2VlConfig,
+    processor_identity: &str,
+    patch_bucket: usize,
+) -> Result<(IreeAuxiliaryModule, Qwen25VlVisionDiagnosticLayout), String> {
+    let (mlir, layout) = emit_qwen2_5_vl_diagnostics(config, patch_bucket)?;
+    let compiler = iree_compile_bin()?;
+    if !compiler.is_file() {
+        return Err(format!("iree-compile not found at {}", compiler.display()));
+    }
+    let flags = target_flags(device)?;
+    let cache = std::env::temp_dir().join("mlxcel-xla-qwen2-vl-vmfb");
+    std::fs::create_dir_all(&cache)
+        .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
+    let (weights, checkpoint_schema) = load_weights(model_dir, config)?;
+    let contract = AuxiliaryArtifactContract::new(
+        ENTRY_NAME,
+        format!(
+            "{};{};diagnostics=window-full-restoration;checkpoint_schema_sha256={}",
+            config.fingerprint(patch_bucket),
+            processor_identity,
+            sha256_hex(checkpoint_schema.as_bytes())
+        ),
+        compiler_generation_identity(&compiler, flags, &mlir)?,
+    )?;
+    let tag = format!("qwen2-5-vl-vision-diagnostics-{patch_bucket}");
+    let vmfb = cached_vmfb_path(&compiler, &mlir, flags, &cache, &tag, 0);
+    ensure_qualified_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
+        compile_one_to(&compiler, &mlir, flags, &cache, &tag, 0, temporary)
+    })?;
+    Ok((
+        IreeAuxiliaryModule::load(device, &vmfb, &contract, weights)?,
+        layout,
+    ))
+}
+
 impl IreeQwen2VlProjector {
     pub fn load(model_dir: &Path, device: &str) -> Result<Self, String> {
         let config = Qwen2VlConfig::from_model_dir(model_dir)?;
@@ -738,6 +824,246 @@ impl IreeQwen2VlProjector {
     }
 }
 
+#[cfg(feature = "diagnostics")]
+fn restore_grouped_rows(
+    values: &[f32],
+    row_width: usize,
+    merge_unit: usize,
+    patch_bucket: usize,
+    actual_patches: usize,
+    restore_indices: &[usize],
+) -> Result<Vec<f32>, String> {
+    let expected = patch_bucket
+        .checked_mul(row_width)
+        .ok_or_else(|| "Qwen2.5-VL diagnostic row count overflowed".to_string())?;
+    if values.len() != expected || actual_patches != restore_indices.len() * merge_unit {
+        return Err("Qwen2.5-VL diagnostic permutation dimensions are inconsistent".to_string());
+    }
+    let mut restored = vec![0.0; expected];
+    for (original_group, &window_group) in restore_indices.iter().enumerate() {
+        let source = window_group
+            .checked_mul(merge_unit)
+            .and_then(|row| row.checked_mul(row_width))
+            .ok_or_else(|| "Qwen2.5-VL diagnostic source offset overflowed".to_string())?;
+        let destination = original_group
+            .checked_mul(merge_unit)
+            .and_then(|row| row.checked_mul(row_width))
+            .ok_or_else(|| "Qwen2.5-VL diagnostic destination offset overflowed".to_string())?;
+        let count = merge_unit
+            .checked_mul(row_width)
+            .ok_or_else(|| "Qwen2.5-VL diagnostic group width overflowed".to_string())?;
+        let source_rows = values
+            .get(source..source + count)
+            .ok_or_else(|| "Qwen2.5-VL diagnostic source group is out of range".to_string())?;
+        restored[destination..destination + count].copy_from_slice(source_rows);
+    }
+    Ok(restored)
+}
+
+#[cfg(feature = "diagnostics")]
+impl IreeQwen25VlDiagnosticProjector {
+    pub fn load(model_dir: &Path, device: &str) -> Result<Self, String> {
+        let config = Qwen2VlConfig::from_model_dir(model_dir)?;
+        if !matches!(&config.variant, QwenVlVisionVariant::Qwen25 { .. }) {
+            return Err("Qwen2.5-VL vision diagnostics require model_type=qwen2_5_vl".to_string());
+        }
+        let processor_identity = processor_identity(model_dir, &config)?;
+        Ok(Self {
+            model_dir: model_dir.to_path_buf(),
+            device: device.to_string(),
+            config,
+            processor_identity,
+            active: None,
+        })
+    }
+
+    fn ensure_bucket(
+        &mut self,
+        patch_bucket: usize,
+    ) -> Result<&mut ActiveDiagnosticModule, String> {
+        if self.active.as_ref().map(|active| active.patch_bucket) != Some(patch_bucket) {
+            let (module, layout) = compile_and_load_diagnostics(
+                &self.model_dir,
+                &self.device,
+                &self.config,
+                &self.processor_identity,
+                patch_bucket,
+            )?;
+            self.active = Some(ActiveDiagnosticModule {
+                patch_bucket,
+                module,
+                layout,
+            });
+        }
+        self.active
+            .as_mut()
+            .ok_or_else(|| "Qwen2.5-VL diagnostic module was not installed".to_string())
+    }
+
+    pub fn capture(
+        &mut self,
+        temporal_patch_rows: &[f32],
+        grids: &[(i32, i32, i32)],
+        mutation: Qwen25VlDiagnosticMutation,
+    ) -> Result<Qwen25VlVisionDiagnostics, String> {
+        let Qwen2VlHostInputs {
+            plan,
+            mut patches,
+            mut vision_rope_freqs,
+            packed_attention_bias,
+            mut window_attention_bias,
+        } = prepare_qwen2_vl_host_inputs(&self.config, grids, temporal_patch_rows)?;
+        let merge_unit = self.config.spatial_merge_size * self.config.spatial_merge_size;
+        let patch_width = self.config.channels
+            * self.config.temporal_patch_size
+            * self.config.patch_size
+            * self.config.patch_size;
+        let frequency_width = self.config.hidden / self.config.heads / 2;
+        match mutation {
+            Qwen25VlDiagnosticMutation::None => {}
+            Qwen25VlDiagnosticMutation::Qwen2FullAttention => {
+                window_attention_bias = Some(packed_attention_bias.clone());
+            }
+            Qwen25VlDiagnosticMutation::IdentityPermutation => {
+                patches = restore_grouped_rows(
+                    &patches,
+                    patch_width,
+                    merge_unit,
+                    plan.patch_bucket,
+                    plan.actual_patches,
+                    &plan.restore_indices,
+                )?;
+                vision_rope_freqs = restore_grouped_rows(
+                    &vision_rope_freqs,
+                    frequency_width,
+                    merge_unit,
+                    plan.patch_bucket,
+                    plan.actual_patches,
+                    &plan.restore_indices,
+                )?;
+            }
+            Qwen25VlDiagnosticMutation::ZeroVisionPositions => {
+                vision_rope_freqs.fill(0.0);
+            }
+        }
+        let window_attention_bias = window_attention_bias
+            .ok_or_else(|| "Qwen2.5-VL diagnostics require a window-attention bias".to_string())?;
+        let patch_shape = [plan.patch_bucket, patch_width];
+        let frequency_shape = [plan.patch_bucket, frequency_width];
+        let bias_shape = [plan.patch_bucket, plan.patch_bucket];
+        let state_shape = [plan.patch_bucket, self.config.hidden];
+        let merger_shape = [plan.patch_bucket / merge_unit, self.config.text_hidden];
+        let state_bytes = state_shape.iter().product::<usize>() * std::mem::size_of::<f32>();
+        let merger_bytes = merger_shape.iter().product::<usize>() * std::mem::size_of::<f32>();
+        let full_layer_count = match &self.config.variant {
+            QwenVlVisionVariant::Qwen25 {
+                full_attention_blocks,
+                ..
+            } => full_attention_blocks.len(),
+            QwenVlVisionVariant::Qwen2 => 0,
+        };
+        let mut output_buffers = vec![vec![0u8; state_bytes]; 2 + full_layer_count];
+        output_buffers.push(vec![0u8; merger_bytes]);
+        let inputs = [
+            AuxiliaryInput {
+                bytes: f32_as_bytes(&patches),
+                dtype: AuxiliaryTensorDType::Float32,
+                shape: &patch_shape,
+            },
+            AuxiliaryInput {
+                bytes: f32_as_bytes(&vision_rope_freqs),
+                dtype: AuxiliaryTensorDType::Float32,
+                shape: &frequency_shape,
+            },
+            AuxiliaryInput {
+                bytes: f32_as_bytes(&packed_attention_bias),
+                dtype: AuxiliaryTensorDType::Float32,
+                shape: &bias_shape,
+            },
+            AuxiliaryInput {
+                bytes: f32_as_bytes(&window_attention_bias),
+                dtype: AuxiliaryTensorDType::Float32,
+                shape: &bias_shape,
+            },
+        ];
+        let mut outputs = output_buffers
+            .iter_mut()
+            .enumerate()
+            .map(|(index, bytes)| AuxiliaryOutput {
+                bytes,
+                dtype: AuxiliaryTensorDType::Float32,
+                shape: if index + 1 == 3 + full_layer_count {
+                    &merger_shape
+                } else {
+                    &state_shape
+                },
+            })
+            .collect::<Vec<_>>();
+        let active = self.ensure_bucket(plan.patch_bucket)?;
+        active.module.invoke(&inputs, &mut outputs)?;
+        let layout = active.layout.clone();
+        let mut decoded = output_buffers
+            .into_iter()
+            .enumerate()
+            .map(|(index, bytes)| {
+                checked_f32_output(&format!("Qwen2.5-VL diagnostic output {index}"), bytes)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let actual_state_values = plan
+            .actual_patches
+            .checked_mul(self.config.hidden)
+            .ok_or_else(|| "Qwen2.5-VL diagnostic state size overflowed".to_string())?;
+        for state in decoded.iter_mut().take(2 + full_layer_count) {
+            state.truncate(actual_state_values);
+        }
+        let all_projected = decoded
+            .pop()
+            .ok_or_else(|| "Qwen2.5-VL diagnostic merger output is missing".to_string())?;
+        let actual_tokens = plan.merged_tokens_per_image.iter().sum::<usize>();
+        let actual_projected_values = actual_tokens
+            .checked_mul(self.config.text_hidden)
+            .ok_or_else(|| "Qwen2.5-VL diagnostic merger size overflowed".to_string())?;
+        let merger_window_ordered = all_projected
+            .get(..actual_projected_values)
+            .ok_or_else(|| "Qwen2.5-VL diagnostic merger output is truncated".to_string())?
+            .to_vec();
+        let mut restored_projection = Vec::with_capacity(actual_projected_values);
+        for &window_position in &plan.restore_indices {
+            let start = window_position
+                .checked_mul(self.config.text_hidden)
+                .ok_or_else(|| "Qwen2.5-VL diagnostic restore offset overflowed".to_string())?;
+            restored_projection.extend_from_slice(
+                merger_window_ordered
+                    .get(start..start + self.config.text_hidden)
+                    .ok_or_else(|| {
+                        "Qwen2.5-VL diagnostic restore index is out of range".to_string()
+                    })?,
+            );
+        }
+        let reordered_patch_embedding = decoded.remove(0);
+        let post_window_layer = decoded.remove(0);
+        Ok(Qwen25VlVisionDiagnostics {
+            window_index: plan.window_index,
+            restore_indices: plan.restore_indices,
+            packed_cu_seqlens: plan.packed_cu_seqlens,
+            window_cu_seqlens: plan
+                .window_cu_seqlens
+                .ok_or_else(|| "Qwen2.5-VL diagnostic window lengths are missing".to_string())?,
+            reordered_patch_embedding,
+            window_layer_index: layout.window_layer_index,
+            post_window_layer,
+            full_layer_indices: layout.full_layer_indices,
+            post_full_layers: decoded,
+            merger_window_ordered,
+            restored_projection,
+            patch_tokens: plan.actual_patches,
+            merged_tokens: actual_tokens,
+            vision_hidden: self.config.hidden,
+            text_hidden: self.config.text_hidden,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -804,5 +1130,13 @@ mod tests {
                 .unwrap_err()
                 .contains("flat index 1")
         );
+    }
+
+    #[cfg(feature = "diagnostics")]
+    #[test]
+    fn diagnostic_identity_mutation_restores_window_groups_to_original_order() {
+        let window_ordered = [2.0, 0.0, 3.0, 1.0];
+        let restored = restore_grouped_rows(&window_ordered, 1, 1, 4, 4, &[1, 3, 0, 2]).unwrap();
+        assert_eq!(restored, vec![0.0, 1.0, 2.0, 3.0]);
     }
 }

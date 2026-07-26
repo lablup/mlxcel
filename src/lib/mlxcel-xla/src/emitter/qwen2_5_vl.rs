@@ -24,6 +24,13 @@ use super::qwen2_vl::{
     QWEN2_VL_PATCH_BUCKETS, Qwen2VlConfig, Qwen2VlWeightSpec, QwenVlVisionVariant,
 };
 
+#[cfg(feature = "diagnostics")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Qwen25VlVisionDiagnosticLayout {
+    pub(crate) window_layer_index: usize,
+    pub(crate) full_layer_indices: Vec<usize>,
+}
+
 struct Args {
     values: Vec<Val>,
     declarations: Vec<String>,
@@ -237,7 +244,11 @@ fn encoder_layer(
     builder.add(&residual, &down)
 }
 
-pub(super) fn emit_qwen2_5_vl(config: &Qwen2VlConfig, patch_bucket: usize) -> String {
+fn emit_qwen2_5_vl_inner(
+    config: &Qwen2VlConfig,
+    patch_bucket: usize,
+    #[cfg(feature = "diagnostics")] diagnostic_layout: Option<&Qwen25VlVisionDiagnosticLayout>,
+) -> String {
     assert!(
         QWEN2_VL_PATCH_BUCKETS.contains(&patch_bucket),
         "unqualified Qwen2.5-VL patch bucket"
@@ -270,6 +281,12 @@ pub(super) fn emit_qwen2_5_vl(config: &Qwen2VlConfig, patch_bucket: usize) -> St
         "window_attention.bias",
     );
     let mut hidden = builder.linear_seq(&patches, &patch_weight);
+    #[cfg(feature = "diagnostics")]
+    let reordered_patch_embedding = diagnostic_layout.map(|_| hidden.clone());
+    #[cfg(feature = "diagnostics")]
+    let mut window_layer_state = None;
+    #[cfg(feature = "diagnostics")]
+    let mut full_layer_states = Vec::new();
     for layer in 0..config.depth {
         let bias = if full_attention_blocks.contains(&layer) {
             &full_bias
@@ -277,6 +294,15 @@ pub(super) fn emit_qwen2_5_vl(config: &Qwen2VlConfig, patch_bucket: usize) -> St
             &window_bias
         };
         hidden = encoder_layer(&mut builder, &hidden, &mut args, config, &freqs, bias);
+        #[cfg(feature = "diagnostics")]
+        if let Some(layout) = diagnostic_layout {
+            if layer == layout.window_layer_index {
+                window_layer_state = Some(hidden.clone());
+            }
+            if layout.full_layer_indices.contains(&layer) {
+                full_layer_states.push(hidden.clone());
+            }
+        }
     }
     hidden = rms_norm(&mut builder, &hidden, &args.take(), config.layer_norm_eps);
     let merge_width = config.hidden * config.spatial_merge_size * config.spatial_merge_size;
@@ -291,6 +317,35 @@ pub(super) fn emit_qwen2_5_vl(config: &Qwen2VlConfig, patch_bucket: usize) -> St
     let merged = exact_gelu(&mut builder, &merged);
     let projected = linear_2d(&mut builder, &merged, &args.take(), &args.take());
     assert_eq!(args.cursor, specs.len(), "Qwen2.5-VL weight schema drifted");
+    #[cfg(feature = "diagnostics")]
+    if let Some(layout) = diagnostic_layout {
+        let mut outputs = vec![
+            reordered_patch_embedding.expect("diagnostics capture patch embedding"),
+            window_layer_state.expect("diagnostics capture window layer"),
+        ];
+        assert_eq!(
+            full_layer_states.len(),
+            layout.full_layer_indices.len(),
+            "diagnostics capture every configured full-attention layer"
+        );
+        outputs.extend(full_layer_states);
+        outputs.push(projected);
+        let result_types = outputs
+            .iter()
+            .map(|value| value.ty.render())
+            .collect::<Vec<_>>();
+        return format!(
+            "module @qwen2_vl_vision {{\n  func.func public @main({signature}) -> ({result_signature}) {{\n{body}    return {results} : {result_signature}\n  }}\n}}\n",
+            signature = args.declarations.join(", "),
+            result_signature = result_types.join(", "),
+            body = builder.body(),
+            results = outputs
+                .iter()
+                .map(|value| value.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
     format!(
         "module @qwen2_vl_vision {{\n  func.func public @main({signature}) -> {result_type} {{\n{body}    return {result} : {result_type}\n  }}\n}}\n",
         signature = args.declarations.join(", "),
@@ -298,4 +353,48 @@ pub(super) fn emit_qwen2_5_vl(config: &Qwen2VlConfig, patch_bucket: usize) -> St
         body = builder.body(),
         result = projected.name,
     )
+}
+
+pub(super) fn emit_qwen2_5_vl(config: &Qwen2VlConfig, patch_bucket: usize) -> String {
+    emit_qwen2_5_vl_inner(
+        config,
+        patch_bucket,
+        #[cfg(feature = "diagnostics")]
+        None,
+    )
+}
+
+#[cfg(feature = "diagnostics")]
+pub(crate) fn emit_qwen2_5_vl_diagnostics(
+    config: &Qwen2VlConfig,
+    patch_bucket: usize,
+) -> Result<(String, Qwen25VlVisionDiagnosticLayout), String> {
+    let QwenVlVisionVariant::Qwen25 {
+        full_attention_blocks,
+        ..
+    } = &config.variant
+    else {
+        return Err("Qwen2.5-VL diagnostics require the Qwen2.5 vision variant".to_string());
+    };
+    let window_layer_index = (0..config.depth)
+        .find(|layer| !full_attention_blocks.contains(layer))
+        .ok_or_else(|| {
+            "Qwen2.5-VL diagnostics require at least one window-attention layer".to_string()
+        })?;
+    if full_attention_blocks.is_empty() {
+        return Err(
+            "Qwen2.5-VL diagnostics require at least one configured full-attention layer"
+                .to_string(),
+        );
+    }
+    let layout = Qwen25VlVisionDiagnosticLayout {
+        window_layer_index,
+        full_layer_indices: (0..config.depth)
+            .filter(|layer| full_attention_blocks.contains(layer))
+            .collect(),
+    };
+    Ok((
+        emit_qwen2_5_vl_inner(config, patch_bucket, Some(&layout)),
+        layout,
+    ))
 }
