@@ -353,6 +353,15 @@ pub struct Qwen3VlIreeHostPreprocessor {
     device: String,
 }
 
+/// Exact shared processor payload and IREE vision result used by the
+/// actual-checkpoint Qwen3-VL oracle.
+#[cfg(feature = "xla-diagnostics")]
+pub struct Qwen3VlIreeVisionCapture {
+    pub patch_values: Vec<f32>,
+    pub grids: Vec<(i32, i32, i32)>,
+    pub projection: mlxcel_xla::Qwen3VlVisionProjection,
+}
+
 #[cfg(feature = "xla-iree")]
 impl Qwen2VlIreeHostPreprocessor {
     pub fn load(model_path: &Path, device: &str) -> Result<Self, HostPreprocessorError> {
@@ -523,6 +532,37 @@ impl HostMultimodalPreprocessor for Qwen2VlIreeHostPreprocessor {
 impl Qwen3VlIreeHostPreprocessor {
     pub fn load(model_path: &Path, device: &str) -> Result<Self, HostPreprocessorError> {
         crate::loading::load_qwen3_vl_iree_host_preprocessor(model_path, device)
+    }
+
+    /// Run the qualified host processor and resident IREE vision graph while
+    /// retaining the exact patch payload for an eager MLX comparison.
+    #[cfg(feature = "xla-diagnostics")]
+    pub fn capture_vision(
+        &self,
+        images: &[DynamicImage],
+    ) -> Result<Qwen3VlIreeVisionCapture, HostPreprocessorError> {
+        if images.is_empty() {
+            return Err(HostPreprocessorError::InvalidConfig(
+                "Qwen3-VL vision diagnostics require at least one image".to_string(),
+            ));
+        }
+        let (patch_values, grids) = self.processor.preprocess_values_with_grid(images);
+        let projection = self
+            .projector
+            .try_borrow_mut()
+            .map_err(|_| {
+                HostPreprocessorError::Iree(
+                    "concurrent/re-entrant Qwen3-VL IREE vision invocation is unsupported"
+                        .to_string(),
+                )
+            })?
+            .project(&patch_values, &grids)
+            .map_err(HostPreprocessorError::Iree)?;
+        Ok(Qwen3VlIreeVisionCapture {
+            patch_values,
+            grids,
+            projection,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]

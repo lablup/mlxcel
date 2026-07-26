@@ -602,6 +602,16 @@ pub struct Qwen3VLModel {
     deepstack_visual_embeds: RefCell<Option<Vec<UniquePtr<MlxArray>>>>,
 }
 
+/// Diagnostics-only result from the eager Qwen3-VL language path.
+///
+/// The snapshots are taken immediately after each configured DeepStack
+/// residual injection. Normal generation never constructs this value.
+#[cfg(feature = "xla-diagnostics")]
+pub struct Qwen3VLDeepStackDiagnostics {
+    pub logits: UniquePtr<MlxArray>,
+    pub post_injection_hidden_states: Vec<UniquePtr<MlxArray>>,
+}
+
 impl Qwen3VLModel {
     pub fn from_weights(weights: &WeightMap, config: &Qwen3VLConfig) -> Result<Self, String> {
         let gs = config.group_size();
@@ -836,6 +846,33 @@ impl Qwen3VLModel {
         self.forward_for_sequence(input_ids, input_embeddings, caches, mask, None)
     }
 
+    /// Run the eager production layer loop and expose the states immediately
+    /// after each DeepStack injection.
+    ///
+    /// This entry is compiled only for the actual-checkpoint XLA oracle. It
+    /// shares every operation with [`Self::forward_for_sequence`] and merely
+    /// copies the selected post-hook tensors before final norm and LM head.
+    #[cfg(feature = "xla-diagnostics")]
+    pub fn forward_deepstack_diagnostics(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> Qwen3VLDeepStackDiagnostics {
+        let (logits, post_injection_hidden_states) = self.forward_for_sequence_inner::<true>(
+            input_ids,
+            Some(input_embeddings),
+            caches,
+            mask,
+            None,
+        );
+        Qwen3VLDeepStackDiagnostics {
+            logits,
+            post_injection_hidden_states,
+        }
+    }
+
     /// Internal forward path that takes an optional `SequenceId` so the
     /// cached MRoPE state is resolved per row.
     pub(crate) fn forward_for_sequence(
@@ -846,6 +883,18 @@ impl Qwen3VLModel {
         mask: Option<&MlxArray>,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        self.forward_for_sequence_inner::<false>(input_ids, input_embeddings, caches, mask, seq_id)
+            .0
+    }
+
+    fn forward_for_sequence_inner<const CAPTURE_DEEPSTACK: bool>(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+    ) -> (UniquePtr<MlxArray>, Vec<UniquePtr<MlxArray>>) {
         let cache_offset = caches[0].offset;
         if input_embeddings.is_none() && cache_offset == 0 {
             self.clear_mrope_state();
@@ -853,7 +902,7 @@ impl Qwen3VLModel {
         }
 
         if input_embeddings.is_none() && self.can_use_text_only_fast_path(seq_id) {
-            return self.forward_text_only(input_ids, caches, mask);
+            return (self.forward_text_only(input_ids, caches, mask), Vec::new());
         }
 
         let mut h = if let Some(embeds) = input_embeddings {
@@ -931,6 +980,7 @@ impl Qwen3VLModel {
         // Get deepstack state references
         let ds_masks = self.visual_pos_masks.borrow();
         let ds_embeds = self.deepstack_visual_embeds.borrow();
+        let mut post_injection_hidden_states = Vec::new();
 
         for (layer_idx, layer) in self.layers.iter().enumerate() {
             h = layer.forward(&h, &mut caches[layer_idx], mask, &position_ids);
@@ -941,11 +991,16 @@ impl Qwen3VLModel {
                 && cache_offset == 0
             {
                 h = Self::deepstack_process(&h, masks, &embeds[layer_idx]);
+                if CAPTURE_DEEPSTACK {
+                    post_injection_hidden_states.push(mlxcel_core::copy(
+                        h.as_ref().expect("DeepStack hidden state"),
+                    ));
+                }
             }
         }
 
         h = self.norm.forward(&h);
-        self.lm_head.forward(&h)
+        (self.lm_head.forward(&h), post_injection_hidden_states)
     }
 
     fn forward_text_only(

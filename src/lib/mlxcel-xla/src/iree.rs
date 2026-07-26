@@ -69,7 +69,7 @@ use crate::emitter::{
 #[cfg(feature = "diagnostics")]
 use crate::emitter::{
     Gemma3nDiagnosticLayout, emit_gemma3n_all_layer_diagnostics_with_qmv,
-    emit_gemma3n_prefill_diagnostics_with_qmv,
+    emit_gemma3n_prefill_diagnostics_with_qmv, emit_prefill_embeddings_deepstack_diagnostics_with,
 };
 use crate::prepared::{
     DecodePositionState, PreparedIreePrefill, PreparedPositionMode, canonical_text_positions,
@@ -373,6 +373,26 @@ unsafe extern "C" {
         real_len: c_int,
         vocab: c_int,
         out_logits: *mut f32,
+    ) -> c_int;
+    #[cfg(feature = "diagnostics")]
+    fn xla_llama_prefill_embeddings_deepstack_slot_diagnostics(
+        c: *mut XlaCtx,
+        slot: c_int,
+        adapter_mode: c_int,
+        position_mode: c_int,
+        embeddings: *const XlaTensorDesc,
+        positions: *const XlaTensorDesc,
+        attention_bias: *const XlaTensorDesc,
+        visual_positions: *const XlaTensorDesc,
+        layer_features: *const XlaTensorDesc,
+        layer_indices: *const XlaTensorDesc,
+        actual_layer_count: c_int,
+        actual_visual_count: c_int,
+        real_len: c_int,
+        vocab: c_int,
+        state_count: c_int,
+        out_logits: *mut f32,
+        out_states: *mut f32,
     ) -> c_int;
     fn xla_llama_decode_ragged_logits(
         c: *mut XlaCtx,
@@ -1048,6 +1068,33 @@ fn compile_gemma3n_diagnostics(
         cfg.context_capacity(),
     )?;
     Ok((vmfb, layout))
+}
+
+#[cfg(feature = "diagnostics")]
+fn compile_deepstack_diagnostics(device: &str, cfg: &RuntimeConfig) -> Result<PathBuf, String> {
+    let RuntimeConfig::Dense(config) = cfg else {
+        return Err("DeepStack diagnostics require a dense runtime config".to_string());
+    };
+    if config.deepstack.is_none() {
+        return Err("DeepStack diagnostics require a declared DeepStack schema".to_string());
+    }
+    let precision = effective_precision(device, cfg)?;
+    let mlir = emit_prefill_embeddings_deepstack_diagnostics_with(config, precision);
+    let compiler = iree_compile_bin()?;
+    if !compiler.exists() {
+        return Err(format!("iree-compile not found at {}", compiler.display()));
+    }
+    let cache = std::env::temp_dir().join("mlxcel-xla-vmfb");
+    std::fs::create_dir_all(&cache)
+        .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
+    compile_one(
+        &compiler,
+        &mlir,
+        target_flags(device)?,
+        &cache,
+        "prefill_embeddings_deepstack_diagnostics",
+        cfg.context_capacity(),
+    )
 }
 
 /// Map each needed weight name to the safetensors file that holds it, in the same
@@ -2157,6 +2204,18 @@ pub struct PreparedPrefillDiagnostics {
     pub kv_width: usize,
 }
 
+#[cfg(feature = "diagnostics")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeepStackPrefillDiagnostics {
+    pub logits: Vec<f32>,
+    /// Flattened `[deepstack_layers, context_capacity, hidden_size]` states.
+    pub post_injection_hidden_states: Vec<f32>,
+    pub target_layer_indices: Vec<usize>,
+    pub deepstack_layers: usize,
+    pub context_capacity: usize,
+    pub hidden_size: usize,
+}
+
 pub struct IreeRaggedLlama {
     ctx: *mut XlaCtx,
     b_max: usize,
@@ -2187,7 +2246,15 @@ impl IreeRaggedLlama {
         b_max: usize,
         context_capacity: usize,
     ) -> Result<Self, String> {
-        Self::load_inner(model_dir, device, b_max, context_capacity, false, false)
+        Self::load_inner(
+            model_dir,
+            device,
+            b_max,
+            context_capacity,
+            false,
+            false,
+            false,
+        )
     }
 
     #[cfg(feature = "diagnostics")]
@@ -2197,7 +2264,15 @@ impl IreeRaggedLlama {
         b_max: usize,
         context_capacity: usize,
     ) -> Result<Self, String> {
-        Self::load_inner(model_dir, device, b_max, context_capacity, true, false)
+        Self::load_inner(
+            model_dir,
+            device,
+            b_max,
+            context_capacity,
+            true,
+            false,
+            false,
+        )
     }
 
     #[cfg(feature = "diagnostics")]
@@ -2207,7 +2282,33 @@ impl IreeRaggedLlama {
         b_max: usize,
         context_capacity: usize,
     ) -> Result<Self, String> {
-        Self::load_inner(model_dir, device, b_max, context_capacity, false, true)
+        Self::load_inner(
+            model_dir,
+            device,
+            b_max,
+            context_capacity,
+            false,
+            true,
+            false,
+        )
+    }
+
+    #[cfg(feature = "diagnostics")]
+    pub fn load_with_deepstack_diagnostics(
+        model_dir: &Path,
+        device: &str,
+        b_max: usize,
+        context_capacity: usize,
+    ) -> Result<Self, String> {
+        Self::load_inner(
+            model_dir,
+            device,
+            b_max,
+            context_capacity,
+            false,
+            false,
+            true,
+        )
     }
 
     fn load_inner(
@@ -2217,8 +2318,15 @@ impl IreeRaggedLlama {
         context_capacity: usize,
         diagnostics: bool,
         all_layer_diagnostics: bool,
+        deepstack_diagnostics: bool,
     ) -> Result<Self, String> {
-        debug_assert!(!(diagnostics && all_layer_diagnostics));
+        debug_assert!(
+            [diagnostics, all_layer_diagnostics, deepstack_diagnostics]
+                .into_iter()
+                .filter(|enabled| *enabled)
+                .count()
+                <= 1
+        );
         let cfg = RuntimeConfig::from_json(model_dir, context_capacity)?;
         runtime_ffi_dimensions(&cfg, cfg.weight_specs().len())?;
         checked_ffi_int(b_max, "b_max")?;
@@ -2280,11 +2388,13 @@ impl IreeRaggedLlama {
         let (diagnostic_vmfb, diagnostic_layout) = if diagnostics || all_layer_diagnostics {
             let (vmfb, layout) = compile_gemma3n_diagnostics(device, &cfg, all_layer_diagnostics)?;
             (Some(vmfb), Some(layout))
+        } else if deepstack_diagnostics {
+            (Some(compile_deepstack_diagnostics(device, &cfg)?), None)
         } else {
             (None, None)
         };
         #[cfg(not(feature = "diagnostics"))]
-        debug_assert!(!diagnostics && !all_layer_diagnostics);
+        debug_assert!(!diagnostics && !all_layer_diagnostics && !deepstack_diagnostics);
         #[cfg(feature = "diagnostics")]
         let ctx = create_ctx_with_diagnostics(
             model_dir,
@@ -2704,6 +2814,92 @@ impl IreeRaggedLlama {
             ));
         }
         Ok(logits)
+    }
+
+    /// Invoke the diagnostics-only DeepStack graph and read back every
+    /// post-injection hidden state without changing the production graph ABI.
+    #[cfg(feature = "diagnostics")]
+    pub fn prefill_deepstack_prepared_slot_diagnostics(
+        &mut self,
+        slot: usize,
+        prepared: &PreparedIreePrefill,
+        deepstack: &PreparedDeepStack,
+    ) -> Result<DeepStackPrefillDiagnostics, String> {
+        let schema = self.deepstack_schema.as_ref().ok_or_else(|| {
+            "DeepStack diagnostics were requested from a runtime without that capability"
+                .to_string()
+        })?;
+        validate_slot(slot, self.b_max).map_err(|error| error.to_string())?;
+        if prepared.hidden_size != self.hidden_size
+            || prepared.context_capacity != self.context_capacity
+            || prepared.effective_len == 0
+            || prepared.effective_len > self.context_capacity
+            || prepared.positions.mode() != self.position_mode
+            || deepstack.hidden_size != self.hidden_size
+            || deepstack.max_layer_count != schema.target_layer_indices.len()
+            || deepstack.max_visual_count != schema.max_visual_positions
+        {
+            return Err(
+                "DeepStack diagnostic payload is incompatible with this runtime bundle".to_string(),
+            );
+        }
+        let (embeddings, positions, attention_bias) = prepared_descriptors(prepared)?;
+        let (visual_positions, layer_features, layer_indices) = deepstack_descriptors(deepstack)?;
+        let actual_layer_count =
+            checked_ffi_int(deepstack.actual_layer_count, "DeepStack actual layer count")?;
+        let actual_visual_count = checked_ffi_int(
+            deepstack.actual_visual_count,
+            "DeepStack actual visual count",
+        )?;
+        let real_len = checked_ffi_int(prepared.effective_len, "prepared effective length")?;
+        let slot = checked_ffi_int(slot, "slot")?;
+        let vocab = checked_ffi_int(self.vocab, "vocab_size")?;
+        let state_count = schema
+            .target_layer_indices
+            .len()
+            .checked_mul(self.context_capacity)
+            .and_then(|count| count.checked_mul(self.hidden_size))
+            .ok_or_else(|| "DeepStack diagnostic state count overflowed".to_string())?;
+        let state_count_ffi = checked_ffi_int(state_count, "DeepStack diagnostic state count")?;
+        let mut logits = vec![0.0; self.vocab];
+        let mut post_injection_hidden_states = vec![0.0; state_count];
+        // Safety: all typed descriptors and output buffers remain live through
+        // the call. The C shim repeats the production DeepStack validation and
+        // verifies the static diagnostics output element count before readback.
+        let rc = unsafe {
+            xla_llama_prefill_embeddings_deepstack_slot_diagnostics(
+                self.ctx,
+                slot,
+                0,
+                prepared.positions.mode().ffi_code(),
+                &embeddings,
+                &positions,
+                &attention_bias,
+                &visual_positions,
+                &layer_features,
+                &layer_indices,
+                actual_layer_count,
+                actual_visual_count,
+                real_len,
+                vocab,
+                state_count_ffi,
+                logits.as_mut_ptr(),
+                post_injection_hidden_states.as_mut_ptr(),
+            )
+        };
+        if rc != 0 {
+            return Err(format!(
+                "xla_llama_prefill_embeddings_deepstack_slot_diagnostics failed (status {rc})"
+            ));
+        }
+        Ok(DeepStackPrefillDiagnostics {
+            logits,
+            post_injection_hidden_states,
+            target_layer_indices: schema.target_layer_indices.clone(),
+            deepstack_layers: schema.target_layer_indices.len(),
+            context_capacity: self.context_capacity,
+            hidden_size: self.hidden_size,
+        })
     }
 
     /// Seed one Gemma3n batch slot from owned prepared embeddings and dense PLE.

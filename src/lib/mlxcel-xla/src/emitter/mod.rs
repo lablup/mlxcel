@@ -1134,6 +1134,12 @@ mod tests {
             "ragged DeepStack ABI must carry the explicit position mode"
         );
         assert!(
+            source.contains(
+                "int xla_llama_prefill_embeddings_deepstack_slot_diagnostics(\n    xla_ctx* c, int32_t slot, int32_t adapter_mode, int32_t position_mode,"
+            ),
+            "diagnostic DeepStack ABI must preserve the production mode contract"
+        );
+        assert!(
             source.contains("desc->byte_length != expected_bytes"),
             "the shared descriptor validator must reject rank-correct truncated buffers"
         );

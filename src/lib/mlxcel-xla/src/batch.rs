@@ -901,6 +901,48 @@ pub struct LlavaReferenceDiagnosticRun {
     pub decode_seconds: f64,
 }
 
+/// Diagnostics-only runner for the actual-checkpoint Qwen3-VL DeepStack
+/// language oracle.
+#[cfg(feature = "diagnostics")]
+pub struct Qwen3VlDeepStackDiagnosticEngine {
+    engine: IreeRaggedLlama,
+}
+
+#[cfg(feature = "diagnostics")]
+impl Qwen3VlDeepStackDiagnosticEngine {
+    pub fn load(model_path: &Path, device: &str, context_capacity: usize) -> Result<Self, String> {
+        Ok(Self {
+            engine: IreeRaggedLlama::load_with_deepstack_diagnostics(
+                model_path,
+                device,
+                4,
+                context_capacity,
+            )?,
+        })
+    }
+
+    #[must_use]
+    pub fn context_capacity(&self) -> usize {
+        self.engine.context_capacity()
+    }
+
+    pub fn capture(
+        &mut self,
+        prepared: &DeepStackPreparedPrefill,
+    ) -> Result<crate::iree::DeepStackPrefillDiagnostics, String> {
+        self.engine.reset_slots_for_diagnostics()?;
+        let prepared_iree = PreparedIreePrefill::prepare(
+            prepared.prepared(),
+            self.engine.hidden_size(),
+            self.engine.context_capacity(),
+        )
+        .map_err(|error| error.to_string())?;
+        let deepstack = self.engine.prepare_deepstack(prepared.deepstack())?;
+        self.engine
+            .prefill_deepstack_prepared_slot_diagnostics(0, &prepared_iree, &deepstack)
+    }
+}
+
 #[cfg(feature = "diagnostics")]
 pub fn run_gemma3n_all_layer_diagnostics(
     model_dir: &Path,
