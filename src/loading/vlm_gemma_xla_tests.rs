@@ -92,6 +92,37 @@ pub mod reference_boundary {
         hidden_state_index: usize,
     }
 
+    // Block 6 already closes the first balanced bisection interval. Capture
+    // blocks 1..=5 immediately before it so the next run identifies the exact
+    // first failing block inside the known 1..=6 range.
+    const SIGLIP_HIDDEN_REFINEMENT_CHECKPOINTS: [SiglipHiddenCheckpoint; 5] = [
+        SiglipHiddenCheckpoint {
+            label: "siglip.hidden.block1.output",
+            block_index: 1,
+            hidden_state_index: 2,
+        },
+        SiglipHiddenCheckpoint {
+            label: "siglip.hidden.block2.output",
+            block_index: 2,
+            hidden_state_index: 3,
+        },
+        SiglipHiddenCheckpoint {
+            label: "siglip.hidden.block3.output",
+            block_index: 3,
+            hidden_state_index: 4,
+        },
+        SiglipHiddenCheckpoint {
+            label: "siglip.hidden.block4.output",
+            block_index: 4,
+            hidden_state_index: 5,
+        },
+        SiglipHiddenCheckpoint {
+            label: "siglip.hidden.block5.output",
+            block_index: 5,
+            hidden_state_index: 6,
+        },
+    ];
+
     // Block 0 already has full sub-stage coverage. These ordered checkpoints
     // split blocks 1..=26 into balanced inclusive ranges 1..=6, 7..=13,
     // 14..=20, and 21..=26 while reusing the existing final-state comparison.
@@ -117,6 +148,13 @@ pub mod reference_boundary {
             hidden_state_index: 27,
         },
     ];
+
+    fn siglip_hidden_checkpoints() -> impl Iterator<Item = SiglipHiddenCheckpoint> {
+        SIGLIP_HIDDEN_REFINEMENT_CHECKPOINTS
+            .iter()
+            .chain(SIGLIP_HIDDEN_BISECTION_CHECKPOINTS.iter())
+            .copied()
+    }
 
     #[derive(Debug, Clone, Copy)]
     struct Tolerance {
@@ -295,7 +333,29 @@ pub mod reference_boundary {
             })
     }
 
-    fn compare_siglip_hidden_bisection(
+    fn first_failing_siglip_block(
+        checkpoint_results: &[(SiglipHiddenCheckpoint, bool)],
+    ) -> Option<usize> {
+        checkpoint_results
+            .iter()
+            .find_map(|(checkpoint, passed)| (!passed).then_some(checkpoint.block_index))
+    }
+
+    fn checkpoint_statuses(checkpoint_results: &[(SiglipHiddenCheckpoint, bool)]) -> String {
+        checkpoint_results
+            .iter()
+            .map(|(checkpoint, passed)| {
+                format!(
+                    "{}:{}",
+                    checkpoint.label,
+                    if *passed { "PASS" } else { "FAIL" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn compare_siglip_hidden_checkpoints(
         observed_hidden_states: &[Vec<f32>],
         reference_checkpoints: &[Vec<f32>],
         first_divergence: &mut Option<String>,
@@ -307,12 +367,10 @@ pub mod reference_boundary {
         );
         assert_eq!(
             reference_checkpoints.len(),
-            SIGLIP_HIDDEN_BISECTION_CHECKPOINTS.len(),
-            "eager SigLIP bisection checkpoint count drifted"
+            SIGLIP_HIDDEN_REFINEMENT_CHECKPOINTS.len() + SIGLIP_HIDDEN_BISECTION_CHECKPOINTS.len(),
+            "eager SigLIP ordered checkpoint count drifted"
         );
-        let results = SIGLIP_HIDDEN_BISECTION_CHECKPOINTS
-            .iter()
-            .copied()
+        let results = siglip_hidden_checkpoints()
             .zip(reference_checkpoints)
             .map(|(checkpoint, reference)| {
                 let observed = observed_hidden_states
@@ -333,30 +391,37 @@ pub mod reference_boundary {
                 (checkpoint, passed)
             })
             .collect::<Vec<_>>();
-        let checkpoint_statuses = results
-            .iter()
-            .map(|(checkpoint, passed)| {
-                format!(
-                    "{}:{}",
-                    checkpoint.label,
-                    if *passed { "PASS" } else { "FAIL" }
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        if let Some((first, last)) = first_failing_siglip_block_interval(&results) {
+        let refinement_end = SIGLIP_HIDDEN_REFINEMENT_CHECKPOINTS.len() + 1;
+        let refinement_results = &results[..refinement_end];
+        let refinement_statuses = checkpoint_statuses(refinement_results);
+        if let Some(block) = first_failing_siglip_block(refinement_results) {
+            eprintln!(
+                "[gemma3-vlm-boundary] stage=siglip.hidden.block1_to_6 status=FAIL \
+                 exact_first_failing_block={block} checkpoints=[{refinement_statuses}]"
+            );
+        } else {
+            eprintln!(
+                "[gemma3-vlm-boundary] stage=siglip.hidden.block1_to_6 status=PASS \
+                 checked_block_range=1..=6 checkpoints=[{refinement_statuses}]"
+            );
+        }
+        let bisection_results = &results[SIGLIP_HIDDEN_REFINEMENT_CHECKPOINTS.len()..];
+        let bisection_statuses = checkpoint_statuses(bisection_results);
+        if let Some((first, last)) = first_failing_siglip_block_interval(bisection_results) {
             eprintln!(
                 "[gemma3-vlm-boundary] stage=siglip.hidden.bisection status=FAIL \
-                 first_failing_block_range={first}..={last} checkpoints=[{checkpoint_statuses}]"
+                 first_failing_block_range={first}..={last} checkpoints=[{bisection_statuses}]"
             );
         } else {
             eprintln!(
                 "[gemma3-vlm-boundary] stage=siglip.hidden.bisection status=PASS \
-                 checked_block_range=1..={} checkpoints=[{checkpoint_statuses}]",
+                 checked_block_range=1..={} checkpoints=[{bisection_statuses}]",
                 PINNED_SIGLIP_BLOCK_COUNT - 1
             );
         }
-        io::stderr().flush().expect("flush SigLIP bisection report");
+        io::stderr()
+            .flush()
+            .expect("flush SigLIP hidden checkpoint report");
     }
 
     fn sha256(path: &Path) -> String {
@@ -507,6 +572,69 @@ pub mod reference_boundary {
         assert_eq!(stats.failures, 2);
         assert_eq!(stats.non_finite_count, 1);
         assert_eq!(stats.first_failure, Some(1));
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn siglip_hidden_refinement_descriptors_are_exact_and_ordered() {
+        assert_eq!(
+            SIGLIP_HIDDEN_REFINEMENT_CHECKPOINTS,
+            [
+                SiglipHiddenCheckpoint {
+                    label: "siglip.hidden.block1.output",
+                    block_index: 1,
+                    hidden_state_index: 2,
+                },
+                SiglipHiddenCheckpoint {
+                    label: "siglip.hidden.block2.output",
+                    block_index: 2,
+                    hidden_state_index: 3,
+                },
+                SiglipHiddenCheckpoint {
+                    label: "siglip.hidden.block3.output",
+                    block_index: 3,
+                    hidden_state_index: 4,
+                },
+                SiglipHiddenCheckpoint {
+                    label: "siglip.hidden.block4.output",
+                    block_index: 4,
+                    hidden_state_index: 5,
+                },
+                SiglipHiddenCheckpoint {
+                    label: "siglip.hidden.block5.output",
+                    block_index: 5,
+                    hidden_state_index: 6,
+                },
+            ]
+        );
+        assert_eq!(
+            siglip_hidden_checkpoints()
+                .map(|checkpoint| checkpoint.block_index)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5, 6, 13, 20, 26]
+        );
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn siglip_hidden_refinement_identifies_each_exact_failed_block() {
+        let refinement = siglip_hidden_checkpoints()
+            .take(SIGLIP_HIDDEN_REFINEMENT_CHECKPOINTS.len() + 1)
+            .collect::<Vec<_>>();
+        assert_eq!(refinement.len(), 6);
+
+        for failed in 0..refinement.len() {
+            let mut results = refinement
+                .iter()
+                .copied()
+                .map(|checkpoint| (checkpoint, true))
+                .collect::<Vec<_>>();
+            results[failed].1 = false;
+            assert_eq!(
+                first_failing_siglip_block(&results),
+                Some(refinement[failed].block_index)
+            );
+        }
     }
 
     #[cfg(test)]
@@ -719,8 +847,7 @@ pub mod reference_boundary {
             PINNED_SIGLIP_BLOCK_COUNT + 1,
             "eager SigLIP diagnostics must contain embedding plus every pinned block output"
         );
-        let mlx_hidden_bisection = SIGLIP_HIDDEN_BISECTION_CHECKPOINTS
-            .iter()
+        let mlx_hidden_checkpoints = siglip_hidden_checkpoints()
             .map(|checkpoint| {
                 assert_eq!(
                     checkpoint.hidden_state_index,
@@ -779,9 +906,9 @@ pub mod reference_boundary {
                 &mut first_divergence,
             );
         }
-        compare_siglip_hidden_bisection(
+        compare_siglip_hidden_checkpoints(
             &iree.hidden_states,
-            &mlx_hidden_bisection,
+            &mlx_hidden_checkpoints,
             &mut first_divergence,
         );
         compare_stage(
