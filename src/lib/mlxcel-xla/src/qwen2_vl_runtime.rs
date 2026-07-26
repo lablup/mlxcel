@@ -127,6 +127,74 @@ struct ActiveDiagnosticModule {
     layout: Qwen25VlVisionDiagnosticLayout,
 }
 
+#[cfg(feature = "diagnostics")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Qwen25VlDiagnosticOutputSpec {
+    label: String,
+    shape: Vec<usize>,
+}
+
+#[cfg(feature = "diagnostics")]
+fn qwen25_diagnostic_output_specs(
+    config: &Qwen2VlConfig,
+    layout: &Qwen25VlVisionDiagnosticLayout,
+    patch_bucket: usize,
+) -> Vec<Qwen25VlDiagnosticOutputSpec> {
+    let state_shape = || vec![patch_bucket, config.hidden];
+    let state = |label: String| Qwen25VlDiagnosticOutputSpec {
+        label,
+        shape: state_shape(),
+    };
+    let mut specs = vec![
+        state("reordered_patch_embedding".to_string()),
+        state(format!("post_window_layer.{}", layout.window_layer_index)),
+    ];
+    specs.extend(
+        layout
+            .full_layer_indices
+            .iter()
+            .map(|layer| state(format!("post_full_layer.{layer}"))),
+    );
+    specs.extend(
+        layout
+            .final_interval_layer_indices
+            .iter()
+            .map(|layer| state(format!("post_final_interval_layer.{layer}"))),
+    );
+    let probe = layout.substage_probe_layer_index;
+    specs.extend([
+        state(format!("substage_probe_layer.{probe}.input")),
+        state(format!("substage_probe_layer.{probe}.norm1")),
+        Qwen25VlDiagnosticOutputSpec {
+            label: format!("substage_probe_layer.{probe}.query"),
+            shape: vec![patch_bucket, config.heads, config.hidden / config.heads],
+        },
+        Qwen25VlDiagnosticOutputSpec {
+            label: format!("substage_probe_layer.{probe}.key"),
+            shape: vec![patch_bucket, config.heads, config.hidden / config.heads],
+        },
+        Qwen25VlDiagnosticOutputSpec {
+            label: format!("substage_probe_layer.{probe}.value"),
+            shape: vec![patch_bucket, config.heads, config.hidden / config.heads],
+        },
+        state(format!("substage_probe_layer.{probe}.attention_context")),
+        state(format!("substage_probe_layer.{probe}.attention")),
+        state(format!(
+            "substage_probe_layer.{probe}.post_attention_residual"
+        )),
+        state(format!("substage_probe_layer.{probe}.norm2")),
+        state(format!("substage_probe_layer.{probe}.mlp")),
+    ]);
+    specs.push(Qwen25VlDiagnosticOutputSpec {
+        label: "merger_window_ordered".to_string(),
+        shape: vec![
+            patch_bucket / (config.spatial_merge_size * config.spatial_merge_size),
+            config.text_hidden,
+        ],
+    });
+    specs
+}
+
 pub struct IreeQwen2VlProjector {
     model_dir: PathBuf,
     device: String,
@@ -1034,19 +1102,20 @@ impl IreeQwen25VlDiagnosticProjector {
         let patch_shape = [plan.patch_bucket, patch_width];
         let frequency_shape = [plan.patch_bucket, frequency_width];
         let bias_shape = [plan.patch_bucket, plan.patch_bucket];
-        let state_shape = [plan.patch_bucket, self.config.hidden];
-        let merger_shape = [plan.patch_bucket / merge_unit, self.config.text_hidden];
-        let state_bytes = state_shape.iter().product::<usize>() * std::mem::size_of::<f32>();
-        let merger_bytes = merger_shape.iter().product::<usize>() * std::mem::size_of::<f32>();
+        let diagnostic_config = self.config.clone();
         let active = self.ensure_bucket(plan.patch_bucket)?;
         let layout = active.layout.clone();
         let full_layer_count = layout.full_layer_indices.len();
         let final_interval_layer_count = layout.final_interval_layer_indices.len();
-        let block_substage_count = 10;
-        let state_output_count =
-            2 + full_layer_count + final_interval_layer_count + block_substage_count;
-        let mut output_buffers = vec![vec![0u8; state_bytes]; state_output_count];
-        output_buffers.push(vec![0u8; merger_bytes]);
+        let output_specs =
+            qwen25_diagnostic_output_specs(&diagnostic_config, &layout, plan.patch_bucket);
+        let merger_output_index = output_specs.len() - 1;
+        let mut output_buffers = output_specs
+            .iter()
+            .map(|spec| {
+                vec![0u8; spec.shape.iter().product::<usize>() * std::mem::size_of::<f32>()]
+            })
+            .collect::<Vec<_>>();
         let inputs = [
             AuxiliaryInput {
                 bytes: f32_as_bytes(&patches),
@@ -1071,30 +1140,32 @@ impl IreeQwen25VlDiagnosticProjector {
         ];
         let mut outputs = output_buffers
             .iter_mut()
-            .enumerate()
-            .map(|(index, bytes)| AuxiliaryOutput {
+            .zip(&output_specs)
+            .map(|(bytes, spec)| AuxiliaryOutput {
                 bytes,
                 dtype: AuxiliaryTensorDType::Float32,
-                shape: if index == state_output_count {
-                    &merger_shape
-                } else {
-                    &state_shape
-                },
+                shape: &spec.shape,
             })
             .collect::<Vec<_>>();
         active.module.invoke(&inputs, &mut outputs)?;
         let mut decoded = output_buffers
             .into_iter()
-            .enumerate()
-            .map(|(index, bytes)| {
-                checked_f32_output(&format!("Qwen2.5-VL diagnostic output {index}"), bytes)
+            .zip(&output_specs)
+            .map(|(bytes, spec)| {
+                checked_f32_output(
+                    &format!("Qwen2.5-VL diagnostic output {}", spec.label),
+                    bytes,
+                )
             })
             .collect::<Result<Vec<_>, _>>()?;
         let actual_state_values = plan
             .actual_patches
             .checked_mul(self.config.hidden)
             .ok_or_else(|| "Qwen2.5-VL diagnostic state size overflowed".to_string())?;
-        for state in decoded.iter_mut().take(state_output_count) {
+        // The public diagnostics API intentionally owns flat comparison
+        // vectors, but the IREE descriptors above retain the emitted rank-3
+        // [patch, head, head_dim] axes for Q/K/V.
+        for state in decoded.iter_mut().take(merger_output_index) {
             state.truncate(actual_state_values);
         }
         let all_projected = decoded
@@ -1225,6 +1296,85 @@ mod tests {
         assert_eq!(audit.cross_media_full_bias_leaks, 0);
         assert_eq!(audit.active_padding_full_bias_leaks, 0);
         assert_eq!(audit.invalid_padded_full_bias_entries, 0);
+    }
+
+    #[cfg(feature = "diagnostics")]
+    #[test]
+    fn qwen25_actual_output_descriptors_pin_semantics_order_and_rank() {
+        let config = Qwen2VlConfig::from_json_str(
+            r#"{
+                "model_type":"qwen2_5_vl",
+                "hidden_size":1536,
+                "vision_config":{
+                    "depth":32,
+                    "hidden_act":"silu",
+                    "hidden_size":1280,
+                    "intermediate_size":3420,
+                    "out_hidden_size":1536,
+                    "num_heads":16,
+                    "in_chans":3,
+                    "patch_size":14,
+                    "spatial_merge_size":2,
+                    "temporal_patch_size":2,
+                    "window_size":112,
+                    "fullatt_block_indexes":[7,15,23,31]
+                }
+            }"#,
+        )
+        .unwrap();
+        let (_, layout) = emit_qwen2_5_vl_diagnostics(
+            &config,
+            256,
+            resolve_precision_checked("local-sync").unwrap(),
+        )
+        .unwrap();
+        let specs = qwen25_diagnostic_output_specs(&config, &layout, 256);
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| spec.label.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "reordered_patch_embedding",
+                "post_window_layer.0",
+                "post_full_layer.7",
+                "post_full_layer.15",
+                "post_full_layer.23",
+                "post_full_layer.31",
+                "post_final_interval_layer.24",
+                "post_final_interval_layer.25",
+                "post_final_interval_layer.26",
+                "post_final_interval_layer.27",
+                "post_final_interval_layer.28",
+                "post_final_interval_layer.29",
+                "post_final_interval_layer.30",
+                "post_final_interval_layer.31",
+                "substage_probe_layer.23.input",
+                "substage_probe_layer.23.norm1",
+                "substage_probe_layer.23.query",
+                "substage_probe_layer.23.key",
+                "substage_probe_layer.23.value",
+                "substage_probe_layer.23.attention_context",
+                "substage_probe_layer.23.attention",
+                "substage_probe_layer.23.post_attention_residual",
+                "substage_probe_layer.23.norm2",
+                "substage_probe_layer.23.mlp",
+                "merger_window_ordered",
+            ]
+        );
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| spec.shape.len())
+                .collect::<Vec<_>>(),
+            [vec![2; 16], vec![3; 3], vec![2; 6],].concat()
+        );
+        for spec in &specs[16..=18] {
+            assert_eq!(spec.shape, vec![256, 16, 80]);
+        }
+        assert_eq!(specs[15].shape, vec![256, 1280]);
+        assert_eq!(specs[19].shape, vec![256, 1280]);
+        assert_eq!(specs[24].shape, vec![64, 1536]);
     }
 
     fn tiny_config() -> Qwen2VlConfig {
