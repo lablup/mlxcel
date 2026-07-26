@@ -383,6 +383,18 @@ pub fn detect_prefix(weights: &WeightMap) -> Result<&'static str, String> {
 /// it (see the module docs); transposing such a weight into the graph would
 /// produce a model that loads and generates fluent-looking output from
 /// corrupted projections.
+///
+/// Quantization packs the *input* axis only, so a quantized weight is still
+/// `[out_features, packed_in]`. The packed input width matches no float layout
+/// and is left to `UnifiedLinear` to reconcile, but the row count is untouched
+/// by packing, so the output width is still checked, and for this family that
+/// check is not cosmetic. [`Attention::forward`] slices the fused `c_attn`
+/// output at offsets derived from the config, so a packed `c_attn` *wider* than
+/// the config claims leaves all three slices in bounds and silently hands K and
+/// V the wrong channels: the model loads and decodes fluent-looking output from
+/// a projection nothing validated. A *narrower* one makes MLX's `slice` clamp
+/// and the following `reshape` throw, which is the uncatchable
+/// `std::terminate` again.
 pub fn load_linear(
     weights: &WeightMap,
     prefix: &str,
@@ -391,11 +403,7 @@ pub fn load_linear(
     group_size: i32,
     bits: i32,
 ) -> Result<UnifiedLinear, String> {
-    // A quantized projection is packed, so its stored shape matches no float
-    // layout. `UnifiedLinear` reconciles the quantization layout itself.
-    if weights.contains_key(&format!("{prefix}.scales")) {
-        return UnifiedLinear::from_weights(weights, prefix, group_size, bits);
-    }
+    let quantized = weights.contains_key(&format!("{prefix}.scales"));
 
     let weight_name = format!("{prefix}.weight");
     let weight = weights
@@ -403,11 +411,14 @@ pub fn load_linear(
         .ok_or_else(|| format!("Weight not found: {weight_name}"))?;
     let shape = mlxcel_core::array_shape(weight);
 
-    let is_expected =
-        shape.len() == 2 && dim_eq(shape[0], out_features) && dim_eq(shape[1], in_features);
+    let is_expected = shape.len() == 2
+        && dim_eq(shape[0], out_features)
+        && (quantized || dim_eq(shape[1], in_features));
     if !is_expected {
-        let looks_transposed =
-            shape.len() == 2 && dim_eq(shape[0], in_features) && dim_eq(shape[1], out_features);
+        let looks_transposed = !quantized
+            && shape.len() == 2
+            && dim_eq(shape[0], in_features)
+            && dim_eq(shape[1], out_features);
         let hint = if looks_transposed {
             " That is the GPT-2 `Conv1D` [in, out] orientation. GPT-BigCode builds its \
              projections with `nn.Linear`, so a genuine checkpoint is already [out, in] and \
@@ -415,9 +426,14 @@ pub fn load_linear(
         } else {
             ""
         };
+        let expected_in = if quantized {
+            "<packed in>".to_string()
+        } else {
+            in_features.to_string()
+        };
         return Err(format!(
             "unexpected {weight_name} shape {shape:?}: expected [{out_features}, \
-             {in_features}].{hint}"
+             {expected_in}].{hint}"
         ));
     }
 

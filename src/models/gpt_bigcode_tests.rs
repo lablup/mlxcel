@@ -502,10 +502,11 @@ fn every_layer_is_checked_not_just_layer_zero() {
 }
 
 #[test]
-fn load_linear_delegates_a_quantized_projection_unchecked() {
-    // A packed weight matches no float layout, so the float shape contract must
-    // not be applied to it; `UnifiedLinear` reconciles the quantization layout
-    // itself. Shapes here follow the 4-bit affine packing (8 values per u32).
+fn a_quantized_projection_skips_the_packed_input_width_but_not_the_output_width() {
+    // Packing compresses the input axis, so a packed weight matches no float
+    // input layout and that half of the contract must not be applied to it;
+    // `UnifiedLinear` reconciles the quantization layout itself. Shapes here
+    // follow the 4-bit affine packing (8 values per u32).
     let mut weights = WeightMap::new();
     weights.insert("q.weight".into(), zeros(&[10, 1]));
     weights.insert("q.scales".into(), ones(&[10, 1]));
@@ -514,8 +515,41 @@ fn load_linear_delegates_a_quantized_projection_unchecked() {
     let loaded = load_linear(&weights, "q", 8, 10, 8, 4).expect("a quantized projection loads");
     assert!(
         matches!(loaded, UnifiedLinear::Quantized { .. }),
-        "the packed path must not be routed through the float shape check"
+        "the packed path must not be routed through the float input-width check"
     );
+
+    // The row count is untouched by packing, so the output width still has to
+    // be the one the config implies. `Attention::forward` slices the fused
+    // `c_attn` at config-derived offsets, so a packed projection wider than the
+    // config claims keeps every slice in bounds and silently hands K and V the
+    // wrong channels; a narrower one makes `slice` clamp and the following
+    // `reshape` throw, which crosses the cxx bridge as `std::terminate`.
+    for rows in [12, 8] {
+        let mut weights = WeightMap::new();
+        weights.insert("q.weight".into(), zeros(&[rows, 1]));
+        weights.insert("q.scales".into(), ones(&[rows, 1]));
+        weights.insert("q.biases".into(), zeros(&[rows, 1]));
+
+        let err = match load_linear(&weights, "q", 8, 10, 8, 4) {
+            Ok(_) => panic!("a packed weight of output width {rows} must not load as width 10"),
+            Err(err) => err,
+        };
+        assert!(err.contains("q.weight"), "unhelpful error: {err}");
+    }
+
+    // A quantized projection's bias is a plain 1-D vector, so it is checked on
+    // the packed path too.
+    let mut weights = WeightMap::new();
+    weights.insert("q.weight".into(), zeros(&[10, 1]));
+    weights.insert("q.scales".into(), ones(&[10, 1]));
+    weights.insert("q.biases".into(), zeros(&[10, 1]));
+    weights.insert("q.bias".into(), zeros(&[11]));
+
+    let err = match load_linear(&weights, "q", 8, 10, 8, 4) {
+        Ok(_) => panic!("a mis-sized bias must be rejected on the packed path too"),
+        Err(err) => err,
+    };
+    assert!(err.contains("q.bias"), "unhelpful error: {err}");
 }
 
 // The learned position table and the token table versus the config.
