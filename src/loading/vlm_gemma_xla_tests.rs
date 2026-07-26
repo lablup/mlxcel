@@ -557,7 +557,7 @@ pub mod reference_boundary {
         let _heartbeat =
             ProgressHeartbeat::start("run IREE diagnostic SigLIP and average-pool projector");
         let mut diagnostic = create_after_diagnostic_iree_configuration(
-            mlxcel_xla::configure_diagnostic_local_task_single_group,
+            mlxcel_xla::configure_diagnostic_local_task_threads,
             || mlxcel_xla::IreeVisionDiagnosticProjector::load(model, device),
         )
         .expect("configure and load Gemma3 IREE diagnostic projector");
@@ -770,7 +770,7 @@ pub mod reference_boundary {
 
     #[cfg(test)]
     #[test]
-    fn diagnostic_runner_configures_topology_before_creating_iree() {
+    fn diagnostic_runner_configures_threads_before_creating_iree() {
         use std::cell::Cell;
 
         let configured = Cell::new(false);
@@ -804,23 +804,33 @@ pub mod reference_boundary {
 
     #[cfg(test)]
     #[test]
-    fn diagnostics_topology_override_stays_out_of_production_iree_paths() {
+    fn diagnostics_thread_overrides_stay_out_of_production_iree_paths() {
         let production_rust = include_str!("../lib/mlxcel-xla/src/aux.rs");
         let production_aux_c = include_str!("../lib/mlxcel-xla/csrc/xla_aux.c");
         let production_iree_c = include_str!("../lib/mlxcel-xla/csrc/xla_iree.c");
         for source in [production_rust, production_aux_c, production_iree_c] {
             assert!(!source.contains("task_topology_group_count"));
-            assert!(!source.contains("configure_diagnostic_local_task_single_group"));
+            assert!(!source.contains("task_worker_stack_size"));
+            assert!(!source.contains("configure_diagnostic_local_task_threads"));
         }
     }
 
     #[cfg(test)]
     #[test]
-    fn native_diagnostic_topology_configuration_is_reusable() {
-        mlxcel_xla::configure_diagnostic_local_task_single_group()
-            .expect("configure diagnostics-only IREE topology");
-        assert!(mlxcel_xla::diagnostic_local_task_single_group_is_configured());
-        mlxcel_xla::configure_diagnostic_local_task_single_group()
-            .expect("reuse diagnostics-only IREE topology configuration");
+    fn diagnostic_iree_thread_flags_pin_group_and_use_host_stack_default() {
+        let diagnostic_c = include_str!("../lib/mlxcel-xla/csrc/xla_diagnostic_flags.c");
+        assert!(diagnostic_c.contains("--task_topology_group_count=1"));
+        assert!(diagnostic_c.contains("--task_worker_stack_size=0"));
+        assert!(diagnostic_c.contains("if (argc != 1)"));
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn native_diagnostic_thread_configuration_is_reusable() {
+        mlxcel_xla::configure_diagnostic_local_task_threads()
+            .expect("configure diagnostics-only IREE task threads");
+        assert!(mlxcel_xla::diagnostic_local_task_threads_are_configured());
+        mlxcel_xla::configure_diagnostic_local_task_threads()
+            .expect("reuse diagnostics-only IREE task thread configuration");
     }
 }
