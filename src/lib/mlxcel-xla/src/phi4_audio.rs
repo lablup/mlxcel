@@ -339,7 +339,7 @@ fn load_audio_module(
         .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
     let vmfb = cached_vmfb_path(&compiler, graph, flags, &cache, artifact_name, frame_bucket);
     let weights = load_audio_weights(model_dir, config)?;
-    let contract = AuxiliaryArtifactContract::new(
+    let contract = AuxiliaryArtifactContract::new_legacy_unqualified(
         entry_name,
         config_identity(config, frame_bucket, precision),
         generation_identity(&compiler, flags, graph)?,
@@ -757,7 +757,7 @@ mod tests {
             shape: vec![1],
         }];
         let config = published_config();
-        let contract = AuxiliaryArtifactContract::new(
+        let contract = AuxiliaryArtifactContract::new_legacy_unqualified(
             "audio.main",
             config_identity(&config, 512, Precision::F32),
             "compiler=test;flags=cpu;stablehlo_sha256=v1",
@@ -779,7 +779,7 @@ mod tests {
         .unwrap();
         assert_eq!(compile_count, 1);
 
-        let stale_replacement = AuxiliaryArtifactContract::new(
+        let stale_replacement = AuxiliaryArtifactContract::new_legacy_unqualified(
             "audio.main",
             config_identity(&config, 512, Precision::F32),
             "compiler=test;flags=cpu;stablehlo_sha256=v2",
@@ -818,8 +818,12 @@ mod tests {
             ),
             "generation identity should contain the compiler executable's raw SHA-256 digest"
         );
-        let first_contract =
-            AuxiliaryArtifactContract::new("audio.main", "config=v1", &first_generation).unwrap();
+        let first_contract = AuxiliaryArtifactContract::new_legacy_unqualified(
+            "audio.main",
+            "config=v1",
+            &first_generation,
+        )
+        .unwrap();
         let mut compile_count = 0usize;
         ensure_qualified_auxiliary_artifact(&vmfb, &first_contract, &weights, |temporary| {
             compile_count += 1;
@@ -832,8 +836,12 @@ mod tests {
         let second_generation =
             generation_identity_from_version(&compiler, &["--target=cpu"], "mlir", "v1").unwrap();
         assert_ne!(first_generation, second_generation);
-        let second_contract =
-            AuxiliaryArtifactContract::new("audio.main", "config=v1", second_generation).unwrap();
+        let second_contract = AuxiliaryArtifactContract::new_legacy_unqualified(
+            "audio.main",
+            "config=v1",
+            second_generation,
+        )
+        .unwrap();
         ensure_qualified_auxiliary_artifact(&vmfb, &second_contract, &weights, |temporary| {
             compile_count += 1;
             std::fs::write(temporary, b"vmfb-b")
