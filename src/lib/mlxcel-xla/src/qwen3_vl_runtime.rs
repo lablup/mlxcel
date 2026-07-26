@@ -38,7 +38,10 @@ use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_
 use crate::emitter::emit_qwen3_vl;
 #[cfg(feature = "diagnostics")]
 use crate::emitter::emit_qwen3_vl_diagnostics;
-use crate::emitter::{Qwen3VlConfig, Qwen3VlHostInputs, prepare_qwen3_vl_host_inputs};
+use crate::emitter::{
+    QWEN3_VL_BLOCK_DIAGNOSTIC_STAGES, QWEN3_VL_DIAGNOSTIC_BLOCK, Qwen3VlConfig, Qwen3VlHostInputs,
+    prepare_qwen3_vl_host_inputs,
+};
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
 use crate::weights::{bf16_to_f32, dequantize_affine, f16_to_f32, f32_le_to_f32};
 
@@ -74,6 +77,9 @@ pub struct Qwen3VlVisionDiagnostics {
     /// merger input; configured DeepStack inputs are the corresponding
     /// `deepstack_visual_indexes` entries.
     pub block_hidden_states: Vec<Vec<f32>>,
+    /// Input, norm1, attention, post-attention residual, norm2, MLP, and
+    /// output for the first divergent encoder block.
+    pub block_2_states: Vec<Vec<f32>>,
     pub shape: [usize; 2],
     /// Normalized/shuffled input, first linear output, and GELU output.
     pub main_merger_states: Vec<Vec<f32>>,
@@ -732,6 +738,12 @@ impl IreeQwen3VlProjector {
             output_shapes.extend(
                 (0..3 + self.config.depth).map(|_| vec![plan.patch_bucket, self.config.hidden]),
             );
+            if self.config.depth > QWEN3_VL_DIAGNOSTIC_BLOCK {
+                output_shapes.extend(
+                    (0..QWEN3_VL_BLOCK_DIAGNOSTIC_STAGES)
+                        .map(|_| vec![plan.patch_bucket, self.config.hidden]),
+                );
+            }
             let merge_width = self.config.hidden
                 * self.config.spatial_merge_size
                 * self.config.spatial_merge_size;
@@ -842,6 +854,13 @@ impl IreeQwen3VlProjector {
             let block_hidden_states = (0..self.config.depth)
                 .map(|layer| trim(&format!("block {layer}")))
                 .collect::<Result<Vec<_>, _>>()?;
+            let block_2_states = if self.config.depth > QWEN3_VL_DIAGNOSTIC_BLOCK {
+                (0..QWEN3_VL_BLOCK_DIAGNOSTIC_STAGES)
+                    .map(|stage| trim(&format!("block 2 stage {stage}")))
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                Vec::new()
+            };
             let actual_merged_tokens = plan.merged_tokens_per_image.iter().sum::<usize>();
             let merge_width = self.config.hidden
                 * self.config.spatial_merge_size
@@ -876,6 +895,7 @@ impl IreeQwen3VlProjector {
                 position_embeddings,
                 positioned_embeddings,
                 block_hidden_states,
+                block_2_states,
                 shape: [plan.actual_patches, self.config.hidden],
                 main_merger_states,
                 deepstack_merger_states,

@@ -601,12 +601,60 @@ impl VisionBlock {
         cu_seqlens: &[i32],
         rotary_pos_emb: &MlxArray,
     ) -> UniquePtr<MlxArray> {
-        let normed = self.norm1.forward(hidden_states);
-        let attn_out = self.attn.forward(&normed, cu_seqlens, rotary_pos_emb);
-        let h = mlxcel_core::add(hidden_states, &attn_out);
-        let normed = self.norm2.forward(&h);
-        let mlp_out = self.mlp.forward(&normed);
-        mlxcel_core::add(&h, &mlp_out)
+        self.forward_with_observer(hidden_states, cu_seqlens, rotary_pos_emb, |_, _| {})
+    }
+
+    fn forward_with_observer<F>(
+        &self,
+        hidden_states: &MlxArray,
+        cu_seqlens: &[i32],
+        rotary_pos_emb: &MlxArray,
+        mut observe: F,
+    ) -> UniquePtr<MlxArray>
+    where
+        F: FnMut(VisionBlockDiagnosticStage, &MlxArray),
+    {
+        observe(VisionBlockDiagnosticStage::Input, hidden_states);
+        let norm1 = self.norm1.forward(hidden_states);
+        observe(VisionBlockDiagnosticStage::Norm1, &norm1);
+        let attention = self.attn.forward(&norm1, cu_seqlens, rotary_pos_emb);
+        observe(VisionBlockDiagnosticStage::Attention, &attention);
+        let residual = mlxcel_core::add(hidden_states, &attention);
+        observe(VisionBlockDiagnosticStage::PostAttentionResidual, &residual);
+        let norm2 = self.norm2.forward(&residual);
+        observe(VisionBlockDiagnosticStage::Norm2, &norm2);
+        let mlp = self.mlp.forward(&norm2);
+        observe(VisionBlockDiagnosticStage::Mlp, &mlp);
+        let output = mlxcel_core::add(&residual, &mlp);
+        observe(VisionBlockDiagnosticStage::Output, &output);
+        output
+    }
+}
+
+#[derive(Clone, Copy)]
+enum VisionBlockDiagnosticStage {
+    Input,
+    Norm1,
+    Attention,
+    PostAttentionResidual,
+    Norm2,
+    Mlp,
+    Output,
+}
+
+impl VisionBlockDiagnosticStage {
+    const COUNT: usize = 7;
+
+    fn index(self) -> usize {
+        match self {
+            Self::Input => 0,
+            Self::Norm1 => 1,
+            Self::Attention => 2,
+            Self::PostAttentionResidual => 3,
+            Self::Norm2 => 4,
+            Self::Mlp => 5,
+            Self::Output => 6,
+        }
     }
 }
 
@@ -712,6 +760,9 @@ pub struct Qwen3VLVisionEncoderDiagnosticOutput {
     /// merger input; configured DeepStack inputs are the corresponding
     /// `deepstack_visual_indexes` entries.
     pub block_hidden_states: Vec<UniquePtr<MlxArray>>,
+    /// Input, norm1, attention, post-attention residual, norm2, MLP, and
+    /// output for encoder block 2.
+    pub block_2_states: Vec<UniquePtr<MlxArray>>,
     /// Normalized/shuffled input, first linear output, and GELU output.
     pub main_merger_states: Vec<UniquePtr<MlxArray>>,
     /// The same ordered merger stages for each DeepStack branch.
@@ -724,6 +775,7 @@ enum VisionStage {
     PositionEmbedding,
     PositionedEmbedding,
     Block(usize),
+    Block2(VisionBlockDiagnosticStage),
     MainMerger(PatchMergerStage),
     DeepStackMerger(usize, PatchMergerStage),
 }
@@ -907,6 +959,7 @@ impl Qwen3VLVisionEncoder {
         let mut position_embeddings = None;
         let mut positioned_embeddings = None;
         let mut block_hidden_states = Vec::with_capacity(self.blocks.len());
+        let mut block_2_states = Vec::with_capacity(VisionBlockDiagnosticStage::COUNT);
         let mut main_merger_states = Vec::with_capacity(3);
         let mut deepstack_merger_states = (0..self.deepstack_merger_list.len())
             .map(|_| Vec::with_capacity(3))
@@ -926,6 +979,12 @@ impl Qwen3VLVisionEncoder {
                     debug_assert_eq!(layer, block_hidden_states.len());
                     block_hidden_states.push(mlxcel_core::copy(hidden));
                 }
+                VisionStage::Block2(stage) => {
+                    debug_assert_eq!(stage.index(), block_2_states.len());
+                    let snapshot = mlxcel_core::copy(hidden);
+                    mlxcel_core::eval(&snapshot);
+                    block_2_states.push(snapshot);
+                }
                 VisionStage::MainMerger(stage) => {
                     debug_assert_eq!(stage.index(), main_merger_states.len());
                     main_merger_states.push(mlxcel_core::copy(hidden));
@@ -943,6 +1002,7 @@ impl Qwen3VLVisionEncoder {
             positioned_embeddings: positioned_embeddings
                 .expect("observer captures positioned embeddings"),
             block_hidden_states,
+            block_2_states,
             main_merger_states,
             deepstack_merger_states,
         }
@@ -986,7 +1046,13 @@ impl Qwen3VLVisionEncoder {
         let mut deepstack_features: Vec<UniquePtr<MlxArray>> = Vec::new();
 
         for (layer_num, block) in self.blocks.iter().enumerate() {
-            h = block.forward(&h, &cu_seqlens, &rotary_pos_emb);
+            h = if layer_num == 2 {
+                block.forward_with_observer(&h, &cu_seqlens, &rotary_pos_emb, |stage, hidden| {
+                    observe(VisionStage::Block2(stage), hidden)
+                })
+            } else {
+                block.forward(&h, &cu_seqlens, &rotary_pos_emb)
+            };
             observe(VisionStage::Block(layer_num), &h);
 
             if let Some(ds_idx) = self

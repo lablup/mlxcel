@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{ensure_fused_sdpa, fused_sdpa_target_dim, gelu_pytorch_tanh, sdpa_pad_width};
+use super::{
+    VisionBlockDiagnosticStage, ensure_fused_sdpa, fused_sdpa_target_dim, gelu_pytorch_tanh,
+    sdpa_pad_width,
+};
 use mlxcel_core::dtype;
 
 #[test]
@@ -58,5 +61,22 @@ fn block_gelu_matches_qwen3_vl_pytorch_tanh_contract() {
             (mlxcel_core::item_f32(&value) - expected).abs() <= 2.0e-6,
             "Qwen3-VL tanh GELU mismatch at {index}"
         );
+    }
+}
+
+#[test]
+fn block_2_diagnostic_stage_order_is_stable() {
+    let stages = [
+        VisionBlockDiagnosticStage::Input,
+        VisionBlockDiagnosticStage::Norm1,
+        VisionBlockDiagnosticStage::Attention,
+        VisionBlockDiagnosticStage::PostAttentionResidual,
+        VisionBlockDiagnosticStage::Norm2,
+        VisionBlockDiagnosticStage::Mlp,
+        VisionBlockDiagnosticStage::Output,
+    ];
+    assert_eq!(stages.len(), VisionBlockDiagnosticStage::COUNT);
+    for (index, stage) in stages.into_iter().enumerate() {
+        assert_eq!(stage.index(), index);
     }
 }
