@@ -371,6 +371,10 @@ fn main() -> Result<(), String> {
             "sscp_conv_1_convolution",
             mlx.sscp_conv_1_convolution.as_slice(),
         ),
+        (
+            "sscp_conv_1_convolution_bf16_result",
+            mlx.sscp_conv_1_convolution.as_slice(),
+        ),
         ("sscp_conv_1_norm", mlx.sscp_conv_1_norm.as_slice()),
         ("sscp_conv_1", mlx.sscp_conv_1.as_slice()),
         ("input_projection", mlx.input_projection.as_slice()),

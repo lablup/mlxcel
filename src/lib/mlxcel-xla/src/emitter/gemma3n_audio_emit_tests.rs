@@ -52,7 +52,10 @@ fn split_audio_graphs_preserve_stage_and_weight_boundaries() {
     );
     assert!(!encode.contains("loc(\"audio.hard_embeddings\")"));
     assert!(!encode.contains("model.language_model."));
-    assert_eq!(encode_layout.stages.len(), 3 + 4 + 12 * 5 + 11 + 8);
+    assert_eq!(
+        encode_layout.stages.len(),
+        3 + 4 + 12 * 5 + 11 + 8 + usize::from(cfg!(any(feature = "diagnostics", test)))
+    );
     for name in [
         "sscp_conv_0_convolution",
         "sscp_conv_0_norm_sum_at_time",
@@ -85,6 +88,12 @@ fn split_audio_graphs_preserve_stage_and_weight_boundaries() {
     ] {
         assert!(encode_layout.stages.iter().any(|stage| stage.name == name));
     }
+    assert!(
+        encode_layout
+            .stages
+            .iter()
+            .any(|stage| stage.name == "sscp_conv_1_convolution_bf16_result")
+    );
 
     assert!(merge.starts_with("module @audio_merge_ple {"));
     assert!(merge.contains("loc(\"audio.projected\")"));
@@ -206,10 +215,84 @@ fn sscp_convolutions_accumulate_bf16_operands_into_f32_results() {
         "(tensor<1x6x66x128xbf16>, tensor<3x3x128x32xbf16>) -> \
          tensor<1x2x32x32xf32>"
     ));
-    assert!(!encode.contains(
-        "(tensor<1x10x130x1xbf16>, tensor<3x3x1x128xbf16>) -> \
-         tensor<1x4x64x128xbf16>"
-    ));
+    assert!(
+        !encode.contains(
+            "(tensor<1x10x130x1xbf16>, tensor<3x3x1x128xbf16>) -> \
+             tensor<1x4x64x128xbf16>"
+        ),
+        "the conv0 production path must remain on the explicit F32 result"
+    );
+}
+
+#[test]
+fn second_sscp_convolution_pins_result_type_as_the_only_candidate_variable() {
+    let (encode, layout) = emit_gemma3n_audio_encode(
+        &text(),
+        &Gemma3nXlaAudioConfig::default(),
+        8,
+        1,
+        Precision::Bf16,
+    )
+    .unwrap();
+    let conv1_lines = encode
+        .lines()
+        .filter(|line| {
+            line.contains("\"stablehlo.convolution\"")
+                && line.contains("(tensor<1x6x66x128xbf16>, tensor<3x3x128x32xbf16>)")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        conv1_lines.len(),
+        2,
+        "diagnostics must emit exactly the production and BF16-result conv1 forms"
+    );
+
+    let demoted_operands = |line: &str| {
+        line.split_once("\"stablehlo.convolution\"(")
+            .and_then(|(_, suffix)| suffix.split_once(')'))
+            .map(|(operands, _)| operands.to_string())
+            .expect("convolution line must expose its operands")
+    };
+    let demotion_sources = |line: &str| {
+        demoted_operands(line)
+            .split(", ")
+            .map(|operand| {
+                encode
+                    .lines()
+                    .find(|candidate| candidate.trim_start().starts_with(&format!("{operand} =")))
+                    .and_then(|conversion| conversion.split_once("stablehlo.convert "))
+                    .and_then(|(_, suffix)| suffix.split_once(" :"))
+                    .map(|(source, _)| source.to_string())
+                    .expect("BF16 convolution operand must come from an explicit conversion")
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        demotion_sources(conv1_lines[0]),
+        demotion_sources(conv1_lines[1]),
+        "both forms must consume the same padded activation and HWIO weight"
+    );
+    for line in &conv1_lines {
+        assert!(line.contains("window_strides = array<i64: 2, 2>"));
+        assert!(line.contains(
+            "dimension_numbers = #stablehlo.conv<[b, 0, 1, f]x[0, 1, i, o]->[b, 0, 1, f]>"
+        ));
+    }
+    assert!(conv1_lines.iter().any(|line| {
+        line.contains(
+            "(tensor<1x6x66x128xbf16>, tensor<3x3x128x32xbf16>) -> \
+             tensor<1x2x32x32xf32>",
+        )
+    }));
+    assert!(conv1_lines.iter().any(|line| {
+        line.contains(
+            "(tensor<1x6x66x128xbf16>, tensor<3x3x128x32xbf16>) -> \
+             tensor<1x2x32x32xbf16>",
+        )
+    }));
+    assert!(layout.stages.iter().any(|stage| {
+        stage.name == "sscp_conv_1_convolution_bf16_result" && stage.shape == [1, 2, 32, 32]
+    }));
 }
 
 #[test]
@@ -231,6 +314,31 @@ fn sscp_f32_accumulator_contract_compiles_for_cpu() {
         .join("bin/iree-compile");
     let stem = format!("mlxcel-gemma3n-sscp-f32-accumulator-{}", std::process::id());
     compile(compiler.as_os_str(), "local", &stem, "contract", mlir);
+}
+
+#[test]
+#[ignore = "requires the version-matched pinned IREE CUDA compiler"]
+fn sscp_conv1_result_type_candidates_compile_for_cuda() {
+    let mut builder = Builder::new().with_precision(Precision::Bf16);
+    let input = Builder::arg(0, Ty::f32(vec![1, 4, 64, 128]));
+    let kernel = Builder::arg(1, Ty::f32(vec![32, 3, 3, 128]));
+    let zero = builder.const_f32(0.0);
+    let padded = builder.pad(&input, &zero, &[0, 0, 1, 0], &[0, 2, 1, 0]);
+    let kernel = builder.transpose(&kernel, &[1, 2, 3, 0]);
+    let f32_result = builder.convolution_f32_accumulate(&padded, &kernel, &[2, 2], &[(0, 0); 2], 1);
+    let bf16_result = builder.convolution(&padded, &kernel, &[2, 2], &[(0, 0); 2], 1);
+    let output_ty = f32_result.ty.render();
+    let mlir = format!(
+        "module @sscp_conv1_result_candidates {{\n  func.func public @main(%arg0: \
+         tensor<1x4x64x128xf32>, %arg1: tensor<32x3x3x128xf32>) -> ({output_ty}, \
+         {output_ty}) {{\n{}    return {}, {} : {output_ty}, {output_ty}\n  }}\n}}\n",
+        builder.body(),
+        f32_result.name,
+        bf16_result.name,
+    );
+    let compiler = std::env::var_os("MLXCEL_XLA_IREE_COMPILE").expect("IREE compiler");
+    let stem = format!("mlxcel-gemma3n-sscp-conv1-cuda-{}", std::process::id());
+    compile(&compiler, "cuda", &stem, "result-candidates", mlir);
 }
 
 #[test]

@@ -664,6 +664,7 @@ impl Gemma3nAudioIreeRuntime {
             "sscp_conv_0_norm",
             "sscp_conv_0",
             "sscp_conv_1_convolution",
+            "sscp_conv_1_convolution_bf16_result",
             "sscp_conv_1_norm",
             "sscp_conv_1",
             "input_projection",

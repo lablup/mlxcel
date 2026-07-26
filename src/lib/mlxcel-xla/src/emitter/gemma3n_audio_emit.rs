@@ -122,6 +122,11 @@ fn audio_encoder(
     trace.push("sscp_conv_0_norm", &subsampled.conv0_norm);
     trace.push("sscp_conv_0", &subsampled.conv0);
     trace.push("sscp_conv_1_convolution", &subsampled.conv1_convolution);
+    #[cfg(any(feature = "diagnostics", test))]
+    trace.push(
+        "sscp_conv_1_convolution_bf16_result",
+        &subsampled.conv1_convolution_bf16_result,
+    );
     trace.push("sscp_conv_1_norm", &subsampled.conv1_norm);
     trace.push("sscp_conv_1", &subsampled.conv1);
     trace.push("input_projection", &subsampled.hidden);
@@ -362,6 +367,7 @@ fn build_encode(
         "sscp_conv_0_norm",
         "sscp_conv_0",
         "sscp_conv_1_convolution",
+        "sscp_conv_1_convolution_bf16_result",
         "sscp_conv_1_norm",
         "sscp_conv_1",
         "input_projection",

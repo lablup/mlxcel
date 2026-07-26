@@ -22,6 +22,8 @@ pub(super) struct SscpOutput {
     pub conv0_norm: Val,
     pub conv0: Val,
     pub conv1_convolution: Val,
+    #[cfg(any(feature = "diagnostics", test))]
+    pub conv1_convolution_bf16_result: Val,
     pub conv1_norm: Val,
     pub conv1: Val,
     pub hidden: Val,
@@ -30,6 +32,8 @@ pub(super) struct SscpOutput {
 
 struct SscpConvStages {
     convolution: Val,
+    #[cfg(any(feature = "diagnostics", test))]
+    convolution_bf16_result: Option<Val>,
     norm_sum_at_time: Val,
     norm_cumulative_sum: Val,
     norm_mean: Val,
@@ -137,10 +141,20 @@ fn sscp_conv(
     stride: [usize; 2],
     groups: usize,
     eps: f32,
+    _diagnostic_bf16_result: bool,
 ) -> SscpConvStages {
     let zero = b.const_f32(0.0);
     let padded = b.pad(x, &zero, &[0, 0, 1, 0], &[0, kernel[0] - 1, 1, 0]);
     let weight = b.transpose(weight, &[1, 2, 3, 0]);
+    // IREE CUDA may select a different contraction lowering when StableHLO
+    // carries a BF16 result instead of an explicit F32 result followed by a
+    // convert. Keep this diagnostics-only candidate on the exact same padded
+    // input and HWIO weight so an actual CUDA run can distinguish result
+    // typing from input, layout, and stride differences without changing the
+    // production convolution.
+    #[cfg(any(feature = "diagnostics", test))]
+    let convolution_bf16_result = _diagnostic_bf16_result
+        .then(|| b.convolution(&padded, &weight, &stride, &[(0, 0), (0, 0)], groups));
     // MLX stores both operands as BF16 but accumulates the convolution into an
     // F32 carrier before materializing the BF16 output tensor. The graph-wide
     // BF16 contraction mode otherwise gives StableHLO a BF16 result type,
@@ -153,6 +167,8 @@ fn sscp_conv(
     let activated = round_bf16(b, &activated);
     SscpConvStages {
         convolution: convolved,
+        #[cfg(any(feature = "diagnostics", test))]
+        convolution_bf16_result,
         norm_sum_at_time: normalized.sum_at_time,
         norm_cumulative_sum: normalized.cumulative_sum,
         norm_mean: normalized.mean,
@@ -193,6 +209,7 @@ fn subsample_convs(
         config.sscp_conv_stride_size[0],
         1,
         config.sscp_conv_group_norm_eps,
+        false,
     );
     let conv1 = sscp_conv(
         b,
@@ -203,6 +220,7 @@ fn subsample_convs(
         config.sscp_conv_stride_size[1],
         1,
         config.sscp_conv_group_norm_eps,
+        true,
     );
     (conv0, conv1)
 }
@@ -262,6 +280,10 @@ pub(super) fn subsample_with_stages(
         conv0_norm: conv0.norm,
         conv0: conv0.activated,
         conv1_convolution: conv1.convolution,
+        #[cfg(any(feature = "diagnostics", test))]
+        conv1_convolution_bf16_result: conv1
+            .convolution_bf16_result
+            .expect("the second SSCP convolution must expose its BF16-result candidate"),
         conv1_norm: conv1.norm,
         conv1: conv1.activated,
         hidden,
