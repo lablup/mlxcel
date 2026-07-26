@@ -708,6 +708,12 @@ pub struct Qwen25VLVisionDiagnostics {
 }
 
 #[cfg(feature = "xla-diagnostics")]
+pub struct Qwen25VLMlpProjectionControls {
+    pub gate_projection: Vec<f32>,
+    pub up_projection: Vec<f32>,
+}
+
+#[cfg(feature = "xla-diagnostics")]
 type Qwen25VLCapture = Option<Qwen25VLVisionDiagnostics>;
 #[cfg(not(feature = "xla-diagnostics"))]
 type Qwen25VLCapture = ();
@@ -755,6 +761,51 @@ impl Qwen25VLVisionEncoder {
             window_size: config.window_size,
             patch_size: config.patch_size,
             fullatt_block_indexes: config.fullatt_block_indexes.clone(),
+        })
+    }
+
+    #[cfg(feature = "xla-diagnostics")]
+    pub fn f16_input_dense_f32_mlp_projection_controls(
+        &self,
+        layer_index: usize,
+        input: &[f32],
+        rows: usize,
+    ) -> Result<Qwen25VLMlpProjectionControls, String> {
+        let block = self
+            .blocks
+            .get(layer_index)
+            .ok_or_else(|| format!("Qwen2.5-VL diagnostic layer {layer_index} is out of range"))?;
+        if rows == 0 || input.len() % rows != 0 {
+            return Err(format!(
+                "Qwen2.5-VL diagnostic projection input has {} values for {rows} rows",
+                input.len()
+            ));
+        }
+        let width = input.len() / rows;
+        let width_i32 = i32::try_from(width)
+            .map_err(|_| "Qwen2.5-VL diagnostic projection width exceeds i32".to_string())?;
+        for (name, linear) in [("gate", &block.mlp.gate_proj), ("up", &block.mlp.up_proj)] {
+            let weight = linear.dequantized_weight();
+            let shape = mlxcel_core::array_shape(&weight);
+            if shape.len() != 2 || shape[1] != width_i32 {
+                return Err(format!(
+                    "Qwen2.5-VL layer {layer_index} {name} projection weight shape {shape:?} \
+                     does not accept diagnostic input width {width}"
+                ));
+            }
+        }
+        let rows = i32::try_from(rows)
+            .map_err(|_| "Qwen2.5-VL diagnostic projection row count exceeds i32".to_string())?;
+        let input = mlxcel_core::from_slice_f32(input, &[rows, width_i32]);
+        // The CUDA IREE graph demotes its captured F32 norm2 value to F16
+        // immediately before dot_general. Round through the same input type,
+        // then use the existing dense-F32 control to isolate accumulation and
+        // reduction behavior from inherited norm2 drift.
+        let input = mlxcel_core::astype(&input, mlxcel_core::dtype::FLOAT16);
+        let (gate_projection, up_projection) = block.mlp.dense_f32_gate_up_controls(&input);
+        Ok(Qwen25VLMlpProjectionControls {
+            gate_projection: host_f32_diagnostic_snapshot(&gate_projection),
+            up_projection: host_f32_diagnostic_snapshot(&up_projection),
         })
     }
 

@@ -487,6 +487,16 @@ fn main() {
             Qwen25VlDiagnosticMutation::None,
         )
         .unwrap_or_else(|error| panic!("capture Qwen2.5-VL IREE diagnostics: {error}"));
+    let iree_norm2_mlp_projection_controls = model
+        .vision_encoder
+        .f16_input_dense_f32_mlp_projection_controls(
+            iree_vision.substage_probe_layer_index,
+            &iree_vision.substage_probe_layer_norm2,
+            iree_vision.patch_tokens,
+        )
+        .unwrap_or_else(|error| {
+            panic!("project captured IREE norm2 through eager Qwen2.5-VL MLP weights: {error}")
+        });
 
     assert_eq!(
         iree_vision.window_index,
@@ -748,6 +758,26 @@ fn main() {
         eager_mlp_up_projection_dense_f32_control,
         tolerance,
     );
+    record_stage(
+        &mut reports,
+        &mut comparison_failures,
+        &format!(
+            "vision.layer_{substage_probe_layer_index}.mlp_gate_projection_iree_norm2_dense_f32_control"
+        ),
+        &iree_vision.substage_probe_layer_mlp_gate_projection,
+        &iree_norm2_mlp_projection_controls.gate_projection,
+        tolerance,
+    );
+    record_stage(
+        &mut reports,
+        &mut comparison_failures,
+        &format!(
+            "vision.layer_{substage_probe_layer_index}.mlp_up_projection_iree_norm2_dense_f32_control"
+        ),
+        &iree_vision.substage_probe_layer_mlp_up_projection,
+        &iree_norm2_mlp_projection_controls.up_projection,
+        tolerance,
+    );
     let target_capture_index = iree_vision
         .full_layer_indices
         .iter()
@@ -810,6 +840,13 @@ fn main() {
                 "weight": "same_checkpoint_weight_cast_to_f32",
                 "operation": "dense_f32_matmul_then_f32_bias",
                 "purpose": "distinguish native_f16_projection_from_f32_accumulation_contract",
+            },
+            "iree_norm2_mlp_projection_control": {
+                "runtime": "eager_mlx",
+                "input": "captured_iree_norm2_rounded_to_f16",
+                "weight": "same_checkpoint_weight_cast_to_f32",
+                "operation": "dense_f32_matmul_then_f32_bias",
+                "purpose": "distinguish inherited_norm2_drift_from_projection_reduction_behavior",
             },
             "failed_phase": "vision",
             "failures": comparison_failures,
