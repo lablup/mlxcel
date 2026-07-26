@@ -15,10 +15,12 @@
 //! Actual-checkpoint eager MLX vs IREE Qwen3-VL DeepStack oracle.
 //!
 //! The qualified production host processor creates one patch payload that is
-//! consumed by both vision implementations. The gate compares the main merger,
-//! every ordered DeepStack merger, post-injection language hidden states, and
-//! final-position logits. It also mutates the actual captured branches to prove
-//! that dropping or zeroing one branch is detected.
+//! consumed by both vision implementations. The gate locates the first
+//! divergence across patch projection, interpolated position embeddings, every
+//! encoder block, the main merger, every ordered DeepStack merger,
+//! post-injection language hidden states, and final-position logits. It also
+//! mutates the actual captured branches to prove that dropping or zeroing one
+//! branch is detected.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -231,15 +233,82 @@ fn main() {
     );
     let eager_vision = model
         .vision_encoder
-        .forward_with_grid(&pixels, &vision_capture.grids);
-    let eager_main = mlx_f32(&eager_vision.hidden_states);
+        .forward_with_grid_diagnostics(&pixels, &vision_capture.grids);
+    let eager_main = mlx_f32(&eager_vision.output.hidden_states);
     let eager_branches = eager_vision
+        .output
         .deepstack_features
         .iter()
         .map(|feature| mlx_f32(feature))
         .collect::<Vec<_>>();
 
     let mut reports = Vec::new();
+    let iree_diagnostics = &vision_capture.projection.diagnostics;
+    assert_eq!(
+        iree_diagnostics.block_hidden_states.len(),
+        eager_vision.block_hidden_states.len(),
+        "eager and IREE vision block capture counts differ"
+    );
+    compare_stage(
+        &mut reports,
+        "vision.patch_embedding",
+        &iree_diagnostics.patch_embeddings,
+        &mlx_f32(&eager_vision.patch_embeddings),
+        tolerance,
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    compare_stage(
+        &mut reports,
+        "vision.position_embedding",
+        &iree_diagnostics.position_embeddings,
+        &mlx_f32(&eager_vision.position_embeddings),
+        tolerance,
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    compare_stage(
+        &mut reports,
+        "vision.positioned_embedding",
+        &iree_diagnostics.positioned_embeddings,
+        &mlx_f32(&eager_vision.positioned_embeddings),
+        tolerance,
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    for (layer, (actual, expected)) in iree_diagnostics
+        .block_hidden_states
+        .iter()
+        .zip(&eager_vision.block_hidden_states)
+        .enumerate()
+    {
+        compare_stage(
+            &mut reports,
+            &format!("vision.block_{layer}"),
+            actual,
+            &mlx_f32(expected),
+            tolerance,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+    }
+    let merger_stage_names = ["normalized_shuffled", "fc1", "activation"];
+    assert_eq!(
+        iree_diagnostics.main_merger_states.len(),
+        eager_vision.main_merger_states.len(),
+        "eager and IREE main merger capture counts differ"
+    );
+    for ((actual, expected), name) in iree_diagnostics
+        .main_merger_states
+        .iter()
+        .zip(&eager_vision.main_merger_states)
+        .zip(merger_stage_names)
+    {
+        compare_stage(
+            &mut reports,
+            &format!("vision.main_merger.{name}"),
+            actual,
+            &mlx_f32(expected),
+            tolerance,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+    }
     compare_stage(
         &mut reports,
         "vision.main_merger",
@@ -248,6 +317,37 @@ fn main() {
         tolerance,
     )
     .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        iree_diagnostics.deepstack_merger_states.len(),
+        eager_vision.deepstack_merger_states.len(),
+        "eager and IREE DeepStack merger capture counts differ"
+    );
+    for (branch, (actual_stages, expected_stages)) in iree_diagnostics
+        .deepstack_merger_states
+        .iter()
+        .zip(&eager_vision.deepstack_merger_states)
+        .enumerate()
+    {
+        assert_eq!(
+            actual_stages.len(),
+            expected_stages.len(),
+            "eager and IREE DeepStack merger stage counts differ for branch {branch}"
+        );
+        for ((actual, expected), name) in actual_stages
+            .iter()
+            .zip(expected_stages)
+            .zip(merger_stage_names)
+        {
+            compare_stage(
+                &mut reports,
+                &format!("vision.deepstack_merger_{branch}.{name}"),
+                actual,
+                &mlx_f32(expected),
+                tolerance,
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
+        }
+    }
     compare_vision_branches(
         &mut reports,
         &vision_capture.projection.deepstack_values,

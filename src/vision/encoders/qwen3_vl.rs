@@ -630,7 +630,10 @@ impl PatchMerger {
         })
     }
 
-    fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+    fn forward_with_observer<F>(&self, x: &MlxArray, mut observe: F) -> UniquePtr<MlxArray>
+    where
+        F: FnMut(PatchMergerStage, &MlxArray),
+    {
         let h = if self.use_postshuffle_norm {
             // DeepStack: reshape first, then norm
             let reshaped = mlxcel_core::reshape(x, &[-1, self.hidden_size as i32]);
@@ -640,9 +643,29 @@ impl PatchMerger {
             let normed = self.norm.forward(x);
             mlxcel_core::reshape(&normed, &[-1, self.hidden_size as i32])
         };
+        observe(PatchMergerStage::NormalizedShuffled, &h);
         let h = self.linear_fc1.forward(&h);
+        observe(PatchMergerStage::Fc1, &h);
         let h = mlxcel_core::gelu(&h);
+        observe(PatchMergerStage::Activation, &h);
         self.linear_fc2.forward(&h)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PatchMergerStage {
+    NormalizedShuffled,
+    Fc1,
+    Activation,
+}
+
+impl PatchMergerStage {
+    fn index(self) -> usize {
+        match self {
+            Self::NormalizedShuffled => 0,
+            Self::Fc1 => 1,
+            Self::Activation => 2,
+        }
     }
 }
 
@@ -651,6 +674,32 @@ impl PatchMerger {
 pub struct Qwen3VLVisionEncoderOutput {
     pub hidden_states: UniquePtr<MlxArray>,
     pub deepstack_features: Vec<UniquePtr<MlxArray>>,
+}
+
+#[cfg(feature = "xla-diagnostics")]
+pub struct Qwen3VLVisionEncoderDiagnosticOutput {
+    pub output: Qwen3VLVisionEncoderOutput,
+    pub patch_embeddings: UniquePtr<MlxArray>,
+    pub position_embeddings: UniquePtr<MlxArray>,
+    pub positioned_embeddings: UniquePtr<MlxArray>,
+    /// Encoder block outputs in layer order. The final entry is the main
+    /// merger input; configured DeepStack inputs are the corresponding
+    /// `deepstack_visual_indexes` entries.
+    pub block_hidden_states: Vec<UniquePtr<MlxArray>>,
+    /// Normalized/shuffled input, first linear output, and GELU output.
+    pub main_merger_states: Vec<UniquePtr<MlxArray>>,
+    /// The same ordered merger stages for each DeepStack branch.
+    pub deepstack_merger_states: Vec<Vec<UniquePtr<MlxArray>>>,
+}
+
+#[derive(Clone, Copy)]
+enum VisionStage {
+    PatchEmbedding,
+    PositionEmbedding,
+    PositionedEmbedding,
+    Block(usize),
+    MainMerger(PatchMergerStage),
+    DeepStackMerger(usize, PatchMergerStage),
 }
 
 // Qwen3-VL Vision Encoder.
@@ -819,14 +868,80 @@ impl Qwen3VLVisionEncoder {
         hidden_states: &MlxArray,
         grid_thw: &[(i32, i32, i32)],
     ) -> Qwen3VLVisionEncoderOutput {
+        self.forward_with_grid_observer(hidden_states, grid_thw, |_, _| {})
+    }
+
+    #[cfg(feature = "xla-diagnostics")]
+    pub fn forward_with_grid_diagnostics(
+        &self,
+        hidden_states: &MlxArray,
+        grid_thw: &[(i32, i32, i32)],
+    ) -> Qwen3VLVisionEncoderDiagnosticOutput {
+        let mut patch_embeddings = None;
+        let mut position_embeddings = None;
+        let mut positioned_embeddings = None;
+        let mut block_hidden_states = Vec::with_capacity(self.blocks.len());
+        let mut main_merger_states = Vec::with_capacity(3);
+        let mut deepstack_merger_states = (0..self.deepstack_merger_list.len())
+            .map(|_| Vec::with_capacity(3))
+            .collect::<Vec<_>>();
+        let output =
+            self.forward_with_grid_observer(hidden_states, grid_thw, |stage, hidden| match stage {
+                VisionStage::PatchEmbedding => {
+                    patch_embeddings = Some(mlxcel_core::copy(hidden));
+                }
+                VisionStage::PositionEmbedding => {
+                    position_embeddings = Some(mlxcel_core::copy(hidden));
+                }
+                VisionStage::PositionedEmbedding => {
+                    positioned_embeddings = Some(mlxcel_core::copy(hidden));
+                }
+                VisionStage::Block(layer) => {
+                    debug_assert_eq!(layer, block_hidden_states.len());
+                    block_hidden_states.push(mlxcel_core::copy(hidden));
+                }
+                VisionStage::MainMerger(stage) => {
+                    debug_assert_eq!(stage.index(), main_merger_states.len());
+                    main_merger_states.push(mlxcel_core::copy(hidden));
+                }
+                VisionStage::DeepStackMerger(branch, stage) => {
+                    debug_assert_eq!(stage.index(), deepstack_merger_states[branch].len());
+                    deepstack_merger_states[branch].push(mlxcel_core::copy(hidden));
+                }
+            });
+        Qwen3VLVisionEncoderDiagnosticOutput {
+            output,
+            patch_embeddings: patch_embeddings.expect("observer captures patch embeddings"),
+            position_embeddings: position_embeddings
+                .expect("observer captures interpolated position embeddings"),
+            positioned_embeddings: positioned_embeddings
+                .expect("observer captures positioned embeddings"),
+            block_hidden_states,
+            main_merger_states,
+            deepstack_merger_states,
+        }
+    }
+
+    fn forward_with_grid_observer<F>(
+        &self,
+        hidden_states: &MlxArray,
+        grid_thw: &[(i32, i32, i32)],
+        mut observe: F,
+    ) -> Qwen3VLVisionEncoderOutput
+    where
+        F: FnMut(VisionStage, &MlxArray),
+    {
         // 1. Patch embedding
         let mut h = self.patch_embed.forward(hidden_states);
+        observe(VisionStage::PatchEmbedding, &h);
 
         // 2. Add learned position embeddings with bilinear interpolation
         let pos_embeds = self
             .pos_embed
             .fast_pos_embed_interpolate(grid_thw, self.spatial_merge_size);
+        observe(VisionStage::PositionEmbedding, &pos_embeds);
         h = mlxcel_core::add(&h, &pos_embeds);
+        observe(VisionStage::PositionedEmbedding, &h);
 
         // 3. Compute rotary position embeddings
         let rotary_pos_emb = self.rot_pos_emb(grid_thw);
@@ -846,19 +961,27 @@ impl Qwen3VLVisionEncoder {
 
         for (layer_num, block) in self.blocks.iter().enumerate() {
             h = block.forward(&h, &cu_seqlens, &rotary_pos_emb);
+            observe(VisionStage::Block(layer_num), &h);
 
             if let Some(ds_idx) = self
                 .deepstack_visual_indexes
                 .iter()
                 .position(|&idx| idx == layer_num)
             {
-                let ds_feature = self.deepstack_merger_list[ds_idx].forward(&h);
+                let ds_feature = self.deepstack_merger_list[ds_idx].forward_with_observer(
+                    &h,
+                    |stage, hidden| {
+                        observe(VisionStage::DeepStackMerger(ds_idx, stage), hidden);
+                    },
+                );
                 deepstack_features.push(ds_feature);
             }
         }
 
         // 6. Apply main merger
-        h = self.merger.forward(&h);
+        h = self.merger.forward_with_observer(&h, |stage, hidden| {
+            observe(VisionStage::MainMerger(stage), hidden);
+        });
 
         Qwen3VLVisionEncoderOutput {
             hidden_states: h,

@@ -131,6 +131,8 @@ pub(crate) use qwen2_vl::{
 };
 #[allow(unused_imports)]
 pub(crate) use qwen3_vl::emit_qwen3_vl;
+#[cfg(feature = "diagnostics")]
+pub(crate) use qwen3_vl::emit_qwen3_vl_diagnostics;
 #[allow(unused_imports)]
 pub(crate) use qwen3_vl::{
     QWEN3_VL_PATCH_BUCKETS, Qwen3VlConfig, Qwen3VlGridPlan, Qwen3VlHostInputs, Qwen3VlWeightSpec,

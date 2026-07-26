@@ -183,6 +183,8 @@ pub use phi4_audio::{Phi4AudioCheckpoint, Phi4AudioDiagnosticRuntime, Phi4AudioD
 pub use qwen2_vl_runtime::{
     IreeQwen2VlProjector, Qwen2VlVisionExecutionMetrics, Qwen2VlVisionProjection,
 };
+#[cfg(feature = "diagnostics")]
+pub use qwen3_vl_runtime::Qwen3VlVisionDiagnostics;
 #[cfg(feature = "iree")]
 pub use qwen3_vl_runtime::{
     IreeQwen3VlProjector, Qwen3VlVisionExecutionMetrics, Qwen3VlVisionProjection,

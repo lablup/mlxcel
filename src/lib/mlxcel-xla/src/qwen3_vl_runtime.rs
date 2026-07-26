@@ -34,9 +34,11 @@ use crate::aux::{
     IreeAuxiliaryModule,
 };
 use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
-use crate::emitter::{
-    Qwen3VlConfig, Qwen3VlHostInputs, emit_qwen3_vl, prepare_qwen3_vl_host_inputs,
-};
+#[cfg(not(feature = "diagnostics"))]
+use crate::emitter::emit_qwen3_vl;
+#[cfg(feature = "diagnostics")]
+use crate::emitter::emit_qwen3_vl_diagnostics;
+use crate::emitter::{Qwen3VlConfig, Qwen3VlHostInputs, prepare_qwen3_vl_host_inputs};
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
 use crate::weights::{bf16_to_f32, dequantize_affine, f16_to_f32, f32_le_to_f32};
 
@@ -54,10 +56,30 @@ pub struct Qwen3VlVisionExecutionMetrics {
 pub struct Qwen3VlVisionProjection {
     pub values: Vec<f32>,
     pub deepstack_values: Vec<Vec<f32>>,
+    #[cfg(feature = "diagnostics")]
+    pub diagnostics: Qwen3VlVisionDiagnostics,
     pub shape: [usize; 2],
     pub merged_tokens_per_image: Vec<usize>,
     pub packed_cu_seqlens: Vec<usize>,
     pub metrics: Qwen3VlVisionExecutionMetrics,
+}
+
+#[cfg(feature = "diagnostics")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct Qwen3VlVisionDiagnostics {
+    pub patch_embeddings: Vec<f32>,
+    pub position_embeddings: Vec<f32>,
+    pub positioned_embeddings: Vec<f32>,
+    /// Encoder block outputs in layer order. The final entry is the main
+    /// merger input; configured DeepStack inputs are the corresponding
+    /// `deepstack_visual_indexes` entries.
+    pub block_hidden_states: Vec<Vec<f32>>,
+    pub shape: [usize; 2],
+    /// Normalized/shuffled input, first linear output, and GELU output.
+    pub main_merger_states: Vec<Vec<f32>>,
+    /// The same ordered merger stages for each DeepStack branch.
+    pub deepstack_merger_states: Vec<Vec<Vec<f32>>>,
+    pub merger_shape: [usize; 2],
 }
 
 struct ActiveModule {
@@ -596,7 +618,10 @@ fn compile_and_load(
     processor_identity: &str,
     patch_bucket: usize,
 ) -> Result<IreeAuxiliaryModule, String> {
+    #[cfg(not(feature = "diagnostics"))]
     let mlir = emit_qwen3_vl(config, patch_bucket);
+    #[cfg(feature = "diagnostics")]
+    let mlir = emit_qwen3_vl_diagnostics(config, patch_bucket);
     let compiler = iree_compile_bin()?;
     if !compiler.is_file() {
         return Err(format!("iree-compile not found at {}", compiler.display()));
@@ -700,17 +725,41 @@ impl IreeQwen3VlProjector {
             plan.patch_bucket / (self.config.spatial_merge_size * self.config.spatial_merge_size),
             self.config.text_hidden,
         ];
-        let output_bytes = full_output_shape.iter().product::<usize>() * std::mem::size_of::<f32>();
-        let mut output_buffers =
-            vec![vec![0u8; output_bytes]; 1 + self.config.deepstack_visual_indexes.len()];
+        let standard_output_count = 1 + self.config.deepstack_visual_indexes.len();
+        let mut output_shapes = vec![full_output_shape.to_vec(); standard_output_count];
+        #[cfg(feature = "diagnostics")]
+        {
+            output_shapes.extend(
+                (0..3 + self.config.depth).map(|_| vec![plan.patch_bucket, self.config.hidden]),
+            );
+            let merge_width = self.config.hidden
+                * self.config.spatial_merge_size
+                * self.config.spatial_merge_size;
+            output_shapes.extend((0..3 * standard_output_count).map(|_| {
+                vec![
+                    plan.patch_bucket
+                        / (self.config.spatial_merge_size * self.config.spatial_merge_size),
+                    merge_width,
+                ]
+            }));
+        }
+        let projected_transfer_bytes = output_shapes
+            .iter()
+            .map(|shape| shape.iter().product::<usize>() * std::mem::size_of::<f32>())
+            .sum();
+        let mut output_buffers = output_shapes
+            .iter()
+            .map(|shape| vec![0u8; shape.iter().product::<usize>() * std::mem::size_of::<f32>()])
+            .collect::<Vec<_>>();
         let started = Instant::now();
         {
             let mut outputs = output_buffers
                 .iter_mut()
-                .map(|output| AuxiliaryOutput {
+                .zip(&output_shapes)
+                .map(|(output, shape)| AuxiliaryOutput {
                     bytes: output.as_mut_slice(),
                     dtype: AuxiliaryTensorDType::Float32,
-                    shape: &full_output_shape,
+                    shape,
                 })
                 .collect::<Vec<_>>();
             self.ensure_bucket(plan.patch_bucket)?.invoke(
@@ -762,7 +811,7 @@ impl IreeQwen3VlProjector {
             .ok_or_else(|| "Qwen3-VL IREE output is shorter than the actual grid".to_string())?
             .to_vec();
         let deepstack_values = decoded_outputs
-            .into_iter()
+            .drain(..self.config.deepstack_visual_indexes.len())
             .map(|output| {
                 output
                     .get(..actual_values)
@@ -772,9 +821,74 @@ impl IreeQwen3VlProjector {
                     .map(<[f32]>::to_vec)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        #[cfg(feature = "diagnostics")]
+        let diagnostics = {
+            let actual_hidden_values = plan
+                .actual_patches
+                .checked_mul(self.config.hidden)
+                .ok_or_else(|| "Qwen3-VL diagnostic hidden size overflowed".to_string())?;
+            let mut trim = |label: &str| -> Result<Vec<f32>, String> {
+                decoded_outputs
+                    .remove(0)
+                    .get(..actual_hidden_values)
+                    .ok_or_else(|| {
+                        format!("Qwen3-VL IREE {label} output is shorter than the actual grid")
+                    })
+                    .map(<[f32]>::to_vec)
+            };
+            let patch_embeddings = trim("patch embedding")?;
+            let position_embeddings = trim("position embedding")?;
+            let positioned_embeddings = trim("positioned embedding")?;
+            let block_hidden_states = (0..self.config.depth)
+                .map(|layer| trim(&format!("block {layer}")))
+                .collect::<Result<Vec<_>, _>>()?;
+            let actual_merged_tokens = plan.merged_tokens_per_image.iter().sum::<usize>();
+            let merge_width = self.config.hidden
+                * self.config.spatial_merge_size
+                * self.config.spatial_merge_size;
+            let actual_merger_values = actual_merged_tokens
+                .checked_mul(merge_width)
+                .ok_or_else(|| "Qwen3-VL diagnostic merger size overflowed".to_string())?;
+            let mut trim_merger = |label: &str| -> Result<Vec<f32>, String> {
+                decoded_outputs
+                    .remove(0)
+                    .get(..actual_merger_values)
+                    .ok_or_else(|| {
+                        format!("Qwen3-VL IREE {label} output is shorter than the actual grid")
+                    })
+                    .map(<[f32]>::to_vec)
+            };
+            let main_merger_states = (0..3)
+                .map(|stage| trim_merger(&format!("main merger stage {stage}")))
+                .collect::<Result<Vec<_>, _>>()?;
+            let deepstack_merger_states = (0..self.config.deepstack_visual_indexes.len())
+                .map(|branch| {
+                    (0..3)
+                        .map(|stage| {
+                            trim_merger(&format!("DeepStack merger branch {branch} stage {stage}"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            debug_assert!(decoded_outputs.is_empty());
+            Qwen3VlVisionDiagnostics {
+                patch_embeddings,
+                position_embeddings,
+                positioned_embeddings,
+                block_hidden_states,
+                shape: [plan.actual_patches, self.config.hidden],
+                main_merger_states,
+                deepstack_merger_states,
+                merger_shape: [actual_merged_tokens, merge_width],
+            }
+        };
+        #[cfg(not(feature = "diagnostics"))]
+        debug_assert!(decoded_outputs.is_empty());
         Ok(Qwen3VlVisionProjection {
             values,
             deepstack_values,
+            #[cfg(feature = "diagnostics")]
+            diagnostics,
             shape: [actual_tokens, self.config.text_hidden],
             merged_tokens_per_image: plan.merged_tokens_per_image,
             packed_cu_seqlens: plan.packed_cu_seqlens,
@@ -784,8 +898,7 @@ impl IreeQwen3VlProjector {
                     + std::mem::size_of_val(packed_attention_bias.as_slice())
                     + std::mem::size_of_val(position_indices.as_slice())
                     + std::mem::size_of_val(position_weights.as_slice()),
-                projected_transfer_bytes: output_bytes
-                    * (1 + self.config.deepstack_visual_indexes.len()),
+                projected_transfer_bytes,
                 elapsed_seconds,
             },
         })
