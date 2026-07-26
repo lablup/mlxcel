@@ -304,12 +304,31 @@ pub fn strip_causal_mask_buffers(weights: &mut WeightMap, args: &ModelArgs) -> u
 ///
 /// The learned table has exactly `n_positions` rows, so positions past the end
 /// are clamped to the last row rather than indexing out of bounds. GPT-2's
-/// hard 1024-token context makes that reachable from the CLI.
+/// hard 1024-token context makes that reachable from the CLI. Clamping keeps an
+/// in-flight request alive, but the tokens it clamps are all embedded at the
+/// same position, so [`exceeds_position_table`] lets the caller say so instead
+/// of degrading silently.
 pub fn position_ids(offset: i32, seq_len: i32, n_positions: usize) -> Vec<i32> {
     let last = n_positions.saturating_sub(1) as i32;
     (0..seq_len.max(0))
         .map(|i| offset.saturating_add(i).clamp(0, last))
         .collect()
+}
+
+/// Whether a forward pass at KV-cache offset `offset` covering `seq_len` tokens
+/// reaches past the last row of the learned `wpe` table.
+///
+/// The default CLI and server budget already keeps generation inside the
+/// window: `context_window_from_config` reads GPT-2's `n_positions`, so the
+/// `-n -1` sentinel resolves to `n_positions - prompt_len`. This predicate
+/// covers the paths that bypass that budget, chiefly an explicit `-n N` and a
+/// prompt that is itself longer than the context.
+pub fn exceeds_position_table(offset: i32, seq_len: i32, n_positions: usize) -> bool {
+    if seq_len <= 0 {
+        return false;
+    }
+    let last = n_positions.saturating_sub(1) as i32;
+    offset.saturating_add(seq_len - 1) > last
 }
 
 // Attention (fused c_attn QKV, no RoPE).
@@ -502,6 +521,27 @@ impl Gpt2Model {
         // `update_and_fetch` advances `caches[0].offset` during the loop below.
         let offset = caches.first().map(|c| c.offset).unwrap_or(0);
         let positions = position_ids(offset, seq_len, self.n_positions);
+        if exceeds_position_table(offset, seq_len, self.n_positions) {
+            // Once per process: the condition holds for every remaining step of
+            // an over-long generation, and it is a prompt/budget problem, not a
+            // per-step event worth repeating.
+            static CLAMP_WARNED: std::sync::Once = std::sync::Once::new();
+            CLAMP_WARNED.call_once(|| {
+                // `eprintln!` rather than `tracing::warn!`: only `mlxcel-server`
+                // installs a tracing subscriber, and the overrun this reports is
+                // reachable from the CLI, where a `tracing` event is a no-op.
+                eprintln!(
+                    "GPT-2 reached position {} but the learned wpe table has only {} rows; \
+                     every token from position {} on is embedded at the same row and output \
+                     quality degrades. Keep prompt plus generated tokens within the model's \
+                     {}-token context.",
+                    offset.saturating_add(seq_len.max(1) - 1),
+                    self.n_positions,
+                    self.n_positions.saturating_sub(1),
+                    self.n_positions
+                );
+            });
+        }
         let position_index = mlxcel_core::from_slice_i32(&positions, &[positions.len() as i32]);
         let position_embeds = self.wpe.forward(&position_index);
         h = mlxcel_core::add(&h, &position_embeds);

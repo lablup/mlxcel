@@ -21,8 +21,8 @@
 //! 8-wide, single-layer model and runs it on the default device.
 
 use super::{
-    EosTokenId, GPT2_EOS_TOKEN_ID, Gpt2Layout, Gpt2Model, ModelArgs, position_ids,
-    strip_causal_mask_buffers,
+    EosTokenId, GPT2_EOS_TOKEN_ID, Gpt2Layout, Gpt2Model, ModelArgs, exceeds_position_table,
+    position_ids, strip_causal_mask_buffers,
 };
 use mlxcel_core::layers::UnifiedLinear;
 use mlxcel_core::weights::WeightMap;
@@ -128,6 +128,20 @@ fn position_ids_clamp_at_the_end_of_the_learned_table() {
 #[test]
 fn position_ids_of_an_empty_step_are_empty() {
     assert!(position_ids(7, 0, 1024).is_empty());
+}
+
+#[test]
+fn position_table_overflow_is_reported_exactly_at_the_boundary() {
+    // A full-window prefill and the last in-table decode step both fit.
+    assert!(!exceeds_position_table(0, 1024, 1024));
+    assert!(!exceeds_position_table(1023, 1, 1024));
+
+    // One token past the last row, and a chunk that straddles the end.
+    assert!(exceeds_position_table(1024, 1, 1024));
+    assert!(exceeds_position_table(1020, 5, 1024));
+
+    // An empty step never overflows, however far the cache has advanced.
+    assert!(!exceeds_position_table(4096, 0, 1024));
 }
 
 // Checkpoint layout detection.
