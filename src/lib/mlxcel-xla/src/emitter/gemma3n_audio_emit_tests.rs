@@ -1,4 +1,5 @@
 use super::*;
+use crate::emitter::builder::Ty;
 
 fn text() -> Gemma3nConfig {
     Gemma3nConfig::from_json_str(
@@ -136,6 +137,51 @@ fn first_sscp_convolution_rounds_mel_inputs_before_accumulation() {
         .expect("the first SSCP padding must consume BF16-rounded mel");
     assert!(widen > 0);
     assert!(pad > 0);
+}
+
+#[test]
+fn sscp_convolutions_accumulate_bf16_operands_into_f32_results() {
+    let (encode, _) = emit_gemma3n_audio_encode(
+        &text(),
+        &Gemma3nXlaAudioConfig::default(),
+        8,
+        1,
+        Precision::Bf16,
+    )
+    .unwrap();
+    assert!(encode.contains(
+        "(tensor<1x10x130x1xbf16>, tensor<3x3x1x128xbf16>) -> \
+         tensor<1x4x64x128xf32>"
+    ));
+    assert!(encode.contains(
+        "(tensor<1x6x66x128xbf16>, tensor<3x3x128x32xbf16>) -> \
+         tensor<1x2x32x32xf32>"
+    ));
+    assert!(!encode.contains(
+        "(tensor<1x10x130x1xbf16>, tensor<3x3x1x128xbf16>) -> \
+         tensor<1x4x64x128xbf16>"
+    ));
+}
+
+#[test]
+#[ignore = "requires IREE_DIST"]
+fn sscp_f32_accumulator_contract_compiles_for_cpu() {
+    let mut builder = Builder::new().with_precision(Precision::Bf16);
+    let input = Builder::arg(0, Ty::f32(vec![1, 3, 3, 1]));
+    let kernel = Builder::arg(1, Ty::f32(vec![3, 3, 1, 4]));
+    let output = builder.convolution_f32_accumulate(&input, &kernel, &[1, 1], &[(0, 0); 2], 1);
+    let output_ty = output.ty.render();
+    let mlir = format!(
+        "module @sscp_f32_accumulator {{\n  func.func public @main(%arg0: \
+         tensor<1x3x3x1xf32>, %arg1: tensor<3x3x1x4xf32>) -> {output_ty} {{\n{}    \
+         return {} : {output_ty}\n  }}\n}}\n",
+        builder.body(),
+        output.name,
+    );
+    let compiler = std::path::PathBuf::from(std::env::var_os("IREE_DIST").expect("IREE_DIST"))
+        .join("bin/iree-compile");
+    let stem = format!("mlxcel-gemma3n-sscp-f32-accumulator-{}", std::process::id());
+    compile(compiler.as_os_str(), "local", &stem, "contract", mlir);
 }
 
 fn compile(compiler: &std::ffi::OsStr, device: &str, stem: &str, artifact: &str, mlir: String) {

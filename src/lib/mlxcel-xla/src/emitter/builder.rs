@@ -1173,6 +1173,32 @@ impl Builder {
         padding: &[(usize, usize)],
         feature_groups: usize,
     ) -> Val {
+        self.convolution_with_output(input, kernel, strides, padding, feature_groups, false)
+    }
+
+    /// Channels-last convolution whose low-precision inputs accumulate into an
+    /// explicit F32 result before the caller applies its output rounding.
+    pub fn convolution_f32_accumulate(
+        &mut self,
+        input: &Val,
+        kernel: &Val,
+        strides: &[usize],
+        padding: &[(usize, usize)],
+        feature_groups: usize,
+    ) -> Val {
+        self.convolution_with_output(input, kernel, strides, padding, feature_groups, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn convolution_with_output(
+        &mut self,
+        input: &Val,
+        kernel: &Val,
+        strides: &[usize],
+        padding: &[(usize, usize)],
+        feature_groups: usize,
+        f32_output: bool,
+    ) -> Val {
         assert!(feature_groups > 0);
         assert_eq!(
             input.ty.elt, kernel.ty.elt,
@@ -1202,7 +1228,7 @@ impl Builder {
             shape.push((padded - kernel_size) / strides[axis] + 1);
         }
         shape.push(kernel.ty.shape[spatial_rank + 1]);
-        let output_ty = Ty::new(shape, input.ty.elt);
+        let output_ty = Ty::new(shape, if f32_output { "f32" } else { input.ty.elt });
         let input_demoted;
         let kernel_demoted;
         let (input, kernel) = match self.precision.dot_elt() {
@@ -1221,7 +1247,10 @@ impl Builder {
             }
             None => (input, kernel),
         };
-        let convolution_ty = Ty::new(output_ty.shape.clone(), input.ty.elt);
+        let convolution_ty = Ty::new(
+            output_ty.shape.clone(),
+            if f32_output { "f32" } else { input.ty.elt },
+        );
         let array = |values: &[usize]| {
             values
                 .iter()

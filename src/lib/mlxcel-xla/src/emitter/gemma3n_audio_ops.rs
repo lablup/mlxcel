@@ -75,7 +75,12 @@ fn sscp_conv(
     let zero = b.const_f32(0.0);
     let padded = b.pad(x, &zero, &[0, 0, 1, 0], &[0, kernel[0] - 1, 1, 0]);
     let weight = b.transpose(weight, &[1, 2, 3, 0]);
-    let convolved = b.convolution(&padded, &weight, &stride, &[(0, 0), (0, 0)], groups);
+    // MLX stores both operands as BF16 but accumulates the convolution into an
+    // F32 carrier before materializing the BF16 output tensor. The graph-wide
+    // BF16 contraction mode otherwise gives StableHLO a BF16 result type,
+    // allowing the local CPU backend to lose cancellation-sensitive lanes.
+    let convolved =
+        b.convolution_f32_accumulate(&padded, &weight, &stride, &[(0, 0), (0, 0)], groups);
     let convolved = round_bf16(b, &convolved);
     let normalized = cumulative_group_norm(b, &convolved, norm, eps);
     let activated = relu(b, &normalized);
