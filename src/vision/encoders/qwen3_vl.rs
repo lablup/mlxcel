@@ -1008,6 +1008,59 @@ impl Qwen3VLVisionEncoder {
         }
     }
 
+    /// Re-run only the two LayerNorm operators of one vision block on supplied
+    /// F32 activations. The Qwen3-VL oracle uses this to compare eager MLX and
+    /// IREE with identical inputs, separating normalization arithmetic from
+    /// upstream quantized-matmul drift.
+    #[cfg(feature = "xla-diagnostics")]
+    pub fn block_layer_norms_from_f32(
+        &self,
+        layer: usize,
+        norm1_input: &[f32],
+        norm2_input: &[f32],
+        rows: usize,
+    ) -> Result<[UniquePtr<MlxArray>; 2], String> {
+        let block = self
+            .blocks
+            .get(layer)
+            .ok_or_else(|| format!("Qwen3-VL diagnostic block {layer} is out of range"))?;
+        let weight_shape = mlxcel_core::array_shape(&block.norm1.weight);
+        let [width] = weight_shape.as_slice() else {
+            return Err(format!(
+                "Qwen3-VL block {layer} norm1 weight must be rank 1, got {weight_shape:?}"
+            ));
+        };
+        let norm2_weight_shape = mlxcel_core::array_shape(&block.norm2.weight);
+        if norm2_weight_shape != weight_shape {
+            return Err(format!(
+                "Qwen3-VL block {layer} norm widths disagree: norm1={weight_shape:?}, norm2={norm2_weight_shape:?}"
+            ));
+        }
+        let width = usize::try_from(*width)
+            .map_err(|_| format!("Qwen3-VL block {layer} norm width must be non-negative"))?;
+        let expected = rows
+            .checked_mul(width)
+            .ok_or_else(|| "Qwen3-VL diagnostic LayerNorm shape overflowed".to_string())?;
+        for (name, input) in [("norm1", norm1_input), ("norm2", norm2_input)] {
+            if input.len() != expected {
+                return Err(format!(
+                    "Qwen3-VL block {layer} {name} diagnostic input has {} values, expected {expected}",
+                    input.len()
+                ));
+            }
+        }
+        let rows = i32::try_from(rows)
+            .map_err(|_| "Qwen3-VL diagnostic LayerNorm row count does not fit i32".to_string())?;
+        let width = i32::try_from(width)
+            .map_err(|_| "Qwen3-VL diagnostic LayerNorm width does not fit i32".to_string())?;
+        let norm1_input = mlxcel_core::from_slice_f32(norm1_input, &[rows, width]);
+        let norm2_input = mlxcel_core::from_slice_f32(norm2_input, &[rows, width]);
+        Ok([
+            block.norm1.forward(&norm1_input),
+            block.norm2.forward(&norm2_input),
+        ])
+    }
+
     fn forward_with_grid_observer<F>(
         &self,
         hidden_states: &MlxArray,

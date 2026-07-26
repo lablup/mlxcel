@@ -1228,6 +1228,30 @@ mod tests {
     }
 
     #[test]
+    fn layer_norm_emits_centered_variance_f32_contract() {
+        let mut builder = Builder::new();
+        let value = Builder::arg(0, Ty::f32(vec![2, 8]));
+        let weight = Builder::arg(1, Ty::f32(vec![8]));
+        let bias = Builder::arg(2, Ty::f32(vec![8]));
+        let output = layer_norm(&mut builder, &value, &weight, &bias, 1.0e-6);
+        let body = builder.body();
+
+        assert_eq!(output.ty.render(), "tensor<2x8xf32>");
+        assert_eq!(body.matches("stablehlo.reduce").count(), 2);
+        assert_eq!(body.matches("stablehlo.subtract").count(), 1);
+        assert_eq!(body.matches("stablehlo.rsqrt").count(), 1);
+        let reductions = body
+            .match_indices("stablehlo.reduce")
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let centered = body.find("stablehlo.subtract").unwrap();
+        assert!(
+            reductions[0] < centered && centered < reductions[1],
+            "variance reduction must consume centered values"
+        );
+    }
+
+    #[test]
     fn host_inputs_preserve_packed_media_isolation_and_finite_padding_rows() {
         let config = config();
         let grids = [(1, 4, 4), (1, 4, 8)];

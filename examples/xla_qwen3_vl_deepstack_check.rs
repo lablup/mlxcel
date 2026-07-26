@@ -349,6 +349,30 @@ fn main() {
             ),
         );
     }
+    let same_input_norms = model
+        .vision_encoder
+        .block_layer_norms_from_f32(
+            2,
+            &iree_diagnostics.block_2_states[0],
+            &iree_diagnostics.block_2_states[3],
+            iree_diagnostics.shape[0],
+        )
+        .unwrap_or_else(|error| panic!("run Qwen3-VL same-input LayerNorm probe: {error}"));
+    for (name, actual_index, expected) in [
+        ("norm1", 1, &same_input_norms[0]),
+        ("norm2", 4, &same_input_norms[1]),
+    ] {
+        record_comparison(
+            &mut failures,
+            compare_stage(
+                &mut reports,
+                &format!("vision.block_2.{name}.same_input"),
+                &iree_diagnostics.block_2_states[actual_index],
+                &mlx_f32(expected),
+                tolerance,
+            ),
+        );
+    }
     let merger_stage_names = ["normalized_shuffled", "fc1", "activation"];
     assert_eq!(
         iree_diagnostics.main_merger_states.len(),
