@@ -217,6 +217,11 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // the planner's supported-architecture validation rejects this string
         // before any TP load is attempted. It keeps the dispatch table total.
         ModelType::Gpt2 => "gpt2",
+        // GPT-BigCode shares GPT-2's fused `c_attn` key names, and its
+        // multi-query KV block cannot be split across ranks anyway, so the
+        // planner's supported-architecture validation rejects this string
+        // before any TP load is attempted. It keeps the dispatch table total.
+        ModelType::GptBigCode => "gpt_bigcode",
         ModelType::StarCoder2 => "starcoder2",
         ModelType::Mellum => "mellum",
         ModelType::MiniCPM | ModelType::MiniCPMOVLM => "minicpm",

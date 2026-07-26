@@ -63,6 +63,7 @@ pub mod glm4v;
 pub mod glm4v_moe;
 pub mod glm_moe_dsa;
 pub mod gpt2;
+pub mod gpt_bigcode;
 pub mod gpt_oss;
 pub mod granite;
 pub mod granitemoehybrid;
@@ -164,6 +165,7 @@ pub use glm4_moe::Glm4MoeModel;
 pub use glm4_moe_lite::Glm4MoeLiteModel;
 pub use glm4v::Glm4vTextModel;
 pub use glm4v_moe::Glm4vMoeTextModel;
+pub use gpt_bigcode::GptBigCodeModel;
 pub use gpt_oss::{GptOssModel, GptOssWrapper};
 pub use gpt2::Gpt2Model;
 pub use granite::GraniteModel;
@@ -372,7 +374,8 @@ pub enum ModelType {
     Olmo3,
 
     // GPT-2 lineage
-    Gpt2, // GPT-2 (learned absolute position embeddings, Conv1D weight layout)
+    Gpt2,       // GPT-2 (learned absolute position embeddings, Conv1D weight layout)
+    GptBigCode, // GPT-BigCode (StarCoder / SantaCoder: GPT-2 block with multi-query attention)
 
     // Code models
     StarCoder2,
@@ -560,6 +563,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Olmo3,
     // GPT-2 lineage
     ModelType::Gpt2,
+    ModelType::GptBigCode,
     // Code models
     ModelType::StarCoder2,
     ModelType::Mellum,
@@ -817,6 +821,10 @@ impl ModelType {
                 "GPT-2 (learned absolute positions, Conv1D weights)",
                 "Specialized",
             ),
+            ModelType::GptBigCode => (
+                "GPT-BigCode (StarCoder / SantaCoder, multi-query attention)",
+                "Specialized",
+            ),
             ModelType::StarCoder2 => ("StarCoder 2", "Specialized"),
             ModelType::Mellum => ("Mellum 2 (JetBrains code)", "Specialized"),
             ModelType::StableLM => ("StableLM", "Specialized"),
@@ -1031,6 +1039,7 @@ mod metadata_tests {
             Olmo2,
             Olmo3,
             Gpt2,
+            GptBigCode,
             StarCoder2,
             Mellum,
             MiniCPM,

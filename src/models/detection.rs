@@ -198,6 +198,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "olmo2" => Ok(ModelType::Olmo2),
         "olmo3" => Ok(ModelType::Olmo3),
         "gpt2" => Ok(ModelType::Gpt2),
+        "gpt_bigcode" => Ok(ModelType::GptBigCode),
         "starcoder2" => Ok(ModelType::StarCoder2),
         "mellum" => Ok(ModelType::Mellum),
         "minicpm" => Ok(ModelType::MiniCPM),

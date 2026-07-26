@@ -644,8 +644,18 @@ impl TransformerBlock {
 
         let attn = Attention::from_weights(weights, args, layout, &format!("{prefix}.attn"))?;
         let mlp = MLP::from_weights(weights, args, layout, &format!("{prefix}.mlp"))?;
-        let ln_1 = layer_norm_from_weights(weights, &format!("{prefix}.ln_1"), args)?;
-        let ln_2 = layer_norm_from_weights(weights, &format!("{prefix}.ln_2"), args)?;
+        let ln_1 = layer_norm_from_weights(
+            weights,
+            &format!("{prefix}.ln_1"),
+            args.n_embd,
+            args.layer_norm_epsilon,
+        )?;
+        let ln_2 = layer_norm_from_weights(
+            weights,
+            &format!("{prefix}.ln_2"),
+            args.n_embd,
+            args.layer_norm_epsilon,
+        )?;
 
         Ok(Self {
             attn,
@@ -764,14 +774,19 @@ impl Gpt2Model {
         let wte = UnifiedEmbedding::from_weights(weights, &layout.key("wte"), group_size, bits)?;
         let wpe_key = layout.key("wpe");
         let wpe = UnifiedEmbedding::from_weights(weights, &wpe_key, group_size, bits)?;
-        validate_position_table(&wpe, args, &wpe_key)?;
+        validate_embedding_table(&wpe, &wpe_key, args.n_positions, "n_positions", args.n_embd)?;
 
         let mut h = Vec::with_capacity(args.n_layer);
         for i in 0..args.n_layer {
             h.push(TransformerBlock::from_weights(weights, args, &layout, i)?);
         }
 
-        let ln_f = layer_norm_from_weights(weights, &layout.key("ln_f"), args)?;
+        let ln_f = layer_norm_from_weights(
+            weights,
+            &layout.key("ln_f"),
+            args.n_embd,
+            args.layer_norm_epsilon,
+        )?;
 
         Ok(Self {
             wte,
@@ -790,74 +805,106 @@ impl Gpt2Model {
 ///
 /// `array_shape` returns `i32`; a negative or oversized value can never match a
 /// real extent, so the conversion failing is itself a mismatch.
-fn dim_eq(dim: i32, expected: usize) -> bool {
+///
+/// Used by: Gpt2, GptBigCode
+pub(crate) fn dim_eq(dim: i32, expected: usize) -> bool {
     usize::try_from(dim).is_ok_and(|d| d == expected)
 }
 
-/// Check the loaded `wpe` table against the config, and return its row count.
+/// Check a loaded embedding table against the config field that bounds lookups
+/// into it, and return its row count.
 ///
-/// `position_ids` clamps to `n_positions - 1`, and `n_positions` comes from
-/// `config.json`, not from the table. Nothing else bounds the lookup: MLX's
-/// gather adds the axis size to a negative index but performs no range check on
-/// a positive one, so an index past the last row reads whatever follows the
-/// table in the buffer rather than faulting or clamping. A checkpoint whose
-/// config overstates `n_positions` therefore turns an ordinary prompt into an
-/// out-of-bounds read whose result reaches the logits, and the row count is the
-/// only place that can be caught.
+/// Lookups are bounded by a number read out of `config.json`, not by the table:
+/// `position_ids` clamps to `n_positions - 1`, and token ids are bounded by
+/// `vocab_size`. Nothing else bounds the gather. MLX adds the axis size to a
+/// negative index but performs no range check on a positive one, so an index
+/// past the last row reads whatever follows the table in the buffer rather than
+/// faulting or clamping. A checkpoint whose config overstates the table
+/// therefore turns an ordinary prompt into an out-of-bounds read whose result
+/// reaches the logits, and the row count is the only place that can be caught.
+///
+/// `claimed_rows_field` names the config field in the rejection message
+/// (`n_positions` for `wpe`, `vocab_size` for `wte`).
 ///
 /// A quantized table is packed along the last axis only, so its row count is
 /// still dimension 0; the width check is skipped for it because the packed width
 /// is a function of the bit depth rather than `n_embd`.
-fn validate_position_table(
-    wpe: &UnifiedEmbedding,
-    args: &ModelArgs,
+///
+/// Used by: Gpt2, GptBigCode
+pub(crate) fn validate_embedding_table(
+    table: &UnifiedEmbedding,
     key: &str,
+    claimed_rows: usize,
+    claimed_rows_field: &str,
+    expected_cols: usize,
 ) -> Result<usize, String> {
-    let shape = mlxcel_core::array_shape(wpe.weight());
+    let shape = mlxcel_core::array_shape(table.weight());
     let [rows, cols] = shape.as_slice() else {
         return Err(format!(
-            "{key}.weight must be a 2-D [n_positions, n_embd] table, got shape {shape:?}"
+            "{key}.weight must be a 2-D [rows, n_embd] table, got shape {shape:?}"
         ));
     };
     let rows = usize::try_from(*rows).unwrap_or(0);
     if rows == 0 {
         return Err(format!("{key}.weight has no rows"));
     }
-    if args.n_positions > rows {
+    if claimed_rows > rows {
         return Err(format!(
-            "GPT-2 config n_positions ({}) exceeds the {rows} rows present in {key}.weight. \
-             Position ids are clamped to n_positions - 1, so a config that overstates the \
-             table would index past the end of it, and the gather behind the lookup does \
-             not range-check a positive index.",
-            args.n_positions
+            "config {claimed_rows_field} ({claimed_rows}) exceeds the {rows} rows present in \
+             {key}.weight. Lookups into this table are bounded by {claimed_rows_field}, so a \
+             config that overstates it indexes past the end of the table, and the gather \
+             behind an embedding lookup does not range-check a positive index."
         ));
     }
-    if !wpe.is_quantized() && !dim_eq(*cols, args.n_embd) {
+    if !table.is_quantized() && !dim_eq(*cols, expected_cols) {
         return Err(format!(
-            "{key}.weight is [{rows}, {cols}] but n_embd is {}; the position embedding must \
-             be the same width as the token embedding it is added to",
-            args.n_embd
+            "{key}.weight is [{rows}, {cols}] but n_embd is {expected_cols}; every embedding \
+             table must be the model width"
         ));
     }
     Ok(rows)
 }
 
 /// Load a `LayerNorm` with an optional bias (GPT-2 always ships the bias).
-fn layer_norm_from_weights(
+///
+/// `dim` is the model width the norm must have. A norm weight of the wrong
+/// width would otherwise broadcast-fail inside MLX, and an MLX C++ exception
+/// crossing the cxx bridge is an uncatchable `std::terminate` rather than a
+/// load error.
+///
+/// Used by: Gpt2, GptBigCode
+pub(crate) fn layer_norm_from_weights(
     weights: &WeightMap,
     prefix: &str,
-    args: &ModelArgs,
+    dim: usize,
+    eps: f32,
 ) -> Result<LayerNorm, String> {
     let weight_name = format!("{prefix}.weight");
     let weight = weights
         .get(&weight_name)
-        .map(|w| mlxcel_core::copy(w))
         .ok_or_else(|| format!("Weight not found: {weight_name}"))?;
-    let bias = weights
-        .get(&format!("{prefix}.bias"))
-        .map(|b| mlxcel_core::copy(b));
+    let weight_shape = mlxcel_core::array_shape(weight);
+    if weight_shape.len() != 1 || !dim_eq(weight_shape[0], dim) {
+        return Err(format!(
+            "unexpected {weight_name} shape {weight_shape:?}: expected [{dim}]"
+        ));
+    }
+    let weight = mlxcel_core::copy(weight);
 
-    Ok(LayerNorm::new(weight, bias, args.layer_norm_epsilon))
+    let bias = match weights.get(&format!("{prefix}.bias")) {
+        Some(bias) => {
+            let bias_shape = mlxcel_core::array_shape(bias);
+            if bias_shape.len() != 1 || !dim_eq(bias_shape[0], dim) {
+                return Err(format!(
+                    "unexpected {prefix}.bias shape {bias_shape:?}: expected [{dim}]"
+                ));
+            }
+            Some(mlxcel_core::copy(bias))
+        }
+        None => None,
+    };
+
+    Ok(LayerNorm::new(weight, bias, eps))
 }
 
 // LanguageModel trait implementation.

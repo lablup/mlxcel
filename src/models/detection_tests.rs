@@ -117,6 +117,37 @@ fn gpt2_model_type_is_detected() {
 }
 
 #[test]
+fn gpt_bigcode_model_type_is_detected() {
+    // GPT-BigCode reuses GPT-2's config field names and its `architectures`
+    // entry starts with the same `GPT` prefix, so detection must key off
+    // `model_type` alone and must not fall through to the `gpt2` arm.
+    let model_dir = temp_path("gpt_bigcode_text");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "gpt_bigcode",
+            "architectures": ["GPTBigCodeForCausalLM"],
+            "n_embd": 2048,
+            "n_head": 16,
+            "n_inner": 8192,
+            "n_layer": 24,
+            "n_positions": 2048,
+            "layer_norm_epsilon": 1e-05,
+            "vocab_size": 49280,
+            "multi_query": true,
+            "activation_function": "gelu_pytorch_tanh"
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::GptBigCode);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn fastvlm_model_type_is_detected() {
     for model_type in ["fastvlm", "llava_qwen2"] {
         let model_dir = temp_path(&format!("fastvlm_{model_type}"));
