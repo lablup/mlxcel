@@ -387,6 +387,113 @@ fn config_validation_rejects_out_of_range_rope_parameters() {
 }
 
 #[test]
+fn config_validation_rejects_a_layer_norm_eps_that_would_nan_every_hidden_state() {
+    // Unlike the rope `dims` contract, MLX's `fast::layer_norm` never looks at
+    // `eps`, so none of these throws. They compute `x * rsqrt(mean(x^2) + eps)`
+    // and hand back NaN, which propagates through every remaining layer into the
+    // logits and then into the sampler. A checkpoint that does this loads
+    // cleanly and generates uniform garbage, so the rejection has to happen at
+    // load or not at all.
+    //
+    // Zero is refused for its own reason: an all-zero row gives `rsqrt(0)`, and
+    // `0 * inf` is NaN again.
+    for (config, label) in [
+        (
+            r#"{"model_type": "gpt_neox", "layer_norm_eps": 0.0}"#,
+            "zero",
+        ),
+        (
+            r#"{"model_type": "gpt_neox", "layer_norm_eps": -1e-5}"#,
+            "negative",
+        ),
+    ] {
+        let args: ModelArgs = serde_json::from_str(config).expect("parses");
+        let err = args
+            .validate()
+            .expect_err(&format!("a {label} layer_norm_eps must be rejected"));
+        assert!(
+            err.contains("layer_norm_eps"),
+            "unhelpful error for a {label} layer_norm_eps: {err}"
+        );
+    }
+
+    // JSON has no NaN or infinity literal, so build those directly.
+    for eps in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let mut args: ModelArgs = serde_json::from_str(PYTHIA_1B_CONFIG).expect("parses");
+        args.layer_norm_eps = eps;
+        let err = args
+            .validate()
+            .expect_err("a non-finite layer_norm_eps must be rejected");
+        assert!(
+            err.contains("layer_norm_eps"),
+            "unhelpful error for layer_norm_eps {eps}: {err}"
+        );
+    }
+
+    // The real value stays accepted, and so does the whole small-positive range
+    // a checkpoint might plausibly declare.
+    for eps in [1e-5f32, 1e-12, 1e-3, 1.0] {
+        let mut args: ModelArgs = serde_json::from_str(PYTHIA_1B_CONFIG).expect("parses");
+        args.layer_norm_eps = eps;
+        assert!(
+            args.validate().is_ok(),
+            "layer_norm_eps {eps} is an ordinary value and must be accepted"
+        );
+    }
+}
+
+#[test]
+fn config_validation_rejects_a_quantization_block_that_would_abort_an_mlx_kernel() {
+    // `group_size` and `bits` reach `quantized_matmul` and `dequantize`
+    // unchanged: `reconcile_quantization_layout` treats a non-positive pair as
+    // "insufficient shape info" and returns it as declared rather than
+    // correcting it. MLX then computes `packed_in * 32 / bits`, which divides by
+    // zero at 0 and collapses to zero above 32, and the throw that follows
+    // crosses the cxx bridge as an uncatchable `std::terminate`.
+    let hostile = [
+        (r#""group_size": 64, "bits": 0"#, "bits"),
+        (r#""group_size": 64, "bits": -4"#, "bits"),
+        (r#""group_size": 64, "bits": 33"#, "bits"),
+        (r#""group_size": 0, "bits": 4"#, "group_size"),
+        (r#""group_size": -64, "bits": 4"#, "group_size"),
+    ];
+    for (quantization, expected) in hostile {
+        let config = format!(r#"{{"model_type": "gpt_neox", "quantization": {{{quantization}}}}}"#);
+        let args: ModelArgs = serde_json::from_str(&config).expect("parses");
+        let err = args
+            .validate()
+            .expect_err(&format!("must be rejected: {config}"));
+        assert!(
+            err.contains(expected),
+            "unhelpful error for {config}: {err}"
+        );
+    }
+
+    // Every bit width and group size a real export declares stays accepted. The
+    // guard is a range rather than an allowlist because mlxcel re-derives an
+    // effective bit width from the tensor shapes when the declared one
+    // disagrees, and an allowlist would reject the mixed-precision exports that
+    // relies on.
+    for (group_size, bits) in [(32, 4), (64, 4), (128, 4), (64, 8), (64, 6), (16, 4)] {
+        let config = format!(
+            r#"{{"model_type": "gpt_neox", "quantization": {{"group_size": {group_size}, "bits": {bits}}}}}"#
+        );
+        let args: ModelArgs = serde_json::from_str(&config).expect("parses");
+        assert!(
+            args.validate().is_ok(),
+            "group_size {group_size} / bits {bits} is a real export and must be accepted"
+        );
+        assert_eq!(args.group_size(), group_size);
+        assert_eq!(args.bits(), bits);
+    }
+
+    // An absent block keeps the defaults and stays accepted.
+    let args: ModelArgs = serde_json::from_str(PYTHIA_1B_CONFIG).expect("parses");
+    assert!(args.quantization.is_none());
+    assert!(args.validate().is_ok());
+}
+
+#[test]
 fn every_accepted_rotary_pct_survives_a_real_rope_call() {
     // `validate_rope` exists because MLX enforces its `dims` contract by
     // throwing, and a throw crossing the cxx bridge is an uncatchable

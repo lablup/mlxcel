@@ -291,7 +291,81 @@ impl ModelArgs {
                  {MAX_INTERMEDIATE_SIZE}"
             ));
         }
+        self.validate_norm_eps()?;
+        self.validate_quantization()?;
         self.validate_rope()
+    }
+
+    /// Reject a `layer_norm_eps` that would turn every hidden state into NaN.
+    ///
+    /// `layer_norm_eps` is the second float a `config.json` author controls, and
+    /// unlike [`ModelArgs::validate_rope`] the failure mode here is silence
+    /// rather than a crash. MLX's `fast::layer_norm` validates the shapes of its
+    /// weight and bias but does not look at `eps` at all: it computes
+    /// `x * rsqrt(mean(x^2) + eps)`, so a NaN `eps` makes every element of every
+    /// hidden state NaN, and a negative one does the same as soon as
+    /// `mean(x^2) + eps` goes below zero. Zero is unsafe for its own reason: an
+    /// all-zero row (an unused or zero-initialized embedding row is enough)
+    /// gives `rsqrt(0)`, and `0 * inf` is NaN again.
+    ///
+    /// Nothing throws on any of those, so the NaN propagates through every
+    /// remaining layer into the logits and the sampler draws from a NaN
+    /// distribution. The result is a checkpoint that loads cleanly and then
+    /// generates uniformly garbage output, which is harder to diagnose than the
+    /// load error rejecting it here produces. No published GPT-NeoX declares
+    /// anything but a small positive value (Pythia: 1e-5).
+    fn validate_norm_eps(&self) -> Result<(), String> {
+        if !self.layer_norm_eps.is_finite() || self.layer_norm_eps <= 0.0 {
+            return Err(format!(
+                "GPT-NeoX layer_norm_eps ({}) must be a finite positive number; it is added to the                  variance under an rsqrt, so a non-finite, negative or zero value makes every                  normalized hidden state NaN and that NaN reaches the logits without anything                  throwing",
+                self.layer_norm_eps
+            ));
+        }
+        Ok(())
+    }
+
+    /// Reject a `quantization` block that would abort the process inside an MLX
+    /// quantized kernel.
+    ///
+    /// `group_size` and `bits` are read straight out of `config.json` and are
+    /// threaded through [`load_linear`] and `UnifiedEmbedding::from_weights`
+    /// into MLX's `quantized_matmul` and `dequantize`. They are not reconciled
+    /// away first: `mlxcel_core::layers::reconcile_quantization_layout`
+    /// deliberately returns the declared pair unchanged when either is
+    /// non-positive (it treats that as "insufficient shape info, trust the
+    /// caller"), so a hostile value reaches the kernel exactly as written.
+    ///
+    /// MLX then computes `w.shape(-1) * 32 / bits` in `validate_quantized_input`.
+    /// At `bits == 0` that is a division by zero, and at `bits > 32` it is zero,
+    /// which cannot match the scales, so both end in a `std::invalid_argument`.
+    /// `quantized_matmul` crosses the cxx bridge as `UniquePtr<MlxArray>` rather
+    /// than a `Result`, so that throw is an uncatchable `std::terminate` at the
+    /// first forward pass rather than a load error, which is the same shape of
+    /// failure [`ModelArgs::validate_rope`] exists to prevent for `rope`.
+    ///
+    /// The bound is a range rather than an allowlist of the widths MLX actually
+    /// supports on purpose. mlxcel tolerates a declared bit width that disagrees
+    /// with the stored tensors and re-derives the effective one from the shapes,
+    /// so an allowlist would reject mixed-precision exports that load correctly
+    /// today. Only the values that cannot describe any packing at all are
+    /// refused.
+    fn validate_quantization(&self) -> Result<(), String> {
+        let Some(quantization) = self.quantization.as_ref() else {
+            return Ok(());
+        };
+        if quantization.bits < 1 || quantization.bits > 32 {
+            return Err(format!(
+                "GPT-NeoX quantization.bits ({}) must be between 1 and 32; MLX derives the                  unpacked width as `packed_in * 32 / bits`, which divides by zero at 0 and                  collapses to zero above 32, and the resulting MLX C++ exception crossing the cxx                  bridge is an uncatchable `std::terminate` at the first forward pass rather than a                  load error",
+                quantization.bits
+            ));
+        }
+        if quantization.group_size < 1 {
+            return Err(format!(
+                "GPT-NeoX quantization.group_size ({}) must be positive; it is multiplied by the                  scales width to check the packing, and a non-positive value can match no real                  tensor, so MLX throws and that throw is an uncatchable `std::terminate` rather                  than a load error",
+                quantization.group_size
+            ));
+        }
+        Ok(())
     }
 
     /// Reject RoPE parameters that would abort the process at the first forward
