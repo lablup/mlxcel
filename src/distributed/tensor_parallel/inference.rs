@@ -240,6 +240,18 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // V rather than between whole heads. This arm keeps the dispatch table
         // total.
         ModelType::GptNeoX => "gpt_neox",
+        // Helium is structurally a shardable dense Llama, but TP is refused for
+        // it on purpose and this arm only keeps the dispatch table total. The
+        // tensor-parallel runtime builds its per-rank model by parsing
+        // `config.json` straight into `llama3::ModelArgs`, and
+        // `llama3::ModelArgs::rope_traditional` is deliberately not
+        // deserializable, so a sharded Helium would silently rotate split-half
+        // pairs while the single-process path rotates interleaved pairs. The
+        // refusal comes from `validate_supported_runtime`, whose
+        // `runtime_kind_for` match has no arm for `ModelType::Helium` and so
+        // returns `None`. Enabling TP here means threading the flag through the
+        // rank-local config first.
+        ModelType::Helium => "helium",
         ModelType::StarCoder2 => "starcoder2",
         ModelType::Mellum => "mellum",
         ModelType::MiniCPM | ModelType::MiniCPMOVLM => "minicpm",

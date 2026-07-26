@@ -68,6 +68,7 @@ pub mod gpt_neox;
 pub mod gpt_oss;
 pub mod granite;
 pub mod granitemoehybrid;
+pub mod helium;
 pub mod hunyuan_moe;
 pub mod hunyuan_v1_dense;
 pub mod hunyuan_vl;
@@ -172,6 +173,7 @@ pub use gpt_oss::{GptOssModel, GptOssWrapper};
 pub use gpt2::Gpt2Model;
 pub use granite::GraniteModel;
 pub use granitemoehybrid::GraniteMoeHybridModel;
+pub use helium::HeliumModel;
 pub use hunyuan_moe::HunyuanMoeModel;
 pub use hunyuan_v1_dense::HunyuanV1DenseModel;
 pub use internlm2::InternLM2Model;
@@ -385,6 +387,7 @@ pub enum ModelType {
     Mellum, // Mellum 2 (JetBrains hybrid-attention MoE code model)
 
     // Other Transformer models
+    Helium, // Kyutai Helium (Llama-shaped dense decoder with traditional RoPE)
     MiniCPM,
     MiniCPM3,
     StableLM,
@@ -572,6 +575,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::StarCoder2,
     ModelType::Mellum,
     // Other Transformer models
+    ModelType::Helium,
     ModelType::MiniCPM,
     ModelType::MiniCPM3,
     ModelType::StableLM,
@@ -833,6 +837,10 @@ impl ModelType {
                 "GPT-NeoX (EleutherAI Pythia, partial RoPE, parallel residual)",
                 "Specialized",
             ),
+            ModelType::Helium => (
+                "Kyutai Helium (dense Llama shape, traditional RoPE)",
+                "Specialized",
+            ),
             ModelType::StarCoder2 => ("StarCoder 2", "Specialized"),
             ModelType::Mellum => ("Mellum 2 (JetBrains code)", "Specialized"),
             ModelType::StableLM => ("StableLM", "Specialized"),
@@ -1051,6 +1059,7 @@ mod metadata_tests {
             GptNeoX,
             StarCoder2,
             Mellum,
+            Helium,
             MiniCPM,
             MiniCPM3,
             StableLM,

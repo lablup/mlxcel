@@ -183,6 +183,42 @@ fn gpt_neox_model_type_is_detected() {
 }
 
 #[test]
+fn helium_model_type_is_detected() {
+    // Helium's config is field-for-field a Llama config apart from `model_type`
+    // and the smaller `rms_norm_eps`, so detection must key off `model_type`
+    // alone and must not fall through to the Llama arm. The two decode
+    // differently: Helium rotates interleaved RoPE pairs, Llama split-half ones.
+    let model_dir = temp_path("helium_text");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "helium",
+            "architectures": ["HeliumForCausalLM"],
+            "hidden_size": 2560,
+            "num_attention_heads": 20,
+            "num_key_value_heads": 20,
+            "num_hidden_layers": 24,
+            "intermediate_size": 7040,
+            "head_dim": 128,
+            "max_position_embeddings": 4096,
+            "rms_norm_eps": 1e-08,
+            "rope_theta": 100000.0,
+            "attention_bias": false,
+            "mlp_bias": false,
+            "tie_word_embeddings": false,
+            "vocab_size": 48000
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::Helium);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn fastvlm_model_type_is_detected() {
     for model_type in ["fastvlm", "llava_qwen2"] {
         let model_dir = temp_path(&format!("fastvlm_{model_type}"));

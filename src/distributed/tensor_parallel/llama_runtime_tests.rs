@@ -52,6 +52,9 @@ fn make_test_model_args() -> LlamaModelArgs {
         rope_scaling: None,
         quantization: None,
         tie_word_embeddings: false,
+        // Every Llama-family checkpoint rotates split-half; only the Helium
+        // loader sets this.
+        rope_traditional: false,
     }
 }
 
@@ -913,6 +916,7 @@ fn local_llama_args_preserves_computed_head_dim_when_config_omits_it() {
         rope_scaling: None,
         quantization: None,
         tie_word_embeddings: true,
+        rope_traditional: false,
     };
     let plan = generate_shard_plan("llama", 1, &ShardConfig::with_tp_size(2)).unwrap();
 
