@@ -348,9 +348,9 @@ fn main() {
     let eager_vision = model
         .vision_encoder
         .forward_with_grid_diagnostics(&pixels, &processor.grids);
-    // MLX arrays are lazy. Materialize the eager substage oracle before
-    // entering the IREE/CUDA runtime so the comparison cannot observe stale or
-    // vacuous intermediates after the mixed-runtime launch.
+    // The producer materializes private copies at each substage boundary.
+    // Export those snapshots before IREE launch and reject a vacuous capture
+    // immediately so the strict oracle cannot report a numeric false positive.
     let eager_substage_probe = [
         (
             "input",
