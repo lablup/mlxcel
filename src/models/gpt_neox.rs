@@ -317,7 +317,10 @@ impl ModelArgs {
     fn validate_norm_eps(&self) -> Result<(), String> {
         if !self.layer_norm_eps.is_finite() || self.layer_norm_eps <= 0.0 {
             return Err(format!(
-                "GPT-NeoX layer_norm_eps ({}) must be a finite positive number; it is added to the                  variance under an rsqrt, so a non-finite, negative or zero value makes every                  normalized hidden state NaN and that NaN reaches the logits without anything                  throwing",
+                "GPT-NeoX layer_norm_eps ({}) must be a finite positive number; it is added to the \
+                 variance under an rsqrt, so a non-finite, negative or zero value makes every \
+                 normalized hidden state NaN and that NaN reaches the logits without anything \
+                 throwing",
                 self.layer_norm_eps
             ));
         }
@@ -355,13 +358,20 @@ impl ModelArgs {
         };
         if quantization.bits < 1 || quantization.bits > 32 {
             return Err(format!(
-                "GPT-NeoX quantization.bits ({}) must be between 1 and 32; MLX derives the                  unpacked width as `packed_in * 32 / bits`, which divides by zero at 0 and                  collapses to zero above 32, and the resulting MLX C++ exception crossing the cxx                  bridge is an uncatchable `std::terminate` at the first forward pass rather than a                  load error",
+                "GPT-NeoX quantization.bits ({}) must be between 1 and 32; MLX derives the \
+                 unpacked width as `packed_in * 32 / bits`, which divides by zero at 0 and \
+                 collapses to zero above 32, and the resulting MLX C++ exception crossing the cxx \
+                 bridge is an uncatchable `std::terminate` at the first forward pass rather than a \
+                 load error",
                 quantization.bits
             ));
         }
         if quantization.group_size < 1 {
             return Err(format!(
-                "GPT-NeoX quantization.group_size ({}) must be positive; it is multiplied by the                  scales width to check the packing, and a non-positive value can match no real                  tensor, so MLX throws and that throw is an uncatchable `std::terminate` rather                  than a load error",
+                "GPT-NeoX quantization.group_size ({}) must be positive; it is multiplied by the \
+                 scales width to check the packing, and a non-positive value can match no real \
+                 tensor, so MLX throws and that throw is an uncatchable `std::terminate` rather \
+                 than a load error",
                 quantization.group_size
             ));
         }
