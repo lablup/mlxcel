@@ -348,64 +348,24 @@ fn main() {
     let eager_vision = model
         .vision_encoder
         .forward_with_grid_diagnostics(&pixels, &processor.grids);
-    // The producer materializes private copies at each substage boundary.
-    // Export those snapshots before IREE launch and reject a vacuous capture
-    // immediately so the strict oracle cannot report a numeric false positive.
+    // The producer exports host-owned F32 values at each substage boundary.
+    // Reject a vacuous capture immediately so the strict oracle cannot report
+    // a numeric false positive.
     let eager_substage_probe = [
-        (
-            "input",
-            mlx_f32(
-                eager_vision
-                    .substage_probe_layer_input
-                    .as_ref()
-                    .expect("eager substage probe layer input"),
-            ),
-        ),
-        (
-            "norm1",
-            mlx_f32(
-                eager_vision
-                    .substage_probe_layer_norm1
-                    .as_ref()
-                    .expect("eager substage probe layer norm1"),
-            ),
-        ),
+        ("input", eager_vision.substage_probe_layer_input.as_slice()),
+        ("norm1", eager_vision.substage_probe_layer_norm1.as_slice()),
         (
             "attention",
-            mlx_f32(
-                eager_vision
-                    .substage_probe_layer_attention
-                    .as_ref()
-                    .expect("eager substage probe layer attention"),
-            ),
+            eager_vision.substage_probe_layer_attention.as_slice(),
         ),
         (
             "post_attention_residual",
-            mlx_f32(
-                eager_vision
-                    .substage_probe_layer_post_attention_residual
-                    .as_ref()
-                    .expect("eager substage probe layer post-attention residual"),
-            ),
+            eager_vision
+                .substage_probe_layer_post_attention_residual
+                .as_slice(),
         ),
-        (
-            "norm2",
-            mlx_f32(
-                eager_vision
-                    .substage_probe_layer_norm2
-                    .as_ref()
-                    .expect("eager substage probe layer norm2"),
-            ),
-        ),
-        (
-            "mlp",
-            mlx_f32(
-                eager_vision
-                    .substage_probe_layer_mlp
-                    .as_ref()
-                    .expect("eager substage probe layer MLP"),
-            ),
-        ),
+        ("norm2", eager_vision.substage_probe_layer_norm2.as_slice()),
+        ("mlp", eager_vision.substage_probe_layer_mlp.as_slice()),
     ];
     for (stage, values) in eager_substage_probe
         .iter()

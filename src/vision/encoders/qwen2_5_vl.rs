@@ -386,19 +386,27 @@ struct VisionBlock {
 
 #[cfg(feature = "xla-diagnostics")]
 struct Qwen25VLBlockDiagnostics {
-    input: UniquePtr<MlxArray>,
-    norm1: UniquePtr<MlxArray>,
-    attention: UniquePtr<MlxArray>,
-    post_attention_residual: UniquePtr<MlxArray>,
-    norm2: UniquePtr<MlxArray>,
-    mlp: UniquePtr<MlxArray>,
+    input: Vec<f32>,
+    norm1: Vec<f32>,
+    attention: Vec<f32>,
+    post_attention_residual: Vec<f32>,
+    norm2: Vec<f32>,
+    mlp: Vec<f32>,
 }
 
-#[cfg(feature = "xla-diagnostics")]
-fn materialized_diagnostic_snapshot(array: &MlxArray) -> UniquePtr<MlxArray> {
-    let snapshot = mlxcel_core::copy(array);
-    mlxcel_core::eval(&snapshot);
-    snapshot
+#[cfg(any(test, feature = "xla-diagnostics"))]
+fn host_f32_diagnostic_snapshot(array: &MlxArray) -> Vec<f32> {
+    let array = mlxcel_core::astype(array, mlxcel_core::dtype::FLOAT32);
+    mlxcel_core::eval(&array);
+    let bytes = mlxcel_core::array_to_raw_bytes(&array);
+    assert!(
+        bytes.len().is_multiple_of(std::mem::size_of::<f32>()),
+        "Qwen2.5-VL diagnostic F32 snapshot has a partial element"
+    );
+    bytes
+        .chunks_exact(std::mem::size_of::<f32>())
+        .map(|bytes| f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        .collect()
 }
 
 impl VisionBlock {
@@ -438,22 +446,22 @@ impl VisionBlock {
         cu_seqlens: &[i32],
         rotary_pos_emb: &MlxArray,
     ) -> (UniquePtr<MlxArray>, Qwen25VLBlockDiagnostics) {
-        // These arrays are diagnostic values, not additional lazy graph
-        // handles. Materialize each private copy before its source feeds the
-        // next substage so later graph evaluation cannot donate or reuse the
-        // intermediate storage observed by the oracle.
-        let input = materialized_diagnostic_snapshot(hidden_states);
+        // Copy each diagnostic value to host-owned F32 memory before its source
+        // feeds the next substage. Retaining even an evaluated MlxArray handle
+        // is insufficient because later graph evaluation may donate or reuse
+        // its backing storage.
+        let input = host_f32_diagnostic_snapshot(hidden_states);
         let norm1 = self.norm1.forward(hidden_states);
-        let norm1_snapshot = materialized_diagnostic_snapshot(&norm1);
+        let norm1_snapshot = host_f32_diagnostic_snapshot(&norm1);
         let attention = self.attn.forward(&norm1, cu_seqlens, rotary_pos_emb);
-        let attention_snapshot = materialized_diagnostic_snapshot(&attention);
+        let attention_snapshot = host_f32_diagnostic_snapshot(&attention);
         let post_attention_residual = mlxcel_core::add(hidden_states, &attention);
         let post_attention_residual_snapshot =
-            materialized_diagnostic_snapshot(&post_attention_residual);
+            host_f32_diagnostic_snapshot(&post_attention_residual);
         let norm2 = self.norm2.forward(&post_attention_residual);
-        let norm2_snapshot = materialized_diagnostic_snapshot(&norm2);
+        let norm2_snapshot = host_f32_diagnostic_snapshot(&norm2);
         let mlp = self.mlp.forward(&norm2);
-        let mlp_snapshot = materialized_diagnostic_snapshot(&mlp);
+        let mlp_snapshot = host_f32_diagnostic_snapshot(&mlp);
         let output = mlxcel_core::add(&post_attention_residual, &mlp);
         (
             output,
@@ -533,12 +541,12 @@ pub struct Qwen25VLVisionDiagnostics {
     pub final_interval_layer_indices: Vec<usize>,
     pub post_final_interval_layers: Vec<UniquePtr<MlxArray>>,
     pub substage_probe_layer_index: usize,
-    pub substage_probe_layer_input: UniquePtr<MlxArray>,
-    pub substage_probe_layer_norm1: UniquePtr<MlxArray>,
-    pub substage_probe_layer_attention: UniquePtr<MlxArray>,
-    pub substage_probe_layer_post_attention_residual: UniquePtr<MlxArray>,
-    pub substage_probe_layer_norm2: UniquePtr<MlxArray>,
-    pub substage_probe_layer_mlp: UniquePtr<MlxArray>,
+    pub substage_probe_layer_input: Vec<f32>,
+    pub substage_probe_layer_norm1: Vec<f32>,
+    pub substage_probe_layer_attention: Vec<f32>,
+    pub substage_probe_layer_post_attention_residual: Vec<f32>,
+    pub substage_probe_layer_norm2: Vec<f32>,
+    pub substage_probe_layer_mlp: Vec<f32>,
     pub merger_window_ordered: UniquePtr<MlxArray>,
     pub restored_projection: UniquePtr<MlxArray>,
 }
@@ -1006,7 +1014,7 @@ impl super::VisionEncoder for Qwen25VLVisionEncoder {
 
 #[cfg(test)]
 mod tests {
-    use super::restoration_indices;
+    use super::{host_f32_diagnostic_snapshot, restoration_indices};
 
     #[test]
     fn restoration_is_the_true_inverse_for_non_self_inverse_permutation() {
@@ -1019,5 +1027,33 @@ mod tests {
             .map(|index| window_ordered[index as usize])
             .collect::<Vec<_>>();
         assert_eq!(original, vec!["zero", "one", "two", "three"]);
+    }
+
+    #[test]
+    fn host_snapshot_preserves_nonzero_rms_norm_after_later_graph_evaluation() {
+        let input = mlxcel_core::from_slice_f32(&[1.0, -2.0, 3.0, -4.0], &[1, 4]);
+        let weight = mlxcel_core::ones(&[4], mlxcel_core::dtype::FLOAT32);
+        let normalized = mlxcel_core::rms_norm(&input, &weight, 1e-6);
+        let snapshot = host_f32_diagnostic_snapshot(&normalized);
+
+        assert!(
+            snapshot
+                .iter()
+                .any(|value| value.is_finite() && *value != 0.0),
+            "RMSNorm snapshot must be non-vacuous"
+        );
+
+        let residual = mlxcel_core::add(&input, &normalized);
+        let donated_candidate = mlxcel_core::multiply(&residual, &residual);
+        mlxcel_core::eval(&donated_candidate);
+
+        let expected = [0.365_148_37, -0.730_296_73, 1.095_445_2, -1.460_593_5];
+        assert_eq!(snapshot.len(), expected.len());
+        for (index, (actual, expected)) in snapshot.iter().zip(expected).enumerate() {
+            assert!(
+                (*actual - expected).abs() <= 2.0e-6,
+                "host snapshot changed at index {index}: actual={actual}, expected={expected}"
+            );
+        }
     }
 }
