@@ -13,11 +13,17 @@
 // limitations under the License.
 
 use super::{
-    VisionBlockDiagnosticStage, ensure_fused_sdpa, fused_sdpa_target_dim, gelu_pytorch_tanh,
-    sdpa_pad_width,
+    VisionBlockDiagnosticStage, diagnostic_dense_linear_from_weight_f32, ensure_fused_sdpa,
+    fused_sdpa_target_dim, gelu_pytorch_tanh, sdpa_pad_width,
 };
 use mlxcel_core::dtype;
 use mlxcel_core::layers::LayerNorm;
+use std::sync::Once;
+
+fn ensure_cpu_device() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| mlxcel_core::set_default_device(false));
+}
 
 #[test]
 fn fused_sdpa_target_dim_uses_next_supported_kernel_width() {
@@ -103,6 +109,26 @@ fn block_layer_norm_matches_centered_variance_f32_contract() {
                 "Qwen3-VL LayerNorm mismatch at row {row}, column {column}"
             );
         }
+    }
+}
+
+#[test]
+fn diagnostic_dense_linear_runs_transposed_weight_and_bias_in_f32() {
+    ensure_cpu_device();
+    let input = mlxcel_core::from_slice_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
+    let weight = mlxcel_core::from_slice_f32(&[2.0, 0.0, 0.0, 3.0], &[2, 2]);
+    let bias = mlxcel_core::from_slice_f32(&[0.5, -1.0], &[2]);
+
+    let output = diagnostic_dense_linear_from_weight_f32(&input, &weight, Some(&bias));
+    mlxcel_core::eval(&output);
+
+    assert_eq!(mlxcel_core::array_dtype(&output), dtype::FLOAT32);
+    assert_eq!(mlxcel_core::array_shape(&output), vec![2, 2]);
+    for (index, expected) in [2.5_f32, 5.0, 6.5, 11.0].into_iter().enumerate() {
+        let row = i32::try_from(index / 2).expect("small test row");
+        let column = i32::try_from(index % 2).expect("small test column");
+        let value = mlxcel_core::slice(&output, &[row, column], &[row + 1, column + 1]);
+        assert_eq!(mlxcel_core::item_f32(&value), expected);
     }
 }
 
