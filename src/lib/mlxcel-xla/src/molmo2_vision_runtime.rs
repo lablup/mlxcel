@@ -37,7 +37,7 @@ use crate::weights::{bf16_to_f32, f16_to_f32, f32_le_to_f32};
 
 const ENTRY_NAME: &str = "molmo2_vision.main";
 #[cfg(feature = "diagnostics")]
-const MOLMO2_VIT_PROBE_LAYER: usize = 24;
+const MOLMO2_VIT_PROBE_LAYER: usize = 18;
 #[cfg(feature = "diagnostics")]
 // 591490 = 513 * checkpoint hidden width 1152 + component 514.
 const MOLMO2_VIT_PROBE_FLAT_ROW: usize = 513;
@@ -701,7 +701,7 @@ impl IreeMolmo2VisionDiagnosticProjector {
             &config,
             &mlir,
             "molmo2-vision-diagnostics",
-            Some("first-divergence-v3-layer24-row513"),
+            Some("first-divergence-v4-layer18-row513"),
         )?;
         Ok(Self { module, config })
     }

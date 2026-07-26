@@ -28,7 +28,7 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
-const MOLMO2_VIT_PROBE_LAYER: usize = 24;
+const MOLMO2_VIT_PROBE_LAYER: usize = 18;
 #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
 // The pinned actual failure was flat index 591490 at hidden width 1152:
 // 591490 = 513 * 1152 + 514. Snapshot the whole row at producer boundaries.

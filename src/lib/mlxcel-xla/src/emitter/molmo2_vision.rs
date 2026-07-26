@@ -17,7 +17,7 @@
 use super::builder::{Builder, Ty, Val};
 use super::molmo2_config::{Molmo2VisionConfig, Molmo2VisionWeightSpec};
 
-const MOLMO2_VIT_PROBE_LAYER: usize = 24;
+const MOLMO2_VIT_PROBE_LAYER: usize = 18;
 // 591490 = 513 * checkpoint hidden width 1152 + component 514.
 const MOLMO2_VIT_PROBE_FLAT_ROW: usize = 513;
 
@@ -639,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_graph_probes_only_the_known_layer24_failure_row() {
+    fn diagnostic_graph_probes_the_first_selected_layer_failure_row() {
         let mut config = test_config(true);
         config.layers = 25;
         config.emitted_layers = 25;
@@ -649,6 +649,10 @@ mod tests {
         config.position_count = config.patches_per_crop;
 
         let diagnostics = emit_molmo2_vision_diagnostics(&config);
+        assert_eq!(
+            MOLMO2_VIT_PROBE_LAYER, 18,
+            "the row probes must precede the first failing selected-layer comparison"
+        );
         assert_eq!(
             diagnostics.matches("stablehlo.slice").count(),
             7,
