@@ -83,6 +83,40 @@ pub mod reference_boundary {
         "siglip.block0.mlp_fc2",
         "siglip.block0.output",
     ];
+    const PINNED_SIGLIP_BLOCK_COUNT: usize = 27;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct SiglipHiddenCheckpoint {
+        label: &'static str,
+        block_index: usize,
+        hidden_state_index: usize,
+    }
+
+    // Block 0 already has full sub-stage coverage. These ordered checkpoints
+    // split blocks 1..=26 into balanced inclusive ranges 1..=6, 7..=13,
+    // 14..=20, and 21..=26 while reusing the existing final-state comparison.
+    const SIGLIP_HIDDEN_BISECTION_CHECKPOINTS: [SiglipHiddenCheckpoint; 4] = [
+        SiglipHiddenCheckpoint {
+            label: "siglip.hidden.block6.output",
+            block_index: 6,
+            hidden_state_index: 7,
+        },
+        SiglipHiddenCheckpoint {
+            label: "siglip.hidden.block13.output",
+            block_index: 13,
+            hidden_state_index: 14,
+        },
+        SiglipHiddenCheckpoint {
+            label: "siglip.hidden.block20.output",
+            block_index: 20,
+            hidden_state_index: 21,
+        },
+        SiglipHiddenCheckpoint {
+            label: "siglip.hidden.last_pre_layernorm",
+            block_index: 26,
+            hidden_state_index: 27,
+        },
+    ];
 
     #[derive(Debug, Clone, Copy)]
     struct Tolerance {
@@ -209,15 +243,16 @@ pub mod reference_boundary {
         reference: &[f32],
         tolerance: Tolerance,
         first_divergence: &mut Option<String>,
-    ) {
+    ) -> bool {
         if observed.len() != reference.len() {
             let detail = format!("{stage}: length {} != {}", observed.len(), reference.len());
             first_divergence.get_or_insert(detail.clone());
             eprintln!("[gemma3-vlm-boundary] stage={stage} status=FAIL {detail}");
-            return;
+            return false;
         }
         let stats = comparison_stats(observed, reference, tolerance);
-        let status = if stats.failures == 0 { "PASS" } else { "FAIL" };
+        let passed = stats.failures == 0;
+        let status = if passed { "PASS" } else { "FAIL" };
         eprintln!(
             "[gemma3-vlm-boundary] stage={stage} status={status} elements={} \
              atol={:.3e} rtol={:.3e} max_abs={:.6e} max_rel={:.6e} \
@@ -242,6 +277,86 @@ pub mod reference_boundary {
                 )
             });
         }
+        passed
+    }
+
+    fn first_failing_siglip_block_interval(
+        checkpoint_results: &[(SiglipHiddenCheckpoint, bool)],
+    ) -> Option<(usize, usize)> {
+        checkpoint_results
+            .iter()
+            .position(|(_, passed)| !passed)
+            .map(|failed| {
+                let first = failed
+                    .checked_sub(1)
+                    .and_then(|previous| checkpoint_results.get(previous))
+                    .map_or(1, |(checkpoint, _)| checkpoint.block_index + 1);
+                (first, checkpoint_results[failed].0.block_index)
+            })
+    }
+
+    fn compare_siglip_hidden_bisection(
+        observed_hidden_states: &[Vec<f32>],
+        reference_checkpoints: &[Vec<f32>],
+        first_divergence: &mut Option<String>,
+    ) {
+        assert_eq!(
+            observed_hidden_states.len(),
+            PINNED_SIGLIP_BLOCK_COUNT + 1,
+            "IREE SigLIP diagnostics must contain embedding plus every pinned block output"
+        );
+        assert_eq!(
+            reference_checkpoints.len(),
+            SIGLIP_HIDDEN_BISECTION_CHECKPOINTS.len(),
+            "eager SigLIP bisection checkpoint count drifted"
+        );
+        let results = SIGLIP_HIDDEN_BISECTION_CHECKPOINTS
+            .iter()
+            .copied()
+            .zip(reference_checkpoints)
+            .map(|(checkpoint, reference)| {
+                let observed = observed_hidden_states
+                    .get(checkpoint.hidden_state_index)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "IREE SigLIP diagnostics are missing {} at hidden-state index {}",
+                            checkpoint.label, checkpoint.hidden_state_index
+                        )
+                    });
+                let passed = compare_stage(
+                    checkpoint.label,
+                    observed,
+                    reference,
+                    VISION_TOLERANCE,
+                    first_divergence,
+                );
+                (checkpoint, passed)
+            })
+            .collect::<Vec<_>>();
+        let checkpoint_statuses = results
+            .iter()
+            .map(|(checkpoint, passed)| {
+                format!(
+                    "{}:{}",
+                    checkpoint.label,
+                    if *passed { "PASS" } else { "FAIL" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        if let Some((first, last)) = first_failing_siglip_block_interval(&results) {
+            eprintln!(
+                "[gemma3-vlm-boundary] stage=siglip.hidden.bisection status=FAIL \
+                 first_failing_block_range={first}..={last} checkpoints=[{checkpoint_statuses}]"
+            );
+        } else {
+            eprintln!(
+                "[gemma3-vlm-boundary] stage=siglip.hidden.bisection status=PASS \
+                 checked_block_range=1..={} checkpoints=[{checkpoint_statuses}]",
+                PINNED_SIGLIP_BLOCK_COUNT - 1
+            );
+        }
+        io::stderr().flush().expect("flush SigLIP bisection report");
     }
 
     fn sha256(path: &Path) -> String {
@@ -394,6 +509,64 @@ pub mod reference_boundary {
         assert_eq!(stats.first_failure, Some(1));
     }
 
+    #[cfg(test)]
+    #[test]
+    fn siglip_hidden_bisection_descriptors_are_exact_and_balanced() {
+        assert_eq!(
+            SIGLIP_HIDDEN_BISECTION_CHECKPOINTS,
+            [
+                SiglipHiddenCheckpoint {
+                    label: "siglip.hidden.block6.output",
+                    block_index: 6,
+                    hidden_state_index: 7,
+                },
+                SiglipHiddenCheckpoint {
+                    label: "siglip.hidden.block13.output",
+                    block_index: 13,
+                    hidden_state_index: 14,
+                },
+                SiglipHiddenCheckpoint {
+                    label: "siglip.hidden.block20.output",
+                    block_index: 20,
+                    hidden_state_index: 21,
+                },
+                SiglipHiddenCheckpoint {
+                    label: "siglip.hidden.last_pre_layernorm",
+                    block_index: 26,
+                    hidden_state_index: 27,
+                },
+            ]
+        );
+        let mut first = 1;
+        let widths = SIGLIP_HIDDEN_BISECTION_CHECKPOINTS.map(|checkpoint| {
+            assert_eq!(checkpoint.hidden_state_index, checkpoint.block_index + 1);
+            let width = checkpoint.block_index - first + 1;
+            first = checkpoint.block_index + 1;
+            width
+        });
+        assert_eq!(widths, [6, 7, 7, 6]);
+        assert_eq!(first, PINNED_SIGLIP_BLOCK_COUNT);
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn siglip_hidden_bisection_bounds_the_first_failed_checkpoint() {
+        let results = SIGLIP_HIDDEN_BISECTION_CHECKPOINTS.map(|checkpoint| (checkpoint, true));
+        assert_eq!(first_failing_siglip_block_interval(&results), None);
+
+        for (failed, expected) in [(0, (1, 6)), (1, (7, 13)), (2, (14, 20)), (3, (21, 26))] {
+            let mut results =
+                SIGLIP_HIDDEN_BISECTION_CHECKPOINTS.map(|checkpoint| (checkpoint, true));
+            for (_, passed) in &mut results[failed..] {
+                *passed = false;
+            }
+            assert_eq!(
+                first_failing_siglip_block_interval(&results),
+                Some(expected)
+            );
+        }
+    }
+
     /// Run the pinned mixed-runtime boundary gate for #869.
     ///
     /// This entry point loads only the eager MLX SigLIP/projector/text embedding
@@ -541,12 +714,33 @@ pub mod reference_boundary {
         let mlx_projected = connector.forward(&mlx_selected.hidden_states);
         let mlx_projected_values = mlx_f32(&mlx_projected, "MLX projected image features");
         let mlx_hidden0 = mlx_f32(&mlx_hidden[0], "MLX SigLIP embedding output");
-        let mlx_last_hidden = mlx_f32(
-            mlx_hidden
-                .last()
-                .expect("MLX captured a final hidden state"),
-            "MLX SigLIP last hidden",
+        assert_eq!(
+            mlx_hidden.len(),
+            PINNED_SIGLIP_BLOCK_COUNT + 1,
+            "eager SigLIP diagnostics must contain embedding plus every pinned block output"
         );
+        let mlx_hidden_bisection = SIGLIP_HIDDEN_BISECTION_CHECKPOINTS
+            .iter()
+            .map(|checkpoint| {
+                assert_eq!(
+                    checkpoint.hidden_state_index,
+                    checkpoint.block_index + 1,
+                    "{} descriptor must map block output to embedding-prefixed hidden-state index",
+                    checkpoint.label
+                );
+                mlx_f32(
+                    mlx_hidden
+                        .get(checkpoint.hidden_state_index)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "eager SigLIP diagnostics are missing {} at hidden-state index {}",
+                                checkpoint.label, checkpoint.hidden_state_index
+                            )
+                        }),
+                    checkpoint.label,
+                )
+            })
+            .collect::<Vec<_>>();
         let mlx_block0_values = mlx_block0
             .iter()
             .map(|stage| mlx_f32(stage, "MLX SigLIP block 0 stage"))
@@ -585,13 +779,9 @@ pub mod reference_boundary {
                 &mut first_divergence,
             );
         }
-        compare_stage(
-            "siglip.hidden.last_pre_layernorm",
-            iree.hidden_states
-                .last()
-                .expect("IREE captured a final hidden state"),
-            &mlx_last_hidden,
-            VISION_TOLERANCE,
+        compare_siglip_hidden_bisection(
+            &iree.hidden_states,
+            &mlx_hidden_bisection,
             &mut first_divergence,
         );
         compare_stage(
