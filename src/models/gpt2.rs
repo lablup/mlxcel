@@ -124,7 +124,70 @@ fn default_vocab_size() -> usize {
 /// GPT-2's own EOS/BOS token (`<|endoftext|>`), used when the config omits it.
 pub const GPT2_EOS_TOKEN_ID: i32 = 50256;
 
+/// Upper bounds on the architecture scalars a GPT-2 `config.json` may declare.
+///
+/// `config.json` is untrusted input. The common `mlxcel generate -m <org>/<repo>`
+/// flow downloads a third-party HuggingFace repo and loads it in the same
+/// command; the download layer validates repo ids, filenames and transport but
+/// never parses the file, so these fields arrive exactly as the checkpoint
+/// author wrote them.
+///
+/// Each ceiling sits orders of magnitude above the largest real GPT-2 (XL: 48
+/// layers, `n_embd` 1600, 1024 positions) and above every dense decoder in this
+/// tree, so no genuine checkpoint is affected. They exist so `n_layer` cannot
+/// size the `Vec::with_capacity` in [`Gpt2Model::from_weights`], and so the
+/// `as i32` casts these values feed (`n_embd`, `3 * n_embd`, `n_positions - 1`)
+/// stay inside `i32` instead of truncating to a negative number.
+const MAX_N_LAYER: usize = 1024;
+/// See [`MAX_N_LAYER`].
+const MAX_N_EMBD: usize = 65_536;
+/// See [`MAX_N_LAYER`].
+const MAX_N_POSITIONS: usize = 1 << 22;
+
 impl ModelArgs {
+    /// Reject a `config.json` that cannot describe a real GPT-2, before any of
+    /// its fields sizes an allocation, indexes a table, or divides.
+    ///
+    /// Rejecting once at load rather than guarding ad hoc downstream follows the
+    /// `SparseAttentionConfig::validate` precedent in
+    /// `src/models/minimax_m3_config.rs`. See [`MAX_N_LAYER`] for why the
+    /// magnitude ceilings exist at all.
+    pub fn validate(&self) -> Result<(), String> {
+        // The zero check has to come first: `0.is_multiple_of(0)` is true, so a
+        // `n_embd == n_head == 0` config would otherwise pass the divisibility
+        // check below and reach `head_dim()`, which divides by `n_head`.
+        if self.n_head == 0 {
+            return Err(
+                "GPT-2 n_head must be non-zero (zero divides by zero in head_dim)".to_string(),
+            );
+        }
+        if self.n_embd == 0 || self.n_embd > MAX_N_EMBD {
+            return Err(format!(
+                "GPT-2 n_embd ({}) must be between 1 and {MAX_N_EMBD}",
+                self.n_embd
+            ));
+        }
+        if !self.n_embd.is_multiple_of(self.n_head) {
+            return Err(format!(
+                "GPT-2 n_embd ({}) must be divisible by n_head ({})",
+                self.n_embd, self.n_head
+            ));
+        }
+        if self.n_layer == 0 || self.n_layer > MAX_N_LAYER {
+            return Err(format!(
+                "GPT-2 n_layer ({}) must be between 1 and {MAX_N_LAYER}",
+                self.n_layer
+            ));
+        }
+        if self.n_positions == 0 || self.n_positions > MAX_N_POSITIONS {
+            return Err(format!(
+                "GPT-2 n_positions ({}) must be between 1 and {MAX_N_POSITIONS}",
+                self.n_positions
+            ));
+        }
+        Ok(())
+    }
+
     pub fn head_dim(&self) -> usize {
         self.n_embd / self.n_head
     }
@@ -248,10 +311,16 @@ impl Gpt2Layout {
         &self,
         weights: &WeightMap,
         prefix: &str,
+        in_dim: usize,
+        out_dim: usize,
         group_size: i32,
         bits: i32,
     ) -> Result<UnifiedLinear, String> {
-        if !self.conv1d || weights.contains_key(&format!("{prefix}.scales")) {
+        // A quantized projection is packed, so its stored shape matches neither
+        // float layout, and the MLX conversion it can only have come from is
+        // already sanitized. `UnifiedLinear` reconciles the quantization layout
+        // itself, so hand it over unchecked.
+        if weights.contains_key(&format!("{prefix}.scales")) {
             return UnifiedLinear::from_weights(weights, prefix, group_size, bits);
         }
 
@@ -259,6 +328,43 @@ impl Gpt2Layout {
         let weight = weights
             .get(&weight_name)
             .ok_or_else(|| format!("Weight not found: {weight_name}"))?;
+
+        // The layout was decided once, from `h.0.attn.c_attn.weight`. Check
+        // every projection against the shape that decision implies instead of
+        // trusting the rest of the checkpoint to agree with layer 0. A
+        // checkpoint whose layers disagree, or one with a degenerate rank, would
+        // otherwise be transposed (or not) into a graph that only fails at
+        // `matmul`, and an MLX C++ exception crossing the cxx bridge is
+        // `std::terminate`: the process dies with no diagnostic instead of
+        // returning a load error naming the tensor.
+        let (expected, layout_note) = if self.conv1d {
+            ([in_dim, out_dim], "HuggingFace Conv1D [in, out]")
+        } else {
+            ([out_dim, in_dim], "already-transposed [out, in]")
+        };
+        let shape = mlxcel_core::array_shape(weight);
+        let shape_ok =
+            shape.len() == 2 && dim_eq(shape[0], expected[0]) && dim_eq(shape[1], expected[1]);
+        if !shape_ok {
+            return Err(format!(
+                "unexpected {weight_name} shape {shape:?}: expected {expected:?} \
+                 ({layout_note}), the layout detected from h.0.attn.c_attn.weight"
+            ));
+        }
+
+        if let Some(bias) = weights.get(&format!("{prefix}.bias")) {
+            let bias_shape = mlxcel_core::array_shape(bias);
+            if bias_shape.len() != 1 || !dim_eq(bias_shape[0], out_dim) {
+                return Err(format!(
+                    "unexpected {prefix}.bias shape {bias_shape:?}: expected [{out_dim}]"
+                ));
+            }
+        }
+
+        if !self.conv1d {
+            return UnifiedLinear::from_weights(weights, prefix, group_size, bits);
+        }
+
         let transposed = mlxcel_core::transpose(weight);
         let bias = weights
             .get(&format!("{prefix}.bias"))
@@ -280,19 +386,37 @@ impl Gpt2Layout {
 /// holding it for the lifetime of the weight map.
 ///
 /// Returns the number of buffers removed.
-pub fn strip_causal_mask_buffers(weights: &mut WeightMap, args: &ModelArgs) -> usize {
-    let mut removed = 0;
-    for prefix in GPT2_PREFIXES {
-        for layer in 0..args.n_layer {
-            if weights
-                .remove(&format!("{prefix}h.{layer}.attn.bias"))
-                .is_some()
-            {
-                removed += 1;
-            }
-        }
+pub fn strip_causal_mask_buffers(weights: &mut WeightMap) -> usize {
+    let before = weights.len();
+    weights.retain(|key, _| !is_causal_mask_buffer_key(key));
+    before - weights.len()
+}
+
+/// Whether `key` names a `<prefix>h.<N>.attn.bias` causal-mask buffer.
+///
+/// Matching the key shape in one pass over the weight map, rather than probing
+/// `<prefix>h.<layer>.attn.bias` for every prefix and every `layer` in
+/// `0..n_layer`, keeps the strip proportional to the checkpoint instead of to a
+/// number read out of `config.json`. `n_layer` is attacker-controlled and is not
+/// checked against anything before this runs on the `load()` path, and the
+/// probing form has no early exit: a config declaring `n_layer` in the billions
+/// spins here for hours before the first weight lookup could reject it.
+///
+/// The real projection biases are `.c_attn.bias`, `.c_proj.bias` and
+/// `.c_fc.bias`; none of them ends in `.attn.bias`, so none is ever matched.
+fn is_causal_mask_buffer_key(key: &str) -> bool {
+    let Some(rest) = key.strip_suffix(".attn.bias") else {
+        return false;
+    };
+    let Some((head, index)) = rest.rsplit_once("h.") else {
+        return false;
+    };
+    // `h.` has to start a path segment, so that a key such as `blah.0.attn.bias`
+    // (which also contains the substring `h.`) is not read as layer 0.
+    if !(head.is_empty() || head.ends_with('.')) {
+        return false;
     }
-    removed
+    !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Position ids for a forward pass that starts at KV-cache offset `offset`.
@@ -309,10 +433,22 @@ pub fn strip_causal_mask_buffers(weights: &mut WeightMap, args: &ModelArgs) -> u
 /// same position, so [`exceeds_position_table`] lets the caller say so instead
 /// of degrading silently.
 pub fn position_ids(offset: i32, seq_len: i32, n_positions: usize) -> Vec<i32> {
-    let last = n_positions.saturating_sub(1) as i32;
+    let last = last_position_row(n_positions);
     (0..seq_len.max(0))
         .map(|i| offset.saturating_add(i).clamp(0, last))
         .collect()
+}
+
+/// Index of the last row of an `n_positions`-row table, saturated into `i32`.
+///
+/// A plain `as i32` truncates: `1usize << 32` becomes `0` and `(1usize << 40) - 1`
+/// becomes `-1`. A negative upper bound makes the `clamp` in [`position_ids`]
+/// panic (`clamp` panics when `min > max`), and a panic on a server worker
+/// thread is a process abort, so the conversion saturates instead.
+/// [`ModelArgs::validate`] already holds `n_positions` far below `i32::MAX`, but
+/// both helpers are public and must not depend on their caller for that.
+fn last_position_row(n_positions: usize) -> i32 {
+    n_positions.saturating_sub(1).min(i32::MAX as usize) as i32
 }
 
 /// Whether a forward pass at KV-cache offset `offset` covering `seq_len` tokens
@@ -327,7 +463,7 @@ pub fn exceeds_position_table(offset: i32, seq_len: i32, n_positions: usize) -> 
     if seq_len <= 0 {
         return false;
     }
-    let last = n_positions.saturating_sub(1) as i32;
+    let last = last_position_row(n_positions);
     offset.saturating_add(seq_len - 1) > last
 }
 
@@ -397,10 +533,23 @@ impl Attention {
 
         // `{prefix}.bias` is the registered causal-mask buffer, never a linear
         // bias: only the `.c_attn` / `.c_proj` sub-prefixes are loaded here.
-        let c_attn =
-            layout.conv1d_linear(weights, &format!("{prefix}.c_attn"), group_size, bits)?;
-        let c_proj =
-            layout.conv1d_linear(weights, &format!("{prefix}.c_proj"), group_size, bits)?;
+        let n_embd = args.n_embd;
+        let c_attn = layout.conv1d_linear(
+            weights,
+            &format!("{prefix}.c_attn"),
+            n_embd,
+            3 * n_embd,
+            group_size,
+            bits,
+        )?;
+        let c_proj = layout.conv1d_linear(
+            weights,
+            &format!("{prefix}.c_proj"),
+            n_embd,
+            n_embd,
+            group_size,
+            bits,
+        )?;
 
         let head_dim = args.head_dim() as i32;
 
@@ -437,9 +586,24 @@ impl MLP {
         let group_size = args.group_size();
         let bits = args.bits();
 
-        let c_fc = layout.conv1d_linear(weights, &format!("{prefix}.c_fc"), group_size, bits)?;
-        let c_proj =
-            layout.conv1d_linear(weights, &format!("{prefix}.c_proj"), group_size, bits)?;
+        let n_embd = args.n_embd;
+        let intermediate = args.intermediate_size();
+        let c_fc = layout.conv1d_linear(
+            weights,
+            &format!("{prefix}.c_fc"),
+            n_embd,
+            intermediate,
+            group_size,
+            bits,
+        )?;
+        let c_proj = layout.conv1d_linear(
+            weights,
+            &format!("{prefix}.c_proj"),
+            intermediate,
+            n_embd,
+            group_size,
+            bits,
+        )?;
 
         Ok(Self { c_fc, c_proj })
     }
@@ -501,7 +665,15 @@ pub struct Gpt2Model {
     pub wpe: UnifiedEmbedding,
     pub h: Vec<TransformerBlock>,
     pub ln_f: LayerNorm,
-    pub n_positions: usize,
+    /// Clamp bound for the learned position lookup.
+    ///
+    /// Private, and never larger than the number of rows actually present in
+    /// `wpe.weight` (enforced by [`validate_position_table`] in
+    /// [`Gpt2Model::from_weights`], the only constructor). That invariant is the
+    /// whole bounds check on the lookup: MLX's gather wraps a negative index but
+    /// does not range-check a positive one, so a value larger than the table
+    /// reads past the end of the buffer instead of faulting.
+    n_positions: usize,
     eos_token_ids: Vec<i32>,
 }
 
@@ -568,9 +740,12 @@ impl Gpt2Model {
             .map_err(|e| format!("Failed to read config.json: {e}"))?;
         let args: ModelArgs = serde_json::from_str(&config_str)
             .map_err(|e| format!("Failed to parse config.json: {e}"))?;
+        // Reject an impossible config before reading the checkpoint, not after.
+        // `from_weights` validates again for the owned-weights route.
+        args.validate()?;
 
         let mut weights = crate::models::load_text_weights(model_dir, None)?;
-        strip_causal_mask_buffers(&mut weights, &args);
+        strip_causal_mask_buffers(&mut weights);
 
         let model = Self::from_weights(&weights, &args)?;
 
@@ -578,22 +753,18 @@ impl Gpt2Model {
     }
 
     pub fn from_weights(weights: &WeightMap, args: &ModelArgs) -> Result<Self, String> {
-        // The zero check has to come first: `0.is_multiple_of(0)` is true, so a
-        // `n_embd == n_head == 0` config would otherwise reach `head_dim()` and
-        // divide by zero.
-        if args.n_head == 0 || !args.n_embd.is_multiple_of(args.n_head) {
-            return Err(format!(
-                "GPT-2 n_embd ({}) must be divisible by n_head ({})",
-                args.n_embd, args.n_head
-            ));
-        }
+        // `config.json` is untrusted: reject impossible scalars before any of
+        // them sizes an allocation, indexes a table, or divides.
+        args.validate()?;
 
         let layout = Gpt2Layout::detect(weights, args)?;
         let group_size = args.group_size();
         let bits = args.bits();
 
         let wte = UnifiedEmbedding::from_weights(weights, &layout.key("wte"), group_size, bits)?;
-        let wpe = UnifiedEmbedding::from_weights(weights, &layout.key("wpe"), group_size, bits)?;
+        let wpe_key = layout.key("wpe");
+        let wpe = UnifiedEmbedding::from_weights(weights, &wpe_key, group_size, bits)?;
+        validate_position_table(&wpe, args, &wpe_key)?;
 
         let mut h = Vec::with_capacity(args.n_layer);
         for i in 0..args.n_layer {
@@ -614,6 +785,62 @@ impl Gpt2Model {
 }
 
 // Helper functions.
+
+/// Whether an MLX dimension equals an expected extent.
+///
+/// `array_shape` returns `i32`; a negative or oversized value can never match a
+/// real extent, so the conversion failing is itself a mismatch.
+fn dim_eq(dim: i32, expected: usize) -> bool {
+    usize::try_from(dim).is_ok_and(|d| d == expected)
+}
+
+/// Check the loaded `wpe` table against the config, and return its row count.
+///
+/// `position_ids` clamps to `n_positions - 1`, and `n_positions` comes from
+/// `config.json`, not from the table. Nothing else bounds the lookup: MLX's
+/// gather adds the axis size to a negative index but performs no range check on
+/// a positive one, so an index past the last row reads whatever follows the
+/// table in the buffer rather than faulting or clamping. A checkpoint whose
+/// config overstates `n_positions` therefore turns an ordinary prompt into an
+/// out-of-bounds read whose result reaches the logits, and the row count is the
+/// only place that can be caught.
+///
+/// A quantized table is packed along the last axis only, so its row count is
+/// still dimension 0; the width check is skipped for it because the packed width
+/// is a function of the bit depth rather than `n_embd`.
+fn validate_position_table(
+    wpe: &UnifiedEmbedding,
+    args: &ModelArgs,
+    key: &str,
+) -> Result<usize, String> {
+    let shape = mlxcel_core::array_shape(wpe.weight());
+    let [rows, cols] = shape.as_slice() else {
+        return Err(format!(
+            "{key}.weight must be a 2-D [n_positions, n_embd] table, got shape {shape:?}"
+        ));
+    };
+    let rows = usize::try_from(*rows).unwrap_or(0);
+    if rows == 0 {
+        return Err(format!("{key}.weight has no rows"));
+    }
+    if args.n_positions > rows {
+        return Err(format!(
+            "GPT-2 config n_positions ({}) exceeds the {rows} rows present in {key}.weight. \
+             Position ids are clamped to n_positions - 1, so a config that overstates the \
+             table would index past the end of it, and the gather behind the lookup does \
+             not range-check a positive index.",
+            args.n_positions
+        ));
+    }
+    if !wpe.is_quantized() && !dim_eq(*cols, args.n_embd) {
+        return Err(format!(
+            "{key}.weight is [{rows}, {cols}] but n_embd is {}; the position embedding must \
+             be the same width as the token embedding it is added to",
+            args.n_embd
+        ));
+    }
+    Ok(rows)
+}
 
 /// Load a `LayerNorm` with an optional bias (GPT-2 always ships the bias).
 fn layer_norm_from_weights(

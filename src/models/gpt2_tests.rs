@@ -99,6 +99,53 @@ fn eos_token_id_accepts_a_list() {
     assert_eq!(args.eos_token_ids(), vec![50256, 50257]);
 }
 
+// Config validation. `config.json` arrives from the model directory, which for
+// `mlxcel generate -m <org>/<repo>` is a third-party HuggingFace repo the
+// download layer never parses.
+
+#[test]
+fn config_validation_rejects_hostile_scalars() {
+    let cases: [(&str, &str); 7] = [
+        // Divides by zero in `head_dim()`. `0.is_multiple_of(0)` is true, so the
+        // divisibility check alone would let this through.
+        (r#"{"model_type": "gpt2", "n_head": 0}"#, "n_head"),
+        (
+            r#"{"model_type": "gpt2", "n_embd": 0, "n_head": 0}"#,
+            "n_head",
+        ),
+        (r#"{"model_type": "gpt2", "n_embd": 0}"#, "n_embd"),
+        (r#"{"model_type": "gpt2", "n_embd": 770}"#, "divisible"),
+        (r#"{"model_type": "gpt2", "n_layer": 0}"#, "n_layer"),
+        // Sizes the `Vec::with_capacity` in `from_weights`, and used to drive an
+        // unbounded probe loop in `strip_causal_mask_buffers`.
+        (
+            r#"{"model_type": "gpt2", "n_layer": 18446744073709551615}"#,
+            "n_layer",
+        ),
+        // 2^32: `(n_positions - 1) as i32` truncates to -1, and `clamp(0, -1)`
+        // panics.
+        (
+            r#"{"model_type": "gpt2", "n_positions": 4294967296}"#,
+            "n_positions",
+        ),
+    ];
+
+    for (config, expected) in cases {
+        let args: ModelArgs = serde_json::from_str(config).expect("parses");
+        let err = args
+            .validate()
+            .expect_err(&format!("must be rejected: {config}"));
+        assert!(
+            err.contains(expected),
+            "unhelpful error for {config}: {err}"
+        );
+    }
+
+    // The real checkpoint config is untouched by any of the ceilings.
+    let real: ModelArgs = serde_json::from_str(GPT2_CONFIG).expect("parses");
+    assert!(real.validate().is_ok(), "the real gpt2 config must pass");
+}
+
 // Learned absolute positions.
 
 #[test]
@@ -131,6 +178,18 @@ fn position_ids_of_an_empty_step_are_empty() {
 }
 
 #[test]
+fn position_ids_saturate_instead_of_panicking_on_an_absurd_table_size() {
+    // Both helpers are public, so neither may depend on its caller having run
+    // `ModelArgs::validate`. `(1usize << 40) - 1` truncates to -1 as an i32, and
+    // `clamp(0, -1)` panics; on a server worker thread that panic is a process
+    // abort.
+    assert_eq!(position_ids(0, 3, 1usize << 40), vec![0, 1, 2]);
+    assert_eq!(position_ids(0, 2, usize::MAX), vec![0, 1]);
+    assert_eq!(position_ids(0, 2, 1usize << 32), vec![0, 1]);
+    assert!(!exceeds_position_table(0, 2, usize::MAX));
+}
+
+#[test]
 fn position_table_overflow_is_reported_exactly_at_the_boundary() {
     // A full-window prefill and the last in-table decode step both fit.
     assert!(!exceeds_position_table(0, 1024, 1024));
@@ -160,6 +219,14 @@ fn tiny_args() -> ModelArgs {
         }"#,
     )
     .expect("tiny config parses")
+}
+
+/// Same shape as [`tiny_args`] but with two layers, so a checkpoint whose layers
+/// disagree with each other can be built.
+fn two_layer_args() -> ModelArgs {
+    let mut args = tiny_args();
+    args.n_layer = 2;
+    args
 }
 
 /// Deterministic non-zero filler so LayerNorm and softmax see real values.
@@ -369,7 +436,7 @@ fn strips_causal_mask_buffers_without_touching_projection_biases() {
     let mut weights = raw_hf_weights(&args, "");
     assert!(weights.contains_key("h.0.attn.bias"));
 
-    let removed = strip_causal_mask_buffers(&mut weights, &args);
+    let removed = strip_causal_mask_buffers(&mut weights);
 
     assert_eq!(removed, args.n_layer);
     assert!(
@@ -383,6 +450,83 @@ fn strips_causal_mask_buffers_without_touching_projection_biases() {
     assert!(weights.contains_key("h.0.attn.c_proj.bias"));
     assert!(weights.contains_key("h.0.mlp.c_fc.bias"));
     assert!(weights.contains_key("h.0.mlp.c_proj.bias"));
+}
+
+#[test]
+fn causal_mask_stripping_matches_key_shape_not_the_config_layer_count() {
+    // One pass over the weight map, not `4 * n_layer` probes: `n_layer` is
+    // attacker-controlled and the probing form had no early exit, so a config
+    // declaring billions of layers spun here before any weight was looked at.
+    let mut weights = WeightMap::new();
+    for key in [
+        "h.0.attn.bias",
+        "transformer.h.7.attn.bias",
+        "model.transformer.h.11.attn.bias",
+    ] {
+        weights.insert(key.into(), zeros(&[1, 1, 4, 4]));
+    }
+    for key in [
+        "h.0.attn.c_attn.bias", // a real projection bias
+        "blah.0.attn.bias",     // contains "h." but not at a segment start
+        "h.x.attn.bias",        // non-numeric layer index
+        "h.0.attn.weight",      // not a bias at all
+    ] {
+        weights.insert(key.into(), zeros(&[4]));
+    }
+
+    assert_eq!(strip_causal_mask_buffers(&mut weights), 3);
+    assert_eq!(weights.len(), 4);
+    assert!(weights.contains_key("h.0.attn.c_attn.bias"));
+    assert!(weights.contains_key("blah.0.attn.bias"));
+    assert!(weights.contains_key("h.x.attn.bias"));
+    assert!(weights.contains_key("h.0.attn.weight"));
+}
+
+#[test]
+fn from_weights_rejects_a_layer_that_disagrees_with_layer_zero_about_conv1d() {
+    // The layout is probed once, from `h.0.attn.c_attn.weight`. Here layer 0 is
+    // Conv1D `[in, out]` so everything gets transposed, but layer 1 already
+    // arrives as `[out, in]`; transposing it again yields a weight the matmul
+    // cannot consume, and that failure lands in MLX C++ as an uncatchable
+    // `std::terminate` rather than a load error.
+    let args = two_layer_args();
+    let mut weights = raw_hf_weights(&args, "");
+    let h = args.n_embd as i32;
+    weights.insert("h.1.attn.c_attn.weight".into(), filled(&[3 * h, h]));
+
+    let err = match Gpt2Model::from_weights(&weights, &args) {
+        Ok(_) => panic!("layers that disagree about the Conv1D layout must be rejected"),
+        Err(err) => err,
+    };
+    assert!(
+        err.contains("h.1.attn.c_attn.weight"),
+        "the error must name the offending tensor: {err}"
+    );
+}
+
+#[test]
+fn from_weights_rejects_a_degenerate_projection_shape() {
+    let args = tiny_args();
+    let h = args.n_embd as i32;
+
+    // Rank 3 instead of rank 2: `transpose` reverses all axes without
+    // complaining, so nothing else would notice until the matmul.
+    let mut weights = raw_hf_weights(&args, "");
+    weights.insert("h.0.mlp.c_fc.weight".into(), filled(&[1, h, 4 * h]));
+    let err = match Gpt2Model::from_weights(&weights, &args) {
+        Ok(_) => panic!("a rank-3 projection weight must be rejected"),
+        Err(err) => err,
+    };
+    assert!(err.contains("c_fc.weight"), "unhelpful error: {err}");
+
+    // A bias that is not the width of its projection output.
+    let mut weights = raw_hf_weights(&args, "");
+    weights.insert("h.0.attn.c_proj.bias".into(), filled(&[h + 1]));
+    let err = match Gpt2Model::from_weights(&weights, &args) {
+        Ok(_) => panic!("a mis-sized projection bias must be rejected"),
+        Err(err) => err,
+    };
+    assert!(err.contains("c_proj.bias"), "unhelpful error: {err}");
 }
 
 #[test]
@@ -402,6 +546,46 @@ fn model_builds_when_the_mask_buffer_is_still_present() {
         vec![args.n_embd as i32],
         "c_proj must take its own [n_embd] bias, not the [1, 1, n_ctx, n_ctx] mask buffer"
     );
+}
+
+// The learned position table versus the config that describes it.
+
+#[test]
+fn from_weights_rejects_a_config_that_overstates_the_position_table() {
+    // `wpe` holds 2 rows while the config claims 16. `position_ids` clamps to
+    // 15, so an ordinary 8-token prompt gathers rows 2..7 from past the end of
+    // the table. The gather behind the lookup wraps a negative index but does
+    // not range-check a positive one, so those reads return whatever follows the
+    // table in the buffer, and the values reach the logits.
+    let args = tiny_args();
+    let mut weights = raw_hf_weights(&args, "");
+    weights.insert("wpe.weight".into(), filled(&[2, args.n_embd as i32]));
+
+    let err = match Gpt2Model::from_weights(&weights, &args) {
+        Ok(_) => panic!("a config that overstates the wpe table must be rejected"),
+        Err(err) => err,
+    };
+    assert!(err.contains("n_positions"), "unhelpful error: {err}");
+
+    // The other direction is safe: the clamp stays inside a longer table.
+    let mut weights = raw_hf_weights(&args, "");
+    weights.insert("wpe.weight".into(), filled(&[64, args.n_embd as i32]));
+    assert!(Gpt2Model::from_weights(&weights, &args).is_ok());
+}
+
+#[test]
+fn from_weights_rejects_a_position_table_of_the_wrong_width() {
+    // A width mismatch only surfaces at the `add` against the token embeddings,
+    // and an MLX C++ exception crossing the cxx bridge is `std::terminate`.
+    let args = tiny_args();
+    let mut weights = raw_hf_weights(&args, "");
+    weights.insert("wpe.weight".into(), filled(&[args.n_positions as i32, 4]));
+
+    let err = match Gpt2Model::from_weights(&weights, &args) {
+        Ok(_) => panic!("a wpe width that disagrees with n_embd must be rejected"),
+        Err(err) => err,
+    };
+    assert!(err.contains("n_embd"), "unhelpful error: {err}");
 }
 
 // Construction and forward.
