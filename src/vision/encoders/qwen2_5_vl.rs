@@ -394,6 +394,13 @@ struct Qwen25VLBlockDiagnostics {
     mlp: UniquePtr<MlxArray>,
 }
 
+#[cfg(feature = "xla-diagnostics")]
+fn materialized_diagnostic_snapshot(array: &MlxArray) -> UniquePtr<MlxArray> {
+    let snapshot = mlxcel_core::copy(array);
+    mlxcel_core::eval(&snapshot);
+    snapshot
+}
+
 impl VisionBlock {
     fn from_weights(
         weights: &WeightMap,
@@ -431,22 +438,32 @@ impl VisionBlock {
         cu_seqlens: &[i32],
         rotary_pos_emb: &MlxArray,
     ) -> (UniquePtr<MlxArray>, Qwen25VLBlockDiagnostics) {
-        let input = mlxcel_core::copy(hidden_states);
+        // These arrays are diagnostic values, not additional lazy graph
+        // handles. Materialize each private copy before its source feeds the
+        // next substage so later graph evaluation cannot donate or reuse the
+        // intermediate storage observed by the oracle.
+        let input = materialized_diagnostic_snapshot(hidden_states);
         let norm1 = self.norm1.forward(hidden_states);
+        let norm1_snapshot = materialized_diagnostic_snapshot(&norm1);
         let attention = self.attn.forward(&norm1, cu_seqlens, rotary_pos_emb);
+        let attention_snapshot = materialized_diagnostic_snapshot(&attention);
         let post_attention_residual = mlxcel_core::add(hidden_states, &attention);
+        let post_attention_residual_snapshot =
+            materialized_diagnostic_snapshot(&post_attention_residual);
         let norm2 = self.norm2.forward(&post_attention_residual);
+        let norm2_snapshot = materialized_diagnostic_snapshot(&norm2);
         let mlp = self.mlp.forward(&norm2);
+        let mlp_snapshot = materialized_diagnostic_snapshot(&mlp);
         let output = mlxcel_core::add(&post_attention_residual, &mlp);
         (
             output,
             Qwen25VLBlockDiagnostics {
                 input,
-                norm1,
-                attention,
-                post_attention_residual,
-                norm2,
-                mlp,
+                norm1: norm1_snapshot,
+                attention: attention_snapshot,
+                post_attention_residual: post_attention_residual_snapshot,
+                norm2: norm2_snapshot,
+                mlp: mlp_snapshot,
             },
         )
     }
