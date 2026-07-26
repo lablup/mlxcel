@@ -329,6 +329,13 @@ required-features = ["xla-diagnostics"]
 name = "xla_vision_reference_check"
 required-features = ["xla-diagnostics"]
 
+# Independent pinned HF-eager Youtu-VL oracle runner (#872). Captures the
+# production 27-layer vision schedule, prepared embeddings, MLA logits/KV,
+# greedy tokens, and reset/reuse lifecycle.
+[[example]]
+name = "xla_youtu_vl_reference_check"
+required-features = ["xla-diagnostics"]
+
 [[example]]
 name = "xla_aux_smoke"
 required-features = ["xla-iree"]

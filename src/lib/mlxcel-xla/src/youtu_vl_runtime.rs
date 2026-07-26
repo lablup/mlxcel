@@ -73,8 +73,14 @@ pub struct YoutuVlVisionDiagnosticProjection {
     pub stages: Vec<YoutuVlVisionDiagnosticStageOutput>,
     pub patch_shape: [usize; 2],
     pub merged_shape: [usize; 2],
+    /// Processor patch rows after the production window-group permutation.
+    pub patches_window_order: Vec<f32>,
+    /// Production two-dimensional vision RoPE frequencies in window order.
+    pub rope_freqs: Vec<f32>,
     pub window_group_index: Vec<usize>,
     pub reverse_group_index: Vec<usize>,
+    pub window_cu_seqlens: Vec<usize>,
+    pub full_cu_seqlens: Vec<usize>,
 }
 
 struct ActiveModule {
@@ -569,13 +575,24 @@ impl IreeYoutuVlDiagnosticProjector {
             values: restored_output,
             shape: [actual_tokens, self.config.text_hidden],
         });
+        let actual_patches = plan.actual_patches;
+        let patch_width = self.config.channels * self.config.patch_size * self.config.patch_size;
+        let rope_width = self.config.hidden / self.config.heads / 2;
+        let mut patches_window_order = patches;
+        patches_window_order.truncate(actual_patches * patch_width);
+        let mut rope_freqs = rope_freqs;
+        rope_freqs.truncate(actual_patches * rope_width);
         Ok(YoutuVlVisionDiagnosticProjection {
             abi_version: YOUTU_VL_DIAGNOSTIC_ABI_VERSION,
             stages,
             patch_shape,
             merged_shape: [actual_tokens, self.config.text_hidden],
+            patches_window_order,
+            rope_freqs,
             window_group_index: plan.window_group_index,
             reverse_group_index: plan.reverse_group_index,
+            window_cu_seqlens: plan.window_cu_seqlens,
+            full_cu_seqlens: plan.full_cu_seqlens,
         })
     }
 }
