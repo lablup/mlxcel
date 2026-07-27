@@ -213,6 +213,33 @@ fn resolve_cache_limit() -> Option<usize> {
     Some(bytes)
 }
 
+/// Default MLX buffer-cache bound applied when a speculative drafter is active
+/// and the operator has not set `MLXCEL_CACHE_LIMIT`.
+///
+/// The speculative burst allocates its own per-request cache set, which is
+/// freed into MLX's pool rather than back to the OS. Nothing trims between
+/// requests — the round loop's cadence is intra-burst and never reached by
+/// short generations — so the pool grows unbounded. 2 GiB is the value
+/// measured to hold the parent repo's per-request-growth gate at −6.3 MB/req;
+/// below it the pool thrashes, above it the growth reappears on a 24 GB host.
+pub const DEFAULT_SPECULATIVE_CACHE_LIMIT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Apply `bytes` as the MLX buffer-cache bound unless the operator already
+/// specified one via `MLXCEL_CACHE_LIMIT`.
+///
+/// Returns `true` when the default was applied. An operator value always wins,
+/// including `0` / `none`, which mean "no bound" and must stay honoured — an
+/// operator who disabled the cap has said so deliberately.
+pub fn apply_default_cache_limit_if_unset(bytes: u64) -> bool {
+    match std::env::var(CACHE_LIMIT_ENV).ok().as_deref() {
+        None | Some("") => {
+            mlxcel_core::memory::set_cache_limit(bytes);
+            true
+        }
+        Some(_) => false,
+    }
+}
+
 /// Parse a memory size string: plain bytes, "NG"/"NGB", or "NM"/"NMB".
 fn parse_memory_size(s: &str) -> Option<usize> {
     let s = s.trim().to_ascii_uppercase();

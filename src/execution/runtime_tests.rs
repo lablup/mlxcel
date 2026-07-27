@@ -12,10 +12,43 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::{Mutex, OnceLock};
+
 use super::{
     RuntimeDevice, parse_memory_size, parse_runtime_device, resolve_runtime_device,
     should_warn_cpu_only_on_nvidia_host,
 };
+
+/// Serialisation lock for tests that mutate `MLXCEL_CACHE_LIMIT`.
+/// Env var changes are process-global and would race when run in parallel.
+fn cache_limit_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Helper: run `f` with the env var set, then restore.
+fn with_cache_limit<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+    let _guard = cache_limit_lock().lock().unwrap();
+    let prev = std::env::var("MLXCEL_CACHE_LIMIT").ok();
+    // SAFETY: single-threaded behind a mutex; env var changes are
+    // restored to the previous value before the lock is released.
+    unsafe {
+        if let Some(v) = value {
+            std::env::set_var("MLXCEL_CACHE_LIMIT", v);
+        } else {
+            std::env::remove_var("MLXCEL_CACHE_LIMIT");
+        }
+    }
+    let result = f();
+    // SAFETY: same mutex guard still held.
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("MLXCEL_CACHE_LIMIT", v),
+            None => std::env::remove_var("MLXCEL_CACHE_LIMIT"),
+        }
+    }
+    result
+}
 
 #[test]
 fn parse_runtime_device_accepts_cpu() {
@@ -89,4 +122,40 @@ fn warns_only_for_cpu_fallback_on_nvidia_host_without_cuda() {
     assert!(!should_warn_cpu_only_on_nvidia_host(Cpu, Cpu, false, true));
     // Already running on the GPU: nothing to warn about.
     assert!(!should_warn_cpu_only_on_nvidia_host(Gpu, Gpu, false, true));
+}
+
+// ── apply_default_cache_limit_if_unset ───────────────────────────────────────
+
+/// Unset `MLXCEL_CACHE_LIMIT` → helper returns `true` (default applied).
+#[test]
+fn apply_default_cache_limit_if_unset_when_unset() {
+    with_cache_limit(None, || {
+        assert!(super::apply_default_cache_limit_if_unset(42));
+    });
+}
+
+/// `MLXCEL_CACHE_LIMIT=1GB` → returns `false` (operator wins).
+#[test]
+fn apply_default_cache_limit_if_unset_operator_1gb() {
+    with_cache_limit(Some("1GB"), || {
+        assert!(!super::apply_default_cache_limit_if_unset(42));
+    });
+}
+
+/// `MLXCEL_CACHE_LIMIT=0` → returns `false`. The operator explicitly
+/// disabled the cap; the default must not override them.
+#[test]
+fn apply_default_cache_limit_if_unset_operator_zero() {
+    with_cache_limit(Some("0"), || {
+        assert!(!super::apply_default_cache_limit_if_unset(42));
+    });
+}
+
+/// `MLXCEL_CACHE_LIMIT=""` → returns `true` (empty is indistinguishable
+/// from unset, matching `resolve_cache_limit` semantics).
+#[test]
+fn apply_default_cache_limit_if_unset_empty_string() {
+    with_cache_limit(Some(""), || {
+        assert!(super::apply_default_cache_limit_if_unset(42));
+    });
 }

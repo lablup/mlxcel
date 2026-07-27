@@ -218,6 +218,24 @@ impl ModelProvider {
         let speculative_dispatch = crate::server::SpeculativeDispatch::resolve(config)
             .map_err(|e| anyhow::anyhow!("Speculative decoding dispatch resolution failed: {e}"))?;
 
+        // When a kind-specific drafter (MTP or DFlash) is active and the
+        // operator has not set `MLXCEL_CACHE_LIMIT`, apply a 2 GiB default
+        // bound on the MLX buffer-cache pool. The speculative burst allocates
+        // per-request caches that are freed into MLX's pool, and nothing trims
+        // between requests (the round loop's cadence is intra-burst), so the
+        // pool grows unbounded without this cap.
+        if speculative_dispatch.is_kind_specific()
+            && crate::execution::runtime::apply_default_cache_limit_if_unset(
+                crate::execution::runtime::DEFAULT_SPECULATIVE_CACHE_LIMIT_BYTES,
+            )
+        {
+            tracing::info!(
+                "Speculative decoding active: bounded the MLX buffer cache at 2 GiB \
+                 (the burst's per-request caches are freed into the pool and nothing \
+                 trims between requests). Override with MLXCEL_CACHE_LIMIT."
+            );
+        }
+
         // OpenXLA backend (issue #449 M3 Stage 2c): when `MLXCEL_BACKEND=xla` is
         // selected on an `xla-iree` build, serve through the continuous-batching
         // XLA engine instead of the MLX scheduler. The MLX path below is the
