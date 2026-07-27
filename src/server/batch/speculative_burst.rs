@@ -232,6 +232,16 @@ pub(crate) trait Qwen35DFlashTarget:
         seq_id: mlxcel_core::cache::SequenceId,
         caches: Vec<crate::models::qwen3_next::Qwen3NextCache>,
     );
+
+    /// Take the restored prompt-cache caches out of the model-owned
+    /// sequence state slot. Returns `None` when no state exists for
+    /// `seq_id`. The caller must either re-install the vector via
+    /// [`install_speculative_caches`] or decline to classic decode
+    /// (which will release the slot).
+    fn take_sequence_state(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+    ) -> Option<Vec<crate::models::qwen3_next::Qwen3NextCache>>;
 }
 
 impl Qwen35DFlashTarget for crate::models::Qwen35Model {
@@ -253,6 +263,13 @@ impl Qwen35DFlashTarget for crate::models::Qwen35Model {
         caches: Vec<crate::models::qwen3_next::Qwen3NextCache>,
     ) {
         self.install_speculative_caches(seq_id, caches);
+    }
+
+    fn take_sequence_state(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+    ) -> Option<Vec<crate::models::qwen3_next::Qwen3NextCache>> {
+        self.take_sequence_state_by_id(seq_id)
     }
 }
 
@@ -276,6 +293,13 @@ impl Qwen35DFlashTarget for crate::vision::Qwen35VLModel {
         caches: Vec<crate::models::qwen3_next::Qwen3NextCache>,
     ) {
         self.text_model.install_speculative_caches(seq_id, caches);
+    }
+
+    fn take_sequence_state(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+    ) -> Option<Vec<crate::models::qwen3_next::Qwen3NextCache>> {
+        self.text_model.take_sequence_state_by_id(seq_id)
     }
 }
 
@@ -1383,28 +1407,17 @@ fn run_dflash_burst(
         return Err(BurstOutcome::DeclineToClassic);
     }
 
-    // Safe fallback for an adopted prompt-cache prefix (issue #518): the DFlash
-    // burst builds its OWN fresh per-layer caches (`make_dflash_caches()`),
-    // independent of the `ModelOwnedSequenceState[seq_id]` slot the scheduler's
-    // APC snapshot restore populates. Those fresh caches do NOT hold the
-    // adopted `[..offset]` KV, so forwarding only the suffix would rotate the
-    // suffix at the wrong positions and attend a missing prefix. Until the B = 1
-    // DFlash path can seed its caches from the adopted prefix (a follow-up),
-    // decline to classic decode — which owns the adopted cache and prefills the
-    // suffix correctly. The check is placed before any drafter load / cache
-    // build so the decline leaves the adopted cache and drafter slot untouched.
+    // Safe fallback for an adopted prompt-cache prefix (issue #518): when
+    // `prefill_start_offset > 0` the scheduler has already restored the
+    // snapshot into `sequence_state[seq_id]` (`scheduler.rs:1777`). The burst
+    // takes those restored caches instead of building fresh, verifying that
+    // every cache's visible length equals the offset. If the precondition
+    // fails or no state exists, the burst declines to classic decode — which
+    // owns the adopted cache and prefills the suffix correctly.
+    // The check is placed before any drafter load so a decline leaves the
+    // drafter slot untouched.
     // (The MTP burst, by contrast, reuses the adopted KV because its target
     // forward resolves the SAME model-owned slot the snapshot restored into.)
-    if seq.prefill_start_offset > 0 {
-        tracing::debug!(
-            "DFlash speculative burst declined for seq {}: prefill_start_offset={} \
-             (adopted cache prefix not yet reusable by the DFlash burst's \
-             independent caches); falling back to classic decode",
-            seq.seq_id,
-            seq.prefill_start_offset,
-        );
-        return Err(BurstOutcome::DeclineToClassic);
-    }
 
     // HOIST: validate the model variant BEFORE loading the drafter.
     // See the function-level docstring above.
@@ -1467,6 +1480,7 @@ fn run_dflash_burst(
             qwen,
             seq.seq_id,
             &prompt,
+            seq.prefill_start_offset,
             &sampling,
             &token_history,
             &eos_token_ids,
@@ -1481,6 +1495,7 @@ fn run_dflash_burst(
             qwen,
             seq.seq_id,
             &prompt,
+            seq.prefill_start_offset,
             &sampling,
             &token_history,
             &eos_token_ids,
@@ -1544,6 +1559,7 @@ fn run_dflash_on_qwen35<T>(
     qwen: &T,
     seq_id: mlxcel_core::cache::SequenceId,
     prompt_tokens: &[i32],
+    prefill_start_offset: usize,
     sampling: &SamplingConfig,
     token_history: &[i32],
     eos_token_ids: &[i32],
@@ -1557,21 +1573,59 @@ fn run_dflash_on_qwen35<T>(
 where
     T: Qwen35DFlashTarget,
 {
-    // Build a fresh per-layer cache vector for this request. We do NOT
-    // touch the scheduler-owned `sequence_state` map — the speculative
-    // burst's caches are independent of the prompt-cache adoption
-    // pipeline. Because these caches start empty, an adopted prefix
-    // cannot be reused here, which is exactly why `run_dflash_burst`
-    // declines `prefill_start_offset > 0` to classic decode (issue #518);
-    // by the time control reaches this helper the offset is guaranteed 0.
+    // When an adopted prompt-cache prefix exists, take the restored
+    // caches from the model-owned slot instead of building fresh empty
+    // ones. The scheduler has already restored the snapshot into
+    // `sequence_state[seq_id]` before the burst decision
+    // (`scheduler.rs:1777`). Fresh `make_dflash_caches()` caches hold no
+    // KV for the adopted `[..offset]` prefix, so reusing the restored
+    // state is the only way to avoid rotating suffix tokens at wrong
+    // positions.
     //
-    // The target-specific cache factory returns the heterogeneous
-    // attention+linear cache vec the round loop needs, while the
-    // `LanguageModel::make_caches(&self) -> Vec<KVCache>` trait method
-    // returns an empty vec for Qwen 3.5 (the model owns its caches
-    // internally). Use the narrow `Qwen35DFlashTarget` helper to
-    // disambiguate against the trait method by name.
-    let mut caches: Vec<crate::models::qwen3_next::Qwen3NextCache> = qwen.make_dflash_caches();
+    // Precondition: every cache's visible length must equal
+    // `prefill_start_offset`. If not — e.g. the identical-replay case
+    // where the scheduler backs off by one token — put the vector back
+    // and decline to classic, which owns the restored state.
+    //
+    // On `prefill_start_offset == 0` (cold path) keep building fresh —
+    // that path must stay byte-identical to the pre-PR-B behavior.
+    let mut caches: Vec<crate::models::qwen3_next::Qwen3NextCache> =
+        if prefill_start_offset > 0 {
+            match qwen.take_sequence_state(seq_id) {
+                Some(caches) => {
+                    // Verify the length precondition before we touch
+                    // the caches.
+                    let all_match = caches.iter().all(|c| match c {
+                        crate::models::qwen3_next::Qwen3NextCache::Attention(kv) => {
+                            kv.seq_len().max(0) as usize == prefill_start_offset
+                        }
+                        crate::models::qwen3_next::Qwen3NextCache::Linear(gd) => {
+                            gd.offset.max(0) as usize == prefill_start_offset
+                        }
+                    });
+                    if !all_match {
+                        // Identical-replay / length-mismatch: put the
+                        // vector back and decline so the classic path
+                        // handles the edge correctly. Do not attempt to
+                        // trim — the scheduler's back-off is pre-existing
+                        // behavior.
+                        qwen.install_speculative_caches(seq_id, caches);
+                        drafter_slot.drafter = Some(owned_drafter);
+                        return Err(BurstOutcome::DeclineToClassic);
+                    }
+                    caches
+                }
+                None => {
+                    // No restored state in the slot — an unexpected
+                    // condition, but decline defensively so the
+                    // classic path can recover.
+                    drafter_slot.drafter = Some(owned_drafter);
+                    return Err(BurstOutcome::DeclineToClassic);
+                }
+            }
+        } else {
+            qwen.make_dflash_caches()
+        };
 
     // Prefill the prompt through the target's speculative verify hook,
     // capturing the same per-layer hidden states the DFlash round loop
@@ -1608,9 +1662,27 @@ where
     // actually consumes. The caches advance identically either way, which is
     // what makes this a pure cost change and not a semantic one — the per-chunk
     // mask offsets come from the caches themselves.
+    //
+    // When `prefill_start_offset > 0`, prefix tokens `[..offset]` already
+    // reside in the restored caches; only the suffix `[offset..split]` is
+    // forwarded. `offset == split` (i.e., zero suffix tokens) is valid and
+    // must work — the verify hook runs on the last token only.
+    // `offset > split` is unreachable given the scheduler's clamp but is
+    // declined defensively to avoid a slice panic.
     let prefill_verify_start = Instant::now();
     let split = prompt_tokens.len().saturating_sub(1);
-    for chunk in prompt_tokens[..split].chunks(DFLASH_PREFILL_CHUNK) {
+    // Declining `offset > split` before touching caches means the taken
+    // vector is still alive — put it back so the classic path can use it.
+    if prefill_start_offset > split {
+        if prefill_start_offset > 0 {
+            qwen.install_speculative_caches(seq_id, caches);
+        }
+        drafter_slot.drafter = Some(owned_drafter);
+        return Err(BurstOutcome::DeclineToClassic);
+    }
+    let suffix_slice = &prompt_tokens[prefill_start_offset..split];
+    let tokens_prefilled = suffix_slice.len();
+    for chunk in suffix_slice.chunks(DFLASH_PREFILL_CHUNK) {
         let chunk_arr = mlxcel_core::from_slice_i32(chunk, &[1, chunk.len() as i32]);
         qwen.dflash_prefill_chunk(&chunk_arr, &mut caches);
     }
@@ -1773,6 +1845,8 @@ where
                     prompt_len = prompt_tokens.len(),
                     generated_len = generated_len,
                     cache_visible_len = avg_visible,
+                    adopted_offset = prefill_start_offset,
+                    tokens_prefilled = tokens_prefilled,
                     "prompt-cache snapshot inserted (DFlash burst)"
                 );
             }

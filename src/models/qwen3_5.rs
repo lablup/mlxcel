@@ -1276,6 +1276,21 @@ impl Qwen35Model {
         self.sequence_state.replace_sequence_state(seq_id, caches);
     }
 
+    /// Take the per-sequence cache vector out of the model-owned slot
+    /// for the given [`SequenceId`]. Returns `None` when no state exists
+    /// for the id (e.g., the slot was never populated or was already
+    /// released).
+    ///
+    /// The caller is responsible for either re-installing the caches via
+    /// [`install_speculative_caches`] or releasing the slot via
+    /// [`release_sequence_state_by_id`].
+    pub(crate) fn take_sequence_state_by_id(
+        &self,
+        seq_id: SequenceId,
+    ) -> Option<Vec<Qwen3NextCache>> {
+        self.sequence_state.take_sequence_state(seq_id)
+    }
+
     fn visible_len(cache: &Qwen3NextCache) -> usize {
         match cache {
             Qwen3NextCache::Attention(kv) => kv.seq_len().max(0) as usize,

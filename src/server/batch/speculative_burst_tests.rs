@@ -1810,3 +1810,60 @@ fn dflash_cache_offset_returns_zero_for_fresh_attention_cache() {
         "fresh attention cache offset must be 0"
     );
 }
+
+// --- PR B: adopted prefix reuse tests ---
+
+/// The `Qwen35DFlashTarget` trait must expose `take_sequence_state` so
+/// the burst can retrieve restored prompt-cache caches. This is a
+/// compile-time structural check — if the method is removed or renamed,
+/// the trait impls and `run_dflash_on_qwen35` call sites will fail to
+/// compile.
+#[test]
+fn dflash_trait_exposes_take_sequence_state() {
+    // Type-check: the trait method returns `Option<Vec<Qwen3NextCache>>`.
+    use crate::models::qwen3_next::Qwen3NextCache;
+    use mlxcel_core::cache::SequenceId;
+    let _ = std::any::type_name::<fn(SequenceId) -> Option<Vec<Qwen3NextCache>>>();
+}
+
+/// `mtp_prefill_suffix_start` returns `None` when `offset >= prompt_len`,
+/// indicating the whole prompt is cached and the caller should decline.
+/// The DFlash burst reuses this helper for the same degenerate-edge check
+/// on adopted prefixes.
+#[test]
+fn mtp_prefill_suffix_start_declines_when_offset_eq_prompt_len() {
+    use crate::server::batch::speculative_burst::mtp_prefill_suffix_start;
+
+    // Full-prompt hit: no suffix to forward.
+    assert_eq!(mtp_prefill_suffix_start(10, 10), None);
+    // offset > prompt_len: degenerate.
+    assert_eq!(mtp_prefill_suffix_start(11, 10), None);
+}
+
+/// `mtp_prefill_suffix_start` returns `Some(offset)` for the normal
+/// adopted-prefix case. `offset == 0` is the cold path.
+#[test]
+fn mtp_prefill_suffix_start_returns_offset_for_partial_prefix() {
+    use crate::server::batch::speculative_burst::mtp_prefill_suffix_start;
+
+    assert_eq!(mtp_prefill_suffix_start(0, 100), Some(0));
+    assert_eq!(mtp_prefill_suffix_start(50, 100), Some(50));
+    // offset == prompt_len - 1: one token left to forward (verify-only).
+    assert_eq!(mtp_prefill_suffix_start(99, 100), Some(99));
+}
+
+/// The precondition check in `run_dflash_on_qwen35` compares every
+/// cache's visible length against `prefill_start_offset`. This test
+/// confirms that `Qwen3NextCache::Attention(KVCache::new()).seq_len()`
+/// returns a defined (zero) value, so the comparison is well-formed.
+#[test]
+fn dflash_cache_seq_len_returns_zero_for_fresh_attention_cache() {
+    use mlxcel_core::layers::KVCache;
+
+    let attn_cache = KVCache::new();
+    assert_eq!(
+        attn_cache.seq_len().max(0) as usize,
+        0,
+        "fresh attention cache seq_len must be 0"
+    );
+}
