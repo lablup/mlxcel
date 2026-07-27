@@ -215,7 +215,7 @@ fn compile_and_load(
     let processor_path = model_dir.join("preprocessor_config.json");
     let processor = std::fs::read(&processor_path)
         .map_err(|error| format!("{}: {error}", processor_path.display()))?;
-    let contract = AuxiliaryArtifactContract::new(
+    let contract = AuxiliaryArtifactContract::new_legacy_unqualified(
         ENTRY_NAME,
         format!(
             "{};processor_sha256={};checkpoint_schema_sha256={}",
