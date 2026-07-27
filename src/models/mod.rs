@@ -33,6 +33,7 @@ pub mod switch_layers;
 // Model implementations (mlxcel-core based)
 pub mod apertus;
 pub mod baichuan;
+pub mod bailing_moe;
 pub mod bitnet;
 pub mod cohere;
 pub mod cohere2;
@@ -139,6 +140,7 @@ pub mod kokoro;
 // Re-export model types
 pub use apertus::ApertusModel;
 pub use baichuan::BaichuanModel;
+pub use bailing_moe::BailingMoeModel;
 pub use bitnet::BitNetModel;
 pub use cohere::CohereModel;
 pub use cohere2::Cohere2Model;
@@ -353,6 +355,10 @@ pub enum ModelType {
     HunyuanMoe,
     HunyuanV1Dense,
     MiMo,
+    /// Ant Group Ling / Bailing MoE (`bailing_moe`): DeepSeek-shaped sparse
+    /// decoder with a fused GQA `query_key_value` and a single wide shared
+    /// expert.
+    BailingMoe,
 
     // Apertus (Swiss AI)
     Apertus,
@@ -550,6 +556,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::HunyuanMoe,
     ModelType::HunyuanV1Dense,
     ModelType::MiMo,
+    ModelType::BailingMoe,
     // Apertus (Swiss AI)
     ModelType::Apertus,
     // ByteDance Seed-OSS
@@ -747,6 +754,7 @@ impl ModelType {
             // ----- Hunyuan -----
             ModelType::HunyuanV1Dense => ("Hunyuan v1 Dense", "Hunyuan"),
             ModelType::HunyuanMoe => ("Hunyuan MoE", "Hunyuan"),
+            ModelType::BailingMoe => ("Ling / Bailing MoE (shared + routed experts)", "Bailing"),
 
             // ----- IBM Granite -----
             ModelType::Granite => ("Granite (dense)", "Granite"),
@@ -1043,6 +1051,7 @@ mod metadata_tests {
             HunyuanMoe,
             HunyuanV1Dense,
             MiMo,
+            BailingMoe,
             Apertus,
             SeedOss,
             Granite,

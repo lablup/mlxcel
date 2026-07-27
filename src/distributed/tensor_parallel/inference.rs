@@ -202,6 +202,14 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::HunyuanMoe => "hunyuan_moe",
         ModelType::HunyuanV1Dense => "hunyuan_v1_dense",
         ModelType::MiMo => "mimo",
+        // Bailing MoE is not shardable by the generic transformer plan: its
+        // attention projection is the fused `attention.query_key_value` rather
+        // than separate q/k/v, and its routed experts live under
+        // `mlp.experts.{idx}` / `mlp.switch_mlp`, neither of which the shard
+        // rules name. The refusal comes from `validate_supported_runtime`, whose
+        // `runtime_kind_for` match has no arm for `ModelType::BailingMoe` and so
+        // returns `None`; this arm only keeps the dispatch table total.
+        ModelType::BailingMoe => "bailing_moe",
         ModelType::Apertus => "apertus",
         ModelType::SeedOss => "seed_oss",
         ModelType::Granite => "granite",
