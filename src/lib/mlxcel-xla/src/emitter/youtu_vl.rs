@@ -6,6 +6,7 @@
 //! StableHLO Youtu-VL windowed vision tower and built-in patch merger.
 
 use super::builder::{Builder, Ty, Val};
+use super::numeric_ops::{exact_gelu, layer_norm_2d, rms_norm_2d, stable_softmax, tanh_gelu};
 #[cfg(any(test, feature = "diagnostics"))]
 use super::youtu_vl_plan::YoutuVlDiagnosticStage;
 use super::youtu_vl_plan::{YOUTU_VL_PATCH_BUCKETS, YoutuVlVisionConfig, YoutuVlWeightSpec};
@@ -58,74 +59,35 @@ fn add_bias(builder: &mut Builder, value: &Val, bias: &Val) -> Val {
     builder.add(value, &bias)
 }
 
+fn round_bf16(builder: &mut Builder, value: &Val) -> Val {
+    let rounded = builder.convert(value, "bf16");
+    builder.convert(&rounded, "f32")
+}
+
 fn linear(builder: &mut Builder, value: &Val, weight: &Val, bias: &Val) -> Val {
     let value = builder.linear_seq(value, weight);
-    add_bias(builder, &value, bias)
+    let value = add_bias(builder, &value, bias);
+    round_bf16(builder, &value)
 }
 
 fn layer_norm(builder: &mut Builder, value: &Val, weight: &Val, bias: &Val, epsilon: f32) -> Val {
-    let rows = value.ty.shape[0];
-    let width = value.ty.shape[1];
-    let zero = builder.const_f32(0.0);
-    let width_scalar = builder.const_f32(width as f32);
-    let width_rows = builder.broadcast(&width_scalar, &[], vec![rows]);
-    let sum = builder.reduce_add(value, 1, &zero);
-    let mean = builder.divide(&sum, &width_rows);
-    let mean = builder.broadcast(&mean, &[0], vec![rows, width]);
-    let centered = builder.subtract(value, &mean);
-    let squared = builder.multiply(&centered, &centered);
-    let sum = builder.reduce_add(&squared, 1, &zero);
-    let variance = builder.divide(&sum, &width_rows);
-    let epsilon = builder.const_f32(epsilon);
-    let epsilon = builder.broadcast(&epsilon, &[], vec![rows]);
-    let variance = builder.add(&variance, &epsilon);
-    let inverse = builder.rsqrt(&variance);
-    let inverse = builder.broadcast(&inverse, &[0], vec![rows, width]);
-    let normalized = builder.multiply(&centered, &inverse);
-    let weight = builder.broadcast(weight, &[1], vec![rows, width]);
-    let bias = builder.broadcast(bias, &[1], vec![rows, width]);
-    let normalized = builder.multiply(&normalized, &weight);
-    builder.add(&normalized, &bias)
+    let normalized = layer_norm_2d(builder, value, weight, bias, epsilon);
+    round_bf16(builder, &normalized)
 }
 
 fn rms_norm(builder: &mut Builder, value: &Val, weight: &Val, epsilon: f32) -> Val {
-    let rows = value.ty.shape[0];
-    let width = value.ty.shape[1];
-    let zero = builder.const_f32(0.0);
-    let squared = builder.multiply(value, value);
-    let sum = builder.reduce_add(&squared, 1, &zero);
-    let width_scalar = builder.const_f32(width as f32);
-    let width_rows = builder.broadcast(&width_scalar, &[], vec![rows]);
-    let mean = builder.divide(&sum, &width_rows);
-    let epsilon = builder.const_f32(epsilon);
-    let epsilon = builder.broadcast(&epsilon, &[], vec![rows]);
-    let mean = builder.add(&mean, &epsilon);
-    let scale = builder.rsqrt(&mean);
-    let scale = builder.broadcast(&scale, &[0], vec![rows, width]);
-    let weight = builder.broadcast(weight, &[1], vec![rows, width]);
-    let value = builder.multiply(value, &scale);
-    builder.multiply(&value, &weight)
+    let value = rms_norm_2d(builder, value, weight, epsilon);
+    round_bf16(builder, &value)
 }
 
 fn gelu_tanh(builder: &mut Builder, value: &Val) -> Val {
-    let shape = value.ty.shape.clone();
-    let half_scalar = builder.const_f32(0.5);
-    let half = builder.broadcast(&half_scalar, &[], shape.clone());
-    let one_scalar = builder.const_f32(1.0);
-    let one = builder.broadcast(&one_scalar, &[], shape.clone());
-    let coefficient_scalar = builder.const_f32(0.044_715);
-    let coefficient = builder.broadcast(&coefficient_scalar, &[], shape.clone());
-    let scale_scalar = builder.const_f32(0.797_884_6);
-    let scale = builder.broadcast(&scale_scalar, &[], shape);
-    let squared = builder.multiply(value, value);
-    let cubed = builder.multiply(&squared, value);
-    let nonlinear = builder.multiply(&coefficient, &cubed);
-    let inner = builder.add(value, &nonlinear);
-    let scaled = builder.multiply(&scale, &inner);
-    let tanh = builder.tanh(&scaled);
-    let cdf = builder.add(&one, &tanh);
-    let half_value = builder.multiply(value, &half);
-    builder.multiply(&half_value, &cdf)
+    let value = tanh_gelu(builder, value);
+    round_bf16(builder, &value)
+}
+
+fn gelu_exact(builder: &mut Builder, value: &Val) -> Val {
+    let value = exact_gelu(builder, value);
+    round_bf16(builder, &value)
 }
 
 fn rotate_half(builder: &mut Builder, value: &Val) -> Val {
@@ -150,20 +112,13 @@ fn apply_rope(builder: &mut Builder, value: &Val, freqs: &Val) -> Val {
     let direct = builder.multiply(value, &cos);
     let rotated = rotate_half(builder, value);
     let rotated = builder.multiply(&rotated, &sin);
-    builder.add(&direct, &rotated)
+    let value = builder.add(&direct, &rotated);
+    round_bf16(builder, &value)
 }
 
 fn softmax(builder: &mut Builder, value: &Val) -> Val {
-    let shape = value.ty.shape.clone();
-    let negative = builder.const_f32(f32::NEG_INFINITY);
-    let maximum = builder.reduce_max(value, 2, &negative);
-    let maximum = builder.broadcast(&maximum, &[0, 1], shape.clone());
-    let shifted = builder.subtract(value, &maximum);
-    let exponentials = builder.exponential(&shifted);
-    let zero = builder.const_f32(0.0);
-    let denominator = builder.reduce_add(&exponentials, 2, &zero);
-    let denominator = builder.broadcast(&denominator, &[0, 1], shape);
-    builder.divide(&exponentials, &denominator)
+    let probabilities = stable_softmax(builder, value, 2);
+    round_bf16(builder, &probabilities)
 }
 
 fn attention(
@@ -196,11 +151,14 @@ fn attention(
         &[2],
         vec![config.heads, tokens, tokens],
     );
+    let scores = round_bf16(builder, &scores);
     let scale = builder.const_f32((head_dim as f32).powf(-0.5));
     let scale = builder.broadcast(&scale, &[], vec![config.heads, tokens, tokens]);
     let scores = builder.multiply(&scores, &scale);
+    let scores = round_bf16(builder, &scores);
     let bias = builder.broadcast(bias, &[1, 2], vec![config.heads, tokens, tokens]);
     let scores = builder.add(&scores, &bias);
+    let scores = round_bf16(builder, &scores);
     let probabilities = softmax(builder, &scores);
     let context = builder.dot_general(
         &probabilities,
@@ -211,6 +169,7 @@ fn attention(
         &[1],
         vec![config.heads, tokens, head_dim],
     );
+    let context = round_bf16(builder, &context);
     let context = builder.transpose(&context, &[1, 0, 2]);
     let context = builder.reshape(&context, vec![tokens, config.hidden]);
     linear(builder, &context, &args.take(), &args.take())
@@ -233,6 +192,7 @@ fn layer(
     );
     let attention = attention(builder, &normalized, args, config, freqs, bias);
     let residual = builder.add(hidden, &attention);
+    let residual = round_bf16(builder, &residual);
     let normalized = layer_norm(
         builder,
         &residual,
@@ -243,7 +203,8 @@ fn layer(
     let up = linear(builder, &normalized, &args.take(), &args.take());
     let up = gelu_tanh(builder, &up);
     let down = linear(builder, &up, &args.take(), &args.take());
-    builder.add(&residual, &down)
+    let residual = builder.add(&residual, &down);
+    round_bf16(builder, &residual)
 }
 
 struct YoutuVlGraph {
@@ -281,6 +242,7 @@ fn build_youtu_vl(config: &YoutuVlVisionConfig, patch_bucket: usize) -> YoutuVlG
         Ty::f32(vec![patch_bucket, patch_bucket]),
         "full_attention.bias",
     );
+    let patches = round_bf16(&mut builder, &patches);
     let mut hidden = linear(&mut builder, &patches, &args.take(), &args.take());
     let patch_projection = hidden.clone();
     let mut layer_outputs = Vec::with_capacity(config.depth);
@@ -305,7 +267,7 @@ fn build_youtu_vl(config: &YoutuVlVisionConfig, patch_bucket: usize) -> YoutuVlG
     let merged_width = config.hidden * config.spatial_merge_size * config.spatial_merge_size;
     let merged = builder.reshape(&hidden, vec![patch_bucket / 4, merged_width]);
     let merged = linear(&mut builder, &merged, &args.take(), &args.take());
-    let merged = gelu_tanh(&mut builder, &merged);
+    let merged = gelu_exact(&mut builder, &merged);
     let projected = linear(&mut builder, &merged, &args.take(), &args.take());
     assert_eq!(args.cursor, specs.len(), "Youtu-VL weight schema drifted");
     YoutuVlGraph {
@@ -384,6 +346,14 @@ mod tests {
         assert!(ir.contains("full_attention.bias"));
         assert!(ir.contains("merger.mlp.2.weight"));
         assert!(ir.contains("tensor<4x12xf32>"));
+        assert!(
+            ir.contains("stablehlo.convert"),
+            "the BF16 checkpoint carrier tape must remain explicit"
+        );
+        assert!(
+            ir.contains("chlo.erf"),
+            "the merger uses PyTorch's exact GELU, unlike the vision MLP"
+        );
     }
 
     #[test]
