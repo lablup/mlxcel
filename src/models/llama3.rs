@@ -146,6 +146,14 @@ pub struct Attention {
 impl Attention {
     /// Dense attention with RoPE.
     ///
+    /// Used by: Llama (`llama` / `mistral` checkpoints), Qwen2 / Qwen2.5 (which
+    /// re-export this attention), Helium (which reuses it with
+    /// `rope_traditional` set), the Llama-3.2-Vision (`mllama`) text decoder's
+    /// self-attention layers, every VLM whose text backbone is `Llama3Model` or
+    /// `Qwen2Model` (Pixtral, LLaVA, SmolVLM / Idefics3, Idefics2, InternVL,
+    /// FastVLM, dots.ocr), the `llama` and `mistral` pipeline stage executors,
+    /// and the tensor-parallel Llama runtime.
+    ///
     /// # Traditional RoPE and the fused fast paths
     ///
     /// Three code paths below can rotate Q and K, and all three must agree on
@@ -337,9 +345,9 @@ impl Attention {
     /// cache updates and attention before concatenating the results back into
     /// `[B, T, hidden_dim]`.
     ///
-    /// Used by: Llama3 batched decode and full-sequence batched prefill, Qwen2
-    /// (which re-exports this attention), Helium (which reuses it with
-    /// `rope_traditional` set)
+    /// Used by: the batched decode and full-sequence batched prefill of every
+    /// family that reaches [`Attention::forward`]; see that method's `Used by`
+    /// list, which this path shares.
     pub fn forward_split_attention(
         &self,
         q_batched: &MlxArray,
@@ -528,6 +536,19 @@ impl Attention {
         result
     }
 
+    /// Build the dense attention block from a checkpoint.
+    ///
+    /// `rope_traditional` is carried over from [`ModelArgs`], where it is
+    /// `#[serde(skip)]`, so it is `false` for every family whose config is
+    /// parsed from JSON and `true` only when a loader sets it programmatically.
+    ///
+    /// Used by: Llama (`llama` / `mistral` checkpoints), Qwen2 / Qwen2.5 (which
+    /// re-export this attention), Helium (which reuses it with
+    /// `rope_traditional` set), the Llama-3.2-Vision (`mllama`) text decoder's
+    /// self-attention layers, every VLM whose text backbone is `Llama3Model` or
+    /// `Qwen2Model` (Pixtral, LLaVA, SmolVLM / Idefics3, Idefics2, InternVL,
+    /// FastVLM, dots.ocr), the `llama` and `mistral` pipeline stage executors,
+    /// and the tensor-parallel Llama runtime.
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,

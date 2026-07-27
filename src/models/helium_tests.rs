@@ -364,9 +364,36 @@ fn helium_logits_differ_from_the_same_weights_with_split_half_rope() {
     let b = split_half.forward(&prompt, &mut b_caches, None);
 
     assert_eq!(mlxcel_core::array_shape(&a), mlxcel_core::array_shape(&b));
+
+    // Two thresholds, because an absolute one alone can go blind.
+    //
+    // The gap this test measures is only meaningful next to the magnitude of
+    // the logits it is measured on. An earlier version of `filled` made every
+    // head nearly collinear and collapsed the gap to 2.4e-5 against a logits
+    // scale of 5.8, a relative separation of 4e-6: green, and useless. That
+    // particular collapse is now caught by the absolute floor, but its mirror
+    // image is not. A future change that widens `tiny_args` or rescales
+    // `filled` can grow the logits without growing the separation, and an
+    // unanchored absolute floor would keep passing while the test drifts back
+    // toward blindness.
+    //
+    // Measured on the pinned inputs below: gap 1.19e-2, logits scale 6.89,
+    // relative separation 1.7e-3. That is ~12x the absolute floor and ~17x the
+    // relative floor, and it is reproducible run to run because `filled` is a
+    // fixed-seed LCG over fixed shapes. Both floors must keep real margin; if a
+    // refactor pushes either one close, widen the model rather than lowering
+    // the floor.
+    let gap = max_abs_diff(&a, &b);
+    let logits_scale = max_abs(&a);
     assert!(
-        max_abs_diff(&a, &b) > 1e-3,
-        "traditional and split-half RoPE must produce different logits from the same weights"
+        gap > 1e-3,
+        "traditional and split-half RoPE must produce different logits from the same weights \
+         (gap {gap}, logits scale {logits_scale})"
+    );
+    assert!(
+        gap > logits_scale * 1e-4,
+        "the two rotations must be separated by a meaningful fraction of the logits, not just by \
+         an absolute epsilon (gap {gap}, logits scale {logits_scale})"
     );
 }
 
@@ -704,7 +731,11 @@ fn ones(shape: &[i32]) -> UniquePtr<MlxArray> {
 }
 
 fn max_abs_diff(a: &MlxArray, b: &MlxArray) -> f32 {
-    mlxcel_core::item_f32(&mlxcel_core::max_all(&mlxcel_core::abs(
-        &mlxcel_core::subtract(a, b),
-    )))
+    max_abs(&mlxcel_core::subtract(a, b))
+}
+
+/// Largest absolute value in `a`, used to scale a difference against the
+/// magnitude it was measured on.
+fn max_abs(a: &MlxArray) -> f32 {
+    mlxcel_core::item_f32(&mlxcel_core::max_all(&mlxcel_core::abs(a)))
 }
