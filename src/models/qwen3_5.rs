@@ -1265,6 +1265,17 @@ impl Qwen35Model {
         self.make_internal_caches()
     }
 
+    /// Install externally-built caches into the model-owned sequence state
+    /// slot for the given [`SequenceId`], making them visible to the
+    /// scheduler's `donate_finished_sequence_cache` snapshot path.
+    pub(crate) fn install_speculative_caches(
+        &self,
+        seq_id: SequenceId,
+        caches: Vec<Qwen3NextCache>,
+    ) {
+        self.sequence_state.replace_sequence_state(seq_id, caches);
+    }
+
     fn visible_len(cache: &Qwen3NextCache) -> usize {
         match cache {
             Qwen3NextCache::Attention(kv) => kv.seq_len().max(0) as usize,

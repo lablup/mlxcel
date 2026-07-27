@@ -205,7 +205,7 @@ const DFLASH_PREFILL_CHUNK: usize = 512;
 /// allocates the same cache shape. This lets text-only requests against
 /// VLM-wrapped checkpoints run DFlash without opening the true multimodal tail
 /// path yet.
-trait Qwen35DFlashTarget:
+pub(crate) trait Qwen35DFlashTarget:
     LanguageModel
     + SpeculativeTarget<
         Cache = crate::models::qwen3_next::Qwen3NextCache,
@@ -223,6 +223,15 @@ trait Qwen35DFlashTarget:
         input_ids: &mlxcel_core::MlxArray,
         caches: &mut [crate::models::qwen3_next::Qwen3NextCache],
     );
+
+    /// Install the burst's per-layer caches into the model-owned sequence
+    /// state slot so `donate_finished_sequence_cache` can snapshot them
+    /// for prompt-cache reuse.
+    fn install_speculative_caches(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        caches: Vec<crate::models::qwen3_next::Qwen3NextCache>,
+    );
 }
 
 impl Qwen35DFlashTarget for crate::models::Qwen35Model {
@@ -236,6 +245,14 @@ impl Qwen35DFlashTarget for crate::models::Qwen35Model {
         caches: &mut [crate::models::qwen3_next::Qwen3NextCache],
     ) {
         self.forward_speculative_prefill(input_ids, caches);
+    }
+
+    fn install_speculative_caches(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        caches: Vec<crate::models::qwen3_next::Qwen3NextCache>,
+    ) {
+        self.install_speculative_caches(seq_id, caches);
     }
 }
 
@@ -251,6 +268,14 @@ impl Qwen35DFlashTarget for crate::vision::Qwen35VLModel {
     ) {
         self.text_model
             .forward_speculative_prefill(input_ids, caches);
+    }
+
+    fn install_speculative_caches(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        caches: Vec<crate::models::qwen3_next::Qwen3NextCache>,
+    ) {
+        self.text_model.install_speculative_caches(seq_id, caches);
     }
 }
 
@@ -1440,6 +1465,7 @@ fn run_dflash_burst(
     let (tokens, logprobs, decode_time_ms) = match ctx.model {
         LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => run_dflash_on_qwen35(
             qwen,
+            seq.seq_id,
             &prompt,
             &sampling,
             &token_history,
@@ -1453,6 +1479,7 @@ fn run_dflash_burst(
         )?,
         LoadedModel::Qwen35VLM(qwen) | LoadedModel::Qwen35MoeVLM(qwen) => run_dflash_on_qwen35(
             qwen,
+            seq.seq_id,
             &prompt,
             &sampling,
             &token_history,
@@ -1515,6 +1542,7 @@ fn run_dflash_burst(
 #[allow(clippy::too_many_arguments)]
 fn run_dflash_on_qwen35<T>(
     qwen: &T,
+    seq_id: mlxcel_core::cache::SequenceId,
     prompt_tokens: &[i32],
     sampling: &SamplingConfig,
     token_history: &[i32],
@@ -1719,6 +1747,35 @@ where
             let mut tokens = Vec::with_capacity(output.tokens.len() + 1);
             tokens.push(first_bonus);
             tokens.extend(output.tokens);
+            // Install the burst's caches into the model-owned slot so
+            // `donate_finished_sequence_cache` (called by the scheduler)
+            // finds non-empty state and can snapshot them for the prompt
+            // cache. Assert the length invariant: the caches' visible
+            // length must equal the full prompt + generated token count
+            // (including the first bonus).
+            {
+                let generated_len = tokens.len();
+                let expected_len = prompt_tokens.len() + generated_len;
+                let total_visible: usize = caches
+                    .iter()
+                    .map(|c| c.offset().max(0) as usize)
+                    .sum();
+                let avg_visible = total_visible / caches.len();
+                debug_assert_eq!(
+                    avg_visible, expected_len,
+                    "DFlash cache visible length mismatch: avg_visible={}                      expected={} (prompt={} + generated={})",
+                    avg_visible, expected_len,
+                    prompt_tokens.len(), generated_len,
+                );
+                qwen.install_speculative_caches(seq_id, caches);
+                tracing::info!(
+                    seq_id = %seq_id,
+                    prompt_len = prompt_tokens.len(),
+                    generated_len = generated_len,
+                    cache_visible_len = avg_visible,
+                    "prompt-cache snapshot inserted (DFlash burst)"
+                );
+            }
             // Assemble the per-token logprobs the same way as `tokens`:
             // the first-bonus logprob (computed above from the prefill's
             // adjusted logits) prepended to the round loop's per-token
