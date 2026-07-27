@@ -26,7 +26,9 @@ use crate::aux::{
 };
 use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 use crate::emitter::numeric_ops::{
-    DENSE_MATMUL_ENTRY, DenseMatmulProbeSpec, emit_dense_matmul_probe,
+    DENSE_MATMUL_ENTRY, DenseMatmulProbeSpec, RESIDUAL_ADD_ENTRY, RMS_NORM_ENTRY, RowWiseProbeSpec,
+    SOFTMAX_ENTRY, emit_dense_matmul_probe, emit_residual_add_probe, emit_rms_norm_probe,
+    emit_softmax_probe,
 };
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
 use crate::numeric_dtype_contract::{NumericDType, WeightExecution};
@@ -43,6 +45,31 @@ const DENSE_ROWS: usize = 2;
 const DENSE_OUTPUTS: usize = 2;
 const DENSE_CONTRACTION: usize = 3;
 const DENSE_OPERATION: &str = "micro-oracle.dense-matmul.f32";
+const ROWS: usize = 2;
+const FEATURES: usize = 4;
+const RMS_EPSILON: f32 = 1e-5;
+const RESIDUAL_OPERATION: &str = "micro-oracle.residual-add.f32";
+const RMS_NORM_OPERATION: &str = "micro-oracle.rms-norm.f32";
+const SOFTMAX_OPERATION: &str = "micro-oracle.attention-softmax.f32";
+
+struct ProbeDefinition {
+    operation: &'static str,
+    entry: &'static str,
+    cache_key: &'static str,
+    config_identity: String,
+    mlir: String,
+    operator_class: OperatorClass,
+    rounding_boundaries: Vec<RoundingBoundary>,
+    association: AssociationPolicy,
+    operands: Vec<NumericTensor>,
+    weights: Vec<AuxiliaryWeight>,
+    dynamic_operand_indices: Vec<usize>,
+    output_shape: Vec<usize>,
+    comparison: ComparisonMode,
+    reference_algorithm: &'static str,
+    candidate_algorithm: &'static str,
+    reference: fn(&[NumericTensor]) -> Result<NumericTensor, String>,
+}
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
@@ -61,11 +88,18 @@ fn f32_bytes(values: &[f32]) -> Vec<u8> {
         .collect()
 }
 
-fn decode_f32(bytes: &[u8]) -> Vec<f32> {
-    bytes
+fn decode_f32(bytes: &[u8]) -> Result<Vec<f32>, String> {
+    if !bytes.len().is_multiple_of(size_of::<f32>()) {
+        return Err(format!(
+            "f32 output has {} bytes, which is not divisible by {}",
+            bytes.len(),
+            size_of::<f32>()
+        ));
+    }
+    Ok(bytes
         .chunks_exact(size_of::<f32>())
         .map(|chunk| f32::from_ne_bytes(chunk.try_into().expect("four-byte f32 chunk")))
-        .collect()
+        .collect())
 }
 
 fn compiler_version(compiler: &Path) -> Result<String, String> {
@@ -109,27 +143,24 @@ fn operator_identity(
     compiler_version: &str,
     runtime_identity: &str,
     device: &str,
+    definition: &ProbeDefinition,
 ) -> Result<OperatorNumericContractSet, String> {
     let backend = BackendNumericIdentity::new(
         "canonical-decomposition-v1",
         runtime_identity,
         compiler_version.replace(';', ","),
         device,
-        "iree-selected-contraction-unobserved",
+        definition.candidate_algorithm,
     )?;
     let operation = OperatorNumericContract::new(
-        DENSE_OPERATION,
-        OperatorClass::DenseMatmul,
+        definition.operation,
+        definition.operator_class,
         CheckpointDType::F32,
         NumericDType::F32,
         NumericDType::F32,
         NumericDType::F32,
-        [
-            RoundingBoundary::OperatorInput,
-            RoundingBoundary::AccumulatorResult,
-            RoundingBoundary::OperatorOutput,
-        ],
-        AssociationPolicy::BackendAlgorithm,
+        definition.rounding_boundaries.iter().copied(),
+        definition.association,
         WeightExecution::Dense,
         None,
         backend,
@@ -152,12 +183,21 @@ fn dense_operands() -> Result<[NumericTensor; 2], String> {
     ])
 }
 
-fn resident_weight(weight: &NumericTensor) -> AuxiliaryWeight {
+fn resident_weight(name: &str, weight: &NumericTensor) -> AuxiliaryWeight {
     AuxiliaryWeight {
-        name: "dense.weight".to_string(),
+        name: name.to_string(),
         bytes: f32_bytes(weight.values()),
         dtype: AuxiliaryWeightDType::Float32,
         shape: weight.shape().to_vec(),
+    }
+}
+
+fn dummy_weight(operation: &str) -> AuxiliaryWeight {
+    AuxiliaryWeight {
+        name: format!("{operation}.abi_dummy"),
+        bytes: f32_bytes(&[0.0]),
+        dtype: AuxiliaryWeightDType::Float32,
+        shape: vec![1],
     }
 }
 
@@ -191,73 +231,343 @@ fn reference_dense_matmul(operands: &[NumericTensor]) -> Result<NumericTensor, S
     NumericTensor::new("output", vec![DENSE_ROWS, DENSE_OUTPUTS], output)
 }
 
-/// Compile and execute one deterministic dense-matmul probe through the native
-/// auxiliary IREE ABI.
-///
-/// The reference is an explicitly reported canonical Rust decomposition, not a
-/// production MLX kernel. Consequently this probe can validate the shared
-/// emitter/runtime path but can never qualify a model family for production.
-pub fn run_dense_matmul_probe(device: &str) -> Result<NumericOracleReport, String> {
-    if !device.starts_with("local") {
+fn residual_operands() -> Result<Vec<NumericTensor>, String> {
+    Ok(vec![
+        NumericTensor::new(
+            "hidden",
+            vec![ROWS, FEATURES],
+            vec![1.0, -2.0, 3.5, 0.25, -4.0, 8.0, 0.5, -0.125],
+        )?,
+        NumericTensor::new(
+            "residual",
+            vec![ROWS, FEATURES],
+            vec![-0.5, 1.0, 2.25, -0.75, 3.0, -2.0, 0.125, 4.0],
+        )?,
+    ])
+}
+
+fn reference_residual_add(operands: &[NumericTensor]) -> Result<NumericTensor, String> {
+    let [hidden, residual] = operands else {
         return Err(format!(
-            "the initial dense matmul canonical probe supports only local IREE CPU targets, got \
-             {device:?}"
+            "residual add reference requires 2 operands, got {}",
+            operands.len()
+        ));
+    };
+    let expected_shape = [ROWS, FEATURES];
+    if hidden.shape() != expected_shape || residual.shape() != expected_shape {
+        return Err(format!(
+            "residual add reference shape mismatch: hidden {:?}, residual {:?}",
+            hidden.shape(),
+            residual.shape()
         ));
     }
-    let spec = DenseMatmulProbeSpec {
-        rows: DENSE_ROWS,
-        outputs: DENSE_OUTPUTS,
-        contraction: DENSE_CONTRACTION,
+    NumericTensor::new(
+        "output",
+        expected_shape.to_vec(),
+        hidden
+            .values()
+            .iter()
+            .zip(residual.values())
+            .map(|(hidden, residual)| hidden + residual)
+            .collect(),
+    )
+}
+
+fn rms_norm_operands() -> Result<Vec<NumericTensor>, String> {
+    Ok(vec![
+        NumericTensor::new(
+            "input",
+            vec![ROWS, FEATURES],
+            vec![1.0, -2.0, 3.0, -4.0, 0.25, 0.5, -0.75, 1.25],
+        )?,
+        NumericTensor::new("weight", vec![FEATURES], vec![0.5, 1.0, 1.5, -0.75])?,
+    ])
+}
+
+fn reference_rms_norm(operands: &[NumericTensor]) -> Result<NumericTensor, String> {
+    let [input, weight] = operands else {
+        return Err(format!(
+            "RMSNorm reference requires 2 operands, got {}",
+            operands.len()
+        ));
     };
-    let mlir = emit_dense_matmul_probe(spec)?;
+    if input.shape() != [ROWS, FEATURES] || weight.shape() != [FEATURES] {
+        return Err(format!(
+            "RMSNorm reference shape mismatch: input {:?}, weight {:?}",
+            input.shape(),
+            weight.shape()
+        ));
+    }
+    let mut output = Vec::with_capacity(ROWS * FEATURES);
+    for row in input.values().chunks_exact(FEATURES) {
+        let sum_of_squares = row.iter().fold(0.0f32, |sum, value| sum + value * value);
+        let inverse_rms = (sum_of_squares / FEATURES as f32 + RMS_EPSILON)
+            .sqrt()
+            .recip();
+        output.extend(
+            row.iter()
+                .zip(weight.values())
+                .map(|(value, weight)| value * inverse_rms * weight),
+        );
+    }
+    NumericTensor::new("output", vec![ROWS, FEATURES], output)
+}
+
+fn softmax_operands() -> Result<Vec<NumericTensor>, String> {
+    Ok(vec![NumericTensor::new(
+        "scores",
+        vec![ROWS, FEATURES],
+        vec![12.0, 11.0, -3.0, 0.5, -8.0, 0.0, 8.0, 7.5],
+    )?])
+}
+
+fn reference_softmax(operands: &[NumericTensor]) -> Result<NumericTensor, String> {
+    let [scores] = operands else {
+        return Err(format!(
+            "attention softmax reference requires 1 operand, got {}",
+            operands.len()
+        ));
+    };
+    if scores.shape() != [ROWS, FEATURES] {
+        return Err(format!(
+            "attention softmax reference shape mismatch: scores {:?}",
+            scores.shape()
+        ));
+    }
+    let mut output = Vec::with_capacity(ROWS * FEATURES);
+    for row in scores.values().chunks_exact(FEATURES) {
+        let maximum = row
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, |maximum, value| maximum.max(value));
+        let exponentials = row
+            .iter()
+            .map(|value| (value - maximum).exp())
+            .collect::<Vec<_>>();
+        let denominator = exponentials.iter().copied().sum::<f32>();
+        output.extend(
+            exponentials
+                .into_iter()
+                .map(|exponential| exponential / denominator),
+        );
+    }
+    NumericTensor::new("output", vec![ROWS, FEATURES], output)
+}
+
+fn dense_definition() -> Result<ProbeDefinition, String> {
+    let operands = dense_operands()?.to_vec();
+    Ok(ProbeDefinition {
+        operation: DENSE_OPERATION,
+        entry: DENSE_MATMUL_ENTRY,
+        cache_key: "dense-matmul-f32",
+        config_identity: format!(
+            "rows={DENSE_ROWS};outputs={DENSE_OUTPUTS};contraction={DENSE_CONTRACTION};dtype=f32"
+        ),
+        mlir: emit_dense_matmul_probe(DenseMatmulProbeSpec {
+            rows: DENSE_ROWS,
+            outputs: DENSE_OUTPUTS,
+            contraction: DENSE_CONTRACTION,
+        })?,
+        operator_class: OperatorClass::DenseMatmul,
+        rounding_boundaries: vec![
+            RoundingBoundary::OperatorInput,
+            RoundingBoundary::AccumulatorResult,
+            RoundingBoundary::OperatorOutput,
+        ],
+        association: AssociationPolicy::BackendAlgorithm,
+        weights: vec![resident_weight("dense.weight", &operands[1])],
+        operands,
+        dynamic_operand_indices: vec![0],
+        output_shape: vec![DENSE_ROWS, DENSE_OUTPUTS],
+        comparison: ComparisonMode::ExactBits,
+        reference_algorithm: "row-major-k-sequential-v1",
+        candidate_algorithm: "iree-selected-contraction-unobserved",
+        reference: reference_dense_matmul,
+    })
+}
+
+fn residual_definition() -> Result<ProbeDefinition, String> {
+    Ok(ProbeDefinition {
+        operation: RESIDUAL_OPERATION,
+        entry: RESIDUAL_ADD_ENTRY,
+        cache_key: "residual-add-f32",
+        config_identity: format!("rows={ROWS};features={FEATURES};dtype=f32"),
+        mlir: emit_residual_add_probe(RowWiseProbeSpec {
+            rows: ROWS,
+            features: FEATURES,
+        })?,
+        operator_class: OperatorClass::ResidualAdd,
+        rounding_boundaries: vec![
+            RoundingBoundary::OperatorInput,
+            RoundingBoundary::ResidualResult,
+            RoundingBoundary::OperatorOutput,
+        ],
+        association: AssociationPolicy::Sequential,
+        operands: residual_operands()?,
+        weights: vec![dummy_weight("residual_add")],
+        dynamic_operand_indices: vec![0, 1],
+        output_shape: vec![ROWS, FEATURES],
+        comparison: ComparisonMode::ExactBits,
+        reference_algorithm: "elementwise-binary-add-v1",
+        candidate_algorithm: "iree-selected-residual-add-unobserved",
+        reference: reference_residual_add,
+    })
+}
+
+fn rms_norm_definition() -> Result<ProbeDefinition, String> {
+    let operands = rms_norm_operands()?;
+    Ok(ProbeDefinition {
+        operation: RMS_NORM_OPERATION,
+        entry: RMS_NORM_ENTRY,
+        cache_key: "rms-norm-f32",
+        config_identity: format!(
+            "rows={ROWS};features={FEATURES};epsilon={RMS_EPSILON:e};dtype=f32"
+        ),
+        mlir: emit_rms_norm_probe(
+            RowWiseProbeSpec {
+                rows: ROWS,
+                features: FEATURES,
+            },
+            RMS_EPSILON,
+        )?,
+        operator_class: OperatorClass::RmsNorm,
+        rounding_boundaries: vec![
+            RoundingBoundary::OperatorInput,
+            RoundingBoundary::AccumulatorResult,
+            RoundingBoundary::OperatorOutput,
+        ],
+        association: AssociationPolicy::BackendAlgorithm,
+        weights: vec![resident_weight("rms_norm.weight", &operands[1])],
+        operands,
+        dynamic_operand_indices: vec![0],
+        output_shape: vec![ROWS, FEATURES],
+        comparison: ComparisonMode::AbsoluteRelative {
+            absolute: 2e-6,
+            relative: 2e-5,
+        },
+        reference_algorithm: "row-major-square-sum-rsqrt-v1",
+        candidate_algorithm: "iree-selected-rms-norm-unobserved",
+        reference: reference_rms_norm,
+    })
+}
+
+fn softmax_definition() -> Result<ProbeDefinition, String> {
+    Ok(ProbeDefinition {
+        operation: SOFTMAX_OPERATION,
+        entry: SOFTMAX_ENTRY,
+        cache_key: "attention-softmax-f32",
+        config_identity: format!("rows={ROWS};features={FEATURES};dtype=f32"),
+        mlir: emit_softmax_probe(RowWiseProbeSpec {
+            rows: ROWS,
+            features: FEATURES,
+        })?,
+        operator_class: OperatorClass::AttentionSoftmax,
+        rounding_boundaries: vec![
+            RoundingBoundary::OperatorInput,
+            RoundingBoundary::AccumulatorResult,
+            RoundingBoundary::ActivationResult,
+            RoundingBoundary::OperatorOutput,
+        ],
+        association: AssociationPolicy::BackendAlgorithm,
+        operands: softmax_operands()?,
+        weights: vec![dummy_weight("attention_softmax")],
+        dynamic_operand_indices: vec![0],
+        output_shape: vec![ROWS, FEATURES],
+        comparison: ComparisonMode::AbsoluteRelative {
+            absolute: 2e-6,
+            relative: 2e-5,
+        },
+        reference_algorithm: "stable-row-major-softmax-v1",
+        candidate_algorithm: "iree-selected-attention-softmax-unobserved",
+        reference: reference_softmax,
+    })
+}
+
+fn checked_output_bytes(shape: &[usize]) -> Result<usize, String> {
+    shape.iter().try_fold(size_of::<f32>(), |bytes, dimension| {
+        if *dimension == 0 {
+            return Err("numeric probe output dimensions must be non-zero".to_string());
+        }
+        bytes
+            .checked_mul(*dimension)
+            .ok_or_else(|| "numeric probe output byte count overflowed".to_string())
+    })
+}
+
+fn execute_probe(device: &str, definition: ProbeDefinition) -> Result<NumericOracleReport, String> {
+    if !device.starts_with("local") {
+        return Err(format!(
+            "canonical operator probes support only local IREE CPU targets, got {device:?}"
+        ));
+    }
+    if definition.dynamic_operand_indices.is_empty() {
+        return Err(format!(
+            "{} requires at least one dynamic operand",
+            definition.operation
+        ));
+    }
+    for &index in &definition.dynamic_operand_indices {
+        if index >= definition.operands.len() {
+            return Err(format!(
+                "{} dynamic operand index {index} exceeds {} operands",
+                definition.operation,
+                definition.operands.len()
+            ));
+        }
+    }
+    let output_bytes = checked_output_bytes(&definition.output_shape)?;
     let compiler = iree_compile_bin()?;
     let flags = target_flags(device)?;
     let compiler_version = compiler_version(&compiler)?;
     let runtime_identity = runtime_archive_identity(&compiler)?;
-    let operator_contract = operator_identity(&compiler_version, &runtime_identity, device)?;
+    let operator_contract =
+        operator_identity(&compiler_version, &runtime_identity, device, &definition)?;
     let generation_identity = format!(
         "compiler={};version={};runtime={runtime_identity};flags={flags:?};mlir_sha256={}",
         compiler.display(),
         compiler_version,
-        sha256_hex(mlir.as_bytes())
+        sha256_hex(definition.mlir.as_bytes())
     );
+    let ProbeDefinition {
+        operation,
+        entry,
+        cache_key,
+        config_identity,
+        mlir,
+        operands,
+        weights,
+        dynamic_operand_indices,
+        output_shape,
+        comparison,
+        reference_algorithm,
+        reference,
+        ..
+    } = definition;
     let artifact_contract = AuxiliaryArtifactContract::new_with_operator_numeric_contract(
-        DENSE_MATMUL_ENTRY,
-        format!(
-            "rows={DENSE_ROWS};outputs={DENSE_OUTPUTS};contraction={DENSE_CONTRACTION};dtype=f32"
-        ),
+        entry,
+        config_identity,
         generation_identity,
         operator_contract.clone(),
     )?;
-    let operands = dense_operands()?;
-    let weights = vec![resident_weight(&operands[1])];
     let cache = std::env::temp_dir().join("mlxcel-xla-numeric-probes");
     std::fs::create_dir_all(&cache)
         .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
-    let vmfb = cached_vmfb_path(&compiler, &mlir, flags, &cache, "dense-matmul-f32", 0);
+    let vmfb = cached_vmfb_path(&compiler, &mlir, flags, &cache, cache_key, 0);
     ensure_qualified_auxiliary_artifact(&vmfb, &artifact_contract, &weights, |output| {
-        compile_one_to(
-            &compiler,
-            &mlir,
-            flags,
-            &cache,
-            "dense-matmul-f32",
-            0,
-            output,
-        )
+        compile_one_to(&compiler, &mlir, flags, &cache, cache_key, 0, output)
     })?;
     let mut module = IreeAuxiliaryModule::load(device, &vmfb, &artifact_contract, weights)?;
     let artifact_fingerprint = format!("{:016x}", module.fingerprint());
     let reference_backend = NumericBackendIdentity::new(
         "rust-canonical-decomposition",
         env!("CARGO_PKG_VERSION"),
-        "dense-matmul-v1",
+        format!("{cache_key}-v1"),
         "rust-f32",
-        vec!["row-major-k-sequential".to_string()],
+        vec![reference_algorithm.to_string()],
         std::env::consts::ARCH,
         "host-cpu",
-        "rust-dense-matmul-v1",
-        AlgorithmIdentity::observed("row-major-k-sequential-v1")?,
+        format!("rust-{cache_key}-v1"),
+        AlgorithmIdentity::observed(reference_algorithm)?,
     )?;
     let candidate_backend = NumericBackendIdentity::new(
         "iree",
@@ -269,48 +579,69 @@ pub fn run_dense_matmul_probe(device: &str) -> Result<NumericOracleReport, Strin
         device,
         artifact_fingerprint,
         AlgorithmIdentity::unobserved(
-            "IREE does not expose the selected CPU contraction kernel identity",
+            "IREE does not expose the selected CPU operator kernel identity",
         )?,
     )?;
     let case = NumericOracleCase::from_operator_contract(
-        DENSE_OPERATION,
+        operation,
         NumericOracleClaim::CanonicalDecomposition,
         &operator_contract,
         reference_backend,
         candidate_backend,
-        ComparisonMode::ExactBits,
+        comparison,
     )?;
-    run_bounded_numeric_oracle(case, &operands, reference_dense_matmul, move |operands| {
-        let [input, weight] = operands else {
-            return Err(format!(
-                "dense matmul IREE candidate requires 2 operands, got {}",
-                operands.len()
-            ));
-        };
-        if weight.shape() != [DENSE_OUTPUTS, DENSE_CONTRACTION] {
-            return Err(format!(
-                "dense matmul IREE resident weight shape changed to {:?}",
-                weight.shape()
-            ));
-        }
-        let input_bytes = f32_bytes(input.values());
-        let input_shape = [DENSE_ROWS, DENSE_CONTRACTION];
-        let output_shape = [DENSE_ROWS, DENSE_OUTPUTS];
-        let mut output_bytes = vec![0u8; DENSE_ROWS * DENSE_OUTPUTS * size_of::<f32>()];
-        module.invoke(
-            &[AuxiliaryInput {
-                bytes: &input_bytes,
+    run_bounded_numeric_oracle(case, &operands, reference, move |operands| {
+        let input_storage = dynamic_operand_indices
+            .iter()
+            .map(|&index| f32_bytes(operands[index].values()))
+            .collect::<Vec<_>>();
+        let inputs = dynamic_operand_indices
+            .iter()
+            .zip(&input_storage)
+            .map(|(&index, bytes)| AuxiliaryInput {
+                bytes,
                 dtype: AuxiliaryTensorDType::Float32,
-                shape: &input_shape,
-            }],
+                shape: operands[index].shape(),
+            })
+            .collect::<Vec<_>>();
+        let mut output_storage = vec![0u8; output_bytes];
+        module.invoke(
+            &inputs,
             &mut [AuxiliaryOutput {
-                bytes: &mut output_bytes,
+                bytes: &mut output_storage,
                 dtype: AuxiliaryTensorDType::Float32,
                 shape: &output_shape,
             }],
         )?;
-        NumericTensor::new("output", output_shape.to_vec(), decode_f32(&output_bytes))
+        NumericTensor::new("output", output_shape, decode_f32(&output_storage)?)
     })
+}
+
+/// Compile and execute one deterministic dense-matmul probe through the native
+/// auxiliary IREE ABI.
+///
+/// The reference is an explicitly reported canonical Rust decomposition, not a
+/// production MLX kernel. Consequently this probe can validate the shared
+/// emitter/runtime path but can never qualify a model family for production.
+pub fn run_dense_matmul_probe(device: &str) -> Result<NumericOracleReport, String> {
+    execute_probe(device, dense_definition()?)
+}
+
+/// Run the bounded CPU operator suite through real in-process IREE
+/// compile/load/invoke boundaries.
+///
+/// Every report uses a canonical Rust decomposition and therefore remains
+/// deliberately ineligible for production-family qualification.
+pub fn run_core_operator_probes(device: &str) -> Result<Vec<NumericOracleReport>, String> {
+    [
+        dense_definition,
+        residual_definition,
+        rms_norm_definition,
+        softmax_definition,
+    ]
+    .into_iter()
+    .map(|definition| execute_probe(device, definition()?))
+    .collect()
 }
 
 #[cfg(test)]
@@ -322,5 +653,38 @@ mod tests {
         let operands = dense_operands().unwrap();
         let output = reference_dense_matmul(&operands).unwrap();
         assert_eq!(output.values(), [-0.5, -6.5, -3.0, 18.125]);
+    }
+
+    #[test]
+    fn canonical_residual_add_has_stable_expected_values() {
+        let operands = residual_operands().unwrap();
+        let output = reference_residual_add(&operands).unwrap();
+        assert_eq!(
+            output.values(),
+            [0.5, -1.0, 5.75, -0.5, -1.0, 6.0, 0.625, 3.875]
+        );
+    }
+
+    #[test]
+    fn canonical_rms_norm_outputs_are_finite() {
+        let operands = rms_norm_operands().unwrap();
+        let output = reference_rms_norm(&operands).unwrap();
+        assert!(output.values().iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn canonical_softmax_rows_sum_to_one() {
+        let operands = softmax_operands().unwrap();
+        let output = reference_softmax(&operands).unwrap();
+        for row in output.values().chunks_exact(FEATURES) {
+            assert!((row.iter().sum::<f32>() - 1.0).abs() <= f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn malformed_f32_output_and_byte_counts_fail_closed() {
+        assert!(decode_f32(&[0, 0, 0]).is_err());
+        assert!(checked_output_bytes(&[1, 0]).is_err());
+        assert!(checked_output_bytes(&[usize::MAX, 2]).is_err());
     }
 }

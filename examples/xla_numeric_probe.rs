@@ -16,16 +16,24 @@ fn main() -> Result<(), String> {
     let device = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "local-task".to_string());
-    let report = mlxcel_xla::run_dense_matmul_probe(&device)?;
-    let json = serde_json::to_string_pretty(&report)
-        .map_err(|error| format!("serialize numeric probe report: {error}"))?;
+    let reports = mlxcel_xla::run_core_operator_probes(&device)?;
+    let json = serde_json::to_string_pretty(&reports)
+        .map_err(|error| format!("serialize numeric probe reports: {error}"))?;
     println!("{json}");
-    if !report.passed() {
-        return Err("dense matmul canonical-decomposition probe diverged".to_string());
+    let failed = reports
+        .iter()
+        .filter(|report| !report.passed())
+        .map(|report| report.operation())
+        .collect::<Vec<_>>();
+    if !failed.is_empty() {
+        return Err(format!(
+            "canonical-decomposition probes diverged: {}",
+            failed.join(", ")
+        ));
     }
-    if report.production_qualified() {
+    if reports.iter().any(|report| report.production_qualified()) {
         return Err(
-            "canonical-decomposition probe must never claim production qualification".to_string(),
+            "canonical-decomposition probes must never claim production qualification".to_string(),
         );
     }
     Ok(())
