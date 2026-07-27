@@ -188,6 +188,14 @@ use crate::server::model_provider::GenerateEvent;
 
 use super::sequence::{FinishReason, SequenceInfo, SequenceState};
 
+/// Tokens per chunk when the DFlash burst prefills a prompt.
+///
+/// Mirrors the scheduler's `prefill_chunk_size` default rather than reading it,
+/// because `BurstContext` does not carry the server config; if that value is
+/// ever tuned, plumb it through instead of editing this in parallel. See the
+/// prefill loop in `run_dflash_burst` for why chunking matters here at all.
+const DFLASH_PREFILL_CHUNK: usize = 512;
+
 /// Narrow target contract used by the server-side Qwen 3.5 DFlash burst.
 ///
 /// `DFlashGenerator` already accepts any [`SpeculativeTarget`], but the
@@ -205,17 +213,44 @@ trait Qwen35DFlashTarget:
     >
 {
     fn make_dflash_caches(&self) -> Vec<crate::models::qwen3_next::Qwen3NextCache>;
+
+    /// Advance the caches over a prompt chunk without producing logits,
+    /// captured hiddens, or GDN rollback snapshots. See
+    /// [`crate::models::Qwen35Model::forward_speculative_prefill`] for why the
+    /// verify hook is the wrong tool for prefill.
+    fn dflash_prefill_chunk(
+        &self,
+        input_ids: &mlxcel_core::MlxArray,
+        caches: &mut [crate::models::qwen3_next::Qwen3NextCache],
+    );
 }
 
 impl Qwen35DFlashTarget for crate::models::Qwen35Model {
     fn make_dflash_caches(&self) -> Vec<crate::models::qwen3_next::Qwen3NextCache> {
         self.make_speculative_caches()
     }
+
+    fn dflash_prefill_chunk(
+        &self,
+        input_ids: &mlxcel_core::MlxArray,
+        caches: &mut [crate::models::qwen3_next::Qwen3NextCache],
+    ) {
+        self.forward_speculative_prefill(input_ids, caches);
+    }
 }
 
 impl Qwen35DFlashTarget for crate::vision::Qwen35VLModel {
     fn make_dflash_caches(&self) -> Vec<crate::models::qwen3_next::Qwen3NextCache> {
         self.text_model.make_speculative_caches()
+    }
+
+    fn dflash_prefill_chunk(
+        &self,
+        input_ids: &mlxcel_core::MlxArray,
+        caches: &mut [crate::models::qwen3_next::Qwen3NextCache],
+    ) {
+        self.text_model
+            .forward_speculative_prefill(input_ids, caches);
     }
 }
 
@@ -1520,15 +1555,50 @@ where
         .filter(|ids| !ids.is_empty())
         .map(<[usize]>::to_vec)
         .unwrap_or_else(|| qwen.capture_layer_ids().to_vec());
-    let prompt_arr = mlxcel_core::from_slice_i32(prompt_tokens, &[1, prompt_tokens.len() as i32]);
+    // Prefill in chunks, and capture on the LAST TOKEN ONLY.
+    //
+    // A single full-prompt `verify_forward_with_capture_layers` measured 21.6 s
+    // at a 4000-token prompt, against 5.76 s for the classic path prefilling the
+    // identical prompt — a 3.8x penalty that sank speculative decoding
+    // end-to-end at long context even though its decode loop is 1.37x faster.
+    // Two causes, both from doing the whole prompt at once:
+    //
+    //  * `forward_speculative` builds one `seq_len x seq_len` causal mask
+    //    (`create_causal_mask(4000, 0)` = 16M elements) where the classic path
+    //    chunks at `prefill_chunk_size` (512 by default).
+    //  * it runs the LM HEAD over every position — `[1, seq_len, 4096]` into a
+    //    248,320-wide vocab — when only the last token's logits are read. This
+    //    is the dominant waste, and it is why chunking alone (measured 21.9 s ->
+    //    8.5 s) did not reach the classic path's 5.96 s.
+    //  * it retains captured hidden states for EVERY position across every
+    //    capture layer, and snapshots GDN rollback state per linear layer, for
+    //    positions the drafter never sees and that can never be rolled back.
+    //
+    // So: walk the prompt through `dflash_prefill_chunk`, which advances the
+    // caches and produces nothing, then run the final single token through the
+    // verify hook to obtain the logits and captured hiddens the round loop
+    // actually consumes. The caches advance identically either way, which is
+    // what makes this a pure cost change and not a semantic one — the per-chunk
+    // mask offsets come from the caches themselves.
     let prefill_verify_start = Instant::now();
+    let split = prompt_tokens.len().saturating_sub(1);
+    for chunk in prompt_tokens[..split].chunks(DFLASH_PREFILL_CHUNK) {
+        let chunk_arr = mlxcel_core::from_slice_i32(chunk, &[1, chunk.len() as i32]);
+        qwen.dflash_prefill_chunk(&chunk_arr, &mut caches);
+    }
+    let last_arr = mlxcel_core::from_slice_i32(&prompt_tokens[split..], &[1, 1]);
     let verify_out =
-        qwen.verify_forward_with_capture_layers(&prompt_arr, &mut caches, &capture_layer_ids);
+        qwen.verify_forward_with_capture_layers(&last_arr, &mut caches, &capture_layer_ids);
     let prefill_verify_ms = prefill_verify_start.elapsed().as_secs_f64() * 1000.0;
 
     // Sample the first bonus token from the last-position logits.
     let first_bonus_start = Instant::now();
-    let last_pos = prompt_tokens.len() as i32 - 1;
+    // The prefill above ends on a ONE-token forward, so the position of
+    // interest inside `verify_out` is 0 — not `prompt_tokens.len() - 1`, which
+    // is where it sat when the whole prompt went through in one call. Both the
+    // logits slice below and the `first_hidden` slice further down index with
+    // this.
+    let last_pos = 0;
     let logits_shape = mlxcel_core::array_shape(&verify_out.logits);
     let vocab = logits_shape[2];
     let last_logits = mlxcel_core::slice(
