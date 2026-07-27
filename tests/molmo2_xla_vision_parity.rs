@@ -341,6 +341,14 @@ fn real_checkpoint_mlx_iree_vision_and_scatter_parity() -> Result<()> {
         ));
     }
 
+    // Bound the local-task worker topology and stack before the first IREE
+    // instance exists. IREE parses its process-global flag registry on that
+    // first creation, so this has to run ahead of the projector load to take
+    // effect. Without it, `local-task` worker creation fails on this host with
+    // `thread creation failed with 22` out of `thread_pthreads.c`, because
+    // IREE's exact PTHREAD_STACK_MIN request is rejected. Diagnostics-only:
+    // the production runtime never applies these flags.
+    mlxcel_xla::configure_diagnostic_local_task_threads().map_err(anyhow::Error::msg)?;
     let mut projector = with_progress("IREE diagnostic compile/load", || {
         IreeMolmo2VisionDiagnosticProjector::load(&model, &device).map_err(anyhow::Error::msg)
     })?;
