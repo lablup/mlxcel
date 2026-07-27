@@ -26,9 +26,10 @@ use crate::aux::{
 };
 use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 use crate::emitter::numeric_ops::{
-    DENSE_MATMUL_ENTRY, DenseMatmulProbeSpec, RESIDUAL_ADD_ENTRY, RMS_NORM_ENTRY, RowWiseProbeSpec,
-    SOFTMAX_ENTRY, emit_dense_matmul_probe, emit_residual_add_probe, emit_rms_norm_probe,
-    emit_softmax_probe,
+    DENSE_MATMUL_ENTRY, DenseMatmulProbeSpec, GELU_PROJECTION_ENTRY, LAYER_NORM_ENTRY,
+    RESIDUAL_ADD_ENTRY, RMS_NORM_ENTRY, RowWiseProbeSpec, SILU_PROJECTION_ENTRY, SOFTMAX_ENTRY,
+    emit_dense_matmul_probe, emit_gelu_projection_probe, emit_layer_norm_probe,
+    emit_residual_add_probe, emit_rms_norm_probe, emit_silu_projection_probe, emit_softmax_probe,
 };
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
 use crate::numeric_dtype_contract::{NumericDType, WeightExecution};
@@ -48,9 +49,14 @@ const DENSE_OPERATION: &str = "micro-oracle.dense-matmul.f32";
 const ROWS: usize = 2;
 const FEATURES: usize = 4;
 const RMS_EPSILON: f32 = 1e-5;
+const LAYER_NORM_EPSILON: f32 = 1e-5;
+const PROJECTION_OUTPUTS: usize = 3;
 const RESIDUAL_OPERATION: &str = "micro-oracle.residual-add.f32";
 const RMS_NORM_OPERATION: &str = "micro-oracle.rms-norm.f32";
 const SOFTMAX_OPERATION: &str = "micro-oracle.attention-softmax.f32";
+const LAYER_NORM_OPERATION: &str = "micro-oracle.layer-norm.f32";
+const SILU_PROJECTION_OPERATION: &str = "micro-oracle.silu-projection.f32";
+const GELU_PROJECTION_OPERATION: &str = "micro-oracle.gelu-projection.f32";
 
 struct ProbeDefinition {
     operation: &'static str,
@@ -354,6 +360,129 @@ fn reference_softmax(operands: &[NumericTensor]) -> Result<NumericTensor, String
     NumericTensor::new("output", vec![ROWS, FEATURES], output)
 }
 
+fn layer_norm_operands() -> Result<Vec<NumericTensor>, String> {
+    Ok(vec![
+        NumericTensor::new(
+            "input",
+            vec![ROWS, FEATURES],
+            vec![1.0, -2.0, 3.0, -4.0, 0.25, 0.5, -0.75, 1.25],
+        )?,
+        NumericTensor::new("weight", vec![FEATURES], vec![0.5, 1.0, 1.5, -0.75])?,
+        NumericTensor::new("bias", vec![FEATURES], vec![0.25, -0.5, 0.75, 1.0])?,
+    ])
+}
+
+fn reference_layer_norm(operands: &[NumericTensor]) -> Result<NumericTensor, String> {
+    let [input, weight, bias] = operands else {
+        return Err(format!(
+            "LayerNorm reference requires 3 operands, got {}",
+            operands.len()
+        ));
+    };
+    if input.shape() != [ROWS, FEATURES]
+        || weight.shape() != [FEATURES]
+        || bias.shape() != [FEATURES]
+    {
+        return Err(format!(
+            "LayerNorm reference shape mismatch: input {:?}, weight {:?}, bias {:?}",
+            input.shape(),
+            weight.shape(),
+            bias.shape()
+        ));
+    }
+    let mut output = Vec::with_capacity(ROWS * FEATURES);
+    for row in input.values().chunks_exact(FEATURES) {
+        let mean = row.iter().copied().sum::<f32>() / FEATURES as f32;
+        let centered = row.iter().map(|value| value - mean).collect::<Vec<_>>();
+        let variance = centered
+            .iter()
+            .fold(0.0f32, |sum, value| sum + value * value)
+            / FEATURES as f32;
+        let inverse_std = (variance + LAYER_NORM_EPSILON).sqrt().recip();
+        output.extend(
+            centered
+                .into_iter()
+                .zip(weight.values())
+                .zip(bias.values())
+                .map(|((value, weight), bias)| value * inverse_std * weight + bias),
+        );
+    }
+    NumericTensor::new("output", vec![ROWS, FEATURES], output)
+}
+
+fn projection_operands() -> Result<Vec<NumericTensor>, String> {
+    Ok(vec![
+        NumericTensor::new(
+            "input",
+            vec![ROWS, FEATURES],
+            vec![1.0, -2.0, 0.5, 3.0, -0.25, 0.75, -1.5, 2.0],
+        )?,
+        NumericTensor::new(
+            "weight",
+            vec![PROJECTION_OUTPUTS, FEATURES],
+            vec![
+                0.5, -1.0, 2.0, 0.25, -2.0, 0.5, 0.75, -0.125, 1.25, 0.0, -0.5, 2.0,
+            ],
+        )?,
+    ])
+}
+
+fn reference_projection(operands: &[NumericTensor]) -> Result<Vec<f32>, String> {
+    let [input, weight] = operands else {
+        return Err(format!(
+            "activation projection reference requires 2 operands, got {}",
+            operands.len()
+        ));
+    };
+    if input.shape() != [ROWS, FEATURES] || weight.shape() != [PROJECTION_OUTPUTS, FEATURES] {
+        return Err(format!(
+            "activation projection reference shape mismatch: input {:?}, weight {:?}",
+            input.shape(),
+            weight.shape()
+        ));
+    }
+    let mut projected = Vec::with_capacity(ROWS * PROJECTION_OUTPUTS);
+    for row in 0..ROWS {
+        for output in 0..PROJECTION_OUTPUTS {
+            let mut accumulator = 0.0f32;
+            for feature in 0..FEATURES {
+                accumulator += input.values()[row * FEATURES + feature]
+                    * weight.values()[output * FEATURES + feature];
+            }
+            projected.push(accumulator);
+        }
+    }
+    Ok(projected)
+}
+
+fn reference_silu_projection(operands: &[NumericTensor]) -> Result<NumericTensor, String> {
+    let output = reference_projection(operands)?
+        .into_iter()
+        .map(|value| {
+            let sigmoid = 1.0f32 / (1.0f32 + (-value).exp());
+            value * sigmoid
+        })
+        .collect();
+    NumericTensor::new("output", vec![ROWS, PROJECTION_OUTPUTS], output)
+}
+
+fn reference_gelu_projection(operands: &[NumericTensor]) -> Result<NumericTensor, String> {
+    let output = reference_projection(operands)?
+        .into_iter()
+        .map(|value| {
+            let squared = value * value;
+            let cubed = squared * value;
+            let nonlinear = 0.044_715f32 * cubed;
+            let inner = value + nonlinear;
+            let scaled = 0.797_884_6f32 * inner;
+            let cdf = 1.0f32 + scaled.tanh();
+            let half_value = 0.5f32 * value;
+            half_value * cdf
+        })
+        .collect();
+    NumericTensor::new("output", vec![ROWS, PROJECTION_OUTPUTS], output)
+}
+
 fn dense_definition() -> Result<ProbeDefinition, String> {
     let operands = dense_operands()?.to_vec();
     Ok(ProbeDefinition {
@@ -481,6 +610,119 @@ fn softmax_definition() -> Result<ProbeDefinition, String> {
         candidate_algorithm: "iree-selected-attention-softmax-unobserved",
         reference: reference_softmax,
     })
+}
+
+fn layer_norm_definition() -> Result<ProbeDefinition, String> {
+    let operands = layer_norm_operands()?;
+    Ok(ProbeDefinition {
+        operation: LAYER_NORM_OPERATION,
+        entry: LAYER_NORM_ENTRY,
+        cache_key: "layer-norm-f32",
+        config_identity: format!(
+            "rows={ROWS};features={FEATURES};epsilon={LAYER_NORM_EPSILON:e};dtype=f32"
+        ),
+        mlir: emit_layer_norm_probe(
+            RowWiseProbeSpec {
+                rows: ROWS,
+                features: FEATURES,
+            },
+            LAYER_NORM_EPSILON,
+        )?,
+        operator_class: OperatorClass::LayerNorm,
+        rounding_boundaries: vec![
+            RoundingBoundary::OperatorInput,
+            RoundingBoundary::AccumulatorResult,
+            RoundingBoundary::BiasAdd,
+            RoundingBoundary::OperatorOutput,
+        ],
+        association: AssociationPolicy::BackendAlgorithm,
+        weights: vec![
+            resident_weight("layer_norm.weight", &operands[1]),
+            resident_weight("layer_norm.bias", &operands[2]),
+        ],
+        operands,
+        dynamic_operand_indices: vec![0],
+        output_shape: vec![ROWS, FEATURES],
+        comparison: ComparisonMode::AbsoluteRelative {
+            absolute: 2e-6,
+            relative: 2e-5,
+        },
+        reference_algorithm: "row-major-centered-square-sum-rsqrt-v1",
+        candidate_algorithm: "iree-selected-layer-norm-unobserved",
+        reference: reference_layer_norm,
+    })
+}
+
+fn activation_projection_definition(
+    operation: &'static str,
+    entry: &'static str,
+    cache_key: &'static str,
+    operator_class: OperatorClass,
+    candidate_algorithm: &'static str,
+    emitter: fn(DenseMatmulProbeSpec) -> Result<String, String>,
+    reference: fn(&[NumericTensor]) -> Result<NumericTensor, String>,
+) -> Result<ProbeDefinition, String> {
+    let operands = projection_operands()?;
+    let spec = DenseMatmulProbeSpec {
+        rows: ROWS,
+        outputs: PROJECTION_OUTPUTS,
+        contraction: FEATURES,
+    };
+    Ok(ProbeDefinition {
+        operation,
+        entry,
+        cache_key,
+        config_identity: format!(
+            "rows={ROWS};outputs={PROJECTION_OUTPUTS};contraction={FEATURES};dtype=f32"
+        ),
+        mlir: emitter(spec)?,
+        operator_class,
+        rounding_boundaries: vec![
+            RoundingBoundary::OperatorInput,
+            RoundingBoundary::AccumulatorResult,
+            RoundingBoundary::ActivationResult,
+            RoundingBoundary::OperatorOutput,
+        ],
+        association: AssociationPolicy::BackendAlgorithm,
+        weights: vec![resident_weight(
+            &format!("{cache_key}.weight"),
+            &operands[1],
+        )],
+        operands,
+        dynamic_operand_indices: vec![0],
+        output_shape: vec![ROWS, PROJECTION_OUTPUTS],
+        comparison: ComparisonMode::AbsoluteRelative {
+            absolute: 3e-6,
+            relative: 3e-5,
+        },
+        reference_algorithm: "row-major-projection-then-activation-v1",
+        candidate_algorithm,
+        reference,
+    })
+}
+
+fn silu_projection_definition() -> Result<ProbeDefinition, String> {
+    activation_projection_definition(
+        SILU_PROJECTION_OPERATION,
+        SILU_PROJECTION_ENTRY,
+        "silu-projection-f32",
+        OperatorClass::SiluProjection,
+        "iree-selected-silu-projection-unobserved",
+        emit_silu_projection_probe,
+        reference_silu_projection,
+    )
+}
+
+fn gelu_projection_definition() -> Result<ProbeDefinition, String> {
+    activation_projection_definition(
+        GELU_PROJECTION_OPERATION,
+        GELU_PROJECTION_ENTRY,
+        "gelu-projection-f32",
+        OperatorClass::GeluProjection,
+        "iree-selected-gelu-projection-unobserved",
+        emit_gelu_projection_probe,
+        reference_gelu_projection,
+    )
 }
 
 fn checked_output_bytes(shape: &[usize]) -> Result<usize, String> {
@@ -638,6 +880,9 @@ pub fn run_core_operator_probes(device: &str) -> Result<Vec<NumericOracleReport>
         residual_definition,
         rms_norm_definition,
         softmax_definition,
+        layer_norm_definition,
+        silu_projection_definition,
+        gelu_projection_definition,
     ]
     .into_iter()
     .map(|definition| execute_probe(device, definition()?))
@@ -686,5 +931,24 @@ mod tests {
         assert!(decode_f32(&[0, 0, 0]).is_err());
         assert!(checked_output_bytes(&[1, 0]).is_err());
         assert!(checked_output_bytes(&[usize::MAX, 2]).is_err());
+    }
+
+    #[test]
+    fn canonical_layer_norm_and_activation_projections_are_finite() {
+        let layer_norm = layer_norm_operands().unwrap();
+        assert!(
+            reference_layer_norm(&layer_norm)
+                .unwrap()
+                .values()
+                .iter()
+                .all(|value| value.is_finite())
+        );
+        let projection = projection_operands().unwrap();
+        for output in [
+            reference_silu_projection(&projection).unwrap(),
+            reference_gelu_projection(&projection).unwrap(),
+        ] {
+            assert!(output.values().iter().all(|value| value.is_finite()));
+        }
     }
 }

@@ -57,7 +57,6 @@ mod gemma3n_schema;
 mod gemma3n_weights;
 mod model;
 mod moe;
-#[cfg(any(feature = "micro-oracle", test))]
 pub(crate) mod numeric_ops;
 mod phi4_audio;
 mod qwen2_vl;
@@ -1113,13 +1112,16 @@ mod tests {
                 .contains("position_mode == 1 ? positions_mrope_dims : positions_1d_dims")
         );
         assert!(
-            source
-                .contains("xla_ctx* c, int32_t position_mode, const xla_tensor_desc* embeddings,"),
+            source.contains(
+                "xla_ctx* c, int32_t adapter_mode, int32_t position_mode,\n    \
+                 const xla_tensor_desc* embeddings,"
+            ),
             "single DeepStack ABI must carry the explicit position mode"
         );
         assert!(
             source.contains(
-                "xla_ctx* c, int32_t slot, int32_t position_mode,\n    const xla_tensor_desc* embeddings,"
+                "xla_ctx* c, int32_t slot, int32_t adapter_mode, int32_t position_mode,\n    \
+                 const xla_tensor_desc* embeddings,"
             ),
             "ragged DeepStack ABI must carry the explicit position mode"
         );

@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Semantically narrow emitters for operator-level numeric probes.
+//! Shared contract-sensitive numeric decompositions and bounded probes.
 //!
-//! These entry points deliberately expose every materialization boundary in
-//! their signature. They reuse the same [`Builder`] operations as production
-//! model emitters without applying graph-wide precision rewrites.
+//! Production emitters and the probe harness call the same helpers so their
+//! materialization order cannot drift independently. Probe entry points keep
+//! each contract boundary explicit and avoid graph-wide precision rewrites.
 
-use super::builder::{Builder, Ty};
+use super::builder::{Builder, Ty, Val};
 
 const MAX_EXACT_F32_INTEGER: usize = 1 << 24;
 
@@ -30,6 +30,12 @@ pub(crate) const RMS_NORM_MODULE: &str = "numeric_rms_norm";
 pub(crate) const RMS_NORM_ENTRY: &str = "numeric_rms_norm.main";
 pub(crate) const SOFTMAX_MODULE: &str = "numeric_attention_softmax";
 pub(crate) const SOFTMAX_ENTRY: &str = "numeric_attention_softmax.main";
+pub(crate) const LAYER_NORM_MODULE: &str = "numeric_layer_norm";
+pub(crate) const LAYER_NORM_ENTRY: &str = "numeric_layer_norm.main";
+pub(crate) const SILU_PROJECTION_MODULE: &str = "numeric_silu_projection";
+pub(crate) const SILU_PROJECTION_ENTRY: &str = "numeric_silu_projection.main";
+pub(crate) const GELU_PROJECTION_MODULE: &str = "numeric_gelu_projection";
+pub(crate) const GELU_PROJECTION_ENTRY: &str = "numeric_gelu_projection.main";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DenseMatmulProbeSpec {
@@ -60,6 +66,156 @@ impl RowWiseProbeSpec {
         }
         Ok(self)
     }
+}
+
+fn validate_row_wise_inputs(operation: &str, value: &Val, parameters: &[&Val]) -> (usize, usize) {
+    assert_eq!(value.ty.shape.len(), 2, "{operation} input must be rank-2");
+    let rows = value.ty.shape[0];
+    let features = value.ty.shape[1];
+    assert!(
+        features <= MAX_EXACT_F32_INTEGER,
+        "{operation} feature count must be exactly representable as f32"
+    );
+    for parameter in parameters {
+        assert_eq!(
+            parameter.ty.shape,
+            [features],
+            "{operation} parameter must match the feature axis"
+        );
+        assert_eq!(
+            parameter.ty.elt, value.ty.elt,
+            "{operation} parameter dtype must match the input"
+        );
+    }
+    (rows, features)
+}
+
+/// Explicit row-wise LayerNorm decomposition shared by production vision
+/// emitters and bounded numeric probes.
+pub(crate) fn layer_norm_2d(
+    builder: &mut Builder,
+    value: &Val,
+    weight: &Val,
+    bias: &Val,
+    epsilon: f32,
+) -> Val {
+    let (rows, features) = validate_row_wise_inputs("LayerNorm", value, &[weight, bias]);
+    assert!(
+        epsilon.is_finite() && epsilon > 0.0,
+        "LayerNorm epsilon must be finite and positive"
+    );
+    let zero = builder.const_f32(0.0);
+    let width_scalar = builder.const_f32(features as f32);
+    let width_rows = builder.broadcast(&width_scalar, &[], vec![rows]);
+    let sum = builder.reduce_add(value, 1, &zero);
+    let mean = builder.divide(&sum, &width_rows);
+    let mean = builder.broadcast(&mean, &[0], vec![rows, features]);
+    let centered = builder.subtract(value, &mean);
+    let squared = builder.multiply(&centered, &centered);
+    let squared_sum = builder.reduce_add(&squared, 1, &zero);
+    let variance = builder.divide(&squared_sum, &width_rows);
+    let epsilon = builder.const_f32(epsilon);
+    let epsilon = builder.broadcast(&epsilon, &[], vec![rows]);
+    let variance = builder.add(&variance, &epsilon);
+    let inv_std = builder.rsqrt(&variance);
+    let inv_std = builder.broadcast(&inv_std, &[0], vec![rows, features]);
+    let normalized = builder.multiply(&centered, &inv_std);
+    let weight = builder.broadcast(weight, &[1], vec![rows, features]);
+    let bias = builder.broadcast(bias, &[1], vec![rows, features]);
+    let normalized = builder.multiply(&normalized, &weight);
+    builder.add(&normalized, &bias)
+}
+
+/// Explicit row-wise RMSNorm decomposition.
+pub(crate) fn rms_norm_2d(builder: &mut Builder, value: &Val, weight: &Val, epsilon: f32) -> Val {
+    let (rows, features) = validate_row_wise_inputs("RMSNorm", value, &[weight]);
+    assert!(
+        epsilon.is_finite() && epsilon > 0.0,
+        "RMSNorm epsilon must be finite and positive"
+    );
+    let zero = builder.const_f32(0.0);
+    let squared = builder.multiply(value, value);
+    let sum = builder.reduce_add(&squared, 1, &zero);
+    let count = builder.const_f32(features as f32);
+    let count = builder.broadcast(&count, &[], vec![rows]);
+    let mean = builder.divide(&sum, &count);
+    let epsilon = builder.const_f32(epsilon);
+    let epsilon = builder.broadcast(&epsilon, &[], vec![rows]);
+    let mean = builder.add(&mean, &epsilon);
+    let inverse_rms = builder.rsqrt(&mean);
+    let inverse_rms = builder.broadcast(&inverse_rms, &[0], value.ty.shape.clone());
+    let normalized = builder.multiply(value, &inverse_rms);
+    let weight = builder.broadcast(weight, &[1], value.ty.shape.clone());
+    builder.multiply(&normalized, &weight)
+}
+
+/// Exact-erf GELU decomposition used by vision projector paths.
+pub(crate) fn exact_gelu(builder: &mut Builder, value: &Val) -> Val {
+    let shape = value.ty.shape.clone();
+    let half = builder.const_f32(0.5);
+    let half = builder.broadcast(&half, &[], shape.clone());
+    let one = builder.const_f32(1.0);
+    let one = builder.broadcast(&one, &[], shape.clone());
+    let inv_sqrt_two = builder.const_f32(std::f32::consts::FRAC_1_SQRT_2);
+    let inv_sqrt_two = builder.broadcast(&inv_sqrt_two, &[], shape);
+    let scaled = builder.multiply(value, &inv_sqrt_two);
+    let erf = builder.erf(&scaled);
+    let cdf = builder.add(&one, &erf);
+    let half_value = builder.multiply(value, &half);
+    builder.multiply(&half_value, &cdf)
+}
+
+/// PyTorch tanh-approximation GELU decomposition.
+pub(crate) fn tanh_gelu(builder: &mut Builder, value: &Val) -> Val {
+    let shape = value.ty.shape.clone();
+    let half = builder.const_f32(0.5);
+    let half = builder.broadcast(&half, &[], shape.clone());
+    let one = builder.const_f32(1.0);
+    let one = builder.broadcast(&one, &[], shape.clone());
+    let coefficient = builder.const_f32(0.044_715);
+    let coefficient = builder.broadcast(&coefficient, &[], shape.clone());
+    let scale = builder.const_f32(0.797_884_6);
+    let scale = builder.broadcast(&scale, &[], shape);
+    let squared = builder.multiply(value, value);
+    let cubed = builder.multiply(&squared, value);
+    let nonlinear = builder.multiply(&coefficient, &cubed);
+    let inner = builder.add(value, &nonlinear);
+    let scaled = builder.multiply(&scale, &inner);
+    let tanh = builder.tanh(&scaled);
+    let cdf = builder.add(&one, &tanh);
+    let half_value = builder.multiply(value, &half);
+    builder.multiply(&half_value, &cdf)
+}
+
+/// SiLU decomposition with an explicit activation materialization boundary.
+pub(crate) fn silu(builder: &mut Builder, value: &Val) -> Val {
+    let one = builder.const_f32(1.0);
+    let one = builder.broadcast(&one, &[], value.ty.shape.clone());
+    let negative = builder.negate(value);
+    let exponential = builder.exponential(&negative);
+    let denominator = builder.add(&one, &exponential);
+    let sigmoid = builder.divide(&one, &denominator);
+    builder.multiply(value, &sigmoid)
+}
+
+/// Numerically stable softmax with an explicit reduction axis.
+pub(crate) fn stable_softmax(builder: &mut Builder, value: &Val, axis: usize) -> Val {
+    assert!(
+        axis < value.ty.shape.len(),
+        "softmax axis must be within the input rank"
+    );
+    let negative_infinity = builder.const_f32(f32::NEG_INFINITY);
+    let maximum = builder.reduce_max(value, axis, &negative_infinity);
+    let kept_axes = (0..value.ty.shape.len())
+        .filter(|candidate| *candidate != axis)
+        .collect::<Vec<_>>();
+    let maximum = builder.broadcast(&maximum, &kept_axes, value.ty.shape.clone());
+    let shifted = builder.subtract(value, &maximum);
+    let exponentials = builder.exponential(&shifted);
+    let zero = builder.const_f32(0.0);
+    let sum = builder.reduce_add(&exponentials, axis, &zero);
+    let sum = builder.broadcast(&sum, &kept_axes, value.ty.shape.clone());
+    builder.divide(&exponentials, &sum)
 }
 
 /// Emit `output[rows, outputs] = input[rows, contraction] @
@@ -135,20 +291,7 @@ pub(crate) fn emit_rms_norm_probe(spec: RowWiseProbeSpec, epsilon: f32) -> Resul
     let weight = Builder::arg(0, weight_ty.clone());
     let input = Builder::arg(1, input_ty.clone());
     let mut builder = Builder::new();
-    let zero = builder.const_f32(0.0);
-    let squared = builder.multiply(&input, &input);
-    let sum = builder.reduce_add(&squared, 1, &zero);
-    let count = builder.const_f32(spec.features as f32);
-    let count = builder.broadcast(&count, &[], vec![spec.rows]);
-    let mean = builder.divide(&sum, &count);
-    let epsilon = builder.const_f32(epsilon);
-    let epsilon = builder.broadcast(&epsilon, &[], vec![spec.rows]);
-    let mean = builder.add(&mean, &epsilon);
-    let inverse_rms = builder.rsqrt(&mean);
-    let inverse_rms = builder.broadcast(&inverse_rms, &[0], input_ty.shape.clone());
-    let normalized = builder.multiply(&input, &inverse_rms);
-    let weight = builder.broadcast(&weight, &[1], input_ty.shape.clone());
-    let output = builder.multiply(&normalized, &weight);
+    let output = rms_norm_2d(&mut builder, &input, &weight, epsilon);
     Ok(format!(
         "module @{RMS_NORM_MODULE} {{\n  \
          func.func public @main(%arg0: {weight_ty}, %arg1: {input_ty}) -> {input_ty} {{\n\
@@ -167,15 +310,7 @@ pub(crate) fn emit_softmax_probe(spec: RowWiseProbeSpec) -> Result<String, Strin
     let input_ty = Ty::f32(vec![spec.rows, spec.features]);
     let input = Builder::arg(1, input_ty.clone());
     let mut builder = Builder::new();
-    let negative_infinity = builder.const_f32(f32::NEG_INFINITY);
-    let maximum = builder.reduce_max(&input, 1, &negative_infinity);
-    let maximum = builder.broadcast(&maximum, &[0], input_ty.shape.clone());
-    let shifted = builder.subtract(&input, &maximum);
-    let exponentials = builder.exponential(&shifted);
-    let zero = builder.const_f32(0.0);
-    let sum = builder.reduce_add(&exponentials, 1, &zero);
-    let sum = builder.broadcast(&sum, &[0], input_ty.shape.clone());
-    let output = builder.divide(&exponentials, &sum);
+    let output = stable_softmax(&mut builder, &input, 1);
     Ok(format!(
         "module @{SOFTMAX_MODULE} {{\n  \
          func.func public @main(%arg0: {dummy_ty}, %arg1: {input_ty}) -> {input_ty} {{\n\
@@ -185,6 +320,77 @@ pub(crate) fn emit_softmax_probe(spec: RowWiseProbeSpec) -> Result<String, Strin
         body = builder.body(),
         output = output.name,
     ))
+}
+
+/// Emit row-wise f32 LayerNorm with resident affine weight and bias.
+pub(crate) fn emit_layer_norm_probe(
+    spec: RowWiseProbeSpec,
+    epsilon: f32,
+) -> Result<String, String> {
+    let spec = spec.validate("LayerNorm")?;
+    if spec.features > MAX_EXACT_F32_INTEGER {
+        return Err(format!(
+            "LayerNorm probe feature count {} exceeds the largest consecutive integer exactly \
+             representable as f32 ({MAX_EXACT_F32_INTEGER})",
+            spec.features
+        ));
+    }
+    if !epsilon.is_finite() || epsilon <= 0.0 {
+        return Err("LayerNorm probe epsilon must be finite and positive".to_string());
+    }
+    let parameter_ty = Ty::f32(vec![spec.features]);
+    let input_ty = Ty::f32(vec![spec.rows, spec.features]);
+    let weight = Builder::arg(0, parameter_ty.clone());
+    let bias = Builder::arg(1, parameter_ty.clone());
+    let input = Builder::arg(2, input_ty.clone());
+    let mut builder = Builder::new();
+    let output = layer_norm_2d(&mut builder, &input, &weight, &bias, epsilon);
+    Ok(format!(
+        "module @{LAYER_NORM_MODULE} {{\n  \
+         func.func public @main(%arg0: {parameter_ty}, %arg1: {parameter_ty}, %arg2: {input_ty}) \
+         -> {input_ty} {{\n\
+         {body}    return {output} : {input_ty}\n  }}\n}}\n",
+        parameter_ty = parameter_ty.render(),
+        input_ty = input_ty.render(),
+        body = builder.body(),
+        output = output.name,
+    ))
+}
+
+fn emit_activation_projection_probe(
+    spec: DenseMatmulProbeSpec,
+    module: &str,
+    activation: fn(&mut Builder, &Val) -> Val,
+) -> Result<String, String> {
+    let spec = spec.validate()?;
+    let weight_ty = Ty::f32(vec![spec.outputs, spec.contraction]);
+    let input_ty = Ty::f32(vec![spec.rows, spec.contraction]);
+    let output_ty = Ty::f32(vec![spec.rows, spec.outputs]);
+    let weight = Builder::arg(0, weight_ty.clone());
+    let input = Builder::arg(1, input_ty.clone());
+    let mut builder = Builder::new();
+    let projected = builder.linear_seq(&input, &weight);
+    let output = activation(&mut builder, &projected);
+    Ok(format!(
+        "module @{module} {{\n  \
+         func.func public @main(%arg0: {weight_ty}, %arg1: {input_ty}) -> {output_ty} {{\n\
+         {body}    return {output} : {output_ty}\n  }}\n}}\n",
+        weight_ty = weight_ty.render(),
+        input_ty = input_ty.render(),
+        output_ty = output_ty.render(),
+        body = builder.body(),
+        output = output.name,
+    ))
+}
+
+/// Emit dense projection followed by explicit SiLU materialization.
+pub(crate) fn emit_silu_projection_probe(spec: DenseMatmulProbeSpec) -> Result<String, String> {
+    emit_activation_projection_probe(spec, SILU_PROJECTION_MODULE, silu)
+}
+
+/// Emit dense projection followed by PyTorch tanh GELU materialization.
+pub(crate) fn emit_gelu_projection_probe(spec: DenseMatmulProbeSpec) -> Result<String, String> {
+    emit_activation_projection_probe(spec, GELU_PROJECTION_MODULE, tanh_gelu)
 }
 
 #[cfg(test)]
@@ -296,5 +502,58 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn layer_norm_probe_pins_center_variance_affine_order() {
+        let graph = emit_layer_norm_probe(
+            RowWiseProbeSpec {
+                rows: 2,
+                features: 4,
+            },
+            1e-5,
+        )
+        .unwrap();
+        assert!(graph.starts_with("module @numeric_layer_norm {"));
+        assert_eq!(
+            graph
+                .matches("applies stablehlo.add across dimensions = [1]")
+                .count(),
+            2
+        );
+        assert!(graph.contains("stablehlo.subtract"));
+        assert!(graph.contains("stablehlo.rsqrt"));
+        assert!(!graph.contains("stablehlo.convert"));
+    }
+
+    #[test]
+    fn activation_projection_probes_pin_matmul_before_activation() {
+        let spec = DenseMatmulProbeSpec {
+            rows: 2,
+            outputs: 3,
+            contraction: 4,
+        };
+        let silu_graph = emit_silu_projection_probe(spec).unwrap();
+        let silu_dot = silu_graph.find("stablehlo.dot_general").unwrap();
+        let silu_exp = silu_graph.find("stablehlo.exponential").unwrap();
+        assert!(silu_dot < silu_exp);
+        assert!(silu_graph.contains("stablehlo.negate"));
+
+        let gelu_graph = emit_gelu_projection_probe(spec).unwrap();
+        let gelu_dot = gelu_graph.find("stablehlo.dot_general").unwrap();
+        let gelu_tanh = gelu_graph.find("stablehlo.tanh").unwrap();
+        assert!(gelu_dot < gelu_tanh);
+        assert!(gelu_graph.contains("0x3D372713"));
+        assert!(!gelu_graph.contains("chlo.erf"));
+    }
+
+    #[test]
+    fn exact_gelu_uses_erf_not_tanh() {
+        let input = Builder::arg(0, Ty::f32(vec![2, 3]));
+        let mut builder = Builder::new();
+        let _ = exact_gelu(&mut builder, &input);
+        let body = builder.body();
+        assert!(body.contains("chlo.erf"));
+        assert!(!body.contains("stablehlo.tanh"));
     }
 }

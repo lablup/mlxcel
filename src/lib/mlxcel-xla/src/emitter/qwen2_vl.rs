@@ -25,6 +25,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::builder::{Builder, Ty, Val};
+use super::numeric_ops::{exact_gelu, layer_norm_2d as layer_norm, stable_softmax, tanh_gelu};
 
 /// Qualified flattened-patch capacities for the pinned Qwen2-VL image path.
 ///
@@ -520,67 +521,6 @@ fn linear_2d(builder: &mut Builder, value: &Val, weight: &Val, bias: &Val) -> Va
     bias_2d(builder, &value, bias)
 }
 
-fn layer_norm(builder: &mut Builder, value: &Val, weight: &Val, bias: &Val, epsilon: f32) -> Val {
-    let rows = value.ty.shape[0];
-    let width = value.ty.shape[1];
-    let zero = builder.const_f32(0.0);
-    let width_scalar = builder.const_f32(width as f32);
-    let width_rows = builder.broadcast(&width_scalar, &[], vec![rows]);
-    let sum = builder.reduce_add(value, 1, &zero);
-    let mean = builder.divide(&sum, &width_rows);
-    let mean = builder.broadcast(&mean, &[0], vec![rows, width]);
-    let centered = builder.subtract(value, &mean);
-    let squared = builder.multiply(&centered, &centered);
-    let squared_sum = builder.reduce_add(&squared, 1, &zero);
-    let variance = builder.divide(&squared_sum, &width_rows);
-    let epsilon = builder.const_f32(epsilon);
-    let epsilon = builder.broadcast(&epsilon, &[], vec![rows]);
-    let variance = builder.add(&variance, &epsilon);
-    let inv_std = builder.rsqrt(&variance);
-    let inv_std = builder.broadcast(&inv_std, &[0], vec![rows, width]);
-    let normalized = builder.multiply(&centered, &inv_std);
-    let weight = builder.broadcast(weight, &[1], vec![rows, width]);
-    let bias = builder.broadcast(bias, &[1], vec![rows, width]);
-    let normalized = builder.multiply(&normalized, &weight);
-    builder.add(&normalized, &bias)
-}
-
-fn exact_gelu(builder: &mut Builder, value: &Val) -> Val {
-    let shape = value.ty.shape.clone();
-    let half = builder.const_f32(0.5);
-    let half = builder.broadcast(&half, &[], shape.clone());
-    let one = builder.const_f32(1.0);
-    let one = builder.broadcast(&one, &[], shape.clone());
-    let inv_sqrt_two = builder.const_f32(std::f32::consts::FRAC_1_SQRT_2);
-    let inv_sqrt_two = builder.broadcast(&inv_sqrt_two, &[], shape);
-    let scaled = builder.multiply(value, &inv_sqrt_two);
-    let erf = builder.erf(&scaled);
-    let cdf = builder.add(&one, &erf);
-    let half_value = builder.multiply(value, &half);
-    builder.multiply(&half_value, &cdf)
-}
-
-fn tanh_gelu(builder: &mut Builder, value: &Val) -> Val {
-    let shape = value.ty.shape.clone();
-    let half = builder.const_f32(0.5);
-    let half = builder.broadcast(&half, &[], shape.clone());
-    let one = builder.const_f32(1.0);
-    let one = builder.broadcast(&one, &[], shape.clone());
-    let coefficient = builder.const_f32(0.044_715);
-    let coefficient = builder.broadcast(&coefficient, &[], shape.clone());
-    let scale = builder.const_f32(0.797_884_6);
-    let scale = builder.broadcast(&scale, &[], shape);
-    let squared = builder.multiply(value, value);
-    let cubed = builder.multiply(&squared, value);
-    let nonlinear = builder.multiply(&coefficient, &cubed);
-    let inner = builder.add(value, &nonlinear);
-    let scaled = builder.multiply(&scale, &inner);
-    let tanh = builder.tanh(&scaled);
-    let cdf = builder.add(&one, &tanh);
-    let half_value = builder.multiply(value, &half);
-    builder.multiply(&half_value, &cdf)
-}
-
 fn rotate_half(builder: &mut Builder, value: &Val) -> Val {
     let tokens = value.ty.shape[0];
     let heads = value.ty.shape[1];
@@ -655,15 +595,7 @@ fn attention(
     let attention_bias =
         builder.broadcast(attention_bias, &[1, 2], vec![config.heads, tokens, tokens]);
     let scores = builder.add(&scores, &attention_bias);
-    let negative_infinity = builder.const_f32(f32::NEG_INFINITY);
-    let maximum = builder.reduce_max(&scores, 2, &negative_infinity);
-    let maximum = builder.broadcast(&maximum, &[0, 1], vec![config.heads, tokens, tokens]);
-    let shifted = builder.subtract(&scores, &maximum);
-    let exponentials = builder.exponential(&shifted);
-    let zero = builder.const_f32(0.0);
-    let denominator = builder.reduce_add(&exponentials, 2, &zero);
-    let denominator = builder.broadcast(&denominator, &[0, 1], vec![config.heads, tokens, tokens]);
-    let probabilities = builder.divide(&exponentials, &denominator);
+    let probabilities = stable_softmax(builder, &scores, 2);
     let context = builder.dot_general(
         &probabilities,
         &v,
