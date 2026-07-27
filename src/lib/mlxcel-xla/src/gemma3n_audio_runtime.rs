@@ -577,12 +577,12 @@ impl Gemma3nAudioIreeRuntime {
             text.n_layers,
             text.hidden_per_layer_input,
         )?;
-        let encode_contract = AuxiliaryArtifactContract::new(
+        let encode_contract = AuxiliaryArtifactContract::new_legacy_unqualified(
             "audio_encode.main",
             format!("encode:{identity}:language={language_fingerprint:016x}"),
             generation_identity(&compiler, &flags, &encode_mlir)?,
         )?;
-        let merge_contract = AuxiliaryArtifactContract::new(
+        let merge_contract = AuxiliaryArtifactContract::new_legacy_unqualified(
             "audio_merge_ple.main",
             format!(
                 "merge:{identity}:context={context_capacity}:text={}:language={language_fingerprint:016x}",
@@ -1004,8 +1004,12 @@ mod tests {
         let first_generation =
             generation_identity_from_version(&compiler, &["--target=cuda"], "mlir", "v1").unwrap();
         assert!(first_generation.contains(&sha256_hex(b"compiler-build-a")));
-        let first_contract =
-            AuxiliaryArtifactContract::new("audio.main", "config=v1", &first_generation).unwrap();
+        let first_contract = AuxiliaryArtifactContract::new_legacy_unqualified(
+            "audio.main",
+            "config=v1",
+            &first_generation,
+        )
+        .unwrap();
         let mut compile_count = 0usize;
         ensure_qualified_auxiliary_artifact(&vmfb, &first_contract, &weights, |temporary| {
             compile_count += 1;
@@ -1018,8 +1022,12 @@ mod tests {
         let second_generation =
             generation_identity_from_version(&compiler, &["--target=cuda"], "mlir", "v1").unwrap();
         assert_ne!(first_generation, second_generation);
-        let second_contract =
-            AuxiliaryArtifactContract::new("audio.main", "config=v1", second_generation).unwrap();
+        let second_contract = AuxiliaryArtifactContract::new_legacy_unqualified(
+            "audio.main",
+            "config=v1",
+            second_generation,
+        )
+        .unwrap();
         ensure_qualified_auxiliary_artifact(&vmfb, &second_contract, &weights, |temporary| {
             compile_count += 1;
             std::fs::write(temporary, b"vmfb-b")
