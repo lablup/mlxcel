@@ -350,15 +350,83 @@ fn prepare_youtu_vl_prompt(
     vision_start_token_id: i32,
     vision_end_token_id: i32,
 ) -> Result<(Vec<i32>, i32), HostPreprocessorError> {
-    let mut logical_tokens = token_ids.to_vec();
-    if logical_tokens.contains(&image_token_id) {
-        return Ok((logical_tokens, image_token_id));
+    let merge = i32::try_from(spatial_merge_size).map_err(|_| {
+        HostPreprocessorError::InvalidConfig(
+            "Youtu-VL spatial merge size exceeds i32::MAX".to_string(),
+        )
+    })?;
+    if merge == 0 {
+        return Err(HostPreprocessorError::InvalidConfig(
+            "Youtu-VL spatial merge size must be positive".to_string(),
+        ));
     }
-    if logical_tokens.contains(&video_token_id) {
+    let expected_per_image = spatial_shapes
+        .iter()
+        .map(|&(height, width)| {
+            if height <= 0 || width <= 0 || height % merge != 0 || width % merge != 0 {
+                return Err(HostPreprocessorError::InvalidConfig(format!(
+                    "Youtu-VL spatial shape [{height}, {width}] must be positive and divisible by merge size {merge}"
+                )));
+            }
+            let tokens = (height / merge)
+                .checked_mul(width / merge)
+                .ok_or(HostPreprocessorError::ShapeOverflow)?;
+            usize::try_from(tokens)
+                .map_err(|_| HostPreprocessorError::ShapeOverflow)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let expected_total = expected_per_image
+        .iter()
+        .try_fold(0usize, |total, &tokens| {
+            total
+                .checked_add(tokens)
+                .ok_or(HostPreprocessorError::ShapeOverflow)
+        })?;
+
+    let expand_existing = |target_token_id| {
+        let actual = token_ids
+            .iter()
+            .filter(|&&token| token == target_token_id)
+            .count();
+        if actual == expected_total {
+            return Ok(token_ids.to_vec());
+        }
+        if actual != expected_per_image.len() {
+            return Err(HostPreprocessorError::ExpandedLength {
+                actual,
+                expected: expected_total,
+            });
+        }
+        let capacity = token_ids
+            .len()
+            .checked_sub(actual)
+            .and_then(|length| length.checked_add(expected_total))
+            .ok_or(HostPreprocessorError::ShapeOverflow)?;
+        let mut expanded = Vec::with_capacity(capacity);
+        let mut image_index = 0usize;
+        for &token in token_ids {
+            if token == target_token_id {
+                expanded.extend(std::iter::repeat_n(
+                    target_token_id,
+                    expected_per_image[image_index],
+                ));
+                image_index += 1;
+            } else {
+                expanded.push(token);
+            }
+        }
+        Ok(expanded)
+    };
+
+    if token_ids.contains(&image_token_id) {
+        return expand_existing(image_token_id).map(|tokens| (tokens, image_token_id));
+    }
+    if token_ids.contains(&video_token_id) {
         // Placeholder compatibility only: the request boundary remains
         // image-only until a video preprocessing oracle is qualified.
-        return Ok((logical_tokens, video_token_id));
+        return expand_existing(video_token_id).map(|tokens| (tokens, video_token_id));
     }
+    let mut logical_tokens = token_ids.to_vec();
     insert_youtu_vl_image_tokens(
         &mut logical_tokens,
         spatial_shapes,

@@ -58,7 +58,7 @@ fn youtu_vl_placeholder_selection_prefers_image_then_video_then_insertion() {
         prepare_youtu_vl_prompt(&[1, VIDEO, IMAGE, 2], &shapes, 2, IMAGE, VIDEO, START, END)
             .unwrap();
     assert_eq!(target, IMAGE);
-    assert_eq!(tokens, vec![1, VIDEO, IMAGE, 2]);
+    assert_eq!(tokens, vec![1, VIDEO, IMAGE, IMAGE, IMAGE, IMAGE, 2]);
 
     let (tokens, target) = prepare_youtu_vl_prompt(
         &[1, VIDEO, VIDEO, VIDEO, VIDEO, 2],
@@ -77,6 +77,44 @@ fn youtu_vl_placeholder_selection_prefers_image_then_video_then_insertion() {
         prepare_youtu_vl_prompt(&[1, 2], &shapes, 2, IMAGE, VIDEO, START, END).unwrap();
     assert_eq!(target, IMAGE);
     assert_eq!(tokens, vec![1, START, IMAGE, IMAGE, IMAGE, IMAGE, END, 2]);
+}
+
+#[cfg(feature = "xla-iree")]
+#[test]
+fn youtu_vl_prompt_expands_one_placeholder_per_image() {
+    const IMAGE: i32 = 100;
+    const VIDEO: i32 = 101;
+    const START: i32 = 102;
+    const END: i32 = 103;
+
+    let (tokens, target) = prepare_youtu_vl_prompt(
+        &[1, IMAGE, 2, IMAGE, 3],
+        &[(4, 4), (2, 2)],
+        2,
+        IMAGE,
+        VIDEO,
+        START,
+        END,
+    )
+    .unwrap();
+
+    assert_eq!(target, IMAGE);
+    assert_eq!(tokens, vec![1, IMAGE, IMAGE, IMAGE, IMAGE, 2, IMAGE, 3]);
+}
+
+#[cfg(feature = "xla-iree")]
+#[test]
+fn youtu_vl_prompt_rejects_ambiguous_partial_expansion() {
+    const IMAGE: i32 = 100;
+    let error = prepare_youtu_vl_prompt(&[1, IMAGE, IMAGE, 2], &[(4, 4)], 2, IMAGE, 101, 102, 103)
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        HostPreprocessorError::ExpandedLength {
+            actual: 2,
+            expected: 4
+        }
+    ));
 }
 
 #[cfg(feature = "xla-iree")]
