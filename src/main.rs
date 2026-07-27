@@ -1849,6 +1849,8 @@ const FAMILY_ORDER: &[&str] = &[
     "GLM VLM",
     "Kimi VLM",
     "PaddleOCR VLM",
+    "MiniMax VLM",
+    "Step VLM",
     "Other VLM",
 ];
 
