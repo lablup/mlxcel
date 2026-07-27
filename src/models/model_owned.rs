@@ -120,6 +120,19 @@ impl<T> ModelOwnedSequenceState<T> {
     pub(crate) fn release_sequence_state(&self, seq_id: SequenceId) {
         self.sequences.borrow_mut().remove(&seq_id);
     }
+
+    /// Take ownership of the per-sequence state for `seq_id`, removing it
+    /// from the slot. Returns `None` when no state exists for the id.
+    ///
+    /// The caller must either re-insert the state (via
+    /// [`replace_sequence_state`]) or release it permanently (via
+    /// [`release_sequence_state`]). Dropping the returned `Vec` while a
+    /// stale entry remains in the caller's view is safe — the next lookup
+    /// will see `None` and the model-owned slot reverts to the internal
+    /// cache pool.
+    pub(crate) fn take_sequence_state(&self, seq_id: SequenceId) -> Option<Vec<T>> {
+        self.sequences.borrow_mut().remove(&seq_id)
+    }
 }
 
 // Used by: Gemma3 paged decode, model-owned cache families with materialized visible views
