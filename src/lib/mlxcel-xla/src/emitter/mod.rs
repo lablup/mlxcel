@@ -57,6 +57,8 @@ mod gemma3n_schema;
 mod gemma3n_weights;
 mod model;
 mod moe;
+#[cfg(any(feature = "micro-oracle", test))]
+pub(crate) mod numeric_ops;
 mod phi4_audio;
 mod qwen2_vl;
 mod rope;

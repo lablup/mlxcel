@@ -333,6 +333,13 @@ required-features = ["xla-diagnostics"]
 name = "xla_aux_smoke"
 required-features = ["xla-iree"]
 
+# Bounded canonical-decomposition vs emitted IREE operator probes. The root
+# example owns the static IREE runtime link recipe, while the reusable harness
+# remains in mlxcel-xla behind the CPU-capable micro-oracle feature.
+[[example]]
+name = "xla_numeric_probe"
+required-features = ["xla-micro-oracle"]
+
 # Pinned #874 MLX-vs-IREE Phi4MM Conformer and speech/vision projection parity.
 [[example]]
 name = "xla_phi4_audio_check"
