@@ -444,7 +444,7 @@ fn compile_vision_module(
     let graph_identity = diagnostic_identity
         .map(|identity| format!("{};diagnostics={identity}", config.fingerprint()))
         .unwrap_or_else(|| config.fingerprint());
-    let contract = AuxiliaryArtifactContract::new(
+    let contract = AuxiliaryArtifactContract::new_legacy_unqualified(
         ENTRY_NAME,
         format!(
             "{graph_identity};checkpoint_schema_sha256={}",
