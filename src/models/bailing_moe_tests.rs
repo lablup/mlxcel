@@ -1562,6 +1562,95 @@ fn validate_weights_rejects_a_quantized_projection_packed_for_a_different_input_
     assert!(err.contains("same shape"), "{err}");
 }
 
+#[test]
+fn validate_weights_rejects_an_output_head_that_disagrees_with_the_config() {
+    // The output head is the one projection nothing else in the loader checks,
+    // and the axis that aborts the process is not the row count. Rows only
+    // bound an argmax over the logits. The input width is the inner dimension
+    // of the matmul that produces them, and MLX throws on a mismatch rather
+    // than broadcasting, which crosses the cxx bridge as an uncatchable abort
+    // at the first forward pass.
+    let args = tiny_args();
+    let hidden = args.hidden_size as i32;
+    let vocab = args.vocab_size as i32;
+
+    // The positive control first, so the guard cannot be passing by rejecting
+    // every head.
+    validate_weights(&tiny_weights(&args), &args).expect("the tiny checkpoint must pass");
+
+    // A head built for a different model width. The row count is still exactly
+    // `vocab_size`, so nothing but the input axis can see this.
+    let mut narrow = tiny_weights(&args);
+    narrow.insert("lm_head.weight".into(), filled(&[vocab, hidden - 8]));
+    let err =
+        validate_weights(&narrow, &args).unwrap_err_or_panic("an output head of the wrong width");
+    assert!(err.contains("lm_head.weight"), "{err}");
+
+    // A head that does not cover the vocabulary the config declares.
+    let mut short = tiny_weights(&args);
+    short.insert("lm_head.weight".into(), filled(&[vocab - 4, hidden]));
+    assert!(
+        validate_weights(&short, &args)
+            .unwrap_err_or_panic("an output head short of vocab_size")
+            .contains("lm_head.weight")
+    );
+
+    // A missing head is named rather than surfacing later.
+    let mut absent = tiny_weights(&args);
+    absent.remove("lm_head.weight");
+    assert!(
+        validate_weights(&absent, &args)
+            .unwrap_err_or_panic("a missing output head")
+            .contains("lm_head.weight")
+    );
+
+    // Tied embeddings ship no head at all, so the guard must not demand one.
+    let mut tied_args = args.clone();
+    tied_args.tie_word_embeddings = true;
+    let mut tied = tiny_weights(&tied_args);
+    tied.remove("lm_head.weight");
+    validate_weights(&tied, &tied_args).expect("a tied checkpoint ships no lm_head");
+
+    // The quantized head, which is the form that actually reaches
+    // `quantized_matmul`: packing compresses the input axis only, so the row
+    // count is still exactly `vocab_size` and only `scales.shape(-1) *
+    // group_size` says which width the tensor was built for.
+    let mut quant_args = tiny_args();
+    quant_args.quantization = Some(Quantization {
+        group_size: 32,
+        bits: 4,
+    });
+    let packed_in = hidden * quant_args.bits() / 32;
+    assert_eq!(hidden / quant_args.group_size(), 1);
+
+    let mut honest = tiny_weights(&quant_args);
+    honest.insert("lm_head.weight".into(), ones(&[vocab, packed_in]));
+    honest.insert("lm_head.scales".into(), filled(&[vocab, 1]));
+    honest.insert("lm_head.biases".into(), filled(&[vocab, 1]));
+    validate_weights(&honest, &quant_args).expect("a consistently packed head must load");
+
+    let mut mispacked = tiny_weights(&quant_args);
+    mispacked.insert("lm_head.weight".into(), ones(&[vocab, packed_in]));
+    mispacked.insert("lm_head.scales".into(), filled(&[vocab, 2]));
+    mispacked.insert("lm_head.biases".into(), filled(&[vocab, 2]));
+    let err = validate_weights(&mispacked, &quant_args)
+        .unwrap_err_or_panic("a head packed for a different input width");
+    assert!(err.contains("input width"), "{err}");
+
+    // The same reconstruction applied to the token table, whose width the
+    // shared `validate_embedding_table` deliberately leaves to the scales.
+    let mut table = tiny_weights(&quant_args);
+    table.insert(
+        "model.word_embeddings.weight".into(),
+        ones(&[vocab, packed_in]),
+    );
+    table.insert("model.word_embeddings.scales".into(), filled(&[vocab, 2]));
+    table.insert("model.word_embeddings.biases".into(), filled(&[vocab, 2]));
+    let err = validate_weights(&table, &quant_args)
+        .unwrap_err_or_panic("a token table packed for a different input width");
+    assert!(err.contains("input width"), "{err}");
+}
+
 // Construction and forward.
 
 #[test]

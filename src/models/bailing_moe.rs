@@ -1208,6 +1208,37 @@ pub fn validate_weights(weights: &WeightMap, args: &ModelArgs) -> Result<(), Str
 
     validate_norm(weights, "model.norm.weight", hidden)?;
 
+    // The token table's row count is checked against `vocab_size` by
+    // `validate_embedding_table` in `from_weights`, which checks the width only
+    // on the float path because a packed width is not the model width. A packed
+    // table still has to describe `hidden_size` once unpacked, and MLX
+    // reconstructs that as `scales.shape(-1) * group_size`, so a table packed
+    // for a different width reaches the first RMSNorm as the wrong shape and
+    // throws there rather than at load. A no-op for an unquantized table.
+    validate_quantized_packing(weights, "model.word_embeddings", hidden, group_size, bits)?;
+
+    // The output head, which nothing else checks. The axis that aborts the
+    // process is not the row count: rows only bound an argmax over the logits.
+    // It is the input width, the inner dimension of the matmul that produces
+    // those logits. MLX throws `std::invalid_argument` when it disagrees with
+    // the hidden state, and `matmul` and `quantized_matmul` cross the cxx bridge
+    // as `UniquePtr<MlxArray>` rather than a `Result`, so that throw is an
+    // uncatchable `std::terminate` at the first forward pass rather than a load
+    // error. The row count is checked exactly because upstream loads this tensor
+    // into an `nn.Linear(hidden_size, vocab_size)` under a strict
+    // `load_weights`, so an inexact head is not a checkpoint the reference
+    // accepts either.
+    if !args.tie_word_embeddings {
+        validate_projection(
+            weights,
+            "lm_head",
+            args.vocab_size,
+            hidden,
+            group_size,
+            bits,
+        )?;
+    }
+
     for layer in 0..args.num_hidden_layers {
         let prefix = format!("model.layers.{layer}");
         let attention = format!("{prefix}.attention");

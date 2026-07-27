@@ -1820,6 +1820,7 @@ const FAMILY_ORDER: &[&str] = &[
     "GLM",
     "ERNIE",
     "Hunyuan",
+    "Bailing",
     "Granite",
     "ExaOne",
     "Solar",

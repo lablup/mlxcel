@@ -645,10 +645,10 @@ fn scatter_unsort(x: &MlxArray, inv_order: &MlxArray, orig_shape: &[i32]) -> Uni
 
 /// Weighted sum over selected expert outputs while preserving the residual dtype.
 ///
-/// Used by: DeepSeek, DeepSeekV3, DeepSeekV32, ExaOneMoe, Ernie4_5Moe,
-///          GLM4Moe, GLM4MoeLite, GptOss, HunyuanMoe, KimiLinear, MiniMax,
-///          Mistral4, Mixtral, Moondream3, OLMoE, PhiMoE, Qwen2Moe, Qwen3Moe,
-///          Qwen3Next, Qwen3VLMoe, SolarOpen, Step3p5
+/// Used by: BailingMoe, DeepSeek, DeepSeekV3, DeepSeekV32, ExaOneMoe,
+///          Ernie4_5Moe, GLM4Moe, GLM4MoeLite, GptOss, HunyuanMoe, KimiLinear,
+///          MiniMax, Mistral4, Mixtral, Moondream3, OLMoE, PhiMoE, Qwen2Moe,
+///          Qwen3Moe, Qwen3Next, Qwen3VLMoe, SolarOpen, Step3p5
 ///
 /// The old `nkh,nk->nh` einsum contraction promotes the combine to float32
 /// on M5 for bf16/f16 activations. Match mlx-lm's `y * scores[..., None]`
@@ -675,7 +675,7 @@ pub fn moe_weighted_sum(
 /// Selects the top `topk_group` expert groups (by sum of top-2 scores per group)
 /// and zeros out scores for experts in non-selected groups.
 ///
-/// Used by: DeepSeekV3, DeepSeekV32, GLM4Moe, GLM4MoeLite, ExaOneMoe
+/// Used by: BailingMoe, DeepSeekV3, DeepSeekV32, GLM4Moe, GLM4MoeLite, ExaOneMoe
 ///
 /// Reference: mlx-lm deepseek_v3.py group_expert_select()
 pub fn group_mask_scores(scores: &MlxArray, n_group: i32, topk_group: i32) -> UniquePtr<MlxArray> {

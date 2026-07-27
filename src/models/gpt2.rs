@@ -816,7 +816,7 @@ impl Gpt2Model {
 /// `array_shape` returns `i32`; a negative or oversized value can never match a
 /// real extent, so the conversion failing is itself a mismatch.
 ///
-/// Used by: Gpt2, GptBigCode, GptNeoX
+/// Used by: BailingMoe, Gpt2, GptBigCode, GptNeoX
 pub(crate) fn dim_eq(dim: i32, expected: usize) -> bool {
     usize::try_from(dim).is_ok_and(|d| d == expected)
 }
@@ -844,7 +844,7 @@ pub(crate) fn dim_eq(dim: i32, expected: usize) -> bool {
 /// still dimension 0; the width check is skipped for it because the packed width
 /// is a function of the bit depth rather than the model width.
 ///
-/// Used by: Gpt2, GptBigCode, GptNeoX
+/// Used by: BailingMoe, Gpt2, GptBigCode, GptNeoX
 pub(crate) fn validate_embedding_table(
     table: &UnifiedEmbedding,
     key: &str,
