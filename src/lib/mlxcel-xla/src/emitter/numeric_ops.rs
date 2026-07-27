@@ -38,6 +38,8 @@ pub(crate) const GELU_PROJECTION_MODULE: &str = "numeric_gelu_projection";
 pub(crate) const GELU_PROJECTION_ENTRY: &str = "numeric_gelu_projection.main";
 pub(crate) const PREFIX_SUM_MODULE: &str = "numeric_cuda_prefix_sum";
 pub(crate) const PREFIX_SUM_ENTRY: &str = "numeric_cuda_prefix_sum.main";
+pub(crate) const AFFINE_Q4_DEQUANT_MODULE: &str = "numeric_affine_q4_dequant";
+pub(crate) const AFFINE_Q4_DEQUANT_ENTRY: &str = "numeric_affine_q4_dequant.main";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DenseMatmulProbeSpec {
@@ -50,6 +52,40 @@ impl DenseMatmulProbeSpec {
     pub(crate) fn validate(self) -> Result<Self, String> {
         if self.rows == 0 || self.outputs == 0 || self.contraction == 0 {
             return Err("dense matmul probe dimensions must be non-zero".to_string());
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AffineQ4ProbeSpec {
+    pub(crate) outputs: usize,
+    pub(crate) inputs: usize,
+    pub(crate) group_size: usize,
+}
+
+impl AffineQ4ProbeSpec {
+    fn validate(self) -> Result<Self, String> {
+        if self.outputs == 0 || self.inputs == 0 || self.group_size == 0 {
+            return Err("affine Q4 probe dimensions must be non-zero".to_string());
+        }
+        if !self.inputs.is_multiple_of(8) {
+            return Err(format!(
+                "affine Q4 probe input width {} must be divisible by 8 packed lanes",
+                self.inputs
+            ));
+        }
+        if !self.inputs.is_multiple_of(self.group_size) {
+            return Err(format!(
+                "affine Q4 probe input width {} must be divisible by group size {}",
+                self.inputs, self.group_size
+            ));
+        }
+        if !self.group_size.is_multiple_of(8) {
+            return Err(format!(
+                "affine Q4 probe group size {} must align to an eight-lane u32 carrier",
+                self.group_size
+            ));
         }
         Ok(self)
     }
@@ -541,6 +577,32 @@ pub(crate) fn emit_prefix_sum_probe(spec: RowWiseProbeSpec) -> Result<String, St
     ))
 }
 
+/// Emit least-significant-lane-first affine Q4 unpack and dequantization.
+pub(crate) fn emit_affine_q4_dequant_probe(spec: AffineQ4ProbeSpec) -> Result<String, String> {
+    let spec = spec.validate()?;
+    let packed_ty = Ty::new(vec![spec.outputs, spec.inputs / 8], "ui32");
+    let metadata_ty = Ty::new(vec![spec.outputs, spec.inputs / spec.group_size], "f16");
+    let dummy_ty = Ty::f32(vec![1]);
+    let output_ty = Ty::f32(vec![spec.outputs, spec.inputs]);
+    let packed = Builder::arg(0, packed_ty.clone());
+    let scales = Builder::arg(1, metadata_ty.clone());
+    let biases = Builder::arg(2, metadata_ty.clone());
+    let mut builder = Builder::new();
+    let output = builder.dequant_affine(&packed, &scales, &biases, 4, spec.group_size);
+    Ok(format!(
+        "module @{AFFINE_Q4_DEQUANT_MODULE} {{\n  \
+         func.func public @main(%arg0: {packed_ty}, %arg1: {metadata_ty}, \
+         %arg2: {metadata_ty}, %arg3: {dummy_ty}) -> {output_ty} {{\n\
+         {body}    return {output} : {output_ty}\n  }}\n}}\n",
+        packed_ty = packed_ty.render(),
+        metadata_ty = metadata_ty.render(),
+        dummy_ty = dummy_ty.render(),
+        output_ty = output_ty.render(),
+        body = builder.body(),
+        output = output.name,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -729,5 +791,46 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn affine_q4_probe_pins_lane_and_evaluation_order() {
+        let graph = emit_affine_q4_dequant_probe(AffineQ4ProbeSpec {
+            outputs: 2,
+            inputs: 16,
+            group_size: 8,
+        })
+        .unwrap();
+        assert!(graph.starts_with("module @numeric_affine_q4_dequant {"));
+        assert!(graph.contains("dense<[0, 4, 8, 12, 16, 20, 24, 28]>"));
+        assert!(graph.contains("stablehlo.shift_right_logical"));
+        assert!(graph.contains("dense<15> : tensor<2x2x8xui32>"));
+        let multiply = graph.find("stablehlo.multiply").unwrap();
+        let add = graph.find("stablehlo.add").unwrap();
+        assert!(multiply < add);
+        assert_eq!(graph.matches("stablehlo.convert").count(), 3);
+    }
+
+    #[test]
+    fn affine_q4_probe_rejects_unaligned_shapes() {
+        for spec in [
+            AffineQ4ProbeSpec {
+                outputs: 0,
+                inputs: 16,
+                group_size: 8,
+            },
+            AffineQ4ProbeSpec {
+                outputs: 1,
+                inputs: 15,
+                group_size: 8,
+            },
+            AffineQ4ProbeSpec {
+                outputs: 1,
+                inputs: 16,
+                group_size: 6,
+            },
+        ] {
+            assert!(emit_affine_q4_dequant_probe(spec).is_err());
+        }
     }
 }

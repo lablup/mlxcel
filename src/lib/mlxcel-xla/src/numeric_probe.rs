@@ -26,9 +26,10 @@ use crate::aux::{
 };
 use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 use crate::emitter::numeric_ops::{
-    DENSE_MATMUL_ENTRY, DenseMatmulProbeSpec, GELU_PROJECTION_ENTRY, LAYER_NORM_ENTRY,
-    PREFIX_SUM_ENTRY, RESIDUAL_ADD_ENTRY, RMS_NORM_ENTRY, RowWiseProbeSpec, SILU_PROJECTION_ENTRY,
-    SOFTMAX_ENTRY, emit_dense_matmul_probe, emit_gelu_projection_probe, emit_layer_norm_probe,
+    AFFINE_Q4_DEQUANT_ENTRY, AffineQ4ProbeSpec, DENSE_MATMUL_ENTRY, DenseMatmulProbeSpec,
+    GELU_PROJECTION_ENTRY, LAYER_NORM_ENTRY, PREFIX_SUM_ENTRY, RESIDUAL_ADD_ENTRY, RMS_NORM_ENTRY,
+    RowWiseProbeSpec, SILU_PROJECTION_ENTRY, SOFTMAX_ENTRY, emit_affine_q4_dequant_probe,
+    emit_dense_matmul_probe, emit_gelu_projection_probe, emit_layer_norm_probe,
     emit_prefix_sum_probe, emit_residual_add_probe, emit_rms_norm_probe,
     emit_silu_projection_probe, emit_softmax_probe,
 };
@@ -39,9 +40,11 @@ use crate::numeric_oracle::{
     NumericOracleClaim, NumericOracleReport, NumericTensor, run_bounded_numeric_oracle,
 };
 use crate::operator_numeric_contract::{
-    AssociationPolicy, BackendNumericIdentity, CheckpointDType, OperatorClass,
-    OperatorNumericContract, OperatorNumericContractSet, RoundingBoundary,
+    AffineDequantizationContract, AffineEvaluationOrder, AssociationPolicy, BackendNumericIdentity,
+    CheckpointDType, OperatorClass, OperatorNumericContract, OperatorNumericContractSet,
+    PackedLaneOrder, RoundingBoundary,
 };
+use crate::weights::f32_to_f16_bits;
 
 const DENSE_ROWS: usize = 2;
 const DENSE_OUTPUTS: usize = 2;
@@ -54,6 +57,9 @@ const LAYER_NORM_EPSILON: f32 = 1e-5;
 const PROJECTION_OUTPUTS: usize = 3;
 const PREFIX_ROWS: usize = 2;
 const PREFIX_WIDTH: usize = 130;
+const Q4_OUTPUTS: usize = 2;
+const Q4_INPUTS: usize = 16;
+const Q4_GROUP_SIZE: usize = 8;
 const RESIDUAL_OPERATION: &str = "micro-oracle.residual-add.f32";
 const RMS_NORM_OPERATION: &str = "micro-oracle.rms-norm.f32";
 const SOFTMAX_OPERATION: &str = "micro-oracle.attention-softmax.f32";
@@ -61,6 +67,28 @@ const LAYER_NORM_OPERATION: &str = "micro-oracle.layer-norm.f32";
 const SILU_PROJECTION_OPERATION: &str = "micro-oracle.silu-projection.f32";
 const GELU_PROJECTION_OPERATION: &str = "micro-oracle.gelu-projection.f32";
 const PREFIX_SUM_OPERATION: &str = "micro-oracle.cuda-prefix-sum.f32";
+const AFFINE_Q4_DEQUANT_OPERATION: &str = "micro-oracle.affine-q4-dequant.f32";
+
+#[derive(Clone, Copy)]
+struct ProbeNumericContract {
+    checkpoint_dtype: CheckpointDType,
+    input_materialization: NumericDType,
+    accumulator: NumericDType,
+    result_materialization: NumericDType,
+    weight_execution: WeightExecution,
+    affine_dequantization: Option<AffineDequantizationContract>,
+}
+
+const fn canonical_f32_contract() -> ProbeNumericContract {
+    ProbeNumericContract {
+        checkpoint_dtype: CheckpointDType::F32,
+        input_materialization: NumericDType::F32,
+        accumulator: NumericDType::F32,
+        result_materialization: NumericDType::F32,
+        weight_execution: WeightExecution::Dense,
+        affine_dequantization: None,
+    }
+}
 
 struct ProbeDefinition {
     operation: &'static str,
@@ -69,6 +97,7 @@ struct ProbeDefinition {
     config_identity: String,
     mlir: String,
     operator_class: OperatorClass,
+    numeric_contract: ProbeNumericContract,
     rounding_boundaries: Vec<RoundingBoundary>,
     association: AssociationPolicy,
     operands: Vec<NumericTensor>,
@@ -92,6 +121,20 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn f32_bytes(values: &[f32]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| value.to_ne_bytes())
+        .collect()
+}
+
+fn f16_bytes(values: &[f32]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| f32_to_f16_bits(*value).to_ne_bytes())
+        .collect()
+}
+
+fn u32_bytes(values: &[u32]) -> Vec<u8> {
     values
         .iter()
         .flat_map(|value| value.to_ne_bytes())
@@ -165,14 +208,14 @@ fn operator_identity(
     let operation = OperatorNumericContract::new(
         definition.operation,
         definition.operator_class,
-        CheckpointDType::F32,
-        NumericDType::F32,
-        NumericDType::F32,
-        NumericDType::F32,
+        definition.numeric_contract.checkpoint_dtype,
+        definition.numeric_contract.input_materialization,
+        definition.numeric_contract.accumulator,
+        definition.numeric_contract.result_materialization,
         definition.rounding_boundaries.iter().copied(),
         definition.association,
-        WeightExecution::Dense,
-        None,
+        definition.numeric_contract.weight_execution,
+        definition.numeric_contract.affine_dequantization,
         backend,
     )?;
     OperatorNumericContractSet::new([operation])
@@ -587,6 +630,115 @@ fn reference_prefix_sum(operands: &[NumericTensor]) -> Result<NumericTensor, Str
     NumericTensor::new("output", vec![PREFIX_ROWS, PREFIX_WIDTH], output)
 }
 
+fn affine_q4_operands() -> Result<Vec<NumericTensor>, String> {
+    Ok(vec![
+        NumericTensor::new("abi_dummy", vec![1], vec![0.0])?,
+        NumericTensor::new(
+            "quantized_lanes",
+            vec![Q4_OUTPUTS, Q4_INPUTS],
+            vec![
+                0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 15.0, 14.0, 13.0, 12.0, 11.0, 10.0, 9.0,
+                8.0, 15.0, 0.0, 7.0, 8.0, 3.0, 12.0, 1.0, 14.0, 2.0, 13.0, 4.0, 11.0, 6.0, 9.0,
+                5.0, 10.0,
+            ],
+        )?,
+        NumericTensor::new(
+            "f16_scales",
+            vec![Q4_OUTPUTS, Q4_INPUTS / Q4_GROUP_SIZE],
+            vec![0.5, -1.0, 2.0, 0.25],
+        )?,
+        NumericTensor::new(
+            "f16_biases",
+            vec![Q4_OUTPUTS, Q4_INPUTS / Q4_GROUP_SIZE],
+            vec![-1.0, 3.0, 0.5, -2.0],
+        )?,
+    ])
+}
+
+fn pack_q4_lanes(lanes: &NumericTensor) -> Result<Vec<u32>, String> {
+    if lanes.shape() != [Q4_OUTPUTS, Q4_INPUTS] {
+        return Err(format!(
+            "affine Q4 lane shape mismatch: {:?}",
+            lanes.shape()
+        ));
+    }
+    lanes
+        .values()
+        .chunks_exact(8)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .enumerate()
+                .try_fold(0u32, |packed, (lane, value)| {
+                    if !value.is_finite() || value.fract() != 0.0 || !(0.0..=15.0).contains(value) {
+                        return Err(format!("invalid affine Q4 lane value {value}"));
+                    }
+                    Ok(packed | (*value as u32) << (lane * 4))
+                })
+        })
+        .collect()
+}
+
+fn affine_q4_weights(operands: &[NumericTensor]) -> Result<Vec<AuxiliaryWeight>, String> {
+    let [_, lanes, scales, biases] = operands else {
+        return Err(format!(
+            "affine Q4 weights require 4 semantic operands, got {}",
+            operands.len()
+        ));
+    };
+    Ok(vec![
+        AuxiliaryWeight {
+            name: "affine_q4.packed".to_string(),
+            bytes: u32_bytes(&pack_q4_lanes(lanes)?),
+            dtype: AuxiliaryWeightDType::Uint32,
+            shape: vec![Q4_OUTPUTS, Q4_INPUTS / 8],
+        },
+        AuxiliaryWeight {
+            name: "affine_q4.scales".to_string(),
+            bytes: f16_bytes(scales.values()),
+            dtype: AuxiliaryWeightDType::Float16,
+            shape: scales.shape().to_vec(),
+        },
+        AuxiliaryWeight {
+            name: "affine_q4.biases".to_string(),
+            bytes: f16_bytes(biases.values()),
+            dtype: AuxiliaryWeightDType::Float16,
+            shape: biases.shape().to_vec(),
+        },
+    ])
+}
+
+fn reference_affine_q4_dequant(operands: &[NumericTensor]) -> Result<NumericTensor, String> {
+    let [_, lanes, scales, biases] = operands else {
+        return Err(format!(
+            "affine Q4 reference requires 4 semantic operands, got {}",
+            operands.len()
+        ));
+    };
+    if lanes.shape() != [Q4_OUTPUTS, Q4_INPUTS]
+        || scales.shape() != [Q4_OUTPUTS, Q4_INPUTS / Q4_GROUP_SIZE]
+        || biases.shape() != scales.shape()
+    {
+        return Err(format!(
+            "affine Q4 reference shape mismatch: lanes {:?}, scales {:?}, biases {:?}",
+            lanes.shape(),
+            scales.shape(),
+            biases.shape()
+        ));
+    }
+    let mut output = Vec::with_capacity(Q4_OUTPUTS * Q4_INPUTS);
+    for row in 0..Q4_OUTPUTS {
+        for input in 0..Q4_INPUTS {
+            let group = input / Q4_GROUP_SIZE;
+            let metadata = row * (Q4_INPUTS / Q4_GROUP_SIZE) + group;
+            let quantized = lanes.values()[row * Q4_INPUTS + input];
+            let scaled = quantized * scales.values()[metadata];
+            output.push(scaled + biases.values()[metadata]);
+        }
+    }
+    NumericTensor::new("output", vec![Q4_OUTPUTS, Q4_INPUTS], output)
+}
+
 fn dense_definition() -> Result<ProbeDefinition, String> {
     let operands = dense_operands()?.to_vec();
     Ok(ProbeDefinition {
@@ -602,6 +754,7 @@ fn dense_definition() -> Result<ProbeDefinition, String> {
             contraction: DENSE_CONTRACTION,
         })?,
         operator_class: OperatorClass::DenseMatmul,
+        numeric_contract: canonical_f32_contract(),
         rounding_boundaries: vec![
             RoundingBoundary::OperatorInput,
             RoundingBoundary::AccumulatorResult,
@@ -630,6 +783,7 @@ fn residual_definition() -> Result<ProbeDefinition, String> {
             features: FEATURES,
         })?,
         operator_class: OperatorClass::ResidualAdd,
+        numeric_contract: canonical_f32_contract(),
         rounding_boundaries: vec![
             RoundingBoundary::OperatorInput,
             RoundingBoundary::ResidualResult,
@@ -664,6 +818,7 @@ fn rms_norm_definition() -> Result<ProbeDefinition, String> {
             RMS_EPSILON,
         )?,
         operator_class: OperatorClass::RmsNorm,
+        numeric_contract: canonical_f32_contract(),
         rounding_boundaries: vec![
             RoundingBoundary::OperatorInput,
             RoundingBoundary::AccumulatorResult,
@@ -695,6 +850,7 @@ fn softmax_definition() -> Result<ProbeDefinition, String> {
             features: FEATURES,
         })?,
         operator_class: OperatorClass::AttentionSoftmax,
+        numeric_contract: canonical_f32_contract(),
         rounding_boundaries: vec![
             RoundingBoundary::OperatorInput,
             RoundingBoundary::AccumulatorResult,
@@ -733,6 +889,7 @@ fn layer_norm_definition() -> Result<ProbeDefinition, String> {
             LAYER_NORM_EPSILON,
         )?,
         operator_class: OperatorClass::LayerNorm,
+        numeric_contract: canonical_f32_contract(),
         rounding_boundaries: vec![
             RoundingBoundary::OperatorInput,
             RoundingBoundary::AccumulatorResult,
@@ -781,6 +938,7 @@ fn activation_projection_definition(
         ),
         mlir: emitter(spec)?,
         operator_class,
+        numeric_contract: canonical_f32_contract(),
         rounding_boundaries: vec![
             RoundingBoundary::OperatorInput,
             RoundingBoundary::AccumulatorResult,
@@ -842,6 +1000,7 @@ fn prefix_sum_definition() -> Result<ProbeDefinition, String> {
             features: PREFIX_WIDTH,
         })?,
         operator_class: OperatorClass::PrefixReduction,
+        numeric_contract: canonical_f32_contract(),
         rounding_boundaries: vec![
             RoundingBoundary::OperatorInput,
             RoundingBoundary::AccumulatorResult,
@@ -856,6 +1015,55 @@ fn prefix_sum_definition() -> Result<ProbeDefinition, String> {
         reference_algorithm: "mlx-cuda-one-block-contiguous-scan-v1",
         candidate_algorithm: "explicit-mlx-cuda-one-block-contiguous-scan-v1",
         reference: reference_prefix_sum,
+    })
+}
+
+fn affine_q4_dequant_definition() -> Result<ProbeDefinition, String> {
+    let operands = affine_q4_operands()?;
+    let weights = affine_q4_weights(&operands)?;
+    let affine_dequantization = AffineDequantizationContract::new(
+        4,
+        Q4_GROUP_SIZE,
+        NumericDType::U32,
+        NumericDType::F16,
+        PackedLaneOrder::LeastSignificantFirst,
+        AffineEvaluationOrder::SeparateMultiplyThenAdd,
+    )?;
+    Ok(ProbeDefinition {
+        operation: AFFINE_Q4_DEQUANT_OPERATION,
+        entry: AFFINE_Q4_DEQUANT_ENTRY,
+        cache_key: "affine-q4-dequant-f32",
+        config_identity: format!(
+            "outputs={Q4_OUTPUTS};inputs={Q4_INPUTS};bits=4;group={Q4_GROUP_SIZE};metadata=f16;result=f32"
+        ),
+        mlir: emit_affine_q4_dequant_probe(AffineQ4ProbeSpec {
+            outputs: Q4_OUTPUTS,
+            inputs: Q4_INPUTS,
+            group_size: Q4_GROUP_SIZE,
+        })?,
+        operator_class: OperatorClass::AffineQ4Dequantize,
+        numeric_contract: ProbeNumericContract {
+            checkpoint_dtype: CheckpointDType::AffineU4,
+            input_materialization: NumericDType::U32,
+            accumulator: NumericDType::F32,
+            result_materialization: NumericDType::F32,
+            weight_execution: WeightExecution::PackedAffineInGraph,
+            affine_dequantization: Some(affine_dequantization),
+        },
+        rounding_boundaries: vec![
+            RoundingBoundary::CheckpointLoad,
+            RoundingBoundary::DequantizedWeight,
+            RoundingBoundary::OperatorOutput,
+        ],
+        association: AssociationPolicy::Sequential,
+        operands,
+        weights,
+        dynamic_operand_indices: vec![0],
+        output_shape: vec![Q4_OUTPUTS, Q4_INPUTS],
+        comparison: ComparisonMode::ExactBits,
+        reference_algorithm: "least-significant-q4-times-f16-scale-plus-f16-bias-v1",
+        candidate_algorithm: "stablehlo-u32-unpack-separate-multiply-add-v1",
+        reference: reference_affine_q4_dequant,
     })
 }
 
@@ -1010,6 +1218,7 @@ pub fn run_dense_matmul_probe(device: &str) -> Result<NumericOracleReport, Strin
 /// deliberately ineligible for production-family qualification.
 pub fn run_core_operator_probes(device: &str) -> Result<Vec<NumericOracleReport>, String> {
     [
+        affine_q4_dequant_definition,
         dense_definition,
         residual_definition,
         rms_norm_definition,
@@ -1109,5 +1318,20 @@ mod tests {
                 .any(|(cuda, sequential)| cuda.to_bits() != sequential.to_bits()),
             "cancellation-sensitive fixture must distinguish the CUDA block schedule"
         );
+    }
+
+    #[test]
+    fn affine_q4_reference_pins_least_significant_lane_order_and_group_boundaries() {
+        let operands = affine_q4_operands().unwrap();
+        let packed = pack_q4_lanes(&operands[1]).unwrap();
+        assert_eq!(packed[0], 0x7654_3210);
+        assert_eq!(packed[1], 0x89ab_cdef);
+
+        let output = reference_affine_q4_dequant(&operands).unwrap();
+        assert_eq!(
+            &output.values()[..10],
+            &[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5, -12.0, -11.0]
+        );
+        assert!(output.values().iter().all(|value| value.is_finite()));
     }
 }
