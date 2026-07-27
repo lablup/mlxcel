@@ -149,6 +149,15 @@ pub fn run_pinned_molmo_eager_mlx_iree_boundaries() {
 
     progress("load filtered eager MLX and production IREE preprocessors");
     let host = MolmoHostPreprocessor::load(&model).expect("load Molmo host preprocessor");
+    // Bound the local-task worker topology and stack before the first IREE
+    // instance exists. IREE's flag registry is process-global and is parsed on
+    // that first creation, so this has to run ahead of `load_iree` to take
+    // effect. Without it, `local-task` worker creation fails on this host with
+    // `thread creation failed with 22` out of `thread_pthreads.c`, because
+    // IREE's exact PTHREAD_STACK_MIN request is rejected. Diagnostics-only:
+    // the production runtime never applies these flags.
+    mlxcel_xla::configure_diagnostic_local_task_threads()
+        .expect("configure diagnostics-only IREE local-task threads");
     let production = MolmoHostPreprocessor::load_iree(&model, &device)
         .expect("load Molmo production IREE preprocessor");
     let host_processor = host.processor.preprocess_image(&image);
