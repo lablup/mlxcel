@@ -17,6 +17,8 @@ use std::sync::Once;
 use image::DynamicImage;
 use mlxcel_core::dtype;
 
+#[cfg(feature = "xla-iree")]
+use super::prepare_youtu_vl_prompt;
 use super::{
     FakeHostMultimodalPreprocessor, HostMultimodalPreprocessor, HostPreprocessorError,
     XlaVisionBackend, XlaVisionBackendPolicy, export_llava_prefill, export_mlx_tensor,
@@ -41,6 +43,98 @@ fn fake() -> FakeHostMultimodalPreprocessor {
         hidden_size: 3,
         max_sequence_len: 32,
     }
+}
+
+#[cfg(feature = "xla-iree")]
+#[test]
+fn youtu_vl_placeholder_selection_prefers_image_then_video_then_insertion() {
+    const IMAGE: i32 = 100;
+    const VIDEO: i32 = 101;
+    const START: i32 = 102;
+    const END: i32 = 103;
+    let shapes = [(4, 4)];
+
+    let (tokens, target) =
+        prepare_youtu_vl_prompt(&[1, VIDEO, IMAGE, 2], &shapes, 2, IMAGE, VIDEO, START, END)
+            .unwrap();
+    assert_eq!(target, IMAGE);
+    assert_eq!(tokens, vec![1, VIDEO, IMAGE, IMAGE, IMAGE, IMAGE, 2]);
+
+    let (tokens, target) = prepare_youtu_vl_prompt(
+        &[1, VIDEO, VIDEO, VIDEO, VIDEO, 2],
+        &shapes,
+        2,
+        IMAGE,
+        VIDEO,
+        START,
+        END,
+    )
+    .unwrap();
+    assert_eq!(target, VIDEO);
+    assert!(!tokens.contains(&IMAGE));
+
+    let (tokens, target) =
+        prepare_youtu_vl_prompt(&[1, 2], &shapes, 2, IMAGE, VIDEO, START, END).unwrap();
+    assert_eq!(target, IMAGE);
+    assert_eq!(tokens, vec![1, START, IMAGE, IMAGE, IMAGE, IMAGE, END, 2]);
+}
+
+#[cfg(feature = "xla-iree")]
+#[test]
+fn youtu_vl_prompt_expands_one_placeholder_per_image() {
+    const IMAGE: i32 = 100;
+    const VIDEO: i32 = 101;
+    const START: i32 = 102;
+    const END: i32 = 103;
+
+    let (tokens, target) = prepare_youtu_vl_prompt(
+        &[1, IMAGE, 2, IMAGE, 3],
+        &[(4, 4), (2, 2)],
+        2,
+        IMAGE,
+        VIDEO,
+        START,
+        END,
+    )
+    .unwrap();
+
+    assert_eq!(target, IMAGE);
+    assert_eq!(tokens, vec![1, IMAGE, IMAGE, IMAGE, IMAGE, 2, IMAGE, 3]);
+}
+
+#[cfg(feature = "xla-iree")]
+#[test]
+fn youtu_vl_prompt_rejects_ambiguous_partial_expansion() {
+    const IMAGE: i32 = 100;
+    let error = prepare_youtu_vl_prompt(&[1, IMAGE, IMAGE, 2], &[(4, 4)], 2, IMAGE, 101, 102, 103)
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        HostPreprocessorError::ExpandedLength {
+            actual: 2,
+            expected: 4
+        }
+    ));
+}
+
+#[cfg(feature = "xla-iree")]
+#[test]
+#[ignore = "requires YOUTU_VL_MODEL_DIR and the pinned production IREE runtime/compiler"]
+fn pinned_youtu_vl_checkpoint_executes_one_iree_vision_bucket() {
+    let model_dir =
+        std::env::var("YOUTU_VL_MODEL_DIR").expect("set YOUTU_VL_MODEL_DIR to the checkpoint");
+    let device = std::env::var("MLXCEL_XLA_DEVICE").unwrap_or_else(|_| "local-task".to_string());
+    let mut projector =
+        mlxcel_xla::IreeYoutuVlProjector::load(std::path::Path::new(&model_dir), &device).unwrap();
+    let patch_width = 3 * 16 * 16;
+    let patch_rows = (0..16 * patch_width)
+        .map(|index| (index % 257) as f32 / 128.0 - 1.0)
+        .collect::<Vec<_>>();
+    let projection = projector.project(&patch_rows, &[(4, 4)]).unwrap();
+    assert_eq!(projection.shape, [4, projector.text_hidden()]);
+    assert!(projection.values.iter().all(|value| value.is_finite()));
+    assert_eq!(projection.merged_tokens_per_image, vec![4]);
+    assert_eq!(projector.active_bucket(), Some(16));
 }
 
 #[test]

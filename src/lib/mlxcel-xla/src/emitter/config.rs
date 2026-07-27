@@ -113,6 +113,32 @@ pub struct MropeConfig {
     pub layout: MropeLayout,
 }
 
+/// Multi-head latent-attention dimensions used by Youtu-VL's DeepSeek-V3
+/// language backbone.
+///
+/// MLA caches one normalized KV latent plus the decoupled rotary key instead of
+/// materializing one full K/V pair per attention head. These dimensions affect
+/// graph signatures and resident cache shapes, so they are part of [`Config`]
+/// and therefore the compiled-artifact identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MlaConfig {
+    pub q_lora_rank: usize,
+    pub kv_lora_rank: usize,
+    pub qk_nope_head_dim: usize,
+    pub qk_rope_head_dim: usize,
+    pub v_head_dim: usize,
+}
+
+impl MlaConfig {
+    pub fn q_head_dim(self) -> usize {
+        self.qk_nope_head_dim + self.qk_rope_head_dim
+    }
+
+    pub fn cache_dim(self) -> usize {
+        self.kv_lora_rank + self.qk_rope_head_dim
+    }
+}
+
 /// The checkpoint tensor-naming scheme (issue #499). Almost every Llama-family
 /// checkpoint uses the standard HF layout
 /// (`model.layers.{i}.self_attn.q_proj.weight`, `model.embed_tokens.weight`,
@@ -319,6 +345,9 @@ pub struct Config {
     /// Three-axis multimodal RoPE. `None` preserves the exact one-dimensional
     /// prefill/decode schemas and emitted modules.
     pub mrope: Option<MropeConfig>,
+    /// DeepSeek-V3 style dense MLA attention. `None` retains the ordinary
+    /// per-head K/V attention and cache contract.
+    pub mla: Option<MlaConfig>,
     /// Optional sparse, prefill-only residual additions injected immediately
     /// after selected transformer layers. Ordinary embeddings prefill and decode
     /// ignore this declaration and keep their existing schemas.
@@ -441,6 +470,7 @@ impl Config {
             sliding_pattern: 2,
             use_rope_layers: None,
             mrope: None,
+            mla: None,
             deepstack: None,
             moe: None,
             weight_scheme: WeightScheme::Llama,
@@ -577,7 +607,7 @@ impl Config {
         let hidden = u("hidden_size")?;
         let n_q = u("num_attention_heads")?;
         // head_dim is explicit in recent configs; otherwise it is hidden / heads.
-        let head_dim = ou("head_dim").unwrap_or(hidden / n_q.max(1));
+        let mut head_dim = ou("head_dim").unwrap_or(hidden / n_q.max(1));
         // ExaOne 3.x uses `num_layers` in place of `num_hidden_layers`.
         let n_layers = u_any(&["num_hidden_layers", "num_layers"])?;
         let deepstack = match (
@@ -671,6 +701,7 @@ impl Config {
         let mut logit_div: Option<f32> = None;
         let mut fused_qkv = false;
         let mut fused_gate_up = false;
+        let mut mla: Option<MlaConfig> = None;
 
         // Read a Gemma family's soft-caps + query scale (shared by gemma2 / gemma3).
         // Gemma3's soft-caps are null, so this yields `None` there.
@@ -730,6 +761,38 @@ impl Config {
                     per_head: true,
                     one_plus: false,
                 });
+            }
+            Some("youtu_vl") => {
+                if ob("attention_bias") == Some(true) {
+                    return Err("the OpenXLA Youtu-VL MLA emitter does not support \
+                         attention_bias = true for q_a_proj, kv_a_proj_with_mqa, \
+                         or o_proj"
+                        .to_string());
+                }
+                let parsed = MlaConfig {
+                    q_lora_rank: u("q_lora_rank")?,
+                    kv_lora_rank: u("kv_lora_rank")?,
+                    qk_nope_head_dim: u("qk_nope_head_dim")?,
+                    qk_rope_head_dim: u("qk_rope_head_dim")?,
+                    v_head_dim: u("v_head_dim")?,
+                };
+                if parsed.q_lora_rank == 0
+                    || parsed.kv_lora_rank == 0
+                    || parsed.qk_nope_head_dim == 0
+                    || parsed.qk_rope_head_dim == 0
+                    || parsed.v_head_dim == 0
+                {
+                    return Err("Youtu-VL MLA dimensions must all be positive".to_string());
+                }
+                if parsed.qk_rope_head_dim % 2 != 0 {
+                    return Err(
+                        "Youtu-VL qk_rope_head_dim must be even for interleaved RoPE".to_string(),
+                    );
+                }
+                mla = Some(parsed);
+                head_dim = parsed.q_head_dim();
+                rope_interleaved = ob("rope_interleave").unwrap_or(true);
+                rotary_dim = Some(parsed.qk_rope_head_dim);
             }
             Some("gemma") => {
                 // Gemma1: Llama-shaped norm placement, but embedding scale, `(1+w)`
@@ -1371,6 +1434,7 @@ impl Config {
             sliding_pattern,
             use_rope_layers,
             mrope,
+            mla,
             deepstack,
             moe,
             weight_scheme,
@@ -1426,6 +1490,7 @@ impl Config {
             && !self.fused_gate_up
             && !self.dense_mlp
             && self.moe.is_none()
+            && self.mla.is_none()
     }
 
     /// Whether the issue #572 f16-resident-weight path can apply: the standard
@@ -1456,6 +1521,18 @@ impl Config {
             Some(q) => q.powf(-0.5) as f32,
             None => (self.head_dim as f32).powf(-0.5),
         }
+    }
+
+    /// Number of logical cache heads. MLA owns one compressed latent row per
+    /// token; ordinary attention retains the checkpoint's KV-head count.
+    pub fn cache_heads(&self) -> usize {
+        if self.mla.is_some() { 1 } else { self.n_kv }
+    }
+
+    /// Elements in each logical cache row. MLA packs
+    /// `[kv_lora_rank, qk_rope_head_dim]`; ordinary attention stores one head.
+    pub fn cache_dim(&self) -> usize {
+        self.mla.map_or(self.head_dim, MlaConfig::cache_dim)
     }
 
     /// The RoPE rotation width: `rotary_dim` for a partial-RoPE arch (StableLM),

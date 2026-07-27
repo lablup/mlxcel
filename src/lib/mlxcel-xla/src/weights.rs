@@ -223,8 +223,25 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
                 );
             }
         }
-        // wk, wo, wq, wv (JAX-alphabetical; a fused Phi3 qkv_proj is [Q|K|V] rows).
-        if cfg.fused_qkv {
+        // Attention projections. Youtu-VL uses the checkpoint's native MLA
+        // factors; ordinary families keep wk/wo/wq/wv in their historical order.
+        if cfg.mla.is_some() {
+            push_proj(&mut out, format!("{p}self_attn.q_a_proj.weight"), quant);
+            out.push(WeightSpec::Whole(format!(
+                "{p}self_attn.q_a_layernorm.weight"
+            )));
+            push_proj(&mut out, format!("{p}self_attn.q_b_proj.weight"), quant);
+            push_proj(
+                &mut out,
+                format!("{p}self_attn.kv_a_proj_with_mqa.weight"),
+                quant,
+            );
+            out.push(WeightSpec::Whole(format!(
+                "{p}self_attn.kv_a_layernorm.weight"
+            )));
+            push_proj(&mut out, format!("{p}self_attn.kv_b_proj.weight"), quant);
+            push_proj(&mut out, format!("{p}self_attn.o_proj.weight"), quant);
+        } else if cfg.fused_qkv {
             let qkv = phi4_base_projection(cfg, format!("{p}self_attn.qkv_proj.weight"));
             out.push(WeightSpec::Rows {
                 name: qkv.clone(),

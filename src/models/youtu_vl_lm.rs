@@ -50,10 +50,18 @@ use super::deepseek_v3::DeepSeekV3Attention;
 
 #[path = "youtu_vl_lm_config.rs"]
 mod youtu_vl_lm_config;
+#[cfg(any(test, feature = "xla-diagnostics"))]
+#[path = "youtu_vl_lm_diagnostics.rs"]
+mod youtu_vl_lm_diagnostics;
 #[path = "youtu_vl_lm_sanitize.rs"]
 mod youtu_vl_lm_sanitize;
 
 pub use youtu_vl_lm_config::{QuantizationConfig, YoutuTextConfig};
+#[cfg(any(test, feature = "xla-diagnostics"))]
+pub use youtu_vl_lm_diagnostics::{
+    YoutuIreeMlaDiagnosticCapture, YoutuMlaDiagnosticCapture, YoutuMlaParityReport,
+    compare_youtu_mla_diagnostics,
+};
 pub use youtu_vl_lm_sanitize::sanitize_text_weights;
 
 // Dense SwiGLU MLP — identical layout to other Llama-family MLPs but kept local

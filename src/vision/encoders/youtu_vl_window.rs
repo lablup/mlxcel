@@ -152,8 +152,36 @@ pub(super) fn reverse_window_indices(window_index: &[i32]) -> Vec<i32> {
         .collect();
     indexed.sort_by_key(|&(v, _)| v);
     let mut reverse = vec![0i32; window_index.len()];
-    for (rank, &(_, orig_idx)) in indexed.iter().enumerate() {
-        reverse[orig_idx] = rank as i32;
+    for (original_position, &(_, window_position)) in indexed.iter().enumerate() {
+        reverse[original_position] = window_position as i32;
     }
     reverse
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reverse_window_indices;
+
+    #[test]
+    fn reverse_indices_restore_original_group_order() {
+        // A two-row, three-window layout with 2x2 windows. This permutation
+        // contains a four-cycle, so it cannot accidentally pass as its own inverse.
+        let window_index = vec![0, 1, 6, 7, 2, 3, 8, 9, 4, 5, 10, 11];
+        let window_order = vec![
+            "g0", "g1", "g6", "g7", "g2", "g3", "g8", "g9", "g4", "g5", "g10", "g11",
+        ];
+        let reverse = reverse_window_indices(&window_index);
+        let restored = reverse
+            .iter()
+            .map(|&position| window_order[position as usize])
+            .collect::<Vec<_>>();
+        assert_ne!(reverse, window_index);
+        assert_eq!(reverse, vec![0, 1, 4, 5, 8, 9, 2, 3, 6, 7, 10, 11]);
+        assert_eq!(
+            restored,
+            vec![
+                "g0", "g1", "g2", "g3", "g4", "g5", "g6", "g7", "g8", "g9", "g10", "g11",
+            ]
+        );
+    }
 }

@@ -154,3 +154,39 @@ fn normalization_matches_siglip_default() {
         mlxcel_core::item_f32(&max_abs)
     );
 }
+
+#[test]
+fn flattened_patch_layout_matches_hf_merge_groups_and_channel_order() {
+    let processor = YoutuVLProcessor::new(1, 2)
+        .with_pixel_bounds(4 * 4, 4 * 4)
+        .with_norm([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+    let mut image = RgbImage::new(4, 4);
+    for y in 0..4 {
+        for x in 0..4 {
+            let base = (y * 4 + x) as u8;
+            image.put_pixel(x, y, image::Rgb([base, base + 32, base + 64]));
+        }
+    }
+
+    let (rows, shapes, width) = processor
+        .try_preprocess_values_with_spatial(&[DynamicImage::ImageRgb8(image)])
+        .unwrap();
+    assert_eq!(shapes, vec![(4, 4)]);
+    assert_eq!(width, 3);
+
+    let observed_pixels = rows
+        .chunks_exact(3)
+        .map(|rgb| (rgb[0] * 255.0).round() as u8)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed_pixels,
+        vec![0, 1, 4, 5, 2, 3, 6, 7, 8, 9, 12, 13, 10, 11, 14, 15]
+    );
+    assert_eq!(
+        rows[..3]
+            .iter()
+            .map(|value| (value * 255.0).round() as u8)
+            .collect::<Vec<_>>(),
+        vec![0, 32, 64]
+    );
+}

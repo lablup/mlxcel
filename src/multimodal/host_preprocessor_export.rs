@@ -151,6 +151,67 @@ pub(super) fn export_llava_prefill(
     )
 }
 
+pub(super) fn export_youtu_vl_prefill(
+    logical_tokens: Vec<i32>,
+    merged: InputEmbeddings,
+    spatial_shapes: &[(i32, i32)],
+    target_token_id: i32,
+    spatial_merge_size: usize,
+    hidden_size: usize,
+) -> Result<PreparedPrefill, HostPreprocessorError> {
+    if spatial_merge_size == 0 {
+        return Err(HostPreprocessorError::InvalidConfig(
+            "Youtu-VL spatial_merge_size must be positive".to_string(),
+        ));
+    }
+    let merge = i32::try_from(spatial_merge_size).map_err(|_| {
+        HostPreprocessorError::InvalidConfig(
+            "Youtu-VL spatial_merge_size exceeds i32::MAX".to_string(),
+        )
+    })?;
+    let expected_tokens = spatial_shapes.iter().try_fold(0usize, |total, &(h, w)| {
+        if h <= 0 || w <= 0 || h % merge != 0 || w % merge != 0 {
+            return Err(HostPreprocessorError::InvalidConfig(format!(
+                "Youtu-VL spatial shape [{h}, {w}] must be positive and divisible by merge size {merge}"
+            )));
+        }
+        let image_tokens = usize::try_from((h / merge) * (w / merge))
+            .map_err(|_| HostPreprocessorError::ShapeOverflow)?;
+        total
+            .checked_add(image_tokens)
+            .ok_or(HostPreprocessorError::ShapeOverflow)
+    })?;
+    let actual_tokens = logical_tokens
+        .iter()
+        .filter(|&&token| token == target_token_id)
+        .count();
+    if actual_tokens != expected_tokens {
+        return Err(HostPreprocessorError::ExpandedLength {
+            actual: actual_tokens,
+            expected: expected_tokens,
+        });
+    }
+    validate_embedding_shape(
+        &mlxcel_core::array_shape(&merged.inputs_embeds),
+        logical_tokens.len(),
+        hidden_size,
+        "Youtu-VL merged embedding",
+    )?;
+    if merged.attention_mask_4d.is_some() {
+        return Err(HostPreprocessorError::InvalidConfig(
+            "Youtu-VL uses standard causal masking, not a family-specific 4D mask".to_string(),
+        ));
+    }
+    let embeddings = export_mlx_tensor(&merged.inputs_embeds, "Youtu-VL merged embedding")?;
+    build_prepared_prefill(
+        logical_tokens,
+        embeddings,
+        spatial_shapes.len(),
+        expected_tokens,
+        "youtu_vl",
+    )
+}
+
 pub(super) fn export_qwen2_vl_prefill(
     logical_tokens: Vec<i32>,
     merged: InputEmbeddings,

@@ -42,10 +42,12 @@ use super::vlm_prompt::{ImageTokenBlockError, ImageTokenBlockInfo, apply_image_t
 mod export;
 #[cfg(feature = "xla-iree")]
 use super::qwen_vl::insert_qwen_vl_image_tokens;
+#[cfg(feature = "xla-iree")]
+use super::youtu_vl_prompt::insert_youtu_vl_image_tokens;
 use export::export_mlx_tensor;
 use export::{
-    build_prepared_prefill, export_llava_prefill, export_qwen2_vl_prefill, usize_to_i32,
-    validate_embedding_shape, validate_processor_shape, validate_projected_shape,
+    build_prepared_prefill, export_llava_prefill, export_qwen2_vl_prefill, export_youtu_vl_prefill,
+    usize_to_i32, validate_embedding_shape, validate_processor_shape, validate_projected_shape,
     validate_sequence_capacity,
 };
 
@@ -175,6 +177,34 @@ pub fn load_xla_image_preprocessor(
             ));
         }
     }
+    if model_type == crate::models::ModelType::YoutuVLM {
+        let policy = XlaVisionBackendPolicy::from_env()?;
+        if policy == XlaVisionBackendPolicy::Host {
+            return Err(HostPreprocessorError::InvalidConfig(
+                "Youtu-VL XLA vision has no MLX fallback; MLXCEL_XLA_VISION_BACKEND=host is unsupported"
+                    .to_string(),
+            ));
+        }
+        #[cfg(feature = "xla-iree")]
+        {
+            let device = std::env::var("MLXCEL_XLA_DEVICE")
+                .unwrap_or_else(|_| mlxcel_xla::default_device().to_string());
+            let preprocessor = YoutuVlIreeHostPreprocessor::load(model_path, &device)?;
+            tracing::info!(
+                vision_backend = "iree",
+                vision_device = %device,
+                family = "youtu_vl",
+                "OpenXLA multimodal vision backend selected"
+            );
+            return Ok(Some(Box::new(preprocessor)));
+        }
+        #[cfg(not(feature = "xla-iree"))]
+        {
+            return Err(HostPreprocessorError::InvalidConfig(
+                "Youtu-VL XLA image execution requires the xla-iree feature".to_string(),
+            ));
+        }
+    }
     if model_type != crate::models::ModelType::LlavaVLM {
         return Ok(None);
     }
@@ -290,6 +320,127 @@ pub struct Qwen2VlIreeHostPreprocessor {
     hidden_size: usize,
     max_sequence_len: usize,
     device: String,
+}
+
+/// Youtu-VL producer with checked flattened-patch preprocessing and the
+/// complete windowed vision tower plus built-in merger resident in IREE.
+#[cfg(feature = "xla-iree")]
+pub struct YoutuVlIreeHostPreprocessor {
+    processor: crate::vision::processors::youtu_vl::YoutuVLProcessor,
+    text_embeddings: UnifiedEmbedding,
+    projector: RefCell<mlxcel_xla::IreeYoutuVlProjector>,
+    image_token_id: i32,
+    video_token_id: i32,
+    vision_start_token_id: i32,
+    vision_end_token_id: i32,
+    spatial_merge_size: usize,
+    hidden_size: usize,
+    max_sequence_len: usize,
+    device: String,
+}
+
+#[cfg(feature = "xla-iree")]
+#[allow(clippy::too_many_arguments)]
+fn prepare_youtu_vl_prompt(
+    token_ids: &[i32],
+    spatial_shapes: &[(i32, i32)],
+    spatial_merge_size: usize,
+    image_token_id: i32,
+    video_token_id: i32,
+    vision_start_token_id: i32,
+    vision_end_token_id: i32,
+) -> Result<(Vec<i32>, i32), HostPreprocessorError> {
+    let merge = i32::try_from(spatial_merge_size).map_err(|_| {
+        HostPreprocessorError::InvalidConfig(
+            "Youtu-VL spatial merge size exceeds i32::MAX".to_string(),
+        )
+    })?;
+    if merge == 0 {
+        return Err(HostPreprocessorError::InvalidConfig(
+            "Youtu-VL spatial merge size must be positive".to_string(),
+        ));
+    }
+    let expected_per_image = spatial_shapes
+        .iter()
+        .map(|&(height, width)| {
+            if height <= 0 || width <= 0 || height % merge != 0 || width % merge != 0 {
+                return Err(HostPreprocessorError::InvalidConfig(format!(
+                    "Youtu-VL spatial shape [{height}, {width}] must be positive and divisible by merge size {merge}"
+                )));
+            }
+            let tokens = (height / merge)
+                .checked_mul(width / merge)
+                .ok_or(HostPreprocessorError::ShapeOverflow)?;
+            usize::try_from(tokens)
+                .map_err(|_| HostPreprocessorError::ShapeOverflow)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let expected_total = expected_per_image
+        .iter()
+        .try_fold(0usize, |total, &tokens| {
+            total
+                .checked_add(tokens)
+                .ok_or(HostPreprocessorError::ShapeOverflow)
+        })?;
+
+    let expand_existing = |target_token_id| {
+        let actual = token_ids
+            .iter()
+            .filter(|&&token| token == target_token_id)
+            .count();
+        if actual == expected_total {
+            return Ok(token_ids.to_vec());
+        }
+        if actual != expected_per_image.len() {
+            return Err(HostPreprocessorError::ExpandedLength {
+                actual,
+                expected: expected_total,
+            });
+        }
+        let capacity = token_ids
+            .len()
+            .checked_sub(actual)
+            .and_then(|length| length.checked_add(expected_total))
+            .ok_or(HostPreprocessorError::ShapeOverflow)?;
+        let mut expanded = Vec::with_capacity(capacity);
+        let mut image_index = 0usize;
+        for &token in token_ids {
+            if token == target_token_id {
+                expanded.extend(std::iter::repeat_n(
+                    target_token_id,
+                    expected_per_image[image_index],
+                ));
+                image_index += 1;
+            } else {
+                expanded.push(token);
+            }
+        }
+        Ok(expanded)
+    };
+
+    if token_ids.contains(&image_token_id) {
+        return expand_existing(image_token_id).map(|tokens| (tokens, image_token_id));
+    }
+    if token_ids.contains(&video_token_id) {
+        // Placeholder compatibility only: the request boundary remains
+        // image-only until a video preprocessing oracle is qualified.
+        return expand_existing(video_token_id).map(|tokens| (tokens, video_token_id));
+    }
+    let mut logical_tokens = token_ids.to_vec();
+    insert_youtu_vl_image_tokens(
+        &mut logical_tokens,
+        spatial_shapes,
+        spatial_merge_size,
+        vision_start_token_id,
+        vision_end_token_id,
+        image_token_id,
+    )
+    .ok_or_else(|| {
+        HostPreprocessorError::InvalidConfig(
+            "Youtu-VL could not expand image placeholders for the decoded images".to_string(),
+        )
+    })?;
+    Ok((logical_tokens, image_token_id))
 }
 
 #[cfg(feature = "xla-iree")]
@@ -445,6 +596,163 @@ impl Qwen2VlIreeHostPreprocessor {
 
 #[cfg(feature = "xla-iree")]
 impl HostMultimodalPreprocessor for Qwen2VlIreeHostPreprocessor {
+    fn backend(&self) -> XlaVisionBackend {
+        XlaVisionBackend::Iree
+    }
+
+    fn prepare(
+        &self,
+        token_ids: &[i32],
+        images: &[DynamicImage],
+    ) -> Result<PreparedPrefill, HostPreprocessorError> {
+        self.prepare_iree(token_ids, images)
+    }
+}
+
+#[cfg(feature = "xla-iree")]
+impl YoutuVlIreeHostPreprocessor {
+    pub fn load(model_path: &Path, device: &str) -> Result<Self, HostPreprocessorError> {
+        crate::loading::load_youtu_vl_iree_host_preprocessor(model_path, device)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_parts(
+        processor: crate::vision::processors::youtu_vl::YoutuVLProcessor,
+        text_embeddings: UnifiedEmbedding,
+        projector: mlxcel_xla::IreeYoutuVlProjector,
+        image_token_id: i32,
+        video_token_id: i32,
+        vision_start_token_id: i32,
+        vision_end_token_id: i32,
+        spatial_merge_size: usize,
+        hidden_size: usize,
+        max_sequence_len: usize,
+        device: String,
+    ) -> Result<Self, HostPreprocessorError> {
+        if hidden_size == 0 || max_sequence_len == 0 || spatial_merge_size == 0 {
+            return Err(HostPreprocessorError::InvalidConfig(
+                "Youtu-VL hidden size, sequence capacity, and spatial merge size must be positive"
+                    .to_string(),
+            ));
+        }
+        if processor.spatial_merge_size != spatial_merge_size {
+            return Err(HostPreprocessorError::InvalidConfig(format!(
+                "Youtu-VL processor merge size {} disagrees with model merge size {spatial_merge_size}",
+                processor.spatial_merge_size
+            )));
+        }
+        if projector.text_hidden() != hidden_size {
+            return Err(HostPreprocessorError::InvalidConfig(format!(
+                "Youtu-VL IREE merger hidden size {} disagrees with text hidden size {hidden_size}",
+                projector.text_hidden()
+            )));
+        }
+        Ok(Self {
+            processor,
+            text_embeddings,
+            projector: RefCell::new(projector),
+            image_token_id,
+            video_token_id,
+            vision_start_token_id,
+            vision_end_token_id,
+            spatial_merge_size,
+            hidden_size,
+            max_sequence_len,
+            device,
+        })
+    }
+
+    fn prepare_iree(
+        &self,
+        token_ids: &[i32],
+        images: &[DynamicImage],
+    ) -> Result<PreparedPrefill, HostPreprocessorError> {
+        if images.is_empty() {
+            return Err(HostPreprocessorError::InvalidConfig(
+                "Youtu-VL image preprocessing requires at least one decoded image; text-only requests use ordinary XLA token prefill"
+                    .to_string(),
+            ));
+        }
+        let (patch_values, spatial_shapes, _patch_width) = self
+            .processor
+            .try_preprocess_values_with_spatial(images)
+            .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+        let (logical_tokens, target_token_id) = prepare_youtu_vl_prompt(
+            token_ids,
+            &spatial_shapes,
+            self.spatial_merge_size,
+            self.image_token_id,
+            self.video_token_id,
+            self.vision_start_token_id,
+            self.vision_end_token_id,
+        )?;
+        validate_sequence_capacity(logical_tokens.len(), self.max_sequence_len)?;
+        let input_ids = mlxcel_core::from_slice_i32(
+            &logical_tokens,
+            &[1, usize_to_i32(logical_tokens.len(), "sequence length")?],
+        );
+        let text_embeddings = mlxcel_core::astype(
+            &self.text_embeddings.forward(&input_ids),
+            mlxcel_core::dtype::FLOAT32,
+        );
+        validate_embedding_shape(
+            &mlxcel_core::array_shape(&text_embeddings),
+            logical_tokens.len(),
+            self.hidden_size,
+            "Youtu-VL text embedding table",
+        )?;
+        let mut projector = self.projector.try_borrow_mut().map_err(|_| {
+            HostPreprocessorError::Iree(
+                "concurrent/re-entrant Youtu-VL IREE vision invocation is unsupported".to_string(),
+            )
+        })?;
+        let projection = projector
+            .project(&patch_values, &spatial_shapes)
+            .map_err(HostPreprocessorError::Iree)?;
+        if projection.shape[1] != self.hidden_size {
+            return Err(HostPreprocessorError::InvalidConfig(format!(
+                "Youtu-VL IREE merger shape {:?} disagrees with text hidden size {}",
+                projection.shape, self.hidden_size
+            )));
+        }
+        tracing::info!(
+            vision_backend = "iree",
+            vision_device = %self.device,
+            image_count = images.len(),
+            patch_upload_bytes = projection.metrics.patch_upload_bytes,
+            metadata_upload_bytes = projection.metrics.metadata_upload_bytes,
+            projected_transfer_bytes = projection.metrics.projected_transfer_bytes,
+            iree_vision_seconds = projection.metrics.elapsed_seconds,
+            merged_tokens_per_image = ?projection.merged_tokens_per_image,
+            "Youtu-VL OpenXLA vision projection completed"
+        );
+        let projected = mlxcel_core::from_slice_f32(
+            &projection.values,
+            &[
+                usize_to_i32(projection.shape[0], "Youtu-VL projected token count")?,
+                usize_to_i32(self.hidden_size, "hidden size")?,
+            ],
+        );
+        let merged = merge_llava(target_token_id, &projected, &text_embeddings, &input_ids);
+        export_youtu_vl_prefill(
+            logical_tokens,
+            InputEmbeddings {
+                inputs_embeds: mlxcel_core::astype(
+                    &merged.inputs_embeds,
+                    mlxcel_core::dtype::FLOAT32,
+                ),
+                attention_mask_4d: merged.attention_mask_4d,
+            },
+            &spatial_shapes,
+            target_token_id,
+            self.spatial_merge_size,
+            self.hidden_size,
+        )
+    }
+}
+
+#[cfg(feature = "xla-iree")]
+impl HostMultimodalPreprocessor for YoutuVlIreeHostPreprocessor {
     fn backend(&self) -> XlaVisionBackend {
         XlaVisionBackend::Iree
     }
