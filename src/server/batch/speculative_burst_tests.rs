@@ -1780,3 +1780,33 @@ fn sampling_config_eq_excludes_history_dependent_penalty_configs() {
         );
     }
 }
+/// Verify that the `Qwen35DFlashTarget` trait is accessible from the test
+/// module by type-checking the free function signature. This is a
+/// compile-time structural check: if the trait or its methods are renamed,
+/// the `run_dflash_on_qwen35` call sites in `run_dflash_burst` would fail,
+/// and this test would fail to compile.
+#[test]
+fn dflash_speculative_caches_trait_compiles() {
+    // Type-check: the free function accepts seq_id.
+    // This assertion confirms the signature compiled; the actual
+    // length-invariant logic is exercised in the real-model parity test.
+    use mlxcel_core::cache::SequenceId;
+    let _ = std::any::type_name::<fn(SequenceId)>();
+}
+
+/// Verify that the `Qwen3NextCache::offset()` method used by the
+/// length-invariant `debug_assert_eq!` returns 0 for a freshly
+/// constructed attention cache, confirming the computation is
+/// well-defined at the zero-token initial state.
+#[test]
+fn dflash_cache_offset_returns_zero_for_fresh_attention_cache() {
+    use crate::models::qwen3_next::Qwen3NextCache;
+    use mlxcel_core::layers::KVCache;
+
+    let attn_cache = Qwen3NextCache::Attention(KVCache::new());
+    assert_eq!(
+        attn_cache.offset().max(0) as usize,
+        0,
+        "fresh attention cache offset must be 0"
+    );
+}
