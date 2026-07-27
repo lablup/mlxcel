@@ -12,8 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{ensure_fused_sdpa, fused_sdpa_target_dim, sdpa_pad_width};
+use super::{
+    VisionBlockDiagnosticStage, diagnostic_dense_linear_from_weight_f32, ensure_fused_sdpa,
+    fused_sdpa_target_dim, gelu_pytorch_tanh, sdpa_pad_width,
+};
 use mlxcel_core::dtype;
+use mlxcel_core::layers::LayerNorm;
+use std::sync::Once;
+
+fn ensure_cpu_device() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| mlxcel_core::set_default_device(false));
+}
 
 #[test]
 fn fused_sdpa_target_dim_uses_next_supported_kernel_width() {
@@ -43,4 +53,98 @@ fn ensure_fused_sdpa_restores_original_output_shape() {
 
     assert_eq!(mlxcel_core::array_shape(&output), vec![1, 2, 4, 96]);
     assert_eq!(mlxcel_core::array_dtype(&output), dtype::FLOAT32);
+}
+
+#[test]
+fn block_gelu_matches_qwen3_vl_pytorch_tanh_contract() {
+    let input = mlxcel_core::from_slice_f32(&[-3.0, -1.0, 0.0, 1.0, 3.0], &[5]);
+    let output = gelu_pytorch_tanh(&input);
+    mlxcel_core::eval(&output);
+
+    let expected = [-0.003_637_433, -0.158_808, 0.0, 0.841_192, 2.996_362_7];
+    for (index, expected) in expected.into_iter().enumerate() {
+        let value = mlxcel_core::slice(&output, &[index as i32], &[index as i32 + 1]);
+        assert!(
+            (mlxcel_core::item_f32(&value) - expected).abs() <= 2.0e-6,
+            "Qwen3-VL tanh GELU mismatch at {index}"
+        );
+    }
+}
+
+#[test]
+fn block_layer_norm_matches_centered_variance_f32_contract() {
+    let values = [3.5_f32, -2.0, 0.25, 7.0, -4.0, 1.5, 8.0, -0.75];
+    let weights = [1.25_f32, 0.5, -0.75, 2.0];
+    let biases = [-0.25_f32, 0.125, 0.5, -1.0];
+    let input = mlxcel_core::from_slice_f32(&values, &[2, 4]);
+    let layer = LayerNorm::new(
+        mlxcel_core::from_slice_f32(&weights, &[4]),
+        Some(mlxcel_core::from_slice_f32(&biases, &[4])),
+        1.0e-6,
+    );
+    let output = layer.forward(&input);
+    mlxcel_core::eval(&output);
+
+    for row in 0..2 {
+        let row_values = &values[row * 4..row * 4 + 4];
+        let mean = row_values.iter().sum::<f32>() / 4.0;
+        let variance = row_values
+            .iter()
+            .map(|value| {
+                let centered = value - mean;
+                centered * centered
+            })
+            .sum::<f32>()
+            / 4.0;
+        let inv_std = (variance + 1.0e-6).sqrt().recip();
+        for column in 0..4 {
+            let expected = (row_values[column] - mean) * inv_std * weights[column] + biases[column];
+            let actual = mlxcel_core::slice(
+                &output,
+                &[row as i32, column as i32],
+                &[row as i32 + 1, column as i32 + 1],
+            );
+            assert!(
+                (mlxcel_core::item_f32(&actual) - expected).abs() <= 2.0e-5,
+                "Qwen3-VL LayerNorm mismatch at row {row}, column {column}"
+            );
+        }
+    }
+}
+
+#[test]
+fn diagnostic_dense_linear_runs_transposed_weight_and_bias_in_f32() {
+    ensure_cpu_device();
+    let input = mlxcel_core::from_slice_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
+    let weight = mlxcel_core::from_slice_f32(&[2.0, 0.0, 0.0, 3.0], &[2, 2]);
+    let bias = mlxcel_core::from_slice_f32(&[0.5, -1.0], &[2]);
+
+    let output = diagnostic_dense_linear_from_weight_f32(&input, &weight, Some(&bias));
+    mlxcel_core::eval(&output);
+
+    assert_eq!(mlxcel_core::array_dtype(&output), dtype::FLOAT32);
+    assert_eq!(mlxcel_core::array_shape(&output), vec![2, 2]);
+    for (index, expected) in [2.5_f32, 5.0, 6.5, 11.0].into_iter().enumerate() {
+        let row = i32::try_from(index / 2).expect("small test row");
+        let column = i32::try_from(index % 2).expect("small test column");
+        let value = mlxcel_core::slice(&output, &[row, column], &[row + 1, column + 1]);
+        assert_eq!(mlxcel_core::item_f32(&value), expected);
+    }
+}
+
+#[test]
+fn block_2_diagnostic_stage_order_is_stable() {
+    let stages = [
+        VisionBlockDiagnosticStage::Input,
+        VisionBlockDiagnosticStage::Norm1,
+        VisionBlockDiagnosticStage::Attention,
+        VisionBlockDiagnosticStage::PostAttentionResidual,
+        VisionBlockDiagnosticStage::Norm2,
+        VisionBlockDiagnosticStage::Mlp,
+        VisionBlockDiagnosticStage::Output,
+    ];
+    assert_eq!(stages.len(), VisionBlockDiagnosticStage::COUNT);
+    for (index, stage) in stages.into_iter().enumerate() {
+        assert_eq!(stage.index(), index);
+    }
 }

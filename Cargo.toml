@@ -329,6 +329,12 @@ required-features = ["xla-diagnostics"]
 name = "xla_vision_reference_check"
 required-features = ["xla-diagnostics"]
 
+# Actual-checkpoint eager MLX vs IREE Qwen3-VL oracle. Compares the main
+# merger, every DeepStack branch, post-injection hidden states, and logits.
+[[example]]
+name = "xla_qwen3_vl_deepstack_check"
+required-features = ["xla-diagnostics"]
+
 [[example]]
 name = "xla_aux_smoke"
 required-features = ["xla-iree"]

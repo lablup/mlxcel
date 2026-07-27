@@ -567,8 +567,12 @@ static iree_status_t xla_llama_create_impl(
   }
   if (c->has_prefill_diagnostics) {
     iree_runtime_call_t probe;
+    const char* diagnostic_entry =
+        c->has_deepstack
+            ? "prefill_embeddings_deepstack_diagnostics.main"
+            : "prefill_diagnostics.main";
     IREE_RETURN_IF_ERROR(iree_runtime_call_initialize_by_name(
-        c->session, iree_make_cstring_view("prefill_diagnostics.main"), &probe));
+        c->session, iree_make_cstring_view(diagnostic_entry), &probe));
     iree_runtime_call_deinitialize(&probe);
   }
 
@@ -1367,7 +1371,8 @@ static int xla_llama_prefill_embeddings_deepstack_impl(
     const xla_tensor_desc* layer_features,
     const xla_tensor_desc* layer_indices, int32_t actual_layer_count,
     int32_t actual_visual_count, int32_t real_len, int32_t vocab,
-    int32_t* out_token, float* out_logits) {
+    int32_t* out_token, float* out_logits, int32_t state_count,
+    float* out_states) {
   if (!c || !c->has_deepstack || position_mode != c->position_mode ||
       real_len <= 0 ||
       real_len > c->context_capacity ||
@@ -1457,8 +1462,16 @@ static int xla_llama_prefill_embeddings_deepstack_impl(
   }
 
   bool batched = slot >= 0;
+  bool diagnostics = out_states != NULL;
+  size_t expected_state_count =
+      (size_t)c->deepstack_layers * (size_t)c->context_capacity *
+      (size_t)c->hidden_size;
   if ((!batched && !out_token) ||
-      (batched && (slot >= c->rg_bsz || vocab <= 0 || !out_logits))) {
+      (batched && (slot >= c->rg_bsz || vocab <= 0 || !out_logits)) ||
+      (diagnostics &&
+       (!c->has_prefill_diagnostics || state_count <= 0 ||
+        (size_t)state_count != expected_state_count)) ||
+      (!diagnostics && state_count != 0)) {
     fprintf(stderr,
             "xla_llama_prefill_embeddings_deepstack: invalid slot/output/vocab contract\n");
     return 1;
@@ -1480,12 +1493,13 @@ static int xla_llama_prefill_embeddings_deepstack_impl(
   iree_hal_buffer_view_t* output = NULL;
   iree_hal_buffer_view_t* kc = NULL;
   iree_hal_buffer_view_t* vc = NULL;
+  iree_hal_buffer_view_t* states = NULL;
 
+  const char* entry = diagnostics
+                          ? "prefill_embeddings_deepstack_diagnostics.main"
+                          : "prefill_embeddings_deepstack.main";
   XLA_CHECK_GOTO(iree_runtime_call_initialize_by_name(
-                     c->session,
-                     iree_make_cstring_view(
-                         "prefill_embeddings_deepstack.main"),
-                     &call),
+                     c->session, iree_make_cstring_view(entry), &call),
                  cleanup, rc);
   call_initialized = true;
   for (int32_t i = 0; i < c->n_weights; ++i) {
@@ -1531,6 +1545,11 @@ static int xla_llama_prefill_embeddings_deepstack_impl(
                  cleanup, rc);
   XLA_CHECK_GOTO(iree_runtime_call_outputs_pop_front_buffer_view(&call, &vc),
                  cleanup, rc);
+  if (diagnostics) {
+    XLA_CHECK_GOTO(
+        iree_runtime_call_outputs_pop_front_buffer_view(&call, &states),
+        cleanup, rc);
+  }
   if (xla_validate_kv_pair(c, kc, vc, 4, 1) != 0) {
     rc = 1;
     goto cleanup;
@@ -1539,6 +1558,11 @@ static int xla_llama_prefill_embeddings_deepstack_impl(
     XLA_CHECK_GOTO(
         xla_read_logits(c, output, out_logits, (iree_host_size_t)vocab),
         cleanup, rc);
+    if (diagnostics) {
+      XLA_CHECK_GOTO(
+          xla_read_logits(c, states, out_states, (iree_host_size_t)state_count),
+          cleanup, rc);
+    }
     rc = xla_store_prefill_kv_slot(c, slot, kc, vc);
   } else {
     XLA_CHECK_GOTO(xla_read_token(c, output, out_token), cleanup, rc);
@@ -1557,6 +1581,7 @@ cleanup:
   if (output) iree_hal_buffer_view_release(output);
   if (kc) iree_hal_buffer_view_release(kc);
   if (vc) iree_hal_buffer_view_release(vc);
+  if (states) iree_hal_buffer_view_release(states);
   if (embeddings_bv) iree_hal_buffer_view_release(embeddings_bv);
   if (positions_bv) iree_hal_buffer_view_release(positions_bv);
   if (len_bv) iree_hal_buffer_view_release(len_bv);
@@ -1581,7 +1606,8 @@ int xla_llama_prefill_embeddings_deepstack(
   return xla_llama_prefill_embeddings_deepstack_impl(
       c, -1, adapter_mode, position_mode, embeddings, positions,
       attention_bias, visual_positions, layer_features, layer_indices,
-      actual_layer_count, actual_visual_count, real_len, 0, out_token, NULL);
+      actual_layer_count, actual_visual_count, real_len, 0, out_token, NULL, 0,
+      NULL);
 }
 
 int xla_llama_prefill_embeddings_deepstack_slot_logits(
@@ -1597,7 +1623,23 @@ int xla_llama_prefill_embeddings_deepstack_slot_logits(
       c, slot, adapter_mode, position_mode, embeddings, positions,
       attention_bias, visual_positions, layer_features, layer_indices,
       actual_layer_count, actual_visual_count, real_len, vocab, NULL,
-      out_logits);
+      out_logits, 0, NULL);
+}
+
+int xla_llama_prefill_embeddings_deepstack_slot_diagnostics(
+    xla_ctx* c, int32_t slot, int32_t adapter_mode, int32_t position_mode,
+    const xla_tensor_desc* embeddings,
+    const xla_tensor_desc* positions, const xla_tensor_desc* attention_bias,
+    const xla_tensor_desc* visual_positions,
+    const xla_tensor_desc* layer_features,
+    const xla_tensor_desc* layer_indices, int32_t actual_layer_count,
+    int32_t actual_visual_count, int32_t real_len, int32_t vocab,
+    int32_t state_count, float* out_logits, float* out_states) {
+  return xla_llama_prefill_embeddings_deepstack_impl(
+      c, slot, adapter_mode, position_mode, embeddings, positions,
+      attention_bias, visual_positions, layer_features, layer_indices,
+      actual_layer_count, actual_visual_count, real_len, vocab, NULL,
+      out_logits, state_count, out_states);
 }
 
 // Ragged decode_step: token[B], pos[B], cache_len[B] (per row), rank-5 KV ->

@@ -25,12 +25,16 @@
 //! about Qwen family details.
 
 use anyhow::Result;
+#[cfg(feature = "xla-iree")]
+use image::imageops::FilterType;
 use std::path::Path;
 
 use crate::LoadedModel;
 use crate::models;
 #[cfg(feature = "xla-iree")]
-use crate::multimodal::host_preprocessor::{HostPreprocessorError, Qwen2VlIreeHostPreprocessor};
+use crate::multimodal::host_preprocessor::{
+    HostPreprocessorError, Qwen2VlIreeHostPreprocessor, Qwen3VlIreeHostPreprocessor,
+};
 use crate::vision;
 
 #[cfg(feature = "xla-iree")]
@@ -198,6 +202,290 @@ pub(crate) fn load_qwen2_vl_iree_host_preprocessor(
         max_sequence_len,
         device.to_string(),
     )
+}
+
+/// Load only Qwen3-VL image patch preprocessing and the dense text embedding
+/// table. The full vision tower and all DeepStack mergers remain resident in
+/// IREE; MoE checkpoints are deliberately rejected by the runtime config.
+#[cfg(feature = "xla-iree")]
+pub(crate) fn load_qwen3_vl_iree_host_preprocessor(
+    model_path: &Path,
+    device: &str,
+) -> Result<Qwen3VlIreeHostPreprocessor, HostPreprocessorError> {
+    use mlxcel_core::layers::UnifiedEmbedding;
+    use vision::encoders::qwen3_vl::Qwen3VLVisionConfig;
+
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)
+        .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    if full_config
+        .get("model_type")
+        .and_then(serde_json::Value::as_str)
+        != Some("qwen3_vl")
+    {
+        return Err(HostPreprocessorError::FamilyMismatch {
+            actual: full_config
+                .get("model_type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<missing>")
+                .to_string(),
+        });
+    }
+    let text_config = full_config
+        .get("text_config")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            HostPreprocessorError::InvalidConfig(
+                "Qwen3-VL text_config must be an object".to_string(),
+            )
+        })?;
+    if text_config
+        .get("model_type")
+        .and_then(serde_json::Value::as_str)
+        != Some("qwen3_vl_text")
+    {
+        return Err(HostPreprocessorError::FamilyMismatch {
+            actual: text_config
+                .get("model_type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<missing>")
+                .to_string(),
+        });
+    }
+    let mut vision_config: Qwen3VLVisionConfig =
+        parse_required_vlm_subconfig(&full_config, "vision_config", "Qwen3VL vision config")
+            .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    inherit_qwen_vision_quantization(&mut vision_config, &full_config);
+    let weights = load_vlm_weights_common_filtered_canonical(model_path, |name| {
+        name.starts_with("language_model.model.embed_tokens.")
+            || name.starts_with("model.language_model.embed_tokens.")
+    })
+    .map(|weights| remap_qwen3_vl_weights(weights, false))
+    .map_err(|error| HostPreprocessorError::WeightLoad(error.to_string()))?;
+    let quant_group_size = full_config
+        .get("quantization")
+        .and_then(|value| value.get("group_size"))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0) as i32;
+    let quant_bits = full_config
+        .get("quantization")
+        .and_then(|value| value.get("bits"))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0) as i32;
+    let text_embeddings = UnifiedEmbedding::from_weights(
+        &weights,
+        "model.embed_tokens",
+        quant_group_size,
+        quant_bits,
+    )
+    .map_err(|error| {
+        HostPreprocessorError::WeightLoad(format!(
+            "missing or invalid Qwen3-VL text embedding table: {error}"
+        ))
+    })?;
+    let positive_text_field = |field: &str| {
+        text_config
+            .get(field)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|&value| value > 0)
+            .ok_or_else(|| {
+                HostPreprocessorError::InvalidConfig(format!(
+                    "Qwen3-VL text_config.{field} must be a positive integer"
+                ))
+            })
+    };
+    let hidden_size = positive_text_field("hidden_size")?;
+    let max_sequence_len = positive_text_field("max_position_embeddings")?;
+    let token_ids = qwen_vl_token_ids(
+        &full_config,
+        QwenVisionTokenIds {
+            image_token_id: 151655,
+            video_token_id: 151656,
+            vision_start_token_id: 151652,
+        },
+    );
+    let processor_policy = load_qwen3_vl_processor_policy(model_path)?;
+    let processor = qwen_vl_processor_with_norm(&vision_config, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+        .with_pixel_bounds(processor_policy.min_pixels, processor_policy.max_pixels)
+        .with_resize_filter(FilterType::CatmullRom);
+    let projector = mlxcel_xla::IreeQwen3VlProjector::load(model_path, device)
+        .map_err(HostPreprocessorError::Iree)?;
+    Qwen3VlIreeHostPreprocessor::from_parts(
+        processor,
+        text_embeddings,
+        projector,
+        token_ids.image_token_id,
+        token_ids.video_token_id,
+        token_ids.vision_start_token_id,
+        vision_config.spatial_merge_size,
+        hidden_size,
+        max_sequence_len,
+        device.to_string(),
+    )
+}
+
+#[cfg(feature = "xla-iree")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Qwen3VlProcessorPolicy {
+    min_pixels: usize,
+    max_pixels: usize,
+}
+
+#[cfg(feature = "xla-iree")]
+fn load_qwen3_vl_processor_policy(
+    model_path: &Path,
+) -> Result<Qwen3VlProcessorPolicy, HostPreprocessorError> {
+    let path = model_path.join("preprocessor_config.json");
+    let bytes = std::fs::read(&path).map_err(|error| {
+        HostPreprocessorError::InvalidConfig(format!("{}: {error}", path.display()))
+    })?;
+    let root: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+        HostPreprocessorError::InvalidConfig(format!("parse {}: {error}", path.display()))
+    })?;
+    let object = root.as_object().ok_or_else(|| {
+        HostPreprocessorError::InvalidConfig(format!("{} must contain an object", path.display()))
+    })?;
+    let size = match object.get("size") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => Some(value.as_object().ok_or_else(|| {
+            HostPreprocessorError::InvalidConfig(
+                "Qwen3-VL preprocessor_config.json size must be an object".to_string(),
+            )
+        })?),
+    };
+    let positive_bound = |nested: &str, fallback: &str| -> Result<usize, HostPreprocessorError> {
+        let value = size
+            .and_then(|size| size.get(nested))
+            .or_else(|| object.get(fallback))
+            .ok_or_else(|| {
+                HostPreprocessorError::InvalidConfig(format!(
+                    "Qwen3-VL preprocessor_config.json requires size.{nested} or {fallback}"
+                ))
+            })?;
+        value
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+                .filter(|&value| value > 0)
+                .ok_or_else(|| {
+                    HostPreprocessorError::InvalidConfig(format!(
+                        "Qwen3-VL preprocessor_config.json size.{nested}/{fallback} must be a positive integer"
+                    ))
+                })
+    };
+    let min_pixels = positive_bound("shortest_edge", "min_pixels")?;
+    let max_pixels = positive_bound("longest_edge", "max_pixels")?;
+    if min_pixels > max_pixels {
+        return Err(HostPreprocessorError::InvalidConfig(format!(
+            "Qwen3-VL preprocessor pixel bounds are inverted: min={min_pixels}, max={max_pixels}"
+        )));
+    }
+    match object.get("resample").and_then(serde_json::Value::as_u64) {
+        Some(3) => {}
+        Some(other) => {
+            return Err(HostPreprocessorError::InvalidConfig(format!(
+                "Qwen3-VL IREE vision requires PIL BICUBIC resample=3, got {other}"
+            )));
+        }
+        None => {
+            return Err(HostPreprocessorError::InvalidConfig(
+                "Qwen3-VL preprocessor_config.json resample must be integer 3 (PIL BICUBIC)"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(Qwen3VlProcessorPolicy {
+        min_pixels,
+        max_pixels,
+    })
+}
+
+#[cfg(all(test, feature = "xla-iree"))]
+mod qwen3_vl_iree_processor_policy_tests {
+    use super::{Qwen3VlProcessorPolicy, load_qwen3_vl_processor_policy};
+
+    fn write_policy(value: serde_json::Value) -> tempfile::TempDir {
+        let model = tempfile::tempdir().unwrap();
+        std::fs::write(
+            model.path().join("preprocessor_config.json"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        model
+    }
+
+    #[test]
+    fn reads_canonical_size_bounds_and_bicubic_resampler() {
+        let model = write_policy(serde_json::json!({
+            "size": {
+                "shortest_edge": 65_536,
+                "longest_edge": 16_777_216
+            },
+            "resample": 3
+        }));
+        assert_eq!(
+            load_qwen3_vl_processor_policy(model.path()).unwrap(),
+            Qwen3VlProcessorPolicy {
+                min_pixels: 65_536,
+                max_pixels: 16_777_216,
+            }
+        );
+    }
+
+    #[test]
+    fn accepts_explicit_legacy_pixel_bound_keys() {
+        let model = write_policy(serde_json::json!({
+            "min_pixels": 65_536,
+            "max_pixels": 16_777_216,
+            "resample": 3
+        }));
+        assert_eq!(
+            load_qwen3_vl_processor_policy(model.path()).unwrap(),
+            Qwen3VlProcessorPolicy {
+                min_pixels: 65_536,
+                max_pixels: 16_777_216,
+            }
+        );
+    }
+
+    #[test]
+    fn missing_or_malformed_policy_fails_closed() {
+        let missing = write_policy(serde_json::json!({"resample": 3}));
+        assert!(
+            load_qwen3_vl_processor_policy(missing.path())
+                .unwrap_err()
+                .to_string()
+                .contains("shortest_edge")
+        );
+
+        let malformed = write_policy(serde_json::json!({
+            "size": {
+                "shortest_edge": "65536",
+                "longest_edge": 16_777_216
+            },
+            "min_pixels": 65_536,
+            "resample": 3
+        }));
+        assert!(
+            load_qwen3_vl_processor_policy(malformed.path())
+                .unwrap_err()
+                .to_string()
+                .contains("positive integer")
+        );
+
+        let wrong_resampler = write_policy(serde_json::json!({
+            "size": {
+                "shortest_edge": 65_536,
+                "longest_edge": 16_777_216
+            },
+            "resample": 1
+        }));
+        assert!(
+            load_qwen3_vl_processor_policy(wrong_resampler.path())
+                .unwrap_err()
+                .to_string()
+                .contains("BICUBIC")
+        );
+    }
 }
 
 /// Load a Qwen2.5-VL model (windowed ViT + Qwen2 language model with MRoPE)

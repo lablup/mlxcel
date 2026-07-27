@@ -16,11 +16,12 @@ use std::collections::BTreeSet;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use image::{DynamicImage, ImageFormat};
 use mlxcel_core::session::{
-    OwnedTensor, PreparedAdapterMode, PreparedAttentionBias, PreparedPositions, PreparedTensorDType,
+    OwnedTensor, PreparedAdapterMode, PreparedAttentionBias, PreparedModality, PreparedPositions,
+    PreparedPrefill, PreparedTensorDType,
 };
 
 use super::*;
@@ -39,6 +40,7 @@ struct FakeServingEngine {
     text_submissions: Vec<Vec<i32>>,
     prepared_submissions: Vec<(Vec<i32>, usize)>,
     prepared_modes: Vec<PreparedAdapterMode>,
+    deepstack_submissions: usize,
 }
 
 impl XlaServingEngine for FakeServingEngine {
@@ -80,6 +82,20 @@ impl XlaServingEngine for FakeServingEngine {
         Ok(self.activate())
     }
 
+    fn submit_deepstack_prepared(
+        &mut self,
+        request: DeepStackPreparedPrefill,
+        _max_new_tokens: usize,
+        _params: SampleParams,
+    ) -> Result<u64, String> {
+        self.prepared_submissions.push((
+            request.prepared().token_ids.clone(),
+            request.prepared().sequence_len,
+        ));
+        self.deepstack_submissions += 1;
+        Ok(self.activate())
+    }
+
     fn cancel(&mut self, req_id: u64) -> bool {
         self.active.remove(&req_id)
     }
@@ -114,6 +130,59 @@ fn png_bytes() -> Vec<u8> {
         .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
         .unwrap();
     bytes
+}
+
+fn deepstack_prepared() -> DeepStackPreparedPrefill {
+    let prepared = PreparedPrefill::new(
+        vec![1, -200, 2],
+        OwnedTensor::new(
+            vec![0; 3 * 2 * std::mem::size_of::<f32>()],
+            PreparedTensorDType::Float32,
+            vec![1, 3, 2],
+        )
+        .unwrap(),
+        PreparedPositions::Sequential {
+            start: 0,
+            length: 3,
+        },
+        PreparedAttentionBias {
+            tensor: OwnedTensor::new(
+                vec![0; 3 * std::mem::size_of::<f32>()],
+                PreparedTensorDType::Float32,
+                vec![1, 1, 1, 3],
+            )
+            .unwrap(),
+            causal: true,
+        },
+        vec![PreparedModality {
+            family: "qwen3_vl".to_string(),
+            item_count: 1,
+            token_count: 1,
+        }],
+    )
+    .unwrap();
+    let features = mlxcel_xla::DeepStackFeatures::new(
+        OwnedTensor::new(
+            1i32.to_le_bytes().to_vec(),
+            PreparedTensorDType::Int32,
+            vec![1],
+        )
+        .unwrap(),
+        OwnedTensor::new(
+            vec![0; 2 * std::mem::size_of::<f32>()],
+            PreparedTensorDType::Float32,
+            vec![1, 1, 2],
+        )
+        .unwrap(),
+        OwnedTensor::new(
+            0i32.to_le_bytes().to_vec(),
+            PreparedTensorDType::Int32,
+            vec![1],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    DeepStackPreparedPrefill::new(prepared, features).unwrap()
 }
 
 fn wav_bytes() -> Vec<u8> {
@@ -513,6 +582,54 @@ fn cancelled_image_does_not_disturb_active_text_or_prevent_slot_reuse() {
     let events = worker.engine.pump().unwrap();
     worker.dispatch(events);
     assert_eq!(receive_done(&reuse_rx).prompt_tokens, 3);
+}
+
+#[test]
+fn deepstack_outcomes_route_distinctly_and_cancelled_payloads_leave_no_slot_state() {
+    use crate::server::batch::xla_preprocess::{
+        ImagePreprocessOutcome, ImagePreprocessResult, PreparedImagePrefill,
+    };
+
+    let pending = |cancelled: Arc<AtomicBool>, response_tx| PendingImageState {
+        response_tx,
+        cancelled,
+        prompt_tokens: vec![1, -200, 2],
+        params: SampleParams::greedy(),
+        stop_sequences: Vec::new(),
+        max_tokens: 1,
+        start: Instant::now(),
+    };
+
+    let mut routed = worker(None);
+    let (routed_tx, _routed_rx) = mpsc::channel();
+    routed
+        .pending_images
+        .insert(41, pending(Arc::new(AtomicBool::new(false)), routed_tx));
+    routed.handle_preprocessed(ImagePreprocessResult {
+        job_id: 41,
+        outcome: ImagePreprocessOutcome::Prepared(PreparedImagePrefill::DeepStack(
+            deepstack_prepared(),
+        )),
+    });
+    assert_eq!(routed.engine.deepstack_submissions, 1);
+    assert_eq!(routed.engine.prepared_submissions.len(), 1);
+    assert_eq!(routed.states.len(), 1);
+
+    let mut cancelled = worker(None);
+    let (cancelled_tx, _cancelled_rx) = mpsc::channel();
+    cancelled
+        .pending_images
+        .insert(42, pending(Arc::new(AtomicBool::new(true)), cancelled_tx));
+    cancelled.handle_preprocessed(ImagePreprocessResult {
+        job_id: 42,
+        outcome: ImagePreprocessOutcome::Prepared(PreparedImagePrefill::DeepStack(
+            deepstack_prepared(),
+        )),
+    });
+    assert_eq!(cancelled.engine.deepstack_submissions, 0);
+    assert!(cancelled.engine.prepared_submissions.is_empty());
+    assert!(cancelled.states.is_empty());
+    assert!(cancelled.pending_images.is_empty());
 }
 
 #[test]

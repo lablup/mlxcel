@@ -81,6 +81,8 @@ mod phi4_audio;
 #[cfg(feature = "iree")]
 mod qwen2_vl_runtime;
 #[cfg(feature = "iree")]
+mod qwen3_vl_runtime;
+#[cfg(feature = "iree")]
 mod vision_runtime;
 
 #[cfg(feature = "micro-oracle")]
@@ -145,8 +147,9 @@ pub use batch::{EngineEvent, FinishReason, XlaAdmissionError, XlaBatchEngine, Xl
 #[cfg(feature = "diagnostics")]
 pub use batch::{
     Gemma3nAllLayerDiagnosticRun, Gemma3nCanonicalDiagnosticRun, Gemma3nPrefixDecodeDiagnosticRun,
-    LlavaReferenceDiagnosticEngine, LlavaReferenceDiagnosticRun, run_gemma3n_all_layer_diagnostics,
-    run_gemma3n_canonical_diagnostics, run_gemma3n_prefix_decode_diagnostic,
+    LlavaReferenceDiagnosticEngine, LlavaReferenceDiagnosticRun, Qwen3VlDeepStackDiagnosticEngine,
+    run_gemma3n_all_layer_diagnostics, run_gemma3n_canonical_diagnostics,
+    run_gemma3n_prefix_decode_diagnostic,
 };
 pub use context::{
     CONTEXT_CAPACITY_ENV, ContextCapacityError, DEFAULT_CONTEXT_CAPACITY,
@@ -167,7 +170,7 @@ pub use emitter::{
     run_gemma3n_sdpa_vector_context_diagnostic_probe,
 };
 #[cfg(feature = "diagnostics")]
-pub use iree::PreparedPrefillDiagnostics;
+pub use iree::{DeepStackPrefillDiagnostics, PreparedPrefillDiagnostics};
 #[cfg(feature = "iree")]
 pub use phi4_audio::{
     PHI4MM_AUDIO_CHECKPOINT_REVISION, PHI4MM_AUDIO_FRAME_BUCKETS, Phi4AudioOutput,
@@ -179,6 +182,12 @@ pub use phi4_audio::{Phi4AudioCheckpoint, Phi4AudioDiagnosticRuntime, Phi4AudioD
 #[cfg(feature = "iree")]
 pub use qwen2_vl_runtime::{
     IreeQwen2VlProjector, Qwen2VlVisionExecutionMetrics, Qwen2VlVisionProjection,
+};
+#[cfg(feature = "diagnostics")]
+pub use qwen3_vl_runtime::Qwen3VlVisionDiagnostics;
+#[cfg(feature = "iree")]
+pub use qwen3_vl_runtime::{
+    IreeQwen3VlProjector, Qwen3VlVisionExecutionMetrics, Qwen3VlVisionProjection,
 };
 #[cfg(feature = "diagnostics")]
 pub use vision_runtime::{IreeVisionDiagnosticProjector, VisionDiagnosticProjection};
@@ -204,6 +213,31 @@ pub fn dequantize_gemma3n_affine_diagnostic(
     group_size: usize,
 ) -> Result<Vec<f32>, String> {
     weights::dequantize_affine_bf16_fused(packed, scales, biases, out, in_packed, bits, group_size)
+}
+
+/// Expose the exact host-side affine widening used by the Qwen3-VL IREE
+/// checkpoint loader to diagnostics without making it part of the runtime API.
+#[cfg(feature = "diagnostics")]
+pub fn dequantize_affine_f32_diagnostic(
+    packed: &[u8],
+    scales: &[u8],
+    biases: &[u8],
+    out: usize,
+    in_packed: usize,
+    bits: usize,
+    group_size: usize,
+    scales_bf16: bool,
+) -> Result<Vec<f32>, String> {
+    weights::dequantize_affine(
+        packed,
+        scales,
+        biases,
+        out,
+        in_packed,
+        bits,
+        group_size,
+        scales_bf16,
+    )
 }
 #[cfg(feature = "diagnostics")]
 pub use emitter::{Gemma3nDiagnosticLayout, Gemma3nDiagnosticSegment};

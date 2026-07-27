@@ -34,6 +34,7 @@ pub struct Qwen2VLProcessor {
     pub max_pixels: usize,
     pub mean: [f32; 3],
     pub std: [f32; 3],
+    resize_filter: FilterType,
 }
 
 impl Qwen2VLProcessor {
@@ -47,6 +48,7 @@ impl Qwen2VLProcessor {
             max_pixels: 16384 * 28 * 28, // large limit
             mean: [0.48145466, 0.4578275, 0.40821073],
             std: [0.26862954, 0.261_302_6, 0.275_777_1],
+            resize_filter: FilterType::Lanczos3,
         }
     }
 
@@ -66,7 +68,24 @@ impl Qwen2VLProcessor {
             max_pixels: 16384 * 28 * 28,
             mean,
             std,
+            resize_filter: FilterType::Lanczos3,
         }
+    }
+
+    /// Override the checkpoint's effective smart-resize pixel bounds.
+    #[must_use]
+    pub fn with_pixel_bounds(mut self, min_pixels: usize, max_pixels: usize) -> Self {
+        self.min_pixels = min_pixels;
+        self.max_pixels = max_pixels;
+        self
+    }
+
+    /// Override the image resampler while preserving the historical Qwen2
+    /// default for callers that do not opt in.
+    #[must_use]
+    pub fn with_resize_filter(mut self, resize_filter: FilterType) -> Self {
+        self.resize_filter = resize_filter;
+        self
     }
 
     /// Compute target size that satisfies constraints
@@ -156,7 +175,7 @@ impl Qwen2VLProcessor {
             let target_w = w_patches as u32 * self.patch_size as u32;
 
             // Resize image
-            let resized = img.resize_exact(target_w, target_h, FilterType::Lanczos3);
+            let resized = img.resize_exact(target_w, target_h, self.resize_filter);
             let rgb = resized.to_rgb8();
 
             // Normalize: (pixel / 255.0 - mean) / std
@@ -267,5 +286,16 @@ mod tests {
         let (mlx, mlx_grids) = processor.preprocess_with_grid(&[DynamicImage::new_rgb8(56, 56)]);
         assert_eq!(mlx_grids, grids);
         assert_eq!(mlxcel_core::array_shape(&mlx), vec![32, row_width as i32]);
+    }
+
+    #[test]
+    fn qwen3_checkpoint_policy_lifts_224_square_to_sixteen_by_sixteen_grid() {
+        let processor = Qwen2VLProcessor::new_with_norm(16, 2, 2, [0.5; 3], [0.5; 3])
+            .with_pixel_bounds(65_536, 16_777_216)
+            .with_resize_filter(FilterType::CatmullRom);
+        assert_eq!(
+            processor.compute_grid_thw(&[DynamicImage::new_rgb8(224, 224)]),
+            vec![(1, 16, 16)]
+        );
     }
 }

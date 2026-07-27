@@ -133,6 +133,34 @@ impl XlaBackendSession {
             .prepare(token_ids, images)
             .map_err(|error| error.to_string())
     }
+
+    /// Prepare and execute an image request through its architecture-specific
+    /// owned prefill entry. Qwen3-VL is routed through the distinct DeepStack
+    /// entry before the ordinary fallback is considered.
+    pub fn generate_images_greedy(
+        &mut self,
+        token_ids: &[i32],
+        images: &[image::DynamicImage],
+        max_tokens: usize,
+    ) -> Result<Vec<i32>, String> {
+        let preprocessor = self.image_preprocessor.as_ref().ok_or_else(|| {
+            "the loaded OpenXLA model/runtime bundle does not support image input".to_string()
+        })?;
+        let eos = self.engine.eos_token_ids().to_vec();
+        if let Some(request) = preprocessor
+            .prepare_deepstack(token_ids, images)
+            .map_err(|error| error.to_string())?
+        {
+            return self
+                .engine
+                .generate_deepstack_prepared_greedy(&request, max_tokens, &eos);
+        }
+        let prepared = preprocessor
+            .prepare(token_ids, images)
+            .map_err(|error| error.to_string())?;
+        self.engine
+            .generate_prepared_greedy(&prepared, max_tokens, &eos)
+    }
 }
 
 #[cfg(feature = "xla-backend")]

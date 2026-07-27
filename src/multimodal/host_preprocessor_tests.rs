@@ -17,6 +17,9 @@ use std::sync::Once;
 use image::DynamicImage;
 use mlxcel_core::dtype;
 
+use super::export::validate_sequence_capacity;
+#[cfg(feature = "xla-iree")]
+use super::reject_qwen3_standard_prefill;
 use super::{
     FakeHostMultimodalPreprocessor, HostMultimodalPreprocessor, HostPreprocessorError,
     XlaVisionBackend, XlaVisionBackendPolicy, export_llava_prefill, export_mlx_tensor,
@@ -63,6 +66,24 @@ fn iree_vision_contract_policy_is_explicit_and_strict() {
     );
     assert!(XlaVisionBackendPolicy::from_value(Some("cuda")).is_err());
     assert_eq!(fake().backend(), XlaVisionBackend::Host);
+}
+
+#[cfg(feature = "xla-backend")]
+#[test]
+fn ordinary_preprocessors_do_not_claim_the_deepstack_entry() {
+    assert!(
+        fake()
+            .prepare_deepstack(&[1, -200, 2], &images(1))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[cfg(feature = "xla-iree")]
+#[test]
+fn qwen3_standard_prefill_is_rejected_instead_of_dropping_deepstack() {
+    let error = reject_qwen3_standard_prefill().unwrap_err();
+    assert!(error.to_string().contains("refusing to omit side features"));
 }
 
 #[test]
@@ -160,6 +181,21 @@ fn fake_preprocessor_rejects_expanded_sequence_over_capacity() {
             actual: 4,
             maximum: 3,
         }
+    ));
+}
+
+#[test]
+fn canonical_two_image_expansion_still_obeys_model_context_capacity() {
+    let visual_tokens = 2 * 64;
+    let prompt_tokens = 2;
+    let expanded = visual_tokens + prompt_tokens;
+    let error = validate_sequence_capacity(expanded, expanded - 1).unwrap_err();
+    assert!(matches!(
+        error,
+        HostPreprocessorError::SequenceCapacity {
+            actual,
+            maximum
+        } if actual == expanded && maximum == expanded - 1
     ));
 }
 
