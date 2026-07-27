@@ -127,6 +127,13 @@ fn the_real_checkpoint_shape_signature_matches_what_loading_expects() {
     assert_eq!(args.hidden_size as i32 / group_size, 40);
     assert_eq!(args.intermediate_size as i32 * bits / 32, 880);
     assert_eq!(args.intermediate_size as i32 / group_size, 110);
+
+    // The input-width guard reconstructs the input axis the way MLX does,
+    // `scales.shape(-1) * group_size`, so the real scales widths must land back
+    // on the config's own values. This is what proves the guard accepts this
+    // checkpoint rather than only rejecting broken ones.
+    assert_eq!(40 * group_size, args.hidden_size as i32);
+    assert_eq!(110 * group_size, args.intermediate_size as i32);
 }
 
 #[test]
@@ -589,7 +596,10 @@ fn loading_rejects_a_partially_quantized_attention_block() {
     let mut weights = tiny_weights(&args);
     weights.insert(
         "model.layers.0.self_attn.q_proj.scales".into(),
-        filled(&[(args.num_attention_heads * args.head_dim()) as i32, 2]),
+        filled(&[
+            (args.num_attention_heads * args.head_dim()) as i32,
+            scale_cols(&args, args.hidden_size),
+        ]),
     );
     let err = validate_weights(&weights, &args).expect_err("mixed quantization is rejected");
     assert!(err.contains("quantized"), "{err}");
@@ -604,18 +614,99 @@ fn loading_rejects_an_attention_block_with_partial_quantization_biases() {
     let mut weights = tiny_weights(&args);
     let q_rows = (args.num_attention_heads * args.head_dim()) as i32;
     let kv_rows = (args.num_kv_heads() * args.head_dim()) as i32;
+    let cols = scale_cols(&args, args.hidden_size);
     for (name, rows) in [("q_proj", q_rows), ("k_proj", kv_rows), ("v_proj", kv_rows)] {
         weights.insert(
             format!("model.layers.0.self_attn.{name}.scales"),
-            filled(&[rows, 2]),
+            filled(&[rows, cols]),
         );
     }
     weights.insert(
         "model.layers.0.self_attn.q_proj.biases".into(),
-        filled(&[q_rows, 2]),
+        filled(&[q_rows, cols]),
     );
     let err = validate_weights(&weights, &args).expect_err("partial biases are rejected");
     assert!(err.contains("quantization biases"), "{err}");
+}
+
+#[test]
+fn a_consistently_quantized_attention_block_is_accepted() {
+    // The positive control for the two rejections below: a quantized block whose
+    // scales describe exactly `hidden_size` must still load, so the width check
+    // cannot be passing by rejecting everything quantized.
+    let args = tiny_args();
+    let mut weights = tiny_weights(&args);
+    quantize_attention_block(&args, &mut weights, 0, scale_cols(&args, args.hidden_size));
+    validate_weights(&weights, &args).unwrap();
+}
+
+#[test]
+fn loading_rejects_a_quantized_projection_packed_for_a_different_input_width() {
+    // Packing compresses the input axis only, so a projection built for a
+    // different `hidden_size` still has exactly the right number of rows and
+    // survives every row check, and q/k/v agreeing with each other proves
+    // nothing about whether any of them agrees with the config. MLX
+    // reconstructs the input width as `scales.shape(-1) * group_size` and
+    // throws from `extract_quantized_matmul_dims` when it disagrees with the
+    // activation, which crosses the cxx bridge as an uncatchable abort at the
+    // first forward pass rather than a load error.
+    let args = tiny_args();
+    let mut weights = tiny_weights(&args);
+    let wrong = scale_cols(&args, args.hidden_size * 2);
+    quantize_attention_block(&args, &mut weights, 0, wrong);
+    let err = validate_weights(&weights, &args).expect_err("a mis-packed input width is rejected");
+    assert!(err.contains("input width"), "{err}");
+}
+
+#[test]
+fn loading_rejects_a_quantized_output_head_packed_for_a_different_input_width() {
+    // Same defect on the untied head, where the throw comes from the final
+    // `quantized_matmul` instead of an attention projection.
+    let args = tiny_args();
+    let mut weights = tiny_weights(&args);
+    let vocab = args.vocab_size as i32;
+    weights.insert(
+        "lm_head.scales".into(),
+        filled(&[vocab, scale_cols(&args, args.hidden_size * 2)]),
+    );
+    let err = validate_weights(&weights, &args).expect_err("a mis-packed head is rejected");
+    assert!(err.contains("input width"), "{err}");
+}
+
+#[test]
+fn loading_rejects_quantization_biases_that_disagree_with_the_scales() {
+    // MLX requires the affine zero points to have the same shape as the scales
+    // and throws otherwise. Presence alone is not enough to check.
+    let args = tiny_args();
+    let mut weights = tiny_weights(&args);
+    let cols = scale_cols(&args, args.hidden_size);
+    quantize_attention_block(&args, &mut weights, 0, cols);
+    weights.insert(
+        "model.layers.0.self_attn.q_proj.biases".into(),
+        filled(&[
+            (args.num_attention_heads * args.head_dim()) as i32,
+            cols + 1,
+        ]),
+    );
+    let err = validate_weights(&weights, &args).expect_err("mis-shaped zero points are rejected");
+    assert!(err.contains("same shape"), "{err}");
+}
+
+#[test]
+fn loading_rejects_an_attention_block_with_a_partial_dense_bias() {
+    // The dense `.bias` set has the same all-or-nothing rule as the affine
+    // `.biases` set: the fused loader concatenates q/k/v biases only when all
+    // three are present and drops the whole set otherwise, so a checkpoint
+    // carrying a bias on only some of them loads and silently runs those
+    // projections unbiased.
+    let args = tiny_args();
+    let mut weights = tiny_weights(&args);
+    weights.insert(
+        "model.layers.0.self_attn.q_proj.bias".into(),
+        filled(&[(args.num_attention_heads * args.head_dim()) as i32]),
+    );
+    let err = validate_weights(&weights, &args).expect_err("a partial bias set is rejected");
+    assert!(err.contains("all carry a bias"), "{err}");
 }
 
 #[test]
@@ -703,6 +794,37 @@ fn tiny_weights(args: &ModelArgs) -> WeightMap {
         w.insert(format!("{p}.mlp.down_proj.weight"), filled(&[hidden, ff]));
     }
     w
+}
+
+/// Scales columns for a quantized `[out, in_features]` weight: one group per
+/// `group_size` input channels, which is the width MLX reconstructs the input
+/// axis from.
+fn scale_cols(args: &ModelArgs, in_features: usize) -> i32 {
+    in_features as i32 / args.group_size()
+}
+
+/// Turn one layer's `q_proj` / `k_proj` / `v_proj` / `o_proj` into a quantized
+/// block by adding `.scales` and `.biases` with `cols` groups each, leaving the
+/// `.weight` tensors from [`tiny_weights`] in place (only the shapes are read).
+fn quantize_attention_block(args: &ModelArgs, weights: &mut WeightMap, layer: usize, cols: i32) {
+    let q_rows = (args.num_attention_heads * args.head_dim()) as i32;
+    let kv_rows = (args.num_kv_heads() * args.head_dim()) as i32;
+    let hidden = args.hidden_size as i32;
+    for (name, rows) in [
+        ("q_proj", q_rows),
+        ("k_proj", kv_rows),
+        ("v_proj", kv_rows),
+        ("o_proj", hidden),
+    ] {
+        weights.insert(
+            format!("model.layers.{layer}.self_attn.{name}.scales"),
+            filled(&[rows, cols]),
+        );
+        weights.insert(
+            format!("model.layers.{layer}.self_attn.{name}.biases"),
+            filled(&[rows, cols]),
+        );
+    }
 }
 
 /// Deterministic pseudo-random filler in `[-0.5, 0.5)`.

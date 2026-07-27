@@ -45,9 +45,10 @@
 //! every scalar that could size an allocation, divide, truncate through an
 //! `as i32` cast, or violate an undocumented precondition of an MLX C++ entry
 //! point, and [`validate_weights`] rejects every tensor whose real shape
-//! disagrees with the config, before either can reach a kernel. An MLX C++
-//! exception crossing the cxx bridge is an uncatchable `std::terminate`, not a
-//! Rust error, so a check that happens at the first forward pass is not a check.
+//! disagrees with the config, on both axes and on both the float and the
+//! quantized path, before either can reach a kernel. An MLX C++ exception
+//! crossing the cxx bridge is an uncatchable `std::terminate`, not a Rust error,
+//! so a check that happens at the first forward pass is not a check.
 
 use mlxcel_core::generate::{DecodeBatchContext, LanguageModel};
 use mlxcel_core::layers::KVCache;
@@ -465,20 +466,108 @@ struct ProjectionShape {
     /// Second axis of `.scales`, or `None` on the float path.
     scale_cols: Option<i32>,
     has_quant_biases: bool,
+    /// Whether a dense `.bias` is present, cross-checked across `q_proj` /
+    /// `k_proj` / `v_proj` for the same reason `has_quant_biases` is.
+    has_dense_bias: bool,
+}
+
+/// Check a quantized projection's `.scales` (and `.biases`) against the input
+/// width `config.json` claims.
+///
+/// A quantized `[out_features, in_features]` matrix packs along the input axis
+/// only, so the row check in [`validate_projection`] still applies but says
+/// nothing about the input width. MLX reconstructs that width as
+/// `scales.shape(-1) * group_size` and `extract_quantized_matmul_dims` throws
+/// `std::invalid_argument` when it disagrees with the activation's last axis;
+/// `validate_quantized_input` throws again when `.biases` and `.scales` differ
+/// in shape. `quantized_matmul` crosses the cxx bridge as
+/// `UniquePtr<MlxArray>` rather than a `Result`, so either throw is an
+/// uncatchable `std::terminate` at the **first forward pass**, long after the
+/// checkpoint appeared to load. The q/k/v cross-check in [`validate_weights`]
+/// cannot substitute: it only proves the three projections agree with each
+/// other, not that any of them agrees with `hidden_size`.
+///
+/// The declared `group_size` is the right one to check against, not a
+/// shape-derived one. The affine loader trusts the declared group size and
+/// re-derives `bits` from the shapes, and
+/// `FusedQKVLinear::from_weights_separate` does so unconditionally, so the
+/// declared value is what reaches MLX. That makes this stricter than the loader
+/// for one layout the loader would repair (a declared `group_size` of 16 at
+/// 4 bits, the NVFP4-fallback repack, where `reconcile_quantization_layout`
+/// re-derives the group size instead); no Helium checkpoint is packed that way,
+/// and rejecting it names the mismatch instead of aborting on it.
+///
+/// Returns the scales column count, or `None` when the projection is not
+/// quantized.
+fn validate_quantized_scales(
+    weights: &WeightMap,
+    prefix: &str,
+    out_features: usize,
+    in_features: usize,
+    group_size: i32,
+) -> Result<Option<i32>, String> {
+    let Some(scales) = weights.get(&format!("{prefix}.scales")) else {
+        return Ok(None);
+    };
+    let scale_shape = mlxcel_core::array_shape(scales);
+    if scale_shape.len() != 2 || !dim_eq(scale_shape[0], out_features) {
+        return Err(format!(
+            "unexpected {prefix}.scales shape {scale_shape:?}: expected {out_features} rows to \
+             match {prefix}.weight"
+        ));
+    }
+
+    let groups = usize::try_from(scale_shape[1]).unwrap_or(0);
+    let group_size = usize::try_from(group_size).unwrap_or(0);
+    let described = groups.checked_mul(group_size);
+    if described != Some(in_features) {
+        return Err(format!(
+            "unexpected {prefix}.scales shape {scale_shape:?}: {groups} quantization groups at \
+             group_size {group_size} describe an input width of {}, but the config says \
+             {in_features}. MLX reconstructs a quantized matrix's input width as \
+             scales.shape(-1) * group_size and throws when it disagrees with the activation, and \
+             that throw crosses the cxx bridge as an uncatchable abort at the first forward pass \
+             rather than a load error. Packing compresses the input axis only, so the row count \
+             is still correct and cannot catch this.",
+            described
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "an overflowing number of".to_string())
+        ));
+    }
+
+    if let Some(biases) = weights.get(&format!("{prefix}.biases")) {
+        let bias_shape = mlxcel_core::array_shape(biases);
+        if bias_shape != scale_shape {
+            return Err(format!(
+                "unexpected {prefix}.biases shape {bias_shape:?}: the affine zero points must \
+                 have the same shape as {prefix}.scales ({scale_shape:?}). MLX rejects a mismatch \
+                 by throwing, which crosses the cxx bridge as an uncatchable abort at the first \
+                 forward pass."
+            ));
+        }
+    }
+
+    Ok(Some(scale_shape[1]))
 }
 
 /// Check one `[out_features, in_features]` projection against the config.
 ///
 /// A quantized weight is packed along the input axis only, so its row count is
-/// still `out_features` and is checked on the same path as a float weight; only
-/// the packed input width is left to `UnifiedLinear`. Skipping the row check on
-/// the quantized path is exactly the carve-out that let K and V be sliced from
-/// arbitrary interior channels in an earlier port in this chain.
+/// still `out_features` and is checked on the same path as a float weight;
+/// skipping the row check on the quantized path is exactly the carve-out that
+/// let K and V be sliced from arbitrary interior channels in an earlier port in
+/// this chain. The input axis is checked too, through the scales rather than
+/// through the packed `.weight`, because the packed width alone does not fix a
+/// width without a bit count: see [`validate_quantized_scales`]. Only the
+/// declared-versus-derived bit width itself is left to `UnifiedLinear`, which
+/// reconciles it from these two shapes and returns a load error, not an abort,
+/// when they cannot agree.
 fn validate_projection(
     weights: &WeightMap,
     prefix: &str,
     out_features: usize,
     in_features: usize,
+    group_size: i32,
 ) -> Result<ProjectionShape, String> {
     let weight_name = format!("{prefix}.weight");
     let weight = weights
@@ -510,21 +599,11 @@ fn validate_projection(
         ));
     }
 
-    let scale_cols = match weights.get(&format!("{prefix}.scales")) {
-        Some(scales) => {
-            let scale_shape = mlxcel_core::array_shape(scales);
-            if scale_shape.len() != 2 || !dim_eq(scale_shape[0], out_features) {
-                return Err(format!(
-                    "unexpected {prefix}.scales shape {scale_shape:?}: expected {out_features} \
-                     rows to match {weight_name}"
-                ));
-            }
-            Some(scale_shape[1])
-        }
-        None => None,
-    };
+    let scale_cols =
+        validate_quantized_scales(weights, prefix, out_features, in_features, group_size)?;
 
-    if let Some(bias) = weights.get(&format!("{prefix}.bias")) {
+    let dense_bias = weights.get(&format!("{prefix}.bias"));
+    if let Some(bias) = dense_bias {
         let bias_shape = mlxcel_core::array_shape(bias);
         if bias_shape.len() != 1 || !dim_eq(bias_shape[0], out_features) {
             return Err(format!(
@@ -538,6 +617,7 @@ fn validate_projection(
         cols: shape[1],
         scale_cols,
         has_quant_biases: weights.contains_key(&format!("{prefix}.biases")),
+        has_dense_bias: dense_bias.is_some(),
     })
 }
 
@@ -568,6 +648,7 @@ fn validate_table(
     key: &str,
     claimed_rows: usize,
     expected_cols: usize,
+    group_size: i32,
 ) -> Result<(), String> {
     let weight_name = format!("{key}.weight");
     let weight = weights
@@ -588,8 +669,14 @@ fn validate_table(
              not range-check a positive index."
         ));
     }
-    let quantized = weights.contains_key(&format!("{key}.scales"));
-    if !quantized && !dim_eq(shape[1], expected_cols) {
+    if weights.contains_key(&format!("{key}.scales")) {
+        // Quantized: the row count above is still the vocabulary bound, but the
+        // model width now lives in the scales, so it is checked there. Leaving
+        // it unchecked lets a table packed for a different width reach either
+        // `quantized_matmul` (an output head) or the first RMSNorm (an embedding
+        // table), both of which throw inside MLX and abort the process.
+        validate_quantized_scales(weights, key, rows, expected_cols, group_size)?;
+    } else if !dim_eq(shape[1], expected_cols) {
         return Err(format!(
             "{weight_name} is {shape:?} but hidden_size is {expected_cols}; an embedding table \
              must be the model width"
@@ -613,19 +700,50 @@ pub fn validate_weights(weights: &WeightMap, args: &ModelArgs) -> Result<(), Str
     let head_dim = args.head_dim();
     let q_out = args.num_attention_heads * head_dim;
     let kv_out = args.num_kv_heads() * head_dim;
+    let group_size = args.group_size();
 
-    validate_table(weights, "model.embed_tokens", args.vocab_size, hidden)?;
+    validate_table(
+        weights,
+        "model.embed_tokens",
+        args.vocab_size,
+        hidden,
+        group_size,
+    )?;
     validate_norm(weights, "model.norm.weight", hidden)?;
     if !args.tie_word_embeddings {
-        validate_table(weights, "lm_head", args.vocab_size, hidden)?;
+        validate_table(weights, "lm_head", args.vocab_size, hidden, group_size)?;
     }
 
     for layer in 0..args.num_hidden_layers {
         let attn = format!("model.layers.{layer}.self_attn");
-        let q = validate_projection(weights, &format!("{attn}.q_proj"), q_out, hidden)?;
-        let k = validate_projection(weights, &format!("{attn}.k_proj"), kv_out, hidden)?;
-        let v = validate_projection(weights, &format!("{attn}.v_proj"), kv_out, hidden)?;
-        validate_projection(weights, &format!("{attn}.o_proj"), hidden, q_out)?;
+        let q = validate_projection(
+            weights,
+            &format!("{attn}.q_proj"),
+            q_out,
+            hidden,
+            group_size,
+        )?;
+        let k = validate_projection(
+            weights,
+            &format!("{attn}.k_proj"),
+            kv_out,
+            hidden,
+            group_size,
+        )?;
+        let v = validate_projection(
+            weights,
+            &format!("{attn}.v_proj"),
+            kv_out,
+            hidden,
+            group_size,
+        )?;
+        validate_projection(
+            weights,
+            &format!("{attn}.o_proj"),
+            hidden,
+            q_out,
+            group_size,
+        )?;
 
         // The fused QKV loader decides "is this quantized?" from `q_proj.scales`
         // alone and then concatenates all three, and it keeps the affine
@@ -658,6 +776,19 @@ pub fn validate_weights(weights: &WeightMap, args: &ModelArgs) -> Result<(), Str
                  dequantizes the others without their zero points"
             ));
         }
+        // The dense `.bias` set has the same all-or-nothing rule as the affine
+        // `.biases` set above, and the same silent failure: the fused loader
+        // concatenates q/k/v biases only when all three are present and drops
+        // the whole set otherwise, so a checkpoint carrying a bias on some of
+        // them loads without complaint and runs those projections unbiased.
+        if q.has_dense_bias != k.has_dense_bias || q.has_dense_bias != v.has_dense_bias {
+            return Err(format!(
+                "{attn}: q_proj, k_proj and v_proj must either all carry a bias or none of them; \
+                 the fused loader concatenates the three biases into one and silently drops the \
+                 whole set when any is missing, which runs the projections that had one without \
+                 it"
+            ));
+        }
 
         let mlp = format!("model.layers.{layer}.mlp");
         validate_projection(
@@ -665,18 +796,21 @@ pub fn validate_weights(weights: &WeightMap, args: &ModelArgs) -> Result<(), Str
             &format!("{mlp}.gate_proj"),
             args.intermediate_size,
             hidden,
+            group_size,
         )?;
         validate_projection(
             weights,
             &format!("{mlp}.up_proj"),
             args.intermediate_size,
             hidden,
+            group_size,
         )?;
         validate_projection(
             weights,
             &format!("{mlp}.down_proj"),
             hidden,
             args.intermediate_size,
+            group_size,
         )?;
 
         validate_norm(
