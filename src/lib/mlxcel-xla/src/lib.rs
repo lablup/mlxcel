@@ -50,6 +50,8 @@ use std::path::{Path, PathBuf};
 use mlxcel_core::session::{InferenceSession, PreparedPrefill, SessionCapabilities};
 
 mod context;
+#[cfg(any(feature = "diagnostics", test))]
+mod diagnostic_flags;
 #[cfg(any(feature = "iree", test))]
 #[allow(dead_code)]
 mod numeric_dtype_contract;
@@ -149,6 +151,10 @@ pub use batch::{
 pub use context::{
     CONTEXT_CAPACITY_ENV, ContextCapacityError, DEFAULT_CONTEXT_CAPACITY,
     context_capacity_from_env, validate_request_capacity,
+};
+#[cfg(feature = "diagnostics")]
+pub use diagnostic_flags::{
+    configure_diagnostic_local_task_threads, diagnostic_local_task_threads_are_configured,
 };
 #[cfg(all(feature = "diagnostics", xla_iree_cuda))]
 pub use emitter::{
