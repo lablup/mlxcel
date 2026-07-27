@@ -919,10 +919,18 @@ fn quant_mode(weights: &WeightMap, prefix: &str, group_size: i32, bits: i32) -> 
 ///
 /// The width is reconstructed from the *effective* group size the loader will
 /// use, obtained from `reconcile_quantization_layout` rather than from the
-/// declared pair, so this check is exactly as strict as the loader itself and no
-/// stricter. Works for both a 2-D projection and a 3-D stacked expert tensor:
-/// only the last axis carries the packing, and the leading axes are required to
-/// agree between weight and scales.
+/// declared pair. Works for both a 2-D projection and a 3-D stacked expert
+/// tensor: only the last axis carries the packing, and the leading axes are
+/// required to agree between weight and scales.
+///
+/// The `mode` fed into `reconcile_quantization_layout` is `quant_mode`'s guess
+/// from `.biases` presence, and that guess matches the loader exactly for every
+/// plain projection here (`UnifiedLinear::from_weights` picks its mode the same
+/// way). It does **not** match for the routed experts: `SwitchLinear::from_weights`
+/// (`src/models/switch_layers.rs:192`) pins `mode` to `"affine"` unconditionally,
+/// regardless of whether `.biases` is present, so a stacked or per-expert tensor
+/// quantized in a block-float scheme without zero-point `biases` would be
+/// reconciled here under the wrong mode. `validate_experts` inherits that gap.
 fn validate_quantized_packing(
     weights: &WeightMap,
     prefix: &str,
