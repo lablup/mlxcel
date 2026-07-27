@@ -1,6 +1,7 @@
 //! Shared exact math for the Gemma3n audio StableHLO graph.
 
 use super::builder::{Builder, Val};
+use super::numeric_ops::mlx_cuda_prefix_sum_2d;
 
 pub(super) fn scalar_like(b: &mut Builder, value: f32, x: &Val) -> Val {
     let scalar = b.const_f32(value);
@@ -110,32 +111,6 @@ pub(super) fn mlx_cuda_row_sum_f32(b: &mut Builder, x: &Val, axis: usize) -> Val
     b.reshape(&reduced, output_shape)
 }
 
-fn inclusive_scan_32_f32(b: &mut Builder, x: &Val, axis: usize) -> Val {
-    assert_eq!(x.ty.elt, "f32");
-    assert_eq!(x.ty.shape[axis], 32);
-    let zero = b.const_f32(0.0);
-    let mut result = x.clone();
-    for offset in [1, 2, 4, 8, 16] {
-        let prior = slice_axis(b, &result, axis, 0, 32 - offset);
-        let mut low = vec![0; result.ty.shape.len()];
-        let high = low.clone();
-        low[axis] = offset;
-        let prior = b.pad(&prior, &zero, &low, &high);
-        // CUDA cooperative_groups uses `out = op(out, shfl_up(out))`.
-        result = b.add(&result, &prior);
-    }
-    result
-}
-
-fn exclusive_from_inclusive_32_f32(b: &mut Builder, inclusive: &Val, axis: usize) -> Val {
-    let prior = slice_axis(b, inclusive, axis, 0, 31);
-    let zero = b.const_f32(0.0);
-    let mut low = vec![0; inclusive.ty.shape.len()];
-    let high = low.clone();
-    low[axis] = 1;
-    b.pad(&prior, &zero, &low, &high)
-}
-
 /// Match the one-block MLX CUDA contiguous inclusive-scan schedule used by the
 /// maintained Gemma3n oracle. Released frame buckets produce at most 1,499
 /// values after the first SSCP convolution, below CUDA's 4,096-value block
@@ -145,62 +120,14 @@ pub(super) fn mlx_cuda_cumsum_time_f32(b: &mut Builder, x: &Val) -> Val {
     assert_eq!(x.ty.shape.len(), 4);
     let batch = x.ty.shape[0];
     let time = x.ty.shape[1];
-    assert!(
-        (1..=4096).contains(&time),
-        "MLX CUDA cumsum emulation supports one scan block"
+    assert_eq!(
+        x.ty.shape[2..],
+        [1, 1],
+        "Gemma3n cumulative sum expects singleton feature axes"
     );
-    let padded_time = time.div_ceil(128) * 128;
-    let padded = if padded_time == time {
-        x.clone()
-    } else {
-        let zero = b.const_f32(0.0);
-        b.pad(x, &zero, &[0, 0, 0, 0], &[0, padded_time - time, 0, 0])
-    };
-    let threads = padded_time / 4;
-    let warps = threads / 32;
-    let grouped = b.reshape(&padded, vec![batch, threads, 4, 1, 1]);
-    let value0 = slice_axis(b, &grouped, 2, 0, 1);
-    let value1 = slice_axis(b, &grouped, 2, 1, 2);
-    let value2 = slice_axis(b, &grouped, 2, 2, 3);
-    let value3 = slice_axis(b, &grouped, 2, 3, 4);
-    let local0 = value0;
-    let local1 = b.add(&value1, &local0);
-    let local2 = b.add(&value2, &local1);
-    let local3 = b.add(&value3, &local2);
-    let local = concat_axis(b, &[local0, local1, local2, local3.clone()], 2);
-
-    let thread_sums = b.reshape(&local3, vec![batch, warps, 32, 1, 1]);
-    let thread_inclusive = inclusive_scan_32_f32(b, &thread_sums, 2);
-    let thread_exclusive = exclusive_from_inclusive_32_f32(b, &thread_inclusive, 2);
-
-    // The MLX kernel forms each warp total as
-    // `exclusive_scan(last_lane) + last_lane_value`, rather than taking the
-    // inclusive result of lane 31. Preserve that distinct association.
-    let prior_last = slice_axis(b, &thread_exclusive, 2, 31, 32);
-    let current_last = slice_axis(b, &thread_sums, 2, 31, 32);
-    let warp_totals = b.add(&prior_last, &current_last);
-    let warp_totals = b.reshape(&warp_totals, vec![batch, warps, 1, 1]);
-    let zero = b.const_f32(0.0);
-    let warp_totals_32 = b.pad(&warp_totals, &zero, &[0, 0, 0, 0], &[0, 32 - warps, 0, 0]);
-    let warp_inclusive = inclusive_scan_32_f32(b, &warp_totals_32, 1);
-    let warp_exclusive = exclusive_from_inclusive_32_f32(b, &warp_inclusive, 1);
-    let warp_exclusive = slice_axis(b, &warp_exclusive, 1, 0, warps);
-
-    let local = b.reshape(&local, vec![batch, warps, 32, 4, 1, 1]);
-    let prefix = zeros_like(b, &local);
-    let local = b.add(&local, &prefix);
-    let warp_exclusive = b.reshape(&warp_exclusive, vec![batch, warps, 1, 1, 1, 1]);
-    let warp_exclusive = b.broadcast(&warp_exclusive, &[0, 1, 2, 3, 4, 5], local.ty.shape.clone());
-    let with_warp_prefix = b.add(&local, &warp_exclusive);
-    let thread_exclusive = b.reshape(&thread_exclusive, vec![batch, warps, 32, 1, 1, 1]);
-    let thread_exclusive = b.broadcast(
-        &thread_exclusive,
-        &[0, 1, 2, 3, 4, 5],
-        with_warp_prefix.ty.shape.clone(),
-    );
-    let scanned = b.add(&with_warp_prefix, &thread_exclusive);
-    let scanned = b.reshape(&scanned, vec![batch, padded_time, 1, 1]);
-    slice_axis(b, &scanned, 1, 0, time)
+    let flattened = b.reshape(x, vec![batch, time]);
+    let scanned = mlx_cuda_prefix_sum_2d(b, &flattened);
+    b.reshape(&scanned, x.ty.shape.clone())
 }
 
 pub(super) fn clip(b: &mut Builder, x: &Val, limit: f32) -> Val {
@@ -286,14 +213,6 @@ pub(super) fn stride_time(b: &mut Builder, x: &Val, stride: usize) -> Val {
             })
             .collect::<Vec<_>>();
     b.slice_strided(x, &ranges)
-}
-
-pub(super) fn concat_axis(b: &mut Builder, values: &[Val], axis: usize) -> Val {
-    let mut result = values[0].clone();
-    for value in &values[1..] {
-        result = b.concatenate(&result, value, axis);
-    }
-    result
 }
 
 pub(super) fn zero_invalid(b: &mut Builder, x: &Val, valid: &Val) -> Val {

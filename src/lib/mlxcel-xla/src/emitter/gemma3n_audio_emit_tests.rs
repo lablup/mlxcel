@@ -342,6 +342,22 @@ fn sscp_conv1_result_type_candidates_compile_for_cuda() {
 }
 
 #[test]
+fn sscp_cumsum_uses_shared_cuda_prefix_schedule() {
+    use crate::emitter::gemma3n_audio_math::mlx_cuda_cumsum_time_f32;
+
+    let mut builder = Builder::new().with_precision(Precision::Bf16);
+    let input = Builder::arg(0, Ty::f32(vec![2, 130, 1, 1]));
+    let output = mlx_cuda_cumsum_time_f32(&mut builder, &input);
+    let body = builder.body();
+
+    assert_eq!(output.ty.shape, [2, 130, 1, 1]);
+    assert_eq!(body.matches("stablehlo.add").count(), 17);
+    assert_eq!(body.matches("stablehlo.concatenate").count(), 3);
+    assert!(!body.contains("stablehlo.reduce"));
+    assert!(!body.contains("stablehlo.reduce_window"));
+}
+
+#[test]
 #[ignore = "requires IREE_DIST"]
 fn sscp_cuda_norm_schedule_compiles_for_cpu() {
     use crate::emitter::gemma3n_audio_math::{mlx_cuda_cumsum_time_f32, mlx_cuda_row_sum_f32};
