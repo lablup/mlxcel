@@ -32,14 +32,20 @@ pub(crate) enum NumericDType {
     F16,
     Bf16,
     F32,
+    I32,
+    U8,
+    U32,
 }
 
 impl NumericDType {
-    const fn identity(self) -> &'static str {
+    pub(crate) const fn identity(self) -> &'static str {
         match self {
             Self::F16 => "f16",
             Self::Bf16 => "bf16",
             Self::F32 => "f32",
+            Self::I32 => "i32",
+            Self::U8 => "u8",
+            Self::U32 => "u32",
         }
     }
 }
@@ -52,7 +58,7 @@ pub(crate) enum WeightExecution {
 }
 
 impl WeightExecution {
-    const fn identity(self) -> &'static str {
+    pub(crate) const fn identity(self) -> &'static str {
         match self {
             Self::Dense => "dense",
             Self::HostAffineDequantized => "host-affine-dequantized",

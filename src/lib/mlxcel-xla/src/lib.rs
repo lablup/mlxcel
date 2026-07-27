@@ -54,6 +54,9 @@ mod context;
 #[allow(dead_code)]
 mod numeric_dtype_contract;
 #[cfg(any(feature = "iree", test))]
+#[allow(dead_code)]
+mod operator_numeric_contract;
+#[cfg(any(feature = "iree", test))]
 #[cfg_attr(not(feature = "iree"), allow(dead_code))]
 mod prepared;
 mod prepared_deepstack;

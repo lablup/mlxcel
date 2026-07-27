@@ -1855,7 +1855,7 @@ pub fn run_ple_injection_all_planes_diagnostic_probe(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(xla_iree_cuda)]
+    #[cfg(any(feature = "diagnostics", xla_iree_cuda))]
     use crate::emitter::builder::Builder;
     use crate::weights::round_bf16_f32;
     #[cfg(xla_iree_cuda)]
@@ -2013,7 +2013,7 @@ mod tests {
         assert!(body.contains("(i32, i32, i32, i32, i32, i32,"));
         assert!(body.contains("tensor.extract %arg3[] : tensor<i32>"));
         assert!(!body.contains("arith.constant 1.000000000 : f32"));
-        let source = executable_source();
+        let source = sdpa_vector_export();
         assert!(source.contains("@gemma3n_sdpa_vector ordinal(5)"));
         assert!(source.contains("#hal.pipeline.layout<constants = 6"));
 

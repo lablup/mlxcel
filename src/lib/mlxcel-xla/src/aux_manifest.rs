@@ -31,9 +31,11 @@ use sha2::{Digest, Sha256};
 
 use crate::aux::AuxiliaryWeight;
 use crate::numeric_dtype_contract::NumericDTypeContract;
+use crate::operator_numeric_contract::OperatorNumericContractSet;
 
 const SCHEMA_V1: &str = "mlxcel-xla-aux-artifact-v1";
 const SCHEMA_NUMERIC_DTYPE_V2: &str = "mlxcel-xla-aux-artifact-v2-numeric-dtype";
+const SCHEMA_OPERATOR_NUMERIC_V3: &str = "mlxcel-xla-aux-artifact-v3-operator-numeric";
 const CACHE_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const CACHE_LOCK_STALE_AFTER: Duration = Duration::from_secs(30 * 60);
 const CACHE_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -46,6 +48,8 @@ pub(crate) struct AuxiliaryArtifactContract {
     pub(crate) generation_identity: String,
     /// A necessary identity subset, not proof that an operator oracle passed.
     numeric_dtype_contract: Option<NumericDTypeContract>,
+    /// Exact per-operation identity, still separate from oracle pass evidence.
+    operator_numeric_contract: Option<OperatorNumericContractSet>,
 }
 
 impl AuxiliaryArtifactContract {
@@ -57,7 +61,7 @@ impl AuxiliaryArtifactContract {
         config_identity: impl Into<String>,
         generation_identity: impl Into<String>,
     ) -> Result<Self, String> {
-        Self::build(entry_name, config_identity, generation_identity, None)
+        Self::build(entry_name, config_identity, generation_identity, None, None)
     }
 
     /// Opt into the dtype-aware v2 manifest.
@@ -73,6 +77,24 @@ impl AuxiliaryArtifactContract {
             config_identity,
             generation_identity,
             Some(numeric_dtype_contract),
+            None,
+        )
+    }
+
+    /// Opt into the operator-aware v3 manifest.
+    #[allow(dead_code)] // Adopted only after the corresponding operator oracle is implemented.
+    pub(crate) fn new_with_operator_numeric_contract(
+        entry_name: impl Into<String>,
+        config_identity: impl Into<String>,
+        generation_identity: impl Into<String>,
+        operator_numeric_contract: OperatorNumericContractSet,
+    ) -> Result<Self, String> {
+        Self::build(
+            entry_name,
+            config_identity,
+            generation_identity,
+            None,
+            Some(operator_numeric_contract),
         )
     }
 
@@ -81,12 +103,14 @@ impl AuxiliaryArtifactContract {
         config_identity: impl Into<String>,
         generation_identity: impl Into<String>,
         numeric_dtype_contract: Option<NumericDTypeContract>,
+        operator_numeric_contract: Option<OperatorNumericContractSet>,
     ) -> Result<Self, String> {
         let contract = Self {
             entry_name: entry_name.into(),
             config_identity: config_identity.into(),
             generation_identity: generation_identity.into(),
             numeric_dtype_contract,
+            operator_numeric_contract,
         };
         if contract.entry_name.is_empty()
             || contract.config_identity.is_empty()
@@ -101,7 +125,9 @@ impl AuxiliaryArtifactContract {
     }
 
     fn manifest_schema(&self) -> &'static str {
-        if self.numeric_dtype_contract.is_some() {
+        if self.operator_numeric_contract.is_some() {
+            SCHEMA_OPERATOR_NUMERIC_V3
+        } else if self.numeric_dtype_contract.is_some() {
             SCHEMA_NUMERIC_DTYPE_V2
         } else {
             SCHEMA_V1
@@ -151,6 +177,7 @@ struct IdentityFields {
     entry: String,
     config: String,
     numeric_dtype_contract: Option<String>,
+    operator_numeric_contract: Option<String>,
     weight_schema: String,
     generation: String,
     vmfb: String,
@@ -163,6 +190,7 @@ struct PersistedManifest {
     entry_sha256: String,
     config_sha256: String,
     numeric_dtype_contract_sha256: Option<String>,
+    operator_numeric_contract_sha256: Option<String>,
     weight_schema_sha256: String,
     generation_sha256: String,
     vmfb_sha256: String,
@@ -186,6 +214,15 @@ fn read_persisted_manifest(path: &Path) -> Result<PersistedManifest, String> {
             path.display()
         ));
     }
+    let operator_field_present = value
+        .as_object()
+        .is_some_and(|object| object.contains_key("operator_numeric_contract_sha256"));
+    if operator_field_present != persisted.operator_numeric_contract_sha256.is_some() {
+        return Err(format!(
+            "parse {}: operator_numeric_contract_sha256 must be a string when present",
+            path.display()
+        ));
+    }
     Ok(persisted)
 }
 
@@ -204,6 +241,11 @@ fn identity_fields(
             .numeric_dtype_contract
             .map(NumericDTypeContract::canonical_identity)
             .map(|identity| sha256_hex(identity.as_bytes())),
+        operator_numeric_contract: contract
+            .operator_numeric_contract
+            .as_ref()
+            .map(OperatorNumericContractSet::canonical_identity)
+            .map(|identity| sha256_hex(identity.as_bytes())),
         weight_schema: sha256_hex(schema.as_bytes()),
         generation: sha256_hex(contract.generation_identity.as_bytes()),
         vmfb: sha256_hex(&vmfb_bytes),
@@ -216,6 +258,7 @@ fn artifact_digest(schema: &str, fields: &IdentityFields) -> String {
         Some(&fields.entry),
         Some(&fields.config),
         fields.numeric_dtype_contract.as_ref(),
+        fields.operator_numeric_contract.as_ref(),
         Some(&fields.weight_schema),
         Some(&fields.generation),
         Some(&fields.vmfb),
@@ -242,6 +285,12 @@ pub(crate) fn write_auxiliary_manifest(
         object.insert(
             "numeric_dtype_contract_sha256".to_string(),
             numeric_dtype_contract.clone().into(),
+        );
+    }
+    if let Some(operator_numeric_contract) = &fields.operator_numeric_contract {
+        object.insert(
+            "operator_numeric_contract_sha256".to_string(),
+            operator_numeric_contract.clone().into(),
         );
     }
     object.insert(
@@ -304,6 +353,14 @@ pub(crate) fn verify_auxiliary_manifest(
     {
         return Err(format!(
             "auxiliary artifact identity mismatch for numeric_dtype_contract_sha256 in {}",
+            path.display()
+        ));
+    }
+    if persisted.operator_numeric_contract_sha256.as_deref()
+        != fields.operator_numeric_contract.as_deref()
+    {
+        return Err(format!(
+            "auxiliary artifact identity mismatch for operator_numeric_contract_sha256 in {}",
             path.display()
         ));
     }
@@ -603,6 +660,11 @@ mod tests {
     use super::*;
     use crate::aux::{AuxiliaryWeight, AuxiliaryWeightDType};
     use crate::numeric_dtype_contract::{NumericDType, NumericDTypeContract, WeightExecution};
+    use crate::operator_numeric_contract::{
+        AffineDequantizationContract, AffineEvaluationOrder, AssociationPolicy,
+        BackendNumericIdentity, CheckpointDType, OperatorClass, OperatorNumericContract,
+        OperatorNumericContractSet, PackedLaneOrder, RoundingBoundary,
+    };
 
     fn temp_vmfb(tag: &str) -> PathBuf {
         let nonce = std::time::SystemTime::now()
@@ -633,6 +695,46 @@ mod tests {
             NumericDType::F32,
             NumericDType::F32,
         )
+    }
+
+    fn operator_numeric_contract(kernel: &str) -> OperatorNumericContractSet {
+        let backend = BackendNumericIdentity::new(
+            "mlx-r2",
+            "qmm-sm80-r2",
+            "iree-3.12.0rc",
+            "cuda-sm80",
+            kernel,
+        )
+        .unwrap();
+        let q4 = OperatorNumericContract::new(
+            "vision.block.0.qmm",
+            OperatorClass::Q4Matmul,
+            CheckpointDType::AffineU4,
+            NumericDType::F16,
+            NumericDType::F32,
+            NumericDType::F32,
+            [
+                RoundingBoundary::DequantizedWeight,
+                RoundingBoundary::OperatorInput,
+                RoundingBoundary::AccumulatorResult,
+            ],
+            AssociationPolicy::BackendAlgorithm,
+            WeightExecution::PackedAffineInGraph,
+            Some(
+                AffineDequantizationContract::new(
+                    4,
+                    64,
+                    NumericDType::U32,
+                    NumericDType::F16,
+                    PackedLaneOrder::LeastSignificantFirst,
+                    AffineEvaluationOrder::FusedMultiplyAdd,
+                )
+                .unwrap(),
+            ),
+            backend,
+        )
+        .unwrap();
+        OperatorNumericContractSet::new([q4]).unwrap()
     }
 
     #[test]
@@ -756,6 +858,65 @@ mod tests {
             verify_auxiliary_manifest(&vmfb, &contract, &resident_weights)
                 .unwrap_err()
                 .contains("unknown field")
+        );
+
+        std::fs::remove_file(vmfb).ok();
+        std::fs::remove_file(manifest).ok();
+    }
+
+    #[test]
+    fn operator_numeric_contract_mismatch_fails_closed() {
+        let vmfb = temp_vmfb("operator-numeric-mismatch");
+        std::fs::write(&vmfb, b"vmfb-operator-numeric").unwrap();
+        let contract = AuxiliaryArtifactContract::new_with_operator_numeric_contract(
+            "aux.main",
+            "config=v1",
+            "compiler=v1",
+            operator_numeric_contract("qmm_sm80_r2"),
+        )
+        .unwrap();
+        let resident_weights = weights();
+        let manifest = write_auxiliary_manifest(&vmfb, &contract, &resident_weights).unwrap();
+        assert!(verify_auxiliary_manifest(&vmfb, &contract, &resident_weights).is_ok());
+
+        let changed = AuxiliaryArtifactContract::new_with_operator_numeric_contract(
+            "aux.main",
+            "config=v1",
+            "compiler=v1",
+            operator_numeric_contract("qmm_sm80_r3"),
+        )
+        .unwrap();
+        assert!(
+            verify_auxiliary_manifest(&vmfb, &changed, &resident_weights)
+                .unwrap_err()
+                .contains("operator_numeric_contract_sha256")
+        );
+
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+        assert_eq!(value["schema"], SCHEMA_OPERATOR_NUMERIC_V3);
+        assert!(value.get("numeric_dtype_contract_sha256").is_none());
+        assert!(
+            value
+                .get("operator_numeric_contract_sha256")
+                .is_some_and(serde_json::Value::is_string)
+        );
+        assert_eq!(value.as_object().unwrap().len(), 8);
+
+        let mut null_operator = value;
+        null_operator.as_object_mut().unwrap().insert(
+            "operator_numeric_contract_sha256".to_string(),
+            serde_json::Value::Null,
+        );
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec_pretty(&null_operator).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            verify_auxiliary_manifest(&vmfb, &contract, &resident_weights)
+                .unwrap_err()
+                .contains("must be a string")
         );
 
         std::fs::remove_file(vmfb).ok();
@@ -1041,6 +1202,75 @@ mod tests {
         assert_eq!(std::fs::read(&vmfb).unwrap(), b"vmfb-v2");
         assert_eq!(std::fs::read(&manifest).unwrap(), manifest_before);
         assert!(verify_auxiliary_manifest(&vmfb, &dtype_contract, &resident_weights).is_ok());
+
+        std::fs::remove_file(manifest).ok();
+        std::fs::remove_file(vmfb).ok();
+    }
+
+    #[test]
+    fn numeric_dtype_cache_migrates_to_operator_contract_and_refuses_downgrade() {
+        let vmfb = temp_vmfb("operator-numeric-migrate");
+        let resident_weights = weights();
+        let dtype_contract = AuxiliaryArtifactContract::new_with_numeric_dtype_contract(
+            "aux.main",
+            "config=v1",
+            "compiler=v1",
+            numeric_dtype_contract(),
+        )
+        .unwrap();
+        let operator_contract = AuxiliaryArtifactContract::new_with_operator_numeric_contract(
+            "aux.main",
+            "config=v1",
+            "compiler=v1",
+            operator_numeric_contract("qmm_sm80_r2"),
+        )
+        .unwrap();
+        let mut compile_count = 0usize;
+
+        ensure_qualified_auxiliary_artifact(
+            &vmfb,
+            &dtype_contract,
+            &resident_weights,
+            |temporary| {
+                compile_count += 1;
+                std::fs::write(temporary, b"vmfb-v2")
+                    .map_err(|error| format!("write test VMFB: {error}"))
+            },
+        )
+        .unwrap();
+        ensure_qualified_auxiliary_artifact(
+            &vmfb,
+            &operator_contract,
+            &resident_weights,
+            |temporary| {
+                compile_count += 1;
+                std::fs::write(temporary, b"vmfb-v3")
+                    .map_err(|error| format!("write test VMFB: {error}"))
+            },
+        )
+        .unwrap();
+        assert_eq!(compile_count, 2);
+        assert_eq!(std::fs::read(&vmfb).unwrap(), b"vmfb-v3");
+
+        ensure_qualified_auxiliary_artifact(&vmfb, &operator_contract, &resident_weights, |_| {
+            compile_count += 1;
+            Err("qualified operator cache must not compile".to_string())
+        })
+        .unwrap();
+        assert_eq!(compile_count, 2);
+
+        let manifest = auxiliary_manifest_path(&vmfb);
+        let manifest_before = std::fs::read(&manifest).unwrap();
+        let error =
+            ensure_qualified_auxiliary_artifact(&vmfb, &dtype_contract, &resident_weights, |_| {
+                compile_count += 1;
+                Err("operator-contract downgrade must not compile".to_string())
+            })
+            .unwrap_err();
+        assert!(error.contains("refusing to replace"));
+        assert_eq!(compile_count, 2);
+        assert_eq!(std::fs::read(&vmfb).unwrap(), b"vmfb-v3");
+        assert_eq!(std::fs::read(&manifest).unwrap(), manifest_before);
 
         std::fs::remove_file(manifest).ok();
         std::fs::remove_file(vmfb).ok();
