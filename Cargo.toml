@@ -76,6 +76,9 @@ xla-iree = ["xla-backend", "mlxcel-xla/iree"]
 # also enables the root MLX CUDA backend. This is not part of `xla-iree`; normal
 # production bundles remain unchanged.
 xla-diagnostics = ["cuda", "xla-iree", "mlxcel-xla/diagnostics"]
+# CPU-capable bounded MLX/IREE operator-oracle harness. CUDA-specific production
+# probes may add `cuda`, but the shared report/comparison layer does not require it.
+xla-micro-oracle = ["xla-iree", "mlxcel-xla/micro-oracle"]
 # Axis A "weight-load surgery" framework.
 #
 # On by default so production `mlxcel` and `mlxcel-server` binaries expose

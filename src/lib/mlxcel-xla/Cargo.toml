@@ -30,6 +30,9 @@ iree = ["dep:safetensors", "dep:memmap2", "dep:sha2"]
 # separate from `iree`, so production bundles never compile or load diagnostic
 # MLIR unless the explicit root `xla-diagnostics` feature forwards this flag.
 diagnostics = ["iree"]
+# Reusable MLX/IREE bounded operator-oracle harness. Unlike `diagnostics`, this
+# feature does not imply a CUDA build, so CPU IREE probes can run independently.
+micro-oracle = ["iree"]
 
 [dependencies]
 # The engine-neutral inference-session contract lives in mlxcel-core. This

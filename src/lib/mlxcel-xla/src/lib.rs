@@ -53,6 +53,8 @@ mod context;
 #[cfg(any(feature = "iree", test))]
 #[allow(dead_code)]
 mod numeric_dtype_contract;
+#[cfg(feature = "micro-oracle")]
+mod numeric_oracle;
 #[cfg(any(feature = "iree", test))]
 #[allow(dead_code)]
 mod operator_numeric_contract;
@@ -76,6 +78,13 @@ mod phi4_audio;
 mod qwen2_vl_runtime;
 #[cfg(feature = "iree")]
 mod vision_runtime;
+
+#[cfg(feature = "micro-oracle")]
+pub use numeric_oracle::{
+    AlgorithmIdentity, ComparisonMode, ComparisonSummary, ExecutionTiming, FirstDivergence,
+    NumericBackendIdentity, NumericOracleCase, NumericOracleClaim, NumericOracleReport,
+    NumericTensor, TensorSummary, run_bounded_numeric_oracle,
+};
 
 // The continuous-batching engine (#449 M3 Stage 2b). Present under `iree` (real
 // execution) and under `test` (so its backend-neutral Scheduler bookkeeping is
