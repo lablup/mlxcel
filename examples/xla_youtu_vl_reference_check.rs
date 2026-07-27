@@ -34,7 +34,7 @@ use mlxcel_xla::{IreeYoutuVlDiagnosticProjector, YoutuVlReferenceDiagnosticEngin
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-const CONTRACT: &str = "youtu-vl-hf-eager-oracle-v1";
+const CONTRACT: &str = "youtu-vl-hf-eager-oracle-v2";
 const CHECKPOINT_REPO: &str = "tencent/Youtu-VL-4B-Instruct";
 const CHECKPOINT_REVISION: &str = "8d30a0e49662a1d628a472b12df264dbcd768753";
 const CHECKPOINT_ARTIFACT_MANIFEST_SHA256: &str =
@@ -44,7 +44,10 @@ const FIXTURE_SHA256: &str = "5e7d54e8a7d21802378c87d2d70cf551e29739fe27599ddf12
 const PROMPT: &str = "<|image_pad|>\nDescribe the image briefly.";
 const IMAGE_TOKEN_ID: i32 = 128_264;
 const PATCH_SIZE: usize = 16;
-const PATCHES: usize = 256;
+const MAX_IMAGE_PATCHES: usize = 256;
+const PATCHES: usize = 196;
+const PATCH_GRID: usize = 14;
+const MERGED_TOKENS: usize = PATCHES / 4;
 const PATCH_WIDTH: usize = 3 * PATCH_SIZE * PATCH_SIZE;
 const TEXT_HIDDEN: usize = 2_560;
 const TEXT_LAYERS: usize = 40;
@@ -311,14 +314,14 @@ fn main() {
 
     let processor = YoutuVLProcessor::new(PATCH_SIZE, 2)
         .with_norm([0.5; 3], [0.5; 3])
-        .with_max_patches_per_image(PATCHES)
+        .with_max_patches_per_image(MAX_IMAGE_PATCHES)
         .with_resample(2);
     let (flattened_patches, spatial_shapes, patch_width) = processor
         .try_preprocess_values_with_spatial(std::slice::from_ref(&image))
         .expect("run checked Youtu-VL flattened-patch processor");
-    assert_eq!(spatial_shapes, [(16, 16)]);
+    assert_eq!(spatial_shapes, [(PATCH_GRID as i32, PATCH_GRID as i32)]);
     assert_eq!(patch_width, PATCH_WIDTH);
-    let resized_pixels = reconstruct_pixels(&flattened_patches, 16, 16);
+    let resized_pixels = reconstruct_pixels(&flattened_patches, PATCH_GRID, PATCH_GRID);
 
     let _runtime = initialize_runtime();
     let mut diagnostic_projector = IreeYoutuVlDiagnosticProjector::load(&model, &device)
@@ -326,9 +329,9 @@ fn main() {
     let vision = diagnostic_projector
         .capture(&flattened_patches, &spatial_shapes)
         .expect("capture actual 27-layer Youtu-VL vision graph");
-    assert_eq!(vision.abi_version, 2);
+    assert_eq!(vision.abi_version, 3);
     assert_eq!(vision.patch_shape, [PATCHES, 1_152]);
-    assert_eq!(vision.merged_shape, [64, TEXT_HIDDEN]);
+    assert_eq!(vision.merged_shape, [MERGED_TOKENS, TEXT_HIDDEN]);
 
     let production_preprocessor = YoutuVlIreeHostPreprocessor::load(&model, &device)
         .expect("load production Youtu-VL IREE host preprocessor");
@@ -346,7 +349,7 @@ fn main() {
             .iter()
             .filter(|&&token| token == IMAGE_TOKEN_ID)
             .count(),
-        64
+        MERGED_TOKENS
     );
 
     let mut engine = YoutuVlReferenceDiagnosticEngine::load(&model, &device, context_capacity)
@@ -376,7 +379,7 @@ fn main() {
         &out,
         "resized_normalized_pixels",
         &resized_pixels,
-        &[3, 256, 256],
+        &[3, PATCH_GRID * PATCH_SIZE, PATCH_GRID * PATCH_SIZE],
     );
     write_f32(
         &mut arrays,
@@ -460,20 +463,26 @@ fn main() {
         &placeholder_positions,
         &[placeholder_positions.len()],
     );
-    write_i32(&mut arrays, &out, "spatial_shapes", &[16, 16], &[1, 2]);
+    write_i32(
+        &mut arrays,
+        &out,
+        "spatial_shapes",
+        &[PATCH_GRID as i32, PATCH_GRID as i32],
+        &[1, 2],
+    );
     write_i32(
         &mut arrays,
         &out,
         "window_group_index",
         &usize_i32(&vision.window_group_index, "window group index"),
-        &[64],
+        &[MERGED_TOKENS],
     );
     write_i32(
         &mut arrays,
         &out,
         "reverse_group_index",
         &usize_i32(&vision.reverse_group_index, "reverse group index"),
-        &[64],
+        &[MERGED_TOKENS],
     );
     write_i32(
         &mut arrays,

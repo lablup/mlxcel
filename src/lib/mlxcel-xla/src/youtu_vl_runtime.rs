@@ -490,7 +490,8 @@ impl IreeYoutuVlDiagnosticProjector {
             self.config.hidden / self.config.heads / 2,
         ];
         let bias_shape = [plan.patch_bucket, plan.patch_bucket];
-        let patch_shape = [plan.patch_bucket, self.config.hidden];
+        let actual_patches = plan.actual_patches;
+        let patch_shape = [actual_patches, self.config.hidden];
         let module_stages = self.config.diagnostic_stages();
         let output_shapes = module_stages
             .iter()
@@ -552,6 +553,9 @@ impl IreeYoutuVlDiagnosticProjector {
                 if stage.is_merger_window_order() {
                     values.truncate(actual_values);
                     shape[0] = actual_tokens;
+                } else {
+                    values.truncate(actual_patches * shape[1]);
+                    shape[0] = actual_patches;
                 }
                 YoutuVlVisionDiagnosticStageOutput {
                     name: stage.name(),
@@ -575,7 +579,6 @@ impl IreeYoutuVlDiagnosticProjector {
             values: restored_output,
             shape: [actual_tokens, self.config.text_hidden],
         });
-        let actual_patches = plan.actual_patches;
         let patch_width = self.config.channels * self.config.patch_size * self.config.patch_size;
         let rope_width = self.config.hidden / self.config.heads / 2;
         let mut patches_window_order = patches;

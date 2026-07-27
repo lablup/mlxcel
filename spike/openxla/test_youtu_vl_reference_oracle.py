@@ -99,7 +99,7 @@ class YoutuVlOracleContractTests(unittest.TestCase):
         elif stage == "placeholder_positions":
             value[:] = np.arange(oracle.MERGED_TOKENS, dtype=np.int32)
         elif stage == "spatial_shapes":
-            value[:] = [[16, 16]]
+            value[:] = [[oracle.PATCH_GRID, oracle.PATCH_GRID]]
         elif stage in {"window_group_index", "reverse_group_index"}:
             value[:] = np.arange(oracle.MERGED_TOKENS, dtype=np.int32)
         elif stage in {"window_cu_seqlens", "full_cu_seqlens"}:

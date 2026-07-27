@@ -400,7 +400,7 @@ mod tests {
         assert!(ir.contains("Youtu-VL diagnostic checkpoints"));
         assert_eq!(
             config.diagnostic_contract_identity(),
-            "youtu-vl-vision-diagnostics-v2:module=[patch_projection,layer.0.window,layer.1.full,post_layernorm,merger.window_order]:host=[merger.restored_order]"
+            "youtu-vl-vision-diagnostics-v3:module=[patch_projection,layer.0.window,layer.1.full,post_layernorm,merger.window_order]:host=[merger.restored_order]"
         );
     }
 
@@ -447,7 +447,7 @@ mod tests {
         let compiler =
             std::env::var("MLXCEL_XLA_IREE_COMPILE").expect("set MLXCEL_XLA_IREE_COMPILE");
         let graph = emit_youtu_vl_diagnostics(&actual_schedule_config(), 16).unwrap();
-        let stem = format!("mlxcel-youtu-vl-diagnostics-v2-{}", std::process::id());
+        let stem = format!("mlxcel-youtu-vl-diagnostics-v3-{}", std::process::id());
         let input = std::env::temp_dir().join(format!("{stem}.mlir"));
         let output = std::env::temp_dir().join(format!("{stem}.vmfb"));
         std::fs::write(&input, graph).expect("write temporary StableHLO");

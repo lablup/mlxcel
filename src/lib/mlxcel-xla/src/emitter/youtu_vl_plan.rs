@@ -15,7 +15,7 @@ use serde_json::Value;
 
 pub(crate) const YOUTU_VL_PATCH_BUCKETS: [usize; 3] = [16, 64, 256];
 #[cfg(any(test, feature = "diagnostics"))]
-pub const YOUTU_VL_DIAGNOSTIC_ABI_VERSION: u32 = 2;
+pub const YOUTU_VL_DIAGNOSTIC_ABI_VERSION: u32 = 3;
 const MAX_IMAGES: usize = 4;
 const DEFAULT_IMAGE_TOKEN_ID: i32 = 128_264;
 const DEFAULT_VIDEO_TOKEN_ID: i32 = 128_265;

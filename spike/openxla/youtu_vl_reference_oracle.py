@@ -20,7 +20,7 @@ from typing import Any
 
 
 SCHEMA_VERSION = 1
-CONTRACT = "youtu-vl-hf-eager-oracle-v1"
+CONTRACT = "youtu-vl-hf-eager-oracle-v2"
 CHECKPOINT_REPO = "tencent/Youtu-VL-4B-Instruct"
 CHECKPOINT_REVISION = "8d30a0e49662a1d628a472b12df264dbcd768753"
 CHECKPOINT_ARTIFACTS = {
@@ -63,7 +63,10 @@ ROPE_WIDTH = 64
 KV_WIDTH = KV_LORA_RANK + ROPE_WIDTH
 PATCH_SIZE = 16
 PATCH_WIDTH = 3 * PATCH_SIZE * PATCH_SIZE
-PATCHES = 256
+MAX_IMAGE_PATCHES = 256
+PATCHES = 196
+PATCH_GRID = 14
+RESIZED_IMAGE_SIDE = PATCH_GRID * PATCH_SIZE
 MERGED_TOKENS = PATCHES // 4
 VISION_ROPE_WIDTH = 36
 MAX_NEW_TOKENS = 4
@@ -388,7 +391,7 @@ def capture(args: argparse.Namespace) -> int:
     inputs = processor(
         text=PROMPT,
         images=image,
-        max_image_patches=PATCHES,
+        max_image_patches=MAX_IMAGE_PATCHES,
         add_special_tokens=False,
         return_tensors="pt",
     )
@@ -396,10 +399,11 @@ def capture(args: argparse.Namespace) -> int:
     pixel_values = inputs["pixel_values"]
     spatial_shapes = inputs["spatial_shapes"]
     if list(spatial_shapes.shape) != [1, 2] or spatial_shapes.tolist() != [
-        [16, 16]
+        [PATCH_GRID, PATCH_GRID]
     ]:
         raise ContractError(
-            f"pinned fixture grid must be [[16, 16]], got {spatial_shapes.tolist()}"
+            "pinned fixture grid must be "
+            f"[[{PATCH_GRID}, {PATCH_GRID}]], got {spatial_shapes.tolist()}"
         )
     flat_patches = pixel_values[0]
     encoder = model.siglip2.vision_model.encoder
@@ -484,7 +488,7 @@ def capture(args: argparse.Namespace) -> int:
 
     store(
         "resized_normalized_pixels",
-        unpatch(torch, flat_patches, 16, 16),
+        unpatch(torch, flat_patches, PATCH_GRID, PATCH_GRID),
         "float32",
     )
     store("flattened_patches", flat_patches, "float32")
@@ -550,7 +554,11 @@ def capture(args: argparse.Namespace) -> int:
 
 def expected_shapes(sequence: int) -> dict[str, list[int]]:
     shapes = {
-        "resized_normalized_pixels": [3, 256, 256],
+        "resized_normalized_pixels": [
+            3,
+            RESIZED_IMAGE_SIDE,
+            RESIZED_IMAGE_SIDE,
+        ],
         "flattened_patches": [PATCHES, PATCH_WIDTH],
         "patches.window_order": [PATCHES, PATCH_WIDTH],
         "vision_rope.freqs": [PATCHES, VISION_ROPE_WIDTH],
@@ -723,7 +731,7 @@ def load_array(np: Any, root: Path, spec: dict[str, Any]) -> Any:
 
 def validate_semantics(np: Any, root: Path, arrays: dict[str, Any], role: str) -> None:
     spatial = load_array(np, root, arrays["spatial_shapes"])
-    if spatial.tolist() != [[16, 16]]:
+    if spatial.tolist() != [[PATCH_GRID, PATCH_GRID]]:
         raise ContractError(f"{role} spatial grid differs")
     expanded = load_array(np, root, arrays["expanded_input_ids"])
     placeholders = load_array(np, root, arrays["placeholder_positions"])
