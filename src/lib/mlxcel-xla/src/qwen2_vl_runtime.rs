@@ -822,7 +822,7 @@ fn compile_and_load_diagnostics(
     std::fs::create_dir_all(&cache)
         .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
     let (weights, checkpoint_schema) = load_weights(model_dir, config)?;
-    let contract = AuxiliaryArtifactContract::new(
+    let contract = AuxiliaryArtifactContract::new_legacy_unqualified(
         ENTRY_NAME,
         format!(
             "{};{};precision={precision:?};diagnostics=window-full-restoration;checkpoint_schema_sha256={}",
