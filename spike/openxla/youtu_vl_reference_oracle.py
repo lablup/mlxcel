@@ -247,9 +247,19 @@ def patch_order(torch: Any, window_index: Any) -> Any:
 
 
 def unpatch(torch: Any, patches: Any, height: int, width: int) -> Any:
-    rows = patches.reshape(height, width, 3, PATCH_SIZE, PATCH_SIZE)
+    if height % 2 or width % 2:
+        raise ContractError("Youtu-VL patch grid must be divisible by merge size 2")
+    rows = patches.reshape(
+        height // 2,
+        width // 2,
+        2,
+        2,
+        PATCH_SIZE,
+        PATCH_SIZE,
+        3,
+    )
     return (
-        rows.permute(2, 0, 3, 1, 4)
+        rows.permute(6, 0, 2, 4, 1, 3, 5)
         .contiguous()
         .reshape(3, height * PATCH_SIZE, width * PATCH_SIZE)
     )
@@ -505,7 +515,10 @@ def capture(args: argparse.Namespace) -> int:
     store("selected_kv", fresh_kv, "float32")
     store("reuse_prefill_logits", reuse_logits, "float32")
     store("reuse_selected_kv", reuse_kv, "float32")
-    store("expanded_input_ids", input_ids, "int32")
+    # The oracle contract models one request and records the expanded token
+    # sequence without a redundant batch dimension. `prepared_embeddings`
+    # retains `[1, sequence, hidden]` because that is the model input boundary.
+    store("expanded_input_ids", input_ids[0], "int32")
     store(
         "placeholder_positions",
         (input_ids[0] == IMAGE_TOKEN_ID).nonzero().flatten(),

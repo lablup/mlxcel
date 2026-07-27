@@ -65,6 +65,10 @@ fn argument(flag: &str) -> Option<String> {
         .cloned()
 }
 
+fn has_flag(flag: &str) -> bool {
+    std::env::args().any(|value| value == flag)
+}
+
 fn required_path(flag: &str) -> PathBuf {
     argument(flag)
         .map(PathBuf::from)
@@ -120,6 +124,75 @@ fn verify_reference_manifest(root: &Path) -> Value {
         ])
     );
     manifest
+}
+
+fn reference_f32(root: &Path, manifest: &Value, stage: &str) -> Vec<f32> {
+    let spec = &manifest["case"]["arrays"][stage];
+    assert_eq!(spec["dtype"], "float32", "{stage} reference dtype differs");
+    let filename = spec["file"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{stage} reference filename must be a string"));
+    let path = root.join(filename);
+    let bytes = fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    assert_eq!(
+        sha256_bytes(&bytes),
+        spec["sha256"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{stage} reference hash must be a string")),
+        "{stage} reference artifact SHA-256 differs"
+    );
+    assert!(bytes.len().is_multiple_of(4));
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("four-byte f32")))
+        .collect()
+}
+
+fn assert_reference_close(
+    root: &Path,
+    manifest: &Value,
+    stage: &str,
+    actual: &[f32],
+    atol: f32,
+    rtol: f32,
+) {
+    let expected = reference_f32(root, manifest, stage);
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "{stage} reference element count differs"
+    );
+    let mismatch =
+        actual
+            .iter()
+            .zip(&expected)
+            .enumerate()
+            .find_map(|(index, (&observed, &wanted))| {
+                let threshold = atol + rtol * wanted.abs();
+                (!observed.is_finite() || (observed - wanted).abs() > threshold)
+                    .then_some((index, observed, wanted))
+            });
+    if let Some((index, observed, wanted)) = mismatch {
+        let mismatch_count = actual
+            .iter()
+            .zip(&expected)
+            .filter(|&(&observed, &wanted)| {
+                let threshold = atol + rtol * wanted.abs();
+                !observed.is_finite() || (observed - wanted).abs() > threshold
+            })
+            .count();
+        let max_absolute = actual
+            .iter()
+            .zip(&expected)
+            .map(|(&observed, &wanted)| (observed - wanted).abs())
+            .fold(0.0f32, f32::max);
+        panic!(
+            "{stage} differs from the pinned HF preprocessing at flat index {index}: \
+             actual={observed}, reference={wanted}, absolute={}, \
+             max_absolute={max_absolute}, mismatch_count={mismatch_count}",
+            (observed - wanted).abs()
+        );
+    }
 }
 
 fn verify_checkpoint(model: &Path, checkpoint: &Value) {
@@ -238,21 +311,31 @@ fn usize_i32(values: &[usize], label: &str) -> Vec<i32> {
 
 fn reconstruct_pixels(patches: &[f32], grid_height: usize, grid_width: usize) -> Vec<f32> {
     assert_eq!(patches.len(), grid_height * grid_width * PATCH_WIDTH);
+    assert!(grid_height.is_multiple_of(2));
+    assert!(grid_width.is_multiple_of(2));
     let height = grid_height * PATCH_SIZE;
     let width = grid_width * PATCH_SIZE;
     let mut pixels = vec![0.0f32; 3 * height * width];
-    for patch in 0..grid_height * grid_width {
-        let patch_y = patch / grid_width;
-        let patch_x = patch % grid_width;
-        let row = &patches[patch * PATCH_WIDTH..(patch + 1) * PATCH_WIDTH];
-        let mut cursor = 0usize;
-        for channel in 0..3 {
-            for dy in 0..PATCH_SIZE {
-                for dx in 0..PATCH_SIZE {
-                    let y = patch_y * PATCH_SIZE + dy;
-                    let x = patch_x * PATCH_SIZE + dx;
-                    pixels[channel * height * width + y * width + x] = row[cursor];
-                    cursor += 1;
+    let mut patch = 0usize;
+    for block_y in 0..grid_height / 2 {
+        for block_x in 0..grid_width / 2 {
+            for inner_y in 0..2 {
+                for inner_x in 0..2 {
+                    let patch_y = block_y * 2 + inner_y;
+                    let patch_x = block_x * 2 + inner_x;
+                    let row = &patches[patch * PATCH_WIDTH..(patch + 1) * PATCH_WIDTH];
+                    let mut cursor = 0usize;
+                    for dy in 0..PATCH_SIZE {
+                        for dx in 0..PATCH_SIZE {
+                            let y = patch_y * PATCH_SIZE + dy;
+                            let x = patch_x * PATCH_SIZE + dx;
+                            for channel in 0..3 {
+                                pixels[channel * height * width + y * width + x] = row[cursor];
+                                cursor += 1;
+                            }
+                        }
+                    }
+                    patch += 1;
                 }
             }
         }
@@ -325,6 +408,26 @@ fn main() {
     assert_eq!(spatial_shapes, [(PATCH_GRID as i32, PATCH_GRID as i32)]);
     assert_eq!(patch_width, PATCH_WIDTH);
     let resized_pixels = reconstruct_pixels(&flattened_patches, PATCH_GRID, PATCH_GRID);
+    assert_reference_close(
+        &reference_root,
+        &reference,
+        "resized_normalized_pixels",
+        &resized_pixels,
+        1e-5,
+        1e-5,
+    );
+    assert_reference_close(
+        &reference_root,
+        &reference,
+        "flattened_patches",
+        &flattened_patches,
+        1e-5,
+        1e-5,
+    );
+    if has_flag("--preprocess-only") {
+        println!("Youtu-VL preprocessing matches the pinned HF capture");
+        return;
+    }
 
     configure_diagnostic_local_task_threads()
         .expect("configure diagnostics-only IREE local-task threads");
@@ -337,6 +440,54 @@ fn main() {
     assert_eq!(vision.abi_version, 3);
     assert_eq!(vision.patch_shape, [PATCHES, 1_152]);
     assert_eq!(vision.merged_shape, [MERGED_TOKENS, TEXT_HIDDEN]);
+    for (stage, values) in [
+        ("resized_normalized_pixels", resized_pixels.as_slice()),
+        ("flattened_patches", flattened_patches.as_slice()),
+        (
+            "patches.window_order",
+            vision.patches_window_order.as_slice(),
+        ),
+        ("vision_rope.freqs", vision.rope_freqs.as_slice()),
+    ] {
+        fs::write(
+            out.join(format!("image_text.{stage}.bin")),
+            f32_bytes(values),
+        )
+        .unwrap_or_else(|error| panic!("write partial {stage}: {error}"));
+    }
+    for stage in &vision.stages {
+        fs::write(
+            out.join(format!("image_text.{}.bin", stage.name)),
+            f32_bytes(&stage.values),
+        )
+        .unwrap_or_else(|error| panic!("write partial {}: {error}", stage.name));
+    }
+    assert_reference_close(
+        &reference_root,
+        &reference,
+        "patches.window_order",
+        &vision.patches_window_order,
+        1e-5,
+        1e-5,
+    );
+    assert_reference_close(
+        &reference_root,
+        &reference,
+        "vision_rope.freqs",
+        &vision.rope_freqs,
+        1e-5,
+        1e-5,
+    );
+    for stage in &vision.stages {
+        assert_reference_close(
+            &reference_root,
+            &reference,
+            &stage.name,
+            &stage.values,
+            2e-2,
+            2e-2,
+        );
+    }
 
     let production_preprocessor = YoutuVlIreeHostPreprocessor::load(&model, &device)
         .expect("load production Youtu-VL IREE host preprocessor");

@@ -299,32 +299,40 @@ impl YoutuVLProcessor {
                 }
             }
 
-            // Emit one row per spatial patch in the layout
-            // `[h_patches * w_patches, channels * patch_size * patch_size]`,
-            // with the inner ordering `(c, dy, dx)` to match how upstream
-            // unfolds patches via `unfold` over the (C, H, W) image tensor.
-            let total_patches_img = (h_patches as usize) * (w_patches as usize);
-            for patch_idx in 0..total_patches_img {
-                let py = patch_idx / w_patches as usize;
-                let px = patch_idx % w_patches as usize;
-                let y_start = py * self.patch_size;
-                let x_start = px * self.patch_size;
-
-                let row_start = (write_offset + patch_idx) * features_per_patch;
-                let mut k = 0usize;
-                for c in 0..in_channels {
-                    for dy in 0..self.patch_size {
-                        for dx in 0..self.patch_size {
-                            let y = y_start + dy;
-                            let x = x_start + dx;
-                            all_patches[row_start + k] = normalized[c * h * w + y * w + x];
-                            k += 1;
+            // Match the pinned HF processor's `convert_image_to_patches`
+            // exactly. Rows are grouped by spatial-merge block, then by the
+            // patch's position inside that block. Values within each row use
+            // `(dy, dx, channel)` ordering with channel fastest.
+            let merge = self.spatial_merge_size;
+            let mut image_row = 0usize;
+            for block_y in 0..h_patches as usize / merge {
+                for block_x in 0..w_patches as usize / merge {
+                    for inner_y in 0..merge {
+                        for inner_x in 0..merge {
+                            let patch_y = block_y * merge + inner_y;
+                            let patch_x = block_x * merge + inner_x;
+                            let y_start = patch_y * self.patch_size;
+                            let x_start = patch_x * self.patch_size;
+                            let row_start = (write_offset + image_row) * features_per_patch;
+                            let mut k = 0usize;
+                            for dy in 0..self.patch_size {
+                                for dx in 0..self.patch_size {
+                                    let y = y_start + dy;
+                                    let x = x_start + dx;
+                                    for c in 0..in_channels {
+                                        all_patches[row_start + k] =
+                                            normalized[c * h * w + y * w + x];
+                                        k += 1;
+                                    }
+                                }
+                            }
+                            image_row += 1;
                         }
                     }
                 }
             }
 
-            write_offset += total_patches_img;
+            write_offset += image_row;
         }
 
         i32::try_from(total_patches).map_err(|_| YoutuVLPreprocessError::DimensionTooLarge {

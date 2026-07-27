@@ -498,31 +498,14 @@ pub(crate) fn prepare_youtu_vl_host_inputs(
     if patch_rows.iter().any(|value| !value.is_finite()) {
         return Err("Youtu-VL processor produced a non-finite patch value".to_string());
     }
+    // The production processor already emits the checkpoint's
+    // spatial-merge-grouped row order. This boundary only permutes whole
+    // groups into the attention-window schedule.
     let merge_unit = config.spatial_merge_size * config.spatial_merge_size;
-    let mut grouped_rows = Vec::with_capacity(patch_rows.len());
-    let mut image_patch_offset = 0usize;
-    for &(height, width) in shapes {
-        let (height, width) = (height as usize, width as usize);
-        for block_h in 0..height / config.spatial_merge_size {
-            for block_w in 0..width / config.spatial_merge_size {
-                for inner_h in 0..config.spatial_merge_size {
-                    for inner_w in 0..config.spatial_merge_size {
-                        let patch = image_patch_offset
-                            + (block_h * config.spatial_merge_size + inner_h) * width
-                            + block_w * config.spatial_merge_size
-                            + inner_w;
-                        let start = patch * patch_width;
-                        grouped_rows.extend_from_slice(&patch_rows[start..start + patch_width]);
-                    }
-                }
-            }
-        }
-        image_patch_offset += height * width;
-    }
     let mut patches = Vec::with_capacity(plan.patch_bucket * patch_width);
     for &group in &plan.window_group_index {
         let start = group * merge_unit * patch_width;
-        patches.extend_from_slice(&grouped_rows[start..start + merge_unit * patch_width]);
+        patches.extend_from_slice(&patch_rows[start..start + merge_unit * patch_width]);
     }
     patches.resize(plan.patch_bucket * patch_width, 0.0);
 
@@ -670,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn host_patch_reorder_preserves_merge_group_membership() {
+    fn host_patch_reorder_preserves_processor_merge_groups() {
         let config = config();
         let width = config.channels * config.patch_size * config.patch_size;
         let mut rows = vec![0.0; 32 * width];
@@ -683,16 +666,9 @@ mod tests {
             .collect::<Vec<_>>();
         for (window_position, &group) in inputs.plan.window_group_index.iter().enumerate() {
             let group_rows = &observed[window_position * 4..window_position * 4 + 4];
-            let group_h = group / 4;
-            let group_w = group % 4;
             assert_eq!(
                 group_rows,
-                &[
-                    group_h * 16 + group_w * 2,
-                    group_h * 16 + group_w * 2 + 1,
-                    group_h * 16 + group_w * 2 + 8,
-                    group_h * 16 + group_w * 2 + 9,
-                ]
+                &[group * 4, group * 4 + 1, group * 4 + 2, group * 4 + 3,]
             );
         }
     }
