@@ -64,11 +64,11 @@
 //!   to additionally trust one or more custom root/intermediate CAs (PEM,
 //!   concatenated) for this module's `reqwest::Client`, on top of its default
 //!   trust store. Needed behind a TLS-inspecting corporate proxy (Cloudflare
-//!   Zero Trust / WARP Gateway, Netskope, Zscaler, ...) whose root CA isn't
-//!   picked up otherwise. [`load_extra_ca_certificates`] is also used by the
-//!   server's `http_image_client` (`src/server/media.rs`), which fetches
-//!   remote media URLs through an independently-built client with the same
-//!   trust gap.
+//!   Zero Trust / WARP Gateway, Netskope, Zscaler, ...) when its root CA is
+//!   not available to the active TLS backend (for example in a container).
+//!   [`load_extra_ca_certificates`] is also used by the server's
+//!   `http_image_client` (`src/server/media.rs`), which fetches remote media
+//!   URLs through an independently-built client with the same trust gap.
 //! - **URL segment encoding** — `repo_id`, `revision`, and `filename` are
 //!   percent-encoded per-segment when composing the GET/HEAD URL so that
 //!   adversarial repo metadata containing `?`, `#`, or other reserved
@@ -112,6 +112,7 @@ use hf_hub::api::sync::{Api, ApiBuilder};
 use hf_hub::{Repo, RepoType};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::io::AsyncWriteExt;
@@ -341,17 +342,23 @@ fn is_insecure_endpoint_opt_out() -> bool {
 }
 
 /// Env var pointing at a PEM file of additional CA certificates to trust,
-/// on top of (not instead of) the built-in Mozilla root bundle.
+/// on top of (not instead of) the active TLS backend's default roots.
 ///
-/// Exists because the shared `reqwest::Client` is built with the
-/// `rustls-tls` backend, whose default root store (`webpki-roots`) is a
-/// bundle baked into the binary at compile time — unlike the `hf-hub`-owned
-/// client used for manifest fetches, it never consults the OS trust store
-/// (Keychain / `/etc/ssl`), so trusting a corporate TLS-inspecting proxy
-/// (Cloudflare Zero Trust, Netskope, Zscaler, ...) system-wide has no effect
-/// on it. Point this at the intercepting proxy's root CA to fix that without
-/// weakening the default trust anchors for everyone else.
+/// The direct download and media clients are built independently from the
+/// `hf-hub` manifest client. Cargo feature unification currently makes both
+/// native-tls and rustls available to `reqwest`, so callers must not depend on
+/// a particular backend discovering a custom OS root. This explicit bundle
+/// gives both direct clients deterministic, scoped trust without weakening or
+/// replacing their default trust anchors.
 const EXTRA_CA_CERTS_ENV: &str = "MLXCEL_EXTRA_CA_CERTS";
+
+/// Generous upper bound for an operator-provided CA bundle.
+///
+/// Public root bundles are typically a few hundred KiB. Limiting this input
+/// prevents a mistaken path to a large file from allocating unbounded memory
+/// in the downloader or performing unbounded work on a server blocking-pool
+/// worker.
+const MAX_EXTRA_CA_CERTS_BYTES: usize = 1024 * 1024;
 
 /// Load additional trust anchors from [`EXTRA_CA_CERTS_ENV`], if set.
 ///
@@ -359,10 +366,10 @@ const EXTRA_CA_CERTS_ENV: &str = "MLXCEL_EXTRA_CA_CERTS";
 /// zero-config path. When set, the file at that path is read and parsed as a
 /// PEM bundle (one or more concatenated `-----BEGIN CERTIFICATE-----` blocks,
 /// e.g. `cat corp-ca.pem >> extra-ca-certs.pem` to add more than one). A
-/// missing file, unreadable file, or bundle with zero valid certificates is
-/// a hard error rather than a silent no-op: an operator who set this var
-/// intended for it to take effect, and downloads would otherwise fail later
-/// with a much less actionable TLS error.
+/// missing file, unreadable file, oversized bundle, or bundle with zero valid
+/// certificates is a hard error rather than a silent no-op: an operator who
+/// set this var intended for it to take effect, and downloads would otherwise
+/// fail later with a much less actionable TLS error.
 pub(crate) fn load_extra_ca_certificates() -> Result<Vec<reqwest::Certificate>> {
     let path = match std::env::var(EXTRA_CA_CERTS_ENV) {
         Ok(val) if !val.trim().is_empty() => val.trim().to_string(),
@@ -373,9 +380,21 @@ pub(crate) fn load_extra_ca_certificates() -> Result<Vec<reqwest::Certificate>> 
             ));
         }
     };
-    let bytes = fs::read(&path).with_context(|| {
+    let file = fs::File::open(&path).with_context(|| {
         format!("{EXTRA_CA_CERTS_ENV} is set to '{path}' but the file could not be read")
     })?;
+    let mut bytes = Vec::new();
+    file.take((MAX_EXTRA_CA_CERTS_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .with_context(|| {
+            format!("{EXTRA_CA_CERTS_ENV} is set to '{path}' but the file could not be read")
+        })?;
+    if bytes.len() > MAX_EXTRA_CA_CERTS_BYTES {
+        return Err(anyhow!(
+            "{EXTRA_CA_CERTS_ENV} points to '{path}', but the bundle exceeds the \
+             {MAX_EXTRA_CA_CERTS_BYTES}-byte safety limit"
+        ));
+    }
     let certs = reqwest::Certificate::from_pem_bundle(&bytes).with_context(|| {
         format!(
             "{EXTRA_CA_CERTS_ENV} points to '{path}', but it could not be parsed as a PEM \

@@ -850,6 +850,26 @@ fn extra_ca_certs_errors_on_missing_file() {
     restore_env(EXTRA_CA_CERTS_ENV, prev);
 }
 
+#[test]
+fn extra_ca_certs_rejects_oversized_bundle_before_parsing() {
+    let _env_guard = env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("oversized.pem");
+    std::fs::write(&path, vec![b'x'; MAX_EXTRA_CA_CERTS_BYTES + 1]).unwrap();
+    let prev = std::env::var(EXTRA_CA_CERTS_ENV).ok();
+    // SAFETY: serialized via the crate-wide ENV_LOCK acquired above.
+    unsafe {
+        std::env::set_var(EXTRA_CA_CERTS_ENV, path.to_str().unwrap());
+    }
+    let err = load_extra_ca_certificates()
+        .expect_err("an oversized CA bundle must be rejected before parsing");
+    assert!(
+        err.to_string().contains("safety limit"),
+        "error should explain the bounded-input failure: {err}"
+    );
+    restore_env(EXTRA_CA_CERTS_ENV, prev);
+}
+
 #[cfg(unix)]
 #[test]
 fn extra_ca_certs_errors_on_unreadable_file() {
