@@ -52,6 +52,7 @@ use mlxcel_core::session::{InferenceSession, PreparedPrefill, SessionCapabilitie
 mod context;
 #[cfg(any(feature = "diagnostics", test))]
 mod diagnostic_flags;
+mod float;
 #[cfg(any(feature = "iree", test))]
 #[allow(dead_code)]
 mod numeric_dtype_contract;

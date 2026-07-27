@@ -69,8 +69,8 @@ pub enum MolmoEmbeddingDType {
 impl MolmoEmbeddingDType {
     fn round(self, value: f32) -> f32 {
         match self {
-            Self::Float16 => crate::weights::half_to_f32(crate::weights::f32_to_f16_bits(value)),
-            Self::BFloat16 => crate::weights::round_bf16_f32(value),
+            Self::Float16 => crate::float::half_to_f32(crate::float::f32_to_f16_bits(value)),
+            Self::BFloat16 => crate::float::round_bf16_f32(value),
             Self::Float32 => value,
         }
     }

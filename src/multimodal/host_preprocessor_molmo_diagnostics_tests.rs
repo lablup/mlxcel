@@ -90,6 +90,7 @@ fn strict_oracle_rejects_molmo2_token_scan_and_replacement() {
 ///
 /// MLXCEL_DEVICE=gpu \
 /// MLXCEL_MOLMO_FIXTURE=/home/inureyes/models/molmo-7b \
+/// MLXCEL_MOLMO_REVISION=5c04b3a418979597b1968e41414ad799c87533e8 \
 /// MLXCEL_MOLMO_IMAGE=tests/fixtures/test_image.png \
 /// MLXCEL_MOLMO_IREE_DEVICE=local-task \
 /// MLXCEL_MOLMO_HEARTBEAT_SECS=30 \

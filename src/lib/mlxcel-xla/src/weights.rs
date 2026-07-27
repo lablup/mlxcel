@@ -449,32 +449,7 @@ pub(crate) fn bf16_to_f32(bytes: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-/// Round one f32 value to BF16 using round-to-nearest, ties-to-even, then widen
-/// it back to an f32 carrier.
-#[inline]
-pub(crate) fn round_bf16_f32(value: f32) -> f32 {
-    let bits = value.to_bits();
-    if bits & 0x7f80_0000 == 0x7f80_0000 {
-        return value;
-    }
-    let rounded = bits.wrapping_add(0x7fff + ((bits >> 16) & 1));
-    f32::from_bits(rounded & 0xffff_0000)
-}
-
-/// One IEEE 754 half (f16) -> f32. The arithmetic forms are exact: a normal's
-/// `1 + mant/1024` is a dyadic with denominator 2^10 and the `2^(exp-15)` / `2^-24`
-/// scales are exact powers of two, so the widening is bit-for-bit.
-pub(crate) fn half_to_f32(h: u16) -> f32 {
-    let sign = if h >> 15 == 1 { -1.0 } else { 1.0 };
-    let exp = (h >> 10) & 0x1f;
-    let mant = (h & 0x3ff) as f32;
-    match exp {
-        0 => sign * mant * 2f32.powi(-24),           // zero / subnormal
-        0x1f if mant == 0.0 => sign * f32::INFINITY, // +/- inf
-        0x1f => f32::NAN,                            // nan
-        _ => sign * (1.0 + mant / 1024.0) * 2f32.powi(exp as i32 - 15), // normal
-    }
-}
+pub(crate) use crate::float::{f32_to_f16_bits, half_to_f32, round_bf16_f32};
 
 /// f16 little-endian bytes -> f32, via a 65536-entry `u16 -> f32` lookup table.
 /// The table is built once (every f16 bit pattern, exact) and then each element
@@ -495,57 +470,6 @@ pub(crate) fn f32_le_to_f32(bytes: &[u8]) -> Vec<f32> {
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
-}
-
-/// One f32 -> IEEE 754 half (f16) bit pattern, round-to-nearest, ties-to-even (the
-/// IEEE default), matching a `stablehlo.convert` f32 -> f16. So a projection weight
-/// packed here (issue #572, f16-resident) is bit-identical to demoting the same f32
-/// weight inside the graph, and the contraction sees the same f16 operand and stays
-/// token-exact. It is the exact inverse of [`half_to_f32`]:
-/// `f32_to_f16_bits(half_to_f32(h)) == h` for every finite, non-NaN f16 `h`.
-pub(crate) fn f32_to_f16_bits(x: f32) -> u16 {
-    let bits = x.to_bits();
-    let sign = ((bits >> 16) & 0x8000) as u16;
-    let abs = bits & 0x7fff_ffff;
-
-    // NaN / Inf (f32 exponent all ones): NaN -> a canonical quiet f16 NaN, Inf -> f16 Inf.
-    if abs >= 0x7f80_0000 {
-        return sign | if abs > 0x7f80_0000 { 0x7e00 } else { 0x7c00 };
-    }
-
-    // f16 biased exponent = (f32 biased exponent - 127) + 15.
-    let e = (abs >> 23) as i32 - 127 + 15;
-
-    if e >= 0x1f {
-        return sign | 0x7c00; // overflow -> Inf
-    }
-
-    if e <= 0 {
-        // Subnormal f16, or underflow to a signed zero.
-        if e < -10 {
-            return sign; // below half the smallest subnormal -> +/- 0
-        }
-        // 24-bit significand (implicit leading 1), shifted into the subnormal range
-        // and rounded to nearest, ties to even.
-        let mant = (abs & 0x007f_ffff) | 0x0080_0000;
-        let shift = (14 - e) as u32; // e in [-10, 0] -> shift in [14, 24]
-        let q = mant >> shift;
-        let rem = mant & ((1 << shift) - 1);
-        let half = 1u32 << (shift - 1);
-        let round = u32::from(rem > half || (rem == half && q & 1 == 1));
-        // q + round may reach 0x400, which is exactly the smallest normal (correct).
-        return sign | (q + round) as u16;
-    }
-
-    // Normal f16: keep the top 10 mantissa bits, round to nearest even on bit 12. A
-    // mantissa carry rolls into the exponent, an exponent carry into 0x7c00 (Inf) --
-    // both the correct results.
-    let mant = abs & 0x007f_ffff;
-    let base = ((e as u32) << 10) | (mant >> 13);
-    let rem = mant & 0x1fff; // the 13 dropped low bits
-    let half = 0x1000u32; // 1 << 12
-    let round = u32::from(rem > half || (rem == half && base & 1 == 1));
-    sign | (base + round) as u16
 }
 
 /// Pack a row-major f32 weight to its little-endian f16 bit pattern for an
