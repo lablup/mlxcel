@@ -36,6 +36,8 @@ pub(crate) const SILU_PROJECTION_MODULE: &str = "numeric_silu_projection";
 pub(crate) const SILU_PROJECTION_ENTRY: &str = "numeric_silu_projection.main";
 pub(crate) const GELU_PROJECTION_MODULE: &str = "numeric_gelu_projection";
 pub(crate) const GELU_PROJECTION_ENTRY: &str = "numeric_gelu_projection.main";
+pub(crate) const PREFIX_SUM_MODULE: &str = "numeric_cuda_prefix_sum";
+pub(crate) const PREFIX_SUM_ENTRY: &str = "numeric_cuda_prefix_sum.main";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DenseMatmulProbeSpec {
@@ -218,6 +220,127 @@ pub(crate) fn stable_softmax(builder: &mut Builder, value: &Val, axis: usize) ->
     builder.divide(&exponentials, &sum)
 }
 
+fn slice_axis(builder: &mut Builder, value: &Val, axis: usize, start: usize, limit: usize) -> Val {
+    let ranges = value
+        .ty
+        .shape
+        .iter()
+        .enumerate()
+        .map(|(current, &size)| {
+            if current == axis {
+                (start, limit)
+            } else {
+                (0, size)
+            }
+        })
+        .collect::<Vec<_>>();
+    builder.slice(value, &ranges)
+}
+
+fn zeros_like(builder: &mut Builder, value: &Val) -> Val {
+    let zero = builder.const_f32(0.0);
+    builder.broadcast(&zero, &[], value.ty.shape.clone())
+}
+
+fn inclusive_scan_32_f32(builder: &mut Builder, value: &Val, axis: usize) -> Val {
+    assert_eq!(value.ty.elt, "f32");
+    assert_eq!(value.ty.shape[axis], 32);
+    let zero = builder.const_f32(0.0);
+    let mut result = value.clone();
+    for offset in [1, 2, 4, 8, 16] {
+        let prior = slice_axis(builder, &result, axis, 0, 32 - offset);
+        let mut low = vec![0; result.ty.shape.len()];
+        let high = low.clone();
+        low[axis] = offset;
+        let prior = builder.pad(&prior, &zero, &low, &high);
+        result = builder.add(&result, &prior);
+    }
+    result
+}
+
+fn exclusive_from_inclusive_32_f32(builder: &mut Builder, inclusive: &Val, axis: usize) -> Val {
+    let prior = slice_axis(builder, inclusive, axis, 0, 31);
+    let zero = builder.const_f32(0.0);
+    let mut low = vec![0; inclusive.ty.shape.len()];
+    let high = low.clone();
+    low[axis] = 1;
+    builder.pad(&prior, &zero, &low, &high)
+}
+
+/// Match MLX CUDA's one-block contiguous inclusive-scan association schedule.
+///
+/// Each logical thread scans four adjacent values serially, each 32-thread
+/// warp uses staged shuffle-up additions, and the warp totals are scanned by
+/// the first warp. The helper accepts `[rows, width]` f32 input with a static
+/// width no larger than the kernel's 4,096-value one-block limit.
+pub(crate) fn mlx_cuda_prefix_sum_2d(builder: &mut Builder, value: &Val) -> Val {
+    assert_eq!(value.ty.elt, "f32");
+    assert_eq!(
+        value.ty.shape.len(),
+        2,
+        "CUDA prefix sum input must be rank-2"
+    );
+    let rows = value.ty.shape[0];
+    let width = value.ty.shape[1];
+    assert!(
+        (1..=4096).contains(&width),
+        "CUDA prefix sum supports one scan block"
+    );
+    let padded_width = width.div_ceil(128) * 128;
+    let padded = if padded_width == width {
+        value.clone()
+    } else {
+        let zero = builder.const_f32(0.0);
+        builder.pad(value, &zero, &[0, 0], &[0, padded_width - width])
+    };
+    let threads = padded_width / 4;
+    let warps = threads / 32;
+    let grouped = builder.reshape(&padded, vec![rows, threads, 4]);
+    let value0 = slice_axis(builder, &grouped, 2, 0, 1);
+    let value1 = slice_axis(builder, &grouped, 2, 1, 2);
+    let value2 = slice_axis(builder, &grouped, 2, 2, 3);
+    let value3 = slice_axis(builder, &grouped, 2, 3, 4);
+    let local0 = value0;
+    let local1 = builder.add(&value1, &local0);
+    let local2 = builder.add(&value2, &local1);
+    let local3 = builder.add(&value3, &local2);
+    let first_half = builder.concatenate(&local0, &local1, 2);
+    let second_half = builder.concatenate(&local2, &local3, 2);
+    let local = builder.concatenate(&first_half, &second_half, 2);
+
+    let thread_sums = builder.reshape(&local3, vec![rows, warps, 32]);
+    let thread_inclusive = inclusive_scan_32_f32(builder, &thread_sums, 2);
+    let thread_exclusive = exclusive_from_inclusive_32_f32(builder, &thread_inclusive, 2);
+
+    // The MLX kernel forms a warp total as the exclusive last-lane prefix plus
+    // the current last-lane value. Keep that distinct association boundary.
+    let prior_last = slice_axis(builder, &thread_exclusive, 2, 31, 32);
+    let current_last = slice_axis(builder, &thread_sums, 2, 31, 32);
+    let warp_totals = builder.add(&prior_last, &current_last);
+    let warp_totals = builder.reshape(&warp_totals, vec![rows, warps]);
+    let zero = builder.const_f32(0.0);
+    let warp_totals = builder.pad(&warp_totals, &zero, &[0, 0], &[0, 32 - warps]);
+    let warp_inclusive = inclusive_scan_32_f32(builder, &warp_totals, 1);
+    let warp_exclusive = exclusive_from_inclusive_32_f32(builder, &warp_inclusive, 1);
+    let warp_exclusive = slice_axis(builder, &warp_exclusive, 1, 0, warps);
+
+    let local = builder.reshape(&local, vec![rows, warps, 32, 4]);
+    let explicit_zero = zeros_like(builder, &local);
+    let local = builder.add(&local, &explicit_zero);
+    let warp_exclusive = builder.reshape(&warp_exclusive, vec![rows, warps, 1, 1]);
+    let warp_exclusive = builder.broadcast(&warp_exclusive, &[0, 1, 2, 3], local.ty.shape.clone());
+    let with_warp_prefix = builder.add(&local, &warp_exclusive);
+    let thread_exclusive = builder.reshape(&thread_exclusive, vec![rows, warps, 32, 1]);
+    let thread_exclusive = builder.broadcast(
+        &thread_exclusive,
+        &[0, 1, 2, 3],
+        with_warp_prefix.ty.shape.clone(),
+    );
+    let scanned = builder.add(&with_warp_prefix, &thread_exclusive);
+    let scanned = builder.reshape(&scanned, vec![rows, padded_width]);
+    slice_axis(builder, &scanned, 1, 0, width)
+}
+
 /// Emit `output[rows, outputs] = input[rows, contraction] @
 /// weight[outputs, contraction]^T` with f32 inputs, accumulation, and result.
 pub(crate) fn emit_dense_matmul_probe(spec: DenseMatmulProbeSpec) -> Result<String, String> {
@@ -393,6 +516,31 @@ pub(crate) fn emit_gelu_projection_probe(spec: DenseMatmulProbeSpec) -> Result<S
     emit_activation_projection_probe(spec, GELU_PROJECTION_MODULE, tanh_gelu)
 }
 
+/// Emit the explicit MLX CUDA one-block contiguous inclusive-scan schedule.
+pub(crate) fn emit_prefix_sum_probe(spec: RowWiseProbeSpec) -> Result<String, String> {
+    let spec = spec.validate("prefix sum")?;
+    if spec.features > 4096 {
+        return Err(format!(
+            "prefix sum probe width {} exceeds the one-block CUDA limit 4096",
+            spec.features
+        ));
+    }
+    let dummy_ty = Ty::f32(vec![1]);
+    let input_ty = Ty::f32(vec![spec.rows, spec.features]);
+    let input = Builder::arg(1, input_ty.clone());
+    let mut builder = Builder::new();
+    let output = mlx_cuda_prefix_sum_2d(&mut builder, &input);
+    Ok(format!(
+        "module @{PREFIX_SUM_MODULE} {{\n  \
+         func.func public @main(%arg0: {dummy_ty}, %arg1: {input_ty}) -> {input_ty} {{\n\
+         {body}    return {output} : {input_ty}\n  }}\n}}\n",
+        dummy_ty = dummy_ty.render(),
+        input_ty = input_ty.render(),
+        body = builder.body(),
+        output = output.name,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -555,5 +703,31 @@ mod tests {
         let body = builder.body();
         assert!(body.contains("chlo.erf"));
         assert!(!body.contains("stablehlo.tanh"));
+    }
+
+    #[test]
+    fn prefix_sum_probe_pins_cuda_hierarchical_association() {
+        let graph = emit_prefix_sum_probe(RowWiseProbeSpec {
+            rows: 2,
+            features: 130,
+        })
+        .unwrap();
+        assert!(graph.starts_with("module @numeric_cuda_prefix_sum {"));
+        assert_eq!(graph.matches("stablehlo.add").count(), 17);
+        assert_eq!(graph.matches("stablehlo.concatenate").count(), 3);
+        assert!(!graph.contains("stablehlo.reduce"));
+        assert!(!graph.contains("stablehlo.reduce_window"));
+        assert!(!graph.contains("stablehlo.convert"));
+    }
+
+    #[test]
+    fn prefix_sum_probe_rejects_multi_block_width() {
+        assert!(
+            emit_prefix_sum_probe(RowWiseProbeSpec {
+                rows: 1,
+                features: 4097,
+            })
+            .is_err()
+        );
     }
 }

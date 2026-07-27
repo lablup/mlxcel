@@ -27,9 +27,10 @@ use crate::aux::{
 use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 use crate::emitter::numeric_ops::{
     DENSE_MATMUL_ENTRY, DenseMatmulProbeSpec, GELU_PROJECTION_ENTRY, LAYER_NORM_ENTRY,
-    RESIDUAL_ADD_ENTRY, RMS_NORM_ENTRY, RowWiseProbeSpec, SILU_PROJECTION_ENTRY, SOFTMAX_ENTRY,
-    emit_dense_matmul_probe, emit_gelu_projection_probe, emit_layer_norm_probe,
-    emit_residual_add_probe, emit_rms_norm_probe, emit_silu_projection_probe, emit_softmax_probe,
+    PREFIX_SUM_ENTRY, RESIDUAL_ADD_ENTRY, RMS_NORM_ENTRY, RowWiseProbeSpec, SILU_PROJECTION_ENTRY,
+    SOFTMAX_ENTRY, emit_dense_matmul_probe, emit_gelu_projection_probe, emit_layer_norm_probe,
+    emit_prefix_sum_probe, emit_residual_add_probe, emit_rms_norm_probe,
+    emit_silu_projection_probe, emit_softmax_probe,
 };
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
 use crate::numeric_dtype_contract::{NumericDType, WeightExecution};
@@ -51,12 +52,15 @@ const FEATURES: usize = 4;
 const RMS_EPSILON: f32 = 1e-5;
 const LAYER_NORM_EPSILON: f32 = 1e-5;
 const PROJECTION_OUTPUTS: usize = 3;
+const PREFIX_ROWS: usize = 2;
+const PREFIX_WIDTH: usize = 130;
 const RESIDUAL_OPERATION: &str = "micro-oracle.residual-add.f32";
 const RMS_NORM_OPERATION: &str = "micro-oracle.rms-norm.f32";
 const SOFTMAX_OPERATION: &str = "micro-oracle.attention-softmax.f32";
 const LAYER_NORM_OPERATION: &str = "micro-oracle.layer-norm.f32";
 const SILU_PROJECTION_OPERATION: &str = "micro-oracle.silu-projection.f32";
 const GELU_PROJECTION_OPERATION: &str = "micro-oracle.gelu-projection.f32";
+const PREFIX_SUM_OPERATION: &str = "micro-oracle.cuda-prefix-sum.f32";
 
 struct ProbeDefinition {
     operation: &'static str,
@@ -483,6 +487,106 @@ fn reference_gelu_projection(operands: &[NumericTensor]) -> Result<NumericTensor
     NumericTensor::new("output", vec![ROWS, PROJECTION_OUTPUTS], output)
 }
 
+fn prefix_sum_operands() -> Result<Vec<NumericTensor>, String> {
+    let mut values = Vec::with_capacity(PREFIX_ROWS * PREFIX_WIDTH);
+    for row in 0..PREFIX_ROWS {
+        let sign = if row == 0 { 1.0 } else { -1.0 };
+        for position in 0..PREFIX_WIDTH {
+            let thread = position / 4;
+            let lane = position % 4;
+            let value = match (thread % 3, lane) {
+                (1, 0) => 1.0,
+                (1, _) => 0.0,
+                (_, 0) => 100_000_000.0,
+                (_, 1) => 1.0,
+                (_, 2) => -100_000_000.0,
+                (_, 3) => 0.0,
+                _ => unreachable!(),
+            };
+            values.push(sign * value);
+        }
+    }
+    Ok(vec![NumericTensor::new(
+        "input",
+        vec![PREFIX_ROWS, PREFIX_WIDTH],
+        values,
+    )?])
+}
+
+fn inclusive_scan_32_reference(mut values: [f32; 32]) -> [f32; 32] {
+    for offset in [1, 2, 4, 8, 16] {
+        let prior = values;
+        for lane in offset..32 {
+            values[lane] = prior[lane] + prior[lane - offset];
+        }
+    }
+    values
+}
+
+fn reference_cuda_prefix_row(row: &[f32]) -> Vec<f32> {
+    let width = row.len();
+    let padded_width = width.div_ceil(128) * 128;
+    let threads = padded_width / 4;
+    let warps = threads / 32;
+    let mut padded = vec![0.0f32; padded_width];
+    padded[..width].copy_from_slice(row);
+    let mut local = vec![0.0f32; padded_width];
+    let mut thread_sums = vec![0.0f32; threads];
+    for (thread, thread_sum) in thread_sums.iter_mut().enumerate() {
+        let offset = thread * 4;
+        local[offset] = padded[offset];
+        local[offset + 1] = padded[offset + 1] + local[offset];
+        local[offset + 2] = padded[offset + 2] + local[offset + 1];
+        local[offset + 3] = padded[offset + 3] + local[offset + 2];
+        *thread_sum = local[offset + 3];
+    }
+
+    let mut thread_exclusive = vec![0.0f32; threads];
+    let mut warp_totals = [0.0f32; 32];
+    for (warp, warp_total) in warp_totals.iter_mut().enumerate().take(warps) {
+        let base = warp * 32;
+        let values: [f32; 32] = thread_sums[base..base + 32]
+            .try_into()
+            .expect("full CUDA warp");
+        let inclusive = inclusive_scan_32_reference(values);
+        thread_exclusive[base + 1..base + 32].copy_from_slice(&inclusive[..31]);
+        *warp_total = thread_exclusive[base + 31] + thread_sums[base + 31];
+    }
+    let warp_inclusive = inclusive_scan_32_reference(warp_totals);
+    let mut warp_exclusive = [0.0f32; 32];
+    warp_exclusive[1..].copy_from_slice(&warp_inclusive[..31]);
+
+    let mut output = Vec::with_capacity(width);
+    for (position, local_value) in local.iter().copied().enumerate().take(width) {
+        let thread = position / 4;
+        let warp = thread / 32;
+        let with_warp_prefix = local_value + warp_exclusive[warp];
+        output.push(with_warp_prefix + thread_exclusive[thread]);
+    }
+    output
+}
+
+fn reference_prefix_sum(operands: &[NumericTensor]) -> Result<NumericTensor, String> {
+    let [input] = operands else {
+        return Err(format!(
+            "CUDA prefix sum reference requires 1 operand, got {}",
+            operands.len()
+        ));
+    };
+    if input.shape() != [PREFIX_ROWS, PREFIX_WIDTH] {
+        return Err(format!(
+            "CUDA prefix sum reference shape mismatch: input {:?}",
+            input.shape()
+        ));
+    }
+    let output = input
+        .values()
+        .chunks_exact(PREFIX_WIDTH)
+        .flat_map(reference_cuda_prefix_row)
+        .collect();
+    NumericTensor::new("output", vec![PREFIX_ROWS, PREFIX_WIDTH], output)
+}
+
 fn dense_definition() -> Result<ProbeDefinition, String> {
     let operands = dense_operands()?.to_vec();
     Ok(ProbeDefinition {
@@ -725,6 +829,36 @@ fn gelu_projection_definition() -> Result<ProbeDefinition, String> {
     )
 }
 
+fn prefix_sum_definition() -> Result<ProbeDefinition, String> {
+    Ok(ProbeDefinition {
+        operation: PREFIX_SUM_OPERATION,
+        entry: PREFIX_SUM_ENTRY,
+        cache_key: "cuda-prefix-sum-f32",
+        config_identity: format!(
+            "rows={PREFIX_ROWS};width={PREFIX_WIDTH};values-per-thread=4;warp=32;block-limit=4096;dtype=f32"
+        ),
+        mlir: emit_prefix_sum_probe(RowWiseProbeSpec {
+            rows: PREFIX_ROWS,
+            features: PREFIX_WIDTH,
+        })?,
+        operator_class: OperatorClass::PrefixReduction,
+        rounding_boundaries: vec![
+            RoundingBoundary::OperatorInput,
+            RoundingBoundary::AccumulatorResult,
+            RoundingBoundary::OperatorOutput,
+        ],
+        association: AssociationPolicy::CudaOneBlockScan,
+        operands: prefix_sum_operands()?,
+        weights: vec![dummy_weight("cuda_prefix_sum")],
+        dynamic_operand_indices: vec![0],
+        output_shape: vec![PREFIX_ROWS, PREFIX_WIDTH],
+        comparison: ComparisonMode::ExactBits,
+        reference_algorithm: "mlx-cuda-one-block-contiguous-scan-v1",
+        candidate_algorithm: "explicit-mlx-cuda-one-block-contiguous-scan-v1",
+        reference: reference_prefix_sum,
+    })
+}
+
 fn checked_output_bytes(shape: &[usize]) -> Result<usize, String> {
     shape.iter().try_fold(size_of::<f32>(), |bytes, dimension| {
         if *dimension == 0 {
@@ -883,6 +1017,7 @@ pub fn run_core_operator_probes(device: &str) -> Result<Vec<NumericOracleReport>
         layer_norm_definition,
         silu_projection_definition,
         gelu_projection_definition,
+        prefix_sum_definition,
     ]
     .into_iter()
     .map(|definition| execute_probe(device, definition()?))
@@ -950,5 +1085,29 @@ mod tests {
         ] {
             assert!(output.values().iter().all(|value| value.is_finite()));
         }
+    }
+
+    #[test]
+    fn cuda_prefix_reference_is_hierarchical_not_naive_sequential() {
+        let operands = prefix_sum_operands().unwrap();
+        let output = reference_prefix_sum(&operands).unwrap();
+        assert!(output.values().iter().all(|value| value.is_finite()));
+
+        let mut naive = Vec::with_capacity(PREFIX_ROWS * PREFIX_WIDTH);
+        for row in operands[0].values().chunks_exact(PREFIX_WIDTH) {
+            let mut accumulator = 0.0f32;
+            naive.extend(row.iter().map(|value| {
+                accumulator += value;
+                accumulator
+            }));
+        }
+        assert!(
+            output
+                .values()
+                .iter()
+                .zip(naive)
+                .any(|(cuda, sequential)| cuda.to_bits() != sequential.to_bits()),
+            "cancellation-sensitive fixture must distinguish the CUDA block schedule"
+        );
     }
 }

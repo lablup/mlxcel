@@ -118,6 +118,7 @@ pub(crate) enum AssociationPolicy {
     Sequential,
     PairwiseTree,
     PrefixSequential,
+    CudaOneBlockScan,
     BackendAlgorithm,
 }
 
@@ -127,6 +128,7 @@ impl AssociationPolicy {
             Self::Sequential => "sequential",
             Self::PairwiseTree => "pairwise-tree",
             Self::PrefixSequential => "prefix-sequential",
+            Self::CudaOneBlockScan => "cuda-one-block-scan",
             Self::BackendAlgorithm => "backend-algorithm",
         }
     }
@@ -497,6 +499,32 @@ mod tests {
         assert!(first.canonical_identity().starts_with(SCHEMA));
         assert!(first.canonical_identity().contains("id=block.0"));
         assert!(first.canonical_identity().contains("algorithm=qmm_sm80_r2"));
+    }
+
+    #[test]
+    fn cuda_one_block_scan_association_is_explicit_identity() {
+        let scan = OperatorNumericContract::new(
+            "audio.cumulative_sum",
+            OperatorClass::PrefixReduction,
+            CheckpointDType::F32,
+            NumericDType::F32,
+            NumericDType::F32,
+            NumericDType::F32,
+            [
+                RoundingBoundary::OperatorInput,
+                RoundingBoundary::AccumulatorResult,
+                RoundingBoundary::OperatorOutput,
+            ],
+            AssociationPolicy::CudaOneBlockScan,
+            WeightExecution::Dense,
+            None,
+            backend(),
+        )
+        .unwrap();
+        let identity = OperatorNumericContractSet::new([scan])
+            .unwrap()
+            .canonical_identity();
+        assert!(identity.contains("association=cuda-one-block-scan"));
     }
 
     #[test]
