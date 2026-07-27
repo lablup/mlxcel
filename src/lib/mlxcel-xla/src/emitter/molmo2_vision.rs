@@ -16,6 +16,7 @@
 
 use super::builder::{Builder, Ty, Val};
 use super::molmo2_config::{Molmo2VisionConfig, Molmo2VisionWeightSpec};
+use super::numeric_ops::{silu, stable_softmax, tanh_gelu};
 
 const MOLMO2_VIT_PROBE_LAYER: usize = 18;
 // 591490 = 513 * checkpoint hidden width 1152 + component 514.
@@ -114,61 +115,9 @@ fn layer_norm(builder: &mut Builder, value: &Val, weight: &Val, bias: &Val, epsi
     builder.add(&normalized, &bias)
 }
 
-fn tanh_gelu(builder: &mut Builder, value: &Val) -> Val {
-    let shape = value.ty.shape.clone();
-    let half = builder.const_f32(0.5);
-    let half = builder.broadcast(&half, &[], shape.clone());
-    let one = builder.const_f32(1.0);
-    let one = builder.broadcast(&one, &[], shape.clone());
-    let coefficient = builder.const_f32(0.044_715);
-    let coefficient = builder.broadcast(&coefficient, &[], shape.clone());
-    let scale = builder.const_f32(0.797_884_6);
-    let scale = builder.broadcast(&scale, &[], shape);
-    let squared = builder.multiply(value, value);
-    let cubed = builder.multiply(&squared, value);
-    let nonlinear = builder.multiply(&coefficient, &cubed);
-    let inner = builder.add(value, &nonlinear);
-    let scaled = builder.multiply(&scale, &inner);
-    let tanh = builder.tanh(&scaled);
-    let cdf = builder.add(&one, &tanh);
-    let half_value = builder.multiply(value, &half);
-    builder.multiply(&half_value, &cdf)
-}
-
-fn silu(builder: &mut Builder, value: &Val) -> Val {
-    let shape = value.ty.shape.clone();
-    let one = builder.const_f32(1.0);
-    let one = builder.broadcast(&one, &[], shape);
-    let negative = builder.negate(value);
-    let exponential = builder.exponential(&negative);
-    let denominator = builder.add(&one, &exponential);
-    // Preserve MLX's `x * sigmoid(x)` operation order. Reassociating this as
-    // `x / (1 + exp(-x))` changes F32 rounding before the wide w2 projection.
-    let sigmoid = builder.divide(&one, &denominator);
-    builder.multiply(value, &sigmoid)
-}
-
 fn softmax_last(builder: &mut Builder, scores: &Val) -> Val {
     let axis = scores.ty.shape.len() - 1;
-    let leading = scores.ty.shape[..axis].to_vec();
-    let negative_infinity = builder.const_f32(f32::NEG_INFINITY);
-    let maximum = builder.reduce_max(scores, axis, &negative_infinity);
-    let maximum = builder.broadcast(
-        &maximum,
-        &(0..axis).collect::<Vec<_>>(),
-        scores.ty.shape.clone(),
-    );
-    let shifted = builder.subtract(scores, &maximum);
-    let exponentials = builder.exponential(&shifted);
-    let zero = builder.const_f32(0.0);
-    let denominator = builder.reduce_add(&exponentials, axis, &zero);
-    let denominator = builder.broadcast(
-        &denominator,
-        &(0..axis).collect::<Vec<_>>(),
-        scores.ty.shape.clone(),
-    );
-    debug_assert_eq!(denominator.ty.shape[..axis], leading);
-    builder.divide(&exponentials, &denominator)
+    stable_softmax(builder, scores, axis)
 }
 
 fn selected_slot(selected_layers: &[usize], layer: usize) -> Option<usize> {
