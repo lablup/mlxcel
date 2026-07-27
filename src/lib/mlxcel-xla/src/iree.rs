@@ -1050,42 +1050,6 @@ fn compile_gemma3n_diagnostics(
     Ok((vmfb, layout))
 }
 
-/// Map each needed weight name to the safetensors file that holds it, in the same
-/// order as `names`. A single-file checkpoint (`model.safetensors` present) maps
-/// every name to that one file; a sharded checkpoint (no `model.safetensors`, only
-/// `model-0000k-of-...safetensors` shards) reads `model.safetensors.index.json`'s
-/// `weight_map`. The big untied models (e.g. Llama-3.1-8B) ship sharded, so this
-/// is what lets them load. A model dir that has BOTH a `model.safetensors` and an
-/// index uses the single file (the index then just points back at it).
-fn resolve_weight_shards(model_dir: &Path, names: &[String]) -> Result<Vec<PathBuf>, String> {
-    let single = model_dir.join("model.safetensors");
-    if single.exists() {
-        return Ok(vec![single; names.len()]);
-    }
-    let index = model_dir.join("model.safetensors.index.json");
-    let text = std::fs::read_to_string(&index).map_err(|e| {
-        format!(
-            "no model.safetensors and no readable model.safetensors.index.json in {}: {e}",
-            model_dir.display()
-        )
-    })?;
-    let v: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", index.display()))?;
-    let map = v
-        .get("weight_map")
-        .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| format!("{}: missing object `weight_map`", index.display()))?;
-    names
-        .iter()
-        .map(|name| {
-            map.get(name)
-                .and_then(serde_json::Value::as_str)
-                .map(|f| model_dir.join(f))
-                .ok_or_else(|| format!("{}: weight_map has no entry for `{name}`", index.display()))
-        })
-        .collect()
-}
-
 fn language_model_tensor_name(name: &str) -> String {
     format!("language_model.{name}")
 }
@@ -1096,12 +1060,28 @@ enum DenseCheckpointNames {
     LanguageModelPrefixed,
 }
 
+fn merge_dense_name_scheme(
+    current: Option<DenseCheckpointNames>,
+    observed: DenseCheckpointNames,
+) -> Result<Option<DenseCheckpointNames>, String> {
+    match current {
+        Some(current) if current != observed => Err(
+            "dense checkpoint mixes canonical and `language_model.*` tensor namespaces".to_string(),
+        ),
+        Some(current) => Ok(Some(current)),
+        None => Ok(Some(observed)),
+    }
+}
+
 /// Resolve dense-language weights from either a standalone checkpoint or the
 /// `language_model.*` namespace used by LLaVA wrappers.
 ///
 /// A single-file checkpoint defers namespace detection until its safetensors
-/// header is open. A sharded checkpoint must choose one complete namespace
-/// from the index so a partially mixed wrapper is rejected.
+/// header is open. A sharded checkpoint scans every shard named by the index
+/// instead of trusting an individual `weight_map` entry: the pinned Youtu-VL
+/// index points `model.embed_tokens.weight` at the wrong shard even though the
+/// tensor itself is present. The scan still rejects missing, duplicate, or
+/// mixed-namespace tensors.
 fn resolve_dense_weight_sources(
     model_dir: &Path,
     names: &[String],
@@ -1110,21 +1090,68 @@ fn resolve_dense_weight_sources(
     if single.exists() {
         return Ok((vec![single; names.len()], None));
     }
-    if let Ok(paths) = resolve_weight_shards(model_dir, names) {
-        return Ok((paths, Some(DenseCheckpointNames::Canonical)));
+    let candidate_shards = checkpoint_candidate_shards(model_dir)?;
+    let mut resolved: Vec<Option<PathBuf>> = vec![None; names.len()];
+    let mut scheme = None;
+    for shard in candidate_shards {
+        let file =
+            File::open(&shard).map_err(|error| format!("open {}: {error}", shard.display()))?;
+        // Safety: the file is read-only for the lifetime of this header scan.
+        let mmap = unsafe { Mmap::map(&file) }
+            .map_err(|error| format!("mmap {}: {error}", shard.display()))?;
+        let tensors = SafeTensors::deserialize(&mmap)
+            .map_err(|error| format!("parse {}: {error}", shard.display()))?;
+        for (index, canonical) in names.iter().enumerate() {
+            let wrapped = language_model_tensor_name(canonical);
+            let has_canonical = tensors.tensor(canonical).is_ok();
+            let has_wrapped = tensors.tensor(&wrapped).is_ok();
+            let observed = match (has_canonical, has_wrapped) {
+                (false, false) => continue,
+                (true, false) => DenseCheckpointNames::Canonical,
+                (false, true) => DenseCheckpointNames::LanguageModelPrefixed,
+                (true, true) => {
+                    return Err(format!(
+                        "dense checkpoint {} contains both `{canonical}` and `{wrapped}`",
+                        shard.display()
+                    ));
+                }
+            };
+            if let Some(previous) = &resolved[index] {
+                return Err(format!(
+                    "dense tensor `{canonical}` is duplicated in {} and {}",
+                    previous.display(),
+                    shard.display()
+                ));
+            }
+            resolved[index] = Some(shard.clone());
+            scheme = merge_dense_name_scheme(scheme, observed)?;
+        }
     }
-    let wrapped: Vec<String> = names
+    let missing = resolved
         .iter()
-        .map(|name| language_model_tensor_name(name))
-        .collect();
-    resolve_weight_shards(model_dir, &wrapped)
-        .map(|paths| (paths, Some(DenseCheckpointNames::LanguageModelPrefixed)))
-        .map_err(|error| {
-            format!(
-                "dense checkpoint has neither a complete canonical nor `language_model.*` \
-                 weight namespace: {error}"
-            )
-        })
+        .zip(names)
+        .filter_map(|(path, name)| path.is_none().then_some(name.as_str()))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "dense checkpoint is missing {} graph weight(s): {}",
+            missing.len(),
+            missing
+                .iter()
+                .take(8)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let scheme = scheme.ok_or_else(|| "dense checkpoint has no graph weights".to_string())?;
+    Ok((
+        resolved
+            .into_iter()
+            .map(|path| path.expect("missing paths rejected above"))
+            .collect(),
+        Some(scheme),
+    ))
 }
 
 /// mlx-community Gemma3n quantized repacks retain the upstream index but rewrite
@@ -1157,16 +1184,36 @@ fn merge_gemma3n_name_scheme(
     }
 }
 
-fn gemma3n_candidate_shards(model_dir: &Path, names: &[String]) -> Result<Vec<PathBuf>, String> {
-    let indexed = resolve_weight_shards(model_dir, names);
-    if let Ok(paths) = &indexed
-        && paths.iter().all(|path| path.is_file())
-    {
-        let mut unique = paths.clone();
-        unique.sort();
-        unique.dedup();
-        return Ok(unique);
-    }
+fn checkpoint_candidate_shards(model_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let index = model_dir.join("model.safetensors.index.json");
+    let indexed = std::fs::read_to_string(&index)
+        .map_err(|error| format!("read {}: {error}", index.display()))
+        .and_then(|text| {
+            let value: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|error| format!("parse {}: {error}", index.display()))?;
+            let weight_map = value
+                .get("weight_map")
+                .and_then(serde_json::Value::as_object)
+                .ok_or_else(|| format!("{}: missing object `weight_map`", index.display()))?;
+            let mut paths = weight_map
+                .values()
+                .filter_map(serde_json::Value::as_str)
+                .map(|file| model_dir.join(file))
+                .collect::<Vec<_>>();
+            paths.sort();
+            paths.dedup();
+            if paths.is_empty() || paths.iter().any(|path| !path.is_file()) {
+                return Err(format!(
+                    "{} does not name a complete set of existing safetensors shards",
+                    index.display()
+                ));
+            }
+            Ok(paths)
+        });
+    let indexed_error = match indexed {
+        Ok(paths) => return Ok(paths),
+        Err(error) => error,
+    };
     let mut actual: Vec<PathBuf> = std::fs::read_dir(model_dir)
         .map_err(|error| format!("read {}: {error}", model_dir.display()))?
         .filter_map(Result::ok)
@@ -1181,10 +1228,7 @@ fn gemma3n_candidate_shards(model_dir: &Path, names: &[String]) -> Result<Vec<Pa
         .collect();
     actual.sort();
     if actual.is_empty() {
-        return Err(match indexed {
-            Err(error) => error,
-            Ok(_) => format!("no safetensors files found in {}", model_dir.display()),
-        });
+        return Err(indexed_error);
     }
     Ok(actual)
 }
@@ -1193,7 +1237,7 @@ fn resolve_gemma3n_weight_sources(
     model_dir: &Path,
     names: &[String],
 ) -> Result<(Vec<PathBuf>, Gemma3nCheckpointNames), String> {
-    let candidate_shards = gemma3n_candidate_shards(model_dir, names)?;
+    let candidate_shards = checkpoint_candidate_shards(model_dir)?;
     let mut resolved: Vec<Option<PathBuf>> = vec![None; names.len()];
     let mut scheme = None;
     for shard in candidate_shards {
@@ -1359,6 +1403,40 @@ mod checkpoint_name_tests {
     }
 
     #[test]
+    fn candidate_shards_scan_every_file_named_by_a_stale_index() {
+        let model_dir = std::env::temp_dir().join(format!(
+            "mlxcel-xla-stale-index-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&model_dir).unwrap();
+        let first = model_dir.join("model-00001-of-00002.safetensors");
+        let second = model_dir.join("model-00002-of-00002.safetensors");
+        std::fs::write(&first, []).unwrap();
+        std::fs::write(&second, []).unwrap();
+        std::fs::write(
+            model_dir.join("model.safetensors.index.json"),
+            serde_json::json!({
+                "weight_map": {
+                    "model.embed_tokens.weight": "model-00001-of-00002.safetensors",
+                    "model.layers.0.input_layernorm.weight": "model-00002-of-00002.safetensors"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            checkpoint_candidate_shards(&model_dir).unwrap(),
+            vec![first, second]
+        );
+        std::fs::remove_dir_all(model_dir).unwrap();
+    }
+
+    #[test]
     #[ignore = "requires GEMMA3N_MODEL_DIR pointing at a real local checkpoint"]
     fn real_gemma3n_headers_resolve_every_graph_weight_once() {
         let model_dir =
@@ -1379,11 +1457,10 @@ mod checkpoint_name_tests {
 /// f32 buffers (kept alive until the shim copies them) plus the flat (ptr, rank,
 /// dims) arrays the C ABI takes. `cfg` fixes the layer count and weight order.
 ///
-/// Single-file and sharded checkpoints both load: [`resolve_weight_shards`] maps
-/// each weight to its file, and the weights are read shard by shard (each shard
-/// mmap'd exactly once, its tensors copied out as owned f32) and placed back into
-/// the emitter's arg order by index, so the buffers line up with the graph args
-/// regardless of how the checkpoint was split.
+/// Single-file and sharded checkpoints both load: the architecture-aware
+/// resolvers map each weight to its containing shard, then each shard is mmap'd
+/// exactly once and its owned buffers are placed back into the emitter's arg
+/// order regardless of how the checkpoint was split.
 #[allow(clippy::type_complexity)]
 fn load_weights(
     model_dir: &Path,
