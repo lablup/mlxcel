@@ -1751,6 +1751,63 @@ impl Qwen35Model {
         }
     }
 
+    /// Advance `caches` over `input_ids` and return NOTHING.
+    ///
+    /// The cheap prefill for a speculative burst. [`Self::forward_speculative`]
+    /// is the verify hot path and does three things a prefill chunk has no use
+    /// for, all of them scaling with the chunk length:
+    ///
+    ///   1. **the LM head over every position.** `[1, 512, 4096]` projected into
+    ///      a 248,320-wide vocab, per chunk — and only the final token's logits
+    ///      are ever read. This is the dominant waste.
+    ///   2. per-capture-layer `copy` of the post-block hidden state, for
+    ///      positions the drafter never sees.
+    ///   3. GDN rollback snapshots for every linear-attention layer. Prefill
+    ///      positions are committed; there is nothing to roll back to.
+    ///
+    /// Uses [`Qwen35DecoderLayer::forward`] (the snapshot-free variant) and
+    /// stops before the final norm, so the KV / GDN caches advance exactly as
+    /// `forward_speculative` would leave them while the per-position output work
+    /// is skipped entirely. The caller then runs the LAST token through
+    /// `forward_speculative` to obtain the logits and captured hiddens the
+    /// round loop consumes.
+    ///
+    /// Mask construction mirrors `forward_speculative`: the causal mask is built
+    /// from the first full-attention layer's cache offset, so chunk N attends
+    /// correctly over chunks `0..N`.
+    pub fn forward_speculative_prefill(&self, input_ids: &MlxArray, caches: &mut [Qwen3NextCache]) {
+        let h0 = self.embed_tokens.forward(input_ids);
+        let shape = mlxcel_core::array_shape(&h0);
+        let seq_len = shape[1];
+
+        let fa_idx = self.config.full_attention_interval - 1;
+        let fa_mask = if seq_len > 1 {
+            let offset = if fa_idx < caches.len() {
+                caches[fa_idx].offset()
+            } else {
+                0
+            };
+            Some(create_causal_mask(seq_len, offset))
+        } else {
+            None
+        };
+
+        let mut h = h0;
+        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
+            let mask = if layer.is_linear {
+                None
+            } else {
+                fa_mask.as_deref()
+            };
+            h = layer.forward(&h, mask, cache, None);
+        }
+        // `h` is deliberately dropped: the point of this method is the cache
+        // advance. Force evaluation so the work lands here rather than
+        // surfacing inside the caller's next timed phase (MLX is lazy, and
+        // that laziness has already made these timings lie once).
+        mlxcel_core::eval(&h);
+    }
+
     /// Rewind both KV (attention) and GDN (linear-attention) caches to the
     /// position of the last accepted token after a DFlash verify-pass block.
     ///
