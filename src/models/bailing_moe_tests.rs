@@ -883,6 +883,34 @@ fn config_validation_rejects_grouped_routing_that_would_index_out_of_range() {
 // no `expert_bias` tensor anywhere in its 5603 keys.
 
 #[test]
+fn an_absurd_topk_group_saturates_rather_than_truncating_when_grouping_is_off() {
+    // `validate_routing` bounds `topk_group` to `1..=n_group - 1` only on the
+    // grouped branch. `n_group` defaults to 1 (and `Ling-lite-1.5` declares
+    // neither field), so on every real config `topk_group` is carried into the
+    // gate unbounded, and a plain `as i32` would truncate a value above
+    // `i32::MAX` to a negative number. The field is unreachable at `n_group == 1`
+    // (`forward` reads it only under `n_group > 1`), so this is defense in depth
+    // rather than a live bug, but a stored negative would become
+    // `slice_axis(..., 0, k)` with a negative `k` the moment a later change did
+    // reach it, and `slice_axis` reads `-1` as "to the end" rather than as an
+    // error.
+    let mut args = router_args(4, 2);
+    args.n_group = 1;
+    args.topk_group = usize::MAX;
+    args.validate()
+        .expect("topk_group is inert while n_group is 1");
+
+    let weights = router_weights(4, None);
+    let gate = BailingMoeGate::from_weights(&weights, &args, "mlp").unwrap();
+    assert_eq!(gate.n_group, 1);
+    assert_eq!(gate.topk_group, i32::MAX);
+
+    // The grouped branch stays unreached, so routing is the plain top-k.
+    let (indices, _) = gate.forward(&row(&[3.0, 2.0, 1.0, 0.0]));
+    assert_eq!(sorted_indices(&indices), vec![0, 1]);
+}
+
+#[test]
 fn the_expert_bias_is_zero_filled_when_the_flag_is_set_but_no_tensor_ships() {
     // Upstream initializes `expert_bias` to zeros when the flag is set, so a
     // checkpoint that carries no tensor still routes with a zero bias rather

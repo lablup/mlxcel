@@ -1549,7 +1549,15 @@ impl BailingMoeGate {
             expert_bias,
             top_k: args.num_experts_per_tok as i32,
             n_group: args.n_group as i32,
-            topk_group: args.topk_group as i32,
+            // `validate_routing` bounds `topk_group` to `1..=n_group - 1` only
+            // on the grouped branch. With `n_group == 1`, the upstream default
+            // and the value `Ling-lite-1.5` inherits, the field is never read
+            // and never bounded, so a plain `as i32` would truncate an absurd
+            // config value to a negative number and store it. Saturate instead,
+            // the same way `ModelArgs::rope_dims` handles an absurd
+            // `rotary_dim`: an unreachable field must still not hold a value
+            // that would be out of range if a later change did reach it.
+            topk_group: i32::try_from(args.topk_group).unwrap_or(i32::MAX),
             routed_scaling_factor: args.routed_scaling_factor,
             norm_topk_prob: args.norm_topk_prob,
             score_function: args.score_function(),
