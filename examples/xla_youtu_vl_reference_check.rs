@@ -30,7 +30,10 @@ use mlxcel::{
     HostMultimodalPreprocessor, PreparedTensorDType, YoutuVlIreeHostPreprocessor,
     initialize_runtime,
 };
-use mlxcel_xla::{IreeYoutuVlDiagnosticProjector, YoutuVlReferenceDiagnosticEngine};
+use mlxcel_xla::{
+    IreeYoutuVlDiagnosticProjector, YoutuVlReferenceDiagnosticEngine,
+    configure_diagnostic_local_task_threads,
+};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
@@ -323,6 +326,8 @@ fn main() {
     assert_eq!(patch_width, PATCH_WIDTH);
     let resized_pixels = reconstruct_pixels(&flattened_patches, PATCH_GRID, PATCH_GRID);
 
+    configure_diagnostic_local_task_threads()
+        .expect("configure diagnostics-only IREE local-task threads");
     let _runtime = initialize_runtime();
     let mut diagnostic_projector = IreeYoutuVlDiagnosticProjector::load(&model, &device)
         .expect("load Youtu-VL diagnostic vision projector");
