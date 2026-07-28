@@ -841,8 +841,15 @@ pub(crate) fn dim_eq(dim: i32, expected: usize) -> bool {
 /// their `config.json` is the whole point of passing them.
 ///
 /// A quantized table is packed along the last axis only, so its row count is
-/// still dimension 0; the width check is skipped for it because the packed width
-/// is a function of the bit depth rather than the model width.
+/// still dimension 0, but its stored width is a function of the bit depth rather
+/// than the model width and cannot be compared against `expected_cols` directly.
+/// The dequantized width is recoverable, and is checked (issue #929): MLX
+/// reconstructs it as `scales.shape(-1) * group_size`, so a table honestly
+/// packed for a different model width is internally self-consistent, passes the
+/// row check, and then feeds a wrong-width hidden state into `fast::layer_norm` /
+/// `fast::rms_norm`, which throws and crosses the cxx bridge as an uncatchable
+/// `std::terminate` at the first forward pass. The reconstruction is shared with
+/// the dense projections via `mlxcel_core::layers::validate_quantized_packing`.
 ///
 /// Used by: BailingMoe, Gpt2, GptBigCode, GptNeoX
 pub(crate) fn validate_embedding_table(
@@ -871,11 +878,39 @@ pub(crate) fn validate_embedding_table(
              behind an embedding lookup does not range-check a positive index."
         ));
     }
-    if !table.is_quantized() && !dim_eq(*cols, expected_cols) {
-        return Err(format!(
-            "{key}.weight is [{rows}, {cols}] but {width_field} is {expected_cols}; every \
-             embedding table must be the model width"
-        ));
+    match table.quantized() {
+        // The packed width says nothing on its own, so reconstruct the width MLX
+        // will compute from the scales and the reconciled group size. `group_size`
+        // and `bits` here are the values the loader already settled on, so this
+        // re-runs reconciliation on an already-reconciled pair, which is a no-op.
+        Some(quantized) => {
+            let scales_shape = mlxcel_core::array_shape(&quantized.scales);
+            let biases_shape = quantized
+                .biases
+                .as_ref()
+                .map(|biases| mlxcel_core::array_shape(biases));
+            mlxcel_core::layers::validate_quantized_packing(
+                key,
+                &mlxcel_core::layers::QuantizedTensorShapes {
+                    weight: &shape,
+                    scales: &scales_shape,
+                    biases: biases_shape.as_deref(),
+                },
+                expected_cols,
+                quantized.group_size,
+                quantized.bits,
+                &quantized.mode,
+            )
+            .map_err(|e| format!("{e} ({width_field} is {expected_cols})"))?;
+        }
+        None => {
+            if !dim_eq(*cols, expected_cols) {
+                return Err(format!(
+                    "{key}.weight is [{rows}, {cols}] but {width_field} is {expected_cols}; every \
+                     embedding table must be the model width"
+                ));
+            }
+        }
     }
     Ok(rows)
 }

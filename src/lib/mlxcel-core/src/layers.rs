@@ -262,15 +262,8 @@ impl QuantizedEmbedding {
         // thread an explicit mode (e.g. vision encoders, which always called
         // this affine default) load non-affine weights correctly instead of
         // aborting in quantized_matmul ("Biases must be provided for affine").
-        let mode = if weights.get(&format!("{}.biases", prefix)).is_some() {
-            "affine"
-        } else if bits == 8 {
-            "mxfp8"
-        } else if group_size == 16 {
-            "nvfp4"
-        } else {
-            "mxfp4"
-        };
+        let has_biases = weights.get(&format!("{}.biases", prefix)).is_some();
+        let mode = infer_quantization_mode(has_biases, group_size, bits);
         Self::from_weights_with_mode(weights, prefix, group_size, bits, mode)
     }
 
@@ -427,6 +420,21 @@ impl UnifiedEmbedding {
     /// Check if this is a quantized embedding
     pub fn is_quantized(&self) -> bool {
         matches!(self, Self::Quantized(_))
+    }
+
+    /// Borrow the quantized table, or `None` for the non-quantized variant.
+    ///
+    /// Load-time validators need the `scales` / `biases` shapes and the
+    /// *reconciled* `group_size` / `bits` to reconstruct the dequantized width
+    /// a packed table describes, which `is_quantized()` alone cannot give them.
+    ///
+    /// Used by: the shared `validate_embedding_table` guard (BailingMoe, Gpt2,
+    ///          GptBigCode, GptNeoX)
+    pub fn quantized(&self) -> Option<&QuantizedEmbedding> {
+        match self {
+            Self::Quantized(e) => Some(e),
+            Self::Regular(_) => None,
+        }
     }
 
     /// Produce an independent [`UnifiedEmbedding`] that shares the same
@@ -944,6 +952,77 @@ pub struct ReconciledQuant {
     pub reconciled: bool,
 }
 
+/// Reject declared quantization parameters that no tensor layout can describe,
+/// before they reach an MLX kernel.
+///
+/// MLX reconstructs a quantized matrix's unpacked input width as
+/// `w.shape(-1) * 32 / bits` and compares it against `scales.shape(-1) *
+/// group_size` (`validate_quantized_input`, reached from
+/// `extract_quantized_matmul_dims`, which gates `quantized_matmul`,
+/// `gather_qmm` and `dequantize` alike). At `bits == 0` that expression is a
+/// division by zero, which is undefined behavior with a platform split: on
+/// AArch64 the divide yields 0 and MLX throws `std::invalid_argument`, while on
+/// x86-64 the hardware raises `SIGFPE` and kills the process before any
+/// exception exists. Above 32 the quotient collapses toward zero and can match
+/// no real `scales` width, and a non-positive `group_size` makes the
+/// right-hand side unmatchable. Every one of those ends the process, because
+/// `quantized_matmul` and `dequantize` cross the cxx bridge as
+/// `UniquePtr<MlxArray>` rather than `Result`, so a C++ throw is an uncatchable
+/// `std::terminate` at the FIRST forward pass rather than a load error.
+///
+/// This is a bounds check rather than an allowlist of the widths MLX actually
+/// supports, and that is a real constraint rather than a stylistic preference:
+/// mlxcel deliberately re-derives an effective bit width from the tensor shapes
+/// when the declared one disagrees (see [`reconcile_quantization_layout`]), and
+/// an allowlist of `{2,3,4,5,6,8}` would reject the mixed-precision exports
+/// that behavior exists to serve. Only values that can describe no packing at
+/// all are refused.
+///
+/// Used by: every quantizing family through [`reconcile_quantization_layout`]
+///          (dense projections and quantized embeddings) and through
+///          `SwitchLinear::from_stacked_parts` (MoE experts), plus the
+///          family-level early diagnostics in BailingMoe, GptNeoX and Helium
+pub fn validate_quantization_params(group_size: i32, bits: i32) -> Result<(), String> {
+    if !(1..=32).contains(&bits) {
+        return Err(format!(
+            "quantization.bits ({bits}) must be between 1 and 32: MLX derives a quantized \
+             matrix's unpacked width as packed_in * 32 / bits, which divides by zero at 0 and \
+             collapses to zero above 32, and the resulting C++ throw crosses the cxx bridge as an \
+             uncatchable abort at the first forward pass rather than a load error"
+        ));
+    }
+    if group_size < 1 {
+        return Err(format!(
+            "quantization.group_size ({group_size}) must be positive: it multiplies the scales \
+             width to reconstruct the input width inside every quantized kernel, and a \
+             non-positive value can match no real tensor, so MLX throws and that throw is an \
+             uncatchable abort rather than a load error"
+        ));
+    }
+    Ok(())
+}
+
+/// Pick the quantization mode a `.biases`-carrying checkpoint implies.
+///
+/// Affine stores zero-point `biases`, so their absence means a block-float
+/// scheme (mxfp4 / nvfp4 / mxfp8) distinguished by bits and group size. Shared
+/// so the linear loader, the embedding loader, and the family-level weight
+/// validators cannot drift apart on which mode a given triple will load as.
+///
+/// Used by: UnifiedLinear::from_weights, QuantizedEmbedding::from_weights,
+///          BailingMoe weight validation
+pub fn infer_quantization_mode(has_biases: bool, group_size: i32, bits: i32) -> &'static str {
+    if has_biases {
+        "affine"
+    } else if bits == 8 {
+        "mxfp8"
+    } else if group_size == 16 {
+        "nvfp4"
+    } else {
+        "mxfp4"
+    }
+}
+
 /// Validate and reconcile caller-declared quantization params against the
 /// observed `weight` / `scales` tensor shapes for `mode`.
 ///
@@ -973,9 +1052,18 @@ pub fn reconcile_quantization_layout(
     bits: i32,
     mode: &str,
 ) -> Result<ReconciledQuant, String> {
+    // A `group_size` or `bits` that can describe no packing at all is refused
+    // outright (issue #929). This used to share the "insufficient shape info"
+    // early return below on a trust-the-caller basis, which handed the declared
+    // pair straight to the kernel and turned a hostile `config.json` into an
+    // uncatchable abort at the first forward pass. The two conditions are
+    // separate: degenerate *shapes* still stay permissive, degenerate *params*
+    // do not. See [`validate_quantization_params`].
+    validate_quantization_params(group_size, bits)?;
+
     // Insufficient shape info: trust the caller, mirroring the historical
     // early-return in `infer_quantization_bits` for empty / scalar shapes.
-    if weight_shape.is_empty() || scales_shape.is_empty() || group_size <= 0 || bits <= 0 {
+    if weight_shape.is_empty() || scales_shape.is_empty() {
         return Ok(ReconciledQuant {
             bits,
             group_size,
@@ -1083,6 +1171,99 @@ fn reconcile_quantization_layout_logged(
     Ok(layout)
 }
 
+/// The three tensor shapes a quantized weight is stored as, borrowed for
+/// validation. `biases` is `None` for the block-float modes, which carry no
+/// zero points.
+pub struct QuantizedTensorShapes<'a> {
+    pub weight: &'a [i32],
+    pub scales: &'a [i32],
+    pub biases: Option<&'a [i32]>,
+}
+
+/// Check a quantized tensor's packing against the input width `config.json`
+/// claims, and its `biases` against its `scales`.
+///
+/// Quantization packs the **input** axis only, so a row-count check says
+/// nothing about the input width: a checkpoint honestly packed for a different
+/// `hidden_size` is internally self-consistent and passes every other check.
+/// MLX reconstructs the width as `scales.shape(-1) * group_size` and
+/// `extract_quantized_matmul_dims` throws `std::invalid_argument` when it
+/// disagrees with the activation's last axis; `validate_quantized_input` throws
+/// again when `biases` and `scales` differ in shape. `quantized_matmul` and
+/// `gather_qmm` cross the cxx bridge as `UniquePtr<MlxArray>` rather than a
+/// `Result`, so either throw is an uncatchable `std::terminate` at the **first
+/// forward pass**, long after the checkpoint appeared to load.
+///
+/// The width is reconstructed from the *effective* group size the loader will
+/// use, obtained from [`reconcile_quantization_layout`] rather than from the
+/// declared pair. Works for both a 2-D projection and a 3-D stacked expert
+/// tensor: only the last axis carries the packing, and the leading axes are
+/// required to agree between weight and scales.
+///
+/// `label` names the tensor in the rejection message; callers pass the weight
+/// prefix so the message points at a key the reader can find in the
+/// checkpoint.
+///
+/// Used by: BailingMoe weight validation (token table, dense projections,
+///          stacked experts) and the shared `validate_embedding_table` guard
+///          (BailingMoe, Gpt2, GptBigCode, GptNeoX)
+pub fn validate_quantized_packing(
+    label: &str,
+    shapes: &QuantizedTensorShapes<'_>,
+    in_features: usize,
+    group_size: i32,
+    bits: i32,
+    mode: &str,
+) -> Result<(), String> {
+    let w_shape = shapes.weight;
+    let s_shape = shapes.scales;
+    if s_shape.len() != w_shape.len() || s_shape.len() < 2 {
+        return Err(format!(
+            "unexpected {label}.scales shape {s_shape:?}: must have the same rank as \
+             {label}.weight {w_shape:?} and be at least 2-D"
+        ));
+    }
+    if s_shape[..s_shape.len() - 1] != w_shape[..w_shape.len() - 1] {
+        return Err(format!(
+            "unexpected {label}.scales shape {s_shape:?}: every axis but the last must match \
+             {label}.weight {w_shape:?}"
+        ));
+    }
+
+    let layout = reconcile_quantization_layout(w_shape, s_shape, group_size, bits, mode)
+        .map_err(|e| format!("{label}: {e}"))?;
+
+    let groups = usize::try_from(s_shape[s_shape.len() - 1]).unwrap_or(0);
+    let effective_group_size = usize::try_from(layout.group_size).unwrap_or(0);
+    let described = groups.checked_mul(effective_group_size);
+    if described != Some(in_features) {
+        return Err(format!(
+            "unexpected {label}.scales shape {s_shape:?}: {groups} quantization groups at \
+             group_size {effective_group_size} describe an input width of {}, but the config says \
+             {in_features}. MLX reconstructs a quantized matrix's input width as \
+             scales.shape(-1) * group_size and throws when it disagrees with the activation, and \
+             that throw crosses the cxx bridge as an uncatchable abort at the first forward pass \
+             rather than a load error. Packing compresses the input axis only, so the row count is \
+             still correct and cannot catch this.",
+            described
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "an overflowing number of".to_string())
+        ));
+    }
+
+    if let Some(bias_shape) = shapes.biases
+        && bias_shape != s_shape
+    {
+        return Err(format!(
+            "unexpected {label}.biases shape {bias_shape:?}: the affine zero points must have \
+             the same shape as {label}.scales ({s_shape:?}). MLX rejects a mismatch by \
+             throwing, which crosses the cxx bridge as an uncatchable abort at the first \
+             forward pass."
+        ));
+    }
+    Ok(())
+}
+
 /// Unified Linear layer that auto-detects quantization
 ///
 /// Checks for `.scales` key in weight map to determine whether to use
@@ -1123,15 +1304,8 @@ impl UnifiedLinear {
         // thread an explicit mode (e.g. vision encoders, which always called
         // this affine default) load non-affine weights correctly instead of
         // aborting in quantized_matmul ("Biases must be provided for affine").
-        let mode = if weights.get(&format!("{}.biases", prefix)).is_some() {
-            "affine"
-        } else if bits == 8 {
-            "mxfp8"
-        } else if group_size == 16 {
-            "nvfp4"
-        } else {
-            "mxfp4"
-        };
+        let has_biases = weights.get(&format!("{}.biases", prefix)).is_some();
+        let mode = infer_quantization_mode(has_biases, group_size, bits);
         Self::from_weights_with_mode(weights, prefix, group_size, bits, mode)
     }
 
@@ -4291,6 +4465,173 @@ mod tests {
         let layout = reconcile_quantization_layout(&[], &[], 64, 4, "affine").expect("noop");
         assert_eq!((layout.bits, layout.group_size), (4, 64));
         assert!(!layout.reconciled);
+    }
+
+    // -- hostile quantization params (issue #929) -----------------------
+
+    #[test]
+    fn reconcile_rejects_quantization_params_that_no_layout_can_describe() {
+        // These used to share the "insufficient shape info" early return and were
+        // handed to the kernel exactly as declared. MLX divides by `bits` in
+        // `validate_quantized_input`, so 0 is a division by zero and anything
+        // above 32 collapses the quotient to zero; a non-positive `group_size`
+        // makes the right-hand side unmatchable. All three end the process,
+        // because the throw crosses the cxx bridge as `std::terminate`.
+        for (group_size, bits, field, offender) in [
+            (64, 0, "bits", 0),
+            (64, -4, "bits", -4),
+            (64, 33, "bits", 33),
+            (0, 4, "group_size", 0),
+            (-64, 4, "group_size", -64),
+        ] {
+            let err =
+                reconcile_quantization_layout(&[32, 16], &[32, 2], group_size, bits, "affine")
+                    .expect_err(&format!(
+                        "group_size {group_size} / bits {bits} must be rejected"
+                    ));
+            assert!(
+                err.contains(field) && err.contains(&offender.to_string()),
+                "the message must name the offending field and value, got: {err}"
+            );
+        }
+
+        // Degenerate shapes must not launder a hostile pair. The old early return
+        // took both conditions at once, so an empty shape turned a `bits` of 0
+        // into a silent pass-through.
+        for mode in ["affine", "mxfp4"] {
+            assert!(
+                reconcile_quantization_layout(&[], &[], 64, 0, mode).is_err(),
+                "an empty shape must not excuse bits=0 in {mode} mode"
+            );
+            assert!(
+                reconcile_quantization_layout(&[32, 16], &[], 0, 4, mode).is_err(),
+                "an empty scales shape must not excuse group_size=0 in {mode} mode"
+            );
+        }
+
+        // The guard is a bounds check, not an allowlist: every pair a real export
+        // declares still reconciles as it did before, including the shape-derived
+        // overrides the mixed-precision path depends on.
+        for (group_size, bits) in [(32, 4), (64, 4), (128, 4), (64, 8), (64, 6), (16, 4)] {
+            assert!(
+                validate_quantization_params(group_size, bits).is_ok(),
+                "group_size {group_size} / bits {bits} is a real export and must be accepted"
+            );
+        }
+        assert!(validate_quantization_params(1, 1).is_ok());
+        assert!(validate_quantization_params(1, 32).is_ok());
+    }
+
+    #[test]
+    fn quantized_loaders_reject_hostile_params_at_load_not_at_the_first_forward() {
+        // The real load path, not the pure helper: both production entry points
+        // must surface a Rust error. If this guard regresses, the bad pair
+        // reaches `quantized_matmul` and the C++ throw aborts this whole test
+        // binary with SIGABRT rather than failing cleanly.
+        let mut weights = crate::weights::WeightMap::new();
+        insert_quantized_qkv_projection(&mut weights, "model.layers.0.self_attn.q_proj", 8);
+        insert_quantized_qkv_projection(&mut weights, "model.embed_tokens", 16);
+
+        // Positive control: the honest pair loads on both paths.
+        UnifiedLinear::from_weights(&weights, "model.layers.0.self_attn.q_proj", 64, 4)
+            .expect("a consistently packed projection must load");
+        UnifiedEmbedding::from_weights(&weights, "model.embed_tokens", 64, 4)
+            .expect("a consistently packed table must load");
+
+        for (group_size, bits, field) in [
+            (64, 0, "bits"),
+            (64, 33, "bits"),
+            (0, 4, "group_size"),
+            (-64, 4, "group_size"),
+        ] {
+            let err = UnifiedLinear::from_weights(
+                &weights,
+                "model.layers.0.self_attn.q_proj",
+                group_size,
+                bits,
+            )
+            .err()
+            .unwrap_or_else(|| {
+                panic!("UnifiedLinear must reject group_size {group_size} / bits {bits}")
+            });
+            assert!(err.contains(field), "unhelpful error: {err}");
+
+            let err =
+                UnifiedEmbedding::from_weights(&weights, "model.embed_tokens", group_size, bits)
+                    .err()
+                    .unwrap_or_else(|| {
+                        panic!("UnifiedEmbedding must reject group_size {group_size} / bits {bits}")
+                    });
+            assert!(err.contains(field), "unhelpful error: {err}");
+        }
+    }
+
+    #[test]
+    fn quantized_packing_check_reconstructs_the_width_mlx_will_compute() {
+        // 4-bit at group_size 64: packed_in 8 and 1 group both describe a 64-wide
+        // input, so the honest triple passes.
+        let honest = QuantizedTensorShapes {
+            weight: &[32, 8],
+            scales: &[32, 1],
+            biases: Some(&[32, 1]),
+        };
+        validate_quantized_packing("q_proj", &honest, 64, 64, 4, "affine")
+            .expect("a consistently packed projection must pass");
+
+        // A tensor honestly packed for a 128-wide input keeps exactly the right
+        // row count, which is why the row check cannot catch it.
+        let mispacked = QuantizedTensorShapes {
+            weight: &[32, 16],
+            scales: &[32, 2],
+            biases: Some(&[32, 2]),
+        };
+        let err = validate_quantized_packing("q_proj", &mispacked, 64, 64, 4, "affine")
+            .expect_err("a table packed for a different width must be rejected");
+        assert!(err.contains("input width"), "unhelpful error: {err}");
+
+        // Zero points must match the scales they belong to.
+        let bad_biases = QuantizedTensorShapes {
+            weight: &[32, 8],
+            scales: &[32, 1],
+            biases: Some(&[32, 2]),
+        };
+        let err = validate_quantized_packing("q_proj", &bad_biases, 64, 64, 4, "affine")
+            .expect_err("mis-shaped zero points must be rejected");
+        assert!(err.contains("same shape"), "unhelpful error: {err}");
+
+        // Rank and leading-axis agreement, which the width arithmetic assumes.
+        let bad_rank = QuantizedTensorShapes {
+            weight: &[32, 8],
+            scales: &[32],
+            biases: None,
+        };
+        assert!(validate_quantized_packing("q_proj", &bad_rank, 64, 64, 4, "affine").is_err());
+        let bad_rows = QuantizedTensorShapes {
+            weight: &[32, 8],
+            scales: &[16, 1],
+            biases: None,
+        };
+        assert!(validate_quantized_packing("q_proj", &bad_rows, 64, 64, 4, "affine").is_err());
+
+        // A 3-D stacked expert plane works the same way: only the last axis
+        // carries the packing.
+        let stacked = QuantizedTensorShapes {
+            weight: &[4, 32, 8],
+            scales: &[4, 32, 1],
+            biases: Some(&[4, 32, 1]),
+        };
+        validate_quantized_packing("switch_mlp.gate_proj", &stacked, 64, 64, 4, "affine")
+            .expect("a stacked expert plane must pass the same check");
+    }
+
+    #[test]
+    fn quantization_mode_inference_is_shared_by_the_linear_and_embedding_loaders() {
+        assert_eq!(infer_quantization_mode(true, 64, 4), "affine");
+        assert_eq!(infer_quantization_mode(true, 16, 8), "affine");
+        assert_eq!(infer_quantization_mode(false, 64, 8), "mxfp8");
+        assert_eq!(infer_quantization_mode(false, 16, 4), "nvfp4");
+        assert_eq!(infer_quantization_mode(false, 64, 4), "mxfp4");
+        assert_eq!(infer_quantization_mode(false, 32, 4), "mxfp4");
     }
 
     #[test]

@@ -253,9 +253,9 @@ impl SwitchLinear {
             let biases = weights
                 .get(&format!("{}.biases", prefix))
                 .map(|w| mlxcel_core::copy(w));
-            return Ok(Self::from_stacked_parts(
-                weight, scales, biases, group_size, bits, mode,
-            ));
+            return Self::from_stacked_parts(
+                prefix, weight, scales, biases, group_size, bits, mode,
+            );
         }
 
         // Per-expert layout: `{root}.experts.{idx}.{proj}.{weight,scales,biases}`.
@@ -268,9 +268,9 @@ impl SwitchLinear {
         // this generic call site, so the shortfall cross-check is skipped
         // (`None`); callers that do carry one (DeepSeek v1) pass it through.
         if let Some((weight, scales, biases)) = stack_individual_experts(weights, prefix, None)? {
-            return Ok(Self::from_stacked_parts(
-                weight, scales, biases, group_size, bits, mode,
-            ));
+            return Self::from_stacked_parts(
+                prefix, weight, scales, biases, group_size, bits, mode,
+            );
         }
 
         Err(format!("Missing weight: {}", prefix))
@@ -280,16 +280,34 @@ impl SwitchLinear {
     /// optional scales/biases). Present scales select the quantized path and the
     /// per-tensor bit width is inferred from the packed-weight and scales shapes;
     /// absent scales select the non-quantized `Regular` path.
+    ///
+    /// This is the one quantized loader that does **not** go through
+    /// `reconcile_quantization_layout`, so it carries its own guards (issue
+    /// #929). The MoE path reaches MLX through `gather_qmm`, which shares
+    /// `extract_quantized_matmul_dims` (and therefore the `w.shape(-1) * 32 /
+    /// bits` division) with the dense `quantized_matmul` path, so a declared
+    /// `group_size` of 0 or a `bits` outside `1..=32` aborts the process at the
+    /// first routed forward pass exactly as it would for a dense projection.
+    /// Guarding only the reconciler would have left every quantized MoE
+    /// checkpoint exposed.
     fn from_stacked_parts(
+        prefix: &str,
         weight: UniquePtr<MlxArray>,
         scales: Option<UniquePtr<MlxArray>>,
         biases: Option<UniquePtr<MlxArray>>,
         group_size: i32,
         bits: i32,
         mode: &str,
-    ) -> Self {
+    ) -> Result<Self, String> {
         match scales {
             Some(scales) => {
+                // Bound the declared pair before anything derived from it is
+                // stored on the layer. `group_size` is never inferred on this
+                // path, so a declared 0 would otherwise zero the denominator
+                // below, skip inference entirely, and be handed to the kernel.
+                mlxcel_core::layers::validate_quantization_params(group_size, bits)
+                    .map_err(|e| format!("{prefix}: {e}"))?;
+
                 // Infer the actual bit width from the packed weight and scales
                 // shapes (group_size fixed): mixed-precision checkpoints such as
                 // dots.llm1 quantize some expert projections at 6-bit while the
@@ -312,16 +330,38 @@ impl SwitchLinear {
                     bits
                 };
 
-                Self::Quantized {
+                // The fallback above keeps the declared `bits` whenever the
+                // shapes solve to something outside the supported widths, which
+                // stores a triple MLX will reject. Refuse it here instead, using
+                // MLX's own predicate from `validate_quantized_input` so this
+                // fires exactly when the kernel would have thrown, and in i64 so
+                // the multiply cannot wrap on a large expert plane. Degenerate
+                // shapes (both last axes absent) evaluate to 0 == 0 and stay
+                // permissive, matching the dense reconciler.
+                let described = i64::from(packed_in) * 32 / i64::from(effective_bits);
+                let claimed = i64::from(num_groups) * i64::from(group_size);
+                if described != claimed {
+                    return Err(format!(
+                        "{prefix}: stacked expert weight {w_shape:?} and scales {s_shape:?} \
+                         describe an input width of {described} at {effective_bits}-bit, but \
+                         {num_groups} groups at group_size {group_size} describe {claimed}. MLX \
+                         checks exactly this in extract_quantized_matmul_dims before gather_qmm \
+                         and throws on a mismatch, and that throw crosses the cxx bridge as an \
+                         uncatchable abort at the first routed forward pass rather than a load \
+                         error."
+                    ));
+                }
+
+                Ok(Self::Quantized {
                     weight,
                     scales,
                     biases,
                     group_size,
                     bits: effective_bits,
                     mode: mode.to_string(),
-                }
+                })
             }
-            None => Self::Regular { weight },
+            None => Ok(Self::Regular { weight }),
         }
     }
 }
@@ -1024,6 +1064,126 @@ mod tests {
         );
         assert_eq!(parts.group_size, group);
         assert_eq!(parts.mode, "affine");
+    }
+
+    /// Affine 4-bit expert planes in the pre-stacked `switch_mlp` layout that
+    /// mlx-community conversions ship: `[num_experts, out, in/8]` weights with
+    /// `[num_experts, out, in/group_size]` scales and zero points.
+    fn stacked_quantized_experts(
+        prefix: &str,
+        experts: i32,
+        out: i32,
+        packed_in: i32,
+        num_groups: i32,
+    ) -> WeightMap {
+        let plane = |last: i32, value: f32| {
+            let n = (experts * out * last) as usize;
+            mlxcel_core::from_slice_f32(&vec![value; n], &[experts, out, last])
+        };
+        let mut weights = WeightMap::new();
+        weights.insert(format!("{prefix}.weight"), plane(packed_in, 0.0));
+        weights.insert(format!("{prefix}.scales"), plane(num_groups, 1.0));
+        weights.insert(format!("{prefix}.biases"), plane(num_groups, 0.0));
+        weights
+    }
+
+    #[test]
+    fn switch_linear_rejects_quantization_params_that_would_abort_gather_qmm() {
+        // The MoE loader never calls `reconcile_quantization_layout`, so the
+        // shared reconciler guard does not cover it. It reaches MLX through
+        // `gather_qmm`, which shares `extract_quantized_matmul_dims` (and its
+        // `w.shape(-1) * 32 / bits` division) with the dense path, so a hostile
+        // pair aborts the process at the first routed forward pass. If this
+        // guard regresses the C++ throw takes this whole test binary down with
+        // SIGABRT rather than failing cleanly.
+        let group = 64i32;
+        let in_dim = 64i32;
+        let packed_in = in_dim / 8; // 4-bit packs 8 weights per uint32 column
+        let num_groups = in_dim / group;
+        let root = "model.layers.0.mlp";
+        let stacked_prefix = format!("{root}.switch_mlp.gate_proj");
+
+        let hostile = [
+            (64, 0, "bits"),
+            (64, -4, "bits"),
+            (64, 33, "bits"),
+            (0, 4, "group_size"),
+            (-64, 4, "group_size"),
+        ];
+
+        // Pre-stacked layout.
+        let stacked = stacked_quantized_experts(&stacked_prefix, 3, 4, packed_in, num_groups);
+        SwitchLinear::from_weights(&stacked, &stacked_prefix, group, 4)
+            .expect("the honest pair must still load");
+        for (group_size, bits, field) in hostile {
+            let err = SwitchLinear::from_weights(&stacked, &stacked_prefix, group_size, bits)
+                .err()
+                .unwrap_or_else(|| {
+                    panic!("stacked experts must reject group_size {group_size} / bits {bits}")
+                });
+            assert!(err.contains(field), "unhelpful error: {err}");
+        }
+
+        // Per-expert layout, which reaches the same constructor through
+        // `stack_individual_experts` instead.
+        let mut per_expert = WeightMap::new();
+        for e in 0..3 {
+            for (leaf, last, value) in [
+                ("weight", packed_in, 0.0),
+                ("scales", num_groups, 1.0),
+                ("biases", num_groups, 0.0),
+            ] {
+                per_expert.insert(
+                    format!("{root}.experts.{e}.gate_proj.{leaf}"),
+                    mlxcel_core::from_slice_f32(&vec![value; (4 * last) as usize], &[4, last]),
+                );
+            }
+        }
+        SwitchLinear::from_weights(&per_expert, &stacked_prefix, group, 4)
+            .expect("the honest pair must still load from the per-expert layout");
+        for (group_size, bits, field) in hostile {
+            let err = SwitchLinear::from_weights(&per_expert, &stacked_prefix, group_size, bits)
+                .err()
+                .unwrap_or_else(|| {
+                    panic!("per-expert stacking must reject group_size {group_size} / bits {bits}")
+                });
+            assert!(err.contains(field), "unhelpful error: {err}");
+        }
+
+        // A non-quantized expert plane carries no packing at all, so the params
+        // are irrelevant there and must not be enforced.
+        let mut regular = WeightMap::new();
+        regular.insert(
+            format!("{stacked_prefix}.weight"),
+            mlxcel_core::from_slice_f32(&vec![0.0; 3 * 4 * 8], &[3, 4, 8]),
+        );
+        SwitchLinear::from_weights(&regular, &stacked_prefix, 0, 0)
+            .expect("a non-quantized expert plane must not be gated on quantization params");
+    }
+
+    #[test]
+    fn switch_linear_rejects_an_expert_plane_whose_packing_mlx_would_reject() {
+        // The bit-width inference falls back to the declared `bits` whenever the
+        // shapes solve to something outside the supported widths, which stores a
+        // triple MLX rejects in `extract_quantized_matmul_dims`. `packed_in * 32
+        // / bits` describes a 64-wide input here while 3 groups at group_size 64
+        // describe 192, so the checkpoint must fail at load rather than abort at
+        // the first routed forward pass.
+        let prefix = "model.layers.0.mlp.switch_mlp.gate_proj";
+        let weights = stacked_quantized_experts(prefix, 3, 4, 8, 3);
+        let err = SwitchLinear::from_weights(&weights, prefix, 64, 4)
+            .err()
+            .expect("an expert plane MLX would reject must fail at load");
+        assert!(err.contains("input width"), "unhelpful error: {err}");
+
+        // The mixed-precision inference the fallback exists for is untouched: a
+        // genuinely 8-bit plane under a 4-bit config default still reconciles.
+        let mixed = stacked_quantized_experts(prefix, 3, 4, 16, 1);
+        let sl = SwitchLinear::from_weights(&mixed, prefix, 64, 4)
+            .expect("a per-tensor bit override must still load");
+        let parts = sl.quantized_parts().expect("quantized");
+        assert_eq!(parts.bits, 8);
+        assert_eq!(parts.group_size, 64);
     }
 
     #[test]

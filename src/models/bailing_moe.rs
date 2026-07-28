@@ -817,37 +817,21 @@ impl ModelArgs {
 
     /// Reject a `quantization` block that would abort an MLX kernel.
     ///
-    /// `group_size` and `bits` reach `quantized_matmul`, `gather_qmm` and
-    /// `dequantize` unreconciled when the tensor shapes carry too little
-    /// information to re-derive them. MLX's own `packed_in * 32 / bits` check
-    /// divides by zero at `bits == 0` and collapses to zero above 32, throwing
-    /// the same uncatchable `std::terminate` the rope guard exists to prevent.
-    ///
-    /// This is a range check rather than an allowlist on purpose: mlxcel
-    /// deliberately re-derives an effective bit width from the tensor shapes when
-    /// the declared one disagrees, and an allowlist would reject the
-    /// mixed-precision exports that behavior serves.
+    /// Kept as a family-level early diagnostic even though the shared loaders now
+    /// enforce the same bound (issue #929): failing here names Bailing MoE and
+    /// fires during `ModelArgs::validate`, before any tensor is touched, rather
+    /// than at the first quantized projection the loader happens to reach.
+    /// [`mlxcel_core::layers::validate_quantization_params`] carries the rationale
+    /// for the bound being a range rather than an allowlist.
     fn validate_quantization(&self) -> Result<(), String> {
         let Some(quantization) = self.quantization.as_ref() else {
             return Ok(());
         };
-        if quantization.bits < 1 || quantization.bits > 32 {
-            return Err(format!(
-                "Bailing MoE quantization.bits ({}) must be between 1 and 32; MLX derives the \
-                 unpacked width as packed_in * 32 / bits, which divides by zero at 0 and collapses \
-                 to zero above 32, and the resulting C++ throw crosses the cxx bridge as an \
-                 uncatchable abort",
-                quantization.bits
-            ));
-        }
-        if quantization.group_size < 1 {
-            return Err(format!(
-                "Bailing MoE quantization.group_size ({}) must be positive; it divides the input \
-                 axis inside every quantized kernel",
-                quantization.group_size
-            ));
-        }
-        Ok(())
+        mlxcel_core::layers::validate_quantization_params(
+            quantization.group_size,
+            quantization.bits,
+        )
+        .map_err(|e| format!("Bailing MoE config.json: {e}"))
     }
 
     /// Whether this config is one where mirroring upstream's unconditional
@@ -892,45 +876,29 @@ impl ModelArgs {
 /// scheme distinguished by bits and group size. Mirrored here rather than
 /// assumed, because the reconciliation below behaves differently per mode.
 fn quant_mode(weights: &WeightMap, prefix: &str, group_size: i32, bits: i32) -> &'static str {
-    if weights.contains_key(&format!("{prefix}.biases")) {
-        "affine"
-    } else if bits == 8 {
-        "mxfp8"
-    } else if group_size == 16 {
-        "nvfp4"
-    } else {
-        "mxfp4"
-    }
+    let has_biases = weights.contains_key(&format!("{prefix}.biases"));
+    mlxcel_core::layers::infer_quantization_mode(has_biases, group_size, bits)
 }
 
 /// Check a quantized tensor's packing against the input width `config.json`
 /// claims, and its `biases` against its `scales`.
 ///
-/// Quantization packs the **input** axis only, so a row-count check says nothing
-/// about the input width: a checkpoint honestly packed for a different
-/// `hidden_size` is internally self-consistent and passes every other check.
-/// MLX reconstructs the width as `scales.shape(-1) * group_size` and
-/// `extract_quantized_matmul_dims` throws `std::invalid_argument` when it
-/// disagrees with the activation's last axis; `validate_quantized_input` throws
-/// again when `biases` and `scales` differ in shape. `quantized_matmul` and
-/// `gather_qmm` cross the cxx bridge as `UniquePtr<MlxArray>` rather than a
-/// `Result`, so either throw is an uncatchable `std::terminate` at the **first
-/// forward pass**, long after the checkpoint appeared to load.
+/// Thin `WeightMap` adapter over
+/// [`mlxcel_core::layers::validate_quantized_packing`], which carries the
+/// reasoning and the rejection messages. This wrapper resolves the three
+/// tensors by key, skips silently when the tensor is not quantized, and picks
+/// the mode the loader will pick.
 ///
-/// The width is reconstructed from the *effective* group size the loader will
-/// use, obtained from `reconcile_quantization_layout` rather than from the
-/// declared pair. Works for both a 2-D projection and a 3-D stacked expert
-/// tensor: only the last axis carries the packing, and the leading axes are
-/// required to agree between weight and scales.
-///
-/// The `mode` fed into `reconcile_quantization_layout` is `quant_mode`'s guess
-/// from `.biases` presence, and that guess matches the loader exactly for every
-/// plain projection here (`UnifiedLinear::from_weights` picks its mode the same
-/// way). It does **not** match for the routed experts: `SwitchLinear::from_weights`
-/// (`src/models/switch_layers.rs:192`) pins `mode` to `"affine"` unconditionally,
-/// regardless of whether `.biases` is present, so a stacked or per-expert tensor
-/// quantized in a block-float scheme without zero-point `biases` would be
-/// reconciled here under the wrong mode. `validate_experts` inherits that gap.
+/// The `mode` fed into the shared reconciliation is `quant_mode`'s guess from
+/// `.biases` presence, and that guess matches the loader exactly for every
+/// plain projection here (`UnifiedLinear::from_weights` picks its mode through
+/// the same `infer_quantization_mode`). It does **not** match for the routed
+/// experts: `SwitchLinear::from_weights`
+/// (https://github.com/lablup/mlxcel/blob/main/src/models/switch_layers.rs) pins
+/// `mode` to `"affine"` unconditionally, regardless of whether `.biases` is
+/// present, so a stacked or per-expert tensor quantized in a block-float scheme
+/// without zero-point `biases` would be reconciled here under the wrong mode.
+/// `validate_experts` inherits that gap.
 fn validate_quantized_packing(
     weights: &WeightMap,
     prefix: &str,
@@ -946,55 +914,22 @@ fn validate_quantized_packing(
         .ok_or_else(|| format!("Weight not found: {prefix}.weight (but {prefix}.scales exists)"))?;
     let w_shape = mlxcel_core::array_shape(weight);
     let s_shape = mlxcel_core::array_shape(scales);
-    if s_shape.len() != w_shape.len() || s_shape.len() < 2 {
-        return Err(format!(
-            "unexpected {prefix}.scales shape {s_shape:?}: must have the same rank as \
-             {prefix}.weight {w_shape:?} and be at least 2-D"
-        ));
-    }
-    if s_shape[..s_shape.len() - 1] != w_shape[..w_shape.len() - 1] {
-        return Err(format!(
-            "unexpected {prefix}.scales shape {s_shape:?}: every axis but the last must match \
-             {prefix}.weight {w_shape:?}"
-        ));
-    }
+    let bias_shape = weights
+        .get(&format!("{prefix}.biases"))
+        .map(|biases| mlxcel_core::array_shape(biases));
 
-    let mode = quant_mode(weights, prefix, group_size, bits);
-    let layout = mlxcel_core::layers::reconcile_quantization_layout(
-        &w_shape, &s_shape, group_size, bits, mode,
+    mlxcel_core::layers::validate_quantized_packing(
+        prefix,
+        &mlxcel_core::layers::QuantizedTensorShapes {
+            weight: &w_shape,
+            scales: &s_shape,
+            biases: bias_shape.as_deref(),
+        },
+        in_features,
+        group_size,
+        bits,
+        quant_mode(weights, prefix, group_size, bits),
     )
-    .map_err(|e| format!("{prefix}: {e}"))?;
-
-    let groups = usize::try_from(s_shape[s_shape.len() - 1]).unwrap_or(0);
-    let effective_group_size = usize::try_from(layout.group_size).unwrap_or(0);
-    let described = groups.checked_mul(effective_group_size);
-    if described != Some(in_features) {
-        return Err(format!(
-            "unexpected {prefix}.scales shape {s_shape:?}: {groups} quantization groups at \
-             group_size {effective_group_size} describe an input width of {}, but the config says \
-             {in_features}. MLX reconstructs a quantized matrix's input width as \
-             scales.shape(-1) * group_size and throws when it disagrees with the activation, and \
-             that throw crosses the cxx bridge as an uncatchable abort at the first forward pass \
-             rather than a load error. Packing compresses the input axis only, so the row count is \
-             still correct and cannot catch this.",
-            described
-                .map(|d| d.to_string())
-                .unwrap_or_else(|| "an overflowing number of".to_string())
-        ));
-    }
-
-    if let Some(biases) = weights.get(&format!("{prefix}.biases")) {
-        let bias_shape = mlxcel_core::array_shape(biases);
-        if bias_shape != s_shape {
-            return Err(format!(
-                "unexpected {prefix}.biases shape {bias_shape:?}: the affine zero points must have \
-                 the same shape as {prefix}.scales ({s_shape:?}). MLX rejects a mismatch by \
-                 throwing, which crosses the cxx bridge as an uncatchable abort at the first \
-                 forward pass."
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// Check one `[out_features, in_features]` projection against the config.

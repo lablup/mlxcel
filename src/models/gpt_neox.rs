@@ -330,52 +330,22 @@ impl ModelArgs {
     /// Reject a `quantization` block that would abort the process inside an MLX
     /// quantized kernel.
     ///
-    /// `group_size` and `bits` are read straight out of `config.json` and are
-    /// threaded through [`load_linear`] and `UnifiedEmbedding::from_weights`
-    /// into MLX's `quantized_matmul` and `dequantize`. They are not reconciled
-    /// away first: `mlxcel_core::layers::reconcile_quantization_layout`
-    /// deliberately returns the declared pair unchanged when either is
-    /// non-positive (it treats that as "insufficient shape info, trust the
-    /// caller"), so a hostile value reaches the kernel exactly as written.
-    ///
-    /// MLX then computes `w.shape(-1) * 32 / bits` in `validate_quantized_input`.
-    /// At `bits == 0` that is a division by zero, and at `bits > 32` it is zero,
-    /// which cannot match the scales, so both end in a `std::invalid_argument`.
-    /// `quantized_matmul` crosses the cxx bridge as `UniquePtr<MlxArray>` rather
-    /// than a `Result`, so that throw is an uncatchable `std::terminate` at the
-    /// first forward pass rather than a load error, which is the same shape of
-    /// failure [`ModelArgs::validate_rope`] exists to prevent for `rope`.
-    ///
-    /// The bound is a range rather than an allowlist of the widths MLX actually
-    /// supports on purpose. mlxcel tolerates a declared bit width that disagrees
-    /// with the stored tensors and re-derives the effective one from the shapes,
-    /// so an allowlist would reject mixed-precision exports that load correctly
-    /// today. Only the values that cannot describe any packing at all are
-    /// refused.
+    /// Kept as a family-level early diagnostic even though the shared loaders now
+    /// enforce the same bound (issue #929): failing here names GPT-NeoX and fires
+    /// during [`ModelArgs::validate`], before any tensor is touched, rather than
+    /// at the first quantized projection the loader happens to reach.
+    /// [`mlxcel_core::layers::validate_quantization_params`] carries the rationale
+    /// for the bound being a range rather than an allowlist, and for why the throw
+    /// it prevents is an uncatchable `std::terminate` rather than a load error.
     fn validate_quantization(&self) -> Result<(), String> {
         let Some(quantization) = self.quantization.as_ref() else {
             return Ok(());
         };
-        if quantization.bits < 1 || quantization.bits > 32 {
-            return Err(format!(
-                "GPT-NeoX quantization.bits ({}) must be between 1 and 32; MLX derives the \
-                 unpacked width as `packed_in * 32 / bits`, which divides by zero at 0 and \
-                 collapses to zero above 32, and the resulting MLX C++ exception crossing the cxx \
-                 bridge is an uncatchable `std::terminate` at the first forward pass rather than a \
-                 load error",
-                quantization.bits
-            ));
-        }
-        if quantization.group_size < 1 {
-            return Err(format!(
-                "GPT-NeoX quantization.group_size ({}) must be positive; it is multiplied by the \
-                 scales width to check the packing, and a non-positive value can match no real \
-                 tensor, so MLX throws and that throw is an uncatchable `std::terminate` rather \
-                 than a load error",
-                quantization.group_size
-            ));
-        }
-        Ok(())
+        mlxcel_core::layers::validate_quantization_params(
+            quantization.group_size,
+            quantization.bits,
+        )
+        .map_err(|e| format!("GPT-NeoX config.json: {e}"))
     }
 
     /// Reject RoPE parameters that would abort the process at the first forward

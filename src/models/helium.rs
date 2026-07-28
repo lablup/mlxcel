@@ -372,37 +372,21 @@ impl ModelArgs {
 
     /// Reject a `quantization` block that would abort an MLX kernel.
     ///
-    /// `group_size` and `bits` reach `quantized_matmul` and `dequantize`
-    /// unreconciled when the tensor shapes carry too little information to
-    /// re-derive them. MLX's own `packed_in * 32 / bits` check divides by zero at
-    /// `bits == 0` and collapses to zero above 32, throwing the same uncatchable
-    /// `std::terminate` the rope guard exists to prevent.
-    ///
-    /// This is a range check rather than an allowlist on purpose: mlxcel
-    /// deliberately re-derives an effective bit width from the tensor shapes when
-    /// the declared one disagrees, and an allowlist would reject the
-    /// mixed-precision exports that behavior serves.
+    /// Kept as a family-level early diagnostic even though the shared loaders now
+    /// enforce the same bound (issue #929): failing here names Helium and fires
+    /// during config validation, before any tensor is touched, rather than at the
+    /// first quantized projection the loader happens to reach.
+    /// [`mlxcel_core::layers::validate_quantization_params`] carries the rationale
+    /// for the bound being a range rather than an allowlist.
     fn validate_quantization(&self) -> Result<(), String> {
         let Some(quantization) = self.quantization.as_ref() else {
             return Ok(());
         };
-        if quantization.bits < 1 || quantization.bits > 32 {
-            return Err(format!(
-                "Helium quantization.bits ({}) must be between 1 and 32; MLX derives the unpacked \
-                 width as packed_in * 32 / bits, which divides by zero at 0 and collapses to zero \
-                 above 32, and the resulting C++ throw crosses the cxx bridge as an uncatchable \
-                 abort",
-                quantization.bits
-            ));
-        }
-        if quantization.group_size < 1 {
-            return Err(format!(
-                "Helium quantization.group_size ({}) must be positive; it divides the input axis \
-                 inside every quantized kernel",
-                quantization.group_size
-            ));
-        }
-        Ok(())
+        mlxcel_core::layers::validate_quantization_params(
+            quantization.group_size,
+            quantization.bits,
+        )
+        .map_err(|e| format!("Helium config.json: {e}"))
     }
 
     /// Build the `llama3::ModelArgs` that drives the shared dense decoder.

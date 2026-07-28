@@ -588,6 +588,84 @@ fn from_weights_rejects_a_position_table_of_the_wrong_width() {
     assert!(err.contains("n_embd"), "unhelpful error: {err}");
 }
 
+/// Replace `wpe` with an affine-quantized table at 4 bits and group_size 8.
+///
+/// `groups` is how many quantization groups the scales claim, so the table
+/// describes a `groups * 8`-wide input. The honest value for the 8-wide tiny
+/// config is 1; anything else is a table packed for a different model width,
+/// which keeps exactly the right row count.
+fn quantize_position_table(args: &ModelArgs, weights: &mut WeightMap, groups: i32) {
+    let rows = args.n_positions as i32;
+    let packed_in = args.n_embd as i32 * 4 / 32; // 4-bit packs 8 values per uint32
+    weights.insert("wpe.weight".into(), ones(&[rows, packed_in]));
+    weights.insert("wpe.scales".into(), filled(&[rows, groups]));
+    weights.insert("wpe.biases".into(), filled(&[rows, groups]));
+}
+
+#[test]
+fn from_weights_rejects_a_quantized_position_table_of_the_wrong_dequantized_width() {
+    // Packing compresses the input axis only, so a table built for a different
+    // model width keeps exactly the right row count and the packed width alone
+    // says nothing without a bit depth. The width check used to be skipped
+    // outright for a quantized table, so the mismatch first surfaced as a
+    // wrong-width hidden state inside `fast::layer_norm`, whose throw crosses
+    // the cxx bridge as an uncatchable abort at the first forward pass.
+    let mut args = tiny_args();
+    args.quantization = Some(super::Quantization {
+        group_size: 8,
+        bits: 4,
+    });
+
+    // The positive control first, so the width check cannot be passing by
+    // rejecting everything quantized.
+    let mut weights = raw_hf_weights(&args, "");
+    quantize_position_table(&args, &mut weights, 1);
+    assert!(
+        Gpt2Model::from_weights(&weights, &args).is_ok(),
+        "a consistently packed position table must load"
+    );
+
+    let mut weights = raw_hf_weights(&args, "");
+    quantize_position_table(&args, &mut weights, 2);
+    let err = match Gpt2Model::from_weights(&weights, &args) {
+        Ok(_) => panic!("a quantized wpe packed for a different width must be rejected"),
+        Err(err) => err,
+    };
+    assert!(err.contains("input width"), "unhelpful error: {err}");
+    assert!(
+        err.contains("n_embd"),
+        "the message must name the field: {err}"
+    );
+}
+
+#[test]
+fn from_weights_rejects_a_quantization_block_that_would_abort_an_mlx_kernel() {
+    // GPT-2 carries no family-level `validate_quantization`, so this exercises
+    // the shared guard in `reconcile_quantization_layout` rather than a local
+    // copy: a `bits` of 0 divides by zero inside MLX's `validate_quantized_input`
+    // and a non-positive `group_size` can match no real tensor, and either throw
+    // crosses the cxx bridge as an uncatchable `std::terminate` at the first
+    // forward pass rather than a load error.
+    for (group_size, bits, field) in [
+        (8, 0, "bits"),
+        (8, -4, "bits"),
+        (8, 33, "bits"),
+        (0, 4, "group_size"),
+        (-8, 4, "group_size"),
+    ] {
+        let mut args = tiny_args();
+        args.quantization = Some(super::Quantization { group_size, bits });
+        let mut weights = raw_hf_weights(&args, "");
+        quantize_position_table(&args, &mut weights, 1);
+
+        let err = match Gpt2Model::from_weights(&weights, &args) {
+            Ok(_) => panic!("group_size {group_size} / bits {bits} must be rejected at load"),
+            Err(err) => err,
+        };
+        assert!(err.contains(field), "unhelpful error: {err}");
+    }
+}
+
 // Construction and forward.
 
 #[test]
