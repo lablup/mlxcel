@@ -151,6 +151,11 @@ pub(super) fn export_llava_prefill(
     )
 }
 
+// Reachable in production only from the `xla-iree` Qwen2-VL prefill path, and
+// exercised by the module tests regardless, so the gate carries `test` too.
+// Without it a default-feature `cargo clippy --lib -- -D warnings` fails the
+// build on `function is never used`.
+#[cfg(any(feature = "xla-iree", test))]
 pub(super) fn export_qwen2_vl_prefill(
     logical_tokens: Vec<i32>,
     merged: InputEmbeddings,

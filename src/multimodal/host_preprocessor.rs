@@ -44,10 +44,14 @@ mod export;
 use super::qwen_vl::insert_qwen_vl_image_tokens;
 use export::export_mlx_tensor;
 use export::{
-    build_prepared_prefill, export_llava_prefill, export_qwen2_vl_prefill, usize_to_i32,
-    validate_embedding_shape, validate_processor_shape, validate_projected_shape,
-    validate_sequence_capacity,
+    build_prepared_prefill, export_llava_prefill, usize_to_i32, validate_embedding_shape,
+    validate_processor_shape, validate_projected_shape, validate_sequence_capacity,
 };
+// Only the `xla-iree` Qwen2-VL prefill path calls this, so importing it
+// unconditionally leaves it unused in a default-feature build and `-D warnings`
+// turns that into a hard error. The gate has to match the single call site.
+#[cfg(any(feature = "xla-iree", test))]
+use export::export_qwen2_vl_prefill;
 
 /// Vision implementation selected for OpenXLA multimodal preprocessing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
