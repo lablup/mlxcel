@@ -29,13 +29,12 @@
 //!    resource-constrained CI hosts).
 //!
 //! A fourth test (`multi_turn_chat_with_drafter_reports_cached_tokens_and_no_decline`)
-//! runs a drafter-enabled variant that validates the prompt cache wire contract,
-//! the absence of burst-decline log lines, and byte-equality against a cold
-//! (drafter-less, no-cache) reference. Note: the cookie-monotonicity assertion
-//! (`cached_tokens > 0` on turns 2..N) does NOT apply here because the
-//! Qwen3.5-9B thinking model's `preserve_thinking=true` causes a chat-template
-//! tokenization mismatch between stored snapshots and incoming prompts — a
-//! pre-existing limitation unrelated to the drafter.
+//! runs a drafter-enabled variant that validates the prompt cache wire contract
+//! (`cached_tokens` present, turn 1 = 0), the absence of burst-decline log
+//! lines, and byte-equality against a cold (drafter-less, no-cache) reference.
+//! `cached_tokens > 0` is not asserted on later turns because the thinking
+//! model's chat template re-renders assistant messages differently from the raw
+//! generated token sequence (a pre-existing prompt-cache limitation).
 //! This is the load-bearing correctness gate for prompt-cache-and-drafter coexistence:
 //! PR A and PR B of the coexistence plan must be merged for this test to pass.
 //!
@@ -167,6 +166,9 @@ fn resolve_drafter_path(name: &str) -> PathBuf {
 struct TurnSummary {
     /// Assistant content returned in `choices[0].message.content`.
     content: String,
+    /// Reasoning / thinking content (`choices[0].message.reasoning_content`).
+    /// `None` when absent (non-thinking models or empty thinking output).
+    reasoning_content: Option<String>,
     /// `usage.prompt_tokens`.
     prompt_tokens: u64,
     /// `usage.completion_tokens`.
@@ -229,21 +231,30 @@ async fn one_turn(
         .as_str()
         .unwrap_or_default()
         .to_string();
+    let reasoning = value["choices"][0]["message"]["reasoning_content"]
+        .as_str()
+        .map(|s| s.to_string());
     let prompt_tokens = value["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
     let completion_tokens = value["usage"]["completion_tokens"].as_u64().unwrap_or(0);
     let cached_tokens = value["usage"]["prompt_tokens_details"]["cached_tokens"].as_u64();
 
     // Thread the reply into the conversation so the next turn's prefix
-    // actually includes this turn's assistant tokens. An empty reply is
-    // tolerable (some short prompts hit EOS immediately) but we still
-    // preserve the turn structure for bucket stability.
-    messages.push(serde_json::json!({
+    // actually includes this turn's assistant tokens. Include
+    // `reasoning_content` when present so thinking models'
+    // chat templates reproduce the same token sequence on the next
+    // turn (needed for prompt-cache prefix matching).
+    let mut assistant_msg = serde_json::json!({
         "role": "assistant",
         "content": content.clone(),
-    }));
+    });
+    if let Some(ref r) = reasoning {
+        assistant_msg["reasoning_content"] = serde_json::json!(r);
+    }
+    messages.push(assistant_msg);
 
     TurnSummary {
         content,
+        reasoning_content: reasoning,
         prompt_tokens,
         completion_tokens,
         cached_tokens,
@@ -551,19 +562,18 @@ async fn multi_turn_chat_with_cache_disabled_never_reports_cached_tokens() {
 
 /// Drafter-enabled multi-turn prompt cache test.
 ///
-/// Boots `mlxcel-server` with a DFlash drafter and the prompt cache enabled,
-/// then validates that:
+/// Boots `mlxcel-server` with a DFlash drafter, the prompt cache enabled,
+/// and `preserve_thinking=true`. Then validates that:
 ///
-/// 1. the `cached_tokens` field is present in the response (wire contract)
-/// 2. the server log contains no burst-decline line for those sequences
+/// 1. the `cached_tokens` field is present and turn 1 is 0 (wire contract)
+/// 2. the server log contains no burst-decline line (proves adopt path ran)
 /// 3. turn-N output at `temperature=0` matches a cold run of the same prompt
 ///
-/// Note: `cached_tokens > 0` is NOT asserted on turns 2..N because
-/// Qwen3.5-9B is a thinking model with `preserve_thinking=true`. The raw
-/// output tokens (which the snapshot stores) may not exactly match the
-/// tokens produced when the chat template re-renders the assistant's
-/// thinking content — a pre-existing prompt-cache limitation unrelated
-/// to the drafter.
+/// NOTE: `cached_tokens > 0` is NOT asserted on turns 2..N.  Qwen3.5-9B is
+/// a thinking model; the chat template's re-rendering of the assistant
+/// message differs from the raw generated token sequence even with
+/// `preserve_thinking=true` and `reasoning_content` feedback — a
+/// pre-existing prompt-cache limitation, not a drafter bug.
 ///
 /// This is the load-bearing correctness gate for prompt-cache-and-drafter
 /// coexistence: PR A (`fix/dflash-burst-donates-prompt-cache`) and PR B
@@ -640,6 +650,8 @@ async fn multi_turn_chat_with_drafter_reports_cached_tokens_and_no_decline() {
         "dflash",
         "--draft-block-size",
         "4",
+        "--chat-template-kwargs",
+        "{\"preserve_thinking\": true}",
     ]);
 
     let client = reqwest::Client::builder()
@@ -700,19 +712,55 @@ async fn multi_turn_chat_with_drafter_reports_cached_tokens_and_no_decline() {
     let warm_logs = stop_server_capturing(&mut warm_child);
 
     // ---------------------------------------------------------------
-    // Assertion 1: wire contract — cached_tokens field is present when
-    // the prompt cache is enabled, even if the thinking model's template
-    // signature means adoption always returns 0 (pre-existing issue).
-    //
-    // Note: Qwen3.5-9B is a thinking model with `preserve_thinking=true`.
-    // The raw output tokens from the burst (which the snapshot stores)
-    // may not exactly match the tokens produced when the chat template
-    // re-renders the assistant's thinking content in the next turn. This
-    // is a pre-existing prompt-cache limitation for thinking models, not
-    // a drafter-specific bug. The critical drafter correctness gates are
-    // assertions 2 and 3 below (no burst-decline + byte-equality).
+    // Assertion 1: wire contract — cached_tokens field is present on
+    // every turn when the cache is enabled on the server.
     // ---------------------------------------------------------------
     for (i, t) in warm_turns.iter().enumerate() {
+        assert!(
+            t.cached_tokens.is_some(),
+            "warm turn {}: cached_tokens must be present when \
+             --prompt-cache-enabled=true (drafter variant)",
+            i + 1
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Assertion 1b: turn 1 cold → cached_tokens == 0.
+    // ---------------------------------------------------------------
+    assert_eq!(
+        warm_turns[0].cached_tokens,
+        Some(0),
+        "warm turn 1 must not have any cached tokens (cold start): got {:?}",
+        warm_turns[0].cached_tokens
+    );
+
+    // ---------------------------------------------------------------
+    // Assertion 1b: turn 1 cold → cached_tokens == 0.
+    // ---------------------------------------------------------------
+    assert_eq!(
+        warm_turns[0].cached_tokens,
+        Some(0),
+        "warm turn 1 must not have any cached tokens (cold start): got {:?}",
+        warm_turns[0].cached_tokens
+    );
+
+    // ---------------------------------------------------------------
+    // Assertion 1c: turns 2..=N — cached_tokens field is present.
+    //
+    // NOTE: `cached_tokens > 0` is NOT asserted here because Qwen3.5-9B
+    // is a thinking model.  Even with `preserve_thinking=true` and
+    // `reasoning_content` fed back into the conversation, the chat
+    // template's re-rendering of the assistant message differs from the
+    // raw generated token sequence (the model emits `<think>` blocks as
+    // raw tokens; the chat template wraps them in special-token
+    // packaging).  This is a pre-existing prompt-cache limitation for
+    // thinking models, not a drafter-specific bug.
+    //
+    // The load-bearing correctness gates are:
+    //   Assertion 2 — no burst-decline log lines (proves adopt path ran)
+    //   Assertion 3 — byte-equality cold vs warm (proves output correct)
+    // ---------------------------------------------------------------
+    for (i, t) in warm_turns.iter().enumerate().skip(1) {
         assert!(
             t.cached_tokens.is_some(),
             "warm turn {}: cached_tokens must be present when \
@@ -786,9 +834,17 @@ async fn multi_turn_chat_with_drafter_reports_cached_tokens_and_no_decline() {
     }
 
     for (turn_idx, snapshot) in turn_message_snapshots.iter().enumerate() {
+        // The snapshot was captured BEFORE one_turn pushed the user
+        // question. Append it here so the cold server receives exactly
+        // the same messages array the warm run answered.
+        let mut cold_messages = snapshot.clone();
+        cold_messages.push(serde_json::json!({
+            "role": "user",
+            "content": new_user_question,
+        }));
         let body = serde_json::json!({
             "model": "qwen35-cold",
-            "messages": snapshot,
+            "messages": cold_messages,
             "max_tokens": 16,
             "temperature": 0.0,
         });

@@ -1733,6 +1733,11 @@ where
         // Drafter slot ownership: we took the drafter at the top; we
         // must not silently drop it on error.
         drafter_slot.drafter = Some(owned_drafter);
+        // When the caches were taken from the model-owned slot (adopted
+        // prefix), restore them so the classic fallback path can use them.
+        if prefill_start_offset > 0 {
+            qwen.install_speculative_caches(seq_id, caches);
+        }
         return Err(BurstOutcome::Error(
             "DFlash prefill returned no captured hidden layers".to_string(),
         ));
@@ -1818,36 +1823,51 @@ where
             );
             let mut tokens = Vec::with_capacity(output.tokens.len() + 1);
             tokens.push(first_bonus);
+            // Capture the round-loop token count before `output.tokens`
+            // is moved into `tokens` below.
+            let round_loop_tokens = output.tokens.len();
             tokens.extend(output.tokens);
             // Install the burst's caches into the model-owned slot so
             // `donate_finished_sequence_cache` (called by the scheduler)
             // finds non-empty state and can snapshot them for the prompt
-            // cache. Assert the length invariant: the caches' visible
-            // length must equal the full prompt + generated token count
-            // (including the first bonus).
+            // cache. Assert the length invariant per cache: every cache's
+            // visible length must equal prompt + round-loop token count.
+            //
+            // The first bonus is sampled from the prefill's last verify
+            // logits — it does NOT advance the cache. Only the round
+            // loop's tokens produce new cache positions.
+            // `round_loop_tokens` is the correct position delta; using
+            // `tokens.len()` (which includes first_bonus) would demand
+            // one more position than the cache can ever hold.
             {
-                let generated_len = tokens.len();
+                let generated_len = round_loop_tokens;
                 let expected_len = prompt_tokens.len() + generated_len;
-                let total_visible: usize = caches
-                    .iter()
-                    .map(|c| c.offset().max(0) as usize)
-                    .sum();
-                let avg_visible = total_visible / caches.len();
-                debug_assert_eq!(
-                    avg_visible, expected_len,
-                    "DFlash cache visible length mismatch: avg_visible={}                      expected={} (prompt={} + generated={})",
-                    avg_visible, expected_len,
-                    prompt_tokens.len(), generated_len,
-                );
+                for (i, c) in caches.iter().enumerate() {
+                    let measured = match c {
+                        crate::models::qwen3_next::Qwen3NextCache::Attention(kv) => {
+                            kv.seq_len().max(0) as usize
+                        }
+                        crate::models::qwen3_next::Qwen3NextCache::Linear(gd) => {
+                            gd.offset.max(0) as usize
+                        }
+                    };
+                    assert_eq!(
+                        measured,
+                        expected_len,
+                        "DFlash cache[{i}] visible length mismatch: measured={measured} \
+                         expected={expected_len} (prompt={} + round_loop={generated_len})",
+                        prompt_tokens.len(),
+                    );
+                }
                 qwen.install_speculative_caches(seq_id, caches);
                 tracing::info!(
                     seq_id = %seq_id,
                     prompt_len = prompt_tokens.len(),
-                    generated_len = generated_len,
-                    cache_visible_len = avg_visible,
+                    generated_len = tokens.len(),
+                    round_loop_tokens = generated_len,
                     adopted_offset = prefill_start_offset,
                     tokens_prefilled = tokens_prefilled,
-                    "prompt-cache snapshot inserted (DFlash burst)"
+                    "DFlash caches installed for prompt-cache snapshot"
                 );
             }
             // Assemble the per-token logprobs the same way as `tokens`:
@@ -1868,9 +1888,17 @@ where
             };
             Ok((tokens, logprobs, output.stats.decode_time_ms))
         }
-        Err(e) => Err(BurstOutcome::Error(format!(
-            "DFlash round loop failed: {e}"
-        ))),
+        Err(e) => {
+            // When the caches were taken from the model-owned slot
+            // (adopted prefix), restore them so the classic fallback path
+            // can use them. The drafter was already restored above.
+            if prefill_start_offset > 0 {
+                qwen.install_speculative_caches(seq_id, caches);
+            }
+            Err(BurstOutcome::Error(format!(
+                "DFlash round loop failed: {e}"
+            )))
+        }
     }
 }
 
@@ -1947,7 +1975,16 @@ fn finalize_burst_success(
 ) -> FinalizeOutcome {
     let mut stream = begin_burst_stream(ctx.model.eos_token_ids(), &seq);
     stream_burst_tokens(ctx.tokenizer, &mut seq, &mut stream, &tokens, &logprobs);
-    finalize_burst_stream(ctx.tokenizer, seq, &stream)
+    let mut outcome = finalize_burst_stream(ctx.tokenizer, seq, &stream);
+    // The first-bonus token is sampled from the prefill's last verify
+    // logits — it does NOT advance the cache.  Strip it from
+    // `generated_tokens` so the scheduler's donate key matches the
+    // cache positions (prompt_len + round_loop_tokens), not the emitted
+    // token count (which is one larger).
+    if !outcome.generated_tokens.is_empty() {
+        outcome.generated_tokens.remove(0);
+    }
+    outcome
 }
 
 /// Cross-slice streaming state of a burst-produced token stream
