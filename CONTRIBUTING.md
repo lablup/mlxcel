@@ -41,12 +41,12 @@ Thank you for your interest in contributing to mlxcel! This document covers the 
    ```
 4. Run the local quality gates:
    ```bash
-   cargo fmt --all -- --check   # enforced by CI; fmt violations block merge
-   cargo clippy --all-targets --features metal,accelerate -- -D warnings   # enforced by CI on self-hosted macOS runner
-   cargo test --release --features metal,accelerate                         # enforced by CI on self-hosted macOS runner
-   cargo deny check             # advisories + licenses + sources
+   cargo fmt --all -- --check   # gated at PR time; fmt violations block merge
+   cargo clippy --all-targets --features metal,accelerate -- -D warnings   # NOT gated at PR time; yours to run
+   cargo test --release --features metal,accelerate                        # NOT gated at PR time; yours to run
+   cargo deny check             # gated at PR time (advisories + licenses + sources)
    ```
-   CI enforces `clippy` (with `-D warnings`) and `cargo test` on the `self-hosted-macos-26-arm64` runner on every PR that touches Rust files. CUDA verification is not gated at PR time — that stays exclusive to `release.yml`.
+   PR-time CI runs only the cheap gates: `cargo fmt` and `cargo deny` in [`ci.yml`](.github/workflows/ci.yml), plus a path-filtered clippy and a `distributed::`-scoped `cargo test` in [`pipeline-parallel-ci.yml`](.github/workflows/pipeline-parallel-ci.yml) when you touch pipeline-parallel code. Clippy and the general unit suite are **not** enforced on your PR. They were moved in #21 and removed in #23 because ~30 min per run on the shared self-hosted Apple Silicon runner blocked PRs and releases for failures that `make verify` catches locally in a fraction of the time. [`nightly-verify.yml`](.github/workflows/nightly-verify.yml) runs the full `make verify` once a day on `self-hosted-macos-26-arm64` and files an issue when `main` goes red, so a broken suite surfaces within a day rather than on the next contributor's `make verify`. Treat that as a backstop, not a substitute: run the two commands above yourself before you push. CUDA verification is not gated at PR time either; that stays exclusive to `release.yml`.
 
    While iterating, prefer `[profile.test-fast]` over `--release`: `make test-fast` / `make test-fast-cuda` (or `cargo test --profile test-fast --features <...>`) rebuild in seconds instead of minutes. It is for local/agent edit-test loops only; run the `--release` commands above (or `make verify`) before opening or updating a PR. See [`docs/installation.md`](docs/installation.md#fast-iteration-builds) for the measured comparison.
 5. For inference changes, validate against a real checkpoint — synthetic or build-only validation is not enough (see [`AGENTS.md`](AGENTS.md) for why).

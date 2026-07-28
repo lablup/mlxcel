@@ -433,11 +433,15 @@ ci: fmt-check check clippy test ## CI workflow: format check, check, lint, test
 pre-commit: fmt clippy test ## Pre-commit checks
 
 # ----------------------------------------------------------------------------
-# CI-faithful local gate (matches .github/workflows/ci.yml exactly)
+# CI-faithful local gate (matches .github/workflows/nightly-verify.yml)
 #
-# The `verify*` targets reproduce the GitHub Actions `clippy + test (macOS
-# ARM64)` job step-for-step. They differ from the looser `clippy` / `test`
-# targets above in three ways that have repeatedly bitten us:
+# The `verify*` targets ARE what the nightly workflow runs: nightly-verify.yml
+# invokes these same Makefile targets so the local gate and the scheduled
+# backstop cannot drift apart. Note that ci.yml gates only fmt and cargo-deny
+# at PR time, so running this before you push is the real gate, not a
+# formality; the nightly is only a net that catches a red `main` within a day.
+# They differ from the looser `clippy` / `test` targets above in three ways
+# that have repeatedly bitten us:
 #
 #   1. `--features metal,accelerate` — the CI feature set. Without it, large
 #      gated regions of mlxcel-core (parts of cache/turbo/quant, the
@@ -473,7 +477,7 @@ verify-test: ## CI-faithful: cargo test --release --features metal,accelerate
 
 .PHONY: verify
 verify: verify-fmt verify-clippy verify-test ## Run the full CI-faithful gate locally (recommended before push)
-	@echo "$(GREEN)[verify] OK — matches GitHub Actions clippy+test job$(RESET)"
+	@echo "$(GREEN)[verify] OK: matches the nightly-verify GitHub Actions job$(RESET)"
 
 .PHONY: verify-clean
 verify-clean: ## Run `verify` after a `cargo clean` (use when clippy's cache may be hiding a regression)

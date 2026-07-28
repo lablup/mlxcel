@@ -1,0 +1,195 @@
+# Nightly `make verify` on the self-hosted Apple Silicon runner.
+#
+# WHY THIS EXISTS
+#
+# No workflow ran the general unit suite, and two deterministically failing
+# tests reached `main` and sat there unnoticed as a result: the mllama
+# cross-attention assertion fixed in #939, red for 26 days, and
+# `family_order_is_exhaustive` in `src/main_tests.rs`, repaired in #946. Both
+# are pure unit tests that need no model weights. The gap is not the policy of
+# keeping the gate local (see below); it is that nothing noticed when the local
+# gate was already red before a contributor ever ran it.
+#
+# WHY NIGHTLY AND NOT PR-TIME
+#
+# `clippy + test` on this target takes ~30 min on the shared self-hosted
+# runner. #21 moved that gate from PR time to release time and #23 removed it
+# entirely, for a cost reason that still holds: a slow shared resource blocking
+# every PR is worse than `make verify` on the developer's machine. This
+# workflow does not reinstate the PR-time gate. It consumes the shared runner
+# once per day at a quiet hour, blocks nothing, and bounds how long a red
+# `main` can hide from 26 days to about one.
+#
+# WHY NOT A CHEAP GITHUB-HOSTED JOB INSTEAD
+#
+# Any Rust test in this repository first builds MLX C++ through `mlxcel-core`,
+# so narrowing the test selector does not make a GitHub-hosted job cheap; the
+# `two-host-logical` job in pipeline-parallel-ci.yml budgets 45 min on
+# `ubuntu-latest` for that reason. It would also be a weaker signal: an
+# `ubuntu-latest` runner builds without `metal` and `accelerate`, leaving large
+# gated regions of mlxcel-core unchecked, and the mllama failure was a Metal
+# SDPA reduction-order artifact that such a job could not have reproduced at
+# all. Running the real feature set on the real hardware class is the point.
+#
+# WHAT IT RUNS
+#
+# `make verify` (fmt + clippy + test), driven through the same Makefile targets
+# CONTRIBUTING.md tells contributors to run, so CI and the local gate cannot
+# drift apart. The three steps run independently so one failure does not mask
+# the other two.
+#
+# The runner carries no model weights, which is fine: the real-checkpoint
+# integration tests under tests/ self-skip on a missing `models/<name>` dir or
+# are `#[ignore]`d. What this run actually gates is the weight-free unit and
+# contract suite, which is exactly where both known failures lived.
+#
+# HOW A FAILURE IS REPORTED
+#
+# A red Actions run that nobody opens is the same blind spot in a new place, so
+# a failed scheduled run files (or comments on) a GitHub issue. If a day of
+# exposure ever proves too long, the next step is adding `push: [main]` here,
+# which costs one run per merge instead of one per day.
+
+name: Nightly verify
+
+on:
+  schedule:
+    # 18:00 UTC = 03:00 KST, when the shared runner is idle.
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+
+# Default-deny; the job grants only what it needs.
+permissions: {}
+
+concurrency:
+  # Never stack two runs on the single shared macOS runner. A manual dispatch
+  # queues behind an in-flight nightly rather than cancelling it.
+  group: nightly-verify
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: fmt + clippy + test (macOS Apple Silicon)
+    # Scheduled workflows run from the default branch of whatever repository
+    # holds them. A fork that enables Actions would otherwise queue forever
+    # against runner labels it does not own.
+    if: github.repository == 'lablup/mlxcel'
+    runs-on: self-hosted-macos-26-arm64 # Self-hosted Apple Silicon runner with macOS 26 SDK + Metal 4
+    # Generous because the FIRST run is a cold MLX C++ build plus a release
+    # link of every integration-test binary. Steady state, with the persistent
+    # target dir below, is the ~30 min `make verify` takes locally.
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          # Don't leave GITHUB_TOKEN in .git/config; this job only fetches.
+          persist-credentials: false
+
+      # Mirrors release.yml, deliberately including the same path: a persistent
+      # target dir outside the workspace so the nightly is incremental instead
+      # of a cold MLX C++ build every time, and so the daily run keeps the
+      # release job's cache warm. release.yml owns the 7-day prune of this
+      # directory; cargo's own file lock serializes the rare overlap.
+      - name: Setup persistent cache paths (self-hosted)
+        run: |
+          set -euo pipefail
+          CARGO_TARGET="$HOME/.cargo-target/mlxcel"
+          mkdir -p "$CARGO_TARGET"
+          echo "CARGO_TARGET_DIR=$CARGO_TARGET" >> "$GITHUB_ENV"
+
+      - name: Ensure build tools
+        run: |
+          set -euo pipefail
+          # cmake is required by the mlxcel-core and sentencepiece-sys build scripts.
+          if ! command -v cmake >/dev/null 2>&1; then
+            echo "cmake not found, installing via Homebrew..."
+            brew install cmake
+          fi
+          echo "cmake: $(cmake --version | head -1)"
+
+      # rust-toolchain.toml pins the channel (and the rustfmt/clippy
+      # components) that every cargo invocation below actually resolves to, so
+      # this step exists to guarantee rustup is present and current, not to
+      # choose the version. Do not "fix" the mismatch by pinning a channel
+      # here: the file is the single source, deliberately.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      # The three steps below are `make verify` split apart. Each runs even if
+      # an earlier one failed, so a fmt violation does not hide a red suite.
+      - name: cargo fmt
+        id: fmt
+        if: ${{ !cancelled() }}
+        run: make verify-fmt
+
+      - name: cargo clippy (metal,accelerate, -D warnings)
+        id: clippy
+        if: ${{ !cancelled() }}
+        run: make verify-clippy
+
+      - name: cargo test (release, metal,accelerate)
+        id: test
+        if: ${{ !cancelled() }}
+        run: make verify-test
+
+      - name: Report a red main
+        # Only the scheduled run reports. A manual dispatch is someone already
+        # watching the run, and filing an issue at them is noise.
+        if: ${{ failure() && github.event_name == 'schedule' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMMIT_SHA: ${{ github.sha }}
+          FMT_OUTCOME: ${{ steps.fmt.outcome }}
+          CLIPPY_OUTCOME: ${{ steps.clippy.outcome }}
+          TEST_OUTCOME: ${{ steps.test.outcome }}
+        run: |
+          set -euo pipefail
+
+          if ! command -v gh >/dev/null 2>&1; then
+            echo "gh not found, installing via Homebrew..."
+            brew install gh
+          fi
+
+          TITLE='[nightly-verify] main is red'
+          BODY_FILE="$(mktemp -t nightly-verify-body)"
+          {
+            echo "The nightly \`make verify\` run on \`self-hosted-macos-26-arm64\` failed."
+            echo
+            echo "| Step | Outcome |"
+            echo "|---|---|"
+            echo "| \`make verify-fmt\` | \`${FMT_OUTCOME}\` |"
+            echo "| \`make verify-clippy\` | \`${CLIPPY_OUTCOME}\` |"
+            echo "| \`make verify-test\` | \`${TEST_OUTCOME}\` |"
+            echo
+            echo "Commit: \`${COMMIT_SHA}\`"
+            echo "Run: ${RUN_URL}"
+            echo
+            echo "Reproduce locally with \`make verify\` (or the single failing target above)."
+            echo "This issue is reused by subsequent nightly failures while it stays open."
+          } > "$BODY_FILE"
+
+          # `|| true` on purpose: a transient search failure must not swallow
+          # the report. An empty result files a fresh issue, and a rare
+          # duplicate is a better failure mode than silence.
+          EXISTING="$(gh issue list --repo "$REPO" --state open \
+            --search "in:title \"$TITLE\"" --limit 1 \
+            --json number -q '.[0].number // empty' || true)"
+
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$REPO" --body-file "$BODY_FILE"
+            echo "Commented on existing tracking issue #${EXISTING}."
+          else
+            gh issue create --repo "$REPO" --title "$TITLE" --body-file "$BODY_FILE" \
+              --label "type:bug,priority:high,status:ready"
+          fi
+
+          rm -f "$BODY_FILE"

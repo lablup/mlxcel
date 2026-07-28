@@ -589,9 +589,11 @@ mod tests {
     // from the per-image `num_tiles`). `exp(logit - 1e9)` underflows to
     // exactly 0.0, so those positions add exact zeros to the softmax numerator
     // and denominator: attending over the REAL-tile rows alone is the same
-    // computation. These tests pin that equivalence at the byte level, which
-    // is what licenses `MllamaVLModel` to drop the padding-tile rows from
+    // computation. These tests pin that equivalence, which is what licenses
+    // `MllamaVLModel` to drop the padding-tile rows from
     // `cross_attention_states` instead of threading a reference-style mask.
+    // Two of the three pin it at the byte level; the ragged case tolerates a
+    // last-bit f32 reassociation artifact for the reason spelled out on it.
 
     /// `[1, rows, HIDDEN]` cross-states with identifiable per-row content.
     fn cross_rows(rows: i32, seed: usize) -> UniquePtr<MlxArray> {
@@ -641,9 +643,17 @@ mod tests {
         );
     }
 
+    /// Bound for the ragged case below. The equivalence this file pins holds
+    /// in exact arithmetic, but the ragged case reassociates an f32 reduction
+    /// (see the test's comment), so it is bitwise-exact only up to a last-bit
+    /// artifact. `1e-6` is ~5 orders of magnitude below the ~`1e-1` output
+    /// scale, so it still fails loudly on a real masking or row-selection
+    /// error while tolerating the reassociation.
+    const RAGGED_REASSOCIATION_TOL: f32 = 1e-6;
+
     /// Ragged multi-image (media 0: 1 real tile of 2, media 1: 2 of 2):
-    /// media-major concatenation of each image's real rows is byte-identical
-    /// to reference-masked attention over the full row set.
+    /// media-major concatenation of each image's real rows matches
+    /// reference-masked attention over the full row set.
     #[test]
     fn ragged_real_tile_rows_match_reference_masked_full_rows() {
         let config = tiny_config();
@@ -661,11 +671,28 @@ mod tests {
         let sliced = mlxcel_core::concatenate(&media0, &media1, 1);
         let sliced_out = layer.forward(&h, &sliced, None);
 
-        assert_eq!(
-            max_abs_diff(&masked_out, &sliced_out),
-            0.0,
-            "ragged per-image selection must be byte-identical to the \
-             reference-masked full attention"
+        // This is the one case in this file that is NOT bitwise-exact, and the
+        // reason is the mask position, not the row selection. Its two siblings
+        // mask a TRAILING run of keys, so every surviving key keeps its lane
+        // position and the softmax denominator and value accumulation are
+        // summed in the same association order on both sides. Those two stay
+        // on `assert_eq!(..., 0.0)`. Here the masked columns are INTERIOR ({2, 3}
+        // of 8), so the surviving keys sit at lanes {0,1,4,5,6,7} in the 8-wide
+        // reduction but at {0..5} in the 6-wide one. f32 addition is not
+        // associative, so the two orders differ in the last bit: the observed
+        // difference on an Apple M1 Ultra is 2^-28, which is 0.25 ULP of the
+        // largest output element. Masking still contributes exact zeros
+        // (`exp(logit - 1e9)` underflows to 0.0); that premise is what the
+        // trailing-mask siblings pin, and it is unaffected. Do not tighten
+        // this back to exact equality; the equality holds in exact arithmetic,
+        // which does not imply bitwise equality once lanes move inside a
+        // parallel reduction, and the artifact is expected to vary with
+        // hardware and kernel tiling.
+        let diff = max_abs_diff(&masked_out, &sliced_out);
+        assert!(
+            diff <= RAGGED_REASSOCIATION_TOL,
+            "ragged per-image selection must match the reference-masked full \
+             attention to within {RAGGED_REASSOCIATION_TOL:e}, got {diff:e}"
         );
     }
 

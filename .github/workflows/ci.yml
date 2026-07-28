@@ -2,13 +2,28 @@
 # advisory) and cargo-fmt on every touched-Rust change so formatting drift and
 # license issues are caught at PR time.
 #
-# Clippy and cargo-test do NOT run in any workflow. They used to run on the
-# self-hosted Apple Silicon runner — first here at PR time, then briefly in
-# release.yml — and in both cases consumed ~30 min per run, blocking either
-# PRs or releases on a shared resource for failures that `make verify`
-# reliably catches on the developer's machine in a fraction of the time.
+# Neither clippy nor the general unit suite is gated at PR time. Both used to
+# run on the self-hosted Apple Silicon runner, first here and then briefly in
+# release.yml, and in both cases consumed ~30 min per run, blocking either PRs
+# or releases on a shared resource for failures that `make verify` reliably
+# catches on the developer's machine in a fraction of the time (#21, #23).
 #
-# Quality gate lives locally. Pre-push checklist:
+# They are not absent from every workflow, though, so do not read the above as
+# "nothing anywhere runs them":
+#
+#   - pipeline-parallel-ci.yml runs `cargo clippy -p mlxcel --lib --tests
+#     -- -D warnings`, and reaches `cargo test` through scripts/ci/run-pp-*.sh
+#     with `distributed::`-prefixed selectors. It is debug profile on
+#     ubuntu-latest and path-filtered to src/distributed/pipeline/** and its
+#     siblings, so it never runs on a model-port PR and never selects a model
+#     or CLI test module.
+#   - nightly-verify.yml runs the full `make verify` (fmt + clippy + test) once
+#     a day on the self-hosted Apple Silicon runner and files an issue when it
+#     fails. It is a backstop against a red `main`, not a PR gate; see #939 for
+#     the two deterministic failures that sat on `main` before it existed, and
+#     for why it is nightly rather than per-PR.
+#
+# Quality gate still lives locally at PR time. Pre-push checklist:
 #   make verify         # fmt + clippy(metal,accelerate, -D warnings) + test(release)
 #   make verify-clean   # same, after `cargo clean` — use when clippy's
 #                       # per-crate cache may be hiding a regression
