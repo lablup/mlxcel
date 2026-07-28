@@ -250,15 +250,25 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::GptNeoX => "gpt_neox",
         // Helium is structurally a shardable dense Llama, but TP is refused for
         // it on purpose and this arm only keeps the dispatch table total. The
-        // tensor-parallel runtime builds its per-rank model by parsing
-        // `config.json` straight into `llama3::ModelArgs`, and
-        // `llama3::ModelArgs::rope_traditional` is deliberately not
-        // deserializable, so a sharded Helium would silently rotate split-half
-        // pairs while the single-process path rotates interleaved pairs. The
         // refusal comes from `validate_supported_runtime`, whose
         // `runtime_kind_for` match has no arm for `ModelType::Helium` and so
-        // returns `None`. Enabling TP here means threading the flag through the
-        // rank-local config first.
+        // returns `None`.
+        //
+        // The original reason (`llama3::ModelArgs::rope_traditional` was not
+        // deserializable) no longer holds: #931 made the field parse from
+        // `config.json`, and `local_llama_args` clones the parsed args into
+        // every rank, which `tensor_parallel_llama_propagates_rope_traditional_
+        // to_every_rank` pins. The refusal survives the change for a different
+        // reason. Helium's convention is fixed in upstream code, not in its
+        // config: upstream builds `nn.RoPE(..., traditional=True)` and the
+        // published `config.json` carries no `rope_traditional` key at all, so
+        // `helium::ModelArgs::to_llama3_args` supplies it. The TP runtime parses
+        // `config.json` straight into `llama3::ModelArgs` and never goes through
+        // that conversion, so a sharded Helium would still parse `false` and
+        // still rotate split-half against a single-process path that rotates
+        // interleaved. Enabling TP for Helium means routing the rank-local
+        // config through `to_llama3_args`, which is a change to how the runtime
+        // builds its config and not something deserializing a key can deliver.
         ModelType::Helium => "helium",
         ModelType::StarCoder2 => "starcoder2",
         ModelType::Mellum => "mellum",

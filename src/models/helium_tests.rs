@@ -294,24 +294,24 @@ fn to_llama3_args_asks_the_shared_decoder_for_traditional_rope() {
 }
 
 #[test]
-fn a_llama_config_cannot_turn_on_traditional_rope_through_json() {
-    // `rope_traditional` is `#[serde(skip)]` on purpose. Every family that
-    // already uses this decoder rotates split-half, and a checkpoint author must
-    // not be able to change how an existing checkpoint decodes by adding a key.
-    let args: crate::models::llama3::ModelArgs = serde_json::from_str(
-        r#"{
-            "model_type": "llama",
-            "hidden_size": 64,
-            "num_hidden_layers": 1,
-            "intermediate_size": 128,
-            "num_attention_heads": 2,
-            "rms_norm_eps": 1e-5,
-            "vocab_size": 32,
-            "rope_traditional": true
-        }"#,
-    )
-    .unwrap();
-    assert!(!args.rope_traditional);
+fn helium_still_needs_the_conversion_because_its_config_omits_the_key() {
+    // #931 made `llama3::ModelArgs::rope_traditional` deserializable, which
+    // could look like it makes `to_llama3_args` redundant. It does not: Helium's
+    // convention is fixed in upstream code, so the published `config.json`
+    // carries no `rope_traditional` key and parsing it directly yields `false`.
+    // The conversion is what supplies the flag, and this pins that the two are
+    // not interchangeable. The parse itself is covered in `llama3_tests.rs`.
+    assert!(
+        !HELIUM_1_PREVIEW_2B_CONFIG.contains("rope_traditional"),
+        "the pinned upstream config must not declare the key, or this test proves nothing"
+    );
+    let direct: crate::models::llama3::ModelArgs =
+        serde_json::from_str(HELIUM_1_PREVIEW_2B_CONFIG).unwrap();
+    assert!(
+        !direct.rope_traditional,
+        "parsing a Helium config straight into the shared args cannot recover the convention"
+    );
+    assert!(helium_1_preview_2b().to_llama3_args().rope_traditional);
 }
 
 #[test]
@@ -334,7 +334,7 @@ fn traditional_and_split_half_rope_are_different_rotations() {
 }
 
 #[test]
-fn attention_carries_the_traditional_flag_only_for_helium() {
+fn attention_carries_the_traditional_flag_from_its_args() {
     let args = tiny_args();
     let weights = tiny_weights(&args);
 
@@ -348,7 +348,7 @@ fn attention_carries_the_traditional_flag_only_for_helium() {
     let llama = Attention::from_weights(&weights, &llama_args, "model.layers.0.self_attn").unwrap();
     assert!(
         !llama.rope_traditional,
-        "every pre-Helium family must keep the split-half rotation"
+        "args that do not ask for the interleaved rotation must get the split-half one"
     );
 }
 

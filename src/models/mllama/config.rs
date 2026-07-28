@@ -74,6 +74,15 @@ impl MllamaTextConfig {
     /// layers. The self-attention layers are byte-for-byte the standard Llama-3
     /// block (fused QKV, plain RoPE with `base = rope_theta`), so they reuse the
     /// existing `llama3::TransformerBlock` loader.
+    ///
+    /// This builds a synthetic config object rather than forwarding the parsed
+    /// struct, so a key that is not named here cannot reach the shared decoder
+    /// no matter what the checkpoint declares. `rope_traditional` is named for
+    /// exactly that reason: [`MllamaTextConfig`] has always deserialized it, but
+    /// until #931 it was dropped here, so an `mllama` checkpoint declaring the
+    /// key rotated split-half in the self-attention layers while its own config
+    /// said otherwise. The cross-attention layers are unaffected either way,
+    /// since they attend to vision features and apply no RoPE at all.
     pub fn to_llama3_args(&self) -> crate::models::llama3::ModelArgs {
         let mut text_config = serde_json::json!({
             "model_type": self.model_type,
@@ -86,6 +95,7 @@ impl MllamaTextConfig {
             "vocab_size": self.vocab_size,
             "head_dim": self.head_dim,
             "rope_theta": self.rope_theta,
+            "rope_traditional": self.rope_traditional,
             "tie_word_embeddings": self.tie_word_embeddings,
         });
         if let Some(q) = &self.quantization {
@@ -311,6 +321,24 @@ mod tests {
         assert_eq!(cfg.vision_config.num_patches(), 1601);
         assert_eq!(cfg.vision_config.head_dim(), 80);
         assert_eq!(cfg.vision_config.supported_aspect_ratios.len(), 8);
+    }
+
+    #[test]
+    fn to_llama3_args_forwards_the_rope_convention() {
+        // `to_llama3_args` rebuilds a config object from a fixed key list, so a
+        // key it does not name cannot reach the self-attention layers no matter
+        // what the checkpoint declares. `rope_traditional` was dropped there
+        // until #931, which meant an `mllama` checkpoint declaring it rotated
+        // split-half against its own config. Both directions are pinned, since
+        // the default is what every published checkpoint relies on.
+        let declared: MllamaTextConfig =
+            serde_json::from_str(r#"{ "rope_traditional": true }"#).expect("valid text config");
+        assert!(declared.rope_traditional);
+        assert!(declared.to_llama3_args().rope_traditional);
+
+        let default: MllamaTextConfig = serde_json::from_str("{}").expect("defaults");
+        assert!(!default.rope_traditional);
+        assert!(!default.to_llama3_args().rope_traditional);
     }
 
     #[test]

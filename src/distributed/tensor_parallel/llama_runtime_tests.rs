@@ -52,8 +52,10 @@ fn make_test_model_args() -> LlamaModelArgs {
         rope_scaling: None,
         quantization: None,
         tie_word_embeddings: false,
-        // Every Llama-family checkpoint rotates split-half; only the Helium
-        // loader sets this.
+        // Every published Llama-family checkpoint rotates split-half, and none
+        // declares the key, so this is the shape the runtime actually sees. The
+        // other direction is covered by
+        // `tensor_parallel_llama_propagates_rope_traditional_to_every_rank`.
         rope_traditional: false,
     }
 }
@@ -924,6 +926,78 @@ fn local_llama_args_preserves_computed_head_dim_when_config_omits_it() {
 
     assert_eq!(local.head_dim, Some(64));
     assert_eq!(local.num_attention_heads, 7);
+}
+
+#[test]
+fn tensor_parallel_llama_propagates_rope_traditional_to_every_rank() {
+    // #931 made `rope_traditional` deserializable, which puts the flag on the
+    // tensor-parallel path for the first time: `from_model_dir` parses
+    // `config.json` straight into the shared args and `local_llama_args` clones
+    // them per rank. That the clone carries the flag is obvious from reading the
+    // code and is exactly the kind of thing that stops being true silently, so
+    // it is asserted rather than inferred.
+    //
+    // The failure this guards against is invisible from the output: a rank that
+    // rotated split-half while its peers rotated interleaved would still produce
+    // correctly shaped activations and a fluent result, since the two
+    // conventions differ only in values.
+    let config_str = crate::models::sanitize_config_json(
+        r#"{
+            "model_type": "llama",
+            "hidden_size": 4,
+            "num_hidden_layers": 1,
+            "intermediate_size": 8,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+            "head_dim": 2,
+            "rms_norm_eps": 1e-5,
+            "rope_theta": 10000.0,
+            "vocab_size": 8,
+            "rope_traditional": true
+        }"#,
+    );
+    let args: LlamaModelArgs = serde_json::from_str(&config_str).unwrap();
+    assert!(
+        args.rope_traditional,
+        "the runtime parses config.json with no conversion step, so the key must survive the parse"
+    );
+
+    let plan = generate_shard_plan(
+        "llama",
+        args.num_hidden_layers,
+        &ShardConfig::with_tp_size(2),
+    )
+    .unwrap();
+    assert!(
+        local_llama_args(&args, &plan).unwrap().rope_traditional,
+        "the rank-local config must keep the convention while it edits the sharded dimensions"
+    );
+
+    let weights = make_test_weight_map();
+    let tp = TensorParallelLlamaModel::from_full_weights(&args, &weights, &plan).unwrap();
+    assert_eq!(tp.ranks.len(), plan.tp_size);
+    for (rank, model) in tp.ranks.iter().enumerate() {
+        assert_eq!(model.layers.len(), args.num_hidden_layers);
+        for (layer, block) in model.layers.iter().enumerate() {
+            assert!(
+                block.self_attn.rope_traditional,
+                "rank {rank} layer {layer} would rotate split-half against its peers"
+            );
+        }
+    }
+
+    // The default direction, on the same plan: nothing invents the flag.
+    let mut split_half = args.clone();
+    split_half.rope_traditional = false;
+    let split_half_tp =
+        TensorParallelLlamaModel::from_full_weights(&split_half, &weights, &plan).unwrap();
+    assert!(
+        split_half_tp
+            .ranks
+            .iter()
+            .flat_map(|model| model.layers.iter())
+            .all(|block| !block.self_attn.rope_traditional)
+    );
 }
 
 #[test]

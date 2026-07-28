@@ -66,18 +66,48 @@ pub struct ModelArgs {
     /// Rotate interleaved channel pairs `(2i, 2i+1)` instead of the split-half
     /// pairs `(i, i + dims/2)`.
     ///
-    /// Deliberately **not** deserialized. Every family that reaches this loader
-    /// today rotates split-half, and a checkpoint author who writes
-    /// `"rope_traditional": true` into a Llama `config.json` must not be able to
-    /// silently change how an existing checkpoint decodes. The flag is set
-    /// programmatically by the loader of a family whose upstream definition
-    /// fixes it, which is currently only [`crate::models::helium`] (upstream
-    /// builds `nn.RoPE(head_dim, traditional=True, base=rope_theta)`).
+    /// Deserialized from `config.json`, defaulting to `false`. This mirrors the
+    /// reference implementation in
+    /// [`mlx_lm/models/llama.py`](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/llama.py),
+    /// whose `ModelArgs` declares `rope_traditional: bool = False` and passes it
+    /// straight into `initialize_rope`, so a checkpoint that declares the key
+    /// now decodes here the way it decodes upstream instead of being silently
+    /// rotated with the other convention.
+    ///
+    /// The default carries every existing checkpoint unchanged: no
+    /// `mlx-community` Llama, Qwen2 or Qwen2.5 checkpoint declares the key, so
+    /// they all keep the split-half rotation they load with today.
+    ///
+    /// A loader may still set the flag programmatically for a family whose
+    /// upstream definition fixes the convention in code rather than in the
+    /// config. That is what [`crate::models::helium`] does (upstream builds
+    /// `nn.RoPE(head_dim, traditional=True, base=rope_theta)` and its
+    /// `config.json` carries no `rope_traditional` key at all), which is why
+    /// deserializing the key does not make `helium::ModelArgs::to_llama3_args`
+    /// redundant.
+    ///
+    /// An explicit `null` parses as `false` rather than as an error. Until
+    /// #931 this field was `#[serde(skip)]`, which ignored whatever the key
+    /// held, so a config carrying `"rope_traditional": null` loaded fine;
+    /// tolerating it keeps such a config loading instead of turning a
+    /// previously-ignored key into a load failure. It also matches the
+    /// reference, where a `None` is falsy and selects the split-half rotation.
     ///
     /// See [`Attention::forward`] for why setting this also disables the two
     /// fused RoPE fast paths.
-    #[serde(skip)]
+    #[serde(default, deserialize_with = "deserialize_rope_traditional")]
     pub rope_traditional: bool,
+}
+
+/// Parse `rope_traditional`, mapping an explicit JSON `null` to `false`.
+///
+/// See [`ModelArgs::rope_traditional`] for why this one field tolerates `null`
+/// where a plain `bool` would reject it.
+fn deserialize_rope_traditional<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<bool>::deserialize(deserializer)?.unwrap_or(false))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -126,6 +156,60 @@ impl ModelArgs {
     }
 }
 
+/// Opts a quantized prefill into `fused_causal_prefill_attention`. Read by the
+/// gate in [`Attention::forward`].
+pub(crate) const FUSED_CAUSAL_PREFILL_ENV: &str = "MLXCEL_ENABLE_FUSED_CAUSAL_PREFILL_ATTENTION";
+
+/// Opts a quantized projection into `fused_qkv_project_split_rope`. Read inside
+/// [`FusedQKVLinear::forward_split_rope`], not here.
+pub(crate) const FUSED_QKV_SPLIT_ROPE_ENV: &str = "MLXCEL_ENABLE_FUSED_QKV_SPLIT_ROPE";
+
+/// Both environment variables that opt a quantized checkpoint into a fused RoPE
+/// launcher.
+///
+/// Both launchers hardcode the split-half rotation inside C++ and take no flag,
+/// so a traditional-RoPE checkpoint is routed around them. Listing them once
+/// keeps the gate in [`Attention::forward`], the notice in
+/// [`Attention::from_weights`] and the tests reading the same set.
+pub(crate) const FUSED_ROPE_ENV_VARS: [&str; 2] =
+    [FUSED_CAUSAL_PREFILL_ENV, FUSED_QKV_SPLIT_ROPE_ENV];
+
+/// Print, at most once per process, that a traditional-RoPE checkpoint has been
+/// routed around a fused RoPE launcher that an environment variable asked for.
+///
+/// Correctness does not depend on this: [`Attention::forward`] bypasses the
+/// launchers regardless. What it buys is that the fallback is reported rather
+/// than silent, which is the one real cost the bypass carries. The notice fires
+/// only when both conditions hold, so a user who never sets the variables never
+/// sees it.
+///
+/// `eprintln!` rather than `tracing::warn!` on purpose: only the server installs
+/// a `tracing` subscriber, so a `warn!` here is a no-op in the `mlxcel` CLI,
+/// which is where this is most likely to be read.
+fn report_fused_rope_bypass_once() {
+    static NOTICE: std::sync::Once = std::sync::Once::new();
+
+    let requested: Vec<&str> = FUSED_ROPE_ENV_VARS
+        .iter()
+        .copied()
+        .filter(|name| std::env::var(name).is_ok())
+        .collect();
+    if requested.is_empty() {
+        return;
+    }
+
+    NOTICE.call_once(|| {
+        eprintln!(
+            "note: this checkpoint sets rope_traditional, so the fused RoPE fast path(s) \
+             requested by {} are bypassed. Those launchers apply the split-half rotation inside \
+             C++ and cannot express the interleaved one, so using them would silently mis-rotate \
+             attention. The graph path is used instead; it applies the correct rotation and costs \
+             a handful of extra FFI calls per layer, not GPU work.",
+            requested.join(" and ")
+        );
+    });
+}
+
 // Attention.
 pub struct Attention {
     /// Fused QKV projection: Q, K, V weights concatenated along output dim.
@@ -138,8 +222,9 @@ pub struct Attention {
     pub scale: f32,
     pub rope_dims: i32,
     pub rope_base: f32,
-    /// See [`ModelArgs::rope_traditional`]. `false` for every family that used
-    /// this attention before Helium, so their graphs are unchanged.
+    /// See [`ModelArgs::rope_traditional`]. `false` unless the checkpoint's
+    /// `config.json` declares the key or a loader sets it programmatically, so
+    /// every family that used this attention before Helium keeps its graph.
     pub rope_traditional: bool,
 }
 
@@ -177,10 +262,46 @@ impl Attention {
     ///
     /// Both are therefore gated on `!self.rope_traditional`, so a
     /// traditional-RoPE model always takes the graph fallback, which receives
-    /// the flag. Neither fast path is on by default, so this costs those models
-    /// nothing that is enabled today. Teaching the two launchers the flag would
-    /// be the better long-term fix, but it is a cxx bridge signature change, and
-    /// correctness must not wait on it.
+    /// the flag.
+    ///
+    /// ## Why the bypass stays, now that the flag is config-driven (#931)
+    ///
+    /// #930 introduced the bypass for a single family whose flag was fixed at
+    /// load time and called extending the cxx bridge the better long-term fix.
+    /// Deserializing the key (#931) makes the flag reachable from any Llama,
+    /// Qwen2 or Qwen2.5 `config.json`, which is the point at which that call had
+    /// to be re-made rather than inherited. The bypass stays, for reasons that
+    /// are about what the launchers actually are:
+    ///
+    /// - Neither launcher is a fused kernel. Read the two C++ bodies: each is a
+    ///   `quantized_matmul`, three `slice`s, `reshape`, `transpose` and
+    ///   `fast::rope`, which is the same MLX graph the Rust fallback builds op
+    ///   for op. What they save is roughly eleven cxx crossings per layer per
+    ///   forward, not GPU work. So the "silent performance cliff" a bypass would
+    ///   open is FFI call overhead, not throughput, and it is invisible next to
+    ///   the quantized matmuls on either side of it.
+    /// - Both are opt-in behind an environment variable and off by default, so
+    ///   no configuration shipped today loses anything.
+    /// - The flag would have to be threaded through a signature shared with
+    ///   `fused_qkv_project_and_rope` and `fused_qkv_project_split_norm_rope`,
+    ///   which hardcode the same constant and serve other families. Changing two
+    ///   of the four leaves an inconsistent surface; changing all four adds a
+    ///   parameter that is `false` at every call site in the tree and puts
+    ///   families that are not part of this fix into the blast radius.
+    /// - It could not be validated where it matters. No checkpoint in existence
+    ///   pairs `rope_traditional` with the quantized Llama path, so an extended
+    ///   bridge would ship on synthetic evidence, while the bypass is provable
+    ///   from the launcher's own behavior (see
+    ///   `the_fused_qkv_rope_launcher_cannot_express_traditional_rope` in
+    ///   `helium_tests.rs`, which pins exactly that).
+    ///
+    /// What the bypass was missing was observability, and that is fixed rather
+    /// than argued away: [`Attention::from_weights`] prints a one-time notice on
+    /// stderr when a traditional-RoPE checkpoint is loaded while one of the two
+    /// environment variables asked for a fused path. The fallback is then a
+    /// reported decision instead of a silent one. Revisit this if either
+    /// launcher is ever promoted to default-on, or if either grows a genuine
+    /// kernel behind it; both are conditions the notice makes visible.
     pub fn forward(
         &self,
         x: &MlxArray,
@@ -196,7 +317,7 @@ impl Attention {
             && mask.is_none()
             && cache.is_empty()
             && !self.rope_traditional
-            && std::env::var("MLXCEL_ENABLE_FUSED_CAUSAL_PREFILL_ATTENTION").is_ok()
+            && std::env::var(FUSED_CAUSAL_PREFILL_ENV).is_ok()
             && let (Some(qkv_weight), Some(o_weight)) = (
                 self.qkv_proj.qkv_proj.as_quantized_weight(),
                 self.o_proj.as_quantized_weight(),
@@ -539,8 +660,11 @@ impl Attention {
     /// Build the dense attention block from a checkpoint.
     ///
     /// `rope_traditional` is carried over from [`ModelArgs`], where it is
-    /// `#[serde(skip)]`, so it is `false` for every family whose config is
-    /// parsed from JSON and `true` only when a loader sets it programmatically.
+    /// deserialized from `config.json` with a default of `false` and may also be
+    /// set programmatically by a loader whose family fixes the convention in
+    /// code (Helium). This is also where the one-time fused-path notice is
+    /// emitted, because it is the only place that sees the flag off the hot
+    /// path; [`Attention::forward`] explains what it reports and why.
     ///
     /// Used by: Llama (`llama` / `mistral` checkpoints), Qwen2 / Qwen2.5 (which
     /// re-export this attention), Helium (which reuses it with
@@ -556,6 +680,10 @@ impl Attention {
     ) -> Result<Self, String> {
         let group_size = args.group_size();
         let bits = args.bits();
+
+        if args.rope_traditional {
+            report_fused_rope_bypass_once();
+        }
 
         let head_dim = args.head_dim() as i32;
         let num_heads = args.num_attention_heads as i32;
@@ -999,3 +1127,7 @@ impl LanguageModel for Llama3Model {
         true
     }
 }
+
+#[cfg(test)]
+#[path = "llama3_tests.rs"]
+mod tests;
