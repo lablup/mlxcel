@@ -558,6 +558,68 @@ impl PhiMoeModel {
     }
 }
 
+// MoE Implementation Details.
+impl SparseMoeBlock {
+    pub fn from_weights(
+        weights: &WeightMap,
+        args: &ModelArgs,
+        prefix: &str,
+    ) -> Result<Self, String> {
+        let router = UnifiedLinear::from_weights(
+            weights,
+            &format!("{}.gate", prefix),
+            args.group_size(),
+            args.bits(),
+        )?;
+
+        let experts = crate::models::switch_layers::SwitchGLU::from_weights(
+            weights,
+            &format!("{}.switch_mlp", prefix),
+            args.group_size(),
+            args.bits(),
+        )?;
+
+        Ok(Self {
+            router,
+            experts,
+            num_experts_per_tok: args.num_experts_per_tok,
+        })
+    }
+}
+
+// Helper Functions.
+fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray>, String> {
+    weights
+        .get(name)
+        .map(|w| mlxcel_core::copy(w))
+        .ok_or_else(|| format!("Weight not found: {}", name))
+}
+
+// LanguageModel trait implementation.
+impl LanguageModel for PhiMoeModel {
+    fn forward(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        PhiMoeModel::forward(self, input_ids, caches, mask)
+    }
+
+    fn make_caches(&self) -> Vec<KVCache> {
+        PhiMoeModel::make_caches(self)
+    }
+
+    fn num_layers(&self) -> usize {
+        self.layers.len()
+    }
+
+    fn eos_token_ids(&self) -> Vec<i32> {
+        // PhiMoE EOS token (commonly <|endoftext|> = 32000)
+        vec![32000]
+    }
+}
+
 #[cfg(test)]
 mod sanitize_tests {
     use super::*;
@@ -639,67 +701,5 @@ mod sanitize_tests {
                 .any(|k| k.contains("block_sparse_moe.experts.")),
             "the per-expert keys must not survive stacking"
         );
-    }
-}
-
-// MoE Implementation Details.
-impl SparseMoeBlock {
-    pub fn from_weights(
-        weights: &WeightMap,
-        args: &ModelArgs,
-        prefix: &str,
-    ) -> Result<Self, String> {
-        let router = UnifiedLinear::from_weights(
-            weights,
-            &format!("{}.gate", prefix),
-            args.group_size(),
-            args.bits(),
-        )?;
-
-        let experts = crate::models::switch_layers::SwitchGLU::from_weights(
-            weights,
-            &format!("{}.switch_mlp", prefix),
-            args.group_size(),
-            args.bits(),
-        )?;
-
-        Ok(Self {
-            router,
-            experts,
-            num_experts_per_tok: args.num_experts_per_tok,
-        })
-    }
-}
-
-// Helper Functions.
-fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray>, String> {
-    weights
-        .get(name)
-        .map(|w| mlxcel_core::copy(w))
-        .ok_or_else(|| format!("Weight not found: {}", name))
-}
-
-// LanguageModel trait implementation.
-impl LanguageModel for PhiMoeModel {
-    fn forward(
-        &self,
-        input_ids: &MlxArray,
-        caches: &mut [KVCache],
-        mask: Option<&MlxArray>,
-    ) -> UniquePtr<MlxArray> {
-        PhiMoeModel::forward(self, input_ids, caches, mask)
-    }
-
-    fn make_caches(&self) -> Vec<KVCache> {
-        PhiMoeModel::make_caches(self)
-    }
-
-    fn num_layers(&self) -> usize {
-        self.layers.len()
-    }
-
-    fn eos_token_ids(&self) -> Vec<i32> {
-        // PhiMoE EOS token (commonly <|endoftext|> = 32000)
-        vec![32000]
     }
 }
