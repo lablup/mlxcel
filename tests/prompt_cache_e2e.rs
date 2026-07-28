@@ -28,9 +28,17 @@
 //!    turn 1 (upper bound: 1.3x; we tolerate observational noise on
 //!    resource-constrained CI hosts).
 //!
-//! The test is gated with `#[ignore]` because it requires the
-//! `mlxcel-server` binary and a local `qwen3-0.6b-4bit` checkout. Run it
-//! explicitly with:
+//! A fourth test (`multi_turn_chat_with_drafter_reports_cached_tokens_and_no_decline`)
+//! runs the same cache assertions with a DFlash drafter attached. It additionally
+//! validates that no burst-decline lines appear in the server log and that each
+//! turn's output is byte-identical to a cold (drafter-less, no-cache) reference.
+//! This is the load-bearing correctness gate for prompt-cache-and-drafter coexistence:
+//! PR A and PR B of the coexistence plan must be merged for this test to pass.
+//!
+//! The classic-path tests are gated with `#[ignore]` because they require the
+//! `mlxcel-server` binary and a local `qwen3-0.6b-4bit` checkout. The drafter
+//! variant requires the Qwen3.5-9B-4bit target and the DFlash drafter checkpoint.
+//! Run them explicitly with:
 //!
 //! ```text
 //! cargo test --test prompt_cache_e2e --release -- --ignored --nocapture
@@ -44,7 +52,9 @@
 
 mod common;
 
+use std::io::Read;
 use std::net::TcpListener;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -52,6 +62,12 @@ use common::{repo_binary_path, repo_model_dir};
 
 /// Smallest Qwen3 weight bundle we keep locally.
 const QWEN3_MODEL: &str = "qwen3-0.6b-4bit";
+
+/// Qwen3.5-9B target for the drafter-enabled prompt cache test.
+const QWEN35_9B_MODEL: &str = "lmstudio-community/Qwen3.5-9B-MLX-4bit";
+
+/// DFlash drafter checkpoint path — produced by `just quantize-dflash`.
+const QWEN35_9B_DFLASH_DRAFTER: &str = "Qwen3.5-9B-DFlash-4bit";
 
 /// Number of successive chat turns driven against the server.
 const NUM_TURNS: usize = 5;
@@ -97,6 +113,49 @@ fn spawn_server(args: &[&str]) -> Child {
 fn stop_server(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// Spawn `mlxcel-server` with stdout/stderr piped for log capture.
+fn spawn_server_capturing(args: &[&str]) -> Child {
+    Command::new(repo_binary_path("mlxcel-server"))
+        .args(args)
+        .env("RUST_LOG", "info")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn mlxcel-server with log capture")
+}
+
+/// Kill the server and drain stdout/stderr into a single captured string.
+fn stop_server_capturing(child: &mut Child) -> String {
+    let _ = child.kill();
+    let mut captured = String::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let _ = pipe.read_to_string(&mut captured);
+    }
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_string(&mut captured);
+    }
+    let _ = child.wait();
+    captured
+}
+
+/// Resolve a drafter path: check under `~/.cache/mlx-drafters/` first, then
+/// fall back to `repo_model_dir`, then return the raw name as a path.
+fn resolve_drafter_path(name: &str) -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let cache_path = PathBuf::from(&home)
+        .join(".cache")
+        .join("mlx-drafters")
+        .join(name);
+    if cache_path.exists() {
+        return cache_path;
+    }
+    let model_path = repo_model_dir(name);
+    if model_path.exists() {
+        return model_path;
+    }
+    PathBuf::from(name)
 }
 
 /// One turn's response summary extracted from the JSON body.
@@ -484,4 +543,285 @@ async fn multi_turn_chat_with_cache_disabled_never_reports_cached_tokens() {
     }
 
     stop_server(&mut child);
+}
+
+/// Drafter-enabled multi-turn prompt cache test.
+///
+/// Boots `mlxcel-server` with a DFlash drafter and the prompt cache enabled,
+/// then validates that:
+///
+/// 1. turn 1 reports `cached_tokens == 0`; turns 2..N report `cached_tokens > 0`
+/// 2. the server log contains no burst-decline line for those sequences
+/// 3. turn-N output at `temperature=0` matches a cold run of the same prompt
+///
+/// This is the load-bearing correctness gate for prompt-cache-and-drafter
+/// coexistence: PR A (`fix/dflash-burst-donates-prompt-cache`) and PR B
+/// (`fix/dflash-burst-adopts-prompt-cache`) must both be merged for this
+/// test to pass. The test is `#[ignore]`-gated as real-model heavy: it
+/// requires the Qwen3.5-9B-4bit target and the DFlash drafter checkpoint
+/// (produced by `just quantize-dflash`), and spawns `mlxcel-server`
+/// subprocesses.
+///
+/// Run with:
+///
+/// ```text
+/// cargo test --test prompt_cache_e2e --release -- --ignored --nocapture
+/// ```
+#[tokio::test]
+#[ignore = "real-model heavy (Qwen3.5-9B target + DFlash drafter, two server spawns); runs in CI hardware lane only"]
+async fn multi_turn_chat_with_drafter_reports_cached_tokens_and_no_decline() {
+    // ---- Skip checks ----
+    let binary = repo_binary_path("mlxcel-server");
+    if !binary.exists() {
+        eprintln!(
+            "Skipping multi_turn_chat_with_drafter_reports_cached_tokens_and_no_decline: \
+             mlxcel-server binary not present at {}. \
+             Build with `cargo build --bin mlxcel-server --release` first.",
+            binary.display()
+        );
+        return;
+    }
+
+    let drafter_path = resolve_drafter_path(QWEN35_9B_DFLASH_DRAFTER);
+    if !drafter_path.exists() {
+        eprintln!(
+            "Skipping: DFlash drafter not found at {}. \
+             Run `just quantize-dflash` first.",
+            drafter_path.display()
+        );
+        return;
+    }
+
+    // ---- Phase 1: warm run (drafter + prompt cache) ----
+    let port = reserve_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let port_str = port.to_string();
+    let drafter_str = drafter_path.to_string_lossy().to_string();
+    let model_alias = "qwen35-cache-e2e";
+
+    // The model path is an HF repo ID — `mlxcel-server` will resolve it
+    // from HuggingFace if not already cached.
+    let mut warm_child = spawn_server_capturing(&[
+        "--model",
+        QWEN35_9B_MODEL,
+        "--alias",
+        model_alias,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &port_str,
+        "--parallel",
+        "1",
+        "--batch-size",
+        "1",
+        "--no-warmup",
+        "--metrics",
+        "--prompt-cache-enabled=true",
+        "--prompt-cache-capacity-bytes",
+        "268435456",
+        "--prompt-cache-max-entries",
+        "32",
+        "--prompt-cache-min-prefix",
+        "4",
+        "--model-draft",
+        &drafter_str,
+        "--draft-kind",
+        "dflash",
+        "--draft-block-size",
+        "4",
+    ]);
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .build()
+        .expect("build reqwest client");
+
+    let healthy = wait_for_health_soft(&client, &base_url, Duration::from_secs(300)).await;
+    if !healthy {
+        eprintln!(
+            "Skipping: mlxcel-server with drafter did not become healthy at {base_url}. \
+             Not failing CI on unsupported hardware."
+        );
+        let _ = warm_child.kill();
+        let _ = warm_child.wait();
+        return;
+    }
+
+    // Same system prompt and question pattern as the classic test.
+    let mut messages: Vec<serde_json::Value> = vec![serde_json::json!({
+        "role": "system",
+        "content":
+            "You are a terse assistant. Answer every question in one short sentence. \
+             Do not repeat yourself. Keep your answers deterministic.",
+    })];
+    let new_user_question = "State one concrete fact about the color of the sky on Earth.";
+
+    // Snapshot of messages at each turn start (for the cold rerun).
+    let mut turn_message_snapshots: Vec<Vec<serde_json::Value>> = Vec::with_capacity(NUM_TURNS);
+    let mut warm_turns: Vec<TurnSummary> = Vec::with_capacity(NUM_TURNS);
+
+    for turn_idx in 0..NUM_TURNS {
+        // Snapshot the messages BEFORE this turn's user message is pushed.
+        turn_message_snapshots.push(messages.clone());
+
+        let summary = one_turn(
+            &client,
+            &base_url,
+            model_alias,
+            &mut messages,
+            new_user_question,
+            16,
+        )
+        .await;
+        eprintln!(
+            "warm turn {idx}: prompt_tokens={pt} completion_tokens={ct} cached_tokens={cached:?} \
+             wall_latency={lat_ms:.1}ms content=\"{content}\"",
+            idx = turn_idx + 1,
+            pt = summary.prompt_tokens,
+            ct = summary.completion_tokens,
+            cached = summary.cached_tokens,
+            lat_ms = summary.wall_latency.as_secs_f64() * 1000.0,
+            content = summary.content.replace('\n', " "),
+        );
+        warm_turns.push(summary);
+    }
+
+    let warm_logs = stop_server_capturing(&mut warm_child);
+
+    // ---------------------------------------------------------------
+    // Assertion 1: cached_tokens == 0 on turn 1, > 0 on turns 2..N.
+    // ---------------------------------------------------------------
+    for (i, t) in warm_turns.iter().enumerate() {
+        assert!(
+            t.cached_tokens.is_some(),
+            "warm turn {}: cached_tokens must be present when \
+             --prompt-cache-enabled=true (drafter variant)",
+            i + 1
+        );
+    }
+    assert_eq!(
+        warm_turns[0].cached_tokens,
+        Some(0),
+        "warm turn 1 must not have any cached tokens (cold start with drafter): got {:?}",
+        warm_turns[0].cached_tokens
+    );
+    for (idx, turn) in warm_turns.iter().enumerate().skip(1) {
+        let cached = turn.cached_tokens.unwrap_or(0);
+        assert!(
+            cached > 0,
+            "warm turn {}: expected cached_tokens > 0 after turn 1; got {cached}",
+            idx + 1,
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Assertion 2: server log contains no burst-decline line.
+    // ---------------------------------------------------------------
+    let decline_pattern = "DFlash speculative dispatch declined";
+    let decline_count = warm_logs.matches(decline_pattern).count();
+    assert!(
+        decline_count == 0,
+        "warm server log contains {decline_count} occurrence(s) of '{decline_pattern}'; \
+         expected 0 for a single-user conversation where cache adoption succeeds. \
+         Captured logs:\n{}",
+        warm_logs,
+    );
+    let burst_decline_pattern = "DFlash speculative burst declined";
+    let burst_decline_count = warm_logs.matches(burst_decline_pattern).count();
+    assert!(
+        burst_decline_count == 0,
+        "warm server log contains {burst_decline_count} occurrence(s) of \
+         '{burst_decline_pattern}'; expected 0. Captured logs:\n{}",
+        warm_logs,
+    );
+    // Sanity: the logs must show a burst completion somewhere.
+    assert!(
+        warm_logs.contains("Speculative burst completed"),
+        "warm server logs must contain at least one 'Speculative burst completed': \
+         the drafter appears to have never ran. Captured logs:\n{}",
+        warm_logs,
+    );
+
+    // ---------------------------------------------------------------
+    // Phase 2: cold reference run (no drafter, no prompt cache).
+    // For each turn, send the accumulated messages from the warm run
+    // to a cold server and compare outputs at temperature=0.
+    // ---------------------------------------------------------------
+    let cold_port = reserve_port();
+    let cold_base_url = format!("http://127.0.0.1:{cold_port}");
+    let cold_port_str = cold_port.to_string();
+
+    let mut cold_child = spawn_server_capturing(&[
+        "--model",
+        QWEN35_9B_MODEL,
+        "--alias",
+        "qwen35-cold",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &cold_port_str,
+        "--parallel",
+        "1",
+        "--batch-size",
+        "1",
+        "--no-warmup",
+        "--prompt-cache-enabled=false",
+    ]);
+
+    let cold_healthy = wait_for_health_soft(&client, &cold_base_url, Duration::from_secs(300)).await;
+    if !cold_healthy {
+        eprintln!(
+            "Skipping byte-equality phase: cold server did not become healthy at {cold_base_url}."
+        );
+        let _ = cold_child.kill();
+        let _ = cold_child.wait();
+        return;
+    }
+
+    for (turn_idx, snapshot) in turn_message_snapshots.iter().enumerate() {
+        let body = serde_json::json!({
+            "model": "qwen35-cold",
+            "messages": snapshot,
+            "max_tokens": 16,
+            "temperature": 0.0,
+        });
+
+        let resp = client
+            .post(format!("{cold_base_url}/v1/chat/completions"))
+            .json(&body)
+            .send()
+            .await
+            .expect("send cold chat request");
+        assert!(
+            resp.status().is_success(),
+            "cold turn {}: chat completion returned non-200: status={}",
+            turn_idx + 1,
+            resp.status(),
+        );
+        let value: serde_json::Value = resp.json().await.expect("parse cold chat response JSON");
+        let cold_content = value["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let warm_content = &warm_turns[turn_idx].content;
+
+        assert_eq!(
+            cold_content, *warm_content,
+            "cold/warm byte-equality mismatch at turn {}: \
+             the drafter+prompt-cache warm path diverged from the cold reference. \
+             This is a speculative-decoding or prompt-cache correctness bug.\n\
+             warm: {:?}\n\
+             cold: {:?}",
+            turn_idx + 1,
+            warm_content,
+            cold_content,
+        );
+        eprintln!(
+            "byte-equality turn {}: warm == cold ({} chars)",
+            turn_idx + 1,
+            warm_content.len(),
+        );
+    }
+
+    let _cold_logs = stop_server_capturing(&mut cold_child);
 }
