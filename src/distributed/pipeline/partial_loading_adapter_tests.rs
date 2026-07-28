@@ -460,7 +460,7 @@ fn stage_filtered_fusion_is_noop_on_empty_stage_adapter() {
 }
 
 // ---------------------------------------------------------------------------
-// apply_stage_lora_adapter — the pipeline-parallel entry point
+// apply_stage_lora_adapter: the pipeline-parallel entry point
 //
 // This path never goes through `load_model_with_adapter`, so it needs its own
 // coverage of the base-weight layout guard rather than inheriting the non-PP

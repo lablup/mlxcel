@@ -261,7 +261,7 @@ struct Conv1dLayoutEvidence {
 /// The only usable signal is the fused QKV projection: `h.<N>.attn.c_attn.weight`
 /// is `[n_embd, 3 * n_embd]` on disk and `[3 * n_embd, n_embd]` once transposed,
 /// and the two can never be confused. That is what makes a whole-map verdict
-/// necessary as well as possible — the square `attn.c_proj` carries no layout
+/// necessary as well as possible: the square `attn.c_proj` carries no layout
 /// signal of its own, so only its `c_attn` sibling can say which way round it is
 /// stored. This is the same probe `Gpt2Layout::detect` uses, minus the config,
 /// which fusion does not have.
