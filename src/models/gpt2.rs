@@ -901,7 +901,7 @@ pub(crate) fn validate_embedding_table(
                 quantized.bits,
                 &quantized.mode,
             )
-            .map_err(|e| format!("{e} ({width_field} is {expected_cols})"))?;
+            .map_err(|e| format!("{e} (the model width came from {width_field})"))?;
         }
         None => {
             if !dim_eq(*cols, expected_cols) {

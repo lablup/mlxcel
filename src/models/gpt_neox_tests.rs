@@ -444,12 +444,12 @@ fn config_validation_rejects_a_layer_norm_eps_that_would_nan_every_hidden_state(
 
 #[test]
 fn config_validation_rejects_a_quantization_block_that_would_abort_an_mlx_kernel() {
-    // `group_size` and `bits` reach `quantized_matmul` and `dequantize`
-    // unchanged: `reconcile_quantization_layout` treats a non-positive pair as
-    // "insufficient shape info" and returns it as declared rather than
-    // correcting it. MLX then computes `packed_in * 32 / bits`, which divides by
-    // zero at 0 and collapses to zero above 32, and the throw that follows
-    // crosses the cxx bridge as an uncatchable `std::terminate`.
+    // MLX computes `packed_in * 32 / bits`, which divides by zero at 0 and
+    // collapses to zero above 32, and the throw that follows crosses the cxx
+    // bridge as an uncatchable `std::terminate`. Since issue #929
+    // `reconcile_quantization_layout` refuses such a pair itself, so this is the
+    // family-level early diagnostic rather than the only guard: it names GPT-NeoX
+    // and fires during config validation, before any tensor is touched.
     let hostile = [
         (r#""group_size": 64, "bits": 0"#, "bits"),
         (r#""group_size": 64, "bits": -4"#, "bits"),

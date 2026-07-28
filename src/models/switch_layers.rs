@@ -318,11 +318,31 @@ impl SwitchLinear {
                 let s_shape = mlxcel_core::array_shape(&scales);
                 let packed_in = *w_shape.last().unwrap_or(&0);
                 let num_groups = *s_shape.last().unwrap_or(&0);
-                let denom = num_groups * group_size;
-                let effective_bits = if denom > 0 && (packed_in * 32) % denom == 0 {
-                    let inferred = (packed_in * 32) / denom;
+
+                // A zero or absent last axis on either tensor used to be treated
+                // as "no layout signal, trust the caller", which let a plane of
+                // shape [E, out, 0] satisfy every arithmetic check below (0 == 0)
+                // and then abort inside `extract_quantized_matmul_dims` on the
+                // inner-dimension comparison. Present `.scales` means a real
+                // quantized tensor, so both axes must be real.
+                if packed_in < 1 || num_groups < 1 {
+                    return Err(format!(
+                        "{prefix}: stacked expert weight {w_shape:?} and scales {s_shape:?} must \
+                         both carry a positive last axis; a zero-length packed axis describes no \
+                         input width and aborts inside gather_qmm rather than failing at load"
+                    ));
+                }
+
+                // i64 throughout: `group_size` is bounded above by the guard, but
+                // `num_groups * group_size` is still a config-influenced multiply
+                // in a load path, and an unchecked i32 version wraps in release
+                // and panics in an overflow-checked build.
+                let denom = i64::from(num_groups) * i64::from(group_size);
+                let packed_bits = i64::from(packed_in) * 32;
+                let effective_bits = if denom > 0 && packed_bits % denom == 0 {
+                    let inferred = packed_bits / denom;
                     if (2..=8).contains(&inferred) {
-                        inferred
+                        i32::try_from(inferred).unwrap_or(bits)
                     } else {
                         bits
                     }
@@ -334,22 +354,32 @@ impl SwitchLinear {
                 // shapes solve to something outside the supported widths, which
                 // stores a triple MLX will reject. Refuse it here instead, using
                 // MLX's own predicate from `validate_quantized_input` so this
-                // fires exactly when the kernel would have thrown, and in i64 so
-                // the multiply cannot wrap on a large expert plane. Degenerate
-                // shapes (both last axes absent) evaluate to 0 == 0 and stay
-                // permissive, matching the dense reconciler.
-                let described = i64::from(packed_in) * 32 / i64::from(effective_bits);
-                let claimed = i64::from(num_groups) * i64::from(group_size);
-                if described != claimed {
+                // fires exactly when the kernel would have thrown.
+                let described = packed_bits / i64::from(effective_bits);
+                if described != denom {
                     return Err(format!(
                         "{prefix}: stacked expert weight {w_shape:?} and scales {s_shape:?} \
                          describe an input width of {described} at {effective_bits}-bit, but \
-                         {num_groups} groups at group_size {group_size} describe {claimed}. MLX \
+                         {num_groups} groups at group_size {group_size} describe {denom}. MLX \
                          checks exactly this in extract_quantized_matmul_dims before gather_qmm \
                          and throws on a mismatch, and that throw crosses the cxx bridge as an \
                          uncatchable abort at the first routed forward pass rather than a load \
                          error."
                     ));
+                }
+
+                // `validate_quantized_input` throws on a `biases` whose shape
+                // differs from `scales` as well, on the same infallible path.
+                if let Some(biases) = biases.as_ref() {
+                    let b_shape = mlxcel_core::array_shape(biases);
+                    if b_shape != s_shape {
+                        return Err(format!(
+                            "{prefix}: stacked expert biases {b_shape:?} must have the same shape \
+                             as the scales {s_shape:?}; MLX rejects a mismatch by throwing, which \
+                             crosses the cxx bridge as an uncatchable abort at the first routed \
+                             forward pass"
+                        ));
+                    }
                 }
 
                 Ok(Self::Quantized {
@@ -1184,6 +1214,27 @@ mod tests {
         let parts = sl.quantized_parts().expect("quantized");
         assert_eq!(parts.bits, 8);
         assert_eq!(parts.group_size, 64);
+
+        // A zero-length packed axis describes no input width. It used to satisfy
+        // every arithmetic check here (0 == 0) and then abort inside
+        // `extract_quantized_matmul_dims` on the inner-dimension comparison.
+        let empty_axis = stacked_quantized_experts(prefix, 3, 4, 0, 0);
+        let err = SwitchLinear::from_weights(&empty_axis, prefix, 64, 4)
+            .err()
+            .expect("a zero-length packed axis must fail at load");
+        assert!(err.contains("positive last axis"), "unhelpful error: {err}");
+
+        // MLX also throws when the zero points disagree in shape with the scales,
+        // on the same infallible path.
+        let mut bad_biases = stacked_quantized_experts(prefix, 3, 4, 8, 1);
+        bad_biases.insert(
+            format!("{prefix}.biases"),
+            mlxcel_core::from_slice_f32(&[0.0; 3 * 4 * 2], &[3, 4, 2]),
+        );
+        let err = SwitchLinear::from_weights(&bad_biases, prefix, 64, 4)
+            .err()
+            .expect("mis-shaped expert zero points must fail at load");
+        assert!(err.contains("same shape"), "unhelpful error: {err}");
     }
 
     #[test]

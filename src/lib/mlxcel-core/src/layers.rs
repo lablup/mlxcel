@@ -991,16 +991,32 @@ pub fn validate_quantization_params(group_size: i32, bits: i32) -> Result<(), St
              uncatchable abort at the first forward pass rather than a load error"
         ));
     }
-    if group_size < 1 {
+    if !(1..=MAX_QUANT_GROUP_SIZE).contains(&group_size) {
         return Err(format!(
-            "quantization.group_size ({group_size}) must be positive: it multiplies the scales \
-             width to reconstruct the input width inside every quantized kernel, and a \
-             non-positive value can match no real tensor, so MLX throws and that throw is an \
-             uncatchable abort rather than a load error"
+            "quantization.group_size ({group_size}) must be between 1 and {MAX_QUANT_GROUP_SIZE}: \
+             it multiplies the scales width to reconstruct the input width inside every quantized \
+             kernel, so a non-positive value can match no real tensor and an enormous one \
+             overflows that multiply. MLX evaluates scales.shape(-1) * group_size in C++ int, so \
+             an overflow there is undefined behavior reached before MLX can throw, and a throw \
+             would in any case cross the cxx bridge as an uncatchable abort rather than a load \
+             error"
         ));
     }
     Ok(())
 }
+
+/// Upper bound on a declared `group_size`.
+///
+/// This is an overflow bound, not an allowlist of the group sizes MLX supports.
+/// The largest group size any real checkpoint declares is 128 (MLX supports 16,
+/// 32, 64 and 128), and the widest model dimension in the supported set is under
+/// six figures, so 2^20 leaves four orders of magnitude of headroom over anything
+/// a genuine export can carry while keeping `num_groups * group_size` far inside
+/// i32 for any tensor that fits in memory. Without it, a declared `i32::MAX`
+/// survives to `quantized_matmul`, where MLX multiplies it by the scales width in
+/// C++ `int`: signed overflow, and therefore undefined behavior reached before
+/// the shape check that would have thrown.
+const MAX_QUANT_GROUP_SIZE: i32 = 1 << 20;
 
 /// Pick the quantization mode a `.biases`-carrying checkpoint implies.
 ///
@@ -1037,6 +1053,9 @@ pub fn infer_quantization_mode(has_biases: bool, group_size: i32, bits: i32) -> 
 ///   (per-path bit overrides, e.g. Qwen3.5/3.6 MoE gates); block-float trusts
 ///   the mode-fixed `bits` and re-derives `group_size` (e.g. minicpm-v mxfp4
 ///   stored at group_size 32 under a config default of 64),
+/// * returns `Err` for a declared `group_size` / `bits` pair that can describe
+///   no packing at all, before it looks at the shapes (issue #929) — see
+///   [`validate_quantization_params`],
 /// * returns `Err` with an actionable message when the affine shapes match no
 ///   valid bit width — the signature of a misdeclared / unsupported external
 ///   packing that must not be dequantized as standard affine and served as
@@ -1121,7 +1140,16 @@ pub fn reconcile_quantization_layout(
                 reconciled: false,
             });
         }
-        let in_features = packed_in * (32 / bits);
+        // `checked_mul` for symmetry with the affine path, which routes through
+        // `infer_quantization_bits`. `packed_in` comes from a real tensor so it
+        // cannot realistically overflow here, but an unchecked multiply in a
+        // config-driven load path is the wrong default.
+        let in_features = packed_in.checked_mul(32 / bits).ok_or_else(|| {
+            format!(
+                "Quantized weight shape overflow: packed_in={packed_in}, bits={bits}, \
+                 weight.shape={weight_shape:?}"
+            )
+        })?;
         if in_features % num_groups == 0 {
             let effective_group_size = in_features / num_groups;
             Ok(ReconciledQuant {
@@ -1174,6 +1202,7 @@ fn reconcile_quantization_layout_logged(
 /// The three tensor shapes a quantized weight is stored as, borrowed for
 /// validation. `biases` is `None` for the block-float modes, which carry no
 /// zero points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QuantizedTensorShapes<'a> {
     pub weight: &'a [i32],
     pub scales: &'a [i32],
@@ -1196,9 +1225,17 @@ pub struct QuantizedTensorShapes<'a> {
 ///
 /// The width is reconstructed from the *effective* group size the loader will
 /// use, obtained from [`reconcile_quantization_layout`] rather than from the
-/// declared pair. Works for both a 2-D projection and a 3-D stacked expert
-/// tensor: only the last axis carries the packing, and the leading axes are
-/// required to agree between weight and scales.
+/// declared pair, and is checked twice: against the config width, and against
+/// the width the packed weight itself describes, which is MLX's own predicate
+/// and does not follow from the first check whenever the reconciler falls back
+/// to the declared `group_size`. Works for both a 2-D projection and a 3-D
+/// stacked expert tensor: only the last axis carries the packing, and the
+/// leading axes are required to agree between weight and scales.
+///
+/// Not covered: `validate_quantized_input` also rejects a `weight` whose dtype
+/// is not `uint32`. That is deliberately not checked here, because the in-tree
+/// test fixtures build packed weights as f32 and a dtype guard would reject them
+/// while a real checkpoint never trips it.
 ///
 /// `label` names the tensor in the rejection message; callers pass the weight
 /// prefix so the message points at a key the reader can find in the
@@ -1248,6 +1285,29 @@ pub fn validate_quantized_packing(
             described
                 .map(|d| d.to_string())
                 .unwrap_or_else(|| "an overflowing number of".to_string())
+        ));
+    }
+
+    // The check above compares only the SCALES side against the config. MLX
+    // compares the WEIGHT side against the scales side, and the two are not the
+    // same test: the block-float branch of the reconciler keeps the declared
+    // `group_size` in both of its fallbacks (`32 % bits != 0`, and
+    // `in_features % num_groups != 0`), so `groups * group_size` can hit the
+    // config width while the packed weight describes something else entirely.
+    // Mirror MLX's own predicate from `validate_quantized_input` in i64 so the
+    // multiply cannot wrap on a large plane. `layout.bits` is guaranteed
+    // non-zero because `reconcile_quantization_layout` bounds it above.
+    let packed_in = w_shape[w_shape.len() - 1];
+    let packed_width = i64::from(packed_in) * 32 / i64::from(layout.bits);
+    let claimed = i64::from(s_shape[s_shape.len() - 1]) * i64::from(layout.group_size);
+    if packed_width != claimed {
+        return Err(format!(
+            "unexpected {label}.weight shape {w_shape:?}: a packed width of {packed_in} at \
+             {}-bit describes an input width of {packed_width}, but {label}.scales {s_shape:?} at \
+             group_size {} describes {claimed}. MLX compares exactly these two in \
+             validate_quantized_input and throws on a mismatch, and that throw crosses the cxx \
+             bridge as an uncatchable abort at the first forward pass rather than a load error.",
+            layout.bits, layout.group_size
         ));
     }
 
@@ -4520,6 +4580,58 @@ mod tests {
         }
         assert!(validate_quantization_params(1, 1).is_ok());
         assert!(validate_quantization_params(1, 32).is_ok());
+
+        // `group_size` is bounded above as well, because it survives the
+        // block-float fallbacks unchanged and MLX multiplies it by the scales
+        // width in C++ `int`. An overflow there is undefined behavior reached
+        // before the shape check that would have thrown.
+        assert!(validate_quantization_params(MAX_QUANT_GROUP_SIZE, 4).is_ok());
+        for group_size in [MAX_QUANT_GROUP_SIZE + 1, i32::MAX] {
+            let err = validate_quantization_params(group_size, 4)
+                .expect_err("an unrepresentable group_size must be rejected");
+            assert!(err.contains("group_size"), "unhelpful error: {err}");
+        }
+    }
+
+    #[test]
+    fn quantized_packing_check_compares_the_weight_side_too() {
+        // The scales-side comparison alone is not MLX's test. The block-float
+        // reconciler keeps the declared group_size in both of its fallbacks, so
+        // `groups * group_size` can hit the config width while the packed weight
+        // describes something else. Here in_features = 8 * (32/4) = 64 does not
+        // divide by 3 groups, so the reconciler keeps group_size 32, the
+        // scales side reports 3 * 32 = 96 and matches the config, and only the
+        // weight side (8 * 32 / 4 = 64) catches it. MLX throws on exactly that.
+        let inconsistent = QuantizedTensorShapes {
+            weight: &[16, 8],
+            scales: &[16, 3],
+            biases: None,
+        };
+        let err = validate_quantized_packing("gate_proj", &inconsistent, 96, 32, 4, "mxfp4")
+            .expect_err("a packing MLX would reject must fail at load");
+        assert!(
+            err.contains("describes an input width of 64"),
+            "the message must name the weight-side width, got: {err}"
+        );
+
+        // The other block-float fallback, `32 % bits != 0`, keeps the declared
+        // group_size without inferring anything at all.
+        let odd_bits = QuantizedTensorShapes {
+            weight: &[16, 8],
+            scales: &[16, 3],
+            biases: None,
+        };
+        assert!(validate_quantized_packing("gate_proj", &odd_bits, 96, 32, 6, "mxfp4").is_err());
+
+        // A consistent block-float triple still passes: 32 packed columns at
+        // 4-bit describe 256, and 8 groups at group_size 32 describe 256.
+        let consistent = QuantizedTensorShapes {
+            weight: &[64, 32],
+            scales: &[64, 8],
+            biases: None,
+        };
+        validate_quantized_packing("gate_proj", &consistent, 256, 32, 4, "mxfp4")
+            .expect("a consistently packed mxfp4 tensor must load");
     }
 
     #[test]
