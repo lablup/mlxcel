@@ -431,6 +431,13 @@ impl SwitchLinear {
 ///          checkpoint. The layouts that actually exercise it today are the
 ///          Qwen1.5-MoE / Qwen2-MoE individual-expert exports, Mixtral's
 ///          `block_sparse_moe.experts.{idx}.{w1,w2,w3}`, and Ling-lite.
+///
+/// PhiMoE and OLMoE are listed for completeness but normally pre-stack in their
+/// own `sanitize_weights`, so the shared loader sees `switch_mlp.{proj}.weight`
+/// and takes the pre-stacked branch. PhiMoE reaches this branch only for a
+/// checkpoint that ships experts unstacked under `gate_proj`/`up_proj`/
+/// `down_proj` names, because its sanitizer probes `experts.0.w1.weight` and
+/// falls through to a plain copy otherwise.
 pub(crate) fn stack_individual_experts(
     weights: &WeightMap,
     prefix: &str,
@@ -486,16 +493,23 @@ fn stack_individual_experts_with_count(
     let has_biases = weights.contains_key(&expert_key(0, "biases"));
 
     // Borrow the per-expert tensors instead of copying them (issue #948). The
-    // copies existed only to produce owned `UniquePtr`s for `stack_owned`, and
-    // contributed nothing: `mlxcel_core::copy` lowers to `mx::copy`, a real
-    // `Copy` primitive that allocates and writes a full-size output, and
-    // `mx::stack` then allocates its own output and reads each input exactly
-    // once, so every byte the copy wrote was read once by the concatenate and
-    // discarded. Both ops are lazy and nothing evaluates model parameters
-    // between construction and the first forward pass, so the waste landed as
-    // copy traffic at the first forward rather than as load-time allocation:
-    // 31.0 GB of it for `models/ling-lite-1.5`, whose 5376 per-expert BF16
-    // tensors are its entire routed payload.
+    // copies existed only to produce owned `UniquePtr`s for `stack_owned` and
+    // contributed nothing to the result, so building the stack from borrowed
+    // pointers drops one graph node per tensor: 5376 of them for
+    // `models/ling-lite-1.5`, whose per-expert projections are its entire routed
+    // payload.
+    //
+    // What that saves is graph metadata and eval scheduling, NOT memory traffic.
+    // Issue #948 framed this as ~31 GB of redundant copy traffic at the first
+    // forward, and that framing is wrong: `mlxcel_core::copy` lowers to
+    // `mx::copy`, whose `Copy::eval` is `out.copy_shared_buffer(inputs[0])`
+    // (`mlx/backend/common/common.cpp`, reached from both `Copy::eval_gpu` and
+    // `Copy::eval_cpu`). That aliases the input buffer; it allocates nothing and
+    // writes nothing. The materializing `copy_gpu(..., CopyType::General)` a few
+    // lines above it in the same file belongs to `Contiguous::eval_gpu`, which is
+    // a different primitive. So there was never a 31 GB transfer, and there was
+    // never a per-projection peak-memory transient either. Do not reintroduce
+    // that claim without re-reading the pinned MLX source.
     //
     // `ops::stack` already takes `*const MlxArray`, so no new borrowing entry
     // point is needed. The pointers are collected and consumed inside the live
@@ -1158,9 +1172,11 @@ mod tests {
         // `WeightMap` rather than from copies (issue #948). That is only sound
         // because the C++ `stack` shim copies each refcounted `mx::array` handle
         // into its own vector, so the stacked graph node keeps its inputs alive
-        // on its own. Drop the map before evaluating anything to pin that: if
-        // the stack ever held a borrow instead of a handle, this reads freed
-        // memory rather than failing an assertion.
+        // on its own. Dropping the map before evaluating anything exercises that
+        // ordering end to end. Treat it as a tripwire rather than a proof: a
+        // stack that held a borrow would be reading freed memory here, and freed
+        // memory often still reads back intact, so a pass is weaker evidence
+        // than the by-value `push_back` in the shim.
         let root = "model.layers.0.mlp";
         let prefix = format!("{root}.switch_mlp.gate_proj");
         let mut weights = WeightMap::new();
