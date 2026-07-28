@@ -79,7 +79,11 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.100.0
+      # The tag on this action IS the toolchain version it installs, so it must
+      # track `rust-toolchain.toml`'s `channel` rather than be bumped on its own.
+      # Dependabot reads the tag as an ordinary version and will try to raise it;
+      # `.github/dependabot.yml` ignores this action for that reason.
+      - uses: dtolnay/rust-toolchain@1.93.1
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check

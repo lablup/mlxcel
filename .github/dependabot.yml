@@ -37,6 +37,14 @@ updates:
       time: "09:00"
       timezone: "Asia/Seoul"
     open-pull-requests-limit: 5
+    ignore:
+      # The tag on this action is the Rust toolchain version it installs, not a
+      # version of the action itself, so it has to track `rust-toolchain.toml`'s
+      # `channel` and cannot be bumped independently. Dependabot cannot know that
+      # and raised it to a Rust release that does not exist, which broke the
+      # cargo-fmt job on every Rust-touching PR until it was reverted. Bump both
+      # by hand, together.
+      - dependency-name: "dtolnay/rust-toolchain"
     labels:
       - "type:dependency"
       - "type:chore"
