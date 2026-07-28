@@ -21,6 +21,8 @@
 //! SwitchGLU: SwiGLU MLP routing through SwitchLinear
 //! group_mask_scores: group-based expert masking for MoE gates with n_group > 1
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use mlxcel_core::utils::slice_axis;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, dtype};
@@ -670,19 +672,163 @@ pub fn moe_weighted_sum(
     }
 }
 
+/// Why [`group_mask_scores`] cannot apply a grouped-routing mask to a given
+/// `(score row, n_group, topk_group)` triple.
+///
+/// The first two variants are ordinary configurations that happen to mask
+/// nothing. The rest are out-of-range values; [`group_mask_scores`] documents
+/// what each one used to do once it reached MLX.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupMaskSkip {
+    /// `n_group <= 1`: the model declares no expert groups.
+    NotGrouped,
+    /// `topk_group == n_group`: every group is kept, so the mask is the
+    /// identity. Upstream mlx-lm accepts this and it is what `k == 0` already
+    /// produced through an empty bottom-k slice.
+    KeepsEveryGroup,
+    /// `n_group` is zero or negative.
+    InvalidGroupCount,
+    /// `topk_group` is outside `1..=n_group`.
+    TopkGroupOutOfRange,
+    /// The score row does not split into `n_group` equal groups.
+    UnevenGroups,
+    /// A group holds fewer than two experts.
+    GroupTooSmall,
+    /// The router scores are not a rank-2 `[tokens, n_experts]` array.
+    BadScoreShape,
+}
+
+impl GroupMaskSkip {
+    /// Whether this is a broken config worth reporting, as opposed to a
+    /// configuration that legitimately masks nothing.
+    fn is_config_error(self) -> bool {
+        !matches!(self, Self::NotGrouped | Self::KeepsEveryGroup)
+    }
+
+    fn reason(self) -> &'static str {
+        match self {
+            Self::NotGrouped => "the model declares no expert groups",
+            Self::KeepsEveryGroup => "topk_group keeps every group",
+            Self::InvalidGroupCount => "n_group must be at least 1",
+            Self::TopkGroupOutOfRange => "topk_group must be between 1 and n_group",
+            Self::UnevenGroups => "num_experts is not divisible by n_group",
+            Self::GroupTooSmall => {
+                "every group must hold at least 2 experts, because a group is scored by the sum \
+                 of its top two"
+            }
+            Self::BadScoreShape => "the router scores are not a rank-2 [tokens, num_experts] array",
+        }
+    }
+}
+
+/// Bounds check for [`group_mask_scores`], returning `experts_per_group` when
+/// the grouped-routing mask is well defined for `shape`.
+///
+/// Pure `i32` arithmetic over values already held in the gate struct: no array
+/// work, no device round-trip, no `eval`. It runs once per MoE layer per
+/// forward and costs nothing measurable.
+fn group_mask_plan(shape: &[i32], n_group: i32, topk_group: i32) -> Result<i32, GroupMaskSkip> {
+    if shape.len() != 2 {
+        return Err(GroupMaskSkip::BadScoreShape);
+    }
+    let n_experts = shape[1];
+    // Before the division below, and so `n_group == 0` cannot divide by zero.
+    if n_group <= 0 {
+        return Err(GroupMaskSkip::InvalidGroupCount);
+    }
+    if n_group == 1 {
+        return Err(GroupMaskSkip::NotGrouped);
+    }
+    if topk_group == n_group {
+        return Err(GroupMaskSkip::KeepsEveryGroup);
+    }
+    // Catches both `topk_group == 0` and the negative value a caller's
+    // `args.topk_group as i32` produces from a `usize` above `i32::MAX`.
+    if !(1..=n_group).contains(&topk_group) {
+        return Err(GroupMaskSkip::TopkGroupOutOfRange);
+    }
+    if n_experts % n_group != 0 {
+        return Err(GroupMaskSkip::UnevenGroups);
+    }
+    // Also rejects an empty score row: `0 % n_group == 0` passes the
+    // divisibility test above and only the group width catches it.
+    let experts_per_group = n_experts / n_group;
+    if experts_per_group < 2 {
+        return Err(GroupMaskSkip::GroupTooSmall);
+    }
+    Ok(experts_per_group)
+}
+
+/// Report an out-of-range grouped-routing config once per process.
+///
+/// `tracing::warn!` is a no-op in the `mlxcel` CLI binary, where nothing
+/// installs a subscriber, so this has to reach stderr directly. Every MoE layer
+/// of a model shares one `(n_group, topk_group)` pair, so one line is the right
+/// granularity: firing per layer per token would bury it.
+fn report_group_mask_skipped(skip: GroupMaskSkip, shape: &[i32], n_group: i32, topk_group: i32) {
+    static REPORTED: AtomicBool = AtomicBool::new(false);
+    if REPORTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    eprintln!(
+        "warning: grouped MoE expert routing is disabled because {}. config n_group={n_group}, \
+         topk_group={topk_group}; router scores {shape:?}. Every token now routes as if the \
+         model declared no expert groups, which changes which experts it selects. Correct \
+         n_group / topk_group in the model's config.json.",
+        skip.reason()
+    );
+}
+
 /// Group-based expert masking for MoE gates with n_group > 1.
 ///
 /// Selects the top `topk_group` expert groups (by sum of top-2 scores per group)
 /// and zeros out scores for experts in non-selected groups.
 ///
-/// Used by: BailingMoe, DeepSeekV3, DeepSeekV32, GLM4Moe, GLM4MoeLite, ExaOneMoe
+/// Used by: BailingMoe, DeepSeekV3, DeepSeekV32, Dots1, ExaOneMoe, GLM4Moe,
+///          GLM4MoeLite, SolarOpen
 ///
-/// Reference: mlx-lm deepseek_v3.py group_expert_select()
+/// # Bounds
+///
+/// `n_group` and `topk_group` arrive straight from `config.json` on seven of the
+/// eight call sites, and this function is the floor that keeps a bad pair from
+/// reaching MLX. When the mask is not well defined it returns the scores
+/// unmasked and reports the config once, rather than computing a negative `k`:
+///
+/// - `topk_group == n_group + 1` gives `k == -1`, and [`slice_axis`] reads that
+///   `end` as "to the end of the axis", so the bottom-k slice became the whole
+///   group axis and every group was zeroed. Nothing threw. Callers gather their
+///   combine weights from an untouched copy of the scores, so an all-equal
+///   selection row silently handed routing to `argpartition`'s tie-break order
+///   while the weights stayed plausible: the router was off, the output was not.
+/// - `n_group + 2 <= topk_group <= 2 * n_group - 1` resolved `end` to
+///   `n_group + k` and zeroed the wrong *number* of groups. Also silent.
+/// - `topk_group >= 2 * n_group`, and any negative `topk_group`, drove
+///   `argpartition`'s `kth` out of range. `mlxcel_core::argpartition` is
+///   declared non-`Result`, so the MLX throw was an uncatchable abort at the
+///   first forward pass rather than a load error.
+/// - `topk_group == 0` gives `k == n_group`, zeroing every group.
+/// - `n_experts % n_group != 0` truncated `experts_per_group` and threw in the
+///   reshape; fewer than two experts per group threw in the top-2
+///   `argpartition`, since a group is scored by the sum of its top two.
+///
+/// This is not a substitute for load-time validation. A family that wants a bad
+/// config to be a load error keeps its own check, as Bailing MoE does in
+/// `ModelArgs::validate_routing`.
+///
+/// Reference: https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/deepseek_v3.py (group_expert_select)
 pub fn group_mask_scores(scores: &MlxArray, n_group: i32, topk_group: i32) -> UniquePtr<MlxArray> {
     let shape = mlxcel_core::array_shape(scores);
+    let experts_per_group = match group_mask_plan(&shape, n_group, topk_group) {
+        Ok(experts_per_group) => experts_per_group,
+        Err(skip) => {
+            if skip.is_config_error() {
+                report_group_mask_skipped(skip, &shape, n_group, topk_group);
+            }
+            return mlxcel_core::copy(scores);
+        }
+    };
     let n = shape[0];
     let n_experts = shape[1];
-    let experts_per_group = n_experts / n_group;
 
     // Unflatten: [n, n_experts] -> [n, n_group, experts_per_group]
     let grouped = mlxcel_core::reshape(scores, &[n, n_group, experts_per_group]);
@@ -964,5 +1110,262 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.contains("Missing weight"), "unexpected error: {err}");
+    }
+
+    // Grouped-expert routing bounds.
+    //
+    // `group_mask_scores` reads `n_group` and `topk_group` from `config.json` on
+    // seven of its eight call sites. Every out-of-range value below used to
+    // reach MLX: the small ones through `slice_axis`, whose Python slice
+    // semantics turn a negative extent into a *different* selection rather than
+    // an error, and the large ones through `argpartition`, which throws across a
+    // non-`Result` bridge and aborts the process at the first forward pass.
+
+    /// 16 expert scores in 4 groups of 4. The hand-computed sum of each group's
+    /// top two experts is 10, 9, 20, 6, so keeping 2 groups keeps {2, 0} and
+    /// keeping 3 keeps {2, 0, 1}. Shared by the in-range pins and by every
+    /// out-of-range case, which must return this row unchanged.
+    #[rustfmt::skip]
+    const GROUPED_SCORES_16: [f32; 16] = [
+        5.0, 5.0, 0.0, 0.0,
+        9.0, 0.0, 0.0, 0.0,
+        20.0, 0.0, 0.0, 0.0,
+        3.0, 3.0, 3.0, 3.0,
+    ];
+
+    fn grouped_scores_16() -> UniquePtr<MlxArray> {
+        mlxcel_core::from_slice_f32(&GROUPED_SCORES_16, &[1, 16])
+    }
+
+    /// Every element of a single-row rank-2 array, in order.
+    fn row_f32(x: &MlxArray) -> Vec<f32> {
+        let shape = mlxcel_core::array_shape(x);
+        assert_eq!(shape.len(), 2, "expected a rank-2 array, got {shape:?}");
+        assert_eq!(shape[0], 1, "expected a single row, got {shape:?}");
+        (0..shape[1])
+            .map(|i| mlxcel_core::item_f32(&mlxcel_core::slice(x, &[0, i], &[1, i + 1])))
+            .collect()
+    }
+
+    /// The masked row for an in-range `(n_group, topk_group)`. Pinned here as
+    /// well as in `bailing_moe_tests.rs` because the guard must not perturb the
+    /// path it wraps.
+    #[test]
+    fn group_mask_scores_zeroes_only_the_weakest_groups_in_range() {
+        let scores = grouped_scores_16();
+
+        #[rustfmt::skip]
+        let keep_two = vec![
+            5.0, 5.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0,
+            20.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0,
+        ];
+        assert_eq!(row_f32(&group_mask_scores(&scores, 4, 2)), keep_two);
+
+        #[rustfmt::skip]
+        let keep_three = vec![
+            5.0, 5.0, 0.0, 0.0,
+            9.0, 0.0, 0.0, 0.0,
+            20.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0,
+        ];
+        assert_eq!(row_f32(&group_mask_scores(&scores, 4, 3)), keep_three);
+
+        // The narrowest in-range case: 2 groups of 8, keep 1. Group 0 scores
+        // 5 + 9 = 14 and group 1 scores 20 + 3 = 23, so the second half wins.
+        #[rustfmt::skip]
+        let keep_second_half = vec![
+            0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0,
+            20.0, 0.0, 0.0, 0.0,
+            3.0, 3.0, 3.0, 3.0,
+        ];
+        assert_eq!(row_f32(&group_mask_scores(&scores, 2, 1)), keep_second_half);
+    }
+
+    /// The bounds check itself, exhaustively, without touching MLX.
+    #[test]
+    fn group_mask_plan_classifies_every_out_of_range_triple() {
+        let row = [1, 16];
+
+        // In range: the mask is applied and the group width comes back.
+        assert_eq!(group_mask_plan(&row, 4, 2), Ok(4));
+        assert_eq!(group_mask_plan(&row, 4, 3), Ok(4));
+        assert_eq!(group_mask_plan(&row, 2, 1), Ok(8));
+        assert_eq!(group_mask_plan(&row, 8, 4), Ok(2));
+
+        // Masks nothing, and says nothing: both are ordinary configurations.
+        assert_eq!(group_mask_plan(&row, 1, 1), Err(GroupMaskSkip::NotGrouped));
+        assert_eq!(
+            group_mask_plan(&row, 4, 4),
+            Err(GroupMaskSkip::KeepsEveryGroup)
+        );
+
+        // Out of range.
+        for n_group in [0, -1, i32::MIN] {
+            assert_eq!(
+                group_mask_plan(&row, n_group, 1),
+                Err(GroupMaskSkip::InvalidGroupCount),
+                "n_group = {n_group}"
+            );
+        }
+        for topk_group in [0, 5, 6, 8, -1, i32::MIN, i32::MAX] {
+            assert_eq!(
+                group_mask_plan(&row, 4, topk_group),
+                Err(GroupMaskSkip::TopkGroupOutOfRange),
+                "topk_group = {topk_group}"
+            );
+        }
+        assert_eq!(
+            group_mask_plan(&row, 3, 2),
+            Err(GroupMaskSkip::UnevenGroups)
+        );
+        assert_eq!(
+            group_mask_plan(&row, 16, 8),
+            Err(GroupMaskSkip::GroupTooSmall)
+        );
+        assert_eq!(
+            group_mask_plan(&[1, 0], 4, 2),
+            Err(GroupMaskSkip::GroupTooSmall),
+            "an empty score row passes divisibility, so only the group width catches it"
+        );
+        assert_eq!(
+            group_mask_plan(&[16], 4, 2),
+            Err(GroupMaskSkip::BadScoreShape)
+        );
+        assert_eq!(
+            group_mask_plan(&[1, 4, 4], 4, 2),
+            Err(GroupMaskSkip::BadScoreShape)
+        );
+
+        // Only the two ordinary reasons stay quiet.
+        assert!(!GroupMaskSkip::NotGrouped.is_config_error());
+        assert!(!GroupMaskSkip::KeepsEveryGroup.is_config_error());
+        for skip in [
+            GroupMaskSkip::InvalidGroupCount,
+            GroupMaskSkip::TopkGroupOutOfRange,
+            GroupMaskSkip::UnevenGroups,
+            GroupMaskSkip::GroupTooSmall,
+            GroupMaskSkip::BadScoreShape,
+        ] {
+            assert!(skip.is_config_error(), "{skip:?} must be reported");
+        }
+    }
+
+    /// `topk_group == n_group + 1` gives `k == -1`, and `slice_axis` reads that
+    /// as "to the end of the axis", so the bottom-k slice became the *whole*
+    /// group axis and every group was zeroed. Nothing threw: the callers gather
+    /// their combine weights from an untouched copy of the scores, so an
+    /// all-equal selection row silently hands routing to `argpartition`'s
+    /// tie-break order while the weights stay plausible.
+    #[test]
+    fn group_mask_scores_leaves_scores_untouched_when_topk_group_exceeds_n_group() {
+        let scores = grouped_scores_16();
+        assert_eq!(
+            row_f32(&group_mask_scores(&scores, 4, 5)),
+            GROUPED_SCORES_16.to_vec()
+        );
+    }
+
+    /// `n_group + 2 <= topk_group <= 2 * n_group - 1` resolves `end` to
+    /// `n_group + k`, zeroing the wrong *number* of groups. Also silent.
+    #[test]
+    fn group_mask_scores_leaves_scores_untouched_when_topk_group_is_well_past_n_group() {
+        let scores = grouped_scores_16();
+        assert_eq!(
+            row_f32(&group_mask_scores(&scores, 4, 6)),
+            GROUPED_SCORES_16.to_vec()
+        );
+    }
+
+    /// `topk_group >= 2 * n_group` drives `argpartition`'s normalized `kth`
+    /// below zero. `fn argpartition` is declared non-`Result` in the bridge, so
+    /// the MLX throw was an uncatchable abort rather than an error. Reaching the
+    /// assertion at all is the point of this test.
+    #[test]
+    fn group_mask_scores_returns_instead_of_aborting_when_topk_group_is_far_out_of_range() {
+        let scores = grouped_scores_16();
+        assert_eq!(
+            row_f32(&group_mask_scores(&scores, 4, 8)),
+            GROUPED_SCORES_16.to_vec()
+        );
+    }
+
+    /// `topk_group == 0` gives `k == n_group`, which zeroed every group. Same
+    /// silent shape as `n_group + 1`.
+    #[test]
+    fn group_mask_scores_leaves_scores_untouched_when_topk_group_is_zero() {
+        let scores = grouped_scores_16();
+        assert_eq!(
+            row_f32(&group_mask_scores(&scores, 4, 0)),
+            GROUPED_SCORES_16.to_vec()
+        );
+    }
+
+    /// Several callers reach the function through `args.topk_group as i32` from
+    /// a `usize` config field, so a `usize` above `i32::MAX` arrives already
+    /// negative. That made `k > n_group` and put `argpartition` in the abort
+    /// regime from the other direction.
+    #[test]
+    fn group_mask_scores_returns_instead_of_aborting_when_topk_group_is_negative() {
+        let scores = grouped_scores_16();
+        assert_eq!(
+            row_f32(&group_mask_scores(&scores, 4, -1)),
+            GROUPED_SCORES_16.to_vec()
+        );
+        assert_eq!(
+            row_f32(&group_mask_scores(&scores, 4, i32::MIN)),
+            GROUPED_SCORES_16.to_vec()
+        );
+    }
+
+    /// `topk_group == n_group` keeps every group, which is what upstream mlx-lm
+    /// means by it and what `k == 0` already produced through an empty slice.
+    /// It stays the identity and is not reported as a bad config.
+    #[test]
+    fn group_mask_scores_is_the_identity_when_topk_group_equals_n_group() {
+        let scores = grouped_scores_16();
+        assert_eq!(
+            row_f32(&group_mask_scores(&scores, 4, 4)),
+            GROUPED_SCORES_16.to_vec()
+        );
+    }
+
+    /// `n_experts % n_group != 0` truncates `experts_per_group` and the reshape
+    /// threw one step before the `topk_group` arithmetic was ever reached.
+    #[test]
+    fn group_mask_scores_returns_instead_of_aborting_when_experts_do_not_divide_evenly() {
+        let scores = grouped_scores_16();
+        assert_eq!(
+            row_f32(&group_mask_scores(&scores, 3, 2)),
+            GROUPED_SCORES_16.to_vec()
+        );
+    }
+
+    /// Group scoring sums each group's top two experts, so `argpartition(kth =
+    /// 1)` on a one-expert group axis is out of range and threw.
+    #[test]
+    fn group_mask_scores_returns_instead_of_aborting_when_a_group_holds_one_expert() {
+        let scores = grouped_scores_16();
+        assert_eq!(
+            row_f32(&group_mask_scores(&scores, 16, 8)),
+            GROUPED_SCORES_16.to_vec()
+        );
+    }
+
+    /// All eight call sites gate the call on `self.n_group > 1`, so this regime
+    /// is covered by convention rather than by the function. `n_group == 0`
+    /// additionally divided by zero in `experts_per_group`.
+    #[test]
+    fn group_mask_scores_leaves_scores_untouched_when_grouping_is_disabled() {
+        let scores = grouped_scores_16();
+        for n_group in [1, 0, -1] {
+            assert_eq!(
+                row_f32(&group_mask_scores(&scores, n_group, 1)),
+                GROUPED_SCORES_16.to_vec(),
+                "n_group = {n_group} must mask nothing"
+            );
+        }
     }
 }
