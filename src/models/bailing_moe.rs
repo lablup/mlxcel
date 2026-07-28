@@ -1152,12 +1152,11 @@ pub fn validate_weights(weights: &WeightMap, args: &ModelArgs) -> Result<(), Str
     validate_norm(weights, "model.norm.weight", hidden)?;
 
     // The token table's row count is checked against `vocab_size` by
-    // `validate_embedding_table` in `from_weights`, which checks the width only
-    // on the float path because a packed width is not the model width. A packed
-    // table still has to describe `hidden_size` once unpacked, and MLX
-    // reconstructs that as `scales.shape(-1) * group_size`, so a table packed
-    // for a different width reaches the first RMSNorm as the wrong shape and
-    // throws there rather than at load. A no-op for an unquantized table.
+    // `validate_embedding_table` in `from_weights`, which since issue #929 also
+    // reconstructs the dequantized width through the same shared check this line
+    // calls. Kept as a redundant early diagnostic: it runs during
+    // `validate_weights`, ahead of the loader, and names the table rather than
+    // the constructor that reached it. A no-op for an unquantized table.
     validate_quantized_packing(weights, "model.word_embeddings", hidden, group_size, bits)?;
 
     // The output head, which nothing else checks. The axis that aborts the

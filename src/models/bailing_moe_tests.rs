@@ -1665,8 +1665,10 @@ fn validate_weights_rejects_an_output_head_that_disagrees_with_the_config() {
         .unwrap_err_or_panic("a head packed for a different input width");
     assert!(err.contains("input width"), "{err}");
 
-    // The same reconstruction applied to the token table, whose width the
-    // shared `validate_embedding_table` deliberately leaves to the scales.
+    // The same reconstruction applied to the token table, whose width comes from
+    // the scales rather than the packed weight. `validate_weights` catches it
+    // here, ahead of the shared `validate_embedding_table` guard that catches the
+    // same thing at load time.
     let mut table = tiny_weights(&quant_args);
     table.insert(
         "model.word_embeddings.weight".into(),
