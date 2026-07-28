@@ -718,6 +718,228 @@ fn require_secure_endpoint_treats_empty_opt_out_as_unset() {
     restore_env("MLXCEL_ALLOW_INSECURE_ENDPOINT", prev);
 }
 
+/// A long-lived (100-year), self-signed test-only CA certificate. Generated
+/// with `openssl req -x509 -newkey rsa:2048 -nodes -days 36500 -subj
+/// "/CN=mlxcel-test-ca-1"`. Used only to exercise PEM parsing — no private
+/// key is checked in, and nothing in these tests ever performs a TLS
+/// handshake with it.
+const TEST_CA_CERT_1: &str = "-----BEGIN CERTIFICATE-----
+MIIDGTCCAgGgAwIBAgIUSsmj23NSs41Xai2FaftQRBoeu5MwDQYJKoZIhvcNAQEL
+BQAwGzEZMBcGA1UEAwwQbWx4Y2VsLXRlc3QtY2EtMTAgFw0yNjA3MjQwNTA2NDha
+GA8yMTI2MDYzMDA1MDY0OFowGzEZMBcGA1UEAwwQbWx4Y2VsLXRlc3QtY2EtMTCC
+ASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBANC/6D66VKOploIqa3o9FRXL
+fT55ETuw9pUCynK4GztDt+9Lc57feIu7ki8i2Roy8OLATn2N075Ln3+dYLBhCTtE
+mJTLswEVZMgpYPLktiad/M9ks16YlpCg6tWYR88JFw7j6SyWraw2joAt0bR+3DTu
+b+BYfRxBnWiA9yoUGiqX5LSKeK2rSB/t6A1by1Y63j34l+pW8K5maHp3Hl5adyM1
+Eh8G9Waiz+WDJOKsofic5WasC8d1W+6he5HEHrWxqQKjgruJBAiKka5Ewyiv0IFP
+llc7cjWafesnT15pClUH7fKKVyAn1WWWCpQkTLF3tme0uYJHbZysmWdsyhRhnEUC
+AwEAAaNTMFEwHQYDVR0OBBYEFC6X73a0ymZD5gx2E5+EBwFc3pK6MB8GA1UdIwQY
+MBaAFC6X73a0ymZD5gx2E5+EBwFc3pK6MA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZI
+hvcNAQELBQADggEBAHQzGfPR39QYNg7dN/GnviwTYUiqHdE6xPTaX/sNeSWpIGPv
+rVMHK5QrvAWHAigYrLPvW7P/CD/ltF+xKkREts1r0ZGuytzRyAyuQZ6NrAul+mg8
+DHDXuMZB+uOHcJXB+EtKdgkWCB/xYrtQIkf/ES/+/JM3UDhDTg1ZYn0m5WhBwo3n
+lnq2hW9ri3bXshuhUTsLTl/7FgwExbsWQt5gIgQJ2k3a2Pk2mkyCsebAIHBgoK/o
+svCeox2DoJWa72nsN7CY/Y8y01ssrgt3H9goUXIq+L/NdLEA/gV98i226aAovvJr
+qxK4mrWI36bI9ufQFtB9cVRnFicTP0me/6wxd8A=
+-----END CERTIFICATE-----
+";
+
+/// A second, distinct self-signed test-only CA certificate (same generation
+/// recipe as [`TEST_CA_CERT_1`] with `/CN=mlxcel-test-ca-2`), used to prove
+/// that a bundle file containing more than one PEM block loads all of them.
+const TEST_CA_CERT_2: &str = "-----BEGIN CERTIFICATE-----
+MIIDGTCCAgGgAwIBAgIUX3xujdtXfMIvyHOIiIj8n2P9pJwwDQYJKoZIhvcNAQEL
+BQAwGzEZMBcGA1UEAwwQbWx4Y2VsLXRlc3QtY2EtMjAgFw0yNjA3MjQwNTA2NDha
+GA8yMTI2MDYzMDA1MDY0OFowGzEZMBcGA1UEAwwQbWx4Y2VsLXRlc3QtY2EtMjCC
+ASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAMZ1xGjVqjbf5GXnPEAB2Scg
+Uqur9WGP7YK41B0vST18SP2lstYNhUAiIbKUzDCkO3+YbMT7zI0xumqHkJcq+AvV
+k9PJY2IeoIDjNNw2t0HlDLyMupXH3RTDuZJapRWUYGzBpH7r7JXKG86DklVqqpBN
+4qCzfhVEEJ9WwQufmehJw6TmDAvE3k3K09I/SpbGEtscQdmBMT6EmTmr5CRTTrPH
+3vB5j4PkiOc6O1RIpq6klr+db0nVjz328LLnFItqKWdDAKuWYH2Av5HFg8p1SKnJ
+tgtO1ONA0I90BVbSSiH8Dio9R6uexoyHURhf+IR71fYUnnSOJhF/j3iBspJqL0UC
+AwEAAaNTMFEwHQYDVR0OBBYEFOQVKDDfg6hO+prghwAgjdY2KIYhMB8GA1UdIwQY
+MBaAFOQVKDDfg6hO+prghwAgjdY2KIYhMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZI
+hvcNAQELBQADggEBAKgoAdxgPHr11Ckwrs0KqtTl0kf8Z4VPevIQrWnTU2g781bV
+sZXcduAMbUM+F1oaoJinwo7zCCSlxRp3CZKulgq0GrfvYMapd7ca7I+MjZUhCyjm
+MoXKu22e+/AWFD5Ql9l1klM4SBtMxBzUOYWp9BM1lOgIwJJ9wpsA4g+mimPMgaPJ
+PnWh4xWx2xaxRAMcXo/5slrv8NvLGqbz+/V5643ZV3S9VdQItCo2FG9ShORfqjG+
+LMuIM76ng7Siyp3OtQIcLvHxpbui5eG5bBzXqq5fT7PNIW55gajp/sV7iEA+JZ4C
+fglnm3e/hZfNMax6H1w0/OLWUBaHU0AaJh5zNAs=
+-----END CERTIFICATE-----
+";
+
+#[test]
+fn extra_ca_certs_defaults_to_empty_when_unset() {
+    let _env_guard = env_lock();
+    let prev = std::env::var(EXTRA_CA_CERTS_ENV).ok();
+    // SAFETY: serialized via the crate-wide ENV_LOCK acquired above.
+    unsafe {
+        std::env::remove_var(EXTRA_CA_CERTS_ENV);
+    }
+    let certs = load_extra_ca_certificates().expect("unset env var must not error");
+    assert!(
+        certs.is_empty(),
+        "expected no extra certs when var is unset"
+    );
+    restore_env(EXTRA_CA_CERTS_ENV, prev);
+}
+
+#[test]
+fn extra_ca_certs_treats_whitespace_value_as_unset() {
+    let _env_guard = env_lock();
+    let prev = std::env::var(EXTRA_CA_CERTS_ENV).ok();
+    // SAFETY: serialized via the crate-wide ENV_LOCK acquired above.
+    unsafe {
+        std::env::set_var(EXTRA_CA_CERTS_ENV, "   ");
+    }
+    let certs = load_extra_ca_certificates().expect("whitespace-only value must not error");
+    assert!(
+        certs.is_empty(),
+        "whitespace-only value must be treated as unset"
+    );
+    restore_env(EXTRA_CA_CERTS_ENV, prev);
+}
+
+#[test]
+fn extra_ca_certs_loads_single_cert_from_file() {
+    let _env_guard = env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ca.pem");
+    std::fs::write(&path, TEST_CA_CERT_1).unwrap();
+    let prev = std::env::var(EXTRA_CA_CERTS_ENV).ok();
+    // SAFETY: serialized via the crate-wide ENV_LOCK acquired above.
+    unsafe {
+        std::env::set_var(EXTRA_CA_CERTS_ENV, path.to_str().unwrap());
+    }
+    let certs = load_extra_ca_certificates().expect("valid single-cert PEM must load");
+    assert_eq!(certs.len(), 1, "expected exactly one certificate");
+    restore_env(EXTRA_CA_CERTS_ENV, prev);
+}
+
+#[test]
+fn extra_ca_certs_loads_multiple_certs_from_bundle() {
+    let _env_guard = env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bundle.pem");
+    std::fs::write(&path, format!("{TEST_CA_CERT_1}{TEST_CA_CERT_2}")).unwrap();
+    let prev = std::env::var(EXTRA_CA_CERTS_ENV).ok();
+    // SAFETY: serialized via the crate-wide ENV_LOCK acquired above.
+    unsafe {
+        std::env::set_var(EXTRA_CA_CERTS_ENV, path.to_str().unwrap());
+    }
+    let certs = load_extra_ca_certificates().expect("concatenated PEM bundle must load");
+    assert_eq!(certs.len(), 2, "expected both certificates from the bundle");
+    restore_env(EXTRA_CA_CERTS_ENV, prev);
+}
+
+#[test]
+fn extra_ca_certs_errors_on_missing_file() {
+    let _env_guard = env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("does-not-exist.pem");
+    let prev = std::env::var(EXTRA_CA_CERTS_ENV).ok();
+    // SAFETY: serialized via the crate-wide ENV_LOCK acquired above.
+    unsafe {
+        std::env::set_var(EXTRA_CA_CERTS_ENV, missing.to_str().unwrap());
+    }
+    let err = load_extra_ca_certificates().expect_err("missing file must error, not silently pass");
+    assert!(
+        err.to_string().contains(EXTRA_CA_CERTS_ENV),
+        "error should name the env var so the operator can find the misconfiguration: {err}"
+    );
+    restore_env(EXTRA_CA_CERTS_ENV, prev);
+}
+
+#[test]
+fn extra_ca_certs_rejects_oversized_bundle_before_parsing() {
+    let _env_guard = env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("oversized.pem");
+    std::fs::write(&path, vec![b'x'; MAX_EXTRA_CA_CERTS_BYTES + 1]).unwrap();
+    let prev = std::env::var(EXTRA_CA_CERTS_ENV).ok();
+    // SAFETY: serialized via the crate-wide ENV_LOCK acquired above.
+    unsafe {
+        std::env::set_var(EXTRA_CA_CERTS_ENV, path.to_str().unwrap());
+    }
+    let err = load_extra_ca_certificates()
+        .expect_err("an oversized CA bundle must be rejected before parsing");
+    assert!(
+        err.to_string().contains("safety limit"),
+        "error should explain the bounded-input failure: {err}"
+    );
+    restore_env(EXTRA_CA_CERTS_ENV, prev);
+}
+
+#[cfg(unix)]
+#[test]
+fn extra_ca_certs_errors_on_unreadable_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // SAFETY: reading our own euid, no env/global state touched.
+    if unsafe { libc::geteuid() } == 0 {
+        // root bypasses Unix permission bits entirely, so this test would
+        // spuriously pass/fail depending on the CI runner's privilege level.
+        return;
+    }
+
+    let _env_guard = env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("unreadable.pem");
+    std::fs::write(&path, TEST_CA_CERT_1).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let prev = std::env::var(EXTRA_CA_CERTS_ENV).ok();
+    // SAFETY: serialized via the crate-wide ENV_LOCK acquired above.
+    unsafe {
+        std::env::set_var(EXTRA_CA_CERTS_ENV, path.to_str().unwrap());
+    }
+    let err =
+        load_extra_ca_certificates().expect_err("unreadable file must error, not silently pass");
+    assert!(
+        err.to_string().contains(EXTRA_CA_CERTS_ENV),
+        "error should name the env var: {err}"
+    );
+    // Restore permissions so the tempdir's own Drop cleanup can remove it.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    restore_env(EXTRA_CA_CERTS_ENV, prev);
+}
+
+#[cfg(unix)]
+#[test]
+fn extra_ca_certs_errors_on_non_utf8_value() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let _env_guard = env_lock();
+    let prev = std::env::var(EXTRA_CA_CERTS_ENV).ok();
+    let invalid = std::ffi::OsString::from_vec(vec![0xFF, 0xFE]);
+    // SAFETY: serialized via the crate-wide ENV_LOCK acquired above.
+    unsafe {
+        std::env::set_var(EXTRA_CA_CERTS_ENV, &invalid);
+    }
+    let err = load_extra_ca_certificates()
+        .expect_err("non-UTF8 value must error, not be silently treated as unset");
+    assert!(
+        err.to_string().contains(EXTRA_CA_CERTS_ENV),
+        "error should name the env var: {err}"
+    );
+    restore_env(EXTRA_CA_CERTS_ENV, prev);
+}
+
+#[test]
+fn extra_ca_certs_errors_on_malformed_pem() {
+    let _env_guard = env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("garbage.pem");
+    std::fs::write(&path, "this is not a certificate").unwrap();
+    let prev = std::env::var(EXTRA_CA_CERTS_ENV).ok();
+    // SAFETY: serialized via the crate-wide ENV_LOCK acquired above.
+    unsafe {
+        std::env::set_var(EXTRA_CA_CERTS_ENV, path.to_str().unwrap());
+    }
+    let result = load_extra_ca_certificates();
+    assert!(result.is_err(), "malformed PEM content must error");
+    restore_env(EXTRA_CA_CERTS_ENV, prev);
+}
+
 /// L2 — Tempfile creation must fail closed when a symlink (or any pre-existing
 /// path) already exists at the predicted tempfile location. `create_new(true)`
 /// provides `O_CREAT|O_EXCL`, and on Unix we add `O_NOFOLLOW`. Either alone

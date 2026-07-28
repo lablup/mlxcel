@@ -62,6 +62,22 @@ pub struct ModelArgs {
 
     #[serde(default)]
     pub tie_word_embeddings: bool,
+
+    /// Rotate interleaved channel pairs `(2i, 2i+1)` instead of the split-half
+    /// pairs `(i, i + dims/2)`.
+    ///
+    /// Deliberately **not** deserialized. Every family that reaches this loader
+    /// today rotates split-half, and a checkpoint author who writes
+    /// `"rope_traditional": true` into a Llama `config.json` must not be able to
+    /// silently change how an existing checkpoint decodes. The flag is set
+    /// programmatically by the loader of a family whose upstream definition
+    /// fixes it, which is currently only [`crate::models::helium`] (upstream
+    /// builds `nn.RoPE(head_dim, traditional=True, base=rope_theta)`).
+    ///
+    /// See [`Attention::forward`] for why setting this also disables the two
+    /// fused RoPE fast paths.
+    #[serde(skip)]
+    pub rope_traditional: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -122,9 +138,49 @@ pub struct Attention {
     pub scale: f32,
     pub rope_dims: i32,
     pub rope_base: f32,
+    /// See [`ModelArgs::rope_traditional`]. `false` for every family that used
+    /// this attention before Helium, so their graphs are unchanged.
+    pub rope_traditional: bool,
 }
 
 impl Attention {
+    /// Dense attention with RoPE.
+    ///
+    /// Used by: Llama (`llama` / `mistral` checkpoints), Qwen2 / Qwen2.5 (which
+    /// re-export this attention), Helium (which reuses it with
+    /// `rope_traditional` set), the Llama-3.2-Vision (`mllama`) text decoder's
+    /// self-attention layers, every VLM whose text backbone is `Llama3Model` or
+    /// `Qwen2Model` (Pixtral, LLaVA, SmolVLM / Idefics3, Idefics2, InternVL,
+    /// FastVLM, dots.ocr), the `llama` and `mistral` pipeline stage executors,
+    /// and the tensor-parallel Llama runtime.
+    ///
+    /// # Traditional RoPE and the fused fast paths
+    ///
+    /// Three code paths below can rotate Q and K, and all three must agree on
+    /// the rotation convention or the model decodes a different graph depending
+    /// on an environment variable and on whether the checkpoint is quantized:
+    ///
+    /// 1. `fused_causal_prefill_attention` (quantized prefill, opt-in through
+    ///    `MLXCEL_ENABLE_FUSED_CAUSAL_PREFILL_ATTENTION`),
+    /// 2. [`FusedQKVLinear::forward_split_rope`] (quantized projection, opt-in
+    ///    through `MLXCEL_ENABLE_FUSED_QKV_SPLIT_ROPE`),
+    /// 3. the graph fallback, which calls `fast_rope` directly.
+    ///
+    /// Only the third can express the convention. The first two apply RoPE
+    /// inside a C++ launcher that hardcodes `traditional = false`
+    /// (`mlx_cxx_bridge.cpp`, `fused_causal_prefill_attention` and
+    /// `fused_qkv_project_split_rope`), and neither takes a flag, so there is no
+    /// way to ask them for the interleaved rotation. Routing a traditional-RoPE
+    /// model through either one applies the wrong rotation to correctly shaped
+    /// tensors: nothing throws, the KV cache is the right shape, and the model
+    /// emits fluent text out of a mis-rotated attention.
+    ///
+    /// Both are therefore gated on `!self.rope_traditional`, so a
+    /// traditional-RoPE model always takes the graph fallback, which receives
+    /// the flag. Neither fast path is on by default, so this costs those models
+    /// nothing that is enabled today. Teaching the two launchers the flag would
+    /// be the better long-term fix, but it is a cxx bridge signature change, and
+    /// correctness must not wait on it.
     pub fn forward(
         &self,
         x: &MlxArray,
@@ -139,6 +195,7 @@ impl Attention {
         if l > 1
             && mask.is_none()
             && cache.is_empty()
+            && !self.rope_traditional
             && std::env::var("MLXCEL_ENABLE_FUSED_CAUSAL_PREFILL_ATTENTION").is_ok()
             && let (Some(qkv_weight), Some(o_weight)) = (
                 self.qkv_proj.qkv_proj.as_quantized_weight(),
@@ -175,10 +232,16 @@ impl Attention {
             return output;
         }
 
-        let (q, k, v) = if let Some((q, k, v)) =
+        let fused_split_rope = if self.rope_traditional {
+            // The fused launcher hardcodes `traditional = false`; see the method
+            // doc comment. Skipping it is what keeps the rotation correct.
+            None
+        } else {
             self.qkv_proj
                 .forward_split_rope(x, self.rope_dims, self.rope_base, offset)
-        {
+        };
+
+        let (q, k, v) = if let Some((q, k, v)) = fused_split_rope {
             (q, k, v)
         } else {
             // Fallback for non-quantized weights: preserve the existing Rust path.
@@ -194,8 +257,22 @@ impl Attention {
             let k = mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]);
             let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
 
-            let q = mlxcel_core::fast_rope(&q, self.rope_dims, false, self.rope_base, 1.0, offset);
-            let k = mlxcel_core::fast_rope(&k, self.rope_dims, false, self.rope_base, 1.0, offset);
+            let q = mlxcel_core::fast_rope(
+                &q,
+                self.rope_dims,
+                self.rope_traditional,
+                self.rope_base,
+                1.0,
+                offset,
+            );
+            let k = mlxcel_core::fast_rope(
+                &k,
+                self.rope_dims,
+                self.rope_traditional,
+                self.rope_base,
+                1.0,
+                offset,
+            );
             (q, k, v)
         };
 
@@ -268,7 +345,9 @@ impl Attention {
     /// cache updates and attention before concatenating the results back into
     /// `[B, T, hidden_dim]`.
     ///
-    /// Used by: Llama3 batched decode and full-sequence batched prefill
+    /// Used by: the batched decode and full-sequence batched prefill of every
+    /// family that reaches [`Attention::forward`]; see that method's `Used by`
+    /// list, which this path shares.
     pub fn forward_split_attention(
         &self,
         q_batched: &MlxArray,
@@ -301,10 +380,14 @@ impl Attention {
         let k_batched = mlxcel_core::transpose_axes(&k_batched, &[0, 2, 1, 3]);
         let v_batched = mlxcel_core::transpose_axes(&v_batched, &[0, 2, 1, 3]);
 
+        // Batched decode / batched prefill share the same rotation convention as
+        // the single-sequence path above; dropping the flag on one route while
+        // honoring it on the other would make a sequence decode differently
+        // depending on whether it was scheduled alone or in a batch.
         let q_batched = mlxcel_core::fast_rope_batched(
             &q_batched,
             self.rope_dims,
-            false,
+            self.rope_traditional,
             self.rope_base,
             1.0,
             &metadata.rope_offsets,
@@ -312,7 +395,7 @@ impl Attention {
         let k_batched = mlxcel_core::fast_rope_batched(
             &k_batched,
             self.rope_dims,
-            false,
+            self.rope_traditional,
             self.rope_base,
             1.0,
             &metadata.rope_offsets,
@@ -453,6 +536,19 @@ impl Attention {
         result
     }
 
+    /// Build the dense attention block from a checkpoint.
+    ///
+    /// `rope_traditional` is carried over from [`ModelArgs`], where it is
+    /// `#[serde(skip)]`, so it is `false` for every family whose config is
+    /// parsed from JSON and `true` only when a loader sets it programmatically.
+    ///
+    /// Used by: Llama (`llama` / `mistral` checkpoints), Qwen2 / Qwen2.5 (which
+    /// re-export this attention), Helium (which reuses it with
+    /// `rope_traditional` set), the Llama-3.2-Vision (`mllama`) text decoder's
+    /// self-attention layers, every VLM whose text backbone is `Llama3Model` or
+    /// `Qwen2Model` (Pixtral, LLaVA, SmolVLM / Idefics3, Idefics2, InternVL,
+    /// FastVLM, dots.ocr), the `llama` and `mistral` pipeline stage executors,
+    /// and the tensor-parallel Llama runtime.
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -487,6 +583,7 @@ impl Attention {
             scale: 1.0 / (head_dim as f32).sqrt(),
             rope_dims: head_dim,
             rope_base: args.rope_theta,
+            rope_traditional: args.rope_traditional,
         })
     }
 }

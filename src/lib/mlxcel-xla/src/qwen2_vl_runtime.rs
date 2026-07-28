@@ -557,7 +557,7 @@ fn compile_and_load(
     std::fs::create_dir_all(&cache)
         .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
     let (weights, checkpoint_schema) = load_weights(model_dir, config)?;
-    let contract = AuxiliaryArtifactContract::new(
+    let contract = AuxiliaryArtifactContract::new_legacy_unqualified(
         ENTRY_NAME,
         format!(
             "{};{};checkpoint_schema_sha256={}",

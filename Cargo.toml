@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "mlxcel"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2024"
 description = "High-performance LLM/VLM/VLA inference on Apple Silicon and CUDA GPUs"
 repository = "https://github.com/lablup/mlxcel"
@@ -76,6 +76,9 @@ xla-iree = ["xla-backend", "mlxcel-xla/iree"]
 # also enables the root MLX CUDA backend. This is not part of `xla-iree`; normal
 # production bundles remain unchanged.
 xla-diagnostics = ["cuda", "xla-iree", "mlxcel-xla/diagnostics"]
+# CPU-capable bounded MLX/IREE operator-oracle harness. CUDA-specific production
+# probes may add `cuda`, but the shared report/comparison layer does not require it.
+xla-micro-oracle = ["xla-iree", "mlxcel-xla/micro-oracle"]
 # Axis A "weight-load surgery" framework.
 #
 # On by default so production `mlxcel` and `mlxcel-server` binaries expose
@@ -329,6 +332,13 @@ required-features = ["xla-diagnostics"]
 [[example]]
 name = "xla_aux_smoke"
 required-features = ["xla-iree"]
+
+# Bounded canonical-decomposition vs emitted IREE operator probes. The root
+# example owns the static IREE runtime link recipe, while the reusable harness
+# remains in mlxcel-xla behind the CPU-capable micro-oracle feature.
+[[example]]
+name = "xla_numeric_probe"
+required-features = ["xla-micro-oracle"]
 
 # Pinned #874 MLX-vs-IREE Phi4MM Conformer and speech/vision projection parity.
 [[example]]

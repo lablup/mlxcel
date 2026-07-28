@@ -136,14 +136,14 @@ pub fn run_auxiliary_abi_smoke(device: &str) -> Result<AuxiliaryAbiSmokeReport, 
     std::fs::create_dir_all(&cache)
         .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
     let vmfb = compile_one(&compiler, SMOKE_MLIR, flags, &cache, "aux-smoke", 0)?;
-    let contract = AuxiliaryArtifactContract::new(
+    let contract = AuxiliaryArtifactContract::new_legacy_unqualified(
         "aux_smoke.main",
         "aux-smoke-config-v1",
         generation_identity(&compiler, flags)?,
     )?;
     write_auxiliary_manifest(&vmfb, &contract, &[weight()])?;
 
-    let wrong_contract = AuxiliaryArtifactContract::new(
+    let wrong_contract = AuxiliaryArtifactContract::new_legacy_unqualified(
         "aux_smoke.main",
         "aux-smoke-config-v2",
         contract.generation_identity.clone(),

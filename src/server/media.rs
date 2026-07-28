@@ -23,10 +23,7 @@ use base64::Engine;
 use futures::StreamExt;
 use std::{
     path::{Path, PathBuf},
-    sync::{
-        OnceLock,
-        atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
-    },
+    sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
     time::Duration,
 };
 
@@ -726,7 +723,14 @@ async fn decode_video_data_uri(url: &str) -> Option<(PathBuf, TempFile)> {
 /// Connect timeout, total request timeout, and redirect cap are configured
 /// on the shared client (see [`http_image_client`]).
 async fn fetch_remote_video(url: &str) -> Option<(PathBuf, TempFile)> {
-    let response = match http_image_client().get(url).send().await {
+    let client = match http_image_client().await {
+        Ok(client) => client,
+        Err(err) => {
+            tracing::warn!("Failed to build image/media HTTP client: {}", err);
+            return None;
+        }
+    };
+    let response = match client.get(url).send().await {
         Ok(r) => r,
         Err(err) => {
             tracing::warn!("Failed to fetch video URL {}: {}", url, err);
@@ -1218,7 +1222,7 @@ async fn fetch_remote_bytes_with_limit_cancel(
     cancelled: Option<&dyn AudioAcquisitionCancellation>,
 ) -> Result<Vec<u8>> {
     check_media_cancel(cancelled, 0)?;
-    let response = match http_image_client().get(url).send().await {
+    let response = match http_image_client().await?.get(url).send().await {
         Ok(response) => response,
         Err(err) => bail!("Failed to fetch {kind} URL {url}: {err}"),
     };
@@ -1325,21 +1329,68 @@ fn validate_payload_size(bytes: Vec<u8>, kind: &str, max_size: usize) -> Result<
     Ok(bytes)
 }
 
-fn http_image_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            // Total deadline for any single fetch.
-            .timeout(Duration::from_secs(10))
-            // Cap the time spent dialling a hostile or unreachable origin so
-            // the request as a whole cannot stall longer than necessary.
-            .connect_timeout(Duration::from_secs(5))
-            // Bound redirect chains so a malicious origin cannot bounce the
-            // client through unbounded hops.
-            .redirect(reqwest::redirect::Policy::limited(5))
-            .build()
-            .expect("server image client should build")
-    })
+/// Returns the shared image/media-fetch client, or an error if
+/// `MLXCEL_EXTRA_CA_CERTS` is set but invalid.
+///
+/// A bad `MLXCEL_EXTRA_CA_CERTS` is an operator misconfiguration, not a
+/// programmer invariant, so it's surfaced as a normal error to the caller
+/// (same as the downloader's client) rather than panicking the request path.
+async fn http_image_client() -> Result<&'static reqwest::Client> {
+    // `tokio::sync::OnceCell::get_or_try_init` gives true single-flight
+    // semantics: concurrent callers that arrive before the first
+    // initialization finishes await that *same* attempt and observe its
+    // *same* outcome, instead of each redundantly building their own client
+    // and racing to publish one. A prior hand-rolled `std::sync::OnceLock`
+    // check-then-build version got this wrong in two ways — a racing
+    // caller's own transient failure could surface as an error even though
+    // a concurrent caller had already (or was about to) succeed, and every
+    // racing caller redundantly read+parsed the cert bundle and built a
+    // full client only to have all but one discarded.
+    static CLIENT: tokio::sync::OnceCell<reqwest::Client> = tokio::sync::OnceCell::const_new();
+    CLIENT
+        .get_or_try_init(|| async {
+            let mut builder = reqwest::Client::builder()
+                // Total deadline for any single fetch.
+                .timeout(Duration::from_secs(10))
+                // Cap the time spent dialling a hostile or unreachable
+                // origin so the request as a whole cannot stall longer
+                // than necessary.
+                .connect_timeout(Duration::from_secs(5))
+                // Bound redirect chains so a malicious origin cannot
+                // bounce the client through unbounded hops.
+                .redirect(reqwest::redirect::Policy::limited(5));
+            // See `downloader::load_extra_ca_certificates` — this client
+            // fetches remote media URLs over the same rustls-tls backend,
+            // so it needs the same MLXCEL_EXTRA_CA_CERTS trust anchors to
+            // work behind a TLS-inspecting corporate proxy. Loading is a
+            // blocking fs::read + PEM parse, so it runs on the blocking
+            // pool instead of this async worker thread.
+            let extra_certs = tokio::task::spawn_blocking(|| {
+                // Serializes with `downloader::tests`' MLXCEL_EXTRA_CA_CERTS
+                // mutations. This is the only production path that reads
+                // that env var outside of a test-controlled call; cargo
+                // test runs every #[test] in one process, so an unguarded
+                // read here can race unsynchronized env::set_var calls
+                // elsewhere in the same test binary — undefined behavior
+                // per Rust 2024's env contract. Held only within this
+                // synchronous closure (never across an `.await`, which
+                // would make the guard's non-`Send` MutexGuard poison the
+                // enclosing future). Compiled out entirely outside test
+                // builds.
+                #[cfg(test)]
+                let _env_guard = crate::test_support::env_lock::env_lock();
+                crate::downloader::load_extra_ca_certificates()
+            })
+            .await
+            .context("extra CA cert loader task panicked")??;
+            for cert in extra_certs {
+                builder = builder.add_root_certificate(cert);
+            }
+            builder
+                .build()
+                .context("Failed to create server image/media HTTP client")
+        })
+        .await
 }
 
 #[cfg(test)]

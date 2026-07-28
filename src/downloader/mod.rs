@@ -60,6 +60,15 @@
 //!   half-closed TCP connection therefore fails fast instead of hanging the
 //!   CLI/server indefinitely. Total elapsed download time is intentionally
 //!   unbounded (large files take time); only inactivity is bounded.
+//! - **Extra CA certificates** — set `MLXCEL_EXTRA_CA_CERTS=/path/to/bundle.pem`
+//!   to additionally trust one or more custom root/intermediate CAs (PEM,
+//!   concatenated) for this module's `reqwest::Client`, on top of its default
+//!   trust store. Needed behind a TLS-inspecting corporate proxy (Cloudflare
+//!   Zero Trust / WARP Gateway, Netskope, Zscaler, ...) when its root CA is
+//!   not available to the active TLS backend (for example in a container).
+//!   [`load_extra_ca_certificates`] is also used by the server's
+//!   `http_image_client` (`src/server/media.rs`), which fetches remote media
+//!   URLs through an independently-built client with the same trust gap.
 //! - **URL segment encoding** — `repo_id`, `revision`, and `filename` are
 //!   percent-encoded per-segment when composing the GET/HEAD URL so that
 //!   adversarial repo metadata containing `?`, `#`, or other reserved
@@ -103,6 +112,7 @@ use hf_hub::api::sync::{Api, ApiBuilder};
 use hf_hub::{Repo, RepoType};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::io::AsyncWriteExt;
@@ -329,6 +339,74 @@ const INSECURE_ENDPOINT_OPT_OUT: &str = "MLXCEL_ALLOW_INSECURE_ENDPOINT";
 /// honor the same operator escape hatch.
 fn is_insecure_endpoint_opt_out() -> bool {
     matches!(std::env::var(INSECURE_ENDPOINT_OPT_OUT), Ok(val) if !val.trim().is_empty())
+}
+
+/// Env var pointing at a PEM file of additional CA certificates to trust,
+/// on top of (not instead of) the active TLS backend's default roots.
+///
+/// The direct download and media clients are built independently from the
+/// `hf-hub` manifest client. Cargo feature unification currently makes both
+/// native-tls and rustls available to `reqwest`, so callers must not depend on
+/// a particular backend discovering a custom OS root. This explicit bundle
+/// gives both direct clients deterministic, scoped trust without weakening or
+/// replacing their default trust anchors.
+const EXTRA_CA_CERTS_ENV: &str = "MLXCEL_EXTRA_CA_CERTS";
+
+/// Generous upper bound for an operator-provided CA bundle.
+///
+/// Public root bundles are typically a few hundred KiB. Limiting this input
+/// prevents a mistaken path to a large file from allocating unbounded memory
+/// in the downloader or performing unbounded work on a server blocking-pool
+/// worker.
+const MAX_EXTRA_CA_CERTS_BYTES: usize = 1024 * 1024;
+
+/// Load additional trust anchors from [`EXTRA_CA_CERTS_ENV`], if set.
+///
+/// Returns an empty `Vec` when the env var is unset or empty — the default,
+/// zero-config path. When set, the file at that path is read and parsed as a
+/// PEM bundle (one or more concatenated `-----BEGIN CERTIFICATE-----` blocks,
+/// e.g. `cat corp-ca.pem >> extra-ca-certs.pem` to add more than one). A
+/// missing file, unreadable file, oversized bundle, or bundle with zero valid
+/// certificates is a hard error rather than a silent no-op: an operator who
+/// set this var intended for it to take effect, and downloads would otherwise
+/// fail later with a much less actionable TLS error.
+pub(crate) fn load_extra_ca_certificates() -> Result<Vec<reqwest::Certificate>> {
+    let path = match std::env::var(EXTRA_CA_CERTS_ENV) {
+        Ok(val) if !val.trim().is_empty() => val.trim().to_string(),
+        Ok(_) | Err(std::env::VarError::NotPresent) => return Ok(Vec::new()),
+        Err(std::env::VarError::NotUnicode(raw)) => {
+            return Err(anyhow!(
+                "{EXTRA_CA_CERTS_ENV} is set but is not valid UTF-8: {raw:?}"
+            ));
+        }
+    };
+    let file = fs::File::open(&path).with_context(|| {
+        format!("{EXTRA_CA_CERTS_ENV} is set to '{path}' but the file could not be read")
+    })?;
+    let mut bytes = Vec::new();
+    file.take((MAX_EXTRA_CA_CERTS_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .with_context(|| {
+            format!("{EXTRA_CA_CERTS_ENV} is set to '{path}' but the file could not be read")
+        })?;
+    if bytes.len() > MAX_EXTRA_CA_CERTS_BYTES {
+        return Err(anyhow!(
+            "{EXTRA_CA_CERTS_ENV} points to '{path}', but the bundle exceeds the \
+             {MAX_EXTRA_CA_CERTS_BYTES}-byte safety limit"
+        ));
+    }
+    let certs = reqwest::Certificate::from_pem_bundle(&bytes).with_context(|| {
+        format!(
+            "{EXTRA_CA_CERTS_ENV} points to '{path}', but it could not be parsed as a PEM \
+             certificate bundle"
+        )
+    })?;
+    if certs.is_empty() {
+        return Err(anyhow!(
+            "{EXTRA_CA_CERTS_ENV} points to '{path}', but it contains no certificates"
+        ));
+    }
+    Ok(certs)
 }
 
 /// Refuse plaintext endpoints when a token would be transmitted (M1).
@@ -781,6 +859,9 @@ fn download_repo_blocking(opts: DownloadOptions) -> Result<()> {
             .default_headers(headers);
         if enforce_https {
             builder = builder.https_only(true);
+        }
+        for cert in load_extra_ca_certificates()? {
+            builder = builder.add_root_certificate(cert);
         }
         builder.build().context("Failed to create HTTP client")
     })?;

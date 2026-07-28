@@ -1,4 +1,12 @@
 // Copyright © 2026 Apple Inc.
+// Patched by mlxcel. Modified from upstream MLX b7c3dd6d
+// mlx/backend/cuda/quantized/qmm/qmm_sm80.cu. Changes:
+// (1) #637: raise the CTA tile_m cap to 128 on consumer Blackwell
+//     (sm_120/121) for large-M prefill shapes, with MLXCEL_QMM_TILE_{M,N,K}
+//     env overrides (see make_cta_tiler below);
+// (2) #910: bump the JIT module name to "qmm_sm80_r2" so PTX caches compiled
+//     from the pre-fix device/qmm_sm80.cuh (shared-memory epilogue race) are
+//     never reused (the cache is keyed by module name only, not source hash).
 
 #include "mlx/backend/cuda/device/qmm_sm80.cuh"
 
@@ -69,8 +77,12 @@ void qmm_sm80(
   auto [m, n, k, l, broadcast_b] = make_problem_shape(x, w, out);
   auto cta_tiler = make_cta_tiler(m, group_size, encoder.device());
 
+  // [mlxcel #910] The "r2" revision marker invalidates PTX caches compiled
+  // from the pre-fix kernel source: the on-disk JIT cache is keyed by module
+  // name only (no source hash), so without the marker a stale cached PTX
+  // would keep serving the epilogue-race kernel after an upgrade.
   std::string module_name = fmt::format(
-      "qmm_sm80_tn_{}_m{}_b{}_g{}_{}",
+      "qmm_sm80_r2_tn_{}_m{}_b{}_g{}_{}",
       dtype_to_string(x.dtype()),
       cute::size<0>(cta_tiler),
       bits,

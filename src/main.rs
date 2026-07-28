@@ -1820,6 +1820,7 @@ const FAMILY_ORDER: &[&str] = &[
     "GLM",
     "ERNIE",
     "Hunyuan",
+    "Bailing",
     "Granite",
     "ExaOne",
     "Solar",
@@ -1848,6 +1849,8 @@ const FAMILY_ORDER: &[&str] = &[
     "GLM VLM",
     "Kimi VLM",
     "PaddleOCR VLM",
+    "MiniMax VLM",
+    "Step VLM",
     "Other VLM",
 ];
 

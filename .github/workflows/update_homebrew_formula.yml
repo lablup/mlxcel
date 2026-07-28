@@ -95,10 +95,49 @@ jobs:
           cd homebrew-tap
           VERSION="${{ env.VERSION_NO_V }}"
 
-          gsed -i "s/^  version .*/  version \"${VERSION}\"/" Formula/mlxcel.rb
+          # Each stanza is matched by name, never by line position. The previous
+          # version of this step rewrote "whatever line follows the url" as the
+          # sha256, which held only while the url lived inside an `on_macos`
+          # block. Once the tap moved the url to the top level with `version`
+          # between url and sha256, that edit overwrote the `version` stanza and
+          # left the stale sha256 in place, producing a formula with no version
+          # and two sha256 lines. See lablup/homebrew-tap 9969ec4.
+          #
+          # The guards below assume mlxcel ships exactly one artifact, so the
+          # formula holds exactly one of each stanza. If that ever stops being
+          # true the run fails here instead of silently editing the wrong line.
+          for stanza in version url sha256; do
+            count=$(grep -c "^[[:space:]]*${stanza} " Formula/mlxcel.rb || true)
+            if [ "$count" -ne 1 ]; then
+              echo "::error::Expected exactly one \`${stanza}\` stanza in Formula/mlxcel.rb, found ${count}. Refusing to edit."
+              exit 1
+            fi
+          done
 
-          gsed -i "s|https://github.com/.*/mlxcel-macos-aarch64.zip|${mac_url}|" Formula/mlxcel.rb
-          gsed -i "/mlxcel-macos-aarch64.zip\"/!b;n;c\      sha256 \"${mac_sha}\"" Formula/mlxcel.rb
+          gsed -i "s|^\([[:space:]]*\)version .*|\1version \"${VERSION}\"|" Formula/mlxcel.rb
+          gsed -i "s|^\([[:space:]]*\)url .*|\1url \"${mac_url}\"|" Formula/mlxcel.rb
+          gsed -i "s|^\([[:space:]]*\)sha256 .*|\1sha256 \"${mac_sha}\"|" Formula/mlxcel.rb
+
+      - name: Validate updated formula
+        run: |
+          cd homebrew-tap
+          echo "=== Formula/mlxcel.rb ==="
+          cat Formula/mlxcel.rb
+
+          # Catches malformed output before it reaches the tap: a syntax error,
+          # a duplicated or misindented stanza, or a version/sha256 that did not
+          # take. `brew style` is the same check the tap is expected to pass.
+          ruby -c Formula/mlxcel.rb
+          brew style Formula/mlxcel.rb
+
+          grep -q "^  version \"${{ env.VERSION_NO_V }}\"$" Formula/mlxcel.rb || {
+            echo "::error::version stanza did not update to ${{ env.VERSION_NO_V }}."
+            exit 1
+          }
+          grep -q "^  sha256 \"${mac_sha}\"$" Formula/mlxcel.rb || {
+            echo "::error::sha256 stanza did not update to ${mac_sha}."
+            exit 1
+          }
 
       - name: Commit and push changes to tap
         run: |

@@ -202,6 +202,14 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::HunyuanMoe => "hunyuan_moe",
         ModelType::HunyuanV1Dense => "hunyuan_v1_dense",
         ModelType::MiMo => "mimo",
+        // Bailing MoE is not shardable by the generic transformer plan: its
+        // attention projection is the fused `attention.query_key_value` rather
+        // than separate q/k/v, and its routed experts live under
+        // `mlp.experts.{idx}` / `mlp.switch_mlp`, neither of which the shard
+        // rules name. The refusal comes from `validate_supported_runtime`, whose
+        // `runtime_kind_for` match has no arm for `ModelType::BailingMoe` and so
+        // returns `None`; this arm only keeps the dispatch table total.
+        ModelType::BailingMoe => "bailing_moe",
         ModelType::Apertus => "apertus",
         ModelType::SeedOss => "seed_oss",
         ModelType::Granite => "granite",
@@ -213,6 +221,45 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::Olmo => "olmo",
         ModelType::Olmo2 => "olmo2",
         ModelType::Olmo3 => "olmo3",
+        // GPT-2's fused `c_attn` and Conv1D key names have no shard rules, so
+        // the planner's supported-architecture validation rejects this string
+        // before any TP load is attempted. It keeps the dispatch table total.
+        ModelType::Gpt2 => "gpt2",
+        // GPT-BigCode shares GPT-2's fused `c_attn` key names, and its
+        // multi-query KV block cannot be split across ranks anyway, but this
+        // string is not rejected here: `generate_shard_plan`'s architecture
+        // match has no `gpt_bigcode` arm, so it falls into the `_ =>` case
+        // and still produces a generic transformer plan. The actual refusal
+        // happens later, in `validate_supported_runtime`, whose
+        // `runtime_kind_for` match has no arm for `ModelType::GptBigCode`
+        // and so returns `None`, which that function turns into an
+        // unsupported-architecture error before any TP load is attempted.
+        // This arm keeps the dispatch table total.
+        ModelType::GptBigCode => "gpt_bigcode",
+        // GPT-NeoX is in the same position as GPT-BigCode above:
+        // `generate_shard_plan` has no `gpt_neox` arm and falls into its
+        // generic `_ =>` case, and the refusal comes from
+        // `validate_supported_runtime`, whose `runtime_kind_for` match has no
+        // arm for `ModelType::GptNeoX` and so returns `None`. Sharding this
+        // family would need its own rules regardless: the fused
+        // `query_key_value` projection is laid out head-major
+        // (`[q_i | k_i | v_i]` per head), so a row split at any offset a
+        // generic plan would pick cuts through the middle of a head's Q, K and
+        // V rather than between whole heads. This arm keeps the dispatch table
+        // total.
+        ModelType::GptNeoX => "gpt_neox",
+        // Helium is structurally a shardable dense Llama, but TP is refused for
+        // it on purpose and this arm only keeps the dispatch table total. The
+        // tensor-parallel runtime builds its per-rank model by parsing
+        // `config.json` straight into `llama3::ModelArgs`, and
+        // `llama3::ModelArgs::rope_traditional` is deliberately not
+        // deserializable, so a sharded Helium would silently rotate split-half
+        // pairs while the single-process path rotates interleaved pairs. The
+        // refusal comes from `validate_supported_runtime`, whose
+        // `runtime_kind_for` match has no arm for `ModelType::Helium` and so
+        // returns `None`. Enabling TP here means threading the flag through the
+        // rank-local config first.
+        ModelType::Helium => "helium",
         ModelType::StarCoder2 => "starcoder2",
         ModelType::Mellum => "mellum",
         ModelType::MiniCPM | ModelType::MiniCPMOVLM => "minicpm",

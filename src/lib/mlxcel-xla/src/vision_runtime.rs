@@ -580,7 +580,7 @@ fn compile_and_load(
     std::fs::create_dir_all(&cache)
         .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
     let (weights, checkpoint_schema) = load_weights(model_dir, &config.weight_specs())?;
-    let contract = AuxiliaryArtifactContract::new(
+    let contract = AuxiliaryArtifactContract::new_legacy_unqualified(
         ENTRY_NAME,
         format!(
             "{};{};checkpoint_schema_sha256={}",
@@ -918,8 +918,12 @@ mod tests {
         let first_generation =
             compiler_generation_identity_from_version(&compiler, &["--target=cuda"], "mlir", "v1")
                 .unwrap();
-        let first_contract =
-            AuxiliaryArtifactContract::new("vision.main", "config=v1", &first_generation).unwrap();
+        let first_contract = AuxiliaryArtifactContract::new_legacy_unqualified(
+            "vision.main",
+            "config=v1",
+            &first_generation,
+        )
+        .unwrap();
         let mut compile_count = 0usize;
         ensure_qualified_auxiliary_artifact(&vmfb, &first_contract, &weights, |temporary| {
             compile_count += 1;
@@ -933,8 +937,12 @@ mod tests {
             compiler_generation_identity_from_version(&compiler, &["--target=cuda"], "mlir", "v1")
                 .unwrap();
         assert_ne!(first_generation, second_generation);
-        let second_contract =
-            AuxiliaryArtifactContract::new("vision.main", "config=v1", second_generation).unwrap();
+        let second_contract = AuxiliaryArtifactContract::new_legacy_unqualified(
+            "vision.main",
+            "config=v1",
+            second_generation,
+        )
+        .unwrap();
         ensure_qualified_auxiliary_artifact(&vmfb, &second_contract, &weights, |temporary| {
             compile_count += 1;
             std::fs::write(temporary, b"vmfb-b")

@@ -1,3 +1,28 @@
+mlxcel (0.4.3-1~jammy1) jammy; urgency=medium
+
+  * Fixed: 4-bit decode on CUDA was non-deterministic at temperature 0 and could
+    emit a stray token; the qmm_sm80 quantized-matmul kernel reused shared memory
+    still being written by in-flight cp.async copies, and now drains them before
+    the epilogue, so greedy decode is byte-identical run to run (#910).
+  * Fixed: the fused decode-MoE kernel rounded each per-expert partial to bf16
+    before summing, corrupting long multi-turn Gemma 4 output; partials are now
+    accumulated in f32 and rounded once (#886).
+  * Fixed: Gemma 4 chunked prefill dropped the sliding-window attention mask under
+    concurrent load, collapsing output to reserved <unused> tokens; the mask is
+    now sized to the keys each attention family returns (#891).
+  * Changed: the Gemma 4 reasoning channel is hidden from CLI output by default;
+    pass --show-reasoning to print it (#889).
+  * Added: GPT-2 (#924), GPT-BigCode (#926), GPT-NeoX (#928), and Kyutai Helium
+    (#930) text models.
+  * Added: OpenXLA multimodal paths for Gemma3n text and audio (#892, #883),
+    Phi4MM audio (#887, #914), LLaVA vision (#913), and Qwen2-VL vision (#915),
+    with image requests admitted in the CLI and continuous-batch serving (#895).
+  * Changed: the IREE compiler and runtime are pinned to 3.12.0rc20260721 on CUDA
+    and macOS, fetched from the official GitHub release and verified by sha256
+    (#882).
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Mon, 27 Jul 2026 09:00:00 +0000
+
 mlxcel (0.4.2-1~jammy1) jammy; urgency=medium
 
   * Added: MiniMax-M3 hybrid dense/MoE text model with block-sparse attention

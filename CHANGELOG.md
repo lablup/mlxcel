@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.4.3] - 2026-07-27
+
+### Added
+
+- GPT-2 text model support (#924).
+- GPT-BigCode text model support (#926).
+- GPT-NeoX text model support (#928).
+- Kyutai Helium text model support (#930).
+- Gemma3n text runtime and dense PLE prefill on the OpenXLA backend (#892).
+- Gemma3n audio reference path (#883).
+- Token-exact Phi4MM audio reference path (#887), and Phi4MM audio with per-slot adapters on OpenXLA (#914).
+- LLaVA vision execution through IREE (#913), with an end-to-end reference-architecture test (#897).
+- Qwen2-VL OpenXLA vision path (#915).
+- Sparse DeepStack prefill on OpenXLA (#893).
+- Multimodal RoPE position state on OpenXLA (#894).
+- Image requests admitted in the CLI and continuous-batch serving (#895).
+- Bounded audio preprocessing and serving plumbing on OpenXLA (#896).
+- Prefill embeddings entry point (#879), and IREE sessions seeded from prepared embeddings (#888).
+- Parameterized static context capacity on OpenXLA (#880).
+- `--show-reasoning` CLI flag to print the reasoning channel that is otherwise hidden (#889).
+- OpenXLA operator numeric contracts and a bounded numeric-oracle probe harness covering dense matmul, affine Q4 dequant, prefix scan, and core ops (#934, #937, #938, #940, #941, #942, #943, #944).
+- Intra-MoE phase profiling for nemotron-h (#832).
+
+### Changed
+
+- The Gemma 4 reasoning channel (`<|channel>thought ... <channel|>`) is hidden from CLI output by default. Pass `--show-reasoning` to print it. Server `reasoning_content` behavior is unchanged (#889).
+- The IREE compiler and runtime are pinned to 3.12.0rc20260721 on both CUDA and macOS, fetched from the official GitHub release and verified by sha256 (#882).
+- VLM host prefill preprocessing was refactored to owned buffers (#881).
+- OpenXLA diagnostic local-task thread count is bounded (#945).
+- Dependency updates: minor and patch bumps across 11 packages (#828).
+
+### Fixed
+
+- 4-bit CUDA decode was non-deterministic at temperature 0 and could emit a stray token. The `qmm_sm80` quantized-matmul kernel reused shared memory still being written by in-flight `cp.async` copies; it now drains outstanding copies before the epilogue store, so greedy decode is byte-identical run to run on every 4-bit model (#910).
+- The fused decode-MoE kernel rounded each of the K per-expert partials to bf16 before summing, which corrupted long multi-turn Gemma 4 output. Partials are now accumulated in f32 and rounded once (#886).
+- Gemma 4 chunked-prefill continuation dropped the sliding-window attention mask when the caller mask was shorter than the returned keys, collapsing output to reserved `<unused>` tokens under concurrent load. The mask is now sized to the keys each attention family returns (#891).
+- The Gemma 4 reasoning channel and its chain-of-thought no longer leak into CLI output as raw tokens (#889).
+
 ## [v0.4.2] - 2026-07-20
 
 ### Added
@@ -1096,6 +1134,7 @@ Initial public release of mlxcel.
 - GitHub Actions release workflow for macOS ARM64
 - Profile mode for prefill/decode timing analysis
 
+[v0.4.3]: https://github.com/lablup/mlxcel/compare/v0.4.2...v0.4.3
 [v0.4.2]: https://github.com/lablup/mlxcel/compare/v0.4.1...v0.4.2
 [v0.4.1]: https://github.com/lablup/mlxcel/compare/v0.4.0...v0.4.1
 [v0.4.0]: https://github.com/lablup/mlxcel/compare/v0.3.3...v0.4.0

@@ -33,6 +33,7 @@ pub mod switch_layers;
 // Model implementations (mlxcel-core based)
 pub mod apertus;
 pub mod baichuan;
+pub mod bailing_moe;
 pub mod bitnet;
 pub mod cohere;
 pub mod cohere2;
@@ -62,9 +63,13 @@ pub mod glm4_moe_lite;
 pub mod glm4v;
 pub mod glm4v_moe;
 pub mod glm_moe_dsa;
+pub mod gpt2;
+pub mod gpt_bigcode;
+pub mod gpt_neox;
 pub mod gpt_oss;
 pub mod granite;
 pub mod granitemoehybrid;
+pub mod helium;
 pub mod hunyuan_moe;
 pub mod hunyuan_v1_dense;
 pub mod hunyuan_vl;
@@ -135,6 +140,7 @@ pub mod kokoro;
 // Re-export model types
 pub use apertus::ApertusModel;
 pub use baichuan::BaichuanModel;
+pub use bailing_moe::BailingMoeModel;
 pub use bitnet::BitNetModel;
 pub use cohere::CohereModel;
 pub use cohere2::Cohere2Model;
@@ -163,9 +169,13 @@ pub use glm4_moe::Glm4MoeModel;
 pub use glm4_moe_lite::Glm4MoeLiteModel;
 pub use glm4v::Glm4vTextModel;
 pub use glm4v_moe::Glm4vMoeTextModel;
+pub use gpt_bigcode::GptBigCodeModel;
+pub use gpt_neox::GptNeoxModel;
 pub use gpt_oss::{GptOssModel, GptOssWrapper};
+pub use gpt2::Gpt2Model;
 pub use granite::GraniteModel;
 pub use granitemoehybrid::GraniteMoeHybridModel;
+pub use helium::HeliumModel;
 pub use hunyuan_moe::HunyuanMoeModel;
 pub use hunyuan_v1_dense::HunyuanV1DenseModel;
 pub use internlm2::InternLM2Model;
@@ -345,6 +355,10 @@ pub enum ModelType {
     HunyuanMoe,
     HunyuanV1Dense,
     MiMo,
+    /// Ant Group Ling / Bailing MoE (`bailing_moe`): DeepSeek-shaped sparse
+    /// decoder with a fused GQA `query_key_value` and a single wide shared
+    /// expert.
+    BailingMoe,
 
     // Apertus (Swiss AI)
     Apertus,
@@ -369,11 +383,17 @@ pub enum ModelType {
     Olmo2,
     Olmo3,
 
+    // GPT-2 lineage
+    Gpt2,       // GPT-2 (learned absolute position embeddings, Conv1D weight layout)
+    GptBigCode, // GPT-BigCode (StarCoder / SantaCoder: GPT-2 block with multi-query attention)
+    GptNeoX,    // GPT-NeoX (EleutherAI Pythia: interleaved per-head QKV, partial RoPE)
+
     // Code models
     StarCoder2,
     Mellum, // Mellum 2 (JetBrains hybrid-attention MoE code model)
 
     // Other Transformer models
+    Helium, // Kyutai Helium (Llama-shaped dense decoder with traditional RoPE)
     MiniCPM,
     MiniCPM3,
     StableLM,
@@ -536,6 +556,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::HunyuanMoe,
     ModelType::HunyuanV1Dense,
     ModelType::MiMo,
+    ModelType::BailingMoe,
     // Apertus (Swiss AI)
     ModelType::Apertus,
     // ByteDance Seed-OSS
@@ -553,10 +574,15 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Olmo,
     ModelType::Olmo2,
     ModelType::Olmo3,
+    // GPT-2 lineage
+    ModelType::Gpt2,
+    ModelType::GptBigCode,
+    ModelType::GptNeoX,
     // Code models
     ModelType::StarCoder2,
     ModelType::Mellum,
     // Other Transformer models
+    ModelType::Helium,
     ModelType::MiniCPM,
     ModelType::MiniCPM3,
     ModelType::StableLM,
@@ -728,6 +754,7 @@ impl ModelType {
             // ----- Hunyuan -----
             ModelType::HunyuanV1Dense => ("Hunyuan v1 Dense", "Hunyuan"),
             ModelType::HunyuanMoe => ("Hunyuan MoE", "Hunyuan"),
+            ModelType::BailingMoe => ("Ling / Bailing MoE (shared + routed experts)", "Bailing"),
 
             // ----- IBM Granite -----
             ModelType::Granite => ("Granite (dense)", "Granite"),
@@ -806,6 +833,22 @@ impl ModelType {
             ModelType::Kokoro => ("Kokoro (StyleTTS2 + iSTFTNet)", "Text-to-speech"),
 
             // ----- Specialized / other small/text -----
+            ModelType::Gpt2 => (
+                "GPT-2 (learned absolute positions, Conv1D weights)",
+                "Specialized",
+            ),
+            ModelType::GptBigCode => (
+                "GPT-BigCode (StarCoder / SantaCoder, multi-query attention)",
+                "Specialized",
+            ),
+            ModelType::GptNeoX => (
+                "GPT-NeoX (EleutherAI Pythia, partial RoPE, parallel residual)",
+                "Specialized",
+            ),
+            ModelType::Helium => (
+                "Kyutai Helium (dense Llama shape, traditional RoPE)",
+                "Specialized",
+            ),
             ModelType::StarCoder2 => ("StarCoder 2", "Specialized"),
             ModelType::Mellum => ("Mellum 2 (JetBrains code)", "Specialized"),
             ModelType::StableLM => ("StableLM", "Specialized"),
@@ -1008,6 +1051,7 @@ mod metadata_tests {
             HunyuanMoe,
             HunyuanV1Dense,
             MiMo,
+            BailingMoe,
             Apertus,
             SeedOss,
             Granite,
@@ -1019,8 +1063,12 @@ mod metadata_tests {
             Olmo,
             Olmo2,
             Olmo3,
+            Gpt2,
+            GptBigCode,
+            GptNeoX,
             StarCoder2,
             Mellum,
+            Helium,
             MiniCPM,
             MiniCPM3,
             StableLM,

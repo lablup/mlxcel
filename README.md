@@ -6,6 +6,14 @@
 
 High-performance LLM/VLM inference runtime and server for Apple Silicon. The CLI and server are implemented in Rust and execute models through native MLX C++ bindings. Linux/CUDA builds are supported as a secondary target.
 
+## New in v0.4.3
+
+- **Deterministic 4-bit decode on CUDA.** Every 4-bit model produced different output run to run at temperature 0 on CUDA, and occasionally a garbage token, because the quantized-matmul kernel (`qmm_sm80`) reused shared memory that was still being written by in-flight async copies. The kernel now drains those copies before the epilogue, so greedy decode is byte-identical across runs on every 4-bit model (#910).
+- **Gemma 4 output correctness.** Three fixes: the fused decode-MoE kernel accumulates the per-expert partials in f32 instead of rounding each to bf16 before summing, which had corrupted long multi-turn output (#886); chunked prefill sizes the sliding-window attention mask to the keys the cache returns instead of dropping it, which had collapsed output to reserved `<unused>` tokens under concurrent load (#891); and the CLI hides the Gemma 4 `<|channel>thought` reasoning channel by default, with `--show-reasoning` to print it (#889).
+- **Four more text models.** GPT-2 (#924), GPT-BigCode (#926), GPT-NeoX (#928), and Kyutai Helium (#930).
+- **OpenXLA multimodal expansion (opt-in).** On the `xla-iree` backend: Gemma3n text runtime and audio (#892, #883), Phi4MM audio with per-slot adapters (#887, #914), LLaVA vision through IREE (#913), the Qwen2-VL vision path (#915), sparse DeepStack prefill (#893), multimodal RoPE position state (#894), and image requests admitted in the CLI and continuous-batch serving (#895). Default builds still do not compile the XLA path.
+- **IREE toolchain pinned and hardened.** The IREE compiler and runtime are unified at 3.12.0rc20260721 across CUDA and macOS, with wheels fetched from the official GitHub release and verified by sha256 (#882).
+
 ## New in v0.4.2
 
 - **Three more model families.** MiniMax-M3, a hybrid dense/MoE text model with block-sparse attention (#799); MiniMax-M3-VL multimodal (#800); and Unlimited-OCR, whose decode runs against a ring sliding KV cache so a long document does not grow the cache unbounded past the window (#801).
