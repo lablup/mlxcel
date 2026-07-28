@@ -205,7 +205,7 @@ fn position_table_overflow_is_reported_exactly_at_the_boundary() {
 
 // Checkpoint layout detection.
 
-fn tiny_args() -> ModelArgs {
+pub(crate) fn tiny_args() -> ModelArgs {
     serde_json::from_str(
         r#"{
             "model_type": "gpt2",
@@ -248,7 +248,7 @@ fn zeros(shape: &[i32]) -> mlxcel_core::UniquePtr<mlxcel_core::MlxArray> {
 
 /// Raw HuggingFace GPT-2 export: no key prefix, Conv1D `[in, out]` weights,
 /// and the `h.N.attn.bias` causal-mask buffer present.
-fn raw_hf_weights(args: &ModelArgs, prefix: &str) -> WeightMap {
+pub(crate) fn raw_hf_weights(args: &ModelArgs, prefix: &str) -> WeightMap {
     let h = args.n_embd as i32;
     let ff = args.intermediate_size() as i32;
     let ctx = args.n_ctx as i32;
@@ -287,7 +287,7 @@ fn raw_hf_weights(args: &ModelArgs, prefix: &str) -> WeightMap {
 
 /// MLX conversion: `model.` prefix, weights already `[out, in]`, no mask
 /// buffer (the reference `sanitize` deleted it).
-fn mlx_converted_weights(args: &ModelArgs) -> WeightMap {
+pub(crate) fn mlx_converted_weights(args: &ModelArgs) -> WeightMap {
     let h = args.n_embd as i32;
     let ff = args.intermediate_size() as i32;
 

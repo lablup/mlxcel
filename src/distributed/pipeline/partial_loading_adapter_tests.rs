@@ -458,3 +458,121 @@ fn stage_filtered_fusion_is_noop_on_empty_stage_adapter() {
     let val = mlxcel_core::item_f32(&sum);
     assert!((val - 10.0).abs() < 1e-5, "base drifted: {val}");
 }
+
+// ---------------------------------------------------------------------------
+// apply_stage_lora_adapter — the pipeline-parallel entry point
+//
+// This path never goes through `load_model_with_adapter`, so it needs its own
+// coverage of the base-weight layout guard rather than inheriting the non-PP
+// path's.
+// ---------------------------------------------------------------------------
+
+fn ones_tensor(rows: usize, cols: usize) -> OwnedTensor {
+    let mut data = Vec::with_capacity(rows * cols * 4);
+    for _ in 0..rows * cols {
+        data.extend_from_slice(&1.0f32.to_le_bytes());
+    }
+    OwnedTensor {
+        dtype: safetensors::tensor::Dtype::F32,
+        shape: vec![rows, cols],
+        data,
+    }
+}
+
+/// Write an mlx-lm-style adapter directory: `lora_a` is `[in, rank]` and
+/// `lora_b` is `[rank, out]`, both all ones, so every delta entry is
+/// `scale * rank`.
+fn write_adapter_dir(dir: &std::path::Path, layer: &str, in_f: usize, rank: usize, out_f: usize) {
+    use std::collections::HashMap;
+
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join("adapter_config.json"),
+        format!(
+            r#"{{"fine_tune_type": "lora", "lora_parameters": {{"rank": {rank}, "scale": 1.0}}}}"#
+        ),
+    )
+    .unwrap();
+
+    let mut tensors: HashMap<String, OwnedTensor> = HashMap::new();
+    tensors.insert(format!("{layer}.lora_a"), ones_tensor(in_f, rank));
+    tensors.insert(format!("{layer}.lora_b"), ones_tensor(rank, out_f));
+    safetensors::serialize_to_file(&tensors, None, &dir.join("adapters.safetensors")).unwrap();
+}
+
+fn sum_of(weights: &mlxcel_core::weights::WeightMap, key: &str) -> f32 {
+    let w = weights.get(key).unwrap();
+    mlxcel_core::eval(w);
+    let sum = mlxcel_core::sum_all(w);
+    mlxcel_core::eval(&sum);
+    mlxcel_core::item_f32(&sum)
+}
+
+#[test]
+fn stage_local_fusion_rejects_a_conv1d_layout_stage_weight_map() {
+    // A pipeline stage holding a raw HuggingFace GPT-2 export: `c_proj` is
+    // square, so the delta broadcasts and nothing downstream would notice the
+    // transposed accumulation. The stage path must refuse it just like the
+    // single-process path does.
+    let args = crate::models::gpt2::tests::tiny_args();
+    let mut base = crate::models::gpt2::tests::raw_hf_weights(&args, "transformer.");
+    let h = args.n_embd;
+
+    let tmp_dir = temp_dir("conv1d");
+    write_adapter_dir(&tmp_dir, "transformer.h.0.attn.c_proj", h, 2, h);
+
+    let filter = LayerFilter {
+        layer_range: 0..1,
+        has_embedding: true,
+        has_lm_head: true,
+    };
+
+    let key = "transformer.h.0.attn.c_proj.weight";
+    let before = sum_of(&base, key);
+
+    let err = match crate::lora::apply_stage_lora_adapter(&mut base, &tmp_dir, &filter) {
+        Ok(()) => panic!("a Conv1D-layout stage weight map must not fuse"),
+        Err(err) => err.to_string(),
+    };
+    assert!(err.contains("Conv1D"), "{err}");
+    assert!(err.contains(key), "{err}");
+
+    let after = sum_of(&base, key);
+    assert!(
+        (before - after).abs() < 1e-6,
+        "stage weights must be left untouched: {before} -> {after}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn stage_local_fusion_still_applies_to_an_out_in_stage_weight_map() {
+    // Positive control: the layout guard must not disturb the layout every
+    // other family (and every MLX conversion) actually ships.
+    use mlxcel_core::weights::WeightMap;
+
+    let mut base: WeightMap = WeightMap::new();
+    base.insert(
+        "model.layers.0.self_attn.q_proj.weight".into(),
+        mlxcel_core::ones(&[4, 4], mlxcel_core::dtype::FLOAT32),
+    );
+
+    let tmp_dir = temp_dir("outin");
+    write_adapter_dir(&tmp_dir, "model.layers.0.self_attn.q_proj", 4, 2, 4);
+
+    let filter = LayerFilter {
+        layer_range: 0..1,
+        has_embedding: false,
+        has_lm_head: false,
+    };
+
+    crate::lora::apply_stage_lora_adapter(&mut base, &tmp_dir, &filter)
+        .expect("stage fusion succeeds on an [out, in] weight map");
+
+    // 16 entries of 1.0, plus a delta of scale (1.0) * rank (2) everywhere.
+    let fused = sum_of(&base, "model.layers.0.self_attn.q_proj.weight");
+    assert!((fused - 48.0).abs() < 1e-4, "unexpected fused sum: {fused}");
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

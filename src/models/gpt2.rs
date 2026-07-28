@@ -982,6 +982,10 @@ impl LanguageModel for Gpt2Model {
     }
 }
 
+// `pub(crate)` because the checkpoint-layout fixtures here are the canonical
+// description of a raw HuggingFace Conv1D export and an MLX conversion, and the
+// LoRA fusion tests (`src/lora/loader_tests.rs`) assert against the same maps
+// rather than re-deriving them.
 #[cfg(test)]
 #[path = "gpt2_tests.rs"]
-mod tests;
+pub(crate) mod tests;

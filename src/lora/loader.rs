@@ -94,7 +94,24 @@ pub fn fuse_lora_weights(
 /// the filter will produce fusion updates — `base_weights` entries that are
 /// not referenced by any `lora_a` / `lora_b` pair are left untouched.
 ///
-/// Used by: [`fuse_lora_weights`], `apply_lora_adapters_in_place`
+/// # Layout
+///
+/// Every delta this produces is in `mlxcel_core` `Linear` layout,
+/// `[out_features, in_features]`. The base weight has to be in the same layout
+/// for the element-wise add to mean anything, and nothing upstream guarantees
+/// that: `load_model_with_adapter` fuses into the raw safetensors map and only
+/// afterwards constructs the model, which is where a family such as GPT-2
+/// transposes its on-disk `Conv1D` projections. Both mismatch cases are checked
+/// here, before any operand reaches MLX. See
+/// [`reject_conv1d_layout_fusion`] and the shape guard in the fusion loop.
+///
+/// # Errors
+///
+/// Returns an error, leaving `base_weights` untouched, when the base weight map
+/// stores its projections transposed, or when a resolved base weight and its
+/// delta disagree on shape.
+///
+/// Used by: [`fuse_lora_weights`], [`apply_stage_lora_adapter`]
 pub fn fuse_lora_weights_into(
     base_weights: &mut WeightMap,
     adapter_weights: &WeightMap,
@@ -118,6 +135,15 @@ pub fn fuse_lora_weights_into(
             lora_pairs.entry(base_name).or_insert((None, None)).1 = Some(mlxcel_core::copy(weight));
         }
         // Ignore other weights (like scales for DoRA)
+    }
+
+    // Refuse up front if the base weight map still stores its projections
+    // transposed. This has to be a whole-map verdict taken before the first
+    // `add`, because the square `attn.c_proj` is precisely the case where the
+    // two shapes agree and the corruption would be silent.
+    if !lora_pairs.is_empty() {
+        let adapter_layers: Vec<&str> = lora_pairs.keys().map(String::as_str).collect();
+        reject_conv1d_layout_fusion(base_weights, &adapter_layers)?;
     }
 
     // Fuse each LoRA pair with the corresponding base weight
@@ -145,6 +171,34 @@ pub fn fuse_lora_weights_into(
         // Compute the LoRA delta: scale * (lora_b @ lora_a)
         let delta = compute_lora_delta(&lora_a, &lora_b, scale)?;
 
+        // Never hand mismatched operands to `mlxcel_core::add`. MLX broadcasts,
+        // so a mismatch is not reliably an error: a base weight that is one
+        // broadcastable step away from the delta fuses cleanly and produces a
+        // silently wrong tensor. And where broadcasting genuinely fails, `add`
+        // is not declared fallible in the cxx bridge, so the MLX C++ exception
+        // is `std::terminate` and takes the process down instead of returning
+        // an error the caller can report.
+        let base_shape = mlxcel_core::array_shape(base_weight);
+        let delta_shape = mlxcel_core::array_shape(&delta);
+        if base_shape != delta_shape {
+            let is_transpose = base_shape.len() == 2
+                && delta_shape.len() == 2
+                && base_shape[0] == delta_shape[1]
+                && base_shape[1] == delta_shape[0];
+            let hint = if is_transpose {
+                " The two are exact transposes of each other, so this base weight is stored \
+                 transposed relative to the [out_features, in_features] layout every LoRA delta \
+                 uses. Fusion does not transpose an operand to make the shapes agree; convert the \
+                 checkpoint to [out_features, in_features] instead."
+            } else {
+                ""
+            };
+            anyhow::bail!(
+                "LoRA shape mismatch fusing adapter layer {base_name} into base weight \
+                 {base_weight_name}: base is {base_shape:?}, delta is {delta_shape:?}.{hint}"
+            );
+        }
+
         // Fuse: W_fused = W_base + delta
         let fused = mlxcel_core::add(base_weight, &delta);
 
@@ -152,6 +206,147 @@ pub fn fuse_lora_weights_into(
     }
 
     Ok(())
+}
+
+/// Suffixes of the transformer-block projections that a HuggingFace GPT-2
+/// export stores as a `Conv1D`, i.e. `[in_features, out_features]`, transposed
+/// relative to the `[out_features, in_features]` layout `Linear` weights and
+/// every LoRA delta use.
+///
+/// GPT-2 is the only family in this tree that ships checkpoints in that layout.
+/// `Gpt2Layout` (`src/models/gpt2.rs`) transposes them, but it does so at model
+/// construction, which runs *after* fusion on the `load_model_with_adapter`
+/// path, so fusion has to recognise the on-disk layout itself.
+const CONV1D_PROJECTION_SUFFIXES: [&str; 4] = [
+    ".attn.c_attn.weight",
+    ".attn.c_proj.weight",
+    ".mlp.c_fc.weight",
+    ".mlp.c_proj.weight",
+];
+
+/// Whether `key` names one of the [`CONV1D_PROJECTION_SUFFIXES`] projections of
+/// a transformer block, returning the suffix that matched.
+///
+/// The `h.<N>.` block index is required, not just the suffix: GPT-BigCode uses
+/// the same `c_attn` / `c_proj` / `c_fc` names while storing them `[out, in]`
+/// (`src/models/gpt_bigcode.rs`), and an unrelated `...c_proj.weight` elsewhere
+/// in a checkpoint must never be mistaken for a Conv1D projection.
+fn conv1d_projection_suffix(key: &str) -> Option<&'static str> {
+    CONV1D_PROJECTION_SUFFIXES.into_iter().find(|suffix| {
+        let Some(rest) = key.strip_suffix(suffix) else {
+            return false;
+        };
+        let Some((head, index)) = rest.rsplit_once("h.") else {
+            return false;
+        };
+        // `h.` has to start a path segment, so that `blah.0.attn.c_proj.weight`
+        // (which also contains the substring `h.`) is not read as block 0.
+        (head.is_empty() || head.ends_with('.'))
+            && !index.is_empty()
+            && index.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
+/// Evidence that a base weight map still stores its transformer-block
+/// projections in the HuggingFace `Conv1D` layout.
+struct Conv1dLayoutEvidence {
+    /// The fused QKV projection key the verdict was taken from.
+    key: String,
+    /// Its `[n_embd, 3 * n_embd]` shape.
+    shape: Vec<i32>,
+}
+
+/// Detect whether `base_weights` is still in the HuggingFace `Conv1D` layout.
+///
+/// The only usable signal is the fused QKV projection: `h.<N>.attn.c_attn.weight`
+/// is `[n_embd, 3 * n_embd]` on disk and `[3 * n_embd, n_embd]` once transposed,
+/// and the two can never be confused. That is what makes a whole-map verdict
+/// necessary as well as possible — the square `attn.c_proj` carries no layout
+/// signal of its own, so only its `c_attn` sibling can say which way round it is
+/// stored. This is the same probe `Gpt2Layout::detect` uses, minus the config,
+/// which fusion does not have.
+///
+/// Returns the lexicographically smallest matching key so the diagnostic is
+/// stable from run to run ([`WeightMap`] is a `HashMap`).
+fn detect_conv1d_projection_layout(base_weights: &WeightMap) -> Option<Conv1dLayoutEvidence> {
+    let mut evidence: Option<Conv1dLayoutEvidence> = None;
+
+    for (key, weight) in base_weights {
+        let Some(block) = key.strip_suffix(".attn.c_attn.weight") else {
+            continue;
+        };
+        if conv1d_projection_suffix(key).is_none() {
+            continue;
+        }
+        // A quantized projection is packed, so its stored shape matches neither
+        // float layout and carries no layout signal. `Gpt2Layout::detect`
+        // short-circuits on exactly this check.
+        if base_weights.contains_key(&format!("{block}.attn.c_attn.scales")) {
+            continue;
+        }
+        let shape = mlxcel_core::array_shape(weight);
+        let [rows, cols] = shape.as_slice() else {
+            continue;
+        };
+        // `i64` because `rows * 3` overflows `i32` for a hostile shape.
+        if *rows <= 0 || i64::from(*cols) != i64::from(*rows) * 3 {
+            continue;
+        }
+        if evidence.as_ref().is_none_or(|found| *key < found.key) {
+            evidence = Some(Conv1dLayoutEvidence {
+                key: key.clone(),
+                shape,
+            });
+        }
+    }
+
+    evidence
+}
+
+/// Refuse to fuse into a base weight map whose projections are still stored
+/// transposed, before any operand reaches MLX.
+///
+/// `adapter_layers` are the layer paths the adapter targets, i.e. the
+/// `lora_a` / `lora_b` key stems. Only targets that resolve to a projection
+/// actually stored in `Conv1D` layout are reported; an adapter that touches
+/// nothing transposed (an embedding-only adapter, say) fuses as before.
+///
+/// This deliberately does not repair anything. Transposing the delta would fix
+/// the non-square projections and leave the square `attn.c_proj` just as wrong,
+/// because a square weight gives no evidence about which orientation was
+/// intended. Reporting is the only honest outcome.
+fn reject_conv1d_layout_fusion(base_weights: &WeightMap, adapter_layers: &[&str]) -> Result<()> {
+    let Some(evidence) = detect_conv1d_projection_layout(base_weights) else {
+        return Ok(());
+    };
+
+    let mut affected: Vec<String> = Vec::new();
+    for layer in adapter_layers {
+        let resolved = find_base_weight_name(layer, base_weights)?;
+        if conv1d_projection_suffix(&resolved).is_some() && base_weights.contains_key(&resolved) {
+            affected.push(resolved);
+        }
+    }
+    if affected.is_empty() {
+        return Ok(());
+    }
+    affected.sort();
+
+    let Conv1dLayoutEvidence { key, shape } = evidence;
+    anyhow::bail!(
+        "LoRA fusion refused: this checkpoint still stores its transformer-block projections in \
+         the HuggingFace Conv1D layout [in_features, out_features], while every LoRA delta is \
+         [out_features, in_features]. Detected from {key} with shape {shape:?}, which is \
+         [n_embd, 3 * n_embd]. Adapter targets landing on a Conv1D-stored projection: {}. \
+         Adding the delta as it stands is not safe: the non-square projections cannot broadcast \
+         and abort the process inside MLX, and the square attention c_proj broadcasts cleanly \
+         while accumulating the transpose of the intended update, with no error anywhere. \
+         Transposing an operand is not a repair either, because a square projection carries no \
+         signal about which orientation was meant. Use a checkpoint whose projections are already \
+         stored [out_features, in_features], such as an mlx-community GPT-2 conversion, or load \
+         the model without the adapter.",
+        affected.join(", "),
+    );
 }
 
 /// Find the base weight name that corresponds to a LoRA layer name
@@ -292,7 +487,10 @@ pub fn apply_lora_adapters(base_weights: &WeightMap, adapter_path: &Path) -> Res
 /// place, and never materializes per-layer deltas for other stages.
 ///
 /// The caller is expected to pass the stage's [`LayerFilter`]. The
-/// adapter configuration is validated exactly as in the non-PP path.
+/// adapter configuration is validated exactly as in the non-PP path, and so is
+/// the base weight layout: this path never goes through
+/// `load_model_with_adapter`, but it shares [`fuse_lora_weights_into`], so it
+/// inherits the same layout and shape guards.
 ///
 /// Used by: pipeline stage initialization (family stage executors)
 pub fn apply_stage_lora_adapter(
@@ -342,67 +540,5 @@ pub fn apply_stage_lora_adapter(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_compute_lora_delta_mlx_format() {
-        // mlx-lm format: a=(in=4, rank=2), b=(rank=2, out=3)
-        // Result should be (out=3, in=4)
-        let lora_a = mlxcel_core::from_slice_f32(&[1.0f32; 8], &[4, 2]);
-        let lora_b = mlxcel_core::from_slice_f32(&[1.0f32; 6], &[2, 3]);
-        let scale = 1.0;
-
-        let delta = compute_lora_delta(&lora_a, &lora_b, scale).unwrap();
-        assert_eq!(mlxcel_core::array_shape(&delta), vec![3, 4]);
-    }
-
-    #[test]
-    fn test_compute_lora_delta_peft_format() {
-        // PEFT format: a=(rank=2, in=4), b=(out=3, rank=2)
-        // Result should be (out=3, in=4)
-        let lora_a = mlxcel_core::from_slice_f32(&[1.0f32; 8], &[2, 4]);
-        let lora_b = mlxcel_core::from_slice_f32(&[1.0f32; 6], &[3, 2]);
-        let scale = 1.0;
-
-        let delta = compute_lora_delta(&lora_a, &lora_b, scale).unwrap();
-        assert_eq!(mlxcel_core::array_shape(&delta), vec![3, 4]);
-    }
-
-    #[test]
-    fn test_fuse_lora_weights_basic() {
-        // Create base weights
-        let mut base_weights = WeightMap::new();
-        base_weights.insert(
-            "layer.weight".to_string(),
-            mlxcel_core::ones(&[3, 4], mlxcel_core::dtype::FLOAT32),
-        );
-
-        // Create adapter weights (mlx-lm format)
-        let mut adapter_weights = WeightMap::new();
-        adapter_weights.insert(
-            "layer.lora_a".to_string(),
-            mlxcel_core::ones(&[4, 2], mlxcel_core::dtype::FLOAT32),
-        );
-        adapter_weights.insert(
-            "layer.lora_b".to_string(),
-            mlxcel_core::ones(&[2, 3], mlxcel_core::dtype::FLOAT32),
-        );
-
-        let fused = fuse_lora_weights(&base_weights, &adapter_weights, 1.0).unwrap();
-
-        // Should have the same key
-        assert!(fused.contains_key("layer.weight"));
-        let fused_weight = fused.get("layer.weight").unwrap();
-        let shape = mlxcel_core::array_shape(fused_weight);
-        assert_eq!(shape, vec![3, 4]);
-
-        // Original was all 1s, delta should be scale * (lora_b.T @ lora_a.T) = 2s matrix
-        // So fused should be > 1.0
-        mlxcel_core::eval(fused_weight);
-        let sum = mlxcel_core::sum_all(fused_weight);
-        mlxcel_core::eval(&sum);
-        let sum_val = mlxcel_core::item_f32(&sum);
-        assert!(sum_val > 12.0); // 3*4 = 12 base + delta > 0
-    }
-}
+#[path = "loader_tests.rs"]
+mod tests;
