@@ -56,6 +56,7 @@ use std::path::Path;
 use mlxcel_core::hardware::{HardwareCapabilities, KvCacheParams, get_hardware};
 use mlxcel_core::weights::weight_footprint_bytes;
 
+use super::config_fields;
 use super::quant_advisor::estimate_model_params_billions;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -499,18 +500,19 @@ struct ActivationDims {
 /// VLM `text_config` nesting). `intermediate_size` falls back to `4 × hidden`
 /// (the common rule of thumb) and `vocab_size` to 0 (no logit buffer term)
 /// when absent. Returns `None` only when `hidden_size` is unavailable.
+///
+/// The alias lists come from [`crate::execution::config_fields`], shared with
+/// the KV classifier: a hidden-size spelling the classifier accepts but this
+/// function does not means a model reports a real KV figure next to a zero
+/// activation reserve.
 fn activation_dims_from_path(model_dir: &Path) -> Option<ActivationDims> {
     let config: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(model_dir.join("config.json")).ok()?).ok()?;
-    let text = config.get("text_config").unwrap_or(&config);
-    let lookup = |keys: &[&str]| -> Option<u64> {
-        keys.iter()
-            .find_map(|k| text.get(*k).and_then(|v| v.as_u64()))
-    };
-    let hidden = lookup(&["hidden_size", "d_model", "dim", "model_dim"])?;
-    let intermediate = lookup(&["intermediate_size", "ffn_dim", "ffn_hidden_size"])
+    let text = config_fields::text_config(&config);
+    let hidden = config_fields::get_u64(text, config_fields::HIDDEN_SIZE_KEYS)?;
+    let intermediate = config_fields::get_u64(text, config_fields::INTERMEDIATE_SIZE_KEYS)
         .unwrap_or_else(|| hidden.saturating_mul(4));
-    let vocab = lookup(&["vocab_size"]).unwrap_or(0);
+    let vocab = config_fields::get_u64(text, &["vocab_size"]).unwrap_or(0);
     Some(ActivationDims {
         hidden,
         intermediate,
@@ -707,6 +709,11 @@ fn parse_meminfo_kib(rest: &str) -> Option<u64> {
 /// back into the legacy recommendation engine without re-parsing
 /// `config.json` twice. Returns `None` when `config.json` is missing
 /// the architecture fields.
+///
+/// Field names and the KV-head resolution come from
+/// [`crate::execution::config_fields`], the same source
+/// [`crate::execution::kv_arch`] classifies from, so this cannot drift out of
+/// agreement with the classifier.
 pub fn kv_cache_params_from_path(
     model_dir: &Path,
     ctx_len: u64,
@@ -716,38 +723,13 @@ pub fn kv_cache_params_from_path(
     let config_path = model_dir.join("config.json");
     let config_str = std::fs::read_to_string(&config_path).ok()?;
     let config: serde_json::Value = serde_json::from_str(&config_str).ok()?;
-    let text_cfg = config.get("text_config").unwrap_or(&config);
+    let text_cfg = config_fields::text_config(&config);
 
-    let num_layers = text_cfg
-        .get("num_hidden_layers")
-        .or_else(|| text_cfg.get("n_layers"))
-        .or_else(|| text_cfg.get("num_layers"))
-        .and_then(|v| v.as_u64())?;
-    let hidden_size = text_cfg
-        .get("hidden_size")
-        .or_else(|| text_cfg.get("d_model"))
-        .or_else(|| text_cfg.get("dim"))
-        .or_else(|| text_cfg.get("model_dim"))
-        .and_then(|v| v.as_u64());
-    let num_heads = text_cfg
-        .get("num_attention_heads")
-        .or_else(|| text_cfg.get("num_heads"))
-        .or_else(|| text_cfg.get("n_heads"))
-        .or_else(|| text_cfg.get("n_head"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(1);
-    let num_kv_heads = text_cfg
-        .get("num_key_value_heads")
-        .or_else(|| text_cfg.get("num_kv_heads"))
-        .or_else(|| text_cfg.get("n_kv_heads"))
-        .or_else(|| text_cfg.get("n_head_kv"))
-        .or_else(|| text_cfg.get("multi_query_group_num"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(num_heads);
-    let explicit_head_dim = text_cfg
-        .get("head_dim")
-        .or_else(|| text_cfg.get("head_size"))
-        .and_then(|v| v.as_u64());
+    let num_layers = config_fields::get_u64(text_cfg, config_fields::LAYER_COUNT_KEYS)?;
+    let hidden_size = config_fields::get_u64(text_cfg, config_fields::HIDDEN_SIZE_KEYS);
+    let num_heads = config_fields::get_u64(text_cfg, config_fields::NUM_HEADS_KEYS).unwrap_or(1);
+    let num_kv_heads = config_fields::resolve_num_kv_heads(text_cfg, num_heads);
+    let explicit_head_dim = config_fields::get_u64(text_cfg, config_fields::HEAD_DIM_KEYS);
     let head_dim = if let Some(head_dim) = explicit_head_dim {
         head_dim
     } else if let Some(hidden_size) = hidden_size {
@@ -1173,6 +1155,100 @@ mod tests {
         let params = kv_cache_params_from_path(tmp.path(), 256, false, 1).unwrap();
         assert_eq!(params.head_dim, 256);
         assert_eq!(kv_cache_bytes_from_params(&params), 35 * 2 * 256 * 2 * 256);
+    }
+
+    // ── OpenAI-era field naming: GPT-2 / GPT-BigCode (#927) ──────────────────
+
+    fn write_config(dir: &Path, cfg: &serde_json::Value) {
+        std::fs::write(dir.join("config.json"), serde_json::to_string(cfg).unwrap()).unwrap();
+    }
+
+    /// `models/gpt2` verbatim.
+    fn gpt2_config() -> serde_json::Value {
+        serde_json::json!({
+            "model_type": "gpt2",
+            "n_layer": 12,
+            "n_head": 12,
+            "n_embd": 768,
+            "vocab_size": 50257,
+        })
+    }
+
+    /// `models/gpt_bigcode-santacoder` verbatim.
+    fn gpt_bigcode_config() -> serde_json::Value {
+        serde_json::json!({
+            "model_type": "gpt_bigcode",
+            "n_layer": 24,
+            "n_head": 16,
+            "n_embd": 2048,
+            "n_inner": 8192,
+            "multi_query": true,
+            "vocab_size": 49280,
+        })
+    }
+
+    /// Before #927 both families reported `KvSource::Unavailable` with 0 KV
+    /// bytes AND a 0-byte activation reserve, because the layer-count and
+    /// hidden-size lookups did not alias `n_layer` / `n_embd`.
+    #[test]
+    fn openai_era_naming_yields_nonzero_kv_and_activation() {
+        for (name, cfg, expected_kv) in [
+            ("gpt2", gpt2_config(), 301_989_888u64),
+            ("gpt_bigcode", gpt_bigcode_config(), 100_663_296u64),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            write_config(tmp.path(), &cfg);
+
+            let est = estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, false);
+            assert_eq!(est.kv_source, KvSource::Config, "{name} kv source");
+            assert_eq!(est.kv_cache_bytes, expected_kv, "{name} kv bytes");
+            assert!(
+                !est.kv_detail.contains("unavailable"),
+                "{name} detail should not say unavailable, got {}",
+                est.kv_detail
+            );
+            assert!(
+                est.activation_bytes > 0,
+                "{name} activation reserve should be non-zero"
+            );
+        }
+    }
+
+    /// `kv_cache_params_from_path` duplicates the classifier's geometry for the
+    /// legacy recommendation engine; it must agree, boolean `multi_query`
+    /// included, or the two surfaces disagree by a factor of `n_head`.
+    #[test]
+    fn kv_params_agree_with_classifier_for_openai_era_naming() {
+        for (name, cfg, expected_kv_heads, expected_head_dim) in [
+            ("gpt2", gpt2_config(), 12u64, 64u64),
+            ("gpt_bigcode", gpt_bigcode_config(), 1u64, 128u64),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            write_config(tmp.path(), &cfg);
+
+            let params = kv_cache_params_from_path(tmp.path(), 8192, false, 1)
+                .unwrap_or_else(|| panic!("{name} params"));
+            assert_eq!(params.num_kv_heads, expected_kv_heads, "{name} kv heads");
+            assert_eq!(params.head_dim, expected_head_dim, "{name} head dim");
+
+            let est = estimate_total_memory(tmp.path(), 8192, 1, QuantHint::Default, false);
+            assert_eq!(
+                kv_cache_bytes_from_params(&params),
+                est.kv_cache_bytes,
+                "{name}: params and classifier must agree"
+            );
+        }
+    }
+
+    /// `paged_block_bytes` fed the server's `--kv-cache-budget auto` ceiling a
+    /// `None` for both families, leaving the pool unbounded.
+    #[test]
+    fn paged_block_bytes_resolves_for_openai_era_naming() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_config(tmp.path(), &gpt_bigcode_config());
+        // 24 layers x 2 (K+V) x 1 kv head x 128 head_dim x 2 bytes = 12288/token
+        // across all layers, so 512 bytes per layer per token, x 16 tokens.
+        assert_eq!(paged_block_bytes(tmp.path(), 24, 16, false), Some(8192));
     }
 
     #[test]

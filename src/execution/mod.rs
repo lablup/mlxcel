@@ -18,6 +18,7 @@
 //! entry points easier to add without re-implementing environment parsing or
 //! generation defaults in multiple places.
 
+pub(crate) mod config_fields;
 pub mod kv_arch;
 pub mod kv_cache_advisor;
 pub mod memory_estimate;

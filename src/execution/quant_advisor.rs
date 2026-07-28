@@ -22,6 +22,7 @@ use std::path::Path;
 
 use mlxcel_core::hardware::{HardwareCapabilities, QuantRecommendation, recommend_quantization};
 
+use crate::execution::config_fields;
 use crate::execution::kv_cache_advisor::{
     KvCacheModeAdvice, advise_kv_cache_modes, print_kv_cache_advice,
 };
@@ -54,68 +55,49 @@ pub fn estimate_model_params_billions(model_path: &Path) -> Option<f64> {
     estimate_params_from_config(&config)
 }
 
+/// Field names come from [`crate::execution::config_fields`], shared with the
+/// KV classifier and the activation estimator so a spelling accepted by one is
+/// accepted by all of them.
 fn estimate_params_from_config(config: &serde_json::Value) -> Option<f64> {
     // Support models that wrap text config under a "text_config" key (VLMs).
-    let text_cfg = config.get("text_config").unwrap_or(config);
+    let text_cfg = config_fields::text_config(config);
 
-    let hidden_size = text_cfg
-        .get("hidden_size")
-        .or_else(|| text_cfg.get("d_model"))
-        .or_else(|| text_cfg.get("dim"))
-        .or_else(|| text_cfg.get("model_dim"))
-        .and_then(|v| v.as_f64())?;
+    let hidden_size = config_fields::get_f64(text_cfg, config_fields::HIDDEN_SIZE_KEYS)?;
 
-    let num_layers = text_cfg
-        .get("num_hidden_layers")
-        .or_else(|| text_cfg.get("n_layers"))
-        .or_else(|| text_cfg.get("num_layers"))
-        .and_then(|v| v.as_f64())?;
+    let num_layers = config_fields::get_f64(text_cfg, config_fields::LAYER_COUNT_KEYS)?;
 
-    let vocab_size = text_cfg
-        .get("vocab_size")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(32_000.0);
+    let vocab_size = config_fields::get_f64(text_cfg, &["vocab_size"]).unwrap_or(32_000.0);
 
     // FFN intermediate size — try several field names used across architectures.
-    let ffn_size = text_cfg
-        .get("intermediate_size")
-        .or_else(|| text_cfg.get("ffn_dim"))
-        .or_else(|| text_cfg.get("ffn_hidden_size"))
-        .and_then(|v| v.as_f64())
+    let ffn_size = config_fields::get_f64(text_cfg, config_fields::INTERMEDIATE_SIZE_KEYS)
         .unwrap_or(hidden_size * 4.0); // fallback: 4× hidden as a rule of thumb
 
     // Number of experts (MoE). For dense models this stays at 1.
-    let num_experts = text_cfg
-        .get("num_experts")
-        .or_else(|| text_cfg.get("num_local_experts"))
-        .or_else(|| text_cfg.get("n_routed_experts"))
-        .and_then(|v| v.as_f64())
-        .unwrap_or(1.0)
-        .max(1.0);
+    let num_experts = config_fields::get_f64(
+        text_cfg,
+        &["num_experts", "num_local_experts", "n_routed_experts"],
+    )
+    .unwrap_or(1.0)
+    .max(1.0);
 
     // Attention heads (used for GQA parameter correction, optional).
-    let num_heads = text_cfg
-        .get("num_attention_heads")
-        .or_else(|| text_cfg.get("num_heads"))
-        .or_else(|| text_cfg.get("n_heads"))
-        .or_else(|| text_cfg.get("n_head"))
-        .and_then(|v| v.as_f64())
+    let num_heads = config_fields::get_f64(text_cfg, config_fields::NUM_HEADS_KEYS)
         .unwrap_or(hidden_size / 64.0);
 
-    let kv_heads = text_cfg
-        .get("num_key_value_heads")
-        .or_else(|| text_cfg.get("num_kv_heads"))
-        .or_else(|| text_cfg.get("n_kv_heads"))
-        .or_else(|| text_cfg.get("n_head_kv"))
-        .or_else(|| text_cfg.get("multi_query_group_num"))
-        .and_then(|v| v.as_f64())
-        .unwrap_or(num_heads);
-
-    let head_dim = text_cfg
-        .get("head_dim")
-        .or_else(|| text_cfg.get("head_size"))
-        .and_then(|v| v.as_f64())
+    // A numeric KV-head field wins; failing that, GPT-BigCode's boolean
+    // `multi_query` means one shared KV head, which shrinks the K/V projection
+    // term below the MHA default.
+    let kv_heads = config_fields::get_f64(text_cfg, config_fields::NUM_KV_HEADS_KEYS)
         .unwrap_or_else(|| {
+            if config_fields::is_multi_query(text_cfg) {
+                1.0
+            } else {
+                num_heads
+            }
+        });
+
+    let head_dim =
+        config_fields::get_f64(text_cfg, config_fields::HEAD_DIM_KEYS).unwrap_or_else(|| {
             if num_heads > 0.0 && num_heads.is_finite() {
                 (hidden_size / num_heads).round()
             } else {

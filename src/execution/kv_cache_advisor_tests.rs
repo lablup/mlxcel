@@ -206,6 +206,52 @@ fn advise_classifies_standard_config_for_all_ranges() {
     assert_eq!(advices[2].suggested, KVCacheMode::Turbo4Delegated);
 }
 
+/// Both OpenAI-era families used to classify as unavailable, so
+/// `advise_kv_cache_modes_from_config` returned an empty vector and `mlxcel
+/// inspect` printed no KV-cache-mode section for them at all (#927).
+#[test]
+fn openai_era_naming_produces_advice() {
+    let gpt2 = serde_json::json!({
+        "model_type": "gpt2",
+        "n_layer": 12,
+        "n_head": 12,
+        "n_embd": 768,
+    });
+    let gpt_bigcode = serde_json::json!({
+        "model_type": "gpt_bigcode",
+        "n_layer": 24,
+        "n_head": 16,
+        "n_embd": 2048,
+        "multi_query": true,
+    });
+
+    for (name, cfg) in [("gpt2", gpt2), ("gpt_bigcode", gpt_bigcode)] {
+        let (kind, mt) =
+            arch_and_type_from_config(&cfg).unwrap_or_else(|| panic!("{name} should classify"));
+        assert_eq!(kind, KvArchKind::Standard, "{name} kind");
+        assert_eq!(mt, name, "{name} model_type");
+
+        let advices = advise_kv_cache_modes_from_config(&cfg);
+        assert_eq!(advices.len(), 3, "{name} advice count");
+        // head_dim is 64 (gpt2) / 128 (gpt_bigcode), both powers of two, so
+        // the Turbo guard does not downgrade the long-context suggestion.
+        assert_eq!(advices[2].suggested, KVCacheMode::Turbo4Delegated, "{name}");
+    }
+}
+
+/// `read_head_dim` derives from `n_embd` / `n_head` now that it shares the
+/// classifier's alias lists. Both families are powers of two, so nothing is
+/// downgraded, but the guard must be deriving a real value rather than
+/// defaulting permissively through `None`.
+#[test]
+fn openai_era_naming_derives_head_dim_for_turbo_guard() {
+    let gpt2 = serde_json::json!({ "n_embd": 768, "n_head": 12 });
+    assert_eq!(read_head_dim(&gpt2), Some(64));
+
+    let gpt_bigcode = serde_json::json!({ "n_embd": 2048, "n_head": 16 });
+    assert_eq!(read_head_dim(&gpt_bigcode), Some(128));
+}
+
 /// Computing advice must not change the runtime default. With no opt-in
 /// flags, the resolver still returns `Fp16`.
 #[test]

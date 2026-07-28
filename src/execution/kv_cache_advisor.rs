@@ -57,6 +57,7 @@ use std::path::Path;
 use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::cache::turbo::is_symmetric_turbo_allowed;
 
+use crate::execution::config_fields;
 use crate::execution::kv_arch::{KvArchKind, estimate_kv_arch_from_config};
 use crate::execution::memory_estimate::DEFAULT_CTX_LEN;
 
@@ -329,32 +330,21 @@ fn read_model_type(config: &serde_json::Value) -> String {
 /// attention-head count. Returns `None` when the required fields are absent or
 /// heads is zero.
 ///
-/// The hidden-size and head-count field-name lists mirror
-/// [`crate::execution::kv_arch`]'s `attn_dims` so the non-power-of-two guard
-/// derives the same head dim the classifier used. Without this, alternate
-/// config naming (OLMo / MPT-style `d_model` + `n_heads`) would make this
-/// return `None`, defaulting `turbo_ok` to `true` and slipping a
-/// non-power-of-two head dim past the guard.
+/// The hidden-size and head-count field-name lists come from
+/// [`crate::execution::config_fields`], the same source
+/// [`crate::execution::kv_arch`]'s `attn_dims` reads, so the non-power-of-two
+/// guard derives the same head dim the classifier used. Without that sharing,
+/// alternate config naming (OLMo / MPT-style `d_model` + `n_heads`, or the
+/// OpenAI-era `n_embd` + `n_head`) would make this return `None`, defaulting
+/// `turbo_ok` to `true` and slipping a non-power-of-two head dim past the
+/// guard.
 fn read_head_dim(config: &serde_json::Value) -> Option<u64> {
-    let text = config.get("text_config").unwrap_or(config);
-    if let Some(d) = text.get("head_dim").and_then(|v| v.as_u64()) {
+    let text = config_fields::text_config(config);
+    if let Some(d) = config_fields::get_u64(text, config_fields::HEAD_DIM_KEYS) {
         return Some(d);
     }
-    if let Some(d) = text.get("head_size").and_then(|v| v.as_u64()) {
-        return Some(d);
-    }
-    let hidden = text
-        .get("hidden_size")
-        .or_else(|| text.get("d_model"))
-        .or_else(|| text.get("dim"))
-        .or_else(|| text.get("model_dim"))
-        .and_then(|v| v.as_u64())?;
-    let heads = text
-        .get("num_attention_heads")
-        .or_else(|| text.get("num_heads"))
-        .or_else(|| text.get("n_heads"))
-        .or_else(|| text.get("n_head"))
-        .and_then(|v| v.as_u64())?;
+    let hidden = config_fields::get_u64(text, config_fields::HIDDEN_SIZE_KEYS)?;
+    let heads = config_fields::get_u64(text, config_fields::NUM_HEADS_KEYS)?;
     if heads == 0 {
         return None;
     }

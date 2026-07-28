@@ -47,6 +47,11 @@ use std::path::Path;
 use mlxcel_core::hardware::KV_CACHE_ALLOC_STEP;
 use serde_json::Value;
 
+use crate::execution::config_fields::{
+    HEAD_DIM_KEYS, HIDDEN_SIZE_KEYS, LAYER_COUNT_KEYS, NUM_HEADS_KEYS, get_u64,
+    resolve_num_kv_heads,
+};
+
 /// Which KV architecture [`estimate_kv_arch`] detected, for labelling output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KvArchKind {
@@ -119,12 +124,6 @@ fn elem_bytes(int8: bool) -> u64 {
     if int8 { 1 } else { 2 }
 }
 
-/// First present `u64` among `keys` in `obj`.
-fn get_u64(obj: &Value, keys: &[&str]) -> Option<u64> {
-    keys.iter()
-        .find_map(|k| obj.get(*k).and_then(|v| v.as_u64()))
-}
-
 fn get_str<'a>(obj: &'a Value, key: &str) -> Option<&'a str> {
     obj.get(key).and_then(|v| v.as_str())
 }
@@ -140,27 +139,18 @@ struct AttnDims {
 /// caller that a standard / sliding / hybrid KV figure cannot be computed. The
 /// MLA and pure-SSM paths do not call this — they size their cache from
 /// architecture-specific fields and need only the layer count.
+///
+/// Field names come from [`crate::execution::config_fields`], shared with the
+/// activation estimator and the KV-cache-mode advisor so the three never
+/// disagree about which spellings a config may use. The KV-head count goes
+/// through `resolve_num_kv_heads`, which honours GPT-BigCode's boolean
+/// `multi_query` as one shared head.
 fn attn_dims(text: &Value) -> Option<AttnDims> {
-    let num_heads = get_u64(
-        text,
-        &["num_attention_heads", "num_heads", "n_heads", "n_head"],
-    )
-    .unwrap_or(1)
-    .max(1);
-    let num_kv_heads = get_u64(
-        text,
-        &[
-            "num_key_value_heads",
-            "num_kv_heads",
-            "n_kv_heads",
-            "n_head_kv",
-            "multi_query_group_num",
-        ],
-    )
-    .unwrap_or(num_heads);
-    let head_dim = match get_u64(text, &["head_dim", "head_size"]) {
+    let num_heads = get_u64(text, NUM_HEADS_KEYS).unwrap_or(1).max(1);
+    let num_kv_heads = resolve_num_kv_heads(text, num_heads);
+    let head_dim = match get_u64(text, HEAD_DIM_KEYS) {
         Some(h) => h,
-        None => get_u64(text, &["hidden_size", "d_model", "dim", "model_dim"])?
+        None => get_u64(text, HIDDEN_SIZE_KEYS)?
             .checked_div(num_heads)
             .unwrap_or(64),
     };
@@ -241,7 +231,7 @@ fn count_attention_layers(text: &Value, num_layers: u64) -> Option<u64> {
 
 /// Classify a model's config into KV layer groups and an architecture kind.
 fn classify(text: &Value, model_type: &str) -> Option<(Vec<KvGroup>, KvArchKind)> {
-    let num_layers = get_u64(text, &["num_hidden_layers", "n_layers", "num_layers"])?;
+    let num_layers = get_u64(text, LAYER_COUNT_KEYS)?;
     let mt = model_type.to_ascii_lowercase();
 
     // 1. Pure SSM — no context-proportional KV cache (needs only the layer count).
@@ -254,12 +244,7 @@ fn classify(text: &Value, model_type: &str) -> Option<(Vec<KvGroup>, KvArchKind)
     //    but NOT `head_dim` (a config may omit it). V3/V3.2 cache the compressed
     //    latent + rope (shared across heads); V2 caches decompressed per-head.
     if let Some(kv_lora_rank) = get_u64(text, &["kv_lora_rank"]) {
-        let num_heads = get_u64(
-            text,
-            &["num_attention_heads", "num_heads", "n_heads", "n_head"],
-        )
-        .unwrap_or(1)
-        .max(1);
+        let num_heads = get_u64(text, NUM_HEADS_KEYS).unwrap_or(1).max(1);
         let rope = get_u64(text, &["qk_rope_head_dim"]).unwrap_or(64);
         if mt.contains("v3") || mt.contains("v32") {
             // Cached form: (kv_latent[kv_lora_rank] , k_pe[qk_rope_head_dim]).
@@ -789,6 +774,137 @@ mod tests {
     fn missing_architecture_fields_returns_none() {
         let cfg = json!({ "vocab_size": 32000 });
         assert!(estimate_kv_arch_from_config(&cfg, 4096, false, 1).is_none());
+    }
+
+    // ── OpenAI-era field naming: GPT-2 / GPT-BigCode (#927) ──────────────────
+
+    /// `models/gpt2` verbatim: `n_layer` / `n_embd` / `n_head`, no
+    /// `multi_query`, so plain MHA at head_dim 64.
+    #[test]
+    fn gpt2_n_layer_and_n_embd_classify_as_standard_mha() {
+        let cfg = json!({
+            "model_type": "gpt2",
+            "n_layer": 12,
+            "n_head": 12,
+            "n_embd": 768,
+            "vocab_size": 50257,
+        });
+        let e = est(&cfg, 8192);
+        assert_eq!(e.kind, KvArchKind::Standard);
+        // 12 layers × 2 (K+V) × 12 kv heads × 64 head_dim × 8192 × 2 bytes.
+        assert_eq!(e.total_bytes, 12 * 2 * 12 * 64 * 8192 * FP16);
+        assert_eq!(e.total_bytes, 301_989_888);
+        assert_eq!(e.marginal_bytes_per_token, 36_864);
+    }
+
+    /// `models/gpt_bigcode-santacoder` verbatim. The boolean `multi_query`
+    /// means ONE shared kv head; falling through to the `num_kv_heads =
+    /// num_heads` MHA default would over-reserve by 16x (1.50 GiB).
+    #[test]
+    fn gpt_bigcode_multi_query_is_one_kv_head() {
+        let cfg = json!({
+            "model_type": "gpt_bigcode",
+            "n_layer": 24,
+            "n_head": 16,
+            "n_embd": 2048,
+            "n_inner": 8192,
+            "multi_query": true,
+            "vocab_size": 49280,
+        });
+        let e = est(&cfg, 8192);
+        assert_eq!(e.kind, KvArchKind::Standard);
+        // 24 layers × 2 (K+V) × 1 kv head × 128 head_dim × 8192 × 2 bytes.
+        assert_eq!(e.total_bytes, 24 * 2 * 128 * 8192 * FP16);
+        assert_eq!(e.total_bytes, 100_663_296);
+        assert_eq!(e.marginal_bytes_per_token, 12_288);
+        // Explicitly below the alias-only-fix figure, which is the trap.
+        let mha_would_be = 24u64 * 2 * 16 * 128 * 8192 * FP16;
+        assert_eq!(mha_would_be, 1_610_612_736);
+        assert_eq!(e.total_bytes * 16, mha_would_be);
+    }
+
+    /// `multi_query: false` must degenerate to `n_head` kv heads, so the
+    /// branch cannot silently shrink a non-MQA checkpoint.
+    #[test]
+    fn gpt_bigcode_multi_query_false_is_full_mha() {
+        let cfg = json!({
+            "model_type": "gpt_bigcode",
+            "n_layer": 24,
+            "n_head": 16,
+            "n_embd": 2048,
+            "multi_query": false,
+        });
+        let e = est(&cfg, 8192);
+        assert_eq!(e.kind, KvArchKind::Standard);
+        assert_eq!(e.total_bytes, 24 * 2 * 16 * 128 * 8192 * FP16);
+    }
+
+    /// A StarCoder-sized head count: the over-reservation the `multi_query`
+    /// branch avoids scales with `n_head`, so it is 48x here, not 16x.
+    #[test]
+    fn gpt_bigcode_over_reservation_scales_with_n_head() {
+        let cfg = json!({
+            "model_type": "gpt_bigcode",
+            "n_layer": 40,
+            "n_head": 48,
+            "n_embd": 6144,
+            "multi_query": true,
+        });
+        let e = est(&cfg, 8192);
+        assert_eq!(e.total_bytes, 40 * 2 * 128 * 8192 * FP16);
+        let mha_would_be = 40u64 * 2 * 48 * 128 * 8192 * FP16;
+        assert_eq!(e.total_bytes * 48, mha_would_be);
+    }
+
+    /// An explicit numeric kv-head field outranks the boolean, so a config
+    /// carrying both is read the way it states.
+    #[test]
+    fn numeric_kv_heads_outrank_multi_query_flag() {
+        let cfg = json!({
+            "num_hidden_layers": 4,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 8,
+            "head_dim": 128,
+            "multi_query": true,
+        });
+        let e = est(&cfg, 1024);
+        assert_eq!(e.total_bytes, 4 * 2 * 8 * 128 * 1024 * FP16);
+    }
+
+    /// The three families verified on real checkpoints in #927 must keep
+    /// byte-identical estimates: appending aliases must not move them.
+    #[test]
+    fn modern_naming_families_are_unchanged() {
+        // models/pythia-1b (gpt_neox).
+        let pythia = json!({
+            "model_type": "gpt_neox",
+            "num_hidden_layers": 16,
+            "hidden_size": 2048,
+            "num_attention_heads": 8,
+        });
+        assert_eq!(est(&pythia, 8192).total_bytes, 1_073_741_824);
+
+        // models/helium-1-preview-2b-4bit.
+        let helium = json!({
+            "model_type": "helium",
+            "num_hidden_layers": 24,
+            "hidden_size": 2560,
+            "num_attention_heads": 20,
+            "num_key_value_heads": 20,
+            "head_dim": 128,
+        });
+        assert_eq!(est(&helium, 8192).total_bytes, 2_013_265_920);
+
+        // models/ling-lite-1.5 (bailing_moe): the sparse block changes only
+        // the FFN, so the attention stack is ordinary GQA.
+        let ling = json!({
+            "model_type": "bailing_moe",
+            "num_hidden_layers": 28,
+            "hidden_size": 2048,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 4,
+        });
+        assert_eq!(est(&ling, 8192).total_bytes, 469_762_048);
     }
 
     #[test]
