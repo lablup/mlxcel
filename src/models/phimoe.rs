@@ -507,22 +507,31 @@ impl PhiMoeModel {
                     );
 
                     if weights.contains_key(&first_key) {
-                        let mut expert_arrays: Vec<UniquePtr<MlxArray>> = Vec::new();
+                        // Borrowed pointers, not copies (issue #948). The
+                        // intermediate `mlxcel_core::copy` here was a real
+                        // `mx::copy` primitive whose full-size output the
+                        // following `mx::stack` read once and discarded, so it
+                        // cost one redundant pass over the whole expert set at
+                        // the first forward. `weights` is only read and is not
+                        // mutated while the pointers are live; the stacked
+                        // result goes into the separate `new_weights` map and
+                        // keeps its inputs alive on its own, because the C++
+                        // `stack` shim copies each refcounted `mx::array`
+                        // handle into its own vector.
+                        let mut expert_ptrs: Vec<*const MlxArray> = Vec::new();
                         for e in 0..args.num_local_experts {
                             let key = format!(
                                 "{}.block_sparse_moe.experts.{}.{}.{}",
                                 prefix, e, orig_name, weight_type
                             );
                             if let Some(w) = weights.get(&key) {
-                                expert_arrays.push(mlxcel_core::copy(w));
+                                expert_ptrs
+                                    .push(w.as_ref().expect("weight map holds no null handles")
+                                        as *const MlxArray);
                             }
                         }
 
-                        if !expert_arrays.is_empty() {
-                            let expert_ptrs: Vec<*const MlxArray> = expert_arrays
-                                .iter()
-                                .map(|a| a.as_ref().unwrap() as *const _)
-                                .collect();
+                        if !expert_ptrs.is_empty() {
                             let stacked = mlxcel_core::stack(&expert_ptrs, 0);
                             let new_key = format!(
                                 "{}.block_sparse_moe.switch_mlp.{}.{}",

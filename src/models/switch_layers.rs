@@ -420,9 +420,17 @@ impl SwitchLinear {
 /// `SwitchGLU::from_weights_with_proj_names`) loads from the matching expert
 /// keys without any name baked in here.
 ///
-/// Used by: Qwen2Moe (Qwen1.5-MoE / Qwen2-MoE individual-expert checkpoints),
-///          Mixtral (`block_sparse_moe.experts.{idx}.{w1,w2,w3}` checkpoints),
-///          DeepSeek v1 (`baidu/Unlimited-OCR` raw per-expert checkpoint)
+/// Used by: every family behind the shared `SwitchGLU` / `SwitchLinear`, which
+///          reaches this through `SwitchLinear::from_weights_with_mode`
+///          whenever its checkpoint ships experts unstacked (BailingMoe,
+///          Cohere2Moe, Dots1, Gemma4, GraniteMoeHybrid, KimiLinear, Lfm2,
+///          Llada2Moe, LongcatFlashNgram, Mellum, MiniMax, MiniMaxM3Moe,
+///          Mistral4, Mixtral, Moondream3, OLMoE, PhiMoE, Qwen2Moe,
+///          SolarOpen), plus DeepSeek v1 (`src/models/deepseek.rs`), which
+///          calls it directly for the `baidu/Unlimited-OCR` raw per-expert
+///          checkpoint. The layouts that actually exercise it today are the
+///          Qwen1.5-MoE / Qwen2-MoE individual-expert exports, Mixtral's
+///          `block_sparse_moe.experts.{idx}.{w1,w2,w3}`, and Ling-lite.
 pub(crate) fn stack_individual_experts(
     weights: &WeightMap,
     prefix: &str,
@@ -477,24 +485,51 @@ fn stack_individual_experts_with_count(
     let has_scales = weights.contains_key(&expert_key(0, "scales"));
     let has_biases = weights.contains_key(&expert_key(0, "biases"));
 
-    let mut stacked_weight = Vec::new();
-    let mut stacked_scales = Vec::new();
-    let mut stacked_biases = Vec::new();
+    // Borrow the per-expert tensors instead of copying them (issue #948). The
+    // copies existed only to produce owned `UniquePtr`s for `stack_owned`, and
+    // contributed nothing: `mlxcel_core::copy` lowers to `mx::copy`, a real
+    // `Copy` primitive that allocates and writes a full-size output, and
+    // `mx::stack` then allocates its own output and reads each input exactly
+    // once, so every byte the copy wrote was read once by the concatenate and
+    // discarded. Both ops are lazy and nothing evaluates model parameters
+    // between construction and the first forward pass, so the waste landed as
+    // copy traffic at the first forward rather than as load-time allocation:
+    // 31.0 GB of it for `models/ling-lite-1.5`, whose 5376 per-expert BF16
+    // tensors are its entire routed payload.
+    //
+    // `ops::stack` already takes `*const MlxArray`, so no new borrowing entry
+    // point is needed. The pointers are collected and consumed inside the live
+    // `&WeightMap` borrow, and the map is only read; do not switch this to
+    // `remove`-based draining the way `src/models/olmoe.rs` does, because this
+    // helper is called from a `&WeightMap` context. The C++ `stack` shim copies
+    // each `a->inner` into its own `std::vector<array>` and `mx::array` is a
+    // refcounted handle, so the stacked node keeps its inputs alive
+    // independently of the map (pinned by
+    // `stacked_experts_outlive_the_weight_map_they_were_borrowed_from`).
+    let as_ptr = |array: &UniquePtr<MlxArray>| {
+        // Same contract as `ops::stack_owned`, which this replaces: a WeightMap
+        // never stores a null handle, and the previous `mlxcel_core::copy` call
+        // panicked identically on one via `UniquePtr`'s `Deref`.
+        array.as_ref().expect("weight map holds no null handles") as *const MlxArray
+    };
+    let mut weight_ptrs: Vec<*const MlxArray> = Vec::new();
+    let mut scales_ptrs: Vec<*const MlxArray> = Vec::new();
+    let mut biases_ptrs: Vec<*const MlxArray> = Vec::new();
     let mut idx = 0;
     while let Some(weight) = weights.get(&expert_key(idx, "weight")) {
-        stacked_weight.push(mlxcel_core::copy(weight));
+        weight_ptrs.push(as_ptr(weight));
         if has_scales {
-            stacked_scales.push(mlxcel_core::copy(weights.get(&expert_key(idx, "scales"))?));
+            scales_ptrs.push(as_ptr(weights.get(&expert_key(idx, "scales"))?));
         }
         if has_biases {
-            stacked_biases.push(mlxcel_core::copy(weights.get(&expert_key(idx, "biases"))?));
+            biases_ptrs.push(as_ptr(weights.get(&expert_key(idx, "biases"))?));
         }
         idx += 1;
     }
 
-    let weight = mlxcel_core::stack_owned(&stacked_weight, 0);
-    let scales = has_scales.then(|| mlxcel_core::stack_owned(&stacked_scales, 0));
-    let biases = has_biases.then(|| mlxcel_core::stack_owned(&stacked_biases, 0));
+    let weight = mlxcel_core::stack(&weight_ptrs, 0);
+    let scales = has_scales.then(|| mlxcel_core::stack(&scales_ptrs, 0));
+    let biases = has_biases.then(|| mlxcel_core::stack(&biases_ptrs, 0));
     Some((weight, scales, biases, idx))
 }
 
@@ -1115,6 +1150,57 @@ mod tests {
         weights.insert(format!("{prefix}.scales"), plane(num_groups, 1.0));
         weights.insert(format!("{prefix}.biases"), plane(num_groups, 0.0));
         weights
+    }
+
+    #[test]
+    fn stacked_experts_outlive_the_weight_map_they_were_borrowed_from() {
+        // The per-expert stack is now built from pointers borrowed out of the
+        // `WeightMap` rather than from copies (issue #948). That is only sound
+        // because the C++ `stack` shim copies each refcounted `mx::array` handle
+        // into its own vector, so the stacked graph node keeps its inputs alive
+        // on its own. Drop the map before evaluating anything to pin that: if
+        // the stack ever held a borrow instead of a handle, this reads freed
+        // memory rather than failing an assertion.
+        let root = "model.layers.0.mlp";
+        let prefix = format!("{root}.switch_mlp.gate_proj");
+        let mut weights = WeightMap::new();
+        for e in 0..3 {
+            let base = (e + 1) as f32;
+            weights.insert(
+                format!("{root}.experts.{e}.gate_proj.weight"),
+                mlxcel_core::from_slice_f32(&[base, base + 0.5, base + 1.0, base + 1.5], &[2, 2]),
+            );
+            weights.insert(
+                format!("{root}.experts.{e}.gate_proj.scales"),
+                mlxcel_core::from_slice_f32(&[base, base], &[2, 1]),
+            );
+        }
+
+        let (weight, scales, biases, found) =
+            stack_individual_experts_with_count(&weights, &prefix).expect("per-expert layout");
+        assert_eq!(found, 3, "the contiguous expert count must be unchanged");
+        let scales = scales.expect("expert 0 carries scales, so scales are stacked");
+        assert!(biases.is_none(), "expert 0 carries no biases");
+
+        // The whole point: the source map is gone before anything is evaluated.
+        drop(weights);
+        mlxcel_core::eval(&weight);
+        mlxcel_core::eval(&scales);
+
+        assert_eq!(mlxcel_core::array_shape(&weight), vec![3, 2, 2]);
+        assert_eq!(mlxcel_core::array_shape(&scales), vec![3, 2, 1]);
+
+        // Values, not just shapes: a stack that silently read the wrong memory
+        // would still have the right shape.
+        for e in 0..3i32 {
+            let first = mlxcel_core::slice(&weight, &[e, 0, 0], &[e + 1, 1, 1]);
+            mlxcel_core::eval(&first);
+            assert_eq!(
+                mlxcel_core::item_f32(&first),
+                (e + 1) as f32,
+                "expert {e} landed at the wrong plane or read freed memory"
+            );
+        }
     }
 
     #[test]
