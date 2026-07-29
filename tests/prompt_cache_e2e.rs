@@ -104,43 +104,76 @@ async fn wait_for_health_soft(client: &reqwest::Client, base_url: &str, timeout:
     false
 }
 
-fn spawn_server(args: &[&str]) -> Child {
-    Command::new(repo_binary_path("mlxcel-server"))
+/// Guard that kills the child process on `Drop`, even if the test panics.
+/// Rust's `std::process::Child` does *not* kill on drop — without this
+/// guard, a panicking test leaks the `mlxcel-server` process.
+struct ServerGuard {
+    child: Child,
+}
+
+impl ServerGuard {
+    fn stop(mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for ServerGuard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn spawn_server(args: &[&str]) -> ServerGuard {
+    let child = Command::new(repo_binary_path("mlxcel-server"))
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("spawn mlxcel-server")
+        .expect("spawn mlxcel-server");
+    ServerGuard { child }
 }
 
-fn stop_server(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+/// Guard that kills the child process on `Drop`, even if the test panics.
+/// Call `stop()` to drain captured stdout/stderr before killing.
+struct CapturedServerGuard {
+    child: Child,
+}
+
+impl CapturedServerGuard {
+    /// Kill the server, drain stdout/stderr, and return the captured logs.
+    fn stop(mut self) -> String {
+        let _ = self.child.kill();
+        let mut captured = String::new();
+        if let Some(mut pipe) = self.child.stdout.take() {
+            let _ = pipe.read_to_string(&mut captured);
+        }
+        if let Some(mut pipe) = self.child.stderr.take() {
+            let _ = pipe.read_to_string(&mut captured);
+        }
+        let _ = self.child.wait();
+        captured
+    }
+}
+
+impl Drop for CapturedServerGuard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 /// Spawn `mlxcel-server` with stdout/stderr piped for log capture.
-fn spawn_server_capturing(args: &[&str]) -> Child {
-    Command::new(repo_binary_path("mlxcel-server"))
+fn spawn_server_capturing(args: &[&str]) -> CapturedServerGuard {
+    let child = Command::new(repo_binary_path("mlxcel-server"))
         .args(args)
         .env("RUST_LOG", "info")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn mlxcel-server with log capture")
-}
-
-/// Kill the server and drain stdout/stderr into a single captured string.
-fn stop_server_capturing(child: &mut Child) -> String {
-    let _ = child.kill();
-    let mut captured = String::new();
-    if let Some(mut pipe) = child.stdout.take() {
-        let _ = pipe.read_to_string(&mut captured);
-    }
-    if let Some(mut pipe) = child.stderr.take() {
-        let _ = pipe.read_to_string(&mut captured);
-    }
-    let _ = child.wait();
-    captured
+        .expect("spawn mlxcel-server with log capture");
+    CapturedServerGuard { child }
 }
 
 /// Resolve a drafter path: check under `~/.cache/mlx-drafters/` first, then
@@ -299,7 +332,7 @@ async fn multi_turn_chat_reports_cached_tokens_and_lowers_prefill_latency() {
     // Prompt cache explicitly enabled via CLI; small caps so we stay within
     // memory even on CI hosts. Dense decode storage is the only backend
     // that can currently donate back to the store (gate).
-    let mut child = spawn_server(&[
+    let child = spawn_server(&[
         "--model",
         &model_str,
         "--alias",
@@ -335,7 +368,7 @@ async fn multi_turn_chat_reports_cached_tokens_and_lowers_prefill_latency() {
              The host may not support the selected model's quantization path. \
              Not failing the test so CI stays green on unsupported hardware."
         );
-        stop_server(&mut child);
+        child.stop();
         return;
     }
 
@@ -375,7 +408,7 @@ async fn multi_turn_chat_reports_cached_tokens_and_lowers_prefill_latency() {
         turns.push(summary);
     }
 
-    stop_server(&mut child);
+    child.stop();
 
     // ---------------------------------------------------------------
     // Assertion 1: wire contract — cached_tokens field present on every
@@ -508,7 +541,7 @@ async fn multi_turn_chat_with_cache_disabled_never_reports_cached_tokens() {
     let model_str = model_dir.to_string_lossy().to_string();
     let model_alias = "qwen3-no-cache";
 
-    let mut child = spawn_server(&[
+    let child = spawn_server(&[
         "--model",
         &model_str,
         "--alias",
@@ -536,7 +569,7 @@ async fn multi_turn_chat_with_cache_disabled_never_reports_cached_tokens() {
             "Skipping: mlxcel-server did not become healthy at {base_url}. \
              Not failing CI on unsupported hardware."
         );
-        stop_server(&mut child);
+        child.stop();
         return;
     }
 
@@ -557,7 +590,7 @@ async fn multi_turn_chat_with_cache_disabled_never_reports_cached_tokens() {
         );
     }
 
-    stop_server(&mut child);
+    child.stop();
 }
 
 /// Drafter-enabled multi-turn prompt cache test.
@@ -622,7 +655,7 @@ async fn multi_turn_chat_with_drafter_reports_cached_tokens_and_no_decline() {
 
     // The model path is an HF repo ID — `mlxcel-server` will resolve it
     // from HuggingFace if not already cached.
-    let mut warm_child = spawn_server_capturing(&[
+    let warm_child = spawn_server_capturing(&[
         "--model",
         QWEN35_9B_MODEL,
         "--alias",
@@ -665,8 +698,7 @@ async fn multi_turn_chat_with_drafter_reports_cached_tokens_and_no_decline() {
             "Skipping: mlxcel-server with drafter did not become healthy at {base_url}. \
              Not failing CI on unsupported hardware."
         );
-        let _ = warm_child.kill();
-        let _ = warm_child.wait();
+        warm_child.stop();
         return;
     }
 
@@ -709,7 +741,7 @@ async fn multi_turn_chat_with_drafter_reports_cached_tokens_and_no_decline() {
         warm_turns.push(summary);
     }
 
-    let warm_logs = stop_server_capturing(&mut warm_child);
+    let warm_logs = warm_child.stop();
 
     // ---------------------------------------------------------------
     // Assertion 1: wire contract — cached_tokens field is present on
@@ -806,7 +838,7 @@ async fn multi_turn_chat_with_drafter_reports_cached_tokens_and_no_decline() {
     let cold_base_url = format!("http://127.0.0.1:{cold_port}");
     let cold_port_str = cold_port.to_string();
 
-    let mut cold_child = spawn_server_capturing(&[
+    let cold_child = spawn_server_capturing(&[
         "--model",
         QWEN35_9B_MODEL,
         "--alias",
@@ -828,8 +860,7 @@ async fn multi_turn_chat_with_drafter_reports_cached_tokens_and_no_decline() {
         eprintln!(
             "Skipping byte-equality phase: cold server did not become healthy at {cold_base_url}."
         );
-        let _ = cold_child.kill();
-        let _ = cold_child.wait();
+        cold_child.stop();
         return;
     }
 
@@ -886,5 +917,5 @@ async fn multi_turn_chat_with_drafter_reports_cached_tokens_and_no_decline() {
         );
     }
 
-    let _cold_logs = stop_server_capturing(&mut cold_child);
+    let _cold_logs = cold_child.stop();
 }
