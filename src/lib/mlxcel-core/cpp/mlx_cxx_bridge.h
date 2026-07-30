@@ -1283,6 +1283,32 @@ std::unique_ptr<MlxArray> fused_sample(
     float min_p
 );
 
+// Pre-#900 reference sampler: identical to `fused_sample` except that the
+// no-filter stochastic path always uses `random::categorical` instead of the
+// Gumbel-max kernel. Kept for the A/B microbenchmark and the parity tests.
+std::unique_ptr<MlxArray> fused_sample_categorical(
+    const MlxArray& logits,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p
+);
+
+// Softmax-free Gumbel-max categorical sampling (#900), called directly.
+// `logits` is 2D [batch, vocab]; returns [batch] uint32 token ids.
+std::unique_ptr<MlxArray> gumbel_max_sample(
+    const MlxArray& logits,
+    float temperature
+);
+
+// True when `fused_sample`'s no-filter path takes the Gumbel-max kernel:
+// backend support plus a non-falsy `MLXCEL_SAMPLING_GUMBEL`.
+bool sampling_gumbel_available();
+
+// Threadgroups the Gumbel-max kernel puts on one row for this launch shape.
+// Exposed so tests can pin that the sampled id does not depend on it.
+int32_t gumbel_sample_num_splits(int32_t batch, int32_t vocab);
+
 // SSM (State Space Model) primitives for Mamba/Jamba/Nemotron-H.
 // Cumulative sum along axis
 std::unique_ptr<MlxArray> cumsum(const MlxArray& a, int32_t axis, bool reverse, bool inclusive);

@@ -411,6 +411,13 @@ fn sample_token_optimized_core(
 /// Available for callers that need standalone batched sampling without
 /// per-sequence state interleaving. The BatchScheduler currently inlines
 /// equivalent logic to interleave sampling with EOS/state/streaming updates.
+///
+/// When every row shares one fused-eligible scalar config (see
+/// [`uniform_fused_batch_params`]) the whole batch is sampled in a single
+/// [`batched_fused_sample`] dispatch instead of the per-row loop. On the
+/// no-filter stochastic path that dispatch is the batch-wide Gumbel-max kernel
+/// (issue #900), which covers all `B` rows in one launch (grid.z = B); greedy
+/// stays on the row-independent `argmax` and is byte-identical either way.
 pub fn batched_sample(
     logits: &MlxArray,
     configs: &[&SamplingConfig],
@@ -418,6 +425,12 @@ pub fn batched_sample(
 ) -> Vec<i32> {
     let b = configs.len();
     debug_assert_eq!(b, token_histories.len());
+
+    // Batch-wide single dispatch when the whole batch is uniform and needs no
+    // per-row logit edits.
+    if let Some(params) = uniform_fused_batch_params(configs) {
+        return batched_fused_sample(logits, &params);
+    }
 
     let mut tokens = Vec::with_capacity(b);
     for i in 0..b {
@@ -429,6 +442,35 @@ pub fn batched_sample(
         tokens.push(ffi::item_i32(&token_arr));
     }
     tokens
+}
+
+/// Shared scalar params for a batch, or `None` when the batch cannot take the
+/// single-dispatch fused path.
+///
+/// Every row must be fused-eligible ([`config_supports_fused_batch`]: no
+/// history-based penalty, no token bias, no XTC) and carry bit-identical
+/// [`FusedSampleParams`]. Any divergence sends the whole batch back to the
+/// per-row loop, which is the only place per-row logit edits can happen.
+///
+/// An empty batch returns `None` so the caller's loop returns an empty vector
+/// instead of dispatching a zero-row kernel.
+///
+/// Used by: [`batched_sample`]
+fn uniform_fused_batch_params(configs: &[&SamplingConfig]) -> Option<FusedSampleParams> {
+    let first = configs.first()?;
+    if !config_supports_fused_batch(first) {
+        return None;
+    }
+    let params = FusedSampleParams::from_config(first);
+    for config in &configs[1..] {
+        if !config_supports_fused_batch(config) {
+            return None;
+        }
+        if !params.matches(&FusedSampleParams::from_config(config)) {
+            return None;
+        }
+    }
+    Some(params)
 }
 
 /// Scalar sampling parameters consumed by [`ffi::fused_sample`].

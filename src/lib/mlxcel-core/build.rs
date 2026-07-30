@@ -56,6 +56,11 @@ fn main() {
         // table with no separate gather copy; the gather-then-SDPA path stays
         // the correctness reference and fallback.
         .file("../mlx-cpp/turbo/paged_attention.cpp")
+        // Softmax-free Gumbel-max categorical sampling kernel launcher (#900).
+        // Replaces the `random::categorical` normalization pass plus the
+        // `argpartition` sort on the no-filter sampling path with one
+        // index-carrying max reduction over the vocabulary.
+        .file("../mlx-cpp/turbo/sampling.cpp")
         .include(&mlx_include)
         .include("cpp")
         .include("../mlx-cpp/turbo")
@@ -169,6 +174,9 @@ fn main() {
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention.cpp");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention.metal");
+    // Gumbel-max categorical sampling kernel launcher (#900).
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling.h");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling.cpp");
     println!("cargo:rerun-if-env-changed=MLX_CUDA_ARCHITECTURES");
     println!("cargo:rerun-if-env-changed=MLXCEL_BUILD_METAL");
     println!("cargo:rerun-if-env-changed=MLXCEL_BUILD_ACCELERATE");

@@ -1923,6 +1923,37 @@ mod ffi {
             min_p: f32,
         ) -> UniquePtr<MlxArray>;
 
+        /// Pre-#900 reference sampler: identical to [`fused_sample`] except
+        /// that the no-filter stochastic path always uses
+        /// `random::categorical` instead of the Gumbel-max kernel. Kept so the
+        /// A/B microbenchmark and the parity tests can exercise both arms in
+        /// one process without restarting under a different env.
+        fn fused_sample_categorical(
+            logits: &MlxArray,
+            temperature: f32,
+            top_k: i32,
+            top_p: f32,
+            min_p: f32,
+        ) -> UniquePtr<MlxArray>;
+
+        /// Softmax-free Gumbel-max categorical sampling (#900), called
+        /// directly. `logits` is 2-D `[batch, vocab]`; returns a `[batch]`
+        /// uint32 token-id array drawn from `softmax(logits / temperature)`.
+        /// Requires `temperature > 0` and a backend for which
+        /// [`sampling_gumbel_available`] reports support.
+        fn gumbel_max_sample(logits: &MlxArray, temperature: f32) -> UniquePtr<MlxArray>;
+
+        /// True when [`fused_sample`]'s no-filter stochastic path takes the
+        /// Gumbel-max kernel: the backend supports it (GPU default device with
+        /// Metal or CUDA available) and `MLXCEL_SAMPLING_GUMBEL` is not falsy.
+        /// The env value is read once per process.
+        fn sampling_gumbel_available() -> bool;
+
+        /// Threadgroups the Gumbel-max kernel cooperates on one row with, for a
+        /// `[batch, vocab]` launch. Always a power of two in `[1, 64]`. Exposed
+        /// so tests can pin that the sampled id does not depend on it.
+        fn gumbel_sample_num_splits(batch: i32, vocab: i32) -> i32;
+
         // SSM (State Space Model) primitives for Mamba/Jamba/Nemotron-H.
         /// Cumulative sum along axis
         fn cumsum(a: &MlxArray, axis: i32, reverse: bool, inclusive: bool) -> UniquePtr<MlxArray>;

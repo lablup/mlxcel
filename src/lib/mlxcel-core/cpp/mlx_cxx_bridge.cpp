@@ -5,6 +5,9 @@
 
 #include "mlx/primitives.h"
 
+#include "sampling.h" // Gumbel-max categorical sampling kernel (#900).
+
+#include <cctype>
 #include <cstdint>
 #include <map>
 #include <sstream>
@@ -4513,27 +4516,95 @@ namespace {
     }
 }
 
+// Env kill switch for the Gumbel-max sampling kernel (#900). Falsy disables
+// and restores the `random::categorical` path exactly. Read once per process
+// (the sampler runs per token, so a `getenv` per call would show up in the very
+// measurement this kernel exists to improve).
+namespace {
+    bool parse_sampling_gumbel_env() {
+        const char* v = std::getenv("MLXCEL_SAMPLING_GUMBEL");
+        if (v == nullptr) {
+            return true;
+        }
+        std::string value(v);
+        for (auto& c : value) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        return !(value == "0" || value == "false" || value == "off" ||
+                 value == "no");
+    }
+}
+
+// True when the no-filter sampling path will use the Gumbel-max kernel: the
+// backend supports it (GPU default device with Metal or CUDA available) and
+// `MLXCEL_SAMPLING_GUMBEL` is not falsy.
+bool sampling_gumbel_available() {
+    static const bool env_enabled = parse_sampling_gumbel_env();
+    return env_enabled && mlxcel::turbo::gumbel_max_sample_supported();
+}
+
+// Whether this exact sampler configuration can take the Gumbel-max kernel.
+// The kernel draws from `softmax(logits / temperature)` over the whole row, so
+// it is valid only when no top-k / top-p / min-p filter narrows the support
+// first. XTC and token bias are upstream logit pre-steps that leave `-inf`
+// masks in `logits`; the kernel reproduces them exactly (a `-inf` entry stays
+// `-inf` after the divide and the finite Gumbel add), so they need no gate.
+static bool gumbel_sample_applies(
+    const mlx::core::array& x,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p
+) {
+    if (!(temperature > 0.0f)) {
+        return false;
+    }
+    if (top_k > 0) {
+        return false;
+    }
+    if (top_p > 0.0f && top_p < 1.0f) {
+        return false;
+    }
+    if (min_p > 0.0f && min_p < 1.0f) {
+        return false;
+    }
+    return mlxcel::turbo::gumbel_max_sample_accepts(x);
+}
+
 // Fused sampling: temperature scaling + top-k + top-p + min-p + categorical
 // in a single function call to minimize FFI round-trips.
 // Input: 2D logits [batch, vocab] (already sliced, penalties already applied)
 // Returns sampled token
 //
 // Uses compiled (fused) kernels where supported:
+// - No-filter stochastic sampling: the Gumbel-max kernel (#900), which drops
+//   the `categorical` normalization pass entirely. `allow_gumbel == false`
+//   reproduces the pre-#900 behavior for A/B benchmarking and parity tests.
 // - Categorical sampling: temp scaling + random::categorical in one kernel
 // - Min-p filtering: softmax + max + mask in one kernel
 // - Top-p filtering: uncompiled (cumsum lacks output_shapes in MLX v0.31.x)
-std::unique_ptr<MlxArray> fused_sample(
+static std::unique_ptr<MlxArray> fused_sample_impl(
     const MlxArray& logits,
     float temperature,
     int32_t top_k,
     float top_p,
-    float min_p
+    float min_p,
+    bool allow_gumbel
 ) {
     auto x = logits.inner;
 
     // Greedy path: argmax
     if (temperature == 0.0f || top_k == 1) {
         return std::make_unique<MlxArray>(mlx::core::argmax(x, -1, false));
+    }
+
+    // Softmax-free stochastic sampling (#900). Batch-wide: one launch covers
+    // every row of `[B, vocab]`, so the batched fused sampler needs no per-row
+    // loop here. Sampled ids differ from the `categorical` path at equal seeds
+    // (a different RNG consumer), but the distribution is identical.
+    if (allow_gumbel && gumbel_sample_applies(x, temperature, top_k, top_p, min_p)) {
+        return std::make_unique<MlxArray>(
+            mlxcel::turbo::gumbel_max_sample(x, temperature));
     }
 
     // Build sampler scalars in the logit dtype on non-Metal backends only
@@ -4594,6 +4665,39 @@ std::unique_ptr<MlxArray> fused_sample(
 
     // Categorical sampling (not compiled — random ops need known shapes at trace time)
     return std::make_unique<MlxArray>(mlx::core::random::categorical(x, -1));
+}
+
+std::unique_ptr<MlxArray> fused_sample(
+    const MlxArray& logits,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p
+) {
+    return fused_sample_impl(
+        logits, temperature, top_k, top_p, min_p, sampling_gumbel_available());
+}
+
+std::unique_ptr<MlxArray> fused_sample_categorical(
+    const MlxArray& logits,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p
+) {
+    return fused_sample_impl(logits, temperature, top_k, top_p, min_p, false);
+}
+
+std::unique_ptr<MlxArray> gumbel_max_sample(
+    const MlxArray& logits,
+    float temperature
+) {
+    return std::make_unique<MlxArray>(
+        mlxcel::turbo::gumbel_max_sample(logits.inner, temperature));
+}
+
+int32_t gumbel_sample_num_splits(int32_t batch, int32_t vocab) {
+    return mlxcel::turbo::gumbel_num_splits(batch, vocab);
 }
 
 // SSM (State Space Model) primitives for Mamba/Jamba/Nemotron-H.
