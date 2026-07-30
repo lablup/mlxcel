@@ -90,7 +90,7 @@ mlxcel run
 
 The default model, and other thinking-capable checkpoints such as Qwen-style `<think>` models, write a chain-of-thought before the final answer. `generate` and `run` hide it from the terminal by default so only the answer prints; pass `--show-reasoning` to also print the reasoning, dimmed on a terminal. The raw `<|channel>thought` / `<channel|>` or `<think>` / `</think>` markers never print either way.
 
-Output length follows llama.cpp: with no `-n/--max-tokens` (default `-1`), `generate` / `run` keep generating until the model emits an end-of-sequence token or fills its context window. The server's `--n-predict` default (`-1`) behaves the same per request. Pass an explicit `-n N` (or `--n-predict N`) to cap output at exactly `N` tokens.
+Output length follows llama.cpp: with no `-n/--max-tokens` (default `-1`), `generate` / `run` keep generating until the model emits an end-of-sequence token or fills its context window. The server's `--n-predict` default (`-1`) behaves the same per request. Pass an explicit `-n N` (or `--n-predict N`) to cap output at exactly `N` tokens. HTTP `max_tokens` and native `/completion` `n_predict` overrides are silently clamped to the effective per-slot context window; when `--ctx-size` is unset, the resolved server default is the cap. With the default `--n-predict -1`, that value comes from the checkpoint context window, or 4096 when unavailable.
 
 ```bash
 # One-off generation (omit -n to run until EOS / context window; -n N caps it).

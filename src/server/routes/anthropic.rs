@@ -60,7 +60,7 @@ use crate::server::types::anthropic_stream::{
 use super::chat::{
     MAX_TOOLS, build_generate_options, build_prompt_cache_request_context, parse_priority_header,
 };
-use crate::server::request_options::chat_carries_loop_amplifier;
+use crate::server::request_options::{chat_carries_loop_amplifier, resolve_server_max_tokens};
 
 /// POST /v1/messages
 pub async fn anthropic_messages(
@@ -98,11 +98,8 @@ pub async fn anthropic_messages(
     }
 
     // Resolve the thinking budget exactly as the chat / responses routes do.
-    let effective_max_tokens = translated
-        .chat_request
-        .params
-        .max_tokens
-        .unwrap_or(state.config.default_max_tokens);
+    let effective_max_tokens =
+        resolve_server_max_tokens(&state.config, translated.chat_request.params.max_tokens);
     let raw_budget = pick_budget_alias(
         translated.chat_request.params.thinking_budget_tokens,
         translated.chat_request.params.thinking_token_budget,

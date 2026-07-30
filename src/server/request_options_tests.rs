@@ -15,7 +15,7 @@
 use super::{
     LOOP_DETECTION_RECOMMENDED, RequestOptionOverrides, build_server_generate_options,
     carries_loop_amplifier, chat_carries_loop_amplifier, loop_detection_from_request,
-    resolve_loop_detection,
+    resolve_loop_detection, resolve_server_max_tokens,
 };
 use crate::server::ServerConfig;
 use crate::server::types::request::{ChatCompletionRequest, FunctionDefinition, Tool};
@@ -173,6 +173,48 @@ fn build_server_generate_options_applies_request_overrides() {
     assert_eq!(options.sampling.xtc_probability, 0.7);
     assert_eq!(options.sampling.xtc_threshold, 0.2);
     assert_eq!(options.stop_sequences, Some(vec!["stop".to_string()]));
+}
+
+#[test]
+fn explicit_max_tokens_clamps_to_per_slot_context_size() {
+    let config = ServerConfig {
+        context_size: 128,
+        default_max_tokens: 64,
+        ..Default::default()
+    };
+
+    assert_eq!(resolve_server_max_tokens(&config, Some(1024)), 128);
+    let options = build_server_generate_options(
+        &config,
+        RequestOptionOverrides {
+            max_tokens: Some(1024),
+            ..Default::default()
+        },
+    );
+    assert_eq!(options.max_tokens, 128);
+}
+
+#[test]
+fn explicit_max_tokens_clamps_to_default_without_explicit_context() {
+    let config = ServerConfig {
+        context_size: 0,
+        default_max_tokens: 768,
+        ..Default::default()
+    };
+
+    assert_eq!(resolve_server_max_tokens(&config, Some(4096)), 768);
+}
+
+#[test]
+fn below_cap_and_absent_max_tokens_are_unchanged() {
+    let config = ServerConfig {
+        context_size: 128,
+        default_max_tokens: 64,
+        ..Default::default()
+    };
+
+    assert_eq!(resolve_server_max_tokens(&config, Some(32)), 32);
+    assert_eq!(resolve_server_max_tokens(&config, None), 64);
 }
 
 // -- loop detection (issue #432) --

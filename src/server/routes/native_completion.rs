@@ -29,7 +29,9 @@ use axum::{
 
 use crate::server::batch::RequestPriority;
 use crate::server::config::ReasoningBudgetOverride;
-use crate::server::request_options::{RequestOptionOverrides, build_server_generate_options};
+use crate::server::request_options::{
+    RequestOptionOverrides, build_server_generate_options, resolve_server_max_tokens,
+};
 use crate::server::streaming::sse_channel;
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
 use crate::server::types::{
@@ -68,7 +70,7 @@ pub async fn native_completion(
 
     // validate thinking_budget_tokens early (semantics match
     // /v1/chat/completions but the cap is checked against n_predict).
-    let effective_n_predict = request.n_predict.unwrap_or(state.config.default_max_tokens);
+    let effective_n_predict = resolve_server_max_tokens(&state.config, request.n_predict);
     let raw_budget = pick_budget_alias(
         request.thinking_budget_tokens,
         request.thinking_token_budget,

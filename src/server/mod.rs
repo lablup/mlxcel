@@ -92,3 +92,6 @@ pub use startup::{
     resolve_parallel_context_size, start_server,
 };
 pub use state::{AppState, BatchMetrics, Metrics, ModelMediaSupport};
+
+#[cfg(test)]
+mod max_tokens_route_tests;

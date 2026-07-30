@@ -36,6 +36,7 @@ use crate::server::prompt_cache::key::{
 };
 use crate::server::request_options::{
     RequestOptionOverrides, build_server_generate_options, chat_carries_loop_amplifier,
+    resolve_server_max_tokens,
 };
 use crate::server::streaming::sse_channel;
 use crate::server::structured::{StructuredOutputError, build_constraint_from_response_format};
@@ -264,10 +265,7 @@ pub async fn chat_completions(
 
     // validate thinking_budget_tokens early so malformed values
     // surface as 400 before any generation work begins.
-    let effective_max_tokens = request
-        .params
-        .max_tokens
-        .unwrap_or(state.config.default_max_tokens);
+    let effective_max_tokens = resolve_server_max_tokens(&state.config, request.params.max_tokens);
     let raw_budget = pick_budget_alias(
         request.params.thinking_budget_tokens,
         request.params.thinking_token_budget,

@@ -268,7 +268,7 @@ pub(crate) fn build_server_generate_options(
     );
 
     ServerGenerateOptions {
-        max_tokens: overrides.max_tokens.unwrap_or(config.default_max_tokens),
+        max_tokens: resolve_server_max_tokens(config, overrides.max_tokens),
         sampling,
         stop_sequences: overrides.stop_sequences,
         priority: overrides.priority,
@@ -288,6 +288,26 @@ pub(crate) fn build_server_generate_options(
         // carry no image parts and always leave it `None`.
         image_soft_tokens: None,
     }
+}
+
+/// Resolve the generation budget shared by every server route.
+///
+/// Explicit client budgets are silently clamped to the effective per-slot
+/// context window when `--ctx-size` supplied one. When the context size is
+/// model-derived (`config.context_size == 0`), the startup-resolved server
+/// default is the cap; that default comes from the checkpoint context window
+/// for the `-n -1` sentinel, with 4096 as the final fallback. An omitted
+/// request budget keeps the configured server default unchanged.
+pub(crate) fn resolve_server_max_tokens(config: &ServerConfig, requested: Option<usize>) -> usize {
+    let Some(requested) = requested else {
+        return config.default_max_tokens;
+    };
+    let cap = if config.context_size > 0 {
+        config.context_size
+    } else {
+        config.default_max_tokens
+    };
+    requested.min(cap)
 }
 
 #[cfg(test)]

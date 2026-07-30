@@ -566,7 +566,8 @@ pub struct Message {
 #[serde(default)]
 #[derive(Default)]
 pub struct SamplingParams {
-    /// Maximum number of tokens to generate
+    /// Maximum number of tokens to generate. Server routes silently clamp an
+    /// explicit value to the effective per-slot context window.
     pub max_tokens: Option<usize>,
     /// Sampling temperature (0.0 = greedy, higher = more random)
     pub temperature: Option<f32>,
@@ -940,7 +941,8 @@ impl ChatCompletionRequest {
 pub struct NativeCompletionRequest {
     /// Input prompt
     pub prompt: String,
-    /// Maximum number of tokens to predict
+    /// Maximum number of tokens to predict. The server silently clamps an
+    /// explicit value to the effective per-slot context window.
     pub n_predict: Option<usize>,
     /// Whether to stream the response
     pub stream: Option<bool>,

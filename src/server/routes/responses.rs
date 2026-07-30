@@ -62,7 +62,7 @@ use super::chat::{
     build_generate_options, build_prompt_cache_request_context, parse_priority_header,
     validate_xtc_params,
 };
-use crate::server::request_options::chat_carries_loop_amplifier;
+use crate::server::request_options::{chat_carries_loop_amplifier, resolve_server_max_tokens};
 
 /// POST /v1/responses
 pub async fn create_response(
@@ -125,11 +125,8 @@ pub async fn create_response(
     };
 
     // Resolve thinking budget the same way the chat path does.
-    let effective_max_tokens = translated
-        .chat_request
-        .params
-        .max_tokens
-        .unwrap_or(state.config.default_max_tokens);
+    let effective_max_tokens =
+        resolve_server_max_tokens(&state.config, translated.chat_request.params.max_tokens);
     let raw_budget = pick_budget_alias(
         translated.chat_request.params.thinking_budget_tokens,
         translated.chat_request.params.thinking_token_budget,

@@ -1419,5 +1419,8 @@ impl Drop for ModelProvider {
 }
 
 #[cfg(test)]
+include!("model_provider_test_support.rs");
+
+#[cfg(test)]
 #[path = "model_provider_tests.rs"]
 mod tests;
