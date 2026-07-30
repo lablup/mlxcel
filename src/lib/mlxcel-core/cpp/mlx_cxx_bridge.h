@@ -2022,6 +2022,63 @@ std::unique_ptr<MlxArray> paged_attention_decode(
 // the threadgroup-memory budget (issue #906).
 int32_t paged_attention_num_splits_cap(int32_t dim);
 
+// Fused residual-add + RMSNorm kernel launcher (issue #905).
+//
+// Wraps `mlxcel::turbo::fused_add_rms_norm`. Computes `new_residual = x +
+// residual` and `normed = rms_norm(new_residual) * (weight_bias + weight)` in a
+// single dispatch. `weight_bias` is `0.0` for a standard RMSNorm and `1.0` for
+// the Gemma `(1 + w)` convention. `x` and `residual` must share shape and
+// dtype; `weight` is `[D]` where `D` is the trailing dim.
+//
+// MLX arrays are immutable from the graph's perspective, so the in-place
+// residual update is expressed as two outputs rather than a mutation: both
+// come back through out-params because cxx cannot return a tuple of
+// `unique_ptr`.
+void fused_add_rms_norm(
+    const MlxArray& x,
+    const MlxArray& residual,
+    const MlxArray& weight,
+    float eps,
+    float weight_bias,
+    std::unique_ptr<MlxArray>& normed_out,
+    std::unique_ptr<MlxArray>& new_residual_out);
+
+// Whether the current backend has a fused-add-RMSNorm kernel at all (issue
+// #905). False on a CPU-only build, where both `metal_kernel` and `cuda_kernel`
+// throw; the Rust helper consults this before committing to the fused path.
+bool fused_add_rms_norm_available();
+
+// Fused q/k RoPE + KV-append-layout kernel launcher (issue #905).
+//
+// Wraps `mlxcel::turbo::fused_rope_qk_append`. Reads the row-contiguous Q and K
+// projection outputs `[B, L, H*D]`, applies rotary embedding to both, and emits
+// them already laid out for the consumer that follows: `q_out` in attention
+// order `[B, Hq, L, D]` and `k_out` in the layout selected by `dest_layout`
+// (`0` = dense `KVCache` slab order `[B, Hkv, L, D]`, `1` = paged pool block
+// row order `[B, L, Hkv, D]`).
+//
+// `positions_base` is the absolute position of the first token in the window,
+// which is what `KVCache::offset` and `RingSlidingKVCache`'s absolute positions
+// both provide.
+void fused_rope_qk_append(
+    const MlxArray& q_proj,
+    const MlxArray& k_proj,
+    int32_t num_heads,
+    int32_t num_kv_heads,
+    int32_t head_dim,
+    int32_t rope_dims,
+    float rope_base,
+    float rope_scale,
+    bool traditional,
+    int32_t positions_base,
+    int32_t dest_layout,
+    std::unique_ptr<MlxArray>& q_out,
+    std::unique_ptr<MlxArray>& k_out);
+
+// Whether the current backend has a fused RoPE + KV-append kernel at all
+// (issue #905). False on a CPU-only build.
+bool fused_rope_qk_append_available();
+
 // Opaque holder for weights loaded via MLX's native load_safetensors().
 // Arrays are lazy — MLX manages the mmap internally, no eager copy needed.
 struct MlxLoadedWeights {
