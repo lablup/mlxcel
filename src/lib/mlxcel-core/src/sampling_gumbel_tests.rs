@@ -23,16 +23,16 @@
 //!
 //! What each group pins:
 //!
-//! 1. **Goodness of fit** — chi-square against `softmax(logits / T)` on four
+//! 1. **Goodness of fit**: chi-square against `softmax(logits / T)` on four
 //!    logit shapes (peaked, flat, bimodal, `-inf`-masked) and three
 //!    temperatures. See [`assert_matches_softmax`] for the binning rule and
 //!    the acceptance threshold.
-//! 2. **Masking** — a `-inf` logit (what token bias and the XTC pre-step leave
+//! 2. **Masking**: a `-inf` logit (what token bias and the XTC pre-step leave
 //!    behind) is never sampled, at any temperature.
-//! 3. **Determinism** — the same seed reproduces the same token stream, and
+//! 3. **Determinism**: the same seed reproduces the same token stream, and
 //!    the sampled id does not depend on the launch shape the split heuristic
 //!    picks.
-//! 4. **Routing** — `fused_sample` reaches the kernel exactly when no filter is
+//! 4. **Routing**: `fused_sample` reaches the kernel exactly when no filter is
 //!    active, greedy stays byte-identical to `argmax`, and every filtered
 //!    configuration stays bit-identical to the pre-#900 categorical path.
 //!
