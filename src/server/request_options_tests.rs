@@ -58,6 +58,47 @@ fn chat_request_with_tools(tool_choice: Option<&str>) -> ChatCompletionRequest {
     serde_json::from_value(body).expect("chat request fixture deserializes")
 }
 
+/// An agent-loop follow-up turn: prior tool calls and their results are replayed
+/// in `messages`, but the turn declares no top-level `tools`. `tool_choice` is
+/// applied when given. This is the shape `has_tool_fields` routes to the
+/// raw-JSON render path, which writes `tool_calls` / `tool_call_id` into the
+/// prompt whatever `effective_tools` says.
+fn tool_replay_request(tool_choice: Option<&str>) -> ChatCompletionRequest {
+    let mut body = serde_json::json!({
+        "model": "gemma-4-12b-it-4bit",
+        "messages": [
+            {"role": "user", "content": "what is the weather"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_weather", "arguments": "{}"}
+                }]
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "sunny, 21C"}
+        ]
+    });
+    if let Some(choice) = tool_choice {
+        body["tool_choice"] = serde_json::Value::String(choice.to_string());
+    }
+    serde_json::from_value(body).expect("tool replay fixture deserializes")
+}
+
+/// The same follow-up turn but with only the `tool_call_id` half: a tool result
+/// message and no assistant `tool_calls`.
+fn tool_result_only_request() -> ChatCompletionRequest {
+    serde_json::from_value(serde_json::json!({
+        "model": "gemma-4-12b-it-4bit",
+        "messages": [
+            {"role": "user", "content": "what is the weather"},
+            {"role": "tool", "tool_call_id": "call_1", "content": "sunny, 21C"}
+        ]
+    }))
+    .expect("tool result fixture deserializes")
+}
+
 #[test]
 fn build_server_generate_options_uses_server_defaults() {
     let config = ServerConfig::default();
@@ -313,6 +354,55 @@ fn tool_choice_auto_keeps_the_tools_signal() {
     assert!(amplified);
     assert_eq!(
         resolve_loop_detection(None, None, true, amplified),
+        LOOP_DETECTION_RECOMMENDED
+    );
+}
+
+// -- tool-shaped message content is its own amplifier (issue #967 follow-up) --
+//
+// `chat_request::has_tool_fields` routes any request whose messages carry
+// `tool_calls` or `tool_call_id` to the raw-JSON render path, and that path
+// writes those fields into the prompt independently of `effective_tools`. An
+// agent loop replaying prior tool calls therefore feeds Gemma 4 a tool-shaped
+// prompt even when the follow-up turn declares no `tools`. #432's unconditional
+// default-on covered those turns; the #967 narrowing was meant to exclude plain
+// chat only, so they stay covered.
+
+#[test]
+fn replayed_tool_calls_amplify_without_a_tools_array() {
+    let request = tool_replay_request(None);
+    assert!(
+        request.tools.is_none(),
+        "fixture must declare no top-level tools, only replayed message content"
+    );
+    assert!(chat_carries_loop_amplifier(&request, false));
+    assert_eq!(
+        chat_route_loop_detection(&request, false),
+        LOOP_DETECTION_RECOMMENDED
+    );
+}
+
+#[test]
+fn replayed_tool_results_amplify_without_a_tools_array() {
+    // The `tool_call_id` half on its own, with no assistant `tool_calls`.
+    let request = tool_result_only_request();
+    assert!(request.tools.is_none());
+    assert!(chat_carries_loop_amplifier(&request, false));
+    assert_eq!(
+        chat_route_loop_detection(&request, false),
+        LOOP_DETECTION_RECOMMENDED
+    );
+}
+
+#[test]
+fn tool_choice_none_does_not_disarm_replayed_tool_calls() {
+    // `tool_choice: "none"` suppresses the declarations, but the replayed
+    // messages still reach the prompt, so the request stays amplified. This is
+    // the case the narrowing regressed before the third disjunct was added.
+    let request = tool_replay_request(Some("none"));
+    assert!(chat_carries_loop_amplifier(&request, false));
+    assert_eq!(
+        chat_route_loop_detection(&request, false),
         LOOP_DETECTION_RECOMMENDED
     );
 }

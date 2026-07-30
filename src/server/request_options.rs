@@ -48,6 +48,16 @@ use mlxcel_core::sampling::LogprobsConfig;
 /// where `p * 4 = 44` tokens previously sufficed. Short-budget requests
 /// therefore lose coverage of long patterns, not of the short ones that dominate
 /// real collapses.
+///
+/// Raising the count does not remove the false-positive class, only shrink it,
+/// and a measured case survives on the grammar-constrained surface: a
+/// `json_schema` request for an integer array of 30 zeros is cut after exactly
+/// 12 of them, returning JSON that is truncated mid-array and violates the
+/// schema it was constrained to, with `finish_reason: "stop"`. Any fixed
+/// `min_count` is exceeded by a longer legitimate run, so a retune of this
+/// constant cannot fix that; the per-request `max_pattern_size: 0` escape hatch
+/// is the recourse, and changing the policy for grammar-constrained decoding
+/// needs its own issue.
 pub(crate) const LOOP_DETECTION_RECOMMENDED: LoopDetectionConfig =
     LoopDetectionConfig::new(1, 20, 12);
 
@@ -88,9 +98,9 @@ pub(crate) struct RequestOptionOverrides {
     /// decide.
     pub loop_detection_request: Option<LoopDetectionConfig>,
     /// Whether this request carries an amplifier of the Gemma 4 repetition
-    /// collapse: tool declarations that reach the rendered prompt, or
-    /// grammar-constrained decoding from a `json_schema` `response_format`
-    /// (issue #967). Only such requests get the family loop-detection
+    /// collapse: tool declarations that reach the rendered prompt, tool-shaped
+    /// message content (`tool_calls` / `tool_call_id`), or grammar-constrained
+    /// decoding from a `json_schema` `response_format` (issue #967). Only such requests get the family loop-detection
     /// default-on; plain chat and plain completion stay on the disabled
     /// baseline. Chat-shaped routes compute it with
     /// [`chat_carries_loop_amplifier`], which cannot be handed the wrong tools
@@ -115,7 +125,10 @@ pub(crate) struct RequestOptionOverrides {
 ///   tell from plain chat has no amplifier, and enabling detection for it would
 ///   only re-expose the false positive this issue exists to remove. The gate and
 ///   the template read the same helper on purpose, so the policy cannot drift
-///   from what the model sees.
+///   from what the model sees. Note this parameter covers declarations only:
+///   tool-shaped *message* content is the separate disjunct that
+///   [`chat_carries_loop_amplifier`] adds, and is another reason chat-shaped
+///   callers must not call this function directly.
 /// - `has_grammar_constraint`: whether grammar-constrained decoding is actually
 ///   active for this request, i.e. a `json_schema` `response_format` compiled
 ///   into a constraint the sampler will enforce. Routes pass the ground truth
@@ -131,13 +144,29 @@ pub(crate) fn carries_loop_amplifier(
 }
 
 /// [`carries_loop_amplifier`] for a chat-shaped request, reading the tools half
-/// from [`crate::server::chat_request::effective_tools`] itself.
+/// from the request itself.
 ///
-/// Every chat-shaped route goes through this rather than extracting the slice
+/// Three disjuncts, any one of which makes the request amplified:
+///
+/// 1. Tool declarations that reach the rendered prompt, per
+///    [`crate::server::chat_request::effective_tools`]. `tool_choice: "none"`
+///    drops these, so on its own it does not amplify.
+/// 2. Tool-shaped message content, per
+///    [`crate::server::chat_request::has_tool_fields`]. Messages carrying
+///    `tool_calls` or `tool_call_id` take the raw-JSON render path, which writes
+///    those fields into the prompt regardless of `effective_tools`. An agent loop
+///    replaying prior tool calls on a follow-up turn that omits the top-level
+///    `tools` array is the common case, and it is thoroughly tool-shaped. Issue
+///    #432's unconditional default-on covered these turns; the #967 narrowing was
+///    meant to exclude plain chat only, so they must stay covered.
+/// 3. Grammar-constrained decoding from a compiled `json_schema`
+///    `response_format`.
+///
+/// Every chat-shaped route goes through this rather than assembling the signal
 /// at the call site. Taking the whole request removes the failure mode: there is
 /// no slice parameter a caller could fill with the raw `request.tools`, which
-/// would quietly restore `tool_choice: "none"` to the amplified set and with it
-/// the false positive issue #967 removes.
+/// would quietly restore `tool_choice: "none"` to the amplified set, and no way
+/// to forget the message-content disjunct.
 pub(crate) fn chat_carries_loop_amplifier(
     request: &crate::server::types::request::ChatCompletionRequest,
     has_grammar_constraint: bool,
@@ -145,7 +174,7 @@ pub(crate) fn chat_carries_loop_amplifier(
     carries_loop_amplifier(
         crate::server::chat_request::effective_tools(request),
         has_grammar_constraint,
-    )
+    ) || crate::server::chat_request::has_tool_fields(request)
 }
 
 /// Build a [`LoopDetectionConfig`] from the raw vLLM-style request fields.

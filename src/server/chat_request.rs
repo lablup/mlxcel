@@ -334,12 +334,21 @@ fn maybe_log_defaulting_once(request: &ChatCompletionRequest) {
 /// Returns `None` when tool_choice is "none" or no tools are provided.
 ///
 /// This is load-bearing beyond template rendering: since issue #967 it is also
-/// the tools half of the Gemma 4 loop-detection activation signal, read through
+/// part of the Gemma 4 loop-detection activation signal, read through
 /// [`crate::server::request_options::chat_carries_loop_amplifier`]. The gate's
 /// premise is that tool declarations amplify the repetition collapse only when
 /// the model actually sees them, so the gate and the template deliberately read
 /// the same helper. A change here moves both, which is the intent: they must not
 /// drift apart.
+///
+/// Note the precise claim: this reports what is *handed to* the template, not
+/// what the template does with it. A checkpoint whose chat template ignores its
+/// `tools` argument renders no declarations, and when `apply_raw_with_kwargs` /
+/// `apply_with_kwargs` fails, `render_simple_fallback` drops tools entirely and
+/// emits a plain-chat prompt. In both cases the gate reports amplified for a
+/// prompt that is not. That is accepted as a conservative over-approximation:
+/// erring toward keeping issue #432's protection on is the safe direction, and
+/// the alternative would mean resolving the gate after rendering.
 pub(crate) fn effective_tools(request: &ChatCompletionRequest) -> Option<&[Tool]> {
     // If tool_choice is "none", do not pass tools to template
     if let Some(ref tc) = request.tool_choice
@@ -352,7 +361,15 @@ pub(crate) fn effective_tools(request: &ChatCompletionRequest) -> Option<&[Tool]
 
 /// Check if any message in the request has tool-related fields that
 /// require raw JSON rendering (tool_calls, tool_call_id).
-fn has_tool_fields(request: &ChatCompletionRequest) -> bool {
+///
+/// Also the second half of the tools signal for the issue #967 loop-detection
+/// gate, via [`crate::server::request_options::chat_carries_loop_amplifier`].
+/// The raw-JSON path writes `tool_calls` and `tool_call_id` into the rendered
+/// prompt independently of [`effective_tools`], so an agent loop replaying prior
+/// tool calls produces a thoroughly tool-shaped prompt even when the follow-up
+/// turn sends no top-level `tools` array (or sends `tool_choice: "none"`). Those
+/// turns are amplified and must keep detection on.
+pub(crate) fn has_tool_fields(request: &ChatCompletionRequest) -> bool {
     request
         .messages
         .iter()
