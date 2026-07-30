@@ -937,9 +937,10 @@ pub(super) fn build_server_config(
         // Global loop-detection override (issue #432) from `MLXCEL_LOOP_DETECTION`.
         // `None` means the per-family auto-enable policy applies.
         loop_detection: resolve_loop_detection_env(),
-        // Whether the loaded model is in the Gemma 4 family, used to turn on
-        // the loop-detection default-on for the family unconditionally (not
-        // gated on tools or a `json_schema` response_format).
+        // Whether the loaded model is in the Gemma 4 family. Combined with the
+        // per-request amplifier flag (tools or a `json_schema` response_format,
+        // issue #967) this turns on the loop-detection default-on for the
+        // family; plain chat and plain completion stay disabled.
         model_is_gemma4_family: detect_gemma4_family(&startup.model_path),
     }
 }
@@ -962,8 +963,8 @@ fn detect_gemma4_family(model_path: &Path) -> bool {
 /// - `off` / `0` / `none` / `false` / `disabled`: force-disable for every
 ///   request (`Some(disabled)`), still overridable per request.
 /// - `on` / `default` / `true` / `enabled`: force the recommended threshold
-///   (`min=1, max=20, count=4`).
-/// - `MIN,MAX,COUNT` or `MIN:MAX:COUNT`: an explicit triple, e.g. `1,20,4`.
+///   (`min=1, max=20, count=12`).
+/// - `MIN,MAX,COUNT` or `MIN:MAX:COUNT`: an explicit triple, e.g. `1,20,12`.
 ///
 /// A malformed value warns and returns `None` so a typo does not silently
 /// change generation behavior.
@@ -994,7 +995,7 @@ fn resolve_loop_detection_env() -> Option<mlxcel_core::LoopDetectionConfig> {
     }
     tracing::warn!(
         "MLXCEL_LOOP_DETECTION=\"{raw}\" is not valid; expected off/on or MIN,MAX,COUNT \
-         (e.g. 1,20,4). Ignoring."
+         (e.g. 1,20,12). Ignoring."
     );
     None
 }

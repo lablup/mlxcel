@@ -34,7 +34,9 @@ use crate::server::config::{PromptCacheRequestContext, ReasoningBudgetOverride};
 use crate::server::prompt_cache::key::{
     multimodal_digest_from_vecs, resolve_session_key, template_sig,
 };
-use crate::server::request_options::{RequestOptionOverrides, build_server_generate_options};
+use crate::server::request_options::{
+    RequestOptionOverrides, build_server_generate_options, uses_constrained_decoding,
+};
 use crate::server::streaming::sse_channel;
 use crate::server::structured::{StructuredOutputError, build_constraint_from_response_format};
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
@@ -399,7 +401,10 @@ async fn non_stream_chat_completion(
         &prepared.audio_data,
     );
     let primed_open_thinking = is_prompt_primed_open_thinking(&prepared.prompt);
-    let mut options = build_generate_options(&request.params, &state.config);
+    // Loop-detection amplifier signal (issue #967): declared tools, or the
+    // grammar constraint already compiled from `response_format` above.
+    let amplified = uses_constrained_decoding(request.tools.as_deref(), structured.is_some());
+    let mut options = build_generate_options(&request.params, &state.config, amplified);
     options.priority = priority;
     options.reasoning_budget = budget_override;
     options.prompt_cache_ctx = prompt_cache_ctx;
@@ -636,7 +641,10 @@ async fn stream_chat_completion(
         &prepared.audio_data,
     );
     let primed_open_thinking = is_prompt_primed_open_thinking(&prepared.prompt);
-    let mut options = build_generate_options(&request.params, &state.config);
+    // Loop-detection amplifier signal (issue #967): same derivation as the
+    // non-streaming path, so both chat surfaces resolve identically.
+    let amplified = uses_constrained_decoding(request.tools.as_deref(), structured.is_some());
+    let mut options = build_generate_options(&request.params, &state.config, amplified);
     options.priority = priority;
     options.reasoning_budget = budget_override;
     options.prompt_cache_ctx = prompt_cache_ctx;
@@ -1136,11 +1144,17 @@ fn extract_reasoning_content(raw_text: &str, primed_open_thinking: bool) -> Opti
 /// vLLM `max_pattern_size` / `min_pattern_size` / `min_count` fields, issue
 /// #432). The Gemma 4 family default-on is applied engine-side from the loaded
 /// model type in
-/// [`crate::server::request_options::build_server_generate_options`], so callers
-/// pass no amplifier signal.
+/// [`crate::server::request_options::build_server_generate_options`], but since
+/// issue #967 it also requires the request to carry an amplifier. `params`
+/// carries no tools and no `response_format`, so that signal cannot be derived
+/// here and every caller must pass it explicitly as
+/// `uses_constrained_decoding`. Compute it with
+/// [`crate::server::request_options::uses_constrained_decoding`]; endpoints that
+/// accept neither tools nor a schema pass `false`.
 pub(crate) fn build_generate_options(
     params: &SamplingParams,
     config: &ServerConfig,
+    uses_constrained_decoding: bool,
 ) -> ServerGenerateOptions {
     build_server_generate_options(
         config,
@@ -1179,6 +1193,7 @@ pub(crate) fn build_generate_options(
                 params.min_pattern_size,
                 params.min_count,
             ),
+            uses_constrained_decoding,
         },
     )
 }

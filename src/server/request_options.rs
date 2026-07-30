@@ -25,13 +25,21 @@ use crate::server::config::ReasoningBudgetOverride;
 use mlxcel_core::LoopDetectionConfig;
 use mlxcel_core::sampling::LogprobsConfig;
 
-/// Conservative built-in loop-detection threshold (issue #432): scan
-/// single-token through 20-token tail patterns and end generation once any
-/// repeats four times. This is the engine-level default applied to the Gemma 4
-/// family (with no per-user configuration), and also the "force-enable"
-/// configuration for the `MLXCEL_LOOP_DETECTION` global override.
+/// Conservative built-in loop-detection threshold (issue #432, recalibrated by
+/// issue #967): scan single-token through 20-token tail patterns and end
+/// generation once any repeats twelve times. This is the engine-level default
+/// applied to the Gemma 4 family (with no per-user configuration), and also the
+/// "force-enable" configuration for the `MLXCEL_LOOP_DETECTION` global override.
+///
+/// The original `min_count` of 4 was low enough to fire on ordinary prose. A
+/// markdown table alignment row (`| :--- | :--- | :--- | :--- |`) tokenizes as a
+/// 3-token block repeated once per column, so any table with 4 or more columns
+/// was truncated mid-row. The asymmetry favors the higher count: a false
+/// positive silently truncates a correct answer and reports a normal stop, while
+/// a genuine collapse repeats until the token budget is exhausted, so a later
+/// stop only costs at most `(12 - 4) * 20 = 160` extra tokens.
 pub(crate) const LOOP_DETECTION_RECOMMENDED: LoopDetectionConfig =
-    LoopDetectionConfig::new(1, 20, 4);
+    LoopDetectionConfig::new(1, 20, 12);
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct RequestOptionOverrides {
@@ -69,6 +77,38 @@ pub(crate) struct RequestOptionOverrides {
     /// family default-on. `None` lets the global override / family policy
     /// decide.
     pub loop_detection_request: Option<LoopDetectionConfig>,
+    /// Whether this request carries a decoding-time amplifier of the Gemma 4
+    /// repetition collapse: tool declarations, or grammar-constrained decoding
+    /// from a `json_schema` `response_format` (issue #967). Only such requests
+    /// get the family loop-detection default-on; plain chat and plain
+    /// completion stay on the disabled baseline. Computed per route with
+    /// [`uses_constrained_decoding`]; the `Default` of `false` is the safe
+    /// (detection off) baseline for any construction site that does not set it.
+    pub uses_constrained_decoding: bool,
+}
+
+/// Whether a request carries one of the amplifiers that justify turning the
+/// Gemma 4 family loop-detection default-on for it (issue #967).
+///
+/// - `tools`: the request's declared tool array, as `Option<&[Tool]>`. Absent or
+///   empty is not a declaration. A non-empty array counts even when
+///   `tool_choice` is `"none"`. That is deliberately more inclusive than the
+///   rendered prompt, where [`crate::server::chat_request`] drops the
+///   declarations for `"none"`: reading `tool_choice` here would tie the
+///   loop-detection policy to a template-rendering rule that can change
+///   independently, and the inclusive direction keeps issue #432's protection
+///   on for a request the client built as a tool call.
+/// - `has_grammar_constraint`: whether grammar-constrained decoding is actually
+///   active for this request, i.e. a `json_schema` `response_format` compiled
+///   into a constraint the sampler will enforce. Routes pass the ground truth
+///   they already computed (`structured.is_some()`) rather than re-inspecting
+///   the raw `response_format` value.
+pub(crate) fn uses_constrained_decoding(
+    tools: Option<&[crate::server::types::request::Tool]>,
+    has_grammar_constraint: bool,
+) -> bool {
+    let has_tool_declarations = tools.is_some_and(|tools| !tools.is_empty());
+    has_tool_declarations || has_grammar_constraint
 }
 
 /// Build a [`LoopDetectionConfig`] from the raw vLLM-style request fields.
@@ -96,18 +136,30 @@ pub(crate) fn loop_detection_from_request(
 
 /// Resolve the effective loop-detection config for one request.
 ///
-/// Precedence (highest first): explicit per-request override, global operator
-/// override (`MLXCEL_LOOP_DETECTION`, which may force-disable), the Gemma 4
-/// family engine-level default-on, otherwise disabled. The family default-on is
-/// unconditional (it does not require tools or a structured-output request);
-/// the issue selects this as the "Best" activation surface so a downstream
-/// serving app needs no configuration and end users see no toggle. Detection
-/// only ends generation when a real repetition loop is present, so a
-/// conservative default-on for this family is low risk.
+/// Precedence (highest first):
+///
+/// 1. Explicit per-request override, which wins over everything including the
+///    amplifier gate below (it may force-enable or force-disable).
+/// 2. Global operator override (`MLXCEL_LOOP_DETECTION`), which applies to every
+///    request unconditionally in both its `off` and its `on` / triple forms and
+///    is deliberately not subject to the gate.
+/// 3. The Gemma 4 family engine-level default-on, gated on this request
+///    carrying an amplifier (`request_uses_constrained_decoding`).
+/// 4. Otherwise disabled.
+///
+/// Issue #967 added the gate at step 3. #432 turned the family default on for
+/// every request, but its own reproduction found the collapse is driven by tool
+/// declarations and grammar-constrained decoding ("no tools in the request:
+/// always clean"). Running the detector on plain chat therefore bought no
+/// protection and cost a class of false positives that truncate correct answers
+/// mid-sentence while reporting a normal stop. Requests that do carry an
+/// amplifier keep the default-on, so a downstream serving app still needs no
+/// configuration and its users still see no toggle.
 pub(crate) fn resolve_loop_detection(
     request_override: Option<LoopDetectionConfig>,
     global_override: Option<LoopDetectionConfig>,
     family_default_on: bool,
+    request_uses_constrained_decoding: bool,
 ) -> LoopDetectionConfig {
     if let Some(req) = request_override {
         return req;
@@ -115,7 +167,7 @@ pub(crate) fn resolve_loop_detection(
     if let Some(global) = global_override {
         return global;
     }
-    if family_default_on {
+    if family_default_on && request_uses_constrained_decoding {
         return LOOP_DETECTION_RECOMMENDED;
     }
     LoopDetectionConfig::disabled()
@@ -164,13 +216,15 @@ pub(crate) fn build_server_generate_options(
 
     // Loop-detection policy (issue #432) is resolved here, in the server
     // control plane, where the loaded model family is visible. The Gemma 4
-    // family is default-on (engine-level, no per-user configuration); the
-    // shared `build_sampling_config` leaves the field disabled for everything
-    // else, preserving the bit-exact baseline.
+    // family is default-on (engine-level, no per-user configuration) for
+    // requests that carry an amplifier (issue #967); the shared
+    // `build_sampling_config` leaves the field disabled for everything else,
+    // preserving the bit-exact baseline.
     sampling.loop_detection = resolve_loop_detection(
         overrides.loop_detection_request,
         config.loop_detection,
         config.model_is_gemma4_family,
+        overrides.uses_constrained_decoding,
     );
 
     ServerGenerateOptions {

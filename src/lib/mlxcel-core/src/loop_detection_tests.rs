@@ -14,10 +14,19 @@
 
 use super::{LoopDetectionConfig, MAX_EFFECTIVE_PATTERN_SIZE, detect_repetition_loop};
 
-/// The conservative starting threshold the server applies for the Gemma 4
-/// amplifier case (`min_pattern_size=1, max_pattern_size=20, min_count=4`).
-fn recommended() -> LoopDetectionConfig {
+/// Detector fixture scanning 1..=20 token tails with a `min_count` of 4. This
+/// was the server's recommended threshold from issue #432 until issue #967
+/// raised it; the boundary tests below keep using 4 because it keeps the token
+/// fixtures short.
+fn min_count_4() -> LoopDetectionConfig {
     LoopDetectionConfig::new(1, 20, 4)
+}
+
+/// The threshold the server actually applies since issue #967
+/// (`min_pattern_size=1, max_pattern_size=20, min_count=12`), mirroring
+/// `LOOP_DETECTION_RECOMMENDED` in the server control plane.
+fn server_recommended() -> LoopDetectionConfig {
+    LoopDetectionConfig::new(1, 20, 12)
 }
 
 // -- enablement / disabled no-op --
@@ -58,7 +67,7 @@ fn min_count_below_two_disables() {
 
 #[test]
 fn single_token_loop_fires_at_exactly_min_count() {
-    let cfg = recommended(); // min_count = 4
+    let cfg = min_count_4(); // min_count = 4
 
     // 3 repeats: below threshold, must not fire.
     assert!(!detect_repetition_loop(&[9, 9, 9], &cfg));
@@ -75,7 +84,7 @@ fn single_token_loop_fires_at_exactly_min_count() {
 
 #[test]
 fn single_token_loop_requires_consecutive_tail() {
-    let cfg = recommended();
+    let cfg = min_count_4();
     // Four 9s but interrupted: the tail is not four consecutive 9s.
     assert!(!detect_repetition_loop(&[9, 9, 0, 9, 9], &cfg));
     // Trailing non-loop token breaks the tail pattern.
@@ -86,7 +95,7 @@ fn single_token_loop_requires_consecutive_tail() {
 
 #[test]
 fn two_token_loop_fires() {
-    let cfg = recommended();
+    let cfg = min_count_4();
     // [3,4] repeated 4 times.
     let stream = vec![3, 4, 3, 4, 3, 4, 3, 4];
     assert!(detect_repetition_loop(&stream, &cfg));
@@ -99,7 +108,7 @@ fn two_token_loop_fires() {
 
 #[test]
 fn three_token_loop_fires_with_prefix() {
-    let cfg = recommended();
+    let cfg = min_count_4();
     // unrelated prefix then [1,2,3] x4.
     let stream = vec![8, 8, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3];
     assert!(detect_repetition_loop(&stream, &cfg));
@@ -118,14 +127,14 @@ fn min_pattern_size_above_one_skips_single_token_loop() {
 
 #[test]
 fn non_repeating_stream_does_not_fire() {
-    let cfg = recommended();
+    let cfg = min_count_4();
     let stream: Vec<i32> = (0..200).collect();
     assert!(!detect_repetition_loop(&stream, &cfg));
 }
 
 #[test]
 fn empty_and_short_streams_do_not_fire() {
-    let cfg = recommended();
+    let cfg = min_count_4();
     assert!(!detect_repetition_loop(&[], &cfg));
     assert!(!detect_repetition_loop(&[1], &cfg));
     assert!(!detect_repetition_loop(&[1, 1], &cfg));
@@ -133,7 +142,7 @@ fn empty_and_short_streams_do_not_fire() {
 
 #[test]
 fn natural_short_repeats_below_threshold_do_not_fire() {
-    let cfg = recommended();
+    let cfg = min_count_4();
     // "the the the" style: token 42 appears 3 times, but not 4 in a row.
     let stream = vec![10, 42, 11, 42, 12, 42, 13];
     assert!(!detect_repetition_loop(&stream, &cfg));
@@ -160,13 +169,82 @@ fn min_pattern_size_clamped_to_max() {
     assert!(!detect_repetition_loop(&[5, 6, 5, 6, 5, 6], &cfg));
 }
 
+// -- issue #967: markdown table alignment rows must not read as a loop --
+
+/// The token ids a `gemma-4-12b-it-4bit` tokenizer emits for a markdown table
+/// alignment row, `| :--- | :--- | :--- | :--- |`, preceded by the newline that
+/// ends the header row: `'\n'` (107), `'|'` (236909), then the 3-token cell
+/// block `' :'` (1017), `'---'` (7243), `' |'` (1109) once per column.
+const TABLE_ROW_PREFIX: [i32; 2] = [107, 236909];
+const TABLE_CELL_BLOCK: [i32; 3] = [1017, 7243, 1109];
+
+fn alignment_row(columns: usize) -> Vec<i32> {
+    let mut stream = TABLE_ROW_PREFIX.to_vec();
+    for _ in 0..columns {
+        stream.extend_from_slice(&TABLE_CELL_BLOCK);
+    }
+    stream
+}
+
+#[test]
+fn markdown_alignment_row_does_not_fire_at_the_server_threshold() {
+    // Issue #967 reproduction: a 4-column alignment row is the exact stream that
+    // truncated a correct answer mid-table. At the server's threshold it must
+    // pass through untouched.
+    let four_columns = alignment_row(4);
+    assert!(!detect_repetition_loop(
+        &four_columns,
+        &server_recommended()
+    ));
+
+    // Every column count the raised threshold is meant to cover.
+    for columns in 2..=11 {
+        assert!(
+            !detect_repetition_loop(&alignment_row(columns), &server_recommended()),
+            "a {columns}-column alignment row must not read as a repetition loop"
+        );
+    }
+
+    // The old threshold is what fired: at min_count=4 the 3-token cell block
+    // trips p=3 right after the 4th ` |`, which is where the user-visible output
+    // ended. Kept as the explicit before/after witness for the recalibration.
+    assert!(detect_repetition_loop(&four_columns, &min_count_4()));
+}
+
+#[test]
+fn repeated_cell_block_still_fires_at_the_server_threshold() {
+    // The detector is not defeated, only recalibrated: the same 3-token block
+    // repeated min_count (12) times is still caught.
+    assert!(detect_repetition_loop(
+        &alignment_row(12),
+        &server_recommended()
+    ));
+    assert!(detect_repetition_loop(
+        &alignment_row(30),
+        &server_recommended()
+    ));
+}
+
+#[test]
+fn single_token_collapse_fires_at_the_server_threshold() {
+    let cfg = server_recommended();
+    // 11 repeats: below the threshold.
+    assert!(!detect_repetition_loop(&[42; 11], &cfg));
+    // Exactly 12 repeats at the tail: fires.
+    assert!(detect_repetition_loop(&[42; 12], &cfg));
+    // With a clean prefix, as a real collapse looks.
+    let mut stream: Vec<i32> = (100..160).collect();
+    stream.extend(std::iter::repeat_n(255, 12));
+    assert!(detect_repetition_loop(&stream, &cfg));
+}
+
 #[test]
 fn observed_cjk_collapse_shape_fires() {
     // Mirrors the issue repro: a long clean prefix then a single garbage token
     // (stand-in for `様`) repeating to fill the thinking budget.
     let mut stream: Vec<i32> = (100..160).collect();
     stream.extend(std::iter::repeat_n(255, 30));
-    assert!(detect_repetition_loop(&stream, &recommended()));
+    assert!(detect_repetition_loop(&stream, &min_count_4()));
 }
 
 // -- effective max_pattern_size cap (CPU-DoS guard) --

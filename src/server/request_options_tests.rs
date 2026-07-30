@@ -14,10 +14,30 @@
 
 use super::{
     LOOP_DETECTION_RECOMMENDED, RequestOptionOverrides, build_server_generate_options,
-    loop_detection_from_request, resolve_loop_detection,
+    loop_detection_from_request, resolve_loop_detection, uses_constrained_decoding,
 };
 use crate::server::ServerConfig;
+use crate::server::types::request::{FunctionDefinition, Tool};
 use mlxcel_core::LoopDetectionConfig;
+
+/// A Gemma 4 server config: the only place `model_is_gemma4_family` is set.
+fn gemma4_config() -> ServerConfig {
+    ServerConfig {
+        model_is_gemma4_family: true,
+        ..Default::default()
+    }
+}
+
+fn make_tool(name: &str) -> Tool {
+    Tool {
+        tool_type: "function".to_string(),
+        function: FunctionDefinition {
+            name: name.to_string(),
+            description: None,
+            parameters: None,
+        },
+    }
+}
 
 #[test]
 fn build_server_generate_options_uses_server_defaults() {
@@ -72,6 +92,7 @@ fn build_server_generate_options_applies_request_overrides() {
             reasoning_budget: crate::server::config::ReasoningBudgetOverride::default(),
             thinking_enter_block_on_start: true,
             loop_detection_request: None,
+            uses_constrained_decoding: false,
         },
     );
 
@@ -122,51 +143,181 @@ fn loop_detection_from_request_some_when_any_field_set() {
 }
 
 #[test]
+fn recommended_threshold_survives_a_four_column_markdown_table() {
+    // Issue #967: the recommended `min_count` must sit above the repeat count a
+    // markdown alignment row produces, or ordinary tables get truncated.
+    assert_eq!(
+        LOOP_DETECTION_RECOMMENDED,
+        LoopDetectionConfig::new(1, 20, 12)
+    );
+    assert!(LOOP_DETECTION_RECOMMENDED.is_enabled());
+}
+
+#[test]
 fn resolve_loop_detection_precedence() {
     let req = LoopDetectionConfig::new(2, 5, 3);
     let global = LoopDetectionConfig::new(1, 10, 6);
 
-    // Explicit request wins over everything, including the family default-on.
-    assert_eq!(
-        resolve_loop_detection(Some(req), Some(global), true),
-        req,
-        "explicit request beats global and family"
-    );
+    // Explicit request wins over everything, including the family default-on and
+    // the amplifier gate: it applies whether or not the request is amplified.
+    for amplified in [false, true] {
+        assert_eq!(
+            resolve_loop_detection(Some(req), Some(global), true, amplified),
+            req,
+            "explicit request beats global, family, and the amplifier gate"
+        );
+    }
 
-    // Global override beats the family default-on (and may force-disable).
-    assert_eq!(resolve_loop_detection(None, Some(global), true), global);
-    let forced_off = LoopDetectionConfig::disabled();
-    assert_eq!(
-        resolve_loop_detection(None, Some(forced_off), true),
-        forced_off,
-        "operator can force-disable even for the Gemma 4 family"
-    );
+    // Global override beats the family default-on (and may force-disable), and
+    // is likewise not subject to the amplifier gate.
+    for amplified in [false, true] {
+        assert_eq!(
+            resolve_loop_detection(None, Some(global), true, amplified),
+            global
+        );
+        let forced_off = LoopDetectionConfig::disabled();
+        assert_eq!(
+            resolve_loop_detection(None, Some(forced_off), true, amplified),
+            forced_off,
+            "operator can force-disable even for the Gemma 4 family"
+        );
+    }
 
-    // Gemma 4 family default-on applies unconditionally when nothing else is set.
+    // Gemma 4 family default-on applies when the request is amplified and
+    // nothing higher-precedence is set.
     assert_eq!(
-        resolve_loop_detection(None, None, true),
+        resolve_loop_detection(None, None, true, true),
         LOOP_DETECTION_RECOMMENDED
     );
 
     // Disabled baseline for non-family models when nothing applies.
     assert_eq!(
-        resolve_loop_detection(None, None, false),
+        resolve_loop_detection(None, None, false, true),
+        LoopDetectionConfig::disabled()
+    );
+}
+
+// -- amplifier gate on the family default-on (issue #967) --
+
+#[test]
+fn uses_constrained_decoding_predicate() {
+    // No tools and no grammar constraint: a plain chat request.
+    assert!(!uses_constrained_decoding(None, false));
+    // An empty `tools` array is not a tool declaration.
+    assert!(!uses_constrained_decoding(Some(&[]), false));
+    // A non-empty `tools` array is. The predicate deliberately does not look at
+    // `tool_choice`, so a `"none"` request that still declares tools keeps
+    // detection on even though the template drops the declarations.
+    assert!(uses_constrained_decoding(
+        Some(&[make_tool("get_weather")]),
+        false
+    ));
+    // A compiled `json_schema` grammar constraint is, on its own.
+    assert!(uses_constrained_decoding(None, true));
+    assert!(uses_constrained_decoding(
+        Some(&[make_tool("get_weather")]),
+        true
+    ));
+}
+
+#[test]
+fn gemma4_family_default_on_requires_an_amplifier() {
+    let tools = [make_tool("get_weather")];
+    let with_tools = uses_constrained_decoding(Some(&tools), false);
+    let with_json_schema = uses_constrained_decoding(None, true);
+    let plain_chat = uses_constrained_decoding(None, false);
+
+    // gemma4 + tools -> recommended threshold.
+    assert_eq!(
+        resolve_loop_detection(None, None, true, with_tools),
+        LOOP_DETECTION_RECOMMENDED
+    );
+    // gemma4 + json_schema response_format -> recommended threshold.
+    assert_eq!(
+        resolve_loop_detection(None, None, true, with_json_schema),
+        LOOP_DETECTION_RECOMMENDED
+    );
+    // gemma4 plain chat -> disabled. This is the #967 regression: detection used
+    // to run here and truncated correct answers mid markdown table.
+    assert_eq!(
+        resolve_loop_detection(None, None, true, plain_chat),
+        LoopDetectionConfig::disabled()
+    );
+    // non-gemma4 + tools -> disabled; the gate never enables a non-family model.
+    assert_eq!(
+        resolve_loop_detection(None, None, false, with_tools),
         LoopDetectionConfig::disabled()
     );
 }
 
 #[test]
-fn gemma4_family_auto_enables_by_default_without_amplifier() {
-    let config = ServerConfig {
-        model_is_gemma4_family: true,
-        ..Default::default()
-    };
+fn global_override_on_enables_plain_chat_despite_the_gate() {
+    // `MLXCEL_LOOP_DETECTION=on` resolves to `Some(LOOP_DETECTION_RECOMMENDED)`
+    // and applies to every request unconditionally, gate or no gate.
+    assert_eq!(
+        resolve_loop_detection(None, Some(LOOP_DETECTION_RECOMMENDED), true, false),
+        LOOP_DETECTION_RECOMMENDED
+    );
+    assert_eq!(
+        resolve_loop_detection(None, Some(LOOP_DETECTION_RECOMMENDED), false, false),
+        LOOP_DETECTION_RECOMMENDED
+    );
+}
 
-    // A plain Gemma 4 chat with no tools and no response_format still gets
-    // detection enabled by default (the "Best" engine-level activation surface).
+#[test]
+fn global_override_off_disables_an_amplified_gemma4_request() {
+    let tools = [make_tool("get_weather")];
+    let amplified = uses_constrained_decoding(Some(&tools), false);
+    assert_eq!(
+        resolve_loop_detection(None, Some(LoopDetectionConfig::disabled()), true, amplified),
+        LoopDetectionConfig::disabled(),
+        "MLXCEL_LOOP_DETECTION=off wins over the gated family default-on"
+    );
+}
+
+#[test]
+fn gemma4_plain_chat_stays_disabled_through_build_server_generate_options() {
+    // End-to-end through the plumbing, not just `resolve_loop_detection`: a
+    // plain Gemma 4 chat leaves the detector off.
+    let config = gemma4_config();
     let plain = build_server_generate_options(&config, RequestOptionOverrides::default());
-    assert_eq!(plain.sampling.loop_detection, LOOP_DETECTION_RECOMMENDED);
-    assert!(plain.sampling.loop_detection.is_enabled());
+    assert!(!plain.sampling.loop_detection.is_enabled());
+    assert_eq!(
+        plain.sampling.loop_detection,
+        LoopDetectionConfig::disabled()
+    );
+}
+
+#[test]
+fn gemma4_amplified_request_auto_enables_through_build_server_generate_options() {
+    // The same plumbing with the flag set: the #432 protection still arrives at
+    // the sampling config for tool-bearing and schema-constrained requests.
+    let config = gemma4_config();
+    let amplified = build_server_generate_options(
+        &config,
+        RequestOptionOverrides {
+            uses_constrained_decoding: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        amplified.sampling.loop_detection,
+        LOOP_DETECTION_RECOMMENDED
+    );
+    assert!(amplified.sampling.loop_detection.is_enabled());
+}
+
+#[test]
+fn non_gemma4_amplified_request_stays_disabled_through_build_server_generate_options() {
+    let config = ServerConfig::default(); // model_is_gemma4_family = false
+    let options = build_server_generate_options(
+        &config,
+        RequestOptionOverrides {
+            uses_constrained_decoding: true,
+            ..Default::default()
+        },
+    );
+    assert!(!options.sampling.loop_detection.is_enabled());
 }
 
 #[test]
@@ -178,17 +329,16 @@ fn non_gemma4_family_stays_disabled_by_default() {
 
 #[test]
 fn explicit_request_disable_overrides_family_default_on() {
-    let config = ServerConfig {
-        model_is_gemma4_family: true,
-        ..Default::default()
-    };
+    let config = gemma4_config();
 
     // A per-request explicit disable (max_pattern_size = 0) must win over the
-    // Gemma 4 family default-on.
+    // Gemma 4 family default-on, including for an amplified request where the
+    // gate would otherwise turn detection on.
     let options = build_server_generate_options(
         &config,
         RequestOptionOverrides {
             loop_detection_request: loop_detection_from_request(Some(0), None, None),
+            uses_constrained_decoding: true,
             ..Default::default()
         },
     );
@@ -197,10 +347,7 @@ fn explicit_request_disable_overrides_family_default_on() {
 
 #[test]
 fn explicit_request_tune_overrides_family_default_on() {
-    let config = ServerConfig {
-        model_is_gemma4_family: true,
-        ..Default::default()
-    };
+    let config = gemma4_config();
 
     // A per-request tune wins over the family default-on threshold.
     let tuned = loop_detection_from_request(Some(8), Some(2), Some(3));
@@ -208,12 +355,35 @@ fn explicit_request_tune_overrides_family_default_on() {
         &config,
         RequestOptionOverrides {
             loop_detection_request: tuned,
+            uses_constrained_decoding: true,
             ..Default::default()
         },
     );
     assert_eq!(
         options.sampling.loop_detection,
         LoopDetectionConfig::new(2, 8, 3)
+    );
+}
+
+#[test]
+fn explicit_request_enable_wins_over_the_amplifier_gate() {
+    let config = gemma4_config();
+
+    // A plain chat (no amplifier) that explicitly asks for detection still gets
+    // it: the per-request override sits above the gate.
+    let tuned = loop_detection_from_request(Some(20), Some(1), Some(4));
+    let options = build_server_generate_options(
+        &config,
+        RequestOptionOverrides {
+            loop_detection_request: tuned,
+            uses_constrained_decoding: false,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        options.sampling.loop_detection,
+        LoopDetectionConfig::new(1, 20, 4),
+        "an operator restoring the pre-#967 threshold per request keeps working"
     );
 }
 
@@ -235,6 +405,12 @@ fn global_override_can_force_disable_gemma4() {
         loop_detection: Some(LoopDetectionConfig::disabled()),
         ..Default::default()
     };
-    let options = build_server_generate_options(&config, RequestOptionOverrides::default());
+    let options = build_server_generate_options(
+        &config,
+        RequestOptionOverrides {
+            uses_constrained_decoding: true,
+            ..Default::default()
+        },
+    );
     assert!(!options.sampling.loop_detection.is_enabled());
 }

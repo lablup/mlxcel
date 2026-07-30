@@ -274,10 +274,16 @@ fn build_native_generate_options(
             // in-block counting to start at the first decoded token.
             thinking_enter_block_on_start: false,
             // The native `/completion` endpoint has no per-request
-            // loop-detection field. The Gemma 4 family default-on and the
-            // global `MLXCEL_LOOP_DETECTION` override still apply engine-side
-            // via `resolve_loop_detection`.
+            // loop-detection field, so the policy is resolved engine-side by
+            // `resolve_loop_detection`.
             loop_detection_request: None,
+            // The endpoint takes a raw prompt with no `tools` and no
+            // `response_format`, so it can never carry a loop-detection
+            // amplifier. Since issue #967 the Gemma 4 family default-on is
+            // gated on that signal and therefore no longer applies here; a
+            // global `MLXCEL_LOOP_DETECTION` override still does, and remains
+            // the way to enable detection on this endpoint.
+            uses_constrained_decoding: false,
         },
     )
 }

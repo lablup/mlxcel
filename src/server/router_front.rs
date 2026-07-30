@@ -664,7 +664,16 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
 
     // Resolve sampling and token budget using the same defaults as the
     // model worker.
-    let opts = super::routes::chat::build_generate_options(&request.params, &state.config);
+    //
+    // Loop-detection amplifier signal (issue #967): tool declarations are
+    // rendered into the prompt by `prepare_chat_request_with_cache` above, so
+    // they count here exactly as on the single-node chat route. The router
+    // never compiles a grammar constraint (the PrefillRequestFrame cannot carry
+    // one), so the grammar half of the signal is always false.
+    let amplified =
+        crate::server::request_options::uses_constrained_decoding(request.tools.as_deref(), false);
+    let opts =
+        super::routes::chat::build_generate_options(&request.params, &state.config, amplified);
 
     // Assign a request id and dispatch the prefill request through the shared
     // tokenize -> select_prefill -> send body (issue #200). The chat id scheme
@@ -940,7 +949,11 @@ async fn route_completion(state: Arc<RouterState>, request: CompletionRequest) -
 
     let prompt = request.prompt.clone();
     // Same default/override resolution as the single-node completion route.
-    let opts = super::routes::chat::build_generate_options(&request.params, &state.config);
+    //
+    // Loop-detection amplifier signal (issue #967): `CompletionRequest` has no
+    // `tools` field and the `response_format` guard above already rejected any
+    // structured-output request with a 400, so neither amplifier can be present.
+    let opts = super::routes::chat::build_generate_options(&request.params, &state.config, false);
 
     // Assign a request id and dispatch the prefill request through the shared
     // tokenize -> select_prefill -> send body. The completion id format
