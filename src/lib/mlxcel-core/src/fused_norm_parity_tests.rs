@@ -378,18 +378,23 @@ fn fused_add_rms_norm_helper_respects_the_kill_switch() {
     if !gpu_available() {
         return;
     }
-    let disabled = matches!(
-        std::env::var("MLXCEL_FUSED_ADD_RMSNORM")
-            .ok()
-            .as_deref()
-            .map(|v| v.trim().to_ascii_lowercase()),
-        Some(ref v) if v == "0" || v == "false" || v == "off" || v == "no"
-    );
+    // Expectation follows the documented precedence: an explicit truthy or
+    // falsey value wins, and anything else (unset, or unrecognised) keeps the
+    // compiled-in default. Deriving it as `!disabled` instead would silently
+    // hard-code default-on, so flipping FUSED_ADD_RMSNORM_DEFAULT after a
+    // measurement would fail this test for the wrong reason.
+    let raw = std::env::var("MLXCEL_FUSED_ADD_RMSNORM").ok();
+    let expected = match raw.as_deref().map(|v| v.trim().to_ascii_lowercase()) {
+        Some(ref v) if v == "0" || v == "false" || v == "off" || v == "no" => false,
+        Some(ref v) if v == "1" || v == "true" || v == "on" || v == "yes" => true,
+        _ => crate::layers::FUSED_ADD_RMSNORM_DEFAULT,
+    };
     assert_eq!(
         crate::layers::fused_add_rmsnorm_enabled(),
-        !disabled,
+        expected,
         "gate does not match MLXCEL_FUSED_ADD_RMSNORM"
     );
+    let disabled = !expected;
 
     let dt = dtype::FLOAT16;
     let (delta, residual, weight) = random_case(555, 3, 2048, dt);

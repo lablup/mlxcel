@@ -228,7 +228,15 @@ fn bench_rope_append(rows: &mut Vec<Row>, dt: i32) {
                 let q = fast_rope(&q, head_dim, false, ROPE_BASE, 1.0, offset);
                 let k = fast_rope(&k, head_dim, false, ROPE_BASE, 1.0, offset);
                 let v = contiguous(&v, false);
-                add(&add(&k, &v), &reshape(&q, &[batch, n_heads, 1, head_dim]))
+                // Group q by its KV group so the consume-the-outputs add stays
+                // valid under GQA: q reshapes to [B, n_kv, ratio, D], which
+                // broadcasts against k/v's [B, n_kv, 1, D]. Reshaping q to
+                // [B, n_heads, 1, D] instead cannot broadcast once
+                // n_heads != n_kv_heads, which is every configuration here.
+                add(
+                    &add(&k, &v),
+                    &reshape(&q, &[batch, n_kv_heads, n_heads / n_kv_heads, head_dim]),
+                )
             });
 
             let fused = time_body(WARMUP, ITERS, || {
@@ -239,7 +247,15 @@ fn bench_rope_append(rows: &mut Vec<Row>, dt: i32) {
                     &qkv, n_heads, n_kv_heads, head_dim, head_dim, ROPE_BASE, 1.0, false, offset,
                     0, &mut q, &mut k, &mut v,
                 );
-                add(&add(&k, &v), &reshape(&q, &[batch, n_heads, 1, head_dim]))
+                // Group q by its KV group so the consume-the-outputs add stays
+                // valid under GQA: q reshapes to [B, n_kv, ratio, D], which
+                // broadcasts against k/v's [B, n_kv, 1, D]. Reshaping q to
+                // [B, n_heads, 1, D] instead cannot broadcast once
+                // n_heads != n_kv_heads, which is every configuration here.
+                add(
+                    &add(&k, &v),
+                    &reshape(&q, &[batch, n_kv_heads, n_heads / n_kv_heads, head_dim]),
+                )
             });
 
             rows.push(Row {

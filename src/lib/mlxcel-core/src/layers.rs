@@ -652,18 +652,37 @@ fn fused_qk_norm_enabled_from(value: Option<&str>) -> bool {
 /// rebuild; setting this constant to `false` makes off the default and
 /// `MLXCEL_FUSED_ADD_RMSNORM=1` the opt-in.
 ///
-/// Default-ON because the fused kernel is a strict op-count reduction at the
-/// residual join (one dispatch instead of an elementwise `Add` plus a
-/// `fast::rms_norm`, and one fewer full-width intermediate handed between
-/// them), and because it must be the default for the end-to-end benchmark to
-/// measure it at all. Issue #905 is explicit that the fusion only *keeps* its
-/// wiring if the numbers justify it.
-const FUSED_ADD_RMSNORM_DEFAULT: bool = true;
+/// Default-OFF: measured, and the measurement did not justify wiring it on.
+///
+/// Op-level microbench on Apple M1 Ultra (Metal, f16, hidden {2048, 4096,
+/// 8192} x batch {1, 4, 8}, three repetitions) put the fused path at roughly
+/// parity with the graph it replaces: per-cell speedups scattered between
+/// 0.77x and 1.14x with no structure, and the extreme values did not
+/// reproduce (the 0.77x cell re-measured at 1.02x and 1.03x). The harness
+/// cannot resolve these ops on this host, because per-iteration time stays
+/// pinned near 280-410us across a 4x change in hidden size, so fixed dispatch
+/// and synchronization cost dominates whatever the kernel saves.
+///
+/// Issue #905's measure-then-keep policy says a fusion lands unwired unless
+/// the microbench shows a win, so the kernel ships available but off, matching
+/// how `MLXCEL_FUSED_QK_NORM` (#326) shipped after the same outcome. Set
+/// `MLXCEL_FUSED_ADD_RMSNORM=1` to opt in. Flip this constant to `true` if a
+/// quiet host, a harness that amortizes dispatch cost, or another backend
+/// demonstrates a win. See
+/// `docs/benchmark_results/fused-norm-rope-m1ultra-2026-07-31.md`.
+pub(crate) const FUSED_ADD_RMSNORM_DEFAULT: bool = false;
 
 /// Default for the fused q/k RoPE + KV-append-layout decode path. Same
-/// flip-here contract as [`FUSED_ADD_RMSNORM_DEFAULT`];
-/// `MLXCEL_FUSED_ROPE_APPEND=0` disables it at runtime.
-const FUSED_ROPE_APPEND_DEFAULT: bool = true;
+/// flip-here contract and the same measured outcome as
+/// [`FUSED_ADD_RMSNORM_DEFAULT`], so it also ships opt-in via
+/// `MLXCEL_FUSED_ROPE_APPEND=1`.
+///
+/// One cell was consistently below parity rather than merely noisy: hidden
+/// 8192 at batch 1 measured 0.94x, 0.90x and 0.89x across three repetitions.
+/// That is the single reproducible signal in the sweep and it points the wrong
+/// way, which is the stronger reason to leave this unwired until a backend or
+/// shape is found where it wins.
+pub(crate) const FUSED_ROPE_APPEND_DEFAULT: bool = false;
 
 /// Whether the fused residual-add + RMSNorm path (#905) is enabled.
 ///

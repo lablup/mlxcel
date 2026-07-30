@@ -370,16 +370,18 @@ fn fused_rope_append_matches_graph_with_scaled_projection() {
 /// file once normally and once with `MLXCEL_FUSED_ROPE_APPEND=0`.
 #[test]
 fn fused_rope_append_gate_follows_the_kill_switch() {
-    let disabled = matches!(
-        std::env::var("MLXCEL_FUSED_ROPE_APPEND")
-            .ok()
-            .as_deref()
-            .map(|v| v.trim().to_ascii_lowercase()),
-        Some(ref v) if v == "0" || v == "false" || v == "off" || v == "no"
-    );
+    // Same precedence as the add-RMSNorm gate: explicit value wins, unset or
+    // unrecognised keeps the compiled-in default. Asserting `!disabled` would
+    // pin default-on and break whenever a measurement flips the constant.
+    let raw = std::env::var("MLXCEL_FUSED_ROPE_APPEND").ok();
+    let expected = match raw.as_deref().map(|v| v.trim().to_ascii_lowercase()) {
+        Some(ref v) if v == "0" || v == "false" || v == "off" || v == "no" => false,
+        Some(ref v) if v == "1" || v == "true" || v == "on" || v == "yes" => true,
+        _ => crate::layers::FUSED_ROPE_APPEND_DEFAULT,
+    };
     assert_eq!(
         crate::layers::fused_rope_append_enabled(),
-        !disabled,
+        expected,
         "gate does not match MLXCEL_FUSED_ROPE_APPEND"
     );
 }
