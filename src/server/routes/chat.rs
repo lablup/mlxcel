@@ -28,7 +28,6 @@ use axum::{
 use mlxcel_core::sampling::{LogprobsConfig, TokenLogprobData};
 
 use crate::server::batch::RequestPriority;
-use crate::server::chat_request::effective_tools;
 use crate::server::chat_request::{prepare_chat_request_with_cache, request_has_effective_input};
 use crate::server::chat_template_kwargs::{extract_request_kwargs, merge_server_and_request};
 use crate::server::config::{PromptCacheRequestContext, ReasoningBudgetOverride};
@@ -36,7 +35,7 @@ use crate::server::prompt_cache::key::{
     multimodal_digest_from_vecs, resolve_session_key, template_sig,
 };
 use crate::server::request_options::{
-    RequestOptionOverrides, build_server_generate_options, uses_constrained_decoding,
+    RequestOptionOverrides, build_server_generate_options, chat_carries_loop_amplifier,
 };
 use crate::server::streaming::sse_channel;
 use crate::server::structured::{StructuredOutputError, build_constraint_from_response_format};
@@ -405,7 +404,7 @@ async fn non_stream_chat_completion(
     // Loop-detection amplifier signal (issue #967): the tools the template will
     // actually render (so `tool_choice: "none"` does not count), or the grammar
     // constraint already compiled from `response_format` above.
-    let amplified = uses_constrained_decoding(effective_tools(&request), structured.is_some());
+    let amplified = chat_carries_loop_amplifier(&request, structured.is_some());
     let mut options = build_generate_options(&request.params, &state.config, amplified);
     options.priority = priority;
     options.reasoning_budget = budget_override;
@@ -645,7 +644,7 @@ async fn stream_chat_completion(
     let primed_open_thinking = is_prompt_primed_open_thinking(&prepared.prompt);
     // Loop-detection amplifier signal (issue #967): same derivation as the
     // non-streaming path, so both chat surfaces resolve identically.
-    let amplified = uses_constrained_decoding(effective_tools(&request), structured.is_some());
+    let amplified = chat_carries_loop_amplifier(&request, structured.is_some());
     let mut options = build_generate_options(&request.params, &state.config, amplified);
     options.priority = priority;
     options.reasoning_budget = budget_override;
@@ -1150,13 +1149,13 @@ fn extract_reasoning_content(raw_text: &str, primed_open_thinking: bool) -> Opti
 /// issue #967 it also requires the request to carry an amplifier. `params`
 /// carries no tools and no `response_format`, so that signal cannot be derived
 /// here and every caller must pass it explicitly as
-/// `uses_constrained_decoding`. Compute it with
-/// [`crate::server::request_options::uses_constrained_decoding`]; endpoints that
-/// accept neither tools nor a schema pass `false`.
+/// `request_carries_loop_amplifier`. Chat-shaped callers compute it with
+/// [`crate::server::request_options::chat_carries_loop_amplifier`]; raw-prompt
+/// endpoints that accept neither tools nor a schema pass `false`.
 pub(crate) fn build_generate_options(
     params: &SamplingParams,
     config: &ServerConfig,
-    uses_constrained_decoding: bool,
+    request_carries_loop_amplifier: bool,
 ) -> ServerGenerateOptions {
     build_server_generate_options(
         config,
@@ -1195,7 +1194,7 @@ pub(crate) fn build_generate_options(
                 params.min_pattern_size,
                 params.min_count,
             ),
-            uses_constrained_decoding,
+            request_carries_loop_amplifier,
         },
     )
 }

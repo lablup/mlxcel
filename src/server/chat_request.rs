@@ -335,7 +335,7 @@ fn maybe_log_defaulting_once(request: &ChatCompletionRequest) {
 ///
 /// This is load-bearing beyond template rendering: since issue #967 it is also
 /// the tools half of the Gemma 4 loop-detection activation signal, read through
-/// [`crate::server::request_options::uses_constrained_decoding`]. The gate's
+/// [`crate::server::request_options::chat_carries_loop_amplifier`]. The gate's
 /// premise is that tool declarations amplify the repetition collapse only when
 /// the model actually sees them, so the gate and the template deliberately read
 /// the same helper. A change here moves both, which is the intent: they must not

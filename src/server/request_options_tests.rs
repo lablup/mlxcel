@@ -14,10 +14,10 @@
 
 use super::{
     LOOP_DETECTION_RECOMMENDED, RequestOptionOverrides, build_server_generate_options,
-    loop_detection_from_request, resolve_loop_detection, uses_constrained_decoding,
+    carries_loop_amplifier, chat_carries_loop_amplifier, loop_detection_from_request,
+    resolve_loop_detection,
 };
 use crate::server::ServerConfig;
-use crate::server::chat_request::effective_tools;
 use crate::server::types::request::{ChatCompletionRequest, FunctionDefinition, Tool};
 use mlxcel_core::LoopDetectionConfig;
 
@@ -111,7 +111,7 @@ fn build_server_generate_options_applies_request_overrides() {
             reasoning_budget: crate::server::config::ReasoningBudgetOverride::default(),
             thinking_enter_block_on_start: true,
             loop_detection_request: None,
-            uses_constrained_decoding: false,
+            request_carries_loop_amplifier: false,
         },
     );
 
@@ -219,21 +219,21 @@ fn resolve_loop_detection_precedence() {
 // -- amplifier gate on the family default-on (issue #967) --
 
 #[test]
-fn uses_constrained_decoding_predicate() {
+fn carries_loop_amplifier_predicate() {
     // No tools and no grammar constraint: a plain chat request.
-    assert!(!uses_constrained_decoding(None, false));
+    assert!(!carries_loop_amplifier(None, false));
     // An empty `tools` array is not a tool declaration.
-    assert!(!uses_constrained_decoding(Some(&[]), false));
+    assert!(!carries_loop_amplifier(Some(&[]), false));
     // A non-empty slice is. Callers pass what the template will render, so
     // `tool_choice` is already accounted for by the time the slice gets here;
     // see the `tool_choice_*` tests below.
-    assert!(uses_constrained_decoding(
+    assert!(carries_loop_amplifier(
         Some(&[make_tool("get_weather")]),
         false
     ));
     // A compiled `json_schema` grammar constraint is, on its own.
-    assert!(uses_constrained_decoding(None, true));
-    assert!(uses_constrained_decoding(
+    assert!(carries_loop_amplifier(None, true));
+    assert!(carries_loop_amplifier(
         Some(&[make_tool("get_weather")]),
         true
     ));
@@ -242,9 +242,9 @@ fn uses_constrained_decoding_predicate() {
 #[test]
 fn gemma4_family_default_on_requires_an_amplifier() {
     let tools = [make_tool("get_weather")];
-    let with_tools = uses_constrained_decoding(Some(&tools), false);
-    let with_json_schema = uses_constrained_decoding(None, true);
-    let plain_chat = uses_constrained_decoding(None, false);
+    let with_tools = carries_loop_amplifier(Some(&tools), false);
+    let with_json_schema = carries_loop_amplifier(None, true);
+    let plain_chat = carries_loop_amplifier(None, false);
 
     // gemma4 + tools -> recommended threshold.
     assert_eq!(
@@ -284,7 +284,7 @@ fn tool_choice_none_drops_the_tools_signal() {
         "fixture must still declare a tool, only tool_choice suppresses it"
     );
 
-    let amplified = uses_constrained_decoding(effective_tools(&request), false);
+    let amplified = chat_carries_loop_amplifier(&request, false);
     assert!(
         !amplified,
         "tool_choice=none renders no declarations, so there is no amplifier"
@@ -298,7 +298,7 @@ fn tool_choice_none_drops_the_tools_signal() {
 #[test]
 fn absent_tool_choice_keeps_the_tools_signal() {
     let request = chat_request_with_tools(None);
-    let amplified = uses_constrained_decoding(effective_tools(&request), false);
+    let amplified = chat_carries_loop_amplifier(&request, false);
     assert!(amplified);
     assert_eq!(
         resolve_loop_detection(None, None, true, amplified),
@@ -309,7 +309,7 @@ fn absent_tool_choice_keeps_the_tools_signal() {
 #[test]
 fn tool_choice_auto_keeps_the_tools_signal() {
     let request = chat_request_with_tools(Some("auto"));
-    let amplified = uses_constrained_decoding(effective_tools(&request), false);
+    let amplified = chat_carries_loop_amplifier(&request, false);
     assert!(amplified);
     assert_eq!(
         resolve_loop_detection(None, None, true, amplified),
@@ -322,7 +322,7 @@ fn grammar_constraint_is_independent_of_tool_choice_none() {
     // A `json_schema` response_format still constrains decoding no matter what
     // `tool_choice` says, so the gate opens on the grammar half alone.
     let request = chat_request_with_tools(Some("none"));
-    let amplified = uses_constrained_decoding(effective_tools(&request), true);
+    let amplified = chat_carries_loop_amplifier(&request, true);
     assert!(amplified);
     assert_eq!(
         resolve_loop_detection(None, None, true, amplified),
@@ -347,7 +347,7 @@ fn global_override_on_enables_plain_chat_despite_the_gate() {
 #[test]
 fn global_override_off_disables_an_amplified_gemma4_request() {
     let tools = [make_tool("get_weather")];
-    let amplified = uses_constrained_decoding(Some(&tools), false);
+    let amplified = carries_loop_amplifier(Some(&tools), false);
     assert_eq!(
         resolve_loop_detection(None, Some(LoopDetectionConfig::disabled()), true, amplified),
         LoopDetectionConfig::disabled(),
@@ -376,7 +376,7 @@ fn gemma4_amplified_request_auto_enables_through_build_server_generate_options()
     let amplified = build_server_generate_options(
         &config,
         RequestOptionOverrides {
-            uses_constrained_decoding: true,
+            request_carries_loop_amplifier: true,
             ..Default::default()
         },
     );
@@ -393,7 +393,7 @@ fn non_gemma4_amplified_request_stays_disabled_through_build_server_generate_opt
     let options = build_server_generate_options(
         &config,
         RequestOptionOverrides {
-            uses_constrained_decoding: true,
+            request_carries_loop_amplifier: true,
             ..Default::default()
         },
     );
@@ -418,7 +418,7 @@ fn explicit_request_disable_overrides_family_default_on() {
         &config,
         RequestOptionOverrides {
             loop_detection_request: loop_detection_from_request(Some(0), None, None),
-            uses_constrained_decoding: true,
+            request_carries_loop_amplifier: true,
             ..Default::default()
         },
     );
@@ -435,7 +435,7 @@ fn explicit_request_tune_overrides_family_default_on() {
         &config,
         RequestOptionOverrides {
             loop_detection_request: tuned,
-            uses_constrained_decoding: true,
+            request_carries_loop_amplifier: true,
             ..Default::default()
         },
     );
@@ -456,7 +456,7 @@ fn explicit_request_enable_wins_over_the_amplifier_gate() {
         &config,
         RequestOptionOverrides {
             loop_detection_request: tuned,
-            uses_constrained_decoding: false,
+            request_carries_loop_amplifier: false,
             ..Default::default()
         },
     );
@@ -488,9 +488,149 @@ fn global_override_can_force_disable_gemma4() {
     let options = build_server_generate_options(
         &config,
         RequestOptionOverrides {
-            uses_constrained_decoding: true,
+            request_carries_loop_amplifier: true,
             ..Default::default()
         },
     );
     assert!(!options.sampling.loop_detection.is_enabled());
+}
+
+// -- route-shaped wiring (issue #967) --
+//
+// The tests above drive the helpers directly. These go one level out and build
+// the options exactly as each route does: the same request type the handler
+// receives, through the same translator where there is one, into the same
+// `chat::build_generate_options`, then assert the resolved `loop_detection` on
+// the result. They pin the composition, so a call site that swapped
+// `chat_carries_loop_amplifier(&request, ..)` for a raw `request.tools` slice
+// would have to change this file too.
+//
+// The async handlers themselves are not invoked: `AppState` requires a real
+// `ModelProvider`, which means loading a model from disk. `routes/cache_tests.rs`
+// documents the same limitation for the cache routes.
+
+use crate::server::routes::chat::build_generate_options;
+
+/// Resolved loop-detection for a chat-shaped request on a Gemma 4 server, built
+/// the way `non_stream_chat_completion` and `stream_chat_completion` build it.
+fn chat_route_loop_detection(
+    request: &ChatCompletionRequest,
+    grammar_active: bool,
+) -> LoopDetectionConfig {
+    let amplified = chat_carries_loop_amplifier(request, grammar_active);
+    let options = build_generate_options(&request.params, &gemma4_config(), amplified);
+    options.sampling.loop_detection
+}
+
+#[test]
+fn chat_route_gates_on_rendered_tools() {
+    assert_eq!(
+        chat_route_loop_detection(&chat_request_with_tools(Some("none")), false),
+        LoopDetectionConfig::disabled(),
+        "tool_choice=none renders no declarations, so /v1/chat/completions must not arm the detector"
+    );
+    assert_eq!(
+        chat_route_loop_detection(&chat_request_with_tools(None), false),
+        LOOP_DETECTION_RECOMMENDED
+    );
+}
+
+#[test]
+fn responses_route_gates_on_rendered_tools() {
+    // The Responses translator flattens `tools` / `tool_choice` onto the chat
+    // request; this covers that mapping as well as the gate.
+    let build = |tool_choice: Option<&str>| {
+        let mut body = serde_json::json!({
+            "model": "gemma-4-12b-it-4bit",
+            "input": "what is the weather",
+            "tools": [{"type": "function", "name": "get_weather"}]
+        });
+        if let Some(choice) = tool_choice {
+            body["tool_choice"] = serde_json::Value::String(choice.to_string());
+        }
+        let request = serde_json::from_value(body).expect("responses request deserializes");
+        let translated =
+            crate::server::responses_translator::responses_request_to_chat(&request, None, None)
+                .expect("translates");
+        chat_route_loop_detection(&translated.chat_request, false)
+    };
+
+    assert_eq!(build(Some("none")), LoopDetectionConfig::disabled());
+    assert_eq!(build(None), LOOP_DETECTION_RECOMMENDED);
+}
+
+#[test]
+fn anthropic_route_gates_on_rendered_tools() {
+    // The Anthropic translator maps `{"type": "none"}` onto `Mode("none")`, so
+    // the gate closes on that surface too. This route never has a grammar
+    // constraint (`response_format` is always translated to `None`).
+    let build = |tool_choice: Option<serde_json::Value>| {
+        let mut body = serde_json::json!({
+            "model": "gemma-4-12b-it-4bit",
+            "messages": [{"role": "user", "content": "what is the weather"}],
+            "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}]
+        });
+        if let Some(choice) = tool_choice {
+            body["tool_choice"] = choice;
+        }
+        let request = serde_json::from_value(body).expect("anthropic request deserializes");
+        let translated = crate::server::anthropic_translator::anthropic_request_to_chat(&request);
+        assert!(
+            translated.chat_request.response_format.is_none(),
+            "the Anthropic surface carries no response_format"
+        );
+        chat_route_loop_detection(&translated.chat_request, false)
+    };
+
+    assert_eq!(
+        build(Some(serde_json::json!({"type": "none"}))),
+        LoopDetectionConfig::disabled()
+    );
+    assert_eq!(build(None), LOOP_DETECTION_RECOMMENDED);
+}
+
+#[test]
+fn completions_route_gates_on_the_grammar_constraint_only() {
+    // `/v1/completions` has no `tools` field, so the tools half is structurally
+    // `None` and only a compiled `json_schema` constraint can arm the detector.
+    let request: crate::server::types::CompletionRequest = serde_json::from_value(
+        serde_json::json!({"model": "gemma-4-12b-it-4bit", "prompt": "once upon a time"}),
+    )
+    .expect("completion request deserializes");
+
+    let plain = build_generate_options(
+        &request.params,
+        &gemma4_config(),
+        carries_loop_amplifier(None, false),
+    );
+    assert_eq!(
+        plain.sampling.loop_detection,
+        LoopDetectionConfig::disabled()
+    );
+
+    let constrained = build_generate_options(
+        &request.params,
+        &gemma4_config(),
+        carries_loop_amplifier(None, true),
+    );
+    assert_eq!(
+        constrained.sampling.loop_detection,
+        LOOP_DETECTION_RECOMMENDED
+    );
+}
+
+#[test]
+fn disaggregated_chat_front_gates_on_rendered_tools() {
+    // `router_front::route_chat` takes the same `ChatCompletionRequest` and calls
+    // the same `build_generate_options`, with the grammar half pinned to false
+    // because the router compiles no constraint. Note that the resolved value is
+    // inert today: `loop_detection` is not carried by the PrefillRequestFrame.
+    assert_eq!(
+        chat_route_loop_detection(&chat_request_with_tools(Some("none")), false),
+        LoopDetectionConfig::disabled()
+    );
+    assert_eq!(
+        chat_route_loop_detection(&chat_request_with_tools(None), false),
+        LOOP_DETECTION_RECOMMENDED
+    );
 }

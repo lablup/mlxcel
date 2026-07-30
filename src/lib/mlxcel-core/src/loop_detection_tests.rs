@@ -25,6 +25,12 @@ fn min_count_4() -> LoopDetectionConfig {
 /// The threshold the server actually applies since issue #967
 /// (`min_pattern_size=1, max_pattern_size=20, min_count=12`), mirroring
 /// `LOOP_DETECTION_RECOMMENDED` in the server control plane.
+///
+/// This crate cannot reference that constant (it lives in the `mlxcel` server
+/// crate, which depends on this one), so the value is duplicated here. The
+/// server-side test `server::request_options::tests::
+/// recommended_threshold_survives_a_four_column_markdown_table` pins the
+/// constant to the same triple. A retune must change both.
 fn server_recommended() -> LoopDetectionConfig {
     LoopDetectionConfig::new(1, 20, 12)
 }

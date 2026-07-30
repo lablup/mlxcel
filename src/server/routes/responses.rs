@@ -62,8 +62,7 @@ use super::chat::{
     build_generate_options, build_prompt_cache_request_context, parse_priority_header,
     validate_xtc_params,
 };
-use crate::server::chat_request::effective_tools;
-use crate::server::request_options::uses_constrained_decoding;
+use crate::server::request_options::chat_carries_loop_amplifier;
 
 /// POST /v1/responses
 pub async fn create_response(
@@ -222,10 +221,7 @@ async fn non_stream_create_response(
     // `chat_request.tool_choice`, and `text.format` onto
     // `chat_request.response_format`; `structured` is the constraint compiled from
     // the last of those.
-    let amplified = uses_constrained_decoding(
-        effective_tools(&translated.chat_request),
-        structured.is_some(),
-    );
+    let amplified = chat_carries_loop_amplifier(&translated.chat_request, structured.is_some());
     let mut options =
         build_generate_options(&translated.chat_request.params, &state.config, amplified);
     options.priority = priority;
@@ -346,10 +342,7 @@ async fn stream_create_response(
     // `chat_request.tool_choice`, and `text.format` onto
     // `chat_request.response_format`; `structured` is the constraint compiled from
     // the last of those.
-    let amplified = uses_constrained_decoding(
-        effective_tools(&translated.chat_request),
-        structured.is_some(),
-    );
+    let amplified = chat_carries_loop_amplifier(&translated.chat_request, structured.is_some());
     let mut options =
         build_generate_options(&translated.chat_request.params, &state.config, amplified);
     options.priority = priority;

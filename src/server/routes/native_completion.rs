@@ -277,13 +277,15 @@ fn build_native_generate_options(
             // loop-detection field, so the policy is resolved engine-side by
             // `resolve_loop_detection`.
             loop_detection_request: None,
-            // The endpoint takes a raw prompt with no `tools` and no
-            // `response_format`, so it can never carry a loop-detection
-            // amplifier. Since issue #967 the Gemma 4 family default-on is
-            // gated on that signal and therefore no longer applies here; a
-            // global `MLXCEL_LOOP_DETECTION` override still does, and remains
-            // the way to enable detection on this endpoint.
-            uses_constrained_decoding: false,
+            // The endpoint takes a raw prompt with no `tools`, and while it
+            // does accept `response_format`, the guard at the top of this
+            // module rejects anything other than `{"type": "text"}` with a 400,
+            // so no grammar constraint can ever be active here. Neither half of
+            // the amplifier signal is reachable. Since issue #967 the Gemma 4
+            // family default-on is gated on that signal and therefore no longer
+            // applies here; a global `MLXCEL_LOOP_DETECTION` override still
+            // does, and remains the way to enable detection on this endpoint.
+            request_carries_loop_amplifier: false,
         },
     )
 }
