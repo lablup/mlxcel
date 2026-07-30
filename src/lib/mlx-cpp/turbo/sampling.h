@@ -69,6 +69,13 @@ int gumbel_num_splits(int batch, int vocab);
 // Returns `[B]` uint32 token ids, matching the dtype `argmax` and
 // `random::categorical` return, so downstream host readback is unchanged.
 //
+// The launch requests a row-contiguous input, so a strided `logits` costs one
+// `[B, V]` copy before the kernel runs. Decode never pays it: `slice_last_logits`
+// on the `[B, 1, V]` decode shape is already contiguous, as is any tensor that
+// came out of a penalty or bias pre-step. The strided case is the batched
+// first-token sample off a `[B, S, V]` prefill output with `S > 1` and `B > 1`,
+// where a `[B, V]` copy is negligible against the prefill that produced it.
+//
 // One RNG key is drawn from MLX's default key sequence per call, so a call
 // advances the shared random state exactly once, the same way one
 // `random::categorical` call does.

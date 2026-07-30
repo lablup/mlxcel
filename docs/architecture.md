@@ -122,8 +122,11 @@ Release builds use `panic = "unwind"` (issue #375), so the deliberate audio work
   build under `src/lib/mlx-cpp/` and the feature flags passed to Cargo.
 - Apple Silicon runtime/device helpers live in `src/lib/mlxcel-core/src/hardware.rs`
   and `src/execution/runtime.rs`.
-- Custom TurboQuant Metal kernels live under `src/lib/mlx-cpp/turbo/` and are
-  called through the C++ bridge.
+- Custom fused kernel launchers live under `src/lib/mlx-cpp/turbo/` and are
+  called through the C++ bridge. Each one carries a Metal JIT source and, where
+  ported, a CUDA counterpart selected at runtime by
+  `mlx::core::metal::is_available()`: TurboQuant Sparse-V and delegated SDPA,
+  paged-attention decode, and Gumbel-max sampling.
 - CUDA kernel behavior is mostly inherited from MLX; `mlxcel` passes the CUDA
   architecture list through `MLX_CUDA_ARCHITECTURES` at build time.
 
