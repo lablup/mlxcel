@@ -337,6 +337,45 @@ fn gumbel_sample_matches_softmax_over_a_large_vocabulary() {
     assert_matches_softmax("large-vocab", &bimodal_logits(4096), 1.0, sample_count());
 }
 
+#[test]
+fn gumbel_noise_stays_inside_its_finite_range() {
+    if !gpu_backend() {
+        return;
+    }
+    // Guards the uniform's open-interval construction, which a chi-square test
+    // is structurally blind to.
+    //
+    // The kernel builds `u` on a 2^-23 grid offset by half a step, so
+    // `g = -log(-log(u))` is bounded by roughly [-2.9, 16.6]. A `u` of exactly
+    // 1.0 would make `g` positive infinity and hand that element the argmax no
+    // matter how small its logit is, and a `u` of exactly 0.0 would make it
+    // negative infinity. Either is a rare per-element event, so it perturbs an
+    // empirical frequency far below chi-square's resolution: at a 24-bit grid,
+    // where `x + 0.5f` ties up to 2^24 for the top value and `u` does reach
+    // 1.0, a 64-entry goodness-of-fit test over a million draws sees about four
+    // stray samples and passes comfortably.
+    //
+    // Separating the logits by 100 makes the argmax unambiguous under any noise
+    // inside that finite range, so a single wrong token is a hard failure
+    // rather than a statistical wobble. Over a 4096-entry vocabulary a
+    // million draws is 4.1e9 element draws, which at the 24-bit spelling would
+    // hit the degenerate value about 244 times.
+    let vocab = 4096usize;
+    let winner = 1234usize;
+    let mut logits = vec![0.0f32; vocab];
+    logits[winner] = 100.0;
+
+    let n = sample_count();
+    let counts = histogram(&logits, 1.0, n);
+    assert_eq!(
+        counts[winner],
+        n as u64,
+        "{} of {n} draws escaped the dominant token; the Gumbel noise left its \
+         finite range",
+        n as u64 - counts[winner]
+    );
+}
+
 // -- temperature --
 
 #[test]

@@ -134,10 +134,16 @@ constexpr const char* GUMBEL_MAX_SAMPLE_SOURCE = R"(
                 break;
             }
             uint word = (j == 0u) ? c0 : ((j == 1u) ? c1 : ((j == 2u) ? c2 : c3));
-            // Uniform on the OPEN interval (0, 1): a 2^-24 grid offset by half
-            // a step. Neither 0 nor 1 is representable, so both logs are finite
-            // and the noise never produces a NaN against a -inf logit.
-            float u = ((float)(word >> 8) + 0.5f) * 5.9604645e-8f;
+            // Uniform on the OPEN interval (0, 1): a 2^-23 grid offset by half
+            // a step, so `u` is never 0 or 1 and both logs stay finite. 23 bits,
+            // not 24: an integer below 2^23 has an f32 ulp of at most 0.5, so
+            // `x + 0.5f` is exact for every value this can produce. At 24 bits
+            // the top value 2^24-1 sits in a binade with ulp 1, `x + 0.5f` ties
+            // up to 2^24, and `u` lands on exactly 1.0 -- which makes the noise
+            // +inf and hands that element the argmax regardless of its logit.
+            // That is a 2^-24 chance per element, which over a 152K vocabulary
+            // is roughly one uniformly-random token every 110 decode steps.
+            float u = ((float)(word >> 9) + 0.5f) * (1.0f / 8388608.0f);
             float g = -log(-log(u));
             float scaled = (float)logits[row_off + idx] / temp_v;
             float cand = scaled + g;
@@ -242,8 +248,9 @@ constexpr const char* GUMBEL_MAX_SAMPLE_CUDA_SOURCE = R"(
             }
             uint32_t word =
                 (j == 0u) ? c0 : ((j == 1u) ? c1 : ((j == 2u) ? c2 : c3));
-            // Uniform on the OPEN interval (0, 1); see the Metal source.
-            float u = ((float)(word >> 8) + 0.5f) * 5.9604645e-8f;
+            // Uniform on the OPEN interval (0, 1); see the Metal source for
+            // why this takes 23 bits rather than 24.
+            float u = ((float)(word >> 9) + 0.5f) * (1.0f / 8388608.0f);
             float g = -logf(-logf(u));
             float scaled = (float)logits[row_off + idx] / temp_v;
             float cand = scaled + g;
