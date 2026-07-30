@@ -2022,6 +2022,54 @@ std::unique_ptr<MlxArray> paged_attention_decode(
 // the threadgroup-memory budget (issue #906).
 int32_t paged_attention_num_splits_cap(int32_t dim);
 
+// Paged-attention decode v2 partial kernel (issue #898). Wraps
+// `mlxcel::turbo::paged_attention_decode_v2_partial`: cross-CTA split-KV over a
+// CSR page table, one CTA per `(chunk, kv head, q-head group)`. `q` is
+// `[B, Hq, 1, D]` f32; `k_pool` / `v_pool` are `[num_blocks, page_size, Hkv,
+// D]` f16; `indices` / `indptr` / `last_page_len` / `first_page_offset` are the
+// CSR view; `request_indices` / `kv_tile_indices` / `params` come from the
+// host-side plan. Both outputs come back through out-params because cxx cannot
+// return a tuple of `unique_ptr`: `partial_v_out` is
+// `[num_chunks, Hq, D]` f32 and `lse_out` is `[num_chunks, Hq]` f32 in log2
+// units.
+void paged_attention_decode_v2_partial(
+    const MlxArray& q,
+    const MlxArray& k_pool,
+    const MlxArray& v_pool,
+    const MlxArray& indices,
+    const MlxArray& indptr,
+    const MlxArray& last_page_len,
+    const MlxArray& first_page_offset,
+    const MlxArray& request_indices,
+    const MlxArray& kv_tile_indices,
+    const MlxArray& params,
+    float scale,
+    std::unique_ptr<MlxArray>& partial_v_out,
+    std::unique_ptr<MlxArray>& lse_out);
+
+// Variable-length attention-state merge kernel (issue #898). Wraps
+// `mlxcel::turbo::paged_attention_merge_states`. `v_in` is `[N, H, D]` f32
+// (each partial already softmax-normalized), `lse_in` is `[N, H]` f32 in log2
+// units, and `o_indptr` is `[M + 1]` i32 grouping partial rows into output
+// rows. Returns `[M, H, D]` f32 and `[M, H]` f32 through the out-params. The
+// cascade-attention issue #903 reuses this kernel unchanged.
+void paged_attention_merge_states(
+    const MlxArray& v_in,
+    const MlxArray& lse_in,
+    const MlxArray& o_indptr,
+    std::unique_ptr<MlxArray>& v_out,
+    std::unique_ptr<MlxArray>& lse_out);
+
+// Query heads one v2 CTA processes together, forwarded from
+// `mlxcel::turbo::paged_attention_v2_q_heads_per_cta` (issue #898). Always
+// divides `n_rep`. The Rust plan derives its CTA count from this so the plan
+// and the launcher cannot drift.
+int32_t paged_attention_v2_q_heads_per_cta(int32_t dim, int32_t n_rep);
+
+// SIMD groups per v2 CTA, forwarded from
+// `mlxcel::turbo::paged_attention_v2_num_warps` (issue #898).
+int32_t paged_attention_v2_num_warps(int32_t dim, int32_t q_heads_per_cta);
+
 // Fused residual-add + RMSNorm kernel launcher (issue #905).
 //
 // Wraps `mlxcel::turbo::fused_add_rms_norm`. Computes `new_residual = x +

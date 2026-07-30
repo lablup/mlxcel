@@ -1331,6 +1331,59 @@ mod ffi {
         /// and thread-count budgets.
         fn paged_attention_num_splits_cap(dim: i32) -> i32;
 
+        /// Paged-attention decode v2 partial kernel (issue #898).
+        ///
+        /// Cross-CTA split-KV over a CSR page table: one CTA per `(chunk, kv
+        /// head, q-head group)` computes an online-softmax partial over its
+        /// chunk. `q` is `[B, Hq, 1, D]` f32 and the pools are `[num_blocks,
+        /// page_size, Hkv, D]` f16, as in v1. `indices` / `indptr` /
+        /// `last_page_len` / `first_page_offset` are the CSR view of the batch;
+        /// `request_indices` / `kv_tile_indices` / `params` (`params[0] =
+        /// pages_per_chunk`) come from [`crate::paged_v2::PagedDecodePlan`].
+        ///
+        /// Writes `partial_v_out` `[num_chunks, Hq, D]` f32 and `lse_out`
+        /// `[num_chunks, Hq]` f32. The LSE is in **log2 units**. When the plan
+        /// emitted one chunk per request, `partial_v_out` is already the final
+        /// answer and reshapes to `[B, Hq, 1, D]`.
+        fn paged_attention_decode_v2_partial(
+            q: &MlxArray,
+            k_pool: &MlxArray,
+            v_pool: &MlxArray,
+            indices: &MlxArray,
+            indptr: &MlxArray,
+            last_page_len: &MlxArray,
+            first_page_offset: &MlxArray,
+            request_indices: &MlxArray,
+            kv_tile_indices: &MlxArray,
+            params: &MlxArray,
+            scale: f32,
+            partial_v_out: &mut UniquePtr<MlxArray>,
+            lse_out: &mut UniquePtr<MlxArray>,
+        );
+
+        /// Variable-length attention-state merge kernel (issue #898).
+        ///
+        /// Merges `v_in` `[N, H, D]` f32 (each partial already normalized by
+        /// its own softmax denominator) and `lse_in` `[N, H]` f32 (log2 units)
+        /// into `[M, H, D]` / `[M, H]`, where output row `o` covers partial
+        /// rows `[o_indptr[o], o_indptr[o + 1])`. Deliberately paging-agnostic:
+        /// the cascade-attention issue #903 reuses it unchanged.
+        fn paged_attention_merge_states(
+            v_in: &MlxArray,
+            lse_in: &MlxArray,
+            o_indptr: &MlxArray,
+            v_out: &mut UniquePtr<MlxArray>,
+            lse_out: &mut UniquePtr<MlxArray>,
+        );
+
+        /// Query heads one v2 CTA processes together (issue #898). Always
+        /// divides `n_rep`, so the plan's CTA count and the launcher's grid
+        /// cannot drift.
+        fn paged_attention_v2_q_heads_per_cta(dim: i32, n_rep: i32) -> i32;
+
+        /// SIMD groups per v2 CTA (issue #898).
+        fn paged_attention_v2_num_warps(dim: i32, q_heads_per_cta: i32) -> i32;
+
         /// Fused residual-add + RMSNorm kernel (issue #905).
         ///
         /// Computes `new_residual = x + residual` and

@@ -56,6 +56,13 @@ fn main() {
         // table with no separate gather copy; the gather-then-SDPA path stays
         // the correctness reference and fallback.
         .file("../mlx-cpp/turbo/paged_attention.cpp")
+        // Paged-attention decode v2 (#898): CSR page table plus cross-CTA
+        // split-KV in `paged_attention_v2.cpp`, and the variable-length
+        // attention-state merge kernel in `paged_attention_v2_merge.cpp`. The
+        // merge half is split out because the cascade issue #903 reuses it
+        // unchanged. v1 above stays intact and remains the default path.
+        .file("../mlx-cpp/turbo/paged_attention_v2.cpp")
+        .file("../mlx-cpp/turbo/paged_attention_v2_merge.cpp")
         // Softmax-free Gumbel-max categorical sampling kernel launcher (#900).
         // Replaces the `random::categorical` normalization pass plus the
         // `argpartition` sort on the no-filter sampling path with one
@@ -181,6 +188,10 @@ fn main() {
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention.cpp");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention.metal");
+
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention_v2.h");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention_v2.cpp");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/paged_attention_v2_merge.cpp");
     // Gumbel-max categorical sampling kernel launcher (#900).
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling.cpp");

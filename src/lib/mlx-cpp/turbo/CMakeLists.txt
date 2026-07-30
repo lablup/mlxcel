@@ -39,6 +39,7 @@ set(MLXCEL_TURBO_KERNEL_HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/sparse_v_sdpa.h
     ${CMAKE_CURRENT_SOURCE_DIR}/turbo4_delegated_sdpa.h
     ${CMAKE_CURRENT_SOURCE_DIR}/paged_attention.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/paged_attention_v2.h
     ${CMAKE_CURRENT_SOURCE_DIR}/sampling.h
     ${CMAKE_CURRENT_SOURCE_DIR}/fused_norm.h
     ${CMAKE_CURRENT_SOURCE_DIR}/fused_rope_append.h)
@@ -47,6 +48,8 @@ set(MLXCEL_TURBO_KERNEL_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/sparse_v_sdpa.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/turbo4_delegated_sdpa.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/paged_attention.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/paged_attention_v2.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/paged_attention_v2_merge.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/sampling.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/fused_norm.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/fused_rope_append.cpp)

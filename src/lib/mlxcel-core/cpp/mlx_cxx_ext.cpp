@@ -6,6 +6,7 @@
 #include "sparse_v_sdpa.h"          // fused Sparse-V SDPA kernel.
 #include "turbo4_delegated_sdpa.h"  // fused Turbo4Delegated SDPA kernel.
 #include "paged_attention.h"        // fused paged-attention decode kernel (#123).
+#include "paged_attention_v2.h"     // paged decode v2 + merge kernels (#898).
 #include "fused_norm.h"             // fused residual-add + RMSNorm kernel (#905).
 #include "fused_rope_append.h"      // fused q/k RoPE + KV-append layout (#905).
 
@@ -227,6 +228,62 @@ std::unique_ptr<MlxArray> paged_attention_decode(
 int32_t paged_attention_num_splits_cap(int32_t dim) {
     return static_cast<int32_t>(
         mlxcel::turbo::paged_attention_num_splits_cap(static_cast<int>(dim)));
+}
+
+// Paged-attention decode v2 (issue #898). Implementation in
+// `src/lib/mlx-cpp/turbo/paged_attention_v2.cpp` (partial kernel) and
+// `paged_attention_v2_merge.cpp` (merge kernel); forwarded here so the symbols
+// show up in the cxx-bridge ABI. Two outputs each, so both use out-params.
+void paged_attention_decode_v2_partial(
+    const MlxArray& q,
+    const MlxArray& k_pool,
+    const MlxArray& v_pool,
+    const MlxArray& indices,
+    const MlxArray& indptr,
+    const MlxArray& last_page_len,
+    const MlxArray& first_page_offset,
+    const MlxArray& request_indices,
+    const MlxArray& kv_tile_indices,
+    const MlxArray& params,
+    float scale,
+    std::unique_ptr<MlxArray>& partial_v_out,
+    std::unique_ptr<MlxArray>& lse_out) {
+    auto outs = mlxcel::turbo::paged_attention_decode_v2_partial(
+        q.inner,
+        k_pool.inner,
+        v_pool.inner,
+        indices.inner,
+        indptr.inner,
+        last_page_len.inner,
+        first_page_offset.inner,
+        request_indices.inner,
+        kv_tile_indices.inner,
+        params.inner,
+        scale);
+    partial_v_out = std::make_unique<MlxArray>(std::move(outs[0]));
+    lse_out = std::make_unique<MlxArray>(std::move(outs[1]));
+}
+
+void paged_attention_merge_states(
+    const MlxArray& v_in,
+    const MlxArray& lse_in,
+    const MlxArray& o_indptr,
+    std::unique_ptr<MlxArray>& v_out,
+    std::unique_ptr<MlxArray>& lse_out) {
+    auto outs = mlxcel::turbo::paged_attention_merge_states(
+        v_in.inner, lse_in.inner, o_indptr.inner);
+    v_out = std::make_unique<MlxArray>(std::move(outs[0]));
+    lse_out = std::make_unique<MlxArray>(std::move(outs[1]));
+}
+
+int32_t paged_attention_v2_q_heads_per_cta(int32_t dim, int32_t n_rep) {
+    return static_cast<int32_t>(mlxcel::turbo::paged_attention_v2_q_heads_per_cta(
+        static_cast<int>(dim), static_cast<int>(n_rep)));
+}
+
+int32_t paged_attention_v2_num_warps(int32_t dim, int32_t q_heads_per_cta) {
+    return static_cast<int32_t>(mlxcel::turbo::paged_attention_v2_num_warps(
+        static_cast<int>(dim), static_cast<int>(q_heads_per_cta)));
 }
 
 // Fused residual-add + RMSNorm kernel launcher (issue #905). Implementation in
