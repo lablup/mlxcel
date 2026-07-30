@@ -256,34 +256,10 @@ pub async fn chat_completions(
         .into_response();
     }
 
-    // Validate tool_choice values
-    if let Some(ref tc) = request.tool_choice {
-        match tc {
-            crate::server::types::request::ToolChoice::Mode(mode) => {
-                if !["auto", "none", "required"].contains(&mode.as_str()) {
-                    return ErrorResponse::new(
-                        format!("Invalid tool_choice value: '{mode}'. Must be 'auto', 'none', 'required', or a function object."),
-                        "invalid_request_error",
-                    )
-                    .into_response();
-                }
-            }
-            crate::server::types::request::ToolChoice::Specific(_) => {}
-        }
-    }
-
-    // Enforce tools array size limit to prevent DoS via template rendering
-    if let Some(ref tools) = request.tools
-        && tools.len() > MAX_TOOLS
-    {
-        return ErrorResponse::new(
-            format!(
-                "Too many tools: {}. Maximum allowed is {MAX_TOOLS}.",
-                tools.len()
-            ),
-            "invalid_request_error",
-        )
-        .into_response();
+    // Keep tool validation shared with the disaggregated router front so both
+    // paths reject invalid and oversized requests before template rendering.
+    if let Err(message) = validate_chat_tool_inputs(&request) {
+        return ErrorResponse::new(message, "invalid_request_error").into_response();
     }
 
     // validate thinking_budget_tokens early so malformed values
@@ -1011,10 +987,33 @@ pub(crate) fn validate_xtc_params(
 }
 
 /// Maximum number of tools allowed in a single request.
-///
-/// Enforced in `chat_completions()` to prevent DoS via large tool definitions
-/// being rendered through the Jinja2 chat template.
 pub(crate) const MAX_TOOLS: usize = 128;
+
+/// Validate the chat tool fields shared by single-node and router fronts.
+///
+/// Both callers run this before chat-template rendering so an invalid
+/// `tool_choice` or oversized tool list cannot reach Jinja2. Error strings are
+/// intentionally kept byte-identical to the original single-node guards.
+pub(crate) fn validate_chat_tool_inputs(request: &ChatCompletionRequest) -> Result<(), String> {
+    if let Some(crate::server::types::request::ToolChoice::Mode(mode)) = &request.tool_choice
+        && !["auto", "none", "required"].contains(&mode.as_str())
+    {
+        return Err(format!(
+            "Invalid tool_choice value: '{mode}'. Must be 'auto', 'none', 'required', or a function object."
+        ));
+    }
+
+    if let Some(tools) = &request.tools
+        && tools.len() > MAX_TOOLS
+    {
+        return Err(format!(
+            "Too many tools: {}. Maximum allowed is {MAX_TOOLS}.",
+            tools.len()
+        ));
+    }
+
+    Ok(())
+}
 
 /// Suffixes that a rendered chat prompt uses to leave the model inside an
 /// open thinking block. Each corresponds to a family-specific reasoning

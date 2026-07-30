@@ -634,6 +634,23 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
         return Ok(resp);
     }
 
+    // The router and single-node chat fronts share these guards so invalid
+    // tool choices and oversized tool arrays cannot reach template rendering.
+    if let Err(message) = super::routes::chat::validate_chat_tool_inputs(&request) {
+        return Ok(ErrorResponse::new(message, "invalid_request_error").into_response());
+    }
+
+    // PrefillRequestFrame cannot carry a compiled structured-output
+    // constraint to the decode node. Reject rather than return unconstrained
+    // output for a request that explicitly asked for structured output.
+    if request.response_format.is_some() {
+        return Ok(ErrorResponse::new(
+            "the disaggregated router does not support response_format (structured output) on /v1/chat/completions",
+            "invalid_request_error",
+        )
+        .into_response());
+    }
+
     // Render the chat template and reject multimodal requests (the
     // disaggregated path is text-only for pool-backed Fp16 families).
     let prepared = super::chat_request::prepare_chat_request_with_cache(

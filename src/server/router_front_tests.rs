@@ -25,6 +25,163 @@
 
 use super::*;
 
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use serde_json::{Value, json};
+use tower::ServiceExt;
+
+use crate::distributed::tcp_transport::TcpTransportConfig;
+
+async fn router_test_state() -> Arc<RouterState> {
+    let transport = Arc::new(
+        TcpTransport::bind(TcpTransportConfig {
+            bind_address: "127.0.0.1:0".to_string(),
+            ..TcpTransportConfig::default()
+        })
+        .await
+        .expect("bind router test transport"),
+    );
+    let reply_to = transport.local_addr().expect("router transport address");
+    let config = ServerConfig {
+        prefill_peers: vec!["127.0.0.1:9".parse().expect("prefill address")],
+        ..ServerConfig::default()
+    };
+
+    Arc::new(
+        RouterState::build(
+            Arc::new(config),
+            transport,
+            reply_to,
+            Arc::new(ChatTemplateProcessor::with_template(
+                "{% for message in messages %}{{ message.content }}{% endfor %}".to_string(),
+            )),
+            Arc::new(MlxcelTokenizer::stub()),
+        )
+        .expect("build router test state"),
+    )
+}
+
+async fn post_router_json(path: &str, body: Value) -> Response {
+    create_router_app(router_test_state().await)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&body).expect("serialize request"),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("router response")
+}
+
+async fn error_message(response: Response) -> String {
+    let bytes = to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("read response body");
+    let body: Value = serde_json::from_slice(&bytes).expect("JSON error response");
+    body["error"]["message"]
+        .as_str()
+        .expect("error message")
+        .to_string()
+}
+
+fn chat_request() -> Value {
+    json!({
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "hello"}]
+    })
+}
+
+#[tokio::test]
+async fn router_chat_rejects_response_format_before_rendering() {
+    let mut body = chat_request();
+    body["response_format"] = json!({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "answer",
+            "strict": true,
+            "schema": {"type": "object"}
+        }
+    });
+
+    let response = post_router_json("/v1/chat/completions", body).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error_message(response).await,
+        "the disaggregated router does not support response_format (structured output) on /v1/chat/completions"
+    );
+}
+
+#[tokio::test]
+async fn router_chat_rejects_more_than_max_tools_before_rendering() {
+    let mut body = chat_request();
+    body["tools"] = Value::Array(
+        (0..=super::super::routes::chat::MAX_TOOLS)
+            .map(|i| {
+                json!({
+                    "type": "function",
+                    "function": {"name": format!("tool_{i}")}
+                })
+            })
+            .collect(),
+    );
+
+    let response = post_router_json("/v1/chat/completions", body).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error_message(response).await,
+        "Too many tools: 129. Maximum allowed is 128."
+    );
+}
+
+#[tokio::test]
+async fn router_chat_rejects_invalid_tool_choice_before_rendering() {
+    let mut body = chat_request();
+    body["tool_choice"] = json!("sometimes");
+
+    let response = post_router_json("/v1/chat/completions", body).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error_message(response).await,
+        "Invalid tool_choice value: 'sometimes'. Must be 'auto', 'none', 'required', or a function object."
+    );
+}
+
+#[tokio::test]
+async fn router_completion_existing_unsupported_option_guards_are_unchanged() {
+    let cases = [
+        (
+            json!({"model": "test-model", "prompt": "hello", "logprobs": 1}),
+            "the disaggregated router does not support logprobs on /v1/completions",
+        ),
+        (
+            json!({
+                "model": "test-model",
+                "prompt": "hello",
+                "response_format": {"type": "json_schema"}
+            }),
+            "the disaggregated router does not support response_format (structured output) on /v1/completions",
+        ),
+        (
+            json!({
+                "model": "test-model",
+                "prompt": "hello",
+                "thinking_budget_tokens": 32
+            }),
+            "the disaggregated router does not support reasoning/thinking budgets on /v1/completions",
+        ),
+    ];
+
+    for (body, expected_message) in cases {
+        let response = post_router_json("/v1/completions", body).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error_message(response).await, expected_message);
+    }
+}
+
 #[test]
 fn text_only_router_rejects_declared_media_even_when_resolution_drops_it() {
     let invalid_image = super::super::media::MediaRequestMetadata::new(1, 0, 0, 0, 0, 0);
