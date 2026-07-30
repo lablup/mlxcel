@@ -6144,9 +6144,19 @@ mod tests {
     /// the compiled-in default, and an unrecognised value must not silently
     /// change the decode graph.
     #[test]
-    fn fused_905_flags_default_on_and_respect_disable_values() {
-        assert!(fused_add_rmsnorm_enabled_from(None));
-        assert!(fused_rope_append_enabled_from(None));
+    fn fused_905_flags_follow_the_default_and_respect_explicit_values() {
+        // Unset means the compiled-in default, whichever way it is set. Asserting
+        // a literal here instead would re-pin the default and fail whenever a
+        // measurement flips it, which is exactly what happened when the #905
+        // sweep moved both constants to off.
+        assert_eq!(
+            fused_add_rmsnorm_enabled_from(None),
+            FUSED_ADD_RMSNORM_DEFAULT
+        );
+        assert_eq!(
+            fused_rope_append_enabled_from(None),
+            FUSED_ROPE_APPEND_DEFAULT
+        );
 
         for v in ["0", "false", "off", "no", "OFF", "False", " 0 ", "No"] {
             assert!(
