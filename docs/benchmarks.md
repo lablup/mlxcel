@@ -90,11 +90,34 @@ exist yet, so on a CUDA host set `MLXCEL_BENCH_LLC_BYTES` to the device's real
 L2 size. Set the same variable on Apple Silicon when the published SLC figure
 for the specific chip is known.
 
-Note that a large working set needs no rotation at all: at batch 4 and context
-32768 the paged microbench already reads 512 MiB per iteration, which no
-last-level cache holds, so the rotation count is 1 and the cold mode costs
-nothing there. The two modes diverge at small batch and short context, which is
-also where a warm measurement is most misleading.
+Note that a large working set needs no rotation at all: once a single iteration
+reads more than the last-level cache holds, the rotation count collapses to 1 and
+the cold mode costs nothing. On an M1 Ultra (96 MiB SLC) that crossover lands at
+batch 4 / context 16384. The two modes diverge at small batch and short context,
+which is also where a warm measurement is most misleading.
+
+### What it actually measured on Apple Silicon
+
+Measured before assuming, because the size of the effect turned out to matter
+less than its shape. On an M1 Ultra at batch 1 / context 4096 (rotation 12),
+medians over five repetitions each:
+
+| Path | Warm | Cold | Delta |
+|---|---|---|---|
+| `contig_sdpa` | 438.3 us | 433.7 us | -1.0% |
+| `gatherA_sdpa` | 509.4 us | 535.0 us | +5.0% |
+
+The median barely moves. What moves is the spread: warm `gatherA_sdpa` ranged
+425.6 to 542.1 us (27%, including one 708 us first-iteration outlier), while cold
+ranged 525.1 to 546.0 us (4.0%).
+
+So on this part the case for cold mode is reproducibility, not a large correction
+to the number. Unified memory with very high bandwidth blunts the cache cliff that
+motivates the technique. Do not carry that conclusion to CUDA: a discrete GPU with
+a private L2 behind PCIe has a much sharper cliff, and the same rotation there
+should be expected to move the median considerably more. Full numbers and the
+load conditions they were taken under are in
+[autotuner-m1ultra-2026-07-30](benchmark_results/autotuner-m1ultra-2026-07-30.md).
 
 ### Running and recording
 
