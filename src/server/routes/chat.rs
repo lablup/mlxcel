@@ -401,10 +401,9 @@ async fn non_stream_chat_completion(
         &prepared.audio_data,
     );
     let primed_open_thinking = is_prompt_primed_open_thinking(&prepared.prompt);
-    // Loop-detection amplifier signal (issue #967): the tools the template will
-    // actually render (so `tool_choice: "none"` does not count), or the grammar
-    // constraint already compiled from `response_format` above.
-    let amplified = chat_carries_loop_amplifier(&request, structured.is_some());
+    // Loop-detection amplifier signal (issues #967 and #977): only tool-shaped
+    // prompts arm the family default. Grammar-only requests stay disabled.
+    let amplified = chat_carries_loop_amplifier(&request);
     let mut options = build_generate_options(&request.params, &state.config, amplified);
     options.priority = priority;
     options.reasoning_budget = budget_override;
@@ -644,7 +643,7 @@ async fn stream_chat_completion(
     let primed_open_thinking = is_prompt_primed_open_thinking(&prepared.prompt);
     // Loop-detection amplifier signal (issue #967): same derivation as the
     // non-streaming path, so both chat surfaces resolve identically.
-    let amplified = chat_carries_loop_amplifier(&request, structured.is_some());
+    let amplified = chat_carries_loop_amplifier(&request);
     let mut options = build_generate_options(&request.params, &state.config, amplified);
     options.priority = priority;
     options.reasoning_budget = budget_override;

@@ -665,17 +665,15 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
     // Resolve sampling and token budget using the same defaults as the
     // model worker.
     //
-    // Loop-detection amplifier signal (issue #967): the same derivation as the
-    // single-node chat route, so the computed value matches it. The router never
-    // compiles a grammar constraint (the PrefillRequestFrame cannot carry one),
-    // so the grammar half is always false.
+    // Loop-detection amplifier signal (issues #967 and #977): the same
+    // tool-shaped prompt derivation as the single-node chat route.
     //
     // This value is currently inert on this path: `sampling_to_serializable`
     // does not put `loop_detection` on the wire and
     // `serving_protocol::sampling_from_serializable` hardcodes the disabled
     // baseline, so the decode node never runs the detector. It is computed
     // anyway so the front is correct the day the field is serialized.
-    let amplified = crate::server::request_options::chat_carries_loop_amplifier(&request, false);
+    let amplified = crate::server::request_options::chat_carries_loop_amplifier(&request);
     let opts =
         super::routes::chat::build_generate_options(&request.params, &state.config, amplified);
 

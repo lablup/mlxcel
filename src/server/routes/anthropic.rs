@@ -177,12 +177,11 @@ async fn non_stream_messages(
     };
 
     // Loop-detection amplifier signal (issue #967): the Anthropic Messages
-    // surface has no `response_format` (the translator always sets it to `None`)
-    // and this route compiles no grammar constraint, so only the translated tool
+    // surface maps translated tool declarations into the chat request. The
     // declarations can turn the Gemma 4 family default-on on. The translator also
     // maps `tool_choice`, so an Anthropic `tool_choice: {"type": "none"}` lands as
     // `Mode("none")` and `effective_tools` drops the declarations here too.
-    let amplified = chat_carries_loop_amplifier(&translated.chat_request, false);
+    let amplified = chat_carries_loop_amplifier(&translated.chat_request);
     let mut options =
         build_generate_options(&translated.chat_request.params, &state.config, amplified);
     options.priority = priority;
@@ -307,12 +306,11 @@ async fn stream_messages(
     };
 
     // Loop-detection amplifier signal (issue #967): the Anthropic Messages
-    // surface has no `response_format` (the translator always sets it to `None`)
-    // and this route compiles no grammar constraint, so only the translated tool
+    // surface maps translated tool declarations into the chat request. The
     // declarations can turn the Gemma 4 family default-on on. The translator also
     // maps `tool_choice`, so an Anthropic `tool_choice: {"type": "none"}` lands as
     // `Mode("none")` and `effective_tools` drops the declarations here too.
-    let amplified = chat_carries_loop_amplifier(&translated.chat_request, false);
+    let amplified = chat_carries_loop_amplifier(&translated.chat_request);
     let mut options =
         build_generate_options(&translated.chat_request.params, &state.config, amplified);
     options.priority = priority;

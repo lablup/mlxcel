@@ -520,10 +520,9 @@ pub struct ServerConfig {
 
     /// Whether the loaded model is in the Gemma 4 family (`Gemma4`,
     /// `Gemma4VLM`, or `Gemma4Unified`), resolved once at startup. Enables the
-    /// engine-level loop-detection default-on for the family, for requests that
-    /// carry an amplifier: declared tools, or a `json_schema` response_format
-    /// that puts decoding under a grammar constraint (issue #967). Plain Gemma 4
-    /// chat is not covered. Defaults to `false` so non-Gemma-4 models keep the
+    /// engine-level loop-detection default-on for the family, for tool-shaped
+    /// requests (issues #967 and #977). Plain and grammar-only Gemma 4 requests
+    /// are not covered. Defaults to `false` so non-Gemma-4 models keep the
     /// bit-exact baseline.
     pub model_is_gemma4_family: bool,
 }

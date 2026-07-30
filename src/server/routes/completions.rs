@@ -42,7 +42,6 @@ use super::chat::{
     build_generate_options, decode_token, parse_priority_header, structured_error_to_response,
     validate_xtc_params,
 };
-use crate::server::request_options::carries_loop_amplifier;
 
 /// Build a `CompletionLogprobs` from a list of `TokenLogprobData` (legacy format).
 fn build_completion_logprobs(
@@ -241,11 +240,9 @@ async fn non_stream_completion(
     let model_id = state.display_model_id().to_string();
 
     let prompt = request.prompt.clone();
-    // Loop-detection amplifier signal (issue #967): `/v1/completions` has no
-    // `tools` field, so only the grammar constraint compiled from
-    // `response_format` can turn the Gemma 4 family default-on on.
-    let amplified = carries_loop_amplifier(None, structured.is_some());
-    let mut options = build_generate_options(&request.params, &state.config, amplified);
+    // `/v1/completions` has no tool-shaped prompt signal. Since issue #977 a
+    // grammar constraint alone does not arm the Gemma 4 family default.
+    let mut options = build_generate_options(&request.params, &state.config, false);
     options.priority = priority;
     options.reasoning_budget = budget_override;
     // `/v1/completions` takes a raw prompt just like `/completion`;
@@ -318,11 +315,9 @@ async fn stream_completion(
     let request_id = format!("cmpl-{}", uuid::Uuid::new_v4());
     let model_id = state.display_model_id().to_string();
     let prompt = request.prompt.clone();
-    // Loop-detection amplifier signal (issue #967): `/v1/completions` has no
-    // `tools` field, so only the grammar constraint compiled from
-    // `response_format` can turn the Gemma 4 family default-on on.
-    let amplified = carries_loop_amplifier(None, structured.is_some());
-    let mut options = build_generate_options(&request.params, &state.config, amplified);
+    // `/v1/completions` has no tool-shaped prompt signal. Since issue #977 a
+    // grammar constraint alone does not arm the Gemma 4 family default.
+    let mut options = build_generate_options(&request.params, &state.config, false);
     options.priority = priority;
     options.reasoning_budget = budget_override;
     // see non_stream_completion — raw-text endpoint, no

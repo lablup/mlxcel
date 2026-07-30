@@ -216,12 +216,10 @@ async fn non_stream_create_response(
             return ErrorResponse::new(err.to_string(), "invalid_request_error").into_response();
         }
     };
-    // Loop-detection amplifier signal (issue #967): the Responses translator maps
-    // `tools` onto `chat_request.tools`, `tool_choice` onto
-    // `chat_request.tool_choice`, and `text.format` onto
-    // `chat_request.response_format`; `structured` is the constraint compiled from
-    // the last of those.
-    let amplified = chat_carries_loop_amplifier(&translated.chat_request, structured.is_some());
+    // Loop-detection amplifier signal (issues #967 and #977): the Responses
+    // translator maps the tool fields onto the chat request. Structured output
+    // alone no longer arms the family default.
+    let amplified = chat_carries_loop_amplifier(&translated.chat_request);
     let mut options =
         build_generate_options(&translated.chat_request.params, &state.config, amplified);
     options.priority = priority;
@@ -337,12 +335,10 @@ async fn stream_create_response(
             return ErrorResponse::new(err.to_string(), "invalid_request_error").into_response();
         }
     };
-    // Loop-detection amplifier signal (issue #967): the Responses translator maps
-    // `tools` onto `chat_request.tools`, `tool_choice` onto
-    // `chat_request.tool_choice`, and `text.format` onto
-    // `chat_request.response_format`; `structured` is the constraint compiled from
-    // the last of those.
-    let amplified = chat_carries_loop_amplifier(&translated.chat_request, structured.is_some());
+    // Loop-detection amplifier signal (issues #967 and #977): the Responses
+    // translator maps the tool fields onto the chat request. Structured output
+    // alone no longer arms the family default.
+    let amplified = chat_carries_loop_amplifier(&translated.chat_request);
     let mut options =
         build_generate_options(&translated.chat_request.params, &state.config, amplified);
     options.priority = priority;

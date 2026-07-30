@@ -938,9 +938,9 @@ pub(super) fn build_server_config(
         // `None` means the per-family auto-enable policy applies.
         loop_detection: resolve_loop_detection_env(),
         // Whether the loaded model is in the Gemma 4 family. Combined with the
-        // per-request amplifier flag (tools or a `json_schema` response_format,
-        // issue #967) this turns on the loop-detection default-on for the
-        // family; plain chat and plain completion stay disabled.
+        // per-request tool-shaped prompt flag (issues #967 and #977), this turns
+        // on the loop-detection default for protected traffic; plain and
+        // grammar-only requests stay disabled.
         model_is_gemma4_family: detect_gemma4_family(&startup.model_path),
     }
 }
