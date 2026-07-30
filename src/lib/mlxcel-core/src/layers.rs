@@ -1036,6 +1036,79 @@ pub fn validate_quantization_params(group_size: i32, bits: i32) -> Result<(), St
     Ok(())
 }
 
+/// Recover the `group_size` / `bits` a packed MLA `kv_b_proj` was quantized
+/// with, from its tensor shapes and the declared `kv_lora_rank`.
+///
+/// The MLA decomposition in the LongCat Flash NGram and Youtu-VL sanitizers has
+/// to dequantize `kv_b_proj` before splitting it per head (splitting in
+/// quantized space would scramble the per-group scales), and the pair it needs
+/// is not declared anywhere: it is solved from `packed_in * 32 == bits *
+/// kv_lora_rank` and `kv_lora_rank == num_groups * group_size`.
+///
+/// Every input here is untrusted. `kv_lora_rank` is a `config.json` field and
+/// both axes come from the checkpoint, so the naive form of this arithmetic has
+/// three separate failure modes before the result is ever used: a
+/// `kv_lora_rank` of 0 and a zero-length scales axis are both Rust integer
+/// divisions by zero, which panic, and `packed_in * 32` overflows `i32` on a
+/// large axis, which wraps in release and panics in an overflow-checked build.
+/// Each is checked here, before the division that would trigger it, and the
+/// multiply is evaluated in `i64`. The solved pair is then bounded by
+/// [`validate_quantization_params`], because it feeds `dequantize`, which
+/// crosses the cxx bridge as `UniquePtr<MlxArray>` rather than `Result`: a C++
+/// throw there is an uncatchable abort during weight sanitization rather than a
+/// load error (issue #958).
+///
+/// `prefix` names the offending tensor in every error.
+///
+/// Used by: LongCat Flash NGram, Youtu-VL (MLA `kv_b_proj` decomposition)
+pub fn infer_mla_quantization_params(
+    weight_shape: &[i32],
+    scales_shape: &[i32],
+    kv_lora_rank: i32,
+    prefix: &str,
+) -> Result<(i32, i32), String> {
+    let packed_in = *weight_shape.last().ok_or_else(|| {
+        format!("{prefix}: packed kv_b_proj weight has rank 0 and describes no input width")
+    })?;
+    let num_groups = *scales_shape.last().ok_or_else(|| {
+        format!("{prefix}: kv_b_proj scales have rank 0 and describe no group count")
+    })?;
+    if kv_lora_rank < 1 {
+        return Err(format!(
+            "{prefix}: kv_lora_rank ({kv_lora_rank}) must be positive; it is the divisor that \
+             recovers the packed bit width, so a zero panics and a negative solves to a bit width \
+             no packing can have"
+        ));
+    }
+    if num_groups < 1 {
+        return Err(format!(
+            "{prefix}: kv_b_proj scales must carry a positive last axis, got {num_groups}; it is \
+             the divisor that recovers the group size"
+        ));
+    }
+    if packed_in < 1 {
+        return Err(format!(
+            "{prefix}: packed kv_b_proj weight must carry a positive last axis, got {packed_in}; a \
+             zero-length packed axis describes no input width"
+        ));
+    }
+
+    // i64: `packed_in * 32` is a checkpoint-controlled multiply that wraps in
+    // release and panics in an overflow-checked build as an i32.
+    let bits = i64::from(packed_in) * 32 / i64::from(kv_lora_rank);
+    let group_size = kv_lora_rank / num_groups;
+    let bits = i32::try_from(bits).map_err(|_| {
+        format!(
+            "{prefix}: packed kv_b_proj weight {weight_shape:?} solves to a bit width of {bits} \
+             against kv_lora_rank {kv_lora_rank}, which no packing can have"
+        )
+    })?;
+
+    validate_quantization_params(group_size, bits)
+        .map_err(|e| format!("{prefix}: inferred quantization params are unusable: {e}"))?;
+    Ok((group_size, bits))
+}
+
 /// Upper bound on a declared `group_size`.
 ///
 /// This is an overflow bound, not an allowlist of the group sizes MLX supports.
@@ -4726,6 +4799,52 @@ mod tests {
         regular.insert("embed_q.weight".to_string(), plane(8));
         MultiLinear::from_weights(&regular, "embed_q", 0, 0)
             .expect("a non-quantized MultiLinear must not be gated on quantization params");
+    }
+
+    /// The MLA `kv_b_proj` pair is solved from shapes rather than declared, and
+    /// every input is untrusted: `kv_lora_rank` is a config field and both axes
+    /// are checkpoint data. The naive arithmetic panics on a zero divisor and
+    /// overflows `i32` on a large packed axis, both of which happen BEFORE any
+    /// bound on the solved pair could fire, so the divisor and overflow checks
+    /// have to come first (issue #958).
+    #[test]
+    fn mla_param_inference_checks_every_divisor_before_dividing() {
+        // Positive control: a real DeepSeek-shaped 4-bit kv_b_proj. packed_in
+        // 64 * 32 / kv_lora_rank 512 solves to 4 bits, and 512 / 8 groups
+        // solves to group_size 64.
+        assert_eq!(
+            infer_mla_quantization_params(&[256, 64], &[256, 8], 512, "kv_b_proj")
+                .expect("an honest MLA layout must solve"),
+            (64, 4)
+        );
+
+        // A zero `kv_lora_rank` is Rust integer division by zero, which panics
+        // rather than returning something the bound could reject.
+        let err = infer_mla_quantization_params(&[256, 64], &[256, 8], 0, "kv_b_proj")
+            .expect_err("kv_lora_rank 0 must be rejected, not divided by");
+        assert!(err.contains("kv_lora_rank"), "unhelpful error: {err}");
+
+        // Same for a zero-length scales axis, the other divisor.
+        let err = infer_mla_quantization_params(&[256, 64], &[256, 0], 512, "kv_b_proj")
+            .expect_err("a zero-length scales axis must be rejected, not divided by");
+        assert!(err.contains("positive last axis"), "unhelpful error: {err}");
+
+        // A rank-0 tensor has no last axis at all, which used to index out of
+        // bounds.
+        assert!(infer_mla_quantization_params(&[], &[256, 8], 512, "kv_b_proj").is_err());
+        assert!(infer_mla_quantization_params(&[256, 64], &[], 512, "kv_b_proj").is_err());
+
+        // `packed_in * 32` overflows i32 well before this axis is reachable in
+        // memory, so it is evaluated in i64 and the result bounded instead.
+        let err = infer_mla_quantization_params(&[1, i32::MAX], &[1, 8], 512, "kv_b_proj")
+            .expect_err("an overflowing packed axis must be rejected");
+        assert!(err.contains("bits"), "unhelpful error: {err}");
+
+        // A solved pair that lands outside anything MLX can describe is refused
+        // on the same path: 8 * 32 / 512 truncates to 0 bits.
+        let err = infer_mla_quantization_params(&[256, 8], &[256, 8], 512, "kv_b_proj")
+            .expect_err("a solved bit width of 0 must be rejected");
+        assert!(err.contains("bits"), "unhelpful error: {err}");
     }
 
     #[test]

@@ -1097,24 +1097,20 @@ pub fn sanitize_weights(
                 let b = weights
                     .remove(&format!("{prefix}.kv_b_proj.biases"))
                     .unwrap();
-                let w_shape = mlxcel_core::array_shape(&w);
-                let s_shape = mlxcel_core::array_shape(&s);
-                let kv_lora_rank = args.kv_lora_rank as i32;
-                let inferred_bits = (w_shape[w_shape.len() - 1] * 32) / kv_lora_rank;
-                let inferred_gs = kv_lora_rank / s_shape[s_shape.len() - 1];
-
-                // The inferred pair is a quotient of a config field and a tensor
-                // axis, so it can still land outside anything MLX can describe,
-                // and `dequantize` crosses the cxx bridge as
-                // `UniquePtr<MlxArray>` rather than `Result`: a throw here would
-                // abort during weight sanitization rather than fail the load
-                // (issue #958). This is why the function is fallible.
-                mlxcel_core::layers::validate_quantization_params(inferred_gs, inferred_bits)
-                    .map_err(|e| {
-                        format!(
-                            "{prefix}.kv_b_proj: inferred quantization params are unusable: {e}"
-                        )
-                    })?;
+                // Solve the packed pair from the shapes and bound it before it
+                // reaches `dequantize`. The shared helper also checks each
+                // divisor before dividing: `kv_lora_rank` is a config field and
+                // the scales axis is checkpoint data, so the naive form panics
+                // on a zero divisor and overflows i32 on a large packed axis,
+                // both before the bound could fire. This is why the function is
+                // fallible (issue #958).
+                let (inferred_gs, inferred_bits) =
+                    mlxcel_core::layers::infer_mla_quantization_params(
+                        &mlxcel_core::array_shape(&w),
+                        &mlxcel_core::array_shape(&s),
+                        args.kv_lora_rank as i32,
+                        &format!("{prefix}.kv_b_proj"),
+                    )?;
 
                 unsafe {
                     mlxcel_core::dequantize(
