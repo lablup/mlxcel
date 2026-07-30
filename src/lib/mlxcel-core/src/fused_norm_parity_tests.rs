@@ -130,7 +130,10 @@ fn random_case(
     // standard-normal weight would make the reference RMS meaningless.
     let w_noise = unsafe { random_normal(&[dim], dtype::FLOAT32, std::ptr::null()) };
     let ones = full_f32(&[dim], 1.0, dtype::FLOAT32);
-    let w_f32 = add(&ones, &multiply(&w_noise, &full_f32(&[1], 0.1, dtype::FLOAT32)));
+    let w_f32 = add(
+        &ones,
+        &multiply(&w_noise, &full_f32(&[1], 0.1, dtype::FLOAT32)),
+    );
 
     let delta = astype(&delta_f32, dtype);
     let residual = astype(&residual_f32, dtype);
@@ -296,7 +299,12 @@ fn gemma_rms_norm_layer_agrees_with_weight_bias_one() {
     let (fused_normed, _) = run_fused(&delta, &residual, gemma.raw_norm_weight(), EPS, 1.0);
     let (graph_normed, _) = crate::layers::graph_add_rms_norm(&gemma, &delta, &residual);
     eval(&graph_normed);
-    assert_within("gemma layer vs weight_bias=1", &fused_normed, &graph_normed, dt);
+    assert_within(
+        "gemma layer vs weight_bias=1",
+        &fused_normed,
+        &graph_normed,
+        dt,
+    );
 }
 
 /// LoRA fusion and the surgery tooling both rewrite norm weights in place
@@ -390,7 +398,8 @@ fn fused_add_rms_norm_helper_respects_the_kill_switch() {
     let (normed, new_residual) = crate::layers::fused_add_rms_norm(&norm, &delta, &residual);
     eval(&normed);
     eval(&new_residual);
-    let (graph_normed, graph_residual) = crate::layers::graph_add_rms_norm(&norm, &delta, &residual);
+    let (graph_normed, graph_residual) =
+        crate::layers::graph_add_rms_norm(&norm, &delta, &residual);
     eval(&graph_normed);
     eval(&graph_residual);
 
@@ -448,10 +457,7 @@ fn fused_add_rms_norm_greedy_argmax_parity_over_steps() {
         eval(&r);
         r
     };
-    let norms: Vec<RMSNorm> = weights
-        .iter()
-        .map(|w| RMSNorm::new(copy(w), EPS))
-        .collect();
+    let norms: Vec<RMSNorm> = weights.iter().map(|w| RMSNorm::new(copy(w), EPS)).collect();
 
     let seed_x = {
         let x = unsafe { random_normal(&[1, dim], dtype::FLOAT32, std::ptr::null()) };
@@ -471,7 +477,8 @@ fn fused_add_rms_norm_greedy_argmax_parity_over_steps() {
             let f_delta = compiled_silu(&fused_state);
             let g_delta = compiled_silu(&graph_state);
 
-            let (f_normed, f_res) = run_fused(&f_delta, &fused_state, norm.raw_norm_weight(), EPS, 0.0);
+            let (f_normed, f_res) =
+                run_fused(&f_delta, &fused_state, norm.raw_norm_weight(), EPS, 0.0);
             let (g_normed, g_res) = crate::layers::graph_add_rms_norm(norm, &g_delta, &graph_state);
             eval(&g_normed);
             eval(&g_res);

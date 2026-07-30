@@ -217,10 +217,14 @@ fn bench_rope_append(rows: &mut Vec<Row>, dt: i32) {
                 let k = slice_last_dim(&qkv, q_size, q_size + kv_size);
                 let v = slice_last_dim(&qkv, q_size + kv_size, q_size + 2 * kv_size);
                 let q = transpose_axes(&reshape(&q, &[batch, 1, n_heads, head_dim]), &[0, 2, 1, 3]);
-                let k =
-                    transpose_axes(&reshape(&k, &[batch, 1, n_kv_heads, head_dim]), &[0, 2, 1, 3]);
-                let v =
-                    transpose_axes(&reshape(&v, &[batch, 1, n_kv_heads, head_dim]), &[0, 2, 1, 3]);
+                let k = transpose_axes(
+                    &reshape(&k, &[batch, 1, n_kv_heads, head_dim]),
+                    &[0, 2, 1, 3],
+                );
+                let v = transpose_axes(
+                    &reshape(&v, &[batch, 1, n_kv_heads, head_dim]),
+                    &[0, 2, 1, 3],
+                );
                 let q = fast_rope(&q, head_dim, false, ROPE_BASE, 1.0, offset);
                 let k = fast_rope(&k, head_dim, false, ROPE_BASE, 1.0, offset);
                 let v = contiguous(&v, false);
@@ -232,19 +236,8 @@ fn bench_rope_append(rows: &mut Vec<Row>, dt: i32) {
                 let mut k = UniquePtr::null();
                 let mut v = UniquePtr::null();
                 fused_rope_qk_append(
-                    &qkv,
-                    n_heads,
-                    n_kv_heads,
-                    head_dim,
-                    head_dim,
-                    ROPE_BASE,
-                    1.0,
-                    false,
-                    offset,
-                    0,
-                    &mut q,
-                    &mut k,
-                    &mut v,
+                    &qkv, n_heads, n_kv_heads, head_dim, head_dim, ROPE_BASE, 1.0, false, offset,
+                    0, &mut q, &mut k, &mut v,
                 );
                 add(&add(&k, &v), &reshape(&q, &[batch, n_heads, 1, head_dim]))
             });

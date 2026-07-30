@@ -543,7 +543,8 @@ const UNFUSED_GREEDY_BASELINE: &[i32] = &[
 fn greedy_decode_is_token_identical_to_the_unfused_baseline() {
     let tokens = greedy_sequence(UNFUSED_GREEDY_BASELINE.len());
     assert_eq!(
-        tokens, UNFUSED_GREEDY_BASELINE,
+        tokens,
+        UNFUSED_GREEDY_BASELINE,
         "greedy decode diverged from the unfused baseline; \
          MLXCEL_FUSED_ADD_RMSNORM / MLXCEL_FUSED_ROPE_APPEND were \
          {:?} / {:?}",

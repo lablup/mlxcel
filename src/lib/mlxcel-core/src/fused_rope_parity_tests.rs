@@ -323,7 +323,10 @@ fn fused_rope_append_leaves_v_bit_identical() {
     let q_size = N_HEADS * HEAD_DIM;
     let kv_size = N_KV_HEADS * HEAD_DIM;
     let v_ref = slice_last_dim(&qkv, q_size + kv_size, q_size + 2 * kv_size);
-    let v_ref = transpose_axes(&reshape(&v_ref, &[1, 3, N_KV_HEADS, HEAD_DIM]), &[0, 2, 1, 3]);
+    let v_ref = transpose_axes(
+        &reshape(&v_ref, &[1, 3, N_KV_HEADS, HEAD_DIM]),
+        &[0, 2, 1, 3],
+    );
     let v_ref = contiguous(&v_ref, false);
     eval(&v_ref);
 

@@ -821,11 +821,8 @@ impl TransformerBlock {
         // residual stream carried to the second join; `normed` feeds the MLP.
         // `MLXCEL_FUSED_ADD_RMSNORM=0` restores the `add` + `fast_rms_norm`
         // pair this replaced.
-        let (normed, h) = mlxcel_core::layers::fused_add_rms_norm(
-            &self.post_attention_layernorm,
-            &attn_out,
-            x,
-        );
+        let (normed, h) =
+            mlxcel_core::layers::fused_add_rms_norm(&self.post_attention_layernorm, &attn_out, x);
         let ff_out = self.mlp.forward(&normed);
         mlxcel_core::add(&h, &ff_out)
     }
@@ -868,11 +865,8 @@ impl TransformerBlock {
         let attn_out = self.self_attn.o_proj.forward(&attn_concat);
 
         // Residual join + batched post-attention norm in one dispatch (#905).
-        let (normed, h) = mlxcel_core::layers::fused_add_rms_norm(
-            &self.post_attention_layernorm,
-            &attn_out,
-            x,
-        );
+        let (normed, h) =
+            mlxcel_core::layers::fused_add_rms_norm(&self.post_attention_layernorm, &attn_out, x);
         let ff_out = self.mlp.forward(&normed);
         mlxcel_core::add(&h, &ff_out)
     }

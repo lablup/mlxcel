@@ -341,11 +341,8 @@ impl TransformerBlock {
         // `(1 + w)` offset folded inside the kernel via `weight_bias = 1.0`.
         // `MLXCEL_FUSED_ADD_RMSNORM=0` restores the `add` + `fast_rms_norm`
         // pair this replaced.
-        let (normed, h) = mlxcel_core::layers::fused_add_rms_norm(
-            &self.post_attention_layernorm,
-            &attn_out,
-            x,
-        );
+        let (normed, h) =
+            mlxcel_core::layers::fused_add_rms_norm(&self.post_attention_layernorm, &attn_out, x);
         let ff_out = self.mlp.forward(&normed);
         mlxcel_core::add(&h, &ff_out)
     }
