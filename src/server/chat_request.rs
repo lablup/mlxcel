@@ -332,7 +332,15 @@ fn maybe_log_defaulting_once(request: &ChatCompletionRequest) {
 /// Determine the effective tools slice to pass to the template.
 ///
 /// Returns `None` when tool_choice is "none" or no tools are provided.
-fn effective_tools(request: &ChatCompletionRequest) -> Option<&[Tool]> {
+///
+/// This is load-bearing beyond template rendering: since issue #967 it is also
+/// the tools half of the Gemma 4 loop-detection activation signal, read through
+/// [`crate::server::request_options::uses_constrained_decoding`]. The gate's
+/// premise is that tool declarations amplify the repetition collapse only when
+/// the model actually sees them, so the gate and the template deliberately read
+/// the same helper. A change here moves both, which is the intent: they must not
+/// drift apart.
+pub(crate) fn effective_tools(request: &ChatCompletionRequest) -> Option<&[Tool]> {
     // If tool_choice is "none", do not pass tools to template
     if let Some(ref tc) = request.tool_choice
         && tc.is_none()

@@ -665,13 +665,15 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
     // Resolve sampling and token budget using the same defaults as the
     // model worker.
     //
-    // Loop-detection amplifier signal (issue #967): tool declarations are
-    // rendered into the prompt by `prepare_chat_request_with_cache` above, so
-    // they count here exactly as on the single-node chat route. The router
-    // never compiles a grammar constraint (the PrefillRequestFrame cannot carry
-    // one), so the grammar half of the signal is always false.
-    let amplified =
-        crate::server::request_options::uses_constrained_decoding(request.tools.as_deref(), false);
+    // Loop-detection amplifier signal (issue #967): read the same
+    // `effective_tools` the `prepare_chat_request_with_cache` call above used to
+    // render the prompt, so this front resolves exactly as the single-node chat
+    // route. The router never compiles a grammar constraint (the
+    // PrefillRequestFrame cannot carry one), so the grammar half is always false.
+    let amplified = crate::server::request_options::uses_constrained_decoding(
+        crate::server::chat_request::effective_tools(&request),
+        false,
+    );
     let opts =
         super::routes::chat::build_generate_options(&request.params, &state.config, amplified);
 

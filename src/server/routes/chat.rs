@@ -28,6 +28,7 @@ use axum::{
 use mlxcel_core::sampling::{LogprobsConfig, TokenLogprobData};
 
 use crate::server::batch::RequestPriority;
+use crate::server::chat_request::effective_tools;
 use crate::server::chat_request::{prepare_chat_request_with_cache, request_has_effective_input};
 use crate::server::chat_template_kwargs::{extract_request_kwargs, merge_server_and_request};
 use crate::server::config::{PromptCacheRequestContext, ReasoningBudgetOverride};
@@ -401,9 +402,10 @@ async fn non_stream_chat_completion(
         &prepared.audio_data,
     );
     let primed_open_thinking = is_prompt_primed_open_thinking(&prepared.prompt);
-    // Loop-detection amplifier signal (issue #967): declared tools, or the
-    // grammar constraint already compiled from `response_format` above.
-    let amplified = uses_constrained_decoding(request.tools.as_deref(), structured.is_some());
+    // Loop-detection amplifier signal (issue #967): the tools the template will
+    // actually render (so `tool_choice: "none"` does not count), or the grammar
+    // constraint already compiled from `response_format` above.
+    let amplified = uses_constrained_decoding(effective_tools(&request), structured.is_some());
     let mut options = build_generate_options(&request.params, &state.config, amplified);
     options.priority = priority;
     options.reasoning_budget = budget_override;
@@ -643,7 +645,7 @@ async fn stream_chat_completion(
     let primed_open_thinking = is_prompt_primed_open_thinking(&prepared.prompt);
     // Loop-detection amplifier signal (issue #967): same derivation as the
     // non-streaming path, so both chat surfaces resolve identically.
-    let amplified = uses_constrained_decoding(request.tools.as_deref(), structured.is_some());
+    let amplified = uses_constrained_decoding(effective_tools(&request), structured.is_some());
     let mut options = build_generate_options(&request.params, &state.config, amplified);
     options.priority = priority;
     options.reasoning_budget = budget_override;

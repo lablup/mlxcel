@@ -62,6 +62,7 @@ use super::chat::{
     build_generate_options, build_prompt_cache_request_context, parse_priority_header,
     validate_xtc_params,
 };
+use crate::server::chat_request::effective_tools;
 use crate::server::request_options::uses_constrained_decoding;
 
 /// POST /v1/responses
@@ -217,11 +218,12 @@ async fn non_stream_create_response(
         }
     };
     // Loop-detection amplifier signal (issue #967): the Responses translator maps
-    // `tools` onto `chat_request.tools` and `text.format` onto
+    // `tools` onto `chat_request.tools`, `tool_choice` onto
+    // `chat_request.tool_choice`, and `text.format` onto
     // `chat_request.response_format`; `structured` is the constraint compiled from
-    // the latter.
+    // the last of those.
     let amplified = uses_constrained_decoding(
-        translated.chat_request.tools.as_deref(),
+        effective_tools(&translated.chat_request),
         structured.is_some(),
     );
     let mut options =
@@ -340,11 +342,12 @@ async fn stream_create_response(
         }
     };
     // Loop-detection amplifier signal (issue #967): the Responses translator maps
-    // `tools` onto `chat_request.tools` and `text.format` onto
+    // `tools` onto `chat_request.tools`, `tool_choice` onto
+    // `chat_request.tool_choice`, and `text.format` onto
     // `chat_request.response_format`; `structured` is the constraint compiled from
-    // the latter.
+    // the last of those.
     let amplified = uses_constrained_decoding(
-        translated.chat_request.tools.as_deref(),
+        effective_tools(&translated.chat_request),
         structured.is_some(),
     );
     let mut options =

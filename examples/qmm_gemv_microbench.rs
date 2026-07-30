@@ -246,7 +246,6 @@ fn main() {
 
     println!();
     println!(
-        "note: GB/s counts quantized weight + scales + biases bytes only (activations are negligible at B=1); {} weight copies round-robin per shape keep reads out of cache.",
-        "2-12"
+        "note: GB/s counts quantized weight + scales + biases bytes only (activations are negligible at B=1); 2-12 weight copies round-robin per shape keep reads out of cache."
     );
 }

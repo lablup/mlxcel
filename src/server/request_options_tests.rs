@@ -17,7 +17,8 @@ use super::{
     loop_detection_from_request, resolve_loop_detection, uses_constrained_decoding,
 };
 use crate::server::ServerConfig;
-use crate::server::types::request::{FunctionDefinition, Tool};
+use crate::server::chat_request::effective_tools;
+use crate::server::types::request::{ChatCompletionRequest, FunctionDefinition, Tool};
 use mlxcel_core::LoopDetectionConfig;
 
 /// A Gemma 4 server config: the only place `model_is_gemma4_family` is set.
@@ -37,6 +38,24 @@ fn make_tool(name: &str) -> Tool {
             parameters: None,
         },
     }
+}
+
+/// Deserialize a chat request carrying one function tool and the given
+/// `tool_choice`, going through serde so the wire shape is what is under test.
+/// `tool_choice: None` omits the field entirely.
+fn chat_request_with_tools(tool_choice: Option<&str>) -> ChatCompletionRequest {
+    let mut body = serde_json::json!({
+        "model": "gemma-4-12b-it-4bit",
+        "messages": [{"role": "user", "content": "what is the weather"}],
+        "tools": [{
+            "type": "function",
+            "function": {"name": "get_weather"}
+        }]
+    });
+    if let Some(choice) = tool_choice {
+        body["tool_choice"] = serde_json::Value::String(choice.to_string());
+    }
+    serde_json::from_value(body).expect("chat request fixture deserializes")
 }
 
 #[test]
@@ -205,9 +224,9 @@ fn uses_constrained_decoding_predicate() {
     assert!(!uses_constrained_decoding(None, false));
     // An empty `tools` array is not a tool declaration.
     assert!(!uses_constrained_decoding(Some(&[]), false));
-    // A non-empty `tools` array is. The predicate deliberately does not look at
-    // `tool_choice`, so a `"none"` request that still declares tools keeps
-    // detection on even though the template drops the declarations.
+    // A non-empty slice is. Callers pass what the template will render, so
+    // `tool_choice` is already accounted for by the time the slice gets here;
+    // see the `tool_choice_*` tests below.
     assert!(uses_constrained_decoding(
         Some(&[make_tool("get_weather")]),
         false
@@ -247,6 +266,67 @@ fn gemma4_family_default_on_requires_an_amplifier() {
     assert_eq!(
         resolve_loop_detection(None, None, false, with_tools),
         LoopDetectionConfig::disabled()
+    );
+}
+
+// -- tool_choice participates in the tools signal (issue #967) --
+//
+// The gate reads `chat_request::effective_tools`, the same helper that decides
+// what the template renders, so a declared tool only counts when the model
+// actually sees it. `tool_choice: "none"` produces a prompt indistinguishable
+// from plain chat, so it carries no amplifier.
+
+#[test]
+fn tool_choice_none_drops_the_tools_signal() {
+    let request = chat_request_with_tools(Some("none"));
+    assert!(
+        request.tools.as_ref().is_some_and(|t| !t.is_empty()),
+        "fixture must still declare a tool, only tool_choice suppresses it"
+    );
+
+    let amplified = uses_constrained_decoding(effective_tools(&request), false);
+    assert!(
+        !amplified,
+        "tool_choice=none renders no declarations, so there is no amplifier"
+    );
+    assert_eq!(
+        resolve_loop_detection(None, None, true, amplified),
+        LoopDetectionConfig::disabled()
+    );
+}
+
+#[test]
+fn absent_tool_choice_keeps_the_tools_signal() {
+    let request = chat_request_with_tools(None);
+    let amplified = uses_constrained_decoding(effective_tools(&request), false);
+    assert!(amplified);
+    assert_eq!(
+        resolve_loop_detection(None, None, true, amplified),
+        LOOP_DETECTION_RECOMMENDED
+    );
+}
+
+#[test]
+fn tool_choice_auto_keeps_the_tools_signal() {
+    let request = chat_request_with_tools(Some("auto"));
+    let amplified = uses_constrained_decoding(effective_tools(&request), false);
+    assert!(amplified);
+    assert_eq!(
+        resolve_loop_detection(None, None, true, amplified),
+        LOOP_DETECTION_RECOMMENDED
+    );
+}
+
+#[test]
+fn grammar_constraint_is_independent_of_tool_choice_none() {
+    // A `json_schema` response_format still constrains decoding no matter what
+    // `tool_choice` says, so the gate opens on the grammar half alone.
+    let request = chat_request_with_tools(Some("none"));
+    let amplified = uses_constrained_decoding(effective_tools(&request), true);
+    assert!(amplified);
+    assert_eq!(
+        resolve_loop_detection(None, None, true, amplified),
+        LOOP_DETECTION_RECOMMENDED
     );
 }
 

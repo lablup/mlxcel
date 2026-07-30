@@ -90,19 +90,23 @@ pub(crate) struct RequestOptionOverrides {
 /// Whether a request carries one of the amplifiers that justify turning the
 /// Gemma 4 family loop-detection default-on for it (issue #967).
 ///
-/// - `tools`: the request's declared tool array, as `Option<&[Tool]>`. Absent or
-///   empty is not a declaration. A non-empty array counts even when
-///   `tool_choice` is `"none"`. That is deliberately more inclusive than the
-///   rendered prompt, where [`crate::server::chat_request`] drops the
-///   declarations for `"none"`: reading `tool_choice` here would tie the
-///   loop-detection policy to a template-rendering rule that can change
-///   independently, and the inclusive direction keeps issue #432's protection
-///   on for a request the client built as a tool call.
+/// - `tools`: the tools the model will actually see, which chat-shaped routes
+///   obtain from [`crate::server::chat_request::effective_tools`]. Absent or
+///   empty is not a declaration. A non-empty `tools` array therefore counts only
+///   when it reaches the rendered prompt, so `tool_choice: "none"` does not
+///   count: `effective_tools` drops the declarations in that case, leaving a
+///   prompt identical to plain chat. The amplifier issue #432 identified is the
+///   rendered declarations steering the model, so a request the model cannot
+///   tell from plain chat has no amplifier, and enabling detection for it would
+///   only re-expose the false positive this issue exists to remove. The gate and
+///   the template read the same helper on purpose, so the policy cannot drift
+///   from what the model sees.
 /// - `has_grammar_constraint`: whether grammar-constrained decoding is actually
 ///   active for this request, i.e. a `json_schema` `response_format` compiled
 ///   into a constraint the sampler will enforce. Routes pass the ground truth
 ///   they already computed (`structured.is_some()`) rather than re-inspecting
-///   the raw `response_format` value.
+///   the raw `response_format` value. This signal is independent of
+///   `tool_choice`.
 pub(crate) fn uses_constrained_decoding(
     tools: Option<&[crate::server::types::request::Tool]>,
     has_grammar_constraint: bool,
