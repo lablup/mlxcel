@@ -470,3 +470,84 @@ fn a_traditional_rope_block_is_routed_around_the_fused_prefill_launcher() {
          proves nothing (gap {convention_gap})"
     );
 }
+
+// Greedy token parity for the #905 fused decode kernels.
+
+/// Argmax of the last position's logits.
+///
+/// The model returns `[1, L, vocab]`; greedy decoding only ever reads the last
+/// row, which is the whole row for a decode step and the final prompt position
+/// for the prefill call.
+fn greedy_last_token(logits: &MlxArray) -> i32 {
+    let shape = mlxcel_core::array_shape(logits);
+    let vocab = *shape.last().expect("logits have a trailing vocab axis") as usize;
+    let f = mlxcel_core::astype(logits, mlxcel_core::dtype::FLOAT32);
+    mlxcel_core::eval(&f);
+    let raw = mlxcel_core::array_to_raw_bytes(&f);
+    let values: Vec<f32> = raw
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    let row = &values[values.len() - vocab..];
+    let mut best = 0usize;
+    for (i, v) in row.iter().enumerate() {
+        if *v > row[best] {
+            best = i;
+        }
+    }
+    best as i32
+}
+
+/// Greedy decode of a pinned prompt through the tiny synthetic Llama, which is
+/// the same `TransformerBlock::forward` and `Attention::forward` the real
+/// family uses.
+fn greedy_sequence(steps: usize) -> Vec<i32> {
+    let args = parse_llama_config("");
+    let weights = tiny_weights(&args);
+    let model = Llama3Model::from_weights(&weights, &args).unwrap();
+    let mut caches = model.make_caches();
+
+    let prompt = mlxcel_core::from_slice_i32(&[3, 1, 4, 1, 5, 9, 2, 6], &[1, 8]);
+    let mut next = greedy_last_token(&model.forward(&prompt, &mut caches, None));
+    let mut out = vec![next];
+    for _ in 1..steps {
+        let step = mlxcel_core::from_slice_i32(&[next], &[1, 1]);
+        next = greedy_last_token(&model.forward(&step, &mut caches, None));
+        out.push(next);
+    }
+    out
+}
+
+/// The unfused baseline, captured from a run with both #905 kill switches set
+/// to `0` and pinned here.
+///
+/// Both fusions sit on this exact path: `TransformerBlock::forward` takes the
+/// fused residual join, and `Attention::forward` takes the fused q/k RoPE +
+/// append-layout kernel ahead of the graph fallback. So the default build has
+/// to reproduce this sequence token for token, and a run with the switches off
+/// has to reproduce it trivially.
+///
+/// Why a pinned list rather than an in-process A/B: both gates are read once
+/// and cached for the process lifetime (they are on the per-token hot path and
+/// must not re-read the environment), so a single test process cannot exercise
+/// both sides. Running this file in both modes is what closes that.
+/// A tiny random-weight model settles into a short cycle after a few steps, so
+/// the discriminating tokens are the leading ones; the tail is kept because a
+/// fusion bug that only compounds over steps would show up there and nowhere
+/// else.
+const UNFUSED_GREEDY_BASELINE: &[i32] = &[
+    13, 23, 20, 10, 20, 10, 20, 10, 20, 10, 20, 10, 20, 10, 20, 10, 20, 10, 20, 10, 20, 10, 20, 10,
+];
+
+#[test]
+fn greedy_decode_is_token_identical_to_the_unfused_baseline() {
+    let tokens = greedy_sequence(UNFUSED_GREEDY_BASELINE.len());
+    assert_eq!(
+        tokens, UNFUSED_GREEDY_BASELINE,
+        "greedy decode diverged from the unfused baseline; \
+         MLXCEL_FUSED_ADD_RMSNORM / MLXCEL_FUSED_ROPE_APPEND were \
+         {:?} / {:?}",
+        std::env::var("MLXCEL_FUSED_ADD_RMSNORM").ok(),
+        std::env::var("MLXCEL_FUSED_ROPE_APPEND").ok()
+    );
+}
