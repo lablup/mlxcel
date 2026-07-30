@@ -3168,6 +3168,13 @@ pub mod autotune;
 // Public so that the harnesses under `examples/` can defeat cache warming.
 pub mod bench_rotation;
 
+// Paged-attention decode v2: CSR page table, cross-CTA split-KV, and the
+// variable-length merge kernel (issue #898). Default off; selected by
+// `MLXCEL_PAGED_ATTENTION_V2=1` inside `PagedBlockPool::paged_decode_fused`.
+// Public so that the correctness harness under `examples/` and the follow-up
+// production wiring (#899) can drive the plan and the launch directly.
+pub mod paged_v2;
+
 // Crate-wide helpers for `#[cfg(test)]` paths. Provides the single shared
 // `ENV_LOCK` that every env-mutating test in this crate must acquire; see `test_support::env_lock` for the rationale. `pub(crate)` so
 // that test modules at any depth (e.g. `crate::lang_analyzer::cache::tests`)

@@ -17,20 +17,25 @@
 //! | Op | Backend | Knob | Status |
 //! |----|---------|------|--------|
 //! | [`paged_decode_splits`] | Metal + CUDA | v1 paged-decode `NumSplits` launch shape | Wired end to end; the Apple-Silicon-tunable op. |
+//! | [`paged_decode_v2_chunk`] | Metal + CUDA | v2 paged-decode `pages_per_chunk` | Wired end to end (issue #898); reachable only when `MLXCEL_PAGED_ATTENTION_V2=1` selects the v2 path. |
 //! | [`cuda_kernel_knobs::QmmTileOp`] | CUDA | Blackwell qmm CTA `tile_m` | Wired, **unvalidated** (no CUDA host was available). |
 //! | [`cuda_kernel_knobs::QmvMultirowOp`] | CUDA | multirow-qmv row-window ceiling | Wired, **unvalidated** (no CUDA host was available). |
 //!
-//! A fourth consumer, issue #898's paged-decode v2 `kv_chunk_size`, is
-//! deliberately absent: #898 is not implemented yet and its feasible chunk
-//! sizes depend on the v2 plan's own memory accounting. The seam it should
-//! plug into is documented in [`crate::autotune`] under
-//! [`crate::autotune::OP_PAGED_DECODE_V2_KV_CHUNK`]; no code here needs to
-//! change to accept it.
+//! [`paged_decode_v2_chunk`] is the consumer the reserved
+//! [`crate::autotune::OP_PAGED_DECODE_V2_KV_CHUNK`] name was held for. Nothing
+//! in the autotuner itself changed to accept it, as that module's extension
+//! note predicted: it registers under the reserved name, enumerates its own
+//! feasible chunk sizes, and returns the plan's binary-search heuristic as its
+//! default tactic.
 
 pub mod cuda_kernel_knobs;
 pub mod paged_decode_splits;
+pub mod paged_decode_v2_chunk;
 
 pub use cuda_kernel_knobs::{
     QmmShape, QmmTileOp, QmvMultirowOp, QmvShape, apply_tuned_cuda_kernel_env,
 };
 pub use paged_decode_splits::{DecodeShape, PagedDecodeSplitsOp, resolve_num_splits};
+pub use paged_decode_v2_chunk::{
+    PagedDecodeV2ChunkOp, V2ChunkShape, chunk_candidates, resolve_pages_per_chunk,
+};

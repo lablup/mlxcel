@@ -1572,6 +1572,27 @@ impl PagedBlockPool {
         )))
     }
 
+    /// The layer's K and V pool tensors when it occupies exactly one slab.
+    ///
+    /// Both fused decode kernels (v1 and v2) read one contiguous pool buffer
+    /// per side, so a layer that has grown past a single slab (#235) cannot be
+    /// handed over at all; `None` is the decline signal every caller answers by
+    /// falling back to the gather path. `None` also covers a layer whose pool
+    /// storage has not been allocated yet.
+    ///
+    /// Public so that the paged decode v2 correctness harness under
+    /// `examples/` can drive the kernels directly against a synthetic pool.
+    #[must_use]
+    pub fn single_slab_tensors(&self, layer_idx: usize) -> Option<(&MlxArray, &MlxArray)> {
+        match (
+            self.pool_k.get(layer_idx).map(Vec::as_slice),
+            self.pool_v.get(layer_idx).map(Vec::as_slice),
+        ) {
+            (Some([k]), Some([v])) => Some((k, v)),
+            _ => None,
+        }
+    }
+
     /// CSR page-table view of `states` for one layer (issue #898).
     ///
     /// This is the metadata the v2 decode kernels consume in place of v1's
@@ -1604,6 +1625,61 @@ impl PagedBlockPool {
         })
     }
 
+    /// Paged decode v2 over the pool: CSR page table, cross-CTA split-KV, and
+    /// the variable-length merge (issue #898).
+    ///
+    /// The v2 counterpart of [`Self::paged_decode_fused`], with the same
+    /// contract: `q` is `[B, Hq, 1, head_dim]`, `states[b]` is sequence b's
+    /// per-layer state, and the result is `[B, Hq, 1, head_dim]` in `q`'s
+    /// dtype. Returns `None` whenever v2 cannot serve the shape (multi-slab
+    /// layer, no visible tokens, or a geometry the kernel declines), which the
+    /// caller answers by falling back to v1 or to gather.
+    ///
+    /// Reachable only through [`Self::paged_decode_fused`] under
+    /// `MLXCEL_PAGED_ATTENTION_V2=1`, or directly by the correctness harness.
+    /// Production dispatch is issue #899.
+    pub fn paged_decode_fused_v2(
+        &self,
+        q: &MlxArray,
+        states: &[&PagedSequenceState],
+        layer_idx: usize,
+        scale: f32,
+    ) -> Result<Option<UniquePtr<MlxArray>>, String> {
+        // Same single-slab restriction as v1: both kernels read one contiguous
+        // pool buffer per side, so a layer that has grown past one slab (#235)
+        // is declined rather than stitched.
+        let Some((pool_k, pool_v)) = self.single_slab_tensors(layer_idx) else {
+            return Ok(None);
+        };
+
+        let view = self.paged_csr_view(states, layer_idx)?;
+        if !view.any_visible() {
+            return Ok(None);
+        }
+
+        // The kernels read Q and emit their output in f32 deterministically
+        // (they never re-specialise by dtype). Cast Q in and the result back to
+        // Q's dtype so v2 is directly comparable with v1 and with gather.
+        let q_dtype = ffi::array_dtype(q);
+        let q_f32 = if q_dtype == crate::dtype::FLOAT32 {
+            None
+        } else {
+            Some(ffi::astype(q, crate::dtype::FLOAT32))
+        };
+        let q_in: &MlxArray = q_f32.as_deref().unwrap_or(q);
+
+        let Some(out_f32) = crate::paged_v2::run_decode_v2(q_in, pool_k, pool_v, &view, scale)?
+        else {
+            return Ok(None);
+        };
+        let out = if q_dtype == crate::dtype::FLOAT32 {
+            out_f32
+        } else {
+            ffi::astype(&out_f32, q_dtype)
+        };
+        Ok(Some(out))
+    }
+
     /// Fused paged-attention decode over the pool via the native Metal kernel
     /// (epic #116 Phase 6, #123).
     ///
@@ -1627,6 +1703,17 @@ impl PagedBlockPool {
         layer_idx: usize,
         scale: f32,
     ) -> Result<Option<UniquePtr<MlxArray>>, String> {
+        // Paged decode v2 (#898), off by default. `v2_enabled()` is one
+        // `OnceLock` load, so with `MLXCEL_PAGED_ATTENTION_V2` unset nothing
+        // below this line differs from the pre-#898 path: no v2 array is built
+        // and neither v2 kernel is JIT-compiled. When v2 declines the shape it
+        // returns `None` and the v1 path below runs unchanged.
+        if crate::paged_v2::v2_enabled()
+            && let Some(out) = self.paged_decode_fused_v2(q, states, layer_idx, scale)?
+        {
+            return Ok(Some(out));
+        }
+
         // The fused kernel reads one contiguous pool buffer per side. With
         // chunked slabs (#235) a layer that has grown past one slab cannot be
         // handed over as a single buffer, so decline and let the caller use

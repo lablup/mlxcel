@@ -60,23 +60,22 @@
 //! `mlxcel tune` wrote but never profiles at runtime; `MLXCEL_AUTOTUNE=1`
 //! additionally profiles on the first use of a bucket.
 //!
-//! ## Extension point for paged decode v2 (issue #898)
+//! ## Extension point for paged decode v2 (issue #898, now occupied)
 //!
 //! Issue #898's paged-decode v2 plan chooses a `kv_chunk_size`, which is
-//! exactly the shape-dependent knob this module exists for. The seam is
-//! deliberately left as a seam rather than a speculative implementation: when
-//! #898 lands its plan builder, it should
+//! exactly the shape-dependent knob this module exists for. That seam is now
+//! filled by [`ops::paged_decode_v2_chunk`], which does precisely what this
+//! note prescribed:
 //!
-//! 1. register its op under [`OP_PAGED_DECODE_V2_KV_CHUNK`],
-//! 2. implement [`TunableOp`] over its own candidate chunk sizes with
-//!    `default_tactic` returning whatever heuristic the plan would have used,
-//! 3. call [`resolve`] once per plan build and read the chunk size out of
+//! 1. registers its op under [`OP_PAGED_DECODE_V2_KV_CHUNK`],
+//! 2. implements [`TunableOp`] over its own candidate chunk sizes with
+//!    `default_tactic` returning the plan's binary-search heuristic,
+//! 3. calls [`resolve`] once per plan build and reads the chunk size out of
 //!    [`Resolution::tactic`] via [`Tactic::param`].
 //!
-//! No code here needs to change for that: the key, the store, and the harness
-//! are op-agnostic. Do not pre-build the v2 candidate set here; the feasible
-//! chunk sizes depend on the v2 plan's own memory accounting, which does not
-//! exist yet.
+//! No code here changed for it: the key, the store, and the harness are
+//! op-agnostic, and the feasible chunk sizes are enumerated by the v2 plan's
+//! own accounting rather than being pre-built here.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
