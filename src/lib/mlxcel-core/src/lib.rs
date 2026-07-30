@@ -3140,3 +3140,18 @@ mod fused_moe_parity_tests;
 #[cfg(test)]
 #[path = "sampling_gumbel_tests.rs"]
 mod sampling_gumbel_tests;
+
+// Numeric-parity, Gemma `(1 + w)` convention, kill-switch and greedy-argmax
+// tests for the fused residual-add RMSNorm kernel (#905). GPU-only; they skip
+// on CPU-only builds.
+#[cfg(test)]
+#[path = "fused_norm_parity_tests.rs"]
+mod fused_norm_parity_tests;
+
+// RoPE-parity tests for the fused q/k RoPE + KV-append-layout kernel (#905):
+// position offsets including the absolute positions rotated/ring caches use,
+// both rotation conventions, partial rope dims, and both destination layouts.
+// GPU-only; they skip on CPU-only builds.
+#[cfg(test)]
+#[path = "fused_rope_parity_tests.rs"]
+mod fused_rope_parity_tests;

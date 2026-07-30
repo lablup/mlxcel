@@ -54,6 +54,37 @@ arguments may evolve, so inspect each script before publishing results.
 ./scripts/bench_all_models.sh --hardware <name> --cooldown 45 --big-cooldown 60
 ```
 
+## Fused decode kernels: the measure-then-keep gate (issue #905)
+
+The two fused decode kernels from issue #905, residual-add + RMSNorm and q/k
+RoPE + KV-append layout, land under a measure-then-keep policy: each keeps its
+wiring only if it beats the graph it replaced at op level on the adopting
+backend and does not lose on the other. `examples/fused_norm_rope_microbench.rs`
+produces that evidence. It loads no model, sweeps hidden sizes 2048 / 4096 /
+8192 against batch 1 / 4 / 8, and prints both a human-readable table and a CSV
+block.
+
+```bash
+caffeinate -i cargo run --release --features metal,accelerate \
+    --example fused_norm_rope_microbench
+
+caffeinate -i cargo run --release --features cuda \
+    --example fused_norm_rope_microbench
+```
+
+A speedup below 1.00 for either op is the signal to flip
+`FUSED_ADD_RMSNORM_DEFAULT` or `FUSED_ROPE_APPEND_DEFAULT` in
+`src/lib/mlxcel-core/src/layers.rs`, which leaves the kernel available and
+opt-in through `MLXCEL_FUSED_ADD_RMSNORM=1` / `MLXCEL_FUSED_ROPE_APPEND=1`
+instead of removing it.
+
+The op-level number is a lower bound on the end-to-end effect. Both fusions also
+remove a full-width intermediate from the MLX graph per call, which shows up as
+allocator and dependency-tracking pressure rather than as kernel time, so the
+end-to-end decode sweep (one dense model and one MoE model, batch 1 and 4, with
+each kill switch flipped for the A/B) is the deciding measurement. Record both
+in `docs/benchmark_results/fused-norm-rope-<hw>-<date>.md`.
+
 ## Warm vs cold last-level cache (issue #906)
 
 An op-level microbenchmark that allocates its inputs once and reuses them on

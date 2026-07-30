@@ -6099,6 +6099,85 @@ mod tests {
         }
     }
 
+    /// The #905 kill switches are default-ON, which is the inverse of the
+    /// opt-in `MLXCEL_FUSED_QK_NORM` flag above, so they get their own pin: a
+    /// recognised disable string turns the fusion off, an unset variable leaves
+    /// the compiled-in default, and an unrecognised value must not silently
+    /// change the decode graph.
+    #[test]
+    fn fused_905_flags_default_on_and_respect_disable_values() {
+        assert!(fused_add_rmsnorm_enabled_from(None));
+        assert!(fused_rope_append_enabled_from(None));
+
+        for v in ["0", "false", "off", "no", "OFF", "False", " 0 ", "No"] {
+            assert!(
+                !fused_add_rmsnorm_enabled_from(Some(v)),
+                "{v:?} should disable the fused add+RMSNorm path"
+            );
+            assert!(
+                !fused_rope_append_enabled_from(Some(v)),
+                "{v:?} should disable the fused RoPE + append path"
+            );
+        }
+        for v in ["1", "true", "on", "yes", "ON", "True", " 1 ", "Yes"] {
+            assert!(fused_add_rmsnorm_enabled_from(Some(v)));
+            assert!(fused_rope_append_enabled_from(Some(v)));
+        }
+        // Unrecognised values keep the compiled-in default rather than
+        // disabling: a typo in a deployment script must not quietly change the
+        // graph in either direction.
+        for v in ["", "maybe", "2"] {
+            assert_eq!(
+                fused_add_rmsnorm_enabled_from(Some(v)),
+                FUSED_ADD_RMSNORM_DEFAULT,
+                "{v:?} should fall back to the compiled-in default"
+            );
+            assert_eq!(
+                fused_rope_append_enabled_from(Some(v)),
+                FUSED_ROPE_APPEND_DEFAULT,
+                "{v:?} should fall back to the compiled-in default"
+            );
+        }
+    }
+
+    /// `RMSNorm` is the standard convention (`weight_bias = 0`, raw and
+    /// effective weight identical); `GemmaRMSNorm` is the `(1 + w)` convention
+    /// (`weight_bias = 1`, effective weight is the precomputed sum). The fused
+    /// kernel picks its behavior entirely from these four accessors, so a
+    /// mis-implemented impl is a silent wrong-math bug.
+    #[test]
+    fn fused_add_rms_norm_spec_reports_the_right_convention() {
+        let w = ffi::from_slice_f32(&[0.5, -0.25, 1.5, 0.0], &[4]);
+        let plain = RMSNorm::new(ffi::copy(&w), 1e-5);
+        assert_eq!(plain.norm_weight_bias(), 0.0);
+        assert_eq!(plain.norm_eps(), 1e-5);
+        assert_eq!(
+            ffi::array_to_raw_bytes(plain.raw_norm_weight()),
+            ffi::array_to_raw_bytes(plain.effective_norm_weight()),
+            "a standard RMSNorm has no separate effective weight"
+        );
+
+        let gemma = GemmaRMSNorm::new(ffi::copy(&w), 1e-5);
+        assert_eq!(gemma.norm_weight_bias(), 1.0);
+        let raw = read_f32_vec(gemma.raw_norm_weight());
+        let effective = read_f32_vec(gemma.effective_norm_weight());
+        for (r, e) in raw.iter().zip(effective.iter()) {
+            assert!(
+                (e - (r + 1.0)).abs() < 1e-6,
+                "Gemma effective weight must be (1 + w): raw {r} vs effective {e}"
+            );
+        }
+    }
+
+    fn read_f32_vec(arr: &MlxArray) -> Vec<f32> {
+        let a = ffi::astype(arr, crate::dtype::FLOAT32);
+        ffi::eval(&a);
+        ffi::array_to_raw_bytes(&a)
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
     // ── Adaptive pooled paged-attention selector (issue #331) ────────────────
     //
     // Thresholds cite docs/adr/0001-paged-attention-gather-vs-fused-kernel.md
