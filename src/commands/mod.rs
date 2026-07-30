@@ -29,6 +29,7 @@ pub(crate) mod inspect;
 pub(crate) mod models;
 pub(crate) mod run;
 mod serve;
+pub(crate) mod tune;
 
 pub(crate) use chat::{ChatOptions, run_chat};
 pub(crate) use detect::run_detect;
@@ -38,3 +39,4 @@ pub(crate) use inspect::run_inspect;
 pub(crate) use models::{run_list_local, run_remove};
 pub(crate) use run::{RunArgs, run_run};
 pub(crate) use serve::run_serve;
+pub(crate) use tune::{TuneArgs, run_tune};

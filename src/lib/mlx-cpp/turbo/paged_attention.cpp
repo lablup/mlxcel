@@ -419,6 +419,20 @@ inline PagedAttentionKernelHolderCuda& get_paged_attention_kernel_cuda() {
 
 } // namespace
 
+int paged_attention_num_splits_cap(int dim) {
+    if (dim <= 0) {
+        return 1;
+    }
+    int cap = 28672 / (dim * 4);
+    if (cap > 32) {
+        cap = 32;
+    }
+    if (cap < 1) {
+        cap = 1;
+    }
+    return cap;
+}
+
 mlx::core::array paged_attention_decode(
     const mlx::core::array& q,
     const mlx::core::array& k_pool,
@@ -427,7 +441,8 @@ mlx::core::array paged_attention_decode(
     const mlx::core::array& row_offsets,
     const mlx::core::array& logical_starts,
     const mlx::core::array& visible_lens,
-    float scale) {
+    float scale,
+    int num_splits_override) {
     using mlx::core::Dtype;
     using mlx::core::Shape;
     using mlx::core::fast::TemplateArg;
@@ -456,16 +471,21 @@ mlx::core::array paged_attention_decode(
     // Each of the 32 lanes owns a ceil(Dim/32)-wide slice of the head.
     int dims_per_thread = (dim + PAGED_ATTENTION_SIMD_WIDTH - 1) / PAGED_ATTENTION_SIMD_WIDTH;
 
-    // Token-split count = SIMD groups per threadgroup. Bounded by the 1024
-    // thread/threadgroup cap (32 * NumSplits <= 1024 => NumSplits <= 32) and by
-    // the `tg_acc[NumSplits * Dim]` threadgroup-memory budget (kept under ~28 KB
-    // of the 32 KB limit).
-    int num_splits = 28672 / (dim * 4);
-    if (num_splits > 32) {
-        num_splits = 32;
-    }
-    if (num_splits < 1) {
-        num_splits = 1;
+    // Token-split count = SIMD groups per threadgroup, bounded by the
+    // thread-count and threadgroup-memory budgets (see
+    // `paged_attention_num_splits_cap`).
+    //
+    // [#906] The budget ceiling is a feasibility bound, not a performance
+    // optimum: it ignores context length and batch, so at short contexts or
+    // large batches the widest split can leave SIMD groups with no tokens to
+    // sweep while still paying the full threadgroup-memory reduction. Each
+    // `NumSplits` is a distinct JIT specialization, so the autotuner can pick
+    // among them per shape bucket. `num_splits_override == 0` (the default, and
+    // what every caller passed before #906) reproduces the ceiling exactly.
+    const int num_splits_cap = paged_attention_num_splits_cap(dim);
+    int num_splits = num_splits_cap;
+    if (num_splits_override >= 1 && num_splits_override <= num_splits_cap) {
+        num_splits = num_splits_override;
     }
 
     std::vector<std::pair<std::string, TemplateArg>> template_args = {

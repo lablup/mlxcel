@@ -1975,6 +1975,10 @@ std::unique_ptr<MlxArray> steel_outputs_take_hot(Turbo4DelegatedSteelOutputs& o)
 // `[B, Hq, 1, D]` f32; `k_pool` / `v_pool` are `[num_blocks, block_size, Hkv,
 // D]` f16; `rows` / `row_offsets` / `logical_starts` / `visible_lens` are i32
 // block-table metadata. Returns `[B, Hq, 1, D]` f32.
+//
+// `num_splits_override` selects the `NumSplits` launch shape (issue #906
+// autotuner); `0` keeps the memory-budget ceiling, which is the pre-#906
+// behavior. Out-of-range values fall back to the ceiling.
 std::unique_ptr<MlxArray> paged_attention_decode(
     const MlxArray& q,
     const MlxArray& k_pool,
@@ -1983,7 +1987,14 @@ std::unique_ptr<MlxArray> paged_attention_decode(
     const MlxArray& row_offsets,
     const MlxArray& logical_starts,
     const MlxArray& visible_lens,
-    float scale);
+    float scale,
+    int32_t num_splits_override);
+
+// Largest feasible `NumSplits` for a head dimension, forwarded from
+// `mlxcel::turbo::paged_attention_num_splits_cap`. The autotuner enumerates its
+// candidate set from this so the launcher stays the single source of truth for
+// the threadgroup-memory budget (issue #906).
+int32_t paged_attention_num_splits_cap(int32_t dim);
 
 // Opaque holder for weights loaded via MLX's native load_safetensors().
 // Arrays are lazy — MLX manages the mmap internally, no eager copy needed.

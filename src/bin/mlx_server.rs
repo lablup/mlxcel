@@ -1181,6 +1181,16 @@ async fn main() -> anyhow::Result<()> {
     // any MLX op.
     mlxcel_core::hardware::apply_cuda_graph_cache_default();
 
+    // Publish autotuned CUDA kernel knobs (qmm CTA tile, multirow-qmv row
+    // window) into the environment the patched MLX kernels read (#906). Inert
+    // unless MLXCEL_AUTOTUNE is set and a tuned entry exists, never overwrites
+    // an operator-set variable, and must run before any MLX op or worker thread.
+    for (var, value) in mlxcel_core::autotune::ops::apply_tuned_cuda_kernel_env(
+        mlxcel_core::autotune::ops::cuda_kernel_knobs::TILE_M_CAP_BLACKWELL,
+    ) {
+        tracing::info!("autotune: applied {var}={value} from the tactic cache");
+    }
+
     match cli.command {
         // Subcommand-driven dispatch. Currently only `download`
         // exists; future operational subcommands (e.g. cache inspection) can

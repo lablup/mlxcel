@@ -16,7 +16,8 @@ For every benchmark run, include:
 - model checkpoint name and quantization format;
 - prompt length, requested decode length, batch size, and warmup policy;
 - cache mode and server/generation flags;
-- raw per-model prefill and decode throughput where available.
+- raw per-model prefill and decode throughput where available;
+- for op-level microbenchmarks, the memory mode (warm or cold last-level cache) and the rotation count, per the section below.
 
 Averages are useful only after the raw rows are available. Avoid statements such
 as "faster than X" unless the comparable model set and exclusions are explicit.
@@ -52,6 +53,71 @@ arguments may evolve, so inspect each script before publishing results.
 # Multi-model suite shape.
 ./scripts/bench_all_models.sh --hardware <name> --cooldown 45 --big-cooldown 60
 ```
+
+## Warm vs cold last-level cache (issue #906)
+
+An op-level microbenchmark that allocates its inputs once and reuses them on
+every timed iteration measures a warm cache. After the first iteration the
+working set is resident in the last-level cache (Apple's System Level Cache,
+NVIDIA's L2), so the remaining iterations read at cache bandwidth. For a
+bandwidth-bound kernel that is a different measurement from the one production
+takes: the KV pool is far larger than any last-level cache and is touched once
+per decode step, so the representative read comes from DRAM.
+
+The gap matters most for exactly the kernels this epic touches. Paged KV
+gather, paged decode attention, and rmsnorm are bandwidth-bound, so a warm-cache
+number for them is an upper bound rather than an estimate. Compute-bound
+kernels (large-M quantized GEMM) barely move between the two modes, which is
+itself a useful signal: a kernel whose warm and cold numbers agree is not
+limited by memory.
+
+### How the harnesses do it
+
+`mlxcel_core::bench_rotation` allocates several copies of the input and
+advances one copy per timed iteration. The rotation count is
+`ceil(2 * last_level_cache / per_iteration_read_bytes)`, clamped to 64, so the
+whole rotation set exceeds the cache and a buffer has been evicted by the time
+the rotation returns to it. The 2x headroom covers the cache being shared with
+the rest of the system and with the kernel's own output traffic.
+
+Cache sizing is an estimate by device family, because macOS exposes no SLC size
+through `sysctl`: 8 MiB for a base M-series, 24 MiB for a Pro, 48 MiB for a
+Max, 96 MiB for an Ultra (two dies, two SLCs). The estimates are biased high,
+since over-estimating only costs memory for extra rotation buffers while
+under-estimating silently reintroduces the warm-cache bias. Reading the CUDA L2
+size needs `cudaDeviceProp::l2CacheSize` through an FFI helper that does not
+exist yet, so on a CUDA host set `MLXCEL_BENCH_LLC_BYTES` to the device's real
+L2 size. Set the same variable on Apple Silicon when the published SLC figure
+for the specific chip is known.
+
+Note that a large working set needs no rotation at all: at batch 4 and context
+32768 the paged microbench already reads 512 MiB per iteration, which no
+last-level cache holds, so the rotation count is 1 and the cold mode costs
+nothing there. The two modes diverge at small batch and short context, which is
+also where a warm measurement is most misleading.
+
+### Running and recording
+
+```bash
+# Warm (historical default, unchanged).
+caffeinate -i cargo run --release --features metal,accelerate \
+    --example page_gather_microbench
+
+# Cold last-level cache.
+caffeinate -i cargo run --release --features metal,accelerate \
+    --example page_gather_microbench -- --cold-l2
+```
+
+The harness prints `memory mode=...` in its header, `mode=` and `rotation=` per
+config, and appends `mode` and `rotation` as the last two columns of its `CSV:`
+rows. Every recorded result must state which mode produced it; a warm number
+and a cold number for the same kernel are not comparable and must never appear
+in the same column of a report.
+
+`examples/qmm_gemv_microbench.rs` has carried its own ad-hoc version of this
+since it landed (a fixed 128 MiB target, 2 to 12 weight copies round-robin).
+`bench_rotation` is the generalization of that idea with the cache size
+detected rather than assumed.
 
 ## Speculative decoding (MTP)
 

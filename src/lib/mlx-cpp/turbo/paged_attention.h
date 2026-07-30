@@ -56,6 +56,13 @@ namespace mlxcel::turbo {
 // - `logical_starts`: `[B]` i32 first visible absolute token index per sequence.
 // - `visible_lens`:   `[B]` i32 visible token count per sequence.
 // - `scale`:          attention scale applied to the QK dot product.
+// - `num_splits_override`: token-split count (`NumSplits`) to launch with, or
+//                     `0` (and any out-of-range value) to use the
+//                     memory-budget ceiling from
+//                     `paged_attention_num_splits_cap`, which is the
+//                     pre-autotuner behavior. Values are clamped into
+//                     `[1, cap]`, so a stale or hostile override can never
+//                     produce an infeasible launch.
 //
 // Output:
 // - `[B, Hq, 1, head_dim]` f32 attention output. The caller casts to the model
@@ -68,6 +75,17 @@ mlx::core::array paged_attention_decode(
     const mlx::core::array& row_offsets,
     const mlx::core::array& logical_starts,
     const mlx::core::array& visible_lens,
-    float scale);
+    float scale,
+    int num_splits_override = 0);
+
+// Largest feasible `NumSplits` for a head dimension.
+//
+// Bounded by the 1024 thread/threadgroup cap (32 lanes * NumSplits <= 1024, so
+// NumSplits <= 32) and by the `tg_acc[NumSplits * Dim]` threadgroup-memory
+// budget (kept under ~28 KB of the 32 KB limit). This is the value the launcher
+// used unconditionally before issue #906; it is exposed so the Rust autotuner
+// enumerates its candidate set from the same source of truth as the launcher
+// instead of duplicating the budget arithmetic.
+int paged_attention_num_splits_cap(int dim);
 
 } // namespace mlxcel::turbo

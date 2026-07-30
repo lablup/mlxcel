@@ -151,6 +151,26 @@ enum Commands {
     ///     mlxcel rm mlx-community/Qwen3-4B-4bit --yes
     #[command(verbatim_doc_comment)]
     Rm(RmArgs),
+
+    /// Profile kernel launch configurations and cache the winners (issue #906).
+    ///
+    /// Times each candidate launch shape for the tunable ops on this machine
+    /// and writes the min-latency choice to
+    /// `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/autotune`. Nothing consumes
+    /// those entries until you also set `MLXCEL_AUTOTUNE`, so tuning is safe to
+    /// run on a production host.
+    ///
+    /// Examples:
+    ///
+    ///     mlxcel tune                                   # every op the backend supports
+    ///     mlxcel tune --op paged-decode-splits          # one op
+    ///     mlxcel tune -m models/llama-3.2-1b-4bit       # head geometry from a checkpoint
+    ///     mlxcel tune --dry-run                         # print the matrix, profile nothing
+    ///
+    /// Then run with `MLXCEL_AUTOTUNE=cache` to consume the tuned tactics, or
+    /// `MLXCEL_AUTOTUNE=1` to additionally tune unseen shapes on first use.
+    #[command(verbatim_doc_comment)]
+    Tune(commands::TuneArgs),
 }
 
 /// Arguments for `mlxcel list`.
@@ -1779,6 +1799,16 @@ fn main() -> anyhow::Result<()> {
     // any MLX op.
     mlxcel_core::hardware::apply_cuda_graph_cache_default();
 
+    // Publish autotuned CUDA kernel knobs (qmm CTA tile, multirow-qmv row
+    // window) into the environment the patched MLX kernels read (#906). Inert
+    // unless MLXCEL_AUTOTUNE is set and a tuned entry exists, never overwrites
+    // an operator-set variable, and must run before any MLX op.
+    for (var, value) in mlxcel_core::autotune::ops::apply_tuned_cuda_kernel_env(
+        mlxcel_core::autotune::ops::cuda_kernel_knobs::TILE_M_CAP_BLACKWELL,
+    ) {
+        tracing::info!("autotune: applied {var}={value} from the tactic cache");
+    }
+
     match cli.command {
         Commands::Run(args) => commands::run_run(args),
         Commands::Generate(args) => commands::run_generate(args),
@@ -1797,6 +1827,7 @@ fn main() -> anyhow::Result<()> {
             args.revision.as_deref(),
             args.models_dir.as_deref(),
         ),
+        Commands::Tune(args) => commands::run_tune(args),
     }
 }
 

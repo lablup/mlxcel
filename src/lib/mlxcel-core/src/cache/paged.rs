@@ -1687,8 +1687,32 @@ impl PagedBlockPool {
         };
         let q_in: &MlxArray = q_f32.as_deref().unwrap_or(q);
 
+        // Launch-shape choice for the kernel's token-split axis (issue #906).
+        // `0` means "use the C++ threadgroup-memory ceiling", which is the
+        // pre-#906 behavior and what this returns whenever the autotuner is off
+        // (the default) with no explicit `MLXCEL_PAGED_DECODE_SPLITS`.
+        let q_shape = ffi::array_shape(q_in);
+        let decode_shape = crate::autotune::ops::DecodeShape {
+            batch: states.len(),
+            q_heads: q_shape.get(1).copied().unwrap_or(0),
+            kv_heads: ffi::array_shape(pool_k).get(2).copied().unwrap_or(0),
+            head_dim: q_shape.get(3).copied().unwrap_or(0),
+            context: visible_lens.iter().copied().max().unwrap_or(0).max(0) as usize,
+        };
+        let num_splits = crate::autotune::ops::resolve_num_splits(
+            q_in,
+            pool_k,
+            pool_v,
+            &rows_arr,
+            &off_arr,
+            &ls_arr,
+            &vl_arr,
+            scale,
+            decode_shape,
+        );
+
         let out_f32 = ffi::paged_attention_decode(
-            q_in, pool_k, pool_v, &rows_arr, &off_arr, &ls_arr, &vl_arr, scale,
+            q_in, pool_k, pool_v, &rows_arr, &off_arr, &ls_arr, &vl_arr, scale, num_splits,
         );
         let out = if q_dtype == crate::dtype::FLOAT32 {
             out_f32

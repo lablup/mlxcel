@@ -1306,6 +1306,12 @@ mod ffi {
         /// block-table order, `row_offsets` (`[B + 1]`) the start of each
         /// sequence's rows, and `logical_starts` / `visible_lens` (`[B]`) bound
         /// each sequence's visible window. Returns `[B, Hq, 1, D]` f32.
+        ///
+        /// `num_splits_override` selects the `NumSplits` launch shape chosen by
+        /// the autotuner (issue #906). `0` keeps the threadgroup-memory budget
+        /// ceiling, which is exactly the pre-#906 behavior; out-of-range values
+        /// clamp back to the ceiling, so a stale cached tactic can never
+        /// produce an infeasible launch.
         fn paged_attention_decode(
             q: &MlxArray,
             k_pool: &MlxArray,
@@ -1315,7 +1321,15 @@ mod ffi {
             logical_starts: &MlxArray,
             visible_lens: &MlxArray,
             scale: f32,
+            num_splits_override: i32,
         ) -> UniquePtr<MlxArray>;
+
+        /// Largest feasible `NumSplits` for a head dimension (issue #906).
+        ///
+        /// The autotuner enumerates its candidate set from this so the C++
+        /// launcher stays the single source of truth for the threadgroup-memory
+        /// and thread-count budgets.
+        fn paged_attention_num_splits_cap(dim: i32) -> i32;
 
         fn sdpa_supports_fast_path(
             q: &MlxArray,
@@ -2995,6 +3009,16 @@ pub mod rope_proportional;
 // Public so that mlxcel (the main crate) and downstream sub-issues (B3–B8)
 // can consume it without further structural changes.
 pub mod lang_analyzer;
+
+// Shape-bucketed kernel autotuner (issue #906): the TunableOp contract, the
+// median-of-N profiling harness, the persistent tactic cache, and the first
+// consumers. Default off; see the module docs for the precedence chain.
+// Public so that the `mlxcel tune` CLI subcommand can drive it offline.
+pub mod autotune;
+
+// Last-level-cache-aware rotating buffers for microbenchmarks (issue #906).
+// Public so that the harnesses under `examples/` can defeat cache warming.
+pub mod bench_rotation;
 
 // Crate-wide helpers for `#[cfg(test)]` paths. Provides the single shared
 // `ENV_LOCK` that every env-mutating test in this crate must acquire; see `test_support::env_lock` for the rationale. `pub(crate)` so

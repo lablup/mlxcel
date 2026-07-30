@@ -11,9 +11,11 @@
 // weight traffic is O(1) in R. Per-row arithmetic (dequant -> fma order,
 // accumulator types, final float reduction) matches the stock kernel exactly,
 // so per-row outputs are bit-identical to the per-row launches it replaces.
-// Selection: broadcast weights and 2 <= m*l <= 8, kill switch
-// MLXCEL_QMV_MULTIROW=0. Everything else is byte-identical upstream (pin
-// 57c66cac, v0.32.0-1).
+// Selection: broadcast weights and 2 <= m*l <= W, kill switch
+// MLXCEL_QMV_MULTIROW=0. W is the row-window ceiling, 8 by default and
+// narrowable to [1, 8] via MLXCEL_QMV_MULTIROW_MAX_ROWS (lablup/mlxcel#906) so
+// the autotuner can tune the crossover instead of hardcoding it. Everything
+// else is byte-identical upstream (pin 57c66cac, v0.32.0-1).
 
 #include "mlx/backend/cuda/device/cute_dequant.cuh"
 #include "mlx/backend/cuda/kernel_utils.cuh"
@@ -469,6 +471,34 @@ inline bool qmv_multirow_enabled() {
   return enabled;
 }
 
+// [mlxcel #906] Row-window ceiling for the multirow path. The #725 window was
+// hardcoded at the compile-time `max_x_rows` (8), but the crossover past which
+// the small-M qmm shape takes over is a per-hardware property, not a constant
+// (docs/CONTINUOUS_BATCHING.md documents a regression past 7 rows on GB10). The
+// autotuner tunes it and publishes the winner here; an operator-set value
+// always wins. Read once, so the decision is process-wide, matching the kill
+// switch above and keeping `getenv` off the per-launch path.
+//
+// Clamped to [1, hard_max]: the multirow kernel keeps its accumulators in
+// registers sized by the compile-time `max_x_rows`, so the window can only be
+// narrowed, never widened. A ceiling of 1 disables the path (the gate below
+// requires at least 2 rows), which is exactly the kill switch, so the whole
+// window including its off state is representable as one integer.
+inline int qmv_multirow_max_rows(int hard_max) {
+  static const int configured = []() {
+    const char* e = std::getenv("MLXCEL_QMV_MULTIROW_MAX_ROWS");
+    if (e == nullptr) {
+      return 0; // unset: use the compile-time ceiling
+    }
+    int v = std::atoi(e);
+    return v > 0 ? v : 0;
+  }();
+  if (configured <= 0 || configured > hard_max) {
+    return hard_max;
+  }
+  return configured;
+}
+
 template <
     int group_size,
     bool has_bias,
@@ -498,9 +528,12 @@ void qmv(
   // warp can apply each dequantized weight tile to every row instead of
   // launching one weight-rereading block column per row. Bounded at 8 rows to
   // match the M*B < 8 qmv dispatch window (and keep accumulators in registers).
+  // `max_x_rows` stays the compile-time accumulator width; `window` is the
+  // runtime dispatch ceiling, which #906 lets the autotuner narrow.
   constexpr int max_x_rows = 8;
+  const int window = qmv_multirow_max_rows(max_x_rows);
   int x_rows = m * l;
-  if (broadcast_w && x_rows >= 2 && x_rows <= max_x_rows &&
+  if (broadcast_w && x_rows >= 2 && x_rows <= window &&
       qmv_multirow_enabled()) {
     dim3 num_blocks{uint32_t(cuda::ceil_div(n, rows_per_block)), 1, 1};
     dim3 block_dims{WARP_SIZE, rows_per_block};

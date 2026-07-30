@@ -207,7 +207,8 @@ std::unique_ptr<MlxArray> paged_attention_decode(
     const MlxArray& row_offsets,
     const MlxArray& logical_starts,
     const MlxArray& visible_lens,
-    float scale) {
+    float scale,
+    int32_t num_splits_override) {
     auto out = mlxcel::turbo::paged_attention_decode(
         q.inner,
         k_pool.inner,
@@ -216,8 +217,14 @@ std::unique_ptr<MlxArray> paged_attention_decode(
         row_offsets.inner,
         logical_starts.inner,
         visible_lens.inner,
-        scale);
+        scale,
+        static_cast<int>(num_splits_override));
     return std::make_unique<MlxArray>(std::move(out));
+}
+
+int32_t paged_attention_num_splits_cap(int32_t dim) {
+    return static_cast<int32_t>(
+        mlxcel::turbo::paged_attention_num_splits_cap(static_cast<int>(dim)));
 }
 
 std::unique_ptr<MlxLoadedWeights> mlx_load_safetensors(rust::Str path) {
