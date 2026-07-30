@@ -830,23 +830,43 @@ pub fn graph_add_rms_norm<N: FusedAddRmsNormSpec + ?Sized>(
     (normed, new_residual)
 }
 
+/// Whether this backend has a fused-add-RMSNorm kernel, asked once.
+///
+/// The FFI answer reaches `metal::is_available()` / `cu::is_available()` in
+/// C++, and the backend cannot change mid-process, so re-asking at every
+/// residual join of every layer of every token would be pure overhead on the
+/// path the fusion exists to make cheaper.
+fn fused_add_rms_norm_backend_available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(ffi::fused_add_rms_norm_available)
+}
+
+/// Whether this backend has a fused RoPE + append kernel, asked once. Same
+/// reasoning as [`fused_add_rms_norm_backend_available`].
+fn fused_rope_append_backend_available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(ffi::fused_rope_qk_append_available)
+}
+
 /// Whether the fused kernel can serve this call.
 ///
 /// The launcher throws on a contract violation rather than returning an error,
-/// so the eligibility test lives here and the fused branch is only taken when
-/// it cannot throw: matching shapes and dtypes, a 1-D weight whose length is the
-/// trailing dimension, and a backend that has a custom-kernel JIT at all (false
-/// on a CPU-only build).
+/// and an exception crossing the cxx boundary is not recoverable, so the
+/// eligibility test lives here and the fused branch is only taken when the
+/// launcher cannot throw: matching shapes and dtypes, a 1-D weight whose length
+/// is the trailing dimension, and a backend that has a custom-kernel JIT at all
+/// (false on a CPU-only build).
 fn fused_add_rms_norm_eligible(delta: &MlxArray, residual: &MlxArray, weight: &MlxArray) -> bool {
+    if !fused_add_rms_norm_backend_available() || ffi::array_ndim(weight) != 1 {
+        return false;
+    }
     let d_shape = ffi::array_shape(delta);
-    let r_shape = ffi::array_shape(residual);
-    let w_shape = ffi::array_shape(weight);
-    d_shape == r_shape
-        && !d_shape.is_empty()
-        && w_shape.len() == 1
-        && w_shape[0] == *d_shape.last().expect("non-empty shape")
+    let Some(&trailing) = d_shape.last() else {
+        return false;
+    };
+    ffi::array_shape(weight)[0] == trailing
+        && ffi::array_shape(residual) == d_shape
         && ffi::array_dtype(delta) == ffi::array_dtype(residual)
-        && ffi::fused_add_rms_norm_available()
 }
 
 /// Destination layout for the fused RoPE + KV-append kernel (#905).
@@ -2219,7 +2239,7 @@ impl FusedQKVLinear {
         UniquePtr<MlxArray>,
         UniquePtr<MlxArray>,
     )> {
-        if !fused_rope_append_enabled() || !ffi::fused_rope_qk_append_available() {
+        if !fused_rope_append_enabled() || !fused_rope_append_backend_available() {
             return None;
         }
         // The kernel's contract, checked here so the launcher's `throw` is

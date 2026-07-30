@@ -66,9 +66,9 @@
 use std::time::{Duration, Instant};
 
 use mlxcel_core::{
-    MlxArray, UniquePtr, add, array_dtype, astype, contiguous, dtype, eval, fast_rms_norm,
-    fast_rope, from_slice_f32, fused_add_rms_norm, fused_rope_qk_append, random_normal,
-    random_seed, reshape, slice_last_dim, synchronize_default, transpose_axes,
+    MlxArray, UniquePtr, add, astype, contiguous, dtype, eval, fast_rms_norm, fast_rope,
+    from_slice_f32, fused_add_rms_norm, fused_rope_qk_append, random_normal, random_seed, reshape,
+    slice_last_dim, synchronize_default, transpose_axes,
 };
 
 /// Hidden sizes from the issue's sweep: 2048 (small dense), 4096 (8B-class),
@@ -282,12 +282,11 @@ fn main() {
         return;
     }
 
+    // f16 is what `load_and_sanitize_weights` leaves non-quantized activations
+    // in on Apple Silicon, so it is the dtype the decode loop actually feeds
+    // these kernels.
     let dt = dtype::FLOAT16;
-    let dt_name = if array_dtype(&randn(&[1], dt)) == dtype::FLOAT16 {
-        "float16"
-    } else {
-        "unknown"
-    };
+    let dt_name = "float16";
 
     println!("# fused decode kernel microbench (issue #905)");
     println!("# backend={backend} dtype={dt_name} warmup={WARMUP} iters={ITERS}");
