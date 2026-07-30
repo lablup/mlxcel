@@ -1326,3 +1326,7 @@ mod deepstack_injection_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "qwen3_vl_moe_tests.rs"]
+mod tests;

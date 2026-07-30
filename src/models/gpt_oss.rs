@@ -1372,4 +1372,141 @@ mod tests {
             assert_eq!(mlxcel_core::array_dtype(&out), dtype);
         }
     }
+
+    /// `ExpertLinear` stores the declared pair and hands it to `gather_qmm`
+    /// without ever reaching `reconcile_quantization_layout`, so a hostile pair
+    /// used to abort the process at the first routed forward pass rather than
+    /// failing at load (issue #958). This drives the real loader, so a
+    /// regression takes this whole test binary down with SIGABRT rather than
+    /// failing cleanly.
+    #[test]
+    fn gpt_oss_expert_linear_rejects_params_that_would_abort_gather_qmm() {
+        let prefix = "model.layers.0.mlp.experts.gate_up_proj";
+        let mut weights = WeightMap::new();
+        crate::models::switch_layers::insert_stacked_quantized_expert_plane(
+            &mut weights,
+            prefix,
+            3,
+            4,
+            8,
+            1,
+        );
+
+        // Positive control first, so a guard that rejects everything quantized
+        // cannot pass this test.
+        ExpertLinear::from_weights(&weights, prefix, 64, 4, "affine")
+            .expect("an honest affine pair must still load");
+
+        for (group_size, bits, field) in crate::models::switch_layers::HOSTILE_QUANT_PARAMS {
+            let err = ExpertLinear::from_weights(&weights, prefix, group_size, bits, "affine")
+                .err()
+                .unwrap_or_else(|| {
+                    panic!("ExpertLinear must reject group_size {group_size} / bits {bits}")
+                });
+            assert!(err.contains(field), "unhelpful error: {err}");
+        }
+
+        // A bf16 expert plane carries no packing at all, so the params are
+        // irrelevant there and must not be enforced.
+        let mut regular = WeightMap::new();
+        regular.insert(
+            format!("{prefix}.weight"),
+            mlxcel_core::from_slice_f32(&vec![0.0; 3 * 4 * 8], &[3, 4, 8]),
+        );
+        ExpertLinear::from_weights(&regular, prefix, 0, 0, "affine")
+            .expect("a non-quantized expert plane must not be gated on quantization params");
+    }
+
+    /// gpt-oss is the one family whose `quantization` block is a map of
+    /// per-weight-prefix overrides, so a bound on the top-level defaults says
+    /// nothing about what an individual projection loads with, and vice versa.
+    /// The canonical mxfp4 checkpoint carries a valid `model.embed_tokens`
+    /// override, which is exactly what let a hostile top-level pair reach the
+    /// experts alone while every reconciler-guarded loader saw a good one.
+    #[test]
+    fn gpt_oss_config_validation_walks_every_per_prefix_override() {
+        let args_from = |quantization: serde_json::Value| -> ModelArgs {
+            serde_json::from_value(serde_json::json!({
+                "model_type": "gpt_oss",
+                "vocab_size": 32,
+                "hidden_size": 8,
+                "intermediate_size": 8,
+                "num_hidden_layers": 1,
+                "num_attention_heads": 2,
+                "num_key_value_heads": 1,
+                "head_dim": 4,
+                "num_local_experts": 2,
+                "num_experts_per_tok": 1,
+                "rms_norm_eps": 1e-5,
+                "rope_theta": 150000.0,
+                "sliding_window": 8,
+                "quantization": quantization,
+            }))
+            .expect("test config must parse")
+        };
+
+        // Positive control: the real gpt-oss-20b-mxfp4 shape, mxfp4 experts on
+        // the top-level defaults with affine overrides for everything else.
+        args_from(serde_json::json!({
+            "group_size": 32,
+            "bits": 4,
+            "mode": "mxfp4",
+            "model.embed_tokens": { "group_size": 64, "bits": 4, "mode": "affine" },
+            "model.layers.0.mlp.router": { "group_size": 64, "bits": 8 },
+        }))
+        .validate_quantization()
+        .expect("the canonical gpt-oss quantization block must still validate");
+
+        // A hostile pair scoped to a single prefix must be refused even though
+        // the top-level defaults are perfectly valid.
+        for (group_size, bits, field) in crate::models::switch_layers::HOSTILE_QUANT_PARAMS {
+            let err = args_from(serde_json::json!({
+                "group_size": 32,
+                "bits": 4,
+                "mode": "mxfp4",
+                "model.layers.0.mlp.experts.gate_up_proj": {
+                    "group_size": group_size,
+                    "bits": bits,
+                },
+            }))
+            .validate_quantization()
+            .expect_err("a hostile per-prefix override must be rejected");
+            assert!(
+                err.contains(field) && err.contains("gate_up_proj"),
+                "the message must name both the field and the override, got: {err}"
+            );
+
+            // And the mirror case: valid overrides, hostile top-level defaults.
+            // This is the shape that actually reaches the experts, because they
+            // read `Quantization::defaults` rather than `quant_for`.
+            let err = args_from(serde_json::json!({
+                "group_size": group_size,
+                "bits": bits,
+                "model.embed_tokens": { "group_size": 64, "bits": 4, "mode": "affine" },
+            }))
+            .validate_quantization()
+            .expect_err("hostile top-level defaults must be rejected");
+            assert!(err.contains(field), "unhelpful error: {err}");
+        }
+
+        // A config with no `quantization` block at all is not gated.
+        let args: ModelArgs = serde_json::from_value(serde_json::json!({
+            "model_type": "gpt_oss",
+            "vocab_size": 32,
+            "hidden_size": 8,
+            "intermediate_size": 8,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "head_dim": 4,
+            "num_local_experts": 2,
+            "num_experts_per_tok": 1,
+            "rms_norm_eps": 1e-5,
+            "rope_theta": 150000.0,
+            "sliding_window": 8,
+        }))
+        .expect("test config must parse");
+        args.validate_quantization()
+            .expect("a bf16 checkpoint declares no quantization and must not be gated");
+    }
 }

@@ -1856,3 +1856,7 @@ impl LanguageModel for Llama4Wrapper {
         vec![200001, 200007, 200008]
     }
 }
+
+#[cfg(test)]
+#[path = "llama4_tests.rs"]
+mod tests;

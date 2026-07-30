@@ -1414,4 +1414,130 @@ mod tests {
         assert_eq!(args.group_size(), 64);
         assert_eq!(args.bits(), 4);
     }
+
+    /// Smallest GLM4-MoE config that parses, varying only the declared
+    /// quantization pair. The flat top-level keys are used because
+    /// `ModelArgs::group_size` resolves them ahead of the nested
+    /// `quantization_config`, so this is the value the loader actually stores.
+    fn quant_args(group_size: i32, bits: i32) -> ModelArgs {
+        serde_json::from_value(serde_json::json!({
+            "model_type": "glm4_moe",
+            "vocab_size": 32,
+            "hidden_size": 8,
+            "intermediate_size": 8,
+            "max_position_embeddings": 16,
+            "moe_intermediate_size": 4,
+            "num_attention_heads": 2,
+            "num_hidden_layers": 1,
+            "num_key_value_heads": 1,
+            "rms_norm_eps": 1e-5,
+            "rope_theta": 10000.0,
+            "partial_rotary_factor": 0.5,
+            "n_routed_experts": 3,
+            "num_experts_per_tok": 1,
+            "routed_scaling_factor": 1.0,
+            "norm_topk_prob": true,
+            "first_k_dense_replace": 0,
+            "group_size": group_size,
+            "bits": bits,
+        }))
+        .expect("test config must parse")
+    }
+
+    /// The pair this family stores is handed straight to `gather_qmm`, which
+    /// crosses the cxx bridge as `UniquePtr<MlxArray>` rather than `Result`. A
+    /// C++ throw there is an uncatchable `std::terminate`, so losing the bound
+    /// would abort the whole test binary with SIGABRT at the first routed
+    /// forward pass instead of failing cleanly at load. Issue #958.
+    ///
+    /// Both storage points are driven here: the pre-stacked loader, and the
+    /// GLM-4(.5)V separate-gate/up fusion path that the VLM text wrapper
+    /// reaches without ever going through the pre-stacked one.
+    #[test]
+    fn glm4_moe_switch_linear_rejects_quantization_params_that_would_abort_gather_qmm() {
+        // Honest 4-bit expert geometry: `packed_in * 32 == bits * num_groups *
+        // group_size` (8 * 32 == 4 * 1 * 64), so the positive control below is
+        // a plane MLX can actually describe.
+        const EXPERTS: i32 = 3;
+        const OUT: i32 = 4;
+        const PACKED_IN: i32 = 8;
+        const NUM_GROUPS: i32 = 1;
+        const GROUP_SIZE: i32 = 64;
+        const BITS: i32 = 4;
+        const DOWN_PREFIX: &str = "model.layers.0.mlp.switch_mlp.down_proj";
+        const GATE_PREFIX: &str = "model.layers.0.mlp.switch_mlp.gate_proj";
+        const UP_PREFIX: &str = "model.layers.0.mlp.switch_mlp.up_proj";
+
+        let mut weights = WeightMap::new();
+        for prefix in [DOWN_PREFIX, GATE_PREFIX, UP_PREFIX] {
+            crate::models::switch_layers::insert_stacked_quantized_expert_plane(
+                &mut weights,
+                prefix,
+                EXPERTS,
+                OUT,
+                PACKED_IN,
+                NUM_GROUPS,
+            );
+        }
+
+        // Positive control first, so a guard that rejected every quantized
+        // plane could not pass this test.
+        SwitchLinear::from_weights(&weights, &quant_args(GROUP_SIZE, BITS), DOWN_PREFIX)
+            .expect("honest 4-bit expert plane must load through the pre-stacked path");
+        SwitchLinear::from_separate_gate_up(
+            &weights,
+            &quant_args(GROUP_SIZE, BITS),
+            GATE_PREFIX,
+            UP_PREFIX,
+        )
+        .expect("honest 4-bit expert planes must load through the fusion path");
+
+        for (group_size, bits, field) in crate::models::switch_layers::HOSTILE_QUANT_PARAMS {
+            let args = quant_args(group_size, bits);
+
+            let err = match SwitchLinear::from_weights(&weights, &args, DOWN_PREFIX) {
+                Ok(_) => panic!(
+                    "(group_size {group_size}, bits {bits}) must be refused at load, \
+                     not stored for gather_qmm"
+                ),
+                Err(e) => e,
+            };
+            assert!(
+                err.contains(field),
+                "(group_size {group_size}, bits {bits}) must be blamed on {field}, got: {err}"
+            );
+
+            let fused_err = match SwitchLinear::from_separate_gate_up(
+                &weights,
+                &args,
+                GATE_PREFIX,
+                UP_PREFIX,
+            ) {
+                Ok(_) => panic!(
+                    "the fusion path must refuse (group_size {group_size}, bits {bits}) \
+                     at load, not store it for gather_qmm"
+                ),
+                Err(e) => e,
+            };
+            assert!(
+                fused_err.contains(field),
+                "(group_size {group_size}, bits {bits}) must be blamed on {field}, \
+                 got: {fused_err}"
+            );
+        }
+
+        // A bf16 expert plane carries no packing at all, so the declared pair
+        // is irrelevant there and must not gate either non-quantized fallback.
+        let mut regular = WeightMap::new();
+        for prefix in [DOWN_PREFIX, GATE_PREFIX, UP_PREFIX] {
+            regular.insert(
+                format!("{prefix}.weight"),
+                mlxcel_core::ones(&[EXPERTS, OUT, PACKED_IN], mlxcel_core::dtype::BFLOAT16),
+            );
+        }
+        SwitchLinear::from_weights(&regular, &quant_args(0, 0), DOWN_PREFIX)
+            .expect("a bf16 expert plane must not be gated on quantization params");
+        SwitchLinear::from_separate_gate_up(&regular, &quant_args(0, 0), GATE_PREFIX, UP_PREFIX)
+            .expect("a bf16 fused expert plane must not be gated on quantization params");
+    }
 }

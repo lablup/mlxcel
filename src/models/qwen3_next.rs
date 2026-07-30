@@ -2153,3 +2153,7 @@ mod cache_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "qwen3_next_tests.rs"]
+mod tests;

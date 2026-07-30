@@ -1884,4 +1884,78 @@ mod tests {
         mlxcel_core::eval(&mx);
         assert!(mlxcel_core::item_f32(&mx).is_finite());
     }
+
+    /// Smallest DeepSeek-V3 config that parses, varying only the declared
+    /// quantization pair. Built through serde rather than a struct literal so
+    /// the `#[serde(default)]` fields fill themselves in.
+    fn quant_config(group_size: i32, bits: i32) -> DeepSeekV3Config {
+        serde_json::from_value(serde_json::json!({
+            "vocab_size": 32,
+            "hidden_size": 8,
+            "intermediate_size": 8,
+            "moe_intermediate_size": 8,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "kv_lora_rank": 4,
+            "qk_rope_head_dim": 2,
+            "v_head_dim": 4,
+            "qk_nope_head_dim": 2,
+            "quantization": { "group_size": group_size, "bits": bits },
+        }))
+        .expect("test config must parse")
+    }
+
+    /// This `SwitchGLU` is unconditionally quantized: it stores the declared
+    /// pair and hands it to three `gather_qmm` calls, which cross the cxx
+    /// bridge as `UniquePtr<MlxArray>` rather than `Result`. A C++ throw there
+    /// is an uncatchable `std::terminate`, so losing the bound would abort the
+    /// whole test binary with SIGABRT at the first routed forward pass instead
+    /// of failing cleanly at load. Issue #958. There is no non-quantized
+    /// fallback to exempt here, unlike the other families carrying this guard.
+    #[test]
+    fn deepseek_v3_switch_glu_rejects_quantization_params_that_would_abort_gather_qmm() {
+        // Honest 4-bit expert geometry: `packed_in * 32 == bits * num_groups *
+        // group_size` (8 * 32 == 4 * 1 * 64), so the positive control below is
+        // a plane MLX can actually describe.
+        const EXPERTS: i32 = 3;
+        const OUT: i32 = 4;
+        const PACKED_IN: i32 = 8;
+        const NUM_GROUPS: i32 = 1;
+        const GROUP_SIZE: i32 = 64;
+        const BITS: i32 = 4;
+        const PREFIX: &str = "model.layers.0.mlp.switch_mlp";
+
+        let mut weights = WeightMap::new();
+        for proj in ["gate_proj", "up_proj", "down_proj"] {
+            crate::models::switch_layers::insert_stacked_quantized_expert_plane(
+                &mut weights,
+                &format!("{PREFIX}.{proj}"),
+                EXPERTS,
+                OUT,
+                PACKED_IN,
+                NUM_GROUPS,
+            );
+        }
+
+        // Positive control first, so a guard that rejected every quantized
+        // plane could not pass this test.
+        SwitchGLU::from_weights(&weights, &quant_config(GROUP_SIZE, BITS), PREFIX)
+            .expect("honest 4-bit expert planes must load");
+
+        for (group_size, bits, field) in crate::models::switch_layers::HOSTILE_QUANT_PARAMS {
+            let err =
+                match SwitchGLU::from_weights(&weights, &quant_config(group_size, bits), PREFIX) {
+                    Ok(_) => panic!(
+                        "(group_size {group_size}, bits {bits}) must be refused at load, \
+                         not stored for gather_qmm"
+                    ),
+                    Err(e) => e,
+                };
+            assert!(
+                err.contains(field),
+                "(group_size {group_size}, bits {bits}) must be blamed on {field}, got: {err}"
+            );
+        }
+    }
 }

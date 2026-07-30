@@ -468,3 +468,124 @@ fn nemotron_h_conv_state_shape_plateaus_after_50_steps() {
         );
     }
 }
+
+/// `QuantizedSwitchLinear` has no named constructor: `NemotronHModel::from_weights`
+/// builds the quantized variant as a bare struct literal, storing the declared
+/// `group_size` / `bits` and handing them to `gather_qmm` without ever reaching
+/// `reconcile_quantization_layout` (issue #958). `gather_qmm` crosses the cxx
+/// bridge as `UniquePtr<MlxArray>` rather than `Result`, so a hostile pair used
+/// to abort the process at the first routed forward pass rather than failing at
+/// load.
+///
+/// This fixture is deliberately the shape the issue calls out as the one no
+/// guarded loader covers: a float `backbone.embeddings` and a float `lm_head`
+/// with quantized expert planes as the ONLY quantized tensors in the
+/// checkpoint. `UnifiedEmbedding::from_weights` only enters its quantized
+/// branch when `.scales` exists, so nothing here touches the reconciler.
+///
+/// It drives the real model loader, so a regression takes this whole test
+/// binary down with SIGABRT rather than failing cleanly.
+#[test]
+fn nemotron_h_rejects_expert_quantization_params_that_would_abort_gather_qmm() {
+    use super::{BlockType, NemotronHConfig, NemotronHModel};
+    use mlxcel_core::weights::WeightMap;
+
+    const HIDDEN: i32 = 8;
+    const EXPERTS: i32 = 2;
+    const FF: i32 = 4;
+    // Honest affine 4-bit geometry: packed_in * 32 == bits * groups * gs,
+    // i.e. 1 * 32 == 4 * 1 * 8.
+    const PACKED_IN: i32 = 1;
+    const NUM_GROUPS: i32 = 1;
+
+    let config_with = |group_size: i32, bits: i32| -> NemotronHConfig {
+        let mut config: NemotronHConfig = serde_json::from_value(serde_json::json!({
+            "model_type": "nemotron_h",
+            "vocab_size": 8,
+            "hidden_size": HIDDEN,
+            "intermediate_size": FF,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "mamba_num_heads": 1,
+            "mamba_head_dim": 4,
+            "ssm_state_size": 4,
+            "conv_kernel": 4,
+            "n_groups": 1,
+            "n_routed_experts": EXPERTS,
+            "num_experts_per_tok": 1,
+            "moe_intermediate_size": FF,
+            "hybrid_override_pattern": "E",
+            "quantization": { "group_size": group_size, "bits": bits },
+        }))
+        .expect("test config must parse");
+        config.post_init().expect("test config must pass post_init");
+        config
+    };
+
+    let build_weights = || {
+        let mut weights = WeightMap::new();
+        let float = |shape: &[i32]| {
+            let n: i32 = shape.iter().product();
+            mlxcel_core::from_slice_f32(&vec![0.0; n as usize], shape)
+        };
+        // Float embedding and lm_head: no `.scales`, so neither reaches the
+        // reconciler and neither can stand in for the expert-plane bound.
+        weights.insert(
+            "backbone.embeddings.weight".to_string(),
+            float(&[8, HIDDEN]),
+        );
+        weights.insert("lm_head.weight".to_string(), float(&[8, HIDDEN]));
+        weights.insert("backbone.norm_f.weight".to_string(), float(&[HIDDEN]));
+        weights.insert(
+            "backbone.layers.0.norm.weight".to_string(),
+            float(&[HIDDEN]),
+        );
+        weights.insert(
+            "backbone.layers.0.mixer.gate.weight".to_string(),
+            float(&[EXPERTS, HIDDEN]),
+        );
+        for fc in ["fc1", "fc2"] {
+            let prefix = format!("backbone.layers.0.mixer.switch_mlp.{fc}");
+            crate::models::switch_layers::insert_stacked_quantized_expert_plane(
+                &mut weights,
+                &prefix,
+                EXPERTS,
+                FF,
+                PACKED_IN,
+                NUM_GROUPS,
+            );
+        }
+        weights
+    };
+
+    // Positive control first, so a guard that rejects everything quantized
+    // cannot pass this test.
+    NemotronHModel::from_weights(config_with(8, 4), build_weights(), vec![BlockType::MoE])
+        .expect("an honest affine pair must still load quantized Nemotron-H experts");
+
+    for (group_size, bits, field) in crate::models::switch_layers::HOSTILE_QUANT_PARAMS {
+        let err = NemotronHModel::from_weights(
+            config_with(group_size, bits),
+            build_weights(),
+            vec![BlockType::MoE],
+        )
+        .err()
+        .unwrap_or_else(|| {
+            panic!("Nemotron-H must reject group_size {group_size} / bits {bits} at load")
+        })
+        .to_string();
+        assert!(err.contains(field), "unhelpful error: {err}");
+    }
+
+    // A bf16 expert plane carries no packing at all, so the params are
+    // irrelevant there and must not be enforced.
+    let mut regular = build_weights();
+    for fc in ["fc1", "fc2"] {
+        let prefix = format!("backbone.layers.0.mixer.switch_mlp.{fc}");
+        regular.remove(&format!("{prefix}.scales"));
+        regular.remove(&format!("{prefix}.biases"));
+    }
+    NemotronHModel::from_weights(config_with(0, 0), regular, vec![BlockType::MoE])
+        .expect("a non-quantized expert plane must not be gated on quantization params");
+}

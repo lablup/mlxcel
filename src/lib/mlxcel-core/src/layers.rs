@@ -4643,6 +4643,91 @@ mod tests {
         }
     }
 
+    /// The two by-hand constructors are the only way to build a quantized layer
+    /// without going through `reconcile_quantization_layout`, which is exactly
+    /// how `mamba` / `mamba2` reached `quantized_embedding` with an unbounded
+    /// pair (issue #958). They are fallible so the bound cannot be skipped, and
+    /// this drives the real constructors rather than the pure helper: if the
+    /// guard regresses, the pair reaches MLX and the C++ throw takes this whole
+    /// test binary down with SIGABRT instead of failing cleanly.
+    #[test]
+    fn hand_built_quantized_layers_bound_their_declared_params() {
+        // Honest affine 4-bit geometry: packed_in * 32 == bits * groups * gs,
+        // i.e. 8 * 32 == 4 * 1 * 64.
+        let plane = |last: i32| ffi::from_slice_f32(&vec![0.0; (4 * last) as usize], &[4, last]);
+
+        // Positive control first, so a guard that rejects everything quantized
+        // cannot pass this test.
+        QuantizedEmbedding::new(plane(8), plane(1), plane(1), 64, 4)
+            .expect("an honest affine pair must still build a quantized embedding");
+        QuantizedMultiLinear::new(plane(8), plane(1), Some(plane(1)), 64, 4)
+            .expect("an honest affine pair must still build a quantized MultiLinear");
+
+        for (group_size, bits, field) in [
+            (64, 0, "bits"),
+            (64, -4, "bits"),
+            (64, 33, "bits"),
+            (0, 4, "group_size"),
+            (-64, 4, "group_size"),
+        ] {
+            let err = QuantizedEmbedding::new(plane(8), plane(1), plane(1), group_size, bits)
+                .err()
+                .unwrap_or_else(|| {
+                    panic!("QuantizedEmbedding::new must reject {group_size} / {bits}")
+                });
+            assert!(err.contains(field), "unhelpful error: {err}");
+
+            let err =
+                QuantizedMultiLinear::new(plane(8), plane(1), Some(plane(1)), group_size, bits)
+                    .err()
+                    .unwrap_or_else(|| {
+                        panic!("QuantizedMultiLinear::new must reject {group_size} / {bits}")
+                    });
+            assert!(err.contains(field), "unhelpful error: {err}");
+        }
+    }
+
+    /// `QuantizedMultiLinear::from_weights` is a shared loader that stores the
+    /// declared pair verbatim and hands it to `quantized_matmul` on every MLA
+    /// forward, without ever calling the reconciler. It sat in the same blind
+    /// spot `SwitchLinear::from_stacked_parts` occupied before #929, and it is
+    /// reached by DeepSeek V3, DeepSeek V3.2, GLM4 MoE Lite and LongCat Flash
+    /// NGram through their `embed_q` / `unembed_out` (issue #958).
+    #[test]
+    fn multi_linear_loader_bounds_its_declared_params() {
+        let mut weights = crate::weights::WeightMap::new();
+        let plane =
+            |last: i32| ffi::from_slice_f32(&vec![0.0; (2 * 4 * last) as usize], &[2, 4, last]);
+        weights.insert("embed_q.weight".to_string(), plane(8));
+        weights.insert("embed_q.scales".to_string(), plane(1));
+        weights.insert("embed_q.biases".to_string(), plane(1));
+
+        QuantizedMultiLinear::from_weights(&weights, "embed_q", 64, 4)
+            .expect("an honest affine pair must still load");
+
+        for (group_size, bits, field) in [
+            (64, 0, "bits"),
+            (64, 33, "bits"),
+            (0, 4, "group_size"),
+            (-64, 4, "group_size"),
+        ] {
+            let err = QuantizedMultiLinear::from_weights(&weights, "embed_q", group_size, bits)
+                .err()
+                .unwrap_or_else(|| panic!("the loader must reject {group_size} / {bits}"));
+            assert!(
+                err.contains(field) && err.contains("embed_q"),
+                "the message must name both the field and the tensor, got: {err}"
+            );
+        }
+
+        // A non-quantized projection carries no packing, so the params are
+        // irrelevant there and must not be enforced.
+        let mut regular = crate::weights::WeightMap::new();
+        regular.insert("embed_q.weight".to_string(), plane(8));
+        MultiLinear::from_weights(&regular, "embed_q", 0, 0)
+            .expect("a non-quantized MultiLinear must not be gated on quantization params");
+    }
+
     #[test]
     fn quantized_packing_check_compares_the_weight_side_too() {
         // The scales-side comparison alone is not MLX's test. The block-float

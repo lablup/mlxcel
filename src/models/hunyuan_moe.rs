@@ -991,3 +991,7 @@ impl LanguageModel for HunyuanMoeModel {
         vec![127960] // Hunyuan EOS token from config
     }
 }
+
+#[cfg(test)]
+#[path = "hunyuan_moe_tests.rs"]
+mod tests;

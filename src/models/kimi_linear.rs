@@ -1400,3 +1400,7 @@ impl LanguageModel for KimiLinearModel {
         self.forward(input_ids, &mut caches)
     }
 }
+
+#[cfg(test)]
+#[path = "kimi_linear_tests.rs"]
+mod tests;

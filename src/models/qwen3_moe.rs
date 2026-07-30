@@ -1042,3 +1042,7 @@ impl LanguageModel for Qwen3MoeModel {
         true
     }
 }
+
+#[cfg(test)]
+#[path = "qwen3_moe_tests.rs"]
+mod tests;

@@ -102,3 +102,85 @@ fn mamba_cache_snapshot_restore_round_trips_state_shapes() {
     assert_eq!(mlxcel_core::array_shape(conv), vec![1, 3, 4]);
     assert_eq!(mlxcel_core::array_shape(ssm), vec![1, 2, 4, 8]);
 }
+
+/// Mamba takes its embedding table out of the `WeightMap` by `remove`, under
+/// either the `backbone.embeddings` or the `model.embed_tokens` spelling, so it
+/// cannot address the single-prefix `UnifiedEmbedding::from_weights` and never
+/// reaches `reconcile_quantization_layout`. Before issue #958 the declared pair
+/// was stored verbatim on a hand-built `QuantizedEmbedding` and divided by
+/// inside `quantized_embedding` at the first token, which crosses the cxx
+/// bridge as `UniquePtr<MlxArray>` rather than `Result` and therefore aborts the
+/// process instead of failing the load.
+///
+/// This drives the real `MambaModel::from_weights`, so a regression takes this
+/// whole test binary down with SIGABRT rather than failing cleanly.
+#[test]
+fn mamba_rejects_quantization_params_that_would_abort_the_embedding_lookup() {
+    use super::{MambaConfig, MambaModel};
+    use mlxcel_core::weights::WeightMap;
+
+    // `num_hidden_layers: 0` plus tied embeddings reduces the load to the
+    // embedding table and the final norm, so the honest case loads all the way
+    // through rather than stopping at an unrelated missing weight.
+    let config_with = |group_size: i32, bits: i32| -> MambaConfig {
+        serde_json::from_value(serde_json::json!({
+            "model_type": "mamba",
+            "vocab_size": 8,
+            "hidden_size": 8,
+            "intermediate_size": 16,
+            "state_size": 4,
+            "num_hidden_layers": 0,
+            "conv_kernel": 4,
+            "time_step_rank": 1,
+            "tie_word_embeddings": true,
+            "quantization": { "group_size": group_size, "bits": bits },
+        }))
+        .expect("test config must parse")
+    };
+
+    // Honest affine 4-bit geometry: packed_in * 32 == bits * groups * gs,
+    // i.e. 1 * 32 == 4 * 1 * 8. The table is [vocab, packed_in].
+    let build_weights = || {
+        let mut weights = WeightMap::new();
+        weights.insert(
+            "backbone.embeddings.weight".to_string(),
+            mlxcel_core::from_slice_f32(&[0.0; 8], &[8, 1]),
+        );
+        weights.insert(
+            "backbone.embeddings.scales".to_string(),
+            mlxcel_core::from_slice_f32(&[1.0; 8], &[8, 1]),
+        );
+        weights.insert(
+            "backbone.embeddings.biases".to_string(),
+            mlxcel_core::from_slice_f32(&[0.0; 8], &[8, 1]),
+        );
+        weights.insert(
+            "backbone.norm_f.weight".to_string(),
+            mlxcel_core::from_slice_f32(&[1.0; 8], &[8]),
+        );
+        weights
+    };
+
+    // Positive control first, so a guard that rejects everything quantized
+    // cannot pass this test.
+    MambaModel::from_weights(config_with(8, 4), build_weights())
+        .expect("an honest affine pair must still load a quantized Mamba embedding");
+
+    for (group_size, bits, field) in crate::models::switch_layers::HOSTILE_QUANT_PARAMS {
+        let err = MambaModel::from_weights(config_with(group_size, bits), build_weights())
+            .err()
+            .unwrap_or_else(|| {
+                panic!("Mamba must reject group_size {group_size} / bits {bits} at load")
+            })
+            .to_string();
+        assert!(err.contains(field), "unhelpful error: {err}");
+    }
+
+    // A float embedding table carries no packing, so the params are irrelevant
+    // there and must not be enforced.
+    let mut regular = build_weights();
+    regular.remove("backbone.embeddings.scales");
+    regular.remove("backbone.embeddings.biases");
+    MambaModel::from_weights(config_with(0, 0), regular)
+        .expect("a float embedding table must not be gated on quantization params");
+}

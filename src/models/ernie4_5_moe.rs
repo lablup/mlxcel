@@ -911,3 +911,7 @@ impl LanguageModel for Ernie45MoeModel {
         vec![2]
     }
 }
+
+#[cfg(test)]
+#[path = "ernie4_5_moe_tests.rs"]
+mod tests;

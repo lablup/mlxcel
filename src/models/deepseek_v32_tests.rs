@@ -12,10 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Unit tests for the DeepSeek Sparse Attention (DSA) lightning indexer.
+//! Unit tests for the DeepSeek Sparse Attention (DSA) lightning indexer and for
+//! the bound on declared quantization params that `load_switch_linear` applies
+//! before it stacks a quantized expert plane (issue #958).
 
-use super::ModelArgs;
 use super::indexer::{Indexer, indexer_top_indices};
+use super::{ModelArgs, load_switch_linear};
+use crate::models::switch_layers::HOSTILE_QUANT_PARAMS;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -430,4 +433,104 @@ fn sanitize_strips_only_the_mtp_trailer_layer() {
         sanitized.contains_key("model.norm.weight"),
         "non-layer keys must pass through"
     );
+}
+
+/// Honest 4-bit expert geometry: `packed_in * 32 == bits * num_groups *
+/// group_size` (8 * 32 == 4 * 1 * 64), so the positive control below is a plane
+/// MLX can actually describe.
+const QUANT_EXPERTS: usize = 3;
+const QUANT_OUT: i32 = 4;
+const QUANT_PACKED_IN: i32 = 8;
+const QUANT_NUM_GROUPS: i32 = 1;
+const QUANT_GROUP_SIZE: i32 = 64;
+const QUANT_BITS: i32 = 4;
+
+const QUANT_PREFIX: &str = "model.layers.0.mlp.experts";
+const QUANT_WEIGHT_NAME: &str = "gate_proj";
+
+/// deepseek_v32 keeps the per-expert checkpoint layout
+/// (`{prefix}.{i}.{weight_name}.*`, stacked at load) rather than the pre-stacked
+/// `switch_mlp` plane, so the fixture is built expert by expert. Pass
+/// `quantized = false` to drop the `.scales` / `.biases` tensors and take the
+/// dense `gather_mm` path.
+fn deepseek_v32_expert_weights(quantized: bool) -> WeightMap {
+    let mut weights = WeightMap::new();
+    for expert_idx in 0..QUANT_EXPERTS {
+        let base = format!("{QUANT_PREFIX}.{expert_idx}.{QUANT_WEIGHT_NAME}");
+        weights.insert(
+            format!("{base}.weight"),
+            f32_weight(&[QUANT_OUT, QUANT_PACKED_IN]),
+        );
+        if quantized {
+            weights.insert(
+                format!("{base}.scales"),
+                f32_weight(&[QUANT_OUT, QUANT_NUM_GROUPS]),
+            );
+            weights.insert(
+                format!("{base}.biases"),
+                f32_weight(&[QUANT_OUT, QUANT_NUM_GROUPS]),
+            );
+        }
+    }
+    weights
+}
+
+/// The pair this loader stores is handed straight to `gather_qmm`, which crosses
+/// the cxx bridge as `UniquePtr<MlxArray>` rather than `Result`. A C++ throw
+/// there is an uncatchable `std::terminate`, so losing the bound would abort the
+/// whole test binary with SIGABRT at the first routed forward pass instead of
+/// failing cleanly at load. Issue #958.
+#[test]
+fn deepseek_v32_switch_linear_rejects_quantization_params_that_would_abort_gather_qmm() {
+    let weights = deepseek_v32_expert_weights(true);
+    let plane_prefix = format!("{QUANT_PREFIX}.{QUANT_WEIGHT_NAME}");
+
+    // Positive control first, so a guard that rejected every quantized plane
+    // could not pass this test.
+    let control = load_switch_linear(
+        &weights,
+        QUANT_EXPERTS,
+        QUANT_PREFIX,
+        QUANT_WEIGHT_NAME,
+        QUANT_GROUP_SIZE,
+        QUANT_BITS,
+    );
+    match control {
+        Ok(_) => {}
+        Err(e) => panic!("honest 4-bit expert plane must load: {e}"),
+    }
+
+    for (group_size, bits, field) in HOSTILE_QUANT_PARAMS {
+        let result = load_switch_linear(
+            &weights,
+            QUANT_EXPERTS,
+            QUANT_PREFIX,
+            QUANT_WEIGHT_NAME,
+            group_size,
+            bits,
+        );
+        let err = match result {
+            Ok(_) => panic!(
+                "(group_size {group_size}, bits {bits}) must be refused at load, \
+                 not stored for gather_qmm"
+            ),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains(field),
+            "(group_size {group_size}, bits {bits}) must be blamed on {field}, got: {err}"
+        );
+        assert!(
+            err.contains(&plane_prefix),
+            "the load error must name the offending tensor {plane_prefix}, got: {err}"
+        );
+    }
+
+    // A bf16 expert plane carries no packing and no `.scales`, so the declared
+    // pair is inert on the `gather_mm` path and must not gate the load.
+    let dense = deepseek_v32_expert_weights(false);
+    match load_switch_linear(&dense, QUANT_EXPERTS, QUANT_PREFIX, QUANT_WEIGHT_NAME, 0, 0) {
+        Ok(_) => {}
+        Err(e) => panic!("a non-quantized expert plane must load with an unset pair: {e}"),
+    }
 }

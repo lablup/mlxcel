@@ -925,3 +925,7 @@ impl LanguageModel for Glm4MoeLiteModel {
         vec![154820, 154827, 154829]
     }
 }
+
+#[cfg(test)]
+#[path = "glm4_moe_lite_tests.rs"]
+mod tests;

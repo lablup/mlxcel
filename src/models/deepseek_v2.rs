@@ -1035,3 +1035,7 @@ impl LanguageModel for DeepSeekV2Model {
         vec![100001] // <|end▁of▁sentence|>
     }
 }
+
+#[cfg(test)]
+#[path = "deepseek_v2_tests.rs"]
+mod tests;

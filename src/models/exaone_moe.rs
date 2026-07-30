@@ -1176,3 +1176,7 @@ mod exaone_moe_mask_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "exaone_moe_tests.rs"]
+mod tests;

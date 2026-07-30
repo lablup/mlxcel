@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{Cache, Step3p5Config, Step3p5Model};
+use super::{Cache, Step3p5Config, Step3p5Model, Step3p5SwitchGLU};
+use crate::models::switch_layers::{HOSTILE_QUANT_PARAMS, insert_stacked_quantized_expert_plane};
+use mlxcel_core::weights::WeightMap;
 
 fn parse_config(json: serde_json::Value) -> Step3p5Config {
     serde_json::from_value(json).expect("valid Step3p5Config")
@@ -218,4 +220,79 @@ fn resolve_eos_treats_null_top_level_as_absent_and_uses_text_config() {
         "text_config": { "eos_token_id": 7 }
     });
     assert_eq!(Step3p5Config::resolve_step3p7_eos_token_ids(&cfg), vec![7]);
+}
+
+/// Honest 4-bit expert geometry: `packed_in * 32 == bits * num_groups *
+/// group_size` (8 * 32 == 4 * 1 * 64), so the positive control below is a plane
+/// MLX can actually describe.
+const QUANT_EXPERTS: i32 = 3;
+const QUANT_OUT: i32 = 4;
+const QUANT_PACKED_IN: i32 = 8;
+const QUANT_NUM_GROUPS: i32 = 1;
+const QUANT_GROUP_SIZE: i32 = 64;
+const QUANT_BITS: i32 = 4;
+
+const QUANT_PREFIX: &str = "model.layers.0.mlp.switch_mlp";
+
+/// Build the three projection planes `Step3p5SwitchGLU::from_weights` requires.
+/// This SwitchGLU is unconditionally quantized, so there is no dense fallback to
+/// exercise: every plane carries `.scales` and `.biases`.
+fn step3p5_quantized_switch_glu_weights() -> WeightMap {
+    let mut weights = WeightMap::new();
+    for proj in ["gate_proj", "up_proj", "down_proj"] {
+        insert_stacked_quantized_expert_plane(
+            &mut weights,
+            &format!("{QUANT_PREFIX}.{proj}"),
+            QUANT_EXPERTS,
+            QUANT_OUT,
+            QUANT_PACKED_IN,
+            QUANT_NUM_GROUPS,
+        );
+    }
+    weights
+}
+
+/// Drive the real loader with only the declared pair varying. `swiglu_limit` is
+/// `None` here: it plays no part in the bound.
+fn load_step3p5_switch_glu(
+    weights: &WeightMap,
+    group_size: i32,
+    bits: i32,
+) -> Result<Step3p5SwitchGLU, String> {
+    Step3p5SwitchGLU::from_weights(weights, QUANT_PREFIX, group_size, bits, None)
+}
+
+/// The pair this loader stores is handed to three `gather_qmm` calls, which
+/// cross the cxx bridge as `UniquePtr<MlxArray>` rather than `Result`. A C++
+/// throw there is an uncatchable `std::terminate`, so losing the bound would
+/// abort the whole test binary with SIGABRT at the first routed forward pass
+/// instead of failing cleanly at load. Issue #958.
+#[test]
+fn step3p5_switch_glu_rejects_quantization_params_that_would_abort_gather_qmm() {
+    let weights = step3p5_quantized_switch_glu_weights();
+
+    // Positive control first, so a guard that rejected every quantized plane
+    // could not pass this test.
+    match load_step3p5_switch_glu(&weights, QUANT_GROUP_SIZE, QUANT_BITS) {
+        Ok(_) => {}
+        Err(e) => panic!("honest 4-bit expert plane must load: {e}"),
+    }
+
+    for (group_size, bits, field) in HOSTILE_QUANT_PARAMS {
+        let err = match load_step3p5_switch_glu(&weights, group_size, bits) {
+            Ok(_) => panic!(
+                "(group_size {group_size}, bits {bits}) must be refused at load, \
+                 not stored for gather_qmm"
+            ),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains(field),
+            "(group_size {group_size}, bits {bits}) must be blamed on {field}, got: {err}"
+        );
+        assert!(
+            err.contains(QUANT_PREFIX),
+            "the load error must name the offending tensor {QUANT_PREFIX}, got: {err}"
+        );
+    }
 }
