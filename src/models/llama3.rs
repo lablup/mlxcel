@@ -362,7 +362,31 @@ impl Attention {
                 .forward_split_rope(x, self.rope_dims, self.rope_base, offset)
         };
 
+        // Fused q/k RoPE + KV-append-layout kernel (#905). Unlike
+        // `forward_split_rope` above, this one takes `traditional` as a real
+        // parameter, so traditional-RoPE checkpoints reach it too. It emits
+        // K/V in the dense `KVCache` slab layout, which is what
+        // `update_and_fetch` splices below; the paged-pool layout the kernel
+        // also supports belongs to the batched paged decode path (#899) and is
+        // deliberately not wired here. `MLXCEL_FUSED_ROPE_APPEND=0` falls back
+        // to the reshape / transpose / `fast_rope` graph below.
+        let fused_rope_append = if fused_split_rope.is_some() {
+            None
+        } else {
+            self.qkv_proj.forward_fused_rope_append(
+                x,
+                self.rope_dims,
+                self.rope_base,
+                1.0,
+                self.rope_traditional,
+                offset,
+                mlxcel_core::layers::FusedRopeDestLayout::DenseSlab,
+            )
+        };
+
         let (q, k, v) = if let Some((q, k, v)) = fused_split_rope {
+            (q, k, v)
+        } else if let Some((q, k, v)) = fused_rope_append {
             (q, k, v)
         } else {
             // Fallback for non-quantized weights: preserve the existing Rust path.
@@ -792,10 +816,16 @@ impl TransformerBlock {
         // Pre-norm attention
         let normed = self.input_layernorm.forward(x);
         let attn_out = self.self_attn.forward(&normed, cache, mask);
-        let h = mlxcel_core::add(x, &attn_out);
 
-        // Pre-norm FFN
-        let normed = self.post_attention_layernorm.forward(&h);
+        // Residual join + pre-FFN norm in one dispatch (#905). `h` is the
+        // residual stream carried to the second join; `normed` feeds the MLP.
+        // `MLXCEL_FUSED_ADD_RMSNORM=0` restores the `add` + `fast_rms_norm`
+        // pair this replaced.
+        let (normed, h) = mlxcel_core::layers::fused_add_rms_norm(
+            &self.post_attention_layernorm,
+            &attn_out,
+            x,
+        );
         let ff_out = self.mlp.forward(&normed);
         mlxcel_core::add(&h, &ff_out)
     }
@@ -837,11 +867,12 @@ impl TransformerBlock {
         // Batched output projection
         let attn_out = self.self_attn.o_proj.forward(&attn_concat);
 
-        // Residual connection
-        let h = mlxcel_core::add(x, &attn_out);
-
-        // Batched post-attention norm + FFN
-        let normed = self.post_attention_layernorm.forward(&h);
+        // Residual join + batched post-attention norm in one dispatch (#905).
+        let (normed, h) = mlxcel_core::layers::fused_add_rms_norm(
+            &self.post_attention_layernorm,
+            &attn_out,
+            x,
+        );
         let ff_out = self.mlp.forward(&normed);
         mlxcel_core::add(&h, &ff_out)
     }

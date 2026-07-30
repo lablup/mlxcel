@@ -61,6 +61,13 @@ fn main() {
         // `argpartition` sort on the no-filter sampling path with one
         // index-carrying max reduction over the vocabulary.
         .file("../mlx-cpp/turbo/sampling.cpp")
+        // Fused residual-add + RMSNorm and fused q/k RoPE + KV-append-layout
+        // decode kernel launchers (#905). Both are two/three-output custom
+        // kernels: MLX arrays are immutable from the graph's perspective, so
+        // the in-place residual update and the append payload are returned as
+        // values rather than written through.
+        .file("../mlx-cpp/turbo/fused_norm.cpp")
+        .file("../mlx-cpp/turbo/fused_rope_append.cpp")
         .include(&mlx_include)
         .include("cpp")
         .include("../mlx-cpp/turbo")
@@ -177,6 +184,11 @@ fn main() {
     // Gumbel-max categorical sampling kernel launcher (#900).
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling.cpp");
+    // Fused residual-add RMSNorm and fused RoPE + KV-append kernel launchers (#905).
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_norm.h");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_norm.cpp");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_rope_append.h");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_rope_append.cpp");
     println!("cargo:rerun-if-env-changed=MLX_CUDA_ARCHITECTURES");
     println!("cargo:rerun-if-env-changed=MLXCEL_BUILD_METAL");
     println!("cargo:rerun-if-env-changed=MLXCEL_BUILD_ACCELERATE");

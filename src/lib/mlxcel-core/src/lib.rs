@@ -1331,6 +1331,70 @@ mod ffi {
         /// and thread-count budgets.
         fn paged_attention_num_splits_cap(dim: i32) -> i32;
 
+        /// Fused residual-add + RMSNorm kernel (issue #905).
+        ///
+        /// Computes `new_residual = x + residual` and
+        /// `normed = rms_norm(new_residual) * (weight_bias + weight)` in one
+        /// dispatch, replacing the elementwise `add` plus `fast_rms_norm` pair
+        /// that a pre-norm block pays at every residual join.
+        ///
+        /// `weight_bias` is `0.0` for a standard RMSNorm and `1.0` for the
+        /// Gemma `(1 + w)` convention; the bias is folded in the weight's own
+        /// dtype, so `1.0` reproduces `GemmaRMSNorm`'s precomputed `(1 + w)`
+        /// tensor rather than approximating it.
+        ///
+        /// `x` and `residual` must share shape and dtype, and `weight` must be
+        /// `[D]` where `D` is their trailing dimension; the launcher throws
+        /// otherwise. Two out-params because MLX arrays are immutable from the
+        /// graph's perspective, so the residual update is a value, not a
+        /// mutation.
+        fn fused_add_rms_norm(
+            x: &MlxArray,
+            residual: &MlxArray,
+            weight: &MlxArray,
+            eps: f32,
+            weight_bias: f32,
+            normed_out: &mut UniquePtr<MlxArray>,
+            new_residual_out: &mut UniquePtr<MlxArray>,
+        );
+
+        /// Whether the current backend has a fused-add-RMSNorm kernel at all
+        /// (issue #905). False on a CPU-only build, where the custom-kernel JIT
+        /// throws.
+        fn fused_add_rms_norm_available() -> bool;
+
+        /// Fused q/k RoPE + KV-append-layout kernel (issue #905).
+        ///
+        /// Takes the whole row-contiguous fused-QKV projection output
+        /// `[B, L, (Hq + 2*Hkv) * D]`, applies rotary embedding to the q and k
+        /// blocks, and writes q, k and v out already in their consumers'
+        /// layouts: `q_out` is `[B, Hq, L, D]`, and `k_out` / `v_out` follow
+        /// `dest_layout` (`0` = dense `KVCache` slab order `[B, Hkv, L, D]`,
+        /// `1` = paged pool row order `[B, L, Hkv, D]`). V is relayout-only.
+        ///
+        /// `positions_base` is the absolute position of the first token in the
+        /// window: token `t` rotates with position `positions_base + t`.
+        #[allow(clippy::too_many_arguments)]
+        fn fused_rope_qk_append(
+            qkv: &MlxArray,
+            num_heads: i32,
+            num_kv_heads: i32,
+            head_dim: i32,
+            rope_dims: i32,
+            rope_base: f32,
+            rope_scale: f32,
+            traditional: bool,
+            positions_base: i32,
+            dest_layout: i32,
+            q_out: &mut UniquePtr<MlxArray>,
+            k_out: &mut UniquePtr<MlxArray>,
+            v_out: &mut UniquePtr<MlxArray>,
+        );
+
+        /// Whether the current backend has a fused RoPE + append kernel at all
+        /// (issue #905). False on a CPU-only build.
+        fn fused_rope_qk_append_available() -> bool;
+
         fn sdpa_supports_fast_path(
             q: &MlxArray,
             k: &MlxArray,

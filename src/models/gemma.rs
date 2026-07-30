@@ -98,6 +98,29 @@ impl GemmaRMSNorm {
     }
 }
 
+/// Lets the fused residual-add + RMSNorm kernel (#905) serve Gemma's
+/// `(1 + weight)` convention without a second weight tensor.
+///
+/// The kernel folds the `+1` from `weight_bias = 1.0` in the weight's own
+/// dtype, which is exactly how [`GemmaRMSNorm::new`] builds `adjusted_weight`,
+/// so the fused and graph paths see the same gain values rather than two
+/// roundings of the same quantity. The graph fallback still gets the
+/// precomputed `adjusted_weight` so it costs no extra op.
+impl mlxcel_core::layers::FusedAddRmsNormSpec for GemmaRMSNorm {
+    fn raw_norm_weight(&self) -> &MlxArray {
+        &self.weight
+    }
+    fn effective_norm_weight(&self) -> &MlxArray {
+        &self.adjusted_weight
+    }
+    fn norm_weight_bias(&self) -> f32 {
+        1.0
+    }
+    fn norm_eps(&self) -> f32 {
+        self.eps
+    }
+}
+
 // Attention (standard, same as Llama).
 // Uses FusedQKVLinear: Q, K, V weights are concatenated at load time
 // into a single [q_dim+k_dim+v_dim, hidden_dim] weight matrix,
@@ -313,10 +336,16 @@ impl TransformerBlock {
         // Pre-norm attention
         let normed = self.input_layernorm.forward(x);
         let attn_out = self.self_attn.forward(&normed, cache, mask);
-        let h = mlxcel_core::add(x, &attn_out);
 
-        // Pre-norm FFN
-        let normed = self.post_attention_layernorm.forward(&h);
+        // Residual join + pre-FFN norm in one dispatch (#905), with the Gemma
+        // `(1 + w)` offset folded inside the kernel via `weight_bias = 1.0`.
+        // `MLXCEL_FUSED_ADD_RMSNORM=0` restores the `add` + `fast_rms_norm`
+        // pair this replaced.
+        let (normed, h) = mlxcel_core::layers::fused_add_rms_norm(
+            &self.post_attention_layernorm,
+            &attn_out,
+            x,
+        );
         let ff_out = self.mlp.forward(&normed);
         mlxcel_core::add(&h, &ff_out)
     }

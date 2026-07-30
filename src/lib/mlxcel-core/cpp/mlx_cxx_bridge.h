@@ -2050,19 +2050,24 @@ bool fused_add_rms_norm_available();
 
 // Fused q/k RoPE + KV-append-layout kernel launcher (issue #905).
 //
-// Wraps `mlxcel::turbo::fused_rope_qk_append`. Reads the row-contiguous Q and K
-// projection outputs `[B, L, H*D]`, applies rotary embedding to both, and emits
-// them already laid out for the consumer that follows: `q_out` in attention
-// order `[B, Hq, L, D]` and `k_out` in the layout selected by `dest_layout`
-// (`0` = dense `KVCache` slab order `[B, Hkv, L, D]`, `1` = paged pool block
-// row order `[B, L, Hkv, D]`).
+// Wraps `mlxcel::turbo::fused_rope_qk_append`. Reads the row-contiguous fused
+// QKV projection output `[B, L, (Hq + 2*Hkv) * D]` whole, applies rotary
+// embedding to the q and k blocks, and emits all three already laid out for the
+// consumer that follows: `q_out` in attention order `[B, Hq, L, D]`, and
+// `k_out` / `v_out` in the layout selected by `dest_layout` (`0` = dense
+// `KVCache` slab order `[B, Hkv, L, D]`, `1` = paged pool block row order
+// `[B, L, Hkv, D]`). V is relayout-only, not rotated.
+//
+// Taking the whole `qkv` rather than three trailing-axis slices is deliberate:
+// a slice of the last axis is not row-contiguous, and the custom kernel's
+// `ensure_row_contiguous` would insert exactly the materializing copies this
+// kernel exists to remove.
 //
 // `positions_base` is the absolute position of the first token in the window,
 // which is what `KVCache::offset` and `RingSlidingKVCache`'s absolute positions
 // both provide.
 void fused_rope_qk_append(
-    const MlxArray& q_proj,
-    const MlxArray& k_proj,
+    const MlxArray& qkv,
     int32_t num_heads,
     int32_t num_kv_heads,
     int32_t head_dim,
@@ -2073,7 +2078,8 @@ void fused_rope_qk_append(
     int32_t positions_base,
     int32_t dest_layout,
     std::unique_ptr<MlxArray>& q_out,
-    std::unique_ptr<MlxArray>& k_out);
+    std::unique_ptr<MlxArray>& k_out,
+    std::unique_ptr<MlxArray>& v_out);
 
 // Whether the current backend has a fused RoPE + KV-append kernel at all
 // (issue #905). False on a CPU-only build.
