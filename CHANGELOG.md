@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- Softmax-free Gumbel-max categorical sampling kernel on Metal and CUDA (#900). On the no-filter stochastic sampling path (`temperature > 0` with no top-k, top-p, or min-p) the fused sampler now adds i.i.d. Gumbel noise to `logits / temperature` and takes the argmax, which draws exactly from the same softmax categorical distribution without the normalization pass over the 32K-152K-entry vocabulary. One launch covers the whole batch. `MLXCEL_SAMPLING_GUMBEL=0` restores the previous `random::categorical` path.
+
+### Changed
+
+- **Sampled token streams differ at equal seeds.** The Gumbel-max sampler (#900) consumes the shared MLX random key sequence differently from `random::categorical`, so a fixed seed no longer reproduces a token stream recorded before this release on the no-filter stochastic path. The sampling *distribution* is unchanged (verified by chi-square goodness of fit against exact softmax probabilities on peaked, flat, bimodal, and `-inf`-masked logits at temperatures 0.5, 1.0, and 1.5), and greedy decoding (`temperature == 0`) is byte-identical. Runs are still fully reproducible going forward: the same seed on the same backend gives the same stream. To reproduce a stream recorded before this release, set `MLXCEL_SAMPLING_GUMBEL=0`.
+
 ## [v0.4.3] - 2026-07-27
 
 ### Added

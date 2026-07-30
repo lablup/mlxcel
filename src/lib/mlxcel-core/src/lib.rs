@@ -3068,3 +3068,11 @@ mod ffi_tests;
 #[cfg(test)]
 #[path = "fused_moe_parity_tests.rs"]
 mod fused_moe_parity_tests;
+
+// Statistical-correctness, determinism, and routing tests for the Gumbel-max
+// sampling kernel (#900). The kernel replaces `random::categorical` with a
+// distributionally equivalent draw, so correctness is a goodness-of-fit
+// property rather than a bitwise one. GPU-only; they skip on CPU-only builds.
+#[cfg(test)]
+#[path = "sampling_gumbel_tests.rs"]
+mod sampling_gumbel_tests;
