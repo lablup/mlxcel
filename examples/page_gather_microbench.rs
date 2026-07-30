@@ -24,6 +24,26 @@
 //! * (B) a fused Metal paged-attention kernel that reads scattered blocks
 //!   directly with no gather copy.
 //!
+//! ## Three-way fused comparison (issue #898)
+//!
+//! The sweep now also times both fused kernels against the gather path, which
+//! is the comparison issue #898 asks for:
+//!
+//! * `fused_v1` (#123): split-K inside one threadgroup, so one CTA serves one
+//!   `(batch, query head)` pair and parallelism does not grow with context.
+//! * `fused_v2` (#898): cross-CTA split-KV over a CSR page table plus a
+//!   variable-length merge, so parallelism grows with context.
+//!
+//! Both read the same layout-A pools the layout-A gather reads, so all three
+//! see the identical scatter pattern, and both consume an f32 query cast once
+//! outside the timed region rather than charged to one of them. The v2 plan is
+//! also built outside the timed region because that is the production model: it
+//! is plain data that stays valid across decode steps.
+//!
+//! The reported ratios are the issue's acceptance bars: `v2/v1 >= 1.0` across
+//! the whole sweep, and `v2/gatherA > 1.0` at the ADR 0001 trigger points
+//! (batch 4 at `ctx >= 1024`, single-sequence at `ctx >= 16384`).
+//!
 //! The bench is fully synthetic: it allocates fake K/V with `zeros` (values do
 //! not matter, only timing) and times three decode-step attention paths plus a
 //! per-step block-append (`slice_update`) across a sweep of context lengths,
@@ -64,13 +84,19 @@
 use std::time::{Duration, Instant};
 
 use clap::Parser;
+use mlxcel_core::cache::PagedCsrView;
+use mlxcel_core::paged_v2::{
+    PagedDecodeGeometry, PagedDecodePlan, V2Context, device_target_ctas,
+};
 use mlxcel_core::{
-    MlxArray, UniquePtr, bench_rotation::Rotation, eval, fast_scaled_dot_product_attention,
-    from_slice_i32, reshape, slice_update, synchronize_default, take, transpose_axes, zeros,
+    MlxArray, UniquePtr, astype, bench_rotation::Rotation, eval, fast_scaled_dot_product_attention,
+    from_slice_i32, paged_attention_decode, reshape, slice_update, synchronize_default, take,
+    transpose_axes, zeros,
 };
 
 // MLX dtype ids (see src/lib/mlxcel-core/cpp/mlx_cxx_bridge.cpp:50-51).
 const F16: i32 = 9;
+const F32: i32 = mlxcel_core::dtype::FLOAT32;
 
 #[derive(Parser, Debug)]
 #[command(name = "page_gather_microbench")]
@@ -349,6 +375,15 @@ struct Row {
     gather_b_sdpa: Duration,
     sliceupd_a: Duration,
     sliceupd_b: Duration,
+    /// Fused paged-attention decode v1 (#123): split-K inside one threadgroup.
+    fused_v1: Duration,
+    /// Fused paged-attention decode v2 (#898): cross-CTA split-KV plus merge.
+    fused_v2: Duration,
+    /// Chunk size the v2 plan chose for this configuration.
+    v2_pages_per_chunk: i32,
+    /// Chunks the v2 plan emitted, and whether a merge launch was needed.
+    v2_chunks: usize,
+    v2_merge: bool,
 }
 
 impl Row {
@@ -378,6 +413,23 @@ impl Row {
     }
     fn overhead_b_pct(&self) -> f64 {
         (self.gather_b_sdpa_us() - self.contig_sdpa_us()) / self.contig_sdpa_us() * 100.0
+    }
+    fn fused_v1_us(&self) -> f64 {
+        per_call_us(self.fused_v1, self.iters)
+    }
+    fn fused_v2_us(&self) -> f64 {
+        per_call_us(self.fused_v2, self.iters)
+    }
+    /// Speedup of v2 over v1. The issue's acceptance bar is `>= 1.0` across the
+    /// whole sweep.
+    fn v2_over_v1(&self) -> f64 {
+        self.fused_v1_us() / self.fused_v2_us().max(f64::MIN_POSITIVE)
+    }
+    /// Speedup of v2 over the production gather-then-SDPA path (layout A). The
+    /// issue's acceptance bar is `> 1.0` at the ADR 0001 trigger points: batch
+    /// 4 at `ctx >= 1024`, and single-sequence at `ctx >= 16384`.
+    fn v2_over_gather(&self) -> f64 {
+        self.gather_a_sdpa_us() / self.fused_v2_us().max(f64::MIN_POSITIVE)
     }
     /// Which memory this row measured: `warm` (single reused buffer) or
     /// `cold-l2` (rotating buffers). Recorded per row because the rotation
@@ -551,6 +603,81 @@ fn run_config(
         slice_update(&pool_k_b[i], &new_block_b, &[0, 0, 0, 0], &[hkv, 1, bs, d])
     });
 
+    // ── Paths 5 and 6: the fused paged-attention kernels (#123 v1, #898 v2) ──
+    //
+    // Both launchers read Q in f32 and emit f32 deterministically, so the cast
+    // is hoisted out of the timed region rather than charged to one of them.
+    // Both read layout-A pools, the same buffers the layout-A gather above
+    // reads, so all three paths see the identical scatter pattern.
+    let q_f32 = astype(&q, F32);
+    eval(&q_f32);
+
+    // v1 block-table metadata: every sequence's rows concatenated, offsets into
+    // it, and the visible window as absolute positions.
+    let row_offsets: Vec<i32> = (0..=batch).map(|r| (r * nb) as i32).collect();
+    let logical_starts = vec![0i32; batch];
+    let visible_lens = vec![t_pad; batch];
+    let rows_arr = from_slice_i32(&ids, &[total_blocks as i32]);
+    let off_arr = from_slice_i32(&row_offsets, &[b + 1]);
+    let ls_arr = from_slice_i32(&logical_starts, &[b]);
+    let vl_arr = from_slice_i32(&visible_lens, &[b]);
+    for arr in [&rows_arr, &off_arr, &ls_arr, &vl_arr] {
+        eval(arr);
+    }
+
+    // v2 CSR view over the same pages. `indptr` is the same prefix-sum array v1
+    // uses as `row_offsets`; every sequence occupies whole pages here, so
+    // `last_page_len` is the page size and no request starts mid-page.
+    let view = PagedCsrView {
+        page_size: bs,
+        indices: ids.clone(),
+        indptr: row_offsets.clone(),
+        last_page_len: vec![bs; batch],
+        first_page_offset: vec![0; batch],
+        seq_lens: visible_lens.clone(),
+        rope_offsets: visible_lens.clone(),
+    };
+    view.validate().expect("microbench CSR view is consistent");
+    let geometry = PagedDecodeGeometry {
+        q_heads: hq,
+        kv_heads: hkv,
+        head_dim: d,
+        page_size: bs,
+    };
+    // The plan is built once, outside the timed region, because that is the
+    // production model: it is plain data that stays valid across decode steps
+    // until a request crosses a page boundary.
+    let plan = PagedDecodePlan::heuristic(geometry, &view.page_counts(), device_target_ctas());
+    plan.validate().expect("microbench plan is well formed");
+    let v2_ctxs: Vec<V2Context<'_>> = (0..rot_count)
+        .map(|i| {
+            V2Context::build(&q_f32, &pool_k_a[i], &pool_v_a[i], &view, geometry, scale)
+                .expect("v2 context builds")
+        })
+        .collect();
+    synchronize_default();
+
+    let mut rot = Rotation::new(rot_count);
+    let fused_v1 = time_body(warmup, iters, || {
+        let i = rot.next_index();
+        paged_attention_decode(
+            &q_f32,
+            &pool_k_a[i],
+            &pool_v_a[i],
+            &rows_arr,
+            &off_arr,
+            &ls_arr,
+            &vl_arr,
+            scale,
+            0,
+        )
+    });
+    let mut rot = Rotation::new(rot_count);
+    let fused_v2 = time_body(warmup, iters, || {
+        let i = rot.next_index();
+        v2_ctxs[i].launch(&plan).expect("v2 launch")
+    });
+
     Row {
         batch,
         ctx,
@@ -566,6 +693,11 @@ fn run_config(
         gather_b_sdpa,
         sliceupd_a,
         sliceupd_b,
+        fused_v1,
+        fused_v2,
+        v2_pages_per_chunk: plan.pages_per_chunk,
+        v2_chunks: plan.num_chunks,
+        v2_merge: plan.needs_merge,
     }
 }
 
@@ -627,10 +759,17 @@ fn main() {
                 fmt_per_call("gatherB_sdpa", row.gather_b_sdpa, row.iters);
                 fmt_per_call("sliceupd_A", row.sliceupd_a, row.iters);
                 fmt_per_call("sliceupd_B", row.sliceupd_b, row.iters);
+                fmt_per_call("fused_v1", row.fused_v1, row.iters);
+                fmt_per_call("fused_v2", row.fused_v2, row.iters);
                 println!(
-                    "  overheadA={:.1}%  overheadB={:.1}%",
+                    "  overheadA={:.1}%  overheadB={:.1}%  v2/v1={:.2}x  v2/gatherA={:.2}x  (v2 plan: ppc={} chunks={} merge={})",
                     row.overhead_a_pct(),
-                    row.overhead_b_pct()
+                    row.overhead_b_pct(),
+                    row.v2_over_v1(),
+                    row.v2_over_gather(),
+                    row.v2_pages_per_chunk,
+                    row.v2_chunks,
+                    row.v2_merge,
                 );
                 println!();
                 rows.push(row);
@@ -641,7 +780,7 @@ fn main() {
     // Aligned human-readable summary table.
     println!("=== summary (per-call microseconds) ===");
     println!(
-        "{:>5} {:>7} {:>7} {:>5} {:>7} | {:>12} {:>12} {:>12} {:>12} {:>12} {:>11} {:>11} | {:>10} {:>10}",
+        "{:>5} {:>7} {:>7} {:>5} {:>7} | {:>12} {:>12} {:>12} {:>12} {:>12} {:>11} {:>11} | {:>10} {:>10} | {:>10} {:>10} {:>8} {:>10}",
         "B",
         "ctx",
         "ctxpad",
@@ -656,10 +795,14 @@ fn main() {
         "sliceupd_B",
         "overheadA%",
         "overheadB%",
+        "fused_v1",
+        "fused_v2",
+        "v2/v1",
+        "v2/gatherA",
     );
     for r in &rows {
         println!(
-            "{:>5} {:>7} {:>7} {:>5} {:>7.2} | {:>12.3} {:>12.3} {:>12.3} {:>12.3} {:>12.3} {:>11.3} {:>11.3} | {:>10.1} {:>10.1}  {} x{}",
+            "{:>5} {:>7} {:>7} {:>5} {:>7.2} | {:>12.3} {:>12.3} {:>12.3} {:>12.3} {:>12.3} {:>11.3} {:>11.3} | {:>10.1} {:>10.1} | {:>10.3} {:>10.3} {:>7.2}x {:>9.2}x  {} x{}",
             r.batch,
             r.ctx,
             r.ctx_pad,
@@ -674,6 +817,10 @@ fn main() {
             r.sliceupd_b_us(),
             r.overhead_a_pct(),
             r.overhead_b_pct(),
+            r.fused_v1_us(),
+            r.fused_v2_us(),
+            r.v2_over_v1(),
+            r.v2_over_gather(),
             r.mode_tag(),
             r.rotation,
         );
@@ -681,15 +828,15 @@ fn main() {
     println!();
 
     // Machine-readable CSV block (one line per config, each prefixed `CSV:`).
-    // `mode` and `rotation` are appended (issue #906), so column-indexed
-    // readers of the historical schema keep working while a recorded result
-    // always states which memory it measured.
+    // Columns are only ever appended, so column-indexed readers of an older
+    // schema keep working: `mode` and `rotation` came with issue #906, and the
+    // fused-kernel columns with issue #898.
     println!(
-        "CSV:batch,ctx,ctx_pad,block,frag_pct,contig_sdpa_us,gatherA_only_us,gatherA_sdpa_us,gatherB_only_us,gatherB_sdpa_us,sliceupd_a_us,sliceupd_b_us,overhead_a_pct,overhead_b_pct,mode,rotation"
+        "CSV:batch,ctx,ctx_pad,block,frag_pct,contig_sdpa_us,gatherA_only_us,gatherA_sdpa_us,gatherB_only_us,gatherB_sdpa_us,sliceupd_a_us,sliceupd_b_us,overhead_a_pct,overhead_b_pct,mode,rotation,fused_v1_us,fused_v2_us,v2_over_v1,v2_over_gather_a,v2_pages_per_chunk,v2_chunks,v2_merge"
     );
     for r in &rows {
         println!(
-            "CSV:{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{}",
+            "CSV:{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{:.3},{:.3},{:.4},{:.4},{},{},{}",
             r.batch,
             r.ctx,
             r.ctx_pad,
@@ -706,6 +853,13 @@ fn main() {
             r.overhead_b_pct(),
             r.mode_tag(),
             r.rotation,
+            r.fused_v1_us(),
+            r.fused_v2_us(),
+            r.v2_over_v1(),
+            r.v2_over_gather(),
+            r.v2_pages_per_chunk,
+            r.v2_chunks,
+            r.v2_merge,
         );
     }
 }
