@@ -72,6 +72,7 @@ impl Batch {
     /// Build a batch with the given per-request written lengths and visible
     /// window starts. `dtype` is the pool dtype (f32 for exact tests, f16 for
     /// the realistic one).
+    #[allow(clippy::too_many_arguments)]
     fn new(
         page_size: usize,
         hq: i32,
@@ -82,12 +83,9 @@ impl Batch {
         pool_dtype: i32,
         seed: u64,
     ) -> Self {
-        let layout = PagedKvLayout::uniform(
-            1,
-            page_size,
-            page_size * hkv as usize * dim as usize * 2,
-        )
-        .unwrap();
+        let layout =
+            PagedKvLayout::uniform(1, page_size, page_size * hkv as usize * dim as usize * 2)
+                .unwrap();
         let mut pool = PagedBlockPool::new(layout);
         let mut rng = Rng::new(seed);
         let mut states = Vec::new();
@@ -206,12 +204,12 @@ impl Batch {
                 for (idx, t) in (start..len).enumerate() {
                     let p = (scores[idx] - m).exp();
                     denom += p;
-                    for i in 0..dim {
-                        acc[i] += p * f64::from(self.v[r][(t * hkv + kv_head) * dim + i]);
+                    for (i, slot) in acc.iter_mut().enumerate() {
+                        *slot += p * f64::from(self.v[r][(t * hkv + kv_head) * dim + i]);
                     }
                 }
-                for i in 0..dim {
-                    out[out_base + i] = (acc[i] / denom) as f32;
+                for (i, value) in acc.iter().enumerate() {
+                    out[out_base + i] = (value / denom) as f32;
                 }
             }
         }
@@ -266,15 +264,7 @@ fn run_with_chunk(batch: &Batch, pages_per_chunk: i32) -> Vec<f32> {
     let q = batch.q_array(dtype::FLOAT32);
     let view = batch.pool.paged_csr_view(&batch.state_refs(), 0).unwrap();
     let (pool_k, pool_v) = batch.pool.single_slab_tensors(0).expect("single-slab pool");
-    let ctx = V2Context::build(
-        &q,
-        pool_k,
-        pool_v,
-        &view,
-        batch.geometry(),
-        batch.scale(),
-    )
-    .unwrap();
+    let ctx = V2Context::build(&q, pool_k, pool_v, &view, batch.geometry(), batch.scale()).unwrap();
     let plan = PagedDecodePlan::with_chunk_size(
         batch.geometry(),
         &view.page_counts(),
@@ -317,7 +307,16 @@ fn many_chunks_merge_to_the_same_answer() {
 
 #[test]
 fn chunk_size_does_not_change_the_answer() {
-    let batch = Batch::new(32, 8, 2, 64, &[200, 97, 128], &[0, 0, 0], dtype::FLOAT32, 0xbeef);
+    let batch = Batch::new(
+        32,
+        8,
+        2,
+        64,
+        &[200, 97, 128],
+        &[0, 0, 0],
+        dtype::FLOAT32,
+        0xbeef,
+    );
     let want = batch.reference();
     for ppc in [1, 2, 3, 4, 7, 16, 64] {
         let got = run_with_chunk(&batch, ppc);
@@ -344,7 +343,10 @@ fn a_trimmed_window_attends_only_to_visible_tokens() {
     let batch = Batch::new(16, 4, 2, 64, &[100, 64], &[37, 16], dtype::FLOAT32, 0x77);
     for ppc in [1, 2, 8] {
         let err = max_rel_error(&run_with_chunk(&batch, ppc), &batch.reference());
-        assert!(err < 2e-3, "trimmed pages_per_chunk {ppc} relative error {err}");
+        assert!(
+            err < 2e-3,
+            "trimmed pages_per_chunk {ppc} relative error {err}"
+        );
     }
 }
 
@@ -352,18 +354,33 @@ fn a_trimmed_window_attends_only_to_visible_tokens() {
 fn an_empty_request_yields_zeros_without_poisoning_its_neighbours() {
     // Request 1 is fully trimmed: its chunk produces an all-empty partial
     // (lse = -inf), which must merge to zeros rather than NaN.
-    let batch = Batch::new(16, 4, 2, 64, &[48, 32, 40], &[0, 32, 5], dtype::FLOAT32, 0x99);
+    let batch = Batch::new(
+        16,
+        4,
+        2,
+        64,
+        &[48, 32, 40],
+        &[0, 32, 5],
+        dtype::FLOAT32,
+        0x99,
+    );
     let want = batch.reference();
     for ppc in [1, 4] {
         let got = run_with_chunk(&batch, ppc);
-        assert!(got.iter().all(|v| v.is_finite()), "output has non-finite values");
+        assert!(
+            got.iter().all(|v| v.is_finite()),
+            "output has non-finite values"
+        );
         let hq_d = (batch.hq * batch.dim) as usize;
         assert!(
             got[hq_d..2 * hq_d].iter().all(|&v| v == 0.0),
             "the empty request should read back as zeros"
         );
         let err = max_rel_error(&got, &want);
-        assert!(err < 2e-3, "empty-request pages_per_chunk {ppc} relative error {err}");
+        assert!(
+            err < 2e-3,
+            "empty-request pages_per_chunk {ppc} relative error {err}"
+        );
     }
 }
 
@@ -391,7 +408,10 @@ fn f16_pools_match_the_gather_reference() {
             .expect("v2 serves this shape"),
     );
     let err = max_rel_error(&got, &want);
-    assert!(err <= 2e-2, "f16 relative error {err} vs the gather reference");
+    assert!(
+        err <= 2e-2,
+        "f16 relative error {err} vs the gather reference"
+    );
 }
 
 #[test]
@@ -435,7 +455,9 @@ fn merge_kernel_matches_the_closed_form() {
         let begin = indptr[o] as usize;
         let end = indptr[o + 1] as usize;
         for h in 0..heads {
-            let finite: Vec<usize> = (begin..end).filter(|&i| lse[i * heads + h].is_finite()).collect();
+            let finite: Vec<usize> = (begin..end)
+                .filter(|&i| lse[i * heads + h].is_finite())
+                .collect();
             let m = finite
                 .iter()
                 .map(|&i| f64::from(lse[i * heads + h]))
@@ -485,7 +507,11 @@ fn merge_kernel_returns_zeros_for_an_all_empty_row() {
     let mut out_lse = UniquePtr::null();
     ffi::paged_attention_merge_states(&v_arr, &lse_arr, &indptr_arr, &mut out_v, &mut out_lse);
     assert!(to_vec_f32(&out_v).iter().all(|&x| x == 0.0));
-    assert!(to_vec_f32(&out_lse).iter().all(|x| x.is_infinite() && *x < 0.0));
+    assert!(
+        to_vec_f32(&out_lse)
+            .iter()
+            .all(|x| x.is_infinite() && *x < 0.0)
+    );
 }
 
 #[test]

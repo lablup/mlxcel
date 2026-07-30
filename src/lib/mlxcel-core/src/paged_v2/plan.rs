@@ -262,7 +262,9 @@ impl PagedDecodePlan {
     /// f32 elements of the partial-V workspace the run step will allocate.
     #[must_use]
     pub fn workspace_partial_v_elems(&self) -> usize {
-        self.num_chunks * self.geometry.q_heads.max(0) as usize * self.geometry.head_dim.max(0) as usize
+        self.num_chunks
+            * self.geometry.q_heads.max(0) as usize
+            * self.geometry.head_dim.max(0) as usize
     }
 
     /// f32 elements of the LSE workspace.
@@ -395,7 +397,8 @@ pub fn search_pages_per_chunk(
     let lo_bound = min_pages_per_chunk(page_counts);
     let hi_bound = max_pages_per_chunk(page_counts).max(lo_bound);
     let per_chunk = ctas_per_chunk.max(1);
-    let reaches = |ppc: i32| chunks_for_batch(page_counts, ppc).saturating_mul(per_chunk) >= target_ctas;
+    let reaches =
+        |ppc: i32| chunks_for_batch(page_counts, ppc).saturating_mul(per_chunk) >= target_ctas;
 
     if !reaches(lo_bound) {
         // Not even the finest feasible split saturates the device; take it and

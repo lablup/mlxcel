@@ -178,6 +178,16 @@ Retire `paged_decode_attention_pooled` and `select_pooled_paged_dispatch` (with 
 
 #634 ports the fused kernel (`src/lib/mlx-cpp/turbo/paged_attention.cpp`) from Metal-only `mx.fast.metal_kernel` to a `mx.fast.cuda_kernel` body with the same split-K flash-decoding scheme and grid geometry; the reduction changes from `simd_sum` to a `__shfl_xor_sync` butterfly all-reduce. The Metal-measured batch>=4/ctx<=4096 gate above does not carry over: on CUDA the fused kernel's win grows with context rather than losing it, so `select_pooled_paged_dispatch` dispatches native for any single-slab layer (any batch, any context) and still declines multi-slab layers per the #235 constraint. The entry point stays the library-only surface this ADR retired above; #634 does not reopen server wiring. See `docs/benchmark_results/paged-attention-cuda-port-gb10-2026-07-10.md` for the GB10 kernel A/B and parity numbers.
 
+## Addendum (2026-07-31): paged decode v2 (#898)
+
+Both the "what reopens this" bullets above are about the same root cause: the v1 kernel splits KV *inside* one threadgroup, so one CTA serves one `(batch, query head)` pair no matter how long the context is. Parallelism does not grow with context, which is why the win island is confined to short contexts and why the single-slab constraint bites.
+
+Issue #898 lands "paged decode v2" as a library capability that attacks the first cause. KV is split across CTAs instead: each request's page range is cut into chunks of `pages_per_chunk` pages, one CTA per `(chunk, kv head, q-head group)` produces an online-softmax partial, and a generic variable-length merge kernel combines the partials. Parallelism becomes `num_chunks * kv_heads * q_groups` and grows with context. The block table becomes a CSR view (`indices` / `indptr` / `last_page_len`, plus a `first_page_offset` extension for sliding-window sequences that start mid-page), so there is no gather pre-pass and one launch covers the whole batch. A host-side plan binary-searches the chunk size against an occupancy-derived CTA target and caches the flat index arrays across decode steps.
+
+Scope of #898: library only. `MLXCEL_PAGED_ATTENTION_V2=1` selects it inside `PagedBlockPool::paged_decode_fused`; with the variable unset nothing changes and v1 remains the only path any caller reaches. The single-slab constraint from #235 is unchanged, so v2 does not by itself reopen the wire-in question, and the correctness harness (`examples/paged_decode_v2_correctness.rs`) drives the kernels against a hand-built page table for that reason. Production dispatch is issue #899, the three-way performance comparison is in `examples/page_gather_microbench.rs` (gather vs fused v1 vs fused v2), and the merge kernel is reused unchanged by the cascade-attention issue #903.
+
+Correctness on an M1 Ultra: 68 configurations against the gather-then-SDPA reference across head dims 64/128, GQA 1/4/8, page sizes 16/32/64, contexts 512 to 32768, and batches 1/4/8, worst relative deviation 5.2e-4 against a 2e-2 tolerance.
+
 ## References
 
 - Epic #116, unified KV cache.

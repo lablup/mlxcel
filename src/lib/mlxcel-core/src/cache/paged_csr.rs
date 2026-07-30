@@ -175,7 +175,9 @@ impl PagedCsrView {
         for r in 0..b {
             let pages = i64::from(self.indptr[r + 1] - self.indptr[r]);
             if pages < 0 {
-                return Err(format!("PagedCsrView: request {r} has a negative page span"));
+                return Err(format!(
+                    "PagedCsrView: request {r} has a negative page span"
+                ));
             }
             let seq_len = i64::from(self.seq_lens[r]);
             let fpo = i64::from(self.first_page_offset[r]);

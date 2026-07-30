@@ -139,7 +139,10 @@ impl<'a> V2Context<'a> {
 ///
 /// `q` is `[B, Hq, 1, D]` and the pool is `[num_blocks, page_size, Hkv, D]`,
 /// the layout-A shapes v1 already uses.
-pub fn geometry_from_shapes(q: &MlxArray, k_pool: &MlxArray) -> Result<(usize, PagedDecodeGeometry), String> {
+pub fn geometry_from_shapes(
+    q: &MlxArray,
+    k_pool: &MlxArray,
+) -> Result<(usize, PagedDecodeGeometry), String> {
     let q_shape = ffi::array_shape(q);
     let pool_shape = ffi::array_shape(k_pool);
     if q_shape.len() != 4 || pool_shape.len() != 4 {

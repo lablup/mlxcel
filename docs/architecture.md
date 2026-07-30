@@ -126,7 +126,9 @@ Release builds use `panic = "unwind"` (issue #375), so the deliberate audio work
   called through the C++ bridge. Each one carries a Metal JIT source and, where
   ported, a CUDA counterpart selected at runtime by
   `mlx::core::metal::is_available()`: TurboQuant Sparse-V and delegated SDPA,
-  paged-attention decode, and Gumbel-max sampling.
+  paged-attention decode (v1, plus the v2 cross-CTA split-KV and merge kernels
+  driven from `src/lib/mlxcel-core/src/paged_v2/` and selected by
+  `MLXCEL_PAGED_ATTENTION_V2=1`), and Gumbel-max sampling.
 - CUDA kernel behavior is mostly inherited from MLX; `mlxcel` passes the CUDA
   architecture list through `MLX_CUDA_ARCHITECTURES` at build time.
 

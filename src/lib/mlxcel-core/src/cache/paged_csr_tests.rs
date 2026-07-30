@@ -197,10 +197,8 @@ fn len_outrunning_the_block_table_is_rejected() {
 #[test]
 fn an_unwritten_block_is_rejected_rather_than_read() {
     let a = layer(&[0, 1], 8, 0);
-    let err = build_paged_csr_view(4, &[&a], |id| {
-        if id.as_u64() == 1 { None } else { Some(0) }
-    })
-    .unwrap_err();
+    let err = build_paged_csr_view(4, &[&a], |id| if id.as_u64() == 1 { None } else { Some(0) })
+        .unwrap_err();
     assert!(err.contains("no pool row"), "unexpected error: {err}");
 }
 

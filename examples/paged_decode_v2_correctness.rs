@@ -351,20 +351,15 @@ fn run_config(
         PagedDecodePlan::heuristic(geometry, &page_counts, target)
     };
     plan.validate().expect("plan is well formed");
-    let ctx_arrays = mlxcel_core::paged_v2::V2Context::build(
-        &q_f32, &pool_k, &pool_v, &view, geometry, scale,
-    )
-    .expect("v2 context builds");
+    let ctx_arrays =
+        mlxcel_core::paged_v2::V2Context::build(&q_f32, &pool_k, &pool_v, &view, geometry, scale)
+            .expect("v2 context builds");
     let got = to_vec_f32(&ctx_arrays.launch(&plan).expect("v2 launch"));
 
     // Reference: gather-then-SDPA, one request at a time.
     let mut want: Vec<f32> = Vec::with_capacity(batch * hq as usize * head_dim);
     for r in 0..batch {
-        let q_row = slice(
-            &q_f16,
-            &[r as i32, 0, 0, 0],
-            &[r as i32 + 1, hq, 1, dim],
-        );
+        let q_row = slice(&q_f16, &[r as i32, 0, 0, 0], &[r as i32 + 1, hq, 1, dim]);
         let begin = indptr[r] as usize;
         let end = indptr[r + 1] as usize;
         let out = reference_for_request(

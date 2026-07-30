@@ -301,7 +301,10 @@ mod tests {
         assert_eq!(c.first(), Some(&1));
         assert!(c.contains(&24), "the heuristic must be measurable: {c:?}");
         assert!(c.contains(&64), "the ceiling must be measurable: {c:?}");
-        assert!(c.windows(2).all(|w| w[0] < w[1]), "sorted and deduped: {c:?}");
+        assert!(
+            c.windows(2).all(|w| w[0] < w[1]),
+            "sorted and deduped: {c:?}"
+        );
     }
 
     #[test]

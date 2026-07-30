@@ -85,9 +85,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use mlxcel_core::cache::PagedCsrView;
-use mlxcel_core::paged_v2::{
-    PagedDecodeGeometry, PagedDecodePlan, V2Context, device_target_ctas,
-};
+use mlxcel_core::paged_v2::{PagedDecodeGeometry, PagedDecodePlan, V2Context, device_target_ctas};
 use mlxcel_core::{
     MlxArray, UniquePtr, astype, bench_rotation::Rotation, eval, fast_scaled_dot_product_attention,
     from_slice_i32, paged_attention_decode, reshape, slice_update, synchronize_default, take,

@@ -128,8 +128,14 @@ fn matches_tracks_page_growth_across_decode_steps() {
     let counts = vec![8usize, 8];
     let p = plan(&counts, 4);
     assert!(p.matches(&geometry(), &[8, 8]));
-    assert!(p.matches(&geometry(), &[8, 7]), "same chunk count, still valid");
-    assert!(!p.matches(&geometry(), &[9, 8]), "9 pages needs a third chunk");
+    assert!(
+        p.matches(&geometry(), &[8, 7]),
+        "same chunk count, still valid"
+    );
+    assert!(
+        !p.matches(&geometry(), &[9, 8]),
+        "9 pages needs a third chunk"
+    );
     assert!(!p.matches(&geometry(), &[8]), "batch composition changed");
     let mut other = geometry();
     other.head_dim = 64;
@@ -315,7 +321,7 @@ fn num_warps_stays_inside_the_threadgroup_budget() {
                 page_size: 32,
             };
             let warps = ffi::paged_attention_v2_num_warps(head_dim, q_per_cta);
-            assert!(warps >= 1 && warps <= 8, "warps {warps} out of range");
+            assert!((1..=8).contains(&warps), "warps {warps} out of range");
             assert!(
                 (warps as u32).is_power_of_two(),
                 "warps {warps} is not a power of two"
