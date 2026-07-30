@@ -447,7 +447,7 @@ fn gumbel_sample_is_reproducible_for_a_fixed_seed() {
     // A stream, not one draw: successive calls consume successive keys, so this
     // also pins that the key sequence advances identically after reseeding.
     let run = || {
-        random_seed(0x5EED_900);
+        random_seed(0x5EED_0900);
         let mut stream = Vec::new();
         for _ in 0..8 {
             stream.extend(token_ids(&gumbel_max_sample(&batched, 1.0)));

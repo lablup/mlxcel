@@ -183,11 +183,11 @@ fn main() {
 
             // Reseed before each arm so both consume the same RNG stream
             // position; the draw itself is part of what is being measured.
-            random_seed(0x900_BEEF);
+            random_seed(0x0900_BEEF);
             let baseline = time_arm(&logits, &opts, |x| {
                 fused_sample_categorical(x, TEMPERATURE, 0, 1.0, 0.0)
             });
-            random_seed(0x900_BEEF);
+            random_seed(0x0900_BEEF);
             let gumbel = time_arm(&logits, &opts, |x| gumbel_max_sample(x, TEMPERATURE));
 
             let baseline_us = baseline.as_secs_f64() * 1e6;

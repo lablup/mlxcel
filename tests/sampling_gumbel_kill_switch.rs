@@ -72,9 +72,9 @@ fn falsy_env_restores_the_categorical_sampling_path() {
 
     // With the kill switch on, the no-filter path must be the pre-#900
     // `random::categorical` graph, bit-for-bit.
-    random_seed(0x900_0FF);
+    random_seed(0x0900_00FF);
     let through_fused = token_ids(&fused_sample(&batched, 1.0, 0, 1.0, 0.0));
-    random_seed(0x900_0FF);
+    random_seed(0x0900_00FF);
     let categorical = token_ids(&fused_sample_categorical(&batched, 1.0, 0, 1.0, 0.0));
     assert_eq!(
         through_fused, categorical,
@@ -83,7 +83,7 @@ fn falsy_env_restores_the_categorical_sampling_path() {
 
     // ... and it must NOT be the kernel, which the same seed would reproduce
     // exactly if the gate were inert.
-    random_seed(0x900_0FF);
+    random_seed(0x0900_00FF);
     let gumbel = token_ids(&gumbel_max_sample(&batched, 1.0));
     assert_ne!(
         through_fused, gumbel,
