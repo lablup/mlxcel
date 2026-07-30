@@ -425,6 +425,20 @@ impl StructuredOutputConstraint {
         Ok(())
     }
 
+    /// Consume one sampled token and report whether it completes the grammar.
+    ///
+    /// Scheduler call sites use this combined operation so a terminal matcher
+    /// becomes a normal stop immediately after its schema-closing token. This
+    /// avoids attempting another decode step, where a stopped matcher has no
+    /// mask to apply.
+    pub fn consume_token_and_check_stopped(
+        &mut self,
+        token: i32,
+    ) -> Result<bool, StructuredOutputError> {
+        self.consume_token(token)?;
+        Ok(self.is_stopped())
+    }
+
     /// Returns `true` when the matcher has reached a terminal accepting state.
     /// Once true, subsequent tokens would either be EOS or cause an error.
     pub fn is_stopped(&self) -> bool {
@@ -745,9 +759,8 @@ pub fn apply_structured_mask_to_logits(
             // silently emitting an arbitrary token.
             return Err(StructuredOutputError::Matcher(
                 "structured-output matcher returned an empty mask: \
-                 no token can extend the partial output without violating \
-                 the schema. The model is stuck — this is usually a sign that \
-                 the schema is too restrictive for the supplied prompt."
+                 no matcher-allowed token is reachable in the model's logits \
+                 vocabulary for the current constrained-decoding state."
                     .to_string(),
             ));
         }

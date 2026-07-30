@@ -2400,19 +2400,23 @@ impl BatchScheduler {
 
     /// advance the matcher state by the just-sampled token.
     ///
-    /// Returns `Ok(())` on success, `Err(msg)` when `consume_token` fails or
-    /// the matcher is in an error state. The caller transitions the sequence
-    /// to `Finished(Error(msg))` on error.
+    /// Returns `Ok(true)` when the consumed token completes the structured
+    /// output, `Ok(false)` when decoding must continue, and `Err(msg)` when
+    /// `consume_token` fails or the matcher is in an error state. The caller
+    /// transitions the sequence to `Finished(Stop)` on completion or
+    /// `Finished(Error(msg))` on error.
     fn consume_structured_token(
         constraint: &std::sync::Arc<
             std::sync::Mutex<crate::server::structured::StructuredOutputConstraint>,
         >,
         token: i32,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let mut guard = constraint
             .lock()
             .map_err(|e| format!("structured-output constraint poisoned: {e}"))?;
-        guard.consume_token(token).map_err(|e| e.to_string())
+        guard
+            .consume_token_and_check_stopped(token)
+            .map_err(|e| e.to_string())
     }
 
     /// send a clean SSE error event and transition the sequence
@@ -5542,22 +5546,27 @@ impl BatchScheduler {
         // If consume_token errors, transition the sequence to Finished(Error)
         // and surface a clean SSE error event rather than leaking
         // non-conforming output.
-        if let Some(constraint) = seq.structured.clone()
-            && let Err(msg) = Self::consume_structured_token(&constraint, sampled_first_token)
-        {
-            let _ = seq
-                .response_tx
-                .send(GenerateEvent::Error(format!("structured output: {msg}")));
-            if let Err(err) = seq
-                .state
-                .transition_to(SequenceState::Finished(FinishReason::Error(msg)))
-            {
-                tracing::error!("State transition error: {err}");
+        let structured_stopped = if let Some(constraint) = seq.structured.clone() {
+            match Self::consume_structured_token(&constraint, sampled_first_token) {
+                Ok(stopped) => stopped,
+                Err(msg) => {
+                    let _ = seq
+                        .response_tx
+                        .send(GenerateEvent::Error(format!("structured output: {msg}")));
+                    if let Err(err) = seq
+                        .state
+                        .transition_to(SequenceState::Finished(FinishReason::Error(msg)))
+                    {
+                        tracing::error!("State transition error: {err}");
+                    }
+                    self.prompt_cache_seq_ctx.remove(&seq.seq_id);
+                    self.release_sequence_caches(seq.seq_id);
+                    return;
+                }
             }
-            self.prompt_cache_seq_ctx.remove(&seq.seq_id);
-            self.release_sequence_caches(seq.seq_id);
-            return;
-        }
+        } else {
+            false
+        };
 
         // thinking-budget override. Qwen3 chat templates prime
         // `<think>\n`, so the first prefill-completion token is already
@@ -5637,10 +5646,17 @@ impl BatchScheduler {
             let _ = seq.response_tx.send(event);
         }
 
-        if seq.generated_tokens.len() >= seq.max_tokens {
+        let prefill_finish_reason = if structured_stopped {
+            Some(FinishReason::Stop)
+        } else if seq.generated_tokens.len() >= seq.max_tokens {
+            Some(FinishReason::Length)
+        } else {
+            None
+        };
+        if let Some(finish_reason) = prefill_finish_reason {
             if let Err(err) = seq
                 .state
-                .transition_to(SequenceState::Finished(FinishReason::Length))
+                .transition_to(SequenceState::Finished(finish_reason))
             {
                 tracing::error!("State transition error: {err}");
             }
@@ -5662,7 +5678,7 @@ impl BatchScheduler {
                 prompt_tokens = seq.prompt_tokens.len(),
                 cached_tokens = cached,
                 generation_time_ms = result.generation_time_ms,
-                "prompt-cache: request completed (max-tokens): \
+                "prompt-cache: request completed during prefill: \
                  cached={}/{} prompt tokens, total {}ms",
                 cached,
                 seq.prompt_tokens.len(),
@@ -6539,16 +6555,21 @@ impl BatchScheduler {
             // If `consume_token` fails (matcher hit an error state),
             // transition the sequence to `Finished(Error)` and skip
             // emission so non-conforming output never reaches the client.
-            if let Some(constraint) = constraint_clone
-                && let Err(msg) = Self::consume_structured_token(&constraint, sampled_token)
-            {
-                Self::abort_sequence_with_error(
-                    self.active_batch.get_mut(seq_id),
-                    "structured output",
-                    &msg,
-                );
-                continue;
-            }
+            let structured_stopped = if let Some(constraint) = constraint_clone {
+                match Self::consume_structured_token(&constraint, sampled_token) {
+                    Ok(stopped) => stopped,
+                    Err(msg) => {
+                        Self::abort_sequence_with_error(
+                            self.active_batch.get_mut(seq_id),
+                            "structured output",
+                            &msg,
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                false
+            };
 
             let seq = match self.active_batch.get_mut(seq_id) {
                 Some(s) => s,
@@ -6580,7 +6601,16 @@ impl BatchScheduler {
                 let _ = seq.response_tx.send(event);
             }
 
-            if seq.generated_tokens.len() >= seq.max_tokens
+            if structured_stopped
+                && let Err(err) = seq
+                    .state
+                    .transition_to(SequenceState::Finished(FinishReason::Stop))
+            {
+                tracing::error!("State transition error: {err}");
+            }
+
+            if !seq.state.is_finished()
+                && seq.generated_tokens.len() >= seq.max_tokens
                 && let Err(err) = seq
                     .state
                     .transition_to(SequenceState::Finished(FinishReason::Length))
@@ -6884,16 +6914,21 @@ impl BatchScheduler {
         // advance the matcher state with the *pre-override*
         // sampled token. See the parallel comment in
         // `execute_batched_decode` for why this must not be `token_val`.
-        if let Some(constraint) = constraint_clone
-            && let Err(msg) = Self::consume_structured_token(&constraint, sampled_token)
-        {
-            Self::abort_sequence_with_error(
-                self.active_batch.get_mut(seq_id),
-                "structured output",
-                &msg,
-            );
-            return;
-        }
+        let structured_stopped = if let Some(constraint) = constraint_clone {
+            match Self::consume_structured_token(&constraint, sampled_token) {
+                Ok(stopped) => stopped,
+                Err(msg) => {
+                    Self::abort_sequence_with_error(
+                        self.active_batch.get_mut(seq_id),
+                        "structured output",
+                        &msg,
+                    );
+                    return;
+                }
+            }
+        } else {
+            false
+        };
 
         let seq = match self.active_batch.get_mut(seq_id) {
             Some(s) => s,
@@ -6925,7 +6960,16 @@ impl BatchScheduler {
             let _ = seq.response_tx.send(event);
         }
 
-        if seq.generated_tokens.len() >= seq.max_tokens
+        if structured_stopped
+            && let Err(err) = seq
+                .state
+                .transition_to(SequenceState::Finished(FinishReason::Stop))
+        {
+            tracing::error!("State transition error: {err}");
+        }
+
+        if !seq.state.is_finished()
+            && seq.generated_tokens.len() >= seq.max_tokens
             && let Err(err) = seq
                 .state
                 .transition_to(SequenceState::Finished(FinishReason::Length))

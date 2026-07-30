@@ -20,11 +20,51 @@
 //! compilation or the per-step `compute_mask` / `consume_token` plumbing
 //! that the scheduler relies on for constrained decoding.
 //!
-//! End-to-end tests against a real model live in
-//! `tests/structured_outputs_real_model.rs` (gated behind a fixture path
-//! environment variable so CI can opt in only when a model is available).
+//! Real-model checks in this file are ignored unless their local fixtures are
+//! available; one of them exercises the complete `/v1/chat/completions` path.
 
+mod common;
+
+use std::net::TcpListener;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+use common::{repo_binary_path, repo_model_dir};
 use serde_json::json;
+
+fn reserve_http_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let port = listener.local_addr().expect("local addr").port();
+    drop(listener);
+    port
+}
+
+async fn wait_for_server_health(client: &reqwest::Client, base_url: &str) {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        if let Ok(response) = client.get(format!("{base_url}/health")).send().await
+            && response.status().is_success()
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    panic!("mlxcel-server did not become healthy at {base_url}");
+}
+
+fn spawn_test_server(args: &[&str]) -> Child {
+    Command::new(repo_binary_path("mlxcel-server"))
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn mlxcel-server")
+}
+
+fn stop_test_server(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
 
 /// Build a byte-level HuggingFace tokenizer from a precomputed JSON
 /// representation. Hermetic (no external file dependency) and small enough
@@ -203,6 +243,62 @@ fn matcher_consume_then_recompute_succeeds() {
         .expect("post-consume mask must be available");
 }
 
+#[test]
+fn long_uniform_integer_array_reaches_a_clean_terminal_state() {
+    let hf = build_byte_level_tokenizer();
+    let mlxcel = mlxcel_tokenizer_from_hf(hf);
+    let constraint = mlxcel::server::structured::build_json_schema_constraint(
+        &mlxcel,
+        json!({
+            "type": "object",
+            "properties": {
+                "values": {
+                    "type": "array",
+                    "items": {"type": "integer"}
+                }
+            },
+            "required": ["values"],
+            "additionalProperties": false
+        }),
+    )
+    .expect("unbounded integer-array schema compiles");
+
+    let output = serde_json::to_string(&json!({"values": vec![7; 40]}))
+        .expect("uniform-array fixture serializes");
+    let mut guard = constraint.lock().expect("uncontended");
+    let vocab_size = guard.vocab_size();
+    let logits = mlxcel_core::from_slice_f32(&vec![0.0f32; vocab_size], &[1, vocab_size as i32]);
+
+    for (step, token) in output.bytes().enumerate() {
+        assert!(
+            !guard.is_stopped(),
+            "matcher stopped before byte {step} of the schema-conforming output"
+        );
+        let masked = mlxcel::server::structured::apply_structured_mask_to_logits(
+            &mut guard, &logits, vocab_size,
+        )
+        .unwrap_or_else(|err| panic!("mask failed at byte {step} ({token:#04x}): {err}"));
+        let host = read_f32_array_to_vec(&masked);
+        assert!(
+            host[token as usize].is_finite(),
+            "schema-conforming byte {step} ({token:#04x}) was masked out"
+        );
+        let stopped = guard
+            .consume_token_and_check_stopped(token as i32)
+            .unwrap_or_else(|err| panic!("consume failed at byte {step} ({token:#04x}): {err}"));
+        assert_eq!(
+            stopped,
+            step + 1 == output.len(),
+            "completion signal changed at byte {step}"
+        );
+    }
+
+    assert!(
+        guard.is_stopped(),
+        "the matcher must report completion after the closing object token so the scheduler can finish without applying another empty mask"
+    );
+}
+
 /// End-to-end test against a real local model. Constrains generation to a
 /// simple JSON schema and verifies the resulting output parses back as JSON
 /// matching the schema's required keys.
@@ -290,6 +386,97 @@ fn end_to_end_constrained_chat_completion_emits_schema_conforming_json() {
     assert!(
         ["forest", "desert", "ocean", "urban", "unknown"].contains(&habitat),
         "habitat must match enum, got {habitat}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires local Gemma 4 weights and the mlxcel-server binary"]
+async fn chat_completions_long_uniform_array_succeeds_end_to_end() {
+    let model_dir = repo_model_dir("gemma-4-12b-it-4bit");
+    let binary = repo_binary_path("mlxcel-server");
+    if !model_dir.exists() || !binary.exists() {
+        eprintln!(
+            "skipping: model or server binary missing (model={}, binary={})",
+            model_dir.display(),
+            binary.display()
+        );
+        return;
+    }
+
+    let port = reserve_http_port();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let port_arg = port.to_string();
+    let model_arg = model_dir.to_string_lossy().to_string();
+    let mut child = spawn_test_server(&[
+        "--model",
+        &model_arg,
+        "--alias",
+        "issue-978",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &port_arg,
+        "--no-warmup",
+    ]);
+
+    let client = reqwest::Client::new();
+    wait_for_server_health(&client, &base_url).await;
+    let response = client
+        .post(format!("{base_url}/v1/chat/completions"))
+        .json(&json!({
+            "model": "issue-978",
+            "messages": [{
+                "role": "user",
+                "content": "Return the values array containing the number 7 repeated 40 times."
+            }],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "vals",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "values": {
+                                "type": "array",
+                                "items": {"type": "integer"}
+                            }
+                        },
+                        "required": ["values"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "temperature": 0,
+            "seed": 42,
+            "max_tokens": 400,
+            "max_pattern_size": 0,
+            "stream": false
+        }))
+        .send()
+        .await
+        .expect("send structured chat request");
+    let status = response.status();
+    let body = response.text().await.expect("read chat response");
+    stop_test_server(&mut child);
+
+    assert!(
+        status.is_success(),
+        "chat request failed ({status}): {body}"
+    );
+    let envelope: serde_json::Value =
+        serde_json::from_str(&body).expect("chat response is valid JSON");
+    let content = envelope["choices"][0]["message"]["content"]
+        .as_str()
+        .expect("chat response has assistant content");
+    let generated: serde_json::Value =
+        serde_json::from_str(content).expect("assistant content is valid JSON");
+    let values = generated["values"]
+        .as_array()
+        .expect("assistant content has a values array");
+    assert_eq!(values.len(), 40, "assistant returned: {content}");
+    assert!(
+        values.iter().all(|value| value.as_i64() == Some(7)),
+        "assistant returned: {content}"
     );
 }
 
