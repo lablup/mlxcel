@@ -78,6 +78,9 @@
 pub mod batch_quant;
 mod detach;
 mod paged;
+/// CSR page-table view of a decode batch, consumed by the paged decode v2
+/// kernels (issue #898).
+pub mod paged_csr;
 mod paged_detach;
 #[cfg(test)]
 #[path = "cache/paged_pool_tests.rs"]
@@ -103,6 +106,7 @@ pub use paged::{
     GatheredKv, PagedBlockId, PagedBlockPool, PagedCacheStats, PagedKvLayout, PagedLayerState,
     PagedSequenceState,
 };
+pub use paged_csr::{PagedCsrView, build_paged_csr_view};
 pub use paged_detach::DetachedPagedCacheSet;
 pub use ring::RingSlidingKVCache;
 

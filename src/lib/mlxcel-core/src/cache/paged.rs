@@ -1572,6 +1572,38 @@ impl PagedBlockPool {
         )))
     }
 
+    /// CSR page-table view of `states` for one layer (issue #898).
+    ///
+    /// This is the metadata the v2 decode kernels consume in place of v1's
+    /// `rows` / `row_offsets` / `logical_starts` / `visible_lens` quadruple; see
+    /// [`crate::cache::paged_csr`] for the layout and why it carries a
+    /// `first_page_offset`. Only pages holding visible tokens are emitted, and
+    /// shared (refcounted) blocks resolve to the same physical row in every
+    /// request that references them.
+    ///
+    /// Pure metadata: no MLX arrays are built here, so a caller may cache the
+    /// view across decode steps for as long as the batch composition and the
+    /// block tables are unchanged.
+    pub fn paged_csr_view(
+        &self,
+        states: &[&PagedSequenceState],
+        layer_idx: usize,
+    ) -> Result<crate::cache::paged_csr::PagedCsrView, String> {
+        let mut layers: Vec<&PagedLayerState> = Vec::with_capacity(states.len());
+        for state in states {
+            layers.push(state.layer(layer_idx).ok_or_else(|| {
+                format!(
+                    "PagedBlockPool::paged_csr_view: layer {layer_idx} out of range for {} layers",
+                    state.layers.len()
+                )
+            })?);
+        }
+        let rows = self.block_rows.get(layer_idx);
+        crate::cache::paged_csr::build_paged_csr_view(self.layout.block_size, &layers, |block_id| {
+            rows.and_then(|map| map.get(&block_id).copied())
+        })
+    }
+
     /// Fused paged-attention decode over the pool via the native Metal kernel
     /// (epic #116 Phase 6, #123).
     ///
