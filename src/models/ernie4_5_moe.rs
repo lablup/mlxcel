@@ -21,6 +21,7 @@
 //! - RMSNorm layer normalization
 //! - Softmax routing for expert selection
 
+use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
@@ -838,6 +839,13 @@ impl SwitchLinear {
         let weight = get_weight_copy(weights, &format!("{}.weight", prefix))?;
         let scales_key = format!("{}.scales", prefix);
         if weights.contains_key(&scales_key) {
+            let (group_size, bits) = (args.group_size(), args.bits());
+            // Bound the declared pair here, where it is stored: this type never
+            // reaches `reconcile_quantization_layout` and hands the stored pair
+            // to `gather_qmm` (issue #958). The VLM sibling reaches the same
+            // enum through its own loader, which carries its own copy of this
+            // bound because it never calls this constructor.
+            validate_expert_quantization_params(prefix, group_size, bits)?;
             let scales = mlxcel_core::copy(weights.get(&scales_key).unwrap());
             let biases = get_weight_copy(weights, &format!("{}.biases", prefix))?;
             let shape = mlxcel_core::array_shape(&weight);
@@ -846,8 +854,8 @@ impl SwitchLinear {
                 weight,
                 scales,
                 biases,
-                group_size: args.group_size(),
-                bits: args.bits(),
+                group_size,
+                bits,
                 num_experts,
             })
         } else {

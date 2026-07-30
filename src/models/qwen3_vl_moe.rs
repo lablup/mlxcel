@@ -28,6 +28,7 @@
 //! Reference: https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen3_vl_moe/language.py
 
 use crate::models::qwen_mrope_state::MRopeState;
+use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::layers::{FusedQKVLinear, KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
@@ -662,6 +663,12 @@ fn load_switch_linear(
     let weight = get_weight_copy(weights, &format!("{}.weight", prefix))?;
     let scales_key = format!("{}.scales", prefix);
     if weights.contains_key(&scales_key) {
+        // This builds `qwen3_moe::SwitchLinear::Quantized` as a bare struct
+        // literal rather than through `qwen3_moe::SwitchLinear::from_weights`,
+        // so the bound that loader carries does not apply here (issue #958).
+        // The pair also arrives from `Qwen3VLMoeConfig`, whose accessors fall
+        // back to 0 rather than 64/4 when no `quantization` block was inherited.
+        validate_expert_quantization_params(prefix, group_size, bits)?;
         let shape = mlxcel_core::array_shape(&weight);
         let num_experts = shape[0] as usize;
         let scales = mlxcel_core::copy(weights.get(&scales_key).unwrap());

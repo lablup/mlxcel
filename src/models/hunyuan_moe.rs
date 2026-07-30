@@ -21,6 +21,7 @@
 //! - Per-layer moe_intermediate_size and moe_topk
 //! - Cross-Layer Attention (CLA) support (optional KV sharing)
 
+use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
@@ -284,6 +285,11 @@ impl SwitchLinear {
         let weight = get_weight_copy(weights, &format!("{}.weight", prefix))?;
         let scales_key = format!("{}.scales", prefix);
         if weights.contains_key(&scales_key) {
+            // Bound the declared pair here, where it is stored: this
+            // family-local expert type never reaches
+            // `reconcile_quantization_layout` and hands the stored pair to
+            // `gather_qmm` (issue #958).
+            validate_expert_quantization_params(prefix, group_size, bits)?;
             let scales = mlxcel_core::copy(weights.get(&scales_key).unwrap());
             let biases = get_weight_copy(weights, &format!("{}.biases", prefix))?;
             Ok(Self::Quantized {

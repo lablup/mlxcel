@@ -39,6 +39,7 @@ use crate::models::gated_delta::{
     GatedDeltaCache, RMSNormGated, gated_delta_update, scaled_fast_rms_norm_no_weight,
 };
 use crate::models::model_owned::ModelOwnedSequenceState;
+use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
 use mlxcel_core::dtype;
 use mlxcel_core::generate::LanguageModel;
@@ -989,6 +990,15 @@ impl SwitchLinear {
             .ok_or_else(|| format!("Missing weight: {}", prefix))?;
         let scales_key = format!("{}.scales", prefix);
         if weights.contains_key(&scales_key) {
+            let (group_size, bits) = (config.group_size(), config.bits());
+            // Bound the declared pair here, where it is stored: this type never
+            // reaches `reconcile_quantization_layout` and hands the stored pair
+            // to `gather_qmm` (issue #958). It is reached with three different
+            // config sources (Qwen3Next, Qwen3.5 through
+            // `to_qwen3next_config`, and the synthesized bridge config in
+            // `audio/qwen3_omni_moe/talker.rs`), so bounding the producer would
+            // not have covered it.
+            validate_expert_quantization_params(prefix, group_size, bits)?;
             let scales = mlxcel_core::copy(weights.get(&scales_key).unwrap());
             let biases = weights
                 .get(&format!("{}.biases", prefix))
@@ -998,8 +1008,8 @@ impl SwitchLinear {
                 weight,
                 scales,
                 biases,
-                group_size: config.group_size(),
-                bits: config.bits(),
+                group_size,
+                bits,
             })
         } else {
             Ok(Self::Regular { weight })

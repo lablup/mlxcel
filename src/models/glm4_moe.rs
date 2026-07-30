@@ -26,6 +26,7 @@
 //!   expert-stacked switch_mlp.gate_proj/up_proj when the checkpoint is not
 //!   pre-fused, e.g. real GLM-4.5V MoE)
 
+use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::slice_axis;
@@ -445,6 +446,13 @@ impl SwitchLinear {
         let weight = get_weight_copy(weights, &format!("{}.weight", prefix))?;
         let scales_key = format!("{}.scales", prefix);
         if weights.contains_key(&scales_key) {
+            let (group_size, bits) = (args.group_size(), args.bits());
+            // Bound the declared pair here, where it is stored: this type never
+            // reaches `reconcile_quantization_layout` and hands the stored pair
+            // to `gather_qmm` (issue #958). `ModelArgs::group_size` resolves the
+            // flat key first and the nested `quantization_config` second, so
+            // either spelling is covered by bounding the resolved value.
+            validate_expert_quantization_params(prefix, group_size, bits)?;
             let scales = mlxcel_core::copy(weights.get(&scales_key).unwrap());
             let biases = get_weight_copy(weights, &format!("{}.biases", prefix))?;
             let shape = mlxcel_core::array_shape(&weight);
@@ -453,8 +461,8 @@ impl SwitchLinear {
                 weight,
                 scales,
                 biases,
-                group_size: args.group_size(),
-                bits: args.bits(),
+                group_size,
+                bits,
                 num_experts,
             })
         } else {
@@ -499,6 +507,10 @@ impl SwitchLinear {
 
         let gate_scales_key = format!("{}.scales", gate_prefix);
         if weights.contains_key(&gate_scales_key) {
+            let (group_size, bits) = (args.group_size(), args.bits());
+            // Second storage point for the same variant, reached by the
+            // GLM-4(.5)V MoE separate-gate/up layout (issue #958).
+            validate_expert_quantization_params(gate_prefix, group_size, bits)?;
             let gate_scales = get_weight_ref(weights, &gate_scales_key)?;
             let up_scales = get_weight_ref(weights, &format!("{}.scales", up_prefix))?;
             let scales = mlxcel_core::concatenate(gate_scales, up_scales, EXPERT_OUT_AXIS);
@@ -511,8 +523,8 @@ impl SwitchLinear {
                 weight,
                 scales,
                 biases,
-                group_size: args.group_size(),
-                bits: args.bits(),
+                group_size,
+                bits,
                 num_experts,
             })
         } else {

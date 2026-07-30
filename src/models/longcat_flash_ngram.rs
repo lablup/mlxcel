@@ -912,7 +912,7 @@ impl LongcatFlashNgramModel {
             .map_err(|e| format!("Failed to parse config: {e}"))?;
 
         let mut weights = crate::models::load_text_weights(path, None)?;
-        weights = sanitize_weights(weights, &args);
+        weights = sanitize_weights(weights, &args)?;
 
         let model = Self::from_weights(&weights, &args)?;
         Ok((model, args.vocab_size))
@@ -1036,7 +1036,10 @@ impl LanguageModel for LongcatFlashNgramModel {
 }
 
 // Weight sanitization.
-pub fn sanitize_weights(mut weights: WeightMap, args: &LongcatFlashNgramConfig) -> WeightMap {
+pub fn sanitize_weights(
+    mut weights: WeightMap,
+    args: &LongcatFlashNgramConfig,
+) -> Result<WeightMap, String> {
     // Stack MoE expert weights into SwitchGLU format
     for l in 0..args.num_layers {
         let prefix = format!("model.layers.{l}");
@@ -1099,6 +1102,20 @@ pub fn sanitize_weights(mut weights: WeightMap, args: &LongcatFlashNgramConfig) 
                 let kv_lora_rank = args.kv_lora_rank as i32;
                 let inferred_bits = (w_shape[w_shape.len() - 1] * 32) / kv_lora_rank;
                 let inferred_gs = kv_lora_rank / s_shape[s_shape.len() - 1];
+
+                // The inferred pair is a quotient of a config field and a tensor
+                // axis, so it can still land outside anything MLX can describe,
+                // and `dequantize` crosses the cxx bridge as
+                // `UniquePtr<MlxArray>` rather than `Result`: a throw here would
+                // abort during weight sanitization rather than fail the load
+                // (issue #958). This is why the function is fallible.
+                mlxcel_core::layers::validate_quantization_params(inferred_gs, inferred_bits)
+                    .map_err(|e| {
+                        format!(
+                            "{prefix}.kv_b_proj: inferred quantization params are unusable: {e}"
+                        )
+                    })?;
+
                 unsafe {
                     mlxcel_core::dequantize(
                         &w,
@@ -1143,5 +1160,5 @@ pub fn sanitize_weights(mut weights: WeightMap, args: &LongcatFlashNgramConfig) 
         );
     }
 
-    weights
+    Ok(weights)
 }

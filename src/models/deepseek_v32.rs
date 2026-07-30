@@ -41,6 +41,7 @@ mod indexer;
 mod deepseek_v32_tests;
 
 use crate::distributed::pipeline::{LayerFilter, StageExecutionOutput};
+use crate::models::switch_layers::validate_expert_quantization_params;
 use indexer::Indexer;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, MultiLinear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
@@ -1230,6 +1231,13 @@ fn load_switch_linear(
     let is_quantized = weights.contains_key(&format!("{}.0.{}.scales", prefix, weight_name));
 
     if is_quantized {
+        // Bound the declared pair before any of the per-expert tensors are
+        // stacked: this family-local expert type never reaches
+        // `reconcile_quantization_layout` and hands the stored pair to
+        // `gather_qmm` (issue #958). The pair can also arrive from a GLM
+        // config, via `glm_moe_dsa::to_dsv32_args`, rather than a DeepSeek one.
+        validate_expert_quantization_params(&format!("{prefix}.{weight_name}"), group_size, bits)?;
+
         let mut expert_scales = Vec::with_capacity(num_experts);
         let mut expert_biases = Vec::with_capacity(num_experts);
 

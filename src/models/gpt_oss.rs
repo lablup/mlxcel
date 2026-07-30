@@ -25,6 +25,7 @@
 //!
 //! Reference: mlx-lm gpt_oss.py
 
+use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
 use mlxcel_core::weights::WeightMap;
@@ -116,6 +117,36 @@ impl Quantization {
         self.defaults()
     }
 
+    /// Reject any `quantization` entry that would abort an MLX kernel.
+    ///
+    /// gpt-oss is the one family whose `quantization` block is a map of
+    /// per-weight-prefix overrides rather than a single triple, so a bound on
+    /// the top-level defaults alone says nothing about what an individual
+    /// projection will load with, and vice versa. This walks the top-level pair
+    /// and every override in one pass, so a hostile pair scoped to a single
+    /// prefix is refused during config validation even when the defaults are
+    /// valid, before any tensor is touched (issue #958).
+    ///
+    /// Entries whose value is not an object are the top-level scalars
+    /// themselves (`group_size`, `bits`, `mode`) and are covered by the
+    /// `defaults()` check rather than iterated as overrides.
+    fn validate(&self) -> Result<(), String> {
+        let Quantization::Full(map) = self;
+        let (gs, bits, _) = self.defaults();
+        mlxcel_core::layers::validate_quantization_params(gs, bits)
+            .map_err(|e| format!("GptOss config.json quantization: {e}"))?;
+        for key in map.keys() {
+            let Some(value) = map.get(key) else { continue };
+            if !value.is_object() {
+                continue;
+            }
+            let (gs, bits, _) = self.params_for(key);
+            mlxcel_core::layers::validate_quantization_params(gs, bits)
+                .map_err(|e| format!("GptOss config.json quantization.{key}: {e}"))?;
+        }
+        Ok(())
+    }
+
     /// Top-level defaults
     fn defaults(&self) -> (i32, i32, String) {
         let Quantization::Full(map) = self;
@@ -131,6 +162,22 @@ impl Quantization {
 }
 
 impl ModelArgs {
+    /// Reject a `quantization` block that would abort an MLX kernel.
+    ///
+    /// Family-level early diagnostic, in the same shape as the BailingMoe,
+    /// GptNeoX and Helium ones added by #929: it names gpt-oss and fires during
+    /// config validation, before any tensor is touched. The authoritative bound
+    /// still lives at each storage point (`ExpertLinear::from_weights` and the
+    /// shared reconciler behind `UnifiedLinear` / `UnifiedEmbedding`); this
+    /// exists because gpt-oss is the only family whose per-prefix overrides can
+    /// each carry their own hostile pair (issue #958).
+    pub fn validate_quantization(&self) -> Result<(), String> {
+        let Some(quantization) = self.quantization.as_ref() else {
+            return Ok(());
+        };
+        quantization.validate()
+    }
+
     /// Default group_size (top-level)
     pub fn group_size(&self) -> i32 {
         self.quantization
@@ -366,6 +413,17 @@ impl ExpertLinear {
 
         let scales_key = format!("{}.scales", prefix);
         if weights.contains_key(&scales_key) {
+            // Bound the declared pair here, where it is stored: `ExpertLinear`
+            // never reaches `reconcile_quantization_layout` and hands the stored
+            // pair to `gather_qmm` (issue #958). Unlike every sibling projection
+            // in this family, the expert pair comes from `Quantization::defaults`
+            // rather than from `quant_for`, so the per-prefix overrides that the
+            // guarded `UnifiedLinear` / `UnifiedEmbedding` loaders see do not
+            // describe it, and a valid override on `model.embed_tokens` (the
+            // shape every real gpt-oss checkpoint ships) leaves a hostile
+            // top-level pair reaching the experts alone.
+            validate_expert_quantization_params(prefix, group_size, bits)?;
+
             let scales = weights
                 .get(&scales_key)
                 .map(|w| mlxcel_core::copy(w))
@@ -967,6 +1025,8 @@ impl GptOssModel {
     }
 
     pub fn from_weights(weights: &WeightMap, args: &ModelArgs) -> Result<Self, String> {
+        args.validate_quantization()?;
+
         // Embedding may have different quantization than the top-level default
         let (embed_gs, embed_bits, _embed_mode) = args.quant_for("model.embed_tokens");
         let embed_tokens =
@@ -1110,6 +1170,8 @@ impl GptOssStageModel {
         filter: &LayerFilter,
         stage_index: usize,
     ) -> Result<Self, String> {
+        args.validate_quantization()?;
+
         let (embed_gs, embed_bits, _embed_mode) = args.quant_for("model.embed_tokens");
         let embed_tokens = if filter.has_embedding {
             Some(UnifiedEmbedding::from_weights(

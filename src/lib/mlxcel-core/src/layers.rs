@@ -231,22 +231,47 @@ pub struct QuantizedEmbedding {
 }
 
 impl QuantizedEmbedding {
-    /// Create a new quantized embedding layer (affine mode)
+    /// Create a new quantized embedding layer (affine mode) from tensors the
+    /// caller already owns.
+    ///
+    /// Fallible on purpose (issue #958). This is the one way to build a
+    /// `QuantizedEmbedding` without going through
+    /// [`Self::from_weights_with_mode`], and therefore without
+    /// [`reconcile_quantization_layout`] and the bound it now carries. A caller
+    /// that hand-builds the layer is exactly the caller whose declared
+    /// `group_size` / `bits` have never been looked at, and the stored pair goes
+    /// straight to `quantized_embedding` / `quantized_matmul`, which cross the
+    /// cxx bridge as `UniquePtr<MlxArray>` rather than `Result`: a C++ throw
+    /// there is an uncatchable abort at the first forward pass rather than a
+    /// load error. Returning `Result` makes the bound impossible to skip for the
+    /// next family that builds one directly, which is the whole reason the
+    /// signature changed rather than the two existing call sites being patched.
+    ///
+    /// This bounds the declared pair only; it does not reconcile against the
+    /// tensor shapes the way `from_weights_with_mode` does, because the shapes
+    /// arrive here already detached from the prefix the reconciler names in its
+    /// divergence warning.
+    ///
+    /// Used by: Mamba, Mamba2 (both take the table out of the `WeightMap` by
+    ///          `remove`, under either the `backbone.embeddings` or the
+    ///          `model.embed_tokens` spelling, so neither can address the
+    ///          single-prefix map loader)
     pub fn new(
         weight: UniquePtr<MlxArray>,
         scales: UniquePtr<MlxArray>,
         biases: UniquePtr<MlxArray>,
         group_size: i32,
         bits: i32,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        validate_quantization_params(group_size, bits)?;
+        Ok(Self {
             weight,
             scales,
             biases: Some(biases),
             group_size,
             bits,
             mode: "affine".to_string(),
-        }
+        })
     }
 
     /// Load from weight map
@@ -980,8 +1005,14 @@ pub struct ReconciledQuant {
 ///
 /// Used by: every quantizing family through [`reconcile_quantization_layout`]
 ///          (dense projections and quantized embeddings) and through
-///          `SwitchLinear::from_stacked_parts` (MoE experts), plus the
-///          family-level early diagnostics in BailingMoe, GptNeoX and Helium
+///          `SwitchLinear::from_stacked_parts` (MoE experts); the by-hand
+///          constructors [`QuantizedEmbedding::new`],
+///          [`QuantizedMultiLinear::new`] and
+///          [`QuantizedMultiLinear::from_weights`], which never reach the
+///          reconciler; every family-local MoE expert loader through
+///          `crate::models::switch_layers::validate_expert_quantization_params`
+///          (issue #958); plus the family-level early diagnostics in BailingMoe,
+///          GptNeoX, Helium and GptOss
 pub fn validate_quantization_params(group_size: i32, bits: i32) -> Result<(), String> {
     if !(1..=32).contains(&bits) {
         return Err(format!(
@@ -2139,24 +2170,41 @@ pub struct QuantizedMultiLinear {
 }
 
 impl QuantizedMultiLinear {
-    /// Create a new quantized multi-linear layer
+    /// Create a new quantized multi-linear layer from tensors the caller
+    /// already owns.
+    ///
+    /// Fallible for the same reason as [`QuantizedEmbedding::new`] (issue
+    /// #958): the stored pair reaches `quantized_matmul` unmediated, and nothing
+    /// else on this path bounds it.
     pub fn new(
         weight: UniquePtr<MlxArray>,
         scales: UniquePtr<MlxArray>,
         biases: Option<UniquePtr<MlxArray>>,
         group_size: i32,
         bits: i32,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        validate_quantization_params(group_size, bits)?;
+        Ok(Self {
             weight,
             scales,
             biases,
             group_size,
             bits,
-        }
+        })
     }
 
     /// Load from weight map
+    ///
+    /// This loader stores the declared `group_size` / `bits` verbatim rather
+    /// than reconciling them against the tensor shapes, and the stored pair is
+    /// handed to `quantized_matmul` on every MLA forward, so it carries the
+    /// bound itself (issue #958). It sits in the same blind spot
+    /// `SwitchLinear::from_stacked_parts` did before #929: a shared quantized
+    /// loader that never calls [`reconcile_quantization_layout`], reached by
+    /// four families whose `embed_q` / `unembed_out` are the only tensors that
+    /// see these params.
+    ///
+    /// Used by: DeepSeek V3, DeepSeek V3.2, GLM4 MoE Lite, LongCat Flash NGram
     pub fn from_weights(
         weights: &crate::weights::WeightMap,
         prefix: &str,
@@ -2166,6 +2214,8 @@ impl QuantizedMultiLinear {
         let weight_name = format!("{}.weight", prefix);
         let scales_name = format!("{}.scales", prefix);
         let biases_name = format!("{}.biases", prefix);
+
+        validate_quantization_params(group_size, bits).map_err(|e| format!("{prefix}: {e}"))?;
 
         let weight = weights
             .get(&weight_name)

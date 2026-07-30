@@ -22,6 +22,7 @@
 //! - MoE with group-limited greedy routing
 //! - Shared experts plus routed experts
 
+use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{repeat_kv, silu, slice_axis};
@@ -993,6 +994,10 @@ fn load_switch_linear(
     let weight = get_weight_copy(weights, &format!("{}.{}.weight", prefix, weight_name))?;
     let scales_key = format!("{}.{}.scales", prefix, weight_name);
     if weights.contains_key(&scales_key) {
+        // Bound the declared pair here, where it is stored: this family-local
+        // expert type never reaches `reconcile_quantization_layout` and hands
+        // the stored pair to `gather_qmm` (issue #958).
+        validate_expert_quantization_params(&format!("{prefix}.{weight_name}"), group_size, bits)?;
         let scales = mlxcel_core::copy(weights.get(&scales_key).unwrap());
         let biases = get_weight_copy(weights, &format!("{}.{}.biases", prefix, weight_name))?;
         Ok(SwitchLinear::Quantized {

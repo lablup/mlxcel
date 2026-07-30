@@ -538,6 +538,13 @@ impl MambaModel {
             .remove("backbone.embeddings.biases")
             .or_else(|| weights.remove("model.embed_tokens.biases"));
 
+        // The table is taken out of the map by `remove`, under either the
+        // `backbone.embeddings` or the `model.embed_tokens` spelling, so this
+        // cannot go through the single-prefix `UnifiedEmbedding::from_weights`
+        // and therefore never reaches `reconcile_quantization_layout`. The bound
+        // that loader carries lives in `QuantizedEmbedding::new` instead (issue
+        // #958); without it a declared `"bits": 0` was stored here and divided
+        // by inside `quantized_embedding` at the first token.
         let embeddings = if let (Some(scales), Some(biases)) = (embed_scales, embed_biases) {
             UnifiedEmbedding::Quantized(mlxcel_core::layers::QuantizedEmbedding::new(
                 embed_weight,
@@ -545,7 +552,7 @@ impl MambaModel {
                 biases,
                 group_size,
                 bits,
-            ))
+            )?)
         } else {
             UnifiedEmbedding::Regular(mlxcel_core::layers::Embedding::new(embed_weight))
         };

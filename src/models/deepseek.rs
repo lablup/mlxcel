@@ -22,6 +22,7 @@
 //! - routed_scaling_factor for expert outputs (default 1.0)
 //! - Top-k routing with softmax scoring
 
+use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
@@ -849,7 +850,7 @@ impl SwitchLinear {
             let biases = weights
                 .get(&format!("{}.biases", prefix))
                 .map(|w| mlxcel_core::copy(w));
-            return Ok(Self::from_stacked_parts(weight, scales, biases, args));
+            return Self::from_stacked_parts(prefix, weight, scales, biases, args);
         }
 
         // Per-expert layout: stack `{root}.experts.{idx}.{proj}` tensors.
@@ -860,7 +861,7 @@ impl SwitchLinear {
                 args.n_routed_experts,
             )?
         {
-            return Ok(Self::from_stacked_parts(weight, scales, biases, args));
+            return Self::from_stacked_parts(prefix, weight, scales, biases, args);
         }
 
         Err(format!("Weight not found: {}.weight", prefix))
@@ -868,27 +869,37 @@ impl SwitchLinear {
 
     /// Build a `SwitchLinear` from a stacked `[num_experts, ...]` weight,
     /// selecting the quantized path when scales are present.
+    ///
+    /// Fallible since issue #958: the quantized arm stores the declared
+    /// `group_size` / `bits` and hands them to `gather_qmm`, and this family
+    /// never reaches `reconcile_quantization_layout`, so the bound has to live
+    /// here. `prefix` is threaded in only so the error names the expert plane.
     fn from_stacked_parts(
+        prefix: &str,
         weight: UniquePtr<MlxArray>,
         scales: Option<UniquePtr<MlxArray>>,
         biases: Option<UniquePtr<MlxArray>>,
         args: &ModelArgs,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let num_experts = mlxcel_core::array_shape(&weight)[0] as usize;
-        match (scales, biases) {
-            (Some(scales), Some(biases)) => Self::Quantized {
-                weight,
-                scales,
-                biases,
-                group_size: args.group_size(),
-                bits: args.bits(),
-                num_experts,
-            },
+        Ok(match (scales, biases) {
+            (Some(scales), Some(biases)) => {
+                let (group_size, bits) = (args.group_size(), args.bits());
+                validate_expert_quantization_params(prefix, group_size, bits)?;
+                Self::Quantized {
+                    weight,
+                    scales,
+                    biases,
+                    group_size,
+                    bits,
+                    num_experts,
+                }
+            }
             _ => Self::Regular {
                 weight,
                 num_experts,
             },
-        }
+        })
     }
 }
 

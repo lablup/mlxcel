@@ -80,6 +80,15 @@ pub fn sanitize_text_weights(
             let inferred_bits = (w_shape[w_shape.len() - 1] * 32) / kv_lora_rank;
             let inferred_gs = kv_lora_rank / s_shape[s_shape.len() - 1];
 
+            // The inferred pair is a quotient of a config field and a tensor
+            // axis, so it can still land outside anything MLX can describe, and
+            // `dequantize` crosses the cxx bridge as `UniquePtr<MlxArray>`
+            // rather than `Result`: a throw here would abort during weight
+            // sanitization rather than fail the load (issue #958).
+            mlxcel_core::layers::validate_quantization_params(inferred_gs, inferred_bits).map_err(
+                |e| format!("{prefix}.kv_b_proj: inferred quantization params are unusable: {e}"),
+            )?;
+
             unsafe {
                 mlxcel_core::dequantize(
                     &w,

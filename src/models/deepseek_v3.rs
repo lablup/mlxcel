@@ -20,6 +20,7 @@
 //! - Shared experts + routed experts
 //! - First k layers are dense (no MoE)
 
+use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, MultiLinear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, slice_axis, stack_arrays};
@@ -732,6 +733,12 @@ impl SwitchGLU {
     ) -> Result<Self, String> {
         let group_size = args.group_size();
         let bits = args.bits();
+
+        // This SwitchGLU is unconditionally quantized (it requires scales and
+        // biases for all three projections below) and hands the stored pair to
+        // three `gather_qmm` calls without ever reaching
+        // `reconcile_quantization_layout`, so the bound lives here (issue #958).
+        validate_expert_quantization_params(prefix, group_size, bits)?;
 
         // Load stacked expert weights
         let gate_weight = get_weight_copy(weights, &format!("{}.gate_proj.weight", prefix))?;

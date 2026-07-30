@@ -128,6 +128,94 @@ pub(crate) fn fused_moe_max_dff_from(env: Option<&str>, metal_available: bool) -
         })
 }
 
+/// Bound a declared `group_size` / `bits` pair before a family-local expert
+/// loader stores it on a quantized expert plane (issue #958).
+///
+/// [`SwitchLinear::from_stacked_parts`] below carries this bound for every
+/// family that routes its experts through the shared loader. Eighteen other
+/// families keep their own quantized expert type instead (a local
+/// `SwitchLinear` / `SwitchGLU` / `ExpertLinear` / `QuantizedSwitchLinear`), and
+/// those types store the declared pair verbatim and hand it to `gather_qmm`,
+/// which reaches the same `w.shape(-1) * 32 / bits` division inside
+/// `extract_quantized_matmul_dims`. Because `gather_qmm` crosses the cxx bridge
+/// as `UniquePtr<MlxArray>` rather than `Result`, the resulting C++ throw is an
+/// uncatchable `std::terminate` at the first routed forward pass rather than a
+/// load error. See [`mlxcel_core::layers::validate_quantization_params`] for why
+/// the bound is a range rather than an allowlist of the widths MLX supports.
+///
+/// The check belongs here, at the point the pair is stored, rather than once at
+/// each family's model-level `from_weights`. A load-boundary check does not
+/// dominate these constructions: the pipeline stage executors
+/// (`distributed/pipeline/stage_executor/{glm4,deepseek_v3,llama4}.rs`), the
+/// `*StageModel::from_filtered_weights` entry points, the VLM text wrappers
+/// (`glm4v_moe`, `ernie4_5_moe_vl`, `loading/vlm_step3p7.rs`), `glm_moe_dsa` and
+/// `audio/qwen3_omni_moe/talker.rs` all build expert planes without ever calling
+/// the family's own model constructor, and three families build the quantized
+/// variant as a bare struct literal from a different module entirely. The pair
+/// also arrives from more than one config type per expert enum, so bounding the
+/// producer would not cover it either.
+///
+/// `prefix` names the offending tensor so the load error points at the weight
+/// rather than at the config alone.
+///
+/// Used by: Qwen3MoE, Qwen3VLMoE, DeepSeek, DeepSeekV2, DeepSeekV3, DeepSeekV32,
+///          GLM4MoE, GLM4MoELite, Ernie45MoE, Ernie45MoEVL, ExaoneMoE,
+///          HunyuanMoE, Llama4, NemotronH, Qwen3Next (and Qwen3.5 through it),
+///          Step3p5, GptOss, KimiLinear
+pub(crate) fn validate_expert_quantization_params(
+    prefix: &str,
+    group_size: i32,
+    bits: i32,
+) -> Result<(), String> {
+    mlxcel_core::layers::validate_quantization_params(group_size, bits)
+        .map_err(|e| format!("{prefix}: {e}"))
+}
+
+/// Insert one affine expert plane in the pre-stacked `switch_mlp` layout that
+/// mlx-community conversions ship: a `[experts, out, packed_in]` packed weight
+/// with `[experts, out, num_groups]` scales and zero points.
+///
+/// Shared by the per-family quantization-bound tests (issue #958) so each of
+/// them drives its own real expert loader over the same honest tensor layout,
+/// and the only thing that varies between the hostile case and its positive
+/// control is the declared `group_size` / `bits` pair.
+///
+/// Used by: the guard tests of every family listed on
+///          [`validate_expert_quantization_params`]
+#[cfg(test)]
+pub(crate) fn insert_stacked_quantized_expert_plane(
+    weights: &mut WeightMap,
+    prefix: &str,
+    experts: i32,
+    out: i32,
+    packed_in: i32,
+    num_groups: i32,
+) {
+    let plane = |last: i32, value: f32| {
+        let n = (experts * out * last) as usize;
+        mlxcel_core::from_slice_f32(&vec![value; n], &[experts, out, last])
+    };
+    weights.insert(format!("{prefix}.weight"), plane(packed_in, 0.0));
+    weights.insert(format!("{prefix}.scales"), plane(num_groups, 1.0));
+    weights.insert(format!("{prefix}.biases"), plane(num_groups, 0.0));
+}
+
+/// The `group_size` / `bits` pairs no tensor layout can describe, paired with
+/// the config field each one must be blamed on.
+///
+/// `bits` outside `1..=32` divides by zero or collapses the reconstructed input
+/// width to zero; a non-positive `group_size` makes the right-hand side of MLX's
+/// width comparison unmatchable. Every family's guard test walks this list so
+/// they cannot drift apart on which values count as hostile.
+#[cfg(test)]
+pub(crate) const HOSTILE_QUANT_PARAMS: [(i32, i32, &str); 5] = [
+    (64, 0, "bits"),
+    (64, -4, "bits"),
+    (64, 33, "bits"),
+    (0, 4, "group_size"),
+    (-64, 4, "group_size"),
+];
+
 /// Per-expert 3D linear layer (falls back to gather_mm for non-quantized models)
 /// Supports affine, mxfp4, nvfp4, and mxfp8 quantization modes.
 pub enum SwitchLinear {
@@ -1146,8 +1234,9 @@ mod tests {
     }
 
     /// Affine 4-bit expert planes in the pre-stacked `switch_mlp` layout that
-    /// mlx-community conversions ship: `[num_experts, out, in/8]` weights with
-    /// `[num_experts, out, in/group_size]` scales and zero points.
+    /// mlx-community conversions ship, as a standalone map. Thin wrapper over
+    /// the module-level [`super::insert_stacked_quantized_expert_plane`], which
+    /// the per-family guard tests share.
     fn stacked_quantized_experts(
         prefix: &str,
         experts: i32,
@@ -1155,14 +1244,15 @@ mod tests {
         packed_in: i32,
         num_groups: i32,
     ) -> WeightMap {
-        let plane = |last: i32, value: f32| {
-            let n = (experts * out * last) as usize;
-            mlxcel_core::from_slice_f32(&vec![value; n], &[experts, out, last])
-        };
         let mut weights = WeightMap::new();
-        weights.insert(format!("{prefix}.weight"), plane(packed_in, 0.0));
-        weights.insert(format!("{prefix}.scales"), plane(num_groups, 1.0));
-        weights.insert(format!("{prefix}.biases"), plane(num_groups, 0.0));
+        super::insert_stacked_quantized_expert_plane(
+            &mut weights,
+            prefix,
+            experts,
+            out,
+            packed_in,
+            num_groups,
+        );
         weights
     }
 

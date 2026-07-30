@@ -47,6 +47,7 @@
 
 use crate::models::ernie4_5_moe::{DenseMLP, SwitchGLU, SwitchLinear};
 use crate::models::qwen_mrope_state::MRopeState;
+use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
@@ -475,6 +476,12 @@ fn load_switch_linear(
     let num_experts = mlxcel_core::array_shape(&weight)[0] as usize;
     let scales_key = format!("{prefix}.scales");
     if let Some(scales) = weights.get(&scales_key) {
+        // This builds `ernie4_5_moe::SwitchLinear::Quantized` as a bare struct
+        // literal rather than through `ernie4_5_moe::SwitchLinear::from_weights`,
+        // so the bound that loader carries does not apply here (issue #958).
+        // The pair also arrives from `Ernie45MoeVlTextConfig`, whose accessors
+        // fall back to 0 rather than 64/4 when no `quantization` block exists.
+        validate_expert_quantization_params(prefix, gs, bits)?;
         let biases_key = format!("{prefix}.biases");
         let biases = weights
             .get(&biases_key)

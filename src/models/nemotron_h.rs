@@ -22,6 +22,7 @@
 // - Mixed cache: MambaCache for M blocks, KVCache for * blocks
 // - relu^2 activation for MLP/MoE
 
+use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, Linear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, relu_squared, silu, slice_axis, stack_arrays};
@@ -2410,7 +2411,21 @@ impl NemotronHModel {
                             norm_topk_prob: config.norm_topk_prob.unwrap_or(false),
                         },
                         switch_mlp: SwitchMLP {
+                            // `QuantizedSwitchLinear` has no named constructor:
+                            // the variant is built as a struct literal here, so
+                            // the bound goes with each literal rather than into
+                            // a loader (issue #958). This type never reaches
+                            // `reconcile_quantization_layout` and hands the
+                            // stored pair to `gather_qmm`. Only the quantized
+                            // arms are gated; a bf16 expert plane carries no
+                            // packing and must stay loadable at any declared
+                            // pair.
                             fc1: if let Some(scales) = fc1_scales {
+                                validate_expert_quantization_params(
+                                    &format!("{}.switch_mlp.fc1", mixer_prefix),
+                                    group_size,
+                                    bits,
+                                )?;
                                 QuantizedSwitchLinear::Quantized {
                                     weight: fc1_weight,
                                     scales,
@@ -2425,6 +2440,11 @@ impl NemotronHModel {
                                 QuantizedSwitchLinear::Regular { weight: fc1_weight }
                             },
                             fc2: if let Some(scales) = fc2_scales {
+                                validate_expert_quantization_params(
+                                    &format!("{}.switch_mlp.fc2", mixer_prefix),
+                                    group_size,
+                                    bits,
+                                )?;
                                 QuantizedSwitchLinear::Quantized {
                                     weight: fc2_weight,
                                     scales,

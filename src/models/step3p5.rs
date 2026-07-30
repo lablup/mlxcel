@@ -23,6 +23,7 @@
 //! - Per-layer rope_theta and partial_rotary_factor
 //! - SwitchGLU experts with shared expert
 
+use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask};
@@ -769,6 +770,12 @@ impl Step3p5SwitchGLU {
         bits: i32,
         swiglu_limit: Option<f32>,
     ) -> Result<Self, String> {
+        // This SwitchGLU is unconditionally quantized (it requires scales and
+        // biases for all three projections below) and hands the stored pair to
+        // three `gather_qmm` calls without ever reaching
+        // `reconcile_quantization_layout`, so the bound lives here (issue #958).
+        validate_expert_quantization_params(prefix, group_size, bits)?;
+
         let gate_weight = get_weight_copy(weights, &format!("{}.gate_proj.weight", prefix))?;
         let gate_scales = get_weight_copy(weights, &format!("{}.gate_proj.scales", prefix))?;
         let gate_biases = get_weight_copy(weights, &format!("{}.gate_proj.biases", prefix))?;

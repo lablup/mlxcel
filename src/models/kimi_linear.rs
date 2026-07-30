@@ -24,6 +24,7 @@
 
 use crate::models::gated_delta::{gated_delta_update, scaled_fast_rms_norm_no_weight};
 use crate::models::switch_layers::SwitchGLU;
+use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::dtype;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
@@ -212,6 +213,13 @@ impl MultiLinear {
             .map(|w| mlxcel_core::copy(w));
 
         let is_quantized = scales.is_some();
+        if is_quantized {
+            // KimiLinear keeps a private `MultiLinear` rather than using
+            // `mlxcel_core::layers::MultiLinear`, so it does not inherit the
+            // bound that loader now carries. The stored pair goes straight to
+            // `quantized_matmul` on every MLA forward (issue #958).
+            validate_expert_quantization_params(prefix, group_size, bits)?;
+        }
 
         Ok(Self {
             weight,

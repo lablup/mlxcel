@@ -22,6 +22,7 @@
 //! - Sparse MoE with grouped expert selection
 //! - Sigmoid routing with e_score_correction_bias
 
+use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, MultiLinear, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, slice_axis};
@@ -480,6 +481,11 @@ impl SwitchLinear {
         let weight = get_weight_copy(weights, &format!("{}.weight", prefix))?;
         let scales_key = format!("{}.scales", prefix);
         if weights.contains_key(&scales_key) {
+            // Bound the declared pair here, where it is stored: this type never
+            // reaches `reconcile_quantization_layout` and hands the stored pair
+            // to `gather_qmm` (issue #958). The pipeline stage executor builds
+            // these planes without going through `Glm4MoeLiteModel::from_weights`.
+            validate_expert_quantization_params(prefix, group_size, bits)?;
             let scales = mlxcel_core::copy(weights.get(&scales_key).unwrap());
             let biases = get_weight_copy(weights, &format!("{}.biases", prefix))?;
             Ok(Self::Quantized {

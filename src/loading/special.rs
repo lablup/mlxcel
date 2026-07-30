@@ -251,7 +251,8 @@ pub(crate) fn try_load_special_model_from_weights(
             let args: models::longcat_flash_ngram::LongcatFlashNgramConfig =
                 super::parse_model_config(config_str)?;
             let mut owned = copy_weight_map(weights);
-            owned = models::longcat_flash_ngram::sanitize_weights(owned, &args);
+            owned = models::longcat_flash_ngram::sanitize_weights(owned, &args)
+                .map_err(|err| anyhow::anyhow!("{}", err))?;
             let model = models::LongcatFlashNgramModel::from_weights(&owned, &args)
                 .map_err(|err| anyhow::anyhow!("{}", err))?;
             if model_type == ModelType::LongcatFlashNgram {
