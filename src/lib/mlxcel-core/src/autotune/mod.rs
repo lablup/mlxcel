@@ -88,7 +88,7 @@ pub mod store;
 pub mod tactic;
 
 pub use bucket::{MAX_BUCKET_DIM, ShapeBucket, powers_of_two_up_to, round_up_pow2};
-pub use profile::{Measurement, ProfileConfig, ProfileResult, profile};
+pub use profile::{Measurement, ProfileConfig, ProfileResult, Selection, profile, select};
 pub use store::{TACTIC_SUBDIR, TACTIC_VERSION, TacticRecord, TacticStore, TuneKey};
 pub use tactic::{Tactic, TunableOp, TuneError};
 
@@ -380,14 +380,7 @@ fn resolve_uncached(
         return Resolution::new(default.clone(), Source::Default);
     };
 
-    let record = TacticRecord::new(
-        key,
-        result.best.clone(),
-        result.best_us,
-        result.default_us,
-        result.measurements.len(),
-        result.reps,
-    );
+    let record = TacticRecord::from_profile(key, &result);
     if let Err(e) = store.save(key, &record) {
         tracing::warn!(
             "autotune: could not persist tuned tactic for {}: {e}",
@@ -424,14 +417,7 @@ pub fn tune_and_store(
         op.dtype_tag(),
     );
     let result = profile(op, cfg)?;
-    let record = TacticRecord::new(
-        &key,
-        result.best.clone(),
-        result.best_us,
-        result.default_us,
-        result.measurements.len(),
-        result.reps,
-    );
+    let record = TacticRecord::from_profile(&key, &result);
     if let Err(e) = store.save(&key, &record) {
         tracing::warn!(
             "autotune: could not persist tuned tactic for {}: {e}",

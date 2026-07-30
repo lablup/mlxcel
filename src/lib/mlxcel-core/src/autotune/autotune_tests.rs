@@ -30,7 +30,10 @@ use super::ops::cuda_kernel_knobs::{
     max_rows_candidates, tile_m_candidates,
 };
 use super::ops::paged_decode_splits::split_candidates;
-use super::profile::{ProfileConfig, median, profile};
+use super::profile::{
+    Measurement, ProfileConfig, median, median_absolute_deviation, profile, samples_this_round,
+    select,
+};
 use super::store::{
     TACTIC_VERSION, TacticRecord, TacticStore, TuneKey, mlx_commit, mlxcel_version,
 };
@@ -144,12 +147,25 @@ impl TunableOp for FakeOp {
     }
 }
 
+/// Zero wall-clock budgets, so the adaptive sampler degenerates to exactly
+/// `reps` timed repetitions per candidate. These tests assert selection logic,
+/// not timing methodology, and a real budget would make their call counts
+/// depend on how accurately the host honors `thread::sleep`.
 fn fast_cfg() -> ProfileConfig {
     ProfileConfig {
         warmup: 0,
+        warmup_budget_us: 0.0,
         reps: 5,
+        max_reps: 5,
+        sample_budget_us: 0.0,
         min_improvement: 0.02,
     }
+}
+
+/// A measurement built from literal samples, for the pure selection tests.
+fn measurement(param: i64, samples_us: &[f64]) -> Measurement {
+    Measurement::from_samples(Tactic::scalar("p", param), samples_us.to_vec())
+        .expect("samples are non-empty")
 }
 
 fn tmp_store(dir: &tempfile::TempDir) -> TacticStore {
@@ -268,9 +284,8 @@ fn profile_keeps_the_default_inside_the_noise_band() {
     // converges back to the default rather than to a coin flip. The margin is
     // exaggerated so that `thread::sleep` jitter cannot decide the assertion.
     let cfg = ProfileConfig {
-        warmup: 0,
-        reps: 5,
         min_improvement: 0.9,
+        ..fast_cfg()
     };
     let op = FakeOp::new("fake_noise_band", vec![(2, 400), (4, 300), (8, 200)]);
     let result = profile(&op, cfg).expect("sweep produced a result");
@@ -303,24 +318,198 @@ fn profile_returns_none_without_candidates() {
 fn profile_config_sanitizes_degenerate_values() {
     let cfg = ProfileConfig {
         warmup: 0,
+        warmup_budget_us: f64::NAN,
         reps: 0,
+        max_reps: 0,
+        sample_budget_us: -1.0,
         min_improvement: f64::NAN,
     }
     .sanitized();
     assert_eq!(cfg.reps, 1);
+    assert_eq!(cfg.max_reps, 1, "the ceiling can never sit below the floor");
     assert!(cfg.min_improvement.is_finite());
+    assert!(cfg.warmup_budget_us.is_finite() && cfg.warmup_budget_us >= 0.0);
+    assert!(cfg.sample_budget_us.is_finite() && cfg.sample_budget_us >= 0.0);
 }
 
 #[test]
 fn profile_runs_warmup_plus_reps_per_candidate() {
+    // With both wall-clock budgets at zero the sampler falls back to the fixed
+    // floors, which is what makes an exact call count assertable at all.
     let cfg = ProfileConfig {
         warmup: 2,
-        reps: 5,
-        min_improvement: 0.02,
+        ..fast_cfg()
     };
     let op = FakeOp::new("fake_call_count", vec![(1, 1), (2, 1)]);
     let _ = profile(&op, cfg).expect("sweep produced a result");
     assert_eq!(op.calls(), 2 * (2 + 5));
+}
+
+// ── Sampling effort ──────────────────────────────────────────────────────────
+
+#[test]
+fn timed_repetitions_scale_inversely_with_launch_cost() {
+    // The #906 follow-up: a flat rep count under-samples exactly the cells that
+    // need it most. Effort is budgeted in wall-clock time, so a cheap launch
+    // (the noisy regime, and the cheap one to sample harder) saturates the
+    // ceiling while an expensive one falls back to the documented floor.
+    let cfg = ProfileConfig {
+        warmup: 1,
+        warmup_budget_us: 2_000.0,
+        reps: 5,
+        max_reps: 64,
+        sample_budget_us: 50_000.0,
+        min_improvement: 0.02,
+    };
+
+    let cheap = FakeOp::new("fake_cheap_launch", vec![(1, 100)]);
+    let cheap_result = profile(&cheap, cfg).expect("cheap sweep produced a result");
+    assert_eq!(
+        cheap_result.reps, 64,
+        "a ~100us launch fits a 50ms budget far more than 64 times"
+    );
+
+    let costly = FakeOp::new("fake_costly_launch", vec![(1, 20_000)]);
+    let costly_result = profile(&costly, cfg).expect("costly sweep produced a result");
+    assert_eq!(
+        costly_result.reps, 5,
+        "a 20ms launch exhausts the budget in three, so the floor applies"
+    );
+}
+
+#[test]
+fn interleaving_gives_every_candidate_its_full_target() {
+    // Round-robin sampling is only fair if the stride actually delivers each
+    // candidate's whole target inside the shared window.
+    for rounds in [1usize, 5, 64, 400] {
+        for target in [1usize, 2, 5, 37, 400] {
+            if target > rounds {
+                continue;
+            }
+            let taken = (0..rounds)
+                .filter(|r| samples_this_round(*r, target, rounds))
+                .count();
+            assert_eq!(taken, target, "target={target} rounds={rounds}");
+        }
+    }
+    assert!(!samples_this_round(0, 0, 8), "a zero target never samples");
+    assert!(
+        !samples_this_round(0, 4, 0),
+        "a zero-round sweep never samples"
+    );
+}
+
+// ── Flaky-tactic guard ───────────────────────────────────────────────────────
+
+#[test]
+fn median_absolute_deviation_ignores_a_single_outlier() {
+    assert_eq!(median_absolute_deviation(&[], 0.0), None);
+    // Four samples one unit from the centre and one 1000 away: the MAD stays 1.
+    assert_eq!(
+        median_absolute_deviation(&[9.0, 9.0, 10.0, 11.0, 1010.0], 10.0),
+        Some(1.0)
+    );
+}
+
+#[test]
+fn relative_spread_is_zero_when_every_sample_agrees() {
+    let m = measurement(1, &[100.0, 100.0, 100.0]);
+    assert_eq!(m.relative_spread(), 0.0);
+    assert_eq!(m.reps(), 3);
+    assert_eq!(m.median_us, 100.0);
+}
+
+#[test]
+fn select_keeps_the_default_when_the_win_is_inside_the_measured_spread() {
+    // The #906 defect in miniature. Candidate 8 is nominally 3% faster, which
+    // clears a flat 2% threshold, but the samples are ~16% wide so the two
+    // medians are indistinguishable. Falling back to the default is both the
+    // honest answer and the safe one.
+    let cfg = fast_cfg();
+    let default = Tactic::scalar("p", 32);
+    let ms = vec![
+        measurement(8, &[420.0, 500.0, 560.0, 610.0, 700.0]),
+        measurement(32, &[440.0, 520.0, 580.0, 640.0, 720.0]),
+    ];
+    let (selection, required) = select(&ms, &default, &cfg);
+    assert_eq!(selection.default_index, Some(1));
+    assert_eq!(ms[selection.index].tactic, default);
+    assert!(
+        required > cfg.min_improvement,
+        "the threshold must come from the samples, not the 2% floor: got {required}"
+    );
+}
+
+#[test]
+fn select_switches_when_the_win_clears_the_measured_spread() {
+    // Same shape of comparison, but the samples are tight and the gap is 20%.
+    // A spread-aware guard must not become a guard against ever switching.
+    let cfg = fast_cfg();
+    let default = Tactic::scalar("p", 32);
+    let ms = vec![
+        measurement(8, &[400.0, 402.0, 404.0, 406.0, 408.0]),
+        measurement(32, &[500.0, 502.0, 504.0, 506.0, 508.0]),
+    ];
+    let (selection, required) = select(&ms, &default, &cfg);
+    assert_eq!(ms[selection.index].tactic, Tactic::scalar("p", 8));
+    assert!(required < 0.2, "a tight cell must not manufacture a guard");
+}
+
+#[test]
+fn select_collapses_a_statistical_tie_toward_the_default() {
+    // Candidates 8 and 16 both beat the default decisively but cannot be told
+    // apart from each other; on the real matrix that pair alternated between
+    // runs. Resolving the tie toward the default makes the row reproducible
+    // whichever of the two happens to measure faster.
+    let cfg = fast_cfg();
+    let default = Tactic::scalar("p", 32);
+    let slower_16 = vec![
+        measurement(8, &[300.0, 310.0, 320.0, 330.0, 340.0]),
+        measurement(16, &[305.0, 315.0, 325.0, 335.0, 345.0]),
+        measurement(32, &[500.0, 505.0, 510.0, 515.0, 520.0]),
+    ];
+    let slower_8 = vec![
+        measurement(8, &[305.0, 315.0, 325.0, 335.0, 345.0]),
+        measurement(16, &[300.0, 310.0, 320.0, 330.0, 340.0]),
+        measurement(32, &[500.0, 505.0, 510.0, 515.0, 520.0]),
+    ];
+    for ms in [&slower_16, &slower_8] {
+        let (selection, _) = select(ms, &default, &cfg);
+        assert_eq!(
+            ms[selection.index].tactic,
+            Tactic::scalar("p", 16),
+            "the tie must resolve to the candidate nearest the default"
+        );
+    }
+}
+
+#[test]
+fn select_falls_back_to_the_default_when_the_pick_is_not_actually_faster() {
+    // A wide-spread candidate can land inside the leader's band while still
+    // being slower than the default. The improvement test is what catches it,
+    // and it is why `best_us <= default_us` holds unconditionally.
+    let cfg = fast_cfg();
+    let default = Tactic::scalar("p", 32);
+    let ms = vec![
+        measurement(4, &[100.0, 100.0, 100.0, 100.0, 100.0]),
+        measurement(8, &[60.0, 90.0, 115.0, 150.0, 190.0]),
+        measurement(32, &[104.0, 104.0, 105.0, 106.0, 106.0]),
+    ];
+    let (selection, _) = select(&ms, &default, &cfg);
+    assert_eq!(ms[selection.index].tactic, default);
+}
+
+#[test]
+fn profile_records_the_spread_behind_every_measurement() {
+    let op = FakeOp::new("fake_spread", vec![(2, 400), (4, 200)]);
+    let result = profile(&op, fast_cfg()).expect("sweep produced a result");
+    assert!(result.default_spread.is_some());
+    assert!(result.best_spread.is_finite() && result.best_spread >= 0.0);
+    assert!(result.required_improvement >= fast_cfg().min_improvement);
+    for m in &result.measurements {
+        assert_eq!(m.reps(), 5);
+        assert!(m.spread_us.is_finite() && m.spread_us >= 0.0);
+    }
 }
 
 // ── Persistent cache ─────────────────────────────────────────────────────────

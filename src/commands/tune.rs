@@ -35,6 +35,10 @@ use mlxcel_core::autotune::ops::cuda_kernel_knobs::{
     QmmShape, QmmTileOp, QmvMultirowOp, QmvShape, TILE_M_CAP_BLACKWELL,
 };
 use mlxcel_core::autotune::ops::paged_decode_splits::{DecodeShape, PagedDecodeSplitsOp};
+use mlxcel_core::autotune::profile::{
+    DEFAULT_MAX_REPS, DEFAULT_MIN_IMPROVEMENT, DEFAULT_REPS, DEFAULT_SAMPLE_BUDGET_US,
+    DEFAULT_WARMUP, DEFAULT_WARMUP_BUDGET_US,
+};
 use mlxcel_core::autotune::{ProfileConfig, TacticStore, tune_and_store};
 use mlxcel_core::{MlxArray, UniquePtr, eval, from_slice_i32, synchronize_default, zeros};
 
@@ -108,19 +112,36 @@ pub(crate) struct TuneArgs {
     #[arg(long, default_value = "1024,4096,16384")]
     pub(crate) context_lengths: String,
 
-    /// Untimed warmup repetitions per candidate.
-    #[arg(long, default_value = "2")]
+    /// Minimum untimed warmup repetitions per candidate.
+    #[arg(long, default_value_t = DEFAULT_WARMUP)]
     pub(crate) warmup: usize,
 
-    /// Timed repetitions per candidate; the median is the candidate's score.
-    /// The determinism guard wants at least 5.
-    #[arg(long, default_value = "5")]
+    /// Wall-clock warmup per candidate, milliseconds. Warmup runs past
+    /// `--warmup` until this elapses, which is what brings the GPU to a steady
+    /// clock before anything is recorded.
+    #[arg(long, default_value_t = DEFAULT_WARMUP_BUDGET_US / 1000.0)]
+    pub(crate) warmup_ms: f64,
+
+    /// Minimum timed repetitions per candidate; the median is the candidate's
+    /// score. The determinism guard wants at least 5.
+    #[arg(long, default_value_t = DEFAULT_REPS)]
     pub(crate) reps: usize,
 
-    /// Relative win over the default a candidate must clear to be selected
-    /// (0.02 = 2%). Below this the default is kept, so a noisy host converges
-    /// back to today's behavior.
-    #[arg(long, default_value = "0.02")]
+    /// Ceiling on the adaptively-grown repetition count.
+    #[arg(long, default_value_t = DEFAULT_MAX_REPS)]
+    pub(crate) max_reps: usize,
+
+    /// Wall-clock sampling budget per candidate, milliseconds. Repetitions
+    /// scale as `budget / per-launch cost`, so cheap cells (the noisy ones) get
+    /// many more samples than expensive ones.
+    #[arg(long, default_value_t = DEFAULT_SAMPLE_BUDGET_US / 1000.0)]
+    pub(crate) sample_ms: f64,
+
+    /// Floor on the relative win over the default a candidate must clear to be
+    /// selected (0.02 = 2%). The effective threshold is the larger of this and
+    /// the measured spread of the two medians being compared, so a noisy host
+    /// converges back to today's behavior instead of to a coin flip.
+    #[arg(long, default_value_t = DEFAULT_MIN_IMPROVEMENT)]
     pub(crate) min_improvement: f64,
 
     /// CTA `tile_m` ceiling the qmm sweep tunes within. Must match the cap the
@@ -134,7 +155,12 @@ impl TuneArgs {
     fn profile_config(&self) -> ProfileConfig {
         ProfileConfig {
             warmup: self.warmup,
-            reps: self.reps,
+            warmup_budget_us: self.warmup_ms * 1000.0,
+            // The determinism guard is documented as median-of-5-or-more, so a
+            // lower floor is refused rather than honored.
+            reps: self.reps.max(DEFAULT_REPS),
+            max_reps: self.max_reps,
+            sample_budget_us: self.sample_ms * 1000.0,
             min_improvement: self.min_improvement,
         }
         .sanitized()
@@ -317,9 +343,13 @@ fn tune_paged_decode(args: &TuneArgs, store: &TacticStore, geom: HeadGeometry) -
         "paged-decode-splits: head_dim={} q_heads={} kv_heads={} block_size={}",
         geom.head_dim, geom.q_heads, geom.kv_heads, args.block_size
     );
+    // `spread` is the selection's relative sample dispersion and `guard` the
+    // improvement it had to clear (min_improvement, or the combined spread when
+    // that is larger). A row whose guard dwarfs its speedup was decided by the
+    // noise floor, not by the kernel.
     println!(
-        "  {:>6} {:>8} | {:>12} {:>12} {:>10} {:>10}",
-        "batch", "context", "default", "selected", "best_us", "speedup"
+        "  {:>6} {:>8} | {:>12} {:>13} {:>9} {:>7} {:>5} {:>7} {:>8}",
+        "batch", "context", "default", "selected", "best_us", "spread", "reps", "guard", "speedup"
     );
 
     for &batch in &batches {
@@ -349,12 +379,15 @@ fn tune_paged_decode(args: &TuneArgs, store: &TacticStore, geom: HeadGeometry) -
             );
             match tune_and_store(&op, store, args.profile_config()) {
                 Some((_, record, result)) => println!(
-                    "  {batch:>6} {context:>8} | {:>12} {:>12} {:>10.1} {:>10}",
+                    "  {batch:>6} {context:>8} | {:>12} {:>13} {:>9.1} {:>6.1}% {:>5} {:>6.1}% {:>8}",
                     result
                         .default_us
                         .map_or_else(|| "n/a".to_string(), |v| format!("{v:.1}us")),
                     record.tactic.label,
                     record.latency_us,
+                    record.spread * 100.0,
+                    record.reps,
+                    record.required_improvement * 100.0,
                     result
                         .speedup_over_default()
                         .map_or_else(|| "n/a".to_string(), |v| format!("{v:.3}x")),
@@ -403,10 +436,13 @@ fn report(
 ) {
     match outcome {
         Some((key, record, result)) => println!(
-            "  {} -> {} ({:.1}us, speedup {})",
+            "  {} -> {} ({:.1}us +/-{:.1}% over {} reps, guard {:.1}%, speedup {})",
             key.display(),
             record.tactic.label,
             record.latency_us,
+            record.spread * 100.0,
+            record.reps,
+            record.required_improvement * 100.0,
             result
                 .speedup_over_default()
                 .map_or_else(|| "n/a".to_string(), |v| format!("{v:.3}x")),
@@ -424,9 +460,15 @@ pub(crate) fn run_tune(args: TuneArgs) -> Result<()> {
             "autotune cache: unavailable (no resolvable cache root); results will not persist"
         ),
     }
+    let cfg = args.profile_config();
     println!(
-        "profile: warmup={} reps={} min_improvement={:.3}",
-        args.warmup, args.reps, args.min_improvement
+        "profile: warmup>={} ({:.0}ms) reps {}..{} ({:.0}ms budget) min_improvement={:.3} (+ measured spread)",
+        cfg.warmup,
+        cfg.warmup_budget_us / 1000.0,
+        cfg.reps,
+        cfg.max_reps,
+        cfg.sample_budget_us / 1000.0,
+        cfg.min_improvement
     );
 
     let fallback = HeadGeometry {

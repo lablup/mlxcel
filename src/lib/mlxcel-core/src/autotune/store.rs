@@ -42,8 +42,9 @@
 //! ## What is persisted
 //!
 //! Only launch-shape configuration: the op identity, the bucketed shape, the
-//! winning tactic's integer parameters, and the median latency behind the
-//! choice. No prompt data, no token ids, nothing request-identifying.
+//! winning tactic's integer parameters, and the median latency and measured
+//! spread behind the choice. No prompt data, no token ids, nothing
+//! request-identifying.
 
 use std::path::PathBuf;
 
@@ -51,6 +52,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::bucket::ShapeBucket;
+use super::profile::ProfileResult;
 use super::tactic::Tactic;
 
 /// Subdirectory under the mlxcel cache root holding tuned tactics.
@@ -58,7 +60,11 @@ pub const TACTIC_SUBDIR: &str = "autotune";
 
 /// Record schema version. Bump when the persisted body changes meaning; older
 /// files are then ignored and the matrix re-tunes once.
-pub const TACTIC_VERSION: u32 = 1;
+///
+/// v2 added the dispersion fields and, with them, a different selection rule
+/// (the flaky-tactic guard). A v1 entry was chosen by a threshold that ignored
+/// measurement spread, so it is not comparable and must not be reused.
+pub const TACTIC_VERSION: u32 = 2;
 
 /// mlxcel version the running binary was built at. Part of the invalidation
 /// metadata: a different mlxcel may launch the tuned kernel differently.
@@ -158,12 +164,29 @@ pub struct TacticRecord {
     pub default_latency_us: Option<f64>,
     /// How many candidates were profiled to reach this choice.
     pub candidates: usize,
-    /// Timed repetitions per candidate behind `latency_us` (median-of-N).
+    /// Timed repetitions behind `latency_us` (median-of-N).
     pub reps: usize,
+    /// Relative spread of the winning tactic's samples, e.g. `0.07` for a
+    /// distribution 7% wide. Recorded so a human reading the cache (or the
+    /// `mlxcel tune` table) can tell a tight measurement from a coin flip
+    /// without re-running the sweep.
+    #[serde(default)]
+    pub spread: f64,
+    /// Relative spread of the default's samples, when the default ran.
+    #[serde(default)]
+    pub default_spread: Option<f64>,
+    /// Relative improvement the selection had to clear to be chosen: the larger
+    /// of the sweep's `min_improvement` and the two measurements' combined
+    /// spread. A large value means this row was measured on a noisy host.
+    #[serde(default)]
+    pub required_improvement: f64,
 }
 
 impl TacticRecord {
-    /// Build a record for `key` from a completed profile.
+    /// Build a record for `key` from a winning tactic and its latency.
+    ///
+    /// Leaves the dispersion fields empty; [`Self::from_profile`] is the path
+    /// production takes, and it fills them in from the sweep.
     #[must_use]
     pub fn new(
         key: &TuneKey,
@@ -187,6 +210,28 @@ impl TacticRecord {
             default_latency_us,
             candidates,
             reps,
+            spread: 0.0,
+            default_spread: None,
+            required_improvement: 0.0,
+        }
+    }
+
+    /// Build a record for `key` from a completed profiling sweep, carrying the
+    /// measured dispersion through so the entry records how trustworthy it is.
+    #[must_use]
+    pub fn from_profile(key: &TuneKey, result: &ProfileResult) -> Self {
+        Self {
+            spread: result.best_spread,
+            default_spread: result.default_spread,
+            required_improvement: result.required_improvement,
+            ..Self::new(
+                key,
+                result.best.clone(),
+                result.best_us,
+                result.default_us,
+                result.measurements.len(),
+                result.reps,
+            )
         }
     }
 

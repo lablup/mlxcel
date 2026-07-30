@@ -44,7 +44,9 @@ src/
 - `src/lib/mlxcel-core/src/layers.rs`, `src/lib/mlxcel-core/src/weights.rs`, `src/lib/mlxcel-core/src/utils.rs` — model building blocks,
   SafeTensors loading, masks, and helper operations.
 - `src/lib/mlxcel-core/src/autotune/`: shape-bucketed kernel autotuner (issue #906), covering the
-  `TunableOp` contract, the median-of-N profiling harness, the persistent tactic cache under
+  `TunableOp` contract, the interleaved median-of-N profiling harness and its flaky-tactic
+  guard (repetitions scale with measured launch cost; a candidate must beat the default by more
+  than the samples' own dispersion), the persistent tactic cache under
   `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/autotune`, and the per-op consumers. Off by default
   and fully inert unless `MLXCEL_AUTOTUNE` is set; `mlxcel tune` drives it offline.
 - `src/lib/mlxcel-core/src/bench_rotation.rs`: last-level-cache-aware rotating input buffers for
