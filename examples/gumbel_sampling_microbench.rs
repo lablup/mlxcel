@@ -35,6 +35,16 @@
 //! sampling step from decode. Pair it with a real end-to-end decode run to see
 //! the throughput effect at batch 1 and batch 4.
 //!
+//! **Memory mode: warm** (see `docs/benchmarks.md`). The logits tensor is
+//! allocated once and reused across iterations, so it is resident in the
+//! last-level cache after the first read. Unlike the paged-KV harnesses, that
+//! is the *representative* mode here rather than an upper bound: in production
+//! the logits row is written by the LM head immediately before the sampler
+//! reads it, so it is warm on a real decode step too. The largest point in the
+//! matrix (batch 8, vocab 152064) reads under 5 MiB, well inside any
+//! last-level cache, so there is no cold variant to run. Both arms read the
+//! identical buffer, so the comparison is unaffected either way.
+//!
 //! Run (Apple):
 //!   cargo run --release --features metal,accelerate \
 //!     --example gumbel_sampling_microbench
@@ -53,9 +63,9 @@ use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use mlxcel_core::{
-    eval, from_slice_f32, fused_sample_categorical, gumbel_max_sample,
+    MlxArray, UniquePtr, eval, from_slice_f32, fused_sample_categorical, gumbel_max_sample,
     gumbel_sample_num_splits, is_gpu_available, random_seed, sampling_gumbel_available,
-    synchronize_default, MlxArray, UniquePtr,
+    synchronize_default,
 };
 
 const VOCABS: [i32; 3] = [32_768, 65_536, 152_064];

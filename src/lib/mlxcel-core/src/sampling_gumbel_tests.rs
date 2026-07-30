@@ -46,10 +46,9 @@
 
 use super::*;
 
-/// Draws per goodness-of-fit test. Override with
-/// `MLXCEL_TEST_GUMBEL_SAMPLES` to trade runtime for tightness; the issue's
-/// 1e6-draw figure is `MLXCEL_TEST_GUMBEL_SAMPLES=1000000`.
-const DEFAULT_SAMPLE_COUNT: usize = 262_144;
+/// Draws per goodness-of-fit test. `MLXCEL_TEST_GUMBEL_SAMPLES` overrides it,
+/// which is the knob for trading runtime against tightness on a slower host.
+const DEFAULT_SAMPLE_COUNT: usize = 1_000_000;
 
 /// Rows per kernel launch while accumulating a sample. Every row carries the
 /// same logits and gets its own Philox stream, so one launch yields this many
@@ -109,7 +108,13 @@ fn softmax_reference(logits: &[f32], temperature: f32) -> Vec<f64> {
     let max = scaled.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let exp: Vec<f64> = scaled
         .iter()
-        .map(|&s| if s.is_infinite() && s < 0.0 { 0.0 } else { (s - max).exp() })
+        .map(|&s| {
+            if s.is_infinite() && s < 0.0 {
+                0.0
+            } else {
+                (s - max).exp()
+            }
+        })
         .collect();
     let total: f64 = exp.iter().sum();
     exp.iter().map(|&e| e / total).collect()
@@ -186,7 +191,11 @@ fn assert_matches_softmax(label: &str, logits: &[f32], temperature: f32, n: usiz
     }
 
     let mut live: Vec<usize> = (0..probs.len()).filter(|&i| probs[i] > 0.0).collect();
-    live.sort_by(|&a, &b| probs[a].partial_cmp(&probs[b]).expect("finite probabilities"));
+    live.sort_by(|&a, &b| {
+        probs[a]
+            .partial_cmp(&probs[b])
+            .expect("finite probabilities")
+    });
 
     let n_f = n as f64;
     let mut bins: Vec<(f64, f64)> = Vec::new(); // (expected, observed)
@@ -239,7 +248,13 @@ fn assert_matches_softmax(label: &str, logits: &[f32], temperature: f32, n: usiz
 /// Sharply peaked: one dominant token, geometric decay elsewhere.
 fn peaked_logits(vocab: usize) -> Vec<f32> {
     (0..vocab)
-        .map(|i| if i == vocab / 3 { 6.0 } else { -0.35 * i as f32 })
+        .map(|i| {
+            if i == vocab / 3 {
+                6.0
+            } else {
+                -0.35 * i as f32
+            }
+        })
         .collect()
 }
 
@@ -329,7 +344,11 @@ fn gumbel_sample_temperature_scaling_matches_reference() {
     if !gpu_backend() {
         return;
     }
-    let logits = peaked_logits(64);
+    // Bimodal rather than peaked: dividing an already sharp peak by 0.5 leaves
+    // a distribution with one cell at p > 0.99999, which has no testable
+    // structure left. The bimodal shape keeps tens of cells above the pooling
+    // floor at both temperatures, so the test actually constrains the scaling.
+    let logits = bimodal_logits(64);
     let n = sample_count();
     // 0.5 sharpens, 1.5 flattens. Both are compared against the exact softmax
     // at that temperature, which is the same reference the categorical path
@@ -499,8 +518,9 @@ fn filtered_configs_stay_bit_identical_to_the_categorical_path() {
         random_seed(0xBEEF);
         let through_fused = token_ids(&fused_sample(&batched, 1.0, top_k, top_p, min_p));
         random_seed(0xBEEF);
-        let reference =
-            token_ids(&fused_sample_categorical(&batched, 1.0, top_k, top_p, min_p));
+        let reference = token_ids(&fused_sample_categorical(
+            &batched, 1.0, top_k, top_p, min_p,
+        ));
         assert_eq!(
             through_fused, reference,
             "top_k={top_k} top_p={top_p} min_p={min_p} diverged from the \
@@ -520,7 +540,12 @@ fn greedy_sampling_is_byte_identical_to_argmax() {
     for (r, _) in (0..rows).enumerate() {
         // Rotate each row so the argmax lands somewhere different per row.
         let shift = (r * 37) % logits.len();
-        tiled.extend(logits[shift..].iter().chain(logits[..shift].iter()).copied());
+        tiled.extend(
+            logits[shift..]
+                .iter()
+                .chain(logits[..shift].iter())
+                .copied(),
+        );
     }
     let batched = from_slice_f32(&tiled, &[rows as i32, logits.len() as i32]);
 

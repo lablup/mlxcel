@@ -123,17 +123,21 @@ constexpr const char* GUMBEL_MAX_SAMPLE_SOURCE = R"(
             k0 += 0x9E3779B9u;
             k1 += 0xBB67AE85u;
         }
-        uint words[4] = {c0, c1, c2, c3};
 
+        // Select by ternary chain rather than indexing a thread-local array:
+        // the trip count is 4 but the early exit can stop the compiler from
+        // unrolling, and a dynamically indexed thread array spills out of
+        // registers into backing memory on both back-ends.
         for (uint j = 0u; j < 4u; j++) {
             uint idx = base + j;
             if (idx >= vocab) {
                 break;
             }
+            uint word = (j == 0u) ? c0 : ((j == 1u) ? c1 : ((j == 2u) ? c2 : c3));
             // Uniform on the OPEN interval (0, 1): a 2^-24 grid offset by half
             // a step. Neither 0 nor 1 is representable, so both logs are finite
             // and the noise never produces a NaN against a -inf logit.
-            float u = ((float)(words[j] >> 8) + 0.5f) * 5.9604645e-8f;
+            float u = ((float)(word >> 8) + 0.5f) * 5.9604645e-8f;
             float g = -log(-log(u));
             float scaled = (float)logits[row_off + idx] / temp_v;
             float cand = scaled + g;
@@ -229,15 +233,17 @@ constexpr const char* GUMBEL_MAX_SAMPLE_CUDA_SOURCE = R"(
             k0 += 0x9E3779B9u;
             k1 += 0xBB67AE85u;
         }
-        uint32_t words[4] = {c0, c1, c2, c3};
 
+        // Ternary chain rather than a thread-local array; see the Metal source.
         for (uint32_t j = 0u; j < 4u; j++) {
             uint32_t idx = base + j;
             if (idx >= vocab) {
                 break;
             }
+            uint32_t word =
+                (j == 0u) ? c0 : ((j == 1u) ? c1 : ((j == 2u) ? c2 : c3));
             // Uniform on the OPEN interval (0, 1); see the Metal source.
-            float u = ((float)(words[j] >> 8) + 0.5f) * 5.9604645e-8f;
+            float u = ((float)(word >> 8) + 0.5f) * 5.9604645e-8f;
             float g = -logf(-logf(u));
             float scaled = (float)logits[row_off + idx] / temp_v;
             float cand = scaled + g;

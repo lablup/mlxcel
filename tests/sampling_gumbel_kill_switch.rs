@@ -26,8 +26,8 @@
 //!     --test sampling_gumbel_kill_switch
 
 use mlxcel_core::{
-    array_to_raw_bytes, from_slice_f32, fused_sample, fused_sample_categorical,
-    gumbel_max_sample, random_seed, sampling_gumbel_available, MlxArray,
+    MlxArray, array_to_raw_bytes, from_slice_f32, fused_sample, fused_sample_categorical,
+    gumbel_max_sample, random_seed, sampling_gumbel_available,
 };
 
 fn token_ids(tokens: &MlxArray) -> Vec<u32> {
