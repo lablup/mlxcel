@@ -112,9 +112,11 @@ fn quant_args(group_size: i32, bits: i32) -> ModelArgs {
 /// `SwitchLinear::from_stacked_parts` stores the declared pair verbatim on the
 /// quantized variant and hands it straight to `gather_qmm`, which crosses the
 /// cxx bridge as `UniquePtr<MlxArray>` rather than `Result`. A C++ throw there
-/// is an uncatchable `std::terminate`, so losing the bound would abort the
-/// whole test binary with SIGABRT at the first routed forward pass instead of
-/// failing cleanly at load. Issue #958.
+/// is an uncatchable `std::terminate`,
+/// so losing the bound turns a rejected load into an uncatchable abort at the
+/// first routed forward pass in production. This test asserts on the load
+/// result rather than running a forward pass, so a regression fails cleanly
+/// here instead of aborting the test binary.
 #[test]
 fn deepseek_switch_linear_rejects_quantization_params_that_would_abort_gather_qmm() {
     // Honest 4-bit expert geometry: `packed_in * 32 == bits * num_groups *

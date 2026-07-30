@@ -39,7 +39,8 @@ impl GlmMoeDsaStageExecutor {
 
         let dsv32_args = args.to_dsv32_args();
         let mut weights = models::load_text_weights(model_dir, None).map_err(anyhow::Error::msg)?;
-        weights = DeepSeekV32Model::sanitize_weights_with_args(weights, &dsv32_args);
+        weights = DeepSeekV32Model::sanitize_weights_with_args(weights, &dsv32_args)
+            .map_err(anyhow::Error::msg)?;
 
         let mut effective_filter = filter.clone();
         if dsv32_args.tie_word_embeddings && filter.has_lm_head {

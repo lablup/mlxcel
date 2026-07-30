@@ -81,7 +81,8 @@ impl DeepSeekV3StageExecutor {
         // split for layers inside the stage would still look for a
         // not-yet-decomposed key.
         let weights = models::load_text_weights(model_dir, None).map_err(anyhow::Error::msg)?;
-        let mut weights = models::DeepSeekV3Model::sanitize_weights_with_args(weights, &config);
+        let mut weights = models::DeepSeekV3Model::sanitize_weights_with_args(weights, &config)
+            .map_err(anyhow::Error::msg)?;
 
         // DeepSeek V3 does not tie word embeddings, so no tied-head adjustment
         // like the one in `LlamaStageExecutor::load` is needed here.

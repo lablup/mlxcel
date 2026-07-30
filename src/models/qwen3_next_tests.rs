@@ -64,9 +64,11 @@ fn config_with(group_size: i32, bits: i32) -> Qwen3NextConfig {
 
 /// The pair this loader stores is handed straight to `gather_qmm`, which
 /// crosses the cxx bridge as `UniquePtr<MlxArray>` rather than `Result`. A C++
-/// throw there is an uncatchable `std::terminate`, so losing the bound would
-/// abort the whole test binary with SIGABRT at the first routed forward pass
-/// instead of failing cleanly at load. Issue #958.
+/// throw there is an uncatchable `std::terminate`,
+/// so losing the bound turns a rejected load into an uncatchable abort at the
+/// first routed forward pass in production. This test asserts on the load
+/// result rather than running a forward pass, so a regression fails cleanly
+/// here instead of aborting the test binary.
 ///
 /// Three config sources reach this one loader (Qwen3-Next, Qwen3.5 through
 /// `to_qwen3next_config`, and the synthesized bridge config in the Qwen3-Omni

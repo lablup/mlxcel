@@ -483,8 +483,10 @@ fn nemotron_h_conv_state_shape_plateaus_after_50_steps() {
 /// checkpoint. `UnifiedEmbedding::from_weights` only enters its quantized
 /// branch when `.scales` exists, so nothing here touches the reconciler.
 ///
-/// It drives the real model loader, so a regression takes this whole test
-/// binary down with SIGABRT rather than failing cleanly.
+/// It drives the real model loader rather than the pure bounds helper, so the
+/// guard is exercised where a checkpoint actually reaches it. The assertions are
+/// on the load result and no forward pass is run, so a regression fails cleanly
+/// here rather than aborting the test binary.
 #[test]
 fn nemotron_h_rejects_expert_quantization_params_that_would_abort_gather_qmm() {
     use super::{BlockType, NemotronHConfig, NemotronHModel};

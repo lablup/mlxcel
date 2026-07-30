@@ -242,7 +242,8 @@ pub(crate) fn try_load_special_model_from_weights(
             let args: models::kimi_linear::KimiLinearConfig =
                 super::parse_model_config(config_str)?;
             let mut owned = copy_weight_map(weights);
-            owned = models::KimiLinearModel::sanitize_weights(owned, &args);
+            owned = models::KimiLinearModel::sanitize_weights(owned, &args)
+                .map_err(|err| anyhow::anyhow!("{}", err))?;
             let model = models::KimiLinearModel::from_weights(&owned, &args)
                 .map_err(|err| anyhow::anyhow!("{}", err))?;
             LoadedModel::KimiLinear(model)

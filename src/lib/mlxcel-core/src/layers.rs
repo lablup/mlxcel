@@ -243,9 +243,12 @@ impl QuantizedEmbedding {
     /// straight to `quantized_embedding` / `quantized_matmul`, which cross the
     /// cxx bridge as `UniquePtr<MlxArray>` rather than `Result`: a C++ throw
     /// there is an uncatchable abort at the first forward pass rather than a
-    /// load error. Returning `Result` makes the bound impossible to skip for the
-    /// next family that builds one directly, which is the whole reason the
+    /// load error. Returning `Result` puts the bound on the path the next family
+    /// that builds one directly will take, which is the whole reason the
     /// signature changed rather than the two existing call sites being patched.
+    /// It is a strong default rather than an enforced invariant: the fields
+    /// above are `pub`, so a struct literal still bypasses this entirely.
+    /// Nothing in the tree does that today.
     ///
     /// This bounds the declared pair only; it does not reconcile against the
     /// tensor shapes the way `from_weights_with_mode` does, because the shapes
@@ -1060,7 +1063,8 @@ pub fn validate_quantization_params(group_size: i32, bits: i32) -> Result<(), St
 ///
 /// `prefix` names the offending tensor in every error.
 ///
-/// Used by: LongCat Flash NGram, Youtu-VL (MLA `kv_b_proj` decomposition)
+/// Used by: DeepSeek V3, DeepSeek V3.2, KimiLinear, LongCat Flash NGram,
+///          Youtu-VL (MLA `kv_b_proj` decomposition)
 pub fn infer_mla_quantization_params(
     weight_shape: &[i32],
     scales_shape: &[i32],
@@ -1106,6 +1110,25 @@ pub fn infer_mla_quantization_params(
 
     validate_quantization_params(group_size, bits)
         .map_err(|e| format!("{prefix}: inferred quantization params are unusable: {e}"))?;
+
+    // Both divisions truncate, so an in-range pair is not yet a consistent one:
+    // `packed_in 65 / kv_lora_rank 512` solves to 4 bits and passes the bound
+    // while describing an input width of 520 against the 512 the groups
+    // describe. `affine_dequantize` compares exactly that and throws, which is
+    // the same uncatchable abort one step later. Evaluated in i64 for the same
+    // reason the multiply above is.
+    let described = i64::from(packed_in) * 32 / i64::from(bits);
+    let denom = i64::from(num_groups) * i64::from(group_size);
+    if described != denom {
+        return Err(format!(
+            "{prefix}: packed kv_b_proj weight {weight_shape:?} and scales {scales_shape:?} \
+             describe an input width of {described} at {bits}-bit, but {num_groups} groups at \
+             group_size {group_size} describe {denom}. MLX checks exactly this inside dequantize \
+             and throws on a mismatch, and that throw crosses the cxx bridge as an uncatchable \
+             abort during weight sanitization rather than a load error."
+        ));
+    }
+
     Ok((group_size, bits))
 }
 
@@ -1870,6 +1893,20 @@ impl FusedQKVLinear {
                 .ok_or_else(|| format!("Scales not found: {}.scales", v_prefix))?;
 
             // Reconcile caller-supplied bits with actual tensor shapes (affine only).
+            // Bound the declared pair before anything derived from it is
+            // stored (issue #958). This loader never calls
+            // `reconcile_quantization_layout`, and `infer_quantization_bits`
+            // below early-returns the caller's `bits` unchanged whenever
+            // `group_size <= 0`, so a declared `(0, 0)` was stored verbatim on
+            // the fused `QuantizedWeight` and handed to `quantized_matmul` /
+            // `fused_qkv_project_split_norm_rope`. In every current family a
+            // sibling `UnifiedLinear` sees the same declared pair and its
+            // reconciler rejects it first, so this is a shadowed hole rather
+            // than a live one, but it is the same shape as the MoE hole #929
+            // left open and it is one line to close.
+            validate_quantization_params(group_size, bits)
+                .map_err(|e| format!("{q_prefix}: {e}"))?;
+
             // Fused QKV concatenates along axis 0, so q/k/v must share bits; infer from q.
             let effective_bits = if mode == "affine" {
                 let w_shape = ffi::array_shape(q_w);
@@ -2716,7 +2753,7 @@ impl Attention {
 /// - `unembed_out`: projects attention output from latent space to V dimensions
 ///
 /// Supports both quantized and non-quantized weights.
-/// Used by: DeepSeek V3, DeepSeek V3.2, GLM4 MoE Lite
+/// Used by: DeepSeek V3, DeepSeek V3.2, GLM4 MoE Lite, LongCat Flash NGram
 pub enum MultiLinear {
     Quantized(QuantizedMultiLinear),
     Regular(RegularMultiLinear),
@@ -4720,9 +4757,11 @@ mod tests {
     /// without going through `reconcile_quantization_layout`, which is exactly
     /// how `mamba` / `mamba2` reached `quantized_embedding` with an unbounded
     /// pair (issue #958). They are fallible so the bound cannot be skipped, and
-    /// this drives the real constructors rather than the pure helper: if the
-    /// guard regresses, the pair reaches MLX and the C++ throw takes this whole
-    /// test binary down with SIGABRT instead of failing cleanly.
+    /// this drives the real constructors rather than the pure helper, so the
+    /// guard is exercised where a checkpoint actually reaches it. Losing it turns
+    /// a rejected load into an uncatchable abort at the first forward pass in
+    /// production; here the assertions are on the constructor result, so a
+    /// regression fails cleanly rather than aborting the test binary.
     #[test]
     fn hand_built_quantized_layers_bound_their_declared_params() {
         // Honest affine 4-bit geometry: packed_in * 32 == bits * groups * gs,
@@ -4891,9 +4930,10 @@ mod tests {
     #[test]
     fn quantized_loaders_reject_hostile_params_at_load_not_at_the_first_forward() {
         // The real load path, not the pure helper: both production entry points
-        // must surface a Rust error. If this guard regresses, the bad pair
-        // reaches `quantized_matmul` and the C++ throw aborts this whole test
-        // binary with SIGABRT rather than failing cleanly.
+        // must surface a Rust error. Losing this guard turns a rejected load
+        // into an uncatchable abort at the first `quantized_matmul` in
+        // production; here the assertion is on the load result, so a regression
+        // fails cleanly.
         let mut weights = crate::weights::WeightMap::new();
         insert_quantized_qkv_projection(&mut weights, "model.layers.0.self_attn.q_proj", 8);
         insert_quantized_qkv_projection(&mut weights, "model.embed_tokens", 16);

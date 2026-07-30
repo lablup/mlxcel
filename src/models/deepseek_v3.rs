@@ -986,7 +986,7 @@ impl DeepSeekV3Model {
         let weights = crate::models::load_text_weights(model_dir, None)?;
 
         // Sanitize weights (stack expert weights if needed)
-        let weights = Self::sanitize_weights(weights, &config);
+        let weights = Self::sanitize_weights(weights, &config)?;
 
         // Create model
         let model = Self::from_weights(&weights, &config)?;
@@ -1000,11 +1000,17 @@ impl DeepSeekV3Model {
     /// filters out layers from other stages).
     ///
     /// Used by: DeepSeek V3 pipeline stage executor
-    pub fn sanitize_weights_with_args(weights: WeightMap, config: &DeepSeekV3Config) -> WeightMap {
+    pub fn sanitize_weights_with_args(
+        weights: WeightMap,
+        config: &DeepSeekV3Config,
+    ) -> Result<WeightMap, String> {
         Self::sanitize_weights(weights, config)
     }
 
-    fn sanitize_weights(mut weights: WeightMap, config: &DeepSeekV3Config) -> WeightMap {
+    fn sanitize_weights(
+        mut weights: WeightMap,
+        config: &DeepSeekV3Config,
+    ) -> Result<WeightMap, String> {
         // Remap pre-stacked weight names that omit the `.mlp.` segment.
         //
         // Some HuggingFace MLX shards for DeepSeek-V3 store pre-stacked MoE expert
@@ -1134,11 +1140,19 @@ impl DeepSeekV3Model {
                     .remove(&format!("{}.kv_b_proj.biases", prefix))
                     .unwrap();
 
-                let w_shape = mlxcel_core::array_shape(&w);
-                let s_shape = mlxcel_core::array_shape(&s);
-                let kv_lora_rank = config.kv_lora_rank as i32;
-                let inferred_bits = (w_shape[w_shape.len() - 1] * 32) / kv_lora_rank;
-                let inferred_gs = kv_lora_rank / s_shape[s_shape.len() - 1];
+                // Solve the packed pair from the shapes and bound it before it
+                // reaches `dequantize`. The shared helper checks each divisor
+                // before dividing: `kv_lora_rank` is a config field and the
+                // scales axis is checkpoint data, so the naive form panics on a
+                // zero divisor and overflows i32 on a large packed axis, both
+                // before the bound could fire (issue #958).
+                let (inferred_gs, inferred_bits) =
+                    mlxcel_core::layers::infer_mla_quantization_params(
+                        &mlxcel_core::array_shape(&w),
+                        &mlxcel_core::array_shape(&s),
+                        config.kv_lora_rank as i32,
+                        &format!("{prefix}.kv_b_proj"),
+                    )?;
 
                 unsafe {
                     mlxcel_core::dequantize(
@@ -1193,7 +1207,7 @@ impl DeepSeekV3Model {
             weights.remove(&key);
         }
 
-        weights
+        Ok(weights)
     }
 
     pub fn from_weights(weights: &WeightMap, args: &DeepSeekV3Config) -> Result<Self, String> {
@@ -1530,7 +1544,8 @@ mod tests {
             }
         }
 
-        let out = DeepSeekV3Model::sanitize_weights(weights, &config);
+        let out =
+            DeepSeekV3Model::sanitize_weights(weights, &config).expect("sanitize must succeed");
 
         // After sanitization, keys must have the `.mlp.` segment
         for l in 0..2usize {
@@ -1572,7 +1587,8 @@ mod tests {
             }
         }
 
-        let out = DeepSeekV3Model::sanitize_weights(weights, &config);
+        let out =
+            DeepSeekV3Model::sanitize_weights(weights, &config).expect("sanitize must succeed");
 
         // Canonical key must still be present
         for l in 0..2usize {
@@ -1722,7 +1738,7 @@ mod tests {
         // MTP trailer at the out-of-range index `num_hidden_layers` (= 2).
         insert_dense_layer_weights(&mut weights, &cfg, cfg.num_hidden_layers);
 
-        let out = DeepSeekV3Model::sanitize_weights(weights, &cfg);
+        let out = DeepSeekV3Model::sanitize_weights(weights, &cfg).expect("sanitize must succeed");
 
         for l in 0..cfg.num_hidden_layers {
             let embed_q = format!("model.layers.{l}.self_attn.embed_q.weight");
@@ -1746,7 +1762,8 @@ mod tests {
     fn from_weights_builds_all_num_hidden_layers() {
         let cfg = test_config_dense_direct_q();
         let weights = tiny_dense_model_weights(&cfg);
-        let weights = DeepSeekV3Model::sanitize_weights(weights, &cfg);
+        let weights =
+            DeepSeekV3Model::sanitize_weights(weights, &cfg).expect("sanitize must succeed");
         let model = DeepSeekV3Model::from_weights(&weights, &cfg)
             .expect("tiny dense direct-q model must load");
         assert_eq!(
@@ -1782,7 +1799,8 @@ mod tests {
         let cfg = test_config_dense_direct_q();
         let mut weights = WeightMap::new();
         insert_dense_layer_weights(&mut weights, &cfg, 0);
-        let weights = DeepSeekV3Model::sanitize_weights(weights, &cfg);
+        let weights =
+            DeepSeekV3Model::sanitize_weights(weights, &cfg).expect("sanitize must succeed");
         let attn = DeepSeekV3Attention::from_weights(&weights, &cfg, "model.layers.0.self_attn")
             .expect("tiny attention must load");
 
@@ -1909,10 +1927,11 @@ mod tests {
     /// This `SwitchGLU` is unconditionally quantized: it stores the declared
     /// pair and hands it to three `gather_qmm` calls, which cross the cxx
     /// bridge as `UniquePtr<MlxArray>` rather than `Result`. A C++ throw there
-    /// is an uncatchable `std::terminate`, so losing the bound would abort the
-    /// whole test binary with SIGABRT at the first routed forward pass instead
-    /// of failing cleanly at load. Issue #958. There is no non-quantized
-    /// fallback to exempt here, unlike the other families carrying this guard.
+    /// is an uncatchable `std::terminate`,
+    /// so losing the bound turns a rejected load into an uncatchable abort at
+    /// the first routed forward pass in production. This test asserts on the
+    /// load result rather than running a forward pass, so a regression fails
+    /// cleanly here instead of aborting the test binary.
     #[test]
     fn deepseek_v3_switch_glu_rejects_quantization_params_that_would_abort_gather_qmm() {
         // Honest 4-bit expert geometry: `packed_in * 32 == bits * num_groups *

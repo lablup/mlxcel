@@ -95,7 +95,8 @@ pub(crate) fn load_kimi_vl_vlm(model_path: &Path) -> Result<LoadedModel> {
     // DeepSeek-V3 sanitize (expert stacking + MLA decomposition).
     let raw_weights = load_vlm_weights_common(model_path, None)?;
     let weights = remap_kimi_vl_weights(raw_weights);
-    let weights = DeepSeekV3Model::sanitize_weights_with_args(weights, &text_config);
+    let weights = DeepSeekV3Model::sanitize_weights_with_args(weights, &text_config)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let text_model = DeepSeekV3Model::from_weights(&weights, &text_config)
         .map_err(|e| anyhow::anyhow!("Failed to load Kimi-VL text model: {e}"))?;

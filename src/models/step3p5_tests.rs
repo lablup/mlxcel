@@ -264,9 +264,11 @@ fn load_step3p5_switch_glu(
 
 /// The pair this loader stores is handed to three `gather_qmm` calls, which
 /// cross the cxx bridge as `UniquePtr<MlxArray>` rather than `Result`. A C++
-/// throw there is an uncatchable `std::terminate`, so losing the bound would
-/// abort the whole test binary with SIGABRT at the first routed forward pass
-/// instead of failing cleanly at load. Issue #958.
+/// throw there is an uncatchable `std::terminate`,
+/// so losing the bound turns a rejected load into an uncatchable abort at the
+/// first routed forward pass in production. This test asserts on the load
+/// result rather than running a forward pass, so a regression fails cleanly
+/// here instead of aborting the test binary.
 #[test]
 fn step3p5_switch_glu_rejects_quantization_params_that_would_abort_gather_qmm() {
     let weights = step3p5_quantized_switch_glu_weights();

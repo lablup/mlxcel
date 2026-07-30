@@ -107,8 +107,10 @@ fn mamba2_cache_snapshot_restore_round_trips_state_shapes() {
 /// `UniquePtr<MlxArray>` rather than `Result`, so the C++ throw was an
 /// uncatchable abort at the first token rather than a load error (issue #958).
 ///
-/// This drives the real `Mamba2Model::from_weights`, so a regression takes this
-/// whole test binary down with SIGABRT rather than failing cleanly.
+/// This drives the real `Mamba2Model::from_weights` rather than the pure bounds
+/// helper, so the guard is exercised where a checkpoint actually reaches it. The
+/// assertions are on the load result and no forward pass is run, so a regression
+/// fails cleanly here rather than aborting the test binary.
 #[test]
 fn mamba2_rejects_quantization_params_that_would_abort_the_embedding_lookup() {
     use super::{Mamba2Config, Mamba2Model};

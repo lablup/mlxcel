@@ -1376,9 +1376,11 @@ mod tests {
     /// `ExpertLinear` stores the declared pair and hands it to `gather_qmm`
     /// without ever reaching `reconcile_quantization_layout`, so a hostile pair
     /// used to abort the process at the first routed forward pass rather than
-    /// failing at load (issue #958). This drives the real loader, so a
-    /// regression takes this whole test binary down with SIGABRT rather than
-    /// failing cleanly.
+    /// failing at load (issue #958). This drives the real loader rather than the
+    /// pure bounds helper, so the guard is exercised where a checkpoint actually
+    /// reaches it. The assertions are on the load result and no forward pass is
+    /// run, so a regression fails cleanly here rather than aborting the test
+    /// binary.
     #[test]
     fn gpt_oss_expert_linear_rejects_params_that_would_abort_gather_qmm() {
         let prefix = "model.layers.0.mlp.experts.gate_up_proj";

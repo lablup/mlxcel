@@ -291,7 +291,8 @@ fn synthetic_mla_weights(args: &ModelArgs, prefix: &str, with_indexer: bool) -> 
 fn tiny_mla_attention(args: &ModelArgs, with_indexer: bool) -> super::MLAAttention {
     let prefix = "model.layers.0.self_attn";
     let weights = synthetic_mla_weights(args, prefix, with_indexer);
-    let weights = super::DeepSeekV32Model::sanitize_weights(weights, args);
+    let weights =
+        super::DeepSeekV32Model::sanitize_weights(weights, args).expect("sanitize must succeed");
     super::load_mla_attention(&weights, args, prefix).expect("tiny MLA attention must load")
 }
 
@@ -420,7 +421,8 @@ fn sanitize_strips_only_the_mtp_trailer_layer() {
     );
     weights.insert("model.norm.weight".to_string(), f32_weight(&[6]));
 
-    let sanitized = super::DeepSeekV32Model::sanitize_weights(weights, &args);
+    let sanitized =
+        super::DeepSeekV32Model::sanitize_weights(weights, &args).expect("sanitize must succeed");
     assert!(
         sanitized.contains_key("model.layers.0.input_layernorm.weight"),
         "real decoder layer 0 must be kept"
@@ -477,9 +479,11 @@ fn deepseek_v32_expert_weights(quantized: bool) -> WeightMap {
 
 /// The pair this loader stores is handed straight to `gather_qmm`, which crosses
 /// the cxx bridge as `UniquePtr<MlxArray>` rather than `Result`. A C++ throw
-/// there is an uncatchable `std::terminate`, so losing the bound would abort the
-/// whole test binary with SIGABRT at the first routed forward pass instead of
-/// failing cleanly at load. Issue #958.
+/// there is an uncatchable `std::terminate`,
+/// so losing the bound turns a rejected load into an uncatchable abort at the
+/// first routed forward pass in production. This test asserts on the load
+/// result rather than running a forward pass, so a regression fails cleanly
+/// here instead of aborting the test binary.
 #[test]
 fn deepseek_v32_switch_linear_rejects_quantization_params_that_would_abort_gather_qmm() {
     let weights = deepseek_v32_expert_weights(true);
