@@ -178,6 +178,31 @@ struct PendingAudioState {
     start: Instant,
 }
 
+/// How many tokens one engine step actually sampled, which is the step's decode
+/// width for `/metrics`.
+///
+/// This is not simply the number of `Token` events: a sequence that ends on EOS
+/// still sampled a token, but the engine withholds that id because it is a
+/// control token rather than output (issue #963). Each `Finished` with
+/// [`XlaFinishReason::Stop`] therefore stands for exactly one sampled-but-
+/// withheld token, while a `Length` finish always accompanies its emitted
+/// `Token`. Counting both keeps the throughput metric measuring device work.
+fn sampled_token_count(events: &[EngineEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                EngineEvent::Token { .. }
+                    | EngineEvent::Finished {
+                        reason: XlaFinishReason::Stop,
+                        ..
+                    }
+            )
+        })
+        .count()
+}
+
 /// Server-side worker that serves requests through the OpenXLA continuous-batching
 /// engine. Built and run on a single worker thread (see
 /// `model_worker::spawn_xla_model_worker`).
@@ -474,10 +499,7 @@ impl<E: XlaServingEngine> BatchEngine for XlaServeWorker<E> {
                 Ok(events) => {
                     // Each `Token` event is one token produced this step across the
                     // active batch, so the count is the step's decode width.
-                    let decoded = events
-                        .iter()
-                        .filter(|e| matches!(e, EngineEvent::Token { .. }))
-                        .count();
+                    let decoded = sampled_token_count(&events);
                     if decoded > 0 {
                         self.batch_observability.record_decode_step(decoded);
                     }

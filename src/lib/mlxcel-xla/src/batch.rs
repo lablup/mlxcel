@@ -112,7 +112,8 @@ impl From<PreparedInputError> for XlaAdmissionError {
 /// called [`XlaBatchEngine::cancel`] already knows), so it is not a finish reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FinishReason {
-    /// An EOS token was emitted.
+    /// An EOS token was sampled. The id itself is a control token and is not
+    /// emitted as a [`EngineEvent::Token`] (issue #963).
     Stop,
     /// The token budget (`max_new_tokens`) was reached.
     Length,
@@ -230,6 +231,35 @@ fn finish_reason(produced: usize, cap: usize, last: i32, eos: &[i32]) -> Option<
         Some(FinishReason::Length)
     } else {
         None
+    }
+}
+
+/// What committing one sampled token means for its slot.
+#[derive(Debug, PartialEq, Eq)]
+struct TokenCommit {
+    /// Whether the token is client-visible output.
+    emit: bool,
+    /// Why the sequence ended, if it did.
+    finish: Option<FinishReason>,
+}
+
+/// Decide, for a slot that has now produced `produced` tokens against `cap`,
+/// whether `last` is output and whether it ends the sequence.
+///
+/// The terminating EOS id is a control token, not output. The eager
+/// `BatchScheduler` drops it before it reaches `generated_tokens` or the
+/// incremental detokenizer, so the XLA engine must not hand it to consumers
+/// either: `XlaServeWorker` detokenizes every `EngineEvent::Token` it receives
+/// and counts one generated token per event, so emitting the EOS id both leaks
+/// it into content (`White<|im_end|>`) and reports one token too many
+/// (issue #963).
+///
+/// A token that ends the sequence by reaching `cap` is real output and is still
+/// emitted. EOS still wins over Length when a token is both.
+fn commit_token(produced: usize, cap: usize, last: i32, eos: &[i32]) -> TokenCommit {
+    TokenCommit {
+        emit: !eos.contains(&last),
+        finish: finish_reason(produced, cap, last, eos),
     }
 }
 
@@ -683,10 +713,13 @@ impl XlaBatchEngine {
             if needs_history {
                 history.push(first);
             }
-            events.push(EngineEvent::Token {
-                req_id: p.req_id,
-                token: first,
-            });
+            let commit = commit_token(1, p.cap, first, &eos);
+            if commit.emit {
+                events.push(EngineEvent::Token {
+                    req_id: p.req_id,
+                    token: first,
+                });
+            }
             let slot = Slot {
                 req_id: p.req_id,
                 adapter_mode: p.input.adapter_mode(),
@@ -699,7 +732,7 @@ impl XlaBatchEngine {
                 rng,
                 history,
             };
-            if let Some(reason) = finish_reason(slot.produced, slot.cap, first, &eos) {
+            if let Some(reason) = commit.finish {
                 // Finished at its first token: leave the slot free for the next admit.
                 events.push(EngineEvent::Finished {
                     req_id: p.req_id,
@@ -759,9 +792,11 @@ impl XlaBatchEngine {
                 slot.cache_len += 1;
                 slot.produced += 1;
                 let req_id = slot.req_id;
-                let done = finish_reason(slot.produced, slot.cap, nt, &eos);
-                events.push(EngineEvent::Token { req_id, token: nt });
-                if let Some(reason) = done {
+                let commit = commit_token(slot.produced, slot.cap, nt, &eos);
+                if commit.emit {
+                    events.push(EngineEvent::Token { req_id, token: nt });
+                }
+                if let Some(reason) = commit.finish {
                     events.push(EngineEvent::Finished { req_id, reason });
                     *slot_opt = None;
                 }
@@ -1232,6 +1267,10 @@ impl XlaReferenceEngine {
     /// is prefilled in full and its argmax is the first token, then decode advances
     /// from there.
     ///
+    /// The terminating EOS id is a control token and is not returned, so this
+    /// reference sequence is directly comparable with an eager MLX one
+    /// (issue #963).
+    ///
     /// # Errors
     ///
     /// Propagates prefill / decode failures.
@@ -1249,15 +1288,16 @@ impl XlaReferenceEngine {
         if max_new_tokens == 0 {
             return Ok(Vec::new());
         }
-        let first = self.inner.prefill_first(prompt)?;
-        let mut out = vec![first];
+        let mut out = Vec::with_capacity(max_new_tokens);
         let mut cache_len = prompt.len() as i32;
-        let mut cur = first;
-        while out.len() < max_new_tokens && !eos.contains(&cur) {
-            let nt = self.inner.decode(cur, cache_len)?;
-            out.push(nt);
+        let mut cur = self.inner.prefill_first(prompt)?;
+        while !eos.contains(&cur) {
+            out.push(cur);
+            if out.len() >= max_new_tokens {
+                break;
+            }
+            cur = self.inner.decode(cur, cache_len)?;
             cache_len += 1;
-            cur = nt;
         }
         Ok(out)
     }
@@ -1285,6 +1325,57 @@ mod tests {
         assert_eq!(finish_reason(4, 4, 7, &EOS), Some(FinishReason::Length));
         assert_eq!(finish_reason(2, 4, 7, &EOS), None);
         assert_eq!(finish_reason(1, 1, 7, &EOS), Some(FinishReason::Length));
+    }
+
+    #[test]
+    fn commit_token_withholds_the_terminating_eos_id() {
+        // The EOS id ends the sequence and is not output: emitting it would leak
+        // `<|im_end|>` into content and count one token too many (issue #963).
+        assert_eq!(
+            commit_token(3, 8, 42, &EOS),
+            TokenCommit {
+                emit: false,
+                finish: Some(FinishReason::Stop),
+            }
+        );
+        // Even as the very first (prefill) token, so an immediately-finished
+        // request streams nothing at all.
+        assert_eq!(
+            commit_token(1, 8, 42, &EOS),
+            TokenCommit {
+                emit: false,
+                finish: Some(FinishReason::Stop),
+            }
+        );
+        // And even when it is also the cap-th token, where EOS wins over Length.
+        assert_eq!(
+            commit_token(8, 8, 42, &EOS),
+            TokenCommit {
+                emit: false,
+                finish: Some(FinishReason::Stop),
+            }
+        );
+    }
+
+    #[test]
+    fn commit_token_emits_a_length_terminated_final_token() {
+        // A non-EOS token that exhausts the budget is real output: it must be
+        // emitted, unlike the EOS id above.
+        assert_eq!(
+            commit_token(8, 8, 7, &EOS),
+            TokenCommit {
+                emit: true,
+                finish: Some(FinishReason::Length),
+            }
+        );
+        // Mid-sequence: emitted, not finished.
+        assert_eq!(
+            commit_token(3, 8, 7, &EOS),
+            TokenCommit {
+                emit: true,
+                finish: None,
+            }
+        );
     }
 
     fn g() -> SampleParams {

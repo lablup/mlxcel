@@ -666,3 +666,76 @@ fn pending_preprocess_poll_timeout_does_not_shutdown_worker() {
     assert!(!worker.shutdown);
     drop(request_tx);
 }
+
+#[test]
+fn stop_finish_without_a_token_event_returns_empty_content_and_no_completion_tokens() {
+    // The engine withholds the terminating EOS id (issue #963), so a sequence
+    // that ends immediately on EOS reaches the worker as a bare `Finished`.
+    // Nothing may be streamed, `completion_tokens` must stay 0, and the finish
+    // reason must still be `stop`.
+    let mut worker = worker(None);
+    let (response_tx, response_rx) = mpsc::channel();
+
+    worker.admit(
+        String::new(),
+        Some(vec![10, 11]),
+        options(8),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        media(0, 0, 0),
+        response_tx,
+        Arc::new(AtomicBool::new(false)),
+    );
+    let req_id = *worker.states.keys().next().expect("one admitted request");
+
+    worker.dispatch(vec![EngineEvent::Finished {
+        req_id,
+        reason: XlaFinishReason::Stop,
+    }]);
+
+    let result = match response_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+        GenerateEvent::Done(result) => result,
+        GenerateEvent::Token(text) | GenerateEvent::TokenWithLogprobs(text, _) => {
+            panic!("the withheld EOS id was streamed as content: {text:?}")
+        }
+        GenerateEvent::Error(error) => panic!("unexpected generation failure: {error}"),
+    };
+    assert_eq!(result.text, "");
+    assert_eq!(result.completion_tokens, 0);
+    assert_eq!(result.finish_reason, "stop");
+    assert!(worker.states.is_empty());
+}
+
+#[test]
+fn sampled_token_count_charges_a_withheld_eos_to_the_decode_step() {
+    // Suppressing the EOS id must not shrink the decode-width metric: the
+    // engine still ran that step on device.
+    let one_token_then_eos = vec![
+        EngineEvent::Token {
+            req_id: 0,
+            token: 7,
+        },
+        EngineEvent::Finished {
+            req_id: 1,
+            reason: XlaFinishReason::Stop,
+        },
+    ];
+    assert_eq!(sampled_token_count(&one_token_then_eos), 2);
+
+    // A length finish accompanies its own emitted token, so it is not counted
+    // twice.
+    let length_terminated = vec![
+        EngineEvent::Token {
+            req_id: 0,
+            token: 7,
+        },
+        EngineEvent::Finished {
+            req_id: 0,
+            reason: XlaFinishReason::Length,
+        },
+    ];
+    assert_eq!(sampled_token_count(&length_terminated), 1);
+
+    assert_eq!(sampled_token_count(&[]), 0);
+}

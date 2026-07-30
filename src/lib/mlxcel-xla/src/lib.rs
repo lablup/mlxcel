@@ -400,7 +400,7 @@ impl XlaInferenceSession {
         prompt_tokens: &[i32],
         max_new_tokens: usize,
         eos_token_ids: &[i32],
-        mut on_token: F,
+        on_token: F,
     ) -> Result<Vec<i32>, String> {
         if prompt_tokens.is_empty() {
             return Err("XLA generation requires a non-empty prompt".to_string());
@@ -413,18 +413,42 @@ impl XlaInferenceSession {
         // and avoids double-counting the last prompt token in the cache.
         let split = prompt_tokens.len() - 1;
         self.prefill(&prompt_tokens[..split])?;
-        let mut current = prompt_tokens[split];
-        let mut out = Vec::with_capacity(max_new_tokens);
-        for _ in 0..max_new_tokens {
-            let next = self.decode_step(current)?;
-            out.push(next);
-            let keep_going = on_token(next);
-            if !keep_going || eos_token_ids.contains(&next) {
-                break;
-            }
-            current = next;
+        if max_new_tokens == 0 {
+            return Ok(Vec::new());
         }
-        Ok(out)
+        let first = self.decode_step(prompt_tokens[split])?;
+        self.drive_greedy(first, max_new_tokens, eos_token_ids, on_token)
+    }
+
+    /// Advance greedy decode from `first` (a prefill's argmax) and collect the
+    /// generated tokens.
+    ///
+    /// Applies the shared terminating-token contract: the EOS id that ends the
+    /// sequence is a control token, so it is neither collected nor handed to
+    /// `on_token`. This mirrors the eager `BatchScheduler`, which drops the EOS
+    /// id before it reaches `generated_tokens` or the incremental detokenizer;
+    /// without it the CLI renders `White<|im_end|>` where eager renders `White`,
+    /// and reports one generated token too many (issue #963). A token that ends
+    /// generation by reaching `max_new_tokens` is real output and is collected.
+    ///
+    /// Every collected token is handed to `on_token` exactly once, including the
+    /// one that exhausts `max_new_tokens`, so a streaming consumer never loses the
+    /// final piece. `on_token` returning `false` stops generation with that token
+    /// still collected. The order of the two break conditions matters: testing the
+    /// budget first would short-circuit past the callback for the last token.
+    ///
+    /// `max_new_tokens` is assumed non-zero; callers return early on zero before
+    /// spending a prefill.
+    fn drive_greedy<F: FnMut(i32) -> bool>(
+        &mut self,
+        first: i32,
+        max_new_tokens: usize,
+        eos_token_ids: &[i32],
+        on_token: F,
+    ) -> Result<Vec<i32>, String> {
+        drive_greedy_loop(first, max_new_tokens, eos_token_ids, on_token, |token| {
+            self.decode_step(token)
+        })
     }
 
     /// Seed KV from a complete token prompt and return the prefill argmax.
@@ -521,14 +545,7 @@ impl XlaInferenceSession {
         )
         .map_err(|error| error.to_string())?;
         let first = self.prefill_deepstack_prepared(request)?;
-        let mut out = Vec::with_capacity(max_new_tokens);
-        out.push(first);
-        let mut current = first;
-        while out.len() < max_new_tokens && !eos_token_ids.contains(&current) {
-            current = self.decode_step(current)?;
-            out.push(current);
-        }
-        Ok(out)
+        self.drive_greedy(first, max_new_tokens, eos_token_ids, |_| true)
     }
 
     /// Greedy generation seeded by Gemma3n post-scale embeddings and dense PLE.
@@ -548,14 +565,7 @@ impl XlaInferenceSession {
         )
         .map_err(|error| error.to_string())?;
         let first = self.prefill_gemma3n_prepared(request)?;
-        let mut out = Vec::with_capacity(max_new_tokens);
-        out.push(first);
-        let mut current = first;
-        while out.len() < max_new_tokens && !eos_token_ids.contains(&current) {
-            current = self.decode_step(current)?;
-            out.push(current);
-        }
-        Ok(out)
+        self.drive_greedy(first, max_new_tokens, eos_token_ids, |_| true)
     }
 
     /// Streaming greedy generation from prepared embeddings. The embeddings
@@ -567,7 +577,7 @@ impl XlaInferenceSession {
         prepared: &PreparedPrefill,
         max_new_tokens: usize,
         eos_token_ids: &[i32],
-        mut on_token: F,
+        on_token: F,
     ) -> Result<Vec<i32>, String> {
         if max_new_tokens == 0 {
             return Ok(Vec::new());
@@ -575,21 +585,7 @@ impl XlaInferenceSession {
         validate_request_capacity(prepared.sequence_len, max_new_tokens, self.context_capacity)
             .map_err(|error| error.to_string())?;
         let first = self.prefill_prepared(prepared)?;
-        let mut out = Vec::with_capacity(max_new_tokens);
-        out.push(first);
-        if !on_token(first) || eos_token_ids.contains(&first) {
-            return Ok(out);
-        }
-        let mut current = first;
-        while out.len() < max_new_tokens {
-            let next = self.decode_step(current)?;
-            out.push(next);
-            if !on_token(next) || eos_token_ids.contains(&next) {
-                break;
-            }
-            current = next;
-        }
-        Ok(out)
+        self.drive_greedy(first, max_new_tokens, eos_token_ids, on_token)
     }
 }
 
@@ -654,6 +650,34 @@ impl InferenceSession for XlaInferenceSession {
     fn decode_step(&mut self, _token: i32) -> Result<i32, String> {
         Err(NOT_WIRED.to_string())
     }
+}
+
+/// The greedy drive loop shared by every single-sequence generator, with `decode`
+/// standing in for `decode_step`.
+///
+/// Split out from [`XlaInferenceSession::drive_greedy`] so the terminating-token
+/// contract of issue #963 is unit-testable without an IREE device.
+fn drive_greedy_loop<F, D>(
+    first: i32,
+    max_new_tokens: usize,
+    eos_token_ids: &[i32],
+    mut on_token: F,
+    mut decode: D,
+) -> Result<Vec<i32>, String>
+where
+    F: FnMut(i32) -> bool,
+    D: FnMut(i32) -> Result<i32, String>,
+{
+    let mut out = Vec::with_capacity(max_new_tokens);
+    let mut current = first;
+    while !eos_token_ids.contains(&current) {
+        out.push(current);
+        if !on_token(current) || out.len() >= max_new_tokens {
+            break;
+        }
+        current = decode(current)?;
+    }
+    Ok(out)
 }
 
 // These scaffold tests cover the without-`iree` behavior (load records inputs;
@@ -802,5 +826,80 @@ mod tests {
         assert!(super::llava_diagnostic_device_memory_note("cuda").contains("GB10"));
         assert!(!super::llava_diagnostic_device_memory_note("local-sync").contains("CUDA"));
         assert!(!super::llava_diagnostic_device_memory_note("local-task").contains("GB10"));
+    }
+}
+
+// The terminating-token contract (issue #963) is device-independent, so these run
+// under both the plain and the `iree` build.
+#[cfg(test)]
+mod greedy_contract_tests {
+    use super::drive_greedy_loop;
+
+    /// Drive the loop over a scripted token stream, returning what was collected
+    /// and, separately, what the streaming callback actually saw.
+    fn drive(
+        first: i32,
+        max_new_tokens: usize,
+        eos: &[i32],
+        script: &[i32],
+    ) -> (Vec<i32>, Vec<i32>) {
+        let mut streamed = Vec::new();
+        let mut next = script.iter().copied();
+        let out = drive_greedy_loop(
+            first,
+            max_new_tokens,
+            eos,
+            |token| {
+                streamed.push(token);
+                true
+            },
+            |_| next.next().ok_or_else(|| "script exhausted".to_string()),
+        )
+        .expect("scripted drive");
+        (out, streamed)
+    }
+
+    #[test]
+    fn withholds_the_terminating_eos_and_never_streams_it() {
+        // 7, 8, then EOS: the EOS id ends the sequence without being collected or
+        // streamed, so the result is comparable with an eager MLX sequence.
+        let (out, streamed) = drive(7, 8, &[42], &[8, 42]);
+        assert_eq!(out, vec![7, 8]);
+        assert_eq!(streamed, vec![7, 8]);
+    }
+
+    #[test]
+    fn returns_nothing_when_the_prefill_token_is_eos() {
+        let (out, streamed) = drive(42, 8, &[42], &[]);
+        assert!(out.is_empty());
+        assert!(streamed.is_empty());
+    }
+
+    #[test]
+    fn streams_the_token_that_exhausts_the_budget() {
+        // Regression guard: testing the budget before invoking the callback would
+        // short-circuit past it and silently drop the last streamed piece.
+        let (out, streamed) = drive(7, 3, &[42], &[8, 9]);
+        assert_eq!(out, vec![7, 8, 9]);
+        assert_eq!(streamed, vec![7, 8, 9], "the final token must still stream");
+    }
+
+    #[test]
+    fn a_false_callback_stops_generation_keeping_that_token() {
+        let mut seen = Vec::new();
+        let mut next = [8, 9].iter().copied();
+        let out = drive_greedy_loop(
+            7,
+            8,
+            &[42],
+            |token| {
+                seen.push(token);
+                token != 8
+            },
+            |_| next.next().ok_or_else(|| "script exhausted".to_string()),
+        )
+        .expect("scripted drive");
+        assert_eq!(out, vec![7, 8]);
+        assert_eq!(seen, vec![7, 8]);
     }
 }
