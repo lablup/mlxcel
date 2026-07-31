@@ -1266,18 +1266,21 @@ mod tests {
         assert!(err.contains("bits"), "unhelpful error: {err}");
 
         // A non-quantized kv_b_proj carries no packing, so the pair is never
-        // solved and the decomposition must stay unaffected.
+        // solved and a `kv_lora_rank` that no packing could describe must not gate
+        // it. The tensor is built at `wide_rank`'s own width so it still satisfies
+        // the separate shape cross-check below the solve, which would otherwise
+        // reject this for an unrelated reason.
         let mut float_only = WeightMap::new();
-        let rows = honest.num_attention_heads as i32
-            * (honest.qk_nope_head_dim + honest.v_head_dim) as i32;
+        let rows = wide_rank.num_attention_heads as i32
+            * (wide_rank.qk_nope_head_dim + wide_rank.v_head_dim) as i32;
         float_only.insert(
             "model.layers.0.self_attn.0.kv_b_proj.weight".to_string(),
             mlxcel_core::zeros(
-                &[rows, honest.kv_lora_rank as i32],
+                &[rows, wide_rank.kv_lora_rank as i32],
                 mlxcel_core::dtype::FLOAT32,
             ),
         );
-        sanitize_weights(float_only, &honest)
+        sanitize_weights(float_only, &wide_rank)
             .expect("a float kv_b_proj must not be gated on quantization params");
     }
 }
