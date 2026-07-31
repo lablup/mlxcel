@@ -913,10 +913,12 @@ const PAGED_V2_MAX_N_REP: u64 = 16;
 /// `Hq = Hkv * n_rep` makes the dominant term independent of the head counts:
 /// `2 * target_ctas * n_rep * (head_dim + 1) * 4`.
 ///
-/// In practice this is single-digit megabytes (about 2 MB at the M1 Ultra's
-/// derived target with `head_dim` 128), which is why it was not accounted for
-/// before v2 became the production path. It is charged now so the accounting is
-/// truthful rather than because it is large.
+/// [`PAGED_V2_MAX_N_REP`] makes the result a few times larger than any real
+/// plan needs, which is the safe direction for an admission bound. Even so it
+/// lands in the low tens of megabytes at most, well under a tenth of a percent
+/// of a serving KV budget, which is why it was not accounted for before v2
+/// became the production path. It is charged now so the accounting is truthful,
+/// not because it is large.
 #[must_use]
 pub fn paged_v2_workspace_reserve_bytes(model_dir: &Path, num_layers: usize, batch: u64) -> u64 {
     let Some(params) = kv_cache_params_from_path(model_dir, DEFAULT_CTX_LEN, false, 1) else {
@@ -1691,6 +1693,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_minimal_config(tmp.path());
         let per_block = paged_block_bytes(tmp.path(), 32, 32, false).unwrap(); // 131072
+        // The paged decode v2 workspace is charged to the byte budget before it
+        // is divided into blocks (#899), so a caller asking for exactly N blocks
+        // of KV has to ask for the workspace too.
+        let workspace = paged_v2_workspace_reserve_bytes(tmp.path(), 32, 1);
+        assert!(workspace > 0, "the minimal config has a derivable geometry");
+
         // Exactly 100 blocks.
         assert_eq!(
             resolve_paged_block_budget(
@@ -1699,7 +1707,7 @@ mod tests {
                 32,
                 1,
                 false,
-                PagedBudgetDirective::Bytes(per_block * 100),
+                PagedBudgetDirective::Bytes(per_block * 100 + workspace),
             ),
             Some(100),
         );
@@ -1711,7 +1719,7 @@ mod tests {
                 32,
                 1,
                 false,
-                PagedBudgetDirective::Bytes(per_block * 100 + per_block / 2),
+                PagedBudgetDirective::Bytes(per_block * 100 + per_block / 2 + workspace),
             ),
             Some(100),
         );
@@ -1724,10 +1732,44 @@ mod tests {
                 32,
                 1,
                 false,
-                PagedBudgetDirective::Bytes(per_block - 1),
+                PagedBudgetDirective::Bytes(per_block - 1 + workspace),
             ),
             Some(0),
         );
+        // A budget that did not account for the workspace comes back short by
+        // exactly the reserve, which is the point: the blocks it hands out are
+        // blocks it can actually back.
+        let shortfall = usize::try_from((per_block * 100 - workspace) / per_block).unwrap();
+        assert!(shortfall < 100);
+        assert_eq!(
+            resolve_paged_block_budget(
+                tmp.path(),
+                32,
+                32,
+                1,
+                false,
+                PagedBudgetDirective::Bytes(per_block * 100),
+            ),
+            Some(shortfall),
+        );
+    }
+
+    #[test]
+    fn the_v2_workspace_reserve_is_small_and_scales_with_the_head_dim() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimal_config(tmp.path());
+        let reserve = paged_v2_workspace_reserve_bytes(tmp.path(), 32, 4);
+        // Single-digit megabytes: the reserve exists so admission is truthful,
+        // not because it is a material share of a KV budget.
+        assert!(reserve > 0, "expected a non-zero reserve, got {reserve}");
+        assert!(
+            reserve < 64 * 1024 * 1024,
+            "the reserve should stay small, got {reserve} bytes"
+        );
+        // A model with no derivable geometry reserves nothing rather than
+        // guessing.
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(paged_v2_workspace_reserve_bytes(empty.path(), 32, 4), 0);
     }
 
     #[test]
