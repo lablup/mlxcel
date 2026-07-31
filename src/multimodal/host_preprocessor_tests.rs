@@ -67,7 +67,12 @@ fn iree_vision_contract_policy_is_explicit_and_strict() {
 
 #[test]
 fn xla_loader_keeps_text_and_unqualified_vlm_image_capability_false() {
-    for model_type in ["llama", "qwen2_vl"] {
+    // `llama` is text-only and `mllama` is a VLM family whose processor and
+    // position contract has never been qualified for XLA. Both are capability
+    // downgrades rather than errors. `qwen2_vl` is deliberately not in this set:
+    // it is qualified, so a build that cannot run it is an error instead, pinned
+    // by `xla_loader_rejects_qwen2_vl_without_the_iree_feature` below.
+    for model_type in ["llama", "mllama"] {
         let model_dir = tempfile::tempdir().unwrap();
         std::fs::write(
             model_dir.path().join("config.json"),
@@ -80,6 +85,37 @@ fn xla_loader_keeps_text_and_unqualified_vlm_image_capability_false() {
             "{model_type} is not a qualified LLaVA host/runtime pair"
         );
     }
+}
+
+/// Qwen2-VL is qualified for the XLA vision path but has no MLX fallback, so a
+/// build without `xla-iree` has no way to embed its images. The loader reports
+/// that as a build-configuration error instead of downgrading capability to
+/// `Ok(None)`, which would be indistinguishable from a text-only checkpoint and
+/// would start a session that silently ignores images. Gated to the build the
+/// contract is about: with `xla-iree` the same config takes the IREE load path.
+#[cfg(not(feature = "xla-iree"))]
+#[test]
+fn xla_loader_rejects_qwen2_vl_without_the_iree_feature() {
+    let model_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        model_dir.path().join("config.json"),
+        r#"{"model_type":"qwen2_vl"}"#,
+    )
+    .unwrap();
+    let error = load_xla_image_preprocessor(model_dir.path())
+        .err()
+        .expect("qwen2_vl without xla-iree must fail startup, not downgrade image capability");
+    let HostPreprocessorError::InvalidConfig(message) = &error else {
+        panic!("expected a build-configuration error, got {error:?}");
+    };
+    assert!(
+        message.contains("requires the xla-iree feature"),
+        "the message must name the missing feature: {message}"
+    );
+    assert!(
+        message.contains("--features xla-iree"),
+        "the message must carry the actionable rebuild instruction: {message}"
+    );
 }
 
 #[test]

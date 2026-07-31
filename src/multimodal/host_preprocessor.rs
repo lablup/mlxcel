@@ -132,16 +132,38 @@ pub trait HostMultimodalPreprocessor {
 
 /// Load the image preprocessor supported by the OpenXLA host-first path.
 ///
-/// `Ok(None)` is the conservative result for text-only checkpoints and VLM
-/// families whose processor/position contract has not been qualified for XLA
-/// yet. Once a checkpoint is identified as the supported LLaVA family, missing
-/// or malformed processor/projector weights are startup errors rather than a
-/// capability downgrade.
+/// Three outcomes are possible, one per axis this loader decides on:
+///
+/// - `Ok(None)` is the conservative result for text-only checkpoints and VLM
+///   families whose processor/position contract has not been qualified for XLA
+///   yet.
+/// - `Ok(Some(preprocessor))` is returned for a qualified family that can run
+///   its vision path in this build. LLaVA reaches this even without the
+///   `xla-iree` feature, because it has a complete MLX host vision tower and
+///   projector to fall back to; only an explicit
+///   `MLXCEL_XLA_VISION_BACKEND=iree` makes feature absence fatal there.
+/// - `Err(..)` is returned for a qualified family this build cannot serve
+///   images for. That covers missing or malformed processor/projector weights
+///   on an identified LLaVA checkpoint, and Qwen2-VL in a build without
+///   `xla-iree`.
+///
+/// The Qwen2-VL asymmetry with LLaVA is deliberate, not an oversight. Qwen2-VL
+/// has no MLX vision fallback, which is the same reason
+/// `MLXCEL_XLA_VISION_BACKEND=host` is rejected for it below, so without
+/// `xla-iree` no code path can embed its images. `Ok(None)` there would be
+/// indistinguishable from a text-only checkpoint and would start a session that
+/// silently ignores every image. Failing takes away nothing that worked:
+/// `xla-iree` also enables `mlxcel-xla/iree`, and without that the session's
+/// `prefill` and `decode_step` return `mlxcel_xla::NOT_WIRED`, so an
+/// `xla-backend`-only build cannot generate from any checkpoint at all. Both
+/// callers (`backend::xla::create_session` and the server's image-preprocess
+/// stage) turn this error into a startup failure, so the message carries the
+/// rebuild instruction the operator needs.
 ///
 /// # Errors
 ///
-/// Returns a typed configuration or weight-loading error for a supported LLaVA
-/// checkpoint that cannot construct its complete host preprocessor.
+/// Returns a typed configuration or weight-loading error for a qualified
+/// checkpoint that cannot construct a complete image path in this build.
 pub fn load_xla_image_preprocessor(
     model_path: &Path,
 ) -> Result<Option<Box<dyn HostMultimodalPreprocessor>>, HostPreprocessorError> {
@@ -172,10 +194,17 @@ pub fn load_xla_image_preprocessor(
             );
             return Ok(Some(Box::new(preprocessor)));
         }
+        // No MLX fallback exists for this family, so an image-capable session
+        // cannot be built here. Report it as a build-configuration error with
+        // the remedy attached: both callers surface this string verbatim, so
+        // the rebuild instruction is the only actionable part the operator
+        // gets.
         #[cfg(not(feature = "xla-iree"))]
         {
             return Err(HostPreprocessorError::InvalidConfig(
-                "Qwen2-VL XLA image execution requires the xla-iree feature".to_string(),
+                "Qwen2-VL XLA image execution requires the xla-iree feature; rebuild mlxcel with \
+                 `--features xla-iree` (this family has no MLX vision fallback)"
+                    .to_string(),
             ));
         }
     }
