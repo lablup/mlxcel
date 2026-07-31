@@ -132,16 +132,22 @@ pub(crate) fn fused_moe_max_dff_from(env: Option<&str>, metal_available: bool) -
 /// loader stores it on a quantized expert plane (issue #958).
 ///
 /// [`SwitchLinear::from_stacked_parts`] below carries this bound for every
-/// family that routes its experts through the shared loader. Eighteen other
-/// families keep their own quantized expert type instead (a local
-/// `SwitchLinear` / `SwitchGLU` / `ExpertLinear` / `QuantizedSwitchLinear`), and
-/// those types store the declared pair verbatim and hand it to `gather_qmm`,
-/// which reaches the same `w.shape(-1) * 32 / bits` division inside
+/// family that routes its experts through the shared loader. Seventeen families
+/// keep their own quantized expert type instead (a local `SwitchLinear` /
+/// `SwitchGLU` / `ExpertLinear` / `QuantizedSwitchLinear`), and those types
+/// store the declared pair verbatim and hand it to `gather_qmm`, which reaches
+/// the same `w.shape(-1) * 32 / bits` division inside
 /// `extract_quantized_matmul_dims`. Because `gather_qmm` crosses the cxx bridge
 /// as `UniquePtr<MlxArray>` rather than `Result`, the resulting C++ throw is an
 /// uncatchable `std::terminate` at the first routed forward pass rather than a
 /// load error. See [`mlxcel_core::layers::validate_quantization_params`] for why
 /// the bound is a range rather than an allowlist of the widths MLX supports.
+///
+/// KimiLinear is the one caller below that is not an expert plane: it keeps a
+/// private `MultiLinear` for MLA rather than using
+/// [`mlxcel_core::layers::MultiLinear`], so it does not inherit the bound that
+/// loader carries, and its stored pair reaches `quantized_matmul` on the same
+/// infallible bridge.
 ///
 /// The check belongs here, at the point the pair is stored, rather than once at
 /// each family's model-level `from_weights`. A load-boundary check does not
