@@ -35,8 +35,11 @@ use crate::aux::{
 };
 use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 use crate::emitter::{
-    Qwen2VlConfig, Qwen2VlHostInputs, emit_qwen2_vl, prepare_qwen2_vl_host_inputs,
+    Qwen2VlConfig, Qwen2VlHostInputs, QwenVlVisionVariant, emit_qwen2_vl_with,
+    prepare_qwen2_vl_host_inputs, resolve_precision_checked,
 };
+#[cfg(feature = "diagnostics")]
+use crate::emitter::{Qwen25VlVisionDiagnosticLayout, emit_qwen2_5_vl_diagnostics};
 use crate::iree::{cached_vmfb_path, compile_one_to, iree_compile_bin, target_flags};
 use crate::weights::{bf16_to_f32, dequantize_affine, f16_to_f32, f32_le_to_f32};
 
@@ -59,9 +62,157 @@ pub struct Qwen2VlVisionProjection {
     pub metrics: Qwen2VlVisionExecutionMetrics,
 }
 
+#[cfg(feature = "diagnostics")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Qwen25VlDiagnosticMutation {
+    None,
+    Qwen2FullAttention,
+    IdentityPermutation,
+    ZeroVisionPositions,
+}
+
+#[cfg(feature = "diagnostics")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Qwen25VlAttentionMaskAudit {
+    pub full_window_differences: usize,
+    pub cross_media_full_bias_leaks: usize,
+    pub active_padding_full_bias_leaks: usize,
+    pub invalid_padded_full_bias_entries: usize,
+}
+
+#[cfg(feature = "diagnostics")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct Qwen25VlVisionDiagnostics {
+    pub window_index: Vec<usize>,
+    pub restore_indices: Vec<usize>,
+    pub packed_cu_seqlens: Vec<usize>,
+    pub window_cu_seqlens: Vec<usize>,
+    pub reordered_patch_embedding: Vec<f32>,
+    pub window_layer_index: usize,
+    pub post_window_layer: Vec<f32>,
+    pub full_layer_indices: Vec<usize>,
+    pub post_full_layers: Vec<Vec<f32>>,
+    pub final_interval_layer_indices: Vec<usize>,
+    pub post_final_interval_layers: Vec<Vec<f32>>,
+    pub diagnostic_layer_indices: Vec<usize>,
+    pub post_diagnostic_layers: Vec<Vec<f32>>,
+    pub substage_probe_layer_index: usize,
+    pub substage_probe_layer_input: Vec<f32>,
+    pub substage_probe_layer_norm1: Vec<f32>,
+    pub substage_probe_layer_query: Vec<f32>,
+    pub substage_probe_layer_key: Vec<f32>,
+    pub substage_probe_layer_value: Vec<f32>,
+    pub substage_probe_layer_attention_context: Vec<f32>,
+    pub substage_probe_layer_attention: Vec<f32>,
+    pub substage_probe_layer_post_attention_residual: Vec<f32>,
+    pub substage_probe_layer_norm2: Vec<f32>,
+    pub substage_probe_layer_mlp_gate_projection: Vec<f32>,
+    pub substage_probe_layer_mlp_gate_activation: Vec<f32>,
+    pub substage_probe_layer_mlp_up_projection: Vec<f32>,
+    pub substage_probe_layer_mlp_gated_product: Vec<f32>,
+    pub substage_probe_layer_mlp_down_projection: Vec<f32>,
+    pub merger_window_ordered: Vec<f32>,
+    pub restored_projection: Vec<f32>,
+    pub patch_bucket: usize,
+    pub patch_tokens: usize,
+    pub merged_tokens: usize,
+    pub vision_hidden: usize,
+    pub text_hidden: usize,
+    pub attention_mask_audit: Qwen25VlAttentionMaskAudit,
+}
+
 struct ActiveModule {
     patch_bucket: usize,
     module: IreeAuxiliaryModule,
+}
+
+#[cfg(feature = "diagnostics")]
+struct ActiveDiagnosticModule {
+    patch_bucket: usize,
+    module: IreeAuxiliaryModule,
+    layout: Qwen25VlVisionDiagnosticLayout,
+}
+
+#[cfg(feature = "diagnostics")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Qwen25VlDiagnosticOutputSpec {
+    label: String,
+    shape: Vec<usize>,
+}
+
+#[cfg(feature = "diagnostics")]
+fn qwen25_diagnostic_output_specs(
+    config: &Qwen2VlConfig,
+    layout: &Qwen25VlVisionDiagnosticLayout,
+    patch_bucket: usize,
+) -> Vec<Qwen25VlDiagnosticOutputSpec> {
+    let state_shape = || vec![patch_bucket, config.hidden];
+    let state = |label: String| Qwen25VlDiagnosticOutputSpec {
+        label,
+        shape: state_shape(),
+    };
+    let intermediate = |label: String| Qwen25VlDiagnosticOutputSpec {
+        label,
+        shape: vec![patch_bucket, config.intermediate],
+    };
+    let mut specs = vec![
+        state("reordered_patch_embedding".to_string()),
+        state(format!("post_window_layer.{}", layout.window_layer_index)),
+    ];
+    specs.extend(
+        layout
+            .full_layer_indices
+            .iter()
+            .map(|layer| state(format!("post_full_layer.{layer}"))),
+    );
+    specs.extend(
+        layout
+            .final_interval_layer_indices
+            .iter()
+            .map(|layer| state(format!("post_final_interval_layer.{layer}"))),
+    );
+    specs.extend(
+        layout
+            .diagnostic_layer_indices
+            .iter()
+            .map(|layer| state(format!("post_diagnostic_layer.{layer}"))),
+    );
+    let probe = layout.substage_probe_layer_index;
+    specs.extend([
+        state(format!("substage_probe_layer.{probe}.input")),
+        state(format!("substage_probe_layer.{probe}.norm1")),
+        Qwen25VlDiagnosticOutputSpec {
+            label: format!("substage_probe_layer.{probe}.query"),
+            shape: vec![patch_bucket, config.heads, config.hidden / config.heads],
+        },
+        Qwen25VlDiagnosticOutputSpec {
+            label: format!("substage_probe_layer.{probe}.key"),
+            shape: vec![patch_bucket, config.heads, config.hidden / config.heads],
+        },
+        Qwen25VlDiagnosticOutputSpec {
+            label: format!("substage_probe_layer.{probe}.value"),
+            shape: vec![patch_bucket, config.heads, config.hidden / config.heads],
+        },
+        state(format!("substage_probe_layer.{probe}.attention_context")),
+        state(format!("substage_probe_layer.{probe}.attention")),
+        state(format!(
+            "substage_probe_layer.{probe}.post_attention_residual"
+        )),
+        state(format!("substage_probe_layer.{probe}.norm2")),
+        intermediate(format!("substage_probe_layer.{probe}.mlp_gate_projection")),
+        intermediate(format!("substage_probe_layer.{probe}.mlp_gate_activation")),
+        intermediate(format!("substage_probe_layer.{probe}.mlp_up_projection")),
+        intermediate(format!("substage_probe_layer.{probe}.mlp_gated_product")),
+        state(format!("substage_probe_layer.{probe}.mlp_down_projection")),
+    ]);
+    specs.push(Qwen25VlDiagnosticOutputSpec {
+        label: "merger_window_ordered".to_string(),
+        shape: vec![
+            patch_bucket / (config.spatial_merge_size * config.spatial_merge_size),
+            config.text_hidden,
+        ],
+    });
+    specs
 }
 
 pub struct IreeQwen2VlProjector {
@@ -70,6 +221,15 @@ pub struct IreeQwen2VlProjector {
     config: Qwen2VlConfig,
     processor_identity: String,
     active: Option<ActiveModule>,
+}
+
+#[cfg(feature = "diagnostics")]
+pub struct IreeQwen25VlDiagnosticProjector {
+    model_dir: PathBuf,
+    device: String,
+    config: Qwen2VlConfig,
+    processor_identity: String,
+    active: Option<ActiveDiagnosticModule>,
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {
@@ -135,10 +295,15 @@ fn processor_identity(model_dir: &Path, config: &Qwen2VlConfig) -> Result<String
         .as_object()
         .ok_or_else(|| format!("{} must contain an object", path.display()))?;
     for field in ["do_resize", "do_rescale", "do_normalize", "do_convert_rgb"] {
-        if object.get(field).and_then(serde_json::Value::as_bool) != Some(true) {
-            return Err(format!(
-                "preprocessor_config.json {field}=true is required by Qwen2-VL IREE vision"
-            ));
+        let enabled = object.get(field).and_then(serde_json::Value::as_bool);
+        match (&config.variant, enabled) {
+            (QwenVlVisionVariant::Qwen2, Some(true))
+            | (QwenVlVisionVariant::Qwen25 { .. }, None | Some(true)) => {}
+            _ => {
+                return Err(format!(
+                    "preprocessor_config.json {field}=true is required by Qwen-VL IREE vision"
+                ));
+            }
         }
     }
     let positive = |field: &str| -> Result<usize, String> {
@@ -170,8 +335,18 @@ fn processor_identity(model_dir: &Path, config: &Qwen2VlConfig) -> Result<String
             "Qwen2-VL IREE vision requires image_processor_type=Qwen2VLImageProcessor".to_string(),
         );
     }
+    if matches!(&config.variant, QwenVlVisionVariant::Qwen25 { .. })
+        && object
+            .get("processor_class")
+            .and_then(serde_json::Value::as_str)
+            != Some("Qwen2_5_VLProcessor")
+    {
+        return Err(
+            "Qwen2.5-VL IREE vision requires processor_class=Qwen2_5_VLProcessor".to_string(),
+        );
+    }
     Ok(format!(
-        "qwen2-vl-processor-v1:sha256={}:patch={}:temporal={}:merge={}",
+        "qwen-vl-processor-v2:sha256={}:patch={}:temporal={}:merge={}",
         sha256_hex(&bytes),
         config.patch_size,
         config.temporal_patch_size,
@@ -540,6 +715,54 @@ fn checked_f32_output(label: &str, bytes: Vec<u8>) -> Result<Vec<f32>, String> {
     Ok(values)
 }
 
+#[cfg(feature = "diagnostics")]
+fn audit_attention_masks(
+    patch_bucket: usize,
+    actual_patches: usize,
+    packed_cu_seqlens: &[usize],
+    full_bias: &[f32],
+    window_bias: &[f32],
+) -> Qwen25VlAttentionMaskAudit {
+    let media_for = |index: usize| {
+        packed_cu_seqlens
+            .windows(2)
+            .position(|range| range[0] <= index && index < range[1])
+    };
+    let mut audit = Qwen25VlAttentionMaskAudit {
+        full_window_differences: 0,
+        cross_media_full_bias_leaks: 0,
+        active_padding_full_bias_leaks: 0,
+        invalid_padded_full_bias_entries: 0,
+    };
+    for row in 0..patch_bucket {
+        for column in 0..patch_bucket {
+            let index = row * patch_bucket + column;
+            if full_bias[index] != window_bias[index] {
+                audit.full_window_differences += 1;
+            }
+            let finite = full_bias[index].is_finite();
+            match (row < actual_patches, column < actual_patches) {
+                (true, true) => {
+                    if media_for(row) != media_for(column) && finite {
+                        audit.cross_media_full_bias_leaks += 1;
+                    }
+                }
+                (true, false) | (false, true) => {
+                    if finite {
+                        audit.active_padding_full_bias_leaks += 1;
+                    }
+                }
+                (false, false) => {
+                    if finite != (row == column) {
+                        audit.invalid_padded_full_bias_entries += 1;
+                    }
+                }
+            }
+        }
+    }
+    audit
+}
+
 fn compile_and_load(
     model_dir: &Path,
     device: &str,
@@ -547,7 +770,8 @@ fn compile_and_load(
     processor_identity: &str,
     patch_bucket: usize,
 ) -> Result<IreeAuxiliaryModule, String> {
-    let mlir = emit_qwen2_vl(config, patch_bucket);
+    let precision = resolve_precision_checked(device)?;
+    let mlir = emit_qwen2_vl_with(config, patch_bucket, precision);
     let compiler = iree_compile_bin()?;
     if !compiler.is_file() {
         return Err(format!("iree-compile not found at {}", compiler.display()));
@@ -560,19 +784,63 @@ fn compile_and_load(
     let contract = AuxiliaryArtifactContract::new_legacy_unqualified(
         ENTRY_NAME,
         format!(
-            "{};{};checkpoint_schema_sha256={}",
+            "{};{};precision={precision:?};checkpoint_schema_sha256={}",
             config.fingerprint(patch_bucket),
             processor_identity,
             sha256_hex(checkpoint_schema.as_bytes())
         ),
         compiler_generation_identity(&compiler, flags, &mlir)?,
     )?;
-    let tag = format!("qwen2-vl-vision-{patch_bucket}");
+    let family = match &config.variant {
+        QwenVlVisionVariant::Qwen2 => "qwen2",
+        QwenVlVisionVariant::Qwen25 { .. } => "qwen2-5",
+    };
+    let tag = format!("{family}-vl-vision-{patch_bucket}");
     let vmfb = cached_vmfb_path(&compiler, &mlir, flags, &cache, &tag, 0);
     ensure_qualified_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
         compile_one_to(&compiler, &mlir, flags, &cache, &tag, 0, temporary)
     })?;
     IreeAuxiliaryModule::load(device, &vmfb, &contract, weights)
+}
+
+#[cfg(feature = "diagnostics")]
+fn compile_and_load_diagnostics(
+    model_dir: &Path,
+    device: &str,
+    config: &Qwen2VlConfig,
+    processor_identity: &str,
+    patch_bucket: usize,
+) -> Result<(IreeAuxiliaryModule, Qwen25VlVisionDiagnosticLayout), String> {
+    let precision = resolve_precision_checked(device)?;
+    let (mlir, layout) = emit_qwen2_5_vl_diagnostics(config, patch_bucket, precision)?;
+    let compiler = iree_compile_bin()?;
+    if !compiler.is_file() {
+        return Err(format!("iree-compile not found at {}", compiler.display()));
+    }
+    let flags = target_flags(device)?;
+    let cache = std::env::temp_dir().join("mlxcel-xla-qwen2-vl-vmfb");
+    std::fs::create_dir_all(&cache)
+        .map_err(|error| format!("mkdir {}: {error}", cache.display()))?;
+    let (weights, checkpoint_schema) = load_weights(model_dir, config)?;
+    let contract = AuxiliaryArtifactContract::new_legacy_unqualified(
+        ENTRY_NAME,
+        format!(
+            "{};{};precision={precision:?};diagnostics=window-full-restoration;checkpoint_schema_sha256={}",
+            config.fingerprint(patch_bucket),
+            processor_identity,
+            sha256_hex(checkpoint_schema.as_bytes())
+        ),
+        compiler_generation_identity(&compiler, flags, &mlir)?,
+    )?;
+    let tag = format!("qwen2-5-vl-vision-diagnostics-{patch_bucket}");
+    let vmfb = cached_vmfb_path(&compiler, &mlir, flags, &cache, &tag, 0);
+    ensure_qualified_auxiliary_artifact(&vmfb, &contract, &weights, |temporary| {
+        compile_one_to(&compiler, &mlir, flags, &cache, &tag, 0, temporary)
+    })?;
+    Ok((
+        IreeAuxiliaryModule::load(device, &vmfb, &contract, weights)?,
+        layout,
+    ))
 }
 
 impl IreeQwen2VlProjector {
@@ -629,6 +897,7 @@ impl IreeQwen2VlProjector {
             patches,
             vision_rope_freqs,
             packed_attention_bias,
+            window_attention_bias,
         } = prepare_qwen2_vl_host_inputs(&self.config, grids, temporal_patch_rows)?;
         let patch_width = self.config.channels
             * self.config.temporal_patch_size
@@ -645,24 +914,32 @@ impl IreeQwen2VlProjector {
         let mut output =
             vec![0u8; full_output_shape.iter().product::<usize>() * std::mem::size_of::<f32>()];
         let started = Instant::now();
+        let mut inputs = vec![
+            AuxiliaryInput {
+                bytes: f32_as_bytes(&patches),
+                dtype: AuxiliaryTensorDType::Float32,
+                shape: &patch_shape,
+            },
+            AuxiliaryInput {
+                bytes: f32_as_bytes(&vision_rope_freqs),
+                dtype: AuxiliaryTensorDType::Float32,
+                shape: &frequency_shape,
+            },
+            AuxiliaryInput {
+                bytes: f32_as_bytes(&packed_attention_bias),
+                dtype: AuxiliaryTensorDType::Float32,
+                shape: &bias_shape,
+            },
+        ];
+        if let Some(window_attention_bias) = &window_attention_bias {
+            inputs.push(AuxiliaryInput {
+                bytes: f32_as_bytes(window_attention_bias),
+                dtype: AuxiliaryTensorDType::Float32,
+                shape: &bias_shape,
+            });
+        }
         self.ensure_bucket(plan.patch_bucket)?.invoke(
-            &[
-                AuxiliaryInput {
-                    bytes: f32_as_bytes(&patches),
-                    dtype: AuxiliaryTensorDType::Float32,
-                    shape: &patch_shape,
-                },
-                AuxiliaryInput {
-                    bytes: f32_as_bytes(&vision_rope_freqs),
-                    dtype: AuxiliaryTensorDType::Float32,
-                    shape: &frequency_shape,
-                },
-                AuxiliaryInput {
-                    bytes: f32_as_bytes(&packed_attention_bias),
-                    dtype: AuxiliaryTensorDType::Float32,
-                    shape: &bias_shape,
-                },
-            ],
+            &inputs,
             &mut [AuxiliaryOutput {
                 bytes: &mut output,
                 dtype: AuxiliaryTensorDType::Float32,
@@ -675,10 +952,21 @@ impl IreeQwen2VlProjector {
         let actual_values = actual_tokens
             .checked_mul(self.config.text_hidden)
             .ok_or_else(|| "Qwen2-VL projected output size overflowed".to_string())?;
-        let values = all_values
+        let window_ordered = all_values
             .get(..actual_values)
             .ok_or_else(|| "Qwen2-VL IREE output is shorter than the actual grid".to_string())?
             .to_vec();
+        let mut values = Vec::with_capacity(actual_values);
+        for &window_position in &plan.restore_indices {
+            let start = window_position
+                .checked_mul(self.config.text_hidden)
+                .ok_or_else(|| "Qwen-VL restoration offset overflowed".to_string())?;
+            values.extend_from_slice(
+                window_ordered
+                    .get(start..start + self.config.text_hidden)
+                    .ok_or_else(|| "Qwen-VL restoration index is out of range".to_string())?,
+            );
+        }
         Ok(Qwen2VlVisionProjection {
             values,
             shape: [actual_tokens, self.config.text_hidden],
@@ -687,7 +975,10 @@ impl IreeQwen2VlProjector {
             metrics: Qwen2VlVisionExecutionMetrics {
                 patch_upload_bytes: std::mem::size_of_val(patches.as_slice()),
                 metadata_upload_bytes: std::mem::size_of_val(vision_rope_freqs.as_slice())
-                    + std::mem::size_of_val(packed_attention_bias.as_slice()),
+                    + std::mem::size_of_val(packed_attention_bias.as_slice())
+                    + window_attention_bias
+                        .as_ref()
+                        .map_or(0, |bias| std::mem::size_of_val(bias.as_slice())),
                 projected_transfer_bytes: std::mem::size_of_val(all_values.as_slice()),
                 elapsed_seconds,
             },
@@ -695,9 +986,459 @@ impl IreeQwen2VlProjector {
     }
 }
 
+#[cfg(feature = "diagnostics")]
+fn restore_grouped_rows(
+    values: &[f32],
+    row_width: usize,
+    merge_unit: usize,
+    patch_bucket: usize,
+    actual_patches: usize,
+    restore_indices: &[usize],
+) -> Result<Vec<f32>, String> {
+    let expected = patch_bucket
+        .checked_mul(row_width)
+        .ok_or_else(|| "Qwen2.5-VL diagnostic row count overflowed".to_string())?;
+    if values.len() != expected || actual_patches != restore_indices.len() * merge_unit {
+        return Err("Qwen2.5-VL diagnostic permutation dimensions are inconsistent".to_string());
+    }
+    let mut restored = vec![0.0; expected];
+    for (original_group, &window_group) in restore_indices.iter().enumerate() {
+        let source = window_group
+            .checked_mul(merge_unit)
+            .and_then(|row| row.checked_mul(row_width))
+            .ok_or_else(|| "Qwen2.5-VL diagnostic source offset overflowed".to_string())?;
+        let destination = original_group
+            .checked_mul(merge_unit)
+            .and_then(|row| row.checked_mul(row_width))
+            .ok_or_else(|| "Qwen2.5-VL diagnostic destination offset overflowed".to_string())?;
+        let count = merge_unit
+            .checked_mul(row_width)
+            .ok_or_else(|| "Qwen2.5-VL diagnostic group width overflowed".to_string())?;
+        let source_rows = values
+            .get(source..source + count)
+            .ok_or_else(|| "Qwen2.5-VL diagnostic source group is out of range".to_string())?;
+        restored[destination..destination + count].copy_from_slice(source_rows);
+    }
+    Ok(restored)
+}
+
+#[cfg(feature = "diagnostics")]
+impl IreeQwen25VlDiagnosticProjector {
+    pub fn load(model_dir: &Path, device: &str) -> Result<Self, String> {
+        let config = Qwen2VlConfig::from_model_dir(model_dir)?;
+        if !matches!(&config.variant, QwenVlVisionVariant::Qwen25 { .. }) {
+            return Err("Qwen2.5-VL vision diagnostics require model_type=qwen2_5_vl".to_string());
+        }
+        let processor_identity = processor_identity(model_dir, &config)?;
+        Ok(Self {
+            model_dir: model_dir.to_path_buf(),
+            device: device.to_string(),
+            config,
+            processor_identity,
+            active: None,
+        })
+    }
+
+    fn ensure_bucket(
+        &mut self,
+        patch_bucket: usize,
+    ) -> Result<&mut ActiveDiagnosticModule, String> {
+        if self.active.as_ref().map(|active| active.patch_bucket) != Some(patch_bucket) {
+            let (module, layout) = compile_and_load_diagnostics(
+                &self.model_dir,
+                &self.device,
+                &self.config,
+                &self.processor_identity,
+                patch_bucket,
+            )?;
+            self.active = Some(ActiveDiagnosticModule {
+                patch_bucket,
+                module,
+                layout,
+            });
+        }
+        self.active
+            .as_mut()
+            .ok_or_else(|| "Qwen2.5-VL diagnostic module was not installed".to_string())
+    }
+
+    pub fn capture(
+        &mut self,
+        temporal_patch_rows: &[f32],
+        grids: &[(i32, i32, i32)],
+        mutation: Qwen25VlDiagnosticMutation,
+    ) -> Result<Qwen25VlVisionDiagnostics, String> {
+        let Qwen2VlHostInputs {
+            plan,
+            mut patches,
+            mut vision_rope_freqs,
+            packed_attention_bias,
+            mut window_attention_bias,
+        } = prepare_qwen2_vl_host_inputs(&self.config, grids, temporal_patch_rows)?;
+        let merge_unit = self.config.spatial_merge_size * self.config.spatial_merge_size;
+        let patch_width = self.config.channels
+            * self.config.temporal_patch_size
+            * self.config.patch_size
+            * self.config.patch_size;
+        let frequency_width = self.config.hidden / self.config.heads / 2;
+        let attention_mask_audit = audit_attention_masks(
+            plan.patch_bucket,
+            plan.actual_patches,
+            &plan.packed_cu_seqlens,
+            &packed_attention_bias,
+            window_attention_bias.as_deref().ok_or_else(|| {
+                "Qwen2.5-VL diagnostics require a window-attention bias".to_string()
+            })?,
+        );
+        match mutation {
+            Qwen25VlDiagnosticMutation::None => {}
+            Qwen25VlDiagnosticMutation::Qwen2FullAttention => {
+                window_attention_bias = Some(packed_attention_bias.clone());
+            }
+            Qwen25VlDiagnosticMutation::IdentityPermutation => {
+                patches = restore_grouped_rows(
+                    &patches,
+                    patch_width,
+                    merge_unit,
+                    plan.patch_bucket,
+                    plan.actual_patches,
+                    &plan.restore_indices,
+                )?;
+                vision_rope_freqs = restore_grouped_rows(
+                    &vision_rope_freqs,
+                    frequency_width,
+                    merge_unit,
+                    plan.patch_bucket,
+                    plan.actual_patches,
+                    &plan.restore_indices,
+                )?;
+            }
+            Qwen25VlDiagnosticMutation::ZeroVisionPositions => {
+                vision_rope_freqs.fill(0.0);
+            }
+        }
+        let window_attention_bias = window_attention_bias
+            .ok_or_else(|| "Qwen2.5-VL diagnostics require a window-attention bias".to_string())?;
+        let patch_shape = [plan.patch_bucket, patch_width];
+        let frequency_shape = [plan.patch_bucket, frequency_width];
+        let bias_shape = [plan.patch_bucket, plan.patch_bucket];
+        let diagnostic_config = self.config.clone();
+        let active = self.ensure_bucket(plan.patch_bucket)?;
+        let layout = active.layout.clone();
+        let full_layer_count = layout.full_layer_indices.len();
+        let final_interval_layer_count = layout.final_interval_layer_indices.len();
+        let diagnostic_layer_count = layout.diagnostic_layer_indices.len();
+        let output_specs =
+            qwen25_diagnostic_output_specs(&diagnostic_config, &layout, plan.patch_bucket);
+        let merger_output_index = output_specs.len() - 1;
+        let mut output_buffers = output_specs
+            .iter()
+            .map(|spec| {
+                vec![0u8; spec.shape.iter().product::<usize>() * std::mem::size_of::<f32>()]
+            })
+            .collect::<Vec<_>>();
+        let inputs = [
+            AuxiliaryInput {
+                bytes: f32_as_bytes(&patches),
+                dtype: AuxiliaryTensorDType::Float32,
+                shape: &patch_shape,
+            },
+            AuxiliaryInput {
+                bytes: f32_as_bytes(&vision_rope_freqs),
+                dtype: AuxiliaryTensorDType::Float32,
+                shape: &frequency_shape,
+            },
+            AuxiliaryInput {
+                bytes: f32_as_bytes(&packed_attention_bias),
+                dtype: AuxiliaryTensorDType::Float32,
+                shape: &bias_shape,
+            },
+            AuxiliaryInput {
+                bytes: f32_as_bytes(&window_attention_bias),
+                dtype: AuxiliaryTensorDType::Float32,
+                shape: &bias_shape,
+            },
+        ];
+        let mut outputs = output_buffers
+            .iter_mut()
+            .zip(&output_specs)
+            .map(|(bytes, spec)| AuxiliaryOutput {
+                bytes,
+                dtype: AuxiliaryTensorDType::Float32,
+                shape: &spec.shape,
+            })
+            .collect::<Vec<_>>();
+        active.module.invoke(&inputs, &mut outputs)?;
+        let mut decoded = output_buffers
+            .into_iter()
+            .zip(&output_specs)
+            .map(|(bytes, spec)| {
+                checked_f32_output(
+                    &format!("Qwen2.5-VL diagnostic output {}", spec.label),
+                    bytes,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // The public diagnostics API intentionally owns flat comparison
+        // vectors, but the IREE descriptors above retain the emitted rank-3
+        // [patch, head, head_dim] axes for Q/K/V and the wider MLP
+        // intermediate axis until after validated device transfer.
+        for (output, spec) in decoded
+            .iter_mut()
+            .zip(&output_specs)
+            .take(merger_output_index)
+        {
+            let actual_values = spec
+                .shape
+                .iter()
+                .skip(1)
+                .try_fold(plan.actual_patches, |values, dimension| {
+                    values.checked_mul(*dimension)
+                });
+            output.truncate(actual_values.ok_or_else(|| {
+                format!(
+                    "Qwen2.5-VL diagnostic output {} size overflowed",
+                    spec.label
+                )
+            })?);
+        }
+        let all_projected = decoded
+            .pop()
+            .ok_or_else(|| "Qwen2.5-VL diagnostic merger output is missing".to_string())?;
+        let actual_tokens = plan.merged_tokens_per_image.iter().sum::<usize>();
+        let actual_projected_values = actual_tokens
+            .checked_mul(self.config.text_hidden)
+            .ok_or_else(|| "Qwen2.5-VL diagnostic merger size overflowed".to_string())?;
+        let merger_window_ordered = all_projected
+            .get(..actual_projected_values)
+            .ok_or_else(|| "Qwen2.5-VL diagnostic merger output is truncated".to_string())?
+            .to_vec();
+        let mut restored_projection = Vec::with_capacity(actual_projected_values);
+        for &window_position in &plan.restore_indices {
+            let start = window_position
+                .checked_mul(self.config.text_hidden)
+                .ok_or_else(|| "Qwen2.5-VL diagnostic restore offset overflowed".to_string())?;
+            restored_projection.extend_from_slice(
+                merger_window_ordered
+                    .get(start..start + self.config.text_hidden)
+                    .ok_or_else(|| {
+                        "Qwen2.5-VL diagnostic restore index is out of range".to_string()
+                    })?,
+            );
+        }
+        let reordered_patch_embedding = decoded.remove(0);
+        let post_window_layer = decoded.remove(0);
+        let post_full_layers = decoded.drain(..full_layer_count).collect::<Vec<_>>();
+        let post_final_interval_layers = decoded
+            .drain(..final_interval_layer_count)
+            .collect::<Vec<_>>();
+        let post_diagnostic_layers = decoded.drain(..diagnostic_layer_count).collect::<Vec<_>>();
+        let mut substage_probe_layer_substages = decoded.into_iter();
+        let substage_probe_layer_input = substage_probe_layer_substages
+            .next()
+            .expect("diagnostic substage probe layer input output");
+        let substage_probe_layer_norm1 = substage_probe_layer_substages
+            .next()
+            .expect("diagnostic substage probe layer norm1 output");
+        let substage_probe_layer_query = substage_probe_layer_substages
+            .next()
+            .expect("diagnostic substage probe layer query output");
+        let substage_probe_layer_key = substage_probe_layer_substages
+            .next()
+            .expect("diagnostic substage probe layer key output");
+        let substage_probe_layer_value = substage_probe_layer_substages
+            .next()
+            .expect("diagnostic substage probe layer value output");
+        let substage_probe_layer_attention_context = substage_probe_layer_substages
+            .next()
+            .expect("diagnostic substage probe layer attention context output");
+        let substage_probe_layer_attention = substage_probe_layer_substages
+            .next()
+            .expect("diagnostic substage probe layer attention output");
+        let substage_probe_layer_post_attention_residual = substage_probe_layer_substages
+            .next()
+            .expect("diagnostic substage probe layer residual output");
+        let substage_probe_layer_norm2 = substage_probe_layer_substages
+            .next()
+            .expect("diagnostic substage probe layer norm2 output");
+        let substage_probe_layer_mlp_gate_projection = substage_probe_layer_substages
+            .next()
+            .expect("diagnostic substage probe layer MLP gate projection output");
+        let substage_probe_layer_mlp_gate_activation = substage_probe_layer_substages
+            .next()
+            .expect("diagnostic substage probe layer MLP gate activation output");
+        let substage_probe_layer_mlp_up_projection = substage_probe_layer_substages
+            .next()
+            .expect("diagnostic substage probe layer MLP up projection output");
+        let substage_probe_layer_mlp_gated_product = substage_probe_layer_substages
+            .next()
+            .expect("diagnostic substage probe layer MLP gated product output");
+        let substage_probe_layer_mlp_down_projection = substage_probe_layer_substages
+            .next()
+            .expect("diagnostic substage probe layer MLP down projection output");
+        debug_assert!(substage_probe_layer_substages.next().is_none());
+        Ok(Qwen25VlVisionDiagnostics {
+            window_index: plan.window_index,
+            restore_indices: plan.restore_indices,
+            packed_cu_seqlens: plan.packed_cu_seqlens,
+            window_cu_seqlens: plan
+                .window_cu_seqlens
+                .ok_or_else(|| "Qwen2.5-VL diagnostic window lengths are missing".to_string())?,
+            reordered_patch_embedding,
+            window_layer_index: layout.window_layer_index,
+            post_window_layer,
+            full_layer_indices: layout.full_layer_indices,
+            post_full_layers,
+            final_interval_layer_indices: layout.final_interval_layer_indices,
+            post_final_interval_layers,
+            diagnostic_layer_indices: layout.diagnostic_layer_indices,
+            post_diagnostic_layers,
+            substage_probe_layer_index: layout.substage_probe_layer_index,
+            substage_probe_layer_input,
+            substage_probe_layer_norm1,
+            substage_probe_layer_query,
+            substage_probe_layer_key,
+            substage_probe_layer_value,
+            substage_probe_layer_attention_context,
+            substage_probe_layer_attention,
+            substage_probe_layer_post_attention_residual,
+            substage_probe_layer_norm2,
+            substage_probe_layer_mlp_gate_projection,
+            substage_probe_layer_mlp_gate_activation,
+            substage_probe_layer_mlp_up_projection,
+            substage_probe_layer_mlp_gated_product,
+            substage_probe_layer_mlp_down_projection,
+            merger_window_ordered,
+            restored_projection,
+            patch_bucket: plan.patch_bucket,
+            patch_tokens: plan.actual_patches,
+            merged_tokens: actual_tokens,
+            vision_hidden: self.config.hidden,
+            text_hidden: self.config.text_hidden,
+            attention_mask_audit,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "diagnostics")]
+    #[test]
+    fn attention_mask_audit_pins_media_and_padding_isolation() {
+        let bucket = 8;
+        let actual = 4;
+        let boundaries = [0, 2, 4];
+        let mut full = vec![f32::NEG_INFINITY; bucket * bucket];
+        for range in boundaries.windows(2) {
+            for row in range[0]..range[1] {
+                for column in range[0]..range[1] {
+                    full[row * bucket + column] = 0.0;
+                }
+            }
+        }
+        for row in actual..bucket {
+            full[row * bucket + row] = 0.0;
+        }
+        let mut window = full.clone();
+        window[1] = f32::NEG_INFINITY;
+        window[bucket] = f32::NEG_INFINITY;
+        let audit = audit_attention_masks(bucket, actual, &boundaries, &full, &window);
+        assert_eq!(audit.full_window_differences, 2);
+        assert_eq!(audit.cross_media_full_bias_leaks, 0);
+        assert_eq!(audit.active_padding_full_bias_leaks, 0);
+        assert_eq!(audit.invalid_padded_full_bias_entries, 0);
+    }
+
+    #[cfg(feature = "diagnostics")]
+    #[test]
+    fn qwen25_actual_output_descriptors_pin_semantics_order_and_rank() {
+        let config = Qwen2VlConfig::from_json_str(
+            r#"{
+                "model_type":"qwen2_5_vl",
+                "hidden_size":1536,
+                "vision_config":{
+                    "depth":32,
+                    "hidden_act":"silu",
+                    "hidden_size":1280,
+                    "intermediate_size":3420,
+                    "out_hidden_size":1536,
+                    "num_heads":16,
+                    "in_chans":3,
+                    "patch_size":14,
+                    "spatial_merge_size":2,
+                    "temporal_patch_size":2,
+                    "window_size":112,
+                    "fullatt_block_indexes":[7,15,23,31]
+                }
+            }"#,
+        )
+        .unwrap();
+        let (_, layout) = emit_qwen2_5_vl_diagnostics(
+            &config,
+            256,
+            resolve_precision_checked("local-sync").unwrap(),
+        )
+        .unwrap();
+        let specs = qwen25_diagnostic_output_specs(&config, &layout, 256);
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| spec.label.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "reordered_patch_embedding",
+                "post_window_layer.0",
+                "post_full_layer.7",
+                "post_full_layer.15",
+                "post_full_layer.23",
+                "post_full_layer.31",
+                "post_final_interval_layer.24",
+                "post_final_interval_layer.25",
+                "post_final_interval_layer.26",
+                "post_final_interval_layer.27",
+                "post_final_interval_layer.28",
+                "post_final_interval_layer.29",
+                "post_final_interval_layer.30",
+                "post_final_interval_layer.31",
+                "post_diagnostic_layer.16",
+                "post_diagnostic_layer.17",
+                "substage_probe_layer.17.input",
+                "substage_probe_layer.17.norm1",
+                "substage_probe_layer.17.query",
+                "substage_probe_layer.17.key",
+                "substage_probe_layer.17.value",
+                "substage_probe_layer.17.attention_context",
+                "substage_probe_layer.17.attention",
+                "substage_probe_layer.17.post_attention_residual",
+                "substage_probe_layer.17.norm2",
+                "substage_probe_layer.17.mlp_gate_projection",
+                "substage_probe_layer.17.mlp_gate_activation",
+                "substage_probe_layer.17.mlp_up_projection",
+                "substage_probe_layer.17.mlp_gated_product",
+                "substage_probe_layer.17.mlp_down_projection",
+                "merger_window_ordered",
+            ]
+        );
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| spec.shape.len())
+                .collect::<Vec<_>>(),
+            [vec![2; 18], vec![3; 3], vec![2; 10],].concat()
+        );
+        for spec in &specs[18..=20] {
+            assert_eq!(spec.shape, vec![256, 16, 80]);
+        }
+        assert_eq!(specs[17].shape, vec![256, 1280]);
+        assert_eq!(specs[21].shape, vec![256, 1280]);
+        for spec in &specs[25..=28] {
+            assert_eq!(spec.shape, vec![256, 3420]);
+        }
+        assert_eq!(specs[29].shape, vec![256, 1280]);
+        assert_eq!(specs[30].shape, vec![64, 1536]);
+    }
 
     fn tiny_config() -> Qwen2VlConfig {
         Qwen2VlConfig::from_json_str(
@@ -761,5 +1502,13 @@ mod tests {
                 .unwrap_err()
                 .contains("flat index 1")
         );
+    }
+
+    #[cfg(feature = "diagnostics")]
+    #[test]
+    fn diagnostic_identity_mutation_restores_window_groups_to_original_order() {
+        let window_ordered = [2.0, 0.0, 3.0, 1.0];
+        let restored = restore_grouped_rows(&window_ordered, 1, 1, 4, 4, &[1, 3, 0, 2]).unwrap();
+        assert_eq!(restored, vec![0.0, 1.0, 2.0, 3.0]);
     }
 }

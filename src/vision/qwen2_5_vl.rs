@@ -115,19 +115,35 @@ impl Qwen25VLModel {
         );
 
         // Compute MRoPE position IDs (same logic as Qwen2-VL)
-        let position_ids = self.compute_rope_index(input_ids, grid_thw);
-        let ids_shape = mlxcel_core::array_shape(input_ids);
-        let seq_len = ids_shape[1];
-
-        mlxcel_core::eval(&position_ids);
-        let max_pos = mlxcel_core::max_all(&position_ids);
-        mlxcel_core::eval(&max_pos);
-        let max_pos_val = mlxcel_core::item_i32(&max_pos);
-        let rope_deltas = max_pos_val + 1 - seq_len;
+        let (position_ids, rope_deltas) = self.compute_rope_state(input_ids, grid_thw);
 
         self.text_model.set_mrope_state(position_ids, rope_deltas);
 
         merged
+    }
+
+    #[cfg(feature = "xla-diagnostics")]
+    pub fn mrope_diagnostics(
+        &self,
+        input_ids: &MlxArray,
+        grid_thw: &[(i32, i32, i32)],
+    ) -> (UniquePtr<MlxArray>, i32) {
+        self.compute_rope_state(input_ids, grid_thw)
+    }
+
+    fn compute_rope_state(
+        &self,
+        input_ids: &MlxArray,
+        grid_thw: &[(i32, i32, i32)],
+    ) -> (UniquePtr<MlxArray>, i32) {
+        let position_ids = self.compute_rope_index(input_ids, grid_thw);
+        let ids_shape = mlxcel_core::array_shape(input_ids);
+        let seq_len = ids_shape[1];
+        mlxcel_core::eval(&position_ids);
+        let max_pos = mlxcel_core::max_all(&position_ids);
+        mlxcel_core::eval(&max_pos);
+        let max_pos_val = mlxcel_core::item_i32(&max_pos);
+        (position_ids, max_pos_val + 1 - seq_len)
     }
 
     /// Compute 3D position IDs [T, H, W] for mixed text+image sequences
