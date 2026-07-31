@@ -149,16 +149,18 @@ fn batch_is_servable(caches: &[&mut KVCache], softcap: f32) -> bool {
     let Some(first) = caches[0].paged_backing.as_ref() else {
         return false;
     };
-    caches.iter().all(|cache| match cache.paged_backing.as_ref() {
-        Some(backing) => {
-            cache.mode == KVCacheMode::Fp16
+    caches
+        .iter()
+        .all(|cache| match cache.paged_backing.as_ref() {
+            Some(backing) => {
+                cache.mode == KVCacheMode::Fp16
                 && backing.layer_idx == first.layer_idx
                 // One launch reads one pool; sequences backed by different
                 // pools cannot share a page table.
                 && Rc::ptr_eq(&backing.pool, &first.pool)
-        }
-        None => false,
-    })
+            }
+            None => false,
+        })
 }
 
 /// `[B, H, 1, D]` shape check for the decode tensors.
@@ -229,7 +231,13 @@ pub fn paged_batch_decode_attention(
         }
         Ok(None) => {
             COUNTERS.gather_fallbacks.fetch_add(1, Ordering::Relaxed);
-            Some(gather_fallback(q_batched, &pool, &state_refs, layer_idx, scale))
+            Some(gather_fallback(
+                q_batched,
+                &pool,
+                &state_refs,
+                layer_idx,
+                scale,
+            ))
         }
         Err(reason) => {
             // A hard error here means the batch's own bookkeeping is

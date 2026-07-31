@@ -181,6 +181,45 @@ savings, the decode throughput, and `--kv-cache-budget` are documented in
 byte-identical to the dense backend; it is the storage backend the disaggregated
 roles below build on.
 
+#### The fused decode kernel
+
+Since v0.4.4 a batched paged decode step runs as **one fused attention launch
+over the whole batch** (issue #899) rather than as a per-sequence loop that
+copied each sequence's visible KV out of the pool before attending. The kernel
+reads the pool's scattered pages in place through a CSR page table and splits
+the KV range across thread blocks, so its parallelism grows with context
+instead of saturating. Measured against the previous path on an Apple M1 Ultra:
+1.4x to 3.1x at batch 4 across 1K to 32K of context, and 1.3x to 1.5x for a
+single sequence at 16K and 32K
+(`docs/benchmark_results/paged-decode-v2-m1ultra-2026-07-31.md`).
+
+What it does *not* serve falls back to the previous gather-then-SDPA path, per
+launch, with identical output:
+
+| case | why |
+|---|---|
+| under 4096 total visible KV tokens in the launch | measured slower there (0.91x at batch 1 with 1K of context) |
+| a layer whose pool rows span more than one slab | the kernel reads one contiguous buffer per side |
+| multi-token steps: batched prefill, speculative / MTP verify | the kernel serves a single query token per sequence |
+| logit-softcap families, explicit attention masks | no soft-cap or mask term in the kernel |
+| Int8 / Turbo KV modes | those sequences keep dense caches and are never pool-backed |
+
+Two knobs, neither normally needed:
+
+- `MLXCEL_PAGED_ATTENTION_NATIVE=0` is the kill switch. It restores the
+  pre-#899 gather behaviour end to end, for bisecting a suspected kernel
+  regression. `=1` forces the fused path for every servable shape, bypassing
+  the token floor.
+- `MLXCEL_PAGED_SLAB_BLOCKS` overrides the pool's slab size in blocks. The
+  server derives it from `--ctx-size` and `--parallel`, clamped by the KV
+  budget, and logs the resolved value at startup (`Paged KV slab size: N blocks
+  per layer`). A layer's first write allocates its whole slab, so this
+  front-loads exactly the KV bytes the startup memory estimate already reports
+  for that batch and context. **Serving contexts longer than `--ctx-size`
+  implies makes layers outgrow the slab and silently returns them to the gather
+  path**; raise `--ctx-size` or set this variable if the startup line looks too
+  small. `0` pins the historical 32-block default.
+
 Recurrent and hybrid SSM / linear-attention families cannot safely reuse
 arbitrary KV blocks, so they keep the hybrid-SSM/APC exclusion. Families that
 opt into `supports_snapshot_reuse()` instead use a separate exact-prefix

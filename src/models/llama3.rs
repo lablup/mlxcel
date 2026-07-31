@@ -559,12 +559,7 @@ impl Attention {
             && mask.is_none()
             && decode_context.is_some_and(|context| context.is_paged_decode())
             && let Some(attn_out) = mlxcel_core::cache::paged_batch_decode_attention(
-                &q_batched,
-                &k_batched,
-                &v_batched,
-                caches,
-                self.scale,
-                0.0,
+                &q_batched, &k_batched, &v_batched, caches, self.scale, 0.0,
             )
         {
             let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);

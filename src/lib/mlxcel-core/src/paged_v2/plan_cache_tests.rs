@@ -29,7 +29,9 @@ const PAGE: usize = 32;
 fn layer(base: u64, len: usize, logical_start: usize) -> PagedLayerState {
     let blocks = len.div_ceil(PAGE);
     PagedLayerState {
-        block_ids: (0..blocks).map(|p| PagedBlockId::from_raw(base + p as u64)).collect(),
+        block_ids: (0..blocks)
+            .map(|p| PagedBlockId::from_raw(base + p as u64))
+            .collect(),
         len,
         logical_start,
     }

@@ -185,7 +185,7 @@ fn run_batched(
     // Batched greedy decode, exactly the dispatch `execute_batched_decode`
     // performs for the paged storage backend.
     let context = DecodeBatchContext::paged_with_native(BLOCK_SIZE as i32, true);
-    let mut streams: Vec<Vec<i32>> = vec![Vec::with_capacity(steps); BATCH];
+    let mut streams: Vec<Vec<i32>> = (0..BATCH).map(|_| Vec::with_capacity(steps)).collect();
     for _ in 0..steps {
         for (slot, stream) in streams.iter_mut().enumerate() {
             stream.push(next[slot]);
@@ -325,7 +325,10 @@ fn paged_decode_v2_greedy_parity_qwen3() {
 #[ignore = "loads a real checkpoint and runs long real GPU forwards; run with --ignored"]
 fn paged_decode_v2_greedy_parity_llama3() {
     let _runtime = initialize_runtime();
-    assert_parity_for("llama-3.2-1b-4bit", "mlx-community/Llama-3.2-1B-Instruct-4bit");
+    assert_parity_for(
+        "llama-3.2-1b-4bit",
+        "mlx-community/Llama-3.2-1B-Instruct-4bit",
+    );
 }
 
 #[test]

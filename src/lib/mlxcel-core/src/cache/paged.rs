@@ -538,8 +538,7 @@ fn launch_v2(
         Some(ffi::astype(q, crate::dtype::FLOAT32))
     };
     let q_in: &MlxArray = q_f32.as_deref().unwrap_or(q);
-    let ctx =
-        crate::paged_v2::V2Context::build(q_in, pool_k, pool_v, view, plan.geometry, scale)?;
+    let ctx = crate::paged_v2::V2Context::build(q_in, pool_k, pool_v, view, plan.geometry, scale)?;
     let out_f32 = ctx.launch(plan)?;
     Ok(if q_dtype == crate::dtype::FLOAT32 {
         out_f32
@@ -1883,9 +1882,7 @@ impl PagedBlockPool {
         }
 
         let (batch, geometry) = {
-            let (pool_k, _) = self
-                .single_slab_tensors(layer_idx)
-                .expect("checked above");
+            let (pool_k, _) = self.single_slab_tensors(layer_idx).expect("checked above");
             crate::paged_v2::geometry_from_shapes(q, pool_k)?
         };
         if batch != states.len() {
@@ -1908,23 +1905,25 @@ impl PagedBlockPool {
         // it back unconditionally (including on the error path) so a failed
         // build never loses the other layers' entries.
         let mut cache = std::mem::take(&mut self.decode_v2_cache);
-        let resolved = cache.view_and_plan(
+        let key = crate::paged_v2::DecodeBatchKey {
             layer_idx,
             epoch,
             page_size,
-            &layers,
-            &geometry,
+            layers: &layers,
+            geometry: &geometry,
+        };
+        let resolved = cache.view_and_plan(
+            &key,
             || self.paged_csr_view(states, layer_idx),
-            |page_counts| crate::paged_v2::PagedDecodePlan::heuristic(geometry, page_counts, target),
+            |page_counts| {
+                crate::paged_v2::PagedDecodePlan::heuristic(geometry, page_counts, target)
+            },
         );
 
         let decision = match &resolved {
             Ok((view, _)) => {
-                let total_tokens: usize = view
-                    .seq_lens
-                    .iter()
-                    .map(|&len| len.max(0) as usize)
-                    .sum();
+                let total_tokens: usize =
+                    view.seq_lens.iter().map(|&len| len.max(0) as usize).sum();
                 if !view.any_visible() {
                     PagedV2Dispatch::Gather
                 } else {
@@ -1939,9 +1938,8 @@ impl PagedBlockPool {
         let launched = match (resolved, decision) {
             (Ok((view, plan)), PagedV2Dispatch::V2) => match plan.validate() {
                 Ok(()) => {
-                    let (pool_k, pool_v) = self
-                        .single_slab_tensors(layer_idx)
-                        .expect("checked above");
+                    let (pool_k, pool_v) =
+                        self.single_slab_tensors(layer_idx).expect("checked above");
                     Some(launch_v2(q, pool_k, pool_v, view, plan, scale))
                 }
                 Err(reason) => {
@@ -2205,12 +2203,7 @@ impl PagedBlockPool {
         let per_slab = self.slab_blocks.max(1);
         let target_slabs = min_capacity.div_ceil(per_slab);
         let block_size = self.layout.block_size as i32;
-        let shape = [
-            per_slab as i32,
-            block_size,
-            meta.n_kv_heads,
-            meta.head_dim,
-        ];
+        let shape = [per_slab as i32, block_size, meta.n_kv_heads, meta.head_dim];
         while self.pool_k[layer_idx].len() < target_slabs {
             self.pool_k[layer_idx].push(ffi::zeros(&shape, meta.dtype));
             self.pool_v[layer_idx].push(ffi::zeros(&shape, meta.dtype));

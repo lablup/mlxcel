@@ -84,7 +84,7 @@ pub use plan::{
     chunks_for_request, device_target_ctas, max_pages_per_chunk, min_pages_per_chunk,
     search_pages_per_chunk,
 };
-pub use plan_cache::{PagedDecodeV2Cache, PlanCacheStats, RequestFingerprint};
+pub use plan_cache::{DecodeBatchKey, PagedDecodeV2Cache, PlanCacheStats, RequestFingerprint};
 
 /// Environment variable selecting the v2 decode path. Default off.
 pub const V2_ENV: &str = "MLXCEL_PAGED_ATTENTION_V2";

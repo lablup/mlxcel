@@ -116,6 +116,26 @@ impl RequestFingerprint {
     }
 }
 
+/// Everything [`PagedDecodeV2Cache::view_and_plan`] needs to identify the batch
+/// it is being asked about: which layer, at which block-topology epoch, over
+/// which live layer states, for which launch geometry.
+///
+/// A struct rather than five parameters because these five always travel
+/// together and are meaningless apart.
+#[derive(Debug, Clone, Copy)]
+pub struct DecodeBatchKey<'a> {
+    /// Layer whose page table is wanted.
+    pub layer_idx: usize,
+    /// The pool's current block-topology epoch.
+    pub epoch: u64,
+    /// Tokens per pool page.
+    pub page_size: usize,
+    /// One live layer state per request, in batch order.
+    pub layers: &'a [&'a PagedLayerState],
+    /// Launch geometry the plan is built against.
+    pub geometry: &'a PagedDecodeGeometry,
+}
+
 /// A cached page table plus the epoch and fingerprints that justify reusing it.
 #[derive(Debug, Clone)]
 struct CachedView {
@@ -183,7 +203,9 @@ impl PagedDecodeV2Cache {
         F: FnOnce() -> Result<PagedCsrView, String>,
     {
         self.ensure_view(layer_idx, epoch, page_size, layers, build)?;
-        Ok(self.view(layer_idx).expect("ensure_view populated the entry"))
+        Ok(self
+            .view(layer_idx)
+            .expect("ensure_view populated the entry"))
     }
 
     /// The cached view for a layer, if one is present.
@@ -203,11 +225,7 @@ impl PagedDecodeV2Cache {
     /// together after both mutations are done.
     pub fn view_and_plan<FV, FP>(
         &mut self,
-        layer_idx: usize,
-        epoch: u64,
-        page_size: usize,
-        layers: &[&PagedLayerState],
-        geometry: &PagedDecodeGeometry,
+        key: &DecodeBatchKey<'_>,
         build_view: FV,
         build_plan: FP,
     ) -> Result<(&PagedCsrView, &PagedDecodePlan), String>
@@ -215,14 +233,20 @@ impl PagedDecodeV2Cache {
         FV: FnOnce() -> Result<PagedCsrView, String>,
         FP: FnOnce(&[usize]) -> PagedDecodePlan,
     {
-        self.ensure_view(layer_idx, epoch, page_size, layers, build_view)?;
+        self.ensure_view(
+            key.layer_idx,
+            key.epoch,
+            key.page_size,
+            key.layers,
+            build_view,
+        )?;
         let page_counts = self
-            .view(layer_idx)
+            .view(key.layer_idx)
             .expect("ensure_view populated the entry")
             .page_counts();
-        self.ensure_plan(geometry, &page_counts, || build_plan(&page_counts));
+        self.ensure_plan(key.geometry, &page_counts, || build_plan(&page_counts));
         Ok((
-            self.view(layer_idx).expect("populated above"),
+            self.view(key.layer_idx).expect("populated above"),
             self.plan.as_ref().expect("populated above"),
         ))
     }

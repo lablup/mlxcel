@@ -128,7 +128,8 @@ fn fresh_pool(
     let bytes_per_block = PAGE * kv_heads * head_dim * 2;
     let layout = PagedKvLayout::uniform(num_layers, PAGE, bytes_per_block).expect("valid layout");
     let mut pool = PagedBlockPool::new(layout.clone());
-    pool.set_slab_blocks(512).expect("fresh pool has no storage");
+    pool.set_slab_blocks(512)
+        .expect("fresh pool has no storage");
     let states = (0..4)
         .map(|_| Rc::new(RefCell::new(PagedSequenceState::new(&layout))))
         .collect();
@@ -233,7 +234,10 @@ fn run_step(
 fn batched_decode_matches_the_gather_path_above_the_floor() {
     // 4 x 1024 = 4096 visible tokens, exactly the dispatch floor, so v2 runs.
     let (out, reference, stats) = run_step(&[1024, 1024, 1024, 1024], 8, 2, 64, 0xA11CE);
-    assert!(stats.view_rebuilds >= 1, "the CSR view should have been built");
+    assert!(
+        stats.view_rebuilds >= 1,
+        "the CSR view should have been built"
+    );
     assert!(stats.plan_rebuilds >= 1, "the plan should have been built");
     let rms = relative_rms(&out, &reference);
     assert!(rms < 5e-3, "relative RMS {rms} exceeds 5e-3");
@@ -261,7 +265,10 @@ fn below_the_floor_the_batch_still_answers_correctly() {
     // must still have written the step's K/V exactly once).
     let (out, reference, _) = run_step(&[512, 512], 8, 2, 64, 0xD00D);
     let rms = relative_rms(&out, &reference);
-    assert!(rms < 1e-6, "the gather fallback must reproduce the reference");
+    assert!(
+        rms < 1e-6,
+        "the gather fallback must reproduce the reference"
+    );
 }
 
 #[test]
@@ -374,7 +381,10 @@ fn a_multi_slab_layer_falls_back_to_gather() {
         gather_fallback(&q, &pool_ref, &state_refs, 0, scale)
     };
     let rms = relative_rms(&to_vec_f32(&out), &to_vec_f32(&reference));
-    assert!(rms < 1e-6, "the gather fallback must reproduce the reference");
+    assert!(
+        rms < 1e-6,
+        "the gather fallback must reproduce the reference"
+    );
     // Nothing was cached, because the fused path was never reached.
     assert_eq!(pool.borrow().decode_plan_cache_stats().plan_rebuilds, 0);
 }
