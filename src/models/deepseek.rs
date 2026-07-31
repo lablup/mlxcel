@@ -22,6 +22,7 @@
 //! - routed_scaling_factor for expert outputs (default 1.0)
 //! - Top-k routing with softmax scoring
 
+use crate::models::deepseek_v2::Quantization;
 use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
@@ -66,6 +67,15 @@ pub struct ModelArgs {
     #[serde(default)]
     pub attention_bias: bool,
 
+    // MLX-style nested `"quantization": {"group_size": .., "bits": ..}` block:
+    // present in a plain `deepseek` config.json and inherited into
+    // `language_config` by the DeepSeek-OCR loaders (vlm_deepseekocr.rs).
+    // Takes precedence over the flat keys below.
+    #[serde(default)]
+    pub quantization: Option<Quantization>,
+
+    // Flat top-level spelling, kept as a fallback for checkpoints that
+    // declare `group_size` / `bits` directly on the (sub-)config root.
     #[serde(default)]
     pub group_size: Option<i32>,
 
@@ -95,11 +105,19 @@ impl ModelArgs {
     }
 
     pub fn group_size(&self) -> i32 {
-        self.group_size.unwrap_or(64)
+        self.quantization
+            .as_ref()
+            .map(|q| q.group_size)
+            .or(self.group_size)
+            .unwrap_or(64)
     }
 
     pub fn bits(&self) -> i32 {
-        self.bits.unwrap_or(4)
+        self.quantization
+            .as_ref()
+            .map(|q| q.bits)
+            .or(self.bits)
+            .unwrap_or(4)
     }
 }
 

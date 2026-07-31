@@ -40,6 +40,7 @@ fn test_args(n_routed_experts: Option<usize>) -> ModelArgs {
         first_k_dense_replace: 0,
         routed_scaling_factor: 1.0,
         attention_bias: false,
+        quantization: None,
         group_size: None,
         bits: None,
     }
@@ -99,9 +100,10 @@ fn switch_linear_accepts_full_expert_count() {
     assert_eq!(sl.num_experts(), 4);
 }
 
-/// The same minimal config with an explicit quantization pair. DeepSeek v1
-/// declares `group_size` / `bits` as flat top-level keys rather than a nested
-/// `quantization` block, so those are the two fields the guard reads.
+/// The same minimal config with an explicit quantization pair, in the flat
+/// top-level spelling. DeepSeek v1 accepts both a nested `quantization` block
+/// (preferred) and flat `group_size` / `bits` keys; the guard reads the
+/// resolved pair either way.
 fn quant_args(group_size: i32, bits: i32) -> ModelArgs {
     let mut args = test_args(None);
     args.group_size = Some(group_size);
@@ -169,4 +171,85 @@ fn deepseek_switch_linear_rejects_quantization_params_that_would_abort_gather_qm
     );
     SwitchLinear::from_weights(&regular, &quant_args(0, 0), PREFIX)
         .expect("a bf16 expert plane must not be gated on quantization params");
+}
+
+/// Minimal `language_config` JSON in the shape the DeepSeek-OCR checkpoints
+/// ship: required structural fields only, no quantization declaration.
+fn minimal_language_config() -> serde_json::Value {
+    serde_json::json!({
+        "model_type": "deepseek",
+        "vocab_size": 8,
+        "hidden_size": 8,
+        "intermediate_size": 8,
+        "num_hidden_layers": 0,
+        "num_attention_heads": 1,
+        "num_key_value_heads": 1,
+        "max_position_embeddings": 16,
+    })
+}
+
+/// #975: the DeepSeek-OCR loaders (`src/loading/vlm_deepseekocr.rs`) inherit
+/// the root `quantization` object into `language_config` before deserializing
+/// into `ModelArgs`. The struct used to lack the nested field, so serde
+/// silently dropped the block and `group_size()` / `bits()` fell back to
+/// 64 / 4 regardless of what the checkpoint declared. This drives the same
+/// insert the loaders perform and asserts the declared pair survives.
+#[test]
+fn model_args_reads_inherited_nested_quantization_block() {
+    let mut lc = minimal_language_config();
+    let full_config = serde_json::json!({
+        "quantization": {"group_size": 32, "bits": 8, "mode": "affine"}
+    });
+    let obj = lc.as_object_mut().unwrap();
+    if !obj.contains_key("quantization")
+        && let Some(q) = full_config.get("quantization")
+    {
+        obj.insert("quantization".to_string(), q.clone());
+    }
+
+    let args: ModelArgs = serde_json::from_value(lc).expect("language_config must deserialize");
+    assert_eq!(args.group_size(), 32);
+    assert_eq!(args.bits(), 8);
+}
+
+/// A checkpoint that spells the pair as flat top-level keys must keep loading
+/// with those values.
+#[test]
+fn model_args_reads_flat_quantization_keys() {
+    let mut lc = minimal_language_config();
+    let obj = lc.as_object_mut().unwrap();
+    obj.insert("group_size".to_string(), serde_json::json!(128));
+    obj.insert("bits".to_string(), serde_json::json!(8));
+
+    let args: ModelArgs = serde_json::from_value(lc).expect("flat spelling must deserialize");
+    assert_eq!(args.group_size(), 128);
+    assert_eq!(args.bits(), 8);
+}
+
+/// When both spellings are present the nested block wins, matching the
+/// documented precedence on `ModelArgs`.
+#[test]
+fn model_args_nested_quantization_beats_flat_keys() {
+    let mut lc = minimal_language_config();
+    let obj = lc.as_object_mut().unwrap();
+    obj.insert(
+        "quantization".to_string(),
+        serde_json::json!({"group_size": 32, "bits": 8}),
+    );
+    obj.insert("group_size".to_string(), serde_json::json!(128));
+    obj.insert("bits".to_string(), serde_json::json!(4));
+
+    let args: ModelArgs = serde_json::from_value(lc).expect("mixed spelling must deserialize");
+    assert_eq!(args.group_size(), 32);
+    assert_eq!(args.bits(), 8);
+}
+
+/// No declaration at all keeps the family defaults, which is what the two
+/// in-tree DeepSeek-OCR checkpoints rely on.
+#[test]
+fn model_args_defaults_without_quantization_declaration() {
+    let args: ModelArgs = serde_json::from_value(minimal_language_config())
+        .expect("undeclared quantization must deserialize");
+    assert_eq!(args.group_size(), 64);
+    assert_eq!(args.bits(), 4);
 }
