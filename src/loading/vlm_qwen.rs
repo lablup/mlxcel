@@ -124,6 +124,14 @@ pub(crate) fn load_qwen2_vl_iree_host_preprocessor(
                 .to_string(),
         });
     }
+    if !full_config
+        .get("vision_config")
+        .is_some_and(serde_json::Value::is_object)
+    {
+        return Err(HostPreprocessorError::FamilyMismatch {
+            actual: "unqualified qwen2_vl config without vision_config".to_string(),
+        });
+    }
     let mut vision_config: Qwen2VLVisionConfig =
         parse_required_vlm_subconfig(&full_config, "vision_config", "Qwen2VL vision config")
             .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;

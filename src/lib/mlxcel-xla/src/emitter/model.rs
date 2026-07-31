@@ -157,9 +157,9 @@ pub(crate) fn validate_prefill_embeddings_metadata(
     Ok(())
 }
 
-/// Validate a canonical additive attention-bias payload. Only `0.0` (allowed)
-/// and [`PREFILL_EMBEDDINGS_MASKED_VALUE`] (masked) are accepted; NaN, infinity,
-/// and intermediate additive values are rejected to keep polarity unambiguous.
+/// Validate a canonical additive attention-bias payload. Generic families use
+/// [`PREFILL_EMBEDDINGS_MASKED_VALUE`]; Gemma3's authoritative VLM mask uses
+/// `f32::MIN`. NaN, infinity, and intermediate values are rejected.
 pub(crate) fn validate_prefill_embeddings_attention_bias(
     c: &Config,
     bias: &[f32],
@@ -179,15 +179,20 @@ pub(crate) fn validate_prefill_embeddings_attention_bias(
             bias.len()
         ));
     }
+    let masked_value = if c.embeddings_prefill_uses_authoritative_mask {
+        f32::MIN
+    } else {
+        PREFILL_EMBEDDINGS_MASKED_VALUE
+    };
     if let Some((index, value)) = bias
         .iter()
         .copied()
         .enumerate()
-        .find(|(_, value)| *value != 0.0 && *value != PREFILL_EMBEDDINGS_MASKED_VALUE)
+        .find(|(_, value)| *value != 0.0 && *value != masked_value)
     {
         return Err(format!(
             "prefill attention bias at flat index {index} is {value}; expected only 0 or {}",
-            PREFILL_EMBEDDINGS_MASKED_VALUE
+            masked_value
         ));
     }
     Ok(())
@@ -3304,6 +3309,14 @@ fn apply_deepstack_after_layer(
     b.add(hidden, &delta)
 }
 
+fn embeddings_prefill_local_window(c: &Config) -> Option<usize> {
+    if c.embeddings_prefill_uses_authoritative_mask {
+        None
+    } else {
+        c.sliding_window
+    }
+}
+
 fn emit_prefill_module(
     c: &Config,
     sample: bool,
@@ -3387,7 +3400,7 @@ fn emit_prefill_module(
         }
         PrefillInput::Embeddings { attention_bias, .. } => {
             let cmask = attention_bias.clone();
-            let cmask_local = c.sliding_window.map(|w| {
+            let cmask_local = embeddings_prefill_local_window(c).map(|w| {
                 let irow = b.iota(lp);
                 let row = b.broadcast(&irow, &[0], vec![lp, lp]);
                 let jcol = b.iota(lp);
@@ -3403,7 +3416,7 @@ fn emit_prefill_module(
         }
         PrefillInput::DeepStack(deepstack) => {
             let cmask = deepstack.attention_bias.clone();
-            let cmask_local = c.sliding_window.map(|w| {
+            let cmask_local = embeddings_prefill_local_window(c).map(|w| {
                 let irow = b.iota(lp);
                 let row = b.broadcast(&irow, &[0], vec![lp, lp]);
                 let jcol = b.iota(lp);
@@ -3514,6 +3527,24 @@ fn emit_prefill_module(
             kc = kcache.name,
             vc = vcache.name,
         )
+    }
+}
+
+#[cfg(test)]
+mod gemma3_vlm_mask_tests {
+    use super::*;
+
+    #[test]
+    fn authoritative_embeddings_mask_bypasses_only_the_external_local_intersection() {
+        let mut config = Config::llama_3_2_1b();
+        config.sliding_window = Some(4096);
+        assert_eq!(embeddings_prefill_local_window(&config), Some(4096));
+        config.embeddings_prefill_uses_authoritative_mask = true;
+        assert_eq!(embeddings_prefill_local_window(&config), None);
+        assert!(
+            config.is_sliding_layer(0),
+            "the token-prefill/decode layer schedule must remain windowed"
+        );
     }
 }
 

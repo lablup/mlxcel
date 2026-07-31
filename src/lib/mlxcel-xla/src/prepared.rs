@@ -213,7 +213,7 @@ impl fmt::Display for PreparedInputError {
                 "prepared {tensor} byte count mismatch: expected {expected}, got {actual}"
             ),
             Self::InvalidFloat { tensor } => {
-                write!(f, "prepared {tensor} contains NaN or an invalid positive mask value")
+                write!(f, "prepared {tensor} contains an invalid floating-point or mask value")
             }
             Self::ShapeOverflow => f.write_str("prepared IREE static shape overflowed"),
         }
@@ -560,10 +560,30 @@ impl PreparedIreePrefill {
                 bias_tensor.shape.clone(),
             ));
         }
+        let gemma3_vlm_mask = value
+            .modalities
+            .iter()
+            .any(|modality| modality.family == "gemma3");
+        if gemma3_vlm_mask
+            && (value.attention_bias.causal
+                || !matrix_bias
+                || compact_bias
+                    .iter()
+                    .any(|value| *value != 0.0 && *value != f32::MIN))
+        {
+            return Err(PreparedInputError::InvalidFloat {
+                tensor: "Gemma3 VLM attention bias",
+            });
+        }
+        let masked_value = if gemma3_vlm_mask {
+            f32::MIN
+        } else {
+            MASKED_VALUE
+        };
         let bias_count = context_capacity
             .checked_mul(context_capacity)
             .ok_or(PreparedInputError::ShapeOverflow)?;
-        let mut attention_bias = vec![MASKED_VALUE; bias_count];
+        let mut attention_bias = vec![masked_value; bias_count];
         for query in 0..effective_len {
             for key in 0..effective_len {
                 let base = if key_bias {
@@ -573,7 +593,7 @@ impl PreparedIreePrefill {
                 };
                 attention_bias[query * context_capacity + key] =
                     if value.attention_bias.causal && key > query {
-                        MASKED_VALUE
+                        masked_value
                     } else {
                         base
                     };

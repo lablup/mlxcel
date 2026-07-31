@@ -71,6 +71,10 @@ xla-backend = ["dep:mlxcel-xla"]
 # StableHLO prefill / decode_step graphs. Needs IREE_DIST at build time (the
 # extracted iree dist), so it is a local / opt-in build, not a CI default.
 xla-iree = ["xla-backend", "mlxcel-xla/iree"]
+# Device-neutral reference capture for native IREE diagnostics. This keeps the
+# eager MLX side on its default CPU backend and qualifies IREE `local-task`
+# without requiring an IREE CUDA source/build tree.
+xla-reference-diagnostics = ["xla-iree", "mlxcel-xla/diagnostics"]
 # Explicit test-only forwarding for Gemma3n intermediate oracle validation.
 # Its pinned reference is the production CUDA runtime, so enabling diagnostics
 # also enables the root MLX CUDA backend. This is not part of `xla-iree`; normal
@@ -344,3 +348,9 @@ required-features = ["xla-micro-oracle"]
 [[example]]
 name = "xla_phi4_audio_check"
 required-features = ["xla-iree"]
+
+# Pinned #869 eager MLX CUDA versus IREE local-task Gemma3 boundary gate.
+# This is a standalone executable so running it does not link libtest.
+[[example]]
+name = "xla_gemma3_reference_check"
+required-features = ["cuda", "xla-reference-diagnostics"]

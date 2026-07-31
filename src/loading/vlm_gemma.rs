@@ -22,17 +22,22 @@
 //! wrapper assembly out of the generic VLM router.
 
 use anyhow::Result;
+#[cfg(feature = "xla-iree")]
+use mlxcel_core::layers::UnifiedEmbedding;
 use mlxcel_core::weights::WeightMap;
 use serde_json::Value;
 use std::path::Path;
 
 use crate::LoadedModel;
 use crate::models;
+#[cfg(feature = "xla-iree")]
+use crate::multimodal::host_preprocessor::{Gemma3IreeHostPreprocessor, HostPreprocessorError};
 use crate::vision;
 
 use super::{
-    load_vlm_weights_common, parse_required_vlm_subconfig, parse_vlm_config,
-    read_optional_model_json, read_sanitized_vlm_config, strip_language_model_prefix,
+    load_vlm_weights_common, load_vlm_weights_common_filtered_canonical,
+    parse_required_vlm_subconfig, parse_vlm_config, read_optional_model_json,
+    read_sanitized_vlm_config, strip_language_model_prefix,
 };
 
 struct Gemma3nMetadata {
@@ -223,6 +228,113 @@ pub(crate) fn load_gemma3_vlm(model_path: &Path) -> Result<LoadedModel> {
 
     Ok(LoadedModel::Gemma3VLM(vlm))
 }
+
+#[cfg(feature = "xla-iree")]
+fn is_gemma3_text_embedding_weight(name: &str) -> bool {
+    name.strip_prefix("language_model.")
+        .unwrap_or(name)
+        .starts_with("model.embed_tokens.")
+}
+
+/// Load the bounded Gemma3 host producer paired with the resident IREE
+/// SigLIP/averaging-projector module. Only the text embedding table is retained
+/// in MLX; no language layer or host vision tower is constructed.
+#[cfg(feature = "xla-iree")]
+pub(crate) fn load_gemma3_iree_host_preprocessor(
+    model_path: &Path,
+    device: &str,
+) -> Result<Gemma3IreeHostPreprocessor, HostPreprocessorError> {
+    use vision::config::VLMConfig;
+    use vision::processors::siglip::SigLipProcessor;
+
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)
+        .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    if !full_config
+        .get("vision_config")
+        .is_some_and(Value::is_object)
+        || !full_config.get("text_config").is_some_and(Value::is_object)
+    {
+        return Err(HostPreprocessorError::FamilyMismatch {
+            actual: "unqualified gemma3 config without vision_config/text_config".to_string(),
+        });
+    }
+    let vlm_config: VLMConfig = serde_json::from_value(full_config.clone())
+        .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+    if vlm_config.model_type != "gemma3"
+        || vlm_config
+            .text_config
+            .get("model_type")
+            .and_then(Value::as_str)
+            != Some("gemma3_text")
+    {
+        return Err(HostPreprocessorError::FamilyMismatch {
+            actual: format!(
+                "model_type={:?}, text_model_type={:?}",
+                vlm_config.model_type,
+                vlm_config
+                    .text_config
+                    .get("model_type")
+                    .and_then(Value::as_str)
+            ),
+        });
+    }
+    let text_config: models::gemma3::ModelArgs =
+        serde_json::from_value(vlm_config.text_config.clone())
+            .map_err(|error| HostPreprocessorError::InvalidConfig(error.to_string()))?;
+
+    let weights = load_vlm_weights_common_filtered_canonical(model_path, |name| {
+        is_gemma3_text_embedding_weight(name)
+    })
+    .map(strip_language_model_prefix)
+    .map_err(|error| HostPreprocessorError::WeightLoad(error.to_string()))?;
+    let quant_group_size = full_config
+        .get("quantization")
+        .and_then(|value| value.get("group_size"))
+        .and_then(Value::as_i64)
+        .unwrap_or(64) as i32;
+    let quant_bits = full_config
+        .get("quantization")
+        .and_then(|value| value.get("bits"))
+        .and_then(Value::as_i64)
+        .unwrap_or(4) as i32;
+    let text_embeddings = UnifiedEmbedding::from_weights(
+        &weights,
+        "model.embed_tokens",
+        quant_group_size,
+        quant_bits,
+    )
+    .map_err(|error| {
+        HostPreprocessorError::WeightLoad(format!(
+            "missing or invalid Gemma3 text embedding table: {error}"
+        ))
+    })?;
+    let tokens_per_image = vlm_config.get_mm_tokens_per_image();
+    let processor = SigLipProcessor::new(vlm_config.vision_config.image_size);
+    let projector = mlxcel_xla::IreeVisionProjector::load(model_path, device)
+        .map_err(HostPreprocessorError::Iree)?;
+
+    Gemma3IreeHostPreprocessor::from_parts(
+        Box::new(processor),
+        text_embeddings,
+        projector,
+        vlm_config.image_token_index,
+        vlm_config.pad_token_id,
+        vlm_config.boi_token_index,
+        vlm_config.eoi_token_index,
+        tokens_per_image,
+        text_config.hidden_size,
+        vlm_config.vision_config.image_size,
+        text_config.max_position_embeddings,
+        device.to_string(),
+    )
+}
+
+#[cfg(all(feature = "xla-iree", any(test, feature = "xla-reference-diagnostics")))]
+#[path = "vlm_gemma_xla_tests.rs"]
+mod xla_tests;
+
+#[cfg(feature = "xla-reference-diagnostics")]
+pub use xla_tests::reference_boundary::run_gemma3_eager_mlx_iree_prepared_boundary;
 
 /// Load a Gemma3n VLM model.
 pub(crate) fn load_gemma3n_vlm(model_path: &Path) -> Result<LoadedModel> {
