@@ -546,6 +546,34 @@ impl Attention {
             &metadata.rope_offsets,
         );
 
+        // Pool-backed paged decode (#899): the whole batch in one fused launch.
+        // This is the production path for `--decode-storage paged`; it appends
+        // every sequence's new K/V to the shared `PagedBlockPool` and runs
+        // attention once over the batch, replacing the per-sequence
+        // `update_and_fetch` + `gather_visible` + SDPA loop below. It declines
+        // (leaving the pool untouched) for anything it cannot serve, including
+        // dense-backed batches, so the loop below is still reached unchanged.
+        // Multi-token steps (batched prefill, speculative / MTP verify) never
+        // enter it: `seq_len != 1`.
+        if seq_len == 1
+            && mask.is_none()
+            && decode_context.is_some_and(|context| context.is_paged_decode())
+            && let Some(attn_out) = mlxcel_core::cache::paged_batch_decode_attention(
+                &q_batched,
+                &k_batched,
+                &v_batched,
+                caches,
+                self.scale,
+                0.0,
+            )
+        {
+            let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
+            return mlxcel_core::reshape(
+                &attn_out,
+                &[b as i32, seq_len, self.num_heads * self.head_dim],
+            );
+        }
+
         let paged_decode = decode_context.and_then(|context| {
             if seq_len != 1 || mask.is_some() || !context.is_paged_decode() {
                 return None;
@@ -553,12 +581,12 @@ impl Attention {
             if caches.iter().any(|cache| cache.mode != KVCacheMode::Fp16) {
                 return None;
             }
-            // Pool-backed caches (scheduler paged decode, #121) keep no dense
-            // `keys`/`values` buffers for the native paged kernel to read.
-            // Route them through the per-sequence `update_and_fetch` loop below,
-            // whose transparent pool intercept writes new K/V into the shared
-            // `PagedBlockPool` (`write_prefill`) and gathers the visible window
-            // back (`gather_visible`) — the #152-validated single-stream path.
+            // Pool-backed caches keep no dense `keys`/`values` buffers for the
+            // dense-compat paged kernel to read. Since #899 they are normally
+            // served by `paged_batch_decode_attention` above; reaching here
+            // means that path declined, so fall through to the per-sequence
+            // `update_and_fetch` loop below, whose pool intercept writes into
+            // the shared `PagedBlockPool` and gathers the visible window back.
             if caches.iter().any(|cache| cache.is_paged_backed()) {
                 return None;
             }

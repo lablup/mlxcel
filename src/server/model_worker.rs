@@ -521,6 +521,26 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                 sched_config.kv_cache_budget,
             );
 
+            // #899: size the paged pool's slab so a layer's rows stay in one
+            // contiguous buffer, which is what the fused decode kernels
+            // require. Derived from the same configuration the KV budget was,
+            // and clamped by it. `None` leaves the pool default alone.
+            let paged_slab_blocks = crate::memory_estimate::resolve_paged_slab_blocks(
+                &model_path,
+                model.num_layers(),
+                crate::server::batch::scheduler::DEFAULT_PAGED_BLOCK_SIZE,
+                effective_max_batch_size.max(1) as u64,
+                sched_config.max_kv_size.unwrap_or(0) as u64,
+                false,
+                paged_block_budget,
+            );
+            if let Some(blocks) = paged_slab_blocks {
+                tracing::info!(
+                    "Paged KV slab size: {blocks} blocks per layer \
+                     (fused decode serves a layer only while its rows fit one slab)"
+                );
+            }
+
             let mut scheduler = super::super::batch::BatchScheduler::with_config(
                 model,
                 tokenizer,
@@ -549,6 +569,8 @@ pub(crate) fn spawn_model_worker_with_batch_config(
             .with_max_kv_size(sched_config.max_kv_size)
             // install the resolved paged KV block budget (epic #116 #122 b3).
             .with_paged_block_budget(paged_block_budget)
+            // install the resolved paged KV slab size (#899).
+            .with_paged_slab_blocks(paged_slab_blocks)
             // experimental VLM prompt-prefix cache sharing (#124 step c).
             .with_vlm_prefix_cache(sched_config.enable_vlm_prefix_cache)
             // attach the resolved speculative dispatch so the

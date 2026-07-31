@@ -1445,6 +1445,26 @@ impl BatchScheduler {
         self
     }
 
+    /// Install the paged KV slab size in blocks (issue #899).
+    ///
+    /// `Some(n)` makes each layer's pool storage one contiguous `n`-row slab,
+    /// which is the precondition for the fused paged-attention decode kernels:
+    /// they read one pool buffer per side, so a layer spread across several
+    /// slabs is declined and falls back to gather-then-SDPA. `None` leaves the
+    /// pool's own default (32 rows), which is the pre-#899 behaviour.
+    ///
+    /// Resolved from the operator's `--ctx-size` / `--parallel` and the KV
+    /// budget by [`crate::memory_estimate::resolve_paged_slab_blocks`] on the
+    /// worker thread. Applied to the pool when it is lazily created; a failure
+    /// (a pool that already has storage) is logged and ignored, because an
+    /// unsized slab costs performance, not correctness.
+    pub fn with_paged_slab_blocks(mut self, slab_blocks: Option<usize>) -> Self {
+        if let Err(reason) = self.cache_pool.set_paged_slab_blocks(slab_blocks) {
+            tracing::warn!("could not install the paged KV slab size: {reason}");
+        }
+        self
+    }
+
     /// Attach the resolved speculative-decoding dispatch.
     ///
     /// Default (constructed by [`Self::with_config`]) is
