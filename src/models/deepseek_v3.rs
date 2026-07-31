@@ -1977,4 +1977,85 @@ mod tests {
             );
         }
     }
+
+    /// The MLA `kv_b_proj` pair `DeepSeekV3Model::sanitize_weights` decomposes
+    /// is solved from `kv_lora_rank` and two tensor axes rather than declared,
+    /// and every input is untrusted: `kv_lora_rank` comes from `config.json`
+    /// and the axes from the checkpoint. Before issue #958 the naive
+    /// arithmetic divided by both without checking them, so a `kv_lora_rank`
+    /// of 0 panicked on integer division and a solved pair outside anything
+    /// MLX can describe reached `dequantize`, which crosses the cxx bridge as
+    /// `UniquePtr<MlxArray>` rather than `Result` and therefore aborts during
+    /// weight sanitization rather than failing the load.
+    ///
+    /// This drives the real `DeepSeekV3Model::sanitize_weights` rather than
+    /// the shared helper directly, so the guard is exercised where a
+    /// checkpoint reaches it. The assertions are on the returned `Result`, so
+    /// a regression fails cleanly here instead of aborting the test binary.
+    #[test]
+    fn quantized_kv_b_proj_rejects_a_kv_lora_rank_no_packing_can_describe() {
+        // Honest affine 4-bit geometry: packed_in * 32 == bits * num_groups *
+        // group_size (2 * 32 == 4 * 1 * 16). `test_config_dense_direct_q`
+        // gives num_attention_heads 2, qk_nope_head_dim 4, v_head_dim 4, so
+        // rows = 2 * 8 = 16.
+        let build = |cfg: &DeepSeekV3Config| {
+            let heads = cfg.num_attention_heads as i32;
+            let head_dim = (cfg.qk_nope_head_dim + cfg.v_head_dim) as i32;
+            let rows = heads * head_dim;
+            let mut weights = WeightMap::new();
+            for l in 0..cfg.num_hidden_layers {
+                let prefix = format!("model.layers.{l}.self_attn.kv_b_proj");
+                // UINT32, not a float ramp: `dequantize` rejects any other
+                // packed dtype by throwing, and that throw is the uncatchable
+                // abort this guard exists to keep out of the forward path.
+                weights.insert(
+                    format!("{prefix}.weight"),
+                    mlxcel_core::zeros(&[rows, 2], mlxcel_core::dtype::UINT32),
+                );
+                insert_ramp(&mut weights, &format!("{prefix}.scales"), &[rows, 1]);
+                insert_ramp(&mut weights, &format!("{prefix}.biases"), &[rows, 1]);
+            }
+            weights
+        };
+
+        // Positive control first, so a guard that rejected every quantized
+        // kv_b_proj could not pass this test.
+        let mut honest = test_config_dense_direct_q();
+        honest.kv_lora_rank = 16;
+        let sanitized = DeepSeekV3Model::sanitize_weights(build(&honest), &honest)
+            .expect("an honest quantized kv_b_proj must still sanitize");
+        assert!(sanitized.contains_key("model.layers.0.self_attn.embed_q.weight"));
+
+        // A zero `kv_lora_rank` is Rust integer division by zero on the very
+        // first solve, so it has to be refused before the division rather
+        // than after.
+        let mut zero_rank = honest.clone();
+        zero_rank.kv_lora_rank = 0;
+        let err = DeepSeekV3Model::sanitize_weights(build(&zero_rank), &zero_rank)
+            .err()
+            .unwrap_or_else(|| panic!("kv_lora_rank 0 must be refused, not divided by"));
+        assert!(err.contains("kv_lora_rank"), "unhelpful error: {err}");
+
+        // A large `kv_lora_rank` truncates the solved bit width to 0, which
+        // is the divisor MLX would then divide by.
+        let mut wide_rank = honest.clone();
+        wide_rank.kv_lora_rank = 4096;
+        let err = DeepSeekV3Model::sanitize_weights(build(&wide_rank), &wide_rank)
+            .err()
+            .unwrap_or_else(|| panic!("a solved bit width of 0 must be refused"));
+        assert!(err.contains("bits"), "unhelpful error: {err}");
+
+        // A non-quantized kv_b_proj carries no packing, so the pair is never
+        // solved and the decomposition must stay unaffected.
+        let mut float_only = WeightMap::new();
+        let rows = honest.num_attention_heads as i32
+            * (honest.qk_nope_head_dim + honest.v_head_dim) as i32;
+        insert_ramp(
+            &mut float_only,
+            "model.layers.0.self_attn.kv_b_proj.weight",
+            &[rows, honest.kv_lora_rank as i32],
+        );
+        DeepSeekV3Model::sanitize_weights(float_only, &honest)
+            .expect("a float kv_b_proj must not be gated on quantization params");
+    }
 }

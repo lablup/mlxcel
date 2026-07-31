@@ -1847,7 +1847,15 @@ impl FusedQKVLinear {
 
     /// Load and concatenate separate q/k/v weights with explicit quantization mode.
     ///
-    /// Used by: Llama3, Qwen2/Qwen2.5, Phi3-style fused attention wrappers.
+    /// Bounds the declared `group_size` / `bits` pair before anything derived
+    /// from it is stored (issue #958): this loader never calls
+    /// `reconcile_quantization_layout`, so a declared `(0, 0)` was stored
+    /// verbatim on the fused `QuantizedWeight` otherwise.
+    ///
+    /// Used by (through [`Self::from_weights_separate`]): Llama3 (and Mistral,
+    /// the same `ModelType::Llama` path), Gemma, Gemma2, Gemma3, Gemma4, Qwen3,
+    /// Qwen3MoE, Qwen3VL, Qwen3VLMoE, Cohere2, Cohere2MoE, StarCoder2,
+    /// InternLM3, Jamba.
     /// Preserves both quantization `biases` and true linear `bias` tensors
     /// when present; Qwen2-family checkpoints require q/k/v linear bias for
     /// sane logits.

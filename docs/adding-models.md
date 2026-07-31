@@ -156,6 +156,13 @@ that implementation and tighten the tests or benchmark notes accordingly.
      parallel entry list in `src/loading/config_backed.rs`.
 7. If LoRA/adapters are supported, verify `load_model_from_weights()` in `src/loading/mod.rs`.
    - Non-standard adapter paths should extend `src/loading/special.rs` instead of growing `load_model_from_weights()` directly.
+8. If the family carries a **quantized MoE expert type of its own** rather than
+   using `switch_layers::SwitchLinear`, bound the declared quantization pair at
+   the point the loader stores it:
+   `switch_layers::validate_expert_quantization_params(prefix, group_size, bits)?`.
+   The shared loader does this for you; a family-local `SwitchLinear` /
+   `SwitchGLU` / `ExpertLinear` does not inherit it. See
+   [Quantization Parameter Bounds](#quantization-parameter-bounds).
 
 ## VLM Checklist
 
@@ -201,6 +208,59 @@ Keep the model in an existing module when:
 
 If you are unsure, extend the existing family module first and split only when
 the test file or router starts to lose a clear boundary.
+
+## Quantization Parameter Bounds
+
+`config.json` is untrusted input: it arrives with a downloaded HuggingFace
+repository. A `group_size` or `bits` that no tensor layout can describe passes
+every Rust-side check and then violates an undocumented MLX precondition. MLX
+reconstructs a quantized matrix's unpacked width as `w.shape(-1) * 32 / bits`,
+so a declared `"bits": 0` is a division by zero and anything above 32 collapses
+the quotient. Because `gather_qmm`, `quantized_matmul`, `quantized_embedding`
+and `dequantize` all cross the cxx bridge as `UniquePtr<MlxArray>` rather than
+`Result`, the resulting C++ throw is an uncatchable `std::terminate` at the
+**first forward pass**, not a load error, and `catch_unwind` does not contain it
+(see [`docs/adr/0003-release-panic-unwind-with-core-thread-abort.md`](adr/0003-release-panic-unwind-with-core-thread-abort.md)).
+In `mlxcel-server` that is a remote denial of service triggered by loading a
+model.
+
+The rule is therefore: **bound the pair wherever it is stored, before anything
+derived from it is kept.** Not at the model's load boundary. The boundary does
+not dominate, because pipeline stage executors, `*StageModel::from_filtered_weights`
+entry points, VLM text wrappers and config-bridging helpers all build layers
+without ever calling the family's own model constructor, and several families
+build the quantized variant as a bare struct literal from another module.
+
+What already carries the bound, so you inherit it for free:
+
+| Loader | Covers |
+|--------|--------|
+| `reconcile_quantization_layout` | every `UnifiedLinear` / `UnifiedEmbedding` |
+| `SwitchLinear::from_stacked_parts` | MoE experts via the shared `switch_layers` loader |
+| `QuantizedMultiLinear::{new, from_weights}` | MLA `embed_q` / `unembed_out` |
+| `QuantizedEmbedding::new` | hand-built embeddings that skip the map loader |
+| `FusedQKVLinear::from_weights_separate_with_mode` | fused QKV projections |
+| `infer_mla_quantization_params` | the MLA `kv_b_proj` decomposition in `sanitize_weights` |
+
+What you must do yourself:
+
+- A **family-local quantized expert type**: call
+  `switch_layers::validate_expert_quantization_params(prefix, group_size, bits)?`
+  in the branch that builds the quantized variant. Gate only that branch: a bf16
+  expert plane carries no packing and must stay loadable at any declared pair.
+- A **per-prefix quantization block** (gpt-oss style, a map of overrides rather
+  than one triple): walk every entry during config validation as well, because
+  a bound on the top-level defaults says nothing about an individual override,
+  and vice versa.
+- Any **new by-hand constructor** that stores a pair and hands it to an MLX
+  quantized op: make it fallible and bound it, rather than trusting the caller.
+
+Add a regression test that drives the bad values through your real loader rather
+than through `validate_quantization_params` directly, and pair every hostile case
+with a positive control so a guard cannot pass by rejecting everything quantized.
+`switch_layers::insert_stacked_quantized_expert_plane` and
+`switch_layers::HOSTILE_QUANT_PARAMS` are the shared test fixtures; see any
+`src/models/*_tests.rs` guard test for the shape.
 
 ## Where Regressions Usually Happen
 

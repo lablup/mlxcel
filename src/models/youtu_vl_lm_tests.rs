@@ -183,3 +183,97 @@ fn kv_b_proj_decompose_returns_error_when_biases_missing() {
         "error message should identify the layer; got: {msg}"
     );
 }
+
+/// The MLA `kv_b_proj` pair is solved from `kv_lora_rank` and two tensor axes
+/// rather than declared, and every input is untrusted: `kv_lora_rank` comes from
+/// `config.json` and the axes from the checkpoint. Before issue #958 the naive
+/// arithmetic divided by both without checking them, so a `kv_lora_rank` of 0
+/// panicked on integer division and a solved pair outside anything MLX can
+/// describe reached `dequantize`, which crosses the cxx bridge as
+/// `UniquePtr<MlxArray>` rather than `Result` and therefore aborts during weight
+/// sanitization rather than failing the load.
+///
+/// This drives the real `sanitize_text_weights` rather than the shared helper
+/// directly, so the guard is exercised where a checkpoint reaches it. The
+/// assertions are on the returned `Result`, so a regression fails cleanly here
+/// rather than aborting the test binary.
+#[test]
+fn quantized_kv_b_proj_rejects_a_kv_lora_rank_no_packing_can_describe() {
+    // Honest affine 4-bit geometry for the positive control: the packed axis is
+    // kv_lora_rank / 8 and the scales axis is kv_lora_rank / group_size, so
+    // packed_in * 32 == bits * num_groups * group_size holds (2 * 32 == 4 * 1 * 16).
+    let build = |config: &YoutuTextConfig| {
+        let num_heads = config.num_attention_heads;
+        let head_dim = config.qk_nope_head_dim + config.v_head_dim;
+        let rows = (num_heads * head_dim) as i32;
+        let mut weights = WeightMap::new();
+        for layer_idx in 0..config.num_hidden_layers {
+            let prefix = format!("model.layers.{}.self_attn.kv_b_proj", layer_idx);
+            // UINT32, not FLOAT32: `dequantize` rejects any other packed dtype
+            // by throwing, and that throw is the uncatchable abort this guard
+            // exists to keep out of the forward path. A float fixture here would
+            // take the test binary down on the positive control.
+            weights.insert(
+                format!("{prefix}.weight"),
+                mlxcel_core::zeros(&[rows, 2], mlxcel_core::dtype::UINT32),
+            );
+            weights.insert(
+                format!("{prefix}.scales"),
+                mlxcel_core::zeros(&[rows, 1], mlxcel_core::dtype::FLOAT32),
+            );
+            weights.insert(
+                format!("{prefix}.biases"),
+                mlxcel_core::zeros(&[rows, 1], mlxcel_core::dtype::FLOAT32),
+            );
+        }
+        weights
+    };
+
+    // Positive control first, so a guard that rejected every quantized
+    // kv_b_proj could not pass this test.
+    let honest = minimal_config();
+    let sanitized = match sanitize_text_weights(build(&honest), &honest) {
+        Ok(w) => w,
+        Err(e) => panic!("an honest quantized kv_b_proj must still sanitize: {e}"),
+    };
+    assert!(sanitized.contains_key("model.layers.0.self_attn.embed_q.weight"));
+
+    // A zero `kv_lora_rank` is Rust integer division by zero on the very first
+    // solve, so it has to be refused before the division rather than after.
+    let mut zero_rank = minimal_config();
+    zero_rank.kv_lora_rank = 0;
+    let err = sanitize_text_weights(build(&zero_rank), &zero_rank)
+        .err()
+        .unwrap_or_else(|| panic!("kv_lora_rank 0 must be refused, not divided by"));
+    assert!(err.contains("kv_lora_rank"), "unhelpful error: {err}");
+
+    // A large `kv_lora_rank` truncates the solved bit width to 0, which is the
+    // divisor MLX would then divide by.
+    let mut wide_rank = minimal_config();
+    wide_rank.kv_lora_rank = 4096;
+    let err = sanitize_text_weights(build(&wide_rank), &wide_rank)
+        .err()
+        .unwrap_or_else(|| panic!("a solved bit width of 0 must be refused"));
+    assert!(err.contains("bits"), "unhelpful error: {err}");
+
+    // A non-quantized kv_b_proj carries no packing, so the pair is never solved
+    // and a `kv_lora_rank` that no packing could describe must not gate it. The
+    // tensor is built at `wide_rank`'s own width so it still satisfies the
+    // separate shape cross-check below the solve, which is what would otherwise
+    // reject this for an unrelated reason.
+    let mut float_only = WeightMap::new();
+    let rows = (wide_rank.num_attention_heads * (wide_rank.qk_nope_head_dim + wide_rank.v_head_dim))
+        as i32;
+    for layer_idx in 0..wide_rank.num_hidden_layers {
+        float_only.insert(
+            format!("model.layers.{}.self_attn.kv_b_proj.weight", layer_idx),
+            mlxcel_core::zeros(
+                &[rows, wide_rank.kv_lora_rank as i32],
+                mlxcel_core::dtype::FLOAT32,
+            ),
+        );
+    }
+    if let Err(e) = sanitize_text_weights(float_only, &wide_rank) {
+        panic!("a float kv_b_proj must not be gated on quantization params: {e}");
+    }
+}
