@@ -78,6 +78,9 @@
 pub mod batch_quant;
 mod detach;
 mod paged;
+/// Whole-batch decode over pool-backed KV caches, the production paged decode
+/// path (issue #899).
+pub mod paged_batch_decode;
 /// CSR page-table view of a decode batch, consumed by the paged decode v2
 /// kernels (issue #898).
 pub mod paged_csr;
@@ -105,6 +108,9 @@ pub use detach::{DetachedCacheSet, DetachedHandle, DetachedKVCache, DetachedRota
 pub use paged::{
     GatheredKv, PagedBlockId, PagedBlockPool, PagedCacheStats, PagedKvLayout, PagedLayerState,
     PagedSequenceState,
+};
+pub use paged_batch_decode::{
+    PagedBatchDecodeStats, paged_batch_decode_attention, paged_batch_decode_stats,
 };
 pub use paged_csr::{PagedCsrView, build_paged_csr_view};
 pub use paged_detach::DetachedPagedCacheSet;

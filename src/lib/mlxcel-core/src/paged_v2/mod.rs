@@ -45,34 +45,46 @@
 //!    for an occupancy-derived CTA target and emits the flat index arrays as
 //!    plain data that can be cached across decode steps.
 //!
-//! ## Default off
+//! ## Two entry points, two gates
 //!
-//! This issue lands v2 as a library capability. `MLXCEL_PAGED_ATTENTION_V2=1`
-//! selects it inside
-//! [`crate::cache::PagedBlockPool::paged_decode_fused`]; with the variable
-//! unset the entry point is one `OnceLock` read away from the exact v1 code it
-//! ran before, no v2 array is built, and no v2 kernel is JIT-compiled. v1 is
-//! left fully intact for comparison. Production wiring (scheduler, server
-//! defaults, dispatch thresholds) is issue #899.
+//! **The v1 entry point** ([`crate::cache::PagedBlockPool::paged_decode_fused`],
+//! reached only from the library-only [`crate::layers::paged_decode_attention_pooled`])
+//! tries v2 first under `MLXCEL_PAGED_ATTENTION_V2=1`, default off. That is
+//! issue #898's comparison gate and is unchanged.
+//!
+//! **The production entry point**
+//! ([`crate::cache::PagedBlockPool::paged_decode_batched`], reached from the
+//! server's pool-backed batched decode) is issue #899 and is **default on**. It
+//! is governed by [`dispatch`] (a measured token floor below which the gather
+//! path is kept) and by `MLXCEL_PAGED_ATTENTION_NATIVE`, whose force-off values
+//! are its kill switch.
 //!
 //! ## Not covered
 //!
-//! Sliding-window and softcap variants keep their documented fallbacks, and
-//! speculative multi-token verify stays on its current path: both are out of
-//! scope per the issue. `first_page_offset` means the *page table* copes with a
-//! trimmed window, but v2 applies no windowing mask of its own.
+//! Logit-softcap families and speculative / MTP multi-token verify steps stay
+//! on their existing paths; see [`crate::cache::paged_batch_decode`] for where
+//! each is declined. `first_page_offset` means the *page table* copes with a
+//! trimmed sliding window, but v2 applies no windowing mask of its own, so the
+//! visible range has to be expressed entirely in the CSR range.
 
 use std::sync::OnceLock;
 
+pub mod dispatch;
 pub mod launch;
 pub mod plan;
+pub mod plan_cache;
 
+pub use dispatch::{
+    MIN_KV_TOKENS_ENV, MIN_TOTAL_KV_TOKENS, PagedV2Dispatch, min_total_kv_tokens,
+    parse_min_total_kv_tokens, select_paged_v2_dispatch,
+};
 pub use launch::{V2Context, geometry_from_shapes, resolve_plan, run_decode_v2};
 pub use plan::{
     MAX_CHUNKS, PagedDecodeGeometry, PagedDecodePlan, TARGET_CTAS_ENV, chunks_for_batch,
     chunks_for_request, device_target_ctas, max_pages_per_chunk, min_pages_per_chunk,
     search_pages_per_chunk,
 };
+pub use plan_cache::{PagedDecodeV2Cache, PlanCacheStats, RequestFingerprint};
 
 /// Environment variable selecting the v2 decode path. Default off.
 pub const V2_ENV: &str = "MLXCEL_PAGED_ATTENTION_V2";
