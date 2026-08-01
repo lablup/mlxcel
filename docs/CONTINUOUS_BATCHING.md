@@ -198,18 +198,43 @@ launch, with identical output:
 
 | case | why |
 |---|---|
-| under 4096 total visible KV tokens in the launch | measured slower there (0.91x at batch 1 with 1K of context) |
+| a lone request under 4096 visible KV tokens | measured slower there (0.91x at batch 1 with 1K of context) |
+| a multi-request launch under 512 visible tokens per request | below the measured evidence, and gather is trivially cheap at that size |
 | a layer whose pool rows span more than one slab | the kernel reads one contiguous buffer per side |
 | multi-token steps: batched prefill, speculative / MTP verify | the kernel serves a single query token per sequence |
 | logit-softcap families, explicit attention masks | no soft-cap or mask term in the kernel |
 | Int8 / Turbo KV modes | those sequences keep dense caches and are never pool-backed |
+
+The floor is two-regime because the measured loss is a property of batch 1, not
+of total work: at 1024 tokens of context per request the kernel runs 0.91x at
+batch 1 but 1.41x at batch 4 and 1.47x at batch 8, since a batched launch
+spreads the same chunk count over more requests and amortizes the merge pass.
+
+#### Seeing which path ran
+
+The server announces the first occurrence of each distinct dispatch outcome at
+**info**, with no `RUST_LOG` needed:
+
+```text
+INFO ...: paged decode v2: fused v2 launch (batch 4, 3828 visible KV tokens, 16 chunks, merge on)
+INFO ...: paged decode v2: gather: the layer spans 3 K / 3 V pool slabs and the fused kernels read one buffer per side (slab_blocks=32); raise --ctx-size or MLXCEL_PAGED_SLAB_BLOCKS so a layer's rows fit one slab
+INFO ...: paged decode v2: gather: 1024 visible KV tokens across 1 request(s) is below the 4096-token dispatch floor
+INFO ...: paged decode v2: gather: pinned by MLXCEL_PAGED_ATTENTION_NATIVE
+```
+
+A run that never prints `fused v2 launch` never used the fused kernel, whatever
+its throughput looks like. Check for that line before drawing any conclusion
+from a before/after comparison.
 
 Two knobs, neither normally needed:
 
 - `MLXCEL_PAGED_ATTENTION_NATIVE=0` is the kill switch. It restores the
   pre-#899 gather behaviour end to end, for bisecting a suspected kernel
   regression. `=1` forces the fused path for every servable shape, bypassing
-  the token floor.
+  the token floor; that is the supported way to benchmark the declined corner.
+  The floors themselves move with `MLXCEL_PAGED_V2_MIN_KV_TOKENS` (lone
+  request, default 4096) and `MLXCEL_PAGED_V2_MIN_KV_TOKENS_PER_REQUEST`
+  (multi-request, default 512).
 - `MLXCEL_PAGED_SLAB_BLOCKS` overrides the pool's slab size in blocks. The
   server derives it from `--ctx-size` and `--parallel`, clamped by the KV
   budget, and logs the resolved value at startup (`Paged KV slab size: N blocks

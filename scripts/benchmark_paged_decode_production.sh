@@ -108,6 +108,34 @@ start_server() {
     echo "NOTE: no slab-size line in the server log (see MLXCEL_PAGED_SLAB_BLOCKS)"
 }
 
+# Confirm each arm ran the kernel it was supposed to. The first sweep for this
+# issue produced a full matrix of null results because both arms were on the
+# gather path and nothing said so; a benchmark that cannot tell you which kernel
+# it measured is worse than no benchmark, so fail loudly instead.
+check_arm_dispatch() {
+  local arm="$1"
+  local log="$LOG_DIR/server_${arm}.log"
+  local fused
+  fused=$(grep -c "paged decode v2: fused v2 launch" "$log" || true)
+  echo "--- $arm: fused-launch announcements in the server log: $fused"
+  grep -m3 "paged decode v2:" "$log" || true
+  if [[ "$arm" == "after" && "$fused" -eq 0 ]]; then
+    echo "" >&2
+    echo "ERROR: the 'after' arm never logged a fused v2 launch, so it measured the" >&2
+    echo "gather path and the comparison is meaningless. The decline reason is in" >&2
+    echo "  $log" >&2
+    echo "on a 'paged decode v2: gather: ...' line, which names what to change." >&2
+    return 1
+  fi
+  if [[ "$arm" == "before" && "$fused" -ne 0 ]]; then
+    echo "" >&2
+    echo "ERROR: the 'before' arm logged a fused v2 launch, so the kill switch did" >&2
+    echo "not take effect and both arms ran the same kernel." >&2
+    return 1
+  fi
+  return 0
+}
+
 run_case() {
   local arm="$1" scenario="$2" concurrency="$3" prompt_tokens="$4"
   local log="$LOG_DIR/${arm}_${scenario}.txt"
@@ -131,6 +159,7 @@ run_arm() {
   # Single-sequence long context.
   run_case "$arm" "batch1_ctx16k" 1 16384
   run_case "$arm" "batch1_ctx32k" 1 32768
+  check_arm_dispatch "$arm"
   cleanup
   # Let the allocator settle before the next arm so the two see the same
   # starting conditions.
