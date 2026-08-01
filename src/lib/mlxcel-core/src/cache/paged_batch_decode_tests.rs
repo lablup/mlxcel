@@ -36,13 +36,13 @@ fn a_dense_batch_is_declined() {
     let mut a = KVCache::new();
     let mut b = KVCache::new();
     let caches: Vec<&mut KVCache> = vec![&mut a, &mut b];
-    assert!(!batch_is_servable(&caches, 0.0));
+    assert!(batch_is_servable(&caches, 0.0).is_err());
 }
 
 #[test]
 fn an_empty_batch_is_declined() {
     let caches: Vec<&mut KVCache> = Vec::new();
-    assert!(!batch_is_servable(&caches, 0.0));
+    assert!(batch_is_servable(&caches, 0.0).is_err());
 }
 
 #[test]
@@ -51,8 +51,8 @@ fn a_softcap_batch_is_declined() {
     let mut a = KVCache::new_paged(pool.clone(), states[0].clone(), 0);
     let mut b = KVCache::new_paged(pool, states[1].clone(), 0);
     let caches: Vec<&mut KVCache> = vec![&mut a, &mut b];
-    assert!(batch_is_servable(&caches, 0.0));
-    assert!(!batch_is_servable(&caches, 30.0));
+    assert!(batch_is_servable(&caches, 0.0).is_ok());
+    assert!(batch_is_servable(&caches, 30.0).is_err());
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn a_mixed_dense_and_paged_batch_is_declined() {
     let mut paged = KVCache::new_paged(pool, states[0].clone(), 0);
     let mut dense = KVCache::new();
     let caches: Vec<&mut KVCache> = vec![&mut paged, &mut dense];
-    assert!(!batch_is_servable(&caches, 0.0));
+    assert!(batch_is_servable(&caches, 0.0).is_err());
 }
 
 #[test]
@@ -71,7 +71,7 @@ fn caches_from_two_pools_are_declined() {
     let mut a = KVCache::new_paged(pool_a, states_a[0].clone(), 0);
     let mut b = KVCache::new_paged(pool_b, states_b[0].clone(), 0);
     let caches: Vec<&mut KVCache> = vec![&mut a, &mut b];
-    assert!(!batch_is_servable(&caches, 0.0));
+    assert!(batch_is_servable(&caches, 0.0).is_err());
 }
 
 #[test]
@@ -80,7 +80,7 @@ fn caches_from_two_layers_are_declined() {
     let mut a = KVCache::new_paged(pool.clone(), states[0].clone(), 0);
     let mut b = KVCache::new_paged(pool, states[1].clone(), 1);
     let caches: Vec<&mut KVCache> = vec![&mut a, &mut b];
-    assert!(!batch_is_servable(&caches, 0.0));
+    assert!(batch_is_servable(&caches, 0.0).is_err());
 }
 
 #[test]
@@ -260,15 +260,61 @@ fn batched_decode_matches_the_gather_path_at_gqa_one() {
 
 #[test]
 fn below_the_floor_the_batch_still_answers_correctly() {
-    // 2 x 512 = 1024 visible tokens, below the floor: the entry point takes its
-    // own gather fallback, which must still produce the reference answer (and
-    // must still have written the step's K/V exactly once).
-    let (out, reference, _) = run_step(&[512, 512], 8, 2, 64, 0xD00D);
+    // 2 x 256 = 512 visible tokens against a 2 x 512 = 1024 batched floor, so
+    // the entry point takes its own gather fallback. It must still produce the
+    // reference answer exactly, not merely within tolerance, and must still
+    // have written the step's K/V once.
+    let (out, reference, stats) = run_step(&[256, 256], 8, 2, 64, 0xD00D);
+    assert_eq!(
+        stats.plan_rebuilds, 0,
+        "a below-floor launch must not build a plan"
+    );
     let rms = relative_rms(&out, &reference);
     assert!(
         rms < 1e-6,
         "the gather fallback must reproduce the reference"
     );
+}
+
+#[test]
+fn a_single_sequence_above_its_floor_takes_the_fused_path() {
+    // The single-sequence decode path (`decode_single_step` -> the model's
+    // one-sequence `forward`) reaches this entry point with a batch of one. Two
+    // of the five scenarios in the issue's benchmark matrix are that shape, so
+    // a batch-1 launch above the single-request floor has to fuse.
+    let (out, reference, stats) = run_step(&[4096], 8, 2, 64, 0x1EAF);
+    assert!(
+        stats.plan_rebuilds >= 1,
+        "a 4096-token single-sequence launch should have built a plan, got {stats:?}"
+    );
+    let rms = relative_rms(&out, &reference);
+    assert!(rms < 5e-3, "relative RMS {rms} exceeds 5e-3");
+}
+
+#[test]
+fn a_short_single_sequence_stays_on_gather() {
+    // The one measured loss in #898 is batch 1 at 1024 tokens, so a lone
+    // request below 4096 must not fuse even though a batched launch of the same
+    // per-request size would.
+    let (_, _, stats) = run_step(&[1024], 8, 2, 64, 0x1EAF);
+    assert_eq!(
+        stats.plan_rebuilds, 0,
+        "a 1024-token single-sequence launch must stay on gather, got {stats:?}"
+    );
+}
+
+#[test]
+fn a_batched_launch_just_under_a_nominal_1k_prompt_fuses() {
+    // The exact shape the production benchmark delivered for its nominal 1K
+    // scenario: 4 requests of 956 tokens. The first floor formulation summed to
+    // 3824 and declined it; the two-regime floor requires 4 x 512 = 2048.
+    let (out, reference, stats) = run_step(&[956, 956, 956, 956], 8, 2, 64, 0x956);
+    assert!(
+        stats.plan_rebuilds >= 1,
+        "4 x 956 tokens should fuse, got {stats:?}"
+    );
+    let rms = relative_rms(&out, &reference);
+    assert!(rms < 5e-3, "relative RMS {rms} exceeds 5e-3");
 }
 
 #[test]
@@ -387,4 +433,104 @@ fn a_multi_slab_layer_falls_back_to_gather() {
     );
     // Nothing was cached, because the fused path was never reached.
     assert_eq!(pool.borrow().decode_plan_cache_stats().plan_rebuilds, 0);
+}
+
+// ── outcome reporting ───────────────────────────────────────────────────────
+
+/// Drive one launch through the pool directly and return only its outcome.
+fn outcome_for(prompt_len: usize, slabbed: bool) -> PagedDecodeOutcome {
+    let (pool, states) = if slabbed {
+        fresh_pool(1, 2, 64)
+    } else {
+        let bytes_per_block = PAGE * 2 * 64 * 2;
+        let layout = PagedKvLayout::uniform(1, PAGE, bytes_per_block).expect("valid layout");
+        let pool = Rc::new(RefCell::new(PagedBlockPool::new(layout.clone())));
+        let states = (0..4)
+            .map(|_| Rc::new(RefCell::new(PagedSequenceState::new(&layout))))
+            .collect();
+        (pool, states)
+    };
+    let mut rng = Rng::new(0xD1A6);
+    let mut cache = KVCache::new_paged(pool.clone(), states[0].clone(), 0);
+    let k = random_array(&mut rng, &[1, 2, prompt_len as i32, 64]);
+    let v = random_array(&mut rng, &[1, 2, prompt_len as i32, 64]);
+    cache.update(k, v);
+
+    let q = random_array(&mut rng, &[1, 8, 1, 64]);
+    let state_ref = states[0].borrow();
+    let refs: Vec<&PagedSequenceState> = vec![&state_ref];
+    let mut pool_mut = pool.borrow_mut();
+    pool_mut
+        .paged_decode_batched(&q, &refs, 0, 0.125)
+        .expect("no hard error")
+        .1
+}
+
+#[test]
+fn a_multi_slab_layer_reports_the_knob_that_would_fix_it() {
+    // The decline that silently disabled the whole fused path in the first #899
+    // production benchmark. It has to name the slab counts and the knob, not
+    // just return `None`.
+    let outcome = outcome_for(2048, false);
+    match &outcome {
+        PagedDecodeOutcome::MultiSlab {
+            k_slabs,
+            slab_blocks,
+            ..
+        } => {
+            assert!(*k_slabs > 1, "expected several slabs, got {k_slabs}");
+            assert_eq!(*slab_blocks, crate::cache::POOL_SLAB_BLOCKS);
+        }
+        other => panic!("expected a multi-slab decline, got {other:?}"),
+    }
+    assert!(!outcome.is_fused());
+    assert!(outcome.describe().contains("MLXCEL_PAGED_SLAB_BLOCKS"));
+}
+
+#[test]
+fn a_below_floor_launch_reports_both_numbers() {
+    match outcome_for(64, true) {
+        PagedDecodeOutcome::BelowFloor {
+            batch,
+            visible_tokens,
+            floor,
+        } => {
+            assert_eq!(batch, 1);
+            assert_eq!(visible_tokens, 64);
+            assert_eq!(floor, crate::paged_v2::MIN_SINGLE_REQUEST_KV_TOKENS);
+        }
+        other => panic!("expected a below-floor decline, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_fused_launch_reports_its_shape() {
+    match outcome_for(8192, true) {
+        PagedDecodeOutcome::Fused {
+            batch,
+            visible_tokens,
+            chunks,
+            ..
+        } => {
+            assert_eq!(batch, 1);
+            assert_eq!(visible_tokens, 8192);
+            assert!(chunks >= 1);
+        }
+        other => panic!("expected a fused launch, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_unservable_batch_declines_without_touching_the_pool() {
+    reset_reported();
+    let (pool, states) = fresh_pool(1, 2, 64);
+    let mut a = KVCache::new_paged(pool.clone(), states[0].clone(), 0);
+    let mut dense = KVCache::new();
+    let mut caches: Vec<&mut KVCache> = vec![&mut a, &mut dense];
+    let q = ffi::zeros(&[2, 8, 1, 64], dtype::FLOAT16);
+    let k = ffi::zeros(&[2, 2, 1, 64], dtype::FLOAT16);
+    let v = ffi::zeros(&[2, 2, 1, 64], dtype::FLOAT16);
+    assert!(paged_batch_decode_attention(&q, &k, &v, &mut caches, 0.125, 0.0).is_none());
+    assert_eq!(states[0].borrow().layer(0).unwrap().len, 0);
+    assert_eq!(pool.borrow().allocated_block_count(), 0);
 }

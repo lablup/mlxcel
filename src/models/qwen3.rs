@@ -175,7 +175,30 @@ impl Attention {
             mlxcel_core::cache::turbo::sparse_v::turbo4_delegated_compressed_attention_enabled();
         let use_turbo4_dequant_sdpa =
             mlxcel_core::cache::turbo::sparse_v::turbo4_dequant_sdpa_enabled();
-        let attn_out = if l == 1
+        // Single-sequence pooled paged decode (#899). The server takes this
+        // path whenever the active batch is one request: `decode_single_step`
+        // calls the single-sequence `forward`, never `forward_split_attention`.
+        // Without this branch the two single-sequence scenarios in the issue's
+        // benchmark matrix (16K and 32K) could never reach the fused kernel, and
+        // neither could any moment in a batched run where only one request is
+        // still decoding. The batch-1 launch is exactly the `[1, H, 1, D]` shape
+        // the whole-batch entry point already serves.
+        let pooled_single = if l == 1 && mask.is_none() && cache.is_paged_backed() {
+            mlxcel_core::cache::paged_batch_decode_attention(
+                &q,
+                &k,
+                &v,
+                &mut [&mut *cache],
+                self.scale,
+                0.0,
+            )
+        } else {
+            None
+        };
+
+        let attn_out = if let Some(out) = pooled_single {
+            out
+        } else if l == 1
             && use_turbo4_asym_dequant_sdpa
             && cache.turbo4_asym_dequant_sdpa_available()
         {

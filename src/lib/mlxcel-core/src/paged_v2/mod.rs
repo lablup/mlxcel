@@ -71,14 +71,18 @@ use std::sync::OnceLock;
 
 pub mod dispatch;
 pub mod launch;
+pub mod outcome;
 pub mod plan;
 pub mod plan_cache;
 
 pub use dispatch::{
-    MIN_KV_TOKENS_ENV, MIN_TOTAL_KV_TOKENS, PagedV2Dispatch, min_total_kv_tokens,
-    parse_min_total_kv_tokens, select_paged_v2_dispatch,
+    MIN_BATCHED_KV_TOKENS_PER_REQUEST, MIN_KV_TOKENS_ENV, MIN_KV_TOKENS_PER_REQUEST_ENV,
+    MIN_SINGLE_REQUEST_KV_TOKENS, PagedV2Dispatch, active_required_visible_tokens,
+    min_kv_tokens_per_request, min_total_kv_tokens, parse_min_total_kv_tokens,
+    required_visible_tokens, select_paged_v2_dispatch,
 };
 pub use launch::{V2Context, geometry_from_shapes, resolve_plan, run_decode_v2};
+pub use outcome::{PAGED_DECODE_OUTCOME_KINDS, PagedDecodeOutcome};
 pub use plan::{
     MAX_CHUNKS, PagedDecodeGeometry, PagedDecodePlan, TARGET_CTAS_ENV, chunks_for_batch,
     chunks_for_request, device_target_ctas, max_pages_per_chunk, min_pages_per_chunk,

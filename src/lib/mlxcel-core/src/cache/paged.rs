@@ -1849,36 +1849,51 @@ impl PagedBlockPool {
     ///    resolving O(pages) block ids.
     /// 2. **It applies the dispatch policy.** [`crate::paged_v2::dispatch`]
     ///    keeps small launches on the gather path, because #898 measured v2
-    ///    losing to gather at batch 1 with 1024 tokens of context.
-    /// 3. **It reports why it declined.** `Ok(None)` is the caller's signal to
-    ///    run the gather path, and the reason is traced at debug level.
+    ///    losing to gather for a single request at 1024 tokens of context.
+    /// 3. **It says what it did.** The returned
+    ///    [`PagedDecodeOutcome`](crate::paged_v2::PagedDecodeOutcome) carries
+    ///    the decision and the numbers behind it, so the caller can surface it
+    ///    at whatever level makes it visible. It is a value rather than a log
+    ///    line because the first cut of this used `tracing::debug!` and a whole
+    ///    production benchmark sweep then compared gather against gather
+    ///    without anything saying so.
     ///
     /// `q` is `[B, Hq, 1, head_dim]`, `states[b]` is sequence `b`'s per-layer
-    /// state, and the result is `[B, Hq, 1, head_dim]` in `q`'s dtype.
+    /// state, and `Ok((Some(out), _))` is `[B, Hq, 1, head_dim]` in `q`'s dtype.
+    /// `Ok((None, outcome))` is the caller's signal to run the gather path, and
+    /// `outcome` says why.
     pub fn paged_decode_batched(
         &mut self,
         q: &MlxArray,
         states: &[&PagedSequenceState],
         layer_idx: usize,
         scale: f32,
-    ) -> Result<Option<UniquePtr<MlxArray>>, String> {
-        use crate::paged_v2::{PagedV2Dispatch, min_total_kv_tokens, select_paged_v2_dispatch};
+    ) -> Result<
+        (
+            Option<UniquePtr<MlxArray>>,
+            crate::paged_v2::PagedDecodeOutcome,
+        ),
+        String,
+    > {
+        use crate::paged_v2::{
+            PagedDecodeOutcome, PagedV2Dispatch, active_required_visible_tokens,
+            select_paged_v2_dispatch,
+        };
 
         // Same single-slab restriction as v1 and as `paged_decode_fused_v2`:
         // both kernels read one contiguous pool buffer per side, so a layer
-        // grown past one slab (#235) is declined rather than stitched.
+        // grown past one slab (#235) is declined rather than stitched. This is
+        // the decline that silently disables the whole fused path when the slab
+        // is sized below the served working set, so it names the knob.
         if self.single_slab_tensors(layer_idx).is_none() {
-            // Say why. This decline is the one that silently disables the whole
-            // fused path in production, and it looked identical to "v2 ran and
-            // did not help" in a before/after benchmark until it was logged.
-            tracing::debug!(
-                "paged decode v2 declines layer {layer_idx}: {} k slabs / {} v slabs, \
-                 need exactly 1 (slab_blocks={})",
-                self.pool_k.get(layer_idx).map_or(0, Vec::len),
-                self.pool_v.get(layer_idx).map_or(0, Vec::len),
-                self.slab_blocks()
-            );
-            return Ok(None);
+            return Ok((
+                None,
+                PagedDecodeOutcome::MultiSlab {
+                    k_slabs: self.pool_k.get(layer_idx).map_or(0, Vec::len),
+                    v_slabs: self.pool_v.get(layer_idx).map_or(0, Vec::len),
+                    slab_blocks: self.slab_blocks(),
+                },
+            ));
         }
 
         let mut layers: Vec<&PagedLayerState> = Vec::with_capacity(states.len());
@@ -1902,8 +1917,7 @@ impl PagedBlockPool {
             ));
         }
         if let Err(reason) = geometry.check() {
-            tracing::debug!("paged decode v2 declines this geometry: {reason}");
-            return Ok(None);
+            return Ok((None, PagedDecodeOutcome::UnservableGeometry(reason)));
         }
 
         let epoch = self.block_epoch;
@@ -1922,53 +1936,80 @@ impl PagedBlockPool {
             layers: &layers,
             geometry: &geometry,
         };
-        let resolved = cache.view_and_plan(
-            &key,
-            || self.paged_csr_view(states, layer_idx),
-            |page_counts| {
-                crate::paged_v2::PagedDecodePlan::heuristic(geometry, page_counts, target)
-            },
-        );
+        // Resolve the page table first and decide from it, then build the plan
+        // only if the fused path is actually going to run. A declined launch
+        // must not pay for the chunk search, and keeping the two steps separate
+        // is what makes the plan-rebuild counter mean "the fused path ran".
+        let view_built = cache.ensure_view(&key, || self.paged_csr_view(states, layer_idx));
 
-        let decision = match &resolved {
-            Ok((view, _)) => {
-                let total_tokens: usize =
+        let decision = match &view_built {
+            Ok(()) => {
+                let view = cache
+                    .view(layer_idx)
+                    .expect("ensure_view populated the entry");
+                let visible_tokens: usize =
                     view.seq_lens.iter().map(|&len| len.max(0) as usize).sum();
                 if !view.any_visible() {
-                    PagedV2Dispatch::Gather
+                    Err(PagedDecodeOutcome::NoVisibleTokens)
                 } else {
-                    crate::layers::resolve_paged_v2_dispatch(|| {
-                        select_paged_v2_dispatch(total_tokens, min_total_kv_tokens())
-                    })
+                    let floor = active_required_visible_tokens(batch);
+                    let policy = select_paged_v2_dispatch(visible_tokens, floor);
+                    match crate::layers::resolve_paged_v2_dispatch(|| policy) {
+                        PagedV2Dispatch::V2 => Ok((visible_tokens, view.page_counts())),
+                        // A gather decision the policy also made is the floor;
+                        // a gather decision it did not make is the kill switch,
+                        // which is the only other thing
+                        // `resolve_paged_v2_dispatch` can do.
+                        PagedV2Dispatch::Gather if policy == PagedV2Dispatch::Gather => {
+                            Err(PagedDecodeOutcome::BelowFloor {
+                                batch,
+                                visible_tokens,
+                                floor,
+                            })
+                        }
+                        PagedV2Dispatch::Gather => Err(PagedDecodeOutcome::KillSwitch),
+                    }
                 }
             }
-            Err(_) => PagedV2Dispatch::Gather,
+            Err(reason) => Err(PagedDecodeOutcome::ViewFailed(reason.clone())),
         };
 
-        let launched = match (resolved, decision) {
-            (Ok((view, plan)), PagedV2Dispatch::V2) => match plan.validate() {
-                Ok(()) => {
-                    let (pool_k, pool_v) =
-                        self.single_slab_tensors(layer_idx).expect("checked above");
-                    Some(launch_v2(q, pool_k, pool_v, view, plan, scale))
+        let launched: Result<Option<UniquePtr<MlxArray>>, String>;
+        let outcome: PagedDecodeOutcome;
+        match decision {
+            Ok((visible_tokens, page_counts)) => {
+                cache.ensure_plan(&geometry, &page_counts, || {
+                    crate::paged_v2::PagedDecodePlan::heuristic(geometry, &page_counts, target)
+                });
+                // Both accessors are shared borrows of the same cache, so they
+                // coexist; the two mutations above have already finished.
+                let view = cache.view(layer_idx).expect("populated above");
+                let plan = cache.plan().expect("populated above");
+                match plan.validate() {
+                    Ok(()) => {
+                        let (pool_k, pool_v) =
+                            self.single_slab_tensors(layer_idx).expect("checked above");
+                        outcome = PagedDecodeOutcome::Fused {
+                            batch,
+                            visible_tokens,
+                            chunks: plan.num_chunks,
+                            merged: plan.needs_merge,
+                        };
+                        launched = launch_v2(q, pool_k, pool_v, view, plan, scale).map(Some);
+                    }
+                    Err(reason) => {
+                        outcome = PagedDecodeOutcome::PlanRejected(reason);
+                        launched = Ok(None);
+                    }
                 }
-                Err(reason) => {
-                    tracing::debug!("paged decode v2 declines this plan: {reason}");
-                    None
-                }
-            },
-            (Ok(_), PagedV2Dispatch::Gather) => None,
-            (Err(reason), _) => {
-                tracing::debug!("paged decode v2 declines this batch: {reason}");
-                None
             }
-        };
-        self.decode_v2_cache = cache;
-
-        match launched {
-            Some(result) => result.map(Some),
-            None => Ok(None),
+            Err(declined) => {
+                outcome = declined;
+                launched = Ok(None);
+            }
         }
+        self.decode_v2_cache = cache;
+        launched.map(|out| (out, outcome))
     }
 
     /// Fused paged-attention decode over the pool via the native Metal kernel

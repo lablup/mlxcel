@@ -202,10 +202,10 @@ impl PagedDecodeV2Cache {
     where
         F: FnOnce() -> Result<PagedCsrView, String>,
     {
-        self.ensure_view(layer_idx, epoch, page_size, layers, build)?;
+        self.ensure_view_inner(layer_idx, epoch, page_size, layers, build)?;
         Ok(self
             .view(layer_idx)
-            .expect("ensure_view populated the entry"))
+            .expect("ensure_view_inner populated the entry"))
     }
 
     /// The cached view for a layer, if one is present.
@@ -217,41 +217,55 @@ impl PagedDecodeV2Cache {
             .map(|cached| &cached.view)
     }
 
-    /// Resolve both the layer's CSR view and the batch's chunk plan in one
-    /// call, so the production path takes a single pass over the cache.
-    ///
-    /// Returned as a pair of shared borrows: the two live in disjoint fields,
-    /// but each is populated under `&mut self`, so they can only be handed out
-    /// together after both mutations are done.
-    pub fn view_and_plan<FV, FP>(
-        &mut self,
-        key: &DecodeBatchKey<'_>,
-        build_view: FV,
-        build_plan: FP,
-    ) -> Result<(&PagedCsrView, &PagedDecodePlan), String>
-    where
-        FV: FnOnce() -> Result<PagedCsrView, String>,
-        FP: FnOnce(&[usize]) -> PagedDecodePlan,
-    {
-        self.ensure_view(
-            key.layer_idx,
-            key.epoch,
-            key.page_size,
-            key.layers,
-            build_view,
-        )?;
-        let page_counts = self
-            .view(key.layer_idx)
-            .expect("ensure_view populated the entry")
-            .page_counts();
-        self.ensure_plan(key.geometry, &page_counts, || build_plan(&page_counts));
-        Ok((
-            self.view(key.layer_idx).expect("populated above"),
-            self.plan.as_ref().expect("populated above"),
-        ))
+    /// The cached chunk plan, if one is present.
+    #[must_use]
+    pub fn plan(&self) -> Option<&PagedDecodePlan> {
+        self.plan.as_ref()
     }
 
-    fn ensure_view<F>(
+    /// Populate the layer's CSR view, reusing the cached page list when the
+    /// batch has only advanced within its current pages.
+    ///
+    /// Separate from [`Self::ensure_plan`] on purpose: the dispatch policy
+    /// needs the view's visible-token count to decide whether the fused path
+    /// runs at all, and a declined launch must not pay for the plan's chunk
+    /// search. Splitting the two also makes the plan-rebuild counter an honest
+    /// "the fused path ran" signal rather than "the fused path was considered".
+    pub fn ensure_view<F>(&mut self, key: &DecodeBatchKey<'_>, build: F) -> Result<(), String>
+    where
+        F: FnOnce() -> Result<PagedCsrView, String>,
+    {
+        self.ensure_view_inner(key.layer_idx, key.epoch, key.page_size, key.layers, build)
+    }
+
+    /// Populate the chunk plan for these page counts, reusing the cached plan
+    /// when it still emits the same chunk grouping.
+    ///
+    /// [`PagedDecodePlan::matches`] is the plan's own O(batch) predicate: it
+    /// checks that every request still needs exactly the number of chunks the
+    /// cached `o_indptr` allotted it, which is what makes the plan's flat index
+    /// arrays still correct.
+    pub fn ensure_plan<F>(
+        &mut self,
+        geometry: &PagedDecodeGeometry,
+        page_counts: &[usize],
+        build: F,
+    ) where
+        F: FnOnce() -> PagedDecodePlan,
+    {
+        let hit = self
+            .plan
+            .as_ref()
+            .is_some_and(|plan| plan.matches(geometry, page_counts));
+        if hit {
+            self.stats.plan_reuses += 1;
+        } else {
+            self.plan = Some(build());
+            self.stats.plan_rebuilds += 1;
+        }
+    }
+
+    fn ensure_view_inner<F>(
         &mut self,
         layer_idx: usize,
         epoch: u64,
@@ -321,22 +335,6 @@ impl PagedDecodeV2Cache {
     {
         self.ensure_plan(geometry, page_counts, build);
         self.plan.as_ref().expect("plan is present after the miss")
-    }
-
-    fn ensure_plan<F>(&mut self, geometry: &PagedDecodeGeometry, page_counts: &[usize], build: F)
-    where
-        F: FnOnce() -> PagedDecodePlan,
-    {
-        let hit = self
-            .plan
-            .as_ref()
-            .is_some_and(|plan| plan.matches(geometry, page_counts));
-        if hit {
-            self.stats.plan_reuses += 1;
-        } else {
-            self.plan = Some(build());
-            self.stats.plan_rebuilds += 1;
-        }
     }
 }
 

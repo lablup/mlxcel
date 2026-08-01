@@ -83,13 +83,14 @@
 
 use std::cell::Ref;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use cxx::UniquePtr;
 
 use super::{KVCache, KVCacheMode, PagedSequenceState};
 use crate::ffi;
 use crate::ffi::MlxArray;
+use crate::paged_v2::{PAGED_DECODE_OUTCOME_KINDS, PagedDecodeOutcome};
 
 /// Counters for what the production paged decode actually did.
 ///
@@ -111,6 +112,43 @@ static COUNTERS: PagedBatchDecodeCounters = PagedBatchDecodeCounters {
     gather_fallbacks: AtomicU64::new(0),
     declines: AtomicU64::new(0),
 };
+
+/// One flag per [`PagedDecodeOutcome`] kind, so the *first* launch of each
+/// distinct outcome is announced and the rest are silent.
+///
+/// Per kind rather than one global flag on purpose. A single one-shot reports
+/// only whatever happened first, which in a real server is a short warmup
+/// request; a later, permanent decline for an entirely different reason then
+/// never surfaces. That is exactly how the #899 production benchmark ran a full
+/// sweep on the gather path without any line saying so.
+static REPORTED: [AtomicBool; PAGED_DECODE_OUTCOME_KINDS] =
+    [const { AtomicBool::new(false) }; PAGED_DECODE_OUTCOME_KINDS];
+
+/// Announce an outcome the first time its kind occurs.
+///
+/// **Info, not debug.** A decode-path diagnostic that only an operator who
+/// already suspects a problem can enable is worthless for the case it exists
+/// for: knowing which kernel a benchmark actually measured. There are at most
+/// [`PAGED_DECODE_OUTCOME_KINDS`] of these lines in a process lifetime, so the
+/// cost of always emitting them is bounded and tiny.
+fn report_once(outcome: &PagedDecodeOutcome) {
+    let slot = &REPORTED[outcome.kind_index()];
+    if slot
+        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+    {
+        tracing::info!("paged decode v2: {}", outcome.describe());
+    }
+}
+
+/// Forget which outcomes have been announced. Test-only: the flags are
+/// process-wide, and a test that asserts on logging needs a clean slate.
+#[cfg(test)]
+fn reset_reported() {
+    for slot in &REPORTED {
+        slot.store(false, Ordering::Relaxed);
+    }
+}
 
 /// Snapshot of [`COUNTERS`] as plain integers.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -135,32 +173,37 @@ pub fn paged_batch_decode_stats() -> PagedBatchDecodeStats {
 /// Pure and MLX-free apart from the shape reads, and evaluated in full before
 /// any pool mutation: a `false` here means the caller's per-sequence loop runs
 /// with the pool untouched.
-fn batch_is_servable(caches: &[&mut KVCache], softcap: f32) -> bool {
+fn batch_is_servable(caches: &[&mut KVCache], softcap: f32) -> Result<(), &'static str> {
     if caches.is_empty() {
-        return false;
+        return Err("empty batch");
     }
     // A logit soft-cap is applied inside SDPA; the v2 kernel has no soft-cap
     // term and the gather fallback in this function does not thread one either,
     // so the whole batch goes back to the caller (issue #899 scopes soft-cap
     // families to a follow-up).
     if softcap != 0.0 {
-        return false;
+        return Err("logit soft-cap requested");
     }
     let Some(first) = caches[0].paged_backing.as_ref() else {
-        return false;
+        return Err("caches are not pool-backed");
     };
-    caches
-        .iter()
-        .all(|cache| match cache.paged_backing.as_ref() {
-            Some(backing) => {
-                cache.mode == KVCacheMode::Fp16
-                && backing.layer_idx == first.layer_idx
-                // One launch reads one pool; sequences backed by different
-                // pools cannot share a page table.
-                && Rc::ptr_eq(&backing.pool, &first.pool)
-            }
-            None => false,
-        })
+    for cache in caches {
+        let Some(backing) = cache.paged_backing.as_ref() else {
+            return Err("caches are not pool-backed");
+        };
+        if cache.mode != KVCacheMode::Fp16 {
+            return Err("cache mode is not Fp16");
+        }
+        if backing.layer_idx != first.layer_idx {
+            return Err("caches name different layers");
+        }
+        // One launch reads one pool; sequences backed by different pools cannot
+        // share a page table.
+        if !Rc::ptr_eq(&backing.pool, &first.pool) {
+            return Err("caches are backed by different pools");
+        }
+    }
+    Ok(())
 }
 
 /// `[B, H, 1, D]` shape check for the decode tensors.
@@ -188,12 +231,20 @@ pub fn paged_batch_decode_attention(
     softcap: f32,
 ) -> Option<UniquePtr<MlxArray>> {
     let batch = caches.len();
-    if !batch_is_servable(caches, softcap)
-        || !is_single_token_batch(&ffi::array_shape(q_batched), batch)
-        || !is_single_token_batch(&ffi::array_shape(k_batched), batch)
-        || !is_single_token_batch(&ffi::array_shape(v_batched), batch)
-    {
+    let servable = batch_is_servable(caches, softcap).and_then(|()| {
+        if !is_single_token_batch(&ffi::array_shape(q_batched), batch)
+            || !is_single_token_batch(&ffi::array_shape(k_batched), batch)
+            || !is_single_token_batch(&ffi::array_shape(v_batched), batch)
+        {
+            // Batched prefill and speculative / MTP verify land here: more than
+            // one query token per sequence, which the kernel does not serve.
+            return Err("not a single-token decode step");
+        }
+        Ok(())
+    });
+    if let Err(reason) = servable {
         COUNTERS.declines.fetch_add(1, Ordering::Relaxed);
+        report_once(&PagedDecodeOutcome::NotServable(reason));
         return None;
     }
 
@@ -225,33 +276,29 @@ pub fn paged_batch_decode_attention(
 
     let mut pool = backing.pool.borrow_mut();
     match pool.paged_decode_batched(q_batched, &state_refs, layer_idx, scale) {
-        Ok(Some(out)) => {
-            if COUNTERS.v2_launches.fetch_add(1, Ordering::Relaxed) == 0 {
-                // Announce the first launch of each outcome exactly once. Which
-                // path a server actually took is otherwise invisible: the
-                // counters are process-local and nothing reads them at runtime,
-                // so a silent fall back to gather (a layer outgrowing its slab,
-                // an unservable shape) looks identical to v2 running well but
-                // not helping. A before/after benchmark cannot be interpreted
-                // without knowing which arm ran which kernel.
-                tracing::info!("paged decode v2: first fused launch (layer {layer_idx})");
+        Ok((launched, outcome)) => {
+            // Which kernel a server actually ran has to be visible without a
+            // profiler and without an operator opting into debug logging; a
+            // before/after benchmark is uninterpretable otherwise, and the
+            // first #899 sweep measured gather against gather because this was
+            // not true.
+            report_once(&outcome);
+            match launched {
+                Some(out) => {
+                    COUNTERS.v2_launches.fetch_add(1, Ordering::Relaxed);
+                    Some(out)
+                }
+                None => {
+                    COUNTERS.gather_fallbacks.fetch_add(1, Ordering::Relaxed);
+                    Some(gather_fallback(
+                        q_batched,
+                        &pool,
+                        &state_refs,
+                        layer_idx,
+                        scale,
+                    ))
+                }
             }
-            Some(out)
-        }
-        Ok(None) => {
-            if COUNTERS.gather_fallbacks.fetch_add(1, Ordering::Relaxed) == 0 {
-                tracing::info!(
-                    "paged decode v2: first gather fallback (layer {layer_idx}); \
-                     the fused path declined this launch"
-                );
-            }
-            Some(gather_fallback(
-                q_batched,
-                &pool,
-                &state_refs,
-                layer_idx,
-                scale,
-            ))
         }
         Err(reason) => {
             // A hard error here means the batch's own bookkeeping is

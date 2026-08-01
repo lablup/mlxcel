@@ -31,32 +31,51 @@
 //! whole attention does at that size. So v2 must not be dispatched
 //! unconditionally.
 //!
-//! ## The threshold
+//! ## Why the floor is two-regime, and not one number
 //!
-//! Re-index that table by **total visible KV tokens in the launch**
-//! (`batch * ctx`, which is what the kernel actually reads and therefore what
-//! the fixed merge + workspace cost has to amortize against):
+//! The first cut of this policy summed the launch's visible tokens and required
+//! 4096 of them, on the reasoning that `batch * ctx` is what the kernel reads
+//! and therefore what the fixed merge and workspace cost has to amortize
+//! against. That fits the table (the loss has 1024 total tokens, every win has
+//! 4096 or more) but it is the wrong *shape*, and the server benchmark for #899
+//! showed it plainly: **the loss is a property of batch 1, not of total
+//! tokens.**
 //!
-//! | total tokens | cells | v2 / gather |
+//! Read the ctx-1024 column: 0.91x at batch 1, 1.41x at batch 4, 1.47x at batch
+//! 8. Same per-request context, same plan degeneracy, opposite outcome. What
+//! changes is that at batch 4 the same chunk count is spread over four
+//! requests, so the plan picks a larger chunk size, emits fewer chunks per
+//! request, and amortizes the merge over four times the useful work. A
+//! total-token floor separates those two cells only by accident, and with
+//! almost no margin: a batched launch at 1024 tokens per request sits exactly
+//! on 4096. The production benchmark's nominal "1K" scenario delivered 956
+//! tokens per request, `4 * 956 = 3824`, and was declined despite being the
+//! same shape as the measured 1.41x win.
+//!
+//! So the floor is now stated the way the measurements are:
+//!
+//! | launch | floor | evidence |
 //! |---|---|---|
-//! | 1024 | b1 / 1K | **0.91x** |
-//! | 4096 | b1 / 4K, b4 / 1K | 1.08x, 1.41x |
-//! | 8192 | b8 / 1K | 1.47x |
-//! | 16384+ | everything else measured | 1.29x to 3.08x |
+//! | one request | [`MIN_SINGLE_REQUEST_KV_TOKENS`] visible tokens | 1024 loses (0.91x), 4096 wins (1.08x) |
+//! | more than one | [`MIN_BATCHED_KV_TOKENS_PER_REQUEST`] per request | 1024 per request wins at batch 4 (1.41x) and batch 8 (1.47x) |
 //!
-//! One number separates the measured loss from every measured win:
-//! [`MIN_TOTAL_KV_TOKENS`] = 4096. The only loss sits strictly below it, and
-//! both cells sitting exactly on it win (the weaker of the two, batch 1 at
-//! 4096, returned 1.02x to 1.21x across repetitions, so it is a win in every
-//! repetition). Single-sequence decode therefore crosses over at 4096 tokens
-//! and batch 4 crosses over at 1024 tokens each, which is the narrow gate the
-//! measurements support.
+//! The batched floor sits at 512 rather than 1024 deliberately. 1024 is the
+//! *lowest measured* batched context and it wins comfortably; putting a floor
+//! on top of a measured point means a real workload landing just under it (a
+//! tokenizer delivering 956 tokens for a nominal 1K prompt, exactly what
+//! happened) is declined for no measured reason. 512 keeps margin below the
+//! evidence while still refusing launches small enough that the gather path is
+//! trivially cheap. Batch 2 and 3 are interpolated, not measured; the trend
+//! across batch 1, 4, and 8 at fixed context is monotone and the mechanism
+//! above explains why, so the interpolation is stated rather than hidden.
 //!
-//! Total tokens is also the cheapest possible gate: [`PagedCsrView::seq_lens`]
-//! already carries it, so the decision is made before the plan is built rather
-//! than after.
+//! ## Overrides
 //!
-//! [`PagedCsrView::seq_lens`]: crate::cache::PagedCsrView::seq_lens
+//! Both floors have an environment override for re-measurement on new hardware.
+//! To force the fused path for every servable shape, including the regime this
+//! policy declines, use `MLXCEL_PAGED_ATTENTION_NATIVE=1`, which bypasses the
+//! selector entirely; that is the supported way to benchmark the declined
+//! corner, rather than driving a floor to zero.
 
 use std::sync::OnceLock;
 
@@ -70,24 +89,28 @@ pub enum PagedV2Dispatch {
     Gather,
 }
 
-/// Minimum total visible KV tokens in a launch for v2 to be dispatched.
+/// Visible tokens a **single-request** launch needs before v2 is dispatched.
 ///
-/// Derived directly from the #898 measurement table in this module's docs: the
-/// single measured loss (batch 1 at 1024 tokens) has 1024 total tokens, and the
-/// weakest measured win (batch 1 at 4096 tokens, 1.08x) has 4096. Change this
-/// constant to move the crossover; [`MIN_KV_TOKENS_ENV`] moves it without a
-/// rebuild.
-pub const MIN_TOTAL_KV_TOKENS: usize = 4096;
+/// From the table in this module's docs: batch 1 at 1024 tokens is the only
+/// measured loss (0.91x), and batch 1 at 4096 is the weakest measured win
+/// (1.08x median, 1.02x to 1.21x across repetitions, so a win in every
+/// repetition).
+pub const MIN_SINGLE_REQUEST_KV_TOKENS: usize = 4096;
 
-/// Environment override for [`MIN_TOTAL_KV_TOKENS`].
+/// Visible tokens **per request** a multi-request launch needs.
 ///
-/// A non-negative integer. `0` dispatches v2 for every servable shape (useful
-/// for re-measuring the crossover on new hardware); a very large value keeps
-/// every batch on gather without disabling the code path the way
-/// `MLXCEL_PAGED_ATTENTION_NATIVE=0` does.
+/// Every measured multi-request cell wins, the smallest being batch 4 at 1024
+/// tokens per request (1.41x). This sits below that with margin rather than on
+/// top of it; see the module docs for why the margin matters.
+pub const MIN_BATCHED_KV_TOKENS_PER_REQUEST: usize = 512;
+
+/// Environment override for [`MIN_SINGLE_REQUEST_KV_TOKENS`].
 pub const MIN_KV_TOKENS_ENV: &str = "MLXCEL_PAGED_V2_MIN_KV_TOKENS";
 
-/// Pure parse of a [`MIN_KV_TOKENS_ENV`] value.
+/// Environment override for [`MIN_BATCHED_KV_TOKENS_PER_REQUEST`].
+pub const MIN_KV_TOKENS_PER_REQUEST_ENV: &str = "MLXCEL_PAGED_V2_MIN_KV_TOKENS_PER_REQUEST";
+
+/// Pure parse of a floor override.
 ///
 /// Anything that is not a non-negative integer falls back to the default, so a
 /// typo degrades to the measured policy rather than to an unmeasured one.
@@ -99,21 +122,43 @@ pub fn parse_min_total_kv_tokens(value: Option<&str>, default: usize) -> usize {
     }
 }
 
-/// The active token floor, read once per process so the decode hot path never
-/// touches the environment.
+/// The active single-request floor, read once per process.
 #[must_use]
 pub fn min_total_kv_tokens() -> usize {
     static FLOOR: OnceLock<usize> = OnceLock::new();
     *FLOOR.get_or_init(|| {
         let raw = std::env::var(MIN_KV_TOKENS_ENV).ok();
-        let resolved = parse_min_total_kv_tokens(raw.as_deref(), MIN_TOTAL_KV_TOKENS);
-        if resolved != MIN_TOTAL_KV_TOKENS {
-            tracing::info!(
-                "paged decode v2 token floor overridden to {resolved} (default {MIN_TOTAL_KV_TOKENS})"
-            );
-        }
-        resolved
+        parse_min_total_kv_tokens(raw.as_deref(), MIN_SINGLE_REQUEST_KV_TOKENS)
     })
+}
+
+/// The active per-request batched floor, read once per process.
+#[must_use]
+pub fn min_kv_tokens_per_request() -> usize {
+    static FLOOR: OnceLock<usize> = OnceLock::new();
+    *FLOOR.get_or_init(|| {
+        let raw = std::env::var(MIN_KV_TOKENS_PER_REQUEST_ENV).ok();
+        parse_min_total_kv_tokens(raw.as_deref(), MIN_BATCHED_KV_TOKENS_PER_REQUEST)
+    })
+}
+
+/// Visible tokens this launch must reach, given how many requests it serves.
+///
+/// Pure, so the number that decided a dispatch can be logged next to the number
+/// that was measured against it.
+#[must_use]
+pub fn required_visible_tokens(batch: usize, single: usize, per_request: usize) -> usize {
+    if batch <= 1 {
+        single
+    } else {
+        batch.saturating_mul(per_request)
+    }
+}
+
+/// The floor this launch faces under the process's active configuration.
+#[must_use]
+pub fn active_required_visible_tokens(batch: usize) -> usize {
+    required_visible_tokens(batch, min_total_kv_tokens(), min_kv_tokens_per_request())
 }
 
 /// Pure regime selector: v2 once the launch reads at least `floor` visible KV
@@ -134,18 +179,23 @@ pub fn select_paged_v2_dispatch(total_visible_tokens: usize, floor: usize) -> Pa
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_only_measured_loss_is_below_the_floor() {
-        // batch 1 / ctx 1024, the 0.91x cell.
-        assert_eq!(
-            select_paged_v2_dispatch(1024, MIN_TOTAL_KV_TOKENS),
-            PagedV2Dispatch::Gather
+    /// Apply the shipped policy to a `(batch, per-request context)` cell.
+    fn decide(batch: usize, ctx: usize) -> PagedV2Dispatch {
+        let floor = required_visible_tokens(
+            batch,
+            MIN_SINGLE_REQUEST_KV_TOKENS,
+            MIN_BATCHED_KV_TOKENS_PER_REQUEST,
         );
+        select_paged_v2_dispatch(batch * ctx, floor)
     }
 
     #[test]
-    fn every_measured_win_is_at_or_above_the_floor() {
-        // (batch, ctx) cells from the #898 table that beat gather.
+    fn the_only_measured_loss_is_declined() {
+        assert_eq!(decide(1, 1024), PagedV2Dispatch::Gather);
+    }
+
+    #[test]
+    fn every_measured_win_is_dispatched() {
         for (batch, ctx) in [
             (1, 4096),
             (1, 16384),
@@ -160,7 +210,7 @@ mod tests {
             (8, 32768),
         ] {
             assert_eq!(
-                select_paged_v2_dispatch(batch * ctx, MIN_TOTAL_KV_TOKENS),
+                decide(batch, ctx),
                 PagedV2Dispatch::V2,
                 "batch {batch} / ctx {ctx} should dispatch v2"
             );
@@ -168,21 +218,50 @@ mod tests {
     }
 
     #[test]
+    fn a_batched_launch_just_under_a_nominal_1k_prompt_still_dispatches() {
+        // The regression that motivated the two-regime floor: the production
+        // benchmark's nominal 1K scenario delivered 956 tokens per request, and
+        // a flat 4096-total floor declined it even though batch 4 at ~1K is a
+        // measured 1.41x win.
+        assert_eq!(decide(4, 956), PagedV2Dispatch::V2);
+        assert_eq!(decide(2, 956), PagedV2Dispatch::V2);
+    }
+
+    #[test]
+    fn a_single_request_is_not_helped_by_the_batched_floor() {
+        // The batched floor must never leak into batch 1, which is the only
+        // regime with a measured loss.
+        assert_eq!(decide(1, 512), PagedV2Dispatch::Gather);
+        assert_eq!(decide(1, 2048), PagedV2Dispatch::Gather);
+        assert_eq!(decide(1, 4095), PagedV2Dispatch::Gather);
+        assert_eq!(decide(1, 4096), PagedV2Dispatch::V2);
+    }
+
+    #[test]
+    fn a_tiny_batched_launch_is_still_declined() {
+        // Not measured, and the gather path is trivially cheap at this size.
+        assert_eq!(decide(4, 128), PagedV2Dispatch::Gather);
+        assert_eq!(decide(2, 256), PagedV2Dispatch::Gather);
+    }
+
+    #[test]
     fn an_empty_batch_stays_on_gather() {
-        assert_eq!(
-            select_paged_v2_dispatch(0, MIN_TOTAL_KV_TOKENS),
-            PagedV2Dispatch::Gather
-        );
+        assert_eq!(decide(0, 0), PagedV2Dispatch::Gather);
+        assert_eq!(decide(4, 0), PagedV2Dispatch::Gather);
     }
 
     #[test]
-    fn a_zero_floor_dispatches_everything() {
-        assert_eq!(select_paged_v2_dispatch(1, 0), PagedV2Dispatch::V2);
-        assert_eq!(select_paged_v2_dispatch(0, 0), PagedV2Dispatch::V2);
+    fn the_floor_scales_with_the_request_count() {
+        assert_eq!(required_visible_tokens(1, 4096, 512), 4096);
+        assert_eq!(required_visible_tokens(2, 4096, 512), 1024);
+        assert_eq!(required_visible_tokens(4, 4096, 512), 2048);
+        assert_eq!(required_visible_tokens(8, 4096, 512), 4096);
+        // Saturating, so an absurd request count cannot wrap the floor down.
+        assert_eq!(required_visible_tokens(usize::MAX, 4096, 512), usize::MAX);
     }
 
     #[test]
-    fn the_env_override_parses_only_non_negative_integers() {
+    fn the_env_overrides_parse_only_non_negative_integers() {
         assert_eq!(parse_min_total_kv_tokens(None, 4096), 4096);
         assert_eq!(parse_min_total_kv_tokens(Some(""), 4096), 4096);
         assert_eq!(parse_min_total_kv_tokens(Some("  "), 4096), 4096);
