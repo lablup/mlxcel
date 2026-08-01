@@ -362,18 +362,42 @@ fn timed_repetitions_scale_inversely_with_launch_cost() {
         min_improvement: 0.02,
     };
 
+    // `FakeOp::run` sleeps, and `thread::sleep` only ever overshoots its
+    // request, so a loaded host inflates the measured per-iteration cost and
+    // lowers the realized rep count. Asserting the exact ceiling made this test
+    // pass in isolation and fail under full-suite parallelism, where 1200+
+    // tests contend; the property under test is that effort scales inversely
+    // with launch cost, not that a cheap launch lands on one particular number.
     let cheap = FakeOp::new("fake_cheap_launch", vec![(1, 100)]);
     let cheap_result = profile(&cheap, cfg).expect("cheap sweep produced a result");
-    assert_eq!(
-        cheap_result.reps, 64,
-        "a ~100us launch fits a 50ms budget far more than 64 times"
+    assert!(
+        cheap_result.reps >= 4 * cfg.reps,
+        "a ~100us launch should sample far above the {} floor inside a 50ms budget, got {}",
+        cfg.reps,
+        cheap_result.reps
+    );
+    assert!(
+        cheap_result.reps <= cfg.max_reps,
+        "the ceiling must still bound the sweep, got {} > {}",
+        cheap_result.reps,
+        cfg.max_reps
     );
 
+    // The costly direction is robust to load in a way the cheap one is not:
+    // overshooting a 20ms sleep only exhausts the budget sooner, so the floor
+    // is reached under any amount of contention.
     let costly = FakeOp::new("fake_costly_launch", vec![(1, 20_000)]);
     let costly_result = profile(&costly, cfg).expect("costly sweep produced a result");
     assert_eq!(
-        costly_result.reps, 5,
+        costly_result.reps, cfg.reps,
         "a 20ms launch exhausts the budget in three, so the floor applies"
+    );
+
+    assert!(
+        cheap_result.reps > costly_result.reps,
+        "cheap {} should outsample costly {}",
+        cheap_result.reps,
+        costly_result.reps
     );
 }
 
