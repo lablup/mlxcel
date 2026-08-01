@@ -226,11 +226,25 @@ pub fn paged_batch_decode_attention(
     let mut pool = backing.pool.borrow_mut();
     match pool.paged_decode_batched(q_batched, &state_refs, layer_idx, scale) {
         Ok(Some(out)) => {
-            COUNTERS.v2_launches.fetch_add(1, Ordering::Relaxed);
+            if COUNTERS.v2_launches.fetch_add(1, Ordering::Relaxed) == 0 {
+                // Announce the first launch of each outcome exactly once. Which
+                // path a server actually took is otherwise invisible: the
+                // counters are process-local and nothing reads them at runtime,
+                // so a silent fall back to gather (a layer outgrowing its slab,
+                // an unservable shape) looks identical to v2 running well but
+                // not helping. A before/after benchmark cannot be interpreted
+                // without knowing which arm ran which kernel.
+                tracing::info!("paged decode v2: first fused launch (layer {layer_idx})");
+            }
             Some(out)
         }
         Ok(None) => {
-            COUNTERS.gather_fallbacks.fetch_add(1, Ordering::Relaxed);
+            if COUNTERS.gather_fallbacks.fetch_add(1, Ordering::Relaxed) == 0 {
+                tracing::info!(
+                    "paged decode v2: first gather fallback (layer {layer_idx}); \
+                     the fused path declined this launch"
+                );
+            }
             Some(gather_fallback(
                 q_batched,
                 &pool,

@@ -1868,6 +1868,16 @@ impl PagedBlockPool {
         // both kernels read one contiguous pool buffer per side, so a layer
         // grown past one slab (#235) is declined rather than stitched.
         if self.single_slab_tensors(layer_idx).is_none() {
+            // Say why. This decline is the one that silently disables the whole
+            // fused path in production, and it looked identical to "v2 ran and
+            // did not help" in a before/after benchmark until it was logged.
+            tracing::debug!(
+                "paged decode v2 declines layer {layer_idx}: {} k slabs / {} v slabs, \
+                 need exactly 1 (slab_blocks={})",
+                self.pool_k.get(layer_idx).map_or(0, Vec::len),
+                self.pool_v.get(layer_idx).map_or(0, Vec::len),
+                self.slab_blocks()
+            );
             return Ok(None);
         }
 
