@@ -78,6 +78,9 @@
 pub mod batch_quant;
 mod detach;
 mod paged;
+/// Whole-batch decode over pool-backed KV caches, the production paged decode
+/// path (issue #899).
+pub mod paged_batch_decode;
 /// CSR page-table view of a decode batch, consumed by the paged decode v2
 /// kernels (issue #898).
 pub mod paged_csr;
@@ -103,8 +106,11 @@ pub use batch_quant::{
 };
 pub use detach::{DetachedCacheSet, DetachedHandle, DetachedKVCache, DetachedRotatingKVCache};
 pub use paged::{
-    GatheredKv, PagedBlockId, PagedBlockPool, PagedCacheStats, PagedKvLayout, PagedLayerState,
-    PagedSequenceState,
+    GatheredKv, POOL_SLAB_BLOCKS, PagedBlockId, PagedBlockPool, PagedCacheStats, PagedKvLayout,
+    PagedLayerState, PagedSequenceState,
+};
+pub use paged_batch_decode::{
+    PagedBatchDecodeStats, paged_batch_decode_attention, paged_batch_decode_stats,
 };
 pub use paged_csr::{PagedCsrView, build_paged_csr_view};
 pub use paged_detach::DetachedPagedCacheSet;
@@ -5874,6 +5880,12 @@ pub struct CachePool {
     /// to a live pool in [`CachePool::set_paged_block_budget`]). `None` =
     /// unbounded (the default).
     paged_block_budget: Option<usize>,
+    /// Paged slab size (physical block rows per pool slab tensor) remembered
+    /// across lazy pool creation, exactly like [`Self::paged_block_budget`].
+    /// `None` leaves [`PagedBlockPool`] on its default, which is the pre-#899
+    /// behaviour. The scheduler sets it when decode storage is paged, so the
+    /// fused decode kernels can serve a layer whose rows all live in one slab.
+    paged_slab_blocks: Option<usize>,
 }
 
 impl CachePool {
@@ -5886,6 +5898,7 @@ impl CachePool {
             paged_pool: None,
             detached: HashMap::new(),
             paged_block_budget: None,
+            paged_slab_blocks: None,
         }
     }
 
@@ -6189,6 +6202,28 @@ impl CachePool {
     /// (the value is applied to the pool on creation).
     pub fn paged_block_budget(&self) -> Option<usize> {
         self.paged_block_budget
+    }
+
+    /// Set the paged pool's slab size in physical block rows (issue #899).
+    ///
+    /// Stored intent: the pool is created lazily on the first paged
+    /// allocation, so the value is applied there. Setting it after the pool
+    /// exists is rejected by [`PagedBlockPool::set_slab_blocks`] once storage
+    /// has been allocated, because the slab shape is baked into the row
+    /// mapping; this returns that error rather than silently ignoring it.
+    ///
+    /// `None` leaves the pool's default in place.
+    pub fn set_paged_slab_blocks(&mut self, slab_blocks: Option<usize>) -> Result<(), String> {
+        self.paged_slab_blocks = slab_blocks;
+        match (self.paged_pool.as_ref(), slab_blocks) {
+            (Some(pool), Some(n)) => pool.borrow_mut().set_slab_blocks(n),
+            _ => Ok(()),
+        }
+    }
+
+    /// The configured paged slab size, or `None` when the pool default applies.
+    pub fn paged_slab_blocks(&self) -> Option<usize> {
+        self.paged_slab_blocks
     }
 
     /// Blocks still **acquirable** before the paged budget is hit
@@ -6654,6 +6689,11 @@ impl CachePool {
         // Apply the budget remembered before the pool existed (set via
         // `set_paged_block_budget` before the first paged allocation).
         pool.set_block_budget(self.paged_block_budget);
+        // Same for the slab size (#899). It must be applied before the first
+        // write, which is exactly here: the pool has no storage yet.
+        if let Some(slab_blocks) = self.paged_slab_blocks {
+            pool.set_slab_blocks(slab_blocks)?;
+        }
         self.paged_pool = Some(Rc::new(RefCell::new(pool)));
         Ok(())
     }

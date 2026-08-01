@@ -870,7 +870,175 @@ pub fn resolve_paged_block_budget(
             auto_kv_budget_bytes(&est)
         }
     };
+    // #899: the fused decode v2 workspace lives outside the block pool but
+    // inside the same memory, so charge it to the KV budget before converting
+    // the remainder into blocks. Admission then reserves blocks it can actually
+    // back with memory.
+    let workspace = paged_v2_workspace_reserve_bytes(model_dir, num_layers, batch);
+    let budget_bytes = budget_bytes.saturating_sub(workspace);
     Some(usize::try_from(budget_bytes / per_block).unwrap_or(usize::MAX))
+}
+
+/// Concurrent v2 launches whose workspaces can be alive at once.
+///
+/// The decode lookahead pipeline (#632) can have the current step's forward and
+/// the next step's prime in flight together, and each holds one layer's
+/// workspace; nothing holds more.
+const PAGED_V2_CONCURRENT_LAUNCHES: u64 = 2;
+
+/// Upper bound on the GQA replication factor used for the workspace reserve.
+///
+/// The workspace scales with the query-head count, which
+/// [`mlxcel_core::hardware::KvCacheParams`] does not carry (it only needs the
+/// KV side). Bounding `Hq / Hkv` at 16 covers every family in
+/// `docs/supported-models.md` (Llama 3 is 4, Qwen 2.5 7B is 7, the widest MQA
+/// ports are 8) with headroom, and over-reserving a few megabytes is the safe
+/// direction for an admission bound.
+const PAGED_V2_MAX_N_REP: u64 = 16;
+
+/// Bytes to reserve for the fused decode v2 workspace (issue #899).
+///
+/// The workspace is the partial kernel's `(partial_v, lse)` output pair, sized
+/// `num_chunks * Hq * (head_dim + 1) * 4` bytes
+/// ([`mlxcel_core::paged_v2::PagedDecodePlan::workspace_bytes`]). The plan's
+/// binary search stops at the largest chunk size still reaching the device CTA
+/// target, so `num_chunks * ctas_per_chunk` lands within a factor of two of
+/// that target and
+///
+/// ```text
+/// num_chunks <= 2 * target_ctas / Hkv + batch
+/// ```
+///
+/// since `ctas_per_chunk = Hkv * q_groups >= Hkv`. Substituting
+/// `Hq = Hkv * n_rep` makes the dominant term independent of the head counts:
+/// `2 * target_ctas * n_rep * (head_dim + 1) * 4`.
+///
+/// [`PAGED_V2_MAX_N_REP`] makes the result a few times larger than any real
+/// plan needs, which is the safe direction for an admission bound. Even so it
+/// lands in the low tens of megabytes at most, well under a tenth of a percent
+/// of a serving KV budget, which is why it was not accounted for before v2
+/// became the production path. It is charged now so the accounting is truthful,
+/// not because it is large.
+#[must_use]
+pub fn paged_v2_workspace_reserve_bytes(model_dir: &Path, num_layers: usize, batch: u64) -> u64 {
+    let Some(params) = kv_cache_params_from_path(model_dir, DEFAULT_CTX_LEN, false, 1) else {
+        return 0;
+    };
+    if num_layers == 0 || params.num_kv_heads == 0 || params.head_dim == 0 {
+        return 0;
+    }
+    let target = mlxcel_core::paged_v2::device_target_ctas() as u64;
+    let batch = batch.max(1);
+    let chunks = target
+        .saturating_mul(2)
+        .div_ceil(params.num_kv_heads)
+        .saturating_add(batch);
+    let hq = params.num_kv_heads.saturating_mul(PAGED_V2_MAX_N_REP);
+    let per_launch = chunks
+        .saturating_mul(hq)
+        .saturating_mul(params.head_dim.saturating_add(1))
+        .saturating_mul(std::mem::size_of::<f32>() as u64);
+    per_launch.saturating_mul(PAGED_V2_CONCURRENT_LAUNCHES)
+}
+
+// ── Paged pool slab sizing (issue #899) ──────────────────────────────────────
+
+/// Environment override for the paged pool's slab size, in blocks.
+///
+/// `0` pins the pool default ([`mlxcel_core::cache::POOL_SLAB_BLOCKS`]), which
+/// keeps the pre-#899 allocation behaviour and, as a side effect, keeps the
+/// fused decode path unreachable for anything past one slab. Any other positive
+/// integer is used verbatim, which is how a benchmark sweeps the setting.
+pub const PAGED_SLAB_BLOCKS_ENV: &str = "MLXCEL_PAGED_SLAB_BLOCKS";
+
+/// Resolve the paged pool's slab size in blocks (issue #899).
+///
+/// ## Why this exists
+///
+/// The fused paged-attention decode kernels read **one contiguous pool buffer
+/// per side**, so they can only serve a layer whose physical rows all live in
+/// the pool's first slab. With the historical 32-block slab that caps them at
+/// 1024 tokens across the entire batch (at `block_size` 32), which is below
+/// every context the #899 dispatch policy would pick them for. Sizing the slab
+/// to the workload is what makes the fused path reachable.
+///
+/// ## The policy
+///
+/// One slab per layer big enough for the batch the server was configured to
+/// run at the context it was configured to serve:
+///
+/// ```text
+/// blocks = ceil(per_slot_ctx / block_size) * batch
+/// ```
+///
+/// clamped below by the pool default and above by the per-layer share of the
+/// paged block budget, so the eager allocation can never exceed what
+/// `--kv-cache-budget` already reserved. `per_slot_ctx` is the effective
+/// per-slot `--ctx-size` (the same figure `--max-kv-size` is resolved from);
+/// [`DEFAULT_CTX_LEN`] stands in when the operator did not set one, which is
+/// also what [`estimate_total_memory`] assumes.
+///
+/// ## What it costs
+///
+/// The slab is allocated lazily, per layer, on that layer's first write, and
+/// the whole slab is allocated at once. So the first prefill front-loads
+/// `blocks * paged_block_bytes * num_layers` bytes: exactly the KV cache for
+/// `batch` sequences at `per_slot_ctx` tokens, which is the figure the startup
+/// memory estimate already reports. A layer that outgrows its slab appends a
+/// second one exactly as before (no copy, #235) and simply stops being eligible
+/// for the fused path, so an under-sized slab degrades to the pre-#899 gather
+/// behaviour rather than failing.
+///
+/// Returns `None` when the geometry is unavailable or the operator pinned the
+/// pool default, in which case the caller should not touch the pool's slab
+/// size.
+#[must_use]
+pub fn resolve_paged_slab_blocks(
+    model_dir: &Path,
+    num_layers: usize,
+    block_size: usize,
+    batch: u64,
+    per_slot_ctx: u64,
+    kv_dtype_int8: bool,
+    block_budget: Option<usize>,
+) -> Option<usize> {
+    if num_layers == 0 || block_size == 0 {
+        return None;
+    }
+    if let Ok(raw) = std::env::var(PAGED_SLAB_BLOCKS_ENV) {
+        return match raw.trim().parse::<usize>() {
+            Ok(0) => None,
+            Ok(n) => Some(n),
+            Err(_) => {
+                tracing::warn!(
+                    "{PAGED_SLAB_BLOCKS_ENV}={raw:?} is not a non-negative integer; \
+                     using the derived slab size"
+                );
+                None
+            }
+        };
+    }
+    // The geometry probe doubles as the "is this model pool-eligible at all"
+    // check: without it the byte clamp below would be meaningless.
+    paged_block_bytes(model_dir, num_layers, block_size, kv_dtype_int8)?;
+
+    let ctx = if per_slot_ctx == 0 {
+        DEFAULT_CTX_LEN
+    } else {
+        per_slot_ctx
+    };
+    let per_seq_blocks = ctx.div_ceil(block_size as u64);
+    let want = per_seq_blocks.saturating_mul(batch.max(1));
+    let want = usize::try_from(want).unwrap_or(usize::MAX);
+
+    let capped = match block_budget {
+        // The budget is a global block count across every layer, so a layer may
+        // claim at most its even share without the eager allocation being able
+        // to exceed the budget the operator approved.
+        Some(budget) => want.min((budget / num_layers).max(1)),
+        None => want,
+    };
+    Some(capped.max(mlxcel_core::cache::POOL_SLAB_BLOCKS))
 }
 
 // ── Output formatting ─────────────────────────────────────────────────────────
@@ -1525,6 +1693,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         write_minimal_config(tmp.path());
         let per_block = paged_block_bytes(tmp.path(), 32, 32, false).unwrap(); // 131072
+        // The paged decode v2 workspace is charged to the byte budget before it
+        // is divided into blocks (#899), so a caller asking for exactly N blocks
+        // of KV has to ask for the workspace too.
+        let workspace = paged_v2_workspace_reserve_bytes(tmp.path(), 32, 1);
+        assert!(workspace > 0, "the minimal config has a derivable geometry");
+
         // Exactly 100 blocks.
         assert_eq!(
             resolve_paged_block_budget(
@@ -1533,7 +1707,7 @@ mod tests {
                 32,
                 1,
                 false,
-                PagedBudgetDirective::Bytes(per_block * 100),
+                PagedBudgetDirective::Bytes(per_block * 100 + workspace),
             ),
             Some(100),
         );
@@ -1545,7 +1719,7 @@ mod tests {
                 32,
                 1,
                 false,
-                PagedBudgetDirective::Bytes(per_block * 100 + per_block / 2),
+                PagedBudgetDirective::Bytes(per_block * 100 + per_block / 2 + workspace),
             ),
             Some(100),
         );
@@ -1558,10 +1732,44 @@ mod tests {
                 32,
                 1,
                 false,
-                PagedBudgetDirective::Bytes(per_block - 1),
+                PagedBudgetDirective::Bytes(per_block - 1 + workspace),
             ),
             Some(0),
         );
+        // A budget that did not account for the workspace comes back short by
+        // exactly the reserve, which is the point: the blocks it hands out are
+        // blocks it can actually back.
+        let shortfall = usize::try_from((per_block * 100 - workspace) / per_block).unwrap();
+        assert!(shortfall < 100);
+        assert_eq!(
+            resolve_paged_block_budget(
+                tmp.path(),
+                32,
+                32,
+                1,
+                false,
+                PagedBudgetDirective::Bytes(per_block * 100),
+            ),
+            Some(shortfall),
+        );
+    }
+
+    #[test]
+    fn the_v2_workspace_reserve_is_small_and_scales_with_the_head_dim() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimal_config(tmp.path());
+        let reserve = paged_v2_workspace_reserve_bytes(tmp.path(), 32, 4);
+        // Single-digit megabytes: the reserve exists so admission is truthful,
+        // not because it is a material share of a KV budget.
+        assert!(reserve > 0, "expected a non-zero reserve, got {reserve}");
+        assert!(
+            reserve < 64 * 1024 * 1024,
+            "the reserve should stay small, got {reserve} bytes"
+        );
+        // A model with no derivable geometry reserves nothing rather than
+        // guessing.
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(paged_v2_workspace_reserve_bytes(empty.path(), 32, 4), 0);
     }
 
     #[test]

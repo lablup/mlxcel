@@ -181,6 +181,70 @@ savings, the decode throughput, and `--kv-cache-budget` are documented in
 byte-identical to the dense backend; it is the storage backend the disaggregated
 roles below build on.
 
+#### The fused decode kernel
+
+Since v0.4.4 a batched paged decode step runs as **one fused attention launch
+over the whole batch** (issue #899) rather than as a per-sequence loop that
+copied each sequence's visible KV out of the pool before attending. The kernel
+reads the pool's scattered pages in place through a CSR page table and splits
+the KV range across thread blocks, so its parallelism grows with context
+instead of saturating. Measured against the previous path on an Apple M1 Ultra:
+1.4x to 3.1x at batch 4 across 1K to 32K of context, and 1.3x to 1.5x for a
+single sequence at 16K and 32K
+(`docs/benchmark_results/paged-decode-v2-m1ultra-2026-07-31.md`).
+
+What it does *not* serve falls back to the previous gather-then-SDPA path, per
+launch, with identical output:
+
+| case | why |
+|---|---|
+| a lone request under 4096 visible KV tokens | measured slower there (0.91x at batch 1 with 1K of context) |
+| a multi-request launch under 512 visible tokens per request | below the measured evidence, and gather is trivially cheap at that size |
+| a layer whose pool rows span more than one slab | the kernel reads one contiguous buffer per side |
+| multi-token steps: batched prefill, speculative / MTP verify | the kernel serves a single query token per sequence |
+| logit-softcap families, explicit attention masks | no soft-cap or mask term in the kernel |
+| Int8 / Turbo KV modes | those sequences keep dense caches and are never pool-backed |
+
+The floor is two-regime because the measured loss is a property of batch 1, not
+of total work: at 1024 tokens of context per request the kernel runs 0.91x at
+batch 1 but 1.41x at batch 4 and 1.47x at batch 8, since a batched launch
+spreads the same chunk count over more requests and amortizes the merge pass.
+
+#### Seeing which path ran
+
+The server announces the first occurrence of each distinct dispatch outcome at
+**info**, with no `RUST_LOG` needed:
+
+```text
+INFO ...: paged decode v2: fused v2 launch (batch 4, 3828 visible KV tokens, 16 chunks, merge on)
+INFO ...: paged decode v2: gather: the layer spans 3 K / 3 V pool slabs and the fused kernels read one buffer per side (slab_blocks=32); raise --ctx-size or MLXCEL_PAGED_SLAB_BLOCKS so a layer's rows fit one slab
+INFO ...: paged decode v2: gather: 1024 visible KV tokens across 1 request(s) is below the 4096-token dispatch floor
+INFO ...: paged decode v2: gather: pinned by MLXCEL_PAGED_ATTENTION_NATIVE
+```
+
+A run that never prints `fused v2 launch` never used the fused kernel, whatever
+its throughput looks like. Check for that line before drawing any conclusion
+from a before/after comparison.
+
+Two knobs, neither normally needed:
+
+- `MLXCEL_PAGED_ATTENTION_NATIVE=0` is the kill switch. It restores the
+  pre-#899 gather behaviour end to end, for bisecting a suspected kernel
+  regression. `=1` forces the fused path for every servable shape, bypassing
+  the token floor; that is the supported way to benchmark the declined corner.
+  The floors themselves move with `MLXCEL_PAGED_V2_MIN_KV_TOKENS` (lone
+  request, default 4096) and `MLXCEL_PAGED_V2_MIN_KV_TOKENS_PER_REQUEST`
+  (multi-request, default 512).
+- `MLXCEL_PAGED_SLAB_BLOCKS` overrides the pool's slab size in blocks. The
+  server derives it from `--ctx-size` and `--parallel`, clamped by the KV
+  budget, and logs the resolved value at startup (`Paged KV slab size: N blocks
+  per layer`). A layer's first write allocates its whole slab, so this
+  front-loads exactly the KV bytes the startup memory estimate already reports
+  for that batch and context. **Serving contexts longer than `--ctx-size`
+  implies makes layers outgrow the slab and silently returns them to the gather
+  path**; raise `--ctx-size` or set this variable if the startup line looks too
+  small. `0` pins the historical 32-block default.
+
 Recurrent and hybrid SSM / linear-attention families cannot safely reuse
 arbitrary KV blocks, so they keep the hybrid-SSM/APC exclusion. Families that
 opt into `supports_snapshot_reuse()` instead use a separate exact-prefix

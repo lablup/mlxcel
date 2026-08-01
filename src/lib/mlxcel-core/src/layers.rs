@@ -4222,12 +4222,21 @@ pub fn select_pooled_paged_dispatch(
 }
 
 /// Process-wide `MLXCEL_PAGED_ATTENTION_NATIVE` override for the fused
-/// paged-attention kernel (#123, extended to tri-state in #331).
+/// paged-attention kernel (#123, extended to tri-state in #331, extended to the
+/// production paged decode path in #899).
 ///
-/// Library-only control: this variable steers only the library-only
-/// [`paged_decode_attention_pooled`] entry point (ADR 0001 #710), not the live
-/// `mlxcel-server` block-table decode path (which uses the separate
-/// `DecodeBatchContext::use_native_paged_kernel` request).
+/// Two consumers:
+///
+/// - The library-only [`paged_decode_attention_pooled`] entry point (ADR 0001
+///   #710), through [`resolve_dispatch_decision`]. Unchanged.
+/// - The server's pool-backed batched paged decode, through
+///   [`resolve_paged_v2_dispatch`]. Issue #899 made the fused v2 kernel the
+///   production path for that decode, and named this variable's force-off
+///   values (`0` / `false` / `off` / `no`) as its kill switch: setting it
+///   restores the pre-#899 gather-then-SDPA behaviour end to end.
+///
+/// The separate `DecodeBatchContext::use_native_paged_kernel` request still
+/// governs the *dense-compat* block-table decode, which is a different path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NativePagedOverride {
     /// Force the fused kernel, bypassing the adaptive selector (the original
@@ -4292,6 +4301,34 @@ fn resolve_dispatch_decision(
                 PagedDecodeDispatch::Gather
             }
         }
+    }
+}
+
+/// Apply the `MLXCEL_PAGED_ATTENTION_NATIVE` override to the production paged
+/// decode v2 dispatch (issue #899).
+///
+/// The override is checked *before* the selector so the kill switch cannot be
+/// out-thought by a shape the selector likes:
+///
+/// - force-off (`0` / `false` / `off` / `no`) pins the gather path, restoring
+///   pre-#899 behaviour end to end;
+/// - force-on (`1` / `true` / `on` / `yes`) pins v2 for every shape the kernel
+///   can actually serve, bypassing the measured token floor (this is how the
+///   floor itself gets re-measured, and how the low-context regime is
+///   benchmarked deliberately);
+/// - unset, or any other value, lets `selector` decide.
+///
+/// A forced dispatch still goes through the kernel's own structural declines
+/// (single-slab layer, servable geometry, non-empty batch), so forcing it on
+/// cannot produce a launch the kernel would reject.
+pub(crate) fn resolve_paged_v2_dispatch(
+    selector: impl FnOnce() -> crate::paged_v2::PagedV2Dispatch,
+) -> crate::paged_v2::PagedV2Dispatch {
+    use crate::paged_v2::PagedV2Dispatch;
+    match native_paged_override() {
+        NativePagedOverride::ForceNative => PagedV2Dispatch::V2,
+        NativePagedOverride::ForceGather => PagedV2Dispatch::Gather,
+        NativePagedOverride::Auto => selector(),
     }
 }
 

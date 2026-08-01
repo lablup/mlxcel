@@ -1,6 +1,8 @@
 # ADR 0001: Paged-attention gather strategy and KV pool tensor layout
 
-**Status:** Accepted (2026-05-31). Part of epic #116 (unified paged KV cache), Phase 0 (#117).
+**Status:** Superseded in part by issue #899 (2026-07-31). Accepted (2026-05-31), part of epic #116 (unified paged KV cache), Phase 0 (#117).
+
+The layout and block-size decisions below still stand. The *attention strategy* decision does not: this ADR chose gather-then-SDPA and named the trigger that would justify building a fused kernel, that trigger has now fired and been measured, and since #899 the fused path is what serves production batched paged decode. See the 2026-07-31 addendum on issue #899 at the end of this document; the historical reasoning is kept intact above it because the measurements are what justified the switch.
 
 ## Context
 
@@ -187,6 +189,20 @@ Issue #898 lands "paged decode v2" as a library capability that attacks the firs
 Scope of #898: library only. `MLXCEL_PAGED_ATTENTION_V2=1` selects it inside `PagedBlockPool::paged_decode_fused`; with the variable unset nothing changes and v1 remains the only path any caller reaches. The single-slab constraint from #235 is unchanged, so v2 does not by itself reopen the wire-in question, and the correctness harness (`examples/paged_decode_v2_correctness.rs`) drives the kernels against a hand-built page table for that reason. Production dispatch is issue #899, the three-way performance comparison is in `examples/page_gather_microbench.rs` (gather vs fused v1 vs fused v2), and the merge kernel is reused unchanged by the cascade-attention issue #903.
 
 Correctness on an M1 Ultra: 68 configurations against the gather-then-SDPA reference across head dims 64/128, GQA 1/4/8, page sizes 16/32/64, contexts 512 to 32768, and batches 1/4/8, worst relative deviation 5.2e-4 against a 2e-2 tolerance.
+
+## Addendum (2026-07-31): the trigger fired, the fused path is production (#899)
+
+This ADR set the trigger for building a fused path at "single-sequence context past ~16384 tokens, or any sustained batched decode". Since v0.4 the server defaults to `--parallel 4`, which is that second condition, and #898's v2 kernel was measured against the production gather path on an Apple M1 Ultra (`docs/benchmark_results/paged-decode-v2-m1ultra-2026-07-31.md`). Both trigger points are met: batch 4 runs 1.41x to 3.08x, and single-sequence decode runs 1.29x at 16384 and 1.47x at 32768. The 2x-3x figure this ADR predicted for batch 4 past 4096 tokens is reproduced almost exactly (2.04x, 2.78x, 3.08x).
+
+**The decision is therefore reversed for batched paged decode.** `PagedBlockPool::paged_decode_batched`, reached from `cache::paged_batch_decode::paged_batch_decode_attention`, is the production path for `--decode-storage paged`; `gather_visible` + SDPA remains as the fallback and the parity reference.
+
+Three qualifications, each with its own reason:
+
+**The switch is not unconditional.** Exactly one measured cell loses: batch 1 at 1024 tokens, 0.91x median and below parity in all three repetitions, where the plan degenerates to two pages per chunk and the merge pass plus the workspace round trip costs more than the attention. `paged_v2::dispatch` keeps that regime on gather with a two-regime floor: a lone request needs 4096 visible KV tokens, a multi-request launch needs 512 per request. The first formulation used a single 4096-token total and had to be corrected: the loss is a property of batch 1, not of total work (the same 1024-token context runs 0.91x at batch 1 and 1.41x at batch 4), and a total-token floor separated the two only by accident, declining a real batch-4 launch that delivered 956 tokens per request.
+
+**The single-slab constraint from #235 had to be relaxed, not removed.** The fused kernels read one contiguous pool buffer per side, and 32-row slabs capped them at 1024 tokens across the whole batch, below the dispatch floor. `PagedBlockPool` now carries its own slab size (default unchanged) and the server sizes it from the configuration the KV budget was already computed from. A layer that outgrows its slab still appends without copying and simply stops being eligible, so the degradation is to this ADR's original strategy rather than to a failure.
+
+**The library-only entry point retired in #710 stays retired.** `paged_decode_attention_pooled` and `select_pooled_paged_dispatch` are untouched: they still serve external `mlxcel-core` consumers with the v1 kernel and the #331 selector. #899 adds a separate production entry point rather than reviving that one, because the two have different inputs (a whole batch versus one sequence at a time) and different dispatch evidence.
 
 ## References
 

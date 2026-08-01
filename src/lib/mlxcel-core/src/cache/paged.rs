@@ -471,13 +471,42 @@ pub struct PagedBlockPool {
     /// "presize allocates once, incremental growth appends once" and
     /// observability can surface growth churn.
     grow_events: u64,
+    /// Monotonic counter bumped by every mutation that can move a block: which
+    /// blocks a sequence holds, and which physical row a block occupies. It is
+    /// the invalidation signal for [`Self::decode_v2_cache`] (issue #899); see
+    /// [`crate::paged_v2::plan_cache`] for the reuse argument it underwrites.
+    ///
+    /// Deliberately **not** bumped by a plain token append that fits in the
+    /// current block, because that is the decode hot path and it changes no
+    /// page list.
+    block_epoch: u64,
+    /// Cached CSR page tables (per layer) and chunk plan for the active decode
+    /// batch (issue #899). Purely derived state: dropping it is always safe and
+    /// only costs a rebuild.
+    decode_v2_cache: crate::paged_v2::PagedDecodeV2Cache,
+    /// Physical block rows per pool slab tensor (issue #899).
+    ///
+    /// Defaults to [`POOL_SLAB_BLOCKS`], which is byte-for-byte the pre-#899
+    /// behaviour. The fused decode kernels read **one contiguous pool buffer
+    /// per side**, so they can only serve a layer whose rows all live in the
+    /// first slab; with the 32-row default that caps the fused path at 1024
+    /// tokens across the whole batch at `block_size` 32, which is below every
+    /// context the production dispatch would choose it for. Raising this to the
+    /// working set the server was configured for is what makes the fused path
+    /// reachable in production. See [`Self::set_slab_blocks`].
+    slab_blocks: usize,
 }
 
-/// Number of physical block rows per pool slab tensor. Growth appends whole
-/// slabs of this size (#235), so a freshly assigned row never triggers a
+/// Default number of physical block rows per pool slab tensor. Growth appends
+/// whole slabs of this size (#235), so a freshly assigned row never triggers a
 /// reallocation or copy of existing storage; this also keeps the allocation
 /// granularity of the previous single-tensor chunked growth (32 blocks).
-const POOL_SLAB_BLOCKS: usize = 32;
+///
+/// Since issue #899 this is a *default* rather than a fixed constant: the pool
+/// carries its own [`PagedBlockPool::slab_blocks`], because the fused decode
+/// kernels can only serve a layer whose rows live in one slab. See
+/// [`PagedBlockPool::set_slab_blocks`].
+pub const POOL_SLAB_BLOCKS: usize = 32;
 
 /// Gathered visible K and V tensors for one layer, each shaped
 /// `[1, n_kv_heads, visible_len, head_dim]` (SDPA-ready). Returned by
@@ -487,6 +516,36 @@ pub type GatheredKv = (UniquePtr<MlxArray>, UniquePtr<MlxArray>);
 /// A normalized layout-A slot update (`[1, n_slots, n_kv_heads, head_dim]`)
 /// paired with its `(n_slots, n_kv_heads, head_dim)` geometry.
 type NormalizedBlock = (UniquePtr<MlxArray>, (i32, i32, i32));
+
+/// Run a resolved v2 plan and return the result in `q`'s dtype.
+///
+/// The kernels read Q and emit their output in f32 deterministically (they
+/// never re-specialise by dtype), so Q is cast in and the result cast back.
+/// That is the same round trip [`PagedBlockPool::paged_decode_fused`] performs,
+/// which is what keeps v1, v2, and gather byte-comparable.
+fn launch_v2(
+    q: &MlxArray,
+    pool_k: &MlxArray,
+    pool_v: &MlxArray,
+    view: &super::paged_csr::PagedCsrView,
+    plan: &crate::paged_v2::PagedDecodePlan,
+    scale: f32,
+) -> Result<UniquePtr<MlxArray>, String> {
+    let q_dtype = ffi::array_dtype(q);
+    let q_f32 = if q_dtype == crate::dtype::FLOAT32 {
+        None
+    } else {
+        Some(ffi::astype(q, crate::dtype::FLOAT32))
+    };
+    let q_in: &MlxArray = q_f32.as_deref().unwrap_or(q);
+    let ctx = crate::paged_v2::V2Context::build(q_in, pool_k, pool_v, view, plan.geometry, scale)?;
+    let out_f32 = ctx.launch(plan)?;
+    Ok(if q_dtype == crate::dtype::FLOAT32 {
+        out_f32
+    } else {
+        ffi::astype(&out_f32, q_dtype)
+    })
+}
 
 impl PagedBlockPool {
     pub fn new(layout: PagedKvLayout) -> Self {
@@ -505,7 +564,52 @@ impl PagedBlockPool {
             next_row: vec![0; num_layers],
             block_budget: None,
             grow_events: 0,
+            block_epoch: 0,
+            decode_v2_cache: crate::paged_v2::PagedDecodeV2Cache::new(),
+            slab_blocks: POOL_SLAB_BLOCKS,
         }
+    }
+
+    /// Physical block rows per pool slab tensor.
+    #[must_use]
+    pub fn slab_blocks(&self) -> usize {
+        self.slab_blocks
+    }
+
+    /// Set the slab size, in physical block rows (issue #899).
+    ///
+    /// Must be called before any layer's pool storage is allocated (that is,
+    /// before the first write), because the slab shape is baked into every
+    /// tensor the layer owns and into the row-to-slab arithmetic
+    /// [`Self::slab_coords`] performs. Returns an error rather than silently
+    /// corrupting the row mapping if storage already exists.
+    ///
+    /// ## What it costs and what it buys
+    ///
+    /// Slabs are allocated lazily, one layer at a time, on that layer's first
+    /// write, and each allocation is `slab_blocks` whole rows. Raising this
+    /// therefore front-loads memory: a layer's first token allocates the whole
+    /// slab instead of growing into it. In exchange, every row of that layer
+    /// lives in one contiguous buffer, which is the precondition for the fused
+    /// decode kernels; a layer that outgrows its first slab appends a second
+    /// one exactly as before (no copy, #235) and simply stops being eligible
+    /// for the fused path, falling back to gather.
+    ///
+    /// The server sizes this from the configuration it already reserved KV
+    /// memory for (context length times batch size, clamped by the block
+    /// budget), so the front-loaded bytes are bytes the budget already
+    /// promised. Callers with no such figure should leave the default alone.
+    pub fn set_slab_blocks(&mut self, slab_blocks: usize) -> Result<(), String> {
+        if slab_blocks == 0 {
+            return Err("PagedBlockPool::set_slab_blocks: slab_blocks must be > 0".to_string());
+        }
+        if self.pool_meta.iter().any(Option::is_some) {
+            return Err(
+                "PagedBlockPool::set_slab_blocks: pool storage is already allocated".to_string(),
+            );
+        }
+        self.slab_blocks = slab_blocks;
+        Ok(())
     }
 
     /// Number of pool growth episodes since construction (see
@@ -515,10 +619,49 @@ impl PagedBlockPool {
         self.grow_events
     }
 
+    /// Current block-topology epoch (issue #899).
+    ///
+    /// Bumped by every mutation that can change which blocks a sequence holds
+    /// or which physical row a block occupies. Stable across a decode step that
+    /// only appends tokens inside already-allocated blocks, which is what makes
+    /// the CSR page table cacheable. See [`crate::paged_v2::plan_cache`].
+    #[must_use]
+    pub fn block_epoch(&self) -> u64 {
+        self.block_epoch
+    }
+
+    /// Invalidate every cached CSR page table and chunk plan.
+    ///
+    /// Called internally on any block-topology change. Public so a caller that
+    /// mutates block tables through a path this pool cannot see (there is none
+    /// today) can still force a rebuild, and so tests can assert the
+    /// invalidation is what makes a stale plan impossible rather than luck.
+    pub fn invalidate_decode_plan_cache(&mut self) {
+        self.block_epoch = self.block_epoch.wrapping_add(1);
+        self.decode_v2_cache.clear();
+    }
+
+    /// Bump the topology epoch without dropping the cached views.
+    ///
+    /// The views carry the epoch they were built at, so a bump alone is enough
+    /// to make every one of them unusable; keeping the allocations lets the
+    /// next rebuild reuse their `Vec` capacity.
+    #[inline]
+    fn bump_block_epoch(&mut self) {
+        self.block_epoch = self.block_epoch.wrapping_add(1);
+    }
+
+    /// Counters for the decode plan cache (issue #899), for tests and tracing.
+    #[must_use]
+    pub fn decode_plan_cache_stats(&self) -> crate::paged_v2::PlanCacheStats {
+        self.decode_v2_cache.stats()
+    }
+
     /// Map a physical row index to its slab and the row within that slab.
     #[inline]
-    fn slab_coords(row: usize) -> (usize, i32) {
-        (row / POOL_SLAB_BLOCKS, (row % POOL_SLAB_BLOCKS) as i32)
+    fn slab_coords(&self, row: usize) -> (usize, i32) {
+        let per_slab = self.slab_blocks.max(1);
+        (row / per_slab, (row % per_slab) as i32)
     }
 
     /// Physical row currently assigned to `block_id` on `layer_idx`, if any.
@@ -669,6 +812,9 @@ impl PagedBlockPool {
                 self.release_block(block_id)?;
             }
         }
+        // A back-trim moves `len` (and may reset `logical_start`), which moves
+        // the visible page range even when no block was released (#899).
+        self.bump_block_epoch();
         Ok(trimmed)
     }
 
@@ -689,6 +835,9 @@ impl PagedBlockPool {
             layer.len = 0;
             layer.logical_start = 0;
         }
+        // A sequence leaving the batch (finish, eviction, preemption) is one of
+        // the invalidation events issue #899 names for the decode plan cache.
+        self.bump_block_epoch();
         Ok(())
     }
 
@@ -810,6 +959,7 @@ impl PagedBlockPool {
             ));
         }
         record.refcount = record.refcount.saturating_add(1);
+        self.bump_block_epoch();
         Ok(())
     }
 
@@ -847,6 +997,7 @@ impl PagedBlockPool {
             self.free_rows[layer_idx].push(row);
         }
         self.free_lists[layer_idx].push(block_id);
+        self.bump_block_epoch();
         Ok(())
     }
 
@@ -1090,13 +1241,14 @@ impl PagedBlockPool {
                 }
             }
             None => {
-                self.create_layer_pool(layer_idx, POOL_SLAB_BLOCKS, n_kv_heads, head_dim, k_dtype);
+                let initial = self.slab_blocks;
+                self.create_layer_pool(layer_idx, initial, n_kv_heads, head_dim, k_dtype);
             }
         }
 
         // Resolve (and grow for) the physical row for this block.
         let row = self.assign_row(block_id, layer_idx)?;
-        let (slab_i, row_in_slab) = Self::slab_coords(row);
+        let (slab_i, row_in_slab) = self.slab_coords(row);
 
         // Reassign the row's slab with the slot update so MLX donates the
         // buffer (in-place append, O(block)). The null placeholder makes the
@@ -1129,9 +1281,10 @@ impl PagedBlockPool {
         dtype: i32,
     ) {
         debug_assert!(self.pool_meta[layer_idx].is_none());
-        let slabs = min_capacity_blocks.div_ceil(POOL_SLAB_BLOCKS).max(1);
+        let per_slab = self.slab_blocks.max(1);
+        let slabs = min_capacity_blocks.div_ceil(per_slab).max(1);
         let block_size = self.layout.block_size as i32;
-        let shape = [POOL_SLAB_BLOCKS as i32, block_size, n_kv_heads, head_dim];
+        let shape = [per_slab as i32, block_size, n_kv_heads, head_dim];
         for _ in 0..slabs {
             self.pool_k[layer_idx].push(ffi::zeros(&shape, dtype));
             self.pool_v[layer_idx].push(ffi::zeros(&shape, dtype));
@@ -1140,7 +1293,7 @@ impl PagedBlockPool {
             n_kv_heads,
             head_dim,
             dtype,
-            capacity_blocks: slabs * POOL_SLAB_BLOCKS,
+            capacity_blocks: slabs * per_slab,
         });
     }
 
@@ -1365,7 +1518,7 @@ impl PagedBlockPool {
                     "PagedBlockPool::copy_on_write_block: shared block {src_block_id} on layer {layer_idx} has no pool row (was it written?)"
                 )
             })?;
-        let (slab_i, row_in_slab) = Self::slab_coords(src_row);
+        let (slab_i, row_in_slab) = self.slab_coords(src_row);
         let block_size = self.layout.block_size as i32;
 
         // Slice the source row's [block_size, H, D] slab out of K and V (the
@@ -1415,7 +1568,7 @@ impl PagedBlockPool {
                 "PagedBlockPool::read_block_contents: block {block_id} on layer {layer_idx} has no pool row (never written)"
             )
         })?;
-        let (slab_i, row_in_slab) = Self::slab_coords(src_row);
+        let (slab_i, row_in_slab) = self.slab_coords(src_row);
         let block_size = self.layout.block_size as i32;
 
         // Slice the source row's [block_size, H, D] slab out of K and V (the bare
@@ -1519,15 +1672,16 @@ impl PagedBlockPool {
         // monotonically, so a sequence spans about one run per slab; the
         // concat output copy is the same magnitude as the gather copy this
         // path always materialized.
+        let per_slab = self.slab_blocks.max(1);
         let gather_rows = |slabs: &[UniquePtr<MlxArray>]| -> UniquePtr<MlxArray> {
             let mut parts: Vec<UniquePtr<MlxArray>> = Vec::new();
             let mut i = 0usize;
             while i < rows.len() {
-                let slab_i = rows[i] / POOL_SLAB_BLOCKS;
+                let slab_i = rows[i] / per_slab;
                 let mut local: Vec<i32> = Vec::new();
                 let mut j = i;
-                while j < rows.len() && rows[j] / POOL_SLAB_BLOCKS == slab_i {
-                    local.push((rows[j] % POOL_SLAB_BLOCKS) as i32);
+                while j < rows.len() && rows[j] / per_slab == slab_i {
+                    local.push((rows[j] % per_slab) as i32);
                     j += 1;
                 }
                 let idx = ffi::from_slice_i32(&local, &[local.len() as i32]);
@@ -1678,6 +1832,184 @@ impl PagedBlockPool {
             ffi::astype(&out_f32, q_dtype)
         };
         Ok(Some(out))
+    }
+
+    /// Production paged decode for a whole batch (issue #899).
+    ///
+    /// This is the entry point the server's pool-backed batched decode takes,
+    /// replacing the per-sequence `gather_visible` + dense SDPA loop that ADR
+    /// 0001 measured as the paged decode hot path. It differs from
+    /// [`Self::paged_decode_fused_v2`] in three ways, all of which are what
+    /// makes it usable on a hot path rather than in a harness:
+    ///
+    /// 1. **It caches.** The CSR page table is kept per layer and the chunk
+    ///    plan per batch, keyed by [`Self::block_epoch`] plus a per-request
+    ///    fingerprint (see [`crate::paged_v2::plan_cache`]). A decode step that
+    ///    does not cross a page boundary refreshes O(batch) scalars instead of
+    ///    resolving O(pages) block ids.
+    /// 2. **It applies the dispatch policy.** [`crate::paged_v2::dispatch`]
+    ///    keeps small launches on the gather path, because #898 measured v2
+    ///    losing to gather for a single request at 1024 tokens of context.
+    /// 3. **It says what it did.** The returned
+    ///    [`PagedDecodeOutcome`](crate::paged_v2::PagedDecodeOutcome) carries
+    ///    the decision and the numbers behind it, so the caller can surface it
+    ///    at whatever level makes it visible. It is a value rather than a log
+    ///    line because the first cut of this used `tracing::debug!` and a whole
+    ///    production benchmark sweep then compared gather against gather
+    ///    without anything saying so.
+    ///
+    /// `q` is `[B, Hq, 1, head_dim]`, `states[b]` is sequence `b`'s per-layer
+    /// state, and `Ok((Some(out), _))` is `[B, Hq, 1, head_dim]` in `q`'s dtype.
+    /// `Ok((None, outcome))` is the caller's signal to run the gather path, and
+    /// `outcome` says why.
+    pub fn paged_decode_batched(
+        &mut self,
+        q: &MlxArray,
+        states: &[&PagedSequenceState],
+        layer_idx: usize,
+        scale: f32,
+    ) -> Result<
+        (
+            Option<UniquePtr<MlxArray>>,
+            crate::paged_v2::PagedDecodeOutcome,
+        ),
+        String,
+    > {
+        use crate::paged_v2::{
+            PagedDecodeOutcome, PagedV2Dispatch, active_required_visible_tokens,
+            select_paged_v2_dispatch,
+        };
+
+        // Same single-slab restriction as v1 and as `paged_decode_fused_v2`:
+        // both kernels read one contiguous pool buffer per side, so a layer
+        // grown past one slab (#235) is declined rather than stitched. This is
+        // the decline that silently disables the whole fused path when the slab
+        // is sized below the served working set, so it names the knob.
+        if self.single_slab_tensors(layer_idx).is_none() {
+            return Ok((
+                None,
+                PagedDecodeOutcome::MultiSlab {
+                    k_slabs: self.pool_k.get(layer_idx).map_or(0, Vec::len),
+                    v_slabs: self.pool_v.get(layer_idx).map_or(0, Vec::len),
+                    slab_blocks: self.slab_blocks(),
+                },
+            ));
+        }
+
+        let mut layers: Vec<&PagedLayerState> = Vec::with_capacity(states.len());
+        for state in states {
+            layers.push(state.layer(layer_idx).ok_or_else(|| {
+                format!(
+                    "PagedBlockPool::paged_decode_batched: layer {layer_idx} out of range for {} layers",
+                    state.layers.len()
+                )
+            })?);
+        }
+
+        let (batch, geometry) = {
+            let (pool_k, _) = self.single_slab_tensors(layer_idx).expect("checked above");
+            crate::paged_v2::geometry_from_shapes(q, pool_k)?
+        };
+        if batch != states.len() {
+            return Err(format!(
+                "PagedBlockPool::paged_decode_batched: q batch {batch} disagrees with {} states",
+                states.len()
+            ));
+        }
+        if let Err(reason) = geometry.check() {
+            return Ok((None, PagedDecodeOutcome::UnservableGeometry(reason)));
+        }
+
+        let epoch = self.block_epoch;
+        let page_size = self.layout.block_size;
+        let target = crate::paged_v2::device_target_ctas();
+
+        // The cache is a disjoint field, but the view builder needs `&self`.
+        // Move it out for the duration so both borrows are independent, and put
+        // it back unconditionally (including on the error path) so a failed
+        // build never loses the other layers' entries.
+        let mut cache = std::mem::take(&mut self.decode_v2_cache);
+        let key = crate::paged_v2::DecodeBatchKey {
+            layer_idx,
+            epoch,
+            page_size,
+            layers: &layers,
+            geometry: &geometry,
+        };
+        // Resolve the page table first and decide from it, then build the plan
+        // only if the fused path is actually going to run. A declined launch
+        // must not pay for the chunk search, and keeping the two steps separate
+        // is what makes the plan-rebuild counter mean "the fused path ran".
+        let view_built = cache.ensure_view(&key, || self.paged_csr_view(states, layer_idx));
+
+        let decision = match &view_built {
+            Ok(()) => {
+                let view = cache
+                    .view(layer_idx)
+                    .expect("ensure_view populated the entry");
+                let visible_tokens: usize =
+                    view.seq_lens.iter().map(|&len| len.max(0) as usize).sum();
+                if !view.any_visible() {
+                    Err(PagedDecodeOutcome::NoVisibleTokens)
+                } else {
+                    let floor = active_required_visible_tokens(batch);
+                    let policy = select_paged_v2_dispatch(visible_tokens, floor);
+                    match crate::layers::resolve_paged_v2_dispatch(|| policy) {
+                        PagedV2Dispatch::V2 => Ok((visible_tokens, view.page_counts())),
+                        // A gather decision the policy also made is the floor;
+                        // a gather decision it did not make is the kill switch,
+                        // which is the only other thing
+                        // `resolve_paged_v2_dispatch` can do.
+                        PagedV2Dispatch::Gather if policy == PagedV2Dispatch::Gather => {
+                            Err(PagedDecodeOutcome::BelowFloor {
+                                batch,
+                                visible_tokens,
+                                floor,
+                            })
+                        }
+                        PagedV2Dispatch::Gather => Err(PagedDecodeOutcome::KillSwitch),
+                    }
+                }
+            }
+            Err(reason) => Err(PagedDecodeOutcome::ViewFailed(reason.clone())),
+        };
+
+        let launched: Result<Option<UniquePtr<MlxArray>>, String>;
+        let outcome: PagedDecodeOutcome;
+        match decision {
+            Ok((visible_tokens, page_counts)) => {
+                cache.ensure_plan(&geometry, &page_counts, || {
+                    crate::paged_v2::PagedDecodePlan::heuristic(geometry, &page_counts, target)
+                });
+                // Both accessors are shared borrows of the same cache, so they
+                // coexist; the two mutations above have already finished.
+                let view = cache.view(layer_idx).expect("populated above");
+                let plan = cache.plan().expect("populated above");
+                match plan.validate() {
+                    Ok(()) => {
+                        let (pool_k, pool_v) =
+                            self.single_slab_tensors(layer_idx).expect("checked above");
+                        outcome = PagedDecodeOutcome::Fused {
+                            batch,
+                            visible_tokens,
+                            chunks: plan.num_chunks,
+                            merged: plan.needs_merge,
+                        };
+                        launched = launch_v2(q, pool_k, pool_v, view, plan, scale).map(Some);
+                    }
+                    Err(reason) => {
+                        outcome = PagedDecodeOutcome::PlanRejected(reason);
+                        launched = Ok(None);
+                    }
+                }
+            }
+            Err(declined) => {
+                outcome = declined;
+                launched = Ok(None);
+            }
+        }
+        self.decode_v2_cache = cache;
+        launched.map(|out| (out, outcome))
     }
 
     /// Fused paged-attention decode over the pool via the native Metal kernel
@@ -1895,6 +2227,9 @@ impl PagedBlockPool {
             self.ensure_layer_capacity(layer_idx, row + 1)?;
         }
         self.block_rows[layer_idx].insert(block_id, row);
+        // A block that previously had no row now has one, so any cached CSR
+        // page table built before this point may name a different row (#899).
+        self.bump_block_epoch();
         Ok(row)
     }
 
@@ -1916,20 +2251,16 @@ impl PagedBlockPool {
         if min_capacity <= meta.capacity_blocks {
             return Ok(());
         }
-        let target_slabs = min_capacity.div_ceil(POOL_SLAB_BLOCKS);
+        let per_slab = self.slab_blocks.max(1);
+        let target_slabs = min_capacity.div_ceil(per_slab);
         let block_size = self.layout.block_size as i32;
-        let shape = [
-            POOL_SLAB_BLOCKS as i32,
-            block_size,
-            meta.n_kv_heads,
-            meta.head_dim,
-        ];
+        let shape = [per_slab as i32, block_size, meta.n_kv_heads, meta.head_dim];
         while self.pool_k[layer_idx].len() < target_slabs {
             self.pool_k[layer_idx].push(ffi::zeros(&shape, meta.dtype));
             self.pool_v[layer_idx].push(ffi::zeros(&shape, meta.dtype));
         }
         self.pool_meta[layer_idx] = Some(PagedPoolMeta {
-            capacity_blocks: target_slabs * POOL_SLAB_BLOCKS,
+            capacity_blocks: target_slabs * per_slab,
             ..meta
         });
         self.grow_events += 1;
@@ -1958,6 +2289,7 @@ impl PagedBlockPool {
                 "free-list block must have zero refcount"
             );
             record.refcount = 1;
+            self.bump_block_epoch();
             return Ok(block_id);
         }
 
@@ -1976,6 +2308,7 @@ impl PagedBlockPool {
         self.next_block_id += 1;
         self.blocks
             .insert(block_id, PagedBlockRecord::new(layer_idx));
+        self.bump_block_epoch();
         Ok(block_id)
     }
 
@@ -2007,6 +2340,7 @@ impl PagedBlockPool {
         }
 
         self.next_block_id = self.next_block_id.max(block_id.as_u64().saturating_add(1));
+        self.bump_block_epoch();
         Ok(())
     }
 
