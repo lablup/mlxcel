@@ -40,7 +40,7 @@
 use std::process::Command;
 
 mod common;
-use common::repo_binary_path;
+use common::{binary_resolution_report, repo_binary_path};
 
 const HEADING: &str = "KV Cache (TurboQuant) Options";
 
@@ -95,9 +95,12 @@ fn help_output(bin_name: &str, args: &[&str]) -> String {
     for key in ENV_TO_CLEAR_FOR_HELP {
         cmd.env_remove(key);
     }
-    let output = cmd
-        .output()
-        .unwrap_or_else(|e| panic!("failed to spawn {} from {:?}: {e}", bin_name, path));
+    let output = cmd.output().unwrap_or_else(|e| {
+        panic!(
+            "failed to spawn {bin_name} from {path:?}: {e}\n{}",
+            binary_resolution_report(bin_name)
+        )
+    });
     assert!(
         output.status.success(),
         "{} {:?} exited with status {:?}: stderr=\n{}",
@@ -358,9 +361,12 @@ fn help_output_for_speculative(bin_name: &str, args: &[&str]) -> String {
     for key in SPECULATIVE_ENV_TO_CLEAR_FOR_HELP {
         cmd.env_remove(key);
     }
-    let output = cmd
-        .output()
-        .unwrap_or_else(|e| panic!("failed to spawn {} from {:?}: {e}", bin_name, path));
+    let output = cmd.output().unwrap_or_else(|e| {
+        panic!(
+            "failed to spawn {bin_name} from {path:?}: {e}\n{}",
+            binary_resolution_report(bin_name)
+        )
+    });
     assert!(
         output.status.success(),
         "{} {:?} exited with status {:?}: stderr=\n{}",
@@ -467,28 +473,232 @@ fn speculative_flag_signatures_match_across_binaries() {
 // discovers the alternate spelling without reading the source. Unit tests
 // in `src/main_tests.rs` and `src/bin/mlx_server.rs` cover that the
 // aliases resolve to the identical parsed value.
+
+/// Leading-space count of a help line.
+fn indent_width(line: &str) -> usize {
+    line.len() - line.trim_start_matches(' ').len()
+}
+
+/// Slice the `--help` entry clap rendered for `flag_signature`: the signature
+/// line plus every following line indented deeper than it, which is the
+/// flag's description and its bracketed annotations. Stops before the next
+/// flag entry (same or shallower indent) and before the next section heading.
+///
+/// Scoping to one entry matters: the prose on `--draft-model` names the
+/// alternate spelling in its own description, so a whole-help substring search
+/// for the alias name would pass even with the `visible_alias` removed.
+fn flag_help_entry<'a>(help: &'a str, flag_signature: &str) -> Option<&'a str> {
+    let mut offset = 0usize;
+    let mut entry_start = None;
+    for line in help.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        // clap renders long-only flags as `      --flag <VALUE>` and flags
+        // carrying a short form as `  -s, --flag <VALUE>`; accept both.
+        let starts_entry = trimmed.starts_with(flag_signature)
+            || trimmed.split_once(", ").is_some_and(|(short, rest)| {
+                short.starts_with('-') && rest.starts_with(flag_signature)
+            });
+        if starts_entry {
+            entry_start = Some(offset);
+            break;
+        }
+        offset += line.len();
+    }
+    let start = entry_start?;
+    let rest = &help[start..];
+
+    let mut lines = rest.split_inclusive('\n');
+    let signature_line = lines.next()?;
+    let signature_indent = indent_width(signature_line);
+
+    let mut consumed = signature_line.len();
+    let mut body_indent: Option<usize> = None;
+    for line in lines {
+        if line.trim().is_empty() {
+            consumed += line.len();
+            continue;
+        }
+        let indent = indent_width(line);
+        match body_indent {
+            // The first non-blank line fixes the body indent. A line no
+            // deeper than the signature means this flag has no body at all.
+            None if indent <= signature_indent => break,
+            None => body_indent = Some(indent),
+            Some(body) if indent < body => break,
+            Some(_) => {}
+        }
+        consumed += line.len();
+    }
+    Some(&rest[..consumed])
+}
+
+/// Alias names clap documented for one flag entry, parsed out of its
+/// `[alias: ...]` / `[aliases: ...]` annotation.
+///
+/// Both labels are accepted because the label is not part of the contract:
+/// `clap_builder` renders `[alias: ...]` for exactly one visible alias and
+/// `[aliases: ...]` for two or more (the `pluralize` call in its help
+/// template, added in 4.6.2). Pinning the singular literal instead would
+/// break again the moment a second alias is added to any of these flags.
+/// What the contract needs is the alias NAME, and that it is carried by a
+/// real clap alias annotation rather than by prose.
+fn documented_aliases(entry: &str) -> Vec<String> {
+    for label in ["[aliases: ", "[alias: "] {
+        let Some(start) = entry.find(label) else {
+            continue;
+        };
+        let inner_start = start + label.len();
+        let Some(len) = entry[inner_start..].find(']') else {
+            continue;
+        };
+        return entry[inner_start..inner_start + len]
+            .split(',')
+            // The annotation wraps across lines when it is long, so collapse
+            // whitespace rather than trimming spaces only.
+            .map(|alias| alias.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|alias| !alias.is_empty())
+            .collect();
+    }
+    Vec::new()
+}
+
+/// Assert one binary's `--help` documents `alias` as a clap alias of the flag
+/// rendered as `flag_signature`.
+fn assert_flag_documents_alias(label: &str, help: &str, flag_signature: &str, alias: &str) {
+    let entry = flag_help_entry(help, flag_signature).unwrap_or_else(|| {
+        panic!("{label} --help has no flag entry for {flag_signature:?}.\nHelp was:\n{help}")
+    });
+    let aliases = documented_aliases(entry);
+    assert!(
+        aliases.iter().any(|documented| documented == alias),
+        "{label} --help must document {flag_signature:?} with a {alias:?} alias (issue #464). \
+         The alias annotation clap rendered for that flag listed {aliases:?}.\n\
+         Entry was:\n{entry}"
+    );
+}
+
 #[test]
 fn drafter_flag_aliases_are_documented_on_both_binaries() {
     let serve_help = help_output("mlxcel", &["serve", "--help"]);
     let server_help = help_output("mlxcel-server", &["--help"]);
 
-    assert!(
-        serve_help.contains("--draft-model <PATH>")
-            && serve_help.contains("[aliases: --model-draft]"),
-        "mlxcel serve --help must document --draft-model with a --model-draft alias.\nHelp was:\n{serve_help}"
+    assert_flag_documents_alias(
+        "mlxcel serve",
+        &serve_help,
+        "--draft-model <PATH>",
+        "--model-draft",
     );
-    assert!(
-        serve_help.contains("--draft-max <DRAFT_MAX>") && serve_help.contains("[aliases: --draft]"),
-        "mlxcel serve --help must document --draft-max with a --draft alias.\nHelp was:\n{serve_help}"
+    assert_flag_documents_alias(
+        "mlxcel serve",
+        &serve_help,
+        "--draft-max <DRAFT_MAX>",
+        "--draft",
     );
 
+    assert_flag_documents_alias(
+        "mlxcel-server",
+        &server_help,
+        "--model-draft <PATH>",
+        "--draft-model",
+    );
+    assert_flag_documents_alias(
+        "mlxcel-server",
+        &server_help,
+        "--draft <DRAFT>",
+        "--draft-max",
+    );
+}
+
+/// Guard for the guard: the alias assertion above must reject an entry whose
+/// clap alias annotation is missing, even when the alias name still appears
+/// in that flag's prose. `--draft-model`'s real help does exactly that, so a
+/// whole-help substring search would not catch a dropped `visible_alias`.
+#[test]
+fn documented_aliases_ignores_alias_names_that_only_appear_in_prose() {
+    let without_annotation = "      --draft-model <PATH>\n          \
+        Accepts the mlx-lm-style `--draft-model` spelling (primary) and the \
+        llama-server-style `--model-draft` spelling.\n\n          [default: none]\n";
     assert!(
-        server_help.contains("--model-draft <PATH>")
-            && server_help.contains("[aliases: --draft-model]"),
-        "mlxcel-server --help must document --model-draft with a --draft-model alias.\nHelp was:\n{server_help}"
+        documented_aliases(without_annotation).is_empty(),
+        "prose mentioning an alias must not count as a documented alias"
+    );
+
+    let singular =
+        "      --draft-max <DRAFT_MAX>\n          Max draft tokens\n\n          [alias: --draft]\n";
+    assert_eq!(documented_aliases(singular), vec!["--draft".to_string()]);
+
+    let plural = "      --draft-max <DRAFT_MAX>\n          Max draft tokens\n\n          [aliases: --draft, --n-draft]\n";
+    assert_eq!(
+        documented_aliases(plural),
+        vec!["--draft".to_string(), "--n-draft".to_string()]
+    );
+}
+
+/// Mutation check on the real help text: dropping a `visible_alias` from the
+/// CLI removes exactly one rendered `[alias: ...]` / `[aliases: ...]`
+/// annotation, so cut that annotation out of the live `mlxcel serve --help`
+/// and confirm the alias is then undocumented. Answers "would a build that
+/// dropped one of the four aliases still fail?" against real output, without
+/// rebuilding the CLI with the attribute removed.
+///
+/// `--draft-model` is the interesting case: its own description names
+/// `--model-draft` in prose, so this also shows the prose alone does not
+/// satisfy the contract.
+#[test]
+fn removing_the_rendered_alias_annotation_leaves_the_alias_undocumented() {
+    let serve_help = help_output("mlxcel", &["serve", "--help"]);
+    let entry = flag_help_entry(&serve_help, "--draft-model <PATH>")
+        .expect("mlxcel serve --help has no --draft-model entry");
+    assert_eq!(
+        documented_aliases(entry),
+        vec!["--model-draft".to_string()],
+        "precondition: the live help must document exactly the one alias"
+    );
+
+    let annotation_start = entry
+        .find("[alias")
+        .expect("precondition: the entry carries an alias annotation");
+    let annotation_end = annotation_start
+        + entry[annotation_start..]
+            .find(']')
+            .expect("alias annotation is unterminated")
+        + 1;
+    let without_annotation = format!("{}{}", &entry[..annotation_start], &entry[annotation_end..]);
+
+    assert!(
+        without_annotation.contains("--model-draft"),
+        "precondition: the alias name still appears in the flag's prose"
     );
     assert!(
-        server_help.contains("--draft <DRAFT>") && server_help.contains("[aliases: --draft-max]"),
-        "mlxcel-server --help must document --draft with a --draft-max alias.\nHelp was:\n{server_help}"
+        documented_aliases(&without_annotation).is_empty(),
+        "a dropped visible_alias must leave the alias undocumented, but the \
+         assertion still found: {:?}",
+        documented_aliases(&without_annotation)
+    );
+}
+
+/// The entry slicer must not spill into the neighbouring flag: an alias
+/// annotation on the *next* flag must never satisfy the assertion for this
+/// one.
+#[test]
+fn flag_help_entry_stops_at_the_next_flag() {
+    let help = "Options:\n      \
+        --draft-model <PATH>\n          Path to drafter checkpoint\n\n      \
+        --draft-max <DRAFT_MAX>\n          Max draft tokens\n\n          [alias: --draft]\n\n\
+        Other Options:\n      --unrelated\n";
+
+    let entry = flag_help_entry(help, "--draft-model <PATH>").expect("entry not found");
+    assert!(entry.contains("Path to drafter checkpoint"));
+    assert!(
+        !entry.contains("--draft-max"),
+        "entry leaked into the next flag:\n{entry}"
+    );
+    assert!(documented_aliases(entry).is_empty());
+
+    let entry = flag_help_entry(help, "--draft-max <DRAFT_MAX>").expect("entry not found");
+    assert_eq!(documented_aliases(entry), vec!["--draft".to_string()]);
+    assert!(
+        !entry.contains("Other Options:"),
+        "entry leaked into the next section:\n{entry}"
     );
 }
