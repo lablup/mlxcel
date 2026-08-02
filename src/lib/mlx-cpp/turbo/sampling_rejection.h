@@ -63,13 +63,31 @@
 // magnitude, where arithmetic bisection of `[0, 1]` stalls long before reaching
 // a probability of 1e-6.
 //
-// ## Convergence and the cap
+// ## Convergence, and why 32 rounds is a proof rather than a hope
 //
-// The interval halves in bit space every round, so the round cap is a hard
-// bound rather than a hope; the data-driven `pivot_0` usually accepts in the
-// first or second round. On cap overflow the kernel reports failure for that
-// row through the `ok` output and the caller falls back to the stock
-// `argpartition` chain, counting the event.
+// Let `d` be the distance between the bit patterns of `low` and `high`. Every
+// round sets `pivot_1` to the bit midpoint of `[pivot_0, high]` with
+// `low < pivot_0 <= high`, and then either raises `low` to `pivot_1` (leaving
+// `high - pivot_1`, at most half of `d`) or lowers `high` to `pivot_1` while
+// raising `low` to `pivot_0` (leaving `pivot_1 - pivot_0`, again at most half).
+// So `d` at least halves every round.
+//
+// `low` starts at 0 (or just under the min-p threshold) and `high` starts at the
+// row maximum, which is a probability and therefore at most 1.0, so `d` starts
+// below `0x3F800000 < 2^30`. Thirty rounds bring `d` to 1, meaning `low` and
+// `high` are adjacent floats. At that point the proposal `{p > low}` is exactly
+// `{p >= high}`, and the loop invariant says `high` passes every filter test,
+// so by monotonicity every element of the proposal passes: the next draw is
+// accepted unconditionally. Convergence therefore takes at most 31 rounds from
+// any starting bracket, and the data-driven `pivot_0` normally gets there in
+// one or two.
+//
+// The cap is `REJECTION_MAX_ROUNDS = 32`, so under this arithmetic a row cannot
+// exhaust it. The `ok` output and the caller's `argpartition` fallback are kept
+// anyway, as the guard that catches a future change to the pivot arithmetic
+// (an arithmetic midpoint, for instance, does not halve the bit distance and
+// stalls outright on small probabilities). A test drives the fallback by
+// lowering the cap explicitly.
 //
 // ## Determinism
 //

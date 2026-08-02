@@ -2092,6 +2092,21 @@ mod ffi {
         /// so tests can pin that the sampled id does not depend on it.
         fn gumbel_sample_num_splits(batch: i32, vocab: i32) -> i32;
 
+        /// [`fused_sample`] without the rejection kernel's converged-flag
+        /// readback (#901). Same routing and the same draw; the filtered path
+        /// simply does not evaluate the per-row `ok` flags and therefore does
+        /// not sync. For the batch scheduler's speculative lookahead prime,
+        /// which schedules its graph asynchronously so the GPU runs ahead. The
+        /// round cap is unreachable under the kernel's bit-space bisection, so
+        /// nothing is given up but the defence-in-depth check.
+        fn fused_sample_lazy(
+            logits: &MlxArray,
+            temperature: f32,
+            top_k: i32,
+            top_p: f32,
+            min_p: f32,
+        ) -> UniquePtr<MlxArray>;
+
         /// Dual-pivot rejection sampling for top-k / top-p / min-p (#901),
         /// forced. Bypasses the `MLXCEL_SAMPLING_REJECTION` gate and takes an
         /// explicit round cap so a test can drive the cap-overflow fallback.

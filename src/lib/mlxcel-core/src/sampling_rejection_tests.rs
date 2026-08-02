@@ -1018,6 +1018,41 @@ fn the_reference_arm_stays_on_the_argpartition_chain() {
 }
 
 #[test]
+fn the_lazy_entry_point_draws_the_same_stream_without_syncing() {
+    let _dispatch = dispatch_guard();
+    if !gpu_backend() {
+        return;
+    }
+    // The scheduler's speculative lookahead prime takes `fused_sample_lazy`
+    // because reading the converged flags would block on the whole forward
+    // graph. The only difference must be that readback: at one seed the two
+    // entry points have to produce the identical stream, or the lookahead and
+    // the synchronous re-dispatch would disagree about step n's token.
+    let logits = spread_logits(1024, 0x90E);
+    let batched = tiled(&logits, 16);
+
+    for (top_k, top_p, min_p) in [(40i32, 1.0f32, 0.0f32), (0, 0.9, 0.0), (40, 0.9, 0.05)] {
+        random_seed(0x0901_1A2B);
+        let verified = u32_values(&fused_sample(&batched, 1.0, top_k, top_p, min_p));
+        random_seed(0x0901_1A2B);
+        let lazy = u32_values(&fused_sample_lazy(&batched, 1.0, top_k, top_p, min_p));
+        assert_eq!(
+            verified, lazy,
+            "top_k={top_k} top_p={top_p} min_p={min_p}: the lazy entry point drew a different \
+             stream from the verified one"
+        );
+    }
+
+    reset_sampling_dispatch();
+    let _ = u32_values(&fused_sample_lazy(&batched, 1.0, 40, 0.9, 0.0));
+    let lines = recorded_dispatch();
+    assert!(
+        lines.iter().any(|l| l.contains("unverified")),
+        "the lazy path did not identify itself in the dispatch report: {lines:?}"
+    );
+}
+
+#[test]
 fn per_row_parameters_reach_the_kernel_from_one_launch() {
     if !gpu_backend() {
         return;

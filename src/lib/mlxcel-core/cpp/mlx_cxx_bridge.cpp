@@ -4588,7 +4588,8 @@ namespace {
         SAMPLING_DISPATCH_GREEDY = 5,
         SAMPLING_DISPATCH_NO_FILTER = 6,
         SAMPLING_DISPATCH_REFERENCE_ARM = 7,
-        SAMPLING_DISPATCH_KIND_COUNT = 8,
+        SAMPLING_DISPATCH_REJECTION_LAZY = 8,
+        SAMPLING_DISPATCH_KIND_COUNT = 9,
     };
 
     struct SamplingDispatchState {
@@ -4957,7 +4958,8 @@ static std::unique_ptr<MlxArray> fused_sample_rejection_path(
     int32_t top_k,
     float top_p,
     float min_p,
-    int32_t max_rounds
+    int32_t max_rounds,
+    bool verify
 ) {
     const int batch = logits.shape(0);
     const int vocab = logits.shape(1);
@@ -4966,7 +4968,35 @@ static std::unique_ptr<MlxArray> fused_sample_rejection_path(
     auto params = rejection_params(batch, top_k, top_p, min_p);
     auto result = mlxcel::turbo::rejection_sample(probs, params, max_rounds);
 
-    mlx::core::eval({result.ids, result.ok});
+    if (!verify) {
+        // Lazy path (the scheduler's speculative lookahead prime). Reading the
+        // `ok` flags means evaluating them, which means blocking on the whole
+        // forward graph, which is exactly what that call site exists to avoid:
+        // it schedules step N asynchronously so the GPU runs ahead while the
+        // host reads step N-1.
+        //
+        // Skipping the check is sound because the round cap cannot be reached:
+        // the bit-space bracket halves every round from a starting distance
+        // below 2^30, and once `low` and `high` are adjacent floats the proposal
+        // equals the support and the next draw is accepted unconditionally, so
+        // 31 rounds is an upper bound (see `sampling_rejection.h`). Were that
+        // ever to change, an unconverged row here returns its own argmax, which
+        // is always inside the filtered support: the failure mode is one greedy
+        // draw on a speculative step, not an out-of-support token.
+        if (sampling_dispatch_is_new(SAMPLING_DISPATCH_REJECTION_LAZY)) {
+            std::ostringstream os;
+            os << "rejection kernel, unverified ("
+               << sampling_config_text(
+                      batch, vocab, temperature, top_k, top_p, min_p)
+               << ", round cap " << max_rounds
+               << "); the speculative lookahead prime skips the converged-flag "
+                  "readback so it does not sync";
+            sampling_dispatch_record(SAMPLING_DISPATCH_REJECTION_LAZY, os.str());
+        }
+        return std::make_unique<MlxArray>(result.ids);
+    }
+
+    mlx::core::eval(std::vector<mlx::core::array>{result.ids, result.ok});
     const auto* ok = result.ok.data<uint32_t>();
     uint32_t unconverged = 0;
     for (int row = 0; row < batch; ++row) {
@@ -5034,7 +5064,8 @@ static std::unique_ptr<MlxArray> fused_sample_impl(
     int32_t top_k,
     float top_p,
     float min_p,
-    bool allow_kernels
+    bool allow_kernels,
+    bool verify
 ) {
     auto x = logits.inner;
 
@@ -5110,7 +5141,8 @@ static std::unique_ptr<MlxArray> fused_sample_impl(
                 top_k,
                 top_p,
                 min_p,
-                mlxcel::turbo::REJECTION_MAX_ROUNDS);
+                mlxcel::turbo::REJECTION_MAX_ROUNDS,
+                verify);
         }
     }
 
@@ -5125,7 +5157,19 @@ std::unique_ptr<MlxArray> fused_sample(
     float top_p,
     float min_p
 ) {
-    return fused_sample_impl(logits, temperature, top_k, top_p, min_p, true);
+    return fused_sample_impl(
+        logits, temperature, top_k, top_p, min_p, true, true);
+}
+
+std::unique_ptr<MlxArray> fused_sample_lazy(
+    const MlxArray& logits,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p
+) {
+    return fused_sample_impl(
+        logits, temperature, top_k, top_p, min_p, true, false);
 }
 
 std::unique_ptr<MlxArray> fused_sample_rejection(
@@ -5137,7 +5181,7 @@ std::unique_ptr<MlxArray> fused_sample_rejection(
     int32_t max_rounds
 ) {
     return fused_sample_rejection_path(
-        logits.inner, temperature, top_k, top_p, min_p, max_rounds);
+        logits.inner, temperature, top_k, top_p, min_p, max_rounds, true);
 }
 
 std::unique_ptr<MlxArray> sampling_rejection_probe(
@@ -5163,7 +5207,8 @@ std::unique_ptr<MlxArray> fused_sample_categorical(
     float top_p,
     float min_p
 ) {
-    return fused_sample_impl(logits, temperature, top_k, top_p, min_p, false);
+    return fused_sample_impl(
+        logits, temperature, top_k, top_p, min_p, false, true);
 }
 
 // The exact categorical distribution `fused_sample` draws from, as a float32
