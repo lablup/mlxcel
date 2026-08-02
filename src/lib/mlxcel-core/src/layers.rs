@@ -73,7 +73,24 @@ impl QuantizedWeight {
         }
     }
 
-    /// Create a new quantized weight with explicit mode
+    /// Create a new quantized weight with explicit mode.
+    ///
+    /// Fallible on purpose (issue #973), on the same reasoning that made
+    /// [`QuantizedEmbedding::new`] fallible for the declared `group_size` /
+    /// `bits` pair. This is the one way to build a `QuantizedWeight` with a
+    /// caller-chosen mode without going through
+    /// [`reconcile_quantization_layout`], and therefore without the allowlist it
+    /// now carries. The stored string goes straight to `quantized_matmul` /
+    /// `dequantize`, which cross the cxx bridge as `UniquePtr<MlxArray>` rather
+    /// than `Result`, so a mode MLX cannot parse is an uncatchable abort at the
+    /// first forward pass rather than a load error. Returning `Result` puts the
+    /// bound on the path the next family that builds one directly will take;
+    /// nothing in the tree calls this today. It is a strong default rather than
+    /// an enforced invariant, since the fields are `pub` and a struct literal
+    /// still bypasses it.
+    ///
+    /// [`validate_quantization_biases`] also rejects a mode that contradicts the
+    /// `biases` argument, which MLX throws on just as hard.
     pub fn new_with_mode(
         weight: UniquePtr<MlxArray>,
         scales: UniquePtr<MlxArray>,
@@ -81,8 +98,10 @@ impl QuantizedWeight {
         group_size: i32,
         bits: i32,
         mode: String,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        validate_quantization_params(group_size, bits)?;
+        validate_quantization_biases(&mode, biases.is_some())?;
+        Ok(Self {
             weight,
             scales,
             biases,
@@ -90,7 +109,7 @@ impl QuantizedWeight {
             bits,
             mode,
             global_scale: None,
-        }
+        })
     }
 
     /// Get raw pointer to biases (null if not present, e.g. mxfp4/nvfp4/mxfp8)
@@ -334,6 +353,15 @@ impl QuantizedEmbedding {
         let layout = reconcile_quantization_layout_logged(
             &w_shape, &s_shape, group_size, bits, mode, prefix,
         )?;
+
+        // The reconciler bounds the mode string itself; this additionally
+        // refuses a valid mode that contradicts the `.biases` plane the
+        // checkpoint ships, which MLX throws on just as uncatchably (issue
+        // #973). A caller that reached here through `from_weights` cannot trip
+        // it, because `infer_quantization_mode` derives the mode from exactly
+        // this predicate.
+        validate_quantization_biases(mode, biases.is_some())
+            .map_err(|e| format!("{e} (prefix: {prefix})"))?;
 
         Ok(Self {
             weight,
@@ -1277,7 +1305,9 @@ pub struct ReconciledQuant {
 /// when the declared one disagrees (see [`reconcile_quantization_layout`]), and
 /// an allowlist of `{2,3,4,5,6,8}` would reject the mixed-precision exports
 /// that behavior exists to serve. Only values that can describe no packing at
-/// all are refused.
+/// all are refused. The declared `mode` in the same `quantization` block is the
+/// opposite case and is an allowlist, for the reasons on
+/// [`validate_quantization_mode`].
 ///
 /// Used by: every quantizing family through [`reconcile_quantization_layout`]
 ///          (dense projections and quantized embeddings) and through
@@ -1310,6 +1340,121 @@ pub fn validate_quantization_params(group_size: i32, bits: i32) -> Result<(), St
         ));
     }
     Ok(())
+}
+
+/// Every quantization mode MLX accepts, in the order its own parser tests them.
+///
+/// This mirrors `string_to_quantization_mode` in
+/// [ml-explore/mlx `mlx/primitives.cpp`](https://github.com/ml-explore/mlx/blob/main/mlx/primitives.cpp),
+/// which is a closed four-value C++ enum with no interior values. Exposed so
+/// the family-level config guards (gemma4's `validate_quantization_scheme`)
+/// cannot keep a private copy that drifts from the one the loaders enforce.
+///
+/// Used by: [`validate_quantization_mode`], [`infer_quantization_mode`] (which
+///          returns only values from this set by construction), and
+///          `crate::models::gemma4::validate_quantization_scheme` in the
+///          consuming crate
+pub const SUPPORTED_QUANTIZATION_MODES: [&str; 4] = ["affine", "mxfp4", "mxfp8", "nvfp4"];
+
+/// Reject a declared quantization mode MLX cannot parse.
+///
+/// Unlike [`validate_quantization_params`] this is an allowlist, and the
+/// reasoning that made the `group_size` / `bits` guard a bounds check does not
+/// transfer. That guard stays permissive because mlxcel deliberately re-derives
+/// an effective bit width from the tensor shapes (see
+/// [`reconcile_quantization_layout`]), so an allowlist of the widths MLX
+/// supports would reject legitimate mixed-precision exports. There is no
+/// analogous re-derivation from the declared mode string:
+/// [`infer_quantization_mode`] derives a mode from bias presence and ignores
+/// the declaration entirely, and the accepted set is a closed four-value C++
+/// enum. Mirroring MLX's own parser is the whole check.
+///
+/// An unrecognized mode is not rejected and not silently defaulted anywhere
+/// else. On the shared loader path it takes the block-float branch of
+/// [`reconcile_quantization_layout`], which on a genuine affine tensor
+/// re-derives the group size back onto the declared value, so not even the
+/// divergence warning fires; the string is then stored verbatim and handed to
+/// `quantized_matmul` / `gather_qmm` / `dequantize` on every forward pass.
+/// Those cross the cxx bridge as `UniquePtr<MlxArray>` rather than `Result`, so
+/// MLX's `std::invalid_argument` is an uncatchable `std::terminate` at the
+/// FIRST forward pass rather than a load error (issue #973).
+///
+/// The comparison is exact: no trimming, no case folding, and an empty string
+/// is rejected rather than read as "not declared". The string compared here has
+/// to be byte-identical to the one MLX parses, because it is the same string:
+/// normalizing before the comparison would accept `" Affine"` and then store
+/// and forward the raw spelling, which is precisely the gap this exists to
+/// close. "Not declared" is expressed by the absence of the key, which every
+/// config reader already resolves to `"affine"` before calling here.
+///
+/// Used by: every quantizing family through [`reconcile_quantization_layout`]
+///          (dense projections and quantized embeddings); the by-hand
+///          constructor [`QuantizedWeight::new_with_mode`], which never reaches
+///          the reconciler; [`validate_quantization_biases`]; and in the
+///          consuming crate `crate::models::switch_layers::SwitchLinear`
+///          (MoE experts), `crate::models::gpt_oss` (the one family that reads
+///          `quantization.mode` out of `config.json`, at both
+///          `Quantization::validate` and `ExpertLinear::from_weights`),
+///          `crate::models::config::QuantizationArgs::get_mode` and
+///          `crate::models::gemma4::validate_quantization_scheme`
+pub fn validate_quantization_mode(mode: &str) -> Result<(), String> {
+    if SUPPORTED_QUANTIZATION_MODES.contains(&mode) {
+        return Ok(());
+    }
+    let accepted = SUPPORTED_QUANTIZATION_MODES.join(", ");
+    Err(format!(
+        "quantization.mode ({mode:?}) must be one of {accepted}: MLX parses the mode with an \
+         exact, case-sensitive string comparison in string_to_quantization_mode and throws on \
+         anything else, and that throw crosses the cxx bridge as an uncatchable abort at the \
+         first forward pass rather than a load error"
+    ))
+}
+
+/// Reject a declared mode that contradicts the `.biases` plane the checkpoint
+/// actually ships.
+///
+/// MLX's `validate_mode_with_type` (see
+/// [ml-explore/mlx `mlx/ops.cpp`](https://github.com/ml-explore/mlx/blob/main/mlx/ops.cpp))
+/// requires zero-point `biases` for `affine` and requires them to be absent for
+/// every block-float mode, throwing `Biases must be provided for affine
+/// quantization` or `Biases must be null for quantization mode '<mode>'`
+/// otherwise. Both throws are the same uncatchable-abort class as an invalid
+/// mode string, and both are reachable from a checkpoint whose `config.json`
+/// declares a mode that its tensors do not match.
+///
+/// The shared loaders never trip this because they ignore the declaration and
+/// call [`infer_quantization_mode`] on bias presence, which is consistent by
+/// construction. Only a caller that threads a config-declared mode can, which
+/// today is gpt-oss. Because this is exactly MLX's own precondition, it can
+/// only reject a load that was already going to abort: it cannot refuse a
+/// checkpoint that works.
+///
+/// Validates `mode` itself first, so a caller needs one call rather than two.
+///
+/// Used by: UnifiedLinear::from_weights_with_mode,
+///          QuantizedEmbedding::from_weights_with_mode,
+///          QuantizedWeight::new_with_mode, `SwitchLinear::from_stacked_parts`
+///          and `GptOss ExpertLinear::from_weights` in the consuming crate
+pub fn validate_quantization_biases(mode: &str, has_biases: bool) -> Result<(), String> {
+    validate_quantization_mode(mode)?;
+    match (mode == "affine", has_biases) {
+        (true, false) => Err(
+            "quantization.mode is \"affine\" but the checkpoint ships no .biases plane: MLX \
+             requires zero points for affine quantization and throws \"Biases must be provided \
+             for affine quantization\" otherwise, which crosses the cxx bridge as an uncatchable \
+             abort at the first forward pass rather than a load error. Either the declared mode \
+             is wrong for these tensors (a block-float export mislabelled affine) or the .biases \
+             plane is missing from the checkpoint"
+                .to_string(),
+        ),
+        (false, true) => Err(format!(
+            "quantization.mode is {mode:?} but the checkpoint ships a .biases plane: the \
+             block-float modes carry no zero points and MLX throws \"Biases must be null for \
+             quantization mode '{mode}'\", which crosses the cxx bridge as an uncatchable abort \
+             at the first forward pass rather than a load error"
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// Recover the `group_size` / `bits` a packed MLA `kv_b_proj` was quantized
@@ -1425,6 +1570,10 @@ const MAX_QUANT_GROUP_SIZE: i32 = 1 << 20;
 /// so the linear loader, the embedding loader, and the family-level weight
 /// validators cannot drift apart on which mode a given triple will load as.
 ///
+/// Every arm returns a member of [`SUPPORTED_QUANTIZATION_MODES`] by
+/// construction, which is why a caller that goes through here can never trip
+/// [`validate_quantization_mode`] or [`validate_quantization_biases`].
+///
 /// Used by: UnifiedLinear::from_weights, QuantizedEmbedding::from_weights,
 ///          BailingMoe weight validation
 pub fn infer_quantization_mode(has_biases: bool, group_size: i32, bits: i32) -> &'static str {
@@ -1456,6 +1605,10 @@ pub fn infer_quantization_mode(has_biases: bool, group_size: i32, bits: i32) -> 
 /// * returns `Err` for a declared `group_size` / `bits` pair that can describe
 ///   no packing at all, before it looks at the shapes (issue #929) — see
 ///   [`validate_quantization_params`],
+/// * returns `Err` for a `mode` MLX cannot parse, before it looks at the shapes
+///   (issue #973), see [`validate_quantization_mode`]. This also makes the
+///   `mode == "affine"` branch below total: without it, any unrecognized string
+///   silently took the block-float branch,
 /// * returns `Err` with an actionable message when the affine shapes match no
 ///   valid bit width — the signature of a misdeclared / unsupported external
 ///   packing that must not be dequantized as standard affine and served as
@@ -1479,6 +1632,15 @@ pub fn reconcile_quantization_layout(
     // separate: degenerate *shapes* still stay permissive, degenerate *params*
     // do not. See [`validate_quantization_params`].
     validate_quantization_params(group_size, bits)?;
+
+    // A `mode` MLX cannot parse is refused on the same terms and for the same
+    // reason (issue #973). Checking it here rather than only at the storage
+    // points covers every `UnifiedLinear` and `UnifiedEmbedding` in one place,
+    // and turns the two-way branch below from a silent fallthrough into a total
+    // one: an unrecognized string used to take the block-float path, which on a
+    // genuine affine tensor re-derives the declared group size back onto itself,
+    // so the layout looked reconciled and not even the divergence warning fired.
+    validate_quantization_mode(mode)?;
 
     // Insufficient shape info: trust the caller, mirroring the historical
     // early-return in `infer_quantization_bits` for empty / scalar shapes.
@@ -1818,6 +1980,16 @@ impl UnifiedLinear {
                 &w_shape, &s_shape, group_size, bits, mode, prefix,
             )?;
             let (effective_bits, effective_group_size) = (layout.bits, layout.group_size);
+
+            // The reconciler bounds the mode string itself; this additionally
+            // refuses a valid mode that contradicts the `.biases` plane the
+            // checkpoint ships, which MLX throws on just as uncatchably (issue
+            // #973). A caller that reached here through `from_weights` cannot
+            // trip it, because `infer_quantization_mode` derives the mode from
+            // exactly this predicate; only a caller threading a config-declared
+            // mode (gpt-oss) can.
+            validate_quantization_biases(mode, biases.is_some())
+                .map_err(|e| format!("{e} (prefix: {prefix})"))?;
 
             // Optional native-NVFP4 global-scale sidecar (`weight_scale_2`).
             // Emitted by the direct ModelOpt transcode (issue #693); absent for
@@ -5197,6 +5369,204 @@ mod tests {
                     });
             assert!(err.contains(field), "unhelpful error: {err}");
         }
+    }
+
+    /// The declared `mode` is the third value in the same `quantization` block
+    /// and, unlike `group_size` / `bits`, is bounded by an allowlist: MLX's
+    /// `string_to_quantization_mode` is a closed four-value enum and mlxcel
+    /// re-derives nothing from the declared string, so mirroring that parser is
+    /// the whole check (issue #973).
+    #[test]
+    fn quantization_mode_allowlist_mirrors_mlx_exactly() {
+        for mode in SUPPORTED_QUANTIZATION_MODES {
+            validate_quantization_mode(mode)
+                .unwrap_or_else(|e| panic!("MLX accepts {mode:?}, so mlxcel must too: {e}"));
+        }
+
+        // `infer_quantization_mode` is the only producer of a mode on the shared
+        // loader path, so every value it can return must be accepted or the
+        // guard would reject checkpoints that load today.
+        for has_biases in [true, false] {
+            for (group_size, bits) in [(64, 4), (32, 4), (16, 4), (64, 8)] {
+                let mode = infer_quantization_mode(has_biases, group_size, bits);
+                validate_quantization_mode(mode).unwrap_or_else(|e| {
+                    panic!("inferred mode {mode:?} must be in the allowlist: {e}")
+                });
+            }
+        }
+
+        // The comparison is exact on purpose: no trimming, no case folding, and
+        // an empty string is a declared value rather than "not declared". The
+        // string checked here is the same string MLX parses byte-for-byte, so
+        // normalizing would accept a spelling that is then stored and forwarded
+        // verbatim into the abort this exists to prevent.
+        for mode in [
+            "optiq", "gptq", "int4", "", "  ", "Affine", "AFFINE", " mxfp4", "mxfp4 ",
+        ] {
+            let Err(err) = validate_quantization_mode(mode) else {
+                panic!("MLX would throw on {mode:?}, so the load must fail first")
+            };
+            assert!(
+                err.contains("affine") && err.contains("nvfp4"),
+                "the message must name the accepted set: {err}"
+            );
+        }
+    }
+
+    /// The reconciler is the one place every `UnifiedLinear` and
+    /// `UnifiedEmbedding` passes through, so bounding the mode there covers the
+    /// whole dense surface at once. It also makes the `mode == "affine"` branch
+    /// total: an unrecognized string used to take the block-float branch, which
+    /// on a genuine affine tensor re-derives the declared group size back onto
+    /// itself, so nothing diverged and not even the warning fired (issue #973).
+    #[test]
+    fn reconciler_rejects_a_mode_mlx_cannot_parse() {
+        // Honest affine 4-bit geometry: packed_in * 32 == bits * groups * gs.
+        let (weight, scales) = (&[4, 8][..], &[4, 1][..]);
+
+        // Positive control first, so a guard that rejects everything cannot pass.
+        let ok = reconcile_quantization_layout(weight, scales, 64, 4, "affine")
+            .expect("an honest affine layout must still reconcile");
+        assert_eq!((ok.bits, ok.group_size, ok.reconciled), (4, 64, false));
+
+        for mode in ["optiq", "", "Affine"] {
+            let err = reconcile_quantization_layout(weight, scales, 64, 4, mode)
+                .expect_err("an unparseable mode must be refused");
+            assert!(err.contains("mode"), "unhelpful error: {err}");
+        }
+
+        // Degenerate shapes take an early return that trusts the caller, but the
+        // mode is checked before it, exactly as the param bound is.
+        assert!(reconcile_quantization_layout(&[], &[], 64, 4, "optiq").is_err());
+    }
+
+    /// A mode that parses but contradicts the `.biases` plane aborts just as
+    /// hard, inside MLX's `validate_mode_with_type`. Rejecting it at load can
+    /// only refuse a checkpoint that was already going to abort, because the
+    /// predicate is MLX's own (issue #973).
+    #[test]
+    fn declared_mode_must_agree_with_bias_presence() {
+        validate_quantization_biases("affine", true).expect("affine with zero points is the norm");
+        for mode in ["mxfp4", "mxfp8", "nvfp4"] {
+            validate_quantization_biases(mode, false)
+                .unwrap_or_else(|e| panic!("{mode} without zero points is the norm: {e}"));
+        }
+
+        let err = validate_quantization_biases("affine", false)
+            .expect_err("affine without zero points aborts in MLX");
+        assert!(err.contains("affine") && err.contains("biases"), "{err}");
+
+        for mode in ["mxfp4", "mxfp8", "nvfp4"] {
+            let err = validate_quantization_biases(mode, true)
+                .expect_err("block-float with zero points aborts in MLX");
+            assert!(err.contains(mode) && err.contains("biases"), "{err}");
+        }
+
+        // An unparseable mode fails here too, so a caller needs one call.
+        assert!(validate_quantization_biases("optiq", true).is_err());
+        assert!(validate_quantization_biases("optiq", false).is_err());
+    }
+
+    /// `QuantizedWeight::new_with_mode` is the by-hand constructor that takes an
+    /// unbounded mode string and never reaches the reconciler. It has no callers
+    /// in the tree, which is exactly why the bound belongs on the signature: the
+    /// next family to build one directly inherits it (issue #973).
+    #[test]
+    fn hand_built_quantized_weight_bounds_its_declared_mode() {
+        let plane = |last: i32| ffi::from_slice_f32(&vec![0.0; (4 * last) as usize], &[4, last]);
+
+        // Positive controls first, in both bias conventions.
+        QuantizedWeight::new_with_mode(plane(8), plane(1), Some(plane(1)), 64, 4, "affine".into())
+            .expect("an honest affine triple must still build");
+        QuantizedWeight::new_with_mode(plane(8), plane(1), None, 32, 4, "mxfp4".into())
+            .expect("an honest mxfp4 pair must still build");
+
+        for mode in ["optiq", "", "Affine"] {
+            let err =
+                QuantizedWeight::new_with_mode(plane(8), plane(1), None, 64, 4, mode.to_string())
+                    .err()
+                    .unwrap_or_else(|| panic!("an unparseable mode {mode:?} must be refused"));
+            assert!(err.contains("mode"), "unhelpful error: {err}");
+        }
+
+        // The declared pair is still bounded here as well.
+        assert!(
+            QuantizedWeight::new_with_mode(
+                plane(8),
+                plane(1),
+                Some(plane(1)),
+                0,
+                4,
+                "affine".into()
+            )
+            .is_err()
+        );
+        // And the mode must agree with the biases argument.
+        assert!(
+            QuantizedWeight::new_with_mode(plane(8), plane(1), None, 64, 4, "affine".into())
+                .is_err()
+        );
+    }
+
+    /// The two shared loaders that accept an explicit mode are what gpt-oss
+    /// threads its `config.json` string into, so drive them rather than the
+    /// helpers in isolation. The assertions are on the load `Result` and no
+    /// forward pass runs, so a regression fails cleanly here instead of aborting
+    /// the test binary the way it would in production (issue #973).
+    #[test]
+    fn explicit_mode_loaders_reject_a_config_declared_bad_mode() {
+        // Honest affine 4-bit geometry: 8 * 32 == 4 * 1 * 64.
+        let plane = |last: i32| ffi::from_slice_f32(&vec![0.0; (4 * last) as usize], &[4, last]);
+        let mut affine = crate::weights::WeightMap::new();
+        affine.insert("q_proj.weight".to_string(), plane(8));
+        affine.insert("q_proj.scales".to_string(), plane(1));
+        affine.insert("q_proj.biases".to_string(), plane(1));
+
+        // Positive controls first, so a guard that rejects everything quantized
+        // cannot pass this test.
+        UnifiedLinear::from_weights_with_mode(&affine, "q_proj", 64, 4, "affine")
+            .expect("an honest affine projection must still load");
+        QuantizedEmbedding::from_weights_with_mode(&affine, "q_proj", 64, 4, "affine")
+            .expect("an honest affine embedding must still load");
+
+        for mode in ["optiq", "gptq", "", "Affine"] {
+            let err = UnifiedLinear::from_weights_with_mode(&affine, "q_proj", 64, 4, mode)
+                .err()
+                .unwrap_or_else(|| panic!("an unparseable mode {mode:?} must be refused at load"));
+            assert!(
+                err.contains("mode") && err.contains("q_proj"),
+                "the message must name the field and the prefix: {err}"
+            );
+            let err = QuantizedEmbedding::from_weights_with_mode(&affine, "q_proj", 64, 4, mode)
+                .err()
+                .unwrap_or_else(|| panic!("an unparseable mode {mode:?} must be refused at load"));
+            assert!(err.contains("mode"), "unhelpful error: {err}");
+        }
+
+        // A parseable mode that contradicts the plane is refused too. Declaring
+        // block-float over a plane that ships zero points is the mirror of the
+        // affine-without-biases case, and MLX throws on both.
+        let err = UnifiedLinear::from_weights_with_mode(&affine, "q_proj", 32, 4, "mxfp4")
+            .err()
+            .unwrap_or_else(|| panic!("mxfp4 over a .biases-carrying plane aborts in MLX"));
+        assert!(err.contains("biases"), "unhelpful error: {err}");
+
+        let mut block_float = crate::weights::WeightMap::new();
+        block_float.insert("gate_proj.weight".to_string(), plane(8));
+        block_float.insert("gate_proj.scales".to_string(), plane(1));
+        UnifiedLinear::from_weights_with_mode(&block_float, "gate_proj", 32, 4, "mxfp4")
+            .expect("an honest mxfp4 projection must still load");
+        let err = UnifiedLinear::from_weights_with_mode(&block_float, "gate_proj", 64, 4, "affine")
+            .err()
+            .unwrap_or_else(|| panic!("affine over a plane with no zero points aborts in MLX"));
+        assert!(err.contains("biases"), "unhelpful error: {err}");
+
+        // A non-quantized projection carries no packing and no mode, so it must
+        // not be gated on either.
+        let mut regular = crate::weights::WeightMap::new();
+        regular.insert("o_proj.weight".to_string(), plane(8));
+        UnifiedLinear::from_weights_with_mode(&regular, "o_proj", 64, 4, "optiq")
+            .expect("a non-quantized projection must not be gated on the declared mode");
     }
 
     /// `QuantizedMultiLinear::from_weights` is a shared loader that stores the
