@@ -206,26 +206,30 @@ nearly deterministic: if `q(t*) ~ 1` then `min(p(t*), q(t*)) = p(t*)` and
 `p(t*) q(t*) ~ p(t*)`, so the two rules accept at the same rate and this change
 buys nothing. The gain appears when `q` is diffuse. Measured on
 Llama-3.1-8B-Instruct-4bit with a Llama-3.2-1B-Instruct drafter, 200 tokens,
-`--num-draft-tokens 4`, one trajectory each:
+`--num-draft-tokens 4`, `--no-chat-template`, `--seed 1234`, one trajectory
+each:
 
 | Temperature | `closed_form_sum_min` | `closed_form_sum_prod` | Ratio | measured `per_position_acceptance` |
 |---|---|---|---|---|
-| 0.7 | 0.2808 | 0.2740 | 1.02x | 0.2902 |
-| 1.0 | 0.1738 | 0.1613 | 1.08x | 0.1735 |
-| 1.5 | 0.6809 | 0.0494 | 13.8x | 0.6966 |
+| 0.7 | 0.7422 | 0.5823 | 1.27x | 0.5870 |
+| 1.0 | 0.7983 | 0.6071 | 1.31x | 0.6000 |
+| 1.5 | 0.7808 | 0.0002 | very large | 0.0000 |
 
-The measured value sits on `sum_min` at every temperature, which is the
-correctness result. The *ratio* column is the throughput headroom, and on this
-pair at 0.7 there is essentially none: the 1B drafter is close to deterministic
-there. Between-trajectory variance in the agreement profile is large (two
-200-token runs at the same temperature differed by nearly 2x in `sum_min`), so
-a single short throughput run at 0.7 on this pair measures noise, not the
-change. Read `closed_form_sum_min / closed_form_sum_prod` first: it is the
-upper bound on what any throughput measurement can show.
+These runs take the default sampler-match rule, so the measured value sits on
+`sum_prod`, not on `sum_min`: `sum_min` is the ceiling the opt-in rule would
+reach, and the *ratio* column is the throughput headroom between the two. At
+0.7 and 1.0 the headroom is about 1.3x. At 1.5 both distributions are diffuse
+enough that an independent target draw essentially never lands on the drafter's
+token, so sampler-match accepts nothing at all while the coupling ceiling is
+still 0.78. That row is the shape of the argument for the opt-in rule.
 
-The temperature 1.5 row is a real measurement of the mechanism but comes from a
-degenerate high-temperature trajectory where both models agree on repetitive
-text; do not read it as a typical production number.
+Read `closed_form_sum_min / closed_form_sum_prod` before any throughput number:
+it is the upper bound on what a throughput measurement can show.
+
+These figures were re-measured after the draft-cache rewind fix (#994). The
+earlier ones on this page were taken while the draft KV cache was trimmed two
+entries too many per rejecting round, which starved the drafter and dragged
+both closed forms down along with the measured rate.
 
 ## Measuring the change
 
@@ -283,7 +287,15 @@ In `src/lib/mlxcel-core/src/speculative/`:
   tolerance: one emitted token outside a `top_k = 2` target's support fails.
 * `distribution_tests.rs::temperature_zero_stream_is_byte_identical_to_greedy_target_only`
   — zero tolerance on greedy output.
-* `distribution_tests.rs::kv_cache_length_is_exact_in_both_termination_regimes`
-  — cache rewind arithmetic, pinned in the all-reject and all-accept regimes.
+* `distribution_tests.rs::kv_cache_length_is_exact_in_both_termination_regimes`:
+  main-cache rewind arithmetic, pinned in the all-reject and all-accept regimes.
+* `distribution_tests.rs::draft_cache_tracks_the_emitted_sequence_in_every_acceptance_regime`:
+  draft-cache rewind arithmetic. Asserts `draft offset + tokens owed == main
+  offset` across the all-reject, all-accept and mixed regimes, which is the
+  statement that the drafter conditions on exactly the prefix the target does.
+* `distribution_tests.rs::a_fully_accepted_round_owes_its_last_proposal_and_the_next_round_pays_it`:
+  the one entry no trim can supply. A fully-accepted round's last proposal is
+  emitted without ever being forwarded through the draft model, so it is carried
+  in `pending_draft_context` and replayed at the head of the next round.
 * `stochastic_accept_tests.rs` — the accept rate against `min(1, p/q)`, the
   residual against `normalize(relu(p - q))`, and the `sum min(p, q)` optimum.

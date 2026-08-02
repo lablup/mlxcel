@@ -33,6 +33,20 @@
 //! sampling, which preserves the target model's distribution exactly; see
 //! [`stochastic_accept`].
 //!
+//! ## Cache invariant
+//!
+//! Both models must condition on the same prefix, or the drafter proposes
+//! against a context the target has already moved past and acceptance decays.
+//! At every round boundary the main and draft KV caches therefore hold the
+//! prompt plus every emitted token except the pending `current_token`, which
+//! the next round forwards itself. The two caches rewind by different amounts
+//! to get there: the verify pass forwards one token more than the draft loop
+//! does, so on a round that rejects, the draft trim is one *less* than the main
+//! trim. The one entry that cannot be reached by trimming at all is the last
+//! proposal on a fully-accepted round, which the draft loop never forwarded;
+//! it is carried in [`SpeculativeGenerator::pending_draft_context`] and
+//! replayed at the head of the next round's first draft forward.
+//!
 //! ## Sibling modules
 //!
 //! - [`mtp`] — Multi-Token Prediction (MTP) round-loop generator for the
@@ -233,6 +247,23 @@ pub struct SpeculativeGenerator {
     /// collapses. See [`Self::compose_target_sampling`] and
     /// [`Self::draft_sampling`] — only the former injects the cached bias.
     token_bias: TokenBiasMap,
+    /// The one emitted token the draft model's KV cache does not hold yet.
+    ///
+    /// A round's draft loop forwards `current_token, d_0, ..., d_{k-2}` for
+    /// `k` proposals: the last proposal `d_{k-1}` is *sampled from* the
+    /// forward of `d_{k-2}` and is never itself forwarded. When verification
+    /// accepts and emits it, it joins the sequence while the draft cache has
+    /// no entry for it, and no amount of trimming can put it there. It is
+    /// parked here and replayed at the head of the next round's first draft
+    /// forward, which costs no extra forward pass because that forward simply
+    /// becomes two tokens wide.
+    ///
+    /// `None` at every other round boundary. Reset by [`Self::reset`].
+    ///
+    /// Mirrors the `draft_y` concatenation in upstream mlx-lm
+    /// `speculative_generate_step`
+    /// (<https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/generate.py>).
+    pending_draft_context: Option<i32>,
 }
 
 impl SpeculativeGenerator {
@@ -246,6 +277,7 @@ impl SpeculativeGenerator {
             acceptance: SpeculativeAcceptanceStats::default(),
             stochastic_acceptance: None,
             token_bias: TokenBiasMap::default(),
+            pending_draft_context: None,
         }
     }
 
@@ -327,6 +359,7 @@ impl SpeculativeGenerator {
         }
         self.generated_tokens.clear();
         self.acceptance = SpeculativeAcceptanceStats::default();
+        self.pending_draft_context = None;
     }
 
     /// Get the generated tokens
@@ -534,7 +567,23 @@ impl SpeculativeGenerator {
             let mut draft_token = current_token;
 
             for _ in 0..num_draft {
-                let draft_input = ffi::from_slice_i32(&[draft_token], &[1, 1]);
+                // A previous round that accepted its last proposal left the
+                // draft model one token behind the sequence (see
+                // `pending_draft_context`). Replay that token at the head of
+                // this round's first draft forward rather than spending a
+                // separate pass on it: the sampler's `slice_last_logits`
+                // pre-step already reads the final position, so the proposal
+                // sampled here is the one conditioned on the full replayed
+                // prefix, and the round still costs `num_draft` forwards. The
+                // draft model sees a 2-token block with no explicit mask,
+                // exactly as it does during chunked prefill and as the target
+                // does during verification, so the same causal-prefill
+                // contract covers it. `take` empties the slot, so only the
+                // first iteration of the round can replay.
+                let draft_input = match self.pending_draft_context.take() {
+                    Some(owed) => ffi::from_slice_i32(&[owed, draft_token], &[1, 2]),
+                    None => ffi::from_slice_i32(&[draft_token], &[1, 1]),
+                };
                 let draft_logits = draft_model.forward(&draft_input, &mut self.draft_caches, None);
                 // Axis B: draft sampler MUST NOT see the bias. See
                 // `draft_sampling` for the rationale.
@@ -717,6 +766,18 @@ impl SpeculativeGenerator {
                         token_history.push(draft_token);
                     }
 
+                    // `d_{k-1}` is the only proposal the draft loop never
+                    // forwards, so emitting it leaves the draft cache one entry
+                    // short of the sequence. Park it for the next round's first
+                    // draft forward. Recorded here rather than beside the bonus
+                    // token below so it is also right on the round that stops on
+                    // `max_tokens`, and so an accepted-EOS proposal (which
+                    // breaks above, before this push) never records a debt for a
+                    // token that was never emitted.
+                    if i + 1 == draft_tokens.len() {
+                        self.pending_draft_context = Some(draft_token);
+                    }
+
                     if self.generated_tokens.len() >= max_tokens {
                         done = true;
                         break;
@@ -773,24 +834,31 @@ impl SpeculativeGenerator {
             self.acceptance.proposed_draft_tokens += draft_tokens.len();
             self.acceptance.accepted_draft_tokens += accepted;
 
-            // Step 4: Rewind caches for rejected tokens
+            // Step 4: rewind whatever this round forwarded past the tokens it
+            // actually kept.
+            //
+            // Write `k` for `draft_tokens.len()` and `a` for `accepted`. Both
+            // caches must end the round holding the prompt plus every emitted
+            // token except the next round's `current_token`, which the next
+            // round forwards itself.
             let rejected = draft_tokens.len() - accepted;
             if rejected > 0 {
-                // Rewind main model caches: we forwarded all verify_tokens but
-                // only accepted `accepted` draft tokens + 1 (the divergence token from main)
-                // Main model cache has current_token + all draft tokens = verify_tokens.len() positions
-                // We need to keep: accepted + 1 (for the token we're continuing from)
-                // So trim: draft_tokens.len() - accepted
-                let main_trim = rejected as i32;
-                trim_caches(&mut self.main_caches, main_trim);
+                // Main: the verify forward appended `current_token, d_0..d_{k-1}`.
+                // The round keeps `d_0..d_{a-1}` and emits one replacement that
+                // becomes the next `current_token`, so the cache must end at
+                // `d_{a-1}`. Trim the rejected tail, `k - a == rejected`.
+                trim_caches(&mut self.main_caches, rejected as i32);
 
-                // Rewind draft model caches: drafted all draft_tokens
-                // Need to trim all rejected + 1 (because draft went past accepted)
-                let draft_trim = (rejected + 1) as i32;
-                trim_caches(
-                    &mut self.draft_caches,
-                    draft_trim.min(draft_tokens.len() as i32),
-                );
+                // Draft: after its loop the draft cache holds the prompt, every
+                // emitted token, and `d_0..d_{k-2}`: the loop feeds
+                // `current_token` and then every proposal except the last, plus
+                // any replayed `pending_draft_context`. It must also end at
+                // `d_{a-1}`, so the trim is `(k - 1) - a == rejected - 1`, one
+                // less than the main cache's and never negative here because
+                // `rejected >= 1`. Trimming `rejected + 1` instead, as this did
+                // before, left the drafter conditioning on a prefix that fell
+                // one to two tokens further behind on every single round.
+                trim_caches(&mut self.draft_caches, (rejected - 1) as i32);
             }
 
             // Periodic cache clearing, backend-aware cadence (#627): disabled by

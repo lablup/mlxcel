@@ -827,70 +827,166 @@ fn closed_form_acceptance_matches_the_hand_computed_values() {
     );
 }
 
-/// Documents a **pre-existing** draft-cache defect that predates issue #902 and
-/// affects every acceptance rule identically.
+/// The draft cache must track the emitted sequence exactly, in the same
+/// deterministic regimes `kv_cache_length_is_exact_in_both_termination_regimes`
+/// pins for the main cache.
 ///
-/// The draft loop forwards `num_draft` tokens (`current_token`, `d_0`, ...,
-/// `d_{n-2}`), so the draft cache gains `n` entries per round. It should end
-/// the round holding `current_token, d_0..d_{a-1}`, that is `a + 1` new
-/// entries, so the correct trim is `n - a - 1 == rejected - 1`. The code trims
-/// `min(rejected + 1, n)`, two entries too many, and the shortfall is never
-/// recovered: for `num_draft = 4` the cache falls behind by 1, 2, 2, 2, 1
-/// tokens at `accepted` 0..4 respectively, every round, forever.
+/// The draft loop forwards `current_token, d_0, ..., d_{k-2}` for `k`
+/// proposals, one fewer new token than the verify pass, so keeping
+/// `d_0..d_{a-1}` means trimming `(k - 1) - a == rejected - 1`. When `a == k`
+/// the arithmetic runs off the other end: `d_{k-1}` was emitted but never
+/// forwarded through the draft model, and no trim can put it into the cache.
+/// It is parked in `pending_draft_context` and replayed at the head of the next
+/// round's first draft forward. The single statement covering both is
 ///
-/// At `accepted == 0` the draft cache does not advance at all. The drafter then
-/// proposes from a frozen prefix while the target advances, its proposals
-/// degrade, acceptance falls further, and the loop reinforces itself. This is
-/// the most likely explanation for observed acceptance around 0.23 on an
-/// 8B/1B pair against the 0.6-0.8 reported upstream.
+/// ```text
+/// draft cache offset + tokens owed == main cache offset
+/// ```
 ///
-/// This test pins the current, wrong behavior so the defect is visible and so
-/// whoever fixes it gets a failing test rather than silence. Fixing it is out
-/// of scope for #902: it changes token streams and belongs in its own issue.
+/// which says the drafter conditions on exactly the prefix the target does.
+/// This replaces `draft_cache_falls_behind_the_main_cache_every_round_pre_existing_defect`,
+/// which pinned the broken arithmetic (`min(rejected + 1, k)`) so a fix would
+/// surface as a failing test rather than silence. Under that trim the draft
+/// cache fell behind by 1 to 2 entries every round and never recovered; at
+/// `accepted == 0` it did not advance at all, so the drafter proposed forever
+/// from the prompt alone.
 #[test]
-fn draft_cache_falls_behind_the_main_cache_every_round_pre_existing_defect() {
-    let target = greedy_target();
-    let draft = always_rejecting_draft();
+fn draft_cache_tracks_the_emitted_sequence_in_every_acceptance_regime() {
     const PROMPT: i32 = 2;
     const N: usize = 24;
+    let target = greedy_target();
 
-    for num_draft in [1usize, 4] {
+    // Regime 1: total disagreement. Every round rejects at position 0, so
+    // `rejected == num_draft` and the draft trim runs at its largest. Nothing
+    // is ever accepted, so nothing is ever owed and the two caches must agree
+    // exactly. This is the regime the old trim froze completely.
+    for num_draft in [1usize, 3, 5] {
         let mut generator = SpeculativeGenerator::new(1, 1);
         let (tokens, _) = generator.generate(
             &target,
-            &draft,
+            &always_rejecting_draft(),
             &[PROMPT],
             N,
             num_draft,
             &SamplingConfig::greedy(),
         );
         assert_eq!(tokens.len(), N);
-
         let main_offset = generator.main_caches[0].offset;
-        let draft_offset = generator.draft_caches[0].offset;
-
-        // Every round rejects at position 0, so `accepted == 0` throughout and
-        // the draft cache never advances past the single prompt token.
-        assert_eq!(
-            draft_offset, 1,
-            "num_draft={num_draft}: draft cache should hold the prompt plus every \
-             emitted token except the pending one ({}), but it is frozen at {} \
-             because the trim is `min(rejected + 1, n)` instead of `rejected - 1`",
-            main_offset, draft_offset
-        );
         assert_eq!(
             main_offset as usize,
             1 + tokens.len() - 1,
-            "num_draft={num_draft}: the main cache does track the sequence, which is \
-             what makes the draft cache's drift a defect rather than a convention"
+            "all-reject num_draft={num_draft}: the main cache must track the \
+             sequence, otherwise there is no moving reference to compare the \
+             draft cache against"
         );
         assert!(
-            main_offset > draft_offset,
-            "the drafter is conditioning on {} tokens while the target conditions on {}",
-            draft_offset,
-            main_offset
+            generator.pending_draft_context.is_none(),
+            "all-reject num_draft={num_draft}: nothing was ever accepted, so the \
+             draft model can owe nothing"
         );
+        for (layer, cache) in generator.draft_caches.iter().enumerate() {
+            assert_eq!(
+                cache.offset, main_offset,
+                "all-reject num_draft={num_draft} layer {layer}: draft cache holds \
+                 {} entries against the target's {main_offset}. A short draft cache \
+                 degrades the drafter's proposals, which lowers acceptance, which \
+                 shortens the cache further.",
+                cache.offset
+            );
+        }
     }
+
+    // Regime 2: total agreement. Every proposal is accepted, so most rounds end
+    // with `d_{k-1}` emitted but never forwarded through the draft model. That
+    // entry cannot be trimmed into place, so the debt is what closes the gap.
+    // Regime 3: the mixed drafter agrees on exactly one token in six, so a
+    // single run walks the accept, reject and full-accept branches repeatedly
+    // and lands on whichever terminal state `max_tokens` happens to produce.
+    for (label, draft) in [("all-accept", greedy_target()), ("mixed", mixed_draft())] {
+        for num_draft in [1usize, 2, 3, 4] {
+            let mut generator = SpeculativeGenerator::new(1, 1);
+            let (tokens, _) = generator.generate(
+                &target,
+                &draft,
+                &[PROMPT],
+                N,
+                num_draft,
+                &SamplingConfig::greedy(),
+            );
+            assert_eq!(tokens.len(), N);
+            let main_offset = generator.main_caches[0].offset;
+            let owed = i32::from(generator.pending_draft_context.is_some());
+            for (layer, cache) in generator.draft_caches.iter().enumerate() {
+                assert_eq!(
+                    cache.offset + owed,
+                    main_offset,
+                    "{label} num_draft={num_draft} layer {layer}: draft cache holds \
+                     {} entries and owes {owed}, against the target's {main_offset}. \
+                     The drafter must condition on exactly the prefix the target does.",
+                    cache.offset
+                );
+            }
+        }
+    }
+}
+
+/// The debt is a genuine one-token shortfall that trimming cannot fix, not a
+/// bookkeeping flourish: a fully-accepted round must actually record it, and
+/// the next round must actually clear it by replaying the token.
+///
+/// Without this the `+ owed` term above could be vacuously zero and the
+/// invariant test would pass on a generator that never accepts anything.
+#[test]
+fn a_fully_accepted_round_owes_its_last_proposal_and_the_next_round_pays_it() {
+    const PROMPT: i32 = 2;
+    let target = greedy_target();
+    let agreeing = greedy_target();
+
+    // The prefill emits one token and a fully-accepted `num_draft = 2` round
+    // emits three more (`d_0`, `d_1`, bonus), so a 4-token budget stops exactly
+    // at a round boundary with the debt live.
+    let mut generator = SpeculativeGenerator::new(1, 1);
+    let (tokens, _) = generator.generate(
+        &target,
+        &agreeing,
+        &[PROMPT],
+        4,
+        2,
+        &SamplingConfig::greedy(),
+    );
+    assert_eq!(tokens.len(), 4);
+    assert_eq!(
+        generator.pending_draft_context,
+        Some(tokens[tokens.len() - 2]),
+        "the last accepted proposal is the token the draft loop never forwarded, \
+         so it is the one that must be owed"
+    );
+    assert_eq!(
+        generator.draft_caches[0].offset + 1,
+        generator.main_caches[0].offset,
+        "the debt must be exactly one entry"
+    );
+
+    // Three more emitted tokens is a second full round. The first round's debt
+    // is replayed at the head of the second round's first draft forward, so the
+    // draft cache catches up to the second round's own debt instead of staying
+    // two entries behind.
+    let mut generator = SpeculativeGenerator::new(1, 1);
+    let (tokens, _) = generator.generate(
+        &target,
+        &agreeing,
+        &[PROMPT],
+        7,
+        2,
+        &SamplingConfig::greedy(),
+    );
+    assert_eq!(tokens.len(), 7);
+    assert_eq!(
+        generator.draft_caches[0].offset + 1,
+        generator.main_caches[0].offset,
+        "the second round must clear the first round's debt; a draft cache two \
+         entries behind means the replay never happened"
+    );
 }
 
 /// The **default** rule (sampler-match, the rule that shipped before #902) must
