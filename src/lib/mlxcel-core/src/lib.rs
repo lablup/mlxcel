@@ -2148,6 +2148,13 @@ mod ffi {
         /// is pending.
         fn sampling_dispatch_drain_report() -> String;
 
+        /// Every dispatch outcome description recorded since the last reset,
+        /// newline-joined, in kind order. NON-DESTRUCTIVE, unlike
+        /// [`sampling_dispatch_drain_report`], which the INFO logger consumes.
+        /// A test or a benchmark sharing a process with other samplers must use
+        /// this one: whichever caller drains first consumes the record.
+        fn sampling_dispatch_recorded_report() -> String;
+
         /// Clear every recorded dispatch outcome and both cap-overflow
         /// counters. The state is process-wide; tests need a clean slate.
         fn sampling_dispatch_reset();

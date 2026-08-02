@@ -58,6 +58,38 @@
 
 use super::*;
 use std::collections::BTreeSet;
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
+/// Serialises the tests that assert on the dispatch report.
+///
+/// The recorded outcomes, their one-shot "already seen" bits, and the
+/// cap-overflow counters are all process-global by design: they exist so a
+/// server announces each distinct outcome exactly once for the life of the
+/// process. Two tests that reset and drain that state concurrently would each
+/// clear the other's record, so every test that calls
+/// [`reset_sampling_dispatch`] holds this lock for the whole reset-call-drain
+/// window. Tests that only sample (and therefore only ever SET a bit) need not
+/// take it.
+fn dispatch_guard() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Every dispatch outcome description recorded since the last reset.
+///
+/// Reads the non-destructive channel on purpose. The INFO logger's
+/// `sampling_dispatch_drain_report` pops what it reports, and the sampling
+/// tests in `sampling.rs` call `report_sampling_dispatch` while these tests run,
+/// so a test that drained would race them for its own record.
+fn recorded_dispatch() -> Vec<String> {
+    let report = sampling_dispatch_recorded_report();
+    if report.is_empty() {
+        return Vec::new();
+    }
+    report.lines().map(str::to_string).collect()
+}
 
 /// Draws per goodness-of-fit test, the count issue #901 asks for.
 /// `MLXCEL_TEST_REJECTION_SAMPLES` overrides it, which is the knob for trading
@@ -238,7 +270,14 @@ fn tiled(logits: &[f32], rows: usize) -> UniquePtr<MlxArray> {
 /// cap; a histogram silently built from cap-overflow rows (which fall back to
 /// the row argmax) would look like a badly skewed distribution rather than a
 /// convergence failure, so it is caught here instead.
-fn histogram(logits: &[f32], temperature: f32, top_k: i32, top_p: f32, min_p: f32, n: usize) -> Vec<u64> {
+fn histogram(
+    logits: &[f32],
+    temperature: f32,
+    top_k: i32,
+    top_p: f32,
+    min_p: f32,
+    n: usize,
+) -> Vec<u64> {
     let vocab = logits.len();
     let rows = ROWS_PER_LAUNCH
         .min(n.max(1))
@@ -282,6 +321,11 @@ fn assert_matches_truncated(
 ) {
     let mass: f64 = support.iter().map(|&i| probs[i]).sum();
     assert!(mass > 0.0, "{label}: empty support");
+    let total: u64 = counts.iter().sum();
+    assert_eq!(
+        total, n as u64,
+        "{label}: histogram holds {total} draws, wanted {n}"
+    );
 
     for (i, &count) in counts.iter().enumerate() {
         if !support.contains(&i) {
@@ -395,8 +439,19 @@ fn bimodal_logits(vocab: usize) -> Vec<f32> {
 }
 
 /// Near-uniform over a production-sized vocabulary: the adversarial shape for a
-/// value-bisection top-k, because every probability sits inside a band far
-/// narrower than the interval the first pivot can carve out.
+/// value-bisection top-k. No token dominates, so the top-40 boundary sits deep
+/// inside a dense cluster and the data-driven pivot buys almost nothing; the
+/// bracket has to be closed by bisection alone.
+///
+/// The band is 2 nats wide rather than the 1e-4 that would make the shape
+/// "maximally" flat, and deliberately so. At 1e-4 the probabilities of 152064
+/// entries collapse onto a few hundred distinct f32 values, so the k-th largest
+/// is a tie group of hundreds of entries; the kernel handles that correctly
+/// (ties at the boundary all survive, exactly as the stock `x >= kth` mask
+/// intends) but the test could then no longer state its expectation in f64.
+/// At 2 nats the order statistics near the top are separated by roughly a
+/// hundred f32 ulps, so the support is well defined in either precision while
+/// the clustering that stresses the bisection is unchanged.
 fn near_uniform_logits(vocab: usize) -> Vec<f32> {
     let mut state = 0xDEAD_BEEF_1234_5678u64;
     (0..vocab)
@@ -405,9 +460,7 @@ fn near_uniform_logits(vocab: usize) -> Vec<f32> {
             state ^= state << 25;
             state ^= state >> 27;
             let u = ((state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 40) as f32) / 16_777_216.0;
-            // A 1e-4 band around zero: 152K entries whose probabilities differ
-            // in the sixth significant digit.
-            (u - 0.5) * 1e-4
+            2.0 * u - 1.0
         })
         .collect()
 }
@@ -424,11 +477,11 @@ fn top_k_support_matches_the_argpartition_mask_including_ties() {
     // that resolved top-k as "exactly k tokens" would fail here.
     let vocab = 64usize;
     let mut logits = vec![-9.0f32; vocab];
-    for i in 0..8 {
-        logits[i] = 5.0 - i as f32 * 0.5;
+    for (i, logit) in logits.iter_mut().enumerate().take(8) {
+        *logit = 5.0 - i as f32 * 0.5;
     }
-    for i in 8..20 {
-        logits[i] = 0.75;
+    for logit in logits.iter_mut().take(20).skip(8) {
+        *logit = 0.75;
     }
     let top_k = 12i32;
 
@@ -616,7 +669,10 @@ fn all_three_filters_compose_into_one_threshold() {
     let logits = spread_logits(vocab, 0x907);
     let probs = softmax_reference(&logits, 1.0);
     let expected = intersect(
-        &intersect(&stock_top_k_support(&probs, 40), &stock_top_p_support(&probs, 0.9)),
+        &intersect(
+            &stock_top_k_support(&probs, 40),
+            &stock_top_p_support(&probs, 0.9),
+        ),
         &stock_min_p_support(&probs, 0.05),
     );
     let counts = histogram(&logits, 1.0, 40, 0.9, 0.05, SUPPORT_SAMPLE_COUNT);
@@ -790,32 +846,42 @@ fn a_near_uniform_152k_row_converges_inside_the_round_cap() {
     let batched = tiled(&logits, rows);
     let cap = sampling_rejection_max_rounds();
 
-    let (ids, ok, rounds) = probe(&batched, rows, 1.0, 40, 0.9, 0.0, cap);
-    let worst = rounds.iter().copied().max().unwrap_or(0);
-    assert!(
-        ok.iter().all(|&f| f == 1),
-        "near-uniform 152K exhausted the {cap}-round cap on {} of {rows} rows (worst {worst})",
-        ok.iter().filter(|&&f| f == 0).count()
-    );
-    assert!(
-        worst > 1,
-        "the near-uniform shape converged in one round; it is not exercising the loop"
-    );
     let probs = softmax_reference(&logits, 1.0);
-    let expected = intersect(
-        &stock_top_k_support(&probs, 40),
-        &stock_top_p_support(&probs, 0.9),
-    );
-    for id in ids {
+    let mut descending = probs.clone();
+    descending.sort_by(|a, b| b.partial_cmp(a).expect("finite"));
+    let tau_40 = descending[39];
+    // The kernel resolves the boundary in f32; the reference above is f64. Allow
+    // the boundary itself to move by a few f32 ulps, which is the only
+    // disagreement the two precisions can produce on this shape.
+    let slack = tau_40 * 4.0 * f64::from(f32::EPSILON);
+
+    for (label, top_p) in [("top-k only", 1.0f32), ("top-k + top-p", 0.9f32)] {
+        let (ids, ok, rounds) = probe(&batched, rows, 1.0, 40, top_p, 0.0, cap);
+        let worst = rounds.iter().copied().max().unwrap_or(0);
         assert!(
-            expected.contains(&(id as usize)),
-            "near-uniform 152K sampled {id}, outside the filtered support"
+            ok.iter().all(|&f| f == 1),
+            "{label}: near-uniform 152K exhausted the {cap}-round cap on {} of {rows} rows \
+             (worst {worst})",
+            ok.iter().filter(|&&f| f == 0).count()
         );
+        assert!(
+            worst > 1,
+            "{label}: the near-uniform shape converged in one round; it is not exercising the loop"
+        );
+        for id in ids {
+            assert!(
+                probs[id as usize] >= tau_40 - slack,
+                "{label}: near-uniform 152K sampled {id} at p={:e}, below the top-40 threshold \
+                 {tau_40:e}",
+                probs[id as usize]
+            );
+        }
     }
 }
 
 #[test]
 fn a_starved_round_cap_falls_back_and_the_event_is_counted() {
+    let _dispatch = dispatch_guard();
     if !gpu_backend() {
         return;
     }
@@ -830,7 +896,7 @@ fn a_starved_round_cap_falls_back_and_the_event_is_counted() {
 
     let (_ids, ok, rounds) = probe(&batched, rows, 1.0, 40, 1.0, 0.0, 1);
     assert!(
-        ok.iter().any(|&f| f == 0),
+        ok.contains(&0),
         "a one-round cap converged on the adversarial shape; the cap is not reachable and the \
          fallback is untestable"
     );
@@ -856,14 +922,7 @@ fn a_starved_round_cap_falls_back_and_the_event_is_counted() {
 
     // And the fallback announces itself, once, at a level a server actually
     // emits. This is the guard against a silent permanent fallback.
-    let mut lines = Vec::new();
-    while sampling_dispatch_pending_kinds() != 0 {
-        let line = sampling_dispatch_drain_report();
-        if line.is_empty() {
-            break;
-        }
-        lines.push(line);
-    }
+    let lines = recorded_dispatch();
     assert!(
         lines.iter().any(|l| l.contains("rejection cap")),
         "no cap-overflow line in the dispatch report: {lines:?}"
@@ -874,6 +933,7 @@ fn a_starved_round_cap_falls_back_and_the_event_is_counted() {
 
 #[test]
 fn fused_sample_routes_every_filtered_config_to_the_rejection_kernel() {
+    let _dispatch = dispatch_guard();
     if !gpu_backend() {
         return;
     }
@@ -891,14 +951,7 @@ fn fused_sample_routes_every_filtered_config_to_the_rejection_kernel() {
         let tokens = u32_values(&fused_sample(&batched, 1.0, top_k, top_p, min_p));
         assert_eq!(tokens.len(), rows);
 
-        let mut lines = Vec::new();
-        while sampling_dispatch_pending_kinds() != 0 {
-            let line = sampling_dispatch_drain_report();
-            if line.is_empty() {
-                break;
-            }
-            lines.push(line);
-        }
+        let lines = recorded_dispatch();
         assert!(
             lines.iter().any(|l| l.starts_with("rejection kernel")),
             "top_k={top_k} top_p={top_p} min_p={min_p} did not report the rejection kernel; \
@@ -909,6 +962,7 @@ fn fused_sample_routes_every_filtered_config_to_the_rejection_kernel() {
 
 #[test]
 fn greedy_and_no_filter_paths_report_that_they_bypass_the_rejection_kernel() {
+    let _dispatch = dispatch_guard();
     if !gpu_backend() {
         return;
     }
@@ -923,14 +977,7 @@ fn greedy_and_no_filter_paths_report_that_they_bypass_the_rejection_kernel() {
 
     reset_sampling_dispatch();
     let _ = u32_values(&fused_sample(&batched, 1.0, 0, 1.0, 0.0));
-    let mut lines = Vec::new();
-    while sampling_dispatch_pending_kinds() != 0 {
-        let line = sampling_dispatch_drain_report();
-        if line.is_empty() {
-            break;
-        }
-        lines.push(line);
-    }
+    let lines = recorded_dispatch();
     assert!(
         lines.iter().any(|l| l.contains("Gumbel-max kernel")),
         "the no-filter path did not report the #900 kernel: {lines:?}"
@@ -939,6 +986,7 @@ fn greedy_and_no_filter_paths_report_that_they_bypass_the_rejection_kernel() {
 
 #[test]
 fn the_reference_arm_stays_on_the_argpartition_chain() {
+    let _dispatch = dispatch_guard();
     if !gpu_backend() {
         return;
     }
@@ -950,23 +998,22 @@ fn the_reference_arm_stays_on_the_argpartition_chain() {
 
     reset_sampling_dispatch();
     let _ = u32_values(&fused_sample_categorical(&batched, 1.0, 40, 0.9, 0.0));
-    let mut lines = Vec::new();
-    while sampling_dispatch_pending_kinds() != 0 {
-        let line = sampling_dispatch_drain_report();
-        if line.is_empty() {
-            break;
-        }
-        lines.push(line);
-    }
+    let lines = recorded_dispatch();
     assert!(
-        lines
-            .iter()
-            .any(|l| l.contains("fused_sample_categorical")),
+        lines.iter().any(|l| l.contains("fused_sample_categorical")),
         "the reference arm did not identify itself: {lines:?}"
     );
-    assert!(
-        !lines.iter().any(|l| l.starts_with("rejection kernel")),
-        "the reference arm reached the rejection kernel: {lines:?}"
+    // And it really is a different path. A negative assertion on the shared
+    // dispatch record would be racy here (another test in this binary can set
+    // the rejection bit between the reset and the read), so compare the streams
+    // instead: at one seed the two arms agree only if they are the same code.
+    random_seed(0x0901_ABCD);
+    let chain = u32_values(&fused_sample_categorical(&batched, 1.0, 40, 0.9, 0.0));
+    random_seed(0x0901_ABCD);
+    let kernel = u32_values(&fused_sample_rejection(&batched, 1.0, 40, 0.9, 0.0, 32));
+    assert_ne!(
+        chain, kernel,
+        "the reference arm produced the rejection kernel's stream; the A/B is measuring one path"
     );
 }
 

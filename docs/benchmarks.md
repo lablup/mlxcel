@@ -52,7 +52,20 @@ arguments may evolve, so inspect each script before publishing results.
 
 # Multi-model suite shape.
 ./scripts/bench_all_models.sh --hardware <name> --cooldown 45 --big-cooldown 60
+
+# Sampling step, no model attached. Gumbel-max (#900) covers the no-filter
+# path; the rejection kernel (#901) covers top-k / top-p / min-p.
+cargo run --release --features metal,accelerate --example gumbel_sampling_microbench
+cargo run --release --features metal,accelerate --example rejection_sampling_microbench
 ```
+
+Both sampling harnesses print, before the table, the dispatch outcome each arm
+recorded, drained from the same one-shot channel `mlxcel-server` logs at INFO.
+Read those two lines before you read the numbers. Issue #899 shipped a
+production benchmark that compared the fallback against itself across a full
+sweep and returned a clean-looking null result, because nothing said which path
+had run; a sampling sweep whose two arms report the same path is measuring
+nothing.
 
 ## Fused decode kernels: the measure-then-keep gate (issue #905)
 

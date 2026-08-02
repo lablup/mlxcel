@@ -1371,6 +1371,10 @@ uint32_t sampling_dispatch_pending_kinds();
 // Pop one pending dispatch outcome description, or "" when none is pending.
 rust::String sampling_dispatch_drain_report();
 
+// Every dispatch outcome description recorded since the last reset,
+// newline-joined. Non-destructive, unlike the drain above.
+rust::String sampling_dispatch_recorded_report();
+
 // Clear every recorded dispatch outcome and both cap-overflow counters.
 void sampling_dispatch_reset();
 

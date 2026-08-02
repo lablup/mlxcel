@@ -4677,6 +4677,31 @@ rust::String sampling_dispatch_drain_report() {
     return rust::String(state.messages[kind]);
 }
 
+// Every outcome description recorded since the last reset, newline-joined, in
+// kind order. NON-DESTRUCTIVE: it neither pops the pending queue nor clears the
+// one-shot bits.
+//
+// `sampling_dispatch_drain_report` is the logger's channel and is destructive
+// by design, which makes it useless to a test running in a binary where other
+// tests also sample: whichever caller drains first consumes the record. Tests
+// and the microbenchmark read this instead.
+rust::String sampling_dispatch_recorded_report() {
+    auto& state = sampling_dispatch_state();
+    std::lock_guard<std::mutex> lock(state.mu);
+    const uint32_t seen = state.seen.load(std::memory_order_relaxed);
+    std::string joined;
+    for (uint32_t kind = 0; kind < SAMPLING_DISPATCH_KIND_COUNT; ++kind) {
+        if ((seen & (1u << kind)) == 0u) {
+            continue;
+        }
+        if (!joined.empty()) {
+            joined.push_back('\n');
+        }
+        joined += state.messages[kind];
+    }
+    return rust::String(joined);
+}
+
 // Clear every recorded outcome and both cap-overflow counters. For tests, which
 // need a clean slate; the state is process-wide.
 void sampling_dispatch_reset() {
