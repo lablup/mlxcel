@@ -2105,11 +2105,11 @@ mod ffi {
             max_rounds: i32,
         ) -> UniquePtr<MlxArray>;
 
-        /// The production (non-verifying) rejection path with an explicit
-        /// round cap (#901). Identical to what [`fused_sample`] runs except
-        /// that the cap is a parameter, so a test can drive cap overflow and
-        /// then observe the deferred, non-blocking check pick it up on the
-        /// following call.
+        /// The production rejection launch with an explicit round cap (#901),
+        /// landed and checked in place. Shares the overflow counting rule with
+        /// the deferred drain, so a test can pin that rule and its report
+        /// without depending on the best-effort ring that delivers the flags in
+        /// production.
         fn fused_sample_rejection_deferred(
             logits: &MlxArray,
             temperature: f32,
@@ -2176,6 +2176,12 @@ mod ffi {
         /// A test or a benchmark sharing a process with other samplers must use
         /// this one: whichever caller drains first consumes the record.
         fn sampling_dispatch_recorded_report() -> String;
+
+        /// Inspect every deferred rejection launch that has landed, now.
+        /// Still non-blocking: a launch that has not landed is left for later.
+        /// For tests, which would otherwise depend on a subsequent sampler call
+        /// to trigger the deferred check.
+        fn sampling_dispatch_drain_pending();
 
         /// Clear every recorded dispatch outcome and both cap-overflow
         /// counters. The state is process-wide; tests need a clean slate.

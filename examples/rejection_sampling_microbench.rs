@@ -108,8 +108,9 @@ use mlxcel_core::{
     MlxArray, UniquePtr, array_to_raw_bytes, async_eval_pair, eval, from_slice_f32, fused_sample,
     fused_sample_categorical, fused_sample_rejection, is_gpu_available, matmul, random_seed,
     rejection_cap_overflow_launches, rejection_cap_overflow_rows, reset_sampling_dispatch,
-    sampling_dispatch_recorded_report, sampling_rejection_available, sampling_rejection_max_rounds,
-    sampling_rejection_probe, sampling_rejection_routes, synchronize_default,
+    sampling_dispatch_drain_pending, sampling_dispatch_recorded_report,
+    sampling_rejection_available, sampling_rejection_max_rounds, sampling_rejection_probe,
+    sampling_rejection_routes, synchronize_default,
 };
 
 /// Target duration for the synthetic forward in the pipelined mode. Roughly a
@@ -454,6 +455,10 @@ fn main() {
         }
     }
 
+    // Flush the last launch's converged flags before reporting. Production
+    // checks each launch on the next sampler call, so without this the final
+    // launch of a run would never be inspected.
+    sampling_dispatch_drain_pending();
     println!(
         "\ncap overflow: {} rows across {} launches",
         rejection_cap_overflow_rows(),

@@ -535,6 +535,11 @@ fn fused_sample_routes_the_no_filter_path_to_the_gumbel_kernel() {
 
 #[test]
 fn filtered_configs_never_reach_the_gumbel_kernel() {
+    // A filtered config routes to the #901 rejection kernel, which parks its
+    // converged flags in a process-global ring for the deferred check. Taking
+    // the shared guard keeps this test from evicting a launch another test is
+    // waiting to inspect.
+    let _dispatch = crate::sampling_dispatch::dispatch_test_guard();
     if !gpu_backend() {
         return;
     }

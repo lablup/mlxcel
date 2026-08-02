@@ -96,6 +96,23 @@ pub fn reset_sampling_dispatch() {
     ffi::sampling_dispatch_reset();
 }
 
+/// Serialises tests that touch the process-global sampling dispatch state.
+///
+/// The recorded outcomes, their one-shot "already seen" bits, the cap-overflow
+/// counters, and the deferred converged-flag ring are all process-global by
+/// design: they exist so a server announces each distinct outcome exactly once
+/// and checks each launch's flags without ever waiting. That makes them shared
+/// mutable state across the whole test binary, so any test that samples through
+/// a routed `fused_sample` or asserts on the report has to take this lock,
+/// including the ones in `sampling_gumbel_tests`.
+#[cfg(test)]
+pub(crate) fn dispatch_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

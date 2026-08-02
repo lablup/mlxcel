@@ -1336,10 +1336,10 @@ std::unique_ptr<MlxArray> fused_sample_rejection(
     int32_t max_rounds
 );
 
-// The production (non-verifying) rejection path with an explicit round cap.
-// Identical to what `fused_sample` runs, except that the cap is a parameter, so
-// a test can drive a row into cap overflow and then observe the deferred,
-// non-blocking check pick it up on the following call.
+// The production rejection launch with an explicit round cap, landed and
+// checked in place. Shares `count_and_report_overflow` with the deferred drain,
+// so a test can pin the overflow counting rule and its report without depending
+// on the best-effort ring that delivers flags in production.
 std::unique_ptr<MlxArray> fused_sample_rejection_deferred(
     const MlxArray& logits,
     float temperature,
@@ -1399,6 +1399,10 @@ rust::String sampling_dispatch_drain_report();
 // Every dispatch outcome description recorded since the last reset,
 // newline-joined. Non-destructive, unlike the drain above.
 rust::String sampling_dispatch_recorded_report();
+
+// Inspect every deferred rejection launch that has landed, now. Non-blocking:
+// a launch still in flight is left for later. For tests.
+void sampling_dispatch_drain_pending();
 
 // Clear every recorded dispatch outcome and both cap-overflow counters.
 void sampling_dispatch_reset();

@@ -80,24 +80,6 @@
 
 use super::*;
 use std::collections::BTreeSet;
-use std::sync::{Mutex, MutexGuard, OnceLock};
-
-/// Serialises the tests that assert on the dispatch report.
-///
-/// The recorded outcomes, their one-shot "already seen" bits, and the
-/// cap-overflow counters are all process-global by design: they exist so a
-/// server announces each distinct outcome exactly once for the life of the
-/// process. Two tests that reset and drain that state concurrently would each
-/// clear the other's record, so every test that calls
-/// [`reset_sampling_dispatch`] holds this lock for the whole reset-call-drain
-/// window. Tests that only sample (and therefore only ever SET a bit) need not
-/// take it.
-fn dispatch_guard() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
 
 /// Every dispatch outcome description recorded since the last reset.
 ///
@@ -903,7 +885,7 @@ fn a_near_uniform_152k_row_converges_inside_the_round_cap() {
 
 #[test]
 fn a_starved_round_cap_falls_back_and_the_event_is_counted() {
-    let _dispatch = dispatch_guard();
+    let _dispatch = crate::sampling_dispatch::dispatch_test_guard();
     if !gpu_backend() {
         return;
     }
@@ -1046,7 +1028,7 @@ fn took_the_kernel(batched: &MlxArray, top_k: i32, top_p: f32, min_p: f32) -> bo
 
 #[test]
 fn fused_sample_routes_only_the_configurations_that_measured_faster() {
-    let _dispatch = dispatch_guard();
+    let _dispatch = crate::sampling_dispatch::dispatch_test_guard();
     if !gpu_backend() {
         return;
     }
@@ -1086,7 +1068,7 @@ fn fused_sample_routes_only_the_configurations_that_measured_faster() {
 
 #[test]
 fn a_large_vocabulary_sends_the_joint_config_back_to_the_stock_chain() {
-    let _dispatch = dispatch_guard();
+    let _dispatch = crate::sampling_dispatch::dispatch_test_guard();
     if !gpu_backend() {
         return;
     }
@@ -1122,7 +1104,7 @@ fn a_large_vocabulary_sends_the_joint_config_back_to_the_stock_chain() {
 
 #[test]
 fn greedy_and_no_filter_paths_report_that_they_bypass_the_rejection_kernel() {
-    let _dispatch = dispatch_guard();
+    let _dispatch = crate::sampling_dispatch::dispatch_test_guard();
     if !gpu_backend() {
         return;
     }
@@ -1146,7 +1128,7 @@ fn greedy_and_no_filter_paths_report_that_they_bypass_the_rejection_kernel() {
 
 #[test]
 fn the_reference_arm_stays_on_the_argpartition_chain() {
-    let _dispatch = dispatch_guard();
+    let _dispatch = crate::sampling_dispatch::dispatch_test_guard();
     if !gpu_backend() {
         return;
     }
@@ -1263,6 +1245,7 @@ where
 /// chain drains.
 #[test]
 fn the_production_sampling_call_never_synchronizes() {
+    let _dispatch = crate::sampling_dispatch::dispatch_test_guard();
     if !gpu_backend() {
         return;
     }
@@ -1317,15 +1300,24 @@ fn the_forced_entry_point_is_the_one_that_synchronizes() {
 
 #[test]
 fn cap_overflow_is_detected_without_waiting_on_the_production_path() {
-    let _dispatch = dispatch_guard();
+    let _dispatch = crate::sampling_dispatch::dispatch_test_guard();
     if !gpu_backend() {
         return;
     }
     // The production path cannot afford to read the converged flags at launch
-    // time, so it stashes them and inspects them on a later call once
-    // `is_available()` says the launch has landed. This drives that mechanism:
-    // a one-round cap on the adversarial near-uniform shape guarantees
-    // unconverged rows, and the SECOND call must pick them up.
+    // time, so it parks them and inspects them later, once `is_available()`
+    // says the launch has landed. What this test pins is the COUNTING RULE and
+    // its report, through the same `count_and_report_overflow` the deferred
+    // drain uses: a one-round cap on the adversarial near-uniform shape
+    // guarantees rows that both fail and consume the whole budget, which is the
+    // conjunction the rule requires.
+    //
+    // It deliberately does not test the delivery ring. That ring is best-effort
+    // by design (production drains it on the next sampler call, and a burst from
+    // other threads can evict an entry that has not landed), which is the right
+    // trade for a hot-path diagnostic and the wrong basis for an assertion.
+    // `the_production_sampling_call_never_synchronizes` covers the property that
+    // made the deferral necessary in the first place.
     //
     // Note what is deliberately not claimed. The overflowing launch is not
     // re-sampled; its token was already emitted. The rows returned their row
@@ -1340,26 +1332,36 @@ fn cap_overflow_is_detected_without_waiting_on_the_production_path() {
     reset_sampling_dispatch();
     assert_eq!(rejection_cap_overflow_rows(), 0);
 
-    // First launch: overflows, stashes its flags, reports nothing yet.
-    let first = u32_values(&fused_sample_rejection_deferred(
-        &batched, 1.0, 0, 0.9, 0.0, 1,
+    // top-k must be active. top-p alone accepts in the FIRST round, because a
+    // probability-weighted draw lands in the high-mass head and `mass(> p)` is
+    // immediately under the target, so a one-round cap converges and there is
+    // nothing to count. Requiring the draw to land in the top forty of 152064
+    // entries is what makes one round hopeless.
+    let ids = u32_values(&fused_sample_rejection_deferred(
+        &batched, 1.0, 40, 0.9, 0.0, 1,
     ));
-    assert_eq!(first.len(), rows);
-    assert!(first.iter().all(|&id| (id as usize) < vocab));
-    assert_eq!(
-        rejection_cap_overflow_rows(),
-        0,
-        "the launch reported its own overflow, so it must have waited for the flags"
-    );
-
-    // Second launch: the first has landed, so the deferred check picks it up.
-    let second = u32_values(&fused_sample_rejection_deferred(
-        &batched, 1.0, 0, 0.9, 0.0, 1,
-    ));
-    assert_eq!(second.len(), rows);
+    assert_eq!(ids.len(), rows);
     assert!(
-        rejection_cap_overflow_rows() > 0,
-        "the deferred check never picked up the previous launch's overflow"
+        ids.iter().all(|&id| (id as usize) < vocab),
+        "the unconverged rows returned something outside the vocabulary: {ids:?}"
+    );
+    // Not `== rows`: a single round can still accept, because the first draw is
+    // probability-weighted and can land inside the top-40 by luck. What the rule
+    // must do is count the rows that did not.
+    let counted = rejection_cap_overflow_rows();
+    assert!(
+        counted > 0,
+        "the overflow counting rule counted nothing on a one-round cap over a near-uniform \
+         152064-entry row, where convergence in one round is a coin toss at best"
+    );
+    assert!(
+        counted <= rows as u64,
+        "the rule counted {counted} overflowing rows out of {rows}"
+    );
+    assert_eq!(
+        rejection_cap_overflow_launches(),
+        1,
+        "the launch counter did not move exactly once"
     );
 
     let lines = recorded_dispatch();
@@ -1368,5 +1370,138 @@ fn cap_overflow_is_detected_without_waiting_on_the_production_path() {
             .iter()
             .any(|l| l.contains("exhausted the round cap on an earlier launch")),
         "the deferred overflow was counted but not announced: {lines:?}"
+    );
+}
+
+// -- agreement with the distribution #902 reports --
+
+/// Row 0 of `fused_sample_probs` as host floats.
+fn reported_probs(
+    batched: &MlxArray,
+    top_k: i32,
+    top_p: f32,
+    min_p: f32,
+    vocab: usize,
+) -> Vec<f32> {
+    let probs = fused_sample_probs(batched, 1.0, top_k, top_p, min_p);
+    array_to_raw_bytes(&probs)
+        .chunks_exact(4)
+        .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+        .take(vocab)
+        .collect()
+}
+
+/// `fused_sample_probs` must describe the distribution `fused_sample` draws
+/// from, for routed and declined configurations alike.
+///
+/// Issue #902 built that function on the sampler's own filter chain precisely so
+/// the two could not drift. Issue #901 then gave the sampler a second support:
+/// the rejection kernel evaluates top-k and top-p against the untruncated row
+/// while the stock chain renormalises between them, so for that one combination
+/// the kernel's support is a superset. `fused_sample_probs` therefore takes the
+/// same routing decision the sampler took, and this test is what holds the two
+/// together: it draws through `fused_sample` and requires every sampled token to
+/// carry mass in the reported distribution, and every well-supported token in
+/// that distribution to be reachable.
+///
+/// Getting this wrong would not fail any other test. It would quietly hand the
+/// speculative accept test (#902) a `p` that is missing part of the target's
+/// support, which rejects tokens the target could genuinely have produced.
+#[test]
+fn the_reported_distribution_matches_what_the_sampler_draws() {
+    let _dispatch = crate::sampling_dispatch::dispatch_test_guard();
+    if !gpu_backend() {
+        return;
+    }
+    let vocab = 512usize;
+    let logits = spread_logits(vocab, 0x912);
+    let single = tiled(&logits, 1);
+    let rows = 4096usize;
+    let batched = tiled(&logits, rows);
+
+    for (top_k, top_p, min_p) in [
+        (0i32, 0.9f32, 0.0f32), // routed
+        (0, 0.9, 0.05),         // routed
+        (40, 0.9, 0.0),         // routed, and the one divergent combination
+        (40, 0.9, 0.05),        // routed
+        (40, 1.0, 0.0),         // declined: stock chain
+        (0, 1.0, 0.05),         // declined: stock chain
+    ] {
+        let routed = sampling_rejection_routes(vocab as i32, top_k, top_p, min_p);
+        let probs = reported_probs(&single, top_k, top_p, min_p, vocab);
+        let total: f64 = probs.iter().map(|&v| f64::from(v)).sum();
+        assert!(
+            (total - 1.0).abs() < 1e-4,
+            "top_k={top_k} top_p={top_p} min_p={min_p}: reported probs sum to {total}"
+        );
+
+        let mut observed = BTreeSet::new();
+        let mut drawn = 0usize;
+        while drawn < 200_000 {
+            for id in u32_values(&fused_sample(&batched, 1.0, top_k, top_p, min_p)) {
+                observed.insert(id as usize);
+                drawn += 1;
+            }
+        }
+
+        for &id in &observed {
+            assert!(
+                probs[id] > 0.0,
+                "top_k={top_k} top_p={top_p} min_p={min_p} (routed={routed}): the sampler drew \
+                 token {id}, which the reported distribution gives zero mass"
+            );
+        }
+        for (id, &pr) in probs.iter().enumerate() {
+            if pr > 1e-4 {
+                assert!(
+                    observed.contains(&id),
+                    "top_k={top_k} top_p={top_p} min_p={min_p} (routed={routed}): the reported \
+                     distribution gives token {id} mass {pr}, but 200000 draws never produced it"
+                );
+            }
+        }
+    }
+}
+
+/// The divergent combination is genuinely divergent, so the test above is not
+/// passing vacuously.
+///
+/// With top-k and top-p both active the rejection kernel's support is a strict
+/// superset of the stock chain's on a distribution built to straddle the
+/// boundary. If this ever stops holding, the two orderings have converged and
+/// the `rejection_semantics` flag can be deleted; until then, deleting it would
+/// silently narrow the reported target support.
+#[test]
+fn the_two_filter_orderings_really_do_differ_for_top_k_plus_top_p() {
+    if !gpu_backend() {
+        return;
+    }
+    let vocab = 512usize;
+    let logits = spread_logits(vocab, 0x913);
+    let probs = softmax_reference(&logits, 1.0);
+
+    let k_set = stock_top_k_support(&probs, 40);
+    let z_k: f64 = k_set.iter().map(|&i| probs[i]).sum();
+    assert!(
+        z_k < 1.0,
+        "the top-40 set carries all the mass; shape is unusable"
+    );
+
+    let mut renormalised = vec![0.0f64; vocab];
+    for &i in &k_set {
+        renormalised[i] = probs[i] / z_k;
+    }
+    let stock = intersect(&k_set, &stock_top_p_support(&renormalised, 0.9));
+    let kernel = intersect(&k_set, &stock_top_p_support(&probs, 0.9));
+
+    assert!(
+        stock.is_subset(&kernel),
+        "the renormalised nucleus escaped the untruncated one: stock={stock:?} kernel={kernel:?}"
+    );
+    assert!(
+        stock.len() < kernel.len(),
+        "the two orderings agree on this shape ({} tokens each), so the divergence test has no \
+         teeth; pick a distribution that straddles the top_p boundary",
+        stock.len()
     );
 }
