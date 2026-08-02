@@ -471,8 +471,21 @@ impl MLAAttention {
         // Update cache
         let (keys, values) = cache.update_and_fetch(keys, values);
 
-        // Scaled dot product attention
-        let output = if l > 1 {
+        // Scaled dot product attention.
+        //
+        // A multi-token prefill with no caller-supplied mask MUST take the
+        // causal path. The generation paths (CLI text prefill, the VLM
+        // embeddings prefill, and the chunked prefill) call the model with
+        // `mask == None` and expect the model to apply its own causal mask,
+        // exactly like `create_attention_mask(h, cache[0])` in the reference
+        // https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/deepseek_v2.py.
+        // Handing that `None` straight to the unmasked SDPA made every prefill
+        // fully bidirectional, so each layer wrote future-contaminated K/V into
+        // the cache and the first sampled token was already wrong (issue #991).
+        // An explicit mask (the padded-prefill case) still goes to the masked
+        // call, and decode is unchanged: `causal_attention` takes its
+        // single-query maskless fast path at `l == 1`.
+        let output = if l > 1 && mask.is_some() {
             let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
             unsafe {
                 mlxcel_core::layers::attention_from_ptr(
@@ -563,12 +576,19 @@ impl MLAAttention {
             let keys = concatenate(&k_nope, &repeat_kv(&kpe_all, self.num_heads as i32), -1);
             let queries = concatenate(q_nope, &q_pe, -1);
             // Same mask policy as the decompressed path above, deliberately:
-            // this change must not alter which steps are causal.
-            let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
-            unsafe {
-                mlxcel_core::layers::attention_from_ptr(
-                    &queries, &keys, &values, self.scale, mask_ptr, 0.0, 0,
-                )
+            // this change must not alter which steps are causal. That includes
+            // the maskless-prefill causal fallback (issue #991); without it the
+            // absorbed prefill would be bidirectional while the decompressed
+            // one is causal, and the two paths would stop being comparable.
+            if let Some(m) = mask {
+                let mask_ptr = m as *const _;
+                unsafe {
+                    mlxcel_core::layers::attention_from_ptr(
+                        &queries, &keys, &values, self.scale, mask_ptr, 0.0, 0,
+                    )
+                }
+            } else {
+                mlxcel_core::causal_attention(&queries, &keys, &values, self.scale, 0.0, 0)
             }
         };
 
