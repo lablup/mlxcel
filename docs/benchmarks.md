@@ -60,12 +60,37 @@ cargo run --release --features metal,accelerate --example rejection_sampling_mic
 ```
 
 Both sampling harnesses print, before the table, the dispatch outcome each arm
-recorded, drained from the same one-shot channel `mlxcel-server` logs at INFO.
-Read those two lines before you read the numbers. Issue #899 shipped a
-production benchmark that compared the fallback against itself across a full
-sweep and returned a clean-looking null result, because nothing said which path
-had run; a sampling sweep whose two arms report the same path is measuring
-nothing.
+recorded, from the same record `mlxcel-server` announces at INFO. Read those
+lines before you read the numbers. Issue #899 shipped a production benchmark
+that compared the fallback against itself across a full sweep and returned a
+clean-looking null result, because nothing said which path had run; a sampling
+sweep whose two arms report the same path is measuring nothing.
+
+### An op-level number is not a decode number (issue #901)
+
+`examples/rejection_sampling_microbench.rs` reports two speedups per row, and
+the second one is the one to read.
+
+`iso_x` is the classic op-level measurement: build, `eval`, `synchronize`, once
+per iteration. `pipe_x` reproduces what a decode loop does, which is a software
+pipeline: build the next forward and the next sample, `async_eval` both, then
+read the PREVIOUS step's token, with one synchronize at the end of the run.
+
+The two disagree whenever the operation under test forces a synchronization on
+its caller, because `iso` has already paid for a sync at every iteration and is
+structurally blind to one more. The first cut of #901 read a device flag back to
+host inside the sampler; `iso` scored it 1.14x to 1.17x faster at vocab 152064
+while end-to-end decode on Qwen3-0.6B measured 1.7x SLOWER. A large `iso_x` with
+a poor `pipe_x` means the operation is synchronizing.
+
+The general rule this leaves behind: an op-level harness measures an operation
+in isolation, and "in isolation" silently includes "with the caller's pipeline
+already drained". Any operation that touches host memory, reads a flag, or
+branches on device state needs a pipelined arm before its number means
+anything. `the_production_sampling_call_never_synchronizes` in
+`src/lib/mlxcel-core/src/sampling_rejection_tests.rs` is the cheaper form of the
+same check: it enqueues a large chain of matmuls and asserts the sampler returns
+before that chain drains, so a regression fails a test rather than a benchmark.
 
 ## Fused decode kernels: the measure-then-keep gate (issue #905)
 

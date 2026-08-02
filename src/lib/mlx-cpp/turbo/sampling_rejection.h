@@ -83,11 +83,25 @@
 // one or two.
 //
 // The cap is `REJECTION_MAX_ROUNDS = 32`, so under this arithmetic a row cannot
-// exhaust it. The `ok` output and the caller's `argpartition` fallback are kept
-// anyway, as the guard that catches a future change to the pivot arithmetic
-// (an arithmetic midpoint, for instance, does not halve the bit distance and
-// stalls outright on small probabilities). A test drives the fallback by
-// lowering the cap explicitly.
+// exhaust it. The `ok` output is kept anyway, as the guard that catches a future
+// change to the pivot arithmetic (an arithmetic midpoint, for instance, does not
+// halve the bit distance and stalls outright on small probabilities), and the
+// caller has two ways to use it.
+//
+// The production sampler never waits on it. Reading `ok` means evaluating it,
+// which drains the GPU queue inside the caller's graph-building phase, and both
+// decode drivers are software pipelines that build step n+1 before reading step
+// n. Doing that cost 1.7x of end-to-end decode throughput while an op-level
+// benchmark called it a win. So production stashes the flags and inspects them
+// on a later call, once `array::is_available()` reports the launch has landed.
+// An unconverged row has already returned its own argmax by then, which is
+// always inside the filtered support, so the degradation would be one greedy
+// draw rather than an invalid token, and it is counted and announced.
+//
+// The forced entry point (`fused_sample_rejection`) does wait, reads the flags,
+// and falls the launch back to the `argpartition` chain. It is what the tests
+// and the microbenchmark call, and lowering its cap is how the fallback is
+// driven.
 //
 // ## Determinism
 //

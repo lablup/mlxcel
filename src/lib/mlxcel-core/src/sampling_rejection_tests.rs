@@ -31,6 +31,16 @@
 //! 4. **Hardening.** Subnormal-scale probabilities do not break the shrinking
 //!    interval, `-inf`-masked entries (token bias, XTC) are never drawn, and a
 //!    fixed seed reproduces a stream.
+//! 5. **No synchronization.** The production sampling call must return before a
+//!    queue of outstanding GPU work drains. Both decode drivers are software
+//!    pipelines that build step n+1 and `async_eval` it before reading step n,
+//!    so a sampler that evaluates anything collapses the pipeline. The first
+//!    cut of this issue did exactly that and lost 1.7x of end-to-end decode
+//!    throughput while the op-level benchmark reported a win, because an
+//!    op-level harness synchronizes around every iteration and cannot see a
+//!    sync it has already paid for. See
+//!    [`the_production_sampling_call_never_synchronizes`], which is a structural
+//!    assertion rather than a timing threshold.
 //!
 //! ## One documented semantic difference
 //!
@@ -1168,41 +1178,6 @@ fn the_reference_arm_stays_on_the_argpartition_chain() {
 }
 
 #[test]
-fn the_lazy_entry_point_draws_the_same_stream_without_syncing() {
-    let _dispatch = dispatch_guard();
-    if !gpu_backend() {
-        return;
-    }
-    // The scheduler's speculative lookahead prime takes `fused_sample_lazy`
-    // because reading the converged flags would block on the whole forward
-    // graph. The only difference must be that readback: at one seed the two
-    // entry points have to produce the identical stream, or the lookahead and
-    // the synchronous re-dispatch would disagree about step n's token.
-    let logits = spread_logits(1024, 0x90E);
-    let batched = tiled(&logits, 16);
-
-    for (top_k, top_p, min_p) in [(40i32, 1.0f32, 0.0f32), (0, 0.9, 0.0), (40, 0.9, 0.05)] {
-        random_seed(0x0901_1A2B);
-        let verified = u32_values(&fused_sample(&batched, 1.0, top_k, top_p, min_p));
-        random_seed(0x0901_1A2B);
-        let lazy = u32_values(&fused_sample_lazy(&batched, 1.0, top_k, top_p, min_p));
-        assert_eq!(
-            verified, lazy,
-            "top_k={top_k} top_p={top_p} min_p={min_p}: the lazy entry point drew a different \
-             stream from the verified one"
-        );
-    }
-
-    reset_sampling_dispatch();
-    let _ = u32_values(&fused_sample_lazy(&batched, 1.0, 40, 0.9, 0.0));
-    let lines = recorded_dispatch();
-    assert!(
-        lines.iter().any(|l| l.contains("unverified")),
-        "the lazy path did not identify itself in the dispatch report: {lines:?}"
-    );
-}
-
-#[test]
 fn per_row_parameters_reach_the_kernel_from_one_launch() {
     if !gpu_backend() {
         return;
@@ -1224,5 +1199,174 @@ fn per_row_parameters_reach_the_kernel_from_one_launch() {
     assert!(
         wide_seen > narrow_seen,
         "k=40 covered {wide_seen} tokens, k=4 covered {narrow_seen}"
+    );
+}
+
+// -- the sampler must not synchronize --
+
+/// A chain of large matmuls, long enough that draining it is unmistakably
+/// measurable. Returns the tail of the chain, unevaluated.
+fn pending_gpu_work(links: usize) -> UniquePtr<MlxArray> {
+    let n = 1024i32;
+    let side = (n * n) as usize;
+    let a: Vec<f32> = (0..side).map(|i| ((i % 251) as f32) * 0.001).collect();
+    let lhs = from_slice_f32(&a, &[n, n]);
+    let mut acc = from_slice_f32(&a, &[n, n]);
+    for _ in 0..links {
+        acc = matmul(&lhs, &acc);
+    }
+    acc
+}
+
+/// Time how long `f` takes while `links` matmuls are still outstanding on the
+/// GPU, and how long the outstanding work then takes to drain.
+///
+/// A call that only builds a graph returns in microseconds and leaves the drain
+/// to be paid afterwards. A call that evaluates anything has to wait for the
+/// queue ahead of it first, so it absorbs the drain and the second number
+/// collapses. The ratio is therefore a direct, hardware-speed-independent
+/// witness of whether the call synchronizes.
+fn build_and_drain<F>(links: usize, mut f: F) -> (std::time::Duration, std::time::Duration)
+where
+    F: FnMut() -> UniquePtr<MlxArray>,
+{
+    let pending = pending_gpu_work(links);
+    async_eval(&pending);
+
+    let t0 = std::time::Instant::now();
+    let out = f();
+    let build = t0.elapsed();
+
+    let t1 = std::time::Instant::now();
+    eval(&pending);
+    synchronize_default();
+    let drain = t1.elapsed();
+
+    eval(&out);
+    synchronize_default();
+    (build, drain)
+}
+
+/// The production sampling call must not block on the GPU.
+///
+/// This is the guard for the failure this issue actually shipped once. The CLI
+/// decode loop and the batch scheduler are both software pipelines: they build
+/// step n+1 and `async_eval` it, then read step n. A sampler that evaluates
+/// anything inside that build collapses the pipeline, and the cost is invisible
+/// to an op-level benchmark because the benchmark synchronizes around every
+/// iteration anyway, which is the one regime where a forced sync is free.
+/// Measured end to end on Qwen3-0.6B the difference was 1.7x, against an
+/// op-level matrix that scored the same configuration at 1.14x to 1.17x faster.
+///
+/// So the property is tested structurally rather than by timing the op: with a
+/// large chain of matmuls outstanding, the sampler must return before that
+/// chain drains.
+#[test]
+fn the_production_sampling_call_never_synchronizes() {
+    if !gpu_backend() {
+        return;
+    }
+    let vocab = 152_064usize;
+    let logits = spread_logits(vocab, 0x910);
+    let batched = tiled(&logits, 1);
+
+    // Calibrate: enough links that the drain dominates any graph-build cost.
+    let links = 24usize;
+
+    for (label, top_k, top_p, min_p) in [
+        ("top-p (routed)", 0i32, 0.9f32, 0.0f32),
+        ("top-k (declined)", 40, 1.0, 0.0),
+        ("greedy", 0, 1.0, 0.0),
+    ] {
+        let (build, drain) =
+            build_and_drain(links, || fused_sample(&batched, 1.0, top_k, top_p, min_p));
+        assert!(
+            build * 4 < drain,
+            "{label}: fused_sample took {build:?} to build while {drain:?} of GPU work was \
+             outstanding, so it waited for the queue instead of enqueueing behind it. A \
+             synchronizing sampler collapses the decode pipeline."
+        );
+    }
+}
+
+/// The forced entry point is allowed to synchronize, and does.
+///
+/// It is what the microbenchmark and the cap-overflow tests call, because they
+/// need the per-row converged flag on the host. Pinning the difference keeps the
+/// two entry points from quietly converging: if this ever stopped blocking, the
+/// cap-overflow fallback would have stopped running.
+#[test]
+fn the_forced_entry_point_is_the_one_that_synchronizes() {
+    if !gpu_backend() {
+        return;
+    }
+    let vocab = 152_064usize;
+    let logits = spread_logits(vocab, 0x911);
+    let batched = tiled(&logits, 1);
+    let cap = sampling_rejection_max_rounds();
+
+    let (build, drain) = build_and_drain(24, || {
+        fused_sample_rejection(&batched, 1.0, 0, 0.9, 0.0, cap)
+    });
+    assert!(
+        build > drain,
+        "fused_sample_rejection built in {build:?} against a {drain:?} drain, so it no longer \
+         reads the converged flags back and the cap-overflow fallback cannot be running"
+    );
+}
+
+#[test]
+fn cap_overflow_is_detected_without_waiting_on_the_production_path() {
+    let _dispatch = dispatch_guard();
+    if !gpu_backend() {
+        return;
+    }
+    // The production path cannot afford to read the converged flags at launch
+    // time, so it stashes them and inspects them on a later call once
+    // `is_available()` says the launch has landed. This drives that mechanism:
+    // a one-round cap on the adversarial near-uniform shape guarantees
+    // unconverged rows, and the SECOND call must pick them up.
+    //
+    // Note what is deliberately not claimed. The overflowing launch is not
+    // re-sampled; its token was already emitted. The rows returned their row
+    // argmax, which the kernel guarantees is inside the filtered support, so the
+    // degradation is one greedy draw rather than an invalid token, and the point
+    // of the check is that it is reported rather than silent.
+    let vocab = 152_064usize;
+    let logits = near_uniform_logits(vocab);
+    let rows = 4usize;
+    let batched = tiled(&logits, rows);
+
+    reset_sampling_dispatch();
+    assert_eq!(rejection_cap_overflow_rows(), 0);
+
+    // First launch: overflows, stashes its flags, reports nothing yet.
+    let first = u32_values(&fused_sample_rejection_deferred(
+        &batched, 1.0, 0, 0.9, 0.0, 1,
+    ));
+    assert_eq!(first.len(), rows);
+    assert!(first.iter().all(|&id| (id as usize) < vocab));
+    assert_eq!(
+        rejection_cap_overflow_rows(),
+        0,
+        "the launch reported its own overflow, so it must have waited for the flags"
+    );
+
+    // Second launch: the first has landed, so the deferred check picks it up.
+    let second = u32_values(&fused_sample_rejection_deferred(
+        &batched, 1.0, 0, 0.9, 0.0, 1,
+    ));
+    assert_eq!(second.len(), rows);
+    assert!(
+        rejection_cap_overflow_rows() > 0,
+        "the deferred check never picked up the previous launch's overflow"
+    );
+
+    let lines = recorded_dispatch();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("exhausted the round cap on an earlier launch")),
+        "the deferred overflow was counted but not announced: {lines:?}"
     );
 }

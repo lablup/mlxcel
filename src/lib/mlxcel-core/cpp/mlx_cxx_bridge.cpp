@@ -4590,7 +4590,7 @@ namespace {
         SAMPLING_DISPATCH_GREEDY = 5,
         SAMPLING_DISPATCH_NO_FILTER = 6,
         SAMPLING_DISPATCH_REFERENCE_ARM = 7,
-        SAMPLING_DISPATCH_REJECTION_LAZY = 8,
+        SAMPLING_DISPATCH_REJECTION_VERIFIED = 8,
         SAMPLING_DISPATCH_NOT_ROUTED = 9,
         SAMPLING_DISPATCH_KIND_COUNT = 10,
     };
@@ -4611,8 +4611,29 @@ namespace {
     };
 
     SamplingDispatchState& sampling_dispatch_state() {
-        static SamplingDispatchState state;
-        return state;
+        // Leaked for the same teardown reason as the kernel holders below.
+        static SamplingDispatchState* state = new SamplingDispatchState();
+        return *state;
+    }
+
+    // The converged flags of the most recent production launch, held so a LATER
+    // call can inspect them without ever waiting.
+    //
+    // Reading them at launch time is what regressed decode by 1.7x: the CLI loop
+    // and the batch scheduler both build step n+1 and `async_eval` it before
+    // reading step n, so any evaluation inside the sampler drains the queue and
+    // collapses the pipeline. `array::is_available()` is the non-blocking query,
+    // so the check simply happens whenever the previous step has landed, which
+    // in a decode loop is always by the next token.
+    struct PendingVerification {
+        std::mutex mu;
+        std::optional<mlx::core::array> ok;
+        int batch = 0;
+    };
+
+    PendingVerification& pending_verification() {
+        static PendingVerification* pending = new PendingVerification();
+        return *pending;
     }
 
     inline bool sampling_dispatch_is_new(SamplingDispatchKind kind) {
@@ -4997,6 +5018,59 @@ static mlx::core::array fused_sample_argpartition_chain(
         -1);
 }
 
+// Inspect the previous production launch's converged flags, but ONLY if they
+// have already landed. Never waits, so it is safe to call from inside a decode
+// loop's graph-building phase.
+//
+// `array::is_available()` is MLX's non-blocking status query: it is false while
+// the launch is still unscheduled or in flight, and true once the event is
+// signalled. A decode loop reads each step's token before building the next, so
+// in practice the check lands one step late and costs nothing. If it never
+// lands (a caller that discards its tokens) the stash is simply replaced by the
+// next launch and nothing is reported, which is the correct outcome for a
+// sample that was never used.
+static void drain_pending_verification() {
+    auto& pending = pending_verification();
+    std::optional<mlx::core::array> ok;
+    int batch = 0;
+    {
+        std::lock_guard<std::mutex> lock(pending.mu);
+        if (!pending.ok.has_value() || !pending.ok->is_available()) {
+            return;
+        }
+        ok = std::move(pending.ok);
+        batch = pending.batch;
+        pending.ok.reset();
+    }
+
+    const auto* flags = ok->data<uint32_t>();
+    uint32_t unconverged = 0;
+    for (int row = 0; row < batch; ++row) {
+        if (flags[row] == 0u) {
+            ++unconverged;
+        }
+    }
+    if (unconverged == 0) {
+        return;
+    }
+
+    auto& state = sampling_dispatch_state();
+    state.cap_overflow_rows.fetch_add(unconverged, std::memory_order_relaxed);
+    state.cap_overflow_launches.fetch_add(1, std::memory_order_relaxed);
+    if (sampling_dispatch_is_new(SAMPLING_DISPATCH_CAP_OVERFLOW)) {
+        std::ostringstream os;
+        os << "rejection kernel: " << unconverged << " of " << batch
+           << " rows exhausted the round cap on an earlier launch. Those rows "
+              "returned their row argmax, which is inside the filtered support, "
+              "and the launch was NOT re-sampled: the production path checks the "
+              "flags without waiting, so the token had already been emitted. "
+              "This should be unreachable (the bit-space bracket bounds the loop "
+              "at 31 rounds), so a nonzero count means the pivot arithmetic "
+              "regressed";
+        sampling_dispatch_record(SAMPLING_DISPATCH_CAP_OVERFLOW, os.str());
+    }
+}
+
 // Probabilities the rejection kernel consumes: one softmax over the
 // temperature-scaled logits, in f32.
 //
@@ -5065,29 +5139,45 @@ static std::unique_ptr<MlxArray> fused_sample_rejection_path(
     auto result = mlxcel::turbo::rejection_sample(probs, params, max_rounds);
 
     if (!verify) {
-        // Lazy path (the scheduler's speculative lookahead prime). Reading the
-        // `ok` flags means evaluating them, which means blocking on the whole
-        // forward graph, which is exactly what that call site exists to avoid:
-        // it schedules step N asynchronously so the GPU runs ahead while the
-        // host reads step N-1.
+        // Production path. It must not evaluate anything.
         //
-        // Skipping the check is sound because the round cap cannot be reached:
-        // the bit-space bracket halves every round from a starting distance
-        // below 2^30, and once `low` and `high` are adjacent floats the proposal
-        // equals the support and the next draw is accepted unconditionally, so
-        // 31 rounds is an upper bound (see `sampling_rejection.h`). Were that
-        // ever to change, an unconverged row here returns its own argmax, which
-        // is always inside the filtered support: the failure mode is one greedy
-        // draw on a speculative step, not an out-of-support token.
-        if (sampling_dispatch_is_new(SAMPLING_DISPATCH_REJECTION_LAZY)) {
+        // Both decode drivers are software pipelines: the CLI loop
+        // (`generate.rs`) and the batch scheduler build step n+1 and
+        // `async_eval` it, then read step n. Evaluating the converged flags here
+        // drains the queue inside that build, which collapses the pipeline. It
+        // measured 1.7x slower end to end on Qwen3-0.6B against an op-level
+        // matrix that scored the same configuration 1.14x to 1.17x FASTER,
+        // because an op-level harness synchronizes around every iteration and is
+        // structurally blind to a sync it forces on its caller.
+        // `the_production_sampling_call_never_synchronizes` is the guard.
+        //
+        // Not checking synchronously is sound, not merely cheap: the round cap
+        // cannot be reached. The bit-space bracket halves every round from a
+        // starting distance below 2^30, and once `low` and `high` are adjacent
+        // floats the proposal equals the support and the next draw is accepted
+        // unconditionally, so 31 rounds is an upper bound (see
+        // `sampling_rejection.h`). The flags are still checked, just never
+        // waited on: they are stashed and inspected on a later call once
+        // `is_available()` says the launch has landed, which in a decode loop is
+        // by the next token. If the invariant were ever violated the row returns
+        // its own argmax, which is always inside the filtered support, so the
+        // failure mode is one greedy draw rather than an invalid token, and it
+        // is counted and announced rather than silent.
+        drain_pending_verification();
+        {
+            auto& pending = pending_verification();
+            std::lock_guard<std::mutex> lock(pending.mu);
+            pending.ok = result.ok;
+            pending.batch = batch;
+        }
+        if (sampling_dispatch_is_new(SAMPLING_DISPATCH_REJECTION)) {
             std::ostringstream os;
-            os << "rejection kernel, unverified ("
+            os << "rejection kernel ("
                << sampling_config_text(
                       batch, vocab, temperature, top_k, top_p, min_p)
                << ", round cap " << max_rounds
-               << "); the speculative lookahead prime skips the converged-flag "
-                  "readback so it does not sync";
-            sampling_dispatch_record(SAMPLING_DISPATCH_REJECTION_LAZY, os.str());
+               << "); converged flags checked without waiting, on the next launch";
+            sampling_dispatch_record(SAMPLING_DISPATCH_REJECTION, os.str());
         }
         return std::make_unique<MlxArray>(result.ids);
     }
@@ -5102,13 +5192,16 @@ static std::unique_ptr<MlxArray> fused_sample_rejection_path(
     }
 
     if (unconverged == 0) {
-        if (sampling_dispatch_is_new(SAMPLING_DISPATCH_REJECTION)) {
+        if (sampling_dispatch_is_new(SAMPLING_DISPATCH_REJECTION_VERIFIED)) {
             std::ostringstream os;
-            os << "rejection kernel ("
+            os << "rejection kernel, verified ("
                << sampling_config_text(
                       batch, vocab, temperature, top_k, top_p, min_p)
-               << ", round cap " << max_rounds << ")";
-            sampling_dispatch_record(SAMPLING_DISPATCH_REJECTION, os.str());
+               << ", round cap " << max_rounds
+               << "); the forced entry point reads the converged flags back and "
+                  "therefore synchronizes";
+            sampling_dispatch_record(
+                SAMPLING_DISPATCH_REJECTION_VERIFIED, os.str());
         }
         return std::make_unique<MlxArray>(result.ids);
     }
@@ -5261,17 +5354,6 @@ std::unique_ptr<MlxArray> fused_sample(
     float min_p
 ) {
     return fused_sample_impl(
-        logits, temperature, top_k, top_p, min_p, true, true);
-}
-
-std::unique_ptr<MlxArray> fused_sample_lazy(
-    const MlxArray& logits,
-    float temperature,
-    int32_t top_k,
-    float top_p,
-    float min_p
-) {
-    return fused_sample_impl(
         logits, temperature, top_k, top_p, min_p, true, false);
 }
 
@@ -5285,6 +5367,18 @@ std::unique_ptr<MlxArray> fused_sample_rejection(
 ) {
     return fused_sample_rejection_path(
         logits.inner, temperature, top_k, top_p, min_p, max_rounds, true);
+}
+
+std::unique_ptr<MlxArray> fused_sample_rejection_deferred(
+    const MlxArray& logits,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p,
+    int32_t max_rounds
+) {
+    return fused_sample_rejection_path(
+        logits.inner, temperature, top_k, top_p, min_p, max_rounds, false);
 }
 
 std::unique_ptr<MlxArray> sampling_rejection_probe(

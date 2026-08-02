@@ -6193,12 +6193,7 @@ impl BatchScheduler {
     ) -> Option<DecodeLookahead> {
         let logits = self.lookahead_forward(seq_ids, input)?;
         let last_logits = mlxcel_core::slice_last_logits(&logits);
-        // `_lazy`, not `fused_sample`: the filtered path of the plain entry
-        // point reads the rejection kernel's per-row converged flags back to
-        // host, and evaluating those means blocking on the whole forward graph,
-        // which is precisely what this function exists to avoid. The draw is
-        // identical either way (#901).
-        let tokens = mlxcel_core::fused_sample_lazy(
+        let tokens = mlxcel_core::fused_sample(
             &last_logits,
             params.temperature,
             params.top_k,

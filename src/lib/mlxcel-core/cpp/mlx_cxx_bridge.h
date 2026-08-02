@@ -1322,28 +1322,25 @@ bool sampling_gumbel_available();
 // Exposed so tests can pin that the sampled id does not depend on it.
 int32_t gumbel_sample_num_splits(int32_t batch, int32_t vocab);
 
-// `fused_sample` without the rejection kernel's converged-flag readback.
-//
-// Same routing and the same draw; the only difference is that the filtered path
-// does not evaluate the per-row `ok` flags and therefore does not sync. For the
-// scheduler's speculative lookahead prime, which schedules its graph
-// asynchronously so the GPU runs ahead: a sync there collapses the pipeline.
-// Sound because the round cap is unreachable under the kernel's bit-space
-// bisection; see `turbo/sampling_rejection.h`.
-std::unique_ptr<MlxArray> fused_sample_lazy(
-    const MlxArray& logits,
-    float temperature,
-    int32_t top_k,
-    float top_p,
-    float min_p
-);
-
 // Dual-pivot rejection sampling for top-k / top-p / min-p (#901), forced.
 // Bypasses the `MLXCEL_SAMPLING_REJECTION` gate and takes an explicit round cap
 // so a test can drive the cap-overflow fallback. Falls back to the
 // `argpartition` chain exactly as the production path does when a row fails to
 // converge, and counts the event.
 std::unique_ptr<MlxArray> fused_sample_rejection(
+    const MlxArray& logits,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p,
+    int32_t max_rounds
+);
+
+// The production (non-verifying) rejection path with an explicit round cap.
+// Identical to what `fused_sample` runs, except that the cap is a parameter, so
+// a test can drive a row into cap overflow and then observe the deferred,
+// non-blocking check pick it up on the following call.
+std::unique_ptr<MlxArray> fused_sample_rejection_deferred(
     const MlxArray& logits,
     float temperature,
     int32_t top_k,
