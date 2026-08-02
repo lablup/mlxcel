@@ -223,10 +223,7 @@ pub fn run_cascade_decode(
         // order `o_indptr = [0, 2, 4, ...]` groups over. Two ops instead of the
         // concatenate-then-gather below, on the shape this feature exists for.
         let v_pairs = crate::ops::stack(
-            &[
-                &*suffix_v as *const MlxArray,
-                &*prefix_v as *const MlxArray,
-            ],
+            &[&*suffix_v as *const MlxArray, &*prefix_v as *const MlxArray],
             1,
         );
         let lse_pairs = crate::ops::stack(

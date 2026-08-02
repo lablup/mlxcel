@@ -29,6 +29,7 @@ Current GitHub-facing docs:
 14. `audio-preprocessing.md` — shared model-input WAV normalization, loaded family policy, resource limits, cancellation, metrics, and current XLA capability boundary.
 15. `speculative-acceptance.md` — speculative-decoding acceptance rules, which rule each code path runs, the distribution-preservation guarantee and its RNG dependency, the kill switch, and how to read the active rule off a log.
 16. `mla-absorbed-decode.md` — DeepSeek-family matrix-absorbed MLA decode over a compressed-latent KV cache: the identity, the cache layout, the flags, and what is and is not verified.
+17. `cascade-attention.md` — shared-prompt-prefix (cascade) decode: computing a prefix shared by several concurrent sequences once per step instead of once per sequence, the two-level decomposition, the flags, and how to tell which path a launch took.
 
 ## Architecture Decision Records
 

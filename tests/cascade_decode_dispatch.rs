@@ -185,7 +185,10 @@ fn the_production_entry_point_dispatches_cascade_and_agrees_with_the_flat_launch
     let stats = mlxcel_core::cache::paged_batch_decode_stats();
     assert_eq!(stats.cascade_failures, 0, "a cascade launch fell back");
 
-    let scale_ref = flat.iter().fold(0.0f32, |acc, v| acc.max(v.abs())).max(1e-6);
+    let scale_ref = flat
+        .iter()
+        .fold(0.0f32, |acc, v| acc.max(v.abs()))
+        .max(1e-6);
     let err = flat
         .iter()
         .zip(&cascade)

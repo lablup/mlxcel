@@ -81,7 +81,10 @@ fn the_env_gate_honours_both_spellings_and_falls_back_to_the_default() {
     // Unset and unparseable both take the shipped default.
     assert_eq!(parse_cascade_enabled(None), DEFAULT_CASCADE_ENABLED);
     assert_eq!(parse_cascade_enabled(Some("")), DEFAULT_CASCADE_ENABLED);
-    assert_eq!(parse_cascade_enabled(Some("maybe")), DEFAULT_CASCADE_ENABLED);
+    assert_eq!(
+        parse_cascade_enabled(Some("maybe")),
+        DEFAULT_CASCADE_ENABLED
+    );
 }
 
 #[test]
@@ -108,16 +111,25 @@ fn the_span_stops_one_page_short_of_the_shortest_member() {
     // Two requests sharing every page they have. The last page of a request is
     // the only one that may be partially filled, and level 0 declares its pages
     // full, so the span must never reach it.
-    let v = view(PAGE, &[(vec![0, 1, 2, 3], 7, 0), (vec![0, 1, 2, 3, 4], PAGE, 0)]);
+    let v = view(
+        PAGE,
+        &[(vec![0, 1, 2, 3], 7, 0), (vec![0, 1, 2, 3, 4], PAGE, 0)],
+    );
     let group = detect_shared_prefix(&v, 1, 2).expect("a shared prefix exists");
-    assert_eq!(group.shared_pages, 3, "the 4th page of request 0 is partial");
+    assert_eq!(
+        group.shared_pages, 3,
+        "the 4th page of request 0 is partial"
+    );
     assert_eq!(group.members, vec![0, 1]);
 }
 
 #[test]
 fn both_thresholds_are_enforced() {
     let v = shared_prompt(20, 2, 3);
-    assert!(detect_shared_prefix(&v, 21, 2).is_none(), "span below floor");
+    assert!(
+        detect_shared_prefix(&v, 21, 2).is_none(),
+        "span below floor"
+    );
     assert!(detect_shared_prefix(&v, 16, 4).is_none(), "too few members");
     assert!(detect_shared_prefix(&v, 20, 3).is_some());
     // A member floor below 2 is nonsense (there is no duplication with one

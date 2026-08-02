@@ -360,16 +360,9 @@ fn main() {
 
             // One launch outside the timed region, to read the stats that
             // attribute the arm and to pay the level-0 kernel JIT.
-            let (_, stats) = run_cascade_decode(
-                &fx.q,
-                pool_k,
-                pool_v,
-                &plan,
-                fx.geometry,
-                fx.scale,
-                target,
-            )
-            .expect("cascade launch");
+            let (_, stats) =
+                run_cascade_decode(&fx.q, pool_k, pool_v, &plan, fx.geometry, fx.scale, target)
+                    .expect("cascade launch");
             assert_eq!(
                 stats.prefix_q_heads,
                 args.q_heads * members as i32,
@@ -378,16 +371,9 @@ fn main() {
             );
 
             let cascade = time_arm(&args, || {
-                let (out, _) = run_cascade_decode(
-                    &fx.q,
-                    pool_k,
-                    pool_v,
-                    &plan,
-                    fx.geometry,
-                    fx.scale,
-                    target,
-                )
-                .expect("cascade launch");
+                let (out, _) =
+                    run_cascade_decode(&fx.q, pool_k, pool_v, &plan, fx.geometry, fx.scale, target)
+                        .expect("cascade launch");
                 mlxcel_core::eval(&out);
             });
 

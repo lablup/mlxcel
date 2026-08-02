@@ -390,8 +390,7 @@ fn run_cascade_variant(
     };
 
     let geometry0 = prefix_geometry(geometry, plan.members()).unwrap();
-    let prefix_plan =
-        PagedDecodePlan::heuristic(geometry0, &plan.prefix_view.page_counts(), 128);
+    let prefix_plan = PagedDecodePlan::heuristic(geometry0, &plan.prefix_view.page_counts(), 128);
     let ctx0 = V2Context::build(
         &q_prefix,
         pool_k,
@@ -418,8 +417,7 @@ fn run_cascade_variant(
         )
     };
 
-    let suffix_plan =
-        PagedDecodePlan::heuristic(geometry, &plan.suffix_view.page_counts(), 128);
+    let suffix_plan = PagedDecodePlan::heuristic(geometry, &plan.suffix_view.page_counts(), 128);
     let ctx1 = V2Context::build(
         &q,
         pool_k,
@@ -437,10 +435,7 @@ fn run_cascade_variant(
     let lse_cat = if (lse_scale - 1.0).abs() < f32::EPSILON {
         lse_cat
     } else {
-        ffi::multiply(
-            &lse_cat,
-            &ffi::full_f32(&[1], lse_scale, dtype::FLOAT32),
-        )
+        ffi::multiply(&lse_cat, &ffi::full_f32(&[1], lse_scale, dtype::FLOAT32))
     };
     let v_in = ffi::take(&v_cat, &order, 0);
     let lse_in = ffi::take(&lse_cat, &order, 0);
@@ -468,14 +463,27 @@ fn cascade_matches_the_flat_launch_on_an_exact_f32_pool() {
         "the flat baseline itself drifted"
     );
     let err = max_rel_error(&cascade, &want);
-    assert!(err < 2e-5, "cascade deviates from the host reference by {err}");
+    assert!(
+        err < 2e-5,
+        "cascade deviates from the host reference by {err}"
+    );
     let err = max_rel_error(&cascade, &flat);
     assert!(err < 2e-5, "cascade deviates from the flat launch by {err}");
 }
 
 #[test]
 fn cascade_matches_the_flat_launch_with_an_f16_pool() {
-    let batch = CascadeBatch::new(16, 8, 4, 32, 6, &[9, 20, 1, 33], &[], dtype::FLOAT16, 0xBEEF);
+    let batch = CascadeBatch::new(
+        16,
+        8,
+        4,
+        32,
+        6,
+        &[9, 20, 1, 33],
+        &[],
+        dtype::FLOAT16,
+        0xBEEF,
+    );
     let plan = plan_for(&batch, 4);
     let flat = run_flat(&batch);
     let cascade = run_cascade(&batch, &plan);
@@ -564,7 +572,10 @@ fn the_shared_blocks_really_are_shared_in_the_pool() {
         assert_eq!(batch.pool.refcount(*id), 3, "block {id} is not shared by 3");
     }
     let view = batch.view();
-    assert_eq!(view.indices[0..5], view.indices[view.indptr[1] as usize..][..5]);
+    assert_eq!(
+        view.indices[0..5],
+        view.indices[view.indptr[1] as usize..][..5]
+    );
 
     let group = detect_shared_prefix(&view, 4, 2).expect("group");
     assert_eq!(

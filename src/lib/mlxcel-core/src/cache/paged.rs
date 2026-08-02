@@ -580,7 +580,9 @@ fn cascade_candidate(
             // Detection accepted a group the builder rejected, which means the
             // two disagree about the view's invariants. Say so once rather than
             // dropping to flat in silence.
-            tracing::warn!("paged decode cascade: plan build failed, using the flat path: {reason}");
+            tracing::warn!(
+                "paged decode cascade: plan build failed, using the flat path: {reason}"
+            );
             None
         }
     }
@@ -2088,8 +2090,8 @@ impl PagedBlockPool {
                                     }
                                     Err(reason) => {
                                         outcome = PagedDecodeOutcome::CascadeFailed(reason);
-                                        launched =
-                                            launch_v2(q, pool_k, pool_v, view, plan, scale).map(Some);
+                                        launched = launch_v2(q, pool_k, pool_v, view, plan, scale)
+                                            .map(Some);
                                     }
                                 }
                             }
@@ -2100,7 +2102,8 @@ impl PagedBlockPool {
                                     chunks: plan.num_chunks,
                                     merged: plan.needs_merge,
                                 };
-                                launched = launch_v2(q, pool_k, pool_v, view, plan, scale).map(Some);
+                                launched =
+                                    launch_v2(q, pool_k, pool_v, view, plan, scale).map(Some);
                             }
                         }
                     }

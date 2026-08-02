@@ -320,12 +320,7 @@ impl CascadePlan {
     #[must_use]
     pub fn members_are_whole_batch(&self) -> bool {
         self.group.members.len() == self.batch()
-            && self
-                .group
-                .members
-                .iter()
-                .enumerate()
-                .all(|(j, &r)| j == r)
+            && self.group.members.iter().enumerate().all(|(j, &r)| j == r)
     }
 
     /// Structural check, run on every build for the same reason
@@ -377,10 +372,7 @@ impl CascadePlan {
 /// launched; this splits it rather than rebuilding it from the pool, so the two
 /// levels are guaranteed to cover exactly the same pages the flat launch would
 /// have read, in the same order.
-pub fn build_cascade_plan(
-    view: &PagedCsrView,
-    group: CascadeGroup,
-) -> Result<CascadePlan, String> {
+pub fn build_cascade_plan(view: &PagedCsrView, group: CascadeGroup) -> Result<CascadePlan, String> {
     view.validate()
         .map_err(|e| format!("cascade: source view is malformed ({e})"))?;
     let batch = view.batch();
@@ -395,7 +387,9 @@ pub fn build_cascade_plan(
     }
     for &r in &group.members {
         if r >= batch {
-            return Err(format!("cascade: member {r} is outside the batch of {batch}"));
+            return Err(format!(
+                "cascade: member {r} is outside the batch of {batch}"
+            ));
         }
         if view.first_page_offset[r] != 0 {
             return Err(format!(
@@ -446,12 +440,16 @@ pub fn build_cascade_plan(
         let end = view.indptr[r + 1] as usize;
         let is_member = group.members.binary_search(&r).is_ok();
         let skip = if is_member { shared } else { 0 };
-        suffix_view.indices.extend_from_slice(&view.indices[begin + skip..end]);
+        suffix_view
+            .indices
+            .extend_from_slice(&view.indices[begin + skip..end]);
         suffix_view.indptr.push(suffix_view.indices.len() as i32);
         suffix_view.last_page_len.push(view.last_page_len[r]);
-        suffix_view
-            .first_page_offset
-            .push(if is_member { 0 } else { view.first_page_offset[r] });
+        suffix_view.first_page_offset.push(if is_member {
+            0
+        } else {
+            view.first_page_offset[r]
+        });
         suffix_view.seq_lens.push(if is_member {
             view.seq_lens[r] - shared_tokens
         } else {
