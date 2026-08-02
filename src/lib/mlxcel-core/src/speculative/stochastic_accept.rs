@@ -12,23 +12,54 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Distribution-preserving speculative acceptance (chain speculative sampling).
+//! Acceptance-optimal speculative acceptance (chain speculative sampling).
 //!
-//! # What is wrong with argmax acceptance
+//! # What the rule this replaces actually did
 //!
-//! The pre-#902 verify rule accepts a drafted token `t` at position `i` iff it
-//! equals the token the target sampler happens to draw at that position. At
-//! `temperature == 0` that sampler is `argmax`, the draw is deterministic, and
-//! the rule is exactly "does the draft agree with the target's greedy choice".
-//! That rule is lossless: the emitted stream is the greedy target stream.
+//! Issue #902 opens by stating that the verify loop "accepts a draft token iff
+//! it equals the target model's argmax". **For this generator that is not
+//! true**, and the correction matters enough to lead with.
 //!
-//! At `temperature > 0` the same rule is *not* lossless. The target sampler is
-//! re-drawn at each verify position, and a drafted token survives only when
-//! that independent draw lands on it. The resulting stream is neither the
-//! target's temperature distribution nor the draft's; it is biased toward
-//! high-probability tokens (the ones a fresh draw is likely to reproduce),
-//! which is why turning speculation on visibly changes generation behavior at
-//! the same seed and temperature.
+//! [`crate::speculative::SpeculativeGenerator`] selects the target token with
+//! `sample_token_optimized(pos_logits, target_sampling, history)`, a fresh draw
+//! from the target *sampler*, which is `argmax` only when `temperature == 0`.
+//! It then emits that draw on **both** branches: on acceptance the drafted
+//! token, which by the accept test equals the draw, and on rejection the draw
+//! itself. Every emitted token is therefore a fresh conditional draw from the
+//! target distribution, and the stream is already exactly a target-only sample.
+//! Call this rule *sampler-match* ([`AcceptanceRule::SamplerMatch`]).
+//!
+//! So sampler-match was never biased. What it loses is acceptance rate: two
+//! independent draws coincide with probability `sum_x p(x) q(x)`, which is
+//! strictly below the best any correct rule can do.
+//!
+//! The biased argmax-against-argmax rule the issue describes is real, but it
+//! lives elsewhere: `Gemma4MtpTargetAdapter::verify_forward` uses
+//! `argmax_per_position` and the DFlash round loop uses `argmax_logits_to_array`,
+//! both regardless of `sampler.temperature`. Neither is reached from here.
+//!
+//! # The acceptance ceiling, and why "beat argmax" is not achievable
+//!
+//! For a `q`-distributed proposal and a `p`-distributed emission, the largest
+//! probability the two can be made to coincide is `sum_x min(p(x), q(x))`: the
+//! maximal-coupling bound, equivalently `1 - TV(p, q)`. **Every**
+//! distribution-preserving acceptance rule is capped there. Sampler-match
+//! reaches `sum_x p(x) q(x)`; modified rejection sampling attains the bound
+//! exactly and is therefore optimal among correct rules.
+//!
+//! Argmax-against-argmax is not bound by this, because it is not correct. It
+//! accepts at `q(argmax p)`, which for a confident drafter that agrees with the
+//! target's mode can be far above `sum_x min(p, q)`: with `p(a) = 0.3` and
+//! `q(a) = 0.95` it accepts at 0.95 where the ceiling for any correct rule is
+//! about 0.30. That extra acceptance is paid for in bias, one token at a time.
+//!
+//! The consequence is worth stating plainly, because it reframes the issue
+//! rather than failing it: **no implementation can make a
+//! distribution-preserving rule "strictly improve" mean accepted length against
+//! argmax acceptance.** Asking for that is asking a correct rule to beat an
+//! incorrect one at the metric the incorrect one optimizes. Against
+//! sampler-match, the rule this generator actually ran, the improvement is
+//! real and provable, since `sum_x min(p, q) >= sum_x p(x) q(x)` always.
 //!
 //! # The rule implemented here
 //!
@@ -77,24 +108,36 @@
 //!
 //! ## Temperature 0 is untouched
 //!
-//! [`acceptance_rule`] returns [`AcceptanceRule::Argmax`] whenever the target
-//! sampler is greedy (`temperature == 0.0` or `top_k == 1`), and the caller
-//! keeps running the pre-#902 comparison verbatim: no distribution tensors are
-//! built, no randomness is drawn, and the token stream is byte-identical.
+//! [`acceptance_rule`] returns [`AcceptanceRule::GreedyArgmax`] whenever the
+//! target sampler is greedy (`temperature == 0.0` or `top_k == 1`), and the
+//! caller keeps running the pre-#902 comparison verbatim: no distribution
+//! tensors are built, no randomness is drawn, and the stream is byte-identical.
+//!
+//! # Opt-in, not default
+//!
+//! `MLXCEL_SPECULATIVE_STOCHASTIC_ACCEPT=1` enables this rule; it is **off by
+//! default**. Since sampler-match was already distribution-preserving on this
+//! path, the change buys acceptance rate and nothing else, and the available
+//! gain is the ratio `sum_x min(p, q) / sum_x p(x) q(x)`. That ratio collapses
+//! toward 1 whenever the drafter is confident, because `q(t*) ~ 1` makes
+//! `min(p, q)` and `p * q` coincide. Measured on a Llama-3.1-8B /
+//! Llama-3.2-1B pair at temperature 0.7 it is about 1.02, which does not
+//! justify two extra full-vocabulary passes and an extra host sync per
+//! verified position.
+//!
+//! Enable it where the gain is real: a high-entropy drafter, a higher
+//! temperature, or a verify path whose current rule is genuinely biased.
+//! `MLXCEL_SPECULATIVE_ACCEPT_DIAG=1` reports both closed forms so the gain can
+//! be checked before a throughput run rather than inferred from one.
 //!
 //! # Observability
 //!
 //! Every distinct outcome kind is logged once per process at **info** level
-//! (see [`note_rule`] and [`note_outcome`]). A production log therefore proves
-//! which acceptance rule a run actually used, and whether the residual
-//! resample and its degenerate fallback were ever reached. The one-shot latch
-//! is per kind, not global, so a later-appearing kind is not swallowed by an
-//! earlier one.
-//!
-//! # Kill switch
-//!
-//! `MLXCEL_SPECULATIVE_STOCHASTIC_ACCEPT=0` (also `false` / `no` / `off`)
-//! restores argmax acceptance at every temperature. Read once per process.
+//! (see [`note_rule`] and [`note_outcome`]), and
+//! [`crate::speculative::SpeculativeAcceptanceStats::summary_line`] prints the
+//! rule and the rates on stdout after every run, because the CLI installs no
+//! tracing subscriber. The one-shot latch is per kind, not global, so a
+//! later-appearing kind is not swallowed by an earlier one.
 
 use crate::dtype;
 use crate::ffi;
@@ -104,34 +147,72 @@ use cxx::UniquePtr;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Environment kill switch restoring pre-#902 argmax acceptance.
+/// Environment switch enabling modified rejection sampling. Opt-in.
 pub const STOCHASTIC_ACCEPT_ENV: &str = "MLXCEL_SPECULATIVE_STOCHASTIC_ACCEPT";
 
 /// Which acceptance rule a speculative verify round runs.
+///
+/// **Every variant here is distribution-preserving.** That is not an accident
+/// of naming, it is the central finding of issue #902: the rule this generator
+/// shipped with compares the drafted token against a fresh draw from the target
+/// *sampler* and emits that draw on both branches, so the emitted stream was
+/// already a target-only sample. The biased argmax-against-argmax rule the
+/// issue describes lives in the Gemma 4 MTP and DFlash verify paths, is not
+/// selected here, and is deliberately not represented in this enum: an
+/// unreachable variant would be a claim this module cannot back up.
+///
+/// What the variants differ in is [`Self::is_acceptance_optimal`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum AcceptanceRule {
-    /// The target sampler is greedy, so the modified rejection-sampling test
-    /// degenerates to "the drafted token is the argmax". Kept on the original
-    /// integer comparison: identical outcome, none of the tensor work.
-    Argmax,
-    /// The target sampler is stochastic but [`STOCHASTIC_ACCEPT_ENV`] disabled
-    /// the new rule. Biased at `temperature > 0`; opt-in only.
-    ArgmaxKillSwitch,
-    /// The target sampler is stochastic and the caller supplied the proposal
-    /// distribution: modified rejection sampling with residual resample.
+    /// The target sampler is greedy, so its draw is the argmax and the rule is
+    /// "the drafted token is the argmax". Kept on the original integer
+    /// comparison: identical outcome, none of the tensor work.
+    GreedyArgmax,
+    /// The pre-#902 default at `temperature > 0`, and still the default:
+    /// accept iff the drafted token equals an independent draw from the target
+    /// sampler, and emit that draw either way. Lossless, but its acceptance
+    /// probability is `sum_x p(x) q(x)`, below the achievable optimum.
+    SamplerMatch,
+    /// Modified rejection sampling with residual resample, enabled by
+    /// [`STOCHASTIC_ACCEPT_ENV`]. Lossless *and* acceptance-optimal.
     Stochastic,
-    /// The target sampler is stochastic but the drafter could not report the
-    /// distribution it proposed from, so the accept test has no `q` and the
-    /// round falls back to the biased argmax comparison.
-    ArgmaxNoProposalDistribution,
+    /// [`STOCHASTIC_ACCEPT_ENV`] asked for the stochastic rule but the drafter
+    /// could not report the distribution it proposed from, so there is no `q`
+    /// for the accept test and the round stays on [`Self::SamplerMatch`].
+    /// Fabricating a `q` would void the losslessness proof outright.
+    SamplerMatchNoProposalDistribution,
 }
 
 impl AcceptanceRule {
     /// True when this rule preserves the target model's token distribution.
+    ///
+    /// True for every variant. See the type-level docs: the biased rule is in
+    /// MTP/DFlash, not here. Kept as an explicit, tested statement rather than
+    /// deleted, because "which of these is safe to serve" is the first question
+    /// a reader of this enum asks.
     #[inline]
     pub fn is_distribution_preserving(self) -> bool {
-        matches!(self, Self::Argmax | Self::Stochastic)
+        true
+    }
+
+    /// True when this rule attains the maximum acceptance probability any
+    /// distribution-preserving rule can reach.
+    ///
+    /// That maximum is `sum_x min(p(x), q(x))`, the maximal-coupling bound: it
+    /// is the largest probability with which a `q`-distributed proposal and a
+    /// `p`-distributed emission can be made to coincide. Modified rejection
+    /// sampling attains it; [`Self::SamplerMatch`] reaches only
+    /// `sum_x p(x) q(x)`.
+    ///
+    /// A rule that is *not* distribution-preserving is not bound by this and
+    /// can accept more. Argmax-against-argmax accepts at `q(argmax p)`, which
+    /// for a confident drafter agreeing with the target's mode far exceeds
+    /// `sum_x min(p, q)`. That is bought by emitting a biased stream, so it is
+    /// not a fair comparison point for any correct rule.
+    #[inline]
+    pub fn is_acceptance_optimal(self) -> bool {
+        matches!(self, Self::Stochastic | Self::GreedyArgmax)
     }
 
     /// Stable, greppable identifier for this rule.
@@ -141,35 +222,39 @@ impl AcceptanceRule {
     /// grepping a benchmark log to prove which arm they measured.
     pub fn id(self) -> &'static str {
         match self {
-            Self::Argmax => "argmax-greedy",
-            Self::ArgmaxKillSwitch => "argmax-kill-switch",
+            Self::GreedyArgmax => "greedy-argmax",
+            Self::SamplerMatch => "sampler-match",
             Self::Stochastic => "stochastic",
-            Self::ArgmaxNoProposalDistribution => "argmax-no-proposal-distribution",
+            Self::SamplerMatchNoProposalDistribution => "sampler-match-no-proposal-distribution",
         }
     }
 
     /// Human-readable description shown next to [`Self::id`].
     pub fn label(self) -> &'static str {
         match self {
-            Self::Argmax => "argmax (greedy target sampler)",
-            Self::ArgmaxKillSwitch => "argmax (stochastic acceptance disabled by env)",
-            Self::Stochastic => "stochastic (modified rejection sampling)",
-            Self::ArgmaxNoProposalDistribution => {
-                "argmax (drafter reported no proposal distribution)"
+            Self::GreedyArgmax => "greedy target sampler: accept iff the draft is the argmax",
+            Self::SamplerMatch => {
+                "sampler-match: accept iff the draft equals a fresh target draw (default; \
+                 set MLXCEL_SPECULATIVE_STOCHASTIC_ACCEPT=1 for the acceptance-optimal rule)"
+            }
+            Self::Stochastic => "stochastic: modified rejection sampling, acceptance-optimal",
+            Self::SamplerMatchNoProposalDistribution => {
+                "sampler-match: stochastic acceptance requested but the drafter reported no \
+                 proposal distribution"
             }
         }
     }
 
     fn latch(self) -> &'static AtomicBool {
-        static ARGMAX: AtomicBool = AtomicBool::new(false);
-        static KILL_SWITCH: AtomicBool = AtomicBool::new(false);
+        static GREEDY: AtomicBool = AtomicBool::new(false);
+        static SAMPLER_MATCH: AtomicBool = AtomicBool::new(false);
         static STOCHASTIC: AtomicBool = AtomicBool::new(false);
         static NO_Q: AtomicBool = AtomicBool::new(false);
         match self {
-            Self::Argmax => &ARGMAX,
-            Self::ArgmaxKillSwitch => &KILL_SWITCH,
+            Self::GreedyArgmax => &GREEDY,
+            Self::SamplerMatch => &SAMPLER_MATCH,
             Self::Stochastic => &STOCHASTIC,
-            Self::ArgmaxNoProposalDistribution => &NO_Q,
+            Self::SamplerMatchNoProposalDistribution => &NO_Q,
         }
     }
 }
@@ -242,10 +327,10 @@ pub fn note_outcome(outcome: AcceptanceOutcome) {
 #[cfg(test)]
 pub(crate) fn reset_log_latches() {
     for rule in [
-        AcceptanceRule::Argmax,
-        AcceptanceRule::ArgmaxKillSwitch,
+        AcceptanceRule::GreedyArgmax,
+        AcceptanceRule::SamplerMatch,
         AcceptanceRule::Stochastic,
-        AcceptanceRule::ArgmaxNoProposalDistribution,
+        AcceptanceRule::SamplerMatchNoProposalDistribution,
     ] {
         rule.latch().store(false, Ordering::Relaxed);
     }
@@ -270,18 +355,34 @@ pub fn sampler_is_greedy(config: &SamplingConfig) -> bool {
     config.temperature == 0.0 || config.top_k == 1
 }
 
-/// Whether the stochastic rule is enabled for this process.
+/// Whether modified rejection sampling is enabled for this process.
 ///
-/// Reads [`STOCHASTIC_ACCEPT_ENV`] once. Absent or any non-falsy value means
-/// enabled.
+/// **Opt-in, default off.** Reads [`STOCHASTIC_ACCEPT_ENV`] once; only an
+/// explicitly truthy value enables it.
+///
+/// The default is off because on the one path this rule reaches, the classic
+/// [`crate::speculative::SpeculativeGenerator`], the rule it replaces was
+/// already distribution-preserving. So the change buys no correctness there,
+/// only acceptance rate, and the acceptance gain is bounded by
+/// `sum_x min(p, q) / sum_x p(x) q(x)`, which collapses toward 1 whenever the
+/// drafter is confident. Measured on a Llama-3.1-8B / Llama-3.2-1B pair at
+/// temperature 0.7 that ratio is about 1.02. Paying two extra
+/// full-vocabulary passes and an extra host sync per verified position for a
+/// two-percent theoretical acceptance gain is not a good default.
+///
+/// It is worth enabling where the gain is real: a high-entropy drafter, a
+/// higher temperature, or a verify path whose current rule is *not*
+/// distribution-preserving (the Gemma 4 MTP and DFlash round loops, which pick
+/// the target token by argmax regardless of temperature). Check the expected
+/// gain first with [`ACCEPT_DIAG_ENV`], which reports both closed forms.
 pub fn stochastic_accept_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| match std::env::var(STOCHASTIC_ACCEPT_ENV) {
-        Ok(raw) => !matches!(
+        Ok(raw) => matches!(
             raw.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "no" | "off"
+            "1" | "true" | "yes" | "on"
         ),
-        Err(_) => true,
+        Err(_) => false,
     })
 }
 
@@ -295,15 +396,35 @@ pub fn acceptance_rule(
     target_config: &SamplingConfig,
     has_proposal_distribution: bool,
 ) -> AcceptanceRule {
+    acceptance_rule_with_override(target_config, has_proposal_distribution, None)
+}
+
+/// [`acceptance_rule`] with an explicit per-caller override of the env default.
+///
+/// `stochastic_override` of `None` consults [`stochastic_accept_enabled`];
+/// `Some(v)` uses `v` directly. This is what makes the opt-in reachable
+/// programmatically rather than only through a process-wide environment
+/// variable, which matters twice over: a future per-request server flag needs
+/// it, and the distributional tests need to exercise the acceptance-optimal
+/// rule regardless of how the process default happens to be set. A test that
+/// silently followed the default would stop covering this module the moment the
+/// default flipped.
+pub fn acceptance_rule_with_override(
+    target_config: &SamplingConfig,
+    has_proposal_distribution: bool,
+    stochastic_override: Option<bool>,
+) -> AcceptanceRule {
+    let want_stochastic = stochastic_override.unwrap_or_else(stochastic_accept_enabled);
     if sampler_is_greedy(target_config) {
-        AcceptanceRule::Argmax
-    } else if !stochastic_accept_enabled() {
-        AcceptanceRule::ArgmaxKillSwitch
-    } else if !has_proposal_distribution {
-        AcceptanceRule::ArgmaxNoProposalDistribution
-    } else {
-        AcceptanceRule::Stochastic
+        return AcceptanceRule::GreedyArgmax;
     }
+    if !want_stochastic {
+        return AcceptanceRule::SamplerMatch;
+    }
+    if !has_proposal_distribution {
+        return AcceptanceRule::SamplerMatchNoProposalDistribution;
+    }
+    AcceptanceRule::Stochastic
 }
 
 /// Environment switch for the per-position acceptance diagnostic.
@@ -332,10 +453,12 @@ pub fn accept_diagnostics_enabled() -> bool {
 
 /// Closed-form acceptance probabilities at one verify position.
 ///
-/// `sum_min` is the probability modified rejection sampling accepts; `sum_prod`
-/// is the probability the pre-#902 rule accepts (an independent target draw
-/// landing on the drafted token). `sum_min >= sum_prod` always, because
-/// `min(a, b) >= a * b` for `a, b` in `[0, 1]`.
+/// `sum_min` is the probability modified rejection sampling accepts, and also
+/// the ceiling for *any* distribution-preserving rule (maximal coupling).
+/// `sum_prod` is the probability the sampler-match rule accepts.
+/// `sum_min >= sum_prod` always, because `min(a, b) >= a * b` for `a, b` in
+/// `[0, 1]`. Their ratio is the entire acceptance headroom this feature can
+/// deliver for the given `(p, q)`.
 pub fn closed_form_acceptance(target_probs: &MlxArray, proposal_probs: &MlxArray) -> (f64, f64) {
     let sum_min = ffi::sum_all(&ffi::minimum(target_probs, proposal_probs));
     let sum_prod = ffi::sum_all(&ffi::multiply(target_probs, proposal_probs));

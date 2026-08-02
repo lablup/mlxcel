@@ -254,7 +254,8 @@ fn collect_speculative_tokens(budget: usize, num_draft: usize) -> Vec<u32> {
     let mut collected = 0usize;
 
     while collected < budget {
-        let mut generator = SpeculativeGenerator::new(target.num_layers(), draft.num_layers());
+        let mut generator = SpeculativeGenerator::new(target.num_layers(), draft.num_layers())
+            .with_stochastic_acceptance(true);
         let per_call = 64.min(budget - collected);
         let (tokens, _stats) =
             generator.generate(&target, &draft, &[0], per_call, num_draft, &config);
@@ -451,7 +452,8 @@ fn filtered_target_support_is_never_violated() {
 
     let mut emitted = 0usize;
     while emitted < 1500 {
-        let mut generator = SpeculativeGenerator::new(target.num_layers(), draft.num_layers());
+        let mut generator = SpeculativeGenerator::new(target.num_layers(), draft.num_layers())
+            .with_stochastic_acceptance(true);
         let (tokens, _) = generator.generate(&target, &draft, &[0], 64, 4, &config);
         for t in &tokens {
             assert!(
@@ -541,7 +543,7 @@ fn temperature_zero_stream_is_byte_identical_to_greedy_target_only() {
 
     assert_eq!(
         stochastic_accept::acceptance_rule(&SamplingConfig::greedy(), true),
-        AcceptanceRule::Argmax,
+        AcceptanceRule::GreedyArgmax,
         "temperature 0 must stay on the argmax rule"
     );
 }
@@ -667,7 +669,7 @@ fn acceptance_accounting_is_exact_in_both_deterministic_regimes() {
             &SamplingConfig::greedy(),
         );
         let stats = generator.acceptance_stats();
-        assert_eq!(stats.rule, Some(AcceptanceRule::Argmax));
+        assert_eq!(stats.rule, Some(AcceptanceRule::GreedyArgmax));
         assert_eq!(stats.accepted_draft_tokens, 0);
         assert_eq!(stats.proposed_draft_tokens, stats.rounds * num_draft);
         // Every round rejects at position 0, so exactly one position per round
@@ -736,7 +738,7 @@ fn stochastic_runs_report_the_stochastic_rule_and_a_longer_accepted_run() {
     let mut accepted = 0usize;
     let mut positions = 0usize;
     for _ in 0..24 {
-        let mut generator = SpeculativeGenerator::new(1, 1);
+        let mut generator = SpeculativeGenerator::new(1, 1).with_stochastic_acceptance(true);
         let _ = generator.generate(&target, &draft, &[0], 240, BLOCK, &stochastic_config());
         let stats = generator.acceptance_stats();
         assert_eq!(
@@ -825,6 +827,109 @@ fn closed_form_acceptance_matches_the_hand_computed_values() {
     );
 }
 
+/// Documents a **pre-existing** draft-cache defect that predates issue #902 and
+/// affects every acceptance rule identically.
+///
+/// The draft loop forwards `num_draft` tokens (`current_token`, `d_0`, ...,
+/// `d_{n-2}`), so the draft cache gains `n` entries per round. It should end
+/// the round holding `current_token, d_0..d_{a-1}`, that is `a + 1` new
+/// entries, so the correct trim is `n - a - 1 == rejected - 1`. The code trims
+/// `min(rejected + 1, n)`, two entries too many, and the shortfall is never
+/// recovered: for `num_draft = 4` the cache falls behind by 1, 2, 2, 2, 1
+/// tokens at `accepted` 0..4 respectively, every round, forever.
+///
+/// At `accepted == 0` the draft cache does not advance at all. The drafter then
+/// proposes from a frozen prefix while the target advances, its proposals
+/// degrade, acceptance falls further, and the loop reinforces itself. This is
+/// the most likely explanation for observed acceptance around 0.23 on an
+/// 8B/1B pair against the 0.6-0.8 reported upstream.
+///
+/// This test pins the current, wrong behavior so the defect is visible and so
+/// whoever fixes it gets a failing test rather than silence. Fixing it is out
+/// of scope for #902: it changes token streams and belongs in its own issue.
+#[test]
+fn draft_cache_falls_behind_the_main_cache_every_round_pre_existing_defect() {
+    let target = greedy_target();
+    let draft = always_rejecting_draft();
+    const PROMPT: i32 = 2;
+    const N: usize = 24;
+
+    for num_draft in [1usize, 4] {
+        let mut generator = SpeculativeGenerator::new(1, 1);
+        let (tokens, _) = generator.generate(
+            &target,
+            &draft,
+            &[PROMPT],
+            N,
+            num_draft,
+            &SamplingConfig::greedy(),
+        );
+        assert_eq!(tokens.len(), N);
+
+        let main_offset = generator.main_caches[0].offset;
+        let draft_offset = generator.draft_caches[0].offset;
+
+        // Every round rejects at position 0, so `accepted == 0` throughout and
+        // the draft cache never advances past the single prompt token.
+        assert_eq!(
+            draft_offset, 1,
+            "num_draft={num_draft}: draft cache should hold the prompt plus every \
+             emitted token except the pending one ({}), but it is frozen at {} \
+             because the trim is `min(rejected + 1, n)` instead of `rejected - 1`",
+            main_offset, draft_offset
+        );
+        assert_eq!(
+            main_offset as usize,
+            1 + tokens.len() - 1,
+            "num_draft={num_draft}: the main cache does track the sequence, which is \
+             what makes the draft cache's drift a defect rather than a convention"
+        );
+        assert!(
+            main_offset > draft_offset,
+            "the drafter is conditioning on {} tokens while the target conditions on {}",
+            draft_offset,
+            main_offset
+        );
+    }
+}
+
+/// The **default** rule (sampler-match, the rule that shipped before #902) must
+/// also pass the distributional test, because it too is distribution-preserving.
+/// This is the empirical half of the premise correction: if the default were
+/// biased as the issue claims, this test would reject it with the same
+/// statistic that rejects argmax-against-argmax at ~1825.
+#[test]
+fn the_default_sampler_match_rule_also_matches_the_target_distribution() {
+    let target = ContextFreeModel::new(&TARGET_LOGITS);
+    let draft = ContextFreeModel::new(&DRAFT_LOGITS);
+    let config = stochastic_config();
+    let expected = softmax(&TARGET_LOGITS, TEMPERATURE);
+    let budget = sample_budget() / 2;
+
+    let mut counts = vec![0u32; VOCAB];
+    let mut collected = 0usize;
+    while collected < budget {
+        let mut generator = SpeculativeGenerator::new(1, 1).with_stochastic_acceptance(false);
+        let (tokens, _) = generator.generate(&target, &draft, &[0], 64, 4, &config);
+        assert_eq!(
+            generator.acceptance_stats().rule,
+            Some(AcceptanceRule::SamplerMatch),
+            "this test must exercise the default rule, not the opt-in one"
+        );
+        for t in &tokens {
+            counts[*t as usize] += 1;
+        }
+        collected += tokens.len();
+    }
+
+    let chi2 = chi_square(&counts, &expected);
+    assert!(
+        chi2 < CHI2_DOF5_ALPHA_1E4,
+        "the pre-#902 sampler-match rule is distribution-preserving and must pass \
+         the same statistic: chi-square {chi2:.3}, counts {counts:?}"
+    );
+}
+
 /// The CLI summary line is the only place the acceptance rule is observable on
 /// `mlxcel generate`, because that binary installs no tracing subscriber. Its
 /// shape is therefore an observable contract, not a debug convenience: pin the
@@ -853,18 +958,15 @@ fn cli_summary_line_carries_the_rule_id_and_mean_accepted_len() {
     // look like a 2x regression.
     assert!(line.contains("per_position_acceptance=0.7500"), "{line}");
     assert!(line.contains("rounds=10"), "{line}");
-    assert!(
-        line.contains("(stochastic (modified rejection sampling))"),
-        "{line}"
-    );
+    assert!(line.contains("acceptance-optimal"), "{line}");
 
     // Every rule id must be distinct and free of whitespace, or `rule=` cannot
     // be grepped unambiguously.
     let ids: Vec<&str> = [
-        AcceptanceRule::Argmax,
-        AcceptanceRule::ArgmaxKillSwitch,
+        AcceptanceRule::GreedyArgmax,
+        AcceptanceRule::SamplerMatch,
         AcceptanceRule::Stochastic,
-        AcceptanceRule::ArgmaxNoProposalDistribution,
+        AcceptanceRule::SamplerMatchNoProposalDistribution,
     ]
     .iter()
     .map(|r| r.id())
@@ -897,13 +999,13 @@ fn cli_summary_line_carries_the_rule_id_and_mean_accepted_len() {
         stats.acceptance_rate()
     );
 
-    // The kill-switch arm must be nameable too: it is one half of the A/B.
+    // The default arm must be nameable too: it is one half of the A/B.
     let baseline = SpeculativeAcceptanceStats {
-        rule: Some(AcceptanceRule::ArgmaxKillSwitch),
+        rule: Some(AcceptanceRule::SamplerMatch),
         ..stats
     };
     assert!(
-        baseline.summary_line().contains("rule=argmax-kill-switch "),
+        baseline.summary_line().contains("rule=sampler-match "),
         "{}",
         baseline.summary_line()
     );
@@ -927,7 +1029,8 @@ fn kv_cache_stays_consistent_across_mixed_accept_reject_rounds() {
 
     for num_draft in [1usize, 3, 5] {
         for trial in 0..8 {
-            let mut generator = SpeculativeGenerator::new(target.num_layers(), draft.num_layers());
+            let mut generator = SpeculativeGenerator::new(target.num_layers(), draft.num_layers())
+                .with_stochastic_acceptance(true);
             let (tokens, _) = generator.generate(&target, &draft, &[0], 40, num_draft, &config);
 
             let pending = 1 + tokens.len() - 1;

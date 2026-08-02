@@ -14,75 +14,88 @@ position (after temperature, token bias, penalties, XTC, and top-k / top-p /
 min-p filtering) and `q` for the distribution the drafter actually drew its
 proposal from.
 
-### Argmax-against-argmax
+### Sampler-match (the default at `temperature > 0`)
 
-Accept the drafted token iff it equals `argmax(target_logits)`; on mismatch
-emit the argmax. At `temperature == 0` this is exactly greedy target decoding
-and is lossless. At `temperature > 0` it is **not**: the emitted stream is the
-target's greedy stream, not a sample from `p`, so turning speculation on
-changes generation behavior.
+Accept the drafted token iff it equals a fresh draw from `p`; emit that draw on
+both branches. **Lossless**: every emitted token is a fresh conditional draw
+from the target, so the stream is exactly a target-only sample. Its acceptance
+probability is `sum_x p(x) q(x)`.
 
-### Sampler-match
+This is what `SpeculativeGenerator` has always done. Issue #902 describes the
+verify loop as comparing against the target's *argmax*; for this generator that
+is inaccurate, and the difference is the whole point: the code calls
+`sample_token_optimized(pos_logits, target_sampling, history)`, which is `argmax`
+only when `temperature == 0`.
 
-Accept the drafted token iff it equals a fresh draw from `p`; on mismatch emit
-that draw. Every emitted token is a fresh conditional draw from `p`, so the
-stream is distributed exactly as target-only sampling. It is lossless, but the
-per-position acceptance probability is only `sum_x p(x) q(x)`, which throws
-away high-probability drafts for no reason other than that an independent
-re-draw did not reproduce them.
+### Greedy argmax (`temperature == 0`)
 
-### Modified rejection sampling (default at `temperature > 0`)
+Sampler-match where the sampler happens to be `argmax`. Lossless by the same
+argument; it is exactly greedy target decoding.
+
+### Argmax-against-argmax (MTP and DFlash only)
+
+Accept iff the drafted token equals `argmax(target_logits)`, regardless of
+temperature; emit the argmax on mismatch. **Not lossless** at `temperature > 0`:
+the served stream is the target's greedy stream, not a sample from `p`. Its
+acceptance probability is `q(argmax p)`.
+
+### Modified rejection sampling (opt-in)
 
 From Leviathan et al. 2023, "Fast Inference from Transformers via Speculative
 Decoding" (Algorithm 1) and Chen et al. 2023, "Accelerating Large Language
 Model Decoding with Speculative Sampling".
 
-1. Draw `u ~ U[0, 1)`. Accept the drafted token `t` iff `u * q(t) <= p(t)`,
-   i.e. with probability `min(1, p(t) / q(t))`.
-2. On the first rejection, emit one token drawn from the residual
-   `normalize(relu(p - q))` and end the chain.
-3. If every drafted token was accepted, emit a bonus token drawn from `p` at
-   the final verify position.
+1. Draw `u ~ U[0, 1)`. Accept the drafted token `t` iff `u * q(t) <= p(t)`.
+2. On the first rejection, emit one token drawn from `normalize(relu(p - q))`
+   and end the chain.
+3. If every drafted token was accepted, emit a bonus token drawn from `p`.
 
-The emitted stream is distributed exactly as target-only sampling, and the
-per-position acceptance probability is `sum_x min(p(x), q(x))`, the optimum for
-that draft/target pair.
+Lossless, because `min(q, p) + relu(p - q) == p` pointwise (the residual's
+normalizer cancels the rejection probability exactly). Acceptance probability
+`sum_x min(p(x), q(x))`.
 
-**Why it is lossless.** For any token `x` at a given position:
+## The acceptance ceiling
 
-```
-P(emit x) = q(x) * min(1, p(x)/q(x))  +  P(reject) * relu(p(x) - q(x)) / beta
-          = min(q(x), p(x))           +  relu(p(x) - q(x))
-          = p(x)
-```
+For a `q`-distributed proposal and a `p`-distributed emission, the largest
+probability the two can coincide is `sum_x min(p(x), q(x))`, the
+maximal-coupling bound, equivalently `1 - TV(p, q)`. **Every**
+distribution-preserving rule is capped there:
 
-because `beta = sum_y relu(p(y) - q(y)) = 1 - sum_y min(p(y), q(y))` is exactly
-`P(reject)`, so the residual's normalizing constant cancels, and
-`min(a, b) + max(a - b, 0) = a`. The argument places no requirement on `q`
-beyond it being *the distribution the token was actually drawn from*. That is
-what keeps greedy drafters (`q` one-hot), drafters whose penalties were
-computed against a stale token history, and drafters from an entirely different
-model family all lossless. Chaining over a block is the same argument applied
-inductively: position `i` is only reached when `0..i` were accepted, in which
-case the target's context matches the context the drafter conditioned on.
+| Rule | Lossless | Acceptance probability |
+|------|----------|------------------------|
+| Sampler-match | yes | `sum_x p(x) q(x)` |
+| Modified rejection sampling | yes | `sum_x min(p(x), q(x))` (the ceiling) |
+| Argmax-against-argmax | **no** | `q(argmax p)` (not bounded by the ceiling) |
+
+Since `min(a, b) >= a * b` on `[0, 1]`, rejection sampling always accepts at
+least as often as sampler-match. But `q(argmax p)` is under no such constraint:
+with `p(a) = 0.3` and `q(a) = 0.95` the argmax rule accepts at 0.95 where the
+ceiling for any correct rule is about 0.30.
+
+**Consequence, stated plainly:** no implementation can make a
+distribution-preserving rule strictly improve mean accepted length against
+argmax acceptance. That is not a defect to fix; it is the price of
+unbiasedness. Issue #902's required outcome ("mean accepted draft length at
+temp 0.7 strictly improves vs argmax acceptance") is unachievable in general
+and should be read as applying against sampler-match, where the improvement is
+real and provable.
 
 ## Which rule each path runs today
 
-| Path | `temperature == 0` | `temperature > 0` |
-|------|--------------------|-------------------|
-| `SpeculativeGenerator` (classic draft model; `mlxcel generate --draft-model`) | argmax-against-argmax (greedy sampler) | **modified rejection sampling** |
-| Gemma 4 MTP round loop (`speculative/mtp/`, server `speculative_slice` / `speculative_burst`) | argmax-against-argmax | argmax-against-argmax (**biased**) |
-| DFlash round loop (`drafter/dflash/`) | argmax-against-argmax | argmax-against-argmax (**biased**) |
+| Path | `temperature == 0` | `temperature > 0` default | `temperature > 0` opt-in |
+|------|--------------------|---------------------------|--------------------------|
+| `SpeculativeGenerator` (classic; `mlxcel generate --draft-model`) | greedy argmax (lossless) | **sampler-match** (lossless) | modified rejection sampling (lossless, acceptance-optimal) |
+| Gemma 4 MTP round loop | argmax (lossless here) | argmax-against-argmax (**biased**) | not wired |
+| DFlash round loop | argmax (lossless here) | argmax-against-argmax (**biased**) | not wired |
 
 The MTP and DFlash verify paths select the target token with
 `argmax_per_position` / `argmax_logits_to_array` regardless of the sampler, and
 their drafters return token ids without the distribution they were drawn from
-(`Drafter::draft_block` returns `Vec<i32>`). Making those paths
-distribution-preserving requires widening both the drafter interface and
-`MtpTarget::verify_forward`'s output; until then, `temperature > 0` on those
-paths does not sample from the target model's distribution. Both were already
-documented in-tree as greedy-only ("Greedy at temp=0.0 / top_k=1 is the only
-mode this sub-issue gates parity on").
+(`Drafter::draft_block` returns `Vec<i32>`). Making them lossless requires
+widening both the drafter interface and `MtpTarget::verify_forward`'s output.
+Those are the paths where this feature would buy correctness rather than only
+acceptance rate, and where the acceptance trade against argmax is a real
+decision rather than a free win.
 
 ## RNG dependency
 
@@ -103,11 +116,25 @@ Greedy (`temperature == 0`, or `top_k == 1`) draws nothing new: the rule
 selector returns the argmax rule before any distribution tensor is built, so
 temperature-0 output is byte-identical.
 
-## Kill switch
+## Opt-in, and why it is not the default
 
-`MLXCEL_SPECULATIVE_STOCHASTIC_ACCEPT=0` (also `false`, `no`, `off`) restores
-the previous acceptance rule at every temperature. Read once per process, so
-set it before starting `mlxcel` or `mlxcel-server`.
+`MLXCEL_SPECULATIVE_STOCHASTIC_ACCEPT=1` (also `true`, `yes`, `on`) enables
+modified rejection sampling. It is **off by default**, and
+`SpeculativeGenerator::with_stochastic_acceptance(bool)` overrides the
+environment programmatically.
+
+The default is off because on the only path it currently reaches, the rule it
+replaces was already lossless. It therefore buys acceptance rate and nothing
+else, and the available gain is exactly
+`sum_x min(p, q) / sum_x p(x) q(x)`, which collapses toward 1 whenever the
+drafter is confident: `q(t*) ~ 1` makes `min(p, q)` and `p * q` coincide.
+Measured at about 1.02 on a Llama-3.1-8B / Llama-3.2-1B pair at temperature
+0.7. Two extra full-vocabulary passes and an extra host sync per verified
+position is not worth two percent of theoretical acceptance.
+
+This follows the same pattern as `MLXCEL_FUSED_QK_NORM` (#326) and the #905
+fusions: the machinery, the proof and the tests land and are available, but the
+default does not move until a measurement justifies it.
 
 ## Reading the rule off a run
 
@@ -120,8 +147,8 @@ info-level instrumentation below is invisible on the only binary that runs
 [Speculative acceptance] rule=stochastic rounds=153 proposed=612 positions_tested=195 accepted=46 per_position_acceptance=0.2359 acceptance_rate=0.0752 mean_accepted_len=0.3007 (stochastic (modified rejection sampling))
 ```
 
-`rule=` is the stable identifier, one of `stochastic`, `argmax-greedy`,
-`argmax-kill-switch`, `argmax-no-proposal-distribution`. It is what proves an
+`rule=` is the stable identifier, one of `stochastic`, `greedy-argmax`,
+`sampler-match`, `sampler-match-no-proposal-distribution`. It is what proves an
 A/B arm is not silently the fallback.
 
 ### The two acceptance rates are not interchangeable
@@ -209,22 +236,22 @@ draft model, not against `speculative_bench`, whose pairings are all MTP or
 DFlash and would compare the unchanged fallback against itself:
 
 ```bash
-# Baseline arm: previous acceptance rule.
-MLXCEL_SPECULATIVE_STOCHASTIC_ACCEPT=0 MLXCEL_SPECULATIVE_ACCEPT_DIAG=1 \
+# Baseline arm: the default sampler-match rule.
+MLXCEL_SPECULATIVE_ACCEPT_DIAG=1 \
   ./target/release/mlxcel generate \
     -m models/<target> --draft-model models/<draft> --num-draft-tokens 4 \
     --temp 0.7 --seed 1234 -n 256 -p "<prompt>"
 
-# New arm: modified rejection sampling. Same command without the kill switch.
-MLXCEL_SPECULATIVE_ACCEPT_DIAG=1 ./target/release/mlxcel generate \
+# Opt-in arm: modified rejection sampling.
+MLXCEL_SPECULATIVE_STOCHASTIC_ACCEPT=1 MLXCEL_SPECULATIVE_ACCEPT_DIAG=1 \
+  ./target/release/mlxcel generate \
     -m models/<target> --draft-model models/<draft> --num-draft-tokens 4 \
     --temp 0.7 --seed 1234 -n 256 -p "<prompt>"
 ```
 
-Confirm the `rule=` field differs between arms (`argmax-kill-switch` vs
-`stochastic`), then compare `per_position_acceptance` and `mean_accepted_len`.
+Confirm the `rule=` field differs between arms (`sampler-match` vs `stochastic`), then compare `per_position_acceptance` and `mean_accepted_len`.
 Repeat at `--temp 0.0`, where both arms must produce identical output and
-identical `rule=argmax-greedy`.
+identical `rule=greedy-argmax`.
 
 **A note on the drafter-kind line.** With no explicit `--draft-kind`, the CLI
 prints the drafter kind it *auto-detected* from the drafter's `config.json`,

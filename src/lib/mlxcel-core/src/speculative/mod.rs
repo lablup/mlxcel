@@ -220,6 +220,9 @@ pub struct SpeculativeGenerator {
     /// which is what makes an acceptance-rate A/B measurable from a log rather
     /// than only from a stopwatch.
     acceptance: SpeculativeAcceptanceStats,
+    /// Per-generator override of the `MLXCEL_SPECULATIVE_STOCHASTIC_ACCEPT`
+    /// default. `None` follows the env; `Some(v)` forces it.
+    stochastic_acceptance: Option<bool>,
     /// Cached per-generator `TokenBiasMap` resolved from a `LangBiasConfig`.
     ///
     /// **Axis B invariant**: the bias is applied **only** to the target
@@ -241,6 +244,7 @@ impl SpeculativeGenerator {
             generated_tokens: Vec::new(),
             generation_stream: new_thread_local_generation_stream(),
             acceptance: SpeculativeAcceptanceStats::default(),
+            stochastic_acceptance: None,
             token_bias: TokenBiasMap::default(),
         }
     }
@@ -248,6 +252,22 @@ impl SpeculativeGenerator {
     /// Acceptance accounting for the most recent [`Self::generate`] call.
     pub fn acceptance_stats(&self) -> SpeculativeAcceptanceStats {
         self.acceptance
+    }
+
+    /// Force the acceptance-optimal (modified rejection sampling) rule on or
+    /// off for this generator, overriding the
+    /// `MLXCEL_SPECULATIVE_STOCHASTIC_ACCEPT` process default.
+    ///
+    /// The feature is opt-in because the rule it replaces was already
+    /// distribution-preserving on this path (see
+    /// [`stochastic_accept`]), so it trades measurable per-position cost for an
+    /// acceptance gain that is near zero against a confident drafter. This
+    /// setter is how a caller that has established the gain is worth taking,
+    /// or a test that must exercise the rule regardless of the process
+    /// default, turns it on.
+    pub fn with_stochastic_acceptance(mut self, enabled: bool) -> Self {
+        self.stochastic_acceptance = Some(enabled);
+        self
     }
 
     /// Attach a pre-resolved `TokenBiasMap` to this speculative generator.
@@ -484,7 +504,11 @@ impl SpeculativeGenerator {
         // sampler being stochastic and the env kill switch. The chosen rule is
         // logged once per process per kind at info level, so a server log
         // proves which rule a run used.
-        let rule = stochastic_accept::acceptance_rule(target_sampling, true);
+        let rule = stochastic_accept::acceptance_rule_with_override(
+            target_sampling,
+            true,
+            self.stochastic_acceptance,
+        );
         stochastic_accept::note_rule(rule);
         let stochastic = rule == AcceptanceRule::Stochastic;
         self.acceptance.rule = Some(rule);

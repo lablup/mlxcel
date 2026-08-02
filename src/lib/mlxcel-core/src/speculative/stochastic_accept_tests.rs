@@ -123,11 +123,11 @@ fn sampler_is_greedy_matches_fused_sampler_short_circuit() {
 fn greedy_target_always_selects_argmax_rule() {
     assert_eq!(
         acceptance_rule(&SamplingConfig::greedy(), true),
-        AcceptanceRule::Argmax
+        AcceptanceRule::GreedyArgmax
     );
     assert_eq!(
         acceptance_rule(&SamplingConfig::greedy(), false),
-        AcceptanceRule::Argmax
+        AcceptanceRule::GreedyArgmax
     );
 }
 
@@ -137,38 +137,91 @@ fn missing_proposal_distribution_falls_back_to_argmax() {
     let rule = acceptance_rule(&stochastic_config(0.7), false);
     assert!(matches!(
         rule,
-        AcceptanceRule::ArgmaxNoProposalDistribution | AcceptanceRule::ArgmaxKillSwitch
+        AcceptanceRule::SamplerMatchNoProposalDistribution | AcceptanceRule::SamplerMatch
     ));
-    assert!(!rule.is_distribution_preserving() || rule == AcceptanceRule::Argmax);
+    // Falling back is safe: sampler-match is distribution-preserving. What is
+    // lost is acceptance optimality, not correctness.
+    assert!(rule.is_distribution_preserving());
+    assert!(!rule.is_acceptance_optimal());
 }
 
-/// Only `Argmax` (greedy target) and `Stochastic` claim distribution
-/// preservation. The two argmax fallbacks at `temperature > 0` must not.
+/// **Every** rule this module can select is distribution-preserving, including
+/// the default. That is the central correction to issue #902's premise: the
+/// rule the classic generator shipped with compares against a fresh draw from
+/// the target *sampler*, not its argmax, and emits that draw on both branches.
+///
+/// What separates the rules is acceptance optimality. `sum_x min(p, q)` is the
+/// maximal-coupling ceiling for any correct rule; modified rejection sampling
+/// attains it, sampler-match reaches only `sum_x p(x) q(x)`.
 #[test]
-fn distribution_preservation_claims_are_correct() {
-    assert!(AcceptanceRule::Argmax.is_distribution_preserving());
-    assert!(AcceptanceRule::Stochastic.is_distribution_preserving());
-    assert!(!AcceptanceRule::ArgmaxKillSwitch.is_distribution_preserving());
-    assert!(!AcceptanceRule::ArgmaxNoProposalDistribution.is_distribution_preserving());
+fn every_selectable_rule_is_distribution_preserving() {
+    for rule in [
+        AcceptanceRule::GreedyArgmax,
+        AcceptanceRule::SamplerMatch,
+        AcceptanceRule::Stochastic,
+        AcceptanceRule::SamplerMatchNoProposalDistribution,
+    ] {
+        assert!(
+            rule.is_distribution_preserving(),
+            "{} must be safe to serve: this module never selects the biased \
+             argmax-against-argmax rule, which lives in the MTP and DFlash paths",
+            rule.id()
+        );
+    }
+
+    assert!(AcceptanceRule::Stochastic.is_acceptance_optimal());
+    assert!(AcceptanceRule::GreedyArgmax.is_acceptance_optimal());
+    assert!(
+        !AcceptanceRule::SamplerMatch.is_acceptance_optimal(),
+        "sampler-match reaches sum_x p(x) q(x), strictly below the \
+         sum_x min(p, q) ceiling"
+    );
+    assert!(!AcceptanceRule::SamplerMatchNoProposalDistribution.is_acceptance_optimal());
 }
 
-/// The env switch is parsed case- and whitespace-insensitively, and absence
-/// means enabled. Tested through the same matcher the runtime uses rather than
-/// through the process-wide `OnceLock`, which cannot be re-read in-process.
+/// The env switch is **opt-in**: absence leaves the acceptance-optimal rule
+/// off. Tested through the same matcher the runtime uses, since the
+/// process-wide `OnceLock` cannot be re-read in-process.
 #[test]
-fn kill_switch_parsing_accepts_the_documented_falsy_values() {
-    let falsy = |raw: &str| {
+fn stochastic_acceptance_is_opt_in_not_opt_out() {
+    let truthy = |raw: &str| {
         matches!(
             raw.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "no" | "off"
+            "1" | "true" | "yes" | "on"
         )
     };
-    for v in ["0", "false", "FALSE", " off ", "No"] {
-        assert!(falsy(v), "{v} must disable stochastic acceptance");
+    for v in ["1", "true", "TRUE", " on ", "Yes"] {
+        assert!(truthy(v), "{v} must enable stochastic acceptance");
     }
-    for v in ["1", "true", "on", "yes", ""] {
-        assert!(!falsy(v), "{v} must leave stochastic acceptance enabled");
+    for v in ["0", "false", "off", "no", "", "maybe"] {
+        assert!(
+            !truthy(v),
+            "{v} must leave the default sampler-match rule in place"
+        );
     }
+}
+
+/// The default, with the variable unset, must be the pre-#902 rule. A silent
+/// flip of this default would change every speculative token stream at
+/// `temperature > 0` and cost throughput on pairs where the gain is nil.
+#[test]
+fn default_rule_at_positive_temperature_is_sampler_match() {
+    // Assumes the test process does not set the variable, which is how CI and
+    // a plain `cargo test` run. Deliberately does not mutate the environment:
+    // `set_var` is unsound with parallel tests and the gate is a `OnceLock`
+    // that a sibling test may already have resolved.
+    assert!(
+        std::env::var(STOCHASTIC_ACCEPT_ENV).is_err(),
+        "this test requires {STOCHASTIC_ACCEPT_ENV} to be unset"
+    );
+    assert!(
+        !stochastic_accept_enabled(),
+        "stochastic acceptance must be opt-in"
+    );
+    assert_eq!(
+        acceptance_rule(&stochastic_config(0.7), true),
+        AcceptanceRule::SamplerMatch
+    );
 }
 
 /// The one-shot latches fire once per kind, not once globally: a process that
@@ -176,9 +229,9 @@ fn kill_switch_parsing_accepts_the_documented_falsy_values() {
 #[test]
 fn log_latches_are_per_kind_and_one_shot() {
     reset_log_latches();
-    assert!(!AcceptanceRule::Argmax.latch().load(Ordering::Relaxed));
-    note_rule(AcceptanceRule::Argmax);
-    assert!(AcceptanceRule::Argmax.latch().load(Ordering::Relaxed));
+    assert!(!AcceptanceRule::GreedyArgmax.latch().load(Ordering::Relaxed));
+    note_rule(AcceptanceRule::GreedyArgmax);
+    assert!(AcceptanceRule::GreedyArgmax.latch().load(Ordering::Relaxed));
     assert!(
         !AcceptanceRule::Stochastic.latch().load(Ordering::Relaxed),
         "logging one rule must not swallow a different rule's first occurrence"
