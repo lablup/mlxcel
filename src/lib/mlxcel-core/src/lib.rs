@@ -3080,8 +3080,9 @@ pub fn fast_rope_batched(
 /// prefill would strand the earliest query rows with an all-`-inf` row -> NaN
 /// (issue #401/#408); the windowed correctness instead comes from the mask.
 ///
-/// Used by: Llama, Qwen, Mixtral, Gemma, Cohere, Phi, OLMo, Exaone, GLM4,
-/// MiniCPM, DeepSeek, Hunyuan, StarCoder2 and other causal prefill call sites
+/// Used by: Llama, Qwen, Mixtral, Gemma, Gemma 2, Cohere, Phi, OLMo, Exaone,
+/// GLM4, MiniCPM, DeepSeek, Hunyuan, InternLM3, StarCoder2 and other causal
+/// prefill call sites
 pub fn causal_attention(
     q: &MlxArray,
     k: &MlxArray,

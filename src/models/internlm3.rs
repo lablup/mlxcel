@@ -226,8 +226,21 @@ impl Attention {
         // Update KV cache and get sliced views
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
 
-        // Scaled dot-product attention (handles GQA expansion internally)
-        let attn_out = if l > 1 {
+        // Scaled dot-product attention (handles GQA expansion internally).
+        //
+        // A multi-token prefill with no caller-supplied mask MUST take the
+        // causal path. Every generation path (CLI text prefill, the VLM
+        // embeddings prefill, and the chunked prefill) calls the model with
+        // `mask == None` and expects the model to apply its own causal mask,
+        // exactly like `create_attention_mask(h, cache[0])` in the reference
+        // https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/internlm3.py.
+        // Handing that `None` straight to the unmasked SDPA made every prefill
+        // fully bidirectional, so each layer wrote future-contaminated K/V into
+        // the cache and the first sampled token was already wrong (issue #999).
+        // An explicit mask (the padded-prefill case) still goes to the masked
+        // call, and decode is unchanged: `causal_attention` takes its
+        // single-query maskless fast path at `l == 1`.
+        let attn_out = if l > 1 && mask.is_some() {
             let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
             unsafe {
                 mlxcel_core::layers::attention_from_ptr(
