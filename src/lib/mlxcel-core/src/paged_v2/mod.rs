@@ -82,6 +82,7 @@ pub mod launch;
 pub mod outcome;
 pub mod plan;
 pub mod plan_cache;
+pub mod sparse;
 
 pub use cascade::{
     CASCADE_ENV, CascadeGroup, CascadePlan, DEFAULT_CASCADE_ENABLED, DEFAULT_MIN_MEMBERS,
@@ -104,6 +105,11 @@ pub use plan::{
     search_pages_per_chunk,
 };
 pub use plan_cache::{DecodeBatchKey, PagedDecodeV2Cache, PlanCacheStats, RequestFingerprint};
+pub use sparse::{
+    SPARSE_DECODE_OUTCOME_KINDS, SPARSE_PAGED_DUMP_ENV, SPARSE_PAGED_ENV, SparseDecodeInputs,
+    SparseDecodeOutcome, SparseDecodeStats, report_sparse_outcome_once, run_sparse_decode,
+    sparse_decode_stats, sparse_paged_enabled,
+};
 
 /// Environment variable selecting the v2 decode path. Default off.
 pub const V2_ENV: &str = "MLXCEL_PAGED_ATTENTION_V2";
