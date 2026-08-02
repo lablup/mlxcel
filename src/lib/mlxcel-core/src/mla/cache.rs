@@ -246,6 +246,39 @@ mod tests {
         let mut cache = KVCache::new_with_mode(KVCacheMode::Int8);
         let err = MlaLatentCache::wrap(&mut cache, LITE).unwrap_err();
         assert!(err.contains("FP16"), "{err}");
+        // `supports` must give the same answer, since the fallback branch in a
+        // family reads it instead of `wrap`.
+        assert!(MlaLatentCache::supports(&cache, LITE).is_err());
+    }
+
+    #[test]
+    fn a_latent_cache_stays_trimmable_for_speculative_decode() {
+        // Speculative decode gates on `can_trim_prompt_cache` and then rejects
+        // the tokens the draft got wrong with `trim`. Both operate on the
+        // sequence axis, which is axis 2 in the latent layout exactly as in the
+        // decompressed one, so a rejected draft token removes one latent row.
+        // If that were not true, a rejection would silently corrupt the cache.
+        const G: MlaGeometry = MlaGeometry {
+            num_heads: 4,
+            kv_lora_rank: 32,
+            qk_nope_head_dim: 16,
+            qk_rope_head_dim: 8,
+            v_head_dim: 12,
+        };
+        let mut cache = KVCache::new();
+        {
+            let mut view = MlaLatentCache::wrap(&mut cache, G).unwrap();
+            let ckv = crate::ffi::zeros(&[1, 1, 6, 32], crate::dtype::FLOAT16);
+            let kpe = crate::ffi::zeros(&[1, 1, 6, 8], crate::dtype::FLOAT16);
+            view.update_and_fetch(ckv, kpe);
+            assert_eq!(view.seq_len(), 6);
+        }
+        assert!(crate::cache::can_trim_prompt_cache(std::slice::from_ref(
+            &cache
+        )));
+        assert_eq!(cache.trim(2), 2);
+        let view = MlaLatentCache::wrap(&mut cache, G).unwrap();
+        assert_eq!(view.seq_len(), 4);
     }
 
     #[test]

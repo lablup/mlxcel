@@ -439,10 +439,12 @@ impl MLAAttention {
         // because the KV cache mode is a runtime flag; the answer is stable for
         // the life of a cache, so a run that declines on step one declines on
         // every step and the cache never mixes the two layouts.
-        if let Some(proj) = self.absorbed.as_ref() {
-            if MlaLatentCache::supports(cache, self.geometry()).is_ok() {
-                return self.forward_absorbed(&q_nope, &q_pe, ckv, k_pe, proj, cache, mask, b, l);
-            }
+        if let Some(proj) = self
+            .absorbed
+            .as_ref()
+            .filter(|_| MlaLatentCache::supports(cache, self.geometry()).is_ok())
+        {
+            return self.forward_absorbed(&q_nope, &q_pe, ckv, k_pe, proj, cache, mask, b, l);
         }
         mla::stats::record(MlaDecodePath::Decompressed);
 

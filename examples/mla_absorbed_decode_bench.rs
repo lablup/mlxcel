@@ -186,8 +186,8 @@ fn main() {
 
     println!();
     println!(
-        "{:<14} {:>7} {:>8} {:>11} {:>11} {:>10}  {}",
-        "arm", "batch", "context", "ms/step", "steps/s", "KV MiB", "paths"
+        "{:<14} {:>7} {:>8} {:>11} {:>11} {:>10}  paths",
+        "arm", "batch", "context", "ms/step", "steps/s", "KV MiB"
     );
 
     for &context in &args.contexts {
