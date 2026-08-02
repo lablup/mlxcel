@@ -37,10 +37,11 @@
 //! When a future flag or mode is added to either shared group, all three
 //! binaries fail the test together, no drift is possible.
 
+use std::path::Path;
 use std::process::Command;
 
 mod common;
-use common::{binary_resolution_report, repo_binary_path};
+use common::resolve_repo_binary;
 
 const HEADING: &str = "KV Cache (TurboQuant) Options";
 
@@ -89,18 +90,15 @@ const ENV_TO_CLEAR_FOR_HELP: &[&str] = &["LLAMA_ARG_CACHE_TYPE_K", "LLAMA_ARG_CA
 /// Run `--help` on a binary and return the resulting stdout. Panics with a
 /// descriptive message when the binary fails to execute.
 fn help_output(bin_name: &str, args: &[&str]) -> String {
-    let path = repo_binary_path(bin_name);
+    let (path, resolution) = resolve_repo_binary(bin_name);
     let mut cmd = Command::new(&path);
     cmd.args(args);
     for key in ENV_TO_CLEAR_FOR_HELP {
         cmd.env_remove(key);
     }
-    let output = cmd.output().unwrap_or_else(|e| {
-        panic!(
-            "failed to spawn {bin_name} from {path:?}: {e}\n{}",
-            binary_resolution_report(bin_name)
-        )
-    });
+    let output = cmd
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn {bin_name} from {path:?}: {e}\n{resolution}"));
     assert!(
         output.status.success(),
         "{} {:?} exited with status {:?}: stderr=\n{}",
@@ -355,18 +353,15 @@ fn extract_speculative_block(help: &str) -> &str {
 /// Run `--help` on a binary with the speculative env vars cleared and
 /// return stdout.
 fn help_output_for_speculative(bin_name: &str, args: &[&str]) -> String {
-    let path = repo_binary_path(bin_name);
+    let (path, resolution) = resolve_repo_binary(bin_name);
     let mut cmd = Command::new(&path);
     cmd.args(args);
     for key in SPECULATIVE_ENV_TO_CLEAR_FOR_HELP {
         cmd.env_remove(key);
     }
-    let output = cmd.output().unwrap_or_else(|e| {
-        panic!(
-            "failed to spawn {bin_name} from {path:?}: {e}\n{}",
-            binary_resolution_report(bin_name)
-        )
-    });
+    let output = cmd
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn {bin_name} from {path:?}: {e}\n{resolution}"));
     assert!(
         output.status.success(),
         "{} {:?} exited with status {:?}: stderr=\n{}",
@@ -484,6 +479,10 @@ fn indent_width(line: &str) -> usize {
 /// flag's description and its bracketed annotations. Stops before the next
 /// flag entry (same or shallower indent) and before the next section heading.
 ///
+/// `flag_signature` must be the complete rendered signature including the
+/// value name, for example `--draft-model <PATH>`, because the anchor line is
+/// matched in full.
+///
 /// Scoping to one entry matters: the prose on `--draft-model` names the
 /// alternate spelling in its own description, so a whole-help substring search
 /// for the alias name would pass even with the `visible_alias` removed.
@@ -491,12 +490,17 @@ fn flag_help_entry<'a>(help: &'a str, flag_signature: &str) -> Option<&'a str> {
     let mut offset = 0usize;
     let mut entry_start = None;
     for line in help.split_inclusive('\n') {
-        let trimmed = line.trim_start();
-        // clap renders long-only flags as `      --flag <VALUE>` and flags
-        // carrying a short form as `  -s, --flag <VALUE>`; accept both.
-        let starts_entry = trimmed.starts_with(flag_signature)
+        let trimmed = line.trim();
+        // clap's long help puts the signature alone on its line, as
+        // `      --flag <VALUE>` for a long-only flag or `  -s, --flag <VALUE>`
+        // for one carrying a short form. Match the whole line rather than a
+        // prefix: `--metrics` is a prefix of the separate `--metrics-port
+        // <PORT>` entry, and a description line that merely mentions the flag
+        // would otherwise anchor the slice on prose. A short form is always
+        // exactly two characters, which rules out a hyphen-bulleted line.
+        let starts_entry = trimmed == flag_signature
             || trimmed.split_once(", ").is_some_and(|(short, rest)| {
-                short.starts_with('-') && rest.starts_with(flag_signature)
+                short.len() == 2 && short.starts_with('-') && rest == flag_signature
             });
         if starts_entry {
             entry_start = Some(offset);
@@ -535,6 +539,12 @@ fn flag_help_entry<'a>(help: &'a str, flag_signature: &str) -> Option<&'a str> {
 /// Alias names clap documented for one flag entry, parsed out of its
 /// `[alias: ...]` / `[aliases: ...]` annotation.
 ///
+/// The annotation must START a line, which is how clap renders it (on its own
+/// line at the description indent). A bare substring search would also accept
+/// a bracketed span someone wrote by hand inside a doc comment, and the help
+/// output already contains such spans on other flags, so the anchor is what
+/// keeps a prose `[alias: --foo]` from silently satisfying the contract.
+///
 /// Both labels are accepted because the label is not part of the contract:
 /// `clap_builder` renders `[alias: ...]` for exactly one visible alias and
 /// `[aliases: ...]` for two or more (the `pluralize` call in its help
@@ -543,21 +553,27 @@ fn flag_help_entry<'a>(help: &'a str, flag_signature: &str) -> Option<&'a str> {
 /// What the contract needs is the alias NAME, and that it is carried by a
 /// real clap alias annotation rather than by prose.
 fn documented_aliases(entry: &str) -> Vec<String> {
-    for label in ["[aliases: ", "[alias: "] {
-        let Some(start) = entry.find(label) else {
-            continue;
-        };
-        let inner_start = start + label.len();
-        let Some(len) = entry[inner_start..].find(']') else {
-            continue;
-        };
-        return entry[inner_start..inner_start + len]
-            .split(',')
-            // The annotation wraps across lines when it is long, so collapse
-            // whitespace rather than trimming spaces only.
-            .map(|alias| alias.split_whitespace().collect::<Vec<_>>().join(" "))
-            .filter(|alias| !alias.is_empty())
-            .collect();
+    let mut offset = 0usize;
+    for line in entry.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let trimmed_offset = offset + (line.len() - trimmed.len());
+        offset += line.len();
+        for label in ["[aliases: ", "[alias: "] {
+            if !trimmed.starts_with(label) {
+                continue;
+            }
+            let inner_start = trimmed_offset + label.len();
+            let Some(len) = entry[inner_start..].find(']') else {
+                continue;
+            };
+            return entry[inner_start..inner_start + len]
+                .split(',')
+                // The annotation wraps across lines when it is long, so
+                // collapse whitespace rather than trimming spaces only.
+                .map(|alias| alias.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|alias| !alias.is_empty())
+                .collect();
+        }
     }
     Vec::new()
 }
@@ -575,6 +591,28 @@ fn assert_flag_documents_alias(label: &str, help: &str, flag_signature: &str, al
          The alias annotation clap rendered for that flag listed {aliases:?}.\n\
          Entry was:\n{entry}"
     );
+}
+
+/// Regression test for the defect that actually took the nightly down: the
+/// CLI binaries must be resolved from the path cargo built them at, never from
+/// a `<manifest>/target/<profile>/` reconstruction. `CARGO_BIN_EXE_*` accounts
+/// for `CARGO_TARGET_DIR`, the profile name, and the target triple, so this
+/// holds for a plain run, for the nightly's external target directory, for
+/// `--profile test-fast`, and for a cross build (issue #962).
+#[test]
+fn cli_binaries_resolve_to_the_path_cargo_built_them_at() {
+    for (name, built_by_cargo) in [
+        ("mlxcel", env!("CARGO_BIN_EXE_mlxcel")),
+        ("mlxcel-server", env!("CARGO_BIN_EXE_mlxcel-server")),
+    ] {
+        let (resolved, report) = resolve_repo_binary(name);
+        assert_eq!(
+            resolved,
+            Path::new(built_by_cargo),
+            "{name} must resolve to the binary cargo built, not a reconstructed path.\n{report}"
+        );
+        assert!(resolved.exists(), "{name} was not built.\n{report}");
+    }
 }
 
 #[test]
@@ -632,6 +670,25 @@ fn documented_aliases_ignores_alias_names_that_only_appear_in_prose() {
         documented_aliases(plural),
         vec!["--draft".to_string(), "--n-draft".to_string()]
     );
+
+    // A bracketed span written by hand mid-sentence must not count either.
+    // The real help already carries prose brackets on other flags (for
+    // example `[llama-server alias for --prefill-chunk-size]`), so an
+    // unanchored substring search would let a doc comment satisfy the
+    // contract with no `visible_alias` attribute behind it.
+    let inline_prose =
+        "      --draft-max <DRAFT_MAX>\n          Max draft tokens [alias: --draft] per step\n";
+    assert!(
+        documented_aliases(inline_prose).is_empty(),
+        "a bracketed span inside prose must not count as a clap alias annotation"
+    );
+
+    // The annotation still parses when clap wraps it across lines.
+    let wrapped = "      --draft-max <DRAFT_MAX>\n          Max draft tokens\n\n          [aliases: --draft,\n           --n-draft]\n";
+    assert_eq!(
+        documented_aliases(wrapped),
+        vec!["--draft".to_string(), "--n-draft".to_string()]
+    );
 }
 
 /// Mutation check on the real help text: dropping a `visible_alias` from the
@@ -665,15 +722,21 @@ fn removing_the_rendered_alias_annotation_leaves_the_alias_undocumented() {
         + 1;
     let without_annotation = format!("{}{}", &entry[..annotation_start], &entry[annotation_end..]);
 
+    // Splice the mutated entry back into the full help so the whole
+    // resolution path runs, not just the annotation parser.
+    let mutated_help = serve_help.replace(entry, &without_annotation);
+    let mutated_entry = flag_help_entry(&mutated_help, "--draft-model <PATH>")
+        .expect("the flag entry itself must survive the mutation");
+
     assert!(
-        without_annotation.contains("--model-draft"),
+        mutated_entry.contains("--model-draft"),
         "precondition: the alias name still appears in the flag's prose"
     );
     assert!(
-        documented_aliases(&without_annotation).is_empty(),
+        documented_aliases(mutated_entry).is_empty(),
         "a dropped visible_alias must leave the alias undocumented, but the \
-         assertion still found: {:?}",
-        documented_aliases(&without_annotation)
+         assertion still found: {:?}\nEntry was:\n{mutated_entry}",
+        documented_aliases(mutated_entry)
     );
 }
 
@@ -701,4 +764,32 @@ fn flag_help_entry_stops_at_the_next_flag() {
         !entry.contains("Other Options:"),
         "entry leaked into the next section:\n{entry}"
     );
+
+    // A signature that is only a prefix of a real entry must not resolve to
+    // it. `--draft` is a prefix of `--draft-max <DRAFT_MAX>`, and in the live
+    // help `--metrics` is a prefix of the separate `--metrics-port <PORT>`.
+    assert!(
+        flag_help_entry(help, "--draft").is_none(),
+        "a prefix of another flag's signature must not match its entry"
+    );
+}
+
+/// A hyphen-bulleted description line must not be mistaken for a flag entry.
+/// The short-form branch of the matcher accepts `-s, --flag <VALUE>`, and
+/// without the two-character constraint a bullet such as `- foo, --draft-max
+/// <DRAFT_MAX> ...` would anchor the entry on prose and pick up whatever
+/// followed it.
+#[test]
+fn flag_help_entry_ignores_hyphen_bulleted_prose() {
+    let help = "Options:\n      \
+        --other <VALUE>\n          Describes something:\n          \
+        - see also, --draft-max <DRAFT_MAX> for the token budget\n\n      \
+        --draft-max <DRAFT_MAX>\n          Max draft tokens\n\n          [alias: --draft]\n";
+
+    let entry = flag_help_entry(help, "--draft-max <DRAFT_MAX>").expect("entry not found");
+    assert!(
+        entry.starts_with("      --draft-max <DRAFT_MAX>"),
+        "matcher anchored on a prose bullet instead of the flag entry:\n{entry}"
+    );
+    assert_eq!(documented_aliases(entry), vec!["--draft".to_string()]);
 }

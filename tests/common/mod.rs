@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 #[allow(dead_code)]
@@ -20,28 +21,36 @@ pub fn repo_model_dir(name: &str) -> PathBuf {
 }
 
 /// Candidate locations for one of the crate's binaries, most authoritative
-/// first. Each entry carries a short label naming where the path came from so
-/// a failure can be diagnosed from the panic message alone.
+/// first, each labelled with where the path came from so a failure is
+/// diagnosable from the panic message alone.
 ///
-/// The list exists because `<manifest>/target/<profile>/<name>` is not where
-/// the binaries live whenever `CARGO_TARGET_DIR` is set. Both `release.yml`
-/// and `nightly-verify.yml` set it to `$HOME/.cargo-target/mlxcel` so the
-/// self-hosted runner keeps a warm build cache outside the checkout, which is
-/// how every test in `tests/cli_help_consistency.rs` came to fail on CI with
-/// `No such file or directory` while passing locally (see issue #962).
+/// The list is deliberately short, and every entry is a signal cargo itself
+/// produces. What used to be here, `<manifest>/target/<profile>/<name>`, is
+/// gone: it is wrong whenever `CARGO_TARGET_DIR` is set, which is how every
+/// test in `tests/cli_help_consistency.rs` came to fail on CI with `No such
+/// file or directory` while passing locally (issue #962). `release.yml` and
+/// `nightly-verify.yml` both set it to `$HOME/.cargo-target/mlxcel` so the
+/// self-hosted runner keeps a warm build cache outside the checkout. It is
+/// also silently wrong under `--target`, where the binaries live under an
+/// extra triple segment it cannot know, and its `cfg!(debug_assertions)`
+/// profile guess is only a proxy for the real profile name. A candidate that
+/// can hand back a stale binary from an unrelated build is worse than no
+/// candidate at all.
+///
+/// The runtime environment is deliberately not consulted either. Cargo never
+/// sets `CARGO_BIN_EXE_*` at test runtime, so the previous `var_os` lookup was
+/// dead code, and honouring it would let a stale exported value win over the
+/// binary cargo just built, which is the same shape as the bug this ordering
+/// exists to fix.
 fn binary_path_candidates(name: &str) -> Vec<(&'static str, PathBuf)> {
     let mut candidates: Vec<(&'static str, PathBuf)> = Vec::new();
 
-    // 1. Runtime override. Cargo never sets this at test runtime, so it only
-    //    fires when a harness or an operator points the tests at a
-    //    pre-built binary on purpose.
-    if let Some(path) = std::env::var_os(format!("CARGO_BIN_EXE_{name}")) {
-        candidates.push(("CARGO_BIN_EXE_* (runtime env)", PathBuf::from(path)));
-    }
-
-    // 2. The compile-time path cargo hands every integration test target. It
+    // 1. The compile-time path cargo hands every integration test target. It
     //    already accounts for the profile, the target triple, and
-    //    `CARGO_TARGET_DIR`, so it needs no reconstruction and cannot drift.
+    //    `CARGO_TARGET_DIR`, and cargo builds the binary before running the
+    //    test, so for the binaries named here it is authoritative and needs no
+    //    reconstruction. This is the same mechanism `tests/surgery_cli.rs` and
+    //    `tests/lang_bias.rs` already use directly.
     let compile_time: Option<&'static str> = match name {
         "mlxcel" => Some(env!("CARGO_BIN_EXE_mlxcel")),
         "mlxcel-server" => Some(env!("CARGO_BIN_EXE_mlxcel-server")),
@@ -52,85 +61,91 @@ fn binary_path_candidates(name: &str) -> Vec<(&'static str, PathBuf)> {
         candidates.push(("CARGO_BIN_EXE_* (compile time)", PathBuf::from(path)));
     }
 
-    // 3. Derived from this test binary's own location. Integration tests are
-    //    linked into `<target-dir>/[<triple>/]<profile>/deps/`, so the profile
-    //    directory holding the package binaries is two levels up. This covers
-    //    binaries not named above without hardcoding a target directory.
+    // 2. Derived from this test binary's own location, covering any binary not
+    //    named above. Integration tests link into
+    //    `<target-dir>/[<triple>/]<profile>/deps/`, so the directory holding
+    //    the package binaries is two levels up. The `deps` check enforces that
+    //    layout rather than assuming it: a test binary running from a copied
+    //    location (a nextest archive, an extracted CI artifact) must not spawn
+    //    whatever sibling file happens to share the binary's name.
     let derived_profile_dir = std::env::current_exe().ok().and_then(|test_exe| {
         test_exe
             .parent()
-            .and_then(|deps| deps.parent())
+            .filter(|deps| deps.file_name() == Some(OsStr::new("deps")))
+            .and_then(Path::parent)
             .map(Path::to_path_buf)
     });
     if let Some(profile_dir) = derived_profile_dir {
         candidates.push(("derived from current_exe()", profile_dir.join(name)));
     }
 
-    // 4. Last resort: reconstruct from `CARGO_TARGET_DIR` when set, else from
-    //    the manifest directory. Kept so a stripped-down invocation still has
-    //    something to try, not relied on by the paths above.
-    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
-    let profile = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
-    candidates.push((
-        "reconstructed from CARGO_TARGET_DIR / CARGO_MANIFEST_DIR",
-        target_dir.join(profile).join(name),
-    ));
-
     candidates
 }
 
-/// Resolve the path to one of the crate's binaries for an integration test.
+/// Resolve one of the crate's binaries, returning both the path and a report
+/// of how it was chosen.
 ///
-/// Returns the first candidate from [`binary_path_candidates`] that exists on
-/// disk, falling back to the most authoritative candidate when none do. The
-/// caller-visible behaviour of returning a path unconditionally is preserved
-/// so the existing `if !binary.exists() { skip }` guards in the real-model
-/// integration tests keep working; [`binary_resolution_report`] supplies the
-/// diagnostics for the paths that spawn unconditionally.
+/// Both halves come from a single pass over the candidates, so the report can
+/// never contradict the choice it is explaining, and the caller stats the
+/// filesystem once rather than twice.
 #[allow(dead_code)]
-pub fn repo_binary_path(name: &str) -> PathBuf {
+pub fn resolve_repo_binary(name: &str) -> (PathBuf, String) {
     let candidates = binary_path_candidates(name);
-    for (_, path) in &candidates {
-        if path.exists() {
-            return path.clone();
-        }
-    }
-    candidates
-        .into_iter()
-        .next()
-        .map(|(_, path)| path)
-        .unwrap_or_else(|| PathBuf::from(name))
-}
+    let selected = candidates
+        .iter()
+        .position(|(_, path)| path.exists())
+        .or(if candidates.is_empty() { None } else { Some(0) });
 
-/// Human-readable account of how [`repo_binary_path`] resolved `name`, for
-/// use in panic messages when spawning the binary fails. Names every
-/// candidate, whether it exists, and the target directory the reconstruction
-/// fallback derived, so a CI failure is diagnosable without reproducing the
-/// environment.
-#[allow(dead_code)]
-pub fn binary_resolution_report(name: &str) -> String {
     let mut report = format!("binary resolution for {name:?}:\n");
-    for (source, path) in binary_path_candidates(name) {
-        let state = if path.exists() { "exists" } else { "missing" };
-        report.push_str(&format!("  [{state}] {source}: {}\n", path.display()));
+    if candidates.is_empty() {
+        report.push_str(
+            "  (no candidate: this binary is not one the helper names, and the \
+             running test binary is not inside a cargo `deps` directory)\n",
+        );
     }
-    let configured_target_dir = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from);
-    report.push_str(&match configured_target_dir {
-        Some(dir) => format!("  CARGO_TARGET_DIR is set to {}", dir.display()),
-        None => format!(
-            "  CARGO_TARGET_DIR is unset; reconstruction assumed {}",
+    for (index, (source, path)) in candidates.iter().enumerate() {
+        let state = if path.exists() { "exists" } else { "missing" };
+        let marker = if Some(index) == selected {
+            " <- selected"
+        } else {
+            ""
+        };
+        report.push_str(&format!(
+            "  [{state}] {source}: {}{marker}\n",
+            path.display()
+        ));
+    }
+    report.push_str(&match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(dir) => format!(
+            "  CARGO_TARGET_DIR is set to {}",
+            PathBuf::from(dir).display()
+        ),
+        None => "  CARGO_TARGET_DIR is unset".to_string(),
+    });
+
+    let path = selected
+        .map(|index| candidates[index].1.clone())
+        // Nothing to go on. Hand back a path that deliberately does not exist,
+        // so the caller's spawn fails with this report attached, rather than a
+        // bare name, which would be resolved through `PATH`.
+        .unwrap_or_else(|| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("target")
-                .display()
-        ),
-    });
-    report
+                .join(name)
+        });
+    (path, report)
+}
+
+/// Path to one of the crate's binaries.
+///
+/// Returns the first candidate that exists, and otherwise the most
+/// authoritative one. It still returns a path unconditionally, so the
+/// `if !binary.exists() { skip }` guards in the real-model integration tests
+/// keep compiling and behaving the same way. Callers that spawn without such a
+/// guard should use [`resolve_repo_binary`] and put the report in their panic.
+#[allow(dead_code)]
+pub fn repo_binary_path(name: &str) -> PathBuf {
+    resolve_repo_binary(name).0
 }
 
 #[allow(dead_code)]
