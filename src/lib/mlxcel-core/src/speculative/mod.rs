@@ -99,15 +99,48 @@ pub struct SpeculativeAcceptanceStats {
     pub accepted_draft_tokens: usize,
     /// The acceptance rule the run actually used.
     pub rule: Option<AcceptanceRule>,
+    /// Verify positions the accept test actually ran on. Differs from
+    /// `proposed_draft_tokens` because a chain stops at its first rejection, so
+    /// positions after it are proposed but never tested.
+    pub positions_tested: usize,
+    /// Running sum of `sum_x min(p(x), q(x))` over tested positions, the
+    /// closed-form probability modified rejection sampling accepts. Zero unless
+    /// [`stochastic_accept::accept_diagnostics_enabled`].
+    pub closed_form_sum_min: f64,
+    /// Running sum of `sum_x p(x) q(x)` over tested positions, the closed-form
+    /// probability the pre-#902 rule accepts. Zero unless diagnostics are on.
+    pub closed_form_sum_prod: f64,
 }
 
 impl SpeculativeAcceptanceStats {
-    /// Accepted draft tokens per proposed draft token.
+    /// Accepted draft tokens per *proposed* draft token.
+    ///
+    /// Not the per-position acceptance probability, and not comparable to
+    /// `sum_x min(p(x), q(x))`: a chain stops at its first rejection, so the
+    /// block positions behind it are counted as proposed but never tested. Use
+    /// [`Self::per_position_acceptance`] to compare against theory or across an
+    /// A/B; this one is the "how much of each drafted block survived" figure,
+    /// which also moves with the block length.
     pub fn acceptance_rate(&self) -> f64 {
         if self.proposed_draft_tokens == 0 {
             0.0
         } else {
             self.accepted_draft_tokens as f64 / self.proposed_draft_tokens as f64
+        }
+    }
+
+    /// Accepted draft tokens per verify position the accept test actually ran
+    /// on.
+    ///
+    /// This is the quantity the theory predicts: modified rejection sampling
+    /// converges to `sum_x min(p(x), q(x))` and the pre-#902 rule to
+    /// `sum_x p(x) q(x)`, both per position. Counted identically on both
+    /// acceptance rules.
+    pub fn per_position_acceptance(&self) -> f64 {
+        if self.positions_tested == 0 {
+            0.0
+        } else {
+            self.accepted_draft_tokens as f64 / self.positions_tested as f64
         }
     }
 
@@ -119,6 +152,49 @@ impl SpeculativeAcceptanceStats {
         } else {
             self.accepted_draft_tokens as f64 / self.rounds as f64
         }
+    }
+
+    /// One-line summary for the CLI, printed on **stdout** after a speculative
+    /// run.
+    ///
+    /// This exists because the `mlxcel` CLI installs no `tracing` subscriber,
+    /// so the info-level instrumentation in this module is unreachable on the
+    /// only binary that runs [`SpeculativeGenerator`]. An acceptance-rate A/B
+    /// that cannot name the rule it measured is not a measurement, so the two
+    /// facts a reviewer needs (which rule ran, and the mean accepted draft
+    /// length) are printed unconditionally rather than behind a log level.
+    ///
+    /// The `rule=` token is [`AcceptanceRule::id`], which is stable and
+    /// greppable. `rule=unknown` means [`SpeculativeGenerator::generate`] never
+    /// reached its decode loop.
+    ///
+    /// Used by: `commands::generate` (offline `mlxcel generate --draft-model`)
+    pub fn summary_line(&self) -> String {
+        let rule = self.rule.map_or("unknown", |r| r.id());
+        let label = self.rule.map_or("no speculative round ran", |r| r.label());
+        let mut line = format!(
+            "[Speculative acceptance] rule={rule} rounds={} proposed={} positions_tested={} \
+             accepted={} per_position_acceptance={:.4} acceptance_rate={:.4} \
+             mean_accepted_len={:.4} ({label})",
+            self.rounds,
+            self.proposed_draft_tokens,
+            self.positions_tested,
+            self.accepted_draft_tokens,
+            self.per_position_acceptance(),
+            self.acceptance_rate(),
+            self.mean_accepted_len(),
+        );
+        if self.positions_tested > 0 && self.closed_form_sum_min > 0.0 {
+            let n = self.positions_tested as f64;
+            line.push_str(&format!(
+                "\n[Speculative acceptance diagnostic] closed_form_sum_min={:.4} \
+                 closed_form_sum_prod={:.4} (measured per-position acceptance must sit at \
+                 sum_min, and sum_min >= sum_prod always)",
+                self.closed_form_sum_min / n,
+                self.closed_form_sum_prod / n,
+            ));
+        }
+        line
     }
 }
 
@@ -413,6 +489,13 @@ impl SpeculativeGenerator {
         let stochastic = rule == AcceptanceRule::Stochastic;
         self.acceptance.rule = Some(rule);
 
+        // The closed-form diagnostic needs `q` on *both* arms, otherwise the
+        // two halves of an A/B report different quantities and cannot be
+        // compared. Off by default, so the argmax arm captures nothing and
+        // stays exactly as it was.
+        let diagnostics = stochastic_accept::accept_diagnostics_enabled();
+        let capture_proposal_probs = stochastic || diagnostics;
+
         let decode_start = Instant::now();
         let mut current_token = first_token;
         let mut done = false;
@@ -431,7 +514,7 @@ impl SpeculativeGenerator {
                 let draft_logits = draft_model.forward(&draft_input, &mut self.draft_caches, None);
                 // Axis B: draft sampler MUST NOT see the bias. See
                 // `draft_sampling` for the rationale.
-                let tok_arr = if stochastic {
+                let tok_arr = if capture_proposal_probs {
                     // The token and `q` come out of one pre-step, which is what
                     // guarantees `q` is the distribution this very token was
                     // drawn from rather than a later reconstruction. `q` is
@@ -558,6 +641,22 @@ impl SpeculativeGenerator {
                 // `accept_token` is the token kept when the draft is accepted;
                 // `replacement` is the token emitted when it is not. Both arms
                 // produce the same pair so the bookkeeping below is shared.
+                // Counted on both arms: this is the denominator the per-position
+                // acceptance probability is measured against, and the two arms
+                // must report the same quantity for an A/B to mean anything.
+                // `proposed_draft_tokens` is *not* that denominator, because a
+                // chain stops at its first rejection and never tests the block
+                // positions behind it.
+                self.acceptance.positions_tested += 1;
+                if diagnostics {
+                    let target_probs =
+                        effective_token_distribution(&pos_logits, target_sampling, &token_history);
+                    let (sum_min, sum_prod) =
+                        stochastic_accept::closed_form_acceptance(&target_probs, &draft_probs[i]);
+                    self.acceptance.closed_form_sum_min += sum_min;
+                    self.acceptance.closed_form_sum_prod += sum_prod;
+                }
+
                 let (accept_draft, replacement) = if stochastic {
                     // `p` at this position, conditioned on the tokens accepted
                     // so far in this round (`token_history` grows as we
@@ -688,10 +787,12 @@ impl SpeculativeGenerator {
         // be read off a log instead of inferred from wall-clock alone, and it
         // names the rule so a run can never be attributed to the wrong arm.
         tracing::info!(
-            rule = ?rule,
+            rule = rule.id(),
             rounds = self.acceptance.rounds,
             proposed_draft_tokens = self.acceptance.proposed_draft_tokens,
+            positions_tested = self.acceptance.positions_tested,
             accepted_draft_tokens = self.acceptance.accepted_draft_tokens,
+            per_position_acceptance = self.acceptance.per_position_acceptance(),
             acceptance_rate = self.acceptance.acceptance_rate(),
             mean_accepted_len = self.acceptance.mean_accepted_len(),
             generated_tokens = self.generated_tokens.len(),

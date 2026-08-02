@@ -670,7 +670,12 @@ fn acceptance_accounting_is_exact_in_both_deterministic_regimes() {
         assert_eq!(stats.rule, Some(AcceptanceRule::Argmax));
         assert_eq!(stats.accepted_draft_tokens, 0);
         assert_eq!(stats.proposed_draft_tokens, stats.rounds * num_draft);
+        // Every round rejects at position 0, so exactly one position per round
+        // is ever tested no matter how long the block is. This is precisely the
+        // gap between `proposed` and `positions_tested`.
+        assert_eq!(stats.positions_tested, stats.rounds);
         assert_eq!(stats.acceptance_rate(), 0.0);
+        assert_eq!(stats.per_position_acceptance(), 0.0);
         assert_eq!(stats.mean_accepted_len(), 0.0);
 
         let mut generator = SpeculativeGenerator::new(1, 1);
@@ -687,7 +692,11 @@ fn acceptance_accounting_is_exact_in_both_deterministic_regimes() {
             stats.accepted_draft_tokens, stats.proposed_draft_tokens,
             "a drafter walking the target's own orbit must be accepted in full"
         );
+        // Nothing is rejected, so every proposed position is also tested and
+        // the two rates coincide. They can only coincide in this regime.
+        assert_eq!(stats.positions_tested, stats.proposed_draft_tokens);
         assert_eq!(stats.acceptance_rate(), 1.0);
+        assert_eq!(stats.per_position_acceptance(), 1.0);
         assert_eq!(stats.mean_accepted_len(), num_draft as f64);
     }
 }
@@ -725,6 +734,7 @@ fn stochastic_runs_report_the_stochastic_rule_and_a_longer_accepted_run() {
 
     let mut rounds = 0usize;
     let mut accepted = 0usize;
+    let mut positions = 0usize;
     for _ in 0..24 {
         let mut generator = SpeculativeGenerator::new(1, 1);
         let _ = generator.generate(&target, &draft, &[0], 240, BLOCK, &stochastic_config());
@@ -737,25 +747,171 @@ fn stochastic_runs_report_the_stochastic_rule_and_a_longer_accepted_run() {
              fallback against itself"
         );
         assert_eq!(stats.proposed_draft_tokens, stats.rounds * BLOCK);
+        assert!(
+            stats.positions_tested <= stats.proposed_draft_tokens,
+            "a chain cannot test more positions than it proposed"
+        );
         rounds += stats.rounds;
         accepted += stats.accepted_draft_tokens;
+        positions += stats.positions_tested;
     }
 
-    let measured = accepted as f64 / rounds as f64;
-    // The band is loose enough to absorb the last round of each call, which
-    // `max_tokens` can truncate mid-block, and tight enough that the pre-#902
-    // rate could never satisfy it.
+    // The primary assertion, stated in the quantity the theory predicts: the
+    // per-position acceptance probability must be `sum_x min(p(x), q(x))`.
+    // Binomial standard error over the pooled positions, 5 sigma.
+    let measured_per_position = accepted as f64 / positions as f64;
+    let se = (sum_min * (1.0 - sum_min) / positions as f64).sqrt();
     assert!(
-        (measured - predicted_new).abs() <= 0.12 * predicted_new,
-        "mean accepted draft length {measured:.4} over {rounds} rounds is not the \
-         predicted {predicted_new:.4} for a per-position accept probability of \
-         {sum_min:.4}"
+        (measured_per_position - sum_min).abs() <= 5.0 * se,
+        "per-position acceptance {measured_per_position:.4} over {positions} tested \
+         positions is not the sum-min optimum {sum_min:.4} (+-{:.4})",
+        5.0 * se
     );
     assert!(
-        measured > 2.0 * predicted_old,
-        "mean accepted draft length {measured:.4} must clear twice the pre-#902 \
+        measured_per_position > sum_prod,
+        "per-position acceptance {measured_per_position:.4} must exceed the pre-#902 \
+         sum-product rate {sum_prod:.4}"
+    );
+
+    // The derived per-round figure must then follow the geometric prediction.
+    // Looser band: `max_tokens` can truncate the final block of each call.
+    let measured_len = accepted as f64 / rounds as f64;
+    assert!(
+        (measured_len - predicted_new).abs() <= 0.12 * predicted_new,
+        "mean accepted draft length {measured_len:.4} over {rounds} rounds is not the \
+         predicted {predicted_new:.4} for a per-position accept probability of {sum_min:.4}"
+    );
+    assert!(
+        measured_len > 2.0 * predicted_old,
+        "mean accepted draft length {measured_len:.4} must clear twice the pre-#902 \
          prediction {predicted_old:.4}"
     );
+}
+
+/// The closed-form diagnostic must agree with the measured acceptance, and must
+/// respect `sum_x min(p, q) >= sum_x p(x) q(x)`.
+///
+/// This is the check that turns "the acceptance rate looks wrong" into an
+/// arithmetic statement. Run here on synthetic models where `p` and `q` are
+/// known in closed form, so a disagreement localizes to the accept test rather
+/// than to the models.
+#[test]
+fn closed_form_acceptance_matches_the_hand_computed_values() {
+    let target_logits = ffi::from_slice_f32(&TARGET_LOGITS, &[1, 1, VOCAB as i32]);
+    let draft_logits = ffi::from_slice_f32(&DRAFT_LOGITS, &[1, 1, VOCAB as i32]);
+    let config = stochastic_config();
+    let p_arr = effective_token_distribution(&target_logits, &config, &[]);
+    let q_arr = effective_token_distribution(&draft_logits, &config, &[]);
+
+    let (sum_min, sum_prod) = stochastic_accept::closed_form_acceptance(&p_arr, &q_arr);
+
+    let p = softmax(&TARGET_LOGITS, TEMPERATURE);
+    let q = softmax(&DRAFT_LOGITS, TEMPERATURE);
+    let want_min: f64 = p.iter().zip(&q).map(|(a, b)| a.min(*b)).sum();
+    let want_prod: f64 = p.iter().zip(&q).map(|(a, b)| a * b).sum();
+
+    assert!(
+        (sum_min - want_min).abs() < 1e-5,
+        "sum min {sum_min} != {want_min}"
+    );
+    assert!(
+        (sum_prod - want_prod).abs() < 1e-5,
+        "sum prod {sum_prod} != {want_prod}"
+    );
+    assert!(
+        sum_min >= sum_prod,
+        "min(a,b) >= a*b pointwise, so sum_min {sum_min} can never fall below \
+         sum_prod {sum_prod}"
+    );
+}
+
+/// The CLI summary line is the only place the acceptance rule is observable on
+/// `mlxcel generate`, because that binary installs no tracing subscriber. Its
+/// shape is therefore an observable contract, not a debug convenience: pin the
+/// stable `rule=` token and the presence of `mean_accepted_len`, so a rename
+/// cannot silently break whoever is grepping a benchmark log to prove which arm
+/// they measured.
+#[test]
+fn cli_summary_line_carries_the_rule_id_and_mean_accepted_len() {
+    let stats = SpeculativeAcceptanceStats {
+        rounds: 10,
+        proposed_draft_tokens: 40,
+        positions_tested: 24,
+        accepted_draft_tokens: 18,
+        rule: Some(AcceptanceRule::Stochastic),
+        ..SpeculativeAcceptanceStats::default()
+    };
+    let line = stats.summary_line();
+    assert!(line.starts_with("[Speculative acceptance] "), "{line}");
+    assert!(line.contains("rule=stochastic "), "{line}");
+    assert!(line.contains("mean_accepted_len=1.8000"), "{line}");
+    assert!(line.contains("acceptance_rate=0.4500"), "{line}");
+    assert!(line.contains("positions_tested=24"), "{line}");
+    // 18/24, the quantity comparable to `sum min(p, q)`. Distinct from
+    // `acceptance_rate` (18/40), which divides by block positions the chain
+    // never reached. Confusing the two is what made a correct implementation
+    // look like a 2x regression.
+    assert!(line.contains("per_position_acceptance=0.7500"), "{line}");
+    assert!(line.contains("rounds=10"), "{line}");
+    assert!(
+        line.contains("(stochastic (modified rejection sampling))"),
+        "{line}"
+    );
+
+    // Every rule id must be distinct and free of whitespace, or `rule=` cannot
+    // be grepped unambiguously.
+    let ids: Vec<&str> = [
+        AcceptanceRule::Argmax,
+        AcceptanceRule::ArgmaxKillSwitch,
+        AcceptanceRule::Stochastic,
+        AcceptanceRule::ArgmaxNoProposalDistribution,
+    ]
+    .iter()
+    .map(|r| r.id())
+    .collect();
+    for id in &ids {
+        assert!(
+            !id.contains(char::is_whitespace),
+            "rule id {id:?} has spaces"
+        );
+    }
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        ids.len(),
+        "rule ids must be distinct: {ids:?}"
+    );
+
+    // `acceptance_rate` and `per_position_acceptance` must never be confused
+    // for each other: they differ whenever any chain stopped early.
+    assert!(
+        (stats.per_position_acceptance() - 0.75).abs() < 1e-9,
+        "{}",
+        stats.per_position_acceptance()
+    );
+    assert!(
+        (stats.acceptance_rate() - 0.45).abs() < 1e-9,
+        "{}",
+        stats.acceptance_rate()
+    );
+
+    // The kill-switch arm must be nameable too: it is one half of the A/B.
+    let baseline = SpeculativeAcceptanceStats {
+        rule: Some(AcceptanceRule::ArgmaxKillSwitch),
+        ..stats
+    };
+    assert!(
+        baseline.summary_line().contains("rule=argmax-kill-switch "),
+        "{}",
+        baseline.summary_line()
+    );
+
+    // A run that never entered the decode loop must say so rather than
+    // implying a rule it did not run.
+    let empty = SpeculativeAcceptanceStats::default();
+    assert!(empty.summary_line().contains("rule=unknown "));
 }
 
 /// The stochastic acceptance path must leave the caches in one of the same two

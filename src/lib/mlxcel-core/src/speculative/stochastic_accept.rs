@@ -134,7 +134,22 @@ impl AcceptanceRule {
         matches!(self, Self::Argmax | Self::Stochastic)
     }
 
-    fn label(self) -> &'static str {
+    /// Stable, greppable identifier for this rule.
+    ///
+    /// Printed by the CLI summary line and matched by tooling, so it is part of
+    /// the observable contract: renaming a token here breaks whoever is
+    /// grepping a benchmark log to prove which arm they measured.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Argmax => "argmax-greedy",
+            Self::ArgmaxKillSwitch => "argmax-kill-switch",
+            Self::Stochastic => "stochastic",
+            Self::ArgmaxNoProposalDistribution => "argmax-no-proposal-distribution",
+        }
+    }
+
+    /// Human-readable description shown next to [`Self::id`].
+    pub fn label(self) -> &'static str {
         match self {
             Self::Argmax => "argmax (greedy target sampler)",
             Self::ArgmaxKillSwitch => "argmax (stochastic acceptance disabled by env)",
@@ -289,6 +304,47 @@ pub fn acceptance_rule(
     } else {
         AcceptanceRule::Stochastic
     }
+}
+
+/// Environment switch for the per-position acceptance diagnostic.
+pub const ACCEPT_DIAG_ENV: &str = "MLXCEL_SPECULATIVE_ACCEPT_DIAG";
+
+/// Whether to accumulate the closed-form acceptance probabilities per verify
+/// position.
+///
+/// Off by default: it costs two full-vocabulary reductions and one host
+/// readback per verified position, which is real work on a 128K vocabulary.
+/// On, it turns "the acceptance rate looks wrong" into an arithmetic
+/// statement, because `sum_x min(p, q) >= sum_x p(x) q(x)` holds for every
+/// pair of distributions. If the measured rate does not sit at `sum min` while
+/// `sum min` sits at or above `sum prod`, the defect is localized immediately
+/// to either the accept test or to `p` and `q` themselves.
+pub fn accept_diagnostics_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| match std::env::var(ACCEPT_DIAG_ENV) {
+        Ok(raw) => !matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "no" | "off"
+        ),
+        Err(_) => false,
+    })
+}
+
+/// Closed-form acceptance probabilities at one verify position.
+///
+/// `sum_min` is the probability modified rejection sampling accepts; `sum_prod`
+/// is the probability the pre-#902 rule accepts (an independent target draw
+/// landing on the drafted token). `sum_min >= sum_prod` always, because
+/// `min(a, b) >= a * b` for `a, b` in `[0, 1]`.
+pub fn closed_form_acceptance(target_probs: &MlxArray, proposal_probs: &MlxArray) -> (f64, f64) {
+    let sum_min = ffi::sum_all(&ffi::minimum(target_probs, proposal_probs));
+    let sum_prod = ffi::sum_all(&ffi::multiply(target_probs, proposal_probs));
+    ffi::eval(&sum_min);
+    ffi::eval(&sum_prod);
+    (
+        f64::from(ffi::item_f32(&sum_min)),
+        f64::from(ffi::item_f32(&sum_prod)),
+    )
 }
 
 /// The verdict for one drafted token.

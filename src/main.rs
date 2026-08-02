@@ -1780,8 +1780,42 @@ impl Default for DiffusionServeOptions {
     }
 }
 
+/// Install a `tracing` subscriber for the offline CLI commands when `RUST_LOG`
+/// is set.
+///
+/// The CLI shipped without any global subscriber, so every `tracing::*` call
+/// reached by `mlxcel generate`, `inspect`, `tune` and friends was silently
+/// discarded no matter what `RUST_LOG` said. That is exactly backwards: the
+/// instrumentation is unreachable precisely when someone has set `RUST_LOG`
+/// because they are trying to diagnose something. Notably it hid the drafter
+/// auto-detection line, which is the difference between a benchmark that ran
+/// the classic `SpeculativeGenerator` and one that ran a kind-specific round
+/// loop.
+///
+/// Two deliberate constraints:
+///
+/// * **Opt-in.** Nothing is installed unless `RUST_LOG` is set, so default
+///   command output is unchanged byte for byte.
+/// * **stderr.** Diagnostics must not contaminate the generated text on stdout,
+///   which callers pipe.
+///
+/// `Serve` is skipped because `server::startup` installs its own subscriber and
+/// would panic on the double `init()`. `try_init` is used anyway so a future
+/// second initializer degrades to a no-op rather than aborting the process.
+fn init_cli_tracing(command: &Commands) {
+    if matches!(command, Commands::Serve(_)) || std::env::var_os("RUST_LOG").is_none() {
+        return;
+    }
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    init_cli_tracing(&cli.command);
 
     // Default the CUDA kernel JIT cache to a persistent, MLX-pin-scoped dir so
     // the first-run kernel compilation is paid once per machine, not every boot.

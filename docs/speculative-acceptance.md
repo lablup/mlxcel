@@ -109,36 +109,96 @@ temperature-0 output is byte-identical.
 the previous acceptance rule at every temperature. Read once per process, so
 set it before starting `mlxcel` or `mlxcel-server`.
 
-## Reading the rule off a log
+## Reading the rule off a run
 
-Both lines are emitted at `info`, so `RUST_LOG=info` (or the default server log
-level) is enough.
-
-The first time a process runs each distinct rule it logs one line:
-
-```
-INFO speculative acceptance rule active rule="stochastic (modified rejection sampling)" distribution_preserving=true
-```
-
-The latch is per rule kind, not global: a process that serves a greedy request
-and later a `temperature > 0` one logs both lines, so the log is a complete
-record of every rule the process ever ran. The other three labels are
-`argmax (greedy target sampler)`,
-`argmax (stochastic acceptance disabled by env)`, and
-`argmax (drafter reported no proposal distribution)`.
-
-The first occurrence of each per-token outcome is logged the same way
-(`accept`, `reject, resampled from normalized relu(p - q)`, and the degenerate
-`reject, residual mass underflowed to zero, resampled from target p`).
-
-Every `SpeculativeGenerator::generate` call then logs a summary:
+**The `mlxcel` CLI installs no `tracing` subscriber by default**, so the
+info-level instrumentation below is invisible on the only binary that runs
+`SpeculativeGenerator`. The acceptance summary is therefore printed on
+**stdout**, unconditionally, after every speculative run:
 
 ```
-INFO speculative decode finished rule=Stochastic rounds=63 proposed_draft_tokens=252 accepted_draft_tokens=113 acceptance_rate=0.448 mean_accepted_len=1.79 generated_tokens=176
+[Speculative acceptance] rule=stochastic rounds=153 proposed=612 positions_tested=195 accepted=46 per_position_acceptance=0.2359 acceptance_rate=0.0752 mean_accepted_len=0.3007 (stochastic (modified rejection sampling))
 ```
 
-`mean_accepted_len` is the figure to compare across an A/B. `rule` on this line
-is what proves an arm is not silently the fallback.
+`rule=` is the stable identifier, one of `stochastic`, `argmax-greedy`,
+`argmax-kill-switch`, `argmax-no-proposal-distribution`. It is what proves an
+A/B arm is not silently the fallback.
+
+### The two acceptance rates are not interchangeable
+
+| Field | Definition | Use |
+|-------|------------|-----|
+| `per_position_acceptance` | `accepted / positions_tested` | **The one theory predicts.** Compare across arms and against `sum_x min(p, q)`. |
+| `acceptance_rate` | `accepted / proposed` | How much of each drafted block survived. Moves with block length. |
+| `mean_accepted_len` | `accepted / rounds` | Tokens gained per target forward. Drives throughput. |
+
+`proposed` counts every position of every drafted block, but a chain stops at
+its first rejection and never tests the positions behind it. So
+`acceptance_rate` is depressed by exactly the amount the chain truncated, and
+comparing it across two arms with different chain-length profiles is
+meaningless. Confusing these two is enough to make a correct implementation
+look like a 2x regression.
+
+### Optional tracing
+
+Setting `RUST_LOG` now installs a subscriber for the offline CLI commands
+(writing to stderr, so piped stdout stays clean), which surfaces the one-shot
+`speculative acceptance rule active` line, the per-call `speculative decode
+finished` line, and the drafter auto-detection line. Default output is
+unchanged when `RUST_LOG` is unset. `mlxcel serve` is unaffected: it installs
+its own subscriber.
+
+## Verifying the gain before trusting a throughput number
+
+`MLXCEL_SPECULATIVE_ACCEPT_DIAG=1` adds a second line:
+
+```
+[Speculative acceptance diagnostic] closed_form_sum_min=0.2213 closed_form_sum_prod=0.2087 (measured per-position acceptance must sit at sum_min, and sum_min >= sum_prod always)
+```
+
+`closed_form_sum_min` is `sum_x min(p(x), q(x))` averaged over the verify
+positions the run actually tested, which is the probability modified rejection
+sampling accepts. `closed_form_sum_prod` is `sum_x p(x) q(x)`, the probability
+the pre-#902 rule accepts. Because `min(a, b) >= a * b` for `a, b` in `[0, 1]`,
+`sum_min >= sum_prod` holds for every pair of distributions, always. The
+diagnostic therefore turns "the acceptance rate looks wrong" into an arithmetic
+statement:
+
+* measured `per_position_acceptance` should sit at `closed_form_sum_min`. If it
+  does not, the accept test is wrong.
+* `closed_form_sum_min` should be at or above `closed_form_sum_prod`. If it is
+  not, `p` or `q` is wrong.
+
+It costs two full-vocabulary reductions and a host readback per tested
+position, so it is off by default.
+
+### The size of the gain depends on the drafter's entropy, not on the code
+
+`sum_x min(p, q)` collapses onto `sum_x p(x) q(x)` whenever the drafter is
+nearly deterministic: if `q(t*) ~ 1` then `min(p(t*), q(t*)) = p(t*)` and
+`p(t*) q(t*) ~ p(t*)`, so the two rules accept at the same rate and this change
+buys nothing. The gain appears when `q` is diffuse. Measured on
+Llama-3.1-8B-Instruct-4bit with a Llama-3.2-1B-Instruct drafter, 200 tokens,
+`--num-draft-tokens 4`, one trajectory each:
+
+| Temperature | `closed_form_sum_min` | `closed_form_sum_prod` | Ratio | measured `per_position_acceptance` |
+|---|---|---|---|---|
+| 0.7 | 0.2808 | 0.2740 | 1.02x | 0.2902 |
+| 1.0 | 0.1738 | 0.1613 | 1.08x | 0.1735 |
+| 1.5 | 0.6809 | 0.0494 | 13.8x | 0.6966 |
+
+The measured value sits on `sum_min` at every temperature, which is the
+correctness result. The *ratio* column is the throughput headroom, and on this
+pair at 0.7 there is essentially none: the 1B drafter is close to deterministic
+there. Between-trajectory variance in the agreement profile is large (two
+200-token runs at the same temperature differed by nearly 2x in `sum_min`), so
+a single short throughput run at 0.7 on this pair measures noise, not the
+change. Read `closed_form_sum_min / closed_form_sum_prod` first: it is the
+upper bound on what any throughput measurement can show.
+
+The temperature 1.5 row is a real measurement of the mechanism but comes from a
+degenerate high-temperature trajectory where both models agree on repetitive
+text; do not read it as a typical production number.
 
 ## Measuring the change
 
@@ -150,21 +210,36 @@ DFlash and would compare the unchanged fallback against itself:
 
 ```bash
 # Baseline arm: previous acceptance rule.
-MLXCEL_SPECULATIVE_STOCHASTIC_ACCEPT=0 RUST_LOG=info \
+MLXCEL_SPECULATIVE_STOCHASTIC_ACCEPT=0 MLXCEL_SPECULATIVE_ACCEPT_DIAG=1 \
   ./target/release/mlxcel generate \
     -m models/<target> --draft-model models/<draft> --num-draft-tokens 4 \
     --temp 0.7 --seed 1234 -n 256 -p "<prompt>"
 
 # New arm: modified rejection sampling. Same command without the kill switch.
-RUST_LOG=info ./target/release/mlxcel generate \
+MLXCEL_SPECULATIVE_ACCEPT_DIAG=1 ./target/release/mlxcel generate \
     -m models/<target> --draft-model models/<draft> --num-draft-tokens 4 \
     --temp 0.7 --seed 1234 -n 256 -p "<prompt>"
 ```
 
-Compare `mean_accepted_len` and the reported tok/s between the two arms, and
-confirm the `rule=` field differs (`ArgmaxKillSwitch` vs `Stochastic`). Repeat
-at `--temp 0.0`, where both arms must produce identical output and identical
-`rule=Argmax`, and at `--temp 1.0`.
+Confirm the `rule=` field differs between arms (`argmax-kill-switch` vs
+`stochastic`), then compare `per_position_acceptance` and `mean_accepted_len`.
+Repeat at `--temp 0.0`, where both arms must produce identical output and
+identical `rule=argmax-greedy`.
+
+**A note on the drafter-kind line.** With no explicit `--draft-kind`, the CLI
+prints the drafter kind it *auto-detected* from the drafter's `config.json`,
+which is frequently `dflash`, and then ignores it and runs the classic
+`SpeculativeGenerator` anyway. A second line now states which path actually
+runs:
+
+```
+Resolved drafter kind: dflash (block_size = 16, default)
+Drafter kind was auto-detected only; running the classic SpeculativeGenerator path (pass --draft-kind explicitly to select a kind-specific round loop).
+```
+
+Passing `--draft-kind` explicitly does **not** get you a DFlash round loop in
+`mlxcel generate`; it returns an error saying the offline path does not
+construct one.
 
 ## Regression guards
 
