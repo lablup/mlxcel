@@ -220,6 +220,7 @@ INFO ...: paged decode v2: fused v2 launch (batch 4, 3828 visible KV tokens, 16 
 INFO ...: paged decode v2: gather: the layer spans 3 K / 3 V pool slabs and the fused kernels read one buffer per side (slab_blocks=32); raise --ctx-size or MLXCEL_PAGED_SLAB_BLOCKS so a layer's rows fit one slab
 INFO ...: paged decode v2: gather: 1024 visible KV tokens across 1 request(s) is below the 4096-token dispatch floor
 INFO ...: paged decode v2: gather: pinned by MLXCEL_PAGED_ATTENTION_NATIVE
+INFO ...: paged decode v2: fused v2 cascade launch (batch 4, 4 of them sharing 256 pages / 8192 KV tokens read once; 8 shared-span chunks, 4 suffix chunks)
 ```
 
 A run that never prints `fused v2 launch` never used the fused kernel, whatever
@@ -235,6 +236,14 @@ Two knobs, neither normally needed:
   The floors themselves move with `MLXCEL_PAGED_V2_MIN_KV_TOKENS` (lone
   request, default 4096) and `MLXCEL_PAGED_V2_MIN_KV_TOKENS_PER_REQUEST`
   (multi-request, default 512).
+- `MLXCEL_CASCADE_ATTENTION=1` enables two-level cascade decode (issue #903):
+  a whole-page prompt prefix shared by several sequences in the batch is
+  attended once for the subgroup and merged into each member's per-request
+  suffix state, instead of being re-read once per sequence. Off by default,
+  pending a serving measurement. Its own outcome line says when it ran, and
+  `/metrics` carries `mlxcel_paged_decode_launches_total{path="cascade"}`
+  alongside the flat and gather counts. See
+  [Cascade attention](cascade-attention.md).
 - `MLXCEL_PAGED_SLAB_BLOCKS` overrides the pool's slab size in blocks. The
   server derives it from `--ctx-size` and `--parallel`, clamped by the KV
   budget, and logs the resolved value at startup (`Paged KV slab size: N blocks

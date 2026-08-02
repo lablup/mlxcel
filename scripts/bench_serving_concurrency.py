@@ -22,6 +22,13 @@ Examples:
 
     # Longer prompts and more decode tokens:
     python3 scripts/bench_serving_concurrency.py --prompt-tokens 2048 --max-tokens 256
+
+    # Shared-prefix (cascade) scenario: every client sends the same 2K system
+    # prompt and a distinct short question, with the decode path printed per
+    # level so the arm can be attributed (issue #903).
+    python3 scripts/bench_serving_concurrency.py \
+        --shared-prefix-tokens 2048 --prompt-tokens 32 \
+        --concurrency 4,8 --max-tokens 256 --metrics
 """
 
 from __future__ import annotations
@@ -126,17 +133,27 @@ def stream_request(
     prompt: str,
     max_tokens: int,
     timeout: float,
+    system_prompt: str = "",
 ) -> RequestResult:
     """Issue one streaming chat completion and time it (blocking).
 
     Runs on a worker thread. Counts completion tokens from the final ``usage``
     chunk when the server emits one, otherwise from the number of non-empty
     content deltas as a proxy.
+
+    ``system_prompt``, when non-empty, is byte-identical across every request of
+    the level. That is what makes the prompt cache hand the same refcounted KV
+    blocks to each sequence, which is the precondition for shared-prefix
+    (cascade) decode to have anything to hoist (issue #903).
     """
+    messages: list[dict[str, str]] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
     payload = json.dumps(
         {
             "model": model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
             "max_tokens": max_tokens,
             "temperature": 0.0,
             "stream": True,
@@ -216,14 +233,31 @@ async def run_level(
     prompt: str,
     max_tokens: int,
     timeout: float,
+    system_prompt: str = "",
 ) -> LevelSummary:
-    """Run ``concurrency`` requests in parallel and aggregate the results."""
+    """Run ``concurrency`` requests in parallel and aggregate the results.
+
+    With a shared system prompt the per-client user questions are made distinct,
+    so the requests share a prefix and diverge after it, which is the shape the
+    shared-prefix decode benchmark needs. Identical user text would let the
+    prompt cache serve the whole prompt and measure nothing.
+    """
     loop = asyncio.get_running_loop()
     tasks = [
         loop.run_in_executor(
-            None, stream_request, host, port, model, prompt, max_tokens, timeout
+            None,
+            stream_request,
+            host,
+            port,
+            model,
+            f"{prompt} Question {i}: what is item {i} in the list above?"
+            if system_prompt
+            else prompt,
+            max_tokens,
+            timeout,
+            system_prompt,
         )
-        for _ in range(concurrency)
+        for i in range(concurrency)
     ]
     results: list[RequestResult] = await asyncio.gather(*tasks)
 
@@ -245,6 +279,70 @@ async def run_level(
     for r in fail:
         print(f"    request error: {r.error}")
     return summary
+
+
+# Prometheus counters that say which attention path the decode loop ran. A
+# shared-prefix benchmark whose cascade counter never moves measured the flat
+# path under a cascade label; issue #899 shipped exactly that mistake.
+_PATH_METRICS = (
+    'mlxcel_paged_decode_launches_total{path="fused_v2"}',
+    'mlxcel_paged_decode_launches_total{path="gather"}',
+    'mlxcel_paged_decode_launches_total{path="cascade"}',
+    "mlxcel_cascade_shared_tokens_total",
+    "mlxcel_cascade_member_sequences_total",
+    "mlxcel_cascade_failures_total",
+    "mlxcel_prompt_cache_hits_total",
+)
+
+
+def scrape_paths(host: str, port: int) -> dict[str, float]:
+    """Read the decode-path counters from ``/metrics``.
+
+    Returns an empty dict when the endpoint is unavailable, so the load
+    generator still works against a build without it.
+    """
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.request("GET", "/metrics")
+        resp = conn.getresponse()
+        body = resp.read().decode("utf-8", "replace")
+        conn.close()
+        if resp.status != 200:
+            return {}
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, float] = {}
+    for line in body.splitlines():
+        if line.startswith("#"):
+            continue
+        name, _, value = line.rpartition(" ")
+        name = name.strip()
+        if name in _PATH_METRICS:
+            try:
+                out[name] = float(value)
+            except ValueError:
+                continue
+    return out
+
+
+def print_path_delta(before: dict[str, float], after: dict[str, float]) -> None:
+    """Print what each decode-path counter did across one level."""
+    if not before and not after:
+        print("    decode paths: /metrics unavailable, path attribution unknown")
+        return
+    parts = []
+    for name in _PATH_METRICS:
+        delta = after.get(name, 0.0) - before.get(name, 0.0)
+        parts.append(f"{name.split('mlxcel_')[-1]}={delta:+.0f}")
+    print("    decode paths: " + "  ".join(parts))
+    cascade = after.get(
+        'mlxcel_paged_decode_launches_total{path="cascade"}', 0.0
+    ) - before.get('mlxcel_paged_decode_launches_total{path="cascade"}', 0.0)
+    if cascade <= 0:
+        print(
+            "    NOTE: no cascade launch in this level. Whatever this level "
+            "measured, it was not cascade attention."
+        )
 
 
 def print_table(summaries: list[LevelSummary]) -> None:
@@ -287,17 +385,26 @@ def parse_concurrency(spec: str) -> list[int]:
 async def _amain(args: argparse.Namespace) -> int:
     model = resolve_model(args.host, args.port, args.model)
     prompt = build_prompt(args.prompt_tokens)
+    system_prompt = (
+        build_prompt(args.shared_prefix_tokens) if args.shared_prefix_tokens else ""
+    )
     levels = parse_concurrency(args.concurrency)
 
     print(f"Server:       http://{args.host}:{args.port}")
     print(f"Model:        {model}")
     print(f"Prompt:       ~{args.prompt_tokens} tokens ({len(prompt)} chars)")
+    if system_prompt:
+        print(
+            f"Shared prefix: ~{args.shared_prefix_tokens} tokens "
+            f"({len(system_prompt)} chars), identical across every client"
+        )
     print(f"Max tokens:   {args.max_tokens}")
     print(f"Concurrency:  {levels}")
 
     summaries: list[LevelSummary] = []
     for level in levels:
         print(f"\n>>> concurrency={level} ...")
+        before = scrape_paths(args.host, args.port) if args.metrics else {}
         summary = await run_level(
             level,
             args.host,
@@ -306,7 +413,10 @@ async def _amain(args: argparse.Namespace) -> int:
             prompt,
             args.max_tokens,
             args.timeout,
+            system_prompt,
         )
+        if args.metrics:
+            print_path_delta(before, scrape_paths(args.host, args.port))
         summaries.append(summary)
 
     print_table(summaries)
@@ -348,6 +458,27 @@ def main() -> int:
         type=float,
         default=600.0,
         help="Per-request socket timeout in seconds (default: 600)",
+    )
+    parser.add_argument(
+        "--shared-prefix-tokens",
+        type=int,
+        default=0,
+        help=(
+            "Approximate length of a system prompt sent identically by every "
+            "client, so the requests share a KV prefix and diverge after it "
+            "(0 = off, the default). This is the shape shared-prefix (cascade) "
+            "decode exists for; see docs/cascade-attention.md."
+        ),
+    )
+    parser.add_argument(
+        "--metrics",
+        action="store_true",
+        help=(
+            "Scrape /metrics around each level and print which attention path "
+            "the decode loop ran. Use it whenever the run is meant to compare "
+            "cascade against flat: a level whose cascade counter did not move "
+            "did not measure cascade."
+        ),
     )
     args = parser.parse_args()
     return asyncio.run(_amain(args))

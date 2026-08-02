@@ -26,7 +26,7 @@
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use mlxcel_core::cache::PagedCacheStats;
+use mlxcel_core::cache::{PagedBatchDecodeStats, PagedCacheStats};
 use serde::Serialize;
 
 use crate::server::prompt_cache::metrics::{PromptCacheRejectCounters, PromptCacheRejectReason};
@@ -205,6 +205,27 @@ pub struct BatchObservability {
     /// Times paged decode was requested but fell back to dense.
     pub decode_storage_fallbacks: AtomicU64,
 
+    // -- paged decode kernel dispatch (issues #899, #903) --
+    /// Layer decode steps served by the fused paged v2 kernel, cascade
+    /// included.
+    pub paged_decode_v2_launches: AtomicU64,
+    /// Layer decode steps served by the gather-then-SDPA fallback inside the
+    /// whole-batch path.
+    pub paged_decode_gather_fallbacks: AtomicU64,
+    /// Layer decode steps served by the two-level cascade decomposition
+    /// (issue #903). A subset of `paged_decode_v2_launches`.
+    pub cascade_launches: AtomicU64,
+    /// Cumulative KV tokens hoisted into a shared-span launch. Against
+    /// `cascade_launches` this is the mean shared-span length, which is the
+    /// scheduler-visible answer to "how much prefix is actually being shared".
+    pub cascade_shared_tokens: AtomicU64,
+    /// Cumulative member count across cascade launches. Against
+    /// `cascade_launches` this is the mean subgroup size.
+    pub cascade_member_seqs: AtomicU64,
+    /// Cascade launches that failed and fell back to the flat v2 launch.
+    /// Non-zero means a planned decomposition is silently not running.
+    pub cascade_failures: AtomicU64,
+
     // -- prompt-prefix cache --
     /// Cumulative count of successful prompt-cache adoptions (hits).
     pub prompt_cache_hits: AtomicU64,
@@ -285,6 +306,12 @@ impl BatchObservability {
             cache_pool_paged_bytes_in_use: AtomicU64::new(0),
             cache_pool_paged_block_budget: AtomicU64::new(0),
             decode_storage_fallbacks: AtomicU64::new(0),
+            paged_decode_v2_launches: AtomicU64::new(0),
+            paged_decode_gather_fallbacks: AtomicU64::new(0),
+            cascade_launches: AtomicU64::new(0),
+            cascade_shared_tokens: AtomicU64::new(0),
+            cascade_member_seqs: AtomicU64::new(0),
+            cascade_failures: AtomicU64::new(0),
             prompt_cache_hits: AtomicU64::new(0),
             prompt_cache_hit_tokens: AtomicU64::new(0),
             prompt_cache_inserts: AtomicU64::new(0),
@@ -523,6 +550,29 @@ impl BatchObservability {
             .store(paged_block_budget, Ordering::Relaxed);
     }
 
+    /// Mirror the core's paged-decode dispatch counters into the scheduler's
+    /// observability (issues #899, #903).
+    ///
+    /// The counters live in `mlxcel-core` because that is where the decision is
+    /// made, and they are process-wide monotonic sums, so this is a copy rather
+    /// than an accumulation. Copying them here is what puts "which attention
+    /// kernel is this server actually running, and is the shared prefix being
+    /// hoisted" into `/health` and `/metrics` without a profiler.
+    pub fn update_paged_decode_gauges(&self, stats: PagedBatchDecodeStats) {
+        self.paged_decode_v2_launches
+            .store(stats.v2_launches, Ordering::Relaxed);
+        self.paged_decode_gather_fallbacks
+            .store(stats.gather_fallbacks, Ordering::Relaxed);
+        self.cascade_launches
+            .store(stats.cascade_launches, Ordering::Relaxed);
+        self.cascade_shared_tokens
+            .store(stats.cascade_shared_tokens, Ordering::Relaxed);
+        self.cascade_member_seqs
+            .store(stats.cascade_member_seqs, Ordering::Relaxed);
+        self.cascade_failures
+            .store(stats.cascade_failures, Ordering::Relaxed);
+    }
+
     // -- Snapshot for HTTP handlers --
 
     /// Create a serializable snapshot of the current observability state.
@@ -555,6 +605,14 @@ impl BatchObservability {
                 .cache_pool_paged_block_budget
                 .load(Ordering::Relaxed),
             decode_storage_fallbacks: self.decode_storage_fallbacks.load(Ordering::Relaxed),
+            paged_decode_v2_launches: self.paged_decode_v2_launches.load(Ordering::Relaxed),
+            paged_decode_gather_fallbacks: self
+                .paged_decode_gather_fallbacks
+                .load(Ordering::Relaxed),
+            cascade_launches: self.cascade_launches.load(Ordering::Relaxed),
+            cascade_shared_tokens: self.cascade_shared_tokens.load(Ordering::Relaxed),
+            cascade_member_seqs: self.cascade_member_seqs.load(Ordering::Relaxed),
+            cascade_failures: self.cascade_failures.load(Ordering::Relaxed),
             audio_source_duration_micros: self.audio_source_duration_micros.load(Ordering::Relaxed),
             audio_source_samples: self.audio_source_samples.load(Ordering::Relaxed),
             audio_normalized_samples: self.audio_normalized_samples.load(Ordering::Relaxed),
@@ -647,6 +705,21 @@ pub struct ObservabilitySnapshot {
     pub cache_pool_paged_bytes_in_use: u64,
     pub cache_pool_paged_block_budget: u64,
     pub decode_storage_fallbacks: u64,
+    /// Layer decode steps served by the fused paged v2 kernel (issue #899),
+    /// cascade included.
+    pub paged_decode_v2_launches: u64,
+    /// Layer decode steps served by the gather-then-SDPA fallback.
+    pub paged_decode_gather_fallbacks: u64,
+    /// Layer decode steps served by the cascade decomposition (issue #903).
+    pub cascade_launches: u64,
+    /// Cumulative shared-span tokens; over `cascade_launches` this is the mean
+    /// shared-span length.
+    pub cascade_shared_tokens: u64,
+    /// Cumulative member count; over `cascade_launches` this is the mean
+    /// subgroup size.
+    pub cascade_member_seqs: u64,
+    /// Planned cascade launches that fell back to flat v2.
+    pub cascade_failures: u64,
     pub audio_source_duration_micros: u64,
     pub audio_source_samples: u64,
     pub audio_normalized_samples: u64,

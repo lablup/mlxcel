@@ -204,6 +204,20 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
          # HELP mlxcel_decode_storage_fallbacks_total Number of paged decode fallback events\n\
          # TYPE mlxcel_decode_storage_fallbacks_total counter\n\
          mlxcel_decode_storage_fallbacks_total {decode_storage_fallbacks}\n\
+         # HELP mlxcel_paged_decode_launches_total Layer decode steps by attention path\n\
+         # TYPE mlxcel_paged_decode_launches_total counter\n\
+         mlxcel_paged_decode_launches_total{{path=\"fused_v2\"}} {paged_decode_v2_launches}\n\
+         mlxcel_paged_decode_launches_total{{path=\"gather\"}} {paged_decode_gather_fallbacks}\n\
+         mlxcel_paged_decode_launches_total{{path=\"cascade\"}} {cascade_launches}\n\
+         # HELP mlxcel_cascade_shared_tokens_total Cumulative KV tokens hoisted into a shared-span cascade launch\n\
+         # TYPE mlxcel_cascade_shared_tokens_total counter\n\
+         mlxcel_cascade_shared_tokens_total {cascade_shared_tokens}\n\
+         # HELP mlxcel_cascade_member_sequences_total Cumulative sequences sharing a cascade span\n\
+         # TYPE mlxcel_cascade_member_sequences_total counter\n\
+         mlxcel_cascade_member_sequences_total {cascade_member_seqs}\n\
+         # HELP mlxcel_cascade_failures_total Planned cascade launches that fell back to the flat v2 launch\n\
+         # TYPE mlxcel_cascade_failures_total counter\n\
+         mlxcel_cascade_failures_total {cascade_failures}\n\
          # HELP mlxcel_lang_bias_applied_total Sampling steps where language token bias was applied\n\
          # TYPE mlxcel_lang_bias_applied_total counter\n\
          mlxcel_lang_bias_applied_total {lang_bias_applied}\n\
@@ -273,6 +287,12 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
         paged_bytes_in_use = obs.cache_pool_paged_bytes_in_use,
         paged_block_budget = obs.cache_pool_paged_block_budget,
         decode_storage_fallbacks = obs.decode_storage_fallbacks,
+        paged_decode_v2_launches = obs.paged_decode_v2_launches,
+        paged_decode_gather_fallbacks = obs.paged_decode_gather_fallbacks,
+        cascade_launches = obs.cascade_launches,
+        cascade_shared_tokens = obs.cascade_shared_tokens,
+        cascade_member_seqs = obs.cascade_member_seqs,
+        cascade_failures = obs.cascade_failures,
         pc_hits = pc_hits,
         pc_misses = pc_misses,
         pc_reused_tokens = pc_reused_tokens,

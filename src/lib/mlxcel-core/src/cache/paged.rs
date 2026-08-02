@@ -547,6 +547,84 @@ fn launch_v2(
     })
 }
 
+/// The cascade plan for this batch, or `None` when the feature is off or no
+/// subgroup clears the thresholds (issue #903).
+///
+/// One `OnceLock` load when the feature is off, so a build with
+/// `MLXCEL_CASCADE_ATTENTION` unset does no page-table scanning at all and the
+/// flat path is byte-identical to pre-#903.
+fn cascade_candidate(
+    view: &super::paged_csr::PagedCsrView,
+    geometry: crate::paged_v2::PagedDecodeGeometry,
+) -> Option<crate::paged_v2::CascadePlan> {
+    if !crate::paged_v2::cascade_enabled() {
+        return None;
+    }
+    // A stacked level-0 launch multiplies the query-head axis by the member
+    // count; refuse here rather than inside the launch so the flat path is
+    // chosen with its own outcome instead of a cascade failure.
+    let group = crate::paged_v2::detect_shared_prefix(
+        view,
+        crate::paged_v2::min_shared_pages(),
+        crate::paged_v2::min_members(),
+    )?;
+    if crate::paged_v2::prefix_geometry(geometry, group.members.len())
+        .and_then(|g| g.check())
+        .is_err()
+    {
+        return None;
+    }
+    match crate::paged_v2::build_cascade_plan(view, group) {
+        Ok(plan) => Some(plan),
+        Err(reason) => {
+            // Detection accepted a group the builder rejected, which means the
+            // two disagree about the view's invariants. Say so once rather than
+            // dropping to flat in silence.
+            tracing::warn!(
+                "paged decode cascade: plan build failed, using the flat path: {reason}"
+            );
+            None
+        }
+    }
+}
+
+/// Cast into and out of f32 around a cascade launch, exactly as [`launch_v2`]
+/// does for the flat launch.
+fn launch_cascade(
+    q: &MlxArray,
+    pool_k: &MlxArray,
+    pool_v: &MlxArray,
+    plan: &crate::paged_v2::CascadePlan,
+    geometry: crate::paged_v2::PagedDecodeGeometry,
+    scale: f32,
+    target_ctas: usize,
+) -> Result<(UniquePtr<MlxArray>, crate::paged_v2::CascadeLaunchStats), String> {
+    let q_dtype = ffi::array_dtype(q);
+    let q_f32 = if q_dtype == crate::dtype::FLOAT32 {
+        None
+    } else {
+        Some(ffi::astype(q, crate::dtype::FLOAT32))
+    };
+    let q_in: &MlxArray = q_f32.as_deref().unwrap_or(q);
+    let (out_f32, stats) = crate::paged_v2::run_cascade_decode(
+        q_in,
+        pool_k,
+        pool_v,
+        plan,
+        geometry,
+        scale,
+        target_ctas,
+    )?;
+    Ok((
+        if q_dtype == crate::dtype::FLOAT32 {
+            out_f32
+        } else {
+            ffi::astype(&out_f32, q_dtype)
+        },
+        stats,
+    ))
+}
+
 impl PagedBlockPool {
     pub fn new(layout: PagedKvLayout) -> Self {
         let num_layers = layout.num_layers;
@@ -1989,13 +2067,45 @@ impl PagedBlockPool {
                     Ok(()) => {
                         let (pool_k, pool_v) =
                             self.single_slab_tensors(layer_idx).expect("checked above");
-                        outcome = PagedDecodeOutcome::Fused {
-                            batch,
-                            visible_tokens,
-                            chunks: plan.num_chunks,
-                            merged: plan.needs_merge,
-                        };
-                        launched = launch_v2(q, pool_k, pool_v, view, plan, scale).map(Some);
+                        // Cascade (#903) is tried first and only when it is both
+                        // enabled and applicable; it degrades to the flat launch
+                        // below through a *named* outcome rather than silently,
+                        // so a benchmark arm can never measure flat while
+                        // claiming cascade.
+                        match cascade_candidate(view, geometry) {
+                            Some(cascade) => {
+                                match launch_cascade(
+                                    q, pool_k, pool_v, &cascade, geometry, scale, target,
+                                ) {
+                                    Ok((out, stats)) => {
+                                        outcome = PagedDecodeOutcome::FusedCascade {
+                                            batch,
+                                            members: cascade.members(),
+                                            shared_pages: cascade.group.shared_pages,
+                                            shared_tokens: cascade.shared_tokens(),
+                                            prefix_chunks: stats.prefix_chunks,
+                                            suffix_chunks: stats.suffix_chunks,
+                                        };
+                                        launched = Ok(Some(out));
+                                    }
+                                    Err(reason) => {
+                                        outcome = PagedDecodeOutcome::CascadeFailed(reason);
+                                        launched = launch_v2(q, pool_k, pool_v, view, plan, scale)
+                                            .map(Some);
+                                    }
+                                }
+                            }
+                            None => {
+                                outcome = PagedDecodeOutcome::Fused {
+                                    batch,
+                                    visible_tokens,
+                                    chunks: plan.num_chunks,
+                                    merged: plan.needs_merge,
+                                };
+                                launched =
+                                    launch_v2(q, pool_k, pool_v, view, plan, scale).map(Some);
+                            }
+                        }
                     }
                     Err(reason) => {
                         outcome = PagedDecodeOutcome::PlanRejected(reason);
