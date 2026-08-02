@@ -216,7 +216,10 @@ fn effective_distribution_is_the_temperature_scaled_softmax() {
     let want = softmax(&logits, 0.7);
 
     let sum: f64 = got.iter().map(|&x| f64::from(x)).sum();
-    assert!((sum - 1.0).abs() < 1e-5, "distribution must normalize: {sum}");
+    assert!(
+        (sum - 1.0).abs() < 1e-5,
+        "distribution must normalize: {sum}"
+    );
     for (i, (g, w)) in got.iter().zip(&want).enumerate() {
         assert!(
             (f64::from(*g) - w).abs() < 1e-5,

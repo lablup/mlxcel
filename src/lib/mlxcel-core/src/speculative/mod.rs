@@ -59,12 +59,12 @@ use crate::sampling::{
     TokenBiasMap, effective_token_distribution, sample_token_optimized,
     sample_token_with_distribution,
 };
-use stochastic_accept::{AcceptanceRule, DraftVerdict};
 use crate::streams::{install_thread_local_default_stream, new_thread_local_generation_stream};
 use crate::utils::{align_to_na_tile, create_padded_prefill_mask};
 use cxx::UniquePtr;
 use std::borrow::Cow;
 use std::time::Instant;
+use stochastic_accept::{AcceptanceRule, DraftVerdict};
 
 /// Default chunk size for chunked prefill in speculative decoding.
 ///
@@ -82,6 +82,46 @@ fn should_align_verification() -> bool {
     hw.has_neural_accelerator && hw.macos_supports_na
 }
 
+/// Acceptance accounting for one [`SpeculativeGenerator::generate`] call.
+///
+/// The two ratios are the quantities the acceptance change is supposed to
+/// move: [`Self::acceptance_rate`] should rise from about `sum_x p(x) q(x)`
+/// under the old rule to about `sum_x min(p(x), q(x))` under modified
+/// rejection sampling, and [`Self::mean_accepted_len`] is the per-round
+/// version that drives end-to-end throughput.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SpeculativeAcceptanceStats {
+    /// Verify rounds executed (one batched target forward each).
+    pub rounds: usize,
+    /// Draft tokens proposed across all rounds.
+    pub proposed_draft_tokens: usize,
+    /// Draft tokens the verify rule accepted.
+    pub accepted_draft_tokens: usize,
+    /// The acceptance rule the run actually used.
+    pub rule: Option<AcceptanceRule>,
+}
+
+impl SpeculativeAcceptanceStats {
+    /// Accepted draft tokens per proposed draft token.
+    pub fn acceptance_rate(&self) -> f64 {
+        if self.proposed_draft_tokens == 0 {
+            0.0
+        } else {
+            self.accepted_draft_tokens as f64 / self.proposed_draft_tokens as f64
+        }
+    }
+
+    /// Mean accepted draft tokens per verify round. This is the figure the
+    /// issue's performance gate names ("mean accepted draft length").
+    pub fn mean_accepted_len(&self) -> f64 {
+        if self.rounds == 0 {
+            0.0
+        } else {
+            self.accepted_draft_tokens as f64 / self.rounds as f64
+        }
+    }
+}
+
 /// Speculative decoding generator
 ///
 /// Uses a draft model to propose candidate tokens and a main model to verify them.
@@ -97,6 +137,13 @@ pub struct SpeculativeGenerator {
     /// synchronization stay paired even when the generator is moved
     /// across threads after construction.
     generation_stream: Option<UniquePtr<MlxThreadLocalStream>>,
+    /// Acceptance accounting for the most recent [`Self::generate`] call.
+    ///
+    /// Reset at the top of every call by [`Self::reset`]. Read through
+    /// [`Self::acceptance_stats`] and summarized once per call at info level,
+    /// which is what makes an acceptance-rate A/B measurable from a log rather
+    /// than only from a stopwatch.
+    acceptance: SpeculativeAcceptanceStats,
     /// Cached per-generator `TokenBiasMap` resolved from a `LangBiasConfig`.
     ///
     /// **Axis B invariant**: the bias is applied **only** to the target
@@ -117,8 +164,14 @@ impl SpeculativeGenerator {
             draft_caches: (0..draft_num_layers).map(|_| KVCache::new()).collect(),
             generated_tokens: Vec::new(),
             generation_stream: new_thread_local_generation_stream(),
+            acceptance: SpeculativeAcceptanceStats::default(),
             token_bias: TokenBiasMap::default(),
         }
+    }
+
+    /// Acceptance accounting for the most recent [`Self::generate`] call.
+    pub fn acceptance_stats(&self) -> SpeculativeAcceptanceStats {
+        self.acceptance
     }
 
     /// Attach a pre-resolved `TokenBiasMap` to this speculative generator.
@@ -177,6 +230,7 @@ impl SpeculativeGenerator {
             *cache = KVCache::new();
         }
         self.generated_tokens.clear();
+        self.acceptance = SpeculativeAcceptanceStats::default();
     }
 
     /// Get the generated tokens
@@ -357,6 +411,7 @@ impl SpeculativeGenerator {
         let rule = stochastic_accept::acceptance_rule(target_sampling, true);
         stochastic_accept::note_rule(rule);
         let stochastic = rule == AcceptanceRule::Stochastic;
+        self.acceptance.rule = Some(rule);
 
         let decode_start = Instant::now();
         let mut current_token = first_token;
@@ -382,8 +437,11 @@ impl SpeculativeGenerator {
                     // drawn from rather than a later reconstruction. `q` is
                     // left unevaluated: a chain that gets rejected at an
                     // earlier position never materializes the tail.
-                    let (tok_arr, probs) =
-                        sample_token_with_distribution(&draft_logits, draft_sampling, &token_history);
+                    let (tok_arr, probs) = sample_token_with_distribution(
+                        &draft_logits,
+                        draft_sampling,
+                        &token_history,
+                    );
                     draft_probs.push(probs);
                     tok_arr
                 } else {
@@ -588,6 +646,10 @@ impl SpeculativeGenerator {
                 current_token = *self.generated_tokens.last().unwrap();
             }
 
+            self.acceptance.rounds += 1;
+            self.acceptance.proposed_draft_tokens += draft_tokens.len();
+            self.acceptance.accepted_draft_tokens += accepted;
+
             // Step 4: Rewind caches for rejected tokens
             let rejected = draft_tokens.len() - accepted;
             if rejected > 0 {
@@ -620,6 +682,21 @@ impl SpeculativeGenerator {
         }
 
         let decode_time = decode_start.elapsed();
+
+        // One summary line per call at info level. Together with the one-shot
+        // rule line from `note_rule`, this is what lets an acceptance-rate A/B
+        // be read off a log instead of inferred from wall-clock alone, and it
+        // names the rule so a run can never be attributed to the wrong arm.
+        tracing::info!(
+            rule = ?rule,
+            rounds = self.acceptance.rounds,
+            proposed_draft_tokens = self.acceptance.proposed_draft_tokens,
+            accepted_draft_tokens = self.acceptance.accepted_draft_tokens,
+            acceptance_rate = self.acceptance.acceptance_rate(),
+            mean_accepted_len = self.acceptance.mean_accepted_len(),
+            generated_tokens = self.generated_tokens.len(),
+            "speculative decode finished"
+        );
 
         let stats = Self::build_stats(
             prompt_tokens.len(),

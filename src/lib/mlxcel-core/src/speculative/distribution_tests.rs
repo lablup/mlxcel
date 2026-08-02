@@ -287,7 +287,10 @@ fn speculative_stream_matches_the_target_distribution() {
     let n: u32 = counts.iter().sum();
     let chi2 = chi_square(&counts, &expected);
 
-    let empirical: Vec<f64> = counts.iter().map(|&c| f64::from(c) / f64::from(n)).collect();
+    let empirical: Vec<f64> = counts
+        .iter()
+        .map(|&c| f64::from(c) / f64::from(n))
+        .collect();
     assert!(
         chi2 < CHI2_DOF5_ALPHA_1E4,
         "speculative stream is distinguishable from target-only sampling: \
@@ -327,14 +330,12 @@ fn emit_one_token(
     argmax_token: i32,
 ) -> i32 {
     match rule {
-        "stochastic" => match stochastic_accept::verify_draft_token(
-            target_probs,
-            draft_probs,
-            draft_token,
-        ) {
-            DraftVerdict::Accept => draft_token,
-            DraftVerdict::Reject { replacement } => replacement,
-        },
+        "stochastic" => {
+            match stochastic_accept::verify_draft_token(target_probs, draft_probs, draft_token) {
+                DraftVerdict::Accept => draft_token,
+                DraftVerdict::Reject { replacement } => replacement,
+            }
+        }
         // The common implementation mistake: reject correctly, then draw the
         // replacement from `p` instead of from the residual.
         "residual_replaced_by_target_resample" => {
@@ -379,13 +380,7 @@ fn power_arm_chi_square(rule: &str, trials: usize) -> f64 {
     let mut counts = vec![0u32; VOCAB];
     for _ in 0..trials {
         let draft_token = draw_from(&draft_probs);
-        let emitted = emit_one_token(
-            rule,
-            &target_probs,
-            &draft_probs,
-            draft_token,
-            argmax_token,
-        );
+        let emitted = emit_one_token(rule, &target_probs, &draft_probs, draft_token, argmax_token);
         counts[emitted as usize] += 1;
     }
     chi_square(&counts, &softmax(&TARGET_LOGITS, TEMPERATURE))
@@ -606,7 +601,8 @@ fn kv_cache_length_is_exact_in_both_termination_regimes() {
         let expected = 1 + tokens.len() - 1;
         for (layer, cache) in generator.main_caches.iter().enumerate() {
             assert_eq!(
-                cache.offset as usize, expected,
+                cache.offset as usize,
+                expected,
                 "all-reject num_draft={num_draft} layer {layer}: main cache holds {} \
                  entries, expected {expected} (prompt 1 + {} emitted - 1 pending). \
                  A wrong trim on rejection lands here.",
@@ -634,7 +630,8 @@ fn kv_cache_length_is_exact_in_both_termination_regimes() {
         let expected = 1 + tokens.len();
         for (layer, cache) in generator.main_caches.iter().enumerate() {
             assert_eq!(
-                cache.offset as usize, expected,
+                cache.offset as usize,
+                expected,
                 "all-accept num_draft={num_draft} layer {layer}: main cache holds {} \
                  entries, expected {expected} (prompt 1 + {} emitted, none pending). \
                  A spurious trim on full acceptance lands here.",
@@ -643,6 +640,122 @@ fn kv_cache_length_is_exact_in_both_termination_regimes() {
             );
         }
     }
+}
+
+/// Acceptance accounting must be exact, not approximate: it is the number the
+/// performance A/B is read from, and a miscount would make the benchmark
+/// report a win that did not happen.
+///
+/// Both deterministic regimes are pinned. The never-agreeing drafter accepts
+/// nothing, so `accepted == 0` and `mean_accepted_len == 0`. The drafter that
+/// walks the target's own orbit accepts every proposal, so `accepted ==
+/// proposed` and the rate is exactly 1.
+#[test]
+fn acceptance_accounting_is_exact_in_both_deterministic_regimes() {
+    let target = greedy_target();
+    const PROMPT: i32 = 2;
+    const N: usize = 24;
+
+    for num_draft in [1usize, 3] {
+        let mut generator = SpeculativeGenerator::new(1, 1);
+        let _ = generator.generate(
+            &target,
+            &always_rejecting_draft(),
+            &[PROMPT],
+            N,
+            num_draft,
+            &SamplingConfig::greedy(),
+        );
+        let stats = generator.acceptance_stats();
+        assert_eq!(stats.rule, Some(AcceptanceRule::Argmax));
+        assert_eq!(stats.accepted_draft_tokens, 0);
+        assert_eq!(stats.proposed_draft_tokens, stats.rounds * num_draft);
+        assert_eq!(stats.acceptance_rate(), 0.0);
+        assert_eq!(stats.mean_accepted_len(), 0.0);
+
+        let mut generator = SpeculativeGenerator::new(1, 1);
+        let _ = generator.generate(
+            &target,
+            &greedy_target(),
+            &[PROMPT],
+            N,
+            num_draft,
+            &SamplingConfig::greedy(),
+        );
+        let stats = generator.acceptance_stats();
+        assert_eq!(
+            stats.accepted_draft_tokens, stats.proposed_draft_tokens,
+            "a drafter walking the target's own orbit must be accepted in full"
+        );
+        assert_eq!(stats.acceptance_rate(), 1.0);
+        assert_eq!(stats.mean_accepted_len(), num_draft as f64);
+    }
+}
+
+/// Expected accepted draft tokens per round when each position is accepted
+/// independently with probability `a` and the chain stops at the first
+/// rejection: `sum_{i=1..k} a^i`.
+fn expected_accepted_len(a: f64, k: usize) -> f64 {
+    (1..=k).map(|i| a.powi(i as i32)).sum()
+}
+
+/// The stochastic rule must be selected, recorded, and must actually raise the
+/// mean accepted draft length. A run that silently fell back to argmax would
+/// otherwise be indistinguishable from a real measurement, which is exactly
+/// how an acceptance benchmark ends up comparing the fallback against itself.
+///
+/// The per-position accept probability under modified rejection sampling is
+/// `sum_x min(p(x), q(x))`; under the pre-#902 rule (an independent target
+/// draw landing on the same token) it is `sum_x p(x) q(x)`. For this model
+/// pair those are 0.705 and 0.344, which at a 4-token block predict mean
+/// accepted lengths of about 1.80 and 0.52 tokens per round. The measurement
+/// is required to land on the first and to clear twice the second.
+#[test]
+fn stochastic_runs_report_the_stochastic_rule_and_a_longer_accepted_run() {
+    const BLOCK: usize = 4;
+    let target = ContextFreeModel::new(&TARGET_LOGITS);
+    let draft = ContextFreeModel::new(&DRAFT_LOGITS);
+
+    let p = softmax(&TARGET_LOGITS, TEMPERATURE);
+    let q = softmax(&DRAFT_LOGITS, TEMPERATURE);
+    let sum_min: f64 = p.iter().zip(&q).map(|(a, b)| a.min(*b)).sum();
+    let sum_prod: f64 = p.iter().zip(&q).map(|(a, b)| a * b).sum();
+    let predicted_new = expected_accepted_len(sum_min, BLOCK);
+    let predicted_old = expected_accepted_len(sum_prod, BLOCK);
+
+    let mut rounds = 0usize;
+    let mut accepted = 0usize;
+    for _ in 0..24 {
+        let mut generator = SpeculativeGenerator::new(1, 1);
+        let _ = generator.generate(&target, &draft, &[0], 240, BLOCK, &stochastic_config());
+        let stats = generator.acceptance_stats();
+        assert_eq!(
+            stats.rule,
+            Some(AcceptanceRule::Stochastic),
+            "a temperature-{TEMPERATURE} run must take the stochastic rule; if this \
+             reports an argmax variant the acceptance measurement is comparing the \
+             fallback against itself"
+        );
+        assert_eq!(stats.proposed_draft_tokens, stats.rounds * BLOCK);
+        rounds += stats.rounds;
+        accepted += stats.accepted_draft_tokens;
+    }
+
+    let measured = accepted as f64 / rounds as f64;
+    // The band is loose enough to absorb the last round of each call, which
+    // `max_tokens` can truncate mid-block, and tight enough that the pre-#902
+    // rate could never satisfy it.
+    assert!(
+        (measured - predicted_new).abs() <= 0.12 * predicted_new,
+        "mean accepted draft length {measured:.4} over {rounds} rounds is not the \
+         predicted {predicted_new:.4} for a per-position accept probability of \
+         {sum_min:.4}"
+    );
+    assert!(
+        measured > 2.0 * predicted_old,
+        "mean accepted draft length {measured:.4} must clear twice the pre-#902 \
+         prediction {predicted_old:.4}"
+    );
 }
 
 /// The stochastic acceptance path must leave the caches in one of the same two
