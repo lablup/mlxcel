@@ -215,6 +215,8 @@ variables below are useful for service-level defaults and A/B experiments. See
 | `MLXCEL_TURBO4_DELEGATED_FP16_FAST_PATH` | truthy enables | off | **Advanced.** Keeps a unified FP16 V working set in delegated mode for speed experiments while maintaining packed sidecars. |
 | `MLXCEL_TURBO4_DELEGATED_FP16_SIDECARS` | `predecode`, `eager`, `lazy`, `on-demand` | `predecode` | Sidecar maintenance policy for the delegated FP16 fast path. |
 | `MLXCEL_ENABLE_DIRECT_PREFILL_CACHE_STORE` | presence enables | off | **Advanced.** Installs the incoming prefill tensor directly as the initial KV cache buffer when applicable. |
+| `MLXCEL_MLA_ABSORBED` | `1`/`true`/`on`/`yes` enables | off | DeepSeek-family matrix-absorbed MLA decode. Caches the compressed latent `(ckv, kpe)` instead of the decompressed per-head K/V, cutting the KV cache from `num_heads * (qk_head_dim + v_head_dim)` to `kv_lora_rank + qk_rope_head_dim` bytes per token per layer. Costs fixed weight memory: `kv_b_proj` is dequantized at load and kept dense. Currently wired for `deepseek_v2`; `deepseek_v3` / `deepseek_v32` already absorb unconditionally and ignore this. Declines (and keeps the decompressed path) for any non-FP16 KV cache mode and for paged-backed caches. Prints one stdout line at load stating how many layers folded. See [MLA absorbed decode](mla-absorbed-decode.md). |
+| `MLXCEL_MLA_SPLIT_KV` | `1`/`true`/`on`/`yes` enables | off | **Advanced.** Cuts the latent range into chunks whose partial softmax states are merged by the issue #898 merge kernel. Requires `MLXCEL_MLA_ABSORBED`; ignored without it. The partial producer is currently composed from MLX ops, so this is a correctness path rather than a speed path. |
 
 ## Video and local-media variables
 

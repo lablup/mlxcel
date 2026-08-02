@@ -3196,6 +3196,14 @@ pub mod bench_rotation;
 // production wiring (#899) can drive the plan and the launch directly.
 pub mod paged_v2;
 
+// Matrix-absorbed MLA decode over a compressed-latent KV cache (issue #907).
+// Default off; selected by `MLXCEL_MLA_ABSORBED=1` at family load time. Public
+// so the DeepSeek-family model code in the `mlxcel` crate and the benchmark
+// harness under `examples/` can build the fold, wrap the latent cache, and
+// drive both decode paths directly. Stage 2 reuses issue #898's merge kernel
+// unchanged; see `mla::split_kv`.
+pub mod mla;
+
 // Crate-wide helpers for `#[cfg(test)]` paths. Provides the single shared
 // `ENV_LOCK` that every env-mutating test in this crate must acquire; see `test_support::env_lock` for the rationale. `pub(crate)` so
 // that test modules at any depth (e.g. `crate::lang_analyzer::cache::tests`)

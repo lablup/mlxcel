@@ -28,6 +28,7 @@ Current GitHub-facing docs:
 13. `python-client.md`: the `mlxcel` Python client over the OpenAI-compatible server, covering managed and connect modes, streaming, chat, structured output, the `openai_client` escape hatch, async usage, and troubleshooting.
 14. `audio-preprocessing.md` — shared model-input WAV normalization, loaded family policy, resource limits, cancellation, metrics, and current XLA capability boundary.
 15. `speculative-acceptance.md` — speculative-decoding acceptance rules, which rule each code path runs, the distribution-preservation guarantee and its RNG dependency, the kill switch, and how to read the active rule off a log.
+16. `mla-absorbed-decode.md` — DeepSeek-family matrix-absorbed MLA decode over a compressed-latent KV cache: the identity, the cache layout, the flags, and what is and is not verified.
 
 ## Architecture Decision Records
 
