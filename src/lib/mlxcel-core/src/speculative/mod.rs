@@ -673,6 +673,10 @@ fn trim_caches(caches: &mut [KVCache], n: i32) -> i32 {
 }
 
 #[cfg(test)]
+#[path = "distribution_tests.rs"]
+mod distribution_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::dtype;
