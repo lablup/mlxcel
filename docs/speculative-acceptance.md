@@ -180,19 +180,21 @@ its own subscriber.
 `MLXCEL_SPECULATIVE_ACCEPT_DIAG=1` adds a second line:
 
 ```
-[Speculative acceptance diagnostic] closed_form_sum_min=0.2213 closed_form_sum_prod=0.2087 (measured per-position acceptance must sit at sum_min, and sum_min >= sum_prod always)
+[Speculative acceptance diagnostic] closed_form_sum_min=0.7302 closed_form_sum_prod=0.5651 (the measured per-position acceptance sits at sum_prod under the default sampler-match rule and at sum_min under the opt-in acceptance-optimal rule; sum_min >= sum_prod always)
 ```
 
 `closed_form_sum_min` is `sum_x min(p(x), q(x))` averaged over the verify
 positions the run actually tested, which is the probability modified rejection
 sampling accepts. `closed_form_sum_prod` is `sum_x p(x) q(x)`, the probability
-the pre-#902 rule accepts. Because `min(a, b) >= a * b` for `a, b` in `[0, 1]`,
-`sum_min >= sum_prod` holds for every pair of distributions, always. The
-diagnostic therefore turns "the acceptance rate looks wrong" into an arithmetic
-statement:
+the sampler-match rule accepts. Because `min(a, b) >= a * b` for `a, b` in
+`[0, 1]`, `sum_min >= sum_prod` holds for every pair of distributions, always.
+The diagnostic therefore turns "the acceptance rate looks wrong" into an
+arithmetic statement:
 
-* measured `per_position_acceptance` should sit at `closed_form_sum_min`. If it
-  does not, the accept test is wrong.
+* measured `per_position_acceptance` should sit at the closed form for the rule
+  that actually ran: `closed_form_sum_prod` on the default sampler-match rule,
+  `closed_form_sum_min` on the opt-in acceptance-optimal rule. Read `rule=` on
+  the line above to know which. If it sits at neither, the accept test is wrong.
 * `closed_form_sum_min` should be at or above `closed_form_sum_prod`. If it is
   not, `p` or `q` is wrong.
 
