@@ -25,6 +25,9 @@
 use crate::models::switch_layers::validate_expert_quantization_params;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
+use mlxcel_core::mla::{
+    self, MlaAbsorbedProjections, MlaDecodePath, MlaGeometry, MlaLatentCache, MlaSplitPlan,
+};
 use mlxcel_core::utils::{repeat_kv, silu, slice_axis};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
@@ -366,9 +369,33 @@ struct MLAAttention {
     scale: f32,
 
     rope: YarnRoPE,
+
+    /// `kv_b_proj` folded into the query and output paths (issue #907).
+    ///
+    /// `Some` only when `MLXCEL_MLA_ABSORBED` is on and the fold succeeded. The
+    /// original `kv_b_proj` above stays loaded either way: prefill up-projects
+    /// through it so the absorbed prefill is the same arithmetic on the same
+    /// quantized weight the decompressed path uses, which keeps prefill parity
+    /// exact and leaves the fold responsible only for decode.
+    absorbed: Option<MlaAbsorbedProjections>,
+
+    /// Why the fold was declined, if it was, so the loader can say so once
+    /// instead of the operator inferring it from a flag that did nothing.
+    absorb_note: Option<String>,
 }
 
 impl MLAAttention {
+    /// This layer's MLA shape.
+    fn geometry(&self) -> MlaGeometry {
+        MlaGeometry {
+            num_heads: self.num_heads,
+            kv_lora_rank: self.kv_lora_rank,
+            qk_nope_head_dim: self.qk_nope_head_dim,
+            qk_rope_head_dim: self.qk_rope_head_dim,
+            v_head_dim: self.v_head_dim,
+        }
+    }
+
     fn forward(
         &self,
         x: &MlxArray,
@@ -404,9 +431,23 @@ impl MLAAttention {
         let k_pe = mlxcel_core::reshape(&k_pe, &[b, l, 1, self.qk_rope_head_dim as i32]);
         let k_pe = mlxcel_core::transpose_axes(&k_pe, &[0, 2, 1, 3]);
 
+        // The compressed latent, before any up-projection.
+        let ckv = self.kv_a_layernorm.forward(&compressed);
+
+        // Absorbed path (issue #907): cache `(ckv, kpe)` instead of the
+        // decompressed per-head K/V. Declined per cache rather than per model
+        // because the KV cache mode is a runtime flag; the answer is stable for
+        // the life of a cache, so a run that declines on step one declines on
+        // every step and the cache never mixes the two layouts.
+        if let Some(proj) = self.absorbed.as_ref() {
+            if MlaLatentCache::supports(cache, self.geometry()).is_ok() {
+                return self.forward_absorbed(&q_nope, &q_pe, ckv, k_pe, proj, cache, mask, b, l);
+            }
+        }
+        mla::stats::record(MlaDecodePath::Decompressed);
+
         // Decompress KV
-        let kv = self.kv_a_layernorm.forward(&compressed);
-        let kv = self.kv_b_proj.forward(&kv);
+        let kv = self.kv_b_proj.forward(&ckv);
         let kv = mlxcel_core::reshape(&kv, &[b, l, self.num_heads as i32, -1]);
         let kv = mlxcel_core::transpose_axes(&kv, &[0, 2, 1, 3]);
 
@@ -444,6 +485,93 @@ impl MLAAttention {
         let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
         let output = mlxcel_core::reshape(&output, &[b, l, -1]);
 
+        self.o_proj.forward(&output)
+    }
+
+    /// Attention over the compressed-latent cache (issue #907).
+    ///
+    /// Decode runs absorbed, directly against the latent. Prefill up-projects
+    /// the whole live latent window through the still-loaded `kv_b_proj` and
+    /// runs the same dense SDPA the decompressed path runs, which is what keeps
+    /// prefill numerically identical to the baseline. The cost of that choice
+    /// is that a chunked prefill re-up-projects the rows it already
+    /// up-projected on the previous chunk; absorption is scoped as a decode win
+    /// and this is where the scope is paid for.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_absorbed(
+        &self,
+        q_nope: &MlxArray,
+        q_pe: &MlxArray,
+        ckv: UniquePtr<MlxArray>,
+        k_pe: UniquePtr<MlxArray>,
+        proj: &MlaAbsorbedProjections,
+        cache: &mut KVCache,
+        mask: Option<&MlxArray>,
+        b: i32,
+        l: i32,
+    ) -> UniquePtr<MlxArray> {
+        let geometry = self.geometry();
+        // Rope position is the pre-update live length, exactly as above.
+        let offset = cache.seq_len();
+        let q_pe = self.rope.forward(q_pe, offset);
+        let k_pe = self.rope.forward(&k_pe, offset);
+
+        // [B, L, kv_lora_rank] -> [B, 1, L, kv_lora_rank]: one latent "head".
+        let ckv = mlxcel_core::expand_dims(&ckv, 1);
+
+        let mut view = MlaLatentCache::wrap(cache, geometry)
+            .expect("supports() was checked immediately before this wrap");
+        let (ckv_all, kpe_all) = view.update_and_fetch(ckv, k_pe);
+        let kv_len = view.seq_len();
+
+        let output = if l == 1 {
+            // Stage 2 first when asked for, Stage 1 otherwise. A split plan that
+            // declines falls through to Stage 1 rather than failing the step.
+            let split = if mla::split_kv_enabled() {
+                let plan = MlaSplitPlan::heuristic(
+                    b.max(0) as usize,
+                    self.num_heads,
+                    kv_len,
+                    mlxcel_core::paged_v2::device_target_ctas(),
+                );
+                mla::absorbed_decode_split_kv(
+                    q_nope, &q_pe, &ckv_all, &kpe_all, proj, self.scale, &plan,
+                )
+                .ok()
+            } else {
+                None
+            };
+            split.unwrap_or_else(|| {
+                // Decode sees the whole cache, so no mask, matching the
+                // `causal_attention` call the decompressed path makes here.
+                mla::absorbed_decode(q_nope, &q_pe, &ckv_all, &kpe_all, proj, self.scale, None)
+            })
+        } else {
+            mla::stats::record(MlaDecodePath::AbsorbedPrefill);
+            // Up-project the live latent window back into per-head K and V.
+            // `kv_b_proj` wants `[B, S, kv_lora_rank]`, the shape before the
+            // latent head axis was added.
+            let ckv_2d = mlxcel_core::reshape(&ckv_all, &[b, kv_len, self.kv_lora_rank as i32]);
+            let kv = self.kv_b_proj.forward(&ckv_2d);
+            let kv = mlxcel_core::reshape(&kv, &[b, kv_len, self.num_heads as i32, -1]);
+            let kv = mlxcel_core::transpose_axes(&kv, &[0, 2, 1, 3]);
+            let k_nope = slice_axis(&kv, -1, 0, self.qk_nope_head_dim as i32);
+            let values = slice_axis(&kv, -1, self.qk_nope_head_dim as i32, -1);
+
+            let keys = concatenate(&k_nope, &repeat_kv(&kpe_all, self.num_heads as i32), -1);
+            let queries = concatenate(q_nope, &q_pe, -1);
+            // Same mask policy as the decompressed path above, deliberately:
+            // this change must not alter which steps are causal.
+            let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
+            unsafe {
+                mlxcel_core::layers::attention_from_ptr(
+                    &queries, &keys, &values, self.scale, mask_ptr, 0.0, 0,
+                )
+            }
+        };
+
+        let output = mlxcel_core::transpose_axes(&output, &[0, 2, 1, 3]);
+        let output = mlxcel_core::reshape(&output, &[b, l, -1]);
         self.o_proj.forward(&output)
     }
 }
@@ -735,12 +863,56 @@ impl DeepSeekV2Model {
             None
         };
 
+        report_absorption(&layers, args);
+
         Ok(Self {
             embed_tokens,
             layers,
             norm,
             lm_head,
         })
+    }
+}
+
+/// State the absorbed-decode decision on stdout, once per load.
+///
+/// Silent unless `MLXCEL_MLA_ABSORBED` is set, so the default path prints
+/// nothing. When it is set, this is the only place that says whether the fold
+/// actually took: `tracing` would not do, because the `mlxcel` CLI installs no
+/// subscriber and a `tracing::info!` from this path emits nothing at any
+/// `RUST_LOG`. A run whose flag is on but whose output says `0/27 layers` is
+/// visibly running the fallback, which is how issue #899's silent null is
+/// avoided here.
+fn report_absorption(layers: &[DecoderLayer], args: &ModelArgs) {
+    if !mla::absorbed_enabled() {
+        return;
+    }
+    let total = layers.len();
+    let folded = layers
+        .iter()
+        .filter(|l| l.self_attn.absorbed.is_some())
+        .count();
+    let geometry = MlaGeometry {
+        num_heads: args.num_attention_heads,
+        kv_lora_rank: args.kv_lora_rank,
+        qk_nope_head_dim: args.qk_nope_head_dim,
+        qk_rope_head_dim: args.qk_rope_head_dim,
+        v_head_dim: args.v_head_dim,
+    };
+    let before = mla::decompressed_bytes_per_token(&geometry, 2);
+    let after = mla::latent_bytes_per_token(&geometry, 2);
+    println!(
+        "mla: absorbed decode folded {folded}/{total} layers; KV cache {before} -> {after} \
+         bytes/token/layer ({:.1}x), split-kv={}",
+        before as f64 / after.max(1) as f64,
+        mla::split_kv_enabled()
+    );
+    if folded != total {
+        let reason = layers
+            .iter()
+            .find_map(|l| l.self_attn.absorb_note.as_deref())
+            .unwrap_or("no reason recorded");
+        println!("mla: absorption declined, keeping the decompressed path: {reason}");
     }
 }
 
@@ -840,6 +1012,27 @@ fn load_mla_attention(
         scale *= ms * ms;
     }
 
+    let kv_b_proj =
+        UnifiedLinear::from_weights(weights, &format!("{}.kv_b_proj", prefix), group_size, bits)?;
+
+    // Fold `kv_b_proj` for absorbed decode (issue #907). Only under the flag,
+    // so an unset environment does no dequantization and allocates nothing.
+    let geometry = MlaGeometry {
+        num_heads: args.num_attention_heads,
+        kv_lora_rank: args.kv_lora_rank,
+        qk_nope_head_dim: args.qk_nope_head_dim,
+        qk_rope_head_dim: args.qk_rope_head_dim,
+        v_head_dim: args.v_head_dim,
+    };
+    let (absorbed, absorb_note) = if mla::absorbed_enabled() {
+        match MlaAbsorbedProjections::from_kv_b_proj(&kv_b_proj, geometry) {
+            Ok(proj) => (Some(proj), None),
+            Err(reason) => (None, Some(reason)),
+        }
+    } else {
+        (None, None)
+    };
+
     Ok(MLAAttention {
         q_proj,
         q_a_proj,
@@ -855,23 +1048,20 @@ fn load_mla_attention(
             get_weight_copy(weights, &format!("{}.kv_a_layernorm.weight", prefix))?,
             1e-6,
         ),
-        kv_b_proj: UnifiedLinear::from_weights(
-            weights,
-            &format!("{}.kv_b_proj", prefix),
-            group_size,
-            bits,
-        )?,
+        kv_b_proj,
+        absorbed,
+        absorb_note,
         o_proj: UnifiedLinear::from_weights(
             weights,
             &format!("{}.o_proj", prefix),
             group_size,
             bits,
         )?,
-        num_heads: args.num_attention_heads,
-        kv_lora_rank: args.kv_lora_rank,
-        qk_nope_head_dim: args.qk_nope_head_dim,
-        qk_rope_head_dim: args.qk_rope_head_dim,
-        v_head_dim: args.v_head_dim,
+        num_heads: geometry.num_heads,
+        kv_lora_rank: geometry.kv_lora_rank,
+        qk_nope_head_dim: geometry.qk_nope_head_dim,
+        qk_rope_head_dim: geometry.qk_rope_head_dim,
+        v_head_dim: geometry.v_head_dim,
         q_head_dim,
         scale,
         rope: YarnRoPE::new(

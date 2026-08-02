@@ -93,8 +93,19 @@ pub struct MlaLatentCache<'a> {
 }
 
 impl<'a> MlaLatentCache<'a> {
-    /// View `cache` as a latent cache, or explain why it cannot be.
-    pub fn wrap(cache: &'a mut KVCache, geometry: MlaGeometry) -> Result<Self, String> {
+    /// Whether `cache` can hold a latent, without borrowing it mutably.
+    ///
+    /// Separate from [`Self::wrap`] because a caller that wants to fall back to
+    /// the decompressed path on failure cannot ask `wrap` first: the borrow
+    /// checker keeps the `&mut` alive through the `Err` arm of a `Result`
+    /// carrying the borrow's lifetime, so the fallback could not touch the
+    /// cache. Asking this first keeps the fallback expressible.
+    ///
+    /// The answer is stable for the life of a cache (mode and backing are set
+    /// at construction), so a family that takes the fallback on step one takes
+    /// it on every step, and the cache never ends up holding a mix of latent
+    /// and decompressed rows.
+    pub fn supports(cache: &KVCache, geometry: MlaGeometry) -> Result<(), String> {
         geometry.check()?;
         if cache.mode != KVCacheMode::Fp16 {
             return Err(format!(
@@ -111,6 +122,12 @@ impl<'a> MlaLatentCache<'a> {
                     .to_string(),
             );
         }
+        Ok(())
+    }
+
+    /// View `cache` as a latent cache, or explain why it cannot be.
+    pub fn wrap(cache: &'a mut KVCache, geometry: MlaGeometry) -> Result<Self, String> {
+        Self::supports(cache, geometry)?;
         Ok(Self {
             inner: cache,
             geometry,
