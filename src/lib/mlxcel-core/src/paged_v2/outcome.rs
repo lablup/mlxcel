@@ -43,6 +43,23 @@ pub enum PagedDecodeOutcome {
         /// Whether the merge pass ran.
         merged: bool,
     },
+    /// The two-level cascade decomposition ran: the shared span was attended
+    /// once for the whole subgroup and merged into each member's suffix state
+    /// (issue #903).
+    FusedCascade {
+        /// Requests in the launch.
+        batch: usize,
+        /// Requests sharing the span.
+        members: usize,
+        /// Whole pages the subgroup shares.
+        shared_pages: usize,
+        /// Tokens those pages hold.
+        shared_tokens: usize,
+        /// Chunks the shared-span (level 0) plan emitted.
+        prefix_chunks: usize,
+        /// Chunks the per-request suffix (level 1) plan emitted.
+        suffix_chunks: usize,
+    },
     /// The layer's rows do not fit one contiguous pool buffer, so neither fused
     /// kernel can address them. This is the decline that silently disables the
     /// whole fused path when the slab is sized too small.
@@ -71,16 +88,30 @@ pub enum PagedDecodeOutcome {
     /// pool-backed on one pool and layer, a soft-cap was requested, or the step
     /// carries more than one query token (batched prefill, speculative verify).
     NotServable(&'static str),
+    /// A cascade decomposition was planned but its launch failed, so the flat
+    /// v2 launch served the step instead (issue #903).
+    ///
+    /// A separate kind rather than a silent retry: a cascade that quietly
+    /// degrades to flat is exactly the shape of failure epic #909 has paid for
+    /// repeatedly, where a benchmark arm labelled "cascade" measures the flat
+    /// path and reports a clean null.
+    CascadeFailed(String),
 }
 
 /// Number of distinct outcome kinds, for the caller's one-shot log table.
-pub const PAGED_DECODE_OUTCOME_KINDS: usize = 9;
+pub const PAGED_DECODE_OUTCOME_KINDS: usize = 11;
 
 impl PagedDecodeOutcome {
-    /// Whether the fused kernel actually ran.
+    /// Whether a fused kernel actually ran, flat or cascade.
     #[must_use]
     pub fn is_fused(&self) -> bool {
-        matches!(self, Self::Fused { .. })
+        matches!(self, Self::Fused { .. } | Self::FusedCascade { .. })
+    }
+
+    /// Whether the cascade decomposition served the step.
+    #[must_use]
+    pub fn is_cascade(&self) -> bool {
+        matches!(self, Self::FusedCascade { .. })
     }
 
     /// Stable index for this kind, so a caller can keep a fixed-size table of
@@ -97,6 +128,8 @@ impl PagedDecodeOutcome {
             Self::PlanRejected(_) => 6,
             Self::ViewFailed(_) => 7,
             Self::NotServable(_) => 8,
+            Self::FusedCascade { .. } => 9,
+            Self::CascadeFailed(_) => 10,
         }
     }
 
@@ -115,6 +148,18 @@ impl PagedDecodeOutcome {
                 "fused v2 launch (batch {batch}, {visible_tokens} visible KV tokens, \
                  {chunks} chunks, merge {})",
                 if *merged { "on" } else { "skipped" }
+            ),
+            Self::FusedCascade {
+                batch,
+                members,
+                shared_pages,
+                shared_tokens,
+                prefix_chunks,
+                suffix_chunks,
+            } => format!(
+                "fused v2 cascade launch (batch {batch}, {members} of them sharing \
+                 {shared_pages} pages / {shared_tokens} KV tokens read once; \
+                 {prefix_chunks} shared-span chunks, {suffix_chunks} suffix chunks)"
             ),
             Self::MultiSlab {
                 k_slabs,
@@ -143,6 +188,9 @@ impl PagedDecodeOutcome {
                 format!("gather: the page table failed to build ({reason})")
             }
             Self::NotServable(reason) => format!("gather: batch not servable ({reason})"),
+            Self::CascadeFailed(reason) => format!(
+                "flat v2: the cascade decomposition was planned but its launch failed ({reason})"
+            ),
         }
     }
 }
@@ -176,6 +224,15 @@ mod tests {
             PagedDecodeOutcome::PlanRejected("x".to_string()),
             PagedDecodeOutcome::ViewFailed("x".to_string()),
             PagedDecodeOutcome::NotServable("x"),
+            PagedDecodeOutcome::FusedCascade {
+                batch: 4,
+                members: 4,
+                shared_pages: 64,
+                shared_tokens: 2048,
+                prefix_chunks: 8,
+                suffix_chunks: 4,
+            },
+            PagedDecodeOutcome::CascadeFailed("x".to_string()),
         ];
         assert_eq!(all.len(), PAGED_DECODE_OUTCOME_KINDS);
         let mut seen = [false; PAGED_DECODE_OUTCOME_KINDS];
@@ -201,6 +258,37 @@ mod tests {
         );
         assert!(!PagedDecodeOutcome::NoVisibleTokens.is_fused());
         assert!(!PagedDecodeOutcome::KillSwitch.is_fused());
+    }
+
+    #[test]
+    fn a_cascade_launch_is_fused_and_says_which_span_it_hoisted() {
+        let outcome = PagedDecodeOutcome::FusedCascade {
+            batch: 8,
+            members: 6,
+            shared_pages: 64,
+            shared_tokens: 2048,
+            prefix_chunks: 8,
+            suffix_chunks: 8,
+        };
+        assert!(outcome.is_fused());
+        assert!(outcome.is_cascade());
+        let text = outcome.describe();
+        for token in ["8", "6", "64", "2048"] {
+            assert!(text.contains(token), "{text} is missing {token}");
+        }
+        // A flat launch must never be mistaken for a cascade launch: the whole
+        // point of the variant is that a benchmark can prove which one ran.
+        assert!(
+            !PagedDecodeOutcome::Fused {
+                batch: 8,
+                visible_tokens: 4096,
+                chunks: 8,
+                merged: true,
+            }
+            .is_cascade()
+        );
+        assert!(!PagedDecodeOutcome::CascadeFailed("x".to_string()).is_fused());
+        assert!(!PagedDecodeOutcome::CascadeFailed("x".to_string()).is_cascade());
     }
 
     #[test]

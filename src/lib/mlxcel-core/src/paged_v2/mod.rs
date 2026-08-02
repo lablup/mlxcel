@@ -45,6 +45,12 @@
 //!    for an occupancy-derived CTA target and emits the flat index arrays as
 //!    plain data that can be cached across decode steps.
 //!
+//! Issue #903 added a fifth piece on top of those four, with no kernel change:
+//! [`cascade`] detects a whole-page prefix shared by a subgroup of the batch
+//! and [`cascade_launch`] decomposes the step into a shared-span launch, a
+//! per-request suffix launch, and one merge. It is off by default, see
+//! [`cascade::DEFAULT_CASCADE_ENABLED`].
+//!
 //! ## Two entry points, two gates
 //!
 //! **The v1 entry point** ([`crate::cache::PagedBlockPool::paged_decode_fused`],
@@ -69,12 +75,21 @@
 
 use std::sync::OnceLock;
 
+pub mod cascade;
+pub mod cascade_launch;
 pub mod dispatch;
 pub mod launch;
 pub mod outcome;
 pub mod plan;
 pub mod plan_cache;
 
+pub use cascade::{
+    CASCADE_ENV, CascadeGroup, CascadePlan, DEFAULT_CASCADE_ENABLED, DEFAULT_MIN_MEMBERS,
+    DEFAULT_MIN_SHARED_PAGES, MIN_MEMBERS_ENV, MIN_SHARED_PAGES_ENV, build_cascade_plan,
+    cascade_enabled, detect_shared_prefix, min_members, min_shared_pages, parse_cascade_enabled,
+    parse_threshold,
+};
+pub use cascade_launch::{CascadeLaunchStats, prefix_geometry, run_cascade_decode};
 pub use dispatch::{
     MIN_BATCHED_KV_TOKENS_PER_REQUEST, MIN_KV_TOKENS_ENV, MIN_KV_TOKENS_PER_REQUEST_ENV,
     MIN_SINGLE_REQUEST_KV_TOKENS, PagedV2Dispatch, active_required_visible_tokens,

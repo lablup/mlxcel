@@ -85,6 +85,32 @@ impl<'a> V2Context<'a> {
 
     /// Launch the plan and return `[B, Hq, 1, D]` f32.
     pub fn launch(&self, plan: &PagedDecodePlan) -> Result<UniquePtr<MlxArray>, String> {
+        let batch = i32::try_from(plan.batch)
+            .map_err(|_| format!("paged decode v2: batch {} overflows i32", plan.batch))?;
+        let (v, _) = self.launch_with_lse(plan)?;
+        Ok(ffi::reshape(
+            &v,
+            &[batch, self.geometry.q_heads, 1, self.geometry.head_dim],
+        ))
+    }
+
+    /// Launch the plan and return the softmax state, `(v [B, Hq, D], lse [B, Hq])`
+    /// f32, with the LSE in the merge kernel's **log2** units (issue #903).
+    ///
+    /// This is the same launch [`Self::launch`] performs; it only declines to
+    /// throw the LSE away. Both kernels already produce it (the partial kernel
+    /// emits `m + log2(l)` per chunk, the merge kernel emits the merged value),
+    /// so "make the v2 kernel expose its LSE", which issue #903 lists as a task,
+    /// is a plumbing change at this boundary and not a kernel change. Nothing in
+    /// `paged_attention_v2.cpp` or `paged_attention_v2_merge.cpp` was touched.
+    ///
+    /// The shape is the merge kernel's `[N, H, D]` partial layout rather than
+    /// the model-facing `[B, Hq, 1, D]`, because the only caller that wants the
+    /// LSE wants to feed both straight back into a merge.
+    pub fn launch_with_lse(
+        &self,
+        plan: &PagedDecodePlan,
+    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>), String> {
         plan.validate()?;
         let n = i32::try_from(plan.num_chunks)
             .map_err(|_| format!("paged decode v2: {} chunks overflows i32", plan.num_chunks))?;
@@ -112,13 +138,11 @@ impl<'a> V2Context<'a> {
 
         let batch = i32::try_from(plan.batch)
             .map_err(|_| format!("paged decode v2: batch {} overflows i32", plan.batch))?;
-        let hq = self.geometry.q_heads;
-        let dim = self.geometry.head_dim;
 
         if !plan.needs_merge {
             // One chunk per request, emitted in request order: the partial
-            // output is [B, Hq, D] already normalized.
-            return Ok(ffi::reshape(&partial_v, &[batch, hq, 1, dim]));
+            // output is [B, Hq, D] already normalized and its LSE is [B, Hq].
+            return Ok((partial_v, lse));
         }
 
         let o_indptr = ffi::from_slice_i32(&plan.o_indptr, &[batch + 1]);
@@ -131,7 +155,7 @@ impl<'a> V2Context<'a> {
             &mut merged_v,
             &mut merged_lse,
         );
-        Ok(ffi::reshape(&merged_v, &[batch, hq, 1, dim]))
+        Ok((merged_v, merged_lse))
     }
 }
 
