@@ -168,17 +168,44 @@ impl Attention {
         // Update KV cache and get sliced views
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
 
-        let mask_ptr = mask.map(|m| m as *const _).unwrap_or(std::ptr::null());
-        let attn_out = unsafe {
-            mlxcel_core::layers::attention_from_ptr(
-                &q,
-                &cache_k,
-                &cache_v,
-                self.scale,
-                mask_ptr,
-                self.softcapping,
-                0,
-            )
+        // Scaled dot-product attention.
+        //
+        // A prefill with no caller-supplied mask MUST take the causal path.
+        // Every generation path (CLI text prefill, the VLM embeddings prefill,
+        // and the chunked prefill) calls the model with `mask == None` and
+        // expects the model to apply its own causal mask, exactly like
+        // `create_attention_mask(h, cache[0], return_array=True)` in the
+        // reference
+        // https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/gemma2.py.
+        // Handing that `None` straight to the unmasked SDPA made every prefill
+        // fully bidirectional, so each layer wrote future-contaminated K/V into
+        // the cache and the first sampled token was already wrong (issue #999).
+        //
+        // `self.softcapping` must be threaded into the causal call rather than
+        // bypassed: Gemma 2 sets `attn_logit_softcapping`, so a null mask
+        // otherwise reaches `compiled_softcap_sdpa` in `attention_dispatch`,
+        // which applies no causality of its own. `causal_attention` builds the
+        // additive causal mask and hands it to the same softcap composite.
+        //
+        // An explicit mask (the padded-prefill case) still goes to the masked
+        // call, and decode is unchanged: `causal_attention` takes its
+        // single-query maskless fast path at `l == 1`, which is the same
+        // maskless softcap SDPA this call site already issued.
+        let attn_out = if let Some(m) = mask {
+            let mask_ptr = m as *const _;
+            unsafe {
+                mlxcel_core::layers::attention_from_ptr(
+                    &q,
+                    &cache_k,
+                    &cache_v,
+                    self.scale,
+                    mask_ptr,
+                    self.softcapping,
+                    0,
+                )
+            }
+        } else {
+            mlxcel_core::causal_attention(&q, &cache_k, &cache_v, self.scale, self.softcapping, 0)
         };
 
         // Transpose back and reshape
