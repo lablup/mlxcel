@@ -615,6 +615,34 @@ fn cli_binaries_resolve_to_the_path_cargo_built_them_at() {
     }
 }
 
+/// Coverage for the other candidate `binary_path_candidates` produces: a
+/// binary the compile-time match arm does not name by hand must still
+/// resolve, derived from this test binary's own `deps/` location rather than
+/// a `CARGO_BIN_EXE_*` constant. `speculative_bench` is the live example, a
+/// real fourth `[[bin]]` target in `Cargo.toml` that no `CARGO_BIN_EXE_*` case
+/// names and that no other integration test spawns, so nothing else in the
+/// suite exercises this branch, including the `deps`-parent layout check
+/// added alongside it.
+#[test]
+fn resolve_repo_binary_derives_the_path_for_a_binary_the_compile_time_case_does_not_name() {
+    let (resolved, report) = resolve_repo_binary("speculative_bench");
+
+    // Same profile directory the compile-time candidates live in, just a
+    // name `binary_path_candidates` does not special-case.
+    let profile_dir = Path::new(env!("CARGO_BIN_EXE_mlxcel"))
+        .parent()
+        .expect("CARGO_BIN_EXE_mlxcel has a parent directory");
+    assert_eq!(
+        resolved,
+        profile_dir.join("speculative_bench"),
+        "speculative_bench must resolve next to the binaries CARGO_BIN_EXE_* names.\n{report}"
+    );
+    assert!(
+        resolved.exists(),
+        "speculative_bench was not built.\n{report}"
+    );
+}
+
 #[test]
 fn drafter_flag_aliases_are_documented_on_both_binaries() {
     let serve_help = help_output("mlxcel", &["serve", "--help"]);
