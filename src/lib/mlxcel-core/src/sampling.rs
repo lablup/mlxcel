@@ -298,8 +298,38 @@ fn sample_token_optimized_core(
     logits: &MlxArray,
     config: &SamplingConfig,
     token_history: &[i32],
-    mut state: Option<&mut SamplerState>,
+    state: Option<&mut SamplerState>,
 ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    let last_logits = preprocess_logits_for_sampling(logits, config, token_history, state);
+
+    let token = ffi::fused_sample(
+        &last_logits,
+        config.temperature,
+        config.top_k,
+        config.top_p,
+        config.min_p,
+    );
+    (token, last_logits)
+}
+
+/// Everything [`sample_token_optimized`] does to the logits *before* the fused
+/// temperature / top-k / top-p / min-p sampler: last-position slice, token
+/// bias, repetition penalty, DRY, frequency/presence penalty, XTC.
+///
+/// Split out so the speculative acceptance path (issue #902) can obtain the
+/// exact same pre-sampler logits and hand them to [`ffi::fused_sample_probs`],
+/// which then applies the identical filter chain the sampler itself runs. The
+/// effective categorical distribution is therefore derived from the sampler's
+/// own code rather than reconstructed alongside it.
+///
+/// Used by: [`sample_token_optimized_core`], [`effective_token_distribution`],
+/// [`sample_token_with_distribution`]
+fn preprocess_logits_for_sampling(
+    logits: &MlxArray,
+    config: &SamplingConfig,
+    token_history: &[i32],
+    mut state: Option<&mut SamplerState>,
+) -> UniquePtr<MlxArray> {
     // Use optimized slice_last_logits: [batch, seq, vocab] -> [batch, vocab].
     let last_logits = ffi::slice_last_logits(logits);
 
@@ -385,20 +415,78 @@ fn sample_token_optimized_core(
     // default disabled state and skips this entirely — no array ops, and no
     // draw from the per-request RNG stream, which keeps every existing
     // request's token stream byte-identical to before this feature existed.
-    let last_logits = if config.xtc_probability > 0.0 {
+    if config.xtc_probability > 0.0 {
         apply_xtc_step(&last_logits, config)
     } else {
         last_logits
-    };
+    }
+}
 
+/// The exact categorical distribution [`sample_token_optimized`] would draw
+/// from for `logits` under `config`, as a float32 `[batch, vocab]`
+/// row-normalized probability tensor.
+///
+/// This is the `p` and `q` of modified rejection sampling (issue #902). It is
+/// built from the sampler's own pre-steps ([`preprocess_logits_for_sampling`])
+/// and the sampler's own filter chain ([`ffi::fused_sample_probs`]), so a
+/// change to either automatically moves the distribution with it.
+///
+/// A greedy config (`temperature == 0.0` or `top_k == 1`) yields the one-hot
+/// indicator at the argmax, which is the correct degenerate proposal
+/// distribution for a greedily-proposing drafter.
+///
+/// Consumes no randomness: safe to call without perturbing the token stream of
+/// any other sampler on the same RNG key sequence.
+///
+/// Used by: `speculative::stochastic_accept`
+pub fn effective_token_distribution(
+    logits: &MlxArray,
+    config: &SamplingConfig,
+    token_history: &[i32],
+) -> UniquePtr<MlxArray> {
+    let processed = preprocess_logits_for_sampling(logits, config, token_history, None);
+    ffi::fused_sample_probs(
+        &processed,
+        config.temperature,
+        config.top_k,
+        config.top_p,
+        config.min_p,
+    )
+}
+
+/// Sample one token *and* return the distribution it was drawn from.
+///
+/// Equivalent to [`sample_token_optimized`] followed by
+/// [`effective_token_distribution`], but the (potentially expensive) bias and
+/// penalty pre-steps run once instead of twice. The returned token is the same
+/// array [`sample_token_optimized`] returns for the same inputs and RNG state:
+/// the extra distribution tensor is a pure function of the pre-sampler logits
+/// and draws nothing from the RNG stream.
+///
+/// Returns `(token, probs)` where `probs` is float32 `[batch, vocab]`.
+///
+/// Used by: `SpeculativeGenerator` draft loop (issue #902)
+pub fn sample_token_with_distribution(
+    logits: &MlxArray,
+    config: &SamplingConfig,
+    token_history: &[i32],
+) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    let processed = preprocess_logits_for_sampling(logits, config, token_history, None);
     let token = ffi::fused_sample(
-        &last_logits,
+        &processed,
         config.temperature,
         config.top_k,
         config.top_p,
         config.min_p,
     );
-    (token, last_logits)
+    let probs = ffi::fused_sample_probs(
+        &processed,
+        config.temperature,
+        config.top_k,
+        config.top_p,
+        config.min_p,
+    );
+    (token, probs)
 }
 
 /// Batch-parallel sampling: sample one token per sequence from batched logits.

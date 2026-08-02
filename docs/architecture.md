@@ -41,6 +41,8 @@ src/
 - `src/lib/mlxcel-core/src/sampling.rs` — penalties and token sampling shared by CLI/server paths.
 - `src/lib/mlxcel-core/src/generate.rs` — `LanguageModel` trait and generation loops.
 - `src/lib/mlxcel-core/src/drafter/` and `src/lib/mlxcel-core/src/speculative/` — speculative decoding support.
+  `speculative/stochastic_accept.rs` holds the acceptance rules and the distribution-preservation
+  guarantee; see [`speculative-acceptance.md`](speculative-acceptance.md) for which rule each path runs.
 - `src/lib/mlxcel-core/src/layers.rs`, `src/lib/mlxcel-core/src/weights.rs`, `src/lib/mlxcel-core/src/utils.rs` — model building blocks,
   SafeTensors loading, masks, and helper operations.
 - `src/lib/mlxcel-core/src/autotune/`: shape-bucketed kernel autotuner (issue #906), covering the

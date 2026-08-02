@@ -1300,6 +1300,12 @@ fn run_generation_mode(
         println!("Loading draft model from {:?}...", draft_model_path);
         let (draft_model, _draft_tokenizer) = select_backend().load_model(draft_model_path)?;
         println!("Draft model loaded.");
+        // This line reports what the drafter's `config.json` *auto-detected*,
+        // which is not the same thing as the path this command will run. With
+        // no explicit `--draft-kind`, an auto-detected `dflash` still falls
+        // through to the classic `SpeculativeGenerator` below. Printing only
+        // the detected kind made a benchmark run indistinguishable from a
+        // DFlash round-loop run, so the path actually taken is now printed too.
         println!(
             "Resolved drafter kind: {} (block_size = {block_size}{})",
             resolved_kind,
@@ -1309,6 +1315,13 @@ fn run_generation_mode(
                 ", default"
             },
         );
+        if !user_requested_explicit_kind {
+            println!(
+                "Drafter kind was auto-detected only; running the classic \
+                 SpeculativeGenerator path (pass --draft-kind explicitly to select a \
+                 kind-specific round loop)."
+            );
+        }
 
         // MTP is handled above (issue #166). The remaining explicit kinds
         // (DFlash, InternalMtp) still need their kind-specific round loops and
@@ -1369,14 +1382,24 @@ fn run_generation_mode(
         let mut spec_generator = SpeculativeGenerator::new(main_num_layers, draft_num_layers)
             .with_token_bias(token_bias);
 
-        spec_generator.generate(
+        let result = spec_generator.generate(
             model,
             &draft_model,
             prompt_tokens,
             args.generation.max_tokens,
             args.model.num_draft_tokens,
             sampling_config,
-        )
+        );
+
+        // The CLI installs no tracing subscriber, so the info-level acceptance
+        // instrumentation inside `SpeculativeGenerator` never reaches a
+        // terminal. Print the summary on stdout unconditionally: it names the
+        // acceptance rule that actually ran and the mean accepted draft length,
+        // which are the two facts an acceptance-rate A/B has to be able to
+        // state about itself.
+        println!("{}", spec_generator.acceptance_stats().summary_line());
+
+        result
     } else if let Some(embeddings) = vlm_embeddings {
         generate_with_embeddings(
             model,

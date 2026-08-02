@@ -1294,6 +1294,19 @@ std::unique_ptr<MlxArray> fused_sample_categorical(
     float min_p
 );
 
+// The exact categorical distribution `fused_sample` draws from (#902), as a
+// float32 [batch, vocab] row-normalized probability tensor. Shares the filter
+// chain with `fused_sample` so support and masses cannot drift. A greedy
+// configuration (temperature == 0 or top_k == 1) returns the one-hot argmax
+// indicator.
+std::unique_ptr<MlxArray> fused_sample_probs(
+    const MlxArray& logits,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p
+);
+
 // Softmax-free Gumbel-max categorical sampling (#900), called directly.
 // `logits` is 2D [batch, vocab]; returns [batch] uint32 token ids.
 std::unique_ptr<MlxArray> gumbel_max_sample(
