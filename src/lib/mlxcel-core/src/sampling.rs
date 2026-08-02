@@ -1263,9 +1263,12 @@ pub(crate) fn top_k_filter(logits: &MlxArray, k: i32) -> UniquePtr<MlxArray> {
 ///   7. argsort(sorted_indices, axis=-1) → indices to undo the sort per row
 ///   8. take_along_axis(filtered_sorted_logits, unsort_indices, axis=-1) → result
 ///
-/// Note: production generation routes through the C++ `fused_sample` → C++ `top_p_filter`
-/// at `cpp/mlx_cxx_bridge.cpp`. This Rust implementation is a reference/test-parity
-/// copy used to validate the algorithm and in unit tests for batched correctness.
+/// Note: production generation routes through the C++ `fused_sample`, which
+/// since issue #901 resolves top-p inside the dual-pivot rejection kernel and
+/// reaches the C++ `top_p_filter` at `cpp/mlx_cxx_bridge.cpp` only under
+/// `MLXCEL_SAMPLING_REJECTION=0` or after a convergence-cap fallback. This Rust
+/// implementation is a reference/test-parity copy used to validate the
+/// algorithm and in unit tests for batched correctness.
 ///
 /// Used by: unit tests (`top_p_filter_*` in `sampling::tests`)
 #[allow(dead_code)]
