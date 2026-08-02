@@ -215,13 +215,37 @@ pub fn run_cascade_decode(
     let suffix_ctx = V2Context::build(q, k_pool, v_pool, &plan.suffix_view, geometry, scale)?;
     let (suffix_v, suffix_lse) = suffix_ctx.launch_with_lse(&suffix_plan)?;
 
-    // -- Merge: #898's kernel over `concat(level 1, level 0)` reordered so each
-    // request's partials are contiguous. --
-    let order = ffi::from_slice_i32(&plan.merge_order, &[plan.merge_order.len() as i32]);
-    let v_cat = crate::concatenate(&suffix_v, &prefix_v, 0);
-    let lse_cat = crate::concatenate(&suffix_lse, &prefix_lse, 0);
-    let v_in = ffi::take(&v_cat, &order, 0);
-    let lse_in = ffi::take(&lse_cat, &order, 0);
+    // -- Merge: #898's kernel over the two levels, arranged so each request's
+    // partials are contiguous rows. --
+    let (v_in, lse_in) = if plan.members_are_whole_batch() {
+        // Every request is a member, so interleaving is a stack on a new axis
+        // and a reshape: [B, 2, H, D] -> [2B, H, D] is already the request-major
+        // order `o_indptr = [0, 2, 4, ...]` groups over. Two ops instead of the
+        // concatenate-then-gather below, on the shape this feature exists for.
+        let v_pairs = crate::ops::stack(
+            &[
+                &*suffix_v as *const MlxArray,
+                &*prefix_v as *const MlxArray,
+            ],
+            1,
+        );
+        let lse_pairs = crate::ops::stack(
+            &[
+                &*suffix_lse as *const MlxArray,
+                &*prefix_lse as *const MlxArray,
+            ],
+            1,
+        );
+        (
+            ffi::reshape(&v_pairs, &[2 * batch, hq, dim]),
+            ffi::reshape(&lse_pairs, &[2 * batch, hq]),
+        )
+    } else {
+        let order = ffi::from_slice_i32(&plan.merge_order, &[plan.merge_order.len() as i32]);
+        let v_cat = crate::concatenate(&suffix_v, &prefix_v, 0);
+        let lse_cat = crate::concatenate(&suffix_lse, &prefix_lse, 0);
+        (ffi::take(&v_cat, &order, 0), ffi::take(&lse_cat, &order, 0))
+    };
     let o_indptr = ffi::from_slice_i32(&plan.o_indptr, &[batch + 1]);
 
     let mut merged_v = UniquePtr::null();

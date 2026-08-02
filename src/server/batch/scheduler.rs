@@ -2592,6 +2592,12 @@ impl BatchScheduler {
             // so `/v1/cache/stats` and `/metrics` can report admission headroom.
             self.cache_pool.paged_block_budget().unwrap_or(0) as u64,
         );
+        // Which attention kernel the decode loop actually ran, and how much
+        // prefix the cascade decomposition hoisted (issues #899, #903). Cheap
+        // relaxed loads of process-wide counters; publishing them here is what
+        // makes the answer readable from `/health` without a profiler.
+        self.batch_observability
+            .update_paged_decode_gauges(mlxcel_core::cache::paged_batch_decode_stats());
     }
 
     fn allocate_sequence_state(&mut self) -> Result<SequenceId, String> {

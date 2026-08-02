@@ -99,18 +99,36 @@ use crate::paged_v2::{PAGED_DECODE_OUTCOME_KINDS, PagedDecodeOutcome};
 /// split without a profiler. They are never read on the hot path.
 #[derive(Debug, Default)]
 pub struct PagedBatchDecodeCounters {
-    /// Layer steps served by a fused v2 launch.
+    /// Layer steps served by a fused v2 launch, cascade included.
     pub v2_launches: AtomicU64,
     /// Layer steps served by the in-function gather-then-SDPA fallback.
     pub gather_fallbacks: AtomicU64,
     /// Calls that declined before writing, leaving the caller's own loop to run.
     pub declines: AtomicU64,
+    /// Layer steps served by the two-level cascade decomposition (issue #903).
+    /// A subset of [`Self::v2_launches`].
+    pub cascade_launches: AtomicU64,
+    /// Cumulative KV tokens hoisted into a shared-span launch. Divided by
+    /// [`Self::cascade_launches`] this is the mean shared-span length; kept as a
+    /// sum so the two numbers stay consistent under concurrent updates.
+    pub cascade_shared_tokens: AtomicU64,
+    /// Cumulative member count across cascade launches. Divided by
+    /// [`Self::cascade_launches`] this is the mean subgroup size.
+    pub cascade_member_seqs: AtomicU64,
+    /// Cascade launches that failed and fell back to the flat v2 launch.
+    /// Non-zero means a planned decomposition is not running; see the
+    /// `CascadeFailed` line in the log for the reason.
+    pub cascade_failures: AtomicU64,
 }
 
 static COUNTERS: PagedBatchDecodeCounters = PagedBatchDecodeCounters {
     v2_launches: AtomicU64::new(0),
     gather_fallbacks: AtomicU64::new(0),
     declines: AtomicU64::new(0),
+    cascade_launches: AtomicU64::new(0),
+    cascade_shared_tokens: AtomicU64::new(0),
+    cascade_member_seqs: AtomicU64::new(0),
+    cascade_failures: AtomicU64::new(0),
 };
 
 /// One flag per [`PagedDecodeOutcome`] kind, so the *first* launch of each
@@ -156,6 +174,38 @@ pub struct PagedBatchDecodeStats {
     pub v2_launches: u64,
     pub gather_fallbacks: u64,
     pub declines: u64,
+    /// Cascade launches (issue #903), a subset of `v2_launches`.
+    pub cascade_launches: u64,
+    /// Cumulative shared-span tokens across cascade launches.
+    pub cascade_shared_tokens: u64,
+    /// Cumulative member count across cascade launches.
+    pub cascade_member_seqs: u64,
+    /// Planned cascade launches that failed and fell back to flat v2.
+    pub cascade_failures: u64,
+}
+
+impl PagedBatchDecodeStats {
+    /// Mean shared-span length in KV tokens, or `0.0` before the first cascade
+    /// launch.
+    #[must_use]
+    pub fn mean_shared_tokens(&self) -> f64 {
+        if self.cascade_launches == 0 {
+            0.0
+        } else {
+            self.cascade_shared_tokens as f64 / self.cascade_launches as f64
+        }
+    }
+
+    /// Mean number of sequences sharing the span, or `0.0` before the first
+    /// cascade launch.
+    #[must_use]
+    pub fn mean_cascade_members(&self) -> f64 {
+        if self.cascade_launches == 0 {
+            0.0
+        } else {
+            self.cascade_member_seqs as f64 / self.cascade_launches as f64
+        }
+    }
 }
 
 /// Read the production paged decode counters.
@@ -165,6 +215,38 @@ pub fn paged_batch_decode_stats() -> PagedBatchDecodeStats {
         v2_launches: COUNTERS.v2_launches.load(Ordering::Relaxed),
         gather_fallbacks: COUNTERS.gather_fallbacks.load(Ordering::Relaxed),
         declines: COUNTERS.declines.load(Ordering::Relaxed),
+        cascade_launches: COUNTERS.cascade_launches.load(Ordering::Relaxed),
+        cascade_shared_tokens: COUNTERS.cascade_shared_tokens.load(Ordering::Relaxed),
+        cascade_member_seqs: COUNTERS.cascade_member_seqs.load(Ordering::Relaxed),
+        cascade_failures: COUNTERS.cascade_failures.load(Ordering::Relaxed),
+    }
+}
+
+/// Fold a cascade outcome into the process counters.
+///
+/// Separate from the `v2_launches` bump so the cascade numbers stay a strict
+/// subset of it: a step that ran the cascade decomposition is still a fused v2
+/// launch, and reporting it as anything else would make the two counters
+/// disagree about what the fused path served.
+fn record_cascade(outcome: &PagedDecodeOutcome) {
+    match outcome {
+        PagedDecodeOutcome::FusedCascade {
+            members,
+            shared_tokens,
+            ..
+        } => {
+            COUNTERS.cascade_launches.fetch_add(1, Ordering::Relaxed);
+            COUNTERS
+                .cascade_shared_tokens
+                .fetch_add(*shared_tokens as u64, Ordering::Relaxed);
+            COUNTERS
+                .cascade_member_seqs
+                .fetch_add(*members as u64, Ordering::Relaxed);
+        }
+        PagedDecodeOutcome::CascadeFailed(_) => {
+            COUNTERS.cascade_failures.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {}
     }
 }
 
@@ -283,6 +365,7 @@ pub fn paged_batch_decode_attention(
             // first #899 sweep measured gather against gather because this was
             // not true.
             report_once(&outcome);
+            record_cascade(&outcome);
             match launched {
                 Some(out) => {
                     COUNTERS.v2_launches.fetch_add(1, Ordering::Relaxed);
