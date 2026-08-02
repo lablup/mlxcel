@@ -4493,8 +4493,10 @@ namespace {
 
 // Compiled min-p filtering fused into a single kernel.
 namespace {
-    static std::function<std::vector<array>(const std::vector<array>&)>
-    get_compiled_min_p_filter() {
+    using CompiledFilterFn =
+        std::function<std::vector<array>(const std::vector<array>&)>;
+
+    static CompiledFilterFn get_compiled_min_p_filter() {
         // Backend is process-constant, so capture the gate once at build time.
         // Non-Metal fills the sentinel in x's dtype so no per-step AsType is
         // inserted on the scalar under the CUDA bf16 promotion patch (issue
@@ -4589,7 +4591,8 @@ namespace {
         SAMPLING_DISPATCH_NO_FILTER = 6,
         SAMPLING_DISPATCH_REFERENCE_ARM = 7,
         SAMPLING_DISPATCH_REJECTION_LAZY = 8,
-        SAMPLING_DISPATCH_KIND_COUNT = 9,
+        SAMPLING_DISPATCH_NOT_ROUTED = 9,
+        SAMPLING_DISPATCH_KIND_COUNT = 10,
     };
 
     struct SamplingDispatchState {
@@ -4777,11 +4780,95 @@ static bool gumbel_sample_applies(
     return mlxcel::turbo::gumbel_max_sample_accepts(x);
 }
 
+// ---------------------------------------------------------------------------
+// Routing policy for the rejection kernel (#901), and the measurements it is
+// built from.
+//
+// The kernel replaces a SORT. That is the whole of where it wins, and the
+// measured matrix says so unambiguously (M1 Ultra, three repetitions of vocab
+// {32K, 64K, 152K} x batch {1, 4, 8}, both arms timed inside one run):
+//
+//   top-p alone      1.28x - 2.35x   every cell a win
+//   top-k alone      0.31x - 0.97x   every cell a loss, worst at 152K
+//   min-p alone      0.47x - 0.88x   at 152K, a loss
+//   top-k + top-p    1.27x - 1.64x   at 32K, but 0.71x - 0.83x at 152K
+//
+// The mechanism is visible in the kernel's own round counter, which the
+// microbenchmark reports. top-p accepts in one or two rounds, because a draw
+// weighted by probability lands in the high-mass head and `mass(> p) <= top_p`
+// is satisfied immediately. top-k needs the draw to land inside the top forty
+// of the whole vocabulary, so it takes two to seven rounds and the count grows
+// with the vocabulary. Every extra round is another full-row sweep, and the
+// loop runs on ONE threadgroup per row because the shrinking interval is carried
+// across sweeps and MLX custom kernels have no grid-wide barrier. So the kernel
+// pays single-core bandwidth per round, while the stock chain's `argpartition`
+// and compiled min-p filter run across the whole GPU. Where the chain also runs
+// `argsort`, the kernel is far ahead; where it does not, it cannot win.
+//
+// Hence: route only when the chain would sort, which is exactly when top-p is
+// active. When top-k is active as well the round count climbs with the
+// vocabulary, so that combination is capped at the vocabulary where it was
+// measured to win.
+//
+// This is the same shape as the dispatch floor #899 ended up with, and the same
+// discipline as #905 landing its fusions unwired: keep the code, gate it on
+// evidence. min-p rides along with top-p for free, because it is folded into the
+// kernel's initial interval and costs no round; that specific combination is an
+// extrapolation from the two filters measured separately, not a measured cell.
+// ---------------------------------------------------------------------------
+
+// Vocabulary ceiling for routing top-k and top-p together.
+//
+// 32768 is measured (1.27x - 1.64x across three repetitions); 152064 is measured
+// as a loss (0.71x - 0.83x); 65536 has not been measured for this combination and
+// is therefore excluded rather than interpolated. Raise it only against a
+// measurement, never to widen coverage.
+constexpr int32_t REJECTION_JOINT_VOCAB_MAX = 32768;
+
+// Pure routing policy: would `fused_sample` send this configuration to the
+// rejection kernel, ignoring backend support and the env switch? Exposed so a
+// test can pin every measured cell of the matrix above without a GPU.
+bool sampling_rejection_routes(
+    int32_t vocab,
+    int32_t top_k,
+    float top_p,
+    float min_p
+) {
+    (void)min_p; // min-p never decides routing; it is free inside the kernel.
+    const bool top_p_active = top_p > 0.0f && top_p < 1.0f;
+    if (!top_p_active) {
+        return false;
+    }
+    const bool top_k_active = top_k > 1 && (vocab <= 0 || top_k < vocab);
+    return !top_k_active || vocab <= REJECTION_JOINT_VOCAB_MAX;
+}
+
+// Human-readable reason a filtered configuration stayed on the stock chain.
+static std::string rejection_not_routed_reason(
+    int32_t vocab,
+    int32_t top_k,
+    float top_p,
+    float min_p
+) {
+    std::ostringstream os;
+    os << "argpartition chain: the rejection kernel is not routed for this "
+          "configuration (";
+    if (!(top_p > 0.0f && top_p < 1.0f)) {
+        os << "top-p inactive, so the stock chain runs no sort and the kernel "
+              "measured slower: top-k alone 0.31x-0.97x, min-p alone "
+              "0.47x-0.88x";
+    } else {
+        os << "top-k and top-p together measured 0.71x-0.83x above vocab "
+           << REJECTION_JOINT_VOCAB_MAX << ", and this row has vocab " << vocab;
+    }
+    os << "; top_k " << top_k << ", top_p " << top_p << ", min_p " << min_p
+       << ")";
+    return os.str();
+}
+
 // Whether this exact sampler configuration can take the dual-pivot rejection
-// kernel (#901). It serves the *filtered* stochastic path: at least one of
-// top-k, top-p, min-p narrows the support, and the temperature is non-greedy.
-// The no-filter path stays on the Gumbel-max kernel (#900), which is strictly
-// cheaper there, and greedy stays on `argmax`.
+// kernel (#901): a non-greedy temperature, an input shape the kernel serves,
+// and a filter combination the measurements above support.
 static bool rejection_sample_applies(
     const mlx::core::array& x,
     float temperature,
@@ -4792,12 +4879,10 @@ static bool rejection_sample_applies(
     if (!(temperature > 0.0f) || top_k == 1) {
         return false;
     }
-    const bool filtered = top_k > 0 || (top_p > 0.0f && top_p < 1.0f) ||
-        (min_p > 0.0f && min_p < 1.0f);
-    if (!filtered) {
+    if (!mlxcel::turbo::rejection_sample_accepts(x)) {
         return false;
     }
-    return mlxcel::turbo::rejection_sample_accepts(x);
+    return sampling_rejection_routes(x.shape(1), top_k, top_p, min_p);
 }
 
 // Fused sampling: temperature scaling + top-k + top-p + min-p + categorical
@@ -4872,8 +4957,19 @@ static mlx::core::array fused_sample_filter_logits(
 
     // Min-p filtering — compiled kernel
     if (min_p > 0.0f && min_p < 1.0f) {
-        static auto compiled_fn = get_compiled_min_p_filter();
-        auto result = compiled_fn({x, sampler_scalar(min_p)});
+        // Leaked on purpose, and it is not an oversight. The compiled callable
+        // holds handles into MLX's process-global compile cache, and a plain
+        // function-local static would be destroyed during `exit` in an order
+        // C++ leaves unspecified relative to that cache. Destroying it after
+        // the cache is gone is a null dereference inside
+        // `__cxa_finalize_ranges`: `examples/rejection_sampling_microbench`
+        // exited 139 after printing a complete, correct table, and the fault
+        // reproduced with nothing in the process but one
+        // `fused_sample_categorical` call carrying a min-p. The object is
+        // process-lifetime by construction, so never destroying it is the fix
+        // rather than a workaround.
+        static auto* compiled_fn = new CompiledFilterFn(get_compiled_min_p_filter());
+        auto result = (*compiled_fn)({x, sampler_scalar(min_p)});
         x = std::move(result[0]);
     }
 
@@ -5125,7 +5221,7 @@ static std::unique_ptr<MlxArray> fused_sample_impl(
                         : "argpartition chain: no Metal or CUDA GPU backend "
                           "for the rejection kernel");
             }
-        } else if (!rejection_sample_applies(x, temperature, top_k, top_p, min_p)) {
+        } else if (!mlxcel::turbo::rejection_sample_accepts(x)) {
             if (sampling_dispatch_is_new(SAMPLING_DISPATCH_SHAPE_UNSUPPORTED)) {
                 std::ostringstream os;
                 os << "argpartition chain: the rejection kernel cannot serve "
@@ -5133,6 +5229,13 @@ static std::unique_ptr<MlxArray> fused_sample_impl(
                    << x.ndim() << ")";
                 sampling_dispatch_record(
                     SAMPLING_DISPATCH_SHAPE_UNSUPPORTED, os.str());
+            }
+        } else if (!rejection_sample_applies(x, temperature, top_k, top_p, min_p)) {
+            if (sampling_dispatch_is_new(SAMPLING_DISPATCH_NOT_ROUTED)) {
+                sampling_dispatch_record(
+                    SAMPLING_DISPATCH_NOT_ROUTED,
+                    rejection_not_routed_reason(
+                        x.shape(1), top_k, top_p, min_p));
             }
         } else {
             return fused_sample_rejection_path(

@@ -2138,6 +2138,14 @@ mod ffi {
         /// and `MLXCEL_SAMPLING_REJECTION` is not falsy. Read once per process.
         fn sampling_rejection_available() -> bool;
 
+        /// Pure routing policy (#901): would `fused_sample` send this
+        /// configuration to the rejection kernel, ignoring backend support and
+        /// the env switch? The kernel replaces a sort, so it is routed only
+        /// where the stock chain sorts (top-p active), and the top-k + top-p
+        /// combination is capped at the vocabulary where it measured a win.
+        /// Pure host arithmetic, so it answers on a CPU-only build too.
+        fn sampling_rejection_routes(vocab: i32, top_k: i32, top_p: f32, min_p: f32) -> bool;
+
         /// Threads per threadgroup the rejection kernel launches with. The
         /// determinism argument rests on this being fixed, so it is exposed.
         fn sampling_rejection_threadgroup_size() -> i32;

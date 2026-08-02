@@ -666,8 +666,14 @@ struct RejectionKernelHolder {
 };
 
 inline RejectionKernelHolder& get_rejection_kernel() {
-    static RejectionKernelHolder holder;
-    return holder;
+    // Leaked on purpose: the holder owns a JIT-compiled kernel that references
+    // backend state owned by other statics, and `exit` destroys statics in an
+    // order C++ does not define across translation units. The compiled min-p
+    // filter in `mlx_cxx_bridge.cpp` faulted in exactly that window; this has
+    // the same shape, is process-lifetime by construction, and costs one
+    // never-freed allocation to take out of the teardown path entirely.
+    static RejectionKernelHolder* holder = new RejectionKernelHolder();
+    return *holder;
 }
 
 struct RejectionKernelHolderCuda {
@@ -687,8 +693,14 @@ struct RejectionKernelHolderCuda {
 };
 
 inline RejectionKernelHolderCuda& get_rejection_kernel_cuda() {
-    static RejectionKernelHolderCuda holder;
-    return holder;
+    // Leaked on purpose: the holder owns a JIT-compiled kernel that references
+    // backend state owned by other statics, and `exit` destroys statics in an
+    // order C++ does not define across translation units. The compiled min-p
+    // filter in `mlx_cxx_bridge.cpp` faulted in exactly that window; this has
+    // the same shape, is process-lifetime by construction, and costs one
+    // never-freed allocation to take out of the teardown path entirely.
+    static RejectionKernelHolderCuda* holder = new RejectionKernelHolderCuda();
+    return *holder;
 }
 
 } // namespace

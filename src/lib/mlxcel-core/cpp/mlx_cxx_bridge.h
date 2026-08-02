@@ -1369,6 +1369,18 @@ std::unique_ptr<MlxArray> sampling_rejection_probe(
 // support plus a non-falsy `MLXCEL_SAMPLING_REJECTION`.
 bool sampling_rejection_available();
 
+// Pure routing policy: would this configuration go to the rejection kernel,
+// ignoring backend support and the env switch? The kernel replaces a sort, so
+// it is routed only where the stock chain sorts (top-p active), and the
+// top-k + top-p combination is capped at the vocabulary where it measured a
+// win. See the measurement table above the definition.
+bool sampling_rejection_routes(
+    int32_t vocab,
+    int32_t top_k,
+    float top_p,
+    float min_p
+);
+
 // Threads per threadgroup the rejection kernel launches with.
 int32_t sampling_rejection_threadgroup_size();
 

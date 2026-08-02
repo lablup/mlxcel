@@ -36,10 +36,20 @@
 //! The reported number is the median over `--iters` repetitions after
 //! `--warmup` discarded ones.
 //!
-//! Each row also reports `rounds`, the worst per-row rejection round count the
-//! kernel consumed for that shape. It is the number that says how close the
-//! configuration runs to the 32-round cap, and therefore how likely the
-//! `argpartition` fallback is in production.
+//! Each row reports two things besides the timings. `rounds` is the worst
+//! per-row rejection round count the kernel consumed for that shape, which is
+//! the number that explains the timings: top-p accepts in one or two rounds,
+//! top-k needs more and the count grows with the vocabulary, and every round is
+//! another full-row sweep on a single threadgroup. `routed` is whether
+//! `fused_sample` would actually send that configuration to the kernel in
+//! production.
+//!
+//! The rejection arm is measured for EVERY cell, routed or not, because it goes
+//! through the forced entry point. A `routed=no` row is therefore a real
+//! measurement of a path production does not take, kept so the routing policy
+//! can be re-derived from the table rather than trusted. Read the `routed=yes`
+//! rows for what shipping costs, and the whole table for whether the policy is
+//! still right.
 //!
 //! The header prints the dispatch outcome each arm recorded, read from the same
 //! record `mlxcel-server` announces at INFO. Those two lines are the proof that
@@ -75,7 +85,7 @@ use mlxcel_core::{
     fused_sample_rejection, is_gpu_available, random_seed, rejection_cap_overflow_launches,
     rejection_cap_overflow_rows, reset_sampling_dispatch, sampling_dispatch_recorded_report,
     sampling_rejection_available, sampling_rejection_max_rounds, sampling_rejection_probe,
-    synchronize_default,
+    sampling_rejection_routes, synchronize_default,
 };
 
 const VOCABS: [i32; 3] = [32_768, 65_536, 152_064];
@@ -225,12 +235,12 @@ fn main() {
     println!();
 
     println!(
-        "{:>12} {:>8} {:>6} {:>7} {:>14} {:>15} {:>9}",
-        "config", "vocab", "batch", "rounds", "baseline_us", "rejection_us", "speedup"
+        "{:>12} {:>8} {:>6} {:>7} {:>7} {:>14} {:>15} {:>9}",
+        "config", "vocab", "batch", "rounds", "routed", "baseline_us", "rejection_us", "speedup"
     );
 
     let mut csv =
-        String::from("config,vocab,batch,worst_rounds,baseline_us,rejection_us,speedup\n");
+        String::from("config,vocab,batch,worst_rounds,routed,baseline_us,rejection_us,speedup\n");
     for (label, top_k, top_p, min_p) in CONFIGS {
         for vocab in VOCABS {
             for batch in BATCHES {
@@ -251,14 +261,16 @@ fn main() {
                 let baseline_us = baseline.as_secs_f64() * 1e6;
                 let rejection_us = rejection.as_secs_f64() * 1e6;
                 let speedup = baseline_us / rejection_us;
+                let routed = sampling_rejection_routes(vocab, top_k, top_p, min_p);
+                let routed_text = if routed { "yes" } else { "no" };
                 println!(
-                    "{label:>12} {vocab:>8} {batch:>6} {rounds:>7} {baseline_us:>14.2} \
-                     {rejection_us:>15.2} {speedup:>8.2}x"
+                    "{label:>12} {vocab:>8} {batch:>6} {rounds:>7} {routed_text:>7} \
+                     {baseline_us:>14.2} {rejection_us:>15.2} {speedup:>8.2}x"
                 );
                 let _ = writeln!(
                     csv,
-                    "{label},{vocab},{batch},{rounds},{baseline_us:.3},{rejection_us:.3},\
-                     {speedup:.4}"
+                    "{label},{vocab},{batch},{rounds},{routed_text},{baseline_us:.3},\
+                     {rejection_us:.3},{speedup:.4}"
                 );
             }
         }
@@ -268,6 +280,11 @@ fn main() {
         "\ncap overflow: {} rows across {} launches",
         rejection_cap_overflow_rows(),
         rejection_cap_overflow_launches()
+    );
+    println!(
+        "routing policy: the kernel replaces a sort, so it is routed only where the stock chain \
+         sorts (top-p active), and top-k + top-p only at vocab <= 32768. A routed=no row is a \
+         path production does not take."
     );
     print_dispatch("dispatch: ");
 

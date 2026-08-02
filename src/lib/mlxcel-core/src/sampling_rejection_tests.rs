@@ -48,6 +48,18 @@
 //! renormalisation. [`joint_top_k_top_p_support_is_a_superset_of_the_stock_chain`]
 //! pins the relationship.
 //!
+//! ## Correctness is tested for every filter, routing is not
+//!
+//! The kernel is correct for top-k, top-p, min-p and every combination, and the
+//! support and goodness-of-fit tests below exercise all of them through
+//! `sampling_rejection_probe`, which bypasses routing. Production only *routes*
+//! the combinations that measured faster; see
+//! [`the_routing_policy_matches_the_measured_matrix`] for the table and
+//! [`fused_sample_routes_only_the_configurations_that_measured_faster`] for the
+//! end-to-end check. Keeping the two separate is deliberate: if the occupancy
+//! limit that makes top-k slow is ever lifted, widening the policy is a
+//! one-constant change against tests that already prove the kernel right.
+//!
 //! GPU-only: the kernel JITs through `mx.fast.metal_kernel` /
 //! `mx.fast.cuda_kernel`, so every test returns early on a CPU-only build,
 //! matching the convention in `sampling_gumbel_tests.rs`.
@@ -931,33 +943,171 @@ fn a_starved_round_cap_falls_back_and_the_event_is_counted() {
 
 // -- routing --
 
+/// The measured matrix the routing policy encodes (M1 Ultra, three repetitions,
+/// vocab {32K, 64K, 152K} x batch {1, 4, 8}, both arms timed in one run).
+///
+/// | configuration | measured speedup | routed |
+/// |---|---|---|
+/// | top-p alone | 1.28x - 2.35x, every cell | yes, every vocabulary |
+/// | top-k alone | 0.31x - 0.97x, every cell | no |
+/// | min-p alone | 0.47x - 0.88x at 152K | no |
+/// | top-k + top-p | 1.27x - 1.64x at 32K, 0.71x - 0.83x at 152K | only at vocab <= 32768 |
+///
+/// The kernel replaces a sort, so it wins exactly where the stock chain sorts,
+/// which is when top-p is active. The `rounds` column of the microbenchmark
+/// shows why the joint case degrades with vocabulary: top-p accepts in one or
+/// two rounds, top-k needs two to seven and the count grows with the
+/// vocabulary, and every round is another full-row sweep on a single
+/// threadgroup.
 #[test]
-fn fused_sample_routes_every_filtered_config_to_the_rejection_kernel() {
+fn the_routing_policy_matches_the_measured_matrix() {
+    // Pure host arithmetic, so this runs on a CPU-only build too.
+    const VOCABS: [i32; 4] = [4096, 32_768, 65_536, 152_064];
+
+    for vocab in VOCABS {
+        assert!(
+            sampling_rejection_routes(vocab, 0, 0.9, 0.0),
+            "top-p alone at vocab {vocab} measured a win at every cell and must route"
+        );
+        // min-p is folded into the kernel's initial interval and costs no round,
+        // so it rides along with top-p. Extrapolated from the two filters
+        // measured separately, not itself a measured cell.
+        assert!(
+            sampling_rejection_routes(vocab, 0, 0.9, 0.05),
+            "top-p + min-p at vocab {vocab} must route"
+        );
+        assert!(
+            !sampling_rejection_routes(vocab, 40, 1.0, 0.0),
+            "top-k alone at vocab {vocab} measured 0.31x-0.97x and must not route"
+        );
+        assert!(
+            !sampling_rejection_routes(vocab, 0, 1.0, 0.05),
+            "min-p alone at vocab {vocab} measured 0.47x-0.88x and must not route"
+        );
+        assert!(
+            !sampling_rejection_routes(vocab, 40, 1.0, 0.05),
+            "top-k + min-p at vocab {vocab} runs no sort in the stock chain and must not route"
+        );
+    }
+
+    // The joint case is capped at the vocabulary where it was measured to win.
+    // 65536 is excluded because it has not been measured for this combination,
+    // not because it was measured to lose.
+    assert!(sampling_rejection_routes(4096, 40, 0.9, 0.0));
+    assert!(sampling_rejection_routes(32_768, 40, 0.9, 0.0));
+    assert!(!sampling_rejection_routes(65_536, 40, 0.9, 0.0));
+    assert!(!sampling_rejection_routes(152_064, 40, 0.9, 0.0));
+    assert!(sampling_rejection_routes(32_768, 40, 0.9, 0.05));
+    assert!(!sampling_rejection_routes(152_064, 40, 0.9, 0.05));
+
+    // A top-k that cannot bind is not a top-k: it leaves the chain's cost
+    // profile at top-p alone, so it does not drag the joint ceiling in.
+    assert!(sampling_rejection_routes(152_064, 152_064, 0.9, 0.0));
+    // `top_k == 1` is the greedy spelling; `fused_sample` takes `argmax` long
+    // before it reaches this policy, so the value here is not load-bearing.
+    assert!(sampling_rejection_routes(152_064, 1, 0.9, 0.0));
+}
+
+/// Which path `fused_sample` took for one configuration, decided by comparing
+/// its stream against both arms at one seed.
+///
+/// The dispatch record cannot answer this on its own: it is process-global and
+/// one-shot per kind, so another test sampling concurrently in the same binary
+/// can claim the "rejection kernel" slot, and a negative assertion on it would
+/// be a coin flip. Both entry points consume exactly one RNG key per call, so at
+/// a fixed seed the streams are an exact, race-free witness of which code ran.
+fn took_the_kernel(batched: &MlxArray, top_k: i32, top_p: f32, min_p: f32) -> bool {
+    let cap = sampling_rejection_max_rounds();
+    random_seed(0x0901_0F0F);
+    let routed = u32_values(&fused_sample(batched, 1.0, top_k, top_p, min_p));
+    random_seed(0x0901_0F0F);
+    let kernel = u32_values(&fused_sample_rejection(
+        batched, 1.0, top_k, top_p, min_p, cap,
+    ));
+    random_seed(0x0901_0F0F);
+    let chain = u32_values(&fused_sample_categorical(batched, 1.0, top_k, top_p, min_p));
+    assert_ne!(
+        kernel, chain,
+        "the two arms produced the same stream for top_k={top_k} top_p={top_p} min_p={min_p}, \
+         so this witness cannot tell them apart"
+    );
+    routed == kernel
+}
+
+#[test]
+fn fused_sample_routes_only_the_configurations_that_measured_faster() {
     let _dispatch = dispatch_guard();
     if !gpu_backend() {
         return;
     }
+    // vocab 1024, below the joint ceiling, so top-p and top-k+top-p both route.
     let logits = spread_logits(1024, 0x90A);
     let rows = 32usize;
     let batched = tiled(&logits, rows);
 
-    for (top_k, top_p, min_p) in [
-        (40i32, 1.0f32, 0.0f32),
-        (0, 0.9, 0.0),
-        (0, 1.0, 0.05),
-        (40, 0.9, 0.05),
+    for (top_k, top_p, min_p, want_kernel) in [
+        (0i32, 0.9f32, 0.0f32, true),
+        (0, 0.9, 0.05, true),
+        (40, 0.9, 0.0, true),
+        (40, 0.9, 0.05, true),
+        (40, 1.0, 0.0, false),
+        (0, 1.0, 0.05, false),
+        (40, 1.0, 0.05, false),
     ] {
-        reset_sampling_dispatch();
-        let tokens = u32_values(&fused_sample(&batched, 1.0, top_k, top_p, min_p));
-        assert_eq!(tokens.len(), rows);
-
-        let lines = recorded_dispatch();
-        assert!(
-            lines.iter().any(|l| l.starts_with("rejection kernel")),
-            "top_k={top_k} top_p={top_p} min_p={min_p} did not report the rejection kernel; \
-             dispatch said {lines:?}"
+        assert_eq!(
+            took_the_kernel(&batched, top_k, top_p, min_p),
+            want_kernel,
+            "top_k={top_k} top_p={top_p} min_p={min_p}: expected kernel={want_kernel}"
         );
+
+        if !want_kernel {
+            reset_sampling_dispatch();
+            let tokens = u32_values(&fused_sample(&batched, 1.0, top_k, top_p, min_p));
+            assert_eq!(tokens.len(), rows);
+            let lines = recorded_dispatch();
+            assert!(
+                lines.iter().any(|l| l.contains("not routed")),
+                "top_k={top_k} top_p={top_p} min_p={min_p} declined without saying why: \
+                 {lines:?}"
+            );
+        }
     }
+}
+
+#[test]
+fn a_large_vocabulary_sends_the_joint_config_back_to_the_stock_chain() {
+    let _dispatch = dispatch_guard();
+    if !gpu_backend() {
+        return;
+    }
+    // The llama-server default (top-k 40 + top-p 0.9) above the measured
+    // ceiling. This is the cell that measured 0.71x-0.83x, so it must decline,
+    // and it must say the vocabulary is the reason.
+    let logits = spread_logits(65_536, 0x90F);
+    let batched = tiled(&logits, 4);
+
+    assert!(
+        !took_the_kernel(&batched, 40, 0.9, 0.0),
+        "a 65536-vocabulary top-k + top-p launch reached the kernel"
+    );
+
+    reset_sampling_dispatch();
+    let tokens = u32_values(&fused_sample(&batched, 1.0, 40, 0.9, 0.0));
+    assert_eq!(tokens.len(), 4);
+    let lines = recorded_dispatch();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("not routed") && l.contains("65536")),
+        "the decline did not name the vocabulary that caused it: {lines:?}"
+    );
+
+    // top-p alone at the same vocabulary still routes, which is the whole point
+    // of splitting the policy by filter rather than by vocabulary alone.
+    assert!(
+        took_the_kernel(&batched, 0, 0.9, 0.0),
+        "top-p alone at vocab 65536 measured a win at every batch and must still route"
+    );
 }
 
 #[test]
