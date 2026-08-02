@@ -523,6 +523,119 @@ pub fn selection_from_positions(
     )
 }
 
+/// Expand a device-resident block selection into a device-resident row list.
+///
+/// This is the block-sparse half of the reduction: a model that selects
+/// fixed-size *blocks* of keys still lands on a `page_size = 1` page table,
+/// because the contiguous allocations these models use have a per-request row
+/// stride (the reserved capacity) that is not a multiple of the block size, so
+/// blocks cannot be pages. Expanding block `j` to its `block_size` token rows
+/// keeps token-exact semantics and costs one `O(selected)` device pass, which
+/// is a fraction of a percent of the attention traffic it replaces.
+///
+/// `blocks` is `[B, budget]` i32 holding block ids drawn from
+/// `[0, tail_start / block_size)`, i.e. the **whole** blocks. The final,
+/// possibly partial block is not selected by score and is appended here
+/// instead, contributing `live_len - tail_start` rows. Two reasons: it keeps
+/// the selected cardinality host-known (the tail width is a function of
+/// `live_len`, not of the scores), and it removes what would otherwise be the
+/// only way for a selected block to name rows past the live window, which in a
+/// pool view are another request's tokens rather than an out-of-bounds error.
+/// Callers whose forced-keep rule already pins the query's own block (the
+/// `local_blocks >= 1` case) lose nothing by this, since that block *is* the
+/// final one at decode.
+///
+/// Nothing is read back: every step below is an MLX graph node, and the result
+/// is a lazy `[B * attn_heads * per_request]` i32 array.
+pub fn selection_from_blocks(
+    layout: &ContiguousCacheLayout,
+    attn_heads: i32,
+    block_size: i32,
+    blocks: &MlxArray,
+    tail_start: i32,
+    live_len: i32,
+) -> Result<SparseSelection, String> {
+    if block_size <= 0 {
+        return Err(format!(
+            "sparse selection: block_size {block_size} must be positive"
+        ));
+    }
+    if live_len <= 0 || live_len > layout.capacity {
+        return Err(format!(
+            "sparse selection: live_len {live_len} outside (0, {}]",
+            layout.capacity
+        ));
+    }
+    if tail_start < 0 || tail_start >= live_len {
+        return Err(format!(
+            "sparse selection: tail_start {tail_start} outside [0, {live_len})"
+        ));
+    }
+    if attn_heads <= 0 || attn_heads > layout.buffer_heads {
+        return Err(format!(
+            "sparse selection: {attn_heads} attention heads outside (0, {}]",
+            layout.buffer_heads
+        ));
+    }
+    let block_shape = ffi::array_shape(blocks);
+    if block_shape.len() != 2 || block_shape[0] != layout.batch || block_shape[1] < 1 {
+        return Err(format!(
+            "sparse selection: expected a [{}, budget] block list, got {block_shape:?}",
+            layout.batch
+        ));
+    }
+    let budget = block_shape[1];
+    let tail = live_len - tail_start;
+    let per_request = (budget as i64) * i64::from(block_size) + i64::from(tail);
+    let per_request = usize::try_from(per_request)
+        .map_err(|_| format!("sparse selection: {per_request} rows per request overflows"))?;
+
+    // Whole blocks: `blocks[b, j] * block_size + [0, block_size)`.
+    let scaled = ffi::multiply(
+        &ffi::astype(blocks, crate::dtype::INT32),
+        &ffi::from_slice_i32(&[block_size], &[1]),
+    );
+    let scaled = ffi::reshape(&scaled, &[layout.batch, budget, 1]);
+    let within = ffi::reshape(&ffi::arange_i32(0, block_size, 1), &[1, 1, block_size]);
+    let body = ffi::add(&scaled, &within);
+    let body = ffi::reshape(&body, &[layout.batch, budget * block_size]);
+
+    // The final, possibly partial block, appended for every sequence.
+    let tail_tokens = ffi::reshape(&ffi::arange_i32(tail_start, live_len, 1), &[1, tail]);
+    let tail_tokens = ffi::broadcast_to(&tail_tokens, &[layout.batch, tail]);
+    let tokens = crate::ops::concatenate(&body, &tail_tokens, 1);
+
+    // Fold the head axis in: request `(b, h)` owns rows starting at
+    // `(b * buffer_heads + h) * capacity`.
+    let seq_base = ffi::multiply(
+        &ffi::arange_i32(0, layout.batch, 1),
+        &ffi::from_slice_i32(
+            &[layout.buffer_heads.saturating_mul(layout.capacity)],
+            &[1],
+        ),
+    );
+    let seq_base = ffi::reshape(&seq_base, &[layout.batch, 1, 1]);
+    let head_base = ffi::multiply(
+        &ffi::arange_i32(0, attn_heads, 1),
+        &ffi::from_slice_i32(&[layout.capacity], &[1]),
+    );
+    let head_base = ffi::reshape(&head_base, &[1, attn_heads, 1]);
+    let base = ffi::add(&seq_base, &head_base);
+
+    let tokens = ffi::reshape(&tokens, &[layout.batch, 1, per_request as i32]);
+    let rows = ffi::add(&base, &tokens);
+    let total = (layout.batch as i64) * i64::from(attn_heads) * (per_request as i64);
+    let total = i32::try_from(total)
+        .map_err(|_| format!("sparse selection: {total} total rows overflows i32"))?;
+    let rows = ffi::reshape(&rows, &[total]);
+
+    SparseSelection::from_device(
+        (layout.batch as usize) * (attn_heads as usize),
+        per_request,
+        rows,
+    )
+}
+
 #[cfg(test)]
 #[path = "sparse_csr_tests.rs"]
 mod sparse_csr_tests;

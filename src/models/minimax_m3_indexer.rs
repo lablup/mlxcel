@@ -244,6 +244,140 @@ impl BlockSparseIndexer {
             self.local_blocks,
         )
     }
+
+    /// Host-known shape of this layer's decode-step selection at `kv_len`.
+    /// See [`decode_selection_shape`].
+    pub(super) fn decode_shape(&self, kv_len: i32) -> Option<DecodeSelectionShape> {
+        decode_selection_shape(kv_len, self.block_size, self.topk_blocks)
+    }
+
+    /// Blocks the decode query selects by score. See
+    /// [`decode_selected_blocks`].
+    pub(super) fn decode_blocks(
+        &self,
+        token_scores: &MlxArray,
+        shape: &DecodeSelectionShape,
+    ) -> UniquePtr<MlxArray> {
+        decode_selected_blocks(
+            token_scores,
+            shape,
+            self.block_size,
+            self.init_blocks,
+            self.local_blocks,
+        )
+    }
+
+    /// Tokens per key block.
+    pub(super) fn block_size(&self) -> i32 {
+        self.block_size
+    }
+}
+
+/// The part of a decode-step block selection that is known without reading a
+/// single device element (issue #904).
+///
+/// A top-`k` selection picks `k` of something on every step by construction, so
+/// the selected *count* is a function of `kv_len` alone even though the selected
+/// *content* is an `argpartition` output. That split is what lets the sparse
+/// page table be built with no device synchronization on the decode path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DecodeSelectionShape {
+    /// Key blocks the live window spans, the last of which may be partial.
+    pub num_blocks: i32,
+    /// Whole blocks chosen by score, drawn from `[0, num_blocks - 1)`.
+    pub budget: i32,
+    /// First token of the final block, i.e. `(num_blocks - 1) * block_size`.
+    pub tail_start: i32,
+}
+
+/// The selection shape at `kv_len`, or `None` when the layer should stay on the
+/// mask path.
+///
+/// `None` covers three cases. The budget covering every block is the
+/// degeneration invariant the mask path already short-circuits (nothing is
+/// dropped, so sparse attention *is* dense attention and a page table would be
+/// pure overhead). A `topk_blocks` of one leaves no whole block to choose once
+/// the final block is accounted for. A non-positive block size is a config the
+/// indexer rejects at load, guarded here so this function is total.
+///
+/// The final block is deliberately excluded from the scored set and appended
+/// unconditionally. It is the query's own block at decode, so the
+/// `local_blocks >= 1` force-keep already pins it and excluding it changes no
+/// selection; what it buys is that the tail width is a function of `kv_len`
+/// rather than of the scores, which is what keeps the cardinality host-known,
+/// and that no selected block can name a row past the live window.
+pub(super) fn decode_selection_shape(
+    kv_len: i32,
+    block_size: i32,
+    topk_blocks: i32,
+) -> Option<DecodeSelectionShape> {
+    if block_size <= 0 || topk_blocks < 2 || kv_len <= 0 {
+        return None;
+    }
+    let num_blocks = (kv_len + block_size - 1) / block_size;
+    if topk_blocks >= num_blocks {
+        return None;
+    }
+    Some(DecodeSelectionShape {
+        num_blocks,
+        budget: topk_blocks - 1,
+        tail_start: (num_blocks - 1) * block_size,
+    })
+}
+
+/// Blocks the single decode query selects, `[b, budget]` i32.
+///
+/// Scores the `num_blocks - 1` whole blocks exactly as
+/// [`build_block_drop_mask`] does (max token score inside the block, forced
+/// blocks lifted to `+inf`, top-`k` by `argpartition` on the negation) and
+/// returns the chosen ids. The union of this set with the final block is the
+/// same set the mask path keeps; `minimax_m3_tests` pins that equality directly
+/// rather than trusting the two code paths to stay aligned.
+///
+/// The `local_blocks` predicate specializes cleanly at decode. The query's own
+/// block is `num_blocks - 1` (`offset / block_size` and `num_blocks - 1` agree
+/// for every `kv_len = offset + 1`), so `j <= query_block` holds for every
+/// scored block and `j > query_block - local_blocks` becomes
+/// `j >= num_blocks - local_blocks`.
+pub(super) fn decode_selected_blocks(
+    token_scores: &MlxArray,
+    shape: &DecodeSelectionShape,
+    block_size: i32,
+    init_blocks: i32,
+    local_blocks: i32,
+) -> UniquePtr<MlxArray> {
+    let b = mlxcel_core::array_shape(token_scores)[0];
+    let scored = shape.num_blocks - 1;
+
+    // Max token score per whole block: [b, 1, 1, scored].
+    let scores = mlxcel_core::astype(token_scores, mlxcel_core::dtype::FLOAT32);
+    let scores = slice_axis(&scores, -1, 0, shape.tail_start);
+    let blocked = mlxcel_core::reshape(&scores, &[b, 1, 1, scored, block_size]);
+    let block_scores = mlxcel_core::max_axis(&blocked, -1, false);
+
+    // Force-keep: the initial blocks and the local window below the query's
+    // own block. block_idx: [1, 1, 1, scored].
+    let block_idx = mlxcel_core::astype(
+        &mlxcel_core::reshape(&mlxcel_core::arange_i32(0, scored, 1), &[1, 1, 1, scored]),
+        mlxcel_core::dtype::FLOAT32,
+    );
+    let init_scalar = mlxcel_core::full_f32(&[1], init_blocks as f32, mlxcel_core::dtype::FLOAT32);
+    let init_keep = mlxcel_core::less(&block_idx, &init_scalar);
+    let local_floor = mlxcel_core::full_f32(
+        &[1],
+        (shape.num_blocks - local_blocks) as f32,
+        mlxcel_core::dtype::FLOAT32,
+    );
+    let local_keep = mlxcel_core::greater_equal(&block_idx, &local_floor);
+    let forced = mlxcel_core::logical_or(&init_keep, &local_keep);
+
+    let pos_inf = mlxcel_core::full_f32(&[1], f32::INFINITY, mlxcel_core::dtype::FLOAT32);
+    let block_scores = mlxcel_core::where_cond(&forced, &pos_inf, &block_scores);
+
+    let neg = mlxcel_core::negative(&block_scores);
+    let part = mlxcel_core::argpartition(&neg, shape.budget - 1, -1);
+    let topk_idx = slice_axis(&part, -1, 0, shape.budget);
+    mlxcel_core::reshape(&topk_idx, &[b, shape.budget])
 }
 
 /// Assert that a weight's output dimension (first axis) matches `expected`.

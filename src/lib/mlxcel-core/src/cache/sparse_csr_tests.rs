@@ -166,6 +166,57 @@ fn a_position_past_the_live_window_is_rejected() {
 }
 
 #[test]
+fn block_expansion_names_exactly_the_selected_blocks_plus_the_tail() {
+    // 1 sequence, 2 heads, capacity 64, live window 50, blocks of 16.
+    // Whole blocks are 0..3 (48 tokens); the tail is [48, 50).
+    let l = layout(1, 2, 64);
+    let blocks = crate::ffi::from_slice_i32(&[2, 0], &[1, 2]);
+    let sel = selection_from_blocks(&l, 2, 16, &blocks, 48, 50).unwrap();
+    assert_eq!(sel.requests, 2);
+    assert_eq!(sel.per_request, 2 * 16 + 2);
+
+    let mut want: Vec<i32> = (32..48).collect(); // block 2
+    want.extend(0..16); // block 0
+    want.extend([48, 49]); // the partial final block
+
+    let rows = sel.materialize();
+    for h in 0..2usize {
+        let decoded: Vec<i32> = rows[h].iter().map(|&r| r - l.base(0, h as i32)).collect();
+        assert_eq!(decoded, want, "head {h}");
+    }
+}
+
+#[test]
+fn block_expansion_gives_every_sequence_its_own_row_space() {
+    let l = layout(2, 2, 32);
+    // Sequence 0 picks block 1, sequence 1 picks block 0.
+    let blocks = crate::ffi::from_slice_i32(&[1, 0], &[2, 1]);
+    let sel = selection_from_blocks(&l, 2, 8, &blocks, 16, 20).unwrap();
+    assert_eq!(sel.per_request, 8 + 4);
+    let rows = sel.materialize();
+    for b in 0..2usize {
+        for h in 0..2usize {
+            let r = b * 2 + h;
+            let decoded: Vec<i32> = rows[r].iter().map(|&x| x - l.base(b as i32, h as i32)).collect();
+            let block = if b == 0 { 1 } else { 0 };
+            let mut want: Vec<i32> = (block * 8..block * 8 + 8).collect();
+            want.extend(16..20);
+            assert_eq!(decoded, want, "sequence {b} head {h}");
+        }
+    }
+}
+
+#[test]
+fn block_expansion_rejects_a_tail_outside_the_live_window() {
+    let l = layout(1, 1, 64);
+    let blocks = crate::ffi::from_slice_i32(&[0], &[1, 1]);
+    assert!(selection_from_blocks(&l, 1, 16, &blocks, 50, 50).is_err());
+    assert!(selection_from_blocks(&l, 1, 16, &blocks, 48, 65).is_err());
+    assert!(selection_from_blocks(&l, 1, 0, &blocks, 48, 50).is_err());
+    assert!(selection_from_blocks(&l, 2, 16, &blocks, 48, 50).is_err());
+}
+
+#[test]
 fn an_empty_or_mis_sized_selection_is_rejected() {
     assert!(SparseSelection::from_host(0, 4, vec![]).is_err());
     assert!(SparseSelection::from_host(2, 0, vec![]).is_err());
