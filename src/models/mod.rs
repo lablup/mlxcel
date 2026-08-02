@@ -26,6 +26,13 @@ mod recurrent_snapshot;
 mod sanitize;
 
 // Shared modules
+// `config` holds shared serde defaults and the common `QuantizationArgs`. It
+// was never declared here, so the file was orphaned: not compiled, not linted,
+// not tested. That is why its `get_mode` could hand out an unvalidated
+// quantization mode with nothing catching it (issue #973). Declaring it makes
+// the bound it now carries real rather than notional, so the next family that
+// reaches for the helper cannot inherit the hole.
+pub mod config;
 pub(crate) mod conv_decode;
 pub mod gated_delta;
 pub mod switch_layers;

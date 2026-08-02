@@ -3738,7 +3738,14 @@ pub(crate) fn slice_layer_input(
 /// Quantization schemes mlxcel can actually dequantize: MLX-native affine plus
 /// the block-float families. Anything else uses a packing mlxcel does not
 /// implement.
-const SUPPORTED_QUANT_SCHEMES: &[&str] = &["affine", "mxfp4", "nvfp4", "mxfp8"];
+///
+/// Borrowed from the core rather than re-listed here (issue #973). This used to
+/// be a private copy of the same four values, which is one list too many: the
+/// core one is what every loader enforces, so a private copy could only ever
+/// drift into accepting a mode the loaders reject or the reverse. `quant_method`
+/// is checked against it too, since a `quant_method` naming an MLX-native scheme
+/// is the same statement as a `mode` naming it.
+const SUPPORTED_QUANT_SCHEMES: [&str; 4] = mlxcel_core::layers::SUPPORTED_QUANTIZATION_MODES;
 
 /// Longest text-only prefill that still builds the dense `[l, l + offset]`
 /// f32 prefill masks. Above this, the mask pair is left `None` and `attend`
@@ -3765,6 +3772,12 @@ const DENSE_PREFILL_MASK_MAX_TOKENS: i32 = 4096;
 /// Inspects the top-level and `text_config`-nested `quantization` /
 /// `quantization_config` objects. Pure over the parsed config JSON so the
 /// policy is unit-testable without a model on disk.
+///
+/// The `mode` half of this is no longer gemma4-shaped and delegates to
+/// [`mlxcel_core::layers::validate_quantization_mode`] (issue #973), which every
+/// quantizing family now enforces at load. What stays here is the
+/// `quant_method` policy: the external-format rejection this function was added
+/// for and the ModelOpt NVFP4 exception that the gemma4 sanitize layer repacks.
 pub(crate) fn validate_quantization_scheme(config: &serde_json::Value) -> Result<(), String> {
     fn is_modelopt_nvfp4(obj: &serde_json::Value) -> bool {
         let method = obj
@@ -3805,25 +3818,44 @@ pub(crate) fn validate_quantization_scheme(config: &serde_json::Value) -> Result
             })
     }
 
+    fn unsupported(raw: &str, location: &str, key: &str) -> String {
+        format!(
+            "Unsupported quantization scheme '{raw}' declared at {location}.{key}. \
+             mlxcel supports MLX-native affine and block-float (mxfp4 / nvfp4 / mxfp8) \
+             quantization only; external formats such as OptiQ / AWQ / GPTQ use a \
+             different packing that would dequantize to degenerate output. Re-export the \
+             model to an MLX affine quantization (mlx_lm.convert / mlx-vlm) before serving."
+        )
+    }
+
     fn check_obj(obj: &serde_json::Value, location: &str) -> Result<(), String> {
-        for key in ["quant_method", "mode"] {
-            let Some(raw) = obj.get(key).and_then(|v| v.as_str()) else {
-                continue;
-            };
+        // `mode` delegates to the core allowlist so this guard and the loaders
+        // cannot disagree about the same config (issue #973). The comparison
+        // there is exact, which is deliberately stricter than the normalized one
+        // still applied to `quant_method` below: `mode` is a string MLX itself
+        // parses byte-for-byte, so accepting `" Affine"` here would only mean
+        // storing and forwarding a spelling the kernel then throws on. An empty
+        // `mode` is rejected on the same grounds; "not declared" is the absent
+        // key, which every config reader resolves to `"affine"` on its own.
+        if let Some(raw) = obj.get("mode").and_then(|v| v.as_str())
+            && mlxcel_core::layers::validate_quantization_mode(raw).is_err()
+        {
+            return Err(unsupported(raw, location, "mode"));
+        }
+
+        // `quant_method` is a gemma4-shaped policy rather than a mode: it is the
+        // #467 external-format guard (OptiQ / AWQ / GPTQ) plus the ModelOpt
+        // NVFP4 exception, and it never reaches an MLX kernel, so it keeps the
+        // permissive normalization it has always had. The accepted set is still
+        // the core one, so the two cannot name different schemes.
+        if let Some(raw) = obj.get("quant_method").and_then(|v| v.as_str()) {
             let norm = raw.trim().to_ascii_lowercase();
-            if key == "quant_method" && norm == "modelopt" && is_modelopt_nvfp4(obj) {
-                continue;
+            let accepted = norm.is_empty()
+                || SUPPORTED_QUANT_SCHEMES.contains(&norm.as_str())
+                || (norm == "modelopt" && is_modelopt_nvfp4(obj));
+            if !accepted {
+                return Err(unsupported(raw, location, "quant_method"));
             }
-            if norm.is_empty() || SUPPORTED_QUANT_SCHEMES.contains(&norm.as_str()) {
-                continue;
-            }
-            return Err(format!(
-                "Unsupported quantization scheme '{raw}' declared at {location}.{key}. \
-                 mlxcel supports MLX-native affine and block-float (mxfp4 / nvfp4 / mxfp8) \
-                 quantization only; external formats such as OptiQ / AWQ / GPTQ use a \
-                 different packing that would dequantize to degenerate output. Re-export the \
-                 model to an MLX affine quantization (mlx_lm.convert / mlx-vlm) before serving."
-            ));
         }
         Ok(())
     }
@@ -5940,6 +5972,46 @@ mod quant_scheme_tests {
     fn rejects_unknown_mode() {
         let cfg = json!({ "quantization": { "group_size": 64, "bits": 4, "mode": "optiq" } });
         assert!(validate_quantization_scheme(&cfg).is_err());
+    }
+
+    /// The `mode` list is no longer owned here: it delegates to
+    /// `mlxcel_core::layers::validate_quantization_mode`, so this guard and the
+    /// loaders cannot disagree about the same config (issue #973). Delegation
+    /// also makes the comparison exact, which is stricter than the normalized
+    /// one this used to apply: a mode is a string MLX parses byte-for-byte, so
+    /// accepting a trimmed or case-folded spelling here would only mean storing
+    /// and forwarding a value the kernel then throws on.
+    #[test]
+    fn mode_check_delegates_to_the_core_allowlist() {
+        for mode in mlxcel_core::layers::SUPPORTED_QUANTIZATION_MODES {
+            let cfg = json!({ "quantization": { "group_size": 64, "bits": 4, "mode": mode } });
+            assert!(
+                validate_quantization_scheme(&cfg).is_ok(),
+                "MLX accepts {mode}, so this guard must too"
+            );
+        }
+
+        // Exact comparison: whitespace, casing and an empty string are all
+        // values MLX would throw on.
+        for mode in ["Affine", "AFFINE", " mxfp4", "mxfp4 ", "", "  "] {
+            let cfg = json!({ "quantization": { "group_size": 64, "bits": 4, "mode": mode } });
+            let err = validate_quantization_scheme(&cfg)
+                .expect_err("a spelling MLX cannot parse must be rejected");
+            assert!(
+                err.contains("Unsupported quantization scheme"),
+                "actionable message: {err}"
+            );
+        }
+
+        // `quant_method` is a separate, gemma4-shaped policy (issue #467) and
+        // keeps its permissive normalization: it never reaches an MLX kernel.
+        for method in ["AFFINE", " affine ", ""] {
+            let cfg = json!({ "quantization": { "quant_method": method } });
+            assert!(
+                validate_quantization_scheme(&cfg).is_ok(),
+                "quant_method {method:?} names an MLX-native scheme and must stay accepted"
+            );
+        }
     }
 
     #[test]

@@ -222,6 +222,19 @@ pub(crate) const HOSTILE_QUANT_PARAMS: [(i32, i32, &str); 5] = [
     (-64, 4, "group_size"),
 ];
 
+/// The `mode` strings MLX's `string_to_quantization_mode` refuses to parse.
+///
+/// `optiq` / `gptq` / `int4` are the external formats a mis-exported checkpoint
+/// actually tags itself with. The rest are the near misses: an empty string, a
+/// whitespace-only string, wrong casing, and stray leading whitespace. All four
+/// are rejected because MLX compares exactly and mlxcel deliberately does not
+/// normalize before handing the string over (issue #973).
+/// Every family's guard test walks this list so they cannot drift apart on
+/// which strings count as hostile.
+#[cfg(test)]
+pub(crate) const HOSTILE_QUANT_MODES: [&str; 7] =
+    ["optiq", "gptq", "int4", "", "  ", "Affine", " mxfp4"];
+
 /// Per-expert 3D linear layer (falls back to gather_mm for non-quantized models)
 /// Supports affine, mxfp4, nvfp4, and mxfp8 quantization modes.
 pub enum SwitchLinear {
@@ -383,7 +396,9 @@ impl SwitchLinear {
     /// `group_size` of 0 or a `bits` outside `1..=32` aborts the process at the
     /// first routed forward pass exactly as it would for a dense projection.
     /// Guarding only the reconciler would have left every quantized MoE
-    /// checkpoint exposed.
+    /// checkpoint exposed. The declared `mode` is bounded here for the same
+    /// reason (issue #973): `SwitchLinear::from_weights` hardcodes `"affine"`,
+    /// but `from_weights_with_mode` is `pub` and takes an unbounded `&str`.
     fn from_stacked_parts(
         prefix: &str,
         weight: UniquePtr<MlxArray>,
@@ -400,6 +415,14 @@ impl SwitchLinear {
                 // path, so a declared 0 would otherwise zero the denominator
                 // below, skip inference entirely, and be handed to the kernel.
                 mlxcel_core::layers::validate_quantization_params(group_size, bits)
+                    .map_err(|e| format!("{prefix}: {e}"))?;
+
+                // Same for the declared mode, which is stored verbatim below and
+                // handed to `gather_qmm` on every routed forward pass (issue
+                // #973). The bias-presence half of this is MLX's own
+                // `validate_mode_with_type` precondition, so it can only refuse
+                // a load that was already going to abort.
+                mlxcel_core::layers::validate_quantization_biases(mode, biases.is_some())
                     .map_err(|e| format!("{prefix}: {e}"))?;
 
                 // Infer the actual bit width from the packed weight and scales
@@ -1387,6 +1410,72 @@ mod tests {
         );
         SwitchLinear::from_weights(&regular, &stacked_prefix, 0, 0)
             .expect("a non-quantized expert plane must not be gated on quantization params");
+    }
+
+    #[test]
+    fn switch_linear_rejects_a_mode_that_would_abort_gather_qmm() {
+        // `SwitchLinear::from_weights` hardcodes `"affine"`, but
+        // `from_weights_with_mode` is `pub` and takes an unbounded `&str`, and
+        // the string it is handed is stored verbatim and passed to `gather_qmm`
+        // on every routed forward pass (issue #973). A regression here takes the
+        // whole test binary down with SIGABRT rather than failing cleanly, which
+        // is why the assertions stop at the load `Result`.
+        let group = 64i32;
+        let in_dim = 64i32;
+        let packed_in = in_dim / 8;
+        let num_groups = in_dim / group;
+        let prefix = "model.layers.0.mlp.switch_mlp.gate_proj";
+        let stacked = stacked_quantized_experts(prefix, 3, 4, packed_in, num_groups);
+
+        // Positive control first, so a guard that rejects everything quantized
+        // cannot pass this test.
+        SwitchLinear::from_weights_with_mode(&stacked, prefix, group, 4, "affine")
+            .expect("an honest affine plane must still load");
+
+        for mode in HOSTILE_QUANT_MODES {
+            let err = SwitchLinear::from_weights_with_mode(&stacked, prefix, group, 4, mode)
+                .err()
+                .unwrap_or_else(|| panic!("stacked experts must reject mode {mode:?}"));
+            assert!(
+                err.contains("mode") && err.contains("gate_proj"),
+                "the message must name the field and the prefix: {err}"
+            );
+        }
+
+        // A parseable mode that contradicts the plane aborts in MLX just as
+        // hard: these experts carry zero points, so block-float is a lie.
+        for mode in ["mxfp4", "mxfp8", "nvfp4"] {
+            let err = SwitchLinear::from_weights_with_mode(&stacked, prefix, group, 4, mode)
+                .err()
+                .unwrap_or_else(|| panic!("block-float over a .biases plane must be rejected"));
+            assert!(err.contains("biases"), "unhelpful error: {err}");
+        }
+
+        // And the mirror: an affine declaration over a plane with no zero points
+        // is the case that reaches `Biases must be provided for affine
+        // quantization`.
+        let mut no_biases = WeightMap::new();
+        for (leaf, last, value) in [("weight", packed_in, 0.0), ("scales", num_groups, 1.0)] {
+            no_biases.insert(
+                format!("{prefix}.{leaf}"),
+                mlxcel_core::from_slice_f32(&vec![value; (3 * 4 * last) as usize], &[3, 4, last]),
+            );
+        }
+        SwitchLinear::from_weights_with_mode(&no_biases, prefix, group, 4, "mxfp4")
+            .expect("an honest block-float plane must still load");
+        let err = SwitchLinear::from_weights_with_mode(&no_biases, prefix, group, 4, "affine")
+            .err()
+            .unwrap_or_else(|| panic!("affine over a plane with no zero points must be rejected"));
+        assert!(err.contains("biases"), "unhelpful error: {err}");
+
+        // A non-quantized expert plane carries no mode at all.
+        let mut regular = WeightMap::new();
+        regular.insert(
+            format!("{prefix}.weight"),
+            mlxcel_core::from_slice_f32(&vec![0.0; 3 * 4 * 8], &[3, 4, 8]),
+        );
+        SwitchLinear::from_weights_with_mode(&regular, prefix, group, 4, "optiq")
+            .expect("a non-quantized expert plane must not be gated on the declared mode");
     }
 
     #[test]

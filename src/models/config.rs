@@ -264,9 +264,26 @@ impl QuantizationArgs {
         self.bits.unwrap_or(4)
     }
 
-    /// Get quantization mode, defaulting to "affine"
-    pub fn get_mode(&self) -> &str {
-        self.mode.as_deref().unwrap_or("affine")
+    /// Get the declared quantization mode, defaulting to `"affine"` when the
+    /// key is absent.
+    ///
+    /// Fallible on purpose (issue #973). This helper has no production callers
+    /// yet and is the obvious thing for the next family that needs a declared
+    /// mode to reach for; handing back an unchecked `&str` would let it inherit
+    /// the hole silently, because the returned string goes on to
+    /// `quantized_matmul` / `gather_qmm` / `dequantize`, which cross the cxx
+    /// bridge as `UniquePtr<MlxArray>` rather than `Result`, so a mode MLX
+    /// cannot parse is an uncatchable abort at the first forward pass rather
+    /// than a load error. Returning `Result` makes the check impossible to skip
+    /// at the point the value is read.
+    ///
+    /// The `None` case is the absent key and resolves to `"affine"`; a present
+    /// but empty or misspelled string is rejected. See
+    /// [`mlxcel_core::layers::validate_quantization_mode`].
+    pub fn get_mode(&self) -> Result<&str, String> {
+        let mode = self.mode.as_deref().unwrap_or("affine");
+        mlxcel_core::layers::validate_quantization_mode(mode)?;
+        Ok(mode)
     }
 }
 
@@ -308,5 +325,37 @@ mod tests {
         assert!(!args.is_quantized());
         assert_eq!(args.get_group_size(), 64);
         assert_eq!(args.get_bits(), 4);
+    }
+
+    /// `get_mode` has no production callers and is the obvious thing for the
+    /// next family that needs a declared mode to reach for, so the bound belongs
+    /// on the signature rather than on each future caller (issue #973).
+    #[test]
+    fn get_mode_bounds_the_declared_string() {
+        // An absent key is "not declared" and resolves to affine.
+        assert_eq!(
+            QuantizationArgs::default().get_mode().as_deref(),
+            Ok("affine")
+        );
+
+        for mode in mlxcel_core::layers::SUPPORTED_QUANTIZATION_MODES {
+            let args = QuantizationArgs {
+                mode: Some(mode.to_string()),
+                ..Default::default()
+            };
+            assert_eq!(args.get_mode().as_deref(), Ok(mode));
+        }
+
+        // A present but unparseable string is not "not declared".
+        for mode in ["optiq", "gptq", "", "  ", "Affine"] {
+            let args = QuantizationArgs {
+                mode: Some(mode.to_string()),
+                ..Default::default()
+            };
+            let err = args
+                .get_mode()
+                .expect_err("a mode MLX cannot parse must not be handed out");
+            assert!(err.contains("mode"), "unhelpful error: {err}");
+        }
     }
 }
