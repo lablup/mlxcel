@@ -202,8 +202,9 @@ impl SpeculativeAcceptanceStats {
             let n = self.positions_tested as f64;
             line.push_str(&format!(
                 "\n[Speculative acceptance diagnostic] closed_form_sum_min={:.4} \
-                 closed_form_sum_prod={:.4} (measured per-position acceptance must sit at \
-                 sum_min, and sum_min >= sum_prod always)",
+                 closed_form_sum_prod={:.4} (the measured per-position acceptance sits at \
+                 sum_prod under the default sampler-match rule and at sum_min under the \
+                 opt-in acceptance-optimal rule; sum_min >= sum_prod always)",
                 self.closed_form_sum_min / n,
                 self.closed_form_sum_prod / n,
             ));
