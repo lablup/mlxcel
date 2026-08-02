@@ -75,19 +75,19 @@ struct Case {
 impl Case {
     /// The default shape: one sequence, four KV heads, two query heads each.
     ///
-    /// `4 requests x 512 selected` is 2048 selected rows, which is exactly the
-    /// shipped batched floor (`4 * MIN_BATCHED_KV_TOKENS_PER_REQUEST`). Sized
-    /// deliberately so the test exercises the dispatched path under the real
-    /// policy instead of an environment override, since the floor is cached in
-    /// a process-wide `OnceLock` that a test cannot safely move.
+    /// Sized to clear both shipped gates under the real policy, since both are
+    /// cached in process-wide `OnceLock`s that a test cannot safely move.
+    /// `4 requests x 512 selected` is 2048 selected rows, exactly the batched
+    /// token floor (`4 * MIN_BATCHED_KV_TOKENS_PER_REQUEST`), and a 4096-token
+    /// live window over a 512-row selection is exactly `MIN_SPARSITY_RATIO`.
     fn default_case() -> Self {
         Self {
             batch: 1,
             kv_heads: 4,
             n_rep: 2,
             head_dim: 64,
-            capacity: 1024,
-            live_len: 1024,
+            capacity: 4096,
+            live_len: 4096,
             k_buffer_heads: 4,
             selected_per_request: 512,
         }
@@ -222,15 +222,15 @@ impl Fixture {
         let c = &self.case;
         let (hq, d) = (c.q_heads() as usize, c.head_dim as usize);
         let mut out = vec![0.0f32; (c.batch as usize) * hq * d];
-        for b in 0..c.batch as usize {
-            for h in 0..c.kv_heads as usize {
+        for (b, heads) in positions.iter().enumerate() {
+            for (h, selected) in heads.iter().enumerate() {
                 let kb = c.k_layout().base(b as i32, h as i32) as usize;
                 let vb = c.v_layout().base(b as i32, h as i32) as usize;
                 for g in 0..c.n_rep as usize {
                     let hq_idx = h * c.n_rep as usize + g;
                     let q0 = (b * hq + hq_idx) * d;
-                    let mut scores: Vec<f64> = Vec::with_capacity(positions[b][h].len());
-                    for &t in &positions[b][h] {
+                    let mut scores: Vec<f64> = Vec::with_capacity(selected.len());
+                    for &t in selected {
                         let k0 = (kb + t as usize) * d;
                         let mut dot = 0.0f64;
                         for i in 0..d {
@@ -242,7 +242,7 @@ impl Fixture {
                     let exps: Vec<f64> = scores.iter().map(|s| (s - m).exp()).collect();
                     let denom: f64 = exps.iter().sum();
                     let o0 = (b * hq + hq_idx) * d;
-                    for (p, &t) in positions[b][h].iter().enumerate() {
+                    for (p, &t) in selected.iter().enumerate() {
                         let v0 = (vb + t as usize) * d;
                         let w = exps[p] / denom;
                         for i in 0..d {
@@ -266,12 +266,18 @@ impl Fixture {
             .collect()
     }
 
-    fn inputs<'a>(&self, q: &'a MlxArray, k: &'a MlxArray, v: &'a MlxArray) -> SparseDecodeInputs<'a> {
+    fn inputs<'a>(
+        &self,
+        q: &'a MlxArray,
+        k: &'a MlxArray,
+        v: &'a MlxArray,
+    ) -> SparseDecodeInputs<'a> {
         SparseDecodeInputs {
             q,
             k_alloc: k,
             v_alloc: v,
             kv_heads: self.case.kv_heads,
+            live_len: self.case.live_len,
             scale: self.case.scale(),
         }
     }
@@ -343,7 +349,10 @@ fn the_fused_output_matches_a_dense_reference_restricted_to_the_selection() {
     assert!(outcome.is_fused(), "{}", outcome.describe());
     let want = fx.reference(&fx.positions);
     let err = max_rel_error(&got, &want);
-    assert!(err < 2e-3, "max relative error {err} against the masked-dense reference");
+    assert!(
+        err < 2e-3,
+        "max relative error {err} against the masked-dense reference"
+    );
 }
 
 #[test]
@@ -435,6 +444,8 @@ fn the_plan_splits_and_merges_without_changing_the_answer() {
     // merge pass runs. The answer must not move.
     let mut case = Case::default_case();
     case.selected_per_request = 1024;
+    case.capacity = 8192;
+    case.live_len = 8192;
     let fx = Fixture::new(case, 0x5eed_0006);
     let (got, outcome) = run_fused(&fx, dtype::FLOAT32);
     assert!(outcome.is_fused(), "{}", outcome.describe());
@@ -527,6 +538,11 @@ fn every_outcome_kind_has_a_distinct_index_and_a_message() {
         SparseDecodeOutcome::SelectionRejected("x".to_string()),
         SparseDecodeOutcome::PlanRejected("x".to_string()),
         SparseDecodeOutcome::NotServable("x"),
+        SparseDecodeOutcome::BelowSparsity {
+            live_len: 8192,
+            selected_per_request: 2048,
+            required_ratio: 8,
+        },
     ];
     assert_eq!(all.len(), SPARSE_DECODE_OUTCOME_KINDS);
     let mut seen = [false; SPARSE_DECODE_OUTCOME_KINDS];
@@ -557,6 +573,60 @@ fn the_floor_message_carries_both_numbers() {
 fn the_kill_switch_names_the_variable_that_set_it() {
     let text = SparseDecodeOutcome::KillSwitch.describe();
     assert!(text.contains(SPARSE_PAGED_ENV), "{text}");
+}
+
+#[test]
+fn a_selection_covering_too_much_of_the_window_is_declined_by_the_sparsity_gate() {
+    // Passes the token floor (2048 selected rows) but is only 4x sparsity,
+    // which the harness measured at 0.77x. Skipping has to be worth the kernel
+    // it is skipped with, and a token floor alone never asks that.
+    let mut case = Case::default_case();
+    case.live_len = 2048;
+    let fx = Fixture::new(case, 0x5eed_000a);
+    let q = fx.q_array();
+    let k = fx.k_alloc(dtype::FLOAT32);
+    let v = fx.v_alloc(dtype::FLOAT32);
+    let (out, outcome) = run_sparse_decode(&fx.inputs(&q, &k, &v), &fx.selection());
+    assert!(out.is_none());
+    match outcome {
+        SparseDecodeOutcome::BelowSparsity {
+            live_len,
+            selected_per_request,
+            required_ratio,
+        } => {
+            assert_eq!(live_len, 2048);
+            assert_eq!(selected_per_request, 512);
+            assert_eq!(required_ratio, MIN_SPARSITY_RATIO);
+        }
+        other => panic!("expected BelowSparsity, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_sparsity_gate_is_a_pure_ratio_test() {
+    // Exactly on the ratio clears it; one token short does not.
+    assert!(clears_sparsity_gate(4096, 512, 8));
+    assert!(!clears_sparsity_gate(4095, 512, 8));
+    assert!(clears_sparsity_gate(8192, 512, 8));
+    // A zero ratio disables the gate, which is how a benchmark measures the
+    // regime the policy declines.
+    assert!(clears_sparsity_gate(1, 512, 0));
+    // A selection of nothing never clears it, rather than dividing by zero.
+    assert!(!clears_sparsity_gate(4096, 0, 8));
+    // An absurd selection cannot wrap the product down into passing.
+    assert!(!clears_sparsity_gate(usize::MAX, usize::MAX, 8));
+}
+
+#[test]
+fn the_sparsity_message_names_the_ratio_it_fell_short_of() {
+    let text = SparseDecodeOutcome::BelowSparsity {
+        live_len: 8192,
+        selected_per_request: 2048,
+        required_ratio: 8,
+    }
+    .describe();
+    assert!(text.contains("4.0x"), "{text}");
+    assert!(text.contains("8x"), "{text}");
 }
 
 #[test]

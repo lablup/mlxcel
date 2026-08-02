@@ -134,10 +134,9 @@ fn a_selection_round_trips_through_the_encoding_unchanged() {
     // Decoding a row back to (b, h, t) must return the position that produced it.
     let rows = sel.materialize();
     assert_eq!(rows.len(), 4);
-    for b in 0..2usize {
-        for h in 0..2usize {
+    for (b, heads) in positions.iter().enumerate() {
+        for (h, want) in heads.iter().enumerate() {
             let r = b * 2 + h;
-            let want = &positions[b][h];
             let got: Vec<i32> = rows[r]
                 .iter()
                 .map(|&row| row - l.base(b as i32, h as i32))
@@ -179,9 +178,8 @@ fn block_expansion_names_exactly_the_selected_blocks_plus_the_tail() {
     want.extend(0..16); // block 0
     want.extend([48, 49]); // the partial final block
 
-    let rows = sel.materialize();
-    for h in 0..2usize {
-        let decoded: Vec<i32> = rows[h].iter().map(|&r| r - l.base(0, h as i32)).collect();
+    for (h, row) in sel.materialize().iter().enumerate() {
+        let decoded: Vec<i32> = row.iter().map(|&r| r - l.base(0, h as i32)).collect();
         assert_eq!(decoded, want, "head {h}");
     }
 }
@@ -197,7 +195,10 @@ fn block_expansion_gives_every_sequence_its_own_row_space() {
     for b in 0..2usize {
         for h in 0..2usize {
             let r = b * 2 + h;
-            let decoded: Vec<i32> = rows[r].iter().map(|&x| x - l.base(b as i32, h as i32)).collect();
+            let decoded: Vec<i32> = rows[r]
+                .iter()
+                .map(|&x| x - l.base(b as i32, h as i32))
+                .collect();
             let block = if b == 0 { 1 } else { 0 };
             let mut want: Vec<i32> = (block * 8..block * 8 + 8).collect();
             want.extend(16..20);

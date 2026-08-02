@@ -43,22 +43,71 @@
 //!   that justified the dispatch.
 //! - **The request count is multiplied by the KV heads.** Folding the head axis
 //!   into the request axis turns a single sequence into `Hkv` CSR requests, so a
-//!   batch-1 sparse decode faces the *batched* floor, not the single-request
-//!   one. That is not a loophole: the losing measurement was caused by a plan
-//!   that degenerates to a couple of pages per chunk and pays a merge for
-//!   nothing, and `Hkv` requests of `S` pages each is the same batched shape
-//!   that measured 1.41x and 1.47x, not the batch-1 shape that measured 0.91x.
+//!   batch-1 sparse decode with `Hkv > 1` faces the *batched* floor, not the
+//!   single-request one. That is not a loophole: the losing measurement was
+//!   caused by a plan that degenerates to a couple of pages per chunk and pays a
+//!   merge for nothing, and `Hkv` requests of `S` pages each is the same batched
+//!   shape that measured 1.41x and 1.47x, not the batch-1 shape that measured
+//!   0.91x.
 //!
 //! The net effect is that a single-sequence sparse decode needs `Hkv * 512`
-//! selected rows rather than 4096. For the block-sparse configurations this
-//! issue targets (`Hkv` of 8, selections of a few thousand rows) that is cleared
-//! comfortably; for a small selection it is not, and the launch declines with
+//! selected rows rather than 4096. For MiniMax-M3's shipped configuration
+//! (`Hkv` of 4, a ~2048-row selection) that is cleared with margin; for a small
+//! selection it is not, and the launch declines with
 //! [`SparseDecodeOutcome::BelowFloor`] carrying both numbers.
 //!
-//! **This reasoning is derived, not measured.** #899's table was taken on dense
-//! page lists; nothing here has been benchmarked on a sparse one. The floor is
-//! the same code path and the same environment overrides, so a re-measurement
-//! moves both together.
+//! **The `Hkv == 1` case does not get that relief and is worth stating
+//! explicitly**, because it is exactly MLA. An absorbed-MLA decode has one KV
+//! head, so head folding yields one CSR request per sequence and a batch-1
+//! launch faces the 4096-row single-request floor. DeepSeek-V3.2's default
+//! `index_topk` is 2048, so such a launch would be declined here even once the
+//! kernel can express MLA's positional term (see `docs/sparse-paged-decode.md`
+//! for why it cannot yet). The floor has to be re-derived for `Hkv == 1` sparse
+//! launches before MLA can be expected to dispatch at all.
+//!
+//! **That part of the reasoning is derived, not measured.** #899's table was
+//! taken on dense page lists. The floor is the same code path and the same
+//! environment overrides, so a re-measurement moves both together.
+//!
+//! ## Why a token floor alone is not enough, and the sparsity gate
+//!
+//! A token floor asks "is this launch big enough". It does not ask the question
+//! that decides a *sparse* launch, which is "is skipping worth the kernel you
+//! have to skip with". `mlx::fast::scaled_dot_product_attention` is a heavily
+//! tuned dense kernel; the v2 partial kernel is a scalar per-lane sweep. Reading
+//! half the data through a kernel with twice the constant factor is a loss, and
+//! `examples/sparse_paged_decode_bench` measures exactly that (MiniMax-M3
+//! geometry, one repetition of 40 steps on an idle M-series host, so indicative
+//! rather than a recorded result):
+//!
+//! | context | sparsity | fused vs mask |
+//! |---|---|---|
+//! | 4096 | 2.0x | **0.67x** |
+//! | 8192 | 4.0x | **0.77x** |
+//! | 16384 | 8.0x | 1.22x |
+//! | 32768 | 16.0x | 1.17x |
+//! | 65536 | 32.0x | 2.06x |
+//!
+//! So the launch must also clear [`MIN_SPARSITY_RATIO`]: the live window has to
+//! be at least that many times the selected count. The default sits **on top of
+//! the measured win** rather than interpolated into the unmeasured 4x-to-8x
+//! band. #899 argued the opposite way for its token floor, and deliberately sat
+//! below its weakest measured point, because what lay under that point was a
+//! missed opportunity. Here what lies under the point is a *measured
+//! regression*, and shipping a regression in a narrow band is worse than
+//! declining a modest win in one.
+//!
+//! Two caveats on that table, both pointing the same way. The harness builds the
+//! mask on the host outside the timed region, while the real mask path rebuilds
+//! it on device every step through several `O(kv_len)` passes; and the harness
+//! hands the sparse arm a prebuilt block list, while the real path expands the
+//! selection in one `O(selected)` pass. Both flatter the mask arm, so the real
+//! crossover should sit at a lower sparsity than 8x, which makes this default
+//! conservative in the direction that cannot regress anything.
+//!
+//! For MiniMax-M3's shipped configuration (`topk_blocks` 16, `block_size` 128,
+//! so a ~2048-row selection) the gate opens at a 16K context, which is exactly
+//! where issue #904 requires decode to improve.
 //!
 //! ## Proving which path ran
 //!
@@ -80,7 +129,9 @@ use crate::cache::sparse_csr::{
 };
 use crate::ffi;
 use crate::ffi::MlxArray;
-use crate::paged_v2::dispatch::{PagedV2Dispatch, active_required_visible_tokens, select_paged_v2_dispatch};
+use crate::paged_v2::dispatch::{
+    PagedV2Dispatch, active_required_visible_tokens, select_paged_v2_dispatch,
+};
 use crate::paged_v2::launch::V2Context;
 use crate::paged_v2::plan::PagedDecodeGeometry;
 use crate::paged_v2::resolve_plan;
@@ -92,6 +143,49 @@ pub const SPARSE_PAGED_ENV: &str = "MLXCEL_SPARSE_PAGED_ATTENTION";
 /// Opt-in dump of the selected rows. Synchronizes, so it is for debugging a
 /// selection only, never for a timed run.
 pub const SPARSE_PAGED_DUMP_ENV: &str = "MLXCEL_SPARSE_PAGED_DUMP";
+
+/// Environment override for [`MIN_SPARSITY_RATIO`].
+pub const MIN_SPARSITY_ENV: &str = "MLXCEL_SPARSE_PAGED_MIN_SPARSITY";
+
+/// How many times larger the live window must be than the selection.
+///
+/// See the module docs for the measurements: the fused path loses at 2x and 4x
+/// and wins from 8x, so this sits on the measured win rather than inside the
+/// unmeasured band below it. `0` disables the gate.
+pub const MIN_SPARSITY_RATIO: usize = 8;
+
+/// The active sparsity gate, read once per process.
+#[must_use]
+pub fn min_sparsity_ratio() -> usize {
+    static RATIO: OnceLock<usize> = OnceLock::new();
+    *RATIO.get_or_init(|| match std::env::var(MIN_SPARSITY_ENV) {
+        Ok(raw) => raw.trim().parse::<usize>().unwrap_or(MIN_SPARSITY_RATIO),
+        Err(_) => MIN_SPARSITY_RATIO,
+    })
+}
+
+/// Whether skipping is worth the kernel it has to be skipped with.
+///
+/// Pure, so the numbers that decided a dispatch can be logged next to the ratio
+/// they were measured against. A non-positive selection never clears the gate;
+/// a zero ratio always does.
+#[must_use]
+pub fn clears_sparsity_gate(live_len: usize, selected_per_request: usize, ratio: usize) -> bool {
+    if ratio == 0 {
+        return true;
+    }
+    if selected_per_request == 0 {
+        return false;
+    }
+    // `checked_mul`, not `saturating_mul`: saturating the requirement to
+    // `usize::MAX` makes an absurd selection *pass* the gate, because the
+    // comparison then reads `usize::MAX >= usize::MAX`. A requirement that
+    // overflows `usize` is one no window can meet.
+    match selected_per_request.checked_mul(ratio) {
+        Some(required) => live_len >= required,
+        None => false,
+    }
+}
 
 /// Whether the fused sparse path is enabled, read once per process.
 ///
@@ -146,6 +240,13 @@ pub enum SparseDecodeOutcome {
         selected: usize,
         floor: usize,
     },
+    /// The selection is too large a fraction of the live window for skipping to
+    /// pay for the kernel it has to be skipped with.
+    BelowSparsity {
+        live_len: usize,
+        selected_per_request: usize,
+        required_ratio: usize,
+    },
     /// The kernel cannot serve this head geometry.
     UnservableGeometry(String),
     /// The K and V allocations do not share a row mapping, or a shape is not
@@ -161,7 +262,7 @@ pub enum SparseDecodeOutcome {
 }
 
 /// Number of distinct outcome kinds, for the one-shot report table.
-pub const SPARSE_DECODE_OUTCOME_KINDS: usize = 8;
+pub const SPARSE_DECODE_OUTCOME_KINDS: usize = 9;
 
 impl SparseDecodeOutcome {
     /// Whether the fused sparse kernel actually ran.
@@ -182,6 +283,7 @@ impl SparseDecodeOutcome {
             Self::SelectionRejected(_) => 5,
             Self::PlanRejected(_) => 6,
             Self::NotServable(_) => 7,
+            Self::BelowSparsity { .. } => 8,
         }
     }
 
@@ -210,6 +312,16 @@ impl SparseDecodeOutcome {
                 "fallback: {selected} selected rows across {requests} request(s) is below the \
                  {floor}-row dispatch floor"
             ),
+            Self::BelowSparsity {
+                live_len,
+                selected_per_request,
+                required_ratio,
+            } => format!(
+                "fallback: a {selected_per_request}-row selection out of a {live_len}-token \
+                 window is {:.1}x sparsity, below the {required_ratio}x the fused kernel needs \
+                 to beat dense SDPA",
+                *live_len as f64 / (*selected_per_request).max(1) as f64
+            ),
             Self::UnservableGeometry(reason) => {
                 format!("fallback: the kernel cannot serve this geometry ({reason})")
             }
@@ -219,7 +331,9 @@ impl SparseDecodeOutcome {
             Self::SelectionRejected(reason) => {
                 format!("fallback: the selection was rejected ({reason})")
             }
-            Self::PlanRejected(reason) => format!("fallback: the chunk plan was rejected ({reason})"),
+            Self::PlanRejected(reason) => {
+                format!("fallback: the chunk plan was rejected ({reason})")
+            }
             Self::NotServable(reason) => format!("fallback: not servable ({reason})"),
         }
     }
@@ -303,6 +417,10 @@ pub struct SparseDecodeInputs<'a> {
     pub v_alloc: &'a MlxArray,
     /// KV heads attention uses. May be fewer than the allocation's heads.
     pub kv_heads: i32,
+    /// Live tokens in the window the selection was drawn from. This is the
+    /// denominator of the sparsity gate: what matters is not how many rows the
+    /// launch reads but how many it *skips*.
+    pub live_len: i32,
     /// Softmax scale.
     pub scale: f32,
 }
@@ -416,6 +534,15 @@ fn prepare(
             requests: structure.requests(),
             selected,
             floor,
+        });
+    }
+    let ratio = min_sparsity_ratio();
+    let live_len = inputs.live_len.max(0) as usize;
+    if !clears_sparsity_gate(live_len, selection.per_request, ratio) {
+        return Err(SparseDecodeOutcome::BelowSparsity {
+            live_len,
+            selected_per_request: selection.per_request,
+            required_ratio: ratio,
         });
     }
 

@@ -106,8 +106,9 @@ pub use plan::{
 };
 pub use plan_cache::{DecodeBatchKey, PagedDecodeV2Cache, PlanCacheStats, RequestFingerprint};
 pub use sparse::{
-    SPARSE_DECODE_OUTCOME_KINDS, SPARSE_PAGED_DUMP_ENV, SPARSE_PAGED_ENV, SparseDecodeInputs,
-    SparseDecodeOutcome, SparseDecodeStats, report_sparse_outcome_once, run_sparse_decode,
+    MIN_SPARSITY_ENV, MIN_SPARSITY_RATIO, SPARSE_DECODE_OUTCOME_KINDS, SPARSE_PAGED_DUMP_ENV,
+    SPARSE_PAGED_ENV, SparseDecodeInputs, SparseDecodeOutcome, SparseDecodeStats,
+    clears_sparsity_gate, min_sparsity_ratio, report_sparse_outcome_once, run_sparse_decode,
     sparse_decode_stats, sparse_paged_enabled,
 };
 

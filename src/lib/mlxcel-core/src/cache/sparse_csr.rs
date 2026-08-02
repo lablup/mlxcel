@@ -413,7 +413,9 @@ pub fn shared_row_mapping(
     attn_heads: i32,
 ) -> Result<(), String> {
     if attn_heads <= 0 {
-        return Err(format!("sparse page table: attn_heads {attn_heads} must be positive"));
+        return Err(format!(
+            "sparse page table: attn_heads {attn_heads} must be positive"
+        ));
     }
     if k.batch != v.batch {
         return Err(format!(
@@ -609,10 +611,7 @@ pub fn selection_from_blocks(
     // `(b * buffer_heads + h) * capacity`.
     let seq_base = ffi::multiply(
         &ffi::arange_i32(0, layout.batch, 1),
-        &ffi::from_slice_i32(
-            &[layout.buffer_heads.saturating_mul(layout.capacity)],
-            &[1],
-        ),
+        &ffi::from_slice_i32(&[layout.buffer_heads.saturating_mul(layout.capacity)], &[1]),
     );
     let seq_base = ffi::reshape(&seq_base, &[layout.batch, 1, 1]);
     let head_base = ffi::multiply(

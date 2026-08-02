@@ -171,11 +171,11 @@ impl Attention {
         // below with the reason announced once per kind.
         if l == 1
             && let Some((idx, token_scores)) = &sparse_ctx
-            && let Some(attn_out) = self.try_fused_sparse_decode(&q, cache, idx, token_scores, kv_len)
+            && let Some(attn_out) =
+                self.try_fused_sparse_decode(&q, cache, idx, token_scores, kv_len)
         {
             let attn_out = mlxcel_core::transpose_axes(&attn_out, &[0, 2, 1, 3]);
-            let attn_out =
-                mlxcel_core::reshape(&attn_out, &[b, l, self.num_heads * self.head_dim]);
+            let attn_out = mlxcel_core::reshape(&attn_out, &[b, l, self.num_heads * self.head_dim]);
             return self.o_proj.forward(&attn_out);
         }
 
@@ -295,6 +295,7 @@ impl Attention {
             k_alloc,
             v_alloc,
             kv_heads: self.num_kv_heads,
+            live_len,
             scale: self.scale,
         };
         let (out, outcome) = run_sparse_decode(&inputs, &selection);

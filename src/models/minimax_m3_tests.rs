@@ -588,7 +588,12 @@ fn the_decode_selection_names_exactly_the_blocks_the_mask_path_keeps() {
     let topk = 4i32;
     let init = 1i32;
     let local = 2i32;
-    for (kv_len, seed) in [(320i32, 0xa11ce), (256, 0xb0b), (261, 0xc0ffee), (513, 0xd00d)] {
+    for (kv_len, seed) in [
+        (320i32, 0xa11ce),
+        (256, 0xb0b),
+        (261, 0xc0ffee),
+        (513, 0xd00d),
+    ] {
         let scores = decode_token_scores(kv_len, seed);
         let offset = kv_len - 1;
 
