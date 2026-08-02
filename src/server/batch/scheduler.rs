@@ -6200,6 +6200,8 @@ impl BatchScheduler {
             params.top_p,
             params.min_p,
         );
+        // Announce a newly-seen sampling dispatch outcome at INFO (#901).
+        mlxcel_core::report_sampling_dispatch();
         // Schedule the sampled tokens (and thus the whole forward graph) without
         // reading them to host, so the GPU runs ahead while the caller returns
         // to the scheduler loop and reads the PREVIOUS step's tokens.

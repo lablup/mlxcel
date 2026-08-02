@@ -6,11 +6,14 @@
 #include "mlx/primitives.h"
 
 #include "sampling.h" // Gumbel-max categorical sampling kernel (#900).
+#include "sampling_rejection.h" // Dual-pivot rejection sampling kernel (#901).
 
 #include <cctype>
 #include <cstdint>
 #include <map>
 #include <sstream>
+#include <tuple>
+#include <vector>
 #include <unordered_set>
 #include <utility>
 
@@ -4492,8 +4495,10 @@ namespace {
 
 // Compiled min-p filtering fused into a single kernel.
 namespace {
-    static std::function<std::vector<array>(const std::vector<array>&)>
-    get_compiled_min_p_filter() {
+    using CompiledFilterFn =
+        std::function<std::vector<array>(const std::vector<array>&)>;
+
+    static CompiledFilterFn get_compiled_min_p_filter() {
         // Backend is process-constant, so capture the gate once at build time.
         // Non-Metal fills the sentinel in x's dtype so no per-step AsType is
         // inserted on the scalar under the CUDA bf16 promotion patch (issue
@@ -4543,6 +4548,259 @@ bool sampling_gumbel_available() {
     return env_enabled && mlxcel::turbo::gumbel_max_sample_supported();
 }
 
+// Env kill switch for the dual-pivot rejection sampling kernels (#901). Falsy
+// disables and restores the `argpartition` + `argsort` + `cumsum` filter chain
+// exactly. Read once per process, for the same reason as the #900 switch.
+namespace {
+    bool parse_sampling_rejection_env() {
+        const char* v = std::getenv("MLXCEL_SAMPLING_REJECTION");
+        if (v == nullptr) {
+            return true;
+        }
+        std::string value(v);
+        for (auto& c : value) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        return !(value == "0" || value == "false" || value == "off" ||
+                 value == "no");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sampling dispatch observability (#901).
+//
+// Issue #899 shipped a fused decode path that never activated, and the
+// before/after benchmark compared the fallback against itself for a full sweep
+// because the declines were reported at `debug`, which a real server run does
+// not emit. This path has the same shape (a new kernel, a kill switch, and a
+// convergence-cap fallback), so the outcome of every `fused_sample` call is
+// recorded here and announced by the Rust caller at INFO, once per distinct
+// outcome kind. Per kind, not one global one-shot: a single flag reports only
+// whatever happened first, which is a warmup request, and a later permanent
+// fallback would never surface.
+//
+// Cost on the sampling hot path is one relaxed atomic load: the message is only
+// formatted the first time a given kind occurs.
+// ---------------------------------------------------------------------------
+namespace {
+    enum SamplingDispatchKind : uint32_t {
+        SAMPLING_DISPATCH_REJECTION = 0,
+        SAMPLING_DISPATCH_CAP_OVERFLOW = 1,
+        SAMPLING_DISPATCH_KILL_SWITCH = 2,
+        SAMPLING_DISPATCH_BACKEND_UNSUPPORTED = 3,
+        SAMPLING_DISPATCH_SHAPE_UNSUPPORTED = 4,
+        SAMPLING_DISPATCH_GREEDY = 5,
+        SAMPLING_DISPATCH_NO_FILTER = 6,
+        SAMPLING_DISPATCH_REFERENCE_ARM = 7,
+        SAMPLING_DISPATCH_REJECTION_VERIFIED = 8,
+        SAMPLING_DISPATCH_NOT_ROUTED = 9,
+        SAMPLING_DISPATCH_KIND_COUNT = 10,
+    };
+
+    struct SamplingDispatchState {
+        std::mutex mu;
+        // Kinds recorded but not yet handed to the Rust logger.
+        uint32_t pending = 0;
+        // Message for each kind, captured at the moment the kind first occurred.
+        std::string messages[SAMPLING_DISPATCH_KIND_COUNT];
+        // Kinds ever recorded. Read on the hot path without the mutex, so the
+        // "is this new" test costs one relaxed load.
+        std::atomic<uint32_t> seen{0};
+        // Rows that exhausted the round cap, cumulative.
+        std::atomic<uint64_t> cap_overflow_rows{0};
+        // Launches in which at least one row exhausted the round cap.
+        std::atomic<uint64_t> cap_overflow_launches{0};
+    };
+
+    SamplingDispatchState& sampling_dispatch_state() {
+        // Leaked for the same teardown reason as the kernel holders below.
+        static SamplingDispatchState* state = new SamplingDispatchState();
+        return *state;
+    }
+
+    // The converged flags of the most recent production launch, held so a LATER
+    // call can inspect them without ever waiting.
+    //
+    // Reading them at launch time is what regressed decode by 1.7x: the CLI loop
+    // and the batch scheduler both build step n+1 and `async_eval` it before
+    // reading step n, so any evaluation inside the sampler drains the queue and
+    // collapses the pipeline. `array::is_available()` is the non-blocking query,
+    // so the check simply happens whenever the previous step has landed, which
+    // in a decode loop is always by the next token.
+    // A few launches' converged flags, held until they land.
+    //
+    // A single slot would be enough for one decode loop, but the server samples
+    // from several worker threads and a launch that has not landed yet would be
+    // overwritten by the next one, silently dropping the only signal that the
+    // kernel regressed. Four slots make that require four concurrent in-flight
+    // launches before anything is lost, and each slot holds two `[B]` uint32
+    // arrays, so the ceiling is negligible.
+    struct PendingVerification {
+        static constexpr size_t SLOTS = 4;
+        std::mutex mu;
+        std::optional<mlx::core::array> ok[SLOTS];
+        std::optional<mlx::core::array> rounds[SLOTS];
+        int cap[SLOTS] = {};
+        // Round-robin victim when every slot is occupied by a launch that has
+        // still not landed.
+        size_t next = 0;
+    };
+
+    PendingVerification& pending_verification() {
+        static PendingVerification* pending = new PendingVerification();
+        return *pending;
+    }
+
+    inline bool sampling_dispatch_is_new(SamplingDispatchKind kind) {
+        const uint32_t bit = 1u << static_cast<uint32_t>(kind);
+        return (sampling_dispatch_state().seen.load(std::memory_order_relaxed) &
+                bit) == 0u;
+    }
+
+    // Record the first occurrence of `kind`. A second call for the same kind is
+    // a no-op, so the caller may skip building `message` by testing
+    // `sampling_dispatch_is_new` first (which is what the hot path does).
+    void sampling_dispatch_record(
+        SamplingDispatchKind kind,
+        const std::string& message
+    ) {
+        const uint32_t bit = 1u << static_cast<uint32_t>(kind);
+        auto& state = sampling_dispatch_state();
+        std::lock_guard<std::mutex> lock(state.mu);
+        if ((state.seen.load(std::memory_order_relaxed) & bit) != 0u) {
+            return;
+        }
+        state.messages[kind] = message;
+        state.pending |= bit;
+        state.seen.fetch_or(bit, std::memory_order_relaxed);
+    }
+
+    // Human-readable sampler configuration, for the dispatch messages.
+    std::string sampling_config_text(
+        int32_t batch,
+        int32_t vocab,
+        float temperature,
+        int32_t top_k,
+        float top_p,
+        float min_p
+    ) {
+        std::ostringstream os;
+        os << "batch " << batch << ", vocab " << vocab << ", temperature "
+           << temperature << ", top_k " << top_k << ", top_p " << top_p
+           << ", min_p " << min_p;
+        return os.str();
+    }
+}
+
+static void drain_pending_verification();
+static uint32_t count_and_report_overflow(
+    const mlx::core::array& ok,
+    const mlx::core::array& rounds,
+    int cap);
+
+// Bitmask of dispatch outcome kinds that have occurred but not yet been drained
+// by `sampling_dispatch_drain_report`. Zero on the overwhelming majority of
+// sampling steps, so the Rust caller's per-token check is one load.
+uint32_t sampling_dispatch_pending_kinds() {
+    auto& state = sampling_dispatch_state();
+    std::lock_guard<std::mutex> lock(state.mu);
+    return state.pending;
+}
+
+// Pop and return the description of one pending outcome kind, or an empty
+// string when nothing is pending. Callers loop until it returns empty.
+rust::String sampling_dispatch_drain_report() {
+    auto& state = sampling_dispatch_state();
+    std::lock_guard<std::mutex> lock(state.mu);
+    if (state.pending == 0u) {
+        return rust::String();
+    }
+    uint32_t kind = 0;
+    while ((state.pending & (1u << kind)) == 0u) {
+        ++kind;
+    }
+    state.pending &= ~(1u << kind);
+    return rust::String(state.messages[kind]);
+}
+
+// Every outcome description recorded since the last reset, newline-joined, in
+// kind order. NON-DESTRUCTIVE: it neither pops the pending queue nor clears the
+// one-shot bits.
+//
+// `sampling_dispatch_drain_report` is the logger's channel and is destructive
+// by design, which makes it useless to a test running in a binary where other
+// tests also sample: whichever caller drains first consumes the record. Tests
+// and the microbenchmark read this instead.
+rust::String sampling_dispatch_recorded_report() {
+    auto& state = sampling_dispatch_state();
+    std::lock_guard<std::mutex> lock(state.mu);
+    const uint32_t seen = state.seen.load(std::memory_order_relaxed);
+    std::string joined;
+    for (uint32_t kind = 0; kind < SAMPLING_DISPATCH_KIND_COUNT; ++kind) {
+        if ((seen & (1u << kind)) == 0u) {
+            continue;
+        }
+        if (!joined.empty()) {
+            joined.push_back('\n');
+        }
+        joined += state.messages[kind];
+    }
+    return rust::String(joined);
+}
+
+// Inspect every deferred launch that has landed, now. Still non-blocking: a
+// launch that has not landed is left for later. For tests, which would
+// otherwise have to depend on a subsequent sampler call to trigger the check.
+void sampling_dispatch_drain_pending() {
+    drain_pending_verification();
+}
+
+// Clear every recorded outcome and both cap-overflow counters. For tests, which
+// need a clean slate; the state is process-wide.
+void sampling_dispatch_reset() {
+    auto& state = sampling_dispatch_state();
+    std::lock_guard<std::mutex> lock(state.mu);
+    state.pending = 0;
+    state.seen.store(0, std::memory_order_relaxed);
+    state.cap_overflow_rows.store(0, std::memory_order_relaxed);
+    state.cap_overflow_launches.store(0, std::memory_order_relaxed);
+    for (auto& message : state.messages) {
+        message.clear();
+    }
+}
+
+// Rows that exhausted the rejection round cap since process start (or since the
+// last `sampling_dispatch_reset`). This is the metric issue #901 asks for; it is
+// reachable from Rust rather than only incremented.
+uint64_t sampling_rejection_cap_overflow_rows() {
+    return sampling_dispatch_state().cap_overflow_rows.load(
+        std::memory_order_relaxed);
+}
+
+// Launches in which at least one row exhausted the round cap and the whole
+// batch therefore fell back to the `argpartition` chain.
+uint64_t sampling_rejection_cap_overflow_launches() {
+    return sampling_dispatch_state().cap_overflow_launches.load(
+        std::memory_order_relaxed);
+}
+
+// True when `fused_sample`'s filtered path will use the rejection kernels: the
+// backend supports them and `MLXCEL_SAMPLING_REJECTION` is not falsy.
+bool sampling_rejection_available() {
+    static const bool env_enabled = parse_sampling_rejection_env();
+    return env_enabled && mlxcel::turbo::rejection_sample_supported();
+}
+
+// Threads per threadgroup the rejection kernel launches with.
+int32_t sampling_rejection_threadgroup_size() {
+    return mlxcel::turbo::rejection_threadgroup_size();
+}
+
+// Production round cap.
+int32_t sampling_rejection_max_rounds() {
+    return mlxcel::turbo::REJECTION_MAX_ROUNDS;
+}
+
 // Whether this exact sampler configuration can take the Gumbel-max kernel.
 // The kernel draws from `softmax(logits / temperature)` over the whole row, so
 // it is valid only when no top-k / top-p / min-p filter narrows the support
@@ -4571,15 +4829,117 @@ static bool gumbel_sample_applies(
     return mlxcel::turbo::gumbel_max_sample_accepts(x);
 }
 
+// ---------------------------------------------------------------------------
+// Routing policy for the rejection kernel (#901), and the measurements it is
+// built from.
+//
+// The kernel replaces a SORT. That is the whole of where it wins, and the
+// measured matrix says so unambiguously (M1 Ultra, three repetitions of vocab
+// {32K, 64K, 152K} x batch {1, 4, 8}, both arms timed inside one run):
+//
+//   top-p alone      1.28x - 2.35x   every cell a win
+//   top-k alone      0.31x - 0.97x   every cell a loss, worst at 152K
+//   min-p alone      0.47x - 0.88x   at 152K, a loss
+//   top-k + top-p    1.27x - 1.64x   at 32K, but 0.71x - 0.83x at 152K
+//
+// The mechanism is visible in the kernel's own round counter, which the
+// microbenchmark reports. top-p accepts in one or two rounds, because a draw
+// weighted by probability lands in the high-mass head and `mass(> p) <= top_p`
+// is satisfied immediately. top-k needs the draw to land inside the top forty
+// of the whole vocabulary, so it takes two to seven rounds and the count grows
+// with the vocabulary. Every extra round is another full-row sweep, and the
+// loop runs on ONE threadgroup per row because the shrinking interval is carried
+// across sweeps and MLX custom kernels have no grid-wide barrier. So the kernel
+// pays single-core bandwidth per round, while the stock chain's `argpartition`
+// and compiled min-p filter run across the whole GPU. Where the chain also runs
+// `argsort`, the kernel is far ahead; where it does not, it cannot win.
+//
+// Hence: route only when the chain would sort, which is exactly when top-p is
+// active. When top-k is active as well the round count climbs with the
+// vocabulary, so that combination is capped at the vocabulary where it was
+// measured to win.
+//
+// This is the same shape as the dispatch floor #899 ended up with, and the same
+// discipline as #905 landing its fusions unwired: keep the code, gate it on
+// evidence. min-p rides along with top-p for free, because it is folded into the
+// kernel's initial interval and costs no round; that specific combination is an
+// extrapolation from the two filters measured separately, not a measured cell.
+// ---------------------------------------------------------------------------
+
+// Vocabulary ceiling for routing top-k and top-p together.
+//
+// 32768 is measured (1.27x - 1.64x across three repetitions); 152064 is measured
+// as a loss (0.71x - 0.83x); 65536 has not been measured for this combination and
+// is therefore excluded rather than interpolated. Raise it only against a
+// measurement, never to widen coverage.
+constexpr int32_t REJECTION_JOINT_VOCAB_MAX = 32768;
+
+// Pure routing policy: would `fused_sample` send this configuration to the
+// rejection kernel, ignoring backend support and the env switch? Exposed so a
+// test can pin every measured cell of the matrix above without a GPU.
+bool sampling_rejection_routes(
+    int32_t vocab,
+    int32_t top_k,
+    float top_p,
+    float min_p
+) {
+    (void)min_p; // min-p never decides routing; it is free inside the kernel.
+    const bool top_p_active = top_p > 0.0f && top_p < 1.0f;
+    if (!top_p_active) {
+        return false;
+    }
+    const bool top_k_active = top_k > 1 && (vocab <= 0 || top_k < vocab);
+    return !top_k_active || vocab <= REJECTION_JOINT_VOCAB_MAX;
+}
+
+// Human-readable reason a filtered configuration stayed on the stock chain.
+static std::string rejection_not_routed_reason(
+    int32_t vocab,
+    int32_t top_k,
+    float top_p,
+    float min_p
+) {
+    std::ostringstream os;
+    os << "argpartition chain: the rejection kernel is not routed for this "
+          "configuration (";
+    if (!(top_p > 0.0f && top_p < 1.0f)) {
+        os << "top-p inactive, so the stock chain runs no sort and the kernel "
+              "measured slower: top-k alone 0.31x-0.97x, min-p alone "
+              "0.47x-0.88x";
+    } else {
+        os << "top-k and top-p together measured 0.71x-0.83x above vocab "
+           << REJECTION_JOINT_VOCAB_MAX << ", and this row has vocab " << vocab;
+    }
+    os << "; top_k " << top_k << ", top_p " << top_p << ", min_p " << min_p
+       << ")";
+    return os.str();
+}
+
+// Whether this exact sampler configuration can take the dual-pivot rejection
+// kernel (#901): a non-greedy temperature, an input shape the kernel serves,
+// and a filter combination the measurements above support.
+static bool rejection_sample_applies(
+    const mlx::core::array& x,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p
+) {
+    if (!(temperature > 0.0f) || top_k == 1) {
+        return false;
+    }
+    if (!mlxcel::turbo::rejection_sample_accepts(x)) {
+        return false;
+    }
+    return sampling_rejection_routes(x.shape(1), top_k, top_p, min_p);
+}
+
 // Fused sampling: temperature scaling + top-k + top-p + min-p + categorical
 // in a single function call to minimize FFI round-trips.
 // Input: 2D logits [batch, vocab] (already sliced, penalties already applied)
 // Returns sampled token
 //
 // Uses compiled (fused) kernels where supported:
-// - No-filter stochastic sampling: the Gumbel-max kernel (#900), which drops
-//   the `categorical` normalization pass entirely. `allow_gumbel == false`
-//   reproduces the pre-#900 behavior for A/B benchmarking and parity tests.
 // - Categorical sampling: temp scaling + random::categorical in one kernel
 // - Min-p filtering: softmax + max + mask in one kernel
 // - Top-p filtering: uncompiled (cumsum lacks output_shapes in MLX v0.31.x)
@@ -4588,12 +4948,33 @@ static bool gumbel_sample_applies(
 // `fused_sample_probs` (issue #902) can reproduce the sampler's support and
 // normalization *by construction* rather than by a parallel reimplementation
 // that could drift.
+//
+// `rejection_semantics` selects WHICH support that is, because issue #901 gave
+// the sampler a second one. The stock chain masks to the top-k set and then
+// RENORMALISES before applying top-p, so its nucleus mass target is
+// `top_p * Z_k`. The rejection kernel evaluates both tests against the
+// untruncated row, so its target is `top_p * total` and its support is a
+// superset. The difference exists only when top-k and top-p are both active;
+// with either one alone the two orders coincide exactly.
+//
+// Rather than reimplement the kernel's support, the flag reorders the SAME
+// stages: run the top-k and top-p masks independently against the untruncated
+// row and intersect them. `minimum` is that intersection exactly, because the
+// masked fill is `std::numeric_limits<float>::lowest()` and therefore below any
+// real logit, so a position survives only where both stages kept it. min-p
+// stays last either way: its threshold is `min_p * p_max` and the row maximum
+// survives every filter, so the test is invariant to where it is applied.
+//
+// The point of routing this through one function is that `fused_sample_probs`
+// passes the same flag the sampler used, so the distribution it reports follows
+// the sampler's routing instead of assuming one branch of it.
 static mlx::core::array fused_sample_filter_logits(
     mlx::core::array x,
     float temperature,
     int32_t top_k,
     float top_p,
-    float min_p
+    float min_p,
+    bool rejection_semantics
 ) {
     // Build sampler scalars in the logit dtype on non-Metal backends only
     // (issue #636). On CUDA the bf16 promotion patch keeps bf16 op boundaries
@@ -4621,8 +5002,8 @@ static mlx::core::array fused_sample_filter_logits(
 
     // Top-k filtering: keep only the k highest-probability tokens
     // (Not compiled: argpartition has dynamic shape that breaks compile)
-    if (top_k > 0) {
-        auto neg_x = mlx::core::negative(x);
+    auto top_k_filter = [&](const mlx::core::array& in) {
+        auto neg_x = mlx::core::negative(in);
         auto indices = mlx::core::argpartition(neg_x, top_k - 1, -1);
 
         auto shape = indices.shape();
@@ -4633,56 +5014,474 @@ static mlx::core::array fused_sample_filter_logits(
         stop[ndim - 1] = top_k;
 
         auto kth_idx = mlx::core::slice(indices, start, stop);
-        auto threshold = mlx::core::take_along_axis(x, kth_idx, -1);
-        auto mask = mlx::core::greater_equal(x, threshold);
-        x = mlx::core::where(
-            mask, x, sampler_scalar(std::numeric_limits<float>::lowest()));
-    }
+        auto threshold = mlx::core::take_along_axis(in, kth_idx, -1);
+        auto mask = mlx::core::greater_equal(in, threshold);
+        return mlx::core::where(
+            mask, in, sampler_scalar(std::numeric_limits<float>::lowest()));
+    };
 
-    // Top-p (nucleus) filtering
-    if (top_p > 0.0f && top_p < 1.0f) {
-        x = top_p_filter(x, top_p, single_dtype_scalars);
+    const bool use_top_k = top_k > 0;
+    const bool use_top_p = top_p > 0.0f && top_p < 1.0f;
+
+    if (rejection_semantics && use_top_k && use_top_p) {
+        // Both tests against the untruncated row, then intersect. See the
+        // header comment for why `minimum` is exactly that intersection.
+        auto kept_by_top_k = top_k_filter(x);
+        auto kept_by_top_p = top_p_filter(x, top_p, single_dtype_scalars);
+        x = mlx::core::minimum(kept_by_top_k, kept_by_top_p);
+    } else {
+        if (use_top_k) {
+            x = top_k_filter(x);
+        }
+        if (use_top_p) {
+            x = top_p_filter(x, top_p, single_dtype_scalars);
+        }
     }
 
     // Min-p filtering — compiled kernel
     if (min_p > 0.0f && min_p < 1.0f) {
-        static auto compiled_fn = get_compiled_min_p_filter();
-        auto result = compiled_fn({x, sampler_scalar(min_p)});
+        // Leaked on purpose, and it is not an oversight. The compiled callable
+        // holds handles into MLX's process-global compile cache, and a plain
+        // function-local static would be destroyed during `exit` in an order
+        // C++ leaves unspecified relative to that cache. Destroying it after
+        // the cache is gone is a null dereference inside
+        // `__cxa_finalize_ranges`: `examples/rejection_sampling_microbench`
+        // exited 139 after printing a complete, correct table, and the fault
+        // reproduced with nothing in the process but one
+        // `fused_sample_categorical` call carrying a min-p. The object is
+        // process-lifetime by construction, so never destroying it is the fix
+        // rather than a workaround.
+        static auto* compiled_fn = new CompiledFilterFn(get_compiled_min_p_filter());
+        auto result = (*compiled_fn)({x, sampler_scalar(min_p)});
         x = std::move(result[0]);
     }
 
     return x;
 }
 
+// The stock filter chain plus the categorical draw that ends it: temperature
+// scale, `argpartition` top-k, `argsort` + `cumsum` top-p, compiled min-p, then
+// `random::categorical`. The reference arm, the kill-switch target, and the
+// cap-overflow fallback all take it.
+//
+// It deliberately shares `fused_sample_filter_logits` with `fused_sample_probs`
+// (#902) rather than repeating the chain, so a fallback draw and the
+// distribution that function reports cannot drift apart.
+static mlx::core::array fused_sample_argpartition_chain(
+    mlx::core::array x,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p,
+    bool rejection_semantics
+) {
+    return mlx::core::random::categorical(
+        fused_sample_filter_logits(
+            std::move(x), temperature, top_k, top_p, min_p, rejection_semantics),
+        -1);
+}
+
+// True when `fused_sample` will send this configuration to the rejection
+// kernel: the backend supports it, the env switch allows it, and the routing
+// policy admits it.
+//
+// Shared with `fused_sample_probs` so the reported distribution follows the
+// sampler's actual routing rather than one assumed branch of it.
+static bool rejection_path_selected(
+    const mlx::core::array& x,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p
+) {
+    return sampling_rejection_available() &&
+        rejection_sample_applies(x, temperature, top_k, top_p, min_p);
+}
+
+// Inspect the previous production launch's converged flags, but ONLY if they
+// have already landed. Never waits, so it is safe to call from inside a decode
+// loop's graph-building phase.
+//
+// `array::is_available()` is MLX's non-blocking status query: it is false while
+// the launch is still unscheduled or in flight, and true once the event is
+// signalled. A decode loop reads each step's token before building the next, so
+// in practice the check lands one step late and costs nothing. If it never
+// lands (a caller that discards its tokens) the stash is simply replaced by the
+// next launch and nothing is reported, which is the correct outcome for a
+// sample that was never used.
+static void drain_pending_verification() {
+    auto& pending = pending_verification();
+    std::vector<std::tuple<mlx::core::array, mlx::core::array, int>> landed;
+    {
+        std::lock_guard<std::mutex> lock(pending.mu);
+        for (size_t slot = 0; slot < PendingVerification::SLOTS; ++slot) {
+            if (!pending.ok[slot].has_value() ||
+                !pending.rounds[slot].has_value() ||
+                !pending.ok[slot]->is_available() ||
+                !pending.rounds[slot]->is_available()) {
+                continue;
+            }
+            landed.emplace_back(
+                *pending.ok[slot], *pending.rounds[slot], pending.cap[slot]);
+            pending.ok[slot].reset();
+            pending.rounds[slot].reset();
+            pending.cap[slot] = 0;
+        }
+    }
+
+    uint32_t unconverged = 0;
+    for (const auto& entry : landed) {
+        unconverged += count_and_report_overflow(
+            std::get<0>(entry), std::get<1>(entry), std::get<2>(entry));
+    }
+    (void)unconverged;
+}
+
+// The overflow counting rule and its report, shared by the deferred drain and
+// by the test hook so there is exactly one implementation of both.
+//
+// Returns the number of rows counted.
+static uint32_t count_and_report_overflow(
+    const mlx::core::array& ok,
+    const mlx::core::array& rounds,
+    int cap
+) {
+    // Row count from the arrays themselves, never from a separately stored
+    // field: a mismatch would read past the buffer and report garbage as cap
+    // overflow, which is a worse failure than missing the event.
+    const int batch = static_cast<int>(ok.size());
+    if (batch <= 0 || static_cast<int>(rounds.size()) != batch || cap <= 0) {
+        return 0;
+    }
+
+    // A row counts as overflow only when it BOTH reports failure and reports
+    // having consumed the whole round budget. Real overflow always satisfies
+    // both. A buffer that was never written by the kernel reads as zeros, which
+    // satisfies the first and fails the second, so a stale or unwritten read
+    // cannot be reported as a kernel regression. The asymmetry is deliberate:
+    // under-reporting a diagnostic is recoverable, sending someone to hunt a
+    // nonexistent bug in the pivot arithmetic is not.
+    const auto* flags = ok.data<uint32_t>();
+    const auto* consumed = rounds.data<uint32_t>();
+    uint32_t unconverged = 0;
+    for (int row = 0; row < batch; ++row) {
+        if (flags[row] == 0u && consumed[row] == static_cast<uint32_t>(cap)) {
+            ++unconverged;
+        }
+    }
+    if (unconverged == 0) {
+        return 0;
+    }
+
+    auto& state = sampling_dispatch_state();
+    state.cap_overflow_rows.fetch_add(unconverged, std::memory_order_relaxed);
+    state.cap_overflow_launches.fetch_add(1, std::memory_order_relaxed);
+    if (sampling_dispatch_is_new(SAMPLING_DISPATCH_CAP_OVERFLOW)) {
+        std::ostringstream os;
+        os << "rejection kernel: " << unconverged << " of " << batch
+           << " rows exhausted the round cap on an earlier launch. Those rows "
+              "returned their row argmax, which is inside the filtered support, "
+              "and the launch was NOT re-sampled: the production path checks the "
+              "flags without waiting, so the token had already been emitted. "
+              "This should be unreachable (the bit-space bracket bounds the loop "
+              "at 31 rounds), so a nonzero count means the pivot arithmetic "
+              "regressed";
+        sampling_dispatch_record(SAMPLING_DISPATCH_CAP_OVERFLOW, os.str());
+    }
+    return unconverged;
+}
+
+// Probabilities the rejection kernel consumes: one softmax over the
+// temperature-scaled logits, in f32.
+//
+// f32 rather than the logit dtype on purpose. The kernel's shrinking interval
+// is a value bisection over probabilities, and an f16 probability grid has ~1e-3
+// relative resolution near 1e-5, which is coarse enough to make distinct
+// vocabulary entries collide at the top-k boundary. The cast reads the row once
+// more; against the `argsort` this replaces, that is noise.
+static mlx::core::array rejection_probabilities(
+    const mlx::core::array& logits,
+    float temperature
+) {
+    auto x = mlx::core::astype(logits, mlx::core::float32);
+    if (temperature > 0.0f && temperature != 1.0f) {
+        x = mlx::core::divide(x, mlx::core::array(temperature));
+    }
+    return mlx::core::softmax(x, -1);
+}
+
+// `[B, 3]` per-row `{top_k, top_p, min_p}` parameter block.
+//
+// The kernel reads the filter parameters per row, so one launch can serve rows
+// with different k and p values. `fused_sample` currently applies one scalar
+// config to the whole batch (its callers gate on that, see
+// `uniform_fused_batch_params` in sampling.rs), so it broadcasts a single row
+// here; the per-row capability is in the kernel for the batched scheduler to
+// use without another kernel revision.
+static mlx::core::array rejection_params(
+    int batch,
+    int32_t top_k,
+    float top_p,
+    float min_p
+) {
+    const float values[3] = {
+        static_cast<float>(top_k),
+        top_p,
+        min_p,
+    };
+    auto row = mlx::core::array(values, Shape{1, 3}, mlx::core::float32);
+    return mlx::core::broadcast_to(row, Shape{batch, 3});
+}
+
+// Filtered stochastic sampling through the rejection kernel, with the
+// convergence-cap fallback.
+//
+// Unlike the other `fused_sample` paths this one EVALUATES before it returns:
+// the per-row `ok` flags decide whether the kernel's answer stands, and that
+// decision has to be made on the host. Every production caller reads the
+// sampled ids back on the very next statement (`batched_fused_sample` calls
+// `array_to_raw_bytes`, the per-row sampler calls `item_i32`), so the sync is
+// the one that was going to happen anyway, moved a few instructions earlier.
+static std::unique_ptr<MlxArray> fused_sample_rejection_path(
+    const mlx::core::array& logits,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p,
+    int32_t max_rounds,
+    bool verify
+) {
+    const int batch = logits.shape(0);
+    const int vocab = logits.shape(1);
+
+    auto probs = rejection_probabilities(logits, temperature);
+    auto params = rejection_params(batch, top_k, top_p, min_p);
+    auto result = mlxcel::turbo::rejection_sample(probs, params, max_rounds);
+
+    if (!verify) {
+        // Production path. It must not evaluate anything.
+        //
+        // Both decode drivers are software pipelines: the CLI loop
+        // (`generate.rs`) and the batch scheduler build step n+1 and
+        // `async_eval` it, then read step n. Evaluating the converged flags here
+        // drains the queue inside that build, which collapses the pipeline. It
+        // measured 1.7x slower end to end on Qwen3-0.6B against an op-level
+        // matrix that scored the same configuration 1.14x to 1.17x FASTER,
+        // because an op-level harness synchronizes around every iteration and is
+        // structurally blind to a sync it forces on its caller.
+        // `the_production_sampling_call_never_synchronizes` is the guard.
+        //
+        // Not checking synchronously is sound, not merely cheap: the round cap
+        // cannot be reached. The bit-space bracket halves every round from a
+        // starting distance below 2^30, and once `low` and `high` are adjacent
+        // floats the proposal equals the support and the next draw is accepted
+        // unconditionally, so 31 rounds is an upper bound (see
+        // `sampling_rejection.h`). The flags are still checked, just never
+        // waited on: they are stashed and inspected on a later call once
+        // `is_available()` says the launch has landed, which in a decode loop is
+        // by the next token. If the invariant were ever violated the row returns
+        // its own argmax, which is always inside the filtered support, so the
+        // failure mode is one greedy draw rather than an invalid token, and it
+        // is counted and announced rather than silent.
+        drain_pending_verification();
+        {
+            auto& pending = pending_verification();
+            std::lock_guard<std::mutex> lock(pending.mu);
+            size_t slot = PendingVerification::SLOTS;
+            for (size_t i = 0; i < PendingVerification::SLOTS; ++i) {
+                if (!pending.ok[i].has_value()) {
+                    slot = i;
+                    break;
+                }
+            }
+            if (slot == PendingVerification::SLOTS) {
+                slot = pending.next;
+                pending.next = (pending.next + 1) % PendingVerification::SLOTS;
+            }
+            pending.ok[slot] = result.ok;
+            pending.rounds[slot] = result.rounds;
+            pending.cap[slot] = max_rounds;
+        }
+        if (sampling_dispatch_is_new(SAMPLING_DISPATCH_REJECTION)) {
+            std::ostringstream os;
+            os << "rejection kernel ("
+               << sampling_config_text(
+                      batch, vocab, temperature, top_k, top_p, min_p)
+               << ", round cap " << max_rounds
+               << "); converged flags checked without waiting, on the next launch";
+            sampling_dispatch_record(SAMPLING_DISPATCH_REJECTION, os.str());
+        }
+        return std::make_unique<MlxArray>(result.ids);
+    }
+
+    mlx::core::eval(std::vector<mlx::core::array>{result.ids, result.ok});
+    const auto* ok = result.ok.data<uint32_t>();
+    uint32_t unconverged = 0;
+    for (int row = 0; row < batch; ++row) {
+        if (ok[row] == 0u) {
+            ++unconverged;
+        }
+    }
+
+    if (unconverged == 0) {
+        if (sampling_dispatch_is_new(SAMPLING_DISPATCH_REJECTION_VERIFIED)) {
+            std::ostringstream os;
+            os << "rejection kernel, verified ("
+               << sampling_config_text(
+                      batch, vocab, temperature, top_k, top_p, min_p)
+               << ", round cap " << max_rounds
+               << "); the forced entry point reads the converged flags back and "
+                  "therefore synchronizes";
+            sampling_dispatch_record(
+                SAMPLING_DISPATCH_REJECTION_VERIFIED, os.str());
+        }
+        return std::make_unique<MlxArray>(result.ids);
+    }
+
+    // Cap overflow. The kernel's interval halves in bit space every round, so
+    // this means a row whose filter boundary sits inside a cluster the bisection
+    // could not separate, not merely slow convergence. Fall the whole launch
+    // back rather than merging per row: the fallback chain costs the same for
+    // one row as for all of them, and a merged result would mix two RNG streams.
+    auto& state = sampling_dispatch_state();
+    state.cap_overflow_rows.fetch_add(unconverged, std::memory_order_relaxed);
+    state.cap_overflow_launches.fetch_add(1, std::memory_order_relaxed);
+    if (sampling_dispatch_is_new(SAMPLING_DISPATCH_CAP_OVERFLOW)) {
+        std::ostringstream os;
+        os << "argpartition chain: " << unconverged << " of " << batch
+           << " rows exhausted the " << max_rounds
+           << "-round rejection cap and the launch fell back ("
+           << sampling_config_text(
+                  batch, vocab, temperature, top_k, top_p, min_p)
+           << ")";
+        sampling_dispatch_record(SAMPLING_DISPATCH_CAP_OVERFLOW, os.str());
+    }
+    // `rejection_semantics = true`: this configuration is routed, so
+    // `fused_sample_probs` reports the kernel's support for it. A fallback that
+    // drew from the stock chain's narrower support would silently disagree with
+    // the distribution the speculative accept test (#902) is using.
+    return std::make_unique<MlxArray>(fused_sample_argpartition_chain(
+        logits, temperature, top_k, top_p, min_p, true));
+}
+
+// Fused sampling: temperature scaling + top-k + top-p + min-p + categorical
+// in a single function call to minimize FFI round-trips.
+// Input: 2D logits [batch, vocab] (already sliced, penalties already applied)
+// Returns sampled token
+//
+// Dispatch, in order:
+// - Greedy (`temperature == 0` or `top_k == 1`): `argmax`, untouched.
+// - No-filter stochastic: the Gumbel-max kernel (#900), which drops the
+//   `categorical` normalization pass entirely.
+// - Filtered stochastic: the dual-pivot rejection kernel (#901), which drops
+//   the `argpartition` / `argsort` / `cumsum` chain entirely.
+// - Everything else: the stock chain (compiled min-p, uncompiled top-p because
+//   cumsum lacks output_shapes in MLX v0.31.x).
+//
+// `allow_kernels == false` reproduces the pre-#900/#901 behavior for A/B
+// benchmarking and parity tests.
+//
+// Every branch records its outcome for the one-shot INFO report, so a benchmark
+// arm can be proven from a log rather than assumed.
 static std::unique_ptr<MlxArray> fused_sample_impl(
     const MlxArray& logits,
     float temperature,
     int32_t top_k,
     float top_p,
     float min_p,
-    bool allow_gumbel
+    bool allow_kernels,
+    bool verify
 ) {
     auto x = logits.inner;
 
     // Greedy path: argmax
     if (temperature == 0.0f || top_k == 1) {
+        if (sampling_dispatch_is_new(SAMPLING_DISPATCH_GREEDY)) {
+            std::ostringstream os;
+            os << "argmax: greedy path (temperature " << temperature
+               << ", top_k " << top_k << "); no sampling kernel involved";
+            sampling_dispatch_record(SAMPLING_DISPATCH_GREEDY, os.str());
+        }
         return std::make_unique<MlxArray>(mlx::core::argmax(x, -1, false));
+    }
+
+    if (!allow_kernels) {
+        if (sampling_dispatch_is_new(SAMPLING_DISPATCH_REFERENCE_ARM)) {
+            sampling_dispatch_record(
+                SAMPLING_DISPATCH_REFERENCE_ARM,
+                "argpartition chain: fused_sample_categorical, the explicit "
+                "pre-#900/#901 reference arm");
+        }
+        return std::make_unique<MlxArray>(fused_sample_argpartition_chain(
+            x, temperature, top_k, top_p, min_p, false));
     }
 
     // Softmax-free stochastic sampling (#900). Batch-wide: one launch covers
     // every row of `[B, vocab]`, so the batched fused sampler needs no per-row
     // loop here. Sampled ids differ from the `categorical` path at equal seeds
     // (a different RNG consumer), but the distribution is identical.
-    if (allow_gumbel && gumbel_sample_applies(x, temperature, top_k, top_p, min_p)) {
+    if (sampling_gumbel_available() &&
+        gumbel_sample_applies(x, temperature, top_k, top_p, min_p)) {
+        if (sampling_dispatch_is_new(SAMPLING_DISPATCH_NO_FILTER)) {
+            sampling_dispatch_record(
+                SAMPLING_DISPATCH_NO_FILTER,
+                "Gumbel-max kernel (#900): no filter active, so the rejection "
+                "kernel is not involved");
+        }
         return std::make_unique<MlxArray>(
             mlxcel::turbo::gumbel_max_sample(x, temperature));
     }
 
-    x = fused_sample_filter_logits(
-        std::move(x), temperature, top_k, top_p, min_p);
+    // Sorting-free filtered sampling (#901).
+    const bool filtered = top_k > 0 || (top_p > 0.0f && top_p < 1.0f) ||
+        (min_p > 0.0f && min_p < 1.0f);
+    if (filtered) {
+        if (!sampling_rejection_available()) {
+            const SamplingDispatchKind kind =
+                mlxcel::turbo::rejection_sample_supported()
+                ? SAMPLING_DISPATCH_KILL_SWITCH
+                : SAMPLING_DISPATCH_BACKEND_UNSUPPORTED;
+            if (sampling_dispatch_is_new(kind)) {
+                sampling_dispatch_record(
+                    kind,
+                    kind == SAMPLING_DISPATCH_KILL_SWITCH
+                        ? "argpartition chain: pinned by "
+                          "MLXCEL_SAMPLING_REJECTION"
+                        : "argpartition chain: no Metal or CUDA GPU backend "
+                          "for the rejection kernel");
+            }
+        } else if (!mlxcel::turbo::rejection_sample_accepts(x)) {
+            if (sampling_dispatch_is_new(SAMPLING_DISPATCH_SHAPE_UNSUPPORTED)) {
+                std::ostringstream os;
+                os << "argpartition chain: the rejection kernel cannot serve "
+                      "this input (ndim "
+                   << x.ndim() << ")";
+                sampling_dispatch_record(
+                    SAMPLING_DISPATCH_SHAPE_UNSUPPORTED, os.str());
+            }
+        } else if (!rejection_sample_applies(x, temperature, top_k, top_p, min_p)) {
+            if (sampling_dispatch_is_new(SAMPLING_DISPATCH_NOT_ROUTED)) {
+                sampling_dispatch_record(
+                    SAMPLING_DISPATCH_NOT_ROUTED,
+                    rejection_not_routed_reason(
+                        x.shape(1), top_k, top_p, min_p));
+            }
+        } else {
+            return fused_sample_rejection_path(
+                x,
+                temperature,
+                top_k,
+                top_p,
+                min_p,
+                mlxcel::turbo::REJECTION_MAX_ROUNDS,
+                verify);
+        }
+    }
 
-    // Categorical sampling (not compiled — random ops need known shapes at trace time)
-    return std::make_unique<MlxArray>(mlx::core::random::categorical(x, -1));
+    // Not routed, so the stock support is what this configuration samples and
+    // what `fused_sample_probs` reports.
+    return std::make_unique<MlxArray>(fused_sample_argpartition_chain(
+        x, temperature, top_k, top_p, min_p, false));
 }
 
 std::unique_ptr<MlxArray> fused_sample(
@@ -4693,7 +5492,61 @@ std::unique_ptr<MlxArray> fused_sample(
     float min_p
 ) {
     return fused_sample_impl(
-        logits, temperature, top_k, top_p, min_p, sampling_gumbel_available());
+        logits, temperature, top_k, top_p, min_p, true, false);
+}
+
+std::unique_ptr<MlxArray> fused_sample_rejection(
+    const MlxArray& logits,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p,
+    int32_t max_rounds
+) {
+    return fused_sample_rejection_path(
+        logits.inner, temperature, top_k, top_p, min_p, max_rounds, true);
+}
+
+std::unique_ptr<MlxArray> fused_sample_rejection_deferred(
+    const MlxArray& logits,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p,
+    int32_t max_rounds
+) {
+    const int batch = logits.inner.shape(0);
+    auto probs = rejection_probabilities(logits.inner, temperature);
+    auto params = rejection_params(batch, top_k, top_p, min_p);
+    auto result = mlxcel::turbo::rejection_sample(probs, params, max_rounds);
+
+    // Land the launch and inspect ITS OWN flags, rather than parking them in the
+    // deferred ring and hoping to find them again. The ring is best-effort by
+    // design: production drains it on the next sampler call, and a burst of
+    // launches from other threads can evict an entry that has not landed yet.
+    // That is the right trade for a diagnostic on the hot path, and the wrong
+    // basis for a test, so the hook exercises the counting rule directly through
+    // the same `count_and_report_overflow` the drain uses.
+    mlx::core::eval(std::vector<mlx::core::array>{
+        result.ids, result.ok, result.rounds});
+    count_and_report_overflow(result.ok, result.rounds, max_rounds);
+    return std::make_unique<MlxArray>(result.ids);
+}
+
+std::unique_ptr<MlxArray> sampling_rejection_probe(
+    const MlxArray& logits,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p,
+    int32_t max_rounds
+) {
+    const int batch = logits.inner.shape(0);
+    auto probs = rejection_probabilities(logits.inner, temperature);
+    auto params = rejection_params(batch, top_k, top_p, min_p);
+    auto result = mlxcel::turbo::rejection_sample(probs, params, max_rounds);
+    return std::make_unique<MlxArray>(mlx::core::stack(
+        {result.ids, result.ok, result.rounds}, 0));
 }
 
 std::unique_ptr<MlxArray> fused_sample_categorical(
@@ -4703,7 +5556,8 @@ std::unique_ptr<MlxArray> fused_sample_categorical(
     float top_p,
     float min_p
 ) {
-    return fused_sample_impl(logits, temperature, top_k, top_p, min_p, false);
+    return fused_sample_impl(
+        logits, temperature, top_k, top_p, min_p, false, true);
 }
 
 // The exact categorical distribution `fused_sample` draws from, as a float32
@@ -4743,8 +5597,16 @@ std::unique_ptr<MlxArray> fused_sample_probs(
             mlx::core::astype(one_hot, mlx::core::float32));
     }
 
+    // Follow the sampler's routing (#901). When `fused_sample` sends this
+    // configuration to the rejection kernel, the kernel's support is what it
+    // draws from, and for top-k with top-p that is a superset of the stock
+    // chain's. Reporting the stock support there would understate the target's
+    // support and make the modified-rejection accept test reject tokens the
+    // target could actually have produced.
+    const bool rejection_semantics =
+        rejection_path_selected(x, temperature, top_k, top_p, min_p);
     x = fused_sample_filter_logits(
-        std::move(x), temperature, top_k, top_p, min_p);
+        std::move(x), temperature, top_k, top_p, min_p, rejection_semantics);
     return std::make_unique<MlxArray>(
         mlx::core::softmax(mlx::core::astype(x, mlx::core::float32), -1, /*precise=*/true));
 }

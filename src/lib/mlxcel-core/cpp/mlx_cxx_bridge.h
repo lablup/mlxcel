@@ -1322,6 +1322,91 @@ bool sampling_gumbel_available();
 // Exposed so tests can pin that the sampled id does not depend on it.
 int32_t gumbel_sample_num_splits(int32_t batch, int32_t vocab);
 
+// Dual-pivot rejection sampling for top-k / top-p / min-p (#901), forced.
+// Bypasses the `MLXCEL_SAMPLING_REJECTION` gate and takes an explicit round cap
+// so a test can drive the cap-overflow fallback. Falls back to the
+// `argpartition` chain exactly as the production path does when a row fails to
+// converge, and counts the event.
+std::unique_ptr<MlxArray> fused_sample_rejection(
+    const MlxArray& logits,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p,
+    int32_t max_rounds
+);
+
+// The production rejection launch with an explicit round cap, landed and
+// checked in place. Shares `count_and_report_overflow` with the deferred drain,
+// so a test can pin the overflow counting rule and its report without depending
+// on the best-effort ring that delivers flags in production.
+std::unique_ptr<MlxArray> fused_sample_rejection_deferred(
+    const MlxArray& logits,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p,
+    int32_t max_rounds
+);
+
+// Raw rejection kernel outputs, stacked as `[3, batch]` uint32:
+// row 0 sampled ids, row 1 the per-row converged flag, row 2 rounds consumed.
+// No host readback and no fallback, so a test can observe the kernel's own
+// verdict rather than the caller's reaction to it.
+std::unique_ptr<MlxArray> sampling_rejection_probe(
+    const MlxArray& logits,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p,
+    int32_t max_rounds
+);
+
+// True when `fused_sample`'s filtered path takes the rejection kernel: backend
+// support plus a non-falsy `MLXCEL_SAMPLING_REJECTION`.
+bool sampling_rejection_available();
+
+// Pure routing policy: would this configuration go to the rejection kernel,
+// ignoring backend support and the env switch? The kernel replaces a sort, so
+// it is routed only where the stock chain sorts (top-p active), and the
+// top-k + top-p combination is capped at the vocabulary where it measured a
+// win. See the measurement table above the definition.
+bool sampling_rejection_routes(
+    int32_t vocab,
+    int32_t top_k,
+    float top_p,
+    float min_p
+);
+
+// Threads per threadgroup the rejection kernel launches with.
+int32_t sampling_rejection_threadgroup_size();
+
+// Rejection rounds the production path allows before falling back.
+int32_t sampling_rejection_max_rounds();
+
+// Rows that exhausted the rejection round cap, cumulative.
+uint64_t sampling_rejection_cap_overflow_rows();
+
+// Launches in which at least one row exhausted the cap.
+uint64_t sampling_rejection_cap_overflow_launches();
+
+// Bitmask of sampling dispatch outcome kinds recorded but not yet drained.
+uint32_t sampling_dispatch_pending_kinds();
+
+// Pop one pending dispatch outcome description, or "" when none is pending.
+rust::String sampling_dispatch_drain_report();
+
+// Every dispatch outcome description recorded since the last reset,
+// newline-joined. Non-destructive, unlike the drain above.
+rust::String sampling_dispatch_recorded_report();
+
+// Inspect every deferred rejection launch that has landed, now. Non-blocking:
+// a launch still in flight is left for later. For tests.
+void sampling_dispatch_drain_pending();
+
+// Clear every recorded dispatch outcome and both cap-overflow counters.
+void sampling_dispatch_reset();
+
 // SSM (State Space Model) primitives for Mamba/Jamba/Nemotron-H.
 // Cumulative sum along axis
 std::unique_ptr<MlxArray> cumsum(const MlxArray& a, int32_t axis, bool reverse, bool inclusive);

@@ -162,8 +162,10 @@ fn build_scheduler(
 }
 
 /// A stochastic sampling config seeded with `seed`. `temperature > 0` with
-/// `top_p < 1` forces the categorical (RNG-consuming) path of `fused_sample`,
-/// not the argmax path, so the seed is load-bearing.
+/// `top_p < 1` forces a filtered RNG-consuming path of `fused_sample` (the
+/// dual-pivot rejection kernel since issue #901, the `argsort` + `categorical`
+/// chain under `MLXCEL_SAMPLING_REJECTION=0`), not the argmax path, so the seed
+/// is load-bearing either way.
 fn stochastic(seed: u64) -> SamplingConfig {
     SamplingConfig {
         temperature: 1.0,

@@ -534,7 +534,12 @@ fn fused_sample_routes_the_no_filter_path_to_the_gumbel_kernel() {
 }
 
 #[test]
-fn filtered_configs_stay_bit_identical_to_the_categorical_path() {
+fn filtered_configs_never_reach_the_gumbel_kernel() {
+    // A filtered config routes to the #901 rejection kernel, which parks its
+    // converged flags in a process-global ring for the deferred check. Taking
+    // the shared guard keeps this test from evicting a launch another test is
+    // waiting to inspect.
+    let _dispatch = crate::sampling_dispatch::dispatch_test_guard();
     if !gpu_backend() {
         return;
     }
@@ -547,6 +552,16 @@ fn filtered_configs_stay_bit_identical_to_the_categorical_path() {
     let batched = from_slice_f32(&tiled, &[rows as i32, logits.len() as i32]);
 
     // (top_k, top_p, min_p): every per-request filter, alone and combined.
+    //
+    // Before #901 this asserted bit-identity with `fused_sample_categorical`,
+    // because a filtered config had nowhere else to go. It now goes to the
+    // dual-pivot rejection kernel, which draws from the same truncated support
+    // through a different RNG consumer, so bit-identity is gone by design and
+    // `sampling_rejection_tests.rs` carries the support-equality and
+    // goodness-of-fit guards instead. What is still true, and is what this test
+    // exists to pin, is that a filtered config never reaches the Gumbel-max
+    // kernel: that kernel draws from the FULL softmax and would ignore the
+    // filter entirely.
     let filtered = [
         (40i32, 1.0f32, 0.0f32),
         (0, 0.9, 0.0),
@@ -557,13 +572,15 @@ fn filtered_configs_stay_bit_identical_to_the_categorical_path() {
         random_seed(0xBEEF);
         let through_fused = token_ids(&fused_sample(&batched, 1.0, top_k, top_p, min_p));
         random_seed(0xBEEF);
-        let reference = token_ids(&fused_sample_categorical(
-            &batched, 1.0, top_k, top_p, min_p,
-        ));
-        assert_eq!(
-            through_fused, reference,
-            "top_k={top_k} top_p={top_p} min_p={min_p} diverged from the \
-             categorical path; a filtered config must never reach the kernel"
+        let unfiltered = token_ids(&gumbel_max_sample(&batched, 1.0));
+        assert_ne!(
+            through_fused, unfiltered,
+            "top_k={top_k} top_p={top_p} min_p={min_p} produced the unfiltered \
+             Gumbel-max stream; the filter was dropped"
+        );
+        assert!(
+            through_fused.iter().all(|&id| (id as usize) < logits.len()),
+            "top_k={top_k} top_p={top_p} min_p={min_p} produced an out-of-range token"
         );
     }
 }

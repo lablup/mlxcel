@@ -68,6 +68,11 @@ fn main() {
         // `argpartition` sort on the no-filter sampling path with one
         // index-carrying max reduction over the vocabulary.
         .file("../mlx-cpp/turbo/sampling.cpp")
+        // Sorting-free top-k / top-p / min-p sampling by dual-pivot rejection
+        // (#901). Replaces the `argpartition` + `argsort` + `cumsum` filter
+        // chain with a shrinking probability interval resolved by two pivots
+        // per vocabulary sweep.
+        .file("../mlx-cpp/turbo/sampling_rejection.cpp")
         // Fused residual-add + RMSNorm and fused q/k RoPE + KV-append-layout
         // decode kernel launchers (#905). Both are two/three-output custom
         // kernels: MLX arrays are immutable from the graph's perspective, so
@@ -195,6 +200,8 @@ fn main() {
     // Gumbel-max categorical sampling kernel launcher (#900).
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling.cpp");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling_rejection.h");
+    println!("cargo:rerun-if-changed=../mlx-cpp/turbo/sampling_rejection.cpp");
     // Fused residual-add RMSNorm and fused RoPE + KV-append kernel launchers (#905).
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_norm.h");
     println!("cargo:rerun-if-changed=../mlx-cpp/turbo/fused_norm.cpp");

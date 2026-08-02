@@ -309,6 +309,9 @@ fn sample_token_optimized_core(
         config.top_p,
         config.min_p,
     );
+    // Announce a newly-seen dispatch outcome at INFO. Costs one `u32` load per
+    // step in steady state; see `sampling_dispatch` for why this is not `debug`.
+    crate::sampling_dispatch::report_sampling_dispatch();
     (token, last_logits)
 }
 
@@ -479,6 +482,9 @@ pub fn sample_token_with_distribution(
         config.top_p,
         config.min_p,
     );
+    // Announce a newly-seen dispatch outcome at INFO. Costs one `u32` load per
+    // step in steady state; see `sampling_dispatch` for why this is not `debug`.
+    crate::sampling_dispatch::report_sampling_dispatch();
     let probs = ffi::fused_sample_probs(
         &processed,
         config.temperature,
@@ -679,6 +685,7 @@ pub fn batched_fused_sample(logits: &MlxArray, params: &FusedSampleParams) -> Ve
         params.top_p,
         params.min_p,
     );
+    crate::sampling_dispatch::report_sampling_dispatch();
     token_ids_to_host(&tokens)
 }
 
@@ -1256,9 +1263,12 @@ pub(crate) fn top_k_filter(logits: &MlxArray, k: i32) -> UniquePtr<MlxArray> {
 ///   7. argsort(sorted_indices, axis=-1) → indices to undo the sort per row
 ///   8. take_along_axis(filtered_sorted_logits, unsort_indices, axis=-1) → result
 ///
-/// Note: production generation routes through the C++ `fused_sample` → C++ `top_p_filter`
-/// at `cpp/mlx_cxx_bridge.cpp`. This Rust implementation is a reference/test-parity
-/// copy used to validate the algorithm and in unit tests for batched correctness.
+/// Note: production generation routes through the C++ `fused_sample`, which
+/// since issue #901 resolves top-p inside the dual-pivot rejection kernel and
+/// reaches the C++ `top_p_filter` at `cpp/mlx_cxx_bridge.cpp` only under
+/// `MLXCEL_SAMPLING_REJECTION=0` or after a convergence-cap fallback. This Rust
+/// implementation is a reference/test-parity copy used to validate the
+/// algorithm and in unit tests for batched correctness.
 ///
 /// Used by: unit tests (`top_p_filter_*` in `sampling::tests`)
 #[allow(dead_code)]
