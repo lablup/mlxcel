@@ -28,6 +28,11 @@
 //!    c. Accept matching prefix, rewind caches for rejected tokens
 //!    d. Continue from the divergence point
 //!
+//! Step 3c is the acceptance rule. At `temperature == 0` it is the argmax
+//! comparison described above. At `temperature > 0` it is modified rejection
+//! sampling, which preserves the target model's distribution exactly; see
+//! [`stochastic_accept`].
+//!
 //! ## Sibling modules
 //!
 //! - [`mtp`] — Multi-Token Prediction (MTP) round-loop generator for the
@@ -36,17 +41,25 @@
 //!   (drafter has no own KV cache; verify is a single forward over the
 //!   whole draft block; rollback uses per-row tail-zero rather than
 //!   `trim_caches`). See [`mtp::MtpGenerator`].
+//! - [`stochastic_accept`] — the distribution-preserving acceptance rule and
+//!   its residual resample, shared by every speculative verify path.
 
 pub mod mtp;
+pub mod stochastic_accept;
 
 use crate::cache::can_trim_prompt_cache;
 use crate::ffi;
+use crate::ffi::MlxArray;
 use crate::ffi::MlxThreadLocalStream;
 use crate::generate::{GenerationStats, LanguageModel, SamplingConfig};
 use crate::generation_policy::{initial_token_history, merged_eos_token_ids};
 use crate::hardware;
 use crate::layers::KVCache;
-use crate::sampling::{TokenBiasMap, sample_token_optimized};
+use crate::sampling::{
+    TokenBiasMap, effective_token_distribution, sample_token_optimized,
+    sample_token_with_distribution,
+};
+use stochastic_accept::{AcceptanceRule, DraftVerdict};
 use crate::streams::{install_thread_local_default_stream, new_thread_local_generation_stream};
 use crate::utils::{align_to_na_tile, create_padded_prefill_mask};
 use cxx::UniquePtr;
@@ -333,6 +346,18 @@ impl SpeculativeGenerator {
         }
 
         // DECODE PHASE.
+        //
+        // Acceptance policy for this call (issue #902). This generator owns
+        // the draft sampler, so it can always report the distribution each
+        // proposal was drawn from; `has_proposal_distribution` is
+        // unconditionally true here. The remaining gates are the target
+        // sampler being stochastic and the env kill switch. The chosen rule is
+        // logged once per process per kind at info level, so a server log
+        // proves which rule a run used.
+        let rule = stochastic_accept::acceptance_rule(target_sampling, true);
+        stochastic_accept::note_rule(rule);
+        let stochastic = rule == AcceptanceRule::Stochastic;
+
         let decode_start = Instant::now();
         let mut current_token = first_token;
         let mut done = false;
@@ -340,6 +365,10 @@ impl SpeculativeGenerator {
         while self.generated_tokens.len() < max_tokens && !done {
             // Step 1: Generate draft tokens
             let mut draft_tokens = Vec::with_capacity(num_draft);
+            // `q` per drafted position, in proposal order. Populated only on
+            // the stochastic path; the argmax path allocates nothing and runs
+            // exactly the pre-#902 code.
+            let mut draft_probs: Vec<UniquePtr<MlxArray>> = Vec::new();
             let mut draft_token = current_token;
 
             for _ in 0..num_draft {
@@ -347,8 +376,19 @@ impl SpeculativeGenerator {
                 let draft_logits = draft_model.forward(&draft_input, &mut self.draft_caches, None);
                 // Axis B: draft sampler MUST NOT see the bias. See
                 // `draft_sampling` for the rationale.
-                let (tok_arr, _) =
-                    sample_token_optimized(&draft_logits, draft_sampling, &token_history);
+                let tok_arr = if stochastic {
+                    // The token and `q` come out of one pre-step, which is what
+                    // guarantees `q` is the distribution this very token was
+                    // drawn from rather than a later reconstruction. `q` is
+                    // left unevaluated: a chain that gets rejected at an
+                    // earlier position never materializes the tail.
+                    let (tok_arr, probs) =
+                        sample_token_with_distribution(&draft_logits, draft_sampling, &token_history);
+                    draft_probs.push(probs);
+                    tok_arr
+                } else {
+                    sample_token_optimized(&draft_logits, draft_sampling, &token_history).0
+                };
                 ffi::eval(&tok_arr);
                 draft_token = ffi::item_i32(&tok_arr);
                 draft_tokens.push(draft_token);
@@ -454,13 +494,35 @@ impl SpeculativeGenerator {
                 // Reshape to [1, 1, vocab] for sample_token_optimized
                 let pos_logits = ffi::reshape(&pos_logits, &[1, 1, main_shape[2]]);
 
-                // Axis B: target verification uses the bias-augmented sampling.
-                let (main_tok_arr, _) =
-                    sample_token_optimized(&pos_logits, target_sampling, &token_history);
-                ffi::eval(&main_tok_arr);
-                let main_token = ffi::item_i32(&main_tok_arr);
+                // Axis B: target verification uses the bias-augmented sampling
+                // on both arms.
+                //
+                // `accept_token` is the token kept when the draft is accepted;
+                // `replacement` is the token emitted when it is not. Both arms
+                // produce the same pair so the bookkeeping below is shared.
+                let (accept_draft, replacement) = if stochastic {
+                    // `p` at this position, conditioned on the tokens accepted
+                    // so far in this round (`token_history` grows as we
+                    // accept), which is the correct target conditional.
+                    let target_probs =
+                        effective_token_distribution(&pos_logits, target_sampling, &token_history);
+                    match stochastic_accept::verify_draft_token(
+                        &target_probs,
+                        &draft_probs[i],
+                        draft_token,
+                    ) {
+                        DraftVerdict::Accept => (true, draft_token),
+                        DraftVerdict::Reject { replacement } => (false, replacement),
+                    }
+                } else {
+                    let (main_tok_arr, _) =
+                        sample_token_optimized(&pos_logits, target_sampling, &token_history);
+                    ffi::eval(&main_tok_arr);
+                    let main_token = ffi::item_i32(&main_tok_arr);
+                    (main_token == draft_token, main_token)
+                };
 
-                if main_token == draft_token {
+                if accept_draft {
                     // Accept draft token
                     accepted += 1;
 
@@ -479,13 +541,17 @@ impl SpeculativeGenerator {
                         break;
                     }
                 } else {
-                    // Reject: use main model's token instead
-                    if eos_tokens.contains(&main_token) {
+                    // Reject: emit the target-side replacement instead. On the
+                    // argmax rule that is the target sampler's own draw; on
+                    // the stochastic rule it is a draw from the normalized
+                    // residual `relu(p - q)`, which is what makes the emitted
+                    // stream distributed as `p`.
+                    if eos_tokens.contains(&replacement) {
                         done = true;
                     } else {
-                        self.generated_tokens.push(main_token);
+                        self.generated_tokens.push(replacement);
                         if needs_history {
-                            token_history.push(main_token);
+                            token_history.push(replacement);
                         }
                     }
                     break;

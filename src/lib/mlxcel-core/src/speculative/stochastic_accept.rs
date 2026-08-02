@@ -1,0 +1,422 @@
+// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Distribution-preserving speculative acceptance (chain speculative sampling).
+//!
+//! # What is wrong with argmax acceptance
+//!
+//! The pre-#902 verify rule accepts a drafted token `t` at position `i` iff it
+//! equals the token the target sampler happens to draw at that position. At
+//! `temperature == 0` that sampler is `argmax`, the draw is deterministic, and
+//! the rule is exactly "does the draft agree with the target's greedy choice".
+//! That rule is lossless: the emitted stream is the greedy target stream.
+//!
+//! At `temperature > 0` the same rule is *not* lossless. The target sampler is
+//! re-drawn at each verify position, and a drafted token survives only when
+//! that independent draw lands on it. The resulting stream is neither the
+//! target's temperature distribution nor the draft's; it is biased toward
+//! high-probability tokens (the ones a fresh draw is likely to reproduce),
+//! which is why turning speculation on visibly changes generation behavior at
+//! the same seed and temperature.
+//!
+//! # The rule implemented here
+//!
+//! Modified rejection sampling, from Leviathan et al. 2023 ("Fast Inference
+//! from Transformers via Speculative Decoding", Algorithm 1) and Chen et al.
+//! 2023 ("Accelerating Large Language Model Decoding with Speculative
+//! Sampling"). Write `p` for the target's effective distribution at the
+//! position and `q` for the distribution the drafter actually proposed from:
+//!
+//! 1. Draw `u ~ U[0, 1)`. **Accept `t` iff `u * q(t) <= p(t)`**, i.e. accept
+//!    with probability `min(1, p(t) / q(t))`.
+//! 2. On the first rejection, emit one token drawn from the **residual**
+//!    `normalize(relu(p - q))` and end the chain there.
+//! 3. If every drafted token was accepted, emit a bonus token drawn from `p`
+//!    at the final verify position (unchanged from before).
+//!
+//! ## Why this preserves the target distribution
+//!
+//! Fix a position and let `A` be the accept event. For any token `x`:
+//!
+//! ```text
+//! P(emit x) = P(propose x, accept x) + P(reject) * P(residual draws x)
+//!           = q(x) * min(1, p(x)/q(x))  +  beta * relu(p(x) - q(x)) / beta
+//!           = min(q(x), p(x))           +  relu(p(x) - q(x))
+//!           = p(x)
+//! ```
+//!
+//! where `beta = sum_y relu(p(y) - q(y)) = 1 - sum_y min(p(y), q(y)) = P(reject)`,
+//! so the normalizing constant of the residual cancels the rejection
+//! probability exactly. The final line is the identity
+//! `min(a, b) + max(a - b, 0) = a`. The argument holds for **any** proposal
+//! `q` whose support is not required to relate to `p` in any way, which is
+//! what makes the rest of the pipeline safe: a drafter that proposes greedily
+//! (`q` one-hot), a drafter whose penalties were computed against a stale
+//! token history, and a drafter that is a different model family all remain
+//! lossless as long as `q` is *the distribution the token was actually drawn
+//! from*. That is the one invariant every caller must maintain, and it is why
+//! [`crate::sampling::sample_token_with_distribution`] returns the token and
+//! its distribution from a single pre-step rather than recomputing `q` later.
+//!
+//! Chaining over a draft block is the same argument applied inductively: the
+//! chain only reaches position `i` when positions `0..i` were accepted, in
+//! which case the target's context at `i` is exactly the context the drafter
+//! conditioned on, so `p_i` and `q_i` are distributions over the same
+//! conditional.
+//!
+//! ## Temperature 0 is untouched
+//!
+//! [`acceptance_rule`] returns [`AcceptanceRule::Argmax`] whenever the target
+//! sampler is greedy (`temperature == 0.0` or `top_k == 1`), and the caller
+//! keeps running the pre-#902 comparison verbatim: no distribution tensors are
+//! built, no randomness is drawn, and the token stream is byte-identical.
+//!
+//! # Observability
+//!
+//! Every distinct outcome kind is logged once per process at **info** level
+//! (see [`note_rule`] and [`note_outcome`]). A production log therefore proves
+//! which acceptance rule a run actually used, and whether the residual
+//! resample and its degenerate fallback were ever reached. The one-shot latch
+//! is per kind, not global, so a later-appearing kind is not swallowed by an
+//! earlier one.
+//!
+//! # Kill switch
+//!
+//! `MLXCEL_SPECULATIVE_STOCHASTIC_ACCEPT=0` (also `false` / `no` / `off`)
+//! restores argmax acceptance at every temperature. Read once per process.
+
+use crate::dtype;
+use crate::ffi;
+use crate::ffi::MlxArray;
+use crate::generate::SamplingConfig;
+use cxx::UniquePtr;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Environment kill switch restoring pre-#902 argmax acceptance.
+pub const STOCHASTIC_ACCEPT_ENV: &str = "MLXCEL_SPECULATIVE_STOCHASTIC_ACCEPT";
+
+/// Which acceptance rule a speculative verify round runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AcceptanceRule {
+    /// The target sampler is greedy, so the modified rejection-sampling test
+    /// degenerates to "the drafted token is the argmax". Kept on the original
+    /// integer comparison: identical outcome, none of the tensor work.
+    Argmax,
+    /// The target sampler is stochastic but [`STOCHASTIC_ACCEPT_ENV`] disabled
+    /// the new rule. Biased at `temperature > 0`; opt-in only.
+    ArgmaxKillSwitch,
+    /// The target sampler is stochastic and the caller supplied the proposal
+    /// distribution: modified rejection sampling with residual resample.
+    Stochastic,
+    /// The target sampler is stochastic but the drafter could not report the
+    /// distribution it proposed from, so the accept test has no `q` and the
+    /// round falls back to the biased argmax comparison.
+    ArgmaxNoProposalDistribution,
+}
+
+impl AcceptanceRule {
+    /// True when this rule preserves the target model's token distribution.
+    #[inline]
+    pub fn is_distribution_preserving(self) -> bool {
+        matches!(self, Self::Argmax | Self::Stochastic)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Argmax => "argmax (greedy target sampler)",
+            Self::ArgmaxKillSwitch => "argmax (stochastic acceptance disabled by env)",
+            Self::Stochastic => "stochastic (modified rejection sampling)",
+            Self::ArgmaxNoProposalDistribution => {
+                "argmax (drafter reported no proposal distribution)"
+            }
+        }
+    }
+
+    fn latch(self) -> &'static AtomicBool {
+        static ARGMAX: AtomicBool = AtomicBool::new(false);
+        static KILL_SWITCH: AtomicBool = AtomicBool::new(false);
+        static STOCHASTIC: AtomicBool = AtomicBool::new(false);
+        static NO_Q: AtomicBool = AtomicBool::new(false);
+        match self {
+            Self::Argmax => &ARGMAX,
+            Self::ArgmaxKillSwitch => &KILL_SWITCH,
+            Self::Stochastic => &STOCHASTIC,
+            Self::ArgmaxNoProposalDistribution => &NO_Q,
+        }
+    }
+}
+
+/// What happened to one drafted token under [`AcceptanceRule::Stochastic`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AcceptanceOutcome {
+    /// `u * q(t) <= p(t)` held: the drafted token was kept.
+    Accepted,
+    /// The drafted token was rejected and replaced by a draw from the
+    /// normalized residual `relu(p - q)`.
+    ResidualResample,
+    /// The residual carried no mass at all, so the replacement was drawn from
+    /// the target distribution `p` instead. Unreachable in exact arithmetic
+    /// (a rejection implies positive residual mass); reachable only when every
+    /// positive entry of `p - q` underflows float32.
+    ResidualDegenerateFallback,
+}
+
+impl AcceptanceOutcome {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Accepted => "accept",
+            Self::ResidualResample => "reject, resampled from normalized relu(p - q)",
+            Self::ResidualDegenerateFallback => {
+                "reject, residual mass underflowed to zero, resampled from target p"
+            }
+        }
+    }
+
+    fn latch(self) -> &'static AtomicBool {
+        static ACCEPTED: AtomicBool = AtomicBool::new(false);
+        static RESIDUAL: AtomicBool = AtomicBool::new(false);
+        static DEGENERATE: AtomicBool = AtomicBool::new(false);
+        match self {
+            Self::Accepted => &ACCEPTED,
+            Self::ResidualResample => &RESIDUAL,
+            Self::ResidualDegenerateFallback => &DEGENERATE,
+        }
+    }
+}
+
+/// Log the first occurrence of each distinct acceptance rule at info level.
+///
+/// One latch per variant, not one global flag: a run that starts greedy and
+/// later serves a `temperature > 0` request logs both lines, so the log is a
+/// complete record of which rules the process ever ran.
+pub fn note_rule(rule: AcceptanceRule) {
+    if !rule.latch().swap(true, Ordering::Relaxed) {
+        tracing::info!(
+            rule = rule.label(),
+            distribution_preserving = rule.is_distribution_preserving(),
+            "speculative acceptance rule active"
+        );
+    }
+}
+
+/// Log the first occurrence of each distinct per-token outcome at info level.
+pub fn note_outcome(outcome: AcceptanceOutcome) {
+    if !outcome.latch().swap(true, Ordering::Relaxed) {
+        tracing::info!(
+            outcome = outcome.label(),
+            "speculative stochastic acceptance outcome first seen"
+        );
+    }
+}
+
+/// Reset every one-shot log latch. Test-only.
+#[cfg(test)]
+pub(crate) fn reset_log_latches() {
+    for rule in [
+        AcceptanceRule::Argmax,
+        AcceptanceRule::ArgmaxKillSwitch,
+        AcceptanceRule::Stochastic,
+        AcceptanceRule::ArgmaxNoProposalDistribution,
+    ] {
+        rule.latch().store(false, Ordering::Relaxed);
+    }
+    for outcome in [
+        AcceptanceOutcome::Accepted,
+        AcceptanceOutcome::ResidualResample,
+        AcceptanceOutcome::ResidualDegenerateFallback,
+    ] {
+        outcome.latch().store(false, Ordering::Relaxed);
+    }
+}
+
+/// True when a [`SamplingConfig`] makes the fused sampler deterministic.
+///
+/// Mirrors the greedy short-circuit in `fused_sample_impl`
+/// (`temperature == 0.0f || top_k == 1` selects `argmax`). Keeping the two in
+/// step matters: if this predicate said "stochastic" for a config the sampler
+/// treats as greedy, the accept test would compare against a one-hot `p` and
+/// reject every non-argmax draft for no reason.
+#[inline]
+pub fn sampler_is_greedy(config: &SamplingConfig) -> bool {
+    config.temperature == 0.0 || config.top_k == 1
+}
+
+/// Whether the stochastic rule is enabled for this process.
+///
+/// Reads [`STOCHASTIC_ACCEPT_ENV`] once. Absent or any non-falsy value means
+/// enabled.
+pub fn stochastic_accept_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| match std::env::var(STOCHASTIC_ACCEPT_ENV) {
+        Ok(raw) => !matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        Err(_) => true,
+    })
+}
+
+/// Pick the acceptance rule for a verify round.
+///
+/// `has_proposal_distribution` is the caller's assertion that it can supply
+/// `q` for every drafted position. A drafter that cannot report what it
+/// proposed from leaves the round on argmax rather than silently inventing a
+/// `q`, because an invented `q` breaks the losslessness proof outright.
+pub fn acceptance_rule(
+    target_config: &SamplingConfig,
+    has_proposal_distribution: bool,
+) -> AcceptanceRule {
+    if sampler_is_greedy(target_config) {
+        AcceptanceRule::Argmax
+    } else if !stochastic_accept_enabled() {
+        AcceptanceRule::ArgmaxKillSwitch
+    } else if !has_proposal_distribution {
+        AcceptanceRule::ArgmaxNoProposalDistribution
+    } else {
+        AcceptanceRule::Stochastic
+    }
+}
+
+/// The verdict for one drafted token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DraftVerdict {
+    /// Keep the drafted token and continue the chain.
+    Accept,
+    /// Drop the drafted token, emit `replacement`, and end the chain.
+    Reject {
+        /// Token drawn from the normalized residual (or from `p` in the
+        /// degenerate case recorded by [`AcceptanceOutcome`]).
+        replacement: i32,
+    },
+}
+
+/// Read `probs[0, token]` back to the host as an `f32`.
+///
+/// `probs` is `[batch, vocab]`; only row 0 is read, which is all the B=1
+/// speculative paths need.
+fn probability_of(probs: &MlxArray, token: i32) -> UniquePtr<MlxArray> {
+    let index = ffi::from_slice_i32(&[token], &[1, 1]);
+    ffi::take_along_axis(probs, &index, -1)
+}
+
+/// The modified rejection-sampling accept test for one drafted token.
+///
+/// * `target_probs` — `p`, float32 `[1, vocab]`, from
+///   [`crate::sampling::effective_token_distribution`] on the target's logits
+///   at this verify position.
+/// * `proposal_probs` — `q`, float32 `[1, vocab]`, the distribution the
+///   drafter drew `draft_token` from. Must be the *actual* proposal
+///   distribution; see the module docs.
+///
+/// Accepts iff `p(t) > 0` **and** `u * q(t) <= p(t)` for a fresh `u ~ U[0, 1)`.
+///
+/// The `p(t) > 0` conjunct is not cosmetic. When the target's top-k / top-p /
+/// min-p filter excludes the drafted token, `p(t)` is exactly zero and the
+/// token must always be rejected. Without the conjunct a `q(t)` that has
+/// underflowed float32 to zero would make the product `0 <= 0` and accept a
+/// token the target assigns no mass at all, which is precisely the failure the
+/// whole change exists to prevent.
+///
+/// One `eval` and one host readback per call, the same synchronization cost as
+/// the argmax comparison it replaces.
+pub fn accept_draft_token(
+    target_probs: &MlxArray,
+    proposal_probs: &MlxArray,
+    draft_token: i32,
+) -> bool {
+    let p_t = probability_of(target_probs, draft_token);
+    let q_t = probability_of(proposal_probs, draft_token);
+
+    // SAFETY: a null key means "draw from the thread-local default RNG state",
+    // the same convention `apply_xtc_step` and `layers.rs` use. Drawing through
+    // MLX's key sequence keeps the accept decisions reproducible under
+    // `ffi::random_seed`.
+    let u = unsafe { ffi::random_uniform(0.0, 1.0, &[1, 1], dtype::FLOAT32, std::ptr::null()) };
+
+    let zero = ffi::zeros(&[1, 1], dtype::FLOAT32);
+    let target_has_mass = ffi::greater(&p_t, &zero);
+    let within_ratio = ffi::less_equal(&ffi::multiply(&u, &q_t), &p_t);
+    let accept = ffi::logical_and(&target_has_mass, &within_ratio);
+
+    ffi::eval(&accept);
+    ffi::item_bool(&accept)
+}
+
+/// Draw the replacement token from the normalized residual `relu(p - q)`.
+///
+/// Returns the token and which outcome kind produced it, so the caller can
+/// feed [`note_outcome`].
+///
+/// `relu(p - q)` is non-negative by construction and sums to the rejection
+/// probability, so normalizing it is exactly the residual distribution the
+/// losslessness proof requires. Sampling runs through
+/// [`ffi::fused_sample`] on `log(relu(p - q))` with `temperature = 1.0` and
+/// every filter disabled: `softmax(log r) == r / sum(r)`, so this is the
+/// normalized residual and nothing else. Routing through `fused_sample` also
+/// means the residual draw uses the same #900 Gumbel-max kernel the rest of
+/// the sampler uses where the backend supports it, and the `categorical` graph
+/// path where it does not. Entries with zero residual become `-inf` and can
+/// never win.
+pub fn residual_resample(
+    target_probs: &MlxArray,
+    proposal_probs: &MlxArray,
+) -> (i32, AcceptanceOutcome) {
+    let residual = ffi::relu(&ffi::subtract(target_probs, proposal_probs));
+    let mass = ffi::sum_all(&residual);
+    ffi::eval(&mass);
+    let mass = ffi::item_f32(&mass);
+
+    let (source, outcome) = if mass > 0.0 && mass.is_finite() {
+        (residual, AcceptanceOutcome::ResidualResample)
+    } else {
+        // Unreachable in exact arithmetic: reaching this function means the
+        // token was rejected, which implies positive residual mass. Only
+        // float32 underflow of every positive entry gets here. Falling back to
+        // `p` keeps the emitted token inside the target's support, which is
+        // the closest available approximation of the residual.
+        (
+            ffi::copy(target_probs),
+            AcceptanceOutcome::ResidualDegenerateFallback,
+        )
+    };
+
+    let token_arr = ffi::fused_sample(&ffi::log(&source), 1.0, 0, 1.0, 0.0);
+    ffi::eval(&token_arr);
+    (ffi::item_i32(&token_arr), outcome)
+}
+
+/// Run the full per-token decision: accept test, and residual resample on
+/// rejection. Records both the accept/reject outcome and, on rejection,
+/// whether the residual was degenerate.
+pub fn verify_draft_token(
+    target_probs: &MlxArray,
+    proposal_probs: &MlxArray,
+    draft_token: i32,
+) -> DraftVerdict {
+    if accept_draft_token(target_probs, proposal_probs, draft_token) {
+        note_outcome(AcceptanceOutcome::Accepted);
+        DraftVerdict::Accept
+    } else {
+        let (replacement, outcome) = residual_resample(target_probs, proposal_probs);
+        note_outcome(outcome);
+        DraftVerdict::Reject { replacement }
+    }
+}
+
+#[cfg(test)]
+#[path = "stochastic_accept_tests.rs"]
+mod stochastic_accept_tests;

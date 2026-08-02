@@ -2053,6 +2053,27 @@ mod ffi {
             min_p: f32,
         ) -> UniquePtr<MlxArray>;
 
+        /// The exact categorical distribution [`fused_sample`] draws from
+        /// (#902), as a float32 `[batch, vocab]` row-normalized probability
+        /// tensor. Shares the filter chain with [`fused_sample`] in C++, so
+        /// its support and relative masses cannot drift from the sampler.
+        ///
+        /// A greedy configuration (`temperature == 0.0` or `top_k == 1`)
+        /// returns the one-hot indicator at the argmax, which is the
+        /// degenerate proposal distribution of a greedily-proposing drafter.
+        ///
+        /// The softmax runs in float32 regardless of the logit dtype: entries
+        /// are read back to the host and compared against a uniform draw,
+        /// where an f16 probability would underflow below ~6e-8 and turn a
+        /// legitimately small acceptance ratio into an unconditional accept.
+        fn fused_sample_probs(
+            logits: &MlxArray,
+            temperature: f32,
+            top_k: i32,
+            top_p: f32,
+            min_p: f32,
+        ) -> UniquePtr<MlxArray>;
+
         /// Softmax-free Gumbel-max categorical sampling (#900), called
         /// directly. `logits` is 2-D `[batch, vocab]`; returns a `[batch]`
         /// uint32 token-id array drawn from `softmax(logits / temperature)`.

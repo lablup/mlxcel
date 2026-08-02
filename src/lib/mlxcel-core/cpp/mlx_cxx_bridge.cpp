@@ -4583,30 +4583,18 @@ static bool gumbel_sample_applies(
 // - Categorical sampling: temp scaling + random::categorical in one kernel
 // - Min-p filtering: softmax + max + mask in one kernel
 // - Top-p filtering: uncompiled (cumsum lacks output_shapes in MLX v0.31.x)
-static std::unique_ptr<MlxArray> fused_sample_impl(
-    const MlxArray& logits,
+//
+// The filter chain itself lives in `fused_sample_filter_logits` so that
+// `fused_sample_probs` (issue #902) can reproduce the sampler's support and
+// normalization *by construction* rather than by a parallel reimplementation
+// that could drift.
+static mlx::core::array fused_sample_filter_logits(
+    mlx::core::array x,
     float temperature,
     int32_t top_k,
     float top_p,
-    float min_p,
-    bool allow_gumbel
+    float min_p
 ) {
-    auto x = logits.inner;
-
-    // Greedy path: argmax
-    if (temperature == 0.0f || top_k == 1) {
-        return std::make_unique<MlxArray>(mlx::core::argmax(x, -1, false));
-    }
-
-    // Softmax-free stochastic sampling (#900). Batch-wide: one launch covers
-    // every row of `[B, vocab]`, so the batched fused sampler needs no per-row
-    // loop here. Sampled ids differ from the `categorical` path at equal seeds
-    // (a different RNG consumer), but the distribution is identical.
-    if (allow_gumbel && gumbel_sample_applies(x, temperature, top_k, top_p, min_p)) {
-        return std::make_unique<MlxArray>(
-            mlxcel::turbo::gumbel_max_sample(x, temperature));
-    }
-
     // Build sampler scalars in the logit dtype on non-Metal backends only
     // (issue #636). On CUDA the bf16 promotion patch keeps bf16 op boundaries
     // in bf16, but a bare `array(f32)` scalar against a bf16/f16 logit tensor
@@ -4663,6 +4651,36 @@ static std::unique_ptr<MlxArray> fused_sample_impl(
         x = std::move(result[0]);
     }
 
+    return x;
+}
+
+static std::unique_ptr<MlxArray> fused_sample_impl(
+    const MlxArray& logits,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p,
+    bool allow_gumbel
+) {
+    auto x = logits.inner;
+
+    // Greedy path: argmax
+    if (temperature == 0.0f || top_k == 1) {
+        return std::make_unique<MlxArray>(mlx::core::argmax(x, -1, false));
+    }
+
+    // Softmax-free stochastic sampling (#900). Batch-wide: one launch covers
+    // every row of `[B, vocab]`, so the batched fused sampler needs no per-row
+    // loop here. Sampled ids differ from the `categorical` path at equal seeds
+    // (a different RNG consumer), but the distribution is identical.
+    if (allow_gumbel && gumbel_sample_applies(x, temperature, top_k, top_p, min_p)) {
+        return std::make_unique<MlxArray>(
+            mlxcel::turbo::gumbel_max_sample(x, temperature));
+    }
+
+    x = fused_sample_filter_logits(
+        std::move(x), temperature, top_k, top_p, min_p);
+
     // Categorical sampling (not compiled — random ops need known shapes at trace time)
     return std::make_unique<MlxArray>(mlx::core::random::categorical(x, -1));
 }
@@ -4686,6 +4704,49 @@ std::unique_ptr<MlxArray> fused_sample_categorical(
     float min_p
 ) {
     return fused_sample_impl(logits, temperature, top_k, top_p, min_p, false);
+}
+
+// The exact categorical distribution `fused_sample` draws from, as a float32
+// `[batch, vocab]` row-normalized probability tensor (issue #902).
+//
+// Correctness contract: the filter chain is *the same code* `fused_sample`
+// runs (`fused_sample_filter_logits`), so the support and the relative masses
+// cannot drift from the sampler. Both stochastic sampler arms agree with it:
+// `random::categorical(x, -1)` draws from `softmax(x, -1)` by definition, and
+// the Gumbel-max kernel draws from `softmax(logits / temperature)`, which is
+// what the filter chain leaves when no top-k / top-p / min-p narrows the row.
+//
+// A greedy sampler configuration (`temperature == 0` or `top_k == 1`) draws a
+// point mass, so this returns the one-hot indicator at the argmax. That is the
+// degenerate `p_draft` a greedily-proposing drafter needs for the modified
+// rejection-sampling accept test.
+//
+// The softmax runs in float32 regardless of the logit dtype: the caller reads
+// individual entries back to the host and compares them against a uniform
+// draw, where an f16 probability (which underflows below ~6e-8) would turn a
+// legitimately small acceptance ratio into an unconditional accept.
+std::unique_ptr<MlxArray> fused_sample_probs(
+    const MlxArray& logits,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p
+) {
+    auto x = logits.inner;
+
+    if (temperature == 0.0f || top_k == 1) {
+        auto idx = mlx::core::argmax(x, -1, /*keepdims=*/true);
+        const auto vocab = static_cast<double>(x.shape(-1));
+        auto ids = mlx::core::arange(0.0, vocab, mlx::core::int32);
+        auto one_hot = mlx::core::equal(ids, mlx::core::astype(idx, mlx::core::int32));
+        return std::make_unique<MlxArray>(
+            mlx::core::astype(one_hot, mlx::core::float32));
+    }
+
+    x = fused_sample_filter_logits(
+        std::move(x), temperature, top_k, top_p, min_p);
+    return std::make_unique<MlxArray>(
+        mlx::core::softmax(mlx::core::astype(x, mlx::core::float32), -1, /*precise=*/true));
 }
 
 std::unique_ptr<MlxArray> gumbel_max_sample(
