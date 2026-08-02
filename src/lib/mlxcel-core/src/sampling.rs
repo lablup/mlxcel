@@ -309,6 +309,9 @@ fn sample_token_optimized_core(
         config.top_p,
         config.min_p,
     );
+    // Announce a newly-seen dispatch outcome at INFO. Costs one `u32` load per
+    // step in steady state; see `sampling_dispatch` for why this is not `debug`.
+    crate::sampling_dispatch::report_sampling_dispatch();
     (token, last_logits)
 }
 
@@ -479,6 +482,9 @@ pub fn sample_token_with_distribution(
         config.top_p,
         config.min_p,
     );
+    // Announce a newly-seen dispatch outcome at INFO. Costs one `u32` load per
+    // step in steady state; see `sampling_dispatch` for why this is not `debug`.
+    crate::sampling_dispatch::report_sampling_dispatch();
     let probs = ffi::fused_sample_probs(
         &processed,
         config.temperature,
@@ -679,6 +685,7 @@ pub fn batched_fused_sample(logits: &MlxArray, params: &FusedSampleParams) -> Ve
         params.top_p,
         params.min_p,
     );
+    crate::sampling_dispatch::report_sampling_dispatch();
     token_ids_to_host(&tokens)
 }
 

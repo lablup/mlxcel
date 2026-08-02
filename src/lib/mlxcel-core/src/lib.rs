@@ -2092,6 +2092,66 @@ mod ffi {
         /// so tests can pin that the sampled id does not depend on it.
         fn gumbel_sample_num_splits(batch: i32, vocab: i32) -> i32;
 
+        /// Dual-pivot rejection sampling for top-k / top-p / min-p (#901),
+        /// forced. Bypasses the `MLXCEL_SAMPLING_REJECTION` gate and takes an
+        /// explicit round cap so a test can drive the cap-overflow fallback.
+        /// Returns `[batch]` uint32 token ids.
+        fn fused_sample_rejection(
+            logits: &MlxArray,
+            temperature: f32,
+            top_k: i32,
+            top_p: f32,
+            min_p: f32,
+            max_rounds: i32,
+        ) -> UniquePtr<MlxArray>;
+
+        /// Raw rejection kernel outputs stacked as `[3, batch]` uint32: row 0
+        /// sampled ids, row 1 the per-row converged flag, row 2 rounds
+        /// consumed. No host readback and no fallback, so a test observes the
+        /// kernel's own verdict.
+        fn sampling_rejection_probe(
+            logits: &MlxArray,
+            temperature: f32,
+            top_k: i32,
+            top_p: f32,
+            min_p: f32,
+            max_rounds: i32,
+        ) -> UniquePtr<MlxArray>;
+
+        /// True when [`fused_sample`]'s filtered path (any of top-k, top-p,
+        /// min-p active) takes the rejection kernel: the backend supports it
+        /// and `MLXCEL_SAMPLING_REJECTION` is not falsy. Read once per process.
+        fn sampling_rejection_available() -> bool;
+
+        /// Threads per threadgroup the rejection kernel launches with. The
+        /// determinism argument rests on this being fixed, so it is exposed.
+        fn sampling_rejection_threadgroup_size() -> i32;
+
+        /// Rejection rounds the production path allows before falling back to
+        /// the `argpartition` chain.
+        fn sampling_rejection_max_rounds() -> i32;
+
+        /// Rows that exhausted the rejection round cap since process start (or
+        /// since the last [`sampling_dispatch_reset`]).
+        fn sampling_rejection_cap_overflow_rows() -> u64;
+
+        /// Launches in which at least one row exhausted the cap and the whole
+        /// launch therefore fell back.
+        fn sampling_rejection_cap_overflow_launches() -> u64;
+
+        /// Bitmask of sampling dispatch outcome kinds recorded but not yet
+        /// drained. Zero on nearly every sampling step, so the hot-path check
+        /// costs one load.
+        fn sampling_dispatch_pending_kinds() -> u32;
+
+        /// Pop one pending dispatch outcome description, or `""` when nothing
+        /// is pending.
+        fn sampling_dispatch_drain_report() -> String;
+
+        /// Clear every recorded dispatch outcome and both cap-overflow
+        /// counters. The state is process-wide; tests need a clean slate.
+        fn sampling_dispatch_reset();
+
         // SSM (State Space Model) primitives for Mamba/Jamba/Nemotron-H.
         /// Cumulative sum along axis
         fn cumsum(a: &MlxArray, axis: i32, reverse: bool, inclusive: bool) -> UniquePtr<MlxArray>;
@@ -2793,6 +2853,13 @@ pub use sampling::{
     lang_bias_applied_total, lang_bias_byte_fragment_suppressions_total,
     lang_bias_tokens_suppressed_total,
 };
+// Re-export the sampling dispatch reporter and the rejection cap-overflow
+// counters (#901) so callers outside this crate can prove which sampling path
+// a run took without reaching into the module path.
+pub use sampling_dispatch::{
+    rejection_cap_overflow_launches, rejection_cap_overflow_rows, report_sampling_dispatch,
+    reset_sampling_dispatch,
+};
 
 // Re-export Axis B language-steering types so downstream consumers (CLI, server, B6–B8)
 // can use them without referencing the internal module path.
@@ -3144,6 +3211,11 @@ pub mod loop_detection;
 // Public so that the server batch scheduler can perform step-level sampling.
 pub mod sampling;
 
+// Which sampling path a decode step actually took, announced at INFO (#901).
+// Public so every `fused_sample` call site can drain the report, and so the
+// microbenchmark and the server can read the cap-overflow counters.
+pub mod sampling_dispatch;
+
 // Speculative decoding
 pub mod speculative;
 
@@ -3229,6 +3301,13 @@ mod fused_moe_parity_tests;
 #[cfg(test)]
 #[path = "sampling_gumbel_tests.rs"]
 mod sampling_gumbel_tests;
+
+// Support-equality, chi-square goodness-of-fit, determinism, subnormal
+// hardening, cap-overflow and routing tests for the dual-pivot rejection
+// sampling kernels (#901). GPU-only; they skip on CPU-only builds.
+#[cfg(test)]
+#[path = "sampling_rejection_tests.rs"]
+mod sampling_rejection_tests;
 
 // Numeric-parity, Gemma `(1 + w)` convention, kill-switch and greedy-argmax
 // tests for the fused residual-add RMSNorm kernel (#905). GPU-only; they skip

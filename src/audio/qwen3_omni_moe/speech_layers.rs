@@ -51,6 +51,8 @@ pub(super) fn load_rms_norm(
 /// pure temperature sampling; `temperature == 0.0` is greedy.
 pub(super) fn sample_logits(logits: &MlxArray, temperature: f32, top_p: f32) -> i32 {
     let token = mlxcel_core::fused_sample(logits, temperature, 0, top_p, 0.0);
+    // Announce a newly-seen sampling dispatch outcome at INFO (#901).
+    mlxcel_core::report_sampling_dispatch();
     mlxcel_core::eval(&token);
     mlxcel_core::item_i32(&token)
 }
