@@ -1,0 +1,454 @@
+#!/usr/bin/env python3
+"""Admission-during-decode latency harness for issue #908 (mixed prefill/decode steps).
+
+``bench_serving_concurrency.py`` fires N identical requests simultaneously and
+reports per-request aggregates. That cannot express the scenario issue #908 is
+about, which needs two things it does not have: **staggered admission** (a long
+prompt arriving while other streams are already decoding) and **per-token
+arrival timestamps** (so inter-token latency can be split into a quiet window
+and an admission window). This harness adds both.
+
+Scenario, matching the issue:
+
+1. Start ``--streams`` streaming requests with short prompts and a generous
+   ``--stream-max-tokens``, so they are all in steady-state decode.
+2. Wait ``--settle-s`` for the decode rate to stabilise.
+3. Admit one request carrying an ``--admit-prompt-tokens`` prompt (8192 by
+   default) and time its first token.
+4. Report per-stream ITL p50/p95 **before** the admission and **during** it,
+   plus the admitted request's TTFT.
+
+Read the output with the scheduler in mind. Under the shipped tick policy a
+parked chunked prefill yields every tick to any active decode batch, so the
+admitted prompt does not advance until the decode streams finish. The
+``admitted_first_token_after_last_stream`` line reports exactly that, and it is
+the measurement ADR 0005 turns on.
+
+Preconditions the harness checks and reports, because getting any of them wrong
+silently measures nothing:
+
+* The server must run with ``--metrics``; without it no counter can attribute a
+  run and the harness says so instead of printing an unattributed table.
+* ``--parallel`` on the server must exceed ``--streams``. With ``--parallel 4``
+  and 4 streams the batch is full, the admitted request never leaves the queue,
+  and there is no prefill during decode to measure at all.
+* The admitted prompt must exceed the server's ``--prefill-chunk-size``, else it
+  prefills in one unchunked forward and the chunked path is never entered.
+
+Examples:
+    # Baseline (shipped tick policy). Server started with --parallel 8 --metrics.
+    python3 scripts/bench_mixed_step_admission.py --expect baseline
+
+    # Prototype arm. Server started with MLXCEL_MIXED_STEP=1 --parallel 8 --metrics.
+    python3 scripts/bench_mixed_step_admission.py --expect mixed
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import http.client
+import json
+import os
+import statistics
+import sys
+import time
+from dataclasses import dataclass, field
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Reuse the prompt sizing and model resolution from the concurrency harness so
+# a "512-token prompt" means the same thing in both benchmarks.
+from bench_serving_concurrency import (  # noqa: E402
+    _percentile,
+    build_prompt,
+    resolve_model,
+)
+
+# Scheduler counters that say which tick policy served the run. `mixed_steps` is
+# the dispatch proof for the issue #908 prototype: it can only move when
+# `MLXCEL_MIXED_STEP` is set and a tick advanced prefill and decode together.
+_TICK_METRICS = (
+    "mlxcel_batch_mixed_steps_total",
+    "mlxcel_batch_prefill_chunks_total",
+    "mlxcel_batch_decode_steps_total",
+)
+
+
+@dataclass
+class StreamTrace:
+    """Per-token arrival times for one streaming request."""
+
+    label: str
+    ok: bool = True
+    error: str | None = None
+    start_s: float = 0.0
+    end_s: float = 0.0
+    # Wall-clock arrival of every non-empty content delta.
+    token_times: list[float] = field(default_factory=list)
+
+    @property
+    def ttft_s(self) -> float | None:
+        return self.token_times[0] - self.start_s if self.token_times else None
+
+    def itls_ms(self, lo: float | None = None, hi: float | None = None) -> list[float]:
+        """Inter-token gaps in ms whose *arrival* falls within ``[lo, hi]``.
+
+        Bounds are absolute ``perf_counter`` values; ``None`` means unbounded.
+        Attributing a gap by its arrival time is what lets one stream's tokens
+        be split into a quiet window and an admission window.
+        """
+        out: list[float] = []
+        for prev, cur in zip(self.token_times, self.token_times[1:]):
+            if lo is not None and cur < lo:
+                continue
+            if hi is not None and cur > hi:
+                continue
+            out.append((cur - prev) * 1000.0)
+        return out
+
+
+def stream_tokens(
+    host: str,
+    port: int,
+    model: str,
+    prompt: str,
+    max_tokens: int,
+    timeout: float,
+    label: str,
+    start_barrier: float = 0.0,
+) -> StreamTrace:
+    """Issue one streaming completion, timestamping every content delta.
+
+    ``start_barrier`` is an absolute ``perf_counter`` deadline to wait for
+    before sending, which is how the admitted request is delayed until the
+    decode streams have settled.
+    """
+    trace = StreamTrace(label=label)
+    if start_barrier:
+        while time.perf_counter() < start_barrier:
+            time.sleep(0.005)
+
+    payload = json.dumps(
+        {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "temperature": 0.0,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+    )
+    headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+    trace.start_s = time.perf_counter()
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        conn.request("POST", "/v1/chat/completions", body=payload, headers=headers)
+        resp = conn.getresponse()
+        if resp.status != 200:
+            body = resp.read().decode("utf-8", "replace")[:200]
+            conn.close()
+            trace.ok = False
+            trace.error = f"HTTP {resp.status}: {body}"
+            trace.end_s = time.perf_counter()
+            return trace
+
+        buf = b""
+        while True:
+            chunk = resp.read(1)
+            if not chunk:
+                break
+            buf += chunk
+            if not buf.endswith(b"\n"):
+                continue
+            line = buf.strip()
+            buf = b""
+            if not line.startswith(b"data:"):
+                continue
+            data = line[len(b"data:") :].strip()
+            if data == b"[DONE]":
+                break
+            try:
+                event = json.loads(data)
+            except ValueError:
+                continue
+            for choice in event.get("choices", []) or []:
+                content = (choice.get("delta") or {}).get("content")
+                if content:
+                    trace.token_times.append(time.perf_counter())
+        conn.close()
+    except (OSError, http.client.HTTPException) as exc:
+        trace.ok = False
+        trace.error = str(exc)
+
+    trace.end_s = time.perf_counter()
+    return trace
+
+
+def scrape_tick_metrics(host: str, port: int) -> dict[str, float]:
+    """Read the scheduler tick counters from ``/metrics``.
+
+    Returns an empty dict when the endpoint is unavailable, which the caller
+    treats as "attribution impossible" rather than "counters were zero".
+    """
+    try:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        conn.request("GET", "/metrics")
+        resp = conn.getresponse()
+        body = resp.read().decode("utf-8", "replace")
+        conn.close()
+        if resp.status != 200:
+            return {}
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, float] = {}
+    for line in body.splitlines():
+        if line.startswith("#"):
+            continue
+        name, _, value = line.rpartition(" ")
+        name = name.strip()
+        if name in _TICK_METRICS:
+            try:
+                out[name] = float(value)
+            except ValueError:
+                continue
+    return out
+
+
+def _fmt(values: list[float]) -> str:
+    if not values:
+        return "n/a (no samples)"
+    return (
+        f"p50 {_percentile(values, 50):.1f} ms  "
+        f"p95 {_percentile(values, 95):.1f} ms  "
+        f"mean {statistics.mean(values):.1f} ms  "
+        f"n={len(values)}"
+    )
+
+
+async def _amain(args: argparse.Namespace) -> int:
+    model = resolve_model(args.host, args.port, args.model)
+    stream_prompt = build_prompt(args.stream_prompt_tokens)
+    admit_prompt = build_prompt(args.admit_prompt_tokens)
+
+    print("# mixed prefill/decode admission bench (issue #908)")
+    print(f"model={model}  streams={args.streams}  settle={args.settle_s}s")
+    print(
+        f"stream_prompt~{args.stream_prompt_tokens} tok  "
+        f"admit_prompt~{args.admit_prompt_tokens} tok  "
+        f"stream_max_tokens={args.stream_max_tokens}"
+    )
+    print(f"expect={args.expect}")
+    print()
+
+    before = scrape_tick_metrics(args.host, args.port)
+    if not before:
+        print(
+            "NOT COMPARABLE: /metrics is unavailable, so no counter can say which "
+            "tick policy served this run. Restart the server with --metrics. "
+            "Refusing to print a latency table that cannot be attributed."
+        )
+        return 2
+
+    loop = asyncio.get_running_loop()
+    admit_at = time.perf_counter() + args.settle_s
+
+    tasks = [
+        loop.run_in_executor(
+            None,
+            stream_tokens,
+            args.host,
+            args.port,
+            model,
+            f"{stream_prompt} Please answer question {i} at length.",
+            args.stream_max_tokens,
+            args.timeout,
+            f"stream{i}",
+            0.0,
+        )
+        for i in range(args.streams)
+    ]
+    tasks.append(
+        loop.run_in_executor(
+            None,
+            stream_tokens,
+            args.host,
+            args.port,
+            model,
+            admit_prompt,
+            args.admit_max_tokens,
+            args.timeout,
+            "admitted",
+            admit_at,
+        )
+    )
+
+    traces: list[StreamTrace] = await asyncio.gather(*tasks)
+    after = scrape_tick_metrics(args.host, args.port)
+
+    streams = [t for t in traces if t.label != "admitted"]
+    admitted = next(t for t in traces if t.label == "admitted")
+
+    for t in traces:
+        if not t.ok:
+            print(f"    request error ({t.label}): {t.error}")
+
+    deltas = {name: after.get(name, 0.0) - before.get(name, 0.0) for name in _TICK_METRICS}
+    print("## scheduler tick attribution")
+    for name, delta in deltas.items():
+        print(f"    {name.replace('mlxcel_batch_', '')}: {delta:+.0f}")
+    print()
+
+    mixed = deltas["mlxcel_batch_mixed_steps_total"]
+    chunks = deltas["mlxcel_batch_prefill_chunks_total"]
+
+    # ---- Dispatch guards. Each one, when it fires, means the run measured
+    # something other than what the invocation claimed, so no table is printed.
+    if chunks <= 0:
+        print(
+            "NOT COMPARABLE: the prefill-chunk counter did not move, so the admitted "
+            "prompt never entered the chunked-prefill path. Either it was never "
+            "admitted (server --parallel must exceed --streams; with a full batch the "
+            "request sits in the queue), or it fit in one unchunked forward "
+            "(--admit-prompt-tokens must exceed the server's --prefill-chunk-size). "
+            "There was no prefill-during-decode window to measure."
+        )
+        return 2
+    if args.expect == "mixed" and mixed <= 0:
+        print(
+            "NOT COMPARABLE: --expect mixed, but no mixed step ran. The server was "
+            "not started with MLXCEL_MIXED_STEP=1, so this run measured the default "
+            "tick policy against itself. This is the failure mode issue #899 shipped; "
+            "refusing to print a timing comparison."
+        )
+        return 2
+    if args.expect == "baseline" and mixed > 0:
+        print(
+            "NOT COMPARABLE: --expect baseline, but the mixed-step counter moved. "
+            "MLXCEL_MIXED_STEP is set in the server's environment, so this is not a "
+            "baseline measurement."
+        )
+        return 2
+
+    # ---- Latency windows.
+    admit_sent = admitted.start_s
+    admit_first = admitted.token_times[0] if admitted.token_times else None
+
+    quiet: list[float] = []
+    during: list[float] = []
+    for t in streams:
+        quiet.extend(t.itls_ms(hi=admit_sent))
+        during.extend(t.itls_ms(lo=admit_sent, hi=admit_first))
+
+    print("## per-stream inter-token latency")
+    print(f"    quiet window  (before admission): {_fmt(quiet)}")
+    print(f"    admission window (prefill live):  {_fmt(during)}")
+    if quiet and during:
+        ratio = _percentile(during, 95) / max(_percentile(quiet, 95), 1e-9)
+        print(f"    p95 inflation during admission:   {ratio:.2f}x")
+    print()
+
+    print("## admitted request")
+    if admit_first is None:
+        print("    never produced a token within the timeout")
+    else:
+        last_stream_end = max((t.end_s for t in streams), default=admit_sent)
+        starved = admit_first > last_stream_end
+        print(f"    TTFT: {(admit_first - admit_sent) * 1000.0:.0f} ms")
+        print(f"    admitted_first_token_after_last_stream: {starved}")
+        if starved:
+            print(
+                "    NOTE: the admitted prompt produced its first token only after "
+                "every decode stream had finished. That is the chunked-prefill "
+                "starvation ADR 0005 documents, not a slow prefill."
+            )
+    print()
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Admission-during-decode latency harness (issue #908).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="Server host (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=8080, help="Server port (default: 8080)")
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Model id (default: resolved from /v1/models, else 'default')",
+    )
+    parser.add_argument(
+        "--streams",
+        type=int,
+        default=4,
+        help=(
+            "Decode streams running before the admission (default: 4). The "
+            "server's --parallel must be strictly greater, or the admitted "
+            "request never leaves the queue."
+        ),
+    )
+    parser.add_argument(
+        "--stream-prompt-tokens",
+        type=int,
+        default=128,
+        help="Approximate prompt length for the decode streams (default: 128)",
+    )
+    parser.add_argument(
+        "--stream-max-tokens",
+        type=int,
+        default=512,
+        help=(
+            "Generation budget per decode stream (default: 512). Must be large "
+            "enough that the streams are still decoding when the admission lands."
+        ),
+    )
+    parser.add_argument(
+        "--admit-prompt-tokens",
+        type=int,
+        default=8192,
+        help=(
+            "Approximate prompt length of the admitted request (default: 8192). "
+            "Must exceed the server's --prefill-chunk-size to enter the chunked path."
+        ),
+    )
+    parser.add_argument(
+        "--admit-max-tokens",
+        type=int,
+        default=32,
+        help="Generation budget for the admitted request (default: 32)",
+    )
+    parser.add_argument(
+        "--settle-s",
+        type=float,
+        default=5.0,
+        help=(
+            "Seconds to let the decode streams reach steady state before the "
+            "admission is sent (default: 5). The quiet-window ITL is measured "
+            "over this span."
+        ),
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=900.0,
+        help="Per-request socket timeout in seconds (default: 900)",
+    )
+    parser.add_argument(
+        "--expect",
+        choices=("baseline", "mixed", "any"),
+        default="any",
+        help=(
+            "Which arm this invocation claims to measure. 'baseline' fails if a "
+            "mixed step ran, 'mixed' fails if none did. Always pass it when the "
+            "run is part of an A/B."
+        ),
+    )
+    args = parser.parse_args()
+    if args.streams < 1:
+        parser.error("--streams must be at least 1")
+    return asyncio.run(_amain(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -105,6 +105,41 @@ budget is inert. Disable the guard with `--kv-cache-budget none`. Memory-
 constrained hosts can also lower `--parallel` or cap `--ctx-size` (see the
 context-sizing note in [environment-variables.md](environment-variables.md)).
 
+### How a chunked prefill shares ticks with decode (it does not)
+
+The flag table above says `--prefill-chunk-size` "bounds prefill's effect on
+decode latency". That is true, and it is worth stating what the tick policy
+actually does, because the shape is the opposite of what a chunk size usually
+implies.
+
+A prompt longer than `--prefill-chunk-size` is admitted, runs chunk 0, and is
+then parked. From that point the scheduler resolves every tick in favour of
+decode for as long as any sequence is active, and because the policy is a pure
+function of scheduler state that a decode does not change, it keeps resolving
+that way. The parked prompt resumes only once the last decoding sequence
+finishes. So a decode stream never waits for more than the one prefill forward
+that admission itself costs, and a long prompt arriving next to a busy batch can
+wait a long time for its first token.
+
+Two consequences worth knowing when reading latency numbers:
+
+- Admission perturbs a decoding stream's inter-token latency exactly once, by
+  one prefill forward, not for the duration of the prompt.
+- With the batch already at `--parallel`, a queued request is not admitted at
+  all, so it contributes no prefill and the effect above does not arise. The
+  scenario "a long prompt prefills while others decode" needs `--parallel`
+  strictly above the number of active streams.
+
+Issue #908 measured this and decided against fixing it with a fused ragged
+forward; see
+[ADR 0005](adr/0005-mixed-prefill-decode-step-execution.md). The experimental
+`MLXCEL_MIXED_STEP=1` makes each tick advance both workloads, which bounds the
+parked prompt's time to first token at the cost of putting the chunk forward
+into the decoding streams' inter-token latency. It is a measurement instrument
+for that trade, not a supported operator knob; a production fairness policy is
+tracked as a follow-up. `scripts/bench_mixed_step_admission.py` drives the
+scenario and attributes each run through `mlxcel_batch_mixed_steps_total`.
+
 ### Bounding the batched-prefill transient (`--max-batch-prefill-tokens`)
 
 The `--kv-cache-budget` guard above bounds steady-state KV, not the transient a
