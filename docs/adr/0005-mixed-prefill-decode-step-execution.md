@@ -166,7 +166,7 @@ Neither result moves the rejection of (b), and the contention pushes the same wa
 
 - **`decide_action` semantics are unchanged** with `MLXCEL_MIXED_STEP` unset, proven exhaustively rather than by inspection. Every existing scheduler unit test passes untouched.
 - **The mirrored-policy pattern is gone** from the scheduler tests. This is the durable part of the change: the starvation was invisible for as long as it was because the tests asserted against a copy. `scheduler_tests.rs` helpers now delegate to `decide_tick`.
-- **A follow-up issue covers the starvation fix**: grant a parked chunked prefill a tick under a fairness policy so a long prompt's TTFT is bounded while the batch decodes. `MixedStep` is one candidate policy (every tick, both workloads) and the harness measures its cost; a grant counter every N decode ticks is the cheaper alternative and lands on the same ITL/TTFT frontier. That issue owns the choice, the default, and the tuning.
+- **Issue #1011 covers the starvation fix**: grant a parked chunked prefill a tick under a fairness policy so a long prompt's TTFT is bounded while the batch decodes. `MixedStep` is one candidate policy (every tick, both workloads) and the harness measures its cost; a grant counter every N decode ticks is the cheaper alternative and lands on the same ITL/TTFT frontier. That issue owns the choice, the default, and the tuning.
 - **No CUDA path was written.** The prototype is scheduler-level and backend-agnostic, so it needs none, and no GB10 hardware was available to validate one.
 - **The prototype stays experimental.** It is not wired to a CLI flag and is not documented as an operator knob beyond the environment-variable reference, because the fairness question belongs to the follow-up issue.
 
@@ -178,7 +178,7 @@ Neither result moves the rejection of (b), and the contention pushes the same wa
 
 ## References
 
-- Issue #908, this spike. Epic #909.
+- Issue #908, this spike. Epic #909. Issue #1011, the starvation fix this spike found and split out.
 - `src/server/batch/tick_policy.rs`, the extracted policy and the `MLXCEL_MIXED_STEP` gate.
 - `src/server/batch/tick_policy_tests.rs`, the starvation pin and the exhaustive default-off parity proof.
 - `scripts/bench_mixed_step_admission.py`, the admission-during-decode harness.
