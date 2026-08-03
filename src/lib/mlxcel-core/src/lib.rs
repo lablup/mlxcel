@@ -3348,6 +3348,13 @@ mod sampling_rejection_tests;
 // Numeric-parity, Gemma `(1 + w)` convention, kill-switch and greedy-argmax
 // tests for the fused residual-add RMSNorm kernel (#905). GPU-only; they skip
 // on CPU-only builds.
+// Guard against a second `mlxcel-core` test binary sharing the GPU (issue
+// #1008). Concurrent suites on one Metal device abort or, worse, complete while
+// reporting failures that do not exist.
+#[cfg(test)]
+#[path = "gpu_exclusivity_tests.rs"]
+mod gpu_exclusivity_tests;
+
 #[cfg(test)]
 #[path = "fused_norm_parity_tests.rs"]
 mod fused_norm_parity_tests;
