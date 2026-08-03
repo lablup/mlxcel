@@ -1,6 +1,6 @@
 # Contributing to mlxcel
 
-Thank you for your interest in contributing to mlxcel! This document covers the basics for getting started. For the deeper working contract — invariants for the request path, MLX upstream pin synchronization, model-porting checklist — read [`AGENTS.md`](AGENTS.md) after this.
+Thank you for your interest in contributing to mlxcel! This document covers the basics for getting started. The deeper working contract lives in the `docs/` directory: [`docs/architecture.md`](docs/architecture.md) for the runtime and module map, [`docs/code-guidelines.md`](docs/code-guidelines.md) for the shared-function rules, and [`docs/adding-models.md`](docs/adding-models.md) for the model-porting checklist.
 
 ## Quick links
 
@@ -11,7 +11,7 @@ Thank you for your interest in contributing to mlxcel! This document covers the 
 | Build and test locally | [`docs/installation.md`](docs/installation.md) |
 | Understand the architecture | [`docs/architecture.md`](docs/architecture.md) |
 | Add a new model family | [`docs/adding-models.md`](docs/adding-models.md) |
-| Understand the project conventions | [`AGENTS.md`](AGENTS.md) |
+| Understand the shared-function conventions | [`docs/code-guidelines.md`](docs/code-guidelines.md) |
 
 ## How to contribute
 
@@ -49,7 +49,7 @@ Thank you for your interest in contributing to mlxcel! This document covers the 
    PR-time CI runs only the cheap gates: `cargo fmt` and `cargo deny` in [`ci.yml`](.github/workflows/ci.yml), plus a path-filtered clippy and a `distributed::`-scoped `cargo test` in [`pipeline-parallel-ci.yml`](.github/workflows/pipeline-parallel-ci.yml) when you touch pipeline-parallel code. Clippy and the general unit suite are **not** enforced on your PR. They were moved in #21 and removed in #23 because ~30 min per run on the shared self-hosted Apple Silicon runner blocked PRs and releases for failures that `make verify` catches locally in a fraction of the time. [`nightly-verify.yml`](.github/workflows/nightly-verify.yml) runs the full `make verify` once a day on `self-hosted-macos-26-arm64` and files an issue when `main` goes red, so a broken suite surfaces within a day rather than on the next contributor's `make verify`. Treat that as a backstop, not a substitute: run the two commands above yourself before you push. CUDA verification is not gated at PR time either; that stays exclusive to `release.yml`.
 
    While iterating, prefer `[profile.test-fast]` over `--release`: `make test-fast` / `make test-fast-cuda` (or `cargo test --profile test-fast --features <...>`) rebuild in seconds instead of minutes. It is for local/agent edit-test loops only; run the `--release` commands above (or `make verify`) before opening or updating a PR. See [`docs/installation.md`](docs/installation.md#fast-iteration-builds) for the measured comparison.
-5. For inference changes, validate against a real checkpoint — synthetic or build-only validation is not enough (see [`AGENTS.md`](AGENTS.md) for why).
+5. For inference changes, validate against a real checkpoint. Synthetic or build-only validation is not enough: a shape-compatible change can compile, pass unit tests, and still produce wrong logits on an actual quantized checkpoint. Fetch one with `mlxcel download mlx-community/<model-id>`, and see [`docs/supported-models.md`](docs/supported-models.md) for the families each code path covers. A change to a shared component should be smoke-tested against at least two families.
 6. Commit with a conventional prefix (see below) and a clear message.
 7. Push to your fork and open a Pull Request. The PR template will prompt for a summary, test plan, and linked issues.
 
@@ -97,7 +97,21 @@ See [`docs/adding-models.md`](docs/adding-models.md) for the full checklist. The
 
 ### Bumping the MLX upstream pin
 
-The pinned MLX C++ commit lives in three files that must stay in sync — see the "MLX upstream commit upgrade" section of [`AGENTS.md`](AGENTS.md) for the list and the mandatory post-bump validation.
+The pinned MLX C++ commit lives in three files that must stay in sync. They control source fetching, build-cache validation (marker file `_deps/.mlx-build-commit`), and CI cache invalidation respectively; a mismatch produces stale build artifacts and CI breakage.
+
+| File | Field |
+|------|-------|
+| `src/lib/mlx-cpp/CMakeLists.txt` | `GIT_TAG` in `FetchContent_Declare(mlx ...)` |
+| `src/lib/mlxcel-core/build.rs` | `MLX_EXPECTED_COMMIT` constant |
+| `.github/workflows/release.yml` | `MLX_EXPECTED_COMMIT` env in the "Validate MLX build cache" step |
+
+After bumping the pin, re-validate the in-tree fused Metal kernel launchers in `src/lib/mlx-cpp/turbo/`, which are runtime-JIT paths a breaking MLX API change can silently regress:
+
+- `sparse_v_sdpa.cpp`, test `sparse_v_kernel_threshold_zero_matches_graph`.
+- `turbo4_delegated_sdpa.cpp::turbo4_delegated_cold_weighted_sum`, test `delegated_fused_kernel_matches_reference_over_200_steps`.
+- `turbo4_delegated_sdpa.cpp::turbo4_delegated_steel_sdpa`, test `delegated_steel_envelope_matches_cold_only_fused_over_200_steps`.
+
+All three should produce output within RMS < 5e-3 of the graph reference on Apple Silicon.
 
 ## Development environment
 
