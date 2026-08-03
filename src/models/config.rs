@@ -240,6 +240,20 @@ where
 // Quantization Configuration.
 /// Common quantization arguments
 /// Supports affine (default), mxfp4, nvfp4, and mxfp8 quantization modes.
+///
+/// This is the shared spelling of the MLX-style nested `"quantization"` block
+/// that every conversion tool emits. Families under `src/models/` overwhelmingly
+/// declare a private near-copy of it instead, and the divergence between two
+/// such copies is what produced issue #975: `deepseek.rs` had no nested field at
+/// all while its sibling `deepseek_v2.rs` did, so the byte-identical
+/// sub-config inheritance in the two VLM loaders behaved differently. Prefer
+/// this type over a new private struct.
+///
+/// All three fields are optional so a partially declared block resolves through
+/// the accessors below rather than failing deserialization, which matters for a
+/// family that reads the block out of an inherited sub-config.
+///
+/// Used by: `crate::models::deepseek::ModelArgs` (issue #975)
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct QuantizationArgs {
     #[serde(default)]
@@ -267,19 +281,21 @@ impl QuantizationArgs {
     /// Get the declared quantization mode, defaulting to `"affine"` when the
     /// key is absent.
     ///
-    /// Fallible on purpose (issue #973). This helper has no production callers
-    /// yet and is the obvious thing for the next family that needs a declared
-    /// mode to reach for; handing back an unchecked `&str` would let it inherit
-    /// the hole silently, because the returned string goes on to
-    /// `quantized_matmul` / `gather_qmm` / `dequantize`, which cross the cxx
-    /// bridge as `UniquePtr<MlxArray>` rather than `Result`, so a mode MLX
-    /// cannot parse is an uncatchable abort at the first forward pass rather
-    /// than a load error. Returning `Result` makes the check impossible to skip
-    /// at the point the value is read.
+    /// Fallible on purpose (issue #973): handing back an unchecked `&str` would
+    /// let each caller inherit the hole silently, because the returned string
+    /// goes on to `quantized_matmul` / `gather_qmm` / `dequantize`, which cross
+    /// the cxx bridge as `UniquePtr<MlxArray>` rather than `Result`, so a mode
+    /// MLX cannot parse is an uncatchable abort at the first forward pass
+    /// rather than a load error. Returning `Result` makes the check impossible
+    /// to skip at the point the value is read.
     ///
     /// The `None` case is the absent key and resolves to `"affine"`; a present
     /// but empty or misspelled string is rejected. See
     /// [`mlxcel_core::layers::validate_quantization_mode`].
+    ///
+    /// Used by: `crate::models::deepseek::ModelArgs::quantization_mode`
+    ///          (issue #975), which is also the family that adopted this whole
+    ///          struct rather than declaring another private `Quantization`
     pub fn get_mode(&self) -> Result<&str, String> {
         let mode = self.mode.as_deref().unwrap_or("affine");
         mlxcel_core::layers::validate_quantization_mode(mode)?;

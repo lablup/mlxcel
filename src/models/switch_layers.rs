@@ -178,6 +178,64 @@ pub(crate) fn validate_expert_quantization_params(
         .map_err(|e| format!("{prefix}: {e}"))
 }
 
+/// Cross-check a declared `group_size` / `bits` pair against the expert plane it
+/// is about to be stored on (issue #975).
+///
+/// [`validate_expert_quantization_params`] above bounds the pair on its own, and
+/// deliberately stays a range rather than an allowlist so mixed-precision
+/// exports keep loading. That leaves the other half open: a pair that is
+/// individually in range can still describe a different tensor than the one on
+/// disk, and nothing on the expert path notices. The dense projections are
+/// covered, because `reconcile_quantization_layout` re-derives an effective pair
+/// from the shapes, but `SwitchLinear::from_stacked_parts` stores what it was
+/// given and hands it to `gather_qmm`.
+///
+/// This is MLX's own precondition, restated where the shapes are still in hand.
+/// `gather_qmm` reaches `extract_quantized_matmul_dims`, which requires
+/// `packed_in * 32 == bits * num_groups * group_size` for a `[experts, out,
+/// packed_in]` weight against `[experts, out, num_groups]` scales, and throws
+/// `The shapes of the weight and scales are incompatible based on bits and
+/// group_size` otherwise. Because `gather_qmm` crosses the cxx bridge as
+/// `UniquePtr<MlxArray>` rather than `Result`, that throw is an uncatchable
+/// `std::terminate` at the first routed forward pass. Checking the same equality
+/// here can only refuse a load that was already going to abort: it cannot reject
+/// a checkpoint that works.
+///
+/// The arithmetic is done in `i64` because `bits * num_groups * group_size`
+/// overflows `i32` well inside the range
+/// [`mlxcel_core::layers::validate_quantization_params`] accepts.
+///
+/// Used by: DeepSeek. The other eighteen families listed on
+///          [`validate_expert_quantization_params`] are the obvious next
+///          adopters and are left alone here so this stays one logical change;
+///          they are unaffected either way, because none of them reads a
+///          declared pair that this crate was previously discarding.
+pub(crate) fn validate_expert_quantization_shapes(
+    prefix: &str,
+    weight_shape: &[i32],
+    scales_shape: &[i32],
+    group_size: i32,
+    bits: i32,
+) -> Result<(), String> {
+    let (Some(&packed_in), Some(&num_groups)) = (weight_shape.last(), scales_shape.last()) else {
+        return Ok(());
+    };
+    let declared = i64::from(bits) * i64::from(num_groups) * i64::from(group_size);
+    let actual = i64::from(packed_in) * 32;
+    if declared == actual {
+        return Ok(());
+    }
+    Err(format!(
+        "{prefix}: the declared quantization pair (group_size {group_size}, bits {bits}) does not \
+         describe this expert plane: MLX requires packed_in * 32 == bits * num_groups * \
+         group_size, and the checkpoint ships weight {weight_shape:?} with scales \
+         {scales_shape:?}, giving {actual} against {declared}. Either the config declares a \
+         quantization block these tensors were not produced with, or the expert plane is from a \
+         different export. gather_qmm would otherwise throw at the first routed forward pass, and \
+         that throw crosses the cxx bridge as an uncatchable abort rather than a load error"
+    ))
+}
+
 /// Insert one affine expert plane in the pre-stacked `switch_mlp` layout that
 /// mlx-community conversions ship: a `[experts, out, packed_in]` packed weight
 /// with `[experts, out, num_groups]` scales and zero points.

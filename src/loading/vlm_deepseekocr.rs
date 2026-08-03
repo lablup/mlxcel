@@ -63,15 +63,35 @@ fn remap_deepseekocr_weights(weights: WeightMap) -> WeightMap {
     out
 }
 
-pub(crate) fn load_deepseekocr_vlm(model_path: &Path) -> Result<LoadedModel> {
-    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
-
-    // Text decoder config from `language_config`, inheriting the root
-    // quantization block and a `model_type` (the sub-config omits both).
+/// Build the shared DeepSeek v1 text-decoder args out of a DeepSeek-OCR-family
+/// `config.json`.
+///
+/// All three loaders in this file need the identical two-step fixup, because
+/// their `language_config` sub-config declares neither a `model_type` nor a
+/// `quantization` block: default the former to `"deepseek"`, and inherit the
+/// root block for the latter unless the sub-config declared one of its own.
+///
+/// It lives in one function rather than inline at each call site because of
+/// issue #975. The inheritance was already written three times and already
+/// correct three times, but `deepseek::ModelArgs` had no nested `quantization`
+/// field, so serde dropped the inherited block on all three and
+/// `args.group_size()` / `args.bits()` returned the hardcoded `64` / `4` for
+/// every DeepSeek-OCR checkpoint no matter what it declared. A single funnel
+/// with a test over it makes that failure mode reproducible without a
+/// checkpoint on disk, and keeps the three from drifting apart.
+///
+/// `family` names the caller in the parse error so the message still points at
+/// the right loader.
+///
+/// Used by: load_deepseekocr_vlm, load_unlimited_ocr_vlm, load_deepseekocr_2_vlm
+fn deepseekocr_language_args(
+    full_config: &serde_json::Value,
+    family: &str,
+) -> Result<models::deepseek::ModelArgs> {
     let mut lc = full_config
         .get("language_config")
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!("Missing language_config in DeepSeek-OCR config"))?;
+        .ok_or_else(|| anyhow::anyhow!("Missing language_config in {} config", family))?;
     if let Some(obj) = lc.as_object_mut() {
         obj.entry("model_type".to_string())
             .or_insert_with(|| json!("deepseek"));
@@ -81,8 +101,14 @@ pub(crate) fn load_deepseekocr_vlm(model_path: &Path) -> Result<LoadedModel> {
             obj.insert("quantization".to_string(), q.clone());
         }
     }
-    let args: models::deepseek::ModelArgs = serde_json::from_value(lc)
-        .map_err(|e| anyhow::anyhow!("Failed to parse DeepSeek-OCR language_config: {}", e))?;
+    serde_json::from_value(lc)
+        .map_err(|e| anyhow::anyhow!("Failed to parse {} language_config: {}", family, e))
+}
+
+pub(crate) fn load_deepseekocr_vlm(model_path: &Path) -> Result<LoadedModel> {
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+
+    let args = deepseekocr_language_args(&full_config, "DeepSeek-OCR")?;
     let (gs, bits) = (args.group_size(), args.bits());
 
     let weights = remap_deepseekocr_weights(load_vlm_weights_common(model_path, None)?);
@@ -125,6 +151,22 @@ pub(crate) fn load_deepseekocr_vlm(model_path: &Path) -> Result<LoadedModel> {
 
 const DEFAULT_SLIDING_WINDOW: i32 = 128;
 
+/// Ring-cache window for Unlimited-OCR, from `language_config.sliding_window_size`.
+///
+/// Read off the untouched `full_config` rather than the args struct because
+/// `deepseek::ModelArgs` has no field for it. Clamped to at least 1 so a
+/// checkpoint declaring 0 or a negative window does not produce a degenerate
+/// cache.
+fn unlimited_ocr_sliding_window(full_config: &serde_json::Value) -> i32 {
+    full_config
+        .get("language_config")
+        .and_then(|lc| lc.get("sliding_window_size"))
+        .and_then(|v| v.as_i64())
+        .map(|v| v as i32)
+        .unwrap_or(DEFAULT_SLIDING_WINDOW)
+        .max(1)
+}
+
 /// Load `baidu/Unlimited-OCR`. The vision + text stack is the DeepSeek-OCR V1
 /// layout (SAM + CLIP + linear projector + DeepSeek MoE decoder) shipped under
 /// the same layout-B `model.*` prefixes, so it loads exactly like
@@ -136,27 +178,8 @@ const DEFAULT_SLIDING_WINDOW: i32 = 128;
 pub(crate) fn load_unlimited_ocr_vlm(model_path: &Path) -> Result<LoadedModel> {
     let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
 
-    let mut lc = full_config
-        .get("language_config")
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("Missing language_config in Unlimited-OCR config"))?;
-    let window = lc
-        .get("sliding_window_size")
-        .and_then(|v| v.as_i64())
-        .map(|v| v as i32)
-        .unwrap_or(DEFAULT_SLIDING_WINDOW)
-        .max(1);
-    if let Some(obj) = lc.as_object_mut() {
-        obj.entry("model_type".to_string())
-            .or_insert_with(|| json!("deepseek"));
-        if !obj.contains_key("quantization")
-            && let Some(q) = full_config.get("quantization")
-        {
-            obj.insert("quantization".to_string(), q.clone());
-        }
-    }
-    let args: models::deepseek::ModelArgs = serde_json::from_value(lc)
-        .map_err(|e| anyhow::anyhow!("Failed to parse Unlimited-OCR language_config: {}", e))?;
+    let window = unlimited_ocr_sliding_window(&full_config);
+    let args = deepseekocr_language_args(&full_config, "Unlimited-OCR")?;
     let (gs, bits) = (args.group_size(), args.bits());
 
     let weights = remap_deepseekocr_weights(load_vlm_weights_common(model_path, None)?);
@@ -235,21 +258,7 @@ fn remap_deepseekocr_2_weights(weights: WeightMap) -> WeightMap {
 pub(crate) fn load_deepseekocr_2_vlm(model_path: &Path) -> Result<LoadedModel> {
     let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
 
-    let mut lc = full_config
-        .get("language_config")
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("Missing language_config in DeepSeek-OCR 2 config"))?;
-    if let Some(obj) = lc.as_object_mut() {
-        obj.entry("model_type".to_string())
-            .or_insert_with(|| json!("deepseek"));
-        if !obj.contains_key("quantization")
-            && let Some(q) = full_config.get("quantization")
-        {
-            obj.insert("quantization".to_string(), q.clone());
-        }
-    }
-    let args: models::deepseek::ModelArgs = serde_json::from_value(lc)
-        .map_err(|e| anyhow::anyhow!("Failed to parse DeepSeek-OCR 2 language_config: {}", e))?;
+    let args = deepseekocr_language_args(&full_config, "DeepSeek-OCR 2")?;
     let (gs, bits) = (args.group_size(), args.bits());
 
     let weights = remap_deepseekocr_2_weights(load_vlm_weights_common(model_path, None)?);
@@ -293,3 +302,7 @@ pub(crate) fn load_deepseekocr_2_vlm(model_path: &Path) -> Result<LoadedModel> {
     };
     Ok(LoadedModel::DeepSeekOcr2VLM(vlm))
 }
+
+#[cfg(test)]
+#[path = "vlm_deepseekocr_tests.rs"]
+mod tests;

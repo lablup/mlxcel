@@ -22,7 +22,10 @@
 //! - routed_scaling_factor for expert outputs (default 1.0)
 //! - Top-k routing with softmax scoring
 
-use crate::models::switch_layers::validate_expert_quantization_params;
+use crate::models::config::QuantizationArgs;
+use crate::models::switch_layers::{
+    validate_expert_quantization_params, validate_expert_quantization_shapes,
+};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
@@ -66,6 +69,33 @@ pub struct ModelArgs {
     #[serde(default)]
     pub attention_bias: bool,
 
+    /// The MLX-style nested block, `"quantization": {"group_size": N, "bits":
+    /// M, "mode": "affine"}`, which is the only spelling any conversion tool
+    /// emits (issue #975).
+    ///
+    /// It arrives two ways. A plain `deepseek` `config.json` carries it at the
+    /// top level, where [`DeepSeekModel::load`] deserializes the whole file
+    /// into this struct. The three DeepSeek-OCR loaders in
+    /// `crate::loading::vlm_deepseekocr` instead inherit the root block into
+    /// `language_config` before deserializing, because that sub-config declares
+    /// no quantization of its own; see
+    /// `crate::loading::vlm_deepseekocr::deepseekocr_language_args`.
+    ///
+    /// Until #975 this field did not exist, so serde silently discarded the
+    /// block on both routes and the accessors below returned the hardcoded
+    /// fallbacks no matter what the checkpoint declared. That is not a
+    /// load-time failure on any path: a wrong `group_size` re-solves inside
+    /// [`mlxcel_core::layers::reconcile_quantization_layout`] onto a
+    /// self-consistent pair that MLX accepts, so the dense projections, the
+    /// embedding and the OCR projector produce silently wrong numbers, while
+    /// the MoE expert planes, which never reach the reconciler, abort
+    /// uncatchably inside `gather_qmm` at the first routed forward pass.
+    #[serde(default)]
+    pub quantization: Option<QuantizationArgs>,
+
+    /// Flat top-level `group_size` / `bits` keys, kept as a fallback for
+    /// whatever checkpoint spelling these fields were originally added for.
+    /// [`Self::quantization`] wins when both are present.
     #[serde(default)]
     pub group_size: Option<i32>,
 
@@ -94,12 +124,39 @@ impl ModelArgs {
         self.hidden_size / self.num_attention_heads
     }
 
+    /// The declared quantization group size: nested block first, flat key
+    /// second, family default last.
     pub fn group_size(&self) -> i32 {
-        self.group_size.unwrap_or(64)
+        self.quantization
+            .as_ref()
+            .and_then(|q| q.group_size)
+            .or(self.group_size)
+            .unwrap_or(64)
     }
 
+    /// The declared quantization bit width, resolved in the same order as
+    /// [`Self::group_size`].
     pub fn bits(&self) -> i32 {
-        self.bits.unwrap_or(4)
+        self.quantization
+            .as_ref()
+            .and_then(|q| q.bits)
+            .or(self.bits)
+            .unwrap_or(4)
+    }
+
+    /// The declared quantization mode, or `"affine"` when no block names one.
+    ///
+    /// Fallible because [`QuantizationArgs::get_mode`] validates against
+    /// [`mlxcel_core::layers::SUPPORTED_QUANTIZATION_MODES`] at the point the
+    /// value is read (issue #973): the string would otherwise reach
+    /// `quantized_matmul` / `gather_qmm` verbatim across a cxx bridge that
+    /// carries no `Result`, making an unparseable mode an uncatchable abort at
+    /// the first forward pass rather than a load error.
+    pub fn quantization_mode(&self) -> Result<&str, String> {
+        match self.quantization.as_ref() {
+            Some(quantization) => quantization.get_mode(),
+            None => Ok("affine"),
+        }
     }
 }
 
@@ -620,6 +677,26 @@ impl DeepSeekModel {
 
     /// Create model from loaded weights
     pub fn from_weights(weights: &WeightMap, args: &ModelArgs) -> Result<Self, String> {
+        // Bound the declared mode before any loader below consumes the pair it
+        // sits next to (#973, #975). Every plane this family builds is affine:
+        // `UnifiedEmbedding`, `UnifiedLinear` and `SwitchLinear::Quantized` all
+        // take the affine entry points, and `from_stacked_parts` selects the
+        // quantized arm only when a `.biases` plane is present, which is the
+        // affine layout by construction. A block-float checkpoint would
+        // therefore land on the `Regular` arm with a packed uint32 weight and
+        // be reinterpreted rather than refused, and an unparseable mode string
+        // is the abort-at-first-forward class described on
+        // `ModelArgs::quantization_mode`. Refuse both here, naming the mode.
+        let mode = args.quantization_mode()?;
+        if mode != "affine" {
+            return Err(format!(
+                "quantization.mode is {mode:?}, but every DeepSeek v1 projection, embedding and \
+                 expert plane is built as affine, so a block-float checkpoint would be \
+                 reinterpreted rather than loaded. Only \"affine\" is supported for this \
+                 architecture"
+            ));
+        }
+
         // Load quantized embedding
         let embed_tokens = UnifiedEmbedding::from_weights(
             weights,
@@ -874,6 +951,14 @@ impl SwitchLinear {
     /// `group_size` / `bits` and hands them to `gather_qmm`, and this family
     /// never reaches `reconcile_quantization_layout`, so the bound has to live
     /// here. `prefix` is threaded in only so the error names the expert plane.
+    ///
+    /// Since #975 the pair is also cross-checked against the tensors it is being
+    /// stored on. Before that issue this family read the hardcoded `64` / `4` no
+    /// matter what the checkpoint declared, so the pair could not disagree with
+    /// an mlx-community export; now that the declaration actually arrives, a
+    /// block that describes different tensors has to fail here rather than
+    /// abort uncatchably inside `gather_qmm`. See
+    /// [`validate_expert_quantization_shapes`].
     fn from_stacked_parts(
         prefix: &str,
         weight: UniquePtr<MlxArray>,
@@ -881,11 +966,19 @@ impl SwitchLinear {
         biases: Option<UniquePtr<MlxArray>>,
         args: &ModelArgs,
     ) -> Result<Self, String> {
-        let num_experts = mlxcel_core::array_shape(&weight)[0] as usize;
+        let weight_shape = mlxcel_core::array_shape(&weight);
+        let num_experts = weight_shape[0] as usize;
         Ok(match (scales, biases) {
             (Some(scales), Some(biases)) => {
                 let (group_size, bits) = (args.group_size(), args.bits());
                 validate_expert_quantization_params(prefix, group_size, bits)?;
+                validate_expert_quantization_shapes(
+                    prefix,
+                    &weight_shape,
+                    &mlxcel_core::array_shape(&scales),
+                    group_size,
+                    bits,
+                )?;
                 Self::Quantized {
                     weight,
                     scales,

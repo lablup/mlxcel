@@ -170,6 +170,7 @@ fn build_wrapper() -> UnlimitedOcrVlModel {
         first_k_dense_replace: 0,
         routed_scaling_factor: 1.0,
         attention_bias: false,
+        quantization: None,
         group_size: None,
         bits: None,
     };
