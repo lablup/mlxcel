@@ -1392,9 +1392,12 @@ pub const SUPPORTED_QUANTIZATION_MODES: [&str; 4] = ["affine", "mxfp4", "mxfp8",
 ///          constructor [`QuantizedWeight::new_with_mode`], which never reaches
 ///          the reconciler; [`validate_quantization_biases`]; and in the
 ///          consuming crate `crate::models::switch_layers::SwitchLinear`
-///          (MoE experts), `crate::models::gpt_oss` (the one family that reads
-///          `quantization.mode` out of `config.json`, at both
+///          (MoE experts), `crate::models::gpt_oss` (which reads
+///          `quantization.mode` out of `config.json` at both
 ///          `Quantization::validate` and `ExpertLinear::from_weights`),
+///          `crate::models::jamba::JambaModel::from_weights` (which reads the
+///          declared mode only to refuse anything its affine-only loaders would
+///          silently reinterpret),
 ///          `crate::models::config::QuantizationArgs::get_mode` and
 ///          `crate::models::gemma4::validate_quantization_scheme`
 pub fn validate_quantization_mode(mode: &str) -> Result<(), String> {

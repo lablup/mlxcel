@@ -17,7 +17,8 @@
 //
 // Key features:
 // - Interleaved Mamba and Attention blocks (configurable pattern)
-// - Optional Sparse MoE (SwitchGLU)
+// - Optional Sparse MoE through the shared `switch_layers::SwitchGLU`
+//   (quantized experts via gather_qmm, dense via gather_mm)
 // - Mamba blocks with dt/b/c layernorms
 // - Mixed cache: KVCache for attention, MambaCache for Mamba
 
@@ -25,7 +26,7 @@ use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{
     FusedQKVLinear, KVCache, Linear, RMSNorm, UnifiedEmbedding, UnifiedLinear,
 };
-use mlxcel_core::utils::{create_causal_mask, silu, slice_axis, stack_arrays};
+use mlxcel_core::utils::{create_causal_mask, silu, slice_axis};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
@@ -33,12 +34,18 @@ use std::path::Path;
 
 use super::model_owned::ModelOwnedSequenceState;
 use super::recurrent_snapshot::{push_optional, restore_optional};
+use super::switch_layers::{SwitchGLU, moe_weighted_sum};
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Quantization {
     pub group_size: i32,
     pub bits: i32,
+    /// Declared quantization mode. Absent means `"affine"`, which is what every
+    /// published Jamba conversion declares. Read so the loader can refuse a mode
+    /// it would otherwise silently reinterpret; see [`JambaConfig::quantization_mode`].
+    #[serde(default = "default_quantization_mode")]
+    pub mode: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -110,6 +117,19 @@ impl JambaConfig {
     pub fn bits(&self) -> i32 {
         self.quantization.as_ref().map(|q| q.bits).unwrap_or(4)
     }
+
+    /// The declared quantization mode, defaulting to `"affine"` when the
+    /// `quantization` block is absent or does not name one.
+    pub fn quantization_mode(&self) -> &str {
+        self.quantization
+            .as_ref()
+            .map(|q| q.mode.as_str())
+            .unwrap_or("affine")
+    }
+}
+
+fn default_quantization_mode() -> String {
+    "affine".to_string()
 }
 
 fn default_rms_norm_eps() -> f32 {
@@ -331,119 +351,41 @@ impl JambaMLP {
     }
 }
 
-// SwitchLinear for MoE.
-// Kept local: uses take+matmul (not gather_mm), different forward shape handling
-#[allow(dead_code)]
-enum SwitchLinear {
-    Quantized {
-        weight: UniquePtr<MlxArray>,
-        scales: UniquePtr<MlxArray>,
-        biases: UniquePtr<MlxArray>,
-        group_size: i32,
-        bits: i32,
-    },
-    Regular {
-        weight: UniquePtr<MlxArray>, // [num_experts, out_features, in_features]
-    },
-}
-
-impl SwitchLinear {
-    fn forward(&self, x: &MlxArray, indices: &MlxArray) -> UniquePtr<MlxArray> {
-        match self {
-            Self::Quantized {
-                weight,
-                scales,
-                biases,
-                group_size,
-                bits,
-            } => {
-                // Use gather_qmm for quantized MoE experts
-                unsafe {
-                    mlxcel_core::gather_qmm(
-                        x,
-                        weight,
-                        scales,
-                        biases
-                            .as_ref()
-                            .map(|b| b as *const _)
-                            .unwrap_or(std::ptr::null()),
-                        std::ptr::null(),
-                        indices as *const _,
-                        true,
-                        *group_size,
-                        *bits,
-                        false,
-                        "affine",
-                    )
-                }
-            }
-            Self::Regular { weight } => {
-                // Gather weights for selected experts, then batched matmul
-                let w = mlxcel_core::take(weight, indices, 0);
-                let x_shape = mlxcel_core::array_shape(x);
-                let x_reshaped = mlxcel_core::reshape(x, &[x_shape[0], x_shape[1], 1, x_shape[2]]);
-                let w_transposed = mlxcel_core::transpose_axes(&w, &[0, 1, 3, 2]);
-                let result = mlxcel_core::matmul(&x_reshaped, &w_transposed);
-                mlxcel_core::squeeze_axis(&result, 2)
-            }
-        }
-    }
-}
-
-// SwitchGLU (MoE FFN).
-struct SwitchGLU {
-    gate_proj: SwitchLinear,
-    up_proj: SwitchLinear,
-    down_proj: SwitchLinear,
-}
-
-impl SwitchGLU {
-    fn forward(&self, x: &MlxArray, indices: &MlxArray) -> UniquePtr<MlxArray> {
-        let shape = mlxcel_core::array_shape(x);
-        let batch = shape[0];
-        let seq_len = shape[1];
-
-        // Expand x for expert routing: [batch, seq, hidden] -> [batch, seq, 1, hidden]
-        let x_exp = mlxcel_core::reshape(x, &[batch, seq_len, 1, shape[2]]);
-
-        // Forward through gate and up projections
-        let x_gate = self.gate_proj.forward(&x_exp, indices);
-        let x_up = self.up_proj.forward(&x_exp, indices);
-
-        // SiLU activation on gate
-        let gated = mlxcel_core::multiply(&silu(&x_gate), &x_up);
-
-        // Reshape for down projection
-        let gated_shape = mlxcel_core::array_shape(&gated);
-        let k = gated_shape[2]; // num_experts_per_tok
-
-        let flat = mlxcel_core::reshape(&gated, &[batch * seq_len, k, gated_shape[3]]);
-
-        // Flatten indices too
-        let indices_flat = mlxcel_core::reshape(indices, &[-1, k]);
-
-        // Down projection
-        let out = self.down_proj.forward(&flat, &indices_flat);
-
-        // Reshape back to [batch, seq, k, hidden]
-        let out_shape = mlxcel_core::array_shape(&out);
-        mlxcel_core::reshape(&out, &[batch, seq_len, k, out_shape[out_shape.len() - 1]])
-    }
-}
-
 // Sparse MoE Block.
 struct JambaSparseMoeBlock {
-    router: Linear,
+    /// Loaded through `UnifiedLinear` rather than the plain `load_linear`
+    /// because real quantized Jamba MoE conversions ship the router packed with
+    /// its own `.scales` / `.biases`, at a width that need not match the
+    /// top-level one (`ncls-p/AI21-Jamba2-Mini-mlx-4Bit` declares 8-bit routers
+    /// under a 4-bit default). `UnifiedLinear` infers the per-tensor width from
+    /// the packed-weight and scales shapes, so both widths load correctly.
+    router: UnifiedLinear,
     switch_mlp: SwitchGLU,
     num_experts_per_tok: usize,
 }
 
 impl JambaSparseMoeBlock {
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        let gates = self.router.forward(x);
+        // The shared `SwitchGLU` takes a 2D `[tokens, hidden]` activation and a
+        // 2D `[tokens, top_k]` index plane (it does its own `expand_dims` before
+        // the gather), so flatten the leading dims here and restore them at the
+        // end. The family-local `SwitchGLU` this replaced passed a 3D `x`
+        // straight through and then expanded it twice, which made every routed
+        // token abort in `reshape` before it ever reached an expert (#974).
+        let orig_shape = mlxcel_core::array_shape(x);
+        let hidden = orig_shape[orig_shape.len() - 1];
+        let x_flat = if orig_shape.len() > 2 {
+            let tokens: i32 = orig_shape[..orig_shape.len() - 1].iter().product();
+            mlxcel_core::reshape(x, &[tokens, hidden])
+        } else {
+            mlxcel_core::copy(x)
+        };
+
+        let gates = self.router.forward(&x_flat);
         let k = self.num_experts_per_tok as i32;
 
-        // Get top-k expert indices using argpartition
+        // Top-k expert selection: argpartition over the negated logits puts the
+        // k largest first, so the head slice is the top-k set.
         let neg_gates = mlxcel_core::negative(&gates);
         let inds = mlxcel_core::argpartition(&neg_gates, k - 1, -1);
         let inds = slice_axis(&inds, -1, 0, k);
@@ -452,17 +394,15 @@ impl JambaSparseMoeBlock {
         let scores = mlxcel_core::take_along_axis(&gates, &inds, -1);
         let scores = mlxcel_core::softmax(&scores, -1);
 
-        // Apply MoE
-        let y = self.switch_mlp.forward(x, &inds);
+        // [tokens, top_k, hidden]
+        let expert_out = self.switch_mlp.forward(&x_flat, &inds);
+        let combined = moe_weighted_sum(&expert_out, &scores, mlxcel_core::array_dtype(&x_flat));
 
-        // Weighted sum: y * scores[..., None]
-        let mut scores_shape = mlxcel_core::array_shape(&scores);
-        scores_shape.push(1);
-        let scores_exp = mlxcel_core::reshape(&scores, &scores_shape);
-        let weighted = mlxcel_core::multiply(&y, &scores_exp);
-
-        // Sum over expert dimension
-        mlxcel_core::sum_axis(&weighted, -2, false)
+        if orig_shape.len() > 2 {
+            mlxcel_core::reshape(&combined, &orig_shape)
+        } else {
+            combined
+        }
     }
 }
 
@@ -1070,31 +1010,15 @@ impl JambaModel {
             weights.remove("lm_head.weight");
         }
 
-        // Handle MoE weight conversion (experts.N -> switch_mlp)
-        for l in 0..config.num_hidden_layers {
-            let base = format!("model.layers.{}.feed_forward", l);
-            let has_experts = weights
-                .keys()
-                .any(|k| k.starts_with(&format!("{}.experts.", base)));
-            if !has_experts {
-                continue;
-            }
-
-            for proj in ["gate_proj", "down_proj", "up_proj"] {
-                let mut expert_tensors: Vec<UniquePtr<MlxArray>> = Vec::new();
-                let mut e = 0;
-                while let Some(w) =
-                    weights.remove(&format!("{}.experts.{}.{}.weight", base, e, proj))
-                {
-                    expert_tensors.push(w);
-                    e += 1;
-                }
-                if !expert_tensors.is_empty() {
-                    let stacked = stack_arrays(&expert_tensors, 0);
-                    weights.insert(format!("{}.switch_mlp.{}.weight", base, proj), stacked);
-                }
-            }
-        }
+        // The per-expert (`experts.{idx}`) to stacked (`switch_mlp`) remap that
+        // used to live here carried `.weight` alone, so a quantized per-expert
+        // export lost its `.scales` / `.biases` and the layer was then built
+        // dense from packed `uint32` (#974). `SwitchLinear::from_weights` now
+        // handles both layouts through `switch_layers::stack_individual_experts`,
+        // which stacks all three planes, and it derives the same expert keys
+        // from the `{root}.switch_mlp.{proj}` prefix this loop used to write. It
+        // also runs for `from_weights` callers that never went through
+        // `sanitize_weights`, which this loop did not.
 
         weights
     }
@@ -1114,6 +1038,25 @@ impl JambaModel {
         // Get quantization parameters
         let group_size = config.group_size();
         let bits = config.bits();
+
+        // Bound the declared mode before any loader consumes it (#973, #974).
+        // Every Jamba loader below builds affine planes: `UnifiedLinear`,
+        // `UnifiedEmbedding`, `FusedQKVLinear` and `SwitchGLU` all take the
+        // `"affine"` entry points. An unparseable mode reaches MLX verbatim and
+        // a block-float one would be silently reinterpreted as affine, and both
+        // cross the cxx bridge as an uncatchable abort at the first forward pass
+        // rather than a load error. Refuse them here instead, naming the mode.
+        let mode = config.quantization_mode();
+        mlxcel_core::layers::validate_quantization_mode(mode)?;
+        if mode != "affine" {
+            return Err(format!(
+                "quantization.mode is {mode:?}, but every Jamba projection and expert plane \
+                 is built as affine, so a block-float checkpoint would be reinterpreted as \
+                 affine and abort inside the kernel instead of failing here. Only \"affine\" \
+                 is supported for this architecture"
+            )
+            .into());
+        }
 
         // Build quantized embeddings
         let embed_tokens =
@@ -1220,38 +1163,31 @@ impl JambaModel {
 
             // Build feed forward (MLP or MoE)
             let feed_forward = if config.is_expert_layer(i) {
-                let router = load_linear(&mut weights, &format!("{}.feed_forward.router", prefix))?;
+                let router = UnifiedLinear::from_weights(
+                    &weights,
+                    &format!("{}.feed_forward.router", prefix),
+                    group_size,
+                    bits,
+                )?;
 
-                let gate_weight = weights
-                    .remove(&format!(
-                        "{}.feed_forward.switch_mlp.gate_proj.weight",
-                        prefix
-                    ))
-                    .ok_or(format!("Missing MoE gate_proj for layer {}", i))?;
-                let up_weight = weights
-                    .remove(&format!(
-                        "{}.feed_forward.switch_mlp.up_proj.weight",
-                        prefix
-                    ))
-                    .ok_or(format!("Missing MoE up_proj for layer {}", i))?;
-                let down_weight = weights
-                    .remove(&format!(
-                        "{}.feed_forward.switch_mlp.down_proj.weight",
-                        prefix
-                    ))
-                    .ok_or(format!("Missing MoE down_proj for layer {}", i))?;
+                // The shared loader branches on `.scales` presence, so a
+                // quantized expert plane reaches `gather_qmm` instead of being
+                // handed to `gather_mm` as raw packed `uint32`. It bounds the
+                // declared `group_size` / `bits` pair and the affine/`.biases`
+                // pairing before storing anything derived from them, and it
+                // accepts both the pre-stacked `switch_mlp` layout and the
+                // per-expert `experts.{idx}` one. The error it returns already
+                // names the full tensor prefix, so no layer wrapper is needed.
+                let switch_mlp = SwitchGLU::from_weights(
+                    &weights,
+                    &format!("{}.feed_forward.switch_mlp", prefix),
+                    group_size,
+                    bits,
+                )?;
 
                 FeedForward::MoE(JambaSparseMoeBlock {
                     router,
-                    switch_mlp: SwitchGLU {
-                        gate_proj: SwitchLinear::Regular {
-                            weight: gate_weight,
-                        },
-                        up_proj: SwitchLinear::Regular { weight: up_weight },
-                        down_proj: SwitchLinear::Regular {
-                            weight: down_weight,
-                        },
-                    },
+                    switch_mlp,
                     num_experts_per_tok: config.num_experts_per_tok,
                 })
             } else {

@@ -15,7 +15,8 @@
 //! Shared SwitchLinear / SwitchGLU for MoE models
 //!
 //! Used by: KimiLinear, LongcatFlashNgram, DeepSeekV3, DeepSeekV32, GLM4Moe,
-//!          GLM4MoeLite, ExaOneMoe, Mixtral, Qwen2Moe, Qwen3Moe, PhiMoE, OLMoE, etc.
+//!          GLM4MoeLite, ExaOneMoe, Jamba, Mixtral, Qwen2Moe, Qwen3Moe, PhiMoE,
+//!          OLMoE, etc.
 //!
 //! SwitchLinear: per-expert 3D matmul (quantized via gather_qmm, regular via gather_mm)
 //! SwitchGLU: SwiGLU MLP routing through SwitchLinear
@@ -540,8 +541,8 @@ impl SwitchLinear {
 /// Used by: every family behind the shared `SwitchGLU` / `SwitchLinear`, which
 ///          reaches this through `SwitchLinear::from_weights_with_mode`
 ///          whenever its checkpoint ships experts unstacked (BailingMoe,
-///          Cohere2Moe, Dots1, Gemma4, GraniteMoeHybrid, KimiLinear, Lfm2,
-///          Llada2Moe, LongcatFlashNgram, Mellum, MiniMax, MiniMaxM3Moe,
+///          Cohere2Moe, Dots1, Gemma4, GraniteMoeHybrid, Jamba, KimiLinear,
+///          Lfm2, Llada2Moe, LongcatFlashNgram, Mellum, MiniMax, MiniMaxM3Moe,
 ///          Mistral4, Mixtral, Moondream3, OLMoE, PhiMoE, Qwen2Moe,
 ///          SolarOpen), plus DeepSeek v1 (`src/models/deepseek.rs`), which
 ///          calls it directly for the `baidu/Unlimited-OCR` raw per-expert
@@ -884,9 +885,9 @@ fn scatter_unsort(x: &MlxArray, inv_order: &MlxArray, orig_shape: &[i32]) -> Uni
 /// Weighted sum over selected expert outputs while preserving the residual dtype.
 ///
 /// Used by: BailingMoe, DeepSeek, DeepSeekV3, DeepSeekV32, ExaOneMoe,
-///          Ernie4_5Moe, GLM4Moe, GLM4MoeLite, GptOss, HunyuanMoe, KimiLinear,
-///          MiniMax, Mistral4, Mixtral, Moondream3, OLMoE, PhiMoE, Qwen2Moe,
-///          Qwen3Moe, Qwen3Next, Qwen3VLMoe, SolarOpen, Step3p5
+///          Ernie4_5Moe, GLM4Moe, GLM4MoeLite, GptOss, HunyuanMoe, Jamba,
+///          KimiLinear, MiniMax, Mistral4, Mixtral, Moondream3, OLMoE, PhiMoE,
+///          Qwen2Moe, Qwen3Moe, Qwen3Next, Qwen3VLMoe, SolarOpen, Step3p5
 ///
 /// The old `nkh,nk->nh` einsum contraction promotes the combine to float32
 /// on M5 for bf16/f16 activations. Match mlx-lm's `y * scores[..., None]`
