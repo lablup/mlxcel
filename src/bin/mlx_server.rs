@@ -329,6 +329,24 @@ struct ServerArgs {
     #[arg(long = "prefill-chunk-size", default_value_t = 512)]
     prefill_chunk_size: usize,
 
+    /// Decode ticks a parked chunked prefill yields before it is granted one
+    /// (#1011).
+    ///
+    /// A prompt longer than `--prefill-chunk-size` admitted next to a busy
+    /// decode batch runs one chunk and is then parked. This bounds how long it
+    /// stays parked: after N consecutive decode ticks the next tick is granted
+    /// to the prefill, so a C-chunk prompt reaches its first token within
+    /// `C * (N + 1)` ticks however long the batch keeps decoding. The price is
+    /// paid by the decoding streams, whose mean inter-token latency during that
+    /// window rises by roughly one chunk forward per N decode steps, so this is
+    /// the TTFT-versus-ITL dial: lower is faster to first token and noisier for
+    /// everyone else. `0` disables the grant and restores the pre-#1011
+    /// behaviour, in which a parked prefill waits for the batch to drain and
+    /// its time to first token has no bound. Env:
+    /// `MLXCEL_PREFILL_GRANT_INTERVAL` (the flag wins).
+    #[arg(long = "prefill-grant-interval", value_name = "N")]
+    prefill_grant_interval: Option<usize>,
+
     /// Prefill batch size [llama-server alias for --prefill-chunk-size] [default: 512]
     #[arg(
         short = 'b',
@@ -1320,6 +1338,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         audio_queue_depth: args.audio_queue_depth,
         audio_request_timeout_secs: args.audio_request_timeout_secs,
         prefill_chunk_size: args.prefill_chunk_size,
+        prefill_grant_interval: args.prefill_grant_interval,
         batch_size: args.batch_size,
         ubatch_size: args.ubatch_size,
         enable_preemption: args.enable_preemption,

@@ -71,6 +71,10 @@ pub struct ServerStartupInput {
     /// audio providers via [`super::config::ServerConfig`].
     pub audio_request_timeout_secs: u64,
     pub prefill_chunk_size: usize,
+    /// #1011: `--prefill-grant-interval`, the decode ticks a parked chunked
+    /// prefill yields before the scheduler grants it one. `None` = env override
+    /// / shipped default; `Some(0)` = grant disabled (pre-#1011 starvation).
+    pub prefill_grant_interval: Option<usize>,
     /// llama-server alias for `--prefill-chunk-size` (`--batch-size` / `-b`).
     ///
     /// When set, maps to `prefill_chunk_size`. If both this and `prefill_chunk_size`
@@ -548,6 +552,7 @@ impl ServerStartupInput {
             audio_queue_depth: self.audio_queue_depth,
             audio_request_timeout_secs: self.audio_request_timeout_secs,
             prefill_chunk_size: resolution.prefill_chunk_size,
+            prefill_grant_interval: self.prefill_grant_interval,
             batch_size_conflict: resolution.batch_size_conflict,
             ubatch_size_provided: resolution.ubatch_size_provided,
             enable_preemption: self.enable_preemption,

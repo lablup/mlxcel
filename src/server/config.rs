@@ -322,6 +322,12 @@ pub struct ServerConfig {
     /// Number of tokens per prefill chunk. When 0, chunking is disabled and
     /// the full prompt is prefilled in a single pass.
     pub prefill_chunk_size: usize,
+    /// #1011 prefill fairness interval (`--prefill-grant-interval`): decode
+    /// ticks a parked chunked prefill yields before the scheduler grants it
+    /// one, bounding the admitted request's time to first token. `None` lets
+    /// the scheduler resolve `MLXCEL_PREFILL_GRANT_INTERVAL` or the shipped
+    /// default; `Some(0)` disables the grant (pre-#1011 unbounded wait).
+    pub prefill_grant_interval: Option<usize>,
     /// Whether preemptive eviction is enabled. When true and the batch is
     /// full, a high-priority incoming request may evict a lower-priority
     /// or longer-running active sequence.
@@ -569,6 +575,8 @@ impl Default for ServerConfig {
             audio_queue_depth: DEFAULT_AUDIO_QUEUE_DEPTH,
             audio_request_timeout_secs: DEFAULT_AUDIO_REQUEST_TIMEOUT_SECS,
             prefill_chunk_size: 512,
+            // #1011: unset -> scheduler resolves the env override / default.
+            prefill_grant_interval: None,
             enable_preemption: false,
             preemption_policy: PreemptionPolicy::default(),
             no_batch: false,

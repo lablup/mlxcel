@@ -89,7 +89,9 @@ use super::queue::PrefillQueue;
 use super::sequence::{
     BatchSchedulerAction, FinishReason, RequestPriority, SequenceInfo, SequenceState,
 };
-use super::tick_policy::{TickChoice, TickState, decide_tick, mixed_step_enabled};
+use super::tick_policy::{
+    TickChoice, TickState, decide_tick, mixed_step_enabled, resolve_prefill_grant_interval,
+};
 
 /// Returns true when the current hardware is M5+ with Neural Accelerator
 /// support and tile-aligned prefill should be applied.
@@ -288,6 +290,23 @@ pub struct BatchScheduler {
     /// default) makes [`BatchSchedulerAction::MixedStep`] unreachable and keeps
     /// tick arbitration identical to the pre-#908 scheduler.
     mixed_step_enabled: bool,
+
+    /// Issue #1011 fairness policy: how many consecutive contended decode ticks
+    /// a parked chunked prefill yields before it is granted one
+    /// (`--prefill-grant-interval` / `MLXCEL_PREFILL_GRANT_INTERVAL`). Resolved
+    /// once at construction so the tick loop never touches the environment.
+    /// `0` disables the grant and restores the pre-#1011 starvation.
+    prefill_grant_interval: u32,
+
+    /// Issue #1011 fairness ledger: consecutive contended ticks that resolved
+    /// to `Decode` since the parked chunked prefill last ran a chunk.
+    ///
+    /// [`Self::decide_action`] is the ONLY writer, and it can only write the
+    /// value the policy returned alongside the choice
+    /// ([`super::tick_policy::TickDecision`]), so this field cannot drift out of
+    /// step with the arbitration it feeds. Nothing else in the scheduler needs
+    /// to remember to reset it.
+    decode_ticks_since_prefill_grant: u32,
 
     // -- Shutdown flag --
     shutdown_requested: bool,
@@ -893,7 +912,7 @@ impl BatchScheduler {
         if self.prefill_chunk_size > 0 && prompt_tokens.len() > self.prefill_chunk_size {
             self.start_chunked_prefill(seq);
             while self.chunked_prefill_seq.is_some() {
-                self.continue_chunked_prefill(false);
+                self.continue_chunked_prefill();
             }
         } else {
             self.execute_full_prefill(seq);
@@ -1238,6 +1257,11 @@ impl BatchScheduler {
             preemption_policy,
             chunked_prefill_seq: None,
             mixed_step_enabled: mixed_step_enabled(),
+            // #1011: resolve the env override / shipped default now;
+            // `with_prefill_grant_interval` overrides this later with an
+            // explicit CLI value when one was passed.
+            prefill_grant_interval: resolve_prefill_grant_interval(None),
+            decode_ticks_since_prefill_grant: 0,
             shutdown_requested: false,
             consecutive_decode_eval_failures: 0,
             max_batch_prefill: max_batch_prefill.max(1),
@@ -1313,6 +1337,24 @@ impl BatchScheduler {
             self.max_batch_prefill,
         );
         self
+    }
+
+    /// Override the #1011 prefill fairness interval with the explicit
+    /// CLI/config value (`--prefill-grant-interval`).
+    ///
+    /// `None` keeps whatever [`Self::with_config`] resolved from
+    /// `MLXCEL_PREFILL_GRANT_INTERVAL` or the shipped default; `Some(0)`
+    /// disables the grant (pre-#1011 arbitration, unbounded parked-prefill
+    /// wait); `Some(n)` sets an explicit interval.
+    pub fn with_prefill_grant_interval(mut self, configured: Option<usize>) -> Self {
+        self.prefill_grant_interval = resolve_prefill_grant_interval(configured);
+        self
+    }
+
+    /// Returns the resolved prefill fairness interval (0 = grant disabled).
+    /// Exposed for tests.
+    pub fn prefill_grant_interval(&self) -> u32 {
+        self.prefill_grant_interval
     }
 
     /// Returns the resolved batched-prefill padded-token budget (0 = uncapped).
@@ -2576,7 +2618,7 @@ impl BatchScheduler {
                     // is this prototype's dispatch proof, so it must not move
                     // on a tick where the parked sequence was already drained
                     // or aborted.
-                    if self.continue_chunked_prefill(true) {
+                    if self.continue_chunked_prefill() {
                         self.batch_observability.record_mixed_step();
                     }
                     // A classic action ran: the next tick goes back to the
@@ -3317,6 +3359,8 @@ impl BatchScheduler {
             queue_is_empty: self.prefill_queue.is_empty(),
             should_preempt: self.should_preempt(),
             mixed_step_enabled: self.mixed_step_enabled,
+            decode_ticks_since_prefill_grant: self.decode_ticks_since_prefill_grant,
+            prefill_grant_interval: self.prefill_grant_interval,
         }
     }
 
@@ -3331,18 +3375,44 @@ impl BatchScheduler {
     /// `chunked_prefill_interleaving_pattern` (issue #908).
     ///
     /// Behaviour is unchanged from before issue #908 unless `MLXCEL_MIXED_STEP`
-    /// is set. `tick_policy_tests::mixed_step_off_is_identical_to_the_pre_908_policy`
-    /// checks that over the complete 128-state space.
-    fn decide_action(&self) -> BatchSchedulerAction {
+    /// is set or the issue #1011 fairness grant fires.
+    /// `tick_policy_tests::default_policy_differs_from_pre_908_only_where_the_grant_fires`
+    /// characterises both directions of that divergence over the complete
+    /// 128-state boolean space, and
+    /// `grant_disabled_is_identical_to_the_pre_908_policy` pins the
+    /// `--prefill-grant-interval 0` escape hatch as byte-identical to the old
+    /// arbitration.
+    ///
+    /// This is the ONLY place the #1011 fairness ledger is written, and it is
+    /// written from the value the policy returned alongside the choice, so the
+    /// counter cannot drift out of step with the arbitration it feeds. Taking
+    /// `&mut self` for that write is what makes forgetting it impossible: there
+    /// is no way to obtain a choice without also obtaining, and storing, its
+    /// successor counter.
+    fn decide_action(&mut self) -> BatchSchedulerAction {
         tracing::debug!(
             active = self.active_batch.len(),
             queued = self.prefill_queue.len(),
             chunked_in_progress = self.chunked_prefill_seq.is_some(),
             speculative_slice = self.speculative_slice.is_some(),
             slice_backlog = self.speculative_slice_backlog.len(),
+            prefill_grant_wait = self.decode_ticks_since_prefill_grant,
             "scheduler tick"
         );
-        match decide_tick(&self.tick_state()) {
+        let decision = decide_tick(&self.tick_state());
+        // A granted tick is one the parked prefill took from a live decode
+        // batch. Count it before the action runs, from the arbitration itself,
+        // so the counter answers "did the fairness policy engage" and not
+        // "did a chunk happen to run"; the ordinary drained-batch continuation
+        // must not move it or it stops being a dispatch proof.
+        if decision.choice == TickChoice::Prefill
+            && self.chunked_prefill_seq.is_some()
+            && !self.active_batch.is_empty()
+        {
+            self.batch_observability.record_prefill_grant();
+        }
+        self.decode_ticks_since_prefill_grant = decision.decode_ticks_since_prefill_grant;
+        match decision.choice {
             TickChoice::SpeculativeRound => BatchSchedulerAction::SpeculativeRound,
             TickChoice::Decode => BatchSchedulerAction::Decode(self.active_batch.sequence_ids()),
             TickChoice::MixedStep => {
@@ -3474,7 +3544,7 @@ impl BatchScheduler {
     fn execute_prefill(&mut self, _action_id: SequenceId) {
         // Resume a chunked prefill already in progress?
         if self.chunked_prefill_seq.is_some() {
-            self.continue_chunked_prefill(false);
+            self.continue_chunked_prefill();
             return;
         }
 
@@ -5391,21 +5461,30 @@ impl BatchScheduler {
     /// counter stay an honest dispatch proof instead of counting ticks on which
     /// no prefill work happened.
     ///
-    /// `mixed_tick` is true only on a `MixedStep` tick, where a decode batch is
-    /// live alongside this chunk. It suppresses the unconditional
-    /// `clear_memory_cache()` below: the decode path deliberately clears on a
-    /// cadence (`cache_clear_interval()`, 256 tokens on Metal and off by
-    /// default on CUDA, because a per-step clear churns the pool and defeats
-    /// CUDA-graph reuse, ml-explore/mlx#2358). Before #908 this function was
-    /// only ever reachable with an empty active batch, so its per-chunk clear
-    /// never touched a decode hot path. Under `MLXCEL_MIXED_STEP` it would run
-    /// on every decode tick for the whole duration of a long prefill and
-    /// inflate exactly the inter-token latency the prototype exists to measure.
-    fn continue_chunked_prefill(&mut self, mixed_tick: bool) -> bool {
+    /// The per-chunk `clear_memory_cache()` below is suppressed whenever a
+    /// decode batch is live alongside this chunk. The decode path deliberately
+    /// clears on a cadence instead (`cache_clear_interval()`, 256 tokens on
+    /// Metal and off by default on CUDA, because a per-step clear churns the
+    /// pool and defeats CUDA-graph reuse, ml-explore/mlx#2358). Before #908
+    /// this function was only ever reachable with an empty active batch, so its
+    /// per-chunk clear never touched a decode hot path.
+    ///
+    /// #908 introduced the first interleaved caller (`MixedStep`) and passed an
+    /// explicit `mixed_tick` flag to suppress the clear. #1011 makes the
+    /// DEFAULT policy interleaved too, via the fairness grant, so the condition
+    /// is now read from the active batch rather than passed in: a caller that
+    /// forgot the flag would silently put an allocator-pool clear on the decode
+    /// hot path for the whole duration of a long prefill, inflating exactly the
+    /// inter-token latency this issue has to measure. There is one source of
+    /// truth for "is decode live" and it is the active batch.
+    fn continue_chunked_prefill(&mut self) -> bool {
         let mut seq = match self.chunked_prefill_seq.take() {
             Some(s) => s,
             None => return false,
         };
+        // Interleaved with decode (a #1011 grant or a #908 mixed step) rather
+        // than running against a drained batch.
+        let decode_batch_live = !self.active_batch.is_empty();
 
         let _span = tracing::info_span!(
             "chunked_prefill_continue",
@@ -5524,7 +5603,7 @@ impl BatchScheduler {
                 self.eval_failures_exhausted();
                 return false;
             }
-            if !mixed_tick {
+            if !decode_batch_live {
                 mlxcel_core::clear_memory_cache();
             }
             self.chunked_prefill_seq = Some(seq);
@@ -5532,7 +5611,7 @@ impl BatchScheduler {
         }
 
         // Final chunk -- complete the prefill and sample the first token
-        if !mixed_tick {
+        if !decode_batch_live {
             mlxcel_core::clear_memory_cache();
         }
 
@@ -5782,6 +5861,24 @@ impl BatchScheduler {
             cache_set.current_offset = prompt_len + 1;
         }
 
+        // The slot this sequence was admitted into is reserved for it: admission
+        // required `!active_batch.is_full()`, and while a chunked prefill is
+        // parked the tick policy's chunked branch short-circuits above the
+        // admission branch, so nothing else can take the slot in between. That
+        // invariant used to be belt and braces because a chunked prefill could
+        // only finish against an EMPTY batch; since #1011 it finishes against a
+        // live one, so it is now the only thing standing between a completed
+        // prefill and a full batch. `ActiveBatch::add` consumes the sequence and
+        // cannot hand it back, so a failure there drops the request silently and
+        // the client's stream just ends. Check first and fail it loudly instead.
+        if self.active_batch.is_full() {
+            self.abort_sequence(
+                seq,
+                "Internal scheduler error: the active batch filled while this prompt was \
+                 being prefilled, so its reserved slot was lost",
+            );
+            return;
+        }
         if let Err(err) = self.active_batch.add(seq) {
             tracing::error!("Failed to add sequence to active batch: {err}");
         }

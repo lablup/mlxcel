@@ -177,6 +177,9 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
          # HELP mlxcel_batch_mixed_steps_total Mixed prefill/decode ticks (issue #908 prototype; zero unless MLXCEL_MIXED_STEP is set)\n\
          # TYPE mlxcel_batch_mixed_steps_total counter\n\
          mlxcel_batch_mixed_steps_total {mixed_steps}\n\
+         # HELP mlxcel_batch_prefill_grants_total Fairness grants handed to a parked chunked prefill (issue #1011; zero when --prefill-grant-interval is 0)\n\
+         # TYPE mlxcel_batch_prefill_grants_total counter\n\
+         mlxcel_batch_prefill_grants_total {prefill_grants}\n\
          # HELP mlxcel_batch_current_size Current active batch size\n\
          # TYPE mlxcel_batch_current_size gauge\n\
          mlxcel_batch_current_size {batch_size}\n\
@@ -281,6 +284,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
         decode_lookahead_steps = obs.decode_lookahead_steps,
         prefill_chunks = obs.prefill_chunks_processed,
         mixed_steps = obs.mixed_steps_processed,
+        prefill_grants = obs.prefill_grants_processed,
         batch_size = obs.current_batch_size,
         cache_active = obs.cache_pool_active,
         paged_block_size = obs.cache_pool_paged_block_size,

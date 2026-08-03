@@ -174,6 +174,16 @@ pub struct BatchObservability {
     /// set, which is what makes this counter the dispatch proof: a mixed-step
     /// benchmark whose delta is zero measured the default tick policy.
     pub mixed_steps_processed: AtomicU64,
+    /// Number of fairness grants handed to a parked chunked prefill
+    /// (issue #1011). One increment per tick where the grant counter reached
+    /// `--prefill-grant-interval` and the tick was given to the parked prompt
+    /// instead of to the decode batch it was competing with. This is the
+    /// dispatch proof for the fairness policy the way `mixed_steps_processed`
+    /// is for the #908 prototype: it can only move when the grant actually
+    /// fires, so a benchmark whose delta is zero measured a server with the
+    /// grant disabled (or one where no prefill was ever contended) rather than
+    /// the shipped policy.
+    pub prefill_grants_processed: AtomicU64,
     /// Number of decode steps served by the lookahead async_eval pipeline
     /// (issue #632). One increment per steady pipelined tick where the batch
     /// committed a token from a prebuilt (async-scheduled) forward instead of
@@ -300,6 +310,7 @@ impl BatchObservability {
             prefill_chunks_processed: AtomicU64::new(0),
             decode_steps_processed: AtomicU64::new(0),
             mixed_steps_processed: AtomicU64::new(0),
+            prefill_grants_processed: AtomicU64::new(0),
             decode_lookahead_steps: AtomicU64::new(0),
             current_batch_size: AtomicUsize::new(0),
             current_queue_depth: AtomicUsize::new(0),
@@ -366,6 +377,13 @@ impl BatchObservability {
     /// Record that one mixed prefill/decode tick was executed (issue #908).
     pub fn record_mixed_step(&self) {
         self.mixed_steps_processed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record that one fairness grant advanced a parked chunked prefill that
+    /// was competing with a live decode batch (issue #1011).
+    pub fn record_prefill_grant(&self) {
+        self.prefill_grants_processed
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record that one decode step was executed for a batch of the given size.
@@ -597,6 +615,7 @@ impl BatchObservability {
             prefill_chunks_processed: self.prefill_chunks_processed.load(Ordering::Relaxed),
             decode_steps_processed: self.decode_steps_processed.load(Ordering::Relaxed),
             mixed_steps_processed: self.mixed_steps_processed.load(Ordering::Relaxed),
+            prefill_grants_processed: self.prefill_grants_processed.load(Ordering::Relaxed),
             decode_lookahead_steps: self.decode_lookahead_steps.load(Ordering::Relaxed),
             current_batch_size: self.current_batch_size.load(Ordering::Relaxed),
             current_queue_depth: self.current_queue_depth.load(Ordering::Relaxed),
@@ -707,6 +726,10 @@ pub struct ObservabilitySnapshot {
     /// Mixed prefill/decode ticks (issue #908 prototype); zero unless
     /// `MLXCEL_MIXED_STEP` is set.
     pub mixed_steps_processed: u64,
+    /// Fairness grants handed to a parked chunked prefill (issue #1011); zero
+    /// when `--prefill-grant-interval 0` disables the policy, or when no
+    /// chunked prefill ever competed with a live decode batch.
+    pub prefill_grants_processed: u64,
     /// Decode steps served by the lookahead async_eval pipeline (issue #632).
     pub decode_lookahead_steps: u64,
     pub current_batch_size: usize,

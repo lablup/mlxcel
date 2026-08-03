@@ -69,8 +69,15 @@ from bench_serving_concurrency import (  # noqa: E402
 # Scheduler counters that say which tick policy served the run. `mixed_steps` is
 # the dispatch proof for the issue #908 prototype: it can only move when
 # `MLXCEL_MIXED_STEP` is set and a tick advanced prefill and decode together.
+#
+# `prefill_grants` is the same kind of proof for the issue #1011 fairness
+# policy: it can only move when a parked chunked prefill took a tick away from a
+# live decode batch, so it separates a server running the shipped grant from one
+# running `--prefill-grant-interval 0`. Comparing two grant intervals without it
+# is comparing a code path against itself and calling the noise a result.
 _TICK_METRICS = (
     "mlxcel_batch_mixed_steps_total",
+    "mlxcel_batch_prefill_grants_total",
     "mlxcel_batch_prefill_chunks_total",
     "mlxcel_batch_decode_steps_total",
 )
@@ -348,6 +355,7 @@ async def _amain(args: argparse.Namespace) -> int:
     print()
 
     mixed = deltas["mlxcel_batch_mixed_steps_total"]
+    grants = deltas["mlxcel_batch_prefill_grants_total"]
     chunks = deltas["mlxcel_batch_prefill_chunks_total"]
 
     admit_sent = admitted.start_s
@@ -411,6 +419,25 @@ async def _amain(args: argparse.Namespace) -> int:
             "NOT COMPARABLE: --expect baseline, but the mixed-step counter moved. "
             "MLXCEL_MIXED_STEP is set in the server's environment, so this is not a "
             "baseline measurement."
+        )
+        return 2
+
+    # Issue #1011 fairness arm, same guard shape. `--expect baseline` says
+    # nothing about the grant, because the grant IS the default policy; this is
+    # the separate axis.
+    if args.expect_grant == "on" and grants <= 0:
+        print(
+            "NOT COMPARABLE: --expect-grant on, but no fairness grant fired. The "
+            "server is running --prefill-grant-interval 0, or the interval is so "
+            "large that no grant came due inside the window, so this run measured "
+            "the starved policy rather than the fair one."
+        )
+        return 2
+    if args.expect_grant == "off" and grants > 0:
+        print(
+            "NOT COMPARABLE: --expect-grant off, but the fairness grant fired. The "
+            "server is not running --prefill-grant-interval 0, so this is not a "
+            "grant-disabled measurement."
         )
         return 2
 
@@ -552,6 +579,17 @@ def main() -> int:
             "point of this harness is an A/B and 'any' silently disables both "
             "dispatch guards; pass 'any' only for exploratory runs whose numbers "
             "will not be recorded."
+        ),
+    )
+    parser.add_argument(
+        "--expect-grant",
+        choices=("on", "off", "any"),
+        default="any",
+        help=(
+            "Whether this invocation claims the issue #1011 prefill fairness "
+            "grant is active. 'on' fails if no grant fired, 'off' fails if one "
+            "did. Orthogonal to --expect, which is about the #908 mixed-step "
+            "prototype. Default 'any' for exploratory runs."
         ),
     )
     args = parser.parse_args()

@@ -1,5 +1,12 @@
 # Mixed prefill/decode step: chunked-prefill starvation, measured
 
+> **Superseded in part by issue #1011.** The baseline arm below is what the
+> shipped default did before #1011 added `--prefill-grant-interval`. It is now
+> reproduced by `GRANT=0 scripts/bench/starvation_probe.sh baseline`; the
+> default arm advances the prefill concurrently with decode. The price of that
+> bound, which this document's Results section left open, is measured in
+> [`prefill-fairness-m1ultra-2026-08-03.md`](prefill-fairness-m1ultra-2026-08-03.md).
+
 Issue #908 / ADR 0005. M1 Ultra (64 GB), macOS 26.6, Metal.
 `mlx-community/Meta-Llama-3.1-8B-Instruct-4bit`, `--parallel 8 --prefill-chunk-size 512`.
 
@@ -74,9 +81,13 @@ that claim.
 
 The starvation itself is a live serving defect independent of this epic: a
 long prompt admitted into a busy batch makes no progress until the batch
-drains, which is unbounded when streams keep arriving. It is pinned by
+drains, which is unbounded when streams keep arriving. It was pinned by
 `chunked_prefill_starves_until_active_batch_drains` in
 `src/server/batch/tick_policy.rs` and tracked separately for the fairness fix.
+Issue #1011 shipped that fix and inverted the test: the defect is now forbidden
+by `a_parked_chunked_prefill_is_never_starved_by_a_live_decode_batch`, and the
+old fixed point survives only as the `--prefill-grant-interval 0` escape hatch's
+regression boundary.
 
 ## Reproducing
 

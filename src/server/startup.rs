@@ -129,6 +129,9 @@ pub struct ServerStartupConfig {
     /// [`super::ServerStartupInput::into_startup_config`] and forwarded to
     /// [`super::config::ServerConfig`].
     pub cors_allowed_origins: Option<Vec<axum::http::HeaderValue>>,
+    /// #1011: `--prefill-grant-interval`. `None` keeps the env override /
+    /// shipped default; `Some(0)` disables the fairness grant.
+    pub prefill_grant_interval: Option<usize>,
     /// Preemption policy string from CLI (parsed into enum at build_server_config).
     pub preemption_policy: String,
     /// Force the legacy sequential worker, bypassing the batch scheduler.
@@ -412,6 +415,8 @@ impl Default for ServerStartupConfig {
             enable_preemption: false,
             enable_vlm_prefix_cache: false,
             cors_allowed_origins: None,
+            // #1011: unset -> scheduler resolves the env override / default.
+            prefill_grant_interval: None,
             preemption_policy: "longest-first".to_string(),
             no_batch: false,
             // Serving-throughput default: batched prefill up to 4 requests (#628).
@@ -877,6 +882,9 @@ pub(super) fn build_server_config(
         audio_queue_depth: startup.audio_queue_depth,
         audio_request_timeout_secs: startup.audio_request_timeout_secs,
         prefill_chunk_size: startup.prefill_chunk_size,
+        // #1011: pass the explicit --prefill-grant-interval through untouched
+        // (the scheduler resolves env / shipped default when this is None).
+        prefill_grant_interval: startup.prefill_grant_interval,
         enable_preemption: startup.enable_preemption,
         preemption_policy: parse_preemption_policy(&startup.preemption_policy),
         no_batch: startup.no_batch,

@@ -294,6 +294,8 @@ impl ModelProvider {
                 config.max_batch_prefill,
                 // forward the --max-batch-prefill-tokens cap to the worker (#715).
                 config.max_batch_prefill_tokens,
+                // forward the --prefill-grant-interval fairness dial (#1011).
+                config.prefill_grant_interval,
                 config.decode_storage_backend,
                 config.pipeline_parallel_runtime.clone(),
                 config.vision_cache_size,
@@ -578,6 +580,9 @@ impl ModelProvider {
             // this wrapper predates --max-batch-prefill-tokens (#715); let the
             // scheduler use the env override or the derived default.
             None,
+            // likewise for --prefill-grant-interval (#1011): the scheduler
+            // resolves the env override or the shipped default.
+            None,
             decode_storage_backend,
             pipeline_parallel_runtime,
             vision_cache_size,
@@ -622,6 +627,7 @@ impl ModelProvider {
         preemption_policy: crate::server::config::PreemptionPolicy,
         max_batch_prefill: usize,
         max_batch_prefill_tokens: Option<usize>,
+        prefill_grant_interval: Option<usize>,
         decode_storage_backend: crate::server::DecodeStorageBackend,
         pipeline_parallel_runtime: Option<crate::server::PipelineParallelRuntimeConfig>,
         vision_cache_size: usize,
@@ -666,6 +672,9 @@ impl ModelProvider {
             // #715: forward the explicit --max-batch-prefill-tokens value; the
             // scheduler resolves the env override / derived default otherwise.
             max_batch_prefill_tokens,
+            // #1011: forward the explicit --prefill-grant-interval value; the
+            // scheduler resolves the env override / shipped default otherwise.
+            prefill_grant_interval,
             decode_storage_backend,
             pipeline_parallel_runtime,
             tensor_parallel: crate::distributed::ShardConfig::default(),
@@ -758,6 +767,9 @@ impl ModelProvider {
             max_batch_size,
             max_queue_depth,
             prefill_chunk_size: 0,
+            // #1011: chunking is off on this path, so no prefill can ever park
+            // and the fairness grant is unreachable; keep the default.
+            prefill_grant_interval: None,
             enable_preemption: false,
             preemption_policy: crate::server::config::PreemptionPolicy::default(),
             max_batch_prefill: 1,

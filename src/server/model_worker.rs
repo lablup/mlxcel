@@ -53,6 +53,11 @@ pub(crate) struct WorkerSchedulerConfig {
     pub max_batch_size: usize,
     pub max_queue_depth: usize,
     pub prefill_chunk_size: usize,
+    /// #1011: explicit `--prefill-grant-interval` value bounding how long a
+    /// parked chunked prefill yields to a live decode batch. `None` keeps the
+    /// `MLXCEL_PREFILL_GRANT_INTERVAL` override or the shipped default;
+    /// `Some(0)` disables the grant (pre-#1011 unbounded parked wait).
+    pub prefill_grant_interval: Option<usize>,
     pub enable_preemption: bool,
     pub preemption_policy: crate::server::config::PreemptionPolicy,
     /// Maximum number of requests to batch together for prefill (default: 1).
@@ -559,6 +564,9 @@ pub(crate) fn spawn_model_worker_with_batch_config(
             .with_vision_cache_size(sched_config.vision_cache_size)
             // cap the batched-prefill transient to --max-batch-prefill-tokens (#715).
             .with_max_batch_prefill_tokens(sched_config.max_batch_prefill_tokens)
+            // bound a parked chunked prefill's wait behind a live decode batch
+            // with --prefill-grant-interval (#1011).
+            .with_prefill_grant_interval(sched_config.prefill_grant_interval)
             .with_token_bias(token_bias)
             .with_xtc_newline_token_ids(xtc_newline_token_ids)
             .with_reasoning_budget(sched_config.reasoning_budget, thinking_ids)
