@@ -174,6 +174,9 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
          # HELP mlxcel_batch_prefill_chunks_total Total prefill chunks processed\n\
          # TYPE mlxcel_batch_prefill_chunks_total counter\n\
          mlxcel_batch_prefill_chunks_total {prefill_chunks}\n\
+         # HELP mlxcel_batch_mixed_steps_total Mixed prefill/decode ticks (issue #908 prototype; zero unless MLXCEL_MIXED_STEP is set)\n\
+         # TYPE mlxcel_batch_mixed_steps_total counter\n\
+         mlxcel_batch_mixed_steps_total {mixed_steps}\n\
          # HELP mlxcel_batch_current_size Current active batch size\n\
          # TYPE mlxcel_batch_current_size gauge\n\
          mlxcel_batch_current_size {batch_size}\n\
@@ -277,6 +280,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
         decode_steps = obs.decode_steps_processed,
         decode_lookahead_steps = obs.decode_lookahead_steps,
         prefill_chunks = obs.prefill_chunks_processed,
+        mixed_steps = obs.mixed_steps_processed,
         batch_size = obs.current_batch_size,
         cache_active = obs.cache_pool_active,
         paged_block_size = obs.cache_pool_paged_block_size,

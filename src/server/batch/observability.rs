@@ -168,6 +168,12 @@ pub struct BatchObservability {
     pub prefill_chunks_processed: AtomicU64,
     /// Number of decode steps executed (one per tick per batch).
     pub decode_steps_processed: AtomicU64,
+    /// Number of mixed prefill/decode ticks executed (issue #908 prototype).
+    /// One increment per tick that advanced the decode batch **and** a parked
+    /// chunked prefill together. Stays at zero unless `MLXCEL_MIXED_STEP` is
+    /// set, which is what makes this counter the dispatch proof: a mixed-step
+    /// benchmark whose delta is zero measured the default tick policy.
+    pub mixed_steps_processed: AtomicU64,
     /// Number of decode steps served by the lookahead async_eval pipeline
     /// (issue #632). One increment per steady pipelined tick where the batch
     /// committed a token from a prebuilt (async-scheduled) forward instead of
@@ -293,6 +299,7 @@ impl BatchObservability {
             total_decode_tokens: AtomicU64::new(0),
             prefill_chunks_processed: AtomicU64::new(0),
             decode_steps_processed: AtomicU64::new(0),
+            mixed_steps_processed: AtomicU64::new(0),
             decode_lookahead_steps: AtomicU64::new(0),
             current_batch_size: AtomicUsize::new(0),
             current_queue_depth: AtomicUsize::new(0),
@@ -354,6 +361,11 @@ impl BatchObservability {
     pub fn record_prefill_chunk(&self) {
         self.prefill_chunks_processed
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record that one mixed prefill/decode tick was executed (issue #908).
+    pub fn record_mixed_step(&self) {
+        self.mixed_steps_processed.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record that one decode step was executed for a batch of the given size.
@@ -584,6 +596,7 @@ impl BatchObservability {
             total_decode_tokens: self.total_decode_tokens.load(Ordering::Relaxed),
             prefill_chunks_processed: self.prefill_chunks_processed.load(Ordering::Relaxed),
             decode_steps_processed: self.decode_steps_processed.load(Ordering::Relaxed),
+            mixed_steps_processed: self.mixed_steps_processed.load(Ordering::Relaxed),
             decode_lookahead_steps: self.decode_lookahead_steps.load(Ordering::Relaxed),
             current_batch_size: self.current_batch_size.load(Ordering::Relaxed),
             current_queue_depth: self.current_queue_depth.load(Ordering::Relaxed),
@@ -691,6 +704,9 @@ pub struct ObservabilitySnapshot {
     pub total_decode_tokens: u64,
     pub prefill_chunks_processed: u64,
     pub decode_steps_processed: u64,
+    /// Mixed prefill/decode ticks (issue #908 prototype); zero unless
+    /// `MLXCEL_MIXED_STEP` is set.
+    pub mixed_steps_processed: u64,
     /// Decode steps served by the lookahead async_eval pipeline (issue #632).
     pub decode_lookahead_steps: u64,
     pub current_batch_size: usize,
