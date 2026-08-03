@@ -152,12 +152,15 @@ Run under `caffeinate -i` and let the machine cool between arms; Apple Silicon d
 
 ### Results
 
-Not yet filled. Record them in `docs/benchmark_results/mixed-step-prototype-<hw>-<date>.md` and summarize here. The two cells that decide whether anything above needs revisiting:
+M1 Ultra, `mlx-community/Meta-Llama-3.1-8B-Instruct-4bit`, `--parallel 8 --prefill-chunk-size 512`. Full table: `docs/benchmark_results/mixed-step-prototype-m1ultra-2026-08-03.md`.
 
-1. `admitted_first_token_after_last_stream` in the baseline arm. If true, the starvation is confirmed end to end and the follow-up issue is justified on measurement rather than on code reading alone.
-2. The admission-window ITL p95 inflation in both arms. The baseline arm bounds what alternation costs the decoding streams today (expected: near zero, since decode never yields). The prototype arm shows what a real interleave costs them, which is the price of fixing the starvation and the number a fairness policy has to be tuned against.
+**Cell 1, the starvation, is confirmed on hardware.** The machine was carrying load from unrelated work during the window available for this run, so the ITL harness above would have produced numbers that say more about the load than about the scheduler. The claim in cell 1 is about *progress*, not latency, so it was measured as a counter comparison instead, via `scripts/bench/starvation_probe.sh`: sample `mlxcel_batch_prefill_chunks_total` every 5 s while four decode streams run and one ~10k-token prompt is admitted. Whether a counter is pinned or advancing does not care how busy the machine is.
 
-The `saving` formula's terms come from the same runs: `C/P` is the admission window divided by the chunk count, `D` is the quiet-window ITL. If `D / (C/P + D)` comes out materially above the low teens on some hardware, the rejection of (b) is worth revisiting on that hardware, and only there.
+Baseline: the prefill sits at chunk 1 of 19 for 20 s while decode advances 138 → 394 steps, resumes only once decode drains to its ceiling, and completes at t=40 s. Prototype: chunks advance concurrently from the first sample and all 19 are done at t=20 s, with decode reaching the same 399 steps. `mlxcel_batch_mixed_steps_total` is 0 in the baseline arm and 18 in the prototype arm, so both arms are what they claim to be. The follow-up issue is therefore justified on measurement, not on code reading.
+
+**Cell 2, the ITL price of interleaving, is not measured and stays open.** It is the fairness policy's tuning input, and it belongs to the follow-up issue that owns that policy; measuring it here on a contended machine would have produced a number nobody should tune against.
+
+Neither result moves the rejection of (b), and the contention pushes the same way the rejection does. `saving = D_lin / (C/P + D)`, and the loaded run puts `C/P` at roughly 830 ms per 512-token chunk against the 160-310 ms this ADR grounds the formula in. Contention inflates `C/P`, which shrinks `saving`. A quiet machine would land back at the 3-20% band already argued, and no lower `C/P` than the clean figure is available on this hardware.
 
 ## Consequences
 
