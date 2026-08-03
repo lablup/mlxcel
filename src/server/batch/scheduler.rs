@@ -89,6 +89,7 @@ use super::queue::PrefillQueue;
 use super::sequence::{
     BatchSchedulerAction, FinishReason, RequestPriority, SequenceInfo, SequenceState,
 };
+use super::tick_policy::{TickChoice, TickState, decide_tick, mixed_step_enabled};
 
 /// Returns true when the current hardware is M5+ with Neural Accelerator
 /// support and tile-aligned prefill should be applied.
@@ -281,6 +282,12 @@ pub struct BatchScheduler {
     /// Sequence currently undergoing chunked prefill. `None` when no chunked
     /// prefill is in progress.
     chunked_prefill_seq: Option<SequenceInfo>,
+
+    /// Issue #908 prototype gate, read once from `MLXCEL_MIXED_STEP` at
+    /// construction so the tick loop never touches the environment. False (the
+    /// default) makes [`BatchSchedulerAction::MixedStep`] unreachable and keeps
+    /// tick arbitration identical to the pre-#908 scheduler.
+    mixed_step_enabled: bool,
 
     // -- Shutdown flag --
     shutdown_requested: bool,
@@ -1230,6 +1237,7 @@ impl BatchScheduler {
             enable_preemption,
             preemption_policy,
             chunked_prefill_seq: None,
+            mixed_step_enabled: mixed_step_enabled(),
             shutdown_requested: false,
             consecutive_decode_eval_failures: 0,
             max_batch_prefill: max_batch_prefill.max(1),
@@ -2540,6 +2548,35 @@ impl BatchScheduler {
                     // in-flight speculative slice, if any (issue #734).
                     self.speculative_slice_yielded = false;
                 }
+                BatchSchedulerAction::MixedStep(ids) => {
+                    // Issue #908 prototype, reachable only under
+                    // `MLXCEL_MIXED_STEP`. One tick advances both workloads:
+                    // the decode batch by a token and the parked chunked
+                    // prefill by a chunk. This is the *scheduling* half of a
+                    // mixed step; the two forwards still run back to back
+                    // rather than fused into one ragged forward. ADR 0005
+                    // explains why that split is the useful experiment.
+                    //
+                    // Same #632 invalidation invariant as the Prefill arm: the
+                    // chunk continuation mutates KV outside the decode fast
+                    // path, so any prebuilt lookahead is torn down first.
+                    // `lookahead_safe()` already returns false whenever a
+                    // chunked prefill is in progress, so the decode below
+                    // cannot build a new one and one discard here suffices.
+                    self.discard_lookahead();
+                    // Decode runs first, against the id set `decide_action`
+                    // captured. The terminal chunk calls `finish_prefill`,
+                    // which admits the prompt into the active batch; decoding
+                    // first keeps that id set valid for this tick and lets the
+                    // freshly admitted sequence start decoding on the next one.
+                    self.execute_decode_step(&ids);
+                    self.continue_chunked_prefill();
+                    self.batch_observability.record_mixed_step();
+                    // A classic action ran: the next tick goes back to the
+                    // in-flight speculative slice, if any (issue #734).
+                    self.speculative_slice_yielded = false;
+                    self.publish_metrics();
+                }
                 BatchSchedulerAction::SpeculativeRound => {
                     // Same invariant as the Prefill arm: any action that can
                     // mutate KV caches outside the decode fast path must tear
@@ -3252,16 +3289,34 @@ impl BatchScheduler {
     // Scheduling decision
     // ------------------------------------------------------------------
 
+    /// Snapshot the scheduler state the tick policy reads.
+    fn tick_state(&self) -> TickState {
+        TickState {
+            speculative_pending: self.speculative_slice.is_some()
+                || !self.speculative_slice_backlog.is_empty(),
+            speculative_yielded: self.speculative_slice_yielded,
+            chunked_prefill_in_progress: self.chunked_prefill_seq.is_some(),
+            active_is_empty: self.active_batch.is_empty(),
+            active_is_full: self.active_batch.is_full(),
+            queue_is_empty: self.prefill_queue.is_empty(),
+            should_preempt: self.should_preempt(),
+            mixed_step_enabled: self.mixed_step_enabled,
+        }
+    }
+
     /// Determine the next action. Runs in O(1) time.
     ///
-    /// Policy:
-    /// 1. If a chunked prefill is in progress and active sequences exist,
-    ///    decode first (interleave).
-    /// 2. If a chunked prefill is in progress and no active sequences,
-    ///    continue the prefill.
-    /// 3. If active sequences exist, decode first.
-    /// 4. If the batch is not full and the queue has work, prefill.
-    /// 5. Otherwise idle.
+    /// The policy itself lives in [`decide_tick`], a pure function over
+    /// [`TickState`]; this method only snapshots the state and attaches the
+    /// active sequence ids that `Decode` and `MixedStep` carry. The split
+    /// exists because the unit tests used to re-implement the policy locally
+    /// and drifted from it, which is how the chunked-prefill starvation
+    /// documented in ADR 0005 stayed hidden behind a test named
+    /// `chunked_prefill_interleaving_pattern` (issue #908).
+    ///
+    /// Behaviour is unchanged from before issue #908 unless `MLXCEL_MIXED_STEP`
+    /// is set. `tick_policy_tests::mixed_step_off_is_identical_to_the_pre_908_policy`
+    /// checks that over the complete 128-state space.
     fn decide_action(&self) -> BatchSchedulerAction {
         tracing::debug!(
             active = self.active_batch.len(),
@@ -3271,67 +3326,15 @@ impl BatchScheduler {
             slice_backlog = self.speculative_slice_backlog.len(),
             "scheduler tick"
         );
-        // Tick-cooperative speculative slice work pending (issue #734):
-        // run one speculative action per tick, alternating strictly with
-        // the classic actions when they have work, so concurrent classic
-        // rows advance between rounds and the speculative request never
-        // starves. When nothing else has work the slice takes every tick
-        // (it IS work, so this branch also prevents an Idle block on the
-        // request channel while a slice is pending). Pending means an
-        // ACTIVE job, or (issue #746) a non-empty grant backlog with the
-        // slot empty right after a rotation: that tick's speculative
-        // action is the promotion of the next grantee (a parked job's
-        // round, or a waiter's slice 0), under the same alternation, so
-        // the #734 HOL bound holds across rotations.
-        if self.speculative_slice.is_some() || !self.speculative_slice_backlog.is_empty() {
-            let others_have_work = self.chunked_prefill_seq.is_some()
-                || !self.active_batch.is_empty()
-                || !self.prefill_queue.is_empty();
-            if super::speculative_slice::slice_takes_tick(
-                self.speculative_slice_yielded,
-                others_have_work,
-            ) {
-                return BatchSchedulerAction::SpeculativeRound;
+        match decide_tick(&self.tick_state()) {
+            TickChoice::SpeculativeRound => BatchSchedulerAction::SpeculativeRound,
+            TickChoice::Decode => BatchSchedulerAction::Decode(self.active_batch.sequence_ids()),
+            TickChoice::MixedStep => {
+                BatchSchedulerAction::MixedStep(self.active_batch.sequence_ids())
             }
-            // Fall through: grant this tick to a classic action; its arm
-            // clears `speculative_slice_yielded` so the next tick returns
-            // to the slice.
+            TickChoice::Prefill => BatchSchedulerAction::Prefill(SequenceId::from_raw(0)),
+            TickChoice::Idle => BatchSchedulerAction::Idle,
         }
-        // Chunked prefill in progress: interleave decode with prefill
-        if self.chunked_prefill_seq.is_some() {
-            if !self.active_batch.is_empty() {
-                // Interleave: decode active sequences first, then continue
-                // prefill on the next tick.
-                return BatchSchedulerAction::Decode(self.active_batch.sequence_ids());
-            }
-            // No active sequences, continue the prefill
-            return BatchSchedulerAction::Prefill(SequenceId::from_raw(0));
-        }
-
-        if self.active_batch.is_empty() && self.prefill_queue.is_empty() {
-            return BatchSchedulerAction::Idle;
-        }
-
-        // When active sequences exist:
-        // 1. If batch is NOT full and queue has work → admit one new sequence
-        //    (this grows the batch to improve decode throughput via batching)
-        // 2. If batch is full or queue is empty → decode existing sequences
-        // 3. Preemption overrides when enabled and a higher-priority request waits
-        if !self.active_batch.is_empty() {
-            if self.should_preempt() {
-                return BatchSchedulerAction::Prefill(SequenceId::from_raw(0));
-            }
-            if !self.active_batch.is_full() && !self.prefill_queue.is_empty() {
-                // Admit one queued request to grow the batch before decoding.
-                // This is critical for throughput: larger batches amortize
-                // weight-loading bandwidth across more sequences.
-                return BatchSchedulerAction::Prefill(SequenceId::from_raw(0));
-            }
-            return BatchSchedulerAction::Decode(self.active_batch.sequence_ids());
-        }
-
-        // Batch is empty but queue has work
-        BatchSchedulerAction::Prefill(SequenceId::from_raw(0))
     }
 
     /// Check if preemption should occur: batch is full, preemption is

@@ -59,6 +59,10 @@ mod speculative_slice_tests;
 /// items read as dead code when that feature is off.
 #[cfg_attr(not(feature = "xla-iree"), allow(dead_code))]
 mod stop_matcher;
+/// Pure tick-arbitration policy (issue #908): the decision `decide_action`
+/// used to inline, extracted so the unit tests exercise the real policy
+/// instead of a local copy, and home of the `MLXCEL_MIXED_STEP` prototype.
+pub(crate) mod tick_policy;
 /// Backend-neutral bounded audio preprocessing foundation. This is compiled
 /// without `xla-iree` so queue/cancellation contracts remain testable on every
 /// platform, but no XLA worker advertises audio until a qualified family

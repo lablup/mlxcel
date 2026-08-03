@@ -366,6 +366,12 @@ pub enum BatchSchedulerAction {
     /// the scheduler; alternates with `Decode` / `Prefill` under
     /// contention so classic rows advance between speculative rounds.
     SpeculativeRound,
+    /// Decode the listed active sequences **and** advance the parked chunked
+    /// prefill by one chunk, in that order, within a single tick (issue #908
+    /// prototype). Emitted only when `MLXCEL_MIXED_STEP` is set; with the
+    /// variable unset the scheduler never produces this variant and a chunked
+    /// prefill sharing a tick with decode work resolves to `Decode`.
+    MixedStep(Vec<SequenceId>),
     /// No work available -- the engine should block until a new request
     /// arrives.
     Idle,
