@@ -268,10 +268,29 @@ fn mixed_step_defaults_off() {
 
 #[test]
 fn mixed_step_opt_in_values() {
-    for v in ["1", "true", "TRUE", "True", "yes", "YES", "on", "ON"] {
+    for v in [
+        "1", "true", "TRUE", "True", "TrUe", "yes", "YES", "on", "ON", "On", " on ", "\ttrue\n",
+    ] {
         assert!(
             mixed_step_default(Some(v)),
-            "{v} should enable the prototype"
+            "{v:?} should enable the prototype"
         );
     }
+}
+
+/// The mixed-step counter is the prototype's dispatch proof, so it has to be
+/// reachable from a snapshot. A benchmark reading a counter that nothing
+/// increments cannot tell "the arm did not engage" from "the wiring is broken".
+#[test]
+fn mixed_step_counter_reaches_the_snapshot() {
+    use crate::server::batch::observability::BatchObservability;
+
+    let obs = BatchObservability::new();
+    assert_eq!(obs.snapshot().mixed_steps_processed, 0);
+    obs.record_mixed_step();
+    obs.record_mixed_step();
+    assert_eq!(obs.snapshot().mixed_steps_processed, 2);
+    // Nothing else moves it, so a zero delta in a benchmark means the arm did
+    // not engage rather than that the counter is inert.
+    assert_eq!(obs.snapshot().decode_steps_processed, 0);
 }

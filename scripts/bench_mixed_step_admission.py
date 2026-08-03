@@ -93,15 +93,21 @@ class StreamTrace:
         return self.token_times[0] - self.start_s if self.token_times else None
 
     def itls_ms(self, lo: float | None = None, hi: float | None = None) -> list[float]:
-        """Inter-token gaps in ms whose *arrival* falls within ``[lo, hi]``.
+        """Inter-token gaps in ms lying wholly within ``[lo, hi]``.
 
         Bounds are absolute ``perf_counter`` values; ``None`` means unbounded.
-        Attributing a gap by its arrival time is what lets one stream's tokens
-        be split into a quiet window and an admission window.
+        Splitting one stream's tokens by time is what separates the quiet window
+        from the admission window.
+
+        A gap is counted only when **both** of its endpoints fall inside the
+        bounds. The gap that straddles the admission instant belongs to neither
+        window: it is part quiet and part contended, and charging it wholly to
+        the admission window would inflate that window by one boundary sample
+        per stream, which at four streams is a visible bias on a p95.
         """
         out: list[float] = []
         for prev, cur in zip(self.token_times, self.token_times[1:]):
-            if lo is not None and cur < lo:
+            if lo is not None and prev < lo:
                 continue
             if hi is not None and cur > hi:
                 continue
@@ -142,28 +148,26 @@ def stream_tokens(
     )
     headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
     trace.start_s = time.perf_counter()
+    conn: http.client.HTTPConnection | None = None
     try:
         conn = http.client.HTTPConnection(host, port, timeout=timeout)
         conn.request("POST", "/v1/chat/completions", body=payload, headers=headers)
         resp = conn.getresponse()
         if resp.status != 200:
             body = resp.read().decode("utf-8", "replace")[:200]
-            conn.close()
             trace.ok = False
             trace.error = f"HTTP {resp.status}: {body}"
             trace.end_s = time.perf_counter()
             return trace
 
-        buf = b""
+        # `readline()` frames in C. The obvious `read(1)` loop spends the GIL
+        # once per byte across `streams + 1` threads, and that scheduling noise
+        # lands directly in the inter-token gaps this harness exists to measure.
         while True:
-            chunk = resp.read(1)
-            if not chunk:
+            raw = resp.readline()
+            if not raw:
                 break
-            buf += chunk
-            if not buf.endswith(b"\n"):
-                continue
-            line = buf.strip()
-            buf = b""
+            line = raw.strip()
             if not line.startswith(b"data:"):
                 continue
             data = line[len(b"data:") :].strip()
@@ -177,10 +181,12 @@ def stream_tokens(
                 content = (choice.get("delta") or {}).get("content")
                 if content:
                     trace.token_times.append(time.perf_counter())
-        conn.close()
     except (OSError, http.client.HTTPException) as exc:
         trace.ok = False
         trace.error = str(exc)
+    finally:
+        if conn is not None:
+            conn.close()
 
     trace.end_s = time.perf_counter()
     return trace
@@ -200,7 +206,7 @@ def scrape_tick_metrics(host: str, port: int) -> dict[str, float]:
         conn.close()
         if resp.status != 200:
             return {}
-    except (OSError, ValueError):
+    except (OSError, ValueError, http.client.HTTPException):
         return {}
     out: dict[str, float] = {}
     for line in body.splitlines():
@@ -230,7 +236,13 @@ def _fmt(values: list[float]) -> str:
 async def _amain(args: argparse.Namespace) -> int:
     model = resolve_model(args.host, args.port, args.model)
     stream_prompt = build_prompt(args.stream_prompt_tokens)
-    admit_prompt = build_prompt(args.admit_prompt_tokens)
+    # Salt the admitted prompt per run. The prompt cache is on by default, and a
+    # byte-identical 8K prompt would be adopted wholesale on the second run of
+    # an A/B, skipping the chunked path the harness is here to observe. The salt
+    # goes at the front so no cached prefix matches. Repeated runs are the point
+    # of this harness, so this is not a detail that can be left to the operator.
+    salt = f"Session {os.getpid()}-{int(time.time())}. "
+    admit_prompt = salt + build_prompt(args.admit_prompt_tokens)
 
     print("# mixed prefill/decode admission bench (issue #908)")
     print(f"model={model}  streams={args.streams}  settle={args.settle_s}s")
@@ -248,6 +260,16 @@ async def _amain(args: argparse.Namespace) -> int:
             "NOT COMPARABLE: /metrics is unavailable, so no counter can say which "
             "tick policy served this run. Restart the server with --metrics. "
             "Refusing to print a latency table that cannot be attributed."
+        )
+        return 2
+    missing = [n for n in _TICK_METRICS if n not in before]
+    if missing:
+        print(
+            "NOT COMPARABLE: /metrics is missing "
+            + ", ".join(missing)
+            + ". This server predates the counters this harness attributes runs "
+            "with, so a zero delta would mean 'not built' rather than 'did not "
+            "engage'. Rebuild the server from this branch."
         )
         return 2
 
@@ -292,17 +314,32 @@ async def _amain(args: argparse.Namespace) -> int:
     )
 
     try:
-        traces: list[StreamTrace] = await asyncio.gather(*tasks)
+        gathered = await asyncio.gather(*tasks, return_exceptions=True)
     finally:
         executor.shutdown(wait=True)
+
+    traces: list[StreamTrace] = []
+    for label, item in zip(
+        [f"stream{i}" for i in range(args.streams)] + ["admitted"], gathered
+    ):
+        if isinstance(item, BaseException):
+            traces.append(StreamTrace(label=label, ok=False, error=repr(item)))
+        else:
+            traces.append(item)
     after = scrape_tick_metrics(args.host, args.port)
+    if [n for n in _TICK_METRICS if n not in after]:
+        print(
+            "NOT COMPARABLE: /metrics stopped serving the tick counters partway "
+            "through the run, so the deltas below cannot be trusted."
+        )
+        return 2
 
     streams = [t for t in traces if t.label != "admitted"]
     admitted = next(t for t in traces if t.label == "admitted")
 
-    for t in traces:
-        if not t.ok:
-            print(f"    request error ({t.label}): {t.error}")
+    failed = [t for t in traces if not t.ok]
+    for t in failed:
+        print(f"    request error ({t.label}): {t.error}")
 
     deltas = {name: after.get(name, 0.0) - before.get(name, 0.0) for name in _TICK_METRICS}
     print("## scheduler tick attribution")
@@ -313,16 +350,52 @@ async def _amain(args: argparse.Namespace) -> int:
     mixed = deltas["mlxcel_batch_mixed_steps_total"]
     chunks = deltas["mlxcel_batch_prefill_chunks_total"]
 
+    admit_sent = admitted.start_s
+    admit_first = admitted.token_times[0] if admitted.token_times else None
+
     # ---- Dispatch guards. Each one, when it fires, means the run measured
     # something other than what the invocation claimed, so no table is printed.
+    if failed:
+        print(
+            "NOT COMPARABLE: "
+            + str(len(failed))
+            + " request(s) failed, so the batch composition during this run is not "
+            "the scenario. Errors are listed above."
+        )
+        return 2
+
+    # The scenario is "a long prompt arrives while others decode". That requires
+    # every stream to be mid-generation at the admission instant. Checking the
+    # prefill-chunk counter alone does not establish it: with --parallel equal to
+    # --streams the admitted request simply queues until a stream finishes and
+    # then prefills against a draining batch, which moves the counter for a run
+    # in which the scenario never occurred.
+    not_decoding: list[str] = []
+    for t in streams:
+        before_admit = any(ts < admit_sent for ts in t.token_times)
+        after_admit = any(ts > admit_sent for ts in t.token_times)
+        if not (before_admit and after_admit):
+            not_decoding.append(t.label)
+    if not_decoding:
+        print(
+            "NOT COMPARABLE: "
+            + ", ".join(not_decoding)
+            + " did not straddle the admission instant, so the long prompt did not "
+            "arrive next to a live decode batch. Raise --stream-max-tokens so the "
+            "streams outlast the admission, lower --settle-s, and make sure the "
+            "server's --parallel exceeds --streams so the request is admitted "
+            "immediately instead of queueing until a slot frees."
+        )
+        return 2
+
     if chunks <= 0:
         print(
             "NOT COMPARABLE: the prefill-chunk counter did not move, so the admitted "
-            "prompt never entered the chunked-prefill path. Either it was never "
-            "admitted (server --parallel must exceed --streams; with a full batch the "
-            "request sits in the queue), or it fit in one unchunked forward "
-            "(--admit-prompt-tokens must exceed the server's --prefill-chunk-size). "
-            "There was no prefill-during-decode window to measure."
+            "prompt never entered the chunked-prefill path at all. Either it was "
+            "never admitted (the server's --parallel must exceed --streams; with a "
+            "full batch the request sits in the queue), or it fit in one unchunked "
+            "forward (--admit-prompt-tokens must exceed the server's "
+            "--prefill-chunk-size). There was no prefill-during-decode window."
         )
         return 2
     if args.expect == "mixed" and mixed <= 0:
@@ -342,31 +415,45 @@ async def _amain(args: argparse.Namespace) -> int:
         return 2
 
     # ---- Latency windows.
-    admit_sent = admitted.start_s
-    admit_first = admitted.token_times[0] if admitted.token_times else None
+    #
+    # The window must end where the prefill stops competing with decode, and
+    # that is NOT the same instant in the two arms. In the mixed arm the
+    # admitted request's first token marks its terminal chunk, so it closes the
+    # window correctly. In the baseline arm the parked prefill does not resume
+    # until the batch drains, which is the finding itself, so that first token
+    # lands after every stream has already ended; using it would sweep the whole
+    # post-admission run into a window labelled "prefill live", during almost
+    # all of which no prefill ran. Clamping to the earliest stream end keeps
+    # both arms measuring gaps that genuinely overlap the prefill.
+    earliest_stream_end = min((t.end_s for t in streams), default=admit_sent)
+    if admit_first is None:
+        window_end = earliest_stream_end
+        window_note = "clamped to first stream end; admitted request produced no token"
+    elif admit_first > earliest_stream_end:
+        window_end = earliest_stream_end
+        window_note = "clamped to first stream end; prefill outlived the decode batch"
+    else:
+        window_end = admit_first
+        window_note = "closed by the admitted request's first token"
 
     quiet: list[float] = []
     during: list[float] = []
     for t in streams:
         quiet.extend(t.itls_ms(hi=admit_sent))
-        during.extend(t.itls_ms(lo=admit_sent, hi=admit_first))
-
-    # The admitted request's first token is sampled when its final prefill
-    # chunk completes, so `admit_first` is the end of the prefill window. When
-    # it is None the window never closed, and `during` runs to the end of the
-    # run; say so rather than labelling an unbounded span as the window.
-    window_label = (
-        "admission window (prefill live): "
-        if admit_first is not None
-        else "admission window (NEVER CLOSED, admitted request produced no token): "
-    )
+        during.extend(t.itls_ms(lo=admit_sent, hi=window_end))
 
     print("## per-stream inter-token latency")
     print(f"    quiet window (before admission): {_fmt(quiet)}")
-    print(f"    {window_label}{_fmt(during)}")
+    print(f"    admission window ({window_note}): {_fmt(during)}")
     if quiet and during:
-        ratio = _percentile(during, 95) / max(_percentile(quiet, 95), 1e-9)
-        print(f"    p95 inflation during admission:   {ratio:.2f}x")
+        quiet_p95 = _percentile(quiet, 95)
+        if quiet_p95 > 0:
+            print(
+                "    p95 inflation during admission: "
+                f"{_percentile(during, 95) / quiet_p95:.2f}x"
+            )
+        else:
+            print("    p95 inflation during admission: n/a (quiet p95 is zero)")
     print()
 
     print("## admitted request")
@@ -458,11 +545,13 @@ def main() -> int:
     parser.add_argument(
         "--expect",
         choices=("baseline", "mixed", "any"),
-        default="any",
+        required=True,
         help=(
             "Which arm this invocation claims to measure. 'baseline' fails if a "
-            "mixed step ran, 'mixed' fails if none did. Always pass it when the "
-            "run is part of an A/B."
+            "mixed step ran, 'mixed' fails if none did. Required, because the "
+            "point of this harness is an A/B and 'any' silently disables both "
+            "dispatch guards; pass 'any' only for exploratory runs whose numbers "
+            "will not be recorded."
         ),
     )
     args = parser.parse_args()

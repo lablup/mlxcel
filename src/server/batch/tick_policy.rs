@@ -52,12 +52,15 @@ pub(crate) fn mixed_step_enabled() -> bool {
 ///
 /// Unset, empty, or unrecognised means off. Only the explicit affirmative set
 /// turns the prototype on, which is the conservative direction for a flag that
-/// changes scheduler arbitration.
+/// changes scheduler arbitration. The value is trimmed and lowercased first, so
+/// `On`, ` yes `, and `TrUe` behave like their canonical spellings; this is an
+/// operator-facing variable and a surprising rejection of `On` would read as
+/// the prototype silently not engaging.
 pub(crate) fn mixed_step_default(env_override: Option<&str>) -> bool {
     match env_override {
         Some(v) => matches!(
-            v,
-            "1" | "true" | "TRUE" | "True" | "yes" | "YES" | "on" | "ON"
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
         ),
         None => false,
     }

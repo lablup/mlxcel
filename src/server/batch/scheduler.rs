@@ -893,7 +893,7 @@ impl BatchScheduler {
         if self.prefill_chunk_size > 0 && prompt_tokens.len() > self.prefill_chunk_size {
             self.start_chunked_prefill(seq);
             while self.chunked_prefill_seq.is_some() {
-                self.continue_chunked_prefill();
+                self.continue_chunked_prefill(false);
             }
         } else {
             self.execute_full_prefill(seq);
@@ -2557,12 +2557,14 @@ impl BatchScheduler {
                     // rather than fused into one ragged forward. ADR 0005
                     // explains why that split is the useful experiment.
                     //
-                    // Same #632 invalidation invariant as the Prefill arm: the
-                    // chunk continuation mutates KV outside the decode fast
-                    // path, so any prebuilt lookahead is torn down first.
-                    // `lookahead_safe()` already returns false whenever a
-                    // chunked prefill is in progress, so the decode below
-                    // cannot build a new one and one discard here suffices.
+                    // Same #632 invalidation invariant as the Prefill arm.
+                    // Like the SpeculativeRound arm's discard, this is a
+                    // guaranteed no-op rather than load-bearing cleanup:
+                    // `lookahead_safe()` returns false whenever a chunked
+                    // prefill is parked, so no lookahead can exist on any tick
+                    // that reaches here, and the decode below cannot build one.
+                    // Kept so the invariant holds by construction if that
+                    // precondition ever changes.
                     self.discard_lookahead();
                     // Decode runs first, against the id set `decide_action`
                     // captured. The terminal chunk calls `finish_prefill`,
@@ -2570,8 +2572,13 @@ impl BatchScheduler {
                     // first keeps that id set valid for this tick and lets the
                     // freshly admitted sequence start decoding on the next one.
                     self.execute_decode_step(&ids);
-                    self.continue_chunked_prefill();
-                    self.batch_observability.record_mixed_step();
+                    // Count the tick only when a chunk really ran. The counter
+                    // is this prototype's dispatch proof, so it must not move
+                    // on a tick where the parked sequence was already drained
+                    // or aborted.
+                    if self.continue_chunked_prefill(true) {
+                        self.batch_observability.record_mixed_step();
+                    }
                     // A classic action ran: the next tick goes back to the
                     // in-flight speculative slice, if any (issue #734).
                     self.speculative_slice_yielded = false;
@@ -3467,7 +3474,7 @@ impl BatchScheduler {
     fn execute_prefill(&mut self, _action_id: SequenceId) {
         // Resume a chunked prefill already in progress?
         if self.chunked_prefill_seq.is_some() {
-            self.continue_chunked_prefill();
+            self.continue_chunked_prefill(false);
             return;
         }
 
@@ -5340,6 +5347,11 @@ impl BatchScheduler {
 
         mlxcel_core::clear_memory_cache();
         seq.prefill_offset = end;
+        // Count the first chunk too. Before issue #908 only
+        // `continue_chunked_prefill` recorded, so the counter reported
+        // continuations and read as zero for a prompt that ran chunk 0 and was
+        // then starved, which is precisely the state a reader needs to see.
+        self.batch_observability.record_prefill_chunk();
 
         tracing::debug!(
             "Chunked prefill: seq {} chunk 0..{end}/{} tokens",
@@ -5372,10 +5384,27 @@ impl BatchScheduler {
     }
 
     /// Continue a chunked prefill that is already in progress.
-    fn continue_chunked_prefill(&mut self) {
+    ///
+    /// Returns `true` when a chunk forward actually ran. Every early return
+    /// here (no parked sequence, an empty range, a missing cache, an exhausted
+    /// eval) reports `false`, which is what lets the issue #908 mixed-step
+    /// counter stay an honest dispatch proof instead of counting ticks on which
+    /// no prefill work happened.
+    ///
+    /// `mixed_tick` is true only on a `MixedStep` tick, where a decode batch is
+    /// live alongside this chunk. It suppresses the unconditional
+    /// `clear_memory_cache()` below: the decode path deliberately clears on a
+    /// cadence (`cache_clear_interval()`, 256 tokens on Metal and off by
+    /// default on CUDA, because a per-step clear churns the pool and defeats
+    /// CUDA-graph reuse, ml-explore/mlx#2358). Before #908 this function was
+    /// only ever reachable with an empty active batch, so its per-chunk clear
+    /// never touched a decode hot path. Under `MLXCEL_MIXED_STEP` it would run
+    /// on every decode tick for the whole duration of a long prefill and
+    /// inflate exactly the inter-token latency the prototype exists to measure.
+    fn continue_chunked_prefill(&mut self, mixed_tick: bool) -> bool {
         let mut seq = match self.chunked_prefill_seq.take() {
             Some(s) => s,
-            None => return,
+            None => return false,
         };
 
         let _span = tracing::info_span!(
@@ -5396,7 +5425,7 @@ impl BatchScheduler {
                     seq,
                     "Chunked prefill continuation had no remaining tokens to process",
                 );
-                return;
+                return false;
             }
         };
         self.batch_observability.record_prefill_chunk();
@@ -5415,7 +5444,7 @@ impl BatchScheduler {
                 Some(c) => c,
                 None => {
                     self.abort_sequence(seq, "Cache not found during chunked prefill continuation");
-                    return;
+                    return false;
                 }
             };
             if self.model.supports_batching() {
@@ -5449,7 +5478,7 @@ impl BatchScheduler {
                 Some(c) => c,
                 None => {
                     self.abort_sequence(seq, "Cache not found during chunked prefill continuation");
-                    return;
+                    return false;
                 }
             };
 
@@ -5493,15 +5522,19 @@ impl BatchScheduler {
             {
                 self.abort_sequence(seq, &msg);
                 self.eval_failures_exhausted();
-                return;
+                return false;
             }
-            mlxcel_core::clear_memory_cache();
+            if !mixed_tick {
+                mlxcel_core::clear_memory_cache();
+            }
             self.chunked_prefill_seq = Some(seq);
-            return;
+            return true;
         }
 
         // Final chunk -- complete the prefill and sample the first token
-        mlxcel_core::clear_memory_cache();
+        if !mixed_tick {
+            mlxcel_core::clear_memory_cache();
+        }
 
         let eos_tokens =
             merged_eos_token_ids(self.model.eos_token_ids(), &seq.sampling.stop_token_ids);
@@ -5509,6 +5542,7 @@ impl BatchScheduler {
         let token_history = initial_token_history(&seq.prompt_tokens, needs_history);
 
         self.finish_prefill(seq, logits, eos_tokens, token_history, needs_history);
+        true
     }
 
     /// Complete a prefill (full or chunked): sample the first token,

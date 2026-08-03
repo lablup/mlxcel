@@ -130,7 +130,7 @@ Two consequences worth knowing when reading latency numbers:
   scenario "a long prompt prefills while others decode" needs `--parallel`
   strictly above the number of active streams.
 
-Issue #908 measured this and decided against fixing it with a fused ragged
+Issue #908 analysed this and decided against fixing it with a fused ragged
 forward; see
 [ADR 0005](adr/0005-mixed-prefill-decode-step-execution.md). The experimental
 `MLXCEL_MIXED_STEP=1` makes each tick advance both workloads, which bounds the
