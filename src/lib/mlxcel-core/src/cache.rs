@@ -92,6 +92,9 @@ mod paged_pool_tests;
 #[path = "cache/paged_turbo_tests.rs"]
 mod paged_turbo_tests;
 pub mod ring;
+/// Sparse attention expressed as a `page_size = 1` page table over a
+/// contiguous KV allocation (issue #904).
+pub mod sparse_csr;
 #[cfg(test)]
 #[path = "cache/sparse_v_tests.rs"]
 mod sparse_v_tests;
@@ -115,6 +118,10 @@ pub use paged_batch_decode::{
 pub use paged_csr::{PagedCsrView, build_paged_csr_view};
 pub use paged_detach::DetachedPagedCacheSet;
 pub use ring::RingSlidingKVCache;
+pub use sparse_csr::{
+    ContiguousCacheLayout, SparseCsrStructure, SparseIndices, SparseSelection,
+    selection_from_positions, shared_row_mapping,
+};
 
 use std::cell::{Ref, RefCell, RefMut};
 use std::rc::Rc;
@@ -798,6 +805,40 @@ impl KVCache {
             ffi::slice(keys, &[0, 0, 0, 0], &[ks[0], ks[1], live_len, ks[3]]),
             ffi::slice(values, &[0, 0, 0, 0], &[vs[0], vs[1], live_len, vs[3]]),
         ))
+    }
+
+    /// The raw reserved K/V allocations, for addressing this cache as a
+    /// `page_size = 1` page pool (issue #904).
+    ///
+    /// Deliberately the **allocations**, not the window [`Self::visible_state`]
+    /// returns. The window is a token-axis slice of a step-padded buffer, so
+    /// reshaping it into a pool view would copy the whole cache and defeat the
+    /// point of attending sparsely. The allocation reshapes for free, and its
+    /// reserved capacity (`shape[2]`) is the row stride the page table must use.
+    ///
+    /// Returns `None` unless every assumption the pool view makes holds:
+    ///
+    /// - plain `KVCacheMode::Fp16`, the only mode whose rows are raw K/V rather
+    ///   than packed or scaled sidecars,
+    /// - not pool-backed, since a `new_paged` cache is already the #899 fused
+    ///   path's territory,
+    /// - `live_start == 0`, so buffer slot `i` is live-window index `i` and a
+    ///   selection expressed in window positions indexes the buffer directly,
+    /// - a non-empty window.
+    ///
+    /// Used by: MiniMax-M3 block-sparse decode (issue #904).
+    pub fn raw_kv_allocations(&self) -> Option<(&MlxArray, &MlxArray, i32)> {
+        if self.mode != KVCacheMode::Fp16 || self.paged_backing.is_some() {
+            return None;
+        }
+        // `buffer_idx()` is `offset - live_start`; requiring it to equal
+        // `offset` is the head-trim check without reaching for the private
+        // field.
+        let live_len = self.buffer_idx();
+        if live_len <= 0 || live_len != self.offset {
+            return None;
+        }
+        Some((self.keys.as_ref()?, self.values.as_ref()?, live_len))
     }
 
     /// Get the allocated buffer size (sequence dimension)

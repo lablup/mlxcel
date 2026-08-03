@@ -516,3 +516,165 @@ fn block_sparse_indexer_degenerates_to_dense_when_topk_covers_all_blocks() {
         "an under-budget block mask must drop at least one block to -inf"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Fused sparse decode: block selection parity with the mask path (issue #904)
+// ---------------------------------------------------------------------------
+
+/// Read a whole array back as f32. Only used by the selection tests, whose
+/// arrays are a few hundred elements.
+fn to_vec_f32(a: &MlxArray) -> Vec<f32> {
+    let f = mlxcel_core::astype(a, mlxcel_core::dtype::FLOAT32);
+    mlxcel_core::eval(&f);
+    mlxcel_core::array_to_raw_bytes(&f)
+        .chunks_exact(4)
+        .map(|c| f32::from_ne_bytes(c.try_into().unwrap()))
+        .collect()
+}
+
+/// Deterministic pseudo-random decode scores, `[1, 1, 1, kv_len]`.
+///
+/// Distinct per position and not monotone, so a selection that silently kept
+/// the first or the last blocks would not pass by accident.
+fn decode_token_scores(kv_len: i32, seed: u64) -> mlxcel_core::UniquePtr<MlxArray> {
+    let mut state = seed | 1;
+    let scores: Vec<f32> = (0..kv_len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            ((state >> 40) as f32) / (1u32 << 24) as f32 * 2.0 - 1.0
+        })
+        .collect();
+    mlxcel_core::from_slice_f32(&scores, &[1, 1, 1, kv_len])
+}
+
+/// The token positions the additive mask keeps (mask entry `0.0`).
+fn mask_kept_positions(mask: &MlxArray) -> std::collections::BTreeSet<i32> {
+    to_vec_f32(mask)
+        .into_iter()
+        .enumerate()
+        .filter(|(_, v)| *v == 0.0)
+        .map(|(i, _)| i as i32)
+        .collect()
+}
+
+/// The token positions the page-table selection names: the scored blocks it
+/// chose, plus the final block it always appends.
+fn selection_positions(
+    blocks: &MlxArray,
+    shape: &super::indexer::DecodeSelectionShape,
+    block_size: i32,
+    kv_len: i32,
+) -> std::collections::BTreeSet<i32> {
+    let mut set: std::collections::BTreeSet<i32> = to_vec_f32(blocks)
+        .into_iter()
+        .flat_map(|b| {
+            let start = b as i32 * block_size;
+            start..start + block_size
+        })
+        .collect();
+    set.extend(shape.tail_start..kv_len);
+    set
+}
+
+#[test]
+fn the_decode_selection_names_exactly_the_blocks_the_mask_path_keeps() {
+    // This is the load-bearing correctness check for issue #904. The page
+    // table replaces the additive mask, so the two must agree on the *set* of
+    // attended positions; comparing only the attention output would let a
+    // wrong block choice hide inside a plausible-looking tensor.
+    let block_size = 16i32;
+    let topk = 4i32;
+    let init = 1i32;
+    let local = 2i32;
+    for (kv_len, seed) in [
+        (320i32, 0xa11ce),
+        (256, 0xb0b),
+        (261, 0xc0ffee),
+        (513, 0xd00d),
+    ] {
+        let scores = decode_token_scores(kv_len, seed);
+        let offset = kv_len - 1;
+
+        let mask = build_block_drop_mask(&scores, offset, block_size, topk, init, local);
+        let kept = mask_kept_positions(&mask);
+
+        let shape = super::indexer::decode_selection_shape(kv_len, block_size, topk)
+            .expect("a sparse regime shape");
+        let blocks =
+            super::indexer::decode_selected_blocks(&scores, &shape, block_size, init, local);
+        let selected = selection_positions(&blocks, &shape, block_size, kv_len);
+
+        assert_eq!(
+            selected, kept,
+            "kv_len {kv_len}: the page-table selection and the additive mask disagree"
+        );
+        // And the selection has to be a real restriction, not everything.
+        assert!(
+            (selected.len() as i32) < kv_len,
+            "kv_len {kv_len}: the selection covers the whole context"
+        );
+    }
+}
+
+#[test]
+fn the_decode_selection_honours_the_forced_initial_and_local_blocks() {
+    let block_size = 8i32;
+    let kv_len = 200i32; // 25 blocks
+    let topk = 6i32;
+    let init = 2i32;
+    let local = 3i32;
+    let scores = decode_token_scores(kv_len, 0xfeed);
+    let shape = super::indexer::decode_selection_shape(kv_len, block_size, topk).unwrap();
+    let blocks = super::indexer::decode_selected_blocks(&scores, &shape, block_size, init, local);
+    let chosen: std::collections::BTreeSet<i32> =
+        to_vec_f32(&blocks).into_iter().map(|b| b as i32).collect();
+
+    // Initial blocks are pinned.
+    for j in 0..init {
+        assert!(chosen.contains(&j), "initial block {j} was not kept");
+    }
+    // The local window below the query's own block is pinned. The query's own
+    // block is `num_blocks - 1`, which this function excludes and the caller
+    // appends, so the pinned scored blocks are `[num_blocks - local, num_blocks - 1)`.
+    for j in (shape.num_blocks - local)..(shape.num_blocks - 1) {
+        assert!(chosen.contains(&j), "local block {j} was not kept");
+    }
+    assert_eq!(chosen.len() as i32, shape.budget);
+}
+
+#[test]
+fn the_decode_selection_shape_declines_the_regimes_that_are_not_sparse() {
+    // Budget covers every block: the mask path already short-circuits to dense,
+    // so a page table would be pure overhead.
+    assert!(super::indexer::decode_selection_shape(64, 16, 4).is_none());
+    assert!(super::indexer::decode_selection_shape(64, 16, 8).is_none());
+    // A single block of budget leaves nothing to choose once the final block
+    // is accounted for.
+    assert!(super::indexer::decode_selection_shape(1024, 16, 1).is_none());
+    // Degenerate configs are declined rather than panicking.
+    assert!(super::indexer::decode_selection_shape(1024, 0, 4).is_none());
+    assert!(super::indexer::decode_selection_shape(0, 16, 4).is_none());
+
+    // A genuinely sparse regime: 1024 tokens, 16-token blocks, budget 4.
+    let shape = super::indexer::decode_selection_shape(1024, 16, 4).unwrap();
+    assert_eq!(shape.num_blocks, 64);
+    assert_eq!(shape.budget, 3);
+    assert_eq!(shape.tail_start, 63 * 16);
+}
+
+#[test]
+fn a_partial_final_block_contributes_only_its_live_tokens() {
+    // kv_len 261 with 16-token blocks: 17 blocks, the last holding 5 tokens.
+    // The tail must stop at 261, never at 272; a page list that ran past the
+    // live window would read the next head's rows in the pool view.
+    let shape = super::indexer::decode_selection_shape(261, 16, 4).unwrap();
+    assert_eq!(shape.num_blocks, 17);
+    assert_eq!(shape.tail_start, 256);
+    let scores = decode_token_scores(261, 0x5151);
+    let blocks = super::indexer::decode_selected_blocks(&scores, &shape, 16, 1, 2);
+    let selected = selection_positions(&blocks, &shape, 16, 261);
+    assert_eq!(selected.iter().copied().max(), Some(260));
+    assert_eq!(selected.len(), (shape.budget * 16 + 5) as usize);
+}
