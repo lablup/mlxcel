@@ -52,6 +52,7 @@ fn sample_input() -> ServerStartupInput {
         audio_queue_depth: 8,
         audio_request_timeout_secs: 120,
         prefill_chunk_size: 512,
+        prefill_grant_interval: None,
         batch_size: None,
         ubatch_size: None,
         enable_preemption: false,

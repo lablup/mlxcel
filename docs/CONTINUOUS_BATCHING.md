@@ -21,6 +21,7 @@ token, then streams the new tokens out. Relevant flags:
 | `--max-batch-prefill-tokens N` | (derived) | Padded-token budget bounding one batched prefill's transient memory. Unset derives `2 * max_batch_prefill * prefill_chunk_size`; `0` disables the cap. |
 | `--max-queue-depth N` | 32 | Maximum queued (not yet admitted) requests. |
 | `--prefill-chunk-size N` | 512 | Token chunk size for prefill; bounds prefill's effect on decode latency. |
+| `--prefill-grant-interval N` | 16 | Decode ticks a parked chunked prefill yields before it is granted one; bounds an admitted long prompt's time to first token. `0` disables the grant (unbounded wait). |
 | `--enable-preemption` | off | Allow evicting a lower-priority sequence to admit a waiting one. |
 | `--no-batch` | off | Disable batching and serve sequentially (the legacy single worker). |
 | `--no-prompt-cache` | off | Disable the prompt-prefix KV cache (it is on by default). |
@@ -105,40 +106,66 @@ budget is inert. Disable the guard with `--kv-cache-budget none`. Memory-
 constrained hosts can also lower `--parallel` or cap `--ctx-size` (see the
 context-sizing note in [environment-variables.md](environment-variables.md)).
 
-### How a chunked prefill shares ticks with decode (it does not)
+### How a chunked prefill shares ticks with decode (`--prefill-grant-interval`)
 
 The flag table above says `--prefill-chunk-size` "bounds prefill's effect on
 decode latency". That is true, and it is worth stating what the tick policy
-actually does, because the shape is the opposite of what a chunk size usually
-implies.
+actually does, because the shape is not what a chunk size usually implies.
 
 A prompt longer than `--prefill-chunk-size` is admitted, runs chunk 0, and is
-then parked. From that point the scheduler resolves every tick in favour of
-decode for as long as any sequence is active, and because the policy is a pure
-function of scheduler state that a decode does not change, it keeps resolving
-that way. The parked prompt resumes only once the last decoding sequence
-finishes. So a decode stream never waits for more than the one prefill forward
-that admission itself costs, and a long prompt arriving next to a busy batch can
-wait a long time for its first token.
+then parked. From that point the tick policy resolves in favour of decode for as
+long as any sequence is active. Before issue #1011 it resolved that way
+*forever*: the policy is a pure function of scheduler state, and running a decode
+changes none of the state it reads, so the parked prompt made no progress at all
+until the last decoding sequence finished. Measured on an M1 Ultra, the prefill
+held at chunk 1 of 19 for 20 s while decode advanced 162 to 344 steps. With
+requests arriving continuously that wait has no ceiling, so neither does the
+admitted request's time to first token.
 
-Two consequences worth knowing when reading latency numbers:
+`--prefill-grant-interval N` (default 16) bounds it. After `N` consecutive
+decode ticks the next tick is GRANTED to the parked prefill, which runs one
+chunk and resets the count. So:
 
-- Admission perturbs a decoding stream's inter-token latency exactly once, by
-  one prefill forward, not for the duration of the prompt.
+- **The bound.** The parked prompt advances at least one chunk per `N + 1`
+  ticks, so a `C`-chunk prompt reaches its first token within `C * (N + 1)`
+  ticks of admission, however long the batch keeps decoding.
+- **The price.** Over one grant cycle the decoding streams get `N` tokens per
+  `N * D + P` of wall clock, for a decode step `D` and a chunk forward `P`, so
+  their mean inter-token latency during the admission window is `D + P / N`.
+  Their p95 is a different shape: one gap in `N + 1` carries the chunk, so the
+  chunk shows up in p95 whenever `N < 19` and hides above p95 otherwise. The
+  hiccup is the same size either way; only its frequency changes, so tuning `N`
+  to keep a percentile clean is not the same as making the streams faster.
+
+`N` is therefore the TTFT-versus-ITL dial, on the same frontier
+`--prefill-chunk-size` moves from the other direction: a smaller chunk makes
+each hiccup smaller, a smaller interval makes them more frequent and the
+admitted request faster. `--prefill-grant-interval 0` disables the grant and
+restores the pre-#1011 arbitration, unbounded wait included. Measured frontier:
+[`docs/benchmark_results/prefill-fairness-m1ultra-2026-08-03.md`](benchmark_results/prefill-fairness-m1ultra-2026-08-03.md).
+
+Two further things worth knowing when reading latency numbers:
+
 - With the batch already at `--parallel`, a queued request is not admitted at
-  all, so it contributes no prefill and the effect above does not arise. The
-  scenario "a long prompt prefills while others decode" needs `--parallel`
-  strictly above the number of active streams.
+  all, so it contributes no prefill and none of the above arises. The scenario
+  "a long prompt prefills while others decode" needs `--parallel` strictly above
+  the number of active streams.
+- At most one chunked prefill is ever parked. The scheduler holds it in a single
+  slot and the chunked branch short-circuits above the admission branch, so
+  while one prompt is parked no further request is admitted whatever the batch's
+  occupancy. Shortening the parked prompt's stay therefore also shortens the
+  head-of-line wait of everything queued behind it.
 
-Issue #908 analysed this and decided against fixing it with a fused ragged
-forward; see
+Issue #908 analysed the same branch and decided against fixing it with a fused
+ragged forward; see
 [ADR 0005](adr/0005-mixed-prefill-decode-step-execution.md). The experimental
-`MLXCEL_MIXED_STEP=1` makes each tick advance both workloads, which bounds the
-parked prompt's time to first token at the cost of putting the chunk forward
-into the decoding streams' inter-token latency. It is a measurement instrument
-for that trade, not a supported operator knob; a production fairness policy is
-tracked as a follow-up. `scripts/bench_mixed_step_admission.py` drives the
-scenario and attributes each run through `mlxcel_batch_mixed_steps_total`.
+`MLXCEL_MIXED_STEP=1` remains as the extreme end of the frontier: every tick
+advances both workloads, which minimizes the parked prompt's TTFT and maximizes
+what the decoding streams pay. It is a measurement instrument, not a supported
+operator knob. `scripts/bench_mixed_step_admission.py` drives the scenario and
+attributes each run through `mlxcel_batch_mixed_steps_total` (the #908
+prototype) and `mlxcel_batch_prefill_grants_total` (the #1011 grant);
+`scripts/bench/starvation_probe.sh` samples the same counters over time.
 
 ### Bounding the batched-prefill transient (`--max-batch-prefill-tokens`)
 

@@ -2,15 +2,27 @@
 # Does a chunked prefill make progress while decode streams are running?
 #
 # Issue #908 assumed tick alternation blocks decode. The implementation found
-# the reverse: decide_action returns Decode while any sequence is active, so the
-# prefill is what starves. This probe measures that directly by sampling
+# the reverse: decide_action returned Decode while any sequence is active, so the
+# prefill is what starved. This probe measures that directly by sampling
 # counters rather than latencies, which makes it robust to the machine being
 # busy with unrelated work.
 #
 #   scripts/bench/starvation_probe.sh baseline
 #   PORT=18994 scripts/bench/starvation_probe.sh mixed
 #
+# GRANT sets --prefill-grant-interval (issue #1011), the fairness dial that
+# bounds how long the parked prefill yields. GRANT=0 disables the grant and
+# reproduces the pre-#1011 starvation; unset leaves the shipped default:
+#
+#   GRANT=0 scripts/bench/starvation_probe.sh baseline     # starved arm
+#   scripts/bench/starvation_probe.sh baseline             # shipped default
+#
+# Read `prefill_grants` as the dispatch proof for the fairness policy the same
+# way `mixed_steps` is for the #908 prototype: it can only move when the grant
+# fired, so a flat column means the arm did not engage.
+#
 # Results: docs/benchmark_results/mixed-step-prototype-m1ultra-2026-08-03.md
+#          docs/benchmark_results/prefill-fairness-m1ultra-2026-08-03.md
 #
 # Every exit path kills the server. Do not add `wait` on the background curls:
 # an earlier version did and hung for eight hours after a stream stalled.
@@ -24,6 +36,10 @@ SERVER=${SERVER:-./target/release/mlxcel-server}
 PARALLEL=${PARALLEL:-8}
 CHUNK=${CHUNK:-512}
 SAMPLES=${SAMPLES:-12}      # one every 5s
+GRANT=${GRANT:-}            # --prefill-grant-interval; empty = shipped default
+
+GRANT_ARGS=""
+[ -n "$GRANT" ] && GRANT_ARGS="--prefill-grant-interval $GRANT"
 
 case "$ARM" in
   baseline|mixed) ;;
@@ -36,11 +52,12 @@ SRV=""
 cleanup() { [ -n "$SRV" ] && kill -9 "$SRV" 2>/dev/null; }
 trap cleanup EXIT INT TERM
 
+# shellcheck disable=SC2086  # GRANT_ARGS is an intentional word split
 if [ "$ARM" = mixed ]; then
-  MLXCEL_MIXED_STEP=1 "$SERVER" -m "$MODEL" --parallel "$PARALLEL" \
+  MLXCEL_MIXED_STEP=1 "$SERVER" -m "$MODEL" --parallel "$PARALLEL" $GRANT_ARGS \
     --prefill-chunk-size "$CHUNK" --metrics --port "$PORT" >"/tmp/starv_$ARM.log" 2>&1 &
 else
-  "$SERVER" -m "$MODEL" --parallel "$PARALLEL" \
+  "$SERVER" -m "$MODEL" --parallel "$PARALLEL" $GRANT_ARGS \
     --prefill-chunk-size "$CHUNK" --metrics --port "$PORT" >"/tmp/starv_$ARM.log" 2>&1 &
 fi
 SRV=$!
@@ -74,11 +91,12 @@ curl -s --max-time 180 -X POST "http://127.0.0.1:$PORT/v1/completions" \
   -H 'Content-Type: application/json' -d "$BODY" >/dev/null 2>&1 &
 
 # If the prefill is starved, chunks stops advancing while decode keeps climbing.
-echo "arm=$ARM   t  prefill_chunks  mixed_steps  decode_steps"
+echo "arm=$ARM grant=${GRANT:-default}   t  prefill_chunks  prefill_grants  mixed_steps  decode_steps"
 t=1
 while [ "$t" -le "$SAMPLES" ]; do
   sleep 5
-  printf "         %5ss  %13s  %11s  %12s\n" "$((t * 5))" \
-    "$(counter prefill_chunks_total)" "$(counter mixed_steps_total)" "$(counter decode_steps_total)"
+  printf "         %5ss  %13s  %14s  %11s  %12s\n" "$((t * 5))" \
+    "$(counter prefill_chunks_total)" "$(counter prefill_grants_total)" \
+    "$(counter mixed_steps_total)" "$(counter decode_steps_total)"
   t=$((t + 1))
 done
