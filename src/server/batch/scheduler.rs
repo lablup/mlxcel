@@ -3290,6 +3290,15 @@ impl BatchScheduler {
     // ------------------------------------------------------------------
 
     /// Snapshot the scheduler state the tick policy reads.
+    ///
+    /// `should_preempt()` is evaluated eagerly here, where the pre-#908
+    /// `decide_action` reached it only inside one branch. That is safe and
+    /// cheap: it takes `&self` and mutates nothing, so hoisting it cannot
+    /// change behaviour, and it returns on the first condition
+    /// (`!self.enable_preemption`) unless `--enable-preemption` is on, which is
+    /// off by default. Even enabled it is O(active batch), bounded by
+    /// `--parallel`, which is why `decide_action_is_o1_regardless_of_queue_size`
+    /// still holds.
     fn tick_state(&self) -> TickState {
         TickState {
             speculative_pending: self.speculative_slice.is_some()

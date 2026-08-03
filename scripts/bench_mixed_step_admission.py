@@ -53,6 +53,7 @@ import os
 import statistics
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -253,9 +254,16 @@ async def _amain(args: argparse.Namespace) -> int:
     loop = asyncio.get_running_loop()
     admit_at = time.perf_counter() + args.settle_s
 
+    # Size the pool explicitly. asyncio's default executor caps at
+    # `min(32, cpu_count + 4)`, so a large `--streams` on a small host would
+    # silently queue requests instead of running them concurrently, and the
+    # admitted request could be the one left waiting for a thread. That would
+    # measure client-side queueing and report it as server latency.
+    executor = ThreadPoolExecutor(max_workers=args.streams + 1)
+
     tasks = [
         loop.run_in_executor(
-            None,
+            executor,
             stream_tokens,
             args.host,
             args.port,
@@ -270,7 +278,7 @@ async def _amain(args: argparse.Namespace) -> int:
     ]
     tasks.append(
         loop.run_in_executor(
-            None,
+            executor,
             stream_tokens,
             args.host,
             args.port,
@@ -283,7 +291,10 @@ async def _amain(args: argparse.Namespace) -> int:
         )
     )
 
-    traces: list[StreamTrace] = await asyncio.gather(*tasks)
+    try:
+        traces: list[StreamTrace] = await asyncio.gather(*tasks)
+    finally:
+        executor.shutdown(wait=True)
     after = scrape_tick_metrics(args.host, args.port)
 
     streams = [t for t in traces if t.label != "admitted"]
@@ -340,9 +351,19 @@ async def _amain(args: argparse.Namespace) -> int:
         quiet.extend(t.itls_ms(hi=admit_sent))
         during.extend(t.itls_ms(lo=admit_sent, hi=admit_first))
 
+    # The admitted request's first token is sampled when its final prefill
+    # chunk completes, so `admit_first` is the end of the prefill window. When
+    # it is None the window never closed, and `during` runs to the end of the
+    # run; say so rather than labelling an unbounded span as the window.
+    window_label = (
+        "admission window (prefill live): "
+        if admit_first is not None
+        else "admission window (NEVER CLOSED, admitted request produced no token): "
+    )
+
     print("## per-stream inter-token latency")
-    print(f"    quiet window  (before admission): {_fmt(quiet)}")
-    print(f"    admission window (prefill live):  {_fmt(during)}")
+    print(f"    quiet window (before admission): {_fmt(quiet)}")
+    print(f"    {window_label}{_fmt(during)}")
     if quiet and during:
         ratio = _percentile(during, 95) / max(_percentile(quiet, 95), 1e-9)
         print(f"    p95 inflation during admission:   {ratio:.2f}x")
