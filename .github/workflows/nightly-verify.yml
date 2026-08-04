@@ -194,6 +194,43 @@ jobs:
           echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
           echo "/usr/local/bin" >> "$GITHUB_PATH"
 
+          # The Metal shader compiler must be resolvable by xcrun, or every COLD
+          # MLX C++ build dies with
+          #   xcrun: error: unable to find utility "metal", not a developer tool or in PATH
+          # once cmake reaches the kernel headers. This is the same condition
+          # docs/mla-absorbed-decode.md and docs/sparse-paged-decode.md tell
+          # developers to fix with DEVELOPER_DIR: `xcode-select -p` points at
+          # CommandLineTools, which ships no metal compiler.
+          #
+          # It stayed hidden because a warm CARGO_TARGET_DIR skips the MLX build
+          # entirely. Run 30761020020 passed with a 71-second clippy for exactly
+          # that reason. Run 30870981405 was the first to need a cold build (a
+          # new profile for tests, and a debug tree that had gone stale) and both
+          # clippy and test failed here. release.yml prunes that directory every
+          # 7 days, so this was going to surface on its own.
+          if ! xcrun -f metal >/dev/null 2>&1; then
+            for candidate in /Applications/Xcode*.app/Contents/Developer; do
+              [ -d "$candidate" ] || continue
+              if DEVELOPER_DIR="$candidate" xcrun -f metal >/dev/null 2>&1; then
+                export DEVELOPER_DIR="$candidate"
+                echo "DEVELOPER_DIR=$candidate" >> "$GITHUB_ENV"
+                echo "xcrun could not find metal; selected DEVELOPER_DIR=$candidate"
+                break
+              fi
+            done
+          fi
+
+          if ! xcrun -f metal >/dev/null 2>&1; then
+            echo "::error::xcrun cannot resolve the metal compiler, so any cold MLX C++ build will fail." >&2
+            echo "This is a runner provisioning problem, not a code failure." >&2
+            echo "xcode-select -p: $(xcode-select -p 2>&1 || true)" >&2
+            echo "Xcode installs found: $(ls -d /Applications/Xcode*.app 2>/dev/null | tr '\n' ' ')" >&2
+            echo "Install Xcode (not just the Command Line Tools) and its Metal toolchain," >&2
+            echo "then either 'sudo xcode-select -s' it or leave DEVELOPER_DIR set for the runner." >&2
+            exit 1
+          fi
+          echo "metal: $(xcrun -f metal)"
+
       # rust-toolchain.toml pins the channel (and the rustfmt/clippy
       # components) that every cargo invocation below actually resolves to, so
       # this step exists to guarantee rustup is present and current, not to
