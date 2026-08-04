@@ -99,6 +99,10 @@ pub mod gemma4_assistant;
 /// — landed here independently so the layer can
 /// be unit-tested in isolation before integration.
 pub mod masked_embedder;
+/// Test-only capture of this module's `tracing` output, used by the
+/// assertions on [`resolve_drafter_kind`]'s operator-facing diagnostics.
+#[cfg(test)]
+mod test_log_capture;
 
 /// Drafter shapes recognised by mlxcel.
 ///
@@ -840,7 +844,25 @@ mod tests {
     use super::*;
     use std::str::FromStr as _;
     use tempfile::tempdir;
-    use tracing_test::traced_test;
+
+    /// Call the resolver. Every test in this module must go through this
+    /// helper (or [`load`]) rather than calling the real function, because
+    /// `test_log_capture::install` has to have completed before any thread
+    /// reaches the resolver's tracing callsites. Skipping it reintroduces the
+    /// intermittent failure in the log assertions below that #1023 removed;
+    /// `test_log_capture` documents the mechanism and a guard test enforces
+    /// this rule.
+    fn resolve(path: &Path, kind: Option<DrafterKind>) -> Result<DrafterKind, DrafterError> {
+        test_log_capture::install();
+        super::resolve_drafter_kind(path, kind)
+    }
+
+    /// Load a drafter. Same install ordering requirement as [`resolve`],
+    /// which the factory reaches through.
+    fn load(path: &Path, kind: Option<DrafterKind>) -> Result<LoadedDrafter, DrafterError> {
+        test_log_capture::install();
+        super::load_drafter(path, kind)
+    }
 
     /// Helper: write a `config.json` with the given `model_type` into a
     /// fresh temp dir and return its path. Mirrors the smallest-possible
@@ -925,7 +947,7 @@ mod tests {
     fn auto_detect_gemma4_assistant_resolves_to_mtp() {
         let dir = tempdir().unwrap();
         write_drafter_config(&dir, Some("gemma4_assistant"));
-        let resolved = resolve_drafter_kind(dir.path(), None).unwrap();
+        let resolved = resolve(dir.path(), None).unwrap();
         assert_eq!(resolved, DrafterKind::Mtp);
     }
 
@@ -936,7 +958,7 @@ mod tests {
         // loop exactly like the non-unified `gemma4_assistant`.
         let dir = tempdir().unwrap();
         write_drafter_config(&dir, Some("gemma4_unified_assistant"));
-        let resolved = resolve_drafter_kind(dir.path(), None).unwrap();
+        let resolved = resolve(dir.path(), None).unwrap();
         assert_eq!(resolved, DrafterKind::Mtp);
     }
 
@@ -946,7 +968,7 @@ mod tests {
         // resolver MUST fall back to DEFAULT_DRAFTER_KIND (Dflash).
         let dir = tempdir().unwrap();
         write_drafter_config(&dir, None);
-        let resolved = resolve_drafter_kind(dir.path(), None).unwrap();
+        let resolved = resolve(dir.path(), None).unwrap();
         assert_eq!(resolved, DrafterKind::Dflash);
     }
 
@@ -955,7 +977,7 @@ mod tests {
         // Some random model_type the map doesn't know about -> still DFlash.
         let dir = tempdir().unwrap();
         write_drafter_config(&dir, Some("some_unknown_model_type_v2"));
-        let resolved = resolve_drafter_kind(dir.path(), None).unwrap();
+        let resolved = resolve(dir.path(), None).unwrap();
         assert_eq!(resolved, DrafterKind::Dflash);
     }
 
@@ -964,7 +986,7 @@ mod tests {
         // No config.json at all: upstream swallows the FileNotFoundError
         // and falls back to DEFAULT_DRAFTER_KIND; we must do the same.
         let dir = tempdir().unwrap();
-        let resolved = resolve_drafter_kind(dir.path(), None).unwrap();
+        let resolved = resolve(dir.path(), None).unwrap();
         assert_eq!(resolved, DrafterKind::Dflash);
     }
 
@@ -975,7 +997,7 @@ mod tests {
         // drafter dir does not break auto-detect.
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("config.json"), "not valid json").unwrap();
-        let resolved = resolve_drafter_kind(dir.path(), None).unwrap();
+        let resolved = resolve(dir.path(), None).unwrap();
         assert_eq!(resolved, DrafterKind::Dflash);
     }
 
@@ -984,7 +1006,7 @@ mod tests {
         // model_type == "gemma4_assistant", caller passes Mtp -> Mtp.
         let dir = tempdir().unwrap();
         write_drafter_config(&dir, Some("gemma4_assistant"));
-        let resolved = resolve_drafter_kind(dir.path(), Some(DrafterKind::Mtp)).unwrap();
+        let resolved = resolve(dir.path(), Some(DrafterKind::Mtp)).unwrap();
         assert_eq!(resolved, DrafterKind::Mtp);
     }
 
@@ -994,17 +1016,16 @@ mod tests {
         // the DFlash path (DFlash configs have no dedicated model_type).
         let dir = tempdir().unwrap();
         write_drafter_config(&dir, None);
-        let resolved = resolve_drafter_kind(dir.path(), Some(DrafterKind::Dflash)).unwrap();
+        let resolved = resolve(dir.path(), Some(DrafterKind::Dflash)).unwrap();
         assert_eq!(resolved, DrafterKind::Dflash);
 
         // Also: an explicit Mtp against an unmapped config must pass
         // through unchanged (no "expected" to override against).
-        let resolved = resolve_drafter_kind(dir.path(), Some(DrafterKind::Mtp)).unwrap();
+        let resolved = resolve(dir.path(), Some(DrafterKind::Mtp)).unwrap();
         assert_eq!(resolved, DrafterKind::Mtp);
     }
 
     #[test]
-    #[traced_test]
     fn warn_and_honor_explicit_kind_when_disagreeing_with_model_type() {
         // model_type == "gemma4_assistant" maps to Mtp, but the caller
         // explicitly asked for DFlash. Resolver MUST honor the explicit
@@ -1016,19 +1037,20 @@ mod tests {
         // tracing::warn!".
         let dir = tempdir().unwrap();
         write_drafter_config(&dir, Some("gemma4_assistant"));
-        let resolved = resolve_drafter_kind(dir.path(), Some(DrafterKind::Dflash)).unwrap();
+        let (resolved, logs) =
+            test_log_capture::capture(|| resolve(dir.path(), Some(DrafterKind::Dflash)).unwrap());
         assert_eq!(
             resolved,
             DrafterKind::Dflash,
             "explicit choice must be honored"
         );
-        assert!(logs_contain(
-            "Explicit --draft-kind disagrees with drafter model_type"
-        ));
+        assert!(
+            logs.contains("Explicit --draft-kind disagrees with drafter model_type"),
+            "captured: {logs:?}"
+        );
     }
 
     #[test]
-    #[traced_test]
     fn warn_also_fires_when_explicit_mtp_disagrees_against_unmapped_inverse() {
         // This is the symmetric mismatch: caller passes Mtp but the
         // drafter's model_type maps to something else. Per the design
@@ -1039,23 +1061,25 @@ mod tests {
         // that boundary.
         let dir = tempdir().unwrap();
         write_drafter_config(&dir, None);
-        let resolved = resolve_drafter_kind(dir.path(), Some(DrafterKind::Mtp)).unwrap();
+        let (resolved, logs) =
+            test_log_capture::capture(|| resolve(dir.path(), Some(DrafterKind::Mtp)).unwrap());
         assert_eq!(resolved, DrafterKind::Mtp);
         assert!(
-            !logs_contain("Explicit --draft-kind disagrees"),
-            "no warn should fire when model_type is unknown / absent"
+            !logs.contains("Explicit --draft-kind disagrees"),
+            "no warn should fire when model_type is unknown / absent, captured: {logs:?}"
         );
     }
 
     #[test]
-    #[traced_test]
     fn auto_detect_emits_info_log_for_default_fallback() {
         let dir = tempdir().unwrap();
         write_drafter_config(&dir, None);
-        let _ = resolve_drafter_kind(dir.path(), None).unwrap();
-        assert!(logs_contain(
-            "Auto-detected --draft-kind using default fallback"
-        ));
+        let (resolved, logs) = test_log_capture::capture(|| resolve(dir.path(), None).unwrap());
+        assert_eq!(resolved, DEFAULT_DRAFTER_KIND);
+        assert!(
+            logs.contains("Auto-detected --draft-kind using default fallback"),
+            "captured: {logs:?}"
+        );
     }
 
     // ----- load_drafter ---------------------------------------------------
@@ -1068,7 +1092,7 @@ mod tests {
         // `Dflash` arm cannot silently regress to `NotYetImplemented`.
         let dir = tempdir().unwrap();
         write_drafter_config(&dir, None);
-        let err = load_drafter(dir.path(), Some(DrafterKind::Dflash))
+        let err = load(dir.path(), Some(DrafterKind::Dflash))
             .expect_err("load_drafter must fail on a config-only fixture with no safetensors");
         match err {
             DrafterError::LoadFailed { reason } => {
@@ -1093,7 +1117,7 @@ mod tests {
         // now dispatches into the concrete impl.
         let dir = tempdir().unwrap();
         write_drafter_config(&dir, Some("gemma4_assistant"));
-        let err = load_drafter(dir.path(), None).expect_err("stub config has no text_config");
+        let err = load(dir.path(), None).expect_err("stub config has no text_config");
         match err {
             DrafterError::NotYetImplemented { .. } => panic!(
                 "Mtp arm should no longer return NotYetImplemented; \
@@ -1112,7 +1136,7 @@ mod tests {
     fn load_drafter_returns_typed_not_yet_implemented_for_internal_mtp() {
         let dir = tempdir().unwrap();
         write_drafter_config(&dir, None);
-        let err = load_drafter(dir.path(), Some(DrafterKind::InternalMtp)).expect_err("stub");
+        let err = load(dir.path(), Some(DrafterKind::InternalMtp)).expect_err("stub");
         match err {
             DrafterError::NotYetImplemented { kind, issue } => {
                 assert_eq!(kind, DrafterKind::InternalMtp);
