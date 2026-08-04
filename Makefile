@@ -220,15 +220,19 @@ test-doc: ## Run documentation tests
 # ----------------------------------------------------------------------------
 # Fast dev-iteration test targets (issue #809)
 #
-# `test` / `verify-test` above build under [profile.release] (fat LTO,
-# codegen-units = 1), which is the right choice for CI-faithful and shipping
-# validation but measured at 4 to 6 minutes per incremental rebuild on the
-# ~390k-line main crate, which is expensive for the edit-test-edit loop of local and
-# agent development. These targets build under [profile.test-fast] instead
-# (thin LTO, parallel codegen, incremental compilation); see the profile's
-# Cargo.toml comment and docs/installation.md ("Fast iteration builds") for
-# the measured speedup. Set FILTER to narrow the run, e.g.
+# `release*` and a hand-run `cargo test --release` build under
+# [profile.release] (fat LTO, codegen-units = 1), which is the right choice for
+# shipping validation but measured at 4 to 6 minutes per incremental rebuild on
+# the ~390k-line main crate, which is expensive for the edit-test-edit loop of
+# local and agent development. These targets build under [profile.test-fast]
+# instead (thin LTO, parallel codegen, incremental compilation); see the
+# profile's Cargo.toml comment and docs/installation.md ("Fast iteration
+# builds") for the measured speedup. Set FILTER to narrow the run, e.g.
 # `make test-fast-cuda FILTER=server::chat_request`.
+#
+# `verify-test` below also builds under [profile.test-fast] as of #1000, so
+# these targets and the CI-faithful gate now differ only in feature set and
+# `--test-threads=1`, not in codegen.
 # ----------------------------------------------------------------------------
 
 .PHONY: test-fast
@@ -450,9 +454,17 @@ pre-commit: fmt clippy test ## Pre-commit checks
 #   2. `-D warnings` — promotes every clippy warning to an error, matching
 #      `-- -D warnings` in CI. The default `clippy` target uses `-W warnings`
 #      and silently hides regressions.
-#   3. `cargo test --release` — CI runs tests in release mode for realistic
-#      MLX/Metal codegen. Debug-mode tests can pass while release-mode tests
-#      hit different optimisation paths.
+#   3. `--profile test-fast`: CI runs tests optimised, not in debug, for
+#      realistic MLX/Metal codegen. Debug-mode tests can pass while optimised
+#      tests hit different paths. `test-fast` keeps `opt-level = 3`, which is
+#      what that argument actually rests on, and drops the fat LTO and
+#      `codegen-units = 1` of `[profile.release]`, which exist to tune a
+#      shipped binary and were costing the nightly its whole budget in
+#      codegen and linking (#1000). release.yml still builds and links what
+#      ships under `[profile.release]`. The residual gap is a defect that
+#      reproduces only under fat LTO or single-unit codegen; use
+#      `cargo test --release --features metal,accelerate` by hand when you
+#      are chasing one.
 #
 # Run `make verify` before opening or updating a PR. Run `make verify-clean`
 # (which prepends `cargo clean`) when you suspect clippy's per-crate result
@@ -471,9 +483,9 @@ verify-clippy: ## CI-faithful: clippy --all-targets --features metal,accelerate 
 	$(CARGO) clippy --all-targets --features metal,accelerate -- -D warnings
 
 .PHONY: verify-test
-verify-test: ## CI-faithful: cargo test --release --features metal,accelerate
-	@echo "$(CYAN)[verify] test (release, features=metal,accelerate)...$(RESET)"
-	$(CARGO) test --release --features metal,accelerate
+verify-test: ## CI-faithful: cargo test --profile test-fast --features metal,accelerate
+	@echo "$(CYAN)[verify] test (test-fast profile, features=metal,accelerate)...$(RESET)"
+	$(CARGO) test --profile test-fast --features metal,accelerate
 
 .PHONY: verify
 verify: verify-fmt verify-clippy verify-test ## Run the full CI-faithful gate locally (recommended before push)

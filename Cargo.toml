@@ -255,7 +255,15 @@ panic = "unwind"
 # DO NOT use this profile for anything that ships or gets measured:
 # performance benchmarks, release binaries, or numbers quoted in a PR as
 # representative throughput/latency. Use `[profile.release]` (via
-# `make release*` / `make verify-test`) for those.
+# `make release*`) for those.
+#
+# As of #1000 this profile also backs `make verify-test`, so it is what the
+# CI-faithful gate and the nightly workflow run tests under. That is a
+# deliberate trade: `opt-level = 3` is what makes the optimised-codegen
+# argument for testing hold, and it is kept, while the fat LTO and single
+# codegen unit that were consuming the nightly's entire budget in linking are
+# not. It does not change what ships; release.yml still builds the shipped
+# binaries under `[profile.release]`.
 [profile.test-fast]
 inherits = "release"
 lto = "thin"           # cross-crate inlining kept; drops the whole-program fat-LTO link

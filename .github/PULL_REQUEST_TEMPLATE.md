@@ -35,7 +35,7 @@ For inference changes, real-checkpoint validation is required — synthetic-only
 
 - [ ] `cargo fmt --all -- --check` (enforced by CI — violations block merge)
 - [ ] `cargo clippy --all-targets -- -D warnings`
-- [ ] `cargo test --release`
+- [ ] `cargo test --profile test-fast`
 - [ ] `cargo deny check`
 - [ ] Validated with a real checkpoint (specify which, e.g. `mlx-community/Qwen3.5-0.8B-OptiQ-4bit`): ...
 

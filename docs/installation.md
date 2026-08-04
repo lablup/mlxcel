@@ -277,17 +277,17 @@ racing another thread's stream capture) or, with graphs disabled, with
 binaries are unaffected; this is a test-parallelism artifact.
 
 ```bash
-cargo test --release --features cuda -- --test-threads=1
+cargo test --profile test-fast --features cuda -- --test-threads=1
 ```
 
 ## Fast iteration builds
 
-`cargo test --release` (and `cargo build --release`) use `[profile.release]`:
-fat LTO across all ~439 locked crates plus `codegen-units = 1` for the
-~390k-line main crate. That is the right tradeoff for CI-faithful validation
-and for anything you ship, but it is expensive for the day-to-day edit-test
-loop: measured at 4 to 6 minutes per incremental rebuild, so a typical issue
-cycle of several edit-test iterations pays 20+ minutes of pure compile time.
+`cargo build --release` (and a hand-run `cargo test --release`) use
+`[profile.release]`: fat LTO across all ~439 locked crates plus
+`codegen-units = 1` for the ~390k-line main crate. That is the right tradeoff
+for anything you ship, but it is expensive for the day-to-day edit-test loop:
+measured at 4 to 6 minutes per incremental rebuild, so a typical issue cycle of
+several edit-test iterations pays 20+ minutes of pure compile time.
 
 For local and agent development, use `[profile.test-fast]` instead (thin LTO,
 `codegen-units = 16`, incremental compilation, `strip = false`; still
@@ -317,10 +317,20 @@ versus 4 to 6 minutes under `[profile.release]`, roughly a 13x to 19x
 iteration speedup. A representative narrow test set (139 tests across model,
 server, sampling, and cache modules) passes identically under both profiles.
 
-`test-fast` is for iteration only. Use `[profile.release]` (`make release*`,
-`make verify-test`, or plain `cargo test --release`) for anything you ship,
-benchmark, or quote as representative performance: `test-fast` trades link
-time and binary size for rebuild speed and is not tuned for either.
+Use `[profile.release]` (`make release*`, or plain `cargo build --release`) for
+anything you ship, benchmark, or quote as representative performance:
+`test-fast` trades link time and binary size for rebuild speed and is not tuned
+for either.
+
+Running *tests* is the exception. `make verify-test`, and therefore the
+[nightly workflow](https://github.com/lablup/mlxcel/blob/main/.github/workflows/nightly-verify.yml)
+that invokes it, builds the test binaries under `test-fast` as well. Linking
+roughly 77 test binaries under fat LTO was costing that job its entire
+180-minute budget before a single test ran. `opt-level = 3` is unchanged, so
+the optimised MLX numerics the suite depends on are the same; what is no longer
+covered is a defect that reproduces only under fat LTO or `codegen-units = 1`.
+Reach for `cargo test --release --features metal,accelerate` by hand when you
+are chasing one of those.
 
 ## Troubleshooting
 
