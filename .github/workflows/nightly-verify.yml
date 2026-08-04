@@ -238,8 +238,9 @@ jobs:
       ${{ always()
           && github.repository == 'lablup/mlxcel'
           && (needs.verify.result == 'failure' || needs.verify.result == 'cancelled') }}
-    # GitHub-hosted, which is what makes reasons 1 and 3 above actually go away:
-    # `ubuntu-latest` ships `gh` preinstalled, so nothing here needs Homebrew.
+    # Being a separate job is what answers reasons 2 and 3; being GitHub-hosted
+    # is what answers reason 1, since `ubuntu-latest` ships `gh` preinstalled
+    # and nothing here needs Homebrew.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -255,8 +256,9 @@ jobs:
           COMMIT_SHA: ${{ github.sha }}
           EVENT_NAME: ${{ github.event_name }}
           VERIFY_RESULT: ${{ needs.verify.result }}
-          # Empty when `verify` was torn down before it could publish outputs,
-          # which is exactly the timeout case. Defaulted to `unknown` below.
+          # These do survive a `timeout-minutes` cancellation, so the usual
+          # timeout report is fully populated. They are empty only if the runner
+          # is lost outright, which the `unknown` default below covers.
           FMT_OUTCOME: ${{ needs.verify.outputs.fmt }}
           CLIPPY_OUTCOME: ${{ needs.verify.outputs.clippy }}
           TEST_OUTCOME: ${{ needs.verify.outputs.test }}
