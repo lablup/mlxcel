@@ -308,7 +308,7 @@ jobs:
             echo "Commit: \`${COMMIT_SHA}\`"
             echo "Run: ${RUN_URL}"
             echo
-            echo "An \`unknown\` step outcome means the job was torn down before it could publish one, which is the normal reading when the job did not finish."
+            echo "An \`unknown\` step outcome means the job published no outcome for that step. A \`timeout-minutes\` cancellation still publishes them, so \`unknown\` points at the runner being lost outright rather than at the budget."
             echo
             echo "Reproduce locally with \`make verify\` (or the single failing target above)."
             echo "This issue is reused by subsequent nightly reports of the same kind while it stays open."
