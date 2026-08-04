@@ -23,8 +23,10 @@
 //!
 //! 1. **Numeric parity**: the fused kernel must match an all-f32 dense
 //!    reference (dequantize + matmul + tanh-approx GeGLU) built from the very
-//!    same bf16 quantized weights, and the production `gather_qmm` fallback,
-//!    within a tolerance far below the greedy-argmax-flip scale.
+//!    same bf16 quantized weights, within a tolerance far below the
+//!    greedy-argmax-flip scale. The production `gather_qmm` fallback is held
+//!    to the same dense truth, and the two production paths to each other
+//!    within the fallback's own measured bf16 jitter (#964).
 //! 2. **Bitwise run-to-run determinism**: repeated invocations on identical
 //!    inputs must produce byte-identical outputs, including with allocator
 //!    churn between calls (dirty recycled buffers are what turn an
@@ -325,6 +327,27 @@ fn gpu_backend_or_skip() -> Option<&'static str> {
     }
 }
 
+/// Absolute ceiling on the `gather_qmm` fallback's own deviation from the
+/// dense f32 truth. `gather_qmm` rounds gate/up/activation through bf16
+/// between GEMMs, so on this synthetic shape it lands ~1.2e-2 nrms / ~4.2e-2
+/// nmax from ground truth, far above the ~1e-4 per-block perturbation the
+/// design harness measured on real checkpoints (random-normal activations
+/// through a GeGLU maximize the cancellation the bf16 intermediates lose).
+/// Pinning it serves two purposes: the production fallback gets a correctness
+/// gate of its own, and the relative bound below cannot silently widen with a
+/// reference that has itself drifted. Measured max over 27 seeds x 2 shapes on
+/// M1 Ultra / Metal: 1.803e-2 nrms, 5.429e-2 nmax.
+const GATHER_JITTER_NRMS_CEILING: f64 = 5e-2;
+const GATHER_JITTER_NMAX_CEILING: f64 = 2e-1;
+
+/// Margins applied to the measured `gather_qmm`-vs-dense jitter when bounding
+/// fused-vs-`gather_qmm`. The same 54-point sweep measured the ratio at
+/// 0.994..1.037 (nrms) and 0.932..1.192 (nmax) on Metal; the margins clear
+/// those with room for other backends' reduction orders, which this machine
+/// cannot measure.
+const GATHER_JITTER_NRMS_MARGIN: f64 = 1.5;
+const GATHER_JITTER_NMAX_MARGIN: f64 = 2.0;
+
 /// Gemma-4-26b-a4b decode-shape parity: fused kernel vs the all-f32 dense
 /// reference and vs the production `gather_qmm` fallback.
 ///
@@ -333,7 +356,13 @@ fn gpu_backend_or_skip() -> Option<&'static str> {
 /// reference rounded the same single time, the only legitimate differences
 /// are f32 summation order (~1e-6 relative) and sub-ulp rounding ties, so the
 /// bound is tight: any real math defect (a dropped lane, a wrong group, an
-/// extra rounding stage) shows up orders of magnitude above it.
+/// extra rounding stage) shows up orders of magnitude above it. That dense
+/// comparison is the sharp correctness gate for the kernel, and it strictly
+/// dominates any fused-vs-`gather_qmm` bound: `gather_qmm` is the noisier of
+/// the two references, so nothing can be caught against it that the dense
+/// comparison has not already caught. The `gather_qmm` assertions below
+/// therefore gate the fallback path itself and the two paths' mutual
+/// agreement, not the fused kernel's math (#964).
 #[test]
 fn fused_moe_geglu_kernel_matches_references_gemma4_shape() {
     let Some(backend) = gpu_backend_or_skip() else {
@@ -353,22 +382,42 @@ fn fused_moe_geglu_kernel_matches_references_gemma4_shape() {
 
         let (nrms_dense, nmax_dense) = normalized_deviation(&fused, &dense_bf16);
         let (nrms_gather, nmax_gather) = normalized_deviation(&fused, &gather);
-        let (nrms_ref_jitter, _) = normalized_deviation(&gather, &dense);
+        let (nrms_ref_jitter, nmax_ref_jitter) = normalized_deviation(&gather, &dense);
         println!(
             "fused_moe_geglu parity [{backend}, seed {seed}]: vs dense f32 (bf16-rounded) \
              nrms={nrms_dense:e} nmax={nmax_dense:e}; vs gather_qmm nrms={nrms_gather:e} \
-             nmax={nmax_gather:e}; gather-vs-dense baseline nrms={nrms_ref_jitter:e}"
+             nmax={nmax_gather:e}; gather-vs-dense baseline nrms={nrms_ref_jitter:e} \
+             nmax={nmax_ref_jitter:e}"
         );
         assert!(
             nrms_dense < 5e-4 && nmax_dense < 2e-2,
             "fused vs bf16-rounded dense f32 reference deviates (seed {seed}): \
              nrms={nrms_dense:e} nmax={nmax_dense:e}"
         );
-        // gather_qmm rounds gate/up/activation through bf16 between GEMMs, so
-        // the mutual deviation sits in the documented fp16-jitter class.
+        // The production fallback held to the same ground truth as the kernel.
         assert!(
-            nrms_gather < 5e-3 && nmax_gather < 5e-2,
-            "fused vs gather_qmm reference deviates (seed {seed}): nrms={nrms_gather:e} nmax={nmax_gather:e}"
+            nrms_ref_jitter < GATHER_JITTER_NRMS_CEILING
+                && nmax_ref_jitter < GATHER_JITTER_NMAX_CEILING,
+            "gather_qmm fallback deviates from the dense f32 reference (seed {seed}): \
+             nrms={nrms_ref_jitter:e} nmax={nmax_ref_jitter:e}"
+        );
+        // Cross-path agreement. The fused kernel matches the dense reference
+        // to `nrms_dense` above, which pins its distance from `gather_qmm` to
+        // `gather_qmm`'s own bf16 jitter; a fixed constant here measures that
+        // jitter rather than either path. #964: the previous 5e-3 nrms bound
+        // sat below the ~1.16e-2 baseline the test already computed and was
+        // unsatisfiable at every seed and both shapes. Scale with the jitter
+        // this run measured, never tighter than the project's 5e-3 / 5e-2
+        // fp16-parity allowance (which binds on a backend whose fallback is
+        // closer to exact than Metal's).
+        let nrms_gather_limit = (GATHER_JITTER_NRMS_MARGIN * nrms_ref_jitter).max(5e-3);
+        let nmax_gather_limit = (GATHER_JITTER_NMAX_MARGIN * nmax_ref_jitter).max(5e-2);
+        assert!(
+            nrms_gather < nrms_gather_limit && nmax_gather < nmax_gather_limit,
+            "fused and gather_qmm disagree beyond the fallback's own jitter (seed {seed}): \
+             nrms={nrms_gather:e} (limit {nrms_gather_limit:e}) \
+             nmax={nmax_gather:e} (limit {nmax_gather_limit:e}); \
+             baseline nrms={nrms_ref_jitter:e} nmax={nmax_ref_jitter:e}"
         );
     }
 }
