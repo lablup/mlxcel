@@ -231,8 +231,11 @@ test-doc: ## Run documentation tests
 # `make test-fast-cuda FILTER=server::chat_request`.
 #
 # `verify-test` below also builds under [profile.test-fast] as of #1000, so
-# these targets and the CI-faithful gate now differ only in feature set and
-# `--test-threads=1`, not in codegen.
+# these targets and the CI-faithful gate no longer differ in codegen. What they
+# do still differ in is scope and reporting: the gate adds `--workspace` and
+# `--no-fail-fast` (#1007) and pins the feature set, while these stay on the
+# root package with `--test-threads=1` and a FILTER hook, which is what makes
+# them fast enough for an edit-test loop.
 # ----------------------------------------------------------------------------
 
 .PHONY: test-fast
@@ -465,6 +468,48 @@ pre-commit: fmt clippy test ## Pre-commit checks
 #      reproduces only under fat LTO or single-unit codegen; use
 #      `cargo test --release --features metal,accelerate` by hand when you
 #      are chasing one.
+#   4. `--workspace`: all four members, not just the root package. The
+#      workspace root IS the `mlxcel` package, so a bare `cargo test` or
+#      `cargo clippy` resolves to `-p mlxcel` and never builds mlxcel-core,
+#      mlxcel-surgery or mlxcel-xla, let alone their test targets. 1754 tests
+#      were invisible on that basis, mlxcel-core's 1354 of them, and so was
+#      test-only lint debt: six clippy errors sat in mlxcel-xla's lib-test
+#      target while the root gate passed clean, and during #973 five
+#      `Debug`-bound compile errors in new mlxcel-core tests passed both of the
+#      commands above, only `cargo test -p mlxcel-core` finding them (#1007).
+#      `verify-fmt` never had the hole because `cargo fmt --all` was already
+#      workspace-wide.
+#
+#      This is a flag here rather than `default-members` in Cargo.toml on
+#      purpose. `default-members` would silently re-scope every bare cargo
+#      invocation in the repository, release.yml's
+#      `cargo build --release --target aarch64-apple-darwin --locked` included,
+#      which would then compile the default-off `mlxcel-xla` into every release
+#      build. It would also move the gate's scope into a manifest field that
+#      the gate's own command line does not mention, and a scope you cannot
+#      read off the command is the defect this item exists to fix.
+#
+#      What `--workspace` covers is each member at the feature set the root
+#      selects: mlxcel-core resolves to metal + accelerate through the root's
+#      forwarding, while mlxcel-surgery and mlxcel-xla resolve to their (empty)
+#      defaults. mlxcel-xla's `iree` feature stays off, so its build script
+#      skips the C shim and the gate needs no IREE distribution; the code
+#      behind `iree`, `diagnostics` and `micro-oracle` is still ungated here.
+#
+#      Cargo builds all the test binaries and then runs them one at a time, so
+#      the mlxcel-core suite never overlaps the root suite on the Metal device.
+#      That is what keeps `--workspace` clear of #1008, where two concurrent
+#      mlxcel-core suites aborted 7 of 12 runs. Anything that starts running
+#      test binaries in parallel here (cargo-nextest, say) has to re-establish
+#      that; the `no_other_mlxcel_core_test_binary_is_sharing_the_gpu` guard
+#      only sees a second mlxcel-core binary, not a root-suite one.
+#   5. `--no-fail-fast` on the test target. Without it the first failing test
+#      binary ends the run, which was harmless when the run was one package and
+#      is not now: a single red root-suite test would hide all of mlxcel-core,
+#      mlxcel-surgery and mlxcel-xla behind it. A nightly that costs the better
+#      part of an hour should report everything that is red in one pass. It
+#      does not weaken the gate, since cargo still exits non-zero, and it does
+#      not skip compile errors, which stop the run either way.
 #
 # Run `make verify` before opening or updating a PR. Run `make verify-clean`
 # (which prepends `cargo clean`) when you suspect clippy's per-crate result
@@ -478,14 +523,14 @@ verify-fmt: ## CI-faithful: cargo fmt --all -- --check
 	$(CARGO) fmt --all -- --check
 
 .PHONY: verify-clippy
-verify-clippy: ## CI-faithful: clippy --all-targets --features metal,accelerate -- -D warnings
-	@echo "$(CYAN)[verify] clippy (features=metal,accelerate, -D warnings)...$(RESET)"
-	$(CARGO) clippy --all-targets --features metal,accelerate -- -D warnings
+verify-clippy: ## CI-faithful: clippy --workspace --all-targets --features metal,accelerate -- -D warnings
+	@echo "$(CYAN)[verify] clippy (workspace, features=metal,accelerate, -D warnings)...$(RESET)"
+	$(CARGO) clippy --workspace --all-targets --features metal,accelerate -- -D warnings
 
 .PHONY: verify-test
-verify-test: ## CI-faithful: cargo test --profile test-fast --features metal,accelerate
-	@echo "$(CYAN)[verify] test (test-fast profile, features=metal,accelerate)...$(RESET)"
-	$(CARGO) test --profile test-fast --features metal,accelerate
+verify-test: ## CI-faithful: cargo test --workspace --profile test-fast --features metal,accelerate --no-fail-fast
+	@echo "$(CYAN)[verify] test (workspace, test-fast profile, features=metal,accelerate)...$(RESET)"
+	$(CARGO) test --workspace --profile test-fast --features metal,accelerate --no-fail-fast
 
 .PHONY: verify
 verify: verify-fmt verify-clippy verify-test ## Run the full CI-faithful gate locally (recommended before push)

@@ -153,6 +153,14 @@ pub(crate) use model::{
 };
 #[allow(unused_imports)]
 pub(crate) use vision::emit_vision;
+// The only consumer is `IreeVisionDiagnosticProjector` in `vision_runtime`, which
+// is gated on `diagnostics` alone. The `test` arm is kept deliberately: it is the
+// only thing that compiles `emit_vision_impl(config, true)` in a build that does
+// not enable `diagnostics`, and `diagnostics` implies `iree`, which needs an IREE
+// distribution and so is never on in CI. Keeping the arm therefore means the
+// diagnostic emit path is still type-checked by `cargo test`, at the price of the
+// re-export having no consumer there. Same reason as the sibling blocks above.
+#[allow(unused_imports)]
 #[cfg(any(test, feature = "diagnostics"))]
 pub(crate) use vision::emit_vision_diagnostics;
 #[allow(unused_imports)]

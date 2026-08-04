@@ -224,7 +224,7 @@ impl Qwen2VlConfig {
                         "Qwen2-VL IREE vision supports 4-bit or 8-bit affine weights, got {bits}"
                     ));
                 }
-                if hidden % group_size != 0 || intermediate % group_size != 0 {
+                if !hidden.is_multiple_of(group_size) || !intermediate.is_multiple_of(group_size) {
                     return Err(format!(
                         "Qwen2-VL vision dimensions hidden={hidden}, intermediate={intermediate} must be divisible by quantization group_size={group_size}"
                     ));
@@ -455,7 +455,7 @@ pub(crate) fn prepare_qwen2_vl_host_inputs(
     let rotary_dim = head_dim / 2;
     let frequency_width = rotary_dim;
     let axis_width = rotary_dim / 2;
-    if head_dim % 4 != 0 {
+    if !head_dim.is_multiple_of(4) {
         return Err(format!(
             "Qwen2-VL vision head_dim={head_dim} must be divisible by 4 for 2D RoPE"
         ));
@@ -814,17 +814,15 @@ mod tests {
         assert_eq!(inputs.patches.len(), 64 * 1176);
         assert_eq!(inputs.vision_rope_freqs.len(), 64 * 40);
         assert_eq!(inputs.packed_attention_bias.len(), 64 * 64);
-        assert_eq!(inputs.packed_attention_bias[15 * 64 + 15], 0.0);
-        assert_eq!(
-            inputs.packed_attention_bias[15 * 64 + 16],
-            f32::NEG_INFINITY
-        );
-        assert_eq!(
-            inputs.packed_attention_bias[16 * 64 + 15],
-            f32::NEG_INFINITY
-        );
-        assert_eq!(inputs.packed_attention_bias[48 * 64 + 48], 0.0);
-        assert_eq!(inputs.packed_attention_bias[48 * 64 + 0], f32::NEG_INFINITY);
+        // Address the packed bias by (row, column) rather than by flat index. The
+        // block structure is what these assertions are about, and column 0 then
+        // does not have to be spelled as a no-op `+ 0`.
+        let bias_at = |row: usize, column: usize| inputs.packed_attention_bias[row * 64 + column];
+        assert_eq!(bias_at(15, 15), 0.0);
+        assert_eq!(bias_at(15, 16), f32::NEG_INFINITY);
+        assert_eq!(bias_at(16, 15), f32::NEG_INFINITY);
+        assert_eq!(bias_at(48, 48), 0.0);
+        assert_eq!(bias_at(48, 0), f32::NEG_INFINITY);
         let mut non_finite = values;
         non_finite[7] = f32::NAN;
         assert!(
