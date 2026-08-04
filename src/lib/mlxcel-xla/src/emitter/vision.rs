@@ -31,56 +31,6 @@ struct Args {
     cursor: usize,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn pinned() -> Option<LlavaVisionConfig> {
-        let path = std::path::Path::new("/tmp/mlxcel-llava-hf-1090956d");
-        path.join("config.json")
-            .is_file()
-            .then(|| LlavaVisionConfig::from_model_dir(path).unwrap())
-    }
-
-    #[test]
-    fn pinned_siglip_graph_has_exact_unbatched_output_contract() {
-        let Some(config) = pinned() else {
-            return;
-        };
-        let mlir = emit_vision(&config);
-        assert!(mlir.contains("stablehlo.convolution"));
-        assert!(mlir.contains("stablehlo.reduce"));
-        assert!(mlir.contains("stablehlo.exponential"));
-        assert!(mlir.contains("stablehlo.tanh"));
-        assert!(mlir.contains("chlo.erf"));
-        assert!(mlir.contains("-> tensor<729x1024xf32>"));
-        assert!(!mlir.contains("-> tensor<1x729x1024xf32>"));
-        assert!(mlir.contains("return "));
-    }
-
-    #[cfg(feature = "iree")]
-    #[test]
-    fn pinned_siglip_graph_compiles_for_cpu() {
-        let Some(config) = pinned() else {
-            return;
-        };
-        let mlir = emit_vision(&config);
-        let compiler = crate::iree::iree_compile_bin().unwrap();
-        let cache = std::env::temp_dir().join("mlxcel-xla-vision-emitter-test");
-        std::fs::create_dir_all(&cache).unwrap();
-        let vmfb = crate::iree::compile_one(
-            &compiler,
-            &mlir,
-            crate::iree::target_flags("local-task").unwrap(),
-            &cache,
-            "pinned-llava-vision",
-            0,
-        )
-        .unwrap();
-        assert!(vmfb.metadata().unwrap().len() > 0);
-    }
-}
-
 impl Args {
     fn new(specs: &[VisionWeightSpec]) -> Self {
         let mut values = Vec::with_capacity(specs.len() + 1);
@@ -358,4 +308,54 @@ pub(crate) fn emit_vision(config: &LlavaVisionConfig) -> String {
 #[cfg(any(test, feature = "diagnostics"))]
 pub(crate) fn emit_vision_diagnostics(config: &LlavaVisionConfig) -> String {
     emit_vision_impl(config, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pinned() -> Option<LlavaVisionConfig> {
+        let path = std::path::Path::new("/tmp/mlxcel-llava-hf-1090956d");
+        path.join("config.json")
+            .is_file()
+            .then(|| LlavaVisionConfig::from_model_dir(path).unwrap())
+    }
+
+    #[test]
+    fn pinned_siglip_graph_has_exact_unbatched_output_contract() {
+        let Some(config) = pinned() else {
+            return;
+        };
+        let mlir = emit_vision(&config);
+        assert!(mlir.contains("stablehlo.convolution"));
+        assert!(mlir.contains("stablehlo.reduce"));
+        assert!(mlir.contains("stablehlo.exponential"));
+        assert!(mlir.contains("stablehlo.tanh"));
+        assert!(mlir.contains("chlo.erf"));
+        assert!(mlir.contains("-> tensor<729x1024xf32>"));
+        assert!(!mlir.contains("-> tensor<1x729x1024xf32>"));
+        assert!(mlir.contains("return "));
+    }
+
+    #[cfg(feature = "iree")]
+    #[test]
+    fn pinned_siglip_graph_compiles_for_cpu() {
+        let Some(config) = pinned() else {
+            return;
+        };
+        let mlir = emit_vision(&config);
+        let compiler = crate::iree::iree_compile_bin().unwrap();
+        let cache = std::env::temp_dir().join("mlxcel-xla-vision-emitter-test");
+        std::fs::create_dir_all(&cache).unwrap();
+        let vmfb = crate::iree::compile_one(
+            &compiler,
+            &mlir,
+            crate::iree::target_flags("local-task").unwrap(),
+            &cache,
+            "pinned-llava-vision",
+            0,
+        )
+        .unwrap();
+        assert!(vmfb.metadata().unwrap().len() > 0);
+    }
 }

@@ -24,7 +24,8 @@
 #     for why it is nightly rather than per-PR.
 #
 # Quality gate still lives locally at PR time. Pre-push checklist:
-#   make verify         # fmt + clippy(metal,accelerate, -D warnings) + test(test-fast)
+#   make verify         # fmt + clippy(workspace, metal,accelerate, -D warnings)
+#                       # + test(workspace, test-fast)
 #   make verify-clean   # same, after `cargo clean` — use when clippy's
 #                       # per-crate cache may be hiding a regression
 #

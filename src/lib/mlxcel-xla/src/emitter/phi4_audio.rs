@@ -1000,7 +1000,7 @@ fn emit_phi4_audio_entry(
     precision: Precision,
     diagnostic: bool,
 ) -> Result<String, String> {
-    if config.attention_dim % config.attention_heads != 0 {
+    if !config.attention_dim.is_multiple_of(config.attention_heads) {
         return Err("Phi4MM audio attention_dim must be divisible by heads".to_string());
     }
     let encoded_len = config.encoded_bucket_len(frame_bucket)?;

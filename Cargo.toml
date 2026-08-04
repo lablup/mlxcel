@@ -1,3 +1,16 @@
+# There is deliberately no `default-members` here, and adding one is a bigger
+# change than it looks. The workspace root is itself the `mlxcel` package, so a
+# bare `cargo <cmd>` run here resolves to `-p mlxcel`; `default-members` would
+# re-point every such invocation in the repository at once, release.yml's
+# `cargo build --release --target aarch64-apple-darwin --locked` included, which
+# would start compiling the default-off `mlxcel-xla` into every release build.
+#
+# The consequence is that a command must say `--workspace` to see all four
+# members, and until #1007 the quality gate did not: `make verify-test` and
+# `make verify-clippy` covered the root package only, leaving 1754 tests across
+# the other three (1354 of them mlxcel-core's) and the whole of their test-target
+# lint surface ungated. Both targets now pass `--workspace` explicitly. If you
+# add a fifth member, they pick it up with no change here.
 [workspace]
 members = [".", "src/lib/mlxcel-core", "src/lib/mlxcel-surgery", "src/lib/mlxcel-xla"]
 resolver = "2"

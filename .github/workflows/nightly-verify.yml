@@ -46,6 +46,40 @@
 # are `#[ignore]`d. What this run actually gates is the weight-free unit and
 # contract suite, which is exactly where both known failures lived.
 #
+# WHICH MEMBERS IT COVERS
+#
+# All four, as of #1007, because `verify-clippy` and `verify-test` now pass
+# `--workspace`. They did not before, and the omission was not a small one: the
+# workspace root is itself the `mlxcel` package, so a bare `cargo test` there
+# resolves to `-p mlxcel` and never builds mlxcel-core, mlxcel-surgery or
+# mlxcel-xla at all. This job was running 5238 of the 6992 tests in the
+# repository and calling that the suite. mlxcel-core held 1354 of the missing
+# ones and is the crate with the MLX `cxx` bridge, layers.rs, the KV cache and
+# the quantization loaders.
+#
+# The clippy half was the subtler one. `--all-targets` without `--workspace`
+# does not compile a member's *test* target either, so test-only lint debt and
+# test-only compile errors were equally invisible: six clippy errors were
+# sitting in mlxcel-xla's lib-test target while this job passed clean, and five
+# `Debug`-bound compile errors in new mlxcel-core tests once passed both this
+# job and the local gate. `verify-fmt` never had the hole, because
+# `cargo fmt --all` was already workspace-wide.
+#
+# Feature resolution across the members is not a complication here.
+# mlxcel-core resolves to metal + accelerate through the root package's
+# forwarding, so one build of it serves every member. mlxcel-surgery and
+# mlxcel-xla resolve to their empty defaults, which matters most for
+# mlxcel-xla: its `iree` feature stays off, its build script skips the native
+# shim, and this job therefore needs no IREE distribution. The code behind
+# `iree`, `diagnostics` and `micro-oracle` stays outside the gate for the same
+# reason.
+#
+# On the budget: the switch to `[profile.test-fast]` in #1000 took the
+# `cargo test` step from 2h54m34s to 48m54s (run 30871982545), and the scope
+# widening spends part of that headroom back. If it ever stops fitting, split
+# `verify-test` into per-member steps before dropping members from it; a member
+# that is not in the gate is a member nobody is testing.
+#
 # WHICH PROFILE THE TESTS BUILD UNDER, AND WHAT THAT GIVES UP
 #
 # `make verify-test` builds under `[profile.test-fast]`, not `[profile.release]`

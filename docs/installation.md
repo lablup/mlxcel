@@ -277,7 +277,7 @@ racing another thread's stream capture) or, with graphs disabled, with
 binaries are unaffected; this is a test-parallelism artifact.
 
 ```bash
-cargo test --profile test-fast --features cuda -- --test-threads=1
+cargo test --workspace --profile test-fast --features cuda -- --test-threads=1
 ```
 
 ## Fast iteration builds
@@ -331,6 +331,48 @@ the optimised MLX numerics the suite depends on are the same; what is no longer
 covered is a defect that reproduces only under fat LTO or `codegen-units = 1`.
 Reach for `cargo test --release --features metal,accelerate` by hand when you
 are chasing one of those.
+
+## Why the gate says `--workspace`
+
+`make verify-clippy` and `make verify-test` pass `--workspace`, and dropping it
+changes what they cover rather than only how fast they run. The workspace root
+in this repository is itself the `mlxcel` package, so a bare `cargo test` or
+`cargo clippy` here resolves to `-p mlxcel` and never builds `mlxcel-core`,
+`mlxcel-surgery` or `mlxcel-xla`. Until #1007 the gate did exactly that, which
+left 1754 tests unrun, 1354 of them in `mlxcel-core`, the crate holding the MLX
+`cxx` bridge, `layers.rs`, the KV cache and the quantization loaders. The lint
+half of the hole is easier to miss: `--all-targets` without `--workspace` does
+not compile a member's *test* target either, so test-only lint errors and
+test-only compile errors both passed the gate.
+
+There is deliberately no `default-members` in `Cargo.toml` doing this instead.
+It would re-scope every bare cargo invocation in the repository at once,
+including the `cargo build --release --target aarch64-apple-darwin --locked`
+that `release.yml` runs, which would start compiling the default-off
+`mlxcel-xla` into every release build.
+
+Each member builds at the feature set the root selects. `mlxcel-core` resolves
+to `metal` and `accelerate` through the root package's forwarding, so there is
+one build of it shared by every member. `mlxcel-surgery` and `mlxcel-xla`
+resolve to their empty defaults; in particular `mlxcel-xla`'s `iree` feature
+stays off, so its build script skips the native shim and the gate needs no IREE
+distribution. The code behind `iree`, `diagnostics` and `micro-oracle` is still
+outside the gate for that reason, and needs a local IREE dist to check (see
+`scripts/iree/setup-macos.sh`).
+
+`make verify-test` also passes `--no-fail-fast`, which matters only now that
+the run covers four members: without it the first failing test binary ends the
+run and hides the other three behind whatever failed first. Cargo still exits
+non-zero, so the gate is no weaker for it.
+
+Widening the scope does not put the run into the concurrency hazard of #1008,
+where two `mlxcel-core` suites sharing one Metal device aborted 7 of 12 runs.
+Cargo builds every test binary and then runs them one at a time, so the
+`mlxcel-core` suite never overlaps the root suite on the device. Anything that
+changes that, a parallel test runner such as `cargo nextest` for instance, has
+to re-establish it: the `no_other_mlxcel_core_test_binary_is_sharing_the_gpu`
+guard in `src/lib/mlxcel-core/src/gpu_exclusivity_tests.rs` detects a second
+`mlxcel-core` binary, not a root-suite binary competing for the same device.
 
 ## Troubleshooting
 
