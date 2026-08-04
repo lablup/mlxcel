@@ -163,12 +163,36 @@ jobs:
       - name: Ensure build tools
         run: |
           set -euo pipefail
+
+          # Put Homebrew on PATH before looking for anything. A non-login shell
+          # on this runner does not source the profile that `brew shellenv`
+          # writes, so neither `cmake` nor `brew` itself is resolvable by
+          # default. Runs 30842184319 (2026-08-03 schedule) and 30870790330
+          # (2026-08-04 dispatch) both died here in about one second: `cmake`
+          # was not found, the fallback ran `brew install cmake`, and `brew`
+          # was not found either, so the step exited 127. Both prefixes are
+          # listed because Apple Silicon installs under /opt/homebrew and
+          # Intel under /usr/local; adding a directory that does not exist is
+          # harmless.
+          export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
           # cmake is required by the mlxcel-core and sentencepiece-sys build scripts.
           if ! command -v cmake >/dev/null 2>&1; then
+            if ! command -v brew >/dev/null 2>&1; then
+              echo "::error::Neither cmake nor brew is on PATH after adding the Homebrew prefixes." >&2
+              echo "This is a runner provisioning problem, not a code failure." >&2
+              echo "PATH=$PATH" >&2
+              exit 1
+            fi
             echo "cmake not found, installing via Homebrew..."
             brew install cmake
           fi
           echo "cmake: $(cmake --version | head -1)"
+
+          # Every later step gets the same PATH; `export` above is scoped to
+          # this step's shell only.
+          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+          echo "/usr/local/bin" >> "$GITHUB_PATH"
 
       # rust-toolchain.toml pins the channel (and the rustfmt/clippy
       # components) that every cargo invocation below actually resolves to, so
@@ -256,6 +280,10 @@ jobs:
           COMMIT_SHA: ${{ github.sha }}
           EVENT_NAME: ${{ github.event_name }}
           VERIFY_RESULT: ${{ needs.verify.result }}
+          # A `workflow_dispatch` can target any branch, so the report must not
+          # claim `main` is red when it was verifying something else.
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           # These do survive a `timeout-minutes` cancellation, so the usual
           # timeout report is fully populated. They are empty only if the runner
           # is lost outright, which the `unknown` default below covers.
@@ -265,12 +293,33 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Name the ref when it is not the default branch. A dispatch against a
+          # PR branch says nothing about `main`, and a title claiming otherwise
+          # sends the reader to the wrong place. Keeping the bare title for the
+          # default branch also keeps the dedup key stable for the scheduled
+          # runs, which are the ones that matter; a branch run gets its own
+          # issue and does not reuse `main`'s.
+          if [ "$REF_NAME" = "$DEFAULT_BRANCH" ]; then
+            SUBJECT='main'
+            SCOPE=''
+          else
+            SUBJECT="\`$REF_NAME\`"
+            SCOPE=" ($REF_NAME)"
+          fi
+
           if [ "$VERIFY_RESULT" = "cancelled" ]; then
-            TITLE='[nightly-verify] the run did not finish'
+            TITLE="[nightly-verify] the run did not finish${SCOPE}"
             HEADLINE='The nightly `make verify` run did not finish. GitHub reports a `timeout-minutes` kill and a human cancel with the same `cancelled` conclusion, so compare the duration below against `timeout-minutes` in `.github/workflows/nightly-verify.yml`: at or just under the budget means the job ran out of time, anything well short of it means someone cancelled the run.'
           else
-            TITLE='[nightly-verify] main is red'
-            HEADLINE='The nightly `make verify` run on `self-hosted-macos-26-arm64` failed. At least one of the three gates below is genuinely red on the commit named at the bottom.'
+            TITLE="[nightly-verify] ${SUBJECT} is red${SCOPE}"
+            # Deliberately not "at least one of the three gates is red": a setup
+            # step (toolchain, build tools) can fail the job before any gate
+            # runs, and then the gates report `failure` only because cargo was
+            # never installed. Run 30870790330 was exactly that, and a headline
+            # asserting a genuine code failure would have pointed the reader at
+            # the wrong thing. Say the job failed and let the table and the log
+            # say where.
+            HEADLINE='The nightly `make verify` run on `self-hosted-macos-26-arm64` failed. Check the first failing step in the run log before reading the gate table below: a setup step that fails leaves the gates reporting `failure` for want of a toolchain rather than because the code is red.'
           fi
           export TITLE
 
