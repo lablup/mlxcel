@@ -33,22 +33,22 @@ Thank you for your interest in contributing to mlxcel! This document covers the 
    ```bash
    # macOS (Apple Silicon)
    cargo build --release --features metal,accelerate
-   cargo test --release
+   cargo test --profile test-fast --features metal,accelerate
 
    # Linux / CUDA
    cargo build --release --features cuda
-   cargo test --release
+   cargo test --profile test-fast --features cuda
    ```
 4. Run the local quality gates:
    ```bash
    cargo fmt --all -- --check   # gated at PR time; fmt violations block merge
    cargo clippy --all-targets --features metal,accelerate -- -D warnings   # NOT gated at PR time; yours to run
-   cargo test --release --features metal,accelerate                        # NOT gated at PR time; yours to run
+   cargo test --profile test-fast --features metal,accelerate              # NOT gated at PR time; yours to run
    cargo deny check             # gated at PR time (advisories + licenses + sources)
    ```
-   PR-time CI runs only the cheap gates: `cargo fmt` and `cargo deny` in [`ci.yml`](.github/workflows/ci.yml), plus a path-filtered clippy and a `distributed::`-scoped `cargo test` in [`pipeline-parallel-ci.yml`](.github/workflows/pipeline-parallel-ci.yml) when you touch pipeline-parallel code. Clippy and the general unit suite are **not** enforced on your PR. They were moved in #21 and removed in #23 because ~30 min per run on the shared self-hosted Apple Silicon runner blocked PRs and releases for failures that `make verify` catches locally in a fraction of the time. [`nightly-verify.yml`](.github/workflows/nightly-verify.yml) runs the full `make verify` once a day on `self-hosted-macos-26-arm64` and files an issue when `main` goes red, so a broken suite surfaces within a day rather than on the next contributor's `make verify`. Treat that as a backstop, not a substitute: run the two commands above yourself before you push. CUDA verification is not gated at PR time either; that stays exclusive to `release.yml`.
+   PR-time CI runs only the cheap gates: `cargo fmt` and `cargo deny` in [`ci.yml`](.github/workflows/ci.yml), plus a path-filtered clippy and a `distributed::`-scoped `cargo test` in [`pipeline-parallel-ci.yml`](.github/workflows/pipeline-parallel-ci.yml) when you touch pipeline-parallel code. Clippy and the general unit suite are **not** enforced on your PR. They were moved in #21 and removed in #23 because ~30 min per run on the shared self-hosted Apple Silicon runner blocked PRs and releases for failures that `make verify` catches locally in a fraction of the time. [`nightly-verify.yml`](.github/workflows/nightly-verify.yml) runs the full `make verify` once a day on `self-hosted-macos-26-arm64` and files an issue when `main` goes red or when the run does not finish, so a broken suite surfaces within a day rather than on the next contributor's `make verify`. Treat that as a backstop, not a substitute: run the two commands above yourself before you push. CUDA verification is not gated at PR time either; that stays exclusive to `release.yml`.
 
-   While iterating, prefer `[profile.test-fast]` over `--release`: `make test-fast` / `make test-fast-cuda` (or `cargo test --profile test-fast --features <...>`) rebuild in seconds instead of minutes. It is for local/agent edit-test loops only; run the `--release` commands above (or `make verify`) before opening or updating a PR. See [`docs/installation.md`](docs/installation.md#fast-iteration-builds) for the measured comparison.
+   `make verify` runs exactly the three commands above, and the nightly invokes those same Makefile targets, so the local gate and CI cannot drift apart. Tests build under `[profile.test-fast]` rather than `--release`: `opt-level = 3` is kept so MLX numerics stay representative, while the fat LTO and single codegen unit that make a full `--release` test link take hours are dropped. `make test-fast` / `make test-fast-cuda` are the same profile with `--test-threads=1` and a `FILTER` hook for narrowing the run while you iterate. Reach for `cargo test --release --features metal,accelerate` by hand only when you suspect a defect specific to release codegen. See [`docs/installation.md`](docs/installation.md#fast-iteration-builds) for the measured comparison.
 5. For inference changes, validate against a real checkpoint. Synthetic or build-only validation is not enough: a shape-compatible change can compile, pass unit tests, and still produce wrong logits on an actual quantized checkpoint. Fetch one with `mlxcel download mlx-community/<model-id>`, and see [`docs/supported-models.md`](docs/supported-models.md) for the families each code path covers. A change to a shared component should be smoke-tested against at least two families.
 6. Commit with a conventional prefix (see below) and a clear message.
 7. Push to your fork and open a Pull Request. The PR template will prompt for a summary, test plan, and linked issues.

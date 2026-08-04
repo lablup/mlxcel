@@ -12,10 +12,13 @@
 #
 # WHY NIGHTLY AND NOT PR-TIME
 #
-# `clippy + test` on this target takes ~30 min on the shared self-hosted
-# runner. #21 moved that gate from PR time to release time and #23 removed it
-# entirely, for a cost reason that still holds: a slow shared resource blocking
-# every PR is worse than `make verify` on the developer's machine. This
+# `clippy + test` on this target was ~30 min on the shared self-hosted runner
+# when #21 moved that gate from PR time to release time and #23 removed it
+# entirely. Treat that number as historical: the one run that ever completed a
+# full pass under `[profile.release]`, 30761020020 on 2026-08-02, took 2h56m,
+# of which 2h54m was the `cargo test` step. The cost reason still holds either
+# way, and more strongly than when it was written: a slow shared resource
+# blocking every PR is worse than `make verify` on the developer's machine. This
 # workflow does not reinstate the PR-time gate. It consumes the shared runner
 # once per day at a quiet hour, blocks nothing, and bounds how long a red
 # `main` can hide from 26 days to about one.
@@ -43,12 +46,51 @@
 # are `#[ignore]`d. What this run actually gates is the weight-free unit and
 # contract suite, which is exactly where both known failures lived.
 #
+# WHICH PROFILE THE TESTS BUILD UNDER, AND WHAT THAT GIVES UP
+#
+# `make verify-test` builds under `[profile.test-fast]`, not `[profile.release]`
+# (#1000). The budget was going almost entirely to codegen and linking rather
+# than to running tests: on 2026-08-02 the `cargo test` step spent 179 minutes
+# and was killed with zero `Running tests/` lines in the log and `ld`/`clang`
+# among the processes the runner terminated. `[profile.release]` is fat LTO
+# plus `codegen-units = 1`, which is 4 to 6 minutes per incremental rebuild of
+# the ~390k-line main crate, paid once per test binary across roughly 77 of
+# them. `test-fast` keeps `opt-level = 3`, so the optimized MLX numerics these
+# tests depend on are unchanged, and relaxes only what exists to shrink or
+# speed up a *shipped* binary (thin LTO, parallel codegen, incremental, no
+# strip).
+#
+# What that gives up: the suite no longer runs under the exact codegen the
+# release binary ships with. A defect that only appears under fat LTO or
+# `codegen-units = 1` (the f16 reduction-order jitter class this repo has hit
+# before, for instance) could in principle differ here. release.yml still
+# builds and links the shipping artifacts under `[profile.release]`, so the
+# shipped binary is unaffected, but it does not run this suite. A second cost:
+# the nightly no longer refreshes `[profile.release]` artifacts in the shared
+# `$HOME/.cargo-target/mlxcel`, so release.yml's first build after a prune is
+# colder than it used to be.
+#
 # HOW A FAILURE IS REPORTED
 #
 # A red Actions run that nobody opens is the same blind spot in a new place, so
-# a failed scheduled run files (or comments on) a GitHub issue. If a day of
-# exposure ever proves too long, the next step is adding `push: [main]` here,
-# which costs one run per merge instead of one per day.
+# a failed or unfinished run files (or comments on) a GitHub issue.
+#
+# The old reporting step was a final step of `verify` conditioned on
+# `failure()`, and it reported nothing on the 180-minute runs of 2026-07-30,
+# 08-01 and 08-02. The reason is narrower than it looks: a `timeout-minutes`
+# kill surfaces as *cancellation*, and `failure()` is false while a job is
+# cancelled, so the condition simply did not match. Later steps still run. A
+# throwaway probe on a job with `timeout-minutes: 1` confirmed it directly:
+# after the timeout, a step with `if: always()` ran, a step with
+# `if: cancelled()` ran, and only the `if: failure()` step was skipped. Job
+# outputs survived the cancellation too.
+#
+# So a step-level condition fix would have covered the timeout case. Reporting
+# still lives in a separate job, for the failure modes a step-level fix cannot
+# reach; see the `report` job for the three of them.
+#
+# If a day of exposure ever proves too long, the next step is adding
+# `push: [main]` here, which costs one run per merge instead of one per day.
 
 name: Nightly verify
 
@@ -75,13 +117,24 @@ jobs:
     # against runner labels it does not own.
     if: github.repository == 'lablup/mlxcel'
     runs-on: self-hosted-macos-26-arm64 # Self-hosted Apple Silicon runner with macOS 26 SDK + Metal 4
-    # Generous because the FIRST run is a cold MLX C++ build plus a release
-    # link of every integration-test binary. Steady state, with the persistent
-    # target dir below, is the ~30 min `make verify` takes locally.
+    # Generous because a cold run is a full MLX C++ build plus a link of every
+    # integration-test binary. Note that the FIRST run after the switch to
+    # `[profile.test-fast]` is cold by construction: a different profile means a
+    # different OUT_DIR for the mlxcel-core build script, so that run rebuilds
+    # MLX C++ from scratch against the persistent target dir below and should
+    # not be read as the steady-state cost.
     timeout-minutes: 180
     permissions:
       contents: read
-      issues: write
+
+    # Surfaced to the `report` job, which cannot see `steps.*.outcome` across a
+    # job boundary. These do survive a `timeout-minutes` cancellation (probed
+    # directly), but they will be empty if the runner is lost outright, so the
+    # reporter treats an empty value as unknown rather than failing on it.
+    outputs:
+      fmt: ${{ steps.fmt.outcome }}
+      clippy: ${{ steps.clippy.outcome }}
+      test: ${{ steps.test.outcome }}
 
     steps:
       - name: Checkout code
@@ -92,9 +145,14 @@ jobs:
 
       # Mirrors release.yml, deliberately including the same path: a persistent
       # target dir outside the workspace so the nightly is incremental instead
-      # of a cold MLX C++ build every time, and so the daily run keeps the
-      # release job's cache warm. release.yml owns the 7-day prune of this
-      # directory; cargo's own file lock serializes the rare overlap.
+      # of a cold MLX C++ build every time. release.yml owns the 7-day prune of
+      # this directory; cargo's own file lock serializes the rare overlap.
+      #
+      # Since #1000 this job populates a `test-fast/` tree here while release.yml
+      # populates `release/`, so the directory holds two profile trees instead of
+      # one (order of 10 GiB each) and the nightly no longer keeps release.yml's
+      # artifacts warm. Both are bounded by the same prune, which drops the whole
+      # directory rather than a single profile, so no third prune rule is needed.
       - name: Setup persistent cache paths (self-hosted)
         run: |
           set -euo pipefail
@@ -105,12 +163,73 @@ jobs:
       - name: Ensure build tools
         run: |
           set -euo pipefail
+
+          # Put Homebrew on PATH before looking for anything. A non-login shell
+          # on this runner does not source the profile that `brew shellenv`
+          # writes, so neither `cmake` nor `brew` itself is resolvable by
+          # default. Runs 30842184319 (2026-08-03 schedule) and 30870790330
+          # (2026-08-04 dispatch) both died here in about one second: `cmake`
+          # was not found, the fallback ran `brew install cmake`, and `brew`
+          # was not found either, so the step exited 127. Both prefixes are
+          # listed because Apple Silicon installs under /opt/homebrew and
+          # Intel under /usr/local; adding a directory that does not exist is
+          # harmless.
+          export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
           # cmake is required by the mlxcel-core and sentencepiece-sys build scripts.
           if ! command -v cmake >/dev/null 2>&1; then
+            if ! command -v brew >/dev/null 2>&1; then
+              echo "::error::Neither cmake nor brew is on PATH after adding the Homebrew prefixes." >&2
+              echo "This is a runner provisioning problem, not a code failure." >&2
+              echo "PATH=$PATH" >&2
+              exit 1
+            fi
             echo "cmake not found, installing via Homebrew..."
             brew install cmake
           fi
           echo "cmake: $(cmake --version | head -1)"
+
+          # Every later step gets the same PATH; `export` above is scoped to
+          # this step's shell only.
+          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+          echo "/usr/local/bin" >> "$GITHUB_PATH"
+
+          # The Metal shader compiler must be resolvable by xcrun, or every COLD
+          # MLX C++ build dies with
+          #   xcrun: error: unable to find utility "metal", not a developer tool or in PATH
+          # once cmake reaches the kernel headers. This is the same condition
+          # docs/mla-absorbed-decode.md and docs/sparse-paged-decode.md tell
+          # developers to fix with DEVELOPER_DIR: `xcode-select -p` points at
+          # CommandLineTools, which ships no metal compiler.
+          #
+          # It stayed hidden because a warm CARGO_TARGET_DIR skips the MLX build
+          # entirely. Run 30761020020 passed with a 71-second clippy for exactly
+          # that reason. Run 30870981405 was the first to need a cold build (a
+          # new profile for tests, and a debug tree that had gone stale) and both
+          # clippy and test failed here. release.yml prunes that directory every
+          # 7 days, so this was going to surface on its own.
+          if ! xcrun -f metal >/dev/null 2>&1; then
+            for candidate in /Applications/Xcode*.app/Contents/Developer; do
+              [ -d "$candidate" ] || continue
+              if DEVELOPER_DIR="$candidate" xcrun -f metal >/dev/null 2>&1; then
+                export DEVELOPER_DIR="$candidate"
+                echo "DEVELOPER_DIR=$candidate" >> "$GITHUB_ENV"
+                echo "xcrun could not find metal; selected DEVELOPER_DIR=$candidate"
+                break
+              fi
+            done
+          fi
+
+          if ! xcrun -f metal >/dev/null 2>&1; then
+            echo "::error::xcrun cannot resolve the metal compiler, so any cold MLX C++ build will fail." >&2
+            echo "This is a runner provisioning problem, not a code failure." >&2
+            echo "xcode-select -p: $(xcode-select -p 2>&1 || true)" >&2
+            echo "Xcode installs found: $(ls -d /Applications/Xcode*.app 2>/dev/null | tr '\n' ' ')" >&2
+            echo "Install Xcode (not just the Command Line Tools) and its Metal toolchain," >&2
+            echo "then either 'sudo xcode-select -s' it or leave DEVELOPER_DIR set for the runner." >&2
+            exit 1
+          fi
+          echo "metal: $(xcrun -f metal)"
 
       # rust-toolchain.toml pins the channel (and the rustfmt/clippy
       # components) that every cargo invocation below actually resolves to, so
@@ -134,55 +253,164 @@ jobs:
         if: ${{ !cancelled() }}
         run: make verify-clippy
 
-      - name: cargo test (release, metal,accelerate)
+      - name: cargo test (test-fast profile, metal,accelerate)
         id: test
         if: ${{ !cancelled() }}
         run: make verify-test
 
-      - name: Report a red main
-        # Only the scheduled run reports. A manual dispatch is someone already
-        # watching the run, and filing an issue at them is noise.
-        if: ${{ failure() && github.event_name == 'schedule' }}
+  # Reporting is a separate job, not a step of `verify` with a wider condition.
+  # A wider condition would have fixed the timeout case on its own (see the
+  # header comment for the probe that established that), but three failure modes
+  # remain that no step inside `verify` can cover:
+  #
+  #   1. Fate-sharing with the runner. On 2026-08-03 `verify` failed in "Ensure
+  #      build tools" because `brew` was not on the self-hosted runner's PATH,
+  #      and the in-job reporting step then died the same way, `brew install gh`
+  #      exiting 127. A genuinely red run reported nothing, for a reason that
+  #      has nothing to do with timeouts. A reporter must not depend on the
+  #      environment whose breakage it exists to announce.
+  #   2. Runner loss. If the self-hosted runner disappears mid-job, no step in
+  #      that job runs at all, whatever its condition says.
+  #   3. The post-cancellation window is bounded and short. The probe's step was
+  #      one `echo`. Real reporting may have to install `gh` and make several
+  #      API calls, which is far likelier to be cut off.
+  #
+  # It also keeps reporting off the shared macOS runner, which is the scarce
+  # resource this workflow is otherwise careful with.
+  report:
+    name: Report a red or unfinished main
+    needs: verify
+    # `always()` so a torn-down `verify` still gets reported. `needs.verify.result`
+    # is `failure` when the suite is genuinely red and `cancelled` when the job
+    # was killed by its budget (or cancelled by a person), and the two need
+    # different responses, so the report says which one happened. `success` and
+    # `skipped` (a fork, where `verify` is guarded off) report nothing.
+    #
+    # Deliberately NOT filtered to `github.event_name == 'schedule'`, which is a
+    # reversal of the previous rule. That rule assumed a manual dispatch is
+    # someone already watching, so reporting at them is noise. The 2026-08-02
+    # dispatch disproved it: it ran three hours, timed out, told nobody, and was
+    # only found because someone went looking days later. Nobody watches a job
+    # for three hours. The noise this reintroduces is bounded, because repeat
+    # dispatches comment on one deduplicated tracking issue rather than filing
+    # new ones, and the body names the trigger so a reader can dismiss a run
+    # they cancelled themselves.
+    if: >-
+      ${{ always()
+          && github.repository == 'lablup/mlxcel'
+          && (needs.verify.result == 'failure' || needs.verify.result == 'cancelled') }}
+    # Being a separate job is what answers reasons 2 and 3; being GitHub-hosted
+    # is what answers reason 1, since `ubuntu-latest` ships `gh` preinstalled
+    # and nothing here needs Homebrew.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: File or update the tracking issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           COMMIT_SHA: ${{ github.sha }}
-          FMT_OUTCOME: ${{ steps.fmt.outcome }}
-          CLIPPY_OUTCOME: ${{ steps.clippy.outcome }}
-          TEST_OUTCOME: ${{ steps.test.outcome }}
+          EVENT_NAME: ${{ github.event_name }}
+          VERIFY_RESULT: ${{ needs.verify.result }}
+          # A `workflow_dispatch` can target any branch, so the report must not
+          # claim `main` is red when it was verifying something else.
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          # These do survive a `timeout-minutes` cancellation, so the usual
+          # timeout report is fully populated. They are empty only if the runner
+          # is lost outright, which the `unknown` default below covers.
+          FMT_OUTCOME: ${{ needs.verify.outputs.fmt }}
+          CLIPPY_OUTCOME: ${{ needs.verify.outputs.clippy }}
+          TEST_OUTCOME: ${{ needs.verify.outputs.test }}
         run: |
           set -euo pipefail
 
-          if ! command -v gh >/dev/null 2>&1; then
-            echo "gh not found, installing via Homebrew..."
-            brew install gh
+          # Name the ref when it is not the default branch. A dispatch against a
+          # PR branch says nothing about `main`, and a title claiming otherwise
+          # sends the reader to the wrong place. Keeping the bare title for the
+          # default branch also keeps the dedup key stable for the scheduled
+          # runs, which are the ones that matter; a branch run gets its own
+          # issue and does not reuse `main`'s.
+          if [ "$REF_NAME" = "$DEFAULT_BRANCH" ]; then
+            SUBJECT='main'
+            SCOPE=''
+          else
+            SUBJECT="\`$REF_NAME\`"
+            SCOPE=" ($REF_NAME)"
           fi
 
-          TITLE='[nightly-verify] main is red'
-          BODY_FILE="$(mktemp -t nightly-verify-body)"
+          if [ "$VERIFY_RESULT" = "cancelled" ]; then
+            TITLE="[nightly-verify] the run did not finish${SCOPE}"
+            HEADLINE='The nightly `make verify` run did not finish. GitHub reports a `timeout-minutes` kill and a human cancel with the same `cancelled` conclusion, so compare the duration below against `timeout-minutes` in `.github/workflows/nightly-verify.yml`: at or just under the budget means the job ran out of time, anything well short of it means someone cancelled the run.'
+          else
+            TITLE="[nightly-verify] ${SUBJECT} is red${SCOPE}"
+            # Deliberately not "at least one of the three gates is red": a setup
+            # step (toolchain, build tools) can fail the job before any gate
+            # runs, and then the gates report `failure` only because cargo was
+            # never installed. Run 30870790330 was exactly that, and a headline
+            # asserting a genuine code failure would have pointed the reader at
+            # the wrong thing. Say the job failed and let the table and the log
+            # say where.
+            HEADLINE='The nightly `make verify` run on `self-hosted-macos-26-arm64` failed. Check the first failing step in the run log before reading the gate table below: a setup step that fails leaves the gates reporting `failure` for want of a toolchain rather than because the code is red.'
+          fi
+          export TITLE
+
+          # Best-effort: the duration is what separates "ran out of budget" from
+          # "someone cancelled it", but every step of computing it is guarded so
+          # a hiccup here can never be the reason a failure goes unreported.
+          DURATION_LINE='Duration: could not be determined; see the run page.'
+          # The filter must keep matching `jobs.verify.name` above. Everything
+          # after it is parameter expansion rather than a pipeline, so no part
+          # of this can fail the step under `set -euo pipefail`.
+          JOB_TIMES="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs" \
+            --jq '.jobs[] | select(.name | startswith("fmt + clippy + test")) | "\(.started_at) \(.completed_at)"' 2>/dev/null || true)"
+          FIRST_JOB="${JOB_TIMES%%$'\n'*}"
+          STARTED="${FIRST_JOB%% *}"
+          ENDED="${FIRST_JOB##* }"
+          ELAPSED="$({ S="$(date -u -d "$STARTED" +%s)" && E="$(date -u -d "$ENDED" +%s)" && echo "$((E - S))"; } 2>/dev/null || true)"
+          if [ -n "$ELAPSED" ] && [ "$ELAPSED" -gt 0 ] 2>/dev/null; then
+            DURATION_LINE="Duration of the \`verify\` job: **$((ELAPSED / 60))m$((ELAPSED % 60))s**."
+          fi
+
+          BODY_FILE="$(mktemp -t nightly-verify-body.XXXXXX)"
           {
-            echo "The nightly \`make verify\` run on \`self-hosted-macos-26-arm64\` failed."
+            echo "$HEADLINE"
             echo
-            echo "| Step | Outcome |"
+            echo "| Field | Value |"
             echo "|---|---|"
-            echo "| \`make verify-fmt\` | \`${FMT_OUTCOME}\` |"
-            echo "| \`make verify-clippy\` | \`${CLIPPY_OUTCOME}\` |"
-            echo "| \`make verify-test\` | \`${TEST_OUTCOME}\` |"
+            echo "| \`verify\` job result | \`${VERIFY_RESULT}\` |"
+            echo "| \`make verify-fmt\` | \`${FMT_OUTCOME:-unknown}\` |"
+            echo "| \`make verify-clippy\` | \`${CLIPPY_OUTCOME:-unknown}\` |"
+            echo "| \`make verify-test\` | \`${TEST_OUTCOME:-unknown}\` |"
+            echo "| Trigger | \`${EVENT_NAME}\` |"
+            echo
+            echo "$DURATION_LINE"
             echo
             echo "Commit: \`${COMMIT_SHA}\`"
             echo "Run: ${RUN_URL}"
             echo
+            echo "An \`unknown\` step outcome means the job published no outcome for that step. A \`timeout-minutes\` cancellation still publishes them, so \`unknown\` points at the runner being lost outright rather than at the budget."
+            echo
             echo "Reproduce locally with \`make verify\` (or the single failing target above)."
-            echo "This issue is reused by subsequent nightly failures while it stays open."
+            echo "This issue is reused by subsequent nightly reports of the same kind while it stays open."
           } > "$BODY_FILE"
+
+          cat "$BODY_FILE" >> "$GITHUB_STEP_SUMMARY"
+          echo "::error title=${TITLE}::verify job result: ${VERIFY_RESULT}. See the job summary."
 
           # `|| true` on purpose: a transient search failure must not swallow
           # the report. An empty result files a fresh issue, and a rare
-          # duplicate is a better failure mode than silence.
+          # duplicate is a better failure mode than silence. The exact-title
+          # filter keeps the two report kinds on two separate tracking issues,
+          # since the search itself matches loosely.
           EXISTING="$(gh issue list --repo "$REPO" --state open \
-            --search "in:title \"$TITLE\"" --limit 1 \
-            --json number -q '.[0].number // empty' || true)"
+            --search "in:title \"$TITLE\"" --limit 20 \
+            --json number,title -q 'map(select(.title == env.TITLE)) | .[0].number // empty' || true)"
 
           if [ -n "$EXISTING" ]; then
             gh issue comment "$EXISTING" --repo "$REPO" --body-file "$BODY_FILE"

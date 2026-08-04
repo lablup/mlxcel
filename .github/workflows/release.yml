@@ -149,7 +149,7 @@ jobs:
       # machine in a fraction of the time.
       #
       # Quality gate lives locally now. Pre-push checklist:
-      #   make verify         # fmt + clippy(metal,accelerate, -D warnings) + test(release)
+      #   make verify         # fmt + clippy(metal,accelerate, -D warnings) + test(test-fast)
       #   make verify-clean   # same, after `cargo clean` — use when clippy's
       #                       # per-crate cache may be hiding a regression
       #
