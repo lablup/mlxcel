@@ -233,6 +233,11 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // neither of which the shard rules name. This arm only keeps the
         // dispatch table total.
         ModelType::Afmoe => "afmoe",
+        // Not shardable by the generic transformer plan: the experts live
+        // under `mlp.experts` and the shared branch is blended rather than
+        // added, neither of which the shard rules name. This arm only keeps
+        // the dispatch table total.
+        ModelType::Klear => "klear",
         ModelType::Apertus => "apertus",
         ModelType::SeedOss => "seed_oss",
         ModelType::Granite => "granite",

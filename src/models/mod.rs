@@ -87,6 +87,7 @@ pub mod internlm2;
 pub mod internlm3;
 pub mod jamba;
 pub mod kimi_linear;
+pub mod klear;
 pub mod lfm2;
 pub mod llada2_moe;
 pub mod llama3;
@@ -198,6 +199,7 @@ pub use internlm2::InternLM2Model;
 pub use internlm3::InternLM3Model;
 pub use jamba::JambaModel;
 pub use kimi_linear::KimiLinearModel;
+pub use klear::KlearModel;
 pub use lfm2::Lfm2Model;
 pub use llada2_moe::Llada2MoeModel;
 pub use llama3::Llama3Model;
@@ -393,6 +395,10 @@ pub enum ModelType {
     /// attention with NoPE global layers, a sigmoid attention gate,
     /// sandwich norms, muP embedding scale and a sparse MoE FFN.
     Afmoe,
+    /// Kuaishou Klear (`Klear`): a Qwen3-shaped sparse MoE whose shared
+    /// expert is blended with the routed mixture through a learned 2-way
+    /// softmax rather than added.
+    Klear,
 
     // Apertus (Swiss AI)
     Apertus,
@@ -597,6 +603,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::BailingMoe,
     ModelType::BailingMoeLinear,
     ModelType::Afmoe,
+    ModelType::Klear,
     // Apertus (Swiss AI)
     ModelType::Apertus,
     // ByteDance Seed-OSS
@@ -799,6 +806,7 @@ impl ModelType {
             ModelType::HunyuanMoe => ("Hunyuan MoE", "Hunyuan"),
             ModelType::BailingMoe => ("Ling / Bailing MoE (shared + routed experts)", "Bailing"),
             ModelType::Afmoe => ("Arcee AFMoE / Trinity (sliding + full hybrid MoE)", "Arcee"),
+            ModelType::Klear => ("Klear MoE (coefficient-blended shared expert)", "Klear"),
             ModelType::BailingMoeLinear => (
                 "Ling / Ring linear-attention MoE (GLA + full attention hybrid)",
                 "Bailing",
@@ -1110,6 +1118,7 @@ mod metadata_tests {
             BailingMoe,
             BailingMoeLinear,
             Afmoe,
+            Klear,
             Apertus,
             SeedOss,
             Granite,

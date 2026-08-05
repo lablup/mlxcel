@@ -212,6 +212,13 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "bailing_moe" => Ok(ModelType::BailingMoe),
         "bailing_moe_linear" => Ok(ModelType::BailingMoeLinear),
         "afmoe" => Ok(ModelType::Afmoe),
+        // `Kwai-Klear/Klear-46B-A2.5B-Instruct` declares the CAPITALIZED
+        // `"Klear"`. It matches this lowercase arm only because
+        // `model_type_raw` is lowercased above; mlx-lm, which does not
+        // normalize, has to ship `Klear.py` and a byte-identical `klear.py` to
+        // cover both spellings. Without that normalization this arm would miss
+        // every published checkpoint.
+        "klear" => Ok(ModelType::Klear),
         "apertus" => Ok(ModelType::Apertus),
         "seed_oss" => Ok(ModelType::SeedOss),
         "granite" => Ok(ModelType::Granite),
