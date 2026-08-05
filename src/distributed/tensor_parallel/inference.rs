@@ -164,6 +164,11 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::Gemma4 | ModelType::Gemma4VLM | ModelType::Gemma4Unified => "gemma4",
         ModelType::Gemma3n | ModelType::Gemma3nVLM => "gemma3n",
         ModelType::Phi => "phi",
+        // Not shardable by the generic transformer plan: attention arrives
+        // fused as `mixer.Wqkv` rather than separate q/k/v, and the experts
+        // live under `moe.switch_mlp`, neither of which the shard rules
+        // name. This arm only keeps the dispatch table total.
+        ModelType::Phixtral => "phixtral",
         ModelType::Phi3 | ModelType::Phi3VLM => "phi3",
         ModelType::Phi4MMVLM | ModelType::Phi4SigLipVLM => "phi4mm",
         ModelType::Phi3Small => "phi3small",
