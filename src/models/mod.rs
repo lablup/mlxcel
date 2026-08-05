@@ -122,6 +122,7 @@ pub mod phi3;
 pub mod phi3small;
 pub mod phi4mm;
 pub mod phimoe;
+pub mod phixtral;
 pub mod plamo2;
 pub mod qwen2;
 pub mod qwen2_moe;
@@ -230,6 +231,7 @@ pub use phi3::Phi3Model;
 pub use phi3small::Phi3SmallModel;
 pub use phi4mm::Phi4MMModel;
 pub use phimoe::PhiMoeModel;
+pub use phixtral::PhixtralModel;
 pub use plamo2::Plamo2Model;
 pub use qwen2::Qwen2Model;
 pub use qwen2_moe::Qwen2MoeModel;
@@ -324,15 +326,20 @@ pub enum ModelType {
     Gemma3n,  // Gemma 3n (text-only)
     Gemma3nVLM, // Gemma 3n VLM (MobileNetV5 + Gemma3n)
     Phi,      // Phi 1/2
-    Phi3,     // Phi 3
-    Phi4MMVLM, // Phi-4 Multimodal (SigLIP2 NaFlex + Conformer audio + Phi4 text)
+    /// Phixtral (`phi-msft` with `num_local_experts`): a Mixtral-style
+    /// sparse MoE on the Phi-2 parallel-residual backbone. Shares the
+    /// `phi-msft` model_type with dense Phi and is told apart by
+    /// `num_local_experts`; see `detection::detect_phi_model_type`.
+    Phixtral,
+    Phi3,          // Phi 3
+    Phi4MMVLM,     // Phi-4 Multimodal (SigLIP2 NaFlex + Conformer audio + Phi4 text)
     Phi4SigLipVLM, // Phi-4 reasoning vision (SigLIP2 NaFlex + Phi3-style text)
-    Phi3VLM,  // Phi 3.5 Vision (CLIP + Phi3)
-    MolmoVLM, // Molmo v1 (CLIP ViT + attention pooling + OLMo-style text)
-    Molmo2VLM, // Molmo2 (custom ViT + attention pooling + Molmo2 text)
+    Phi3VLM,       // Phi 3.5 Vision (CLIP + Phi3)
+    MolmoVLM,      // Molmo v1 (CLIP ViT + attention pooling + OLMo-style text)
+    Molmo2VLM,     // Molmo2 (custom ViT + attention pooling + Molmo2 text)
     MolmoPointVLM, // Molmo-Point (custom ViT + point prediction + Molmo2 text)
-    Phi3Small, // Phi 3 Small
-    PhiMoe,   // Phi MoE
+    Phi3Small,     // Phi 3 Small
+    PhiMoe,        // Phi MoE
 
     // MoE models
     GptOss,
@@ -538,6 +545,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Gemma3n,
     ModelType::Gemma3nVLM,
     ModelType::Phi,
+    ModelType::Phixtral,
     ModelType::Phi3,
     ModelType::Phi4MMVLM,
     ModelType::Phi4SigLipVLM,
@@ -739,6 +747,7 @@ impl ModelType {
 
             // ----- Phi (text) -----
             ModelType::Phi => ("Phi 1 / 2", "Phi"),
+            ModelType::Phixtral => ("Phixtral (Phi-2 backbone + sparse MoE)", "Phi"),
             ModelType::Phi3 => ("Phi 3", "Phi"),
             ModelType::Phi3Small => ("Phi 3 Small", "Phi"),
             ModelType::PhiMoe => ("Phi MoE", "Phi"),
@@ -1051,6 +1060,7 @@ mod metadata_tests {
             Gemma3n,
             Gemma3nVLM,
             Phi,
+            Phixtral,
             Phi3,
             Phi4MMVLM,
             Phi4SigLipVLM,

@@ -931,7 +931,12 @@ pub fn gather_sort(
 }
 
 /// Unsort tokens back to original order
-fn scatter_unsort(x: &MlxArray, inv_order: &MlxArray, orig_shape: &[i32]) -> UniquePtr<MlxArray> {
+/// Used by: SwitchGLU, Phixtral
+pub(crate) fn scatter_unsort(
+    x: &MlxArray,
+    inv_order: &MlxArray,
+    orig_shape: &[i32],
+) -> UniquePtr<MlxArray> {
     let unsorted = mlxcel_core::take(x, inv_order, 0);
     let x_shape = mlxcel_core::array_shape(&unsorted);
     let n_tokens = orig_shape[0];

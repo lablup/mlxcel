@@ -64,6 +64,26 @@ pub(crate) fn detect_text_or_vlm(
     }
 }
 
+/// Split the `phi` / `phi-msft` arm between the dense Phi decoder and Phixtral.
+///
+/// No phixtral checkpoint declares `model_type: "phixtral"`.
+/// `mlabonne/phixtral-4x2_8` declares `phi-msft`, and upstream mlx-lm reaches
+/// its phixtral implementation through `MODEL_REMAPPING` rather than the config
+/// value, so an arm keyed on the string `"phixtral"` could never fire. The
+/// discriminator is `num_local_experts`, which the sparse config carries and
+/// the dense Phi-2 config does not.
+///
+/// A value of 1 is treated as dense: it describes one expert, which is a dense
+/// MLP, and the phixtral block would be a needless indirection over it.
+pub(crate) fn detect_phi_model_type(config: &serde_json::Value) -> ModelType {
+    let num_local_experts = config["num_local_experts"].as_i64().unwrap_or(0);
+    if num_local_experts > 1 {
+        ModelType::Phixtral
+    } else {
+        ModelType::Phi
+    }
+}
+
 pub(crate) fn detect_hunyuan_model_type(config: &serde_json::Value) -> ModelType {
     let num_experts = config["num_experts"].as_i64().unwrap_or(1);
     if num_experts > 1 {
@@ -151,7 +171,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
             ModelType::Gemma3n,
             ModelType::Gemma3nVLM,
         )),
-        "phi" | "phi-msft" => Ok(ModelType::Phi),
+        "phi" | "phi-msft" => Ok(detect_phi_model_type(&v)),
         "phi3" => Ok(ModelType::Phi3),
         "phi4mm" => Ok(ModelType::Phi4MMVLM),
         "phi4-siglip" => Ok(ModelType::Phi4SigLipVLM),
