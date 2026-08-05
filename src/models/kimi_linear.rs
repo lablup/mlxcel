@@ -217,12 +217,23 @@ impl MultiLinear {
     /// rather than `Result`, so that throw is an uncatchable `std::terminate`
     /// at the first MLA forward rather than a load error (issue #1026).
     ///
-    /// That path is not reachable today: `sanitize_weights` always dequantizes
-    /// `kv_b_proj` and inserts `embed_q.weight` / `unembed_out.weight` as dense
-    /// tensors with no `.scales`, and no shipped checkpoint ships those two
-    /// tensors itself, so `is_quantized` is always false here. This is a bound
-    /// on what a future change to that sanitizer can reintroduce, not a live
-    /// fix. `src/models/gpt_oss.rs` `ExpertLinear::from_weights` is the
+    /// This path is reachable today, not merely defended against a future
+    /// sanitizer change. `sanitize_weights` only inserts a dense
+    /// `embed_q.weight` / `unembed_out.weight` pair inside the
+    /// `if weights.contains_key(&kv_b_key)` guard, where `kv_b_key` is
+    /// `{attn_prefix}.kv_b_proj.weight`; when a checkpoint carries no
+    /// `kv_b_proj.weight` at all, that whole decomposition block is skipped,
+    /// so any `embed_q` / `unembed_out` planes the checkpoint shipped itself
+    /// pass through sanitization untouched. `MlaAttention::from_weights`
+    /// then calls this loader unconditionally for every non-linear-attention
+    /// layer, so a checkpoint that ships pre-decomposed, quantized
+    /// `embed_q.weight` plus `embed_q.scales` (and the matching pair for
+    /// `unembed_out`) with no `kv_b_proj.weight` to decompose from lands
+    /// here with `is_quantized == true`. Do not delete this branch as dead
+    /// code: it is live for that checkpoint shape, and removing it
+    /// reintroduces the same uncatchable abort described above, just reached
+    /// from a checkpoint layout other than the one issue #1026 was filed
+    /// against. `src/models/gpt_oss.rs` `ExpertLinear::from_weights` is the
     /// in-tree precedent for the shape of it.
     fn from_weights(
         weights: &WeightMap,

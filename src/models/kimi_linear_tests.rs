@@ -283,12 +283,17 @@ fn kimi_linear_sanitize_rejects_a_kv_b_proj_with_scales_and_no_biases() {
 /// `UniquePtr<MlxArray>` rather than `Result`, so that throw is an uncatchable
 /// `std::terminate` at the first MLA forward.
 ///
-/// The branch is unreachable today: `sanitize_weights` always dequantizes
-/// `kv_b_proj` and inserts `embed_q.weight` / `unembed_out.weight` dense, and
-/// no shipped checkpoint carries those two tensors itself, so `is_quantized`
-/// is always false in production. This test drives the loader directly to pin
-/// the stored mode against the planes present, so a future sanitizer that does
-/// keep `embed_q` quantized cannot silently reintroduce the abort.
+/// This branch is reachable today, not merely defended against a future
+/// sanitizer change: `sanitize_weights` only dequantizes `kv_b_proj` and
+/// inserts `embed_q.weight` / `unembed_out.weight` dense inside its
+/// `if weights.contains_key(&kv_b_key)` guard, so a checkpoint that ships no
+/// `kv_b_proj.weight` at all skips that block outright and leaves its own
+/// pre-decomposed, quantized `embed_q` / `unembed_out` planes untouched;
+/// `MlaAttention::from_weights` then hands those planes straight to this
+/// loader with `is_quantized == true`. This test drives the loader directly
+/// rather than through a full checkpoint fixture, since that is the
+/// cheapest way to pin the stored mode against every plane combination
+/// without constructing that checkpoint shape end to end.
 #[test]
 fn kimi_linear_multi_linear_infers_its_quantization_mode_from_the_biases_plane() {
     let load = |group_size: i32, bits: i32, with_biases: bool| {
@@ -331,4 +336,5 @@ fn kimi_linear_multi_linear_infers_its_quantization_mode_from_the_biases_plane()
     let loaded = MultiLinear::from_weights(&dense, PREFIX, 0, 0)
         .expect("a non-quantized per-head projection must load with an unset pair");
     assert!(!loaded.is_quantized);
+    assert_eq!(loaded.mode, "affine");
 }
