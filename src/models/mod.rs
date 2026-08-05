@@ -113,6 +113,7 @@ pub mod olmo;
 pub mod olmo2;
 pub mod olmo3;
 pub mod olmoe;
+pub mod openelm;
 pub mod paddleocr_vl;
 pub mod phi;
 pub mod phi3;
@@ -217,6 +218,7 @@ pub use olmo::OlmoModel;
 pub use olmo2::OLMo2Model;
 pub use olmo3::OLMo3Model;
 pub use olmoe::OlmoeModel;
+pub use openelm::OpenElmModel;
 pub use paddleocr_vl::{PaddleOcrTextConfig, PaddleOcrTextModel};
 pub use phi::PhiModel;
 pub use phi3::Phi3Model;
@@ -389,6 +391,7 @@ pub enum ModelType {
     Olmo,
     Olmo2,
     Olmo3,
+    OpenElm, // Apple OpenELM (layer-wise scaling: per-layer head counts and FFN widths)
 
     // GPT-2 lineage
     Gpt2,       // GPT-2 (learned absolute position embeddings, Conv1D weight layout)
@@ -581,6 +584,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Olmo,
     ModelType::Olmo2,
     ModelType::Olmo3,
+    ModelType::OpenElm,
     // GPT-2 lineage
     ModelType::Gpt2,
     ModelType::GptBigCode,
@@ -780,6 +784,7 @@ impl ModelType {
             ModelType::Olmo => ("OLMo 1", "OLMo"),
             ModelType::Olmo2 => ("OLMo 2", "OLMo"),
             ModelType::Olmo3 => ("OLMo 3", "OLMo"),
+            ModelType::OpenElm => ("Apple OpenELM (layer-wise scaling)", "Specialized"),
             ModelType::OLMoE => ("OLMoE (MoE)", "OLMo"),
 
             // ----- Nemotron -----
@@ -1070,6 +1075,7 @@ mod metadata_tests {
             Olmo,
             Olmo2,
             Olmo3,
+            OpenElm,
             Gpt2,
             GptBigCode,
             GptNeoX,

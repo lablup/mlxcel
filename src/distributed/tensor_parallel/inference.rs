@@ -221,6 +221,14 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::Olmo => "olmo",
         ModelType::Olmo2 => "olmo2",
         ModelType::Olmo3 => "olmo3",
+        // OpenELM is not TP-enabled and this arm only keeps the dispatch table
+        // total; the refusal comes from `validate_supported_runtime`, whose
+        // `runtime_kind_for` match has no `ModelType::OpenElm` arm. Layer-wise
+        // scaling is the obstacle: a generic shard plan assumes one head count
+        // for the whole stack, but OpenELM's query heads run 16 through 32 and
+        // its KV heads 4 through 8 across the layers, so a single tp_size
+        // divisibility check cannot describe the model.
+        ModelType::OpenElm => "openelm",
         // GPT-2's fused `c_attn` and Conv1D key names have no shard rules, so
         // the planner's supported-architecture validation rejects this string
         // before any TP load is attempted. It keeps the dispatch table total.
