@@ -310,3 +310,39 @@ fn mamba2_rejects_an_embedding_table_narrower_than_hidden_size() {
         .to_string();
     assert!(err.contains("hidden_size"), "unhelpful error: {err}");
 }
+
+/// The test above exercises the guard's width clause; this one exercises its
+/// row-count clause, `claimed_rows > rows`. Token ids are bounded by
+/// `vocab_size`, not by the rows actually present in the table, and MLX's
+/// embedding gather wraps a negative index but performs no range check on a
+/// positive one, so a config that overstates `vocab_size` turns an ordinary
+/// prompt into an out-of-bounds read whose result reaches the logits rather
+/// than faulting. It is also the one place a caller can silently mis-wire the
+/// shared guard by passing the wrong config field into the `claimed_rows`
+/// slot, so this pins Mamba2 to `config.vocab_size` specifically, not merely
+/// to some `usize` that happens to be lying around.
+#[test]
+fn mamba2_rejects_a_config_that_overstates_vocab_size() {
+    use super::Mamba2Model;
+
+    let mut narrow = embedding_test_base_weights();
+    narrow.insert(
+        "backbone.embeddings.weight".to_string(),
+        mlxcel_core::from_slice_f32(&[0.0; 24], &[3, 8]),
+    );
+    let err = Mamba2Model::from_weights(embedding_config(0, 0), narrow)
+        .err()
+        .expect("a config that overstates the embeddings table must fail the load")
+        .to_string();
+    assert!(err.contains("vocab_size"), "unhelpful error: {err}");
+
+    // The other direction is safe: a table padded with more rows than
+    // vocab_size keeps the bound inside it.
+    let mut padded = embedding_test_base_weights();
+    padded.insert(
+        "backbone.embeddings.weight".to_string(),
+        mlxcel_core::from_slice_f32(&[0.0; 512], &[64, 8]),
+    );
+    Mamba2Model::from_weights(embedding_config(0, 0), padded)
+        .expect("a table with more rows than vocab_size must still load");
+}
