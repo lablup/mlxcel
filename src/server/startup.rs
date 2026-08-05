@@ -1572,18 +1572,20 @@ fn install_surgery_pipeline_for_server(startup: &ServerStartupConfig) -> Result<
 pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     initialize_server_logging(&startup)?;
 
-    // Issue #688 (M1/M2 hardening), extended to DeepSeek-V2 by issue #824: disable
-    // CUDA graph capture for hazard-family models (Gemma 4, DeepSeek-V2) here, on
-    // the main startup thread, before any generation or pipeline worker is spawned
-    // and before the first GPU eval latches MLX's process-wide `use_cuda_graphs`
-    // static. Performing the env write on this thread (rather than only at the
-    // per-load-site calls, which run inside the spawned worker) keeps it sound
-    // under Rust 2024's concurrent-getenv rule. This single chokepoint covers every
-    // serve path that flows through `start_server`: the batched, legacy,
-    // tensor-parallel and XLA workers, the in-process pipeline-parallel worker, and
-    // the remote pipeline stage worker (the `serve_remote_pipeline_stage` branch
-    // below) — all load `startup.model_path`. Unaffected model families and an
-    // explicit `MLX_USE_CUDA_GRAPHS` operator override are left untouched.
+    // Issue #688 (M1/M2 hardening): disable CUDA graph capture for hazard-family
+    // models (Gemma 4) here, on the main startup thread, before any generation or
+    // pipeline worker is spawned and before the first GPU eval latches MLX's
+    // process-wide `use_cuda_graphs` static. (DeepSeek-V2 was on this lever from
+    // #829 to #831; its collapse turned out to be the broken RMSNorm overlay, not
+    // graph capture, so the family was removed.) Performing the env write on this
+    // thread (rather than only at the per-load-site calls, which run inside the
+    // spawned worker) keeps it sound under Rust 2024's concurrent-getenv rule. This
+    // single chokepoint covers every serve path that flows through `start_server`:
+    // the batched, legacy, tensor-parallel and XLA workers, the in-process
+    // pipeline-parallel worker, and the remote pipeline stage worker (the
+    // `serve_remote_pipeline_stage` branch below) all load `startup.model_path`.
+    // Unaffected model families and an explicit `MLX_USE_CUDA_GRAPHS` operator
+    // override are left untouched.
     crate::loading::maybe_disable_cuda_graphs_for_model_for_path(&startup.model_path);
 
     super::media::configure_image_input_limits(super::media::ImageInputLimits {

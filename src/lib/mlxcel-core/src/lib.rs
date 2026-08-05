@@ -3359,6 +3359,15 @@ mod gpu_exclusivity_tests;
 #[path = "fused_norm_parity_tests.rs"]
 mod fused_norm_parity_tests;
 
+// Numeric regression tests for `fast::rms_norm` on the small-axis CUDA dispatch
+// band (#830/#831): the deleted pre-#3792 overlay read past its shared scratch
+// for 16-bit axes in (256, 512] (f32: (128, 256]), which is exactly the
+// DeepSeek-V2 `kv_a_layernorm` axis and was misattributed as a graph-capture
+// hazard. GPU-only; they skip on CPU-only builds.
+#[cfg(test)]
+#[path = "rms_norm_small_axis_tests.rs"]
+mod rms_norm_small_axis_tests;
+
 // RoPE-parity tests for the fused q/k RoPE + KV-append-layout kernel (#905):
 // position offsets including the absolute positions rotated/ring caches use,
 // both rotation conventions, partial rope dims, and both destination layouts.
