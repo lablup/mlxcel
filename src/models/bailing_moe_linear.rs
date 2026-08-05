@@ -1840,12 +1840,35 @@ impl DecoderLayer {
             (AttentionKind::Linear(attn), BailingLinearCache::Linear(state)) => {
                 attn.forward(&normed, state, offset)
             }
-            // `make_caches` builds one cache per layer from the same
-            // `is_global` predicate, so the mismatched arms are unreachable.
-            // Returning the residual unchanged keeps the mismatch from
-            // corrupting the hidden state silently if a future cache path
-            // hands over the wrong flavour.
-            _ => mlxcel_core::zeros_like(&normed),
+            // Unreachable: every cache vector is built by
+            // `make_internal_caches` from the same `is_global` predicate that
+            // chose the attention, and `restore_sequence_state` rebuilds it the
+            // same way before restoring into it.
+            //
+            // The fallback is a *silent* wrong answer: a zero attention output
+            // turns the layer into `h = x`, which stays finite and decodes
+            // fluent text. The `debug_assert` makes a future regression loud
+            // under a dev-profile `cargo test`, but note it does NOT fire under
+            // the project's own gate: `[profile.test-fast]` inherits from
+            // release, where `debug-assertions` defaults off. The invariant is
+            // held by construction at both producers rather than by this check.
+            (attention, cache) => {
+                debug_assert!(
+                    false,
+                    "cache flavour does not match the layer: attention is {}, cache is {}",
+                    if matches!(attention, AttentionKind::Full(_)) {
+                        "full"
+                    } else {
+                        "linear"
+                    },
+                    if matches!(cache, BailingLinearCache::Attention(_)) {
+                        "attention"
+                    } else {
+                        "linear"
+                    },
+                );
+                mlxcel_core::zeros_like(&normed)
+            }
         };
         let h = mlxcel_core::add(x, &attn_out);
 
