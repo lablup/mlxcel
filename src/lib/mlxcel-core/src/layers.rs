@@ -1399,8 +1399,12 @@ pub fn validate_quantization_mode(mode: &str) -> Result<(), String> {
 ///
 /// Used by: UnifiedLinear::from_weights_with_mode,
 ///          QuantizedEmbedding::from_weights_with_mode,
-///          QuantizedWeight::new_with_mode, `SwitchLinear::from_stacked_parts`
-///          and `GptOss ExpertLinear::from_weights` in the consuming crate
+///          QuantizedWeight::new_with_mode,
+///          [`QuantizedMultiLinear::new`] and
+///          [`QuantizedMultiLinear::from_weights`] (which infer the mode and so
+///          couple the two helpers rather than checking a declaration),
+///          `SwitchLinear::from_stacked_parts` and `GptOss
+///          ExpertLinear::from_weights` in the consuming crate
 pub fn validate_quantization_biases(mode: &str, has_biases: bool) -> Result<(), String> {
     validate_quantization_mode(mode)?;
     match (mode == "affine", has_biases) {
@@ -1541,7 +1545,10 @@ const MAX_QUANT_GROUP_SIZE: i32 = 1 << 20;
 /// [`validate_quantization_mode`] or [`validate_quantization_biases`].
 ///
 /// Used by: UnifiedLinear::from_weights, QuantizedEmbedding::from_weights,
-///          BailingMoe weight validation
+///          [`QuantizedMultiLinear::new`] and
+///          [`QuantizedMultiLinear::from_weights`] (MLA `embed_q` /
+///          `unembed_out`), BailingMoe weight validation, and `kimi_linear`'s
+///          private `MultiLinear` in the consuming crate
 pub fn infer_quantization_mode(has_biases: bool, group_size: i32, bits: i32) -> &'static str {
     if has_biases {
         "affine"
@@ -2778,6 +2785,19 @@ pub struct QuantizedMultiLinear {
     pub biases: Option<UniquePtr<MlxArray>>,
     pub group_size: i32,
     pub bits: i32,
+    /// Quantization mode resolved at load from the planes the checkpoint
+    /// actually ships, never hardcoded: `"affine"` for a `.biases`-carrying
+    /// plane, one of the block-float modes otherwise. Both constructors derive
+    /// it with [`infer_quantization_mode`], and every kernel call on this
+    /// layer reads this field (issue #1028).
+    ///
+    /// `&'static str` rather than the `String` its siblings
+    /// [`QuantizedWeight`] and [`QuantizedEmbedding`] carry, because those two
+    /// have `*_with_mode` constructors that store a caller-declared string
+    /// while this layer only ever stores what `infer_quantization_mode`
+    /// returns. The type says so, and it saves an allocation per MLA
+    /// projection.
+    pub mode: &'static str,
 }
 
 impl QuantizedMultiLinear {
@@ -2787,12 +2807,22 @@ impl QuantizedMultiLinear {
     /// Fallible on purpose (issue #958): the stored pair reaches
     /// `quantized_matmul` unmediated, without
     /// [`reconcile_quantization_layout`] and the bound it carries, and nothing
-    /// else on this path bounds it. Unlike the `QuantizedEmbedding` constructor
-    /// this once mirrored (removed in issue #976), it takes `biases` as an
-    /// `Option` and so cannot express a mode that contradicts the planes the
-    /// checkpoint ships. Nothing in the tree calls it today; it is a strong
-    /// default for the next caller that hand-builds one, not an enforced
+    /// else on this path bounds it. Nothing in the tree calls it today; it is a
+    /// strong default for the next caller that hand-builds one, not an enforced
     /// invariant, since the fields are `pub`.
+    ///
+    /// Kept rather than removed the way the `QuantizedEmbedding` constructor it
+    /// once mirrored was (issue #976), because that removal was about a
+    /// signature that forced the defect: that one required a `biases` argument
+    /// and hardcoded `"affine"`, so a block-float caller could not express its
+    /// checkpoint at all and fell back to a dense layer over a packed table.
+    /// This takes `biases` as an `Option` and now derives the mode from it with
+    /// the same [`infer_quantization_mode`] call [`Self::from_weights`] uses,
+    /// so it can express every plane layout the loader can and cannot store a
+    /// mode that contradicts them. The closer precedent is
+    /// [`QuantizedWeight::new_with_mode`] (issue #973): also callerless, also
+    /// pre-emptive, kept so the bound lands on the path the next hand-builder
+    /// takes.
     pub fn new(
         weight: UniquePtr<MlxArray>,
         scales: UniquePtr<MlxArray>,
@@ -2801,12 +2831,15 @@ impl QuantizedMultiLinear {
         bits: i32,
     ) -> Result<Self, String> {
         validate_quantization_params(group_size, bits)?;
+        let mode = infer_quantization_mode(biases.is_some(), group_size, bits);
+        validate_quantization_biases(mode, biases.is_some())?;
         Ok(Self {
             weight,
             scales,
             biases,
             group_size,
             bits,
+            mode,
         })
     }
 
@@ -2820,6 +2853,15 @@ impl QuantizedMultiLinear {
     /// loader that never calls [`reconcile_quantization_layout`], reached by
     /// four families whose `embed_q` / `unembed_out` are the only tensors that
     /// see these params.
+    ///
+    /// The mode is inferred from `.biases` presence rather than read from
+    /// `config.json` (issue #1028). This loader takes only `group_size` and
+    /// `bits`, its four callers thread the top-level `quantization` block into
+    /// exactly those two, and the shared `UnifiedLinear` / `UnifiedEmbedding`
+    /// loaders every other layer in those models goes through infer the same
+    /// way, so reading a declared mode here alone would make one projection
+    /// disagree with the rest of the model. `kimi_linear`'s private
+    /// `MultiLinear` was corrected the same way in issue #1026.
     ///
     /// Used by: DeepSeek V3, DeepSeek V3.2, GLM4 MoE Lite, LongCat Flash NGram
     pub fn from_weights(
@@ -2842,7 +2884,24 @@ impl QuantizedMultiLinear {
             .get(&scales_name)
             .map(|w| ffi::copy(w))
             .ok_or_else(|| format!("Scales not found: {}", scales_name))?;
+        // Absent for every block-float mode by design, which is exactly what
+        // `infer_quantization_mode` keys on.
         let biases = weights.get(&biases_name).map(|w| ffi::copy(w));
+
+        let mode = infer_quantization_mode(biases.is_some(), group_size, bits);
+        // Consistent by construction with the line above, which keys the mode
+        // on the same `biases.is_some()` this re-checks, so it cannot fire
+        // while that line stands. It is here because it is the assertion that
+        // couples the two helpers, and it fires the moment the coupling breaks:
+        // if the mode above ever comes from somewhere else (a declared
+        // `quantization.mode`, a per-prefix override) or is regressed back to a
+        // literal, the contradiction is refused here, at the point the mode is
+        // stored, instead of inside `quantized_matmul`, where MLX's "Biases
+        // must be provided for affine quantization" crosses the cxx bridge as
+        // an uncatchable abort at the first forward pass rather than a load
+        // error.
+        validate_quantization_biases(mode, biases.is_some())
+            .map_err(|e| format!("{prefix}: {e}"))?;
 
         Ok(Self {
             weight,
@@ -2850,70 +2909,71 @@ impl QuantizedMultiLinear {
             biases,
             group_size,
             bits,
+            mode,
         })
+    }
+
+    /// Raw pointer to the optional zero-point plane, null for the block-float
+    /// modes. Mirrors [`QuantizedWeight::biases_ptr`], and is always passed
+    /// alongside `self.mode`: MLX's `validate_mode_with_type` throws when the
+    /// two disagree, so the pointer and the mode must come from the same place.
+    fn biases_ptr(&self) -> *const MlxArray {
+        match &self.biases {
+            Some(b) => b.as_ref().unwrap() as *const MlxArray,
+            None => std::ptr::null(),
+        }
+    }
+
+    /// The one place this layer calls `quantized_matmul`.
+    ///
+    /// The two public forward methods differ only in `transpose`, and before
+    /// issue #1028 they were separate copies of this body that each hardcoded
+    /// `"affine"`. Sharing the body is what keeps a fix from landing in one of
+    /// them and not the other.
+    fn quantized_matmul(&self, x: &MlxArray, transpose: bool) -> UniquePtr<MlxArray> {
+        unsafe {
+            ffi::quantized_matmul(
+                x,
+                &self.weight,
+                &self.scales,
+                self.biases_ptr(),
+                transpose,
+                self.group_size,
+                self.bits,
+                self.mode,
+            )
+        }
     }
 
     /// Forward pass: per-head linear projection
     /// x: [batch, heads, seq, input_dim]
     /// Returns: [batch, heads, seq, output_dim]
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        let biases_ptr: *const MlxArray = match &self.biases {
-            Some(b) => b.as_ref().unwrap() as *const MlxArray,
-            None => std::ptr::null(),
-        };
-
-        unsafe {
-            ffi::quantized_matmul(
-                x,
-                &self.weight,
-                &self.scales,
-                biases_ptr,
-                true, // transpose
-                self.group_size,
-                self.bits,
-                "affine",
-            )
-        }
+        self.quantized_matmul(x, true)
     }
 
     /// Forward pass without transpose: x @ weight
     /// Used by MLA embed_q(kv_latent, transpose=False) for projecting latent to K
     pub fn forward_no_transpose(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        let biases_ptr: *const MlxArray = match &self.biases {
-            Some(b) => b.as_ref().unwrap() as *const MlxArray,
-            None => std::ptr::null(),
-        };
-
-        unsafe {
-            ffi::quantized_matmul(
-                x,
-                &self.weight,
-                &self.scales,
-                biases_ptr,
-                false, // no transpose
-                self.group_size,
-                self.bits,
-                "affine",
-            )
-        }
+        self.quantized_matmul(x, false)
     }
 
     /// Dequantize weights to full precision
     /// Returns: [num_heads, output_dim, input_dim]
+    ///
+    /// Callerless in tree, but it reads `self.mode` like the forward path
+    /// does: MLX applies the same `validate_mode_with_type` precondition inside
+    /// `dequantize`, so leaving this one hardcoded would put the abort back one
+    /// call away from where issue #1028 removed it.
     pub fn dequantize(&self) -> UniquePtr<MlxArray> {
-        let biases_ptr: *const MlxArray = match &self.biases {
-            Some(b) => b.as_ref().unwrap() as *const MlxArray,
-            None => std::ptr::null(),
-        };
-
         unsafe {
             ffi::dequantize(
                 &self.weight,
                 &self.scales,
-                biases_ptr,
+                self.biases_ptr(),
                 self.group_size,
                 self.bits,
-                "affine",
+                self.mode,
             )
         }
     }
@@ -3276,6 +3336,16 @@ impl MultiLinear {
     /// Load from weight map, auto-detecting quantization.
     ///
     /// Checks for `.scales` key to determine if weights are quantized.
+    ///
+    /// Gating on `.scales` alone is correct, and is the gate the shared
+    /// `UnifiedLinear` / `UnifiedEmbedding` loaders use: the block-float modes
+    /// (mxfp4 / nvfp4 / mxfp8) ship scales with no zero points, so requiring
+    /// `.biases` here would send a block-float plane down the `Regular` branch
+    /// to be matmul'd as a raw packed uint32 table (the shape of issue #976).
+    /// What that gate needs from the quantized arm is that it can express a
+    /// plane with no `.biases`, which [`QuantizedMultiLinear::from_weights`]
+    /// does by inferring the mode rather than hardcoding `"affine"`
+    /// (issue #1028).
     pub fn from_weights(
         weights: &crate::weights::WeightMap,
         prefix: &str,
@@ -5310,9 +5380,13 @@ mod tests {
     /// production now uses: the by-hand `QuantizedEmbedding::new` was removed in
     /// issue #976, because requiring a `biases` argument is what made a
     /// block-float table look non-quantized to the two families that called it.
-    /// `QuantizedMultiLinear::new` stays and is still hand-built here: it takes
-    /// `Option<biases>` and so cannot express that defect, and it remains the
-    /// bound for the next caller that builds one directly.
+    /// `QuantizedMultiLinear::new` stays and is still hand-built here. That
+    /// removal was about a signature that forced the defect, and this one does
+    /// not have it: it takes `Option<biases>` and, since issue #1028, derives
+    /// the mode from that `Option` with the same `infer_quantization_mode` call
+    /// the loader uses, so it can express a block-float plane instead of
+    /// hardcoding `"affine"` over a null bias pointer. It remains the bound for
+    /// the next caller that builds one directly.
     #[test]
     fn hand_built_quantized_layers_bound_their_declared_params() {
         use crate::weights::WeightMap;
@@ -5332,8 +5406,17 @@ mod tests {
         // cannot pass this test.
         QuantizedEmbedding::from_weights(&embed_weights(), "embed", 64, 4)
             .expect("an honest affine pair must still build a quantized embedding");
-        QuantizedMultiLinear::new(plane(8), plane(1), Some(plane(1)), 64, 4)
+        let affine = QuantizedMultiLinear::new(plane(8), plane(1), Some(plane(1)), 64, 4)
             .expect("an honest affine pair must still build a quantized MultiLinear");
+        assert_eq!(affine.mode, "affine");
+
+        // The hand-built path has to reach the same mode the loader would for
+        // the same planes, or a caller that owns its tensors (an MLA sanitizer
+        // that decomposed them, say) would be the one way left to build a
+        // layer whose stored mode contradicts its bias pointer.
+        let block_float = QuantizedMultiLinear::new(plane(8), plane(1), None, 64, 4)
+            .expect("a block-float plane carries no zero points and must still build");
+        assert_eq!(block_float.mode, "mxfp4");
 
         for (group_size, bits, field) in [
             (64, 0, "bits"),
@@ -5557,6 +5640,34 @@ mod tests {
             .expect("a non-quantized projection must not be gated on the declared mode");
     }
 
+    /// One plane of a per-head MLA projection: `num_heads` 2, `output_dim` 4,
+    /// `last` packed or group-counted depending on which plane it is.
+    fn mla_plane(last: i32) -> UniquePtr<MlxArray> {
+        ffi::from_slice_f32(&vec![0.0; (2 * 4 * last) as usize], &[2, 4, last])
+    }
+
+    /// A quantized `embed_q` / `unembed_out` triple under `prefix`, with the
+    /// `.biases` plane present only when the mode carries zero points.
+    ///
+    /// Callers pass honest geometry (`packed_in * 32 == bits * num_groups *
+    /// group_size`) even though this loader deliberately never reconciles the
+    /// declared pair against the shapes, so the fixtures do not teach a layout
+    /// MLX would reject one call later.
+    fn mla_quantized_weights(
+        prefix: &str,
+        packed_in: i32,
+        num_groups: i32,
+        with_biases: bool,
+    ) -> crate::weights::WeightMap {
+        let mut weights = crate::weights::WeightMap::new();
+        weights.insert(format!("{prefix}.weight"), mla_plane(packed_in));
+        weights.insert(format!("{prefix}.scales"), mla_plane(num_groups));
+        if with_biases {
+            weights.insert(format!("{prefix}.biases"), mla_plane(num_groups));
+        }
+        weights
+    }
+
     /// `QuantizedMultiLinear::from_weights` is a shared loader that stores the
     /// declared pair verbatim and hands it to `quantized_matmul` on every MLA
     /// forward, without ever calling the reconciler. It sat in the same blind
@@ -5565,12 +5676,7 @@ mod tests {
     /// NGram through their `embed_q` / `unembed_out` (issue #958).
     #[test]
     fn multi_linear_loader_bounds_its_declared_params() {
-        let mut weights = crate::weights::WeightMap::new();
-        let plane =
-            |last: i32| ffi::from_slice_f32(&vec![0.0; (2 * 4 * last) as usize], &[2, 4, last]);
-        weights.insert("embed_q.weight".to_string(), plane(8));
-        weights.insert("embed_q.scales".to_string(), plane(1));
-        weights.insert("embed_q.biases".to_string(), plane(1));
+        let weights = mla_quantized_weights("embed_q", 8, 1, true);
 
         QuantizedMultiLinear::from_weights(&weights, "embed_q", 64, 4)
             .expect("an honest affine pair must still load");
@@ -5593,9 +5699,144 @@ mod tests {
         // A non-quantized projection carries no packing, so the params are
         // irrelevant there and must not be enforced.
         let mut regular = crate::weights::WeightMap::new();
-        regular.insert("embed_q.weight".to_string(), plane(8));
+        regular.insert("embed_q.weight".to_string(), mla_plane(8));
         MultiLinear::from_weights(&regular, "embed_q", 0, 0)
             .expect("a non-quantized MultiLinear must not be gated on quantization params");
+    }
+
+    /// `QuantizedMultiLinear` stored `"affine"` nowhere and hardcoded it at
+    /// every kernel call, so a block-float `embed_q` / `unembed_out`
+    /// (`.scales`, no `.biases`, which is what mxfp4 / nvfp4 / mxfp8 ship by
+    /// design) satisfied `MultiLinear::from_weights`'s `.scales`-only gate,
+    /// loaded without complaint, and then handed `quantized_matmul` a null bias
+    /// pointer under a declared affine mode. MLX's `validate_mode_with_type`
+    /// throws `Biases must be provided for affine quantization` on exactly
+    /// that, and the throw crosses the cxx bridge as an uncatchable abort at
+    /// the first MLA forward rather than a load error (issue #1028).
+    ///
+    /// No forward pass is run here: on a regressed load a forward aborts the
+    /// test binary instead of failing the test. The assertion is on the stored
+    /// mode instead, which is sound because the field is the single value
+    /// `forward`, `forward_no_transpose` and `dequantize` all read. The two
+    /// forward methods share one private `quantized_matmul` body precisely so
+    /// there is no second copy of the mode argument for a fix to miss.
+    #[test]
+    fn multi_linear_loader_infers_its_quantization_mode_from_the_biases_plane() {
+        // Geometry per mode, all satisfying packed_in * 32 == bits *
+        // num_groups * group_size: 4-bit at group_size 64 packs 8 uint32 into
+        // one group, nvfp4's group_size 16 splits the same width into four,
+        // and mxfp8 needs twice the packed width for one group.
+        for (packed_in, num_groups, with_biases, group_size, bits, expected) in [
+            (8, 1, true, 64, 4, "affine"),
+            (8, 1, false, 64, 4, "mxfp4"),
+            (8, 4, false, 16, 4, "nvfp4"),
+            (16, 1, false, 64, 8, "mxfp8"),
+        ] {
+            let weights = mla_quantized_weights("embed_q", packed_in, num_groups, with_biases);
+            let loaded = QuantizedMultiLinear::from_weights(&weights, "embed_q", group_size, bits)
+                .unwrap_or_else(|e| {
+                    panic!("an honest {expected} embed_q must load, got: {e}");
+                });
+            assert_eq!(
+                loaded.mode, expected,
+                "a plane with biases present = {with_biases} at {group_size} / {bits} is {expected}"
+            );
+            assert_eq!(loaded.biases.is_some(), with_biases);
+            // The precondition every kernel call on this layer hands MLX: the
+            // stored mode and the bias pointer derived from `self.biases` must
+            // agree, or the call aborts the process.
+            validate_quantization_biases(loaded.mode, loaded.biases.is_some()).unwrap_or_else(
+                |e| panic!("the stored mode contradicts the plane it was inferred from: {e}"),
+            );
+        }
+
+        // The four MLA families reach the layer through the enum, so pin the
+        // mode on that path too rather than only on the inner loader.
+        let block_float = mla_quantized_weights("unembed_out", 8, 1, false);
+        match MultiLinear::from_weights(&block_float, "unembed_out", 64, 4)
+            .expect("a block-float unembed_out must load as quantized")
+        {
+            MultiLinear::Quantized(q) => assert_eq!(q.mode, "mxfp4"),
+            MultiLinear::Regular(_) => {
+                panic!("a plane carrying .scales is quantized even with no .biases")
+            }
+        }
+
+        // A dense projection carries no packing and no mode, so it must not be
+        // gated on either.
+        let mut regular = crate::weights::WeightMap::new();
+        regular.insert("unembed_out.weight".to_string(), mla_plane(8));
+        match MultiLinear::from_weights(&regular, "unembed_out", 64, 4)
+            .expect("a dense unembed_out must still load")
+        {
+            MultiLinear::Regular(_) => {}
+            MultiLinear::Quantized(_) => panic!("a plane with no .scales is not quantized"),
+        }
+    }
+
+    /// The contradiction this loader must never store is a mode that disagrees
+    /// with the `.biases` plane, which MLX refuses inside `quantized_matmul`
+    /// and `dequantize` alike.
+    ///
+    /// Stated honestly: the `validate_quantization_biases` call in
+    /// `from_weights` cannot fire while the inference above it stands, because
+    /// the mode is derived from the same `biases.is_some()` it re-checks one
+    /// line later. It is not decorative either. Regressing that inference back
+    /// to a hardcoded `"affine"` makes this test fail on the load `Result`,
+    /// which is the guard doing its job: the contradiction is refused at load
+    /// instead of aborting the process at the first MLA forward. The rest of
+    /// what is testable, and what actually protects the four families, is that
+    /// the pairing holds for every declared pair the loader accepts and that
+    /// the guard rejects both directions. This is the same position
+    /// `kimi_linear`'s private `MultiLinear` records for its copy of the call
+    /// (issue #1026).
+    #[test]
+    fn multi_linear_loader_cannot_store_a_mode_that_contradicts_its_planes() {
+        // Real export pairs, plus a group_size 16 to reach the nvfp4 arm, each
+        // with the packed width and group count that pair actually implies.
+        for (packed_in, num_groups, group_size, bits) in [
+            (8, 4, 16, 4),
+            (8, 2, 32, 4),
+            (8, 1, 64, 4),
+            (16, 1, 128, 4),
+            (16, 1, 64, 8),
+            (12, 1, 64, 6),
+        ] {
+            for with_biases in [true, false] {
+                let weights = mla_quantized_weights("embed_q", packed_in, num_groups, with_biases);
+                let loaded =
+                    QuantizedMultiLinear::from_weights(&weights, "embed_q", group_size, bits)
+                        .unwrap_or_else(|e| panic!("{group_size} / {bits} is a real export: {e}"));
+                validate_quantization_biases(loaded.mode, loaded.biases.is_some()).unwrap_or_else(
+                    |e| {
+                        panic!(
+                            "at {group_size} / {bits} with biases present = {with_biases} the \
+                             loader stored {:?}, which MLX aborts on: {e}",
+                            loaded.mode
+                        )
+                    },
+                );
+            }
+        }
+
+        // Both directions of the contradiction, so the call in `from_weights`
+        // is holding a guard that can say no rather than a tautology.
+        let err = validate_quantization_biases("affine", false)
+            .expect_err("affine over a plane with no zero points aborts in MLX");
+        assert!(err.contains("biases"), "unhelpful error: {err}");
+        let err = validate_quantization_biases("mxfp4", true)
+            .expect_err("mxfp4 over a .biases-carrying plane aborts in MLX");
+        assert!(err.contains("biases"), "unhelpful error: {err}");
+
+        // The hand-built constructor derives the mode the same way, so it
+        // cannot be the one remaining way to build a contradicting layer.
+        // nvfp4's group_size 16 splits the same 8-uint32 packed width into
+        // four groups, so the scales plane is four wide here.
+        let hand_built = QuantizedMultiLinear::new(mla_plane(8), mla_plane(4), None, 16, 4)
+            .expect("a block-float plane must still build by hand");
+        assert_eq!(hand_built.mode, "nvfp4");
+        validate_quantization_biases(hand_built.mode, hand_built.biases.is_some())
+            .expect("the hand-built layer must satisfy the same precondition as the loaded one");
     }
 
     /// The MLA `kv_b_proj` pair is solved from shapes rather than declared, and

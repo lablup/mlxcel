@@ -251,6 +251,18 @@ spells the embedding prefix more than one way, resolve the prefix with a
 `contains_key` probe and pass it to `UnifiedEmbedding::from_weights`; do not
 hand-build the layer.
 
+`QuantizedMultiLinear::new` is still on the list, and the difference is worth
+being precise about, because the two constructors looked alike. The embedding
+one was removed for a signature that forced the defect: requiring a `biases`
+argument meant a block-float caller could not describe its own checkpoint. The
+MLA one takes `Option<biases>` and derives the mode from it with the same
+`infer_quantization_mode` call the loader uses (issue #1028), so it can describe
+every plane layout the loader can and cannot store a mode that contradicts them.
+Both entry points also bound the declared `group_size` / `bits` pair, which
+matters more here than elsewhere because this is the one shared quantized loader
+that stores the declared pair verbatim rather than reconciling it against the
+tensor shapes.
+
 What you must do yourself:
 
 - A **family-local quantized expert type**: call
