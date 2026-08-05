@@ -45,6 +45,7 @@ pub mod bitnet;
 pub mod cohere;
 pub mod cohere2;
 pub mod cohere2_moe;
+pub mod dbrx;
 pub mod deepseek;
 pub mod deepseek_v2;
 pub mod deepseek_v3;
@@ -154,6 +155,7 @@ pub use bitnet::BitNetModel;
 pub use cohere::CohereModel;
 pub use cohere2::Cohere2Model;
 pub use cohere2_moe::Cohere2MoeModel;
+pub use dbrx::DbrxModel;
 pub use deepseek::DeepSeekModel;
 pub use deepseek_v2::DeepSeekV2Model;
 pub use deepseek_v3::DeepSeekV3Model;
@@ -338,6 +340,7 @@ pub enum ModelType {
     Mixtral,
     Qwen2Moe,
     OLMoE,
+    Dbrx, // Databricks DBRX (fused clipped QKV, norm-attn-norm, w1/v1/w2 experts)
 
     // DeepSeek family
     DeepSeek,
@@ -546,6 +549,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Mixtral,
     ModelType::Qwen2Moe,
     ModelType::OLMoE,
+    ModelType::Dbrx,
     // DeepSeek family
     ModelType::DeepSeek,
     ModelType::DeepSeekV2,
@@ -812,6 +816,7 @@ impl ModelType {
                 "MiniMax VLM",
             ),
             ModelType::Mixtral => ("Mixtral (MoE)", "MoE (other)"),
+            ModelType::Dbrx => ("Databricks DBRX (MoE)", "MoE (other)"),
             ModelType::KimiLinear => ("Kimi Linear (MLA + GatedDeltaNet hybrid)", "MoE (other)"),
             ModelType::KimiVL => ("Kimi-VL (MoonViT + DeepSeek-V3 MoE)", "Kimi VLM"),
             ModelType::KimiK25 => ("Kimi-VL 2.5 (MoonViT + DeepSeek-V3 MoE)", "Kimi VLM"),
@@ -1051,6 +1056,7 @@ mod metadata_tests {
             Mixtral,
             Qwen2Moe,
             OLMoE,
+            Dbrx,
             DeepSeek,
             DeepSeekV2,
             DeepSeekV3,

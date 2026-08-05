@@ -173,6 +173,15 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::MiniMaxM3 => "minimax_m3",
         ModelType::MiniMaxM3VL => "minimax_m3",
         ModelType::Mixtral => "mixtral",
+        // DBRX is not TP-enabled and this arm only keeps the dispatch table
+        // total; the refusal comes from `validate_supported_runtime`, whose
+        // `runtime_kind_for` match has no `ModelType::Dbrx` arm and so returns
+        // `None`. Sharding it would need rules of its own: the fused `Wqkv`
+        // packs 48 query heads and 8 KV heads into one tensor, so a row split at
+        // any offset a generic plan would pick lands inside the Q block instead
+        // of between whole heads, and the `clip_qkv` clamp has to be applied to
+        // the rank-local slice before the split rather than after the gather.
+        ModelType::Dbrx => "dbrx",
         ModelType::Qwen2Moe => "qwen2_moe",
         ModelType::OLMoE => "olmoe",
         ModelType::DeepSeek => "deepseek",

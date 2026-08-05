@@ -163,6 +163,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "minimax_m3_vl" => Ok(ModelType::MiniMaxM3VL),
         "gpt_oss" => Ok(ModelType::GptOss),
         "mixtral" => Ok(ModelType::Mixtral),
+        "dbrx" => Ok(ModelType::Dbrx),
         "olmoe" => Ok(ModelType::OLMoE),
         "deepseek" => Ok(ModelType::DeepSeek),
         "deepseek_v2" => Ok(ModelType::DeepSeekV2),
