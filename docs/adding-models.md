@@ -135,6 +135,49 @@ be possible at first, but the implementation should still prove that:
 If later a reference implementation appears, add a follow-up comparison against
 that implementation and tighten the tests or benchmark notes accordingly.
 
+## Labelling a Model Issue
+
+Model-support issues carry three orthogonal labels beyond the usual
+`type:` / `priority:` / `area:` set. They exist so that "what do we support, and
+what can we actually test here?" is a label query rather than an archaeology
+exercise.
+
+**`modelsize:`** is measured on the **smallest publicly available checkpoint at
+the lowest published quantization**, by on-disk size, which for MLX is close to
+resident memory. It describes the model, not the machine, so it does not need
+revisiting when the development hardware changes.
+
+| Label | Size | Meaning |
+|-------|------|---------|
+| `modelsize:small` | ≤ 10 GB | Fast iteration; safe to use in a smoke test |
+| `modelsize:medium` | 10 to 50 GB | Comfortable on a 128 GB box |
+| `modelsize:large` | 50 to 100 GB | Runs, but dominates the machine; serialize other work |
+| `modelsize:xlarge` | > 100 GB | Exceeds a 128 GB box; needs bigger hardware |
+
+`modelsize:large` is deliberately not a blocker: DBRX is 70 GB and was validated
+token-exact on the 128 GB development machine. When a model genuinely cannot be
+validated on available hardware, say so with `status:blocked` and record the
+reason in the issue body. Keeping the two apart means a hardware upgrade
+re-opens work by clearing `status:blocked`, without relabelling every model.
+
+**`modeltype:`** is the modality: `text`, `vlm`, `audio`, `omni`.
+
+**`arch:`** is the structural family, which is what actually predicts porting
+effort and code reuse:
+
+| Label | Covers |
+|-------|--------|
+| `arch:dense` | Dense transformer decoder |
+| `arch:moe` | Sparse mixture-of-experts decoder |
+| `arch:hybrid` | Mixed attention stack: linear/sliding/full interleave, or attention + SSM |
+| `arch:ssm` | State-space or recurrent (Mamba, RWKV) |
+
+`arch:hybrid` wins over `arch:moe` when a model is both, because the hybrid
+cache is the harder half of the port: it forces the
+`ModelOwnedSequenceState<Cache>` path rather than the simple `LanguageModel`
+cache path. AFMoE and MiMo v2 Flash are MoE models labelled `arch:hybrid` for
+exactly this reason.
+
 ## Text Model Checklist
 
 1. Add the implementation file under `src/models/`.
