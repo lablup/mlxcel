@@ -10,9 +10,21 @@
 // generation (bisected to a5a684d / #3792; verified coherent at 1700b39). The
 // upstream fast kernel is not restored here because its small-axis path is the
 // broken one; this overlay keeps the MLX pin at the latest commit and only
-// swaps this single kernel file back to the last-known-good version. Re-sync or
-// drop this overlay once the upstream small-axis RMSNorm bug is fixed (report
-// filed as a follow-up). The helpers this file relies on (load_vector,
+// swaps this single kernel file back to the last-known-good version.
+//
+// CORRECTION (issue #830): re-verifying that bisect against real upstream
+// source inverted it, so the paragraph above records what #824 concluded, not
+// what is true. The reverted kernel below is the broken one. At block_dim == 64
+// it launches groups_per_block == 2, so a 128-thread block runs a two-level
+// reduction whose shared scratch is sized for 64 threads: it indexes two floats
+// past the end of `temp` and folds in partials belonging to the other row that
+// shares the block. #3792 fixed exactly that (and added a static_assert
+// pinning the invariant), and the pinned #3850 forward is correct on this axis.
+// Measurements, the compute-sanitizer trace and the removal plan are in
+// docs/upstream/mlx-cuda-rmsnorm-small-axis-regression.md. Removal condition:
+// nothing needs to land upstream first, so delete this overlay and re-verify
+// that deepseek-v2-lite stays coherent on the upstream fast kernel, recovering
+// the #3850 speedup. The helpers this file relies on (load_vector,
 // BlockBroadcastReduce, dispatch_float_types, contiguous_copy_gpu) are
 // unchanged between 1700b39 and the pinned commit, so it compiles as-is.
 //
