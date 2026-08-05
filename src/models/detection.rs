@@ -211,6 +211,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "mimo" => Ok(ModelType::MiMo),
         "bailing_moe" => Ok(ModelType::BailingMoe),
         "bailing_moe_linear" => Ok(ModelType::BailingMoeLinear),
+        "afmoe" => Ok(ModelType::Afmoe),
         "apertus" => Ok(ModelType::Apertus),
         "seed_oss" => Ok(ModelType::SeedOss),
         "granite" => Ok(ModelType::Granite),
