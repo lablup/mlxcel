@@ -31,6 +31,11 @@ use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
 use std::path::Path;
 
+#[path = "glm4_moe_lite_sanitize.rs"]
+mod glm4_moe_lite_sanitize;
+
+pub use glm4_moe_lite_sanitize::sanitize_weights;
+
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelArgs {
@@ -861,6 +866,10 @@ impl Glm4MoeLiteModel {
             .map_err(|e| format!("Failed to parse config.json: {}", e))?;
 
         let weights = crate::models::load_text_weights(model_dir, None)?;
+        // Public checkpoints ship `kv_b_proj` and no `embed_q`, so this step is
+        // what makes the canonical layout loadable at all (issue #1029). The
+        // sibling MLA families call their own sanitizer from the same place.
+        let weights = sanitize_weights(weights, &args)?;
         let model = Self::from_weights(&weights, &args)?;
 
         Ok((model, args))
