@@ -278,6 +278,14 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // config through `to_llama3_args`, which is a change to how the runtime
         // builds its config and not something deserializing a key can deliver.
         ModelType::Helium => "helium",
+        // TeleChat3 is not TP-enabled and this arm only keeps the dispatch table
+        // total; the refusal comes from `validate_supported_runtime`, whose
+        // `runtime_kind_for` match has no `ModelType::TeleChat3` arm. The
+        // obstacle is the same one that stops it reusing the llama3 decoder:
+        // the TP runtime parses `config.json` straight into `llama3::ModelArgs`,
+        // which never reads `rope_scaling`, so a sharded TeleChat3 would rotate
+        // at the unscaled base while the single-process path applies YaRN.
+        ModelType::TeleChat3 => "telechat3",
         ModelType::StarCoder2 => "starcoder2",
         ModelType::Mellum => "mellum",
         ModelType::MiniCPM | ModelType::MiniCPMOVLM => "minicpm",

@@ -167,6 +167,7 @@ pub enum LoadedModel {
     GptBigCode(models::GptBigCodeModel),
     GptNeoX(models::GptNeoxModel),
     Helium(models::HeliumModel),
+    TeleChat3(models::TeleChat3Model),
     StarCoder2(models::StarCoder2Model),
     // Mixed full/sliding caches use a wrapper
     Mellum(models::MellumWrapper),
@@ -319,6 +320,7 @@ macro_rules! delegate_language_model {
             LoadedModel::GptBigCode(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::GptNeoX(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Helium(inner) => LanguageModel::$method(inner, $($arg),*),
+            LoadedModel::TeleChat3(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::StarCoder2(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::Mellum(inner) => LanguageModel::$method(inner, $($arg),*),
             LoadedModel::MiniCPM(inner) => LanguageModel::$method(inner, $($arg),*),

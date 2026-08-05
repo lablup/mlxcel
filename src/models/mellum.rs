@@ -177,13 +177,23 @@ pub(crate) struct YarnRope {
 /// Build the YaRN frequencies for a `full_attention` layer from its
 /// `rope_parameters` entry. Returns `None` when the entry is not a YaRN config
 /// (then the layer falls back to a default RoPE).
+///
+/// Used by: Mellum, TeleChat3
+///
+/// The accepted `rope_type` set mirrors upstream's, which groups several
+/// vendor spellings onto one `YarnRoPE`
+/// (<https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/rope_utils.py>
+/// dispatches `"yarn"`, `"deepseek_yarn"` and `"telechat3-yarn"` identically).
+/// A vendor prefix names the checkpoint that produced the config, not a
+/// different algorithm, so rejecting one here would silently drop the scaling
+/// and leave the model rotating at the unscaled base.
 pub(crate) fn compute_yarn_rope(head_dim: usize, params: &serde_json::Value) -> Option<YarnRope> {
     let rope_type = params
         .get("rope_type")
         .or_else(|| params.get("type"))
         .and_then(|v| v.as_str())
         .unwrap_or("default");
-    if rope_type != "yarn" {
+    if !matches!(rope_type, "yarn" | "deepseek_yarn" | "telechat3-yarn") {
         return None;
     }
 

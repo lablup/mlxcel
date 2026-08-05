@@ -138,6 +138,7 @@ pub mod solar_open;
 pub mod stablelm;
 pub mod starcoder2;
 pub mod step3p5;
+pub mod telechat3;
 pub mod whisper;
 pub mod youtu_vl_lm;
 
@@ -253,6 +254,7 @@ pub use solar_open::SolarOpenModel;
 pub use stablelm::StableLMModel;
 pub use starcoder2::StarCoder2Model;
 pub use step3p5::Step3p5Model;
+pub use telechat3::TeleChat3Model;
 pub use whisper::WhisperModel;
 
 pub use kokoro::KokoroModel;
@@ -403,7 +405,8 @@ pub enum ModelType {
     Mellum, // Mellum 2 (JetBrains hybrid-attention MoE code model)
 
     // Other Transformer models
-    Helium, // Kyutai Helium (Llama-shaped dense decoder with traditional RoPE)
+    Helium,    // Kyutai Helium (Llama-shaped dense decoder with traditional RoPE)
+    TeleChat3, // TeleAI TeleChat3 (Llama-shaped dense decoder with YaRN RoPE scaling)
     MiniCPM,
     MiniCPM3,
     StableLM,
@@ -594,6 +597,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Mellum,
     // Other Transformer models
     ModelType::Helium,
+    ModelType::TeleChat3,
     ModelType::MiniCPM,
     ModelType::MiniCPM3,
     ModelType::StableLM,
@@ -861,6 +865,10 @@ impl ModelType {
                 "Kyutai Helium (dense Llama shape, traditional RoPE)",
                 "Specialized",
             ),
+            ModelType::TeleChat3 => (
+                "TeleAI TeleChat3 (dense Llama shape, YaRN RoPE)",
+                "Specialized",
+            ),
             ModelType::StarCoder2 => ("StarCoder 2", "Specialized"),
             ModelType::Mellum => ("Mellum 2 (JetBrains code)", "Specialized"),
             ModelType::StableLM => ("StableLM", "Specialized"),
@@ -1082,6 +1090,7 @@ mod metadata_tests {
             StarCoder2,
             Mellum,
             Helium,
+            TeleChat3,
             MiniCPM,
             MiniCPM3,
             StableLM,
