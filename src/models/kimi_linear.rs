@@ -164,6 +164,11 @@ struct MultiLinear {
     group_size: i32,
     bits: i32,
     is_quantized: bool,
+    /// Quantization mode resolved at load from the planes the checkpoint
+    /// actually ships, never hardcoded. `"affine"` for a `.biases`-carrying
+    /// plane, one of the block-float modes otherwise. See
+    /// [`Self::from_weights`] for why this is not read from `config.json`.
+    mode: &'static str,
 }
 
 impl MultiLinear {
@@ -183,7 +188,7 @@ impl MultiLinear {
                     transpose,
                     self.group_size,
                     self.bits,
-                    "affine",
+                    self.mode,
                 )
             }
         } else if transpose {
@@ -194,6 +199,31 @@ impl MultiLinear {
         }
     }
 
+    /// Load a per-head MLA projection, resolving its quantization mode from the
+    /// planes present rather than assuming affine.
+    ///
+    /// The mode is inferred with
+    /// [`mlxcel_core::layers::infer_quantization_mode`] on `.biases` presence,
+    /// the same rule the shared `UnifiedLinear` / `UnifiedEmbedding` loaders
+    /// use, rather than read from `config.json`: KimiLinear's local
+    /// `Quantization` carries only `group_size` and `bits`, and every other
+    /// layer in this family already infers, so reading a declared mode here
+    /// alone would make one projection disagree with the rest of the model.
+    ///
+    /// Storing `"affine"` unconditionally, as this did, is what MLX's
+    /// `validate_mode_with_type` throws `Biases must be provided for affine
+    /// quantization` on when the plane carries no zero points, and
+    /// `quantized_matmul` crosses the cxx bridge as `UniquePtr<MlxArray>`
+    /// rather than `Result`, so that throw is an uncatchable `std::terminate`
+    /// at the first MLA forward rather than a load error (issue #1026).
+    ///
+    /// That path is not reachable today: `sanitize_weights` always dequantizes
+    /// `kv_b_proj` and inserts `embed_q.weight` / `unembed_out.weight` as dense
+    /// tensors with no `.scales`, and no shipped checkpoint ships those two
+    /// tensors itself, so `is_quantized` is always false here. This is a bound
+    /// on what a future change to that sanitizer can reintroduce, not a live
+    /// fix. `src/models/gpt_oss.rs` `ExpertLinear::from_weights` is the
+    /// in-tree precedent for the shape of it.
     fn from_weights(
         weights: &WeightMap,
         prefix: &str,
@@ -213,12 +243,28 @@ impl MultiLinear {
             .map(|w| mlxcel_core::copy(w));
 
         let is_quantized = scales.is_some();
+        // Inert on the dense `matmul` path, so it must not be resolved (or
+        // enforced) for a projection that carries no packing at all.
+        let mut mode = "affine";
         if is_quantized {
             // KimiLinear keeps a private `MultiLinear` rather than using
             // `mlxcel_core::layers::MultiLinear`, so it does not inherit the
             // bound that loader now carries. The stored pair goes straight to
             // `quantized_matmul` on every MLA forward (issue #958).
             validate_expert_quantization_params(prefix, group_size, bits)?;
+
+            mode = mlxcel_core::layers::infer_quantization_mode(biases.is_some(), group_size, bits);
+            // Consistent by construction with the line above, which keys the
+            // mode on the same `biases.is_some()` this re-checks, so it cannot
+            // fire as written. It is here because it is the assertion that
+            // couples the two helpers: the day the mode comes from anywhere
+            // else (a declared `quantization.mode`, a per-prefix override),
+            // the contradiction is caught at the point the mode is stored
+            // instead of inside `quantized_matmul`, where it is an uncatchable
+            // abort. The same pairing on a genuinely declared mode is
+            // `gpt_oss.rs` `ExpertLinear::from_weights`.
+            mlxcel_core::layers::validate_quantization_biases(mode, biases.is_some())
+                .map_err(|e| format!("{prefix}: {e}"))?;
         }
 
         Ok(Self {
@@ -228,6 +274,7 @@ impl MultiLinear {
             group_size,
             bits,
             is_quantized,
+            mode,
         })
     }
 }
@@ -1278,9 +1325,25 @@ impl KimiLinearModel {
                     let scales = weights
                         .remove(&format!("{}.kv_b_proj.scales", attn_prefix))
                         .unwrap();
-                    let biases = weights
-                        .remove(&format!("{}.kv_b_proj.biases", attn_prefix))
-                        .unwrap();
+                    // `is_quantized` gates on `.scales` alone, and the
+                    // block-float modes (mxfp4 / nvfp4 / mxfp8) ship scales
+                    // with no zero points, so a block-float export satisfies
+                    // that gate and arrives here carrying no `.biases` plane.
+                    // The `.unwrap()` this replaces turned that into a panic
+                    // during sanitization, which in the server takes the
+                    // process down rather than rejecting one model load
+                    // (issue #1026). `dequantize` below is hardcoded
+                    // `"affine"` and so could not decompose such a plane in
+                    // any case; what this buys is a load error naming the key
+                    // that is missing.
+                    let biases_key = format!("{}.kv_b_proj.biases", attn_prefix);
+                    let biases = weights.remove(&biases_key).ok_or_else(|| {
+                        format!(
+                            "layer {l}: kv_b_proj has scales but no biases at key \
+                             `{biases_key}`; the checkpoint may be corrupted or only \
+                             partially converted"
+                        )
+                    })?;
                     // Solve the packed pair from the shapes and bound it
                     // before it reaches `dequantize`. The shared helper checks
                     // each divisor before dividing: `kv_lora_rank` is a config

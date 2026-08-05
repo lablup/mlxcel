@@ -65,8 +65,16 @@ pub fn sanitize_text_weights(
         let w = weights.remove(&kv_b_key).unwrap();
         let w_full = if is_quantized {
             let s = weights.remove(&scales_key).unwrap();
-            // M1: biases are mandatory when scales are present; missing biases
-            // indicate a malformed or partially-converted checkpoint.
+            // `is_quantized` gates on `.scales` alone, and the block-float
+            // modes (mxfp4 / nvfp4 / mxfp8) ship scales with no zero points, so
+            // a block-float export satisfies that gate and arrives here
+            // carrying no `.biases` plane. Taking it with `.unwrap()` would
+            // turn that into a panic during sanitization, which in the server
+            // takes the process down rather than rejecting one model load
+            // (issue #1026 made the other four sanitizers match this site).
+            // `dequantize` below is hardcoded `"affine"` and so could not
+            // decompose such a plane in any case; what this buys is a load
+            // error naming the key that is missing.
             let b_key = format!("{}.kv_b_proj.biases", prefix);
             let b = weights.remove(&b_key).ok_or_else(|| {
                 format!(

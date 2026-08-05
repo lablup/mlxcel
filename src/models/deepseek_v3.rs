@@ -1136,9 +1136,23 @@ impl DeepSeekV3Model {
                 let s = weights
                     .remove(&format!("{}.kv_b_proj.scales", prefix))
                     .unwrap();
-                let b = weights
-                    .remove(&format!("{}.kv_b_proj.biases", prefix))
-                    .unwrap();
+                // `is_quantized` gates on `.scales` alone, and the block-float
+                // modes (mxfp4 / nvfp4 / mxfp8) ship scales with no zero
+                // points, so a block-float export satisfies that gate and
+                // arrives here carrying no `.biases` plane. The `.unwrap()`
+                // this replaces turned that into a panic during sanitization,
+                // which in the server takes the process down rather than
+                // rejecting one model load (issue #1026). `dequantize` below is
+                // hardcoded `"affine"` and so could not decompose such a plane
+                // in any case; what this buys is a load error naming the key
+                // that is missing.
+                let b_key = format!("{}.kv_b_proj.biases", prefix);
+                let b = weights.remove(&b_key).ok_or_else(|| {
+                    format!(
+                        "layer {l}: kv_b_proj has scales but no biases at key `{b_key}`; \
+                         the checkpoint may be corrupted or only partially converted"
+                    )
+                })?;
 
                 // Solve the packed pair from the shapes and bound it before it
                 // reaches `dequantize`. The shared helper checks each divisor
@@ -1978,6 +1992,44 @@ mod tests {
         }
     }
 
+    /// An affine 4-bit `kv_b_proj` for every layer in `cfg`.
+    ///
+    /// Honest geometry at `kv_lora_rank` 16: packed_in * 32 == bits *
+    /// num_groups * group_size (2 * 32 == 4 * 1 * 16). `test_config_dense_direct_q`
+    /// gives num_attention_heads 2, qk_nope_head_dim 4, v_head_dim 4, so
+    /// rows = 2 * 8 = 16.
+    ///
+    /// The packed plane is UINT32, not a float ramp: `dequantize` rejects any
+    /// other packed dtype by throwing, and that throw is the uncatchable abort
+    /// these guards exist to keep out of the forward path.
+    fn affine_kv_b_proj_weights(cfg: &DeepSeekV3Config) -> WeightMap {
+        let heads = cfg.num_attention_heads as i32;
+        let head_dim = (cfg.qk_nope_head_dim + cfg.v_head_dim) as i32;
+        let rows = heads * head_dim;
+        let mut weights = WeightMap::new();
+        for l in 0..cfg.num_hidden_layers {
+            let prefix = format!("model.layers.{l}.self_attn.kv_b_proj");
+            weights.insert(
+                format!("{prefix}.weight"),
+                mlxcel_core::zeros(&[rows, 2], mlxcel_core::dtype::UINT32),
+            );
+            insert_ramp(&mut weights, &format!("{prefix}.scales"), &[rows, 1]);
+            insert_ramp(&mut weights, &format!("{prefix}.biases"), &[rows, 1]);
+        }
+        weights
+    }
+
+    /// The same plane an mxfp4 / nvfp4 / mxfp8 export ships: `.scales`
+    /// present, `.biases` absent, because the block-float modes carry no zero
+    /// points.
+    fn block_float_kv_b_proj_weights(cfg: &DeepSeekV3Config) -> WeightMap {
+        let mut weights = affine_kv_b_proj_weights(cfg);
+        for l in 0..cfg.num_hidden_layers {
+            weights.remove(&format!("model.layers.{l}.self_attn.kv_b_proj.biases"));
+        }
+        weights
+    }
+
     /// The MLA `kv_b_proj` pair `DeepSeekV3Model::sanitize_weights` decomposes
     /// is solved from `kv_lora_rank` and two tensor axes rather than declared,
     /// and every input is untrusted: `kv_lora_rank` comes from `config.json`
@@ -1994,36 +2046,13 @@ mod tests {
     /// a regression fails cleanly here instead of aborting the test binary.
     #[test]
     fn quantized_kv_b_proj_rejects_a_kv_lora_rank_no_packing_can_describe() {
-        // Honest affine 4-bit geometry: packed_in * 32 == bits * num_groups *
-        // group_size (2 * 32 == 4 * 1 * 16). `test_config_dense_direct_q`
-        // gives num_attention_heads 2, qk_nope_head_dim 4, v_head_dim 4, so
-        // rows = 2 * 8 = 16.
-        let build = |cfg: &DeepSeekV3Config| {
-            let heads = cfg.num_attention_heads as i32;
-            let head_dim = (cfg.qk_nope_head_dim + cfg.v_head_dim) as i32;
-            let rows = heads * head_dim;
-            let mut weights = WeightMap::new();
-            for l in 0..cfg.num_hidden_layers {
-                let prefix = format!("model.layers.{l}.self_attn.kv_b_proj");
-                // UINT32, not a float ramp: `dequantize` rejects any other
-                // packed dtype by throwing, and that throw is the uncatchable
-                // abort this guard exists to keep out of the forward path.
-                weights.insert(
-                    format!("{prefix}.weight"),
-                    mlxcel_core::zeros(&[rows, 2], mlxcel_core::dtype::UINT32),
-                );
-                insert_ramp(&mut weights, &format!("{prefix}.scales"), &[rows, 1]);
-                insert_ramp(&mut weights, &format!("{prefix}.biases"), &[rows, 1]);
-            }
-            weights
-        };
-
         // Positive control first, so a guard that rejected every quantized
         // kv_b_proj could not pass this test.
         let mut honest = test_config_dense_direct_q();
         honest.kv_lora_rank = 16;
-        let sanitized = DeepSeekV3Model::sanitize_weights(build(&honest), &honest)
-            .expect("an honest quantized kv_b_proj must still sanitize");
+        let sanitized =
+            DeepSeekV3Model::sanitize_weights(affine_kv_b_proj_weights(&honest), &honest)
+                .expect("an honest quantized kv_b_proj must still sanitize");
         assert!(sanitized.contains_key("model.layers.0.self_attn.embed_q.weight"));
 
         // A zero `kv_lora_rank` is Rust integer division by zero on the very
@@ -2031,18 +2060,20 @@ mod tests {
         // than after.
         let mut zero_rank = honest.clone();
         zero_rank.kv_lora_rank = 0;
-        let err = DeepSeekV3Model::sanitize_weights(build(&zero_rank), &zero_rank)
-            .err()
-            .unwrap_or_else(|| panic!("kv_lora_rank 0 must be refused, not divided by"));
+        let err =
+            DeepSeekV3Model::sanitize_weights(affine_kv_b_proj_weights(&zero_rank), &zero_rank)
+                .err()
+                .unwrap_or_else(|| panic!("kv_lora_rank 0 must be refused, not divided by"));
         assert!(err.contains("kv_lora_rank"), "unhelpful error: {err}");
 
         // A large `kv_lora_rank` truncates the solved bit width to 0, which
         // is the divisor MLX would then divide by.
         let mut wide_rank = honest.clone();
         wide_rank.kv_lora_rank = 4096;
-        let err = DeepSeekV3Model::sanitize_weights(build(&wide_rank), &wide_rank)
-            .err()
-            .unwrap_or_else(|| panic!("a solved bit width of 0 must be refused"));
+        let err =
+            DeepSeekV3Model::sanitize_weights(affine_kv_b_proj_weights(&wide_rank), &wide_rank)
+                .err()
+                .unwrap_or_else(|| panic!("a solved bit width of 0 must be refused"));
         assert!(err.contains("bits"), "unhelpful error: {err}");
 
         // A non-quantized kv_b_proj carries no packing, so the pair is never
@@ -2060,5 +2091,45 @@ mod tests {
         );
         DeepSeekV3Model::sanitize_weights(float_only, &wide_rank)
             .expect("a float kv_b_proj must not be gated on quantization params");
+    }
+
+    /// Issue #1026: `sanitize_weights` decides `kv_b_proj` is quantized on
+    /// `.scales` alone, then used to take `.biases` with `.unwrap()`.
+    ///
+    /// Affine stores zero points; the block-float modes (mxfp4 / nvfp4 /
+    /// mxfp8) do not, which is exactly what `infer_quantization_mode` keys on.
+    /// A block-float `kv_b_proj` therefore satisfies the `.scales` gate and
+    /// arrives at the `.biases` removal with nothing to take, and the
+    /// `.unwrap()` made that a panic during weight sanitization. In the server
+    /// that takes the process down rather than rejecting one model load, which
+    /// is strictly worse than the load error it should be.
+    ///
+    /// The decomposition still dequantizes as `"affine"`, so a genuine
+    /// block-float `kv_b_proj` is not supported either way: what this pins is
+    /// that it is refused by name instead of unwinding. The assertion is on
+    /// the returned `Result` and no forward pass runs, so a regression fails
+    /// cleanly here.
+    #[test]
+    fn quantized_kv_b_proj_rejects_scales_with_no_biases() {
+        let mut cfg = test_config_dense_direct_q();
+        cfg.kv_lora_rank = 16;
+
+        // Positive control first, so a check that rejected every quantized
+        // kv_b_proj could not pass this test.
+        let sanitized = DeepSeekV3Model::sanitize_weights(affine_kv_b_proj_weights(&cfg), &cfg)
+            .expect("a kv_b_proj carrying both planes must still sanitize");
+        assert!(sanitized.contains_key("model.layers.0.self_attn.embed_q.weight"));
+
+        let err = DeepSeekV3Model::sanitize_weights(block_float_kv_b_proj_weights(&cfg), &cfg)
+            .err()
+            .expect("scales with no biases must be refused at load, not unwrapped");
+        assert!(
+            err.contains("model.layers.0.self_attn.kv_b_proj.biases"),
+            "the error must name the key that is missing, got: {err}"
+        );
+        assert!(
+            err.contains("scales but no biases"),
+            "the wording must match the other four MLA sanitizers, got: {err}"
+        );
     }
 }

@@ -918,9 +918,23 @@ impl DeepSeekV32Model {
                 let s = weights
                     .remove(&format!("{}.kv_b_proj.scales", prefix))
                     .unwrap();
-                let b = weights
-                    .remove(&format!("{}.kv_b_proj.biases", prefix))
-                    .unwrap();
+                // `is_quantized` gates on `.scales` alone, and the block-float
+                // modes (mxfp4 / nvfp4 / mxfp8) ship scales with no zero
+                // points, so a block-float export satisfies that gate and
+                // arrives here carrying no `.biases` plane. The `.unwrap()`
+                // this replaces turned that into a panic during sanitization,
+                // which in the server takes the process down rather than
+                // rejecting one model load (issue #1026). `dequantize` below is
+                // hardcoded `"affine"` and so could not decompose such a plane
+                // in any case; what this buys is a load error naming the key
+                // that is missing.
+                let b_key = format!("{}.kv_b_proj.biases", prefix);
+                let b = weights.remove(&b_key).ok_or_else(|| {
+                    format!(
+                        "layer {l}: kv_b_proj has scales but no biases at key `{b_key}`; \
+                         the checkpoint may be corrupted or only partially converted"
+                    )
+                })?;
                 // Solve the packed pair from the shapes and bound it before it
                 // reaches `dequantize`. The shared helper checks each divisor
                 // before dividing: `kv_lora_rank` is a config field and the
