@@ -208,6 +208,14 @@ pub fn apply_metal_ops_per_buffer_default() {
 /// (any value) always wins (see [`apply_cuda_graph_cache_default`]). The variable
 /// is read only by MLX's CUDA backend, so it is a harmless no-op when the runtime
 /// device is CPU.
+///
+/// Tracking (issue #821): the upstream behavior is written up in
+/// `docs/upstream/mlx-cuda-graph-cache-lifetime-miss-abort.md`. Raising the cap
+/// only buys a proportionally larger lifetime budget, so it is a delay, not a
+/// fix. Removal condition: once an upstream fix lands that stops punishing a
+/// large lifetime working set (a windowed miss rate, or a non-fatal report) and
+/// the MLX pin in `src/lib/mlx-cpp/CMakeLists.txt` moves past it, this default
+/// can be lowered back toward MLX's own 400 or dropped entirely.
 #[must_use]
 pub fn cuda_graph_cache_default() -> Option<u32> {
     #[cfg(feature = "cuda")]
