@@ -219,6 +219,10 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // `runtime_kind_for` match has no arm for `ModelType::BailingMoe` and so
         // returns `None`; this arm only keeps the dispatch table total.
         ModelType::BailingMoe => "bailing_moe",
+        // Same refusal as `BailingMoe`, plus a second reason: the linear layers
+        // carry a recurrent state rather than a KV cache, which the generic
+        // transformer plan has no shard rule for at all.
+        ModelType::BailingMoeLinear => "bailing_moe_linear",
         ModelType::Apertus => "apertus",
         ModelType::SeedOss => "seed_oss",
         ModelType::Granite => "granite",
