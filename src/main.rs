@@ -1905,6 +1905,7 @@ const FAMILY_ORDER: &[&str] = &[
     "Hunyuan",
     "Bailing",
     "Arcee",
+    "Klear",
     "Granite",
     "ExaOne",
     "Solar",
