@@ -851,7 +851,7 @@ pub(crate) fn dim_eq(dim: i32, expected: usize) -> bool {
 /// `std::terminate` at the first forward pass. The reconstruction is shared with
 /// the dense projections via `mlxcel_core::layers::validate_quantized_packing`.
 ///
-/// Used by: BailingMoe, Gpt2, GptBigCode, GptNeoX
+/// Used by: BailingMoe, Gpt2, GptBigCode, GptNeoX, Mamba, Mamba2
 pub(crate) fn validate_embedding_table(
     table: &UnifiedEmbedding,
     key: &str,

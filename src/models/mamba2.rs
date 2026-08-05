@@ -25,6 +25,7 @@ use std::path::Path;
 
 use super::model_owned::ModelOwnedSequenceState;
 use super::recurrent_snapshot::{push_optional, restore_optional};
+use crate::models::gpt2::validate_embedding_table;
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
@@ -755,36 +756,50 @@ impl Mamba2Model {
         let group_size = config.group_size();
         let bits = config.bits();
 
-        // Build embeddings (auto-detect quantization)
-        let embed_weight = weights
-            .remove("backbone.embeddings.weight")
-            .or_else(|| weights.remove("model.embed_tokens.weight"))
-            .ok_or("Missing embedding weight")?;
-        let embed_scales = weights
-            .remove("backbone.embeddings.scales")
-            .or_else(|| weights.remove("model.embed_tokens.scales"));
-        let embed_biases = weights
-            .remove("backbone.embeddings.biases")
-            .or_else(|| weights.remove("model.embed_tokens.biases"));
+        // Build embeddings (auto-detect quantization).
+        //
+        // The table ships under either the `backbone.embeddings` spelling (the
+        // original mamba export) or the `model.embed_tokens` one (the
+        // transformers conversion), which is the only thing the shared loader
+        // cannot do on its own: resolve the prefix here, then hand it the whole
+        // map. This used to hand-build the layer from three `remove` calls
+        // instead, which cost it both of the guards below.
+        //
+        // The quantized branch is gated on `.scales` alone, not on `.scales`
+        // and `.biases`. Affine stores zero points; the block-float modes
+        // (mxfp4 / nvfp4 / mxfp8) carry none by design, so requiring both sent
+        // every block-float embedding down the non-quantized branch and built a
+        // plain `Embedding` over the raw packed uint32 table, whose lookup is a
+        // bare `take` with no dequantization (issue #976).
+        // `UnifiedEmbedding::from_weights` infers the mode from bias presence
+        // for exactly that reason, and reaching `QuantizedEmbedding` through it
+        // also runs `reconcile_quantization_layout` and therefore
+        // `validate_quantization_params`, which is what refuses a declared
+        // `"bits": 0` at load rather than dividing by it inside
+        // `quantized_embedding` at the first token (issue #958).
+        let embed_prefix = ["backbone.embeddings", "model.embed_tokens"]
+            .into_iter()
+            .find(|prefix| weights.contains_key(&format!("{prefix}.weight")))
+            .ok_or(
+                "Missing embedding weight (tried backbone.embeddings.weight and \
+                 model.embed_tokens.weight)",
+            )?;
+        let embeddings = UnifiedEmbedding::from_weights(&weights, embed_prefix, group_size, bits)?;
 
-        // The table is taken out of the map by `remove`, under either the
-        // `backbone.embeddings` or the `model.embed_tokens` spelling, so this
-        // cannot go through the single-prefix `UnifiedEmbedding::from_weights`
-        // and therefore never reaches `reconcile_quantization_layout`. The bound
-        // that loader carries lives in `QuantizedEmbedding::new` instead (issue
-        // #958); without it a declared `"bits": 0` was stored here and divided
-        // by inside `quantized_embedding` at the first token.
-        let embeddings = if let (Some(scales), Some(biases)) = (embed_scales, embed_biases) {
-            UnifiedEmbedding::Quantized(mlxcel_core::layers::QuantizedEmbedding::new(
-                embed_weight,
-                scales,
-                biases,
-                group_size,
-                bits,
-            )?)
-        } else {
-            UnifiedEmbedding::Regular(mlxcel_core::layers::Embedding::new(embed_weight))
-        };
+        // The shared table guard four other families already run. It is what
+        // makes a mis-loaded embedding a load error instead of a first-token
+        // abort: a packed table taken for a float one has a last axis of
+        // `hidden_size * bits / 32` rather than `hidden_size`, and a config that
+        // overstates `vocab_size` indexes past the end of a gather that does not
+        // range-check a positive index.
+        validate_embedding_table(
+            &embeddings,
+            embed_prefix,
+            config.vocab_size,
+            "vocab_size",
+            config.hidden_size,
+            "hidden_size",
+        )?;
 
         // Build layers
         let mut layers = Vec::with_capacity(config.num_hidden_layers);

@@ -238,9 +238,18 @@ What already carries the bound, so you inherit it for free:
 | `reconcile_quantization_layout` | every `UnifiedLinear` / `UnifiedEmbedding` |
 | `SwitchLinear::from_stacked_parts` | MoE experts via the shared `switch_layers` loader |
 | `QuantizedMultiLinear::{new, from_weights}` | MLA `embed_q` / `unembed_out` |
-| `QuantizedEmbedding::new` | hand-built embeddings that skip the map loader |
 | `FusedQKVLinear::from_weights_separate_with_mode` | fused QKV projections |
 | `infer_mla_quantization_params` | the MLA `kv_b_proj` decomposition in `sanitize_weights` |
+
+There is deliberately no hand-built `QuantizedEmbedding` constructor on that
+list any more. One existed for Mamba / Mamba2, which resolve their table under
+two possible prefixes and so looked unable to address the single-prefix map
+loader. It hardcoded `mode: "affine"` and required a `biases` argument, and that
+is exactly how those two families came to treat a block-float embedding
+(`.scales`, no `.biases`) as non-quantized (issue #976). If your checkpoint
+spells the embedding prefix more than one way, resolve the prefix with a
+`contains_key` probe and pass it to `UnifiedEmbedding::from_weights`; do not
+hand-build the layer.
 
 What you must do yourself:
 
