@@ -36,6 +36,16 @@ pub struct Glm4MoeStageExecutor {
     model: TransformerStageModel<Glm4MoeStageLayer>,
 }
 
+/// Stage-local executor for the MLA variant of the GLM4 family.
+///
+/// Unlike `Glm4StageExecutor` and `Glm4MoeStageExecutor`, this one has to
+/// sanitize the weight map before loading: every published `glm4_moe_lite`
+/// checkpoint stores the MLA up-projection as a single `self_attn.kv_b_proj`
+/// rather than the decomposed `embed_q` / `unembed_out` pair that
+/// `models::glm4_moe_lite::TransformerBlock::from_weights` reads
+/// unconditionally (issue #1029). The split runs on the full weight map,
+/// before the stage filter trims it, the same way `DeepSeekV3StageExecutor`
+/// and `GlmMoeDsaStageExecutor` order it.
 pub struct Glm4MoeLiteStageExecutor {
     model: TransformerStageModel<Glm4MoeLiteStageLayer>,
 }
@@ -47,6 +57,7 @@ impl Glm4StageExecutor {
                 model_dir,
                 filter,
                 stage_index,
+                no_sanitize,
                 models::glm4::TransformerBlock::from_weights,
                 |args: &models::glm4::ModelArgs| args.group_size(),
                 |args: &models::glm4::ModelArgs| args.bits(),
@@ -65,6 +76,7 @@ impl Glm4MoeStageExecutor {
                 model_dir,
                 filter,
                 stage_index,
+                no_sanitize,
                 models::glm4_moe::TransformerBlock::from_weights,
                 |args: &models::glm4_moe::ModelArgs| args.group_size(),
                 |args: &models::glm4_moe::ModelArgs| args.bits(),
@@ -83,6 +95,7 @@ impl Glm4MoeLiteStageExecutor {
                 model_dir,
                 filter,
                 stage_index,
+                models::glm4_moe_lite::sanitize_weights,
                 models::glm4_moe_lite::TransformerBlock::from_weights,
                 |args: &models::glm4_moe_lite::ModelArgs| args.group_size(),
                 |args: &models::glm4_moe_lite::ModelArgs| args.bits(),
@@ -186,10 +199,29 @@ impl TransformerStageLayer for Glm4MoeLiteStageLayer {
     }
 }
 
-fn load_glm4_family_stage_model<A, B, L, BuildLayer, GroupSize, Bits, RmsEps, TieEmbeddings, Wrap>(
+/// Glm4 and Glm4Moe store their attention projections in the layout
+/// `TransformerBlock::from_weights` already reads, so their stage load needs
+/// no weight surgery. Only the MLA variant does.
+fn no_sanitize<A>(weights: WeightMap, _args: &A) -> Result<WeightMap, String> {
+    Ok(weights)
+}
+
+fn load_glm4_family_stage_model<
+    A,
+    B,
+    L,
+    Sanitize,
+    BuildLayer,
+    GroupSize,
+    Bits,
+    RmsEps,
+    TieEmbeddings,
+    Wrap,
+>(
     model_dir: &Path,
     filter: &LayerFilter,
     stage_index: usize,
+    sanitize: Sanitize,
     build_layer: BuildLayer,
     group_size: GroupSize,
     bits: Bits,
@@ -200,6 +232,7 @@ fn load_glm4_family_stage_model<A, B, L, BuildLayer, GroupSize, Bits, RmsEps, Ti
 where
     A: DeserializeOwned,
     L: TransformerStageLayer,
+    Sanitize: Fn(WeightMap, &A) -> Result<WeightMap, String>,
     BuildLayer: Fn(&WeightMap, &A, usize) -> Result<B, String>,
     GroupSize: Fn(&A) -> i32,
     Bits: Fn(&A) -> i32,
@@ -208,7 +241,14 @@ where
     Wrap: Fn(B) -> L,
 {
     let args: A = parse_model_args(model_dir)?;
-    let mut weights = models::load_text_weights(model_dir, None).map_err(anyhow::Error::msg)?;
+    // Sanitation runs on the full weight map, before `filter_weight_map` trims
+    // it. Only the MLA variant of this family needs it, and it needs this
+    // ordering: `glm4_moe_lite` checkpoints ship `self_attn.kv_b_proj` instead
+    // of the `embed_q` / `unembed_out` pair the block loads (issue #1029), and
+    // the stage filter would drop the `kv_b_proj` keys of every out-of-range
+    // layer before the split could consume them.
+    let weights = models::load_text_weights(model_dir, None).map_err(anyhow::Error::msg)?;
+    let mut weights = sanitize(weights, &args).map_err(anyhow::Error::msg)?;
 
     let mut effective_filter = filter.clone();
     if tie_embeddings(&args) && filter.has_lm_head {

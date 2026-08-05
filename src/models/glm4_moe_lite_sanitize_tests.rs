@@ -33,11 +33,19 @@ const HEADS: i32 = 2;
 const KV_LORA_RANK: i32 = 16;
 const QK_NOPE: i32 = 4;
 const QK_ROPE: i32 = 2;
-const V_HEAD: i32 = 4;
+/// Deliberately different from [`QK_NOPE`]. While the two half-widths were
+/// equal, `[HEADS, KV_LORA_RANK, QK_NOPE]` and `[HEADS, V_HEAD, KV_LORA_RANK]`
+/// stayed valid with the nope and v halves swapped, so every shape assertion in
+/// this file passed whichever half each output was built from.
+const V_HEAD: i32 = 6;
 
 /// `[num_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank]`, the layout
 /// every public `glm4_moe_lite` checkpoint stores `kv_b_proj` in.
 const KV_B_ROWS: i32 = HEADS * (QK_NOPE + V_HEAD);
+
+/// The per-head row block of `kv_b_proj`: `qk_nope_head_dim` rows of the nope
+/// half first, then `v_head_dim` rows of the v half.
+const HEAD_DIM: i32 = QK_NOPE + V_HEAD;
 
 const ATTN: &str = "model.layers.0.self_attn";
 
@@ -132,6 +140,20 @@ fn float_kv_b_proj_checkpoint() -> WeightMap {
     weights
 }
 
+/// The same float layout, but with `kv_b_proj` filled with a `0, 1, 2, ...`
+/// ramp in row-major order over `[KV_B_ROWS, KV_LORA_RANK]`, so every element
+/// carries its own flat source index and the decomposition's element mapping
+/// becomes observable. The zero-filled fixtures above cannot show it.
+fn ramp_kv_b_proj_checkpoint() -> (WeightMap, Vec<f32>) {
+    let kv_b: Vec<f32> = (0..KV_B_ROWS * KV_LORA_RANK).map(|i| i as f32).collect();
+    let mut weights = checkpoint_without_the_mla_pair();
+    weights.insert(
+        format!("{ATTN}.kv_b_proj.weight"),
+        mlxcel_core::from_slice_f32(&kv_b, &[KV_B_ROWS, KV_LORA_RANK]),
+    );
+    (weights, kv_b)
+}
+
 /// An affine 4-bit `kv_b_proj`. The geometry is honest: `packed_in * 32 == bits
 /// * num_groups * group_size` (2 * 32 == 4 * 1 * 16) against `kv_lora_rank` 16,
 /// which is what `infer_mla_quantization_params` solves the pair from.
@@ -176,6 +198,18 @@ fn predecomposed_checkpoint() -> WeightMap {
 
 fn shape_of(weights: &WeightMap, key: &str) -> Vec<i32> {
     mlxcel_core::array_shape(weights.get(key).unwrap_or_else(|| panic!("missing {key}")))
+}
+
+/// Read an array back as flat row-major `f32`. Reading values out over the cxx
+/// bridge is safe in a way a forward pass is not: it neither reshapes nor
+/// matmuls, so there is no C++ throw to abort the test binary.
+fn read_f32(arr: &MlxArray) -> Vec<f32> {
+    let a = mlxcel_core::astype(arr, mlxcel_core::dtype::FLOAT32);
+    mlxcel_core::eval(&a);
+    mlxcel_core::array_to_raw_bytes(&a)
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
 }
 
 /// Issue #1029: `glm4_moe_lite` had no `sanitize_weights` and no `kv_b_proj`
@@ -340,4 +374,75 @@ fn sanitize_rejects_a_kv_b_proj_that_disagrees_with_the_config() {
         err.contains(&format!("[{KV_B_ROWS}, {KV_LORA_RANK}]")),
         "the error must name the shape the config describes, got: {err}"
     );
+}
+
+/// Pins the element mapping, not just the shapes: which half of `kv_b_proj`
+/// each output is built from, and which axis order it lands in.
+///
+/// Every other assertion in this file is blind to both. Shapes cannot catch a
+/// swapped nope / v half once the two half-widths are told apart only by
+/// [`QK_NOPE`] and [`V_HEAD`], and cannot catch a wrong reshape or transpose
+/// axis order at all, so the ramp fixture is what makes either failure
+/// observable.
+///
+/// This matters more than a load error would. A decomposition that picks the
+/// wrong half or the wrong axis order still produces tensors of the right
+/// shape, so the model loads, runs, and emits plausible text built on weights
+/// that mean something else. A missing `embed_q` at least stops at the loader.
+///
+/// The two expectations come from the HF definition: `kv_b_proj =
+/// nn.Linear(kv_lora_rank, num_heads * (qk_nope_head_dim + v_head_dim))`, so
+/// the stored `weight` is `[num_heads * head_dim, kv_lora_rank]` row-major and
+/// head-major, and within each head the `qk_nope` rows precede the `v_head`
+/// ones (`expand_kv` views `(..., -1, qk_nope + v_head)` then splits on the
+/// last axis). `embed_q` is the nope half transposed; `unembed_out` is the v
+/// half as stored.
+#[test]
+fn sanitize_splits_the_halves_in_the_order_the_reference_layout_stores_them() {
+    let args = tiny_config();
+    let (weights, kv_b) = ramp_kv_b_proj_checkpoint();
+
+    let sanitized = sanitize_weights(weights, &args).expect("a float kv_b_proj must decompose");
+
+    let embed_q = read_f32(
+        sanitized
+            .get(&format!("{ATTN}.embed_q.weight"))
+            .expect("embed_q"),
+    );
+    let unembed_out = read_f32(
+        sanitized
+            .get(&format!("{ATTN}.unembed_out.weight"))
+            .expect("unembed_out"),
+    );
+    assert_eq!(embed_q.len(), (HEADS * KV_LORA_RANK * QK_NOPE) as usize);
+    assert_eq!(unembed_out.len(), (HEADS * V_HEAD * KV_LORA_RANK) as usize);
+
+    for h in 0..HEADS {
+        // embed_q[h][r][c] is the nope row `c` of head `h`, column `r`: the
+        // last two axes of the nope half swapped.
+        for r in 0..KV_LORA_RANK {
+            for c in 0..QK_NOPE {
+                let got = embed_q[((h * KV_LORA_RANK + r) * QK_NOPE + c) as usize];
+                let want = kv_b[((h * HEAD_DIM + c) * KV_LORA_RANK + r) as usize];
+                assert_eq!(
+                    got, want,
+                    "embed_q[{h}][{r}][{c}] must be the transposed nope half, not the v half \
+                     or an untransposed view"
+                );
+            }
+        }
+        // unembed_out[h][d][r] is v row `d` of head `h`, stored as it is: the v
+        // rows start `QK_NOPE` into the head's row block.
+        for d in 0..V_HEAD {
+            for r in 0..KV_LORA_RANK {
+                let got = unembed_out[((h * V_HEAD + d) * KV_LORA_RANK + r) as usize];
+                let want = kv_b[((h * HEAD_DIM + QK_NOPE + d) * KV_LORA_RANK + r) as usize];
+                assert_eq!(
+                    got, want,
+                    "unembed_out[{h}][{d}][{r}] must be the untransposed v half, not the nope \
+                     half"
+                );
+            }
+        }
+    }
 }
