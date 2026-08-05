@@ -41,6 +41,7 @@ pub mod switch_layers;
 pub mod apertus;
 pub mod baichuan;
 pub mod bailing_moe;
+pub mod bailing_moe_linear;
 pub mod bitnet;
 pub mod cohere;
 pub mod cohere2;
@@ -151,6 +152,7 @@ pub mod kokoro;
 pub use apertus::ApertusModel;
 pub use baichuan::BaichuanModel;
 pub use bailing_moe::BailingMoeModel;
+pub use bailing_moe_linear::BailingMoeLinearModel;
 pub use bitnet::BitNetModel;
 pub use cohere::CohereModel;
 pub use cohere2::Cohere2Model;
@@ -373,6 +375,10 @@ pub enum ModelType {
     /// decoder with a fused GQA `query_key_value` and a single wide shared
     /// expert.
     BailingMoe,
+    /// Ant Group Ling / Ring linear-attention MoE (`bailing_moe_linear`): the
+    /// same MoE block interleaved with gated-linear-attention layers whose decay
+    /// is a fixed ALiBi schedule.
+    BailingMoeLinear,
 
     // Apertus (Swiss AI)
     Apertus,
@@ -574,6 +580,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::HunyuanV1Dense,
     ModelType::MiMo,
     ModelType::BailingMoe,
+    ModelType::BailingMoeLinear,
     // Apertus (Swiss AI)
     ModelType::Apertus,
     // ByteDance Seed-OSS
@@ -774,6 +781,10 @@ impl ModelType {
             ModelType::HunyuanV1Dense => ("Hunyuan v1 Dense", "Hunyuan"),
             ModelType::HunyuanMoe => ("Hunyuan MoE", "Hunyuan"),
             ModelType::BailingMoe => ("Ling / Bailing MoE (shared + routed experts)", "Bailing"),
+            ModelType::BailingMoeLinear => (
+                "Ling / Ring linear-attention MoE (GLA + full attention hybrid)",
+                "Bailing",
+            ),
 
             // ----- IBM Granite -----
             ModelType::Granite => ("Granite (dense)", "Granite"),
@@ -1078,6 +1089,7 @@ mod metadata_tests {
             HunyuanV1Dense,
             MiMo,
             BailingMoe,
+            BailingMoeLinear,
             Apertus,
             SeedOss,
             Granite,

@@ -190,6 +190,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "hunyuan" => Ok(detect_hunyuan_model_type(&v)),
         "mimo" => Ok(ModelType::MiMo),
         "bailing_moe" => Ok(ModelType::BailingMoe),
+        "bailing_moe_linear" => Ok(ModelType::BailingMoeLinear),
         "apertus" => Ok(ModelType::Apertus),
         "seed_oss" => Ok(ModelType::SeedOss),
         "granite" => Ok(ModelType::Granite),
