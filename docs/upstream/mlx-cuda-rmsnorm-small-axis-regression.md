@@ -23,7 +23,7 @@ Two consequences for this repo:
 1. Nothing should be filed against ml-explore/mlx for this. The pinned kernel is correct across the whole swept space.
 2. mlxcel's overlay reintroduces a defect that upstream had already fixed, on an axis that nine model files reach.
 
-The overlay was measured in lablup/mlxcel#829 to take deepseek-v2-lite from 0/4 to 4/4 coherent. That measurement and this one cannot both be explained by the RMSNorm kernel alone, and the discrepancy is unresolved. See "What #830's bisect got right" below.
+The overlay was measured in lablup/mlxcel#829 to take deepseek-v2-lite from 0/4 to 4/4 coherent. That measurement and this one cannot both be explained by the RMSNorm kernel alone; the #831 re-measurement did not reproduce #829's 0/4 baseline and settled the question. See "Resolution: the model-level 2x2 matrix" below.
 
 ## Evidence
 
@@ -158,13 +158,34 @@ Two observations that may bear on it, neither verified:
 - lablup/mlxcel#817 characterized the original DeepSeek-V2 failure as nondeterministic across fresh processes with roughly 50% coherence, present at the 2026-05-19 benchmark commit, long before the 0.32.1 bump. The pre-#3792 kernel was in the tree for that entire window and its `n_rows == 1` behavior is exactly that shape: same input, different answer depending on residual shared memory. The uninitialized read is a candidate root cause for the *original* bug rather than for the regression.
 - lablup/mlxcel#829's second commit added a `MLX_USE_CUDA_GRAPHS=0` startup lever for DeepSeek-V2, attributed to a graph-capture hazard. Graph capture changes which kernels precede the norm, which is precisely what determines the overlay's answer at `n_rows == 1`.
 
-Resolving this needs a build with the overlay removed, measured on deepseek-v2-lite the way lablup/mlxcel#829 measured it. That is a separate change with real risk and is not made here.
+Resolving this needs a build with the overlay removed, measured on deepseek-v2-lite the way lablup/mlxcel#829 measured it. That measurement was run for lablup/mlxcel#831; see "Resolution: the model-level 2x2 matrix" below.
+
+## Resolution: the model-level 2x2 matrix (issue #831)
+
+The build this document called for was run on GB10 at mlxcel `13741ae2`: deepseek-v2-lite-4bit, greedy (`--temp 0`), 48 generated tokens, fresh process per rep, six reps per cell per prompt, two prompts (the 1-token "Hi" and a ~90-token summarization prompt). "Identical" below means byte-identical generated text across reps by content hash.
+
+| Cell | Kernel | `MLX_USE_CUDA_GRAPHS` | Short prompt | Long prompt |
+|---|---|---|---|---|
+| A | overlay (`1700b39`) | 0 | 6/6 coherent, identical | 6/6 coherent, identical |
+| B | overlay (`1700b39`) | 1 | 4/6 coherent but all four token-divergent, 2/6 collapse into repeated `!` | 0/6: every rep collapses into repeated `!` after one generated token |
+| C | pinned (`b7c3dd6d`) | 0 | 6/6 coherent, identical | 6/6 coherent, identical |
+| D | pinned (`b7c3dd6d`) | 1 | 6/6 coherent, identical, byte-identical to cell C | 6/6 coherent, identical, byte-identical to cell C |
+
+Cell D is the verdict. With the overlay deleted, CUDA graph capture has no observable effect on DeepSeek-V2 greedy decode: cells C and D produce byte-for-byte the same output, deterministically, at both prompt lengths. The "graph-capture hazard" recorded for DeepSeek-V2 in lablup/mlxcel#824 and #829 was this kernel. The mechanism fits the recorded symptoms exactly: at `n_rows == 1` the overlay's normalizer depends on residual shared memory, and graph capture changes which kernels precede `kv_a_layernorm`, so turning capture on or off flipped the same uninitialized read between nearly-correct and catastrophic. Prompt length changes the preceding-kernel population too, which is the recorded prompt-length dependence, and `MLXCEL_FORCE_SYNC=1` cannot help because nothing is racing.
+
+The cell C/D binary was proven to contain the pinned kernel, not silently rebuilt from the overlay (`configure_file(COPYONLY)` copies overlays into the fetched MLX tree, so deleting the patch file alone does not restore upstream): the pinned source was written into `_deps/mlx-src` and diffed clean after the build, `rms_norm.cu.o` was recompiled (mtime), and `cuobjdump -symbols` plus `strings` on the linked binary show 128 `rms_norm_small` instantiations with #3850's `bool ALIGNED` template parameter (`Lb0E`/`Lb1E` in the mangling) and zero instantiations of the overlay's four-integer-parameter form.
+
+On the #829 discrepancy this document could not reconcile: it does not reproduce. #829 recorded the pre-overlay tree as 0/4 coherent under `MLX_USE_CUDA_GRAPHS=0`; cell C (the same configuration, current tree) is deterministically coherent. Whatever produced that 0/4 is not present on `main` at `13741ae2`, and with the overlay gone there is nothing left in this story to carry it.
+
+Consequences shipped in #831: the overlay is deleted, DeepSeek-V2 and DeepSeek-VL2 are removed from `maybe_disable_cuda_graphs_for_model` (`src/loading/mod.rs`) and run with CUDA graphs again, and a numeric regression test pins the band (`src/lib/mlxcel-core/src/rms_norm_small_axis_tests.rs`: `fast::rms_norm` against a float64 host reference across `(256, 512]` at bf16/f16 and `(128, 256]` at f32, multi-row and single-row). Gemma 4 stays on the lever: every Gemma 4 norm axis (head_dim 256, hidden 2816/3840/5376 at bf16) selects a dispatch config whose launched thread count matches `BLOCK_DIM`, so the overlay defect never touched that family and lablup/mlxcel#688 keeps its own, still-unidentified root cause. #831's premise that Gemma 4 and DeepSeek-V2 shared one hazard class is therefore wrong; the two are separate problems.
+
+Local checkpoints that sat in the broken band while the overlay was live, from a sweep of `models/mlx/*/config.json`: deepseek-v2-lite-4bit, deepseek-v3-4bit, glm4-flash-4bit, kimi-vl-a3b-thinking-4bit and youtu-vl-4b-instruct (all `kv_lora_rank == 512`), glm-5-4bit (carries the same 512 but builds no `kv_a_layernorm`, see above), and falcon-h1-tiny-90m-instruct-4bit, whose main `hidden_size` is itself 512 so every layer norm in that model ran through the broken geometry.
 
 ## Minimal fix
 
 Nothing upstream.
 
-For mlxcel: delete `src/lib/mlx-cpp/patches/mlx/backend/cuda/rms_norm.cu` and re-verify deepseek-v2-lite. The pinned kernel is correct on the affected axis and carries #3850's speedup.
+For mlxcel: delete `src/lib/mlx-cpp/patches/mlx/backend/cuda/rms_norm.cu` and re-verify deepseek-v2-lite. The pinned kernel is correct on the affected axis and carries #3850's speedup. Done in #831; see the resolution section above.
 
 If the overlay is kept for any reason, it needs the one-value change #3792 already made:
 

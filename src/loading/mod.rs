@@ -368,12 +368,25 @@ pub fn context_window_from_config(config: &serde_json::Value) -> Option<usize> {
 }
 
 /// Force CUDA graph capture off for model families whose captured decode
-/// collapses on this hardware: Gemma 4 (issue #688) and DeepSeek-V2 (issue
-/// #824). The DeepSeek-V2 case is the same class of hazard: with graph capture
-/// on, the naive-MLA incremental decode degenerates into repeated tokens even
-/// though the identical forward is deterministically coherent with capture off
-/// (verified via `MLX_USE_CUDA_GRAPHS=0`). The Gemma 4 analysis below applies to
-/// that family; DeepSeek-V2 is added to the same lever for the same reason.
+/// collapses on this hardware: Gemma 4 (issue #688).
+///
+/// DeepSeek-V2 (and DeepSeek-VL2, whose language tower is the same MLA
+/// backbone) sat on this lever from #829 to #831, attributed to the same class
+/// of hazard. That attribution was wrong: the collapse was the broken RMSNorm
+/// overlay mlxcel carried at `patches/mlx/backend/cuda/rms_norm.cu`, whose
+/// two-stage reduction read past its shared scratch on the `kv_a_layernorm`
+/// axis (`kv_lora_rank == 512` at bf16), making the applied normalizer depend
+/// on residual shared memory at single-row decode. Deleting the overlay (#831)
+/// made greedy decode on deepseek-v2-lite-4bit deterministically coherent AND
+/// byte-identical with capture on versus off (12/12 runs each, two prompt
+/// lengths), while the overlay build reproduced the recorded flakiness with
+/// capture on (4/12 coherent) and full determinism with capture off. There is
+/// no graph-capture hazard for DeepSeek-V2; the family runs with CUDA graphs.
+/// Full analysis: docs/upstream/mlx-cuda-rmsnorm-small-axis-regression.md.
+///
+/// Gemma 4 stays: its norm axes (head_dim 256, hidden 2816/3840/5376 at bf16)
+/// never select the overlay's broken dispatch geometry, so the #688 collapse
+/// has a different, still-unidentified root cause.
 ///
 /// mlxcel's Gemma 4 incremental (single-query, KV-cache) decode has a CUDA-graph
 /// read-before-write hazard: greedy (temperature 0) decode is nondeterministic
@@ -403,22 +416,21 @@ pub fn context_window_from_config(config: &serde_json::Value) -> Option<usize> {
 /// Invariant: this env-based lever assumes one model per process. The server is
 /// single-model-per-process today (no in-process hot-swap in `start_server`), so a
 /// non-hazard-family eval never latches `use_cuda_graphs = true` before a later
-/// hazard-family (Gemma 4 or DeepSeek-V2) load. If in-process model hot-swap is
+/// hazard-family (Gemma 4) load. If in-process model hot-swap is
 /// ever added, a non-hazard-family model loaded first would make a subsequent
 /// hazard-family `set_var` a silent no-op (the static is already latched) and this
 /// approach would need revisiting.
 fn maybe_disable_cuda_graphs_for_model(model_type: ModelType) {
     // Families whose CUDA-graph-captured decode collapses on this hardware and
-    // must run with graph capture off. Gemma 4 (issue #688) and DeepSeek-V2
-    // (issue #824: the naive-MLA decode path degenerates into repeated tokens
-    // under graph capture even though the same forward is coherent with capture
-    // off). Other families (Gemma 3, Qwen 3.5, etc.) are unaffected and keep
-    // capture on.
+    // must run with graph capture off. Gemma 4 (issue #688) only. DeepSeek-V2
+    // and DeepSeek-VL2 were removed in #831: their collapse was the broken
+    // RMSNorm overlay, not graph capture, and with the overlay deleted their
+    // captured decode is deterministic and coherent. Other families (Gemma 3,
+    // Qwen 3.5, etc.) are unaffected and keep capture on.
     let hazard = match model_type {
         ModelType::Gemma4 | ModelType::Gemma4VLM | ModelType::Gemma4Unified => {
             Some(("Gemma 4", "#688"))
         }
-        ModelType::DeepSeekV2 | ModelType::DeepSeekVL2 => Some(("DeepSeek-V2", "#824")),
         _ => None,
     };
     let Some((family, issue)) = hazard else {
