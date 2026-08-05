@@ -76,7 +76,7 @@ impl QuantizedWeight {
     /// Create a new quantized weight with explicit mode.
     ///
     /// Fallible on purpose (issue #973), on the same reasoning that made
-    /// [`QuantizedEmbedding::new`] fallible for the declared `group_size` /
+    /// [`QuantizedMultiLinear::new`] fallible for the declared `group_size` /
     /// `bits` pair. This is the one way to build a `QuantizedWeight` with a
     /// caller-chosen mode without going through
     /// [`reconcile_quantization_layout`], and therefore without the allowlist it
@@ -250,53 +250,17 @@ pub struct QuantizedEmbedding {
 }
 
 impl QuantizedEmbedding {
-    /// Create a new quantized embedding layer (affine mode) from tensors the
-    /// caller already owns.
-    ///
-    /// Fallible on purpose (issue #958). This is the one way to build a
-    /// `QuantizedEmbedding` without going through
-    /// [`Self::from_weights_with_mode`], and therefore without
-    /// [`reconcile_quantization_layout`] and the bound it now carries. A caller
-    /// that hand-builds the layer is exactly the caller whose declared
-    /// `group_size` / `bits` have never been looked at, and the stored pair goes
-    /// straight to `quantized_embedding` / `quantized_matmul`, which cross the
-    /// cxx bridge as `UniquePtr<MlxArray>` rather than `Result`: a C++ throw
-    /// there is an uncatchable abort at the first forward pass rather than a
-    /// load error. Returning `Result` puts the bound on the path the next family
-    /// that builds one directly will take, which is the whole reason the
-    /// signature changed rather than the two existing call sites being patched.
-    /// It is a strong default rather than an enforced invariant: the fields
-    /// above are `pub`, so a struct literal still bypasses this entirely.
-    /// Nothing in the tree does that today.
-    ///
-    /// This bounds the declared pair only; it does not reconcile against the
-    /// tensor shapes the way `from_weights_with_mode` does, because the shapes
-    /// arrive here already detached from the prefix the reconciler names in its
-    /// divergence warning.
-    ///
-    /// Used by: Mamba, Mamba2 (both take the table out of the `WeightMap` by
-    ///          `remove`, under either the `backbone.embeddings` or the
-    ///          `model.embed_tokens` spelling, so neither can address the
-    ///          single-prefix map loader)
-    pub fn new(
-        weight: UniquePtr<MlxArray>,
-        scales: UniquePtr<MlxArray>,
-        biases: UniquePtr<MlxArray>,
-        group_size: i32,
-        bits: i32,
-    ) -> Result<Self, String> {
-        validate_quantization_params(group_size, bits)?;
-        Ok(Self {
-            weight,
-            scales,
-            biases: Some(biases),
-            group_size,
-            bits,
-            mode: "affine".to_string(),
-        })
-    }
-
     /// Load from weight map
+    ///
+    /// There is deliberately no by-hand `new` beside this. One existed for
+    /// Mamba / Mamba2, which took their table out of the `WeightMap` by
+    /// `remove` under two possible prefixes and so could not address a
+    /// single-prefix map loader; it hardcoded `mode: "affine"` and required a
+    /// `biases` argument, which is precisely how those two families came to
+    /// treat a block-float embedding (`.scales`, no `.biases`) as
+    /// non-quantized (issue #976). Both now resolve the prefix and come through
+    /// here, and the constructor is gone so the next family cannot rebuild the
+    /// same defect. Prefer resolving a prefix over hand-building a layer.
     pub fn from_weights(
         weights: &crate::weights::WeightMap,
         prefix: &str,
@@ -485,7 +449,7 @@ impl UnifiedEmbedding {
     /// a packed table describes, which `is_quantized()` alone cannot give them.
     ///
     /// Used by: the shared `validate_embedding_table` guard (BailingMoe, Gpt2,
-    ///          GptBigCode, GptNeoX)
+    ///          GptBigCode, GptNeoX, Mamba, Mamba2)
     pub fn quantized(&self) -> Option<&QuantizedEmbedding> {
         match self {
             Self::Quantized(e) => Some(e),
@@ -1312,8 +1276,7 @@ pub struct ReconciledQuant {
 /// Used by: every quantizing family through [`reconcile_quantization_layout`]
 ///          (dense projections and quantized embeddings) and through
 ///          `SwitchLinear::from_stacked_parts` (MoE experts); the by-hand
-///          constructors [`QuantizedEmbedding::new`],
-///          [`QuantizedMultiLinear::new`] and
+///          constructors [`QuantizedMultiLinear::new`] and
 ///          [`QuantizedMultiLinear::from_weights`], which never reach the
 ///          reconciler; every family-local MoE expert loader through
 ///          `crate::models::switch_layers::validate_expert_quantization_params`
@@ -1808,7 +1771,7 @@ pub struct QuantizedTensorShapes<'a> {
 ///
 /// Used by: BailingMoe weight validation (token table, dense projections,
 ///          stacked experts) and the shared `validate_embedding_table` guard
-///          (BailingMoe, Gpt2, GptBigCode, GptNeoX)
+///          (BailingMoe, Gpt2, GptBigCode, GptNeoX, Mamba, Mamba2)
 pub fn validate_quantized_packing(
     label: &str,
     shapes: &QuantizedTensorShapes<'_>,
@@ -2821,9 +2784,15 @@ impl QuantizedMultiLinear {
     /// Create a new quantized multi-linear layer from tensors the caller
     /// already owns.
     ///
-    /// Fallible for the same reason as [`QuantizedEmbedding::new`] (issue
-    /// #958): the stored pair reaches `quantized_matmul` unmediated, and nothing
-    /// else on this path bounds it.
+    /// Fallible on purpose (issue #958): the stored pair reaches
+    /// `quantized_matmul` unmediated, without
+    /// [`reconcile_quantization_layout`] and the bound it carries, and nothing
+    /// else on this path bounds it. Unlike the `QuantizedEmbedding` constructor
+    /// this once mirrored (removed in issue #976), it takes `biases` as an
+    /// `Option` and so cannot express a mode that contradicts the planes the
+    /// checkpoint ships. Nothing in the tree calls it today; it is a strong
+    /// default for the next caller that hand-builds one, not an enforced
+    /// invariant, since the fields are `pub`.
     pub fn new(
         weight: UniquePtr<MlxArray>,
         scales: UniquePtr<MlxArray>,
@@ -5328,24 +5297,40 @@ mod tests {
         }
     }
 
-    /// The two by-hand constructors are the only way to build a quantized layer
-    /// without going through `reconcile_quantization_layout`, which is exactly
-    /// how `mamba` / `mamba2` reached `quantized_embedding` with an unbounded
-    /// pair (issue #958). They are fallible so the bound cannot be skipped, and
-    /// this drives the real constructors rather than the pure helper, so the
-    /// guard is exercised where a checkpoint actually reaches it. Losing it turns
-    /// a rejected load into an uncatchable abort at the first forward pass in
-    /// production; here the assertions are on the constructor result, so a
-    /// regression fails cleanly rather than aborting the test binary.
+    /// A quantized layer built without going through
+    /// `reconcile_quantization_layout` stores the declared `group_size` / `bits`
+    /// verbatim, which is exactly how `mamba` / `mamba2` reached
+    /// `quantized_embedding` with an unbounded pair (issue #958). Both halves
+    /// here drive a real entry point rather than the pure helper, so the guard
+    /// is exercised where a checkpoint actually reaches it, and both assert on
+    /// the constructor result with no forward pass, so a regression fails
+    /// cleanly rather than aborting the test binary.
+    ///
+    /// The embedding half targets `QuantizedEmbedding::from_weights`, the path
+    /// production now uses: the by-hand `QuantizedEmbedding::new` was removed in
+    /// issue #976, because requiring a `biases` argument is what made a
+    /// block-float table look non-quantized to the two families that called it.
+    /// `QuantizedMultiLinear::new` stays and is still hand-built here: it takes
+    /// `Option<biases>` and so cannot express that defect, and it remains the
+    /// bound for the next caller that builds one directly.
     #[test]
     fn hand_built_quantized_layers_bound_their_declared_params() {
+        use crate::weights::WeightMap;
+
         // Honest affine 4-bit geometry: packed_in * 32 == bits * groups * gs,
         // i.e. 8 * 32 == 4 * 1 * 64.
         let plane = |last: i32| ffi::from_slice_f32(&vec![0.0; (4 * last) as usize], &[4, last]);
+        let embed_weights = || {
+            let mut weights = WeightMap::new();
+            weights.insert("embed.weight".to_string(), plane(8));
+            weights.insert("embed.scales".to_string(), plane(1));
+            weights.insert("embed.biases".to_string(), plane(1));
+            weights
+        };
 
         // Positive control first, so a guard that rejects everything quantized
         // cannot pass this test.
-        QuantizedEmbedding::new(plane(8), plane(1), plane(1), 64, 4)
+        QuantizedEmbedding::from_weights(&embed_weights(), "embed", 64, 4)
             .expect("an honest affine pair must still build a quantized embedding");
         QuantizedMultiLinear::new(plane(8), plane(1), Some(plane(1)), 64, 4)
             .expect("an honest affine pair must still build a quantized MultiLinear");
@@ -5357,10 +5342,10 @@ mod tests {
             (0, 4, "group_size"),
             (-64, 4, "group_size"),
         ] {
-            let err = QuantizedEmbedding::new(plane(8), plane(1), plane(1), group_size, bits)
+            let err = QuantizedEmbedding::from_weights(&embed_weights(), "embed", group_size, bits)
                 .err()
                 .unwrap_or_else(|| {
-                    panic!("QuantizedEmbedding::new must reject {group_size} / {bits}")
+                    panic!("QuantizedEmbedding::from_weights must reject {group_size} / {bits}")
                 });
             assert!(err.contains(field), "unhelpful error: {err}");
 
