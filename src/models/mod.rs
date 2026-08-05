@@ -38,6 +38,7 @@ pub mod gated_delta;
 pub mod switch_layers;
 
 // Model implementations (mlxcel-core based)
+pub mod afmoe;
 pub mod apertus;
 pub mod baichuan;
 pub mod bailing_moe;
@@ -150,6 +151,7 @@ pub mod g2p;
 pub mod kokoro;
 
 // Re-export model types
+pub use afmoe::AfmoeModel;
 pub use apertus::ApertusModel;
 pub use baichuan::BaichuanModel;
 pub use bailing_moe::BailingMoeModel;
@@ -387,6 +389,11 @@ pub enum ModelType {
     /// is a fixed ALiBi schedule.
     BailingMoeLinear,
 
+    /// Arcee AFMoE (`afmoe`, the Trinity family): hybrid sliding/full
+    /// attention with NoPE global layers, a sigmoid attention gate,
+    /// sandwich norms, muP embedding scale and a sparse MoE FFN.
+    Afmoe,
+
     // Apertus (Swiss AI)
     Apertus,
 
@@ -589,6 +596,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::MiMo,
     ModelType::BailingMoe,
     ModelType::BailingMoeLinear,
+    ModelType::Afmoe,
     // Apertus (Swiss AI)
     ModelType::Apertus,
     // ByteDance Seed-OSS
@@ -790,6 +798,7 @@ impl ModelType {
             ModelType::HunyuanV1Dense => ("Hunyuan v1 Dense", "Hunyuan"),
             ModelType::HunyuanMoe => ("Hunyuan MoE", "Hunyuan"),
             ModelType::BailingMoe => ("Ling / Bailing MoE (shared + routed experts)", "Bailing"),
+            ModelType::Afmoe => ("Arcee AFMoE / Trinity (sliding + full hybrid MoE)", "Arcee"),
             ModelType::BailingMoeLinear => (
                 "Ling / Ring linear-attention MoE (GLA + full attention hybrid)",
                 "Bailing",
@@ -1100,6 +1109,7 @@ mod metadata_tests {
             MiMo,
             BailingMoe,
             BailingMoeLinear,
+            Afmoe,
             Apertus,
             SeedOss,
             Granite,

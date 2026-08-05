@@ -228,6 +228,11 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // carry a recurrent state rather than a KV cache, which the generic
         // transformer plan has no shard rule for at all.
         ModelType::BailingMoeLinear => "bailing_moe_linear",
+        // Not shardable by the generic transformer plan: the experts live
+        // under `mlp.experts` and the sliding layers carry a rotating cache,
+        // neither of which the shard rules name. This arm only keeps the
+        // dispatch table total.
+        ModelType::Afmoe => "afmoe",
         ModelType::Apertus => "apertus",
         ModelType::SeedOss => "seed_oss",
         ModelType::Granite => "granite",
