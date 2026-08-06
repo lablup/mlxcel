@@ -54,6 +54,7 @@ jobs:
       pull-requests: read
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      mlx_pin: ${{ steps.filter.outputs.mlx_pin }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -67,6 +68,10 @@ jobs:
               - '**/Cargo.toml'
               - 'Cargo.lock'
               - 'deny.toml'
+              - '.github/workflows/ci.yml'
+            mlx_pin:
+              - 'src/lib/mlx-cpp/CMakeLists.txt'
+              - 'scripts/ci/mlx_pinned_commit.sh'
               - '.github/workflows/ci.yml'
 
   deny:
@@ -103,6 +108,31 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+
+  mlx-pin:
+    name: MLX pin extraction
+    needs: changes
+    if: needs.changes.outputs.mlx_pin == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # The pinned MLX commit has one home, GIT_TAG in
+      # src/lib/mlx-cpp/CMakeLists.txt, and two independent parsers read it:
+      # mlxcel-core's build.rs in Rust (build_support/mlx_pin.rs, unit-tested by
+      # mlxcel-mlx-pin) and this script in awk, for release.yml's "Validate MLX
+      # build cache" steps. The shell half accepts strictly less than the Rust
+      # half: it needs GIT_TAG as the first token of its own line, after the
+      # GIT_REPOSITORY line, with no closing parenthesis in between. A CMake
+      # reformat that leaves every local build and `make verify` green can
+      # therefore break every release build, and release.yml is the only other
+      # place this script runs, so without this job the breakage would first
+      # appear when a release is cut. Issue #1047.
+      - name: Extract the pinned MLX commit
+        run: scripts/ci/mlx_pinned_commit.sh
 
   cross-repo-refs:
     name: cross-repo refs
