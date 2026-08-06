@@ -269,12 +269,9 @@ For the complete `MLXCEL_*` reference, see
 
 On CUDA hosts, run the test suite single threaded. Since the 2026-07 MLX pin
 the quantized kernels are JIT-compiled and module-loaded on first use, and
-those first-use paths are not safe against concurrent test threads: the
-default parallel run can abort with
-`cudaStreamEndCapture ... previous error during capture` (a module load
-racing another thread's stream capture) or, with graphs disabled, with
-`cuLaunchKernelEx ... invalid argument` (a kernel-configure race). Inference
-binaries are unaffected; this is a test-parallelism artifact.
+those first-use paths are not safe against concurrent test threads, so the
+default parallel run aborts. The measured signatures are in the table below.
+Inference binaries are unaffected; this is a test-parallelism artifact.
 
 ```bash
 make verify-test-cuda
@@ -293,11 +290,16 @@ idle GB10 (sm_121) at MLX pin `2c46b953` put numbers on that (#1048):
 
 The third row is why `MLX_USE_CUDA_GRAPHS=0` is not the workaround it looks
 like: disabling capture does not rescue the parallel run, it only changes which
-CUDA call reports the failure. Serializing addresses the cause; capture stays
-fully on under the gate, so the suite keeps exercising it. The abort site and
-the error text both move between runs, which is what makes the raw SIGABRT
-expensive to read: it looks like whichever test happened to be running is
-broken. `mlxcel-core` carries a `the_cuda_test_suite_must_run_single_threaded`
+CUDA call reports the failure, from a module load racing another thread's
+stream capture to a kernel-configure race. Serializing addresses the cause;
+capture stays fully on under the gate, so the suite keeps exercising it. The
+same command under `[profile.test-fast]`, which is what `make verify-test-cuda`
+actually builds, behaves the same way: 1411 passed, 4 failed, 89.35s, no abort.
+The abort site and the error text both move between runs, which is what makes
+the raw SIGABRT expensive to read: it looks like whichever test happened to be
+running is broken.
+
+`mlxcel-core` carries a `the_cuda_test_suite_must_run_single_threaded`
 guard (`src/lib/mlxcel-core/src/cuda_test_serialization_tests.rs`) so an
 invocation that forgets the flag fails by name with the right command instead.
 Being an ordinary test, the guard is filtered out of any narrowed run whose

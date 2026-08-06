@@ -328,3 +328,5 @@ normal end-user operation.
 | `MLXCEL_SKIP_HEAVY_TESTS` | Skips selected heavy tests. |
 | `MLXCEL_BENCH_DATE` | Metadata override for Turbo KV benchmark tests. |
 | `MLXCEL_BENCH_MACHINE` | Metadata override for Turbo KV benchmark tests. |
+| `MLXCEL_ALLOW_PARALLEL_CUDA_TESTS` | Downgrades the CUDA serialization guard to a warning. The guard fails when the `mlxcel-core` suite is about to run with more than one test thread under `--features cuda`, which aborts inside MLX partway through (#1048). Set it only to reproduce that abort, or when a narrow filter happens to match the guard's own name on a run that would have been safe. |
+| `MLXCEL_ALLOW_CONCURRENT_GPU_TESTS` | Downgrades the GPU-exclusivity guard to a warning. The guard fails when a second `mlxcel-core` test binary is running, because two suites on one device corrupt each other and can report failures that do not exist (#1008). |
