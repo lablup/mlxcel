@@ -182,20 +182,33 @@ constexpr const char* FUSED_ROPE_APPEND_SOURCE = R"(
 
 // CUDA port of the fused RoPE + append-layout kernel.
 //
-// UNVALIDATED. This host is Apple Silicon with no CUDA device and no `nvcc`, so
-// this string has never been compiled or executed. It is a structural
-// transliteration of the Metal body above, kept deliberately line-for-line
-// parallel so a reviewer with a CUDA box can diff the two rather than re-derive
-// the addressing. Check it against `fused_rope_append_matches_graph_rope` in
-// `src/lib/mlxcel-core/src/fused_norm_parity_tests.rs` on first CUDA run,
-// before `MLXCEL_FUSED_ROPE_APPEND` is left on by default there.
+// A structural transliteration of the Metal body above, kept deliberately
+// line-for-line parallel so a reviewer can diff the two rather than re-derive
+// the addressing. Validated on GB10 (sm_121) by the parity suite in
+// `src/lib/mlxcel-core/src/fused_rope_parity_tests.rs`.
 //
-// The only substantive differences from the Metal body are the thread-index
+// The substantive differences from the Metal body are the thread-index
 // expressions (MLX's CUDA custom kernel ceil-divides the Metal-style grid by the
 // threadgroup tuple, so the global index has to be reconstructed from
 // `blockIdx * blockDim + threadIdx`; the bounds guards at the top already cover
-// the padding that introduces) and `exp2f` / `__cosf` / `__sinf` standing in for
-// `metal::exp2` / `metal::fast::cos` / `metal::fast::sin`.
+// the padding that introduces), `exp2f` for `metal::exp2`, and `cosf` / `sinf`
+// for `metal::fast::cos` / `metal::fast::sin`.
+//
+// That last substitution is not a like-for-like one, and it must not be
+// "corrected" back to `__cosf` / `__sinf` (issue #1049). The rule this file
+// follows is to call whatever MLX's own RoPE kernel for the same backend calls,
+// because that is what keeps the fused and unfused paths on the same numbers.
+// `rope.metal` uses `metal::fast::cos` / `metal::fast::sin`, so the Metal body
+// does too. `mlx/backend/cuda/rope.cu` uses `cos(float)` / `sin(float)`, which
+// resolve to libdevice `cosf` / `sinf`, so this body does too.
+//
+// `__cosf` / `__sinf` map to the SFU, whose range reduction only carries enough
+// bits for the documented accuracy over `[-pi, pi]`; past that the phase error
+// grows about as `theta * 2^-23`. RoPE angles are unreduced and the `p = 0` pair
+// has `inv_freq == 1`, so `theta` is the absolute position: at position 131071
+// the SFU applied a rotation about 1.2e-2 rad off the true angle, while `cosf` /
+// `sinf` stayed at the 1e-5 rad measurement floor. Metal is unaffected because
+// both sides there use the same fast intrinsic and degrade together.
 constexpr const char* FUSED_ROPE_APPEND_CUDA_SOURCE = R"(
     uint32_t p = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t t = blockIdx.y * blockDim.y + threadIdx.y;
@@ -279,8 +292,8 @@ constexpr const char* FUSED_ROPE_APPEND_CUDA_SOURCE = R"(
         float inv_freq = exp2f(-d * rope_params[0]);
         float pos = (float)((int)t + positions_base[0]);
         float theta = rope_params[1] * pos * inv_freq;
-        float costheta = __cosf(theta);
-        float sintheta = __sinf(theta);
+        float costheta = cosf(theta);
+        float sintheta = sinf(theta);
         r1 = x1 * costheta - x2 * sintheta;
         r2 = x1 * sintheta + x2 * costheta;
     }

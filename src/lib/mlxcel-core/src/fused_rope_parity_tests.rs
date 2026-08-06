@@ -78,10 +78,22 @@ fn normalized_deviation(a: &[f32], b: &[f32]) -> (f64, f64) {
     )
 }
 
-/// The rotation is a pair of fp32 multiply-adds around `fast::cos` / `fast::sin`
-/// in both paths, so the only divergence available is the final rounding to the
-/// activation dtype. One f16 ulp on a 4-sigma element is about 2e-3 relative to
+/// The rotation is a pair of fp32 multiply-adds around a sine and a cosine that
+/// both paths compute from a bit-identical fp32 angle, using the same function
+/// as MLX's own RoPE kernel for that backend: `metal::fast::cos` / `sin` on
+/// Metal, libdevice `cosf` / `sinf` on CUDA (#1049). So the trig call itself
+/// contributes no divergence, and what is left is the final rounding to the
+/// activation dtype plus FMA contraction differing between two separately
+/// compiled kernels. One f16 ulp on a 4-sigma element is about 2e-3 relative to
 /// the RMS; the budget allows a few of those.
+///
+/// This premise is load-bearing and was wrong once. Until #1049 the CUDA body
+/// called `__cosf` / `__sinf`, whose range reduction degrades outside
+/// `[-pi, pi]`, and RoPE angles are unreduced: at position 131071 the `p = 0`
+/// pair rotates by about 1.3e5 radians. That is a divergence this budget does
+/// not cover and must not be made to cover, so a failure here at large offsets
+/// means the trig calls have drifted apart again, not that the tolerance is
+/// too tight.
 fn assert_close(label: &str, got: &MlxArray, want: &MlxArray) {
     let (nrms, nmax) = normalized_deviation(&flatten_f32(got), &flatten_f32(want));
     assert!(
