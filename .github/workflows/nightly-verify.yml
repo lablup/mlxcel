@@ -48,14 +48,14 @@
 #
 # WHICH MEMBERS IT COVERS
 #
-# All four, as of #1007, because `verify-clippy` and `verify-test` now pass
-# `--workspace`. They did not before, and the omission was not a small one: the
-# workspace root is itself the `mlxcel` package, so a bare `cargo test` there
-# resolves to `-p mlxcel` and never builds mlxcel-core, mlxcel-surgery or
-# mlxcel-xla at all. This job was running 5238 of the 6992 tests in the
-# repository and calling that the suite. mlxcel-core held 1354 of the missing
-# ones and is the crate with the MLX `cxx` bridge, layers.rs, the KV cache and
-# the quantization loaders.
+# All five, as of #1007 and #1047, because `verify-clippy` and `verify-test`
+# now pass `--workspace`. They did not before, and the omission was not a small
+# one: the workspace root is itself the `mlxcel` package, so a bare `cargo test`
+# there resolves to `-p mlxcel` and never builds mlxcel-core, mlxcel-mlx-pin,
+# mlxcel-surgery or mlxcel-xla at all. This job was running 5238 of the 6992
+# tests in the repository and calling that the suite. mlxcel-core held 1354 of
+# the missing ones and is the crate with the MLX `cxx` bridge, layers.rs, the
+# KV cache and the quantization loaders.
 #
 # The clippy half was the subtler one. `--all-targets` without `--workspace`
 # does not compile a member's *test* target either, so test-only lint debt and
@@ -67,12 +67,15 @@
 #
 # Feature resolution across the members is not a complication here.
 # mlxcel-core resolves to metal + accelerate through the root package's
-# forwarding, so one build of it serves every member. mlxcel-surgery and
-# mlxcel-xla resolve to their empty defaults, which matters most for
-# mlxcel-xla: its `iree` feature stays off, its build script skips the native
-# shim, and this job therefore needs no IREE distribution. The code behind
-# `iree`, `diagnostics` and `micro-oracle` stays outside the gate for the same
-# reason.
+# forwarding, so one build of it serves every member. mlxcel-mlx-pin,
+# mlxcel-surgery and mlxcel-xla resolve to their empty defaults, which matters
+# most for mlxcel-xla: its `iree` feature stays off, its build script skips the
+# native shim, and this job therefore needs no IREE distribution. The code
+# behind `iree`, `diagnostics` and `micro-oracle` stays outside the gate for
+# the same reason. mlxcel-mlx-pin (#1047) adds nothing measurable to the
+# budget: it is a leaf with no build script that hosts the unit tests for the
+# MLX-pin logic in mlxcel-core/build_support/mlx_pin.rs, and it does not depend
+# on mlxcel-core, so it never triggers an MLX C++ build of its own.
 #
 # On the budget: the switch to `[profile.test-fast]` in #1000 took the
 # `cargo test` step from 2h54m34s to 48m54s (run 30871982545), and the scope
