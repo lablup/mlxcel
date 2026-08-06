@@ -237,7 +237,8 @@ Invocations:
 
 - **Hardware**: Apple M1 Ultra, 128 GB unified memory.
 - **MLX upstream commit pin**: `84961223c02925bef6bef95d3a0a046779bde935`
-  (`src/lib/mlxcel-core/build.rs::MLX_EXPECTED_COMMIT` at the time of measurement).
+  (the `GIT_TAG` in `src/lib/mlx-cpp/CMakeLists.txt` at the time of measurement,
+  which is the single place the pin is written down).
 - Re-measure after each MLX pin bump so the perf table reflects the active runtime.
 
 ### Reachable pairings

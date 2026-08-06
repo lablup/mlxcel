@@ -5,14 +5,26 @@
 # `cargo build --release --target aarch64-apple-darwin --locked` included, which
 # would start compiling the default-off `mlxcel-xla` into every release build.
 #
-# The consequence is that a command must say `--workspace` to see all four
+# The consequence is that a command must say `--workspace` to see all five
 # members, and until #1007 the quality gate did not: `make verify-test` and
 # `make verify-clippy` covered the root package only, leaving 1754 tests across
-# the other three (1354 of them mlxcel-core's) and the whole of their test-target
+# the others (1354 of them mlxcel-core's) and the whole of their test-target
 # lint surface ungated. Both targets now pass `--workspace` explicitly. If you
-# add a fifth member, they pick it up with no change here.
+# add a sixth member, they pick it up with no change here.
+#
+# `mlxcel-mlx-pin` is a leaf with no production role: it hosts the unit tests
+# for the MLX-pin logic in `mlxcel-core/build_support/mlx_pin.rs` so that logic
+# can be tested without compiling mlxcel-core (and therefore MLX C++). Nothing
+# depends on it; see its manifest for why it is a path include rather than a
+# build dependency.
 [workspace]
-members = [".", "src/lib/mlxcel-core", "src/lib/mlxcel-surgery", "src/lib/mlxcel-xla"]
+members = [
+    ".",
+    "src/lib/mlxcel-core",
+    "src/lib/mlxcel-mlx-pin",
+    "src/lib/mlxcel-surgery",
+    "src/lib/mlxcel-xla",
+]
 resolver = "2"
 
 [package]

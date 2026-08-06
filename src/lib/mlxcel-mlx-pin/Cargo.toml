@@ -1,0 +1,33 @@
+# Unit-test host for the MLX-pin logic that `mlxcel-core`'s build script runs.
+#
+# The logic itself lives in `src/lib/mlxcel-core/build_support/mlx_pin.rs`, next
+# to the build script that owns it; `mlxcel-core/build.rs` pulls that file in
+# with `#[path]`. This crate includes the very same file so its behaviour can be
+# unit-tested with `cargo test -p mlxcel-mlx-pin` in seconds, instead of only
+# through `mlxcel-core`, whose build script builds MLX C++ from source (roughly
+# 770 MB of artifacts and tens of minutes) for any feature/profile pair that is
+# not already warm.
+#
+# Deliberately NOT wired as a `[build-dependencies]` entry of `mlxcel-core`,
+# which would be the more conventional shape. A build dependency feeds the
+# build-script unit's metadata hash, and that hash names `mlxcel-core`'s
+# `OUT_DIR` (`target/<profile>/build/mlxcel-core-<hash>/out`). Changing it
+# strands every warm `_deps/` MLX checkout under the old hash and forces a
+# from-scratch MLX rebuild on every existing configuration. Including the source
+# by path leaves the hash untouched, which is what keeps this change a no-op for
+# caches that are already valid.
+[package]
+name = "mlxcel-mlx-pin"
+version = "0.4.3"
+edition = "2024"
+description = "Unit-test host for mlxcel-core's build-script MLX pin resolution"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+# Real temporary directories for the fetched-HEAD tests, which run against
+# actual `git init` repositories rather than a mocked `git`.
+tempfile = "3"

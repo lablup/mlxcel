@@ -83,7 +83,9 @@ set(_mlx_cached_binary_dir "${CMAKE_BINARY_DIR}/_deps/mlx-build")
 # proceed without re-running FetchContent. This is especially useful when Cargo
 # changes the build hash but the developer already has a cached MLX checkout.
 # NOTE: Stale-cache validation is handled by build.rs (purge_stale_mlx_cache)
-# which runs *before* CMake, ensuring _deps/ is either valid or absent.
+# which runs *before* CMake, ensuring _deps/ is either valid or absent, and
+# build.rs re-checks the fetched checkout's HEAD afterwards so a tree seeded
+# out of band cannot slip through this reuse branch either.
 if(EXISTS "${_mlx_cached_source_dir}/CMakeLists.txt")
   set(mlx_SOURCE_DIR "${_mlx_cached_source_dir}")
   set(mlx_BINARY_DIR "${_mlx_cached_binary_dir}")
@@ -92,6 +94,15 @@ else()
   FetchContent_Declare(
     mlx
     GIT_REPOSITORY "https://github.com/ml-explore/mlx.git"
+    # SINGLE SOURCE OF TRUTH for the pinned MLX commit, issue #1047. No other
+    # file stores this value. Two parsers read this exact line, both scoped to
+    # this declaration by the GIT_REPOSITORY URL just above it:
+    #   src/lib/mlxcel-core/build_support/mlx_pin.rs, used by mlxcel-core's
+    #     build.rs for cache purging, the fetched-HEAD check and the
+    #     MLXCEL_MLX_COMMIT env baked into the binary
+    #   scripts/ci/mlx_pinned_commit.sh, used by release.yml
+    # Keep the literal shape `GIT_TAG <40-char lowercase hex sha>` on one line.
+    # Both parsers reject anything else and fail loudly rather than guess.
     GIT_TAG 2c46b953db88965c4270cc7306eda6887a3247f2)
 
   # Use FetchContent_Populate + add_subdirectory so we can apply source

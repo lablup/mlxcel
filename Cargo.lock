@@ -1966,6 +1966,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mlxcel-mlx-pin"
+version = "0.4.3"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "mlxcel-surgery"
 version = "0.4.3"
 dependencies = [

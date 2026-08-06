@@ -468,10 +468,11 @@ pre-commit: fmt clippy test ## Pre-commit checks
 #      reproduces only under fat LTO or single-unit codegen; use
 #      `cargo test --release --features metal,accelerate` by hand when you
 #      are chasing one.
-#   4. `--workspace`: all four members, not just the root package. The
+#   4. `--workspace`: all five members, not just the root package. The
 #      workspace root IS the `mlxcel` package, so a bare `cargo test` or
 #      `cargo clippy` resolves to `-p mlxcel` and never builds mlxcel-core,
-#      mlxcel-surgery or mlxcel-xla, let alone their test targets. 1754 tests
+#      mlxcel-mlx-pin, mlxcel-surgery or mlxcel-xla, let alone their test
+#      targets. 1754 tests
 #      were invisible on that basis, mlxcel-core's 1354 of them, and so was
 #      test-only lint debt: six clippy errors sat in mlxcel-xla's lib-test
 #      target while the root gate passed clean, and during #973 five
@@ -491,8 +492,12 @@ pre-commit: fmt clippy test ## Pre-commit checks
 #
 #      What `--workspace` covers is each member at the feature set the root
 #      selects: mlxcel-core resolves to metal + accelerate through the root's
-#      forwarding, while mlxcel-surgery and mlxcel-xla resolve to their (empty)
-#      defaults. mlxcel-xla's `iree` feature stays off, so its build script
+#      forwarding, while mlxcel-mlx-pin, mlxcel-surgery and mlxcel-xla resolve
+#      to their (empty) defaults. mlxcel-mlx-pin is a leaf with no production
+#      role: it hosts the unit tests for the MLX-pin logic in
+#      mlxcel-core/build_support/mlx_pin.rs, and it costs the gate almost
+#      nothing because it does not depend on mlxcel-core and so never triggers
+#      an MLX build. mlxcel-xla's `iree` feature stays off, so its build script
 #      skips the C shim and the gate needs no IREE distribution; the code
 #      behind `iree`, `diagnostics` and `micro-oracle` is still ungated here.
 #

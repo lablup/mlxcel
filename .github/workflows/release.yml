@@ -23,13 +23,13 @@ on:
 # Default-deny top-level permissions; each job grants only what it needs.
 permissions: {}
 
-# Pinned MLX C++ commit, shared by both Linux CUDA jobs for build-cache
-# validation. Must match GIT_TAG in src/lib/mlx-cpp/CMakeLists.txt and
-# MLX_EXPECTED_COMMIT in src/lib/mlxcel-core/build.rs (the three-place pin
-# documented in CLAUDE.md). Hoisted to workflow scope so a future bump
-# touches one literal here instead of one per job.
-env:
-  MLX_EXPECTED_COMMIT: "b7c3dd6d27f45b5365b08a840310187dc503f1db"
+# This workflow does not store the pinned MLX C++ commit. Both Linux CUDA jobs
+# derive it from its single source of truth, GIT_TAG in
+# src/lib/mlx-cpp/CMakeLists.txt, via scripts/ci/mlx_pinned_commit.sh. The
+# workflow used to keep its own literal at this scope and it had already drifted
+# a bump behind the CMake file, so every release build was purging and rebuilding
+# MLX from scratch while reporting a pin the tree no longer used (issue #1047).
+# The bump checklist is in CONTRIBUTING.md ("Bumping the MLX upstream pin").
 
 jobs:
   # ============================================================================
@@ -467,7 +467,18 @@ jobs:
 
       - name: Validate MLX build cache
         run: |
-          # MLX_EXPECTED_COMMIT is set at workflow scope (top of this file).
+          # Derive the pin from its single source of truth (GIT_TAG in
+          # src/lib/mlx-cpp/CMakeLists.txt), the same line mlxcel-core's
+          # build.rs parses, rather than restating it here. The script exits
+          # non-zero unless the pin resolves to exactly one 40-character
+          # lowercase hex SHA; an empty value must never reach the comparison
+          # below, because it would mark every cache stale and purge all of them.
+          MLX_EXPECTED_COMMIT="$(scripts/ci/mlx_pinned_commit.sh)" || exit 1
+          if [ -z "$MLX_EXPECTED_COMMIT" ]; then
+            echo "Refusing to validate build caches against an empty MLX pin" >&2
+            exit 1
+          fi
+          echo "Pinned MLX commit: $MLX_EXPECTED_COMMIT"
           # Check every _deps directory for a valid .mlx-build-commit marker.
           # If the marker is missing or doesn't match, purge that _deps/ entirely.
           # This ensures stale MLX source/objects never survive across MLX upgrades.
@@ -646,7 +657,18 @@ jobs:
 
       - name: Validate MLX build cache
         run: |
-          # MLX_EXPECTED_COMMIT is set at workflow scope (top of this file).
+          # Derive the pin from its single source of truth (GIT_TAG in
+          # src/lib/mlx-cpp/CMakeLists.txt), the same line mlxcel-core's
+          # build.rs parses, rather than restating it here. The script exits
+          # non-zero unless the pin resolves to exactly one 40-character
+          # lowercase hex SHA; an empty value must never reach the comparison
+          # below, because it would mark every cache stale and purge all of them.
+          MLX_EXPECTED_COMMIT="$(scripts/ci/mlx_pinned_commit.sh)" || exit 1
+          if [ -z "$MLX_EXPECTED_COMMIT" ]; then
+            echo "Refusing to validate build caches against an empty MLX pin" >&2
+            exit 1
+          fi
+          echo "Pinned MLX commit: $MLX_EXPECTED_COMMIT"
           # Check every _deps directory for a valid .mlx-build-commit marker.
           # If the marker is missing or doesn't match, purge that _deps/ entirely.
           FOUND=0
@@ -904,8 +926,8 @@ jobs:
           VERSION="${TAG#v}"
           # syft dir:. catalogs the Rust workspace via the committed Cargo.lock.
           # Note: it does NOT capture the MLX C++ dependency fetched at build time
-          # via FetchContent (pinned by MLX_EXPECTED_COMMIT at the top of this
-          # file); recording that native pin in the SBOM is out of scope here.
+          # via FetchContent (pinned by GIT_TAG in src/lib/mlx-cpp/CMakeLists.txt);
+          # recording that native pin in the SBOM is out of scope here.
           syft dir:. -o cyclonedx-json > sbom.cyclonedx.json
           gzip -9 sbom.cyclonedx.json
           SBOM_FILE="sbom-${VERSION}.cyclonedx.json.gz"
