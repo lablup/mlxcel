@@ -5,10 +5,16 @@
 // exceeds the gridDim.y/z limit of 65535 and no `l = out.size()/(m*n)` int32
 // multiply overflows (see lablup/mlxcel#648); (3) route sorted M==1 GatherQMM
 // (MoE prefill) through dequant + CUTLASS grouped GEMM (lablup/mlxcel#629).
-// Synced to upstream e9463bb
-// (post-#3706/#3576 JIT qmm rework and #3723 qmv global scale; the dispatch
-// consumed here kept its public signatures, with qmv gaining an optional
-// global_scale that QuantizedMatmul passes as std::nullopt).
+// Synced to upstream 2c46b953 (lablup/mlxcel#1042). The only upstream change to
+// this file since the previous sync is #3757 (Add gather_qqmm), which inserted a
+// `const std::optional<array>& global_scale` parameter into qmm_naive at
+// position 5, right after `biases`. Both qmm_naive call sites below pass
+// std::nullopt there, matching upstream. Every other dispatch entry point
+// consumed here (qmm_sm90, qmm_sm80, qmv, gather_qmv, fp_qmv) kept its
+// signature: the full diff of quantized/qmm/qmm.h across that range is the one
+// global_scale line. Re-verify these call sites against qmm.h on the next pin
+// bump; an overlay that silently reverts an upstream change is how #830 / #831
+// happened.
 
 #include "mlx/backend/cuda/quantized/quantized.h"
 #include "mlx/backend/cuda/device.h"
@@ -187,6 +193,7 @@ void QuantizedMatmul::eval_gpu(const std::vector<array>& inputs, array& out) {
           w,
           scales,
           biases,
+          std::nullopt,
           std::nullopt,
           std::nullopt,
           oc,
@@ -428,6 +435,7 @@ void GatherQMM::eval_gpu(const std::vector<array>& inputs, array& out) {
               w,
               scales,
               biases,
+              std::nullopt,
               lc,
               rc,
               oc,
