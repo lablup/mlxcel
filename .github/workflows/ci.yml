@@ -112,6 +112,29 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  crate-versions:
+    name: crate versions
+    # Deliberately not behind the `changes` filter. It needs no toolchain and
+    # runs in seconds, and a version-consistency gate that can be skipped is
+    # exactly the gate that gets skipped on the one PR that breaks it.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Gating, not advisory. From v0.3.3 onward the root `mlxcel` and every
+      # member crate that ships with it carry the same `[package] version`, and
+      # a release has to bump several manifests at once. The list used to live
+      # in prose (CLAUDE.md, the release skill) and went stale the moment a
+      # member was added: `mlxcel-mlx-pin` tracked the root version from the day
+      # it was created without either document saying so. The script inverts the
+      # rule, so a new member fails this job until it is either bumped with the
+      # root or declared independent with a reason. No toolchain needed.
+      - name: Check every version-tracking crate carries the root version
+        run: python3 scripts/ci/check_crate_versions.py
+
   mlx-pin:
     name: MLX pin extraction
     needs: changes
