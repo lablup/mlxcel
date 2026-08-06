@@ -42,13 +42,26 @@ Applied-phase error in radians against the exact float64 angle:
 | 114688 | 114688 | -1.23e-2 | -2.47e-5 | 1.37e-2 |
 | 131071 | 131071 | -1.16e-2 | 7.81e-6 | 1.56e-2 |
 
-The libdevice column is flat at the 1e-5 rad measurement floor set by fp16
-output rounding; it shows no trend across a 128x change in angle. The SFU column
-grows with the angle and stays inside the `theta * 2^-23` envelope the CUDA
-documentation's `[-pi, pi]`-only accuracy bound predicts. Growth is smooth: no
-threshold, no wraparound, and the sign is stable. So the fused kernel was the
-less accurate side and the MLX reference was right, which is what licenses
-changing the kernel rather than the tolerance.
+The libdevice column shows no trend across a 128x change in angle. It scatters
+between 2.9e-7 and 5.0e-5 rad, order 1e-5 throughout, and its largest entry sits
+at offset 4096 rather than at 131071. That is the measurement floor, and it is
+the floor this method predicts: each head's two output components carry fp16
+rounding of about 2^-11 relative, so a single head recovers the phase to roughly
+5e-4 rad, and averaging the 32 heads that share one `theta` brings that under
+1e-4 rad. The bound to quote for this arm is 5e-5 rad with no trend, not any one
+cell.
+
+The SFU column instead grows with the angle, about 300x over that same 128x
+range, and every point stays inside the `theta * 2^-23` envelope the CUDA
+documentation's `[-pi, pi]`-only accuracy bound predicts (the ratio to the
+envelope runs 0.28 to 0.90). The growth is not monotonic point to point: 49152,
+81920 and 114688 each read higher than the next offset up, by up to 24%. That is
+expected, because the SFU error depends on where the angle falls inside the
+reduction period and not on the angle alone. What the issue asked for is settled
+either way: there is no threshold, no wraparound, and no sign change, only a
+trend that tracks the magnitude of the angle. So the fused kernel was the less
+accurate side and the MLX reference was right, which is what licenses changing
+the kernel rather than the tolerance.
 
 Whole-tensor deviation from the float64 reference (q, B=1 L=1, normalized rms /
 normalized max, same statistic the parity test asserts on):
@@ -92,6 +105,13 @@ graph as a control), arm order rotated each round, 9 repetitions per shape.
 Interleaving matters: an earlier split-across-builds A/B moved the *unchanged*
 control arm by 4x between runs and was unusable.
 
+The sweep covered eight sequence lengths and three of them are tabulated below:
+the decode shape and the two prefill lengths where the arms were stable enough
+across sessions for an arm-to-arm ratio to mean anything. The intermediate
+lengths are measured but not reported, because the control arm was too noisy
+there to quote a ratio from. They are not evidence either way; the numbers below
+are the whole of what this section claims.
+
 Per-call microseconds, median of 9, across three separate quiet-host sessions:
 
 | seq | `cosf`/`sinf` | `__cosf`/`__sinf` | graph control | cosf vs SFU |
@@ -100,18 +120,41 @@ Per-call microseconds, median of 9, across three separate quiet-host sessions:
 | 4096 | 1092 / 1028 / 961 | 1054 / 804 / 850 | 1390 / 1481 / 1453 | 1.04x / 1.28x / 1.13x |
 | 8192 | 1701 / 1593 / 1544 | 1504 / 1354 / 1394 | 2251 / 2237 / 2186 | 1.13x / 1.18x / 1.11x |
 
-At the decode shape the kernel is launch-bound and the change costs about 0.7us
+At the decode shape the kernel is launch-bound and the change costs 0.2 to 0.7us
 of 17-19us, which is smaller than the run-to-run drift of the control arm over
-the same sessions. At prefill scale the kernel does real work (about 200 MB
-moved in 1.6 ms, roughly half of this host's memory bandwidth) and the change
-costs 11-25%. The fusion still beats the graph it replaces in every row.
+the same sessions (38.1 to 43.6us).
+
+At prefill scale the kernel does real work (about 200 MB moved in 1.6 ms,
+roughly half of this host's memory bandwidth) and the change costs 11-18% at seq
+8192, where all four arms are tight. The seq 4096 row is looser: it reads 4%, 28%
+and 13% across the three sessions, and its `__cosf`/`__sinf` arm alone moved 804
+to 1054us between sessions, a spread wider than the effect being measured, so
+that row bounds the cost rather than measuring it. Across every prefill cell
+reported here the cost spans 4% to 28%; the figure to carry forward is the seq
+8192 one, 11-18%. The fusion still beats the graph it replaces in every row.
 
 `sincosf` was measured as a third arm and lands on the SFU arm's time (medians
-925 vs 900 at seq 4096, 1469 vs 1403 at seq 8192), so it recovers essentially
-the whole cost. It was not adopted: it is not bit-identical to the two separate
-calls (one differing q element at L=17, offset 65536), which would trade the
-exact-agreement property this fix is built on for a saving that is invisible at
-the decode shape the path is wired for.
+925 vs 900 at seq 4096, 1469 vs 1403 at seq 8192, each pair from one session), so
+it recovers essentially the whole cost. It was not adopted, and this is a trade
+rather than a dismissal, so the terms are recorded here for whoever revisits it.
+
+Against `sincosf`: it is not bit-identical to the two separate calls (one
+differing q element at L=17, offset 65536). Byte-identical single-token decode
+against the `fast_rope` graph is the property this fix is built on and the
+cleanest thing the parity suite can assert, and `sincosf` would give it up.
+
+For `sincosf`: the cost it recovers is not confined to prefill microbenchmarks.
+`Attention::forward` in `src/models/llama3.rs` calls
+`forward_fused_rope_append` for every window, prefill as well as decode, with no
+`l == 1` guard, so the 11-18% at seq 8192 is paid on the wired path whenever
+`MLXCEL_FUSED_ROPE_APPEND=1` and the checkpoint is non-quantized. At the decode
+shape the same saving is 0.2 to 0.7us of 17-19us and is invisible.
+
+Bit-identity was judged worth more while this path ships opt-in and off by
+default, so the prefill percentage is currently paid by nobody. If
+`FUSED_ROPE_APPEND_DEFAULT` is ever flipped, or a prefill-heavy profile makes
+that percentage matter, `sincosf` is the first thing to re-measure and the table
+above is the number to beat.
 
 ## Token-level impact
 
