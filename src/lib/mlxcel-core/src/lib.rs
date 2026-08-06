@@ -3355,6 +3355,17 @@ mod sampling_rejection_tests;
 #[path = "gpu_exclusivity_tests.rs"]
 mod gpu_exclusivity_tests;
 
+// Guard against running this suite multi-threaded on the CUDA backend (issue
+// #1048). The libtest default of one thread per core drives MLX concurrently and
+// takes the process down with SIGABRT partway through, at a different test and
+// with a different CUDA error each run, so the abort reads as "whichever test
+// was running is broken". Disabling graph capture does not help; only
+// serializing does. CUDA-only: the Metal hazard is the cross-process one in
+// #1008, which `gpu_exclusivity_tests` above covers.
+#[cfg(all(test, feature = "cuda"))]
+#[path = "cuda_test_serialization_tests.rs"]
+mod cuda_test_serialization_tests;
+
 #[cfg(test)]
 #[path = "fused_norm_parity_tests.rs"]
 mod fused_norm_parity_tests;

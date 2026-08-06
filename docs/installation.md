@@ -269,16 +269,51 @@ For the complete `MLXCEL_*` reference, see
 
 On CUDA hosts, run the test suite single threaded. Since the 2026-07 MLX pin
 the quantized kernels are JIT-compiled and module-loaded on first use, and
-those first-use paths are not safe against concurrent test threads: the
-default parallel run can abort with
-`cudaStreamEndCapture ... previous error during capture` (a module load
-racing another thread's stream capture) or, with graphs disabled, with
-`cuLaunchKernelEx ... invalid argument` (a kernel-configure race). Inference
-binaries are unaffected; this is a test-parallelism artifact.
+those first-use paths are not safe against concurrent test threads, so the
+default parallel run aborts. The measured signatures are in the table below.
+Inference binaries are unaffected; this is a test-parallelism artifact.
 
 ```bash
-cargo test --workspace --profile test-fast --features cuda -- --test-threads=1
+make verify-test-cuda
+# which is:
+cargo test --workspace --profile test-fast --features cuda --no-fail-fast -- --test-threads=1
 ```
+
+Three runs of `cargo test --release --features cuda -p mlxcel-core --lib` on an
+idle GB10 (sm_121) at MLX pin `2c46b953` put numbers on that (#1048):
+
+| Threads | `MLX_USE_CUDA_GRAPHS` | Outcome |
+|---|---|---|
+| default (20) | on | SIGABRT, `cudaStreamEndCapture ... previous error during capture` |
+| `--test-threads=1` | on | ran to a verdict, 1410 tests in 88s |
+| default (20) | `0` | SIGABRT, `cuLaunchKernelEx ... invalid argument` |
+
+The third row is why `MLX_USE_CUDA_GRAPHS=0` is not the workaround it looks
+like: disabling capture does not rescue the parallel run, it only changes which
+CUDA call reports the failure, from a module load racing another thread's
+stream capture to a kernel-configure race. Serializing addresses the cause;
+capture stays fully on under the gate, so the suite keeps exercising it. The
+same command under `[profile.test-fast]`, which is what `make verify-test-cuda`
+actually builds, behaves the same way: 1411 passed, 4 failed, 89.35s, no abort.
+The abort site and the error text both move between runs, which is what makes
+the raw SIGABRT expensive to read: it looks like whichever test happened to be
+running is broken.
+
+`mlxcel-core` carries a `the_cuda_test_suite_must_run_single_threaded`
+guard (`src/lib/mlxcel-core/src/cuda_test_serialization_tests.rs`) so an
+invocation that forgets the flag fails by name with the right command instead.
+Being an ordinary test, the guard is filtered out of any narrowed run whose
+filter does not match its name, and those runs stay parallel; scoped subsets
+pass parallel and it is whole-suite runs that abort. A filter that does match
+it, `--lib cuda` for one, trips the guard on a run that would have been safe;
+set `MLXCEL_ALLOW_PARALLEL_CUDA_TESTS=1` to downgrade it to a warning there.
+
+`make verify-test-cuda` is the Linux/NVIDIA counterpart of `make verify-test`.
+Before #1048 there was no CUDA target that ran `mlxcel-core`'s tests at all:
+`verify-test` pins `--features metal,accelerate`, and `make test-fast-cuda`
+serializes but stays on the root package, so a bare `cargo test` under it
+resolves to `-p mlxcel` and never builds `mlxcel-core`. That is the same
+blindness #1007 removed on macOS, on the other backend.
 
 ## Fast iteration builds
 
@@ -364,10 +399,22 @@ with no production role, holding the unit tests for the MLX-pin logic in
 `mlxcel-core`, so `cargo test -p mlxcel-mlx-pin` runs in seconds instead of
 triggering an MLX C++ build.
 
+`make verify-test-cuda` (#1048) says `--workspace` for the same reason and
+resolves the same way, with `cuda` in place of `metal,accelerate`. Pulling in
+`mlxcel-surgery` and `mlxcel-xla` on the CUDA path is intended and close to
+free. Both depend on `mlxcel-core`, and one `cargo test --workspace --features
+cuda` unifies that into a single `cuda`-enabled build of it, so neither triggers
+a second MLX compile; `mlxcel-xla`'s `iree` feature stays off there too, so it
+stays pure Rust and needs no IREE distribution. What their test targets contain
+is backend-agnostic Rust, so excluding them would only mean the two crates are
+gated on macOS and nowhere else. `mlxcel-mlx-pin` does not depend on
+`mlxcel-core` at all and costs the run seconds.
+
 `make verify-test` also passes `--no-fail-fast`, which matters only now that
 the run covers five members: without it the first failing test binary ends the
 run and hides the other four behind whatever failed first. Cargo still exits
-non-zero, so the gate is no weaker for it.
+non-zero, so the gate is no weaker for it. `make verify-test-cuda` passes it
+too.
 
 Widening the scope does not put the run into the concurrency hazard of #1008,
 where two `mlxcel-core` suites sharing one Metal device aborted 7 of 12 runs.
