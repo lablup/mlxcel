@@ -36,6 +36,29 @@ fi
 # interval syntax, which is not portable across the awk implementations on the
 # GitHub-hosted Linux and self-hosted macOS runners; the SHA shape is validated
 # in the shell below instead.
+#
+# Count the matching declarations before reading any tag out of them. Counting
+# tags alone is not the same check and is not sufficient: with two blocks naming
+# the MLX repository where only the second carries a GIT_TAG, the tag count is 1
+# and this script would return that second block's SHA without complaint, while
+# the Rust parser rejects the same file as ambiguous. Anything the two parsers
+# disagree about is exactly the divergence #1047 exists to remove, so the shape
+# they accept has to be the same one.
+mlx_declarations="$(
+  awk '
+    { line = $0; sub(/#.*/, "", line); $0 = line }
+    /FetchContent_Declare/ { in_block = 1; is_mlx = 0 }
+    in_block && !is_mlx && index($0, "ml-explore/mlx") > 0 { is_mlx = 1; found++ }
+    in_block && index($0, ")") > 0 { in_block = 0; is_mlx = 0 }
+    END { print found + 0 }
+  ' "$cmake_file"
+)"
+
+if [ "$mlx_declarations" -ne 1 ]; then
+  echo "mlx_pinned_commit: expected exactly one FetchContent_Declare block naming ml-explore/mlx in $cmake_file, found $mlx_declarations. Leave exactly one; the pin is its GIT_TAG argument." >&2
+  exit 1
+fi
+
 commits="$(
   awk '
     { line = $0; sub(/#.*/, "", line); $0 = line }

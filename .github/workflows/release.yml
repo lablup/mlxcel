@@ -466,6 +466,15 @@ jobs:
           fi
 
       - name: Validate MLX build cache
+        # MLX_PIN_CMAKE_FILE redirects which file the pin is read from. It
+        # exists for the parser's own negative-path fixtures and has no place in
+        # a release build, so it is pinned empty here (the script's `:-` default
+        # treats empty as unset) rather than left to whatever the runner
+        # environment or an earlier step happens to have put in scope. These are
+        # persistent self-hosted runners and this is the value that decides
+        # which upstream source a shipped binary is built from.
+        env:
+          MLX_PIN_CMAKE_FILE: ""
         run: |
           # Derive the pin from its single source of truth (GIT_TAG in
           # src/lib/mlx-cpp/CMakeLists.txt), the same line mlxcel-core's
@@ -669,6 +678,15 @@ jobs:
           fi
 
       - name: Validate MLX build cache
+        # MLX_PIN_CMAKE_FILE redirects which file the pin is read from. It
+        # exists for the parser's own negative-path fixtures and has no place in
+        # a release build, so it is pinned empty here (the script's `:-` default
+        # treats empty as unset) rather than left to whatever the runner
+        # environment or an earlier step happens to have put in scope. These are
+        # persistent self-hosted runners and this is the value that decides
+        # which upstream source a shipped binary is built from.
+        env:
+          MLX_PIN_CMAKE_FILE: ""
         run: |
           # Derive the pin from its single source of truth (GIT_TAG in
           # src/lib/mlx-cpp/CMakeLists.txt), the same line mlxcel-core's

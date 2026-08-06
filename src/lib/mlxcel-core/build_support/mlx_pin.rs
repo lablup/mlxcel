@@ -245,6 +245,49 @@ pub fn cache_state(marker_contents: Option<&str>, expected_commit: &str) -> Cach
     }
 }
 
+/// Environment variables through which git's repository discovery can be
+/// redirected at a different repository than the one named on the command line.
+///
+/// They are cleared for the HEAD probe. The probe exists to read the HEAD of
+/// one specific directory, and any of these left in the ambient environment
+/// silently makes `git -C <dir> rev-parse HEAD` answer for something else:
+/// `GIT_DIR` alone is enough to turn a `Mismatch` into a `Match`, which would
+/// let `mark_mlx_cache_valid` bless a `_deps/mlx-src` that is not the pinned
+/// commit. This is not an exotic condition. Git exports `GIT_DIR` (and friends)
+/// into the child environment of every hook, of `git rebase -x`, and of
+/// `git bisect run`, so any `cargo build` reached through one of those inherits
+/// it. The `.git` probe above defends against discovery walking *up*; this
+/// defends against it being redirected *sideways*.
+const GIT_DISCOVERY_ENV: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_INDEX_FILE",
+    "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+];
+
+/// Build the `git rev-parse HEAD` invocation the HEAD probe runs.
+///
+/// `mlx_src_dir` is passed as the argument of `-C`, which git consumes
+/// unconditionally, so a directory whose name begins with a dash is read as a
+/// path and never as an option. Nothing else on the command line is
+/// path-derived.
+fn head_command(mlx_src_dir: &Path) -> Command {
+    let mut command = Command::new("git");
+    for name in GIT_DISCOVERY_ENV {
+        command.env_remove(name);
+    }
+    command
+        .arg("-C")
+        .arg(mlx_src_dir)
+        .args(["rev-parse", "HEAD"]);
+    command
+}
+
 /// Compare the HEAD of a fetched MLX checkout against the pin.
 ///
 /// This is the half of the fix that `parse_pinned_commit` cannot cover: it
@@ -271,12 +314,7 @@ pub fn check_fetched_head(mlx_src_dir: &Path, expected_commit: &str) -> HeadChec
         };
     }
 
-    let output = match Command::new("git")
-        .arg("-C")
-        .arg(mlx_src_dir)
-        .args(["rev-parse", "HEAD"])
-        .output()
-    {
+    let output = match head_command(mlx_src_dir).output() {
         Ok(output) => output,
         Err(err) => {
             return HeadCheck::Unavailable {
@@ -807,6 +845,31 @@ mod tests {
         match check_fetched_head(&inner, PIN) {
             HeadCheck::Unavailable { .. } => {}
             other => panic!("expected Unavailable, got {other:?} (outer HEAD is {outer_head})"),
+        }
+    }
+
+    /// `GIT_DIR` in the ambient environment redirects `git -C <dir> rev-parse
+    /// HEAD` at another repository entirely, which reports a `Match` for a
+    /// `_deps/mlx-src` that is not the pinned commit and gets it blessed by the
+    /// cache marker. The probe therefore clears the discovery variables rather
+    /// than trusting the environment it was launched in.
+    ///
+    /// Asserted on the constructed command rather than by setting the variable
+    /// for real: libtest runs these in threads of one process, and mutating the
+    /// process environment would race the other `git`-spawning tests here.
+    #[test]
+    fn the_head_probe_clears_gits_repository_redirection_variables() {
+        let command = head_command(Path::new("/out/build/_deps/mlx-src"));
+        let cleared: Vec<String> = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        for name in GIT_DISCOVERY_ENV {
+            assert!(
+                cleared.iter().any(|entry| entry == name),
+                "{name} must be cleared for the HEAD probe, cleared: {cleared:?}"
+            );
         }
     }
 

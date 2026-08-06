@@ -72,6 +72,7 @@ jobs:
             mlx_pin:
               - 'src/lib/mlx-cpp/CMakeLists.txt'
               - 'scripts/ci/mlx_pinned_commit.sh'
+              - 'scripts/ci/mlx_pinned_commit_test.sh'
               - '.github/workflows/ci.yml'
 
   deny:
@@ -133,6 +134,14 @@ jobs:
       # appear when a release is cut. Issue #1047.
       - name: Extract the pinned MLX commit
         run: scripts/ci/mlx_pinned_commit.sh
+
+      # The other half of the contract: the shell parser must also *reject*
+      # everything the Rust parser rejects. A value it accepts and the Rust
+      # parser refuses is not harmless, because release.yml purges every MLX
+      # build cache that does not match what this script prints and the build
+      # then fails on the same file the purge was justified by.
+      - name: Check the pinned MLX commit parser rejects malformed input
+        run: scripts/ci/mlx_pinned_commit_test.sh
 
   cross-repo-refs:
     name: cross-repo refs
