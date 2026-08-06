@@ -24,15 +24,6 @@ High-performance LLM/VLM inference runtime and server for Apple Silicon / NVIDIA
 - **OpenXLA multimodal expansion (opt-in).** On the `xla-iree` backend: Gemma3n text runtime and audio (#892, #883), Phi4MM audio with per-slot adapters (#887, #914), LLaVA vision through IREE (#913), the Qwen2-VL vision path (#915), sparse DeepStack prefill (#893), multimodal RoPE position state (#894), and image requests admitted in the CLI and continuous-batch serving (#895). Default builds still do not compile the XLA path.
 - **IREE toolchain pinned and hardened.** The IREE compiler and runtime are unified at 3.12.0rc20260721 across CUDA and macOS, with wheels fetched from the official GitHub release and verified by sha256 (#882).
 
-## New in v0.4.2
-
-- **Three more model families.** MiniMax-M3, a hybrid dense/MoE text model with block-sparse attention (#799); MiniMax-M3-VL multimodal (#800); and Unlimited-OCR, whose decode runs against a ring sliding KV cache so a long document does not grow the cache unbounded past the window (#801).
-- **XTC sampling.** Exclude Top Choices sampling (`xtc_probability`, `xtc_threshold`) is read and applied end to end on the OpenAI-compatible chat, completions, and responses routes; out-of-range values return a 400 (#802).
-- **DeepSeek-V2 is correct on CUDA again.** An upstream MLX 0.32.1 RMSNorm kernel regression turned DeepSeek-V2-Lite generation into repeated tokens on GB10. The affected kernel is overlaid with its last-good version and CUDA graph capture is disabled for the family (as it already is for Gemma 4), so output is coherent again (#829).
-- **Empty-input requests are rejected up front.** A request whose effective input is empty or whitespace-only returns a 400 before model dispatch, on `/v1/chat/completions`, `/v1/completions`, and `/v1/messages` (#803, #813, #814).
-- **The server survives more backend faults.** An MLX evaluation throw in the decode loop fails the affected request instead of aborting the worker (#825), and CUDA builds raise the MLX graph-cache default so long-lived speculative serving no longer hits the fatal "Cache thrashing" abort (#818).
-- **Gemma 4 audio transcription fix.** The CLI renders the audio placeholder after the prompt text, so the 12B unified model transcribes acoustically hard clips instead of answering their perceived content (#798).
-
 ## New in v0.4
 
 - **Experimental OpenXLA / IREE backend (opt-in).** A second forward-execution engine built on a Rust-native StableHLO emitter and the IREE runtime, selectable with `MLXCEL_BACKEND=xla` behind the `xla-backend` / `xla-iree` build features. It runs on Metal and CUDA and serves through a continuous-batching engine. Default builds do not compile it, and the MLX path is unchanged.
