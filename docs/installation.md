@@ -300,8 +300,11 @@ expensive to read: it looks like whichever test happened to be running is
 broken. `mlxcel-core` carries a `the_cuda_test_suite_must_run_single_threaded`
 guard (`src/lib/mlxcel-core/src/cuda_test_serialization_tests.rs`) so an
 invocation that forgets the flag fails by name with the right command instead.
-Being an ordinary test, the guard is filtered out of narrowed runs, which stay
-parallel; scoped subsets pass parallel and it is whole-suite runs that abort.
+Being an ordinary test, the guard is filtered out of any narrowed run whose
+filter does not match its name, and those runs stay parallel; scoped subsets
+pass parallel and it is whole-suite runs that abort. A filter that does match
+it, `--lib cuda` for one, trips the guard on a run that would have been safe;
+set `MLXCEL_ALLOW_PARALLEL_CUDA_TESTS=1` to downgrade it to a warning there.
 
 `make verify-test-cuda` is the Linux/NVIDIA counterpart of `make verify-test`.
 Before #1048 there was no CUDA target that ran `mlxcel-core`'s tests at all:
