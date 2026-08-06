@@ -50,9 +50,9 @@ Thank you for your interest in contributing to mlxcel! This document covers the 
 
    `make verify` runs exactly the three commands above, and the nightly invokes those same Makefile targets, so the local gate and CI cannot drift apart. Tests build under `[profile.test-fast]` rather than `--release`: `opt-level = 3` is kept so MLX numerics stay representative, while the fat LTO and single codegen unit that make a full `--release` test link take hours are dropped. `make test-fast` / `make test-fast-cuda` are the same profile with `--test-threads=1` and a `FILTER` hook for narrowing the run while you iterate. Reach for `cargo test --release --features metal,accelerate` by hand only when you suspect a defect specific to release codegen. See [`docs/installation.md`](docs/installation.md#fast-iteration-builds) for the measured comparison.
 
-   `--workspace` is not optional, and leaving it off is how the gate went blind before (#1007). This repository's workspace root is itself the `mlxcel` package, so a bare `cargo test` or `cargo clippy` resolves to `-p mlxcel` and never builds `mlxcel-core`, `mlxcel-surgery` or `mlxcel-xla` at all, let alone their test targets. That hid 1754 tests, 1354 of them in `mlxcel-core`, which is the crate holding the MLX `cxx` bridge, `layers.rs`, the KV cache and the quantization loaders. It also hid test-only lint debt, since `--all-targets` without `--workspace` does not compile a member's test target either. `cargo fmt --all` was already workspace-wide, which is why the fmt gate never had the hole. Each member builds at the feature set the root selects: `mlxcel-core` gets `metal` and `accelerate` through the root's forwarding, `mlxcel-surgery` and `mlxcel-xla` get their empty defaults. `mlxcel-xla`'s `iree` feature stays off, so the gate needs no IREE distribution and the code behind `iree`, `diagnostics` and `micro-oracle` remains ungated.
+   `--workspace` is not optional, and leaving it off is how the gate went blind before (#1007). This repository's workspace root is itself the `mlxcel` package, so a bare `cargo test` or `cargo clippy` resolves to `-p mlxcel` and never builds `mlxcel-core`, `mlxcel-mlx-pin`, `mlxcel-surgery` or `mlxcel-xla` at all, let alone their test targets. That hid 1754 tests, 1354 of them in `mlxcel-core`, which is the crate holding the MLX `cxx` bridge, `layers.rs`, the KV cache and the quantization loaders. It also hid test-only lint debt, since `--all-targets` without `--workspace` does not compile a member's test target either. `cargo fmt --all` was already workspace-wide, which is why the fmt gate never had the hole. Each member builds at the feature set the root selects: `mlxcel-core` gets `metal` and `accelerate` through the root's forwarding, `mlxcel-mlx-pin`, `mlxcel-surgery` and `mlxcel-xla` get their empty defaults. `mlxcel-xla`'s `iree` feature stays off, so the gate needs no IREE distribution and the code behind `iree`, `diagnostics` and `micro-oracle` remains ungated.
 
-   `--no-fail-fast` goes with it. Once the run covers four members, the first failing test binary would otherwise end it and hide the other three; cargo still exits non-zero, so the gate is no weaker. Cargo runs the test binaries one at a time, so the `mlxcel-core` suite never shares the Metal device with the root suite, which is the condition that corrupts results in #1008.
+   `--no-fail-fast` goes with it. Once the run covers five members, the first failing test binary would otherwise end it and hide the other four; cargo still exits non-zero, so the gate is no weaker. Cargo runs the test binaries one at a time, so the `mlxcel-core` suite never shares the Metal device with the root suite, which is the condition that corrupts results in #1008.
 5. For inference changes, validate against a real checkpoint. Synthetic or build-only validation is not enough: a shape-compatible change can compile, pass unit tests, and still produce wrong logits on an actual quantized checkpoint. Fetch one with `mlxcel download mlx-community/<model-id>`, and see [`docs/supported-models.md`](docs/supported-models.md) for the families each code path covers. A change to a shared component should be smoke-tested against at least two families.
 6. Commit with a conventional prefix (see below) and a clear message.
 7. Push to your fork and open a Pull Request. The PR template will prompt for a summary, test plan, and linked issues.
@@ -101,13 +101,18 @@ See [`docs/adding-models.md`](docs/adding-models.md) for the full checklist. The
 
 ### Bumping the MLX upstream pin
 
-The pinned MLX C++ commit lives in three files that must stay in sync. They control source fetching, build-cache validation (marker file `_deps/.mlx-build-commit`), and CI cache invalidation respectively; a mismatch produces stale build artifacts and CI breakage.
+Edit one line: `GIT_TAG` in the `FetchContent_Declare(mlx ...)` block of [`src/lib/mlx-cpp/CMakeLists.txt`](src/lib/mlx-cpp/CMakeLists.txt). That is the commit CMake fetches, and since #1047 it is the only place the value is written down. It must be a full 40-character lowercase hex SHA; a branch or tag name is rejected, because the build-cache marker and the fetched-HEAD check both compare against an exact commit.
 
-| File | Field |
-|------|-------|
-| `src/lib/mlx-cpp/CMakeLists.txt` | `GIT_TAG` in `FetchContent_Declare(mlx ...)` |
-| `src/lib/mlxcel-core/build.rs` | `MLX_EXPECTED_COMMIT` constant |
-| `.github/workflows/release.yml` | `MLX_EXPECTED_COMMIT` env in the "Validate MLX build cache" step |
+Everything else derives from it:
+
+| Consumer | How it reads the pin |
+|----------|----------------------|
+| `src/lib/mlxcel-core/build.rs` | Parses the `GIT_TAG` line at build time via `build_support/mlx_pin.rs`, then drives `_deps/` purging, the `_deps/.mlx-build-commit` marker, the post-build check that the fetched `_deps/mlx-src` HEAD really is that commit, and the `MLXCEL_MLX_COMMIT` value baked into the binary |
+| `.github/workflows/release.yml` | Runs [`scripts/ci/mlx_pinned_commit.sh`](scripts/ci/mlx_pinned_commit.sh) inside each "Validate MLX build cache" step |
+
+Both parsers scope themselves to the declaration whose `GIT_REPOSITORY` names the MLX repository, so a second `FetchContent_Declare` cannot supply the pin by accident, and both fail loudly rather than guess when the line is missing, duplicated, or malformed. The Rust half is unit-tested by `cargo test -p mlxcel-mlx-pin`, which runs in seconds because it does not compile `mlxcel-core`.
+
+This used to be three literals in three files with nothing checking that they agreed. A partial bump left `_deps/` looking valid, so `FetchContent` never re-ran and the build linked the previous MLX while reporting the new commit. The workflow's copy had in fact already fallen a bump behind by the time #1047 was filed.
 
 After bumping the pin, re-validate the in-tree fused Metal kernel launchers in `src/lib/mlx-cpp/turbo/`, which are runtime-JIT paths a breaking MLX API change can silently regress:
 

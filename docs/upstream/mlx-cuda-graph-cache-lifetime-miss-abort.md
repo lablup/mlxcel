@@ -1,6 +1,6 @@
 # MLX CUDA: LRUCache's thrashing check aborts long-lived processes on a lifetime miss count
 
-Upstream bug report draft for ml-explore/mlx. Observed in mlxcel (lablup/mlxcel#818) and mitigated there by raising the CUDA graph-cache default (commit `bac0fca`); tracked for upstream in lablup/mlxcel#821. Every file and line reference below was read at MLX commit `b7c3dd6d27f45b5365b08a840310187dc503f1db`, which is mlxcel's current pin.
+Upstream bug report draft for ml-explore/mlx. Observed in mlxcel (lablup/mlxcel#818) and mitigated there by raising the CUDA graph-cache default (commit `bac0fca`); tracked for upstream in lablup/mlxcel#821. Every file and line reference below was read at MLX commit `b7c3dd6d27f45b5365b08a840310187dc503f1db`, which was mlxcel's pin at the time this report was written. For the pin in effect today, see the `GIT_TAG` argument of the `FetchContent_Declare(mlx ...)` block in `src/lib/mlx-cpp/CMakeLists.txt`, the single source of truth per issue #1047; it has moved on since.
 
 ## Summary
 

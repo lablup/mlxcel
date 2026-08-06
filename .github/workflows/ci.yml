@@ -54,6 +54,7 @@ jobs:
       pull-requests: read
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      mlx_pin: ${{ steps.filter.outputs.mlx_pin }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -67,6 +68,13 @@ jobs:
               - '**/Cargo.toml'
               - 'Cargo.lock'
               - 'deny.toml'
+              - '.github/workflows/ci.yml'
+            mlx_pin:
+              - 'src/lib/mlx-cpp/CMakeLists.txt'
+              - 'src/lib/mlxcel-core/build_support/mlx_pin.rs'
+              - 'src/lib/mlxcel-mlx-pin/**'
+              - 'scripts/ci/mlx_pinned_commit.sh'
+              - 'scripts/ci/mlx_pinned_commit_test.sh'
               - '.github/workflows/ci.yml'
 
   deny:
@@ -103,6 +111,52 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+
+  mlx-pin:
+    name: MLX pin extraction
+    needs: changes
+    if: needs.changes.outputs.mlx_pin == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # The pinned MLX commit has one home, GIT_TAG in
+      # src/lib/mlx-cpp/CMakeLists.txt, and two independent parsers read it:
+      # mlxcel-core's build.rs in Rust (build_support/mlx_pin.rs, unit-tested by
+      # mlxcel-mlx-pin) and this script in awk, for release.yml's "Validate MLX
+      # build cache" steps. The shell half accepts strictly less than the Rust
+      # half: it needs GIT_TAG as the first token of its own line, after the
+      # GIT_REPOSITORY line, with no closing parenthesis in between. A CMake
+      # reformat that leaves every local build and `make verify` green can
+      # therefore break every release build, and release.yml is the only other
+      # place this script runs, so without this job the breakage would first
+      # appear when a release is cut. Issue #1047.
+      #
+      # `mlxcel-mlx-pin` compiles in under a second (a leaf crate with no
+      # production role, only `std` plus a `tempfile` dev-dependency), so it
+      # runs first here rather than only in nightly-verify.yml's `make verify`.
+      # Its `tests/cross_parser.rs` shells out to mlx_pinned_commit.sh itself
+      # and asserts that whenever the shell parser accepts an input, the Rust
+      # parser resolves to the identical commit for that same input: the two
+      # unit-test files below each cover one parser in isolation and cannot
+      # catch a same-input value mismatch on their own.
+      - uses: dtolnay/rust-toolchain@1.93.1
+      - name: Run the Rust pin parser's unit and cross-parser tests
+        run: cargo test -p mlxcel-mlx-pin
+
+      - name: Extract the pinned MLX commit
+        run: scripts/ci/mlx_pinned_commit.sh
+
+      # The other half of the contract: the shell parser must also *reject*
+      # everything the Rust parser rejects. A value it accepts and the Rust
+      # parser refuses is not harmless, because release.yml purges every MLX
+      # build cache that does not match what this script prints and the build
+      # then fails on the same file the purge was justified by.
+      - name: Check the pinned MLX commit parser rejects malformed input
+        run: scripts/ci/mlx_pinned_commit_test.sh
 
   cross-repo-refs:
     name: cross-repo refs

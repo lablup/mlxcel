@@ -353,16 +353,20 @@ that `release.yml` runs, which would start compiling the default-off
 
 Each member builds at the feature set the root selects. `mlxcel-core` resolves
 to `metal` and `accelerate` through the root package's forwarding, so there is
-one build of it shared by every member. `mlxcel-surgery` and `mlxcel-xla`
-resolve to their empty defaults; in particular `mlxcel-xla`'s `iree` feature
-stays off, so its build script skips the native shim and the gate needs no IREE
-distribution. The code behind `iree`, `diagnostics` and `micro-oracle` is still
-outside the gate for that reason, and needs a local IREE dist to check (see
-`scripts/iree/setup-macos.sh`).
+one build of it shared by every member. `mlxcel-mlx-pin`, `mlxcel-surgery` and
+`mlxcel-xla` resolve to their empty defaults; in particular `mlxcel-xla`'s
+`iree` feature stays off, so its build script skips the native shim and the gate
+needs no IREE distribution. The code behind `iree`, `diagnostics` and
+`micro-oracle` is still outside the gate for that reason, and needs a local IREE
+dist to check (see `scripts/iree/setup-macos.sh`). `mlxcel-mlx-pin` is a leaf
+with no production role, holding the unit tests for the MLX-pin logic in
+`mlxcel-core/build_support/mlx_pin.rs`; it deliberately does not depend on
+`mlxcel-core`, so `cargo test -p mlxcel-mlx-pin` runs in seconds instead of
+triggering an MLX C++ build.
 
 `make verify-test` also passes `--no-fail-fast`, which matters only now that
-the run covers four members: without it the first failing test binary ends the
-run and hides the other three behind whatever failed first. Cargo still exits
+the run covers five members: without it the first failing test binary ends the
+run and hides the other four behind whatever failed first. Cargo still exits
 non-zero, so the gate is no weaker for it.
 
 Widening the scope does not put the run into the concurrency hazard of #1008,

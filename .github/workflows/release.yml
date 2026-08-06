@@ -23,13 +23,13 @@ on:
 # Default-deny top-level permissions; each job grants only what it needs.
 permissions: {}
 
-# Pinned MLX C++ commit, shared by both Linux CUDA jobs for build-cache
-# validation. Must match GIT_TAG in src/lib/mlx-cpp/CMakeLists.txt and
-# MLX_EXPECTED_COMMIT in src/lib/mlxcel-core/build.rs (the three-place pin
-# documented in CLAUDE.md). Hoisted to workflow scope so a future bump
-# touches one literal here instead of one per job.
-env:
-  MLX_EXPECTED_COMMIT: "b7c3dd6d27f45b5365b08a840310187dc503f1db"
+# This workflow does not store the pinned MLX C++ commit. Both Linux CUDA jobs
+# derive it from its single source of truth, GIT_TAG in
+# src/lib/mlx-cpp/CMakeLists.txt, via scripts/ci/mlx_pinned_commit.sh. The
+# workflow used to keep its own literal at this scope and it had already drifted
+# a bump behind the CMake file, so every release build was purging and rebuilding
+# MLX from scratch while reporting a pin the tree no longer used (issue #1047).
+# The bump checklist is in CONTRIBUTING.md ("Bumping the MLX upstream pin").
 
 jobs:
   # ============================================================================
@@ -466,8 +466,28 @@ jobs:
           fi
 
       - name: Validate MLX build cache
+        # MLX_PIN_CMAKE_FILE redirects which file the pin is read from. It
+        # exists for the parser's own negative-path fixtures and has no place in
+        # a release build, so it is pinned empty here (the script's `:-` default
+        # treats empty as unset) rather than left to whatever the runner
+        # environment or an earlier step happens to have put in scope. These are
+        # persistent self-hosted runners and this is the value that decides
+        # which upstream source a shipped binary is built from.
+        env:
+          MLX_PIN_CMAKE_FILE: ""
         run: |
-          # MLX_EXPECTED_COMMIT is set at workflow scope (top of this file).
+          # Derive the pin from its single source of truth (GIT_TAG in
+          # src/lib/mlx-cpp/CMakeLists.txt), the same line mlxcel-core's
+          # build.rs parses, rather than restating it here. The script exits
+          # non-zero unless the pin resolves to exactly one 40-character
+          # lowercase hex SHA; an empty value must never reach the comparison
+          # below, because it would mark every cache stale and purge all of them.
+          MLX_EXPECTED_COMMIT="$(scripts/ci/mlx_pinned_commit.sh)" || exit 1
+          if [ -z "$MLX_EXPECTED_COMMIT" ]; then
+            echo "Refusing to validate build caches against an empty MLX pin" >&2
+            exit 1
+          fi
+          echo "Pinned MLX commit: $MLX_EXPECTED_COMMIT"
           # Check every _deps directory for a valid .mlx-build-commit marker.
           # If the marker is missing or doesn't match, purge that _deps/ entirely.
           # This ensures stale MLX source/objects never survive across MLX upgrades.
@@ -484,7 +504,20 @@ jobs:
               PURGED=$((PURGED + 1))
             fi
           done
-          # Also clean workspace target/ from any previous actions/cache restore
+          # Also clean workspace target/ from any previous actions/cache restore.
+          # This loop is UNCONDITIONAL by design and does not consult a marker:
+          # $CARGO_TARGET_DIR above is the persistent self-hosted cache and is
+          # the only authoritative one, so anything a cache restore dropped into
+          # the ephemeral workspace target/ is discarded outright rather than
+          # trusted. It is also written against the literal relative path
+          # `target`, so it ignores CARGO_TARGET_DIR entirely.
+          #
+          # Consequence, which is why this is spelled out: running this step's
+          # body by hand from a developer checkout deletes every _deps/ under
+          # that checkout's target/, whatever the pin says, and each one costs a
+          # full MLX C++ rebuild to recreate. Exercise the pin extraction with
+          # MLX_PIN_CMAKE_FILE against a scratch fixture instead of running the
+          # step.
           for deps_dir in $(find target -path "*/_deps" -type d 2>/dev/null); do
             rm -rf "$deps_dir"
             PURGED=$((PURGED + 1))
@@ -645,8 +678,28 @@ jobs:
           fi
 
       - name: Validate MLX build cache
+        # MLX_PIN_CMAKE_FILE redirects which file the pin is read from. It
+        # exists for the parser's own negative-path fixtures and has no place in
+        # a release build, so it is pinned empty here (the script's `:-` default
+        # treats empty as unset) rather than left to whatever the runner
+        # environment or an earlier step happens to have put in scope. These are
+        # persistent self-hosted runners and this is the value that decides
+        # which upstream source a shipped binary is built from.
+        env:
+          MLX_PIN_CMAKE_FILE: ""
         run: |
-          # MLX_EXPECTED_COMMIT is set at workflow scope (top of this file).
+          # Derive the pin from its single source of truth (GIT_TAG in
+          # src/lib/mlx-cpp/CMakeLists.txt), the same line mlxcel-core's
+          # build.rs parses, rather than restating it here. The script exits
+          # non-zero unless the pin resolves to exactly one 40-character
+          # lowercase hex SHA; an empty value must never reach the comparison
+          # below, because it would mark every cache stale and purge all of them.
+          MLX_EXPECTED_COMMIT="$(scripts/ci/mlx_pinned_commit.sh)" || exit 1
+          if [ -z "$MLX_EXPECTED_COMMIT" ]; then
+            echo "Refusing to validate build caches against an empty MLX pin" >&2
+            exit 1
+          fi
+          echo "Pinned MLX commit: $MLX_EXPECTED_COMMIT"
           # Check every _deps directory for a valid .mlx-build-commit marker.
           # If the marker is missing or doesn't match, purge that _deps/ entirely.
           FOUND=0
@@ -662,6 +715,13 @@ jobs:
               PURGED=$((PURGED + 1))
             fi
           done
+          # Same unconditional workspace sweep as the aarch64 job above, and the
+          # same caveat: it consults no marker and is written against the
+          # literal relative path `target`, so running this step's body by hand
+          # from a developer checkout deletes every _deps/ under that checkout's
+          # target/ whatever the pin says, at the cost of a full MLX C++ rebuild
+          # each. Exercise the pin extraction with MLX_PIN_CMAKE_FILE against a
+          # scratch fixture instead of running the step.
           for deps_dir in $(find target -path "*/_deps" -type d 2>/dev/null); do
             rm -rf "$deps_dir"
             PURGED=$((PURGED + 1))
@@ -904,8 +964,8 @@ jobs:
           VERSION="${TAG#v}"
           # syft dir:. catalogs the Rust workspace via the committed Cargo.lock.
           # Note: it does NOT capture the MLX C++ dependency fetched at build time
-          # via FetchContent (pinned by MLX_EXPECTED_COMMIT at the top of this
-          # file); recording that native pin in the SBOM is out of scope here.
+          # via FetchContent (pinned by GIT_TAG in src/lib/mlx-cpp/CMakeLists.txt);
+          # recording that native pin in the SBOM is out of scope here.
           syft dir:. -o cyclonedx-json > sbom.cyclonedx.json
           gzip -9 sbom.cyclonedx.json
           SBOM_FILE="sbom-${VERSION}.cyclonedx.json.gz"

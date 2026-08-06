@@ -83,7 +83,9 @@ set(_mlx_cached_binary_dir "${CMAKE_BINARY_DIR}/_deps/mlx-build")
 # proceed without re-running FetchContent. This is especially useful when Cargo
 # changes the build hash but the developer already has a cached MLX checkout.
 # NOTE: Stale-cache validation is handled by build.rs (purge_stale_mlx_cache)
-# which runs *before* CMake, ensuring _deps/ is either valid or absent.
+# which runs *before* CMake, ensuring _deps/ is either valid or absent, and
+# build.rs re-checks the fetched checkout's HEAD afterwards so a tree seeded
+# out of band cannot slip through this reuse branch either.
 if(EXISTS "${_mlx_cached_source_dir}/CMakeLists.txt")
   set(mlx_SOURCE_DIR "${_mlx_cached_source_dir}")
   set(mlx_BINARY_DIR "${_mlx_cached_binary_dir}")
@@ -92,6 +94,26 @@ else()
   FetchContent_Declare(
     mlx
     GIT_REPOSITORY "https://github.com/ml-explore/mlx.git"
+    # SINGLE SOURCE OF TRUTH for the pinned MLX commit, issue #1047. No other
+    # file stores this value. Two parsers read this exact line, both scoped to
+    # this declaration by the GIT_REPOSITORY URL just above it:
+    #   src/lib/mlxcel-core/build_support/mlx_pin.rs, used by mlxcel-core's
+    #     build.rs for cache purging, the fetched-HEAD check and the
+    #     MLXCEL_MLX_COMMIT env baked into the binary
+    #   scripts/ci/mlx_pinned_commit.sh, used by release.yml
+    # The awk scan in mlx_pinned_commit.sh is the stricter of the two parsers,
+    # so keeping its shape satisfies both:
+    #   * GIT_TAG must be the first token on its line (leading whitespace is
+    #     fine; nothing else may precede it), followed by a bare or quoted
+    #     40-character lowercase hex sha, e.g. `GIT_TAG 2c46b95...` or
+    #     `GIT_TAG "2c46b95..."`.
+    #   * That line must come after the GIT_REPOSITORY line above naming
+    #     ml-explore/mlx, inside this same FetchContent_Declare(...) call.
+    #   * No line containing a closing paren `)` may appear between the
+    #     GIT_REPOSITORY line and the GIT_TAG line; the awk scan treats any
+    #     `)` as ending the declaration, so one there would hide the tag
+    #     instead of being read past.
+    # Both parsers fail loudly rather than guess when the shape does not hold.
     GIT_TAG 2c46b953db88965c4270cc7306eda6887a3247f2)
 
   # Use FetchContent_Populate + add_subdirectory so we can apply source
