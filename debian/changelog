@@ -1,3 +1,38 @@
+mlxcel (0.5.0~beta.1-1~jammy1) jammy; urgency=medium
+
+  * Added: fused paged-attention decode v2 with a CSR page table and cross-CTA
+    split-KV (#898), routed as the production path for batched paged decode above
+    measured token floors (#899). MLXCEL_PAGED_ATTENTION_NATIVE=0 restores the
+    previous gather path.
+  * Added: fused sparse-attention decode by page indirection, with MiniMax-M3
+    block-sparse decode routed onto it above a sparsity gate (#904), and cascade
+    shared-prefix decode, default off (#903).
+  * Added: sorting-free top-p sampling by dual-pivot rejection kernels (#901) and
+    a softmax-free Gumbel-max categorical sampler (#900), both on Metal and CUDA.
+  * Changed: top-p and no-filter stochastic sampling no longer reproduce a token
+    stream recorded before this release at the same seed. Greedy decoding is
+    byte-identical. MLXCEL_SAMPLING_REJECTION=0 and MLXCEL_SAMPLING_GUMBEL=0
+    restore the previous chains.
+  * Added: Ant Group Ling / Bailing MoE (#838), Apple OpenELM (#839), TeleAI
+    TeleChat3 (#841), Databricks DBRX (#835), Ling / Ring linear-attention MoE
+    (#840), Phixtral (#844), Arcee AFMoE (#845), and Kuaishou Klear (#846) text
+    models.
+  * Fixed: deepseek_v2, internlm3, hunyuan and gemma2 ran a fully bidirectional
+    prefill on the generation path, because a None mask was passed through to
+    attention instead of a causal one (#991, #999).
+  * Fixed: speculative decoding lost about half its throughput to a draft KV
+    cache rewind arithmetic error (#994).
+  * Fixed: quantized checkpoints now fail at load rather than aborting at the
+    first forward. The declared quantization mode is bounded by an allowlist
+    (#973), MoE expert loaders bound their parameters (#929, #958),
+    QuantizedMultiLinear infers its own mode (#1028), and the MLA and Mamba
+    sanitizers refuse a scales-without-biases plane (#976, #1026). Jamba MoE
+    experts build through the shared SwitchGLU (#974).
+  * Changed: the MLX pin moves to 2c46b953 and reads from one source of truth
+    instead of three (#1042, #1047).
+
+ -- Jeongkyu Shin <inureyes@gmail.com>  Thu, 06 Aug 2026 09:00:00 +0000
+
 mlxcel (0.4.3-1~jammy1) jammy; urgency=medium
 
   * Fixed: 4-bit decode on CUDA was non-deterministic at temperature 0 and could

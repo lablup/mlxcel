@@ -4,18 +4,72 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [v0.5.0-beta.1] - 2026-08-06
 
 ### Added
 
+- Ant Group Ling / Bailing MoE (`bailing_moe`) text model support (#838).
+- Apple OpenELM (`openelm`) text model support (#839).
+- TeleAI TeleChat3 (`telechat3`) text model support (#841).
+- Databricks DBRX (`dbrx`) text model support (#835).
+- Ling / Ring linear-attention MoE (`bailing_moe_linear`) text model support (#840).
+- Phixtral (`phi-msft` sparse MoE) text model support (#844).
+- Arcee AFMoE (`afmoe`) text model support (#845).
+- Kuaishou Klear (`klear`) text model support (#846).
+- Fused paged-attention decode v2, with a CSR page table, a cross-CTA split-KV partial kernel, and a variable-length merge kernel (#898). v1 splits the KV inside one threadgroup, so one CTA serves one `(batch, query head)` pair and a long context adds no parallelism; v2 splits across CTAs, so parallelism is `num_chunks * kv_heads * q_groups` and grows with context. The CUDA bodies are structural transliterations of the Metal ones and have never been compiled or run.
+- Batched paged decode is routed through the v2 kernel in the server (#899). On M1 Ultra the switch is gated by measured floors rather than applied unconditionally: batch 1 loses at 1024 tokens of context (0.91x) and wins at 4096 (1.08x median), so single-request launches need 4096 visible tokens, while batch 4 and batch 8 win at 1024 tokens per request (1.41x and 1.47x), so batched launches need 512 per request. `MLXCEL_PAGED_V2_MIN_KV_TOKENS` and `MLXCEL_PAGED_V2_MIN_KV_TOKENS_PER_REQUEST` move the floors; `MLXCEL_PAGED_ATTENTION_NATIVE=0` pins the previous gather path.
+- Fused sparse-attention decode by page indirection over the v2 kernel (#904). A sparse selection becomes a `page_size = 1` page table, so no gathered copy is materialized. MiniMax-M3 block-sparse decode is routed onto it above a sparsity gate (default 8x, `MLXCEL_SPARSE_PAGED_MIN_SPARSITY`), which is where the measurement turns: at MiniMax-M3 geometry the fused path runs 0.67x at 2x sparsity and 0.77x at 4x, then 1.22x at 8x, 1.17x at 16x, and 2.06x at 32x. DeepSeek Sparse Attention is not routed onto it; the reason and the kernel generalization it needs are written up in `docs/sparse-paged-decode.md`.
+- Cascade (shared-prefix) decode: a whole-page prompt prefix shared by several sequences in a decode batch is attended once for the subgroup and merged into each member's suffix state instead of being re-read per sequence (#903). Default off (`MLXCEL_CASCADE_ATTENTION`); correctness is verified, throughput is not yet measured.
+- Fused residual-add RMSNorm and fused RoPE + KV-append decode kernels, both default on with `MLXCEL_FUSED_ADD_RMSNORM=0` and `MLXCEL_FUSED_ROPE_APPEND=0` as kill switches (#905).
+- Shape-bucketed kernel autotuner (`mlxcel_core::autotune`) and a cold-last-level-cache microbenchmark harness (`mlxcel_core::bench_rotation`) (#906). The v1 paged-decode `NumSplits` launch shape is the first consumer, validated on Apple Silicon; the two CUDA knobs are wired but unvalidated.
+- Matrix-absorbed MLA decode over a compressed-latent KV cache (`mlxcel_core::mla`), wired to `deepseek_v2` behind `MLXCEL_MLA_ABSORBED` (default off) (#907).
 - Sorting-free top-p sampling by dual-pivot rejection kernels on Metal and CUDA (#901). Where top-p is active, the fused sampler now replaces the `argsort` + `cumsum` nucleus filter and the trailing `random::categorical` with one softmax and one custom kernel that resolves the filtered support by rejection sampling on a shrinking probability interval, with no sort anywhere. Measured 1.28x to 2.35x on M1 Ultra across vocab {32K, 64K, 152K} and batch {1, 4, 8}. One launch covers the whole batch, and the kernel takes per-row `{top_k, top_p, min_p}` so rows with different values need no second launch. Routing is deliberately restricted to what measured faster: top-k alone, min-p alone and top-k with min-p keep the stock chain (the kernel measured 0.31x to 0.97x there, because those configurations make the chain run no sort), and top-k with top-p routes only up to vocab 32768 (1.27x to 1.64x at 32K, 0.71x to 0.83x at 152K). Declines are announced once at INFO with the numbers behind them. The routed path evaluates nothing, so it does not collapse the software pipeline that both decode drivers run; the kernel's convergence flags are checked without waiting, on a later call. `MLXCEL_SAMPLING_REJECTION=0` restores the previous chain everywhere.
 - Sampling dispatch outcomes are announced at INFO, once per distinct outcome kind (#901). Every `fused_sample` branch (greedy argmax, the #900 Gumbel-max kernel, the #901 rejection kernel, the kill switch, an unsupported backend, and the convergence-cap fallback) records what it did and why, so which sampling path a run took can be read off a normal server log instead of inferred from a benchmark. Cap-overflow events are also a reachable counter, `mlxcel_core::rejection_cap_overflow_rows()`.
 - Softmax-free Gumbel-max categorical sampling kernel on Metal and CUDA (#900). On the no-filter stochastic sampling path (`temperature > 0` with no top-k, top-p, or min-p) the fused sampler now adds i.i.d. Gumbel noise to `logits / temperature` and takes the argmax, which draws exactly from the same softmax categorical distribution without the normalization pass over the 32K-152K-entry vocabulary. One launch covers the whole batch. `MLXCEL_SAMPLING_GUMBEL=0` restores the previous `random::categorical` path.
+- Opt-in acceptance-optimal rejection sampling for the classic speculative path, with the proof, regression guards, and closed-form acceptance diagnostic (`MLXCEL_SPECULATIVE_STOCHASTIC_ACCEPT=1`, default off) (#902).
+- `MLXCEL_EXTRA_CA_CERTS` accepts a path to a PEM bundle, added to the default TLS trust roots of both HTTP clients, so mlxcel can fetch checkpoints from behind a TLS-inspecting corporate proxy (#912).
+- `MLXCEL_MIXED_STEP` prototype and ADR 0005, which records why model-level ragged mixing and kernel-level mixing on MLX were rejected (#908). The issue's premise was inverted: tick alternation never stalls decode, because a chunked prefill does not interleave at all, it waits for the batch to drain.
+- The `modelsize` / `modeltype` / `arch` label taxonomy is documented (#1038).
 
 ### Changed
 
 - **Top-p sampling streams differ at equal seeds, and top-k + top-p changes support slightly.** The rejection sampler (#901) consumes the shared MLX random key sequence differently from `random::categorical`, so a fixed seed no longer reproduces a token stream recorded before this release on the paths it is routed to (top-p active). Configurations that stay on the stock chain are bit-identical to before. The truncated support is unchanged for top-k alone, top-p alone, min-p alone, top-k+min-p and top-p+min-p (support equality against the `argpartition` mask including ties is a committed test), and frequencies inside the support pass chi-square against the renormalised truncated distribution. When top-k AND top-p are both active the support does change: the stock chain renormalises over the top-k set before applying top-p, so its mass target is `top_p * Z_k` with `Z_k` the top-k mass, while the kernel applies both tests to the untruncated distribution and therefore keeps a superset. Greedy decoding (`temperature == 0` or `top_k == 1`) is byte-identical. To reproduce a stream recorded before this release, or to restore the renormalised top-k+top-p semantics exactly, set `MLXCEL_SAMPLING_REJECTION=0`.
 - **Sampled token streams differ at equal seeds.** The Gumbel-max sampler (#900) consumes the shared MLX random key sequence differently from `random::categorical`, so a fixed seed no longer reproduces a token stream recorded before this release on the no-filter stochastic path. The sampling *distribution* is unchanged (verified by chi-square goodness of fit against exact softmax probabilities on peaked, flat, bimodal, and `-inf`-masked logits at temperatures 0.5, 1.0, and 1.5), and greedy decoding (`temperature == 0`) is byte-identical. Runs are still fully reproducible going forward: the same seed on the same backend gives the same stream. To reproduce a stream recorded before this release, set `MLXCEL_SAMPLING_GUMBEL=0`.
+- The pinned MLX C++ commit moves to `2c46b953`, and three in-tree overlays are re-derived against it (#1042).
+- The MLX pin has one source of truth. It was duplicated across `CMakeLists.txt`, `build.rs`, and `release.yml`, where a mismatch produced stale build artifacts and CI breakage; the three now read one value (#1047).
+- Loop detection is less trigger-happy. `LOOP_DETECTION_RECOMMENDED` moves from `min_count = 4` to `12`, and the Gemma 4 family default-on is narrowed to the requests where the collapse actually happens (#967). At the old threshold a markdown table alignment row (`| :--- | :--- | :--- |`) tripped the detector at its fourth column, so a correct answer stopped mid-table and the client saw a normal stop with no error.
+- The paged block-pool slab size is a per-pool value instead of a constant 32. The server sizes it from the configuration it already reserved KV memory for, clamped by the per-layer share of the paged block budget; `MLXCEL_PAGED_SLAB_BLOCKS=0` pins the old default (#899).
+- The quality gate covers all workspace members (#1007). The workspace root is itself the `mlxcel` package, so the previous bare `cargo test` and `cargo clippy` resolved to `-p mlxcel` and never built `mlxcel-core`, `mlxcel-surgery`, or `mlxcel-xla`: 1754 tests, 1354 of them `mlxcel-core`'s, plus the whole test-target lint surface of those members. `make verify-test` and `make verify-clippy` now pass `--workspace`.
+- Tests build under a new `[profile.test-fast]` rather than `[profile.release]` (#1000). It inherits from release and keeps `opt-level = 3`, so the optimized MLX numerics the suite depends on are unchanged, but drops fat LTO and `codegen-units = 1`, which were making the nightly spend its entire 180-minute budget in codegen and linking without ever starting a test. `release.yml` still builds and links under `[profile.release]`. An unfinished nightly run is also reported instead of silently skipped: a timeout was recorded as `cancelled`, which skipped the "Report a red main" step.
+- The CUDA merge gate is runnable and serialized (#1048).
+- The `rust-toolchain` pin is restored and excluded from dependabot bumps (#952).
+- Dependency updates: `dtolnay/rust-toolchain` 1.93.1 to 1.100.0, `actions/setup-python` 6 to 7, and minor and patch bumps across 10 packages (#936).
+
+### Fixed
+
+- **Four model families ran a fully bidirectional prefill.** Generation calls `forward` with `mask == None` and expects the model to build its own causal mask; `deepseek_v2` (#991) and then `internlm3`, `hunyuan`, and `gemma2` (#999) passed `None` through to attention instead, so every prompt token attended to every later one. Output stayed fluent, which is why it survived: a short prompt cannot expose it. `gemma2` was the mitigated case (its sliding window bounded the leak); PaliGemma 2 was checked and is unaffected.
+- Speculative decoding lost about half its throughput to a draft KV cache rewind arithmetic error (#994). Aggregate decode goes from 41.8 tok/s and a 3.09x run-to-run spread to a 1.06x spread.
+- Quantized Jamba MoE experts are built through the shared `SwitchGLU` (#974). The family-local expert construction was broken for every Jamba MoE checkpoint, dense ones included, not just quantized ones. The router moves to `UnifiedLinear` so a checkpoint that ships 8-bit routers under a 4-bit default loads.
+- `deepseek::ModelArgs` dropped the nested `quantization` block from `config.json`, so the values reaching the expert loaders were not the ones the checkpoint declared (#975).
+- `QuantizedMultiLinear` infers its quantization mode instead of assuming affine, and validates the bias plane (#1028).
+- The declared `quantization.mode` string is bounded by an allowlist at load. An unparseable mode reached MLX verbatim and a block-float one was silently reinterpreted as affine, both aborting at the first forward instead of failing at load (#973).
+- Quantization parameters are bounded in the family-local MoE expert loaders (#958) and rejected at load when MLX would abort on them (#929).
+- The MLA `kv_b_proj` sanitizers refuse a scales-without-biases plane, in wording standardized across all five implementations (#1026), and `mamba` / `mamba2` treat a scales-without-biases embedding as non-quantized rather than misreading it (#976).
+- GLM4 MoE Lite loads its own layout: `kv_b_proj` is decomposed into the per-head `embed_q` / `unembed_out` pair (#1029).
+- `rope_traditional` from `config.json` is honored on the shared Llama path (#931).
+- `topk_group` is bounds-checked inside `group_mask_scores` (#947).
+- KV-cache estimation recognizes the `n_layer` / `n_embd` and `multi_query` config spellings (#927).
+- LoRA adapter weight fusion is Conv1D-layout aware (#925).
+- Per-expert tensors are stacked from borrows instead of copies, removing one `Copy` graph node per per-expert tensor: 5376 of them for `ling-lite-1.5` (#948).
+- A parked chunked prefill's wait is bounded by a fairness grant, cutting worst-case admission latency from 50.5s to 23.8s at the default `--prefill-grant-interval` of 16, at 1.60x mean stream ITL during admission (#1011).
+- Grammar-only requests are excluded from loop detection (#977), and generation stops when the structured matcher completes (#978).
+- Disaggregated router chat guards are enforced (#979), and client token budgets are clamped (#980).
+- CUDA: the broken RMSNorm overlay is dropped and DeepSeek-V2 graph capture is restored (#831). The upstream MLX CUDA small-axis attribution is corrected in the docs (#830), and the MLX CUDA graph-cache lifetime-miss abort is reported upstream (#821).
+- CUDA: the fused RoPE kernel calls libdevice `cosf` / `sinf` instead of the inaccurate variants (#1049).
+- XLA: the terminating EOS token is no longer emitted as output (#963), the Qwen2-VL prefill export is gated on the feature that calls it (PR #961), and the Qwen2-VL XLA loader contract is pinned with all three outcomes documented (#966).
+- Test-harness fixes: a second `mlxcel-core` test binary sharing the GPU now fails loudly instead of aborting the run (#1008), the fused MoE GeGLU parity bound is derived from the reference's measured jitter (#964), the mllama ragged test tolerates f32 reassociation and gained a nightly gate (#939), the autotune rep-scaling test no longer pins an exact ceiling (PR #990), a dead-callsite race behind the drafter log assertions is removed (#1023), and the test harness honors `CARGO_TARGET_DIR` (PR #996).
+- Homebrew tap formula stanzas are edited by name instead of line position (PR #949).
+- The dead `AGENTS.md` links in `CONTRIBUTING.md` are replaced (PR #1014).
 
 ## [v0.4.3] - 2026-07-27
 
@@ -1147,6 +1201,7 @@ Initial public release of mlxcel.
 - GitHub Actions release workflow for macOS ARM64
 - Profile mode for prefill/decode timing analysis
 
+[v0.5.0-beta.1]: https://github.com/lablup/mlxcel/compare/v0.4.3...v0.5.0-beta.1
 [v0.4.3]: https://github.com/lablup/mlxcel/compare/v0.4.2...v0.4.3
 [v0.4.2]: https://github.com/lablup/mlxcel/compare/v0.4.1...v0.4.2
 [v0.4.1]: https://github.com/lablup/mlxcel/compare/v0.4.0...v0.4.1
