@@ -99,6 +99,8 @@ help: ## Show this help message
 	@echo "  make run-generate MODEL=./models/llama PROMPT=\"Tell me a joke\""
 	@echo "  make serve MODEL=./models/qwen PORT=8000"
 	@echo "  make test                            # Run all tests"
+	@echo "  make verify                          # macOS merge gate (fmt + clippy + test)"
+	@echo "  make verify-test-cuda                # Linux/NVIDIA merge gate (workspace, single threaded)"
 	@echo "  make test-fast-cuda FILTER=server::chat_request  # Fast filtered test-fast-profile run"
 	@echo ""
 
@@ -236,6 +238,13 @@ test-doc: ## Run documentation tests
 # `--no-fail-fast` (#1007) and pins the feature set, while these stay on the
 # root package with `--test-threads=1` and a FILTER hook, which is what makes
 # them fast enough for an edit-test loop.
+#
+# Neither of these is a gate, on either platform, and the scope difference is
+# the reason. Without `--workspace` a bare `cargo test` here resolves to
+# `-p mlxcel`, so `test-fast-cuda` cannot run a single one of mlxcel-core's 1410
+# tests, which is the crate holding the MLX bridge, layers.rs, the KV cache and
+# the quantization loaders. Use `verify-test` (macOS) or `verify-test-cuda`
+# (Linux/NVIDIA) below before you push; these two are for the edit-test loop.
 # ----------------------------------------------------------------------------
 
 .PHONY: test-fast
@@ -516,6 +525,29 @@ pre-commit: fmt clippy test ## Pre-commit checks
 #      does not weaken the gate, since cargo still exits non-zero, and it does
 #      not skip compile errors, which stop the run either way.
 #
+# `verify-test-cuda` is the Linux/NVIDIA counterpart of `verify-test`: same
+# scope, same profile, same `--no-fail-fast`, `--features cuda` instead of
+# `metal,accelerate`, plus `--test-threads=1`. Two things about it:
+#
+#   * Until #1048 there was no CUDA target that ran mlxcel-core's tests at all.
+#     `verify-test` is the macOS feature set and `test-fast-cuda` is root-package
+#     only, so the crate with the MLX bridge and the KV cache had no gate on this
+#     platform. That is #1007's blindness a second time, on the other backend.
+#   * `--test-threads=1` is load-bearing, not tidiness. Measured on GB10 at MLX
+#     pin 2c46b953: the 20-thread run dies with SIGABRT from
+#     `cudaStreamEndCapture ... previous error during capture`, at a different
+#     test each time; the same binary serialized finishes 1410 tests in 88s.
+#     Turning graph capture off does not rescue the parallel run, it only
+#     re-reports the abort as `cuLaunchKernelEx ... invalid argument`, so
+#     MLX_USE_CUDA_GRAPHS=0 is not the workaround it looks like. Capture stays
+#     fully on under this target. mlxcel-core carries a
+#     `the_cuda_test_suite_must_run_single_threaded` guard so a hand-run
+#     `cargo test --workspace --features cuda` names the problem instead of
+#     aborting anonymously.
+#
+# There is deliberately no `verify-clippy-cuda` here yet: the CUDA lint half is
+# a separate hole from the CUDA test half, and #1048 is about the test gate.
+#
 # Run `make verify` before opening or updating a PR. Run `make verify-clean`
 # (which prepends `cargo clean`) when you suspect clippy's per-crate result
 # cache is masking a regression — most often after editing shared code in
@@ -536,6 +568,11 @@ verify-clippy: ## CI-faithful: clippy --workspace --all-targets --features metal
 verify-test: ## CI-faithful: cargo test --workspace --profile test-fast --features metal,accelerate --no-fail-fast
 	@echo "$(CYAN)[verify] test (workspace, test-fast profile, features=metal,accelerate)...$(RESET)"
 	$(CARGO) test --workspace --profile test-fast --features metal,accelerate --no-fail-fast
+
+.PHONY: verify-test-cuda
+verify-test-cuda: ## CUDA gate: cargo test --workspace --profile test-fast --features cuda --no-fail-fast -- --test-threads=1 (issue #1048)
+	@echo "$(CYAN)[verify] test (workspace, test-fast profile, features=cuda, single threaded)...$(RESET)"
+	$(CARGO) test --workspace --profile test-fast --features cuda --no-fail-fast -- --test-threads=1
 
 .PHONY: verify
 verify: verify-fmt verify-clippy verify-test ## Run the full CI-faithful gate locally (recommended before push)
