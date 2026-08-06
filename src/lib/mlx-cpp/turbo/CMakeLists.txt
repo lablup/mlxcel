@@ -25,7 +25,7 @@
 # this dir, because the cxx-build path in `mlxcel-core/build.rs` compiles the
 # launcher .cpp files directly. The CMakeLists.txt below documents the build
 # contract so MLX upstream-commit upgrades treat this directory as in-scope.
-# See `CLAUDE.md` MLX upgrade checklist.
+# See "Bumping the MLX upstream pin" in CONTRIBUTING.md.
 
 cmake_minimum_required(VERSION 3.16)
 

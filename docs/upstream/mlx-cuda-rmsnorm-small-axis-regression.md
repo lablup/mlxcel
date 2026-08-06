@@ -2,7 +2,7 @@
 
 Started as an upstream bug report draft for ml-explore/mlx, tracked in lablup/mlxcel#830 (follow-up to lablup/mlxcel#824 and lablup/mlxcel#829). Verifying the claim against real source inverted it, so there is nothing to file upstream. The kernel at mlxcel's MLX pin computes the correct normalizer on the axis in question; the kernel mlxcel overlays on top of it does not.
 
-Every upstream file and line reference below was read at MLX commit `b7c3dd6d27f45b5365b08a840310187dc503f1db`, which is mlxcel's current pin (`src/lib/mlx-cpp/CMakeLists.txt:95`) and is upstream PR #3850 itself. The two bisect-boundary commits were read at `1700b39a1dc05611dc6792f4453458d379997037` (parent, PR #3804) and `a5a684db596c117f13f7bacaea9902d0ad6d28a6` (PR #3792). All measurements were run on GB10 (DGX Spark, sm_121), CUDA 13.0, Linux 6.17.
+Every upstream file and line reference below was read at MLX commit `b7c3dd6d27f45b5365b08a840310187dc503f1db` (upstream PR #3850 itself), which was mlxcel's pin at the time this report was written. For the pin in effect today, see the `GIT_TAG` argument of the `FetchContent_Declare(mlx ...)` block in `src/lib/mlx-cpp/CMakeLists.txt`, the single source of truth per issue #1047; it has moved on since. The two bisect-boundary commits were read at `1700b39a1dc05611dc6792f4453458d379997037` (parent, PR #3804) and `a5a684db596c117f13f7bacaea9902d0ad6d28a6` (PR #3792). All measurements were run on GB10 (DGX Spark, sm_121), CUDA 13.0, Linux 6.17.
 
 ## Summary
 

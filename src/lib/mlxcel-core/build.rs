@@ -67,7 +67,8 @@ fn main() {
         .file("cpp/mlx_cxx_ext.cpp")
         // Fused Sparse-V SDPA kernel launcher. Lives under
         // `src/lib/mlx-cpp/turbo/` so the MLX-upstream-commit upgrade
-        // checklist (CLAUDE.md) treats this directory as in-scope.
+        // checklist ("Bumping the MLX upstream pin" in CONTRIBUTING.md)
+        // treats this directory as in-scope.
         .file("../mlx-cpp/turbo/sparse_v_sdpa.cpp")
         // Fused Turbo4Delegated cold-V weighted-sum kernel
         // launcher. Reads the packed cold V directly so the dequantised

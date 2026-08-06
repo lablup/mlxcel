@@ -71,6 +71,8 @@ jobs:
               - '.github/workflows/ci.yml'
             mlx_pin:
               - 'src/lib/mlx-cpp/CMakeLists.txt'
+              - 'src/lib/mlxcel-core/build_support/mlx_pin.rs'
+              - 'src/lib/mlxcel-mlx-pin/**'
               - 'scripts/ci/mlx_pinned_commit.sh'
               - 'scripts/ci/mlx_pinned_commit_test.sh'
               - '.github/workflows/ci.yml'
@@ -132,6 +134,19 @@ jobs:
       # therefore break every release build, and release.yml is the only other
       # place this script runs, so without this job the breakage would first
       # appear when a release is cut. Issue #1047.
+      #
+      # `mlxcel-mlx-pin` compiles in under a second (a leaf crate with no
+      # production role, only `std` plus a `tempfile` dev-dependency), so it
+      # runs first here rather than only in nightly-verify.yml's `make verify`.
+      # Its `tests/cross_parser.rs` shells out to mlx_pinned_commit.sh itself
+      # and asserts that whenever the shell parser accepts an input, the Rust
+      # parser resolves to the identical commit for that same input: the two
+      # unit-test files below each cover one parser in isolation and cannot
+      # catch a same-input value mismatch on their own.
+      - uses: dtolnay/rust-toolchain@1.93.1
+      - name: Run the Rust pin parser's unit and cross-parser tests
+        run: cargo test -p mlxcel-mlx-pin
+
       - name: Extract the pinned MLX commit
         run: scripts/ci/mlx_pinned_commit.sh
 

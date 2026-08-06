@@ -101,8 +101,19 @@ else()
     #     build.rs for cache purging, the fetched-HEAD check and the
     #     MLXCEL_MLX_COMMIT env baked into the binary
     #   scripts/ci/mlx_pinned_commit.sh, used by release.yml
-    # Keep the literal shape `GIT_TAG <40-char lowercase hex sha>` on one line.
-    # Both parsers reject anything else and fail loudly rather than guess.
+    # The awk scan in mlx_pinned_commit.sh is the stricter of the two parsers,
+    # so keeping its shape satisfies both:
+    #   * GIT_TAG must be the first token on its line (leading whitespace is
+    #     fine; nothing else may precede it), followed by a bare or quoted
+    #     40-character lowercase hex sha, e.g. `GIT_TAG 2c46b95...` or
+    #     `GIT_TAG "2c46b95..."`.
+    #   * That line must come after the GIT_REPOSITORY line above naming
+    #     ml-explore/mlx, inside this same FetchContent_Declare(...) call.
+    #   * No line containing a closing paren `)` may appear between the
+    #     GIT_REPOSITORY line and the GIT_TAG line; the awk scan treats any
+    #     `)` as ending the declaration, so one there would hide the tag
+    #     instead of being read past.
+    # Both parsers fail loudly rather than guess when the shape does not hold.
     GIT_TAG 2c46b953db88965c4270cc7306eda6887a3247f2)
 
   # Use FetchContent_Populate + add_subdirectory so we can apply source
