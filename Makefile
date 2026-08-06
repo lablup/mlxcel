@@ -574,8 +574,20 @@ verify-test-cuda: ## CUDA gate: cargo test --workspace --profile test-fast --fea
 	@echo "$(CYAN)[verify] test (workspace, test-fast profile, features=cuda, single threaded)...$(RESET)"
 	$(CARGO) test --workspace --profile test-fast --features cuda --no-fail-fast -- --test-threads=1
 
+.PHONY: verify-versions
+verify-versions: ## Assert every version-tracking workspace crate carries the root `mlxcel` version
+	@echo "$(CYAN)[verify] workspace crate versions...$(RESET)"
+	@python3 scripts/ci/check_crate_versions.py
+
+.PHONY: bump-version
+bump-version: ## Release: set every version-tracking crate to VERSION and sync Cargo.lock (make bump-version VERSION=0.5.0)
+	@test -n "$(VERSION)" || { echo "$(RED)usage: make bump-version VERSION=0.5.0$(RESET)"; exit 1; }
+	@python3 scripts/ci/check_crate_versions.py --set "$(VERSION)"
+	@$(CARGO) update $$(python3 scripts/ci/check_crate_versions.py --print-update-args)
+	@$(MAKE) --no-print-directory verify-versions
+
 .PHONY: verify
-verify: verify-fmt verify-clippy verify-test ## Run the full CI-faithful gate locally (recommended before push)
+verify: verify-versions verify-fmt verify-clippy verify-test ## Run the full CI-faithful gate locally (recommended before push)
 	@echo "$(GREEN)[verify] OK: matches the nightly-verify GitHub Actions job$(RESET)"
 
 .PHONY: verify-clean
