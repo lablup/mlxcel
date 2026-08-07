@@ -49,6 +49,75 @@ const LOCATEANYTHING_STD: [f32; 3] = [0.5, 0.5, 0.5];
 /// user-visible way to renegotiate the resolution mid-request.
 const MAX_GRID_SIDE: usize = 511;
 
+/// Backstop bound on `patch_size` for direct constructor callers.
+///
+/// The VLM loader is the primary guard: it range-checks `patch_size` in
+/// `LocateAnythingVisionConfig::to_moonvit_config` and refuses the checkpoint,
+/// because the same value also sizes the MoonViT conv patch-embed and clamping
+/// only this side would desync the emitted patch grid from the tower. This
+/// constant exists because [`LocateAnythingProcessor::new`] is `pub` and
+/// reachable without the loader, so it must not be able to build a processor
+/// whose geometry is unbounded.
+///
+/// It must stay equal to the loader's `MAX_PATCH_SIZE`. A tighter value here
+/// would reintroduce exactly the desync the loader-side rejection prevents:
+/// the loader would accept a `patch_size` this constructor then quietly
+/// lowered.
+///
+/// `patch_size` drives `LocateAnythingProcessor::rescale` quadratically: step 2
+/// rounds each side *up* to a multiple of `merge * patch`, and the only ceiling
+/// on the result is the `MAX_GRID_SIDE` envelope, i.e. roughly
+/// `MAX_GRID_SIDE * patch_size` pixels per side. The patchified f32 buffer
+/// therefore grows as `MAX_GRID_SIDE^2 * 3 * patch_size^2` values, and the
+/// step-1 `in_token_limit` downscale cannot bound it, because `(w / p) * (h /
+/// p)` is 0 whenever `p` exceeds the image and the downscale never engages.
+/// Uncapped, a declared `patch_size: 100000` asks
+/// `image::imageops::resize_exact` for a ~200000x200000 RGB buffer (over
+/// 100 GB) and OOM-aborts the process.
+///
+/// 128 is generous next to every ViT/MoonViT patch size in this tree (14 and 16
+/// throughout, with a single 48), and holds the worst case to roughly 51 GB of
+/// resize target that a caller can only reach by supplying an equally enormous
+/// source image, while the common merge 2 / patch 14 geometry is untouched.
+pub(crate) const MAX_PATCH_SIZE: usize = 128;
+
+/// Backstop bound on each `merge_kernel_size` axis for direct constructor
+/// callers.
+///
+/// As with [`MAX_PATCH_SIZE`], the loader rejects an out-of-range
+/// `merge_kernel_size` before a processor is ever built, and this constant must
+/// stay equal to the loader's `MAX_MERGE_KERNEL` so the constructor cannot
+/// silently lower a value the loader accepted.
+///
+/// Keeps the merge product far inside `i32` so this module's own state can
+/// never feed
+/// [`crate::multimodal::locateanything_prompt::merged_token_count`] a product
+/// that truncates to a zero divisor, and keeps the `merge * patch` pad unit
+/// small: step 2 rounds a 1x1 image up to a full `merge * patch` square, so the
+/// pad unit alone sets the floor on the allocation. Real spatial merges are 1,
+/// 2 (LocateAnything and Kimi-VL), or 4.
+pub(crate) const MAX_MERGE_KERNEL: usize = 16;
+
+/// Upper bound on `in_token_limit`.
+///
+/// Unlike the two geometry bounds above, this clamp is the primary guard and
+/// not a backstop. `in_token_limit` is a per-image memory budget that the
+/// MoonViT tower never sees, so the processor and the tower cannot disagree
+/// about it, and there is nothing a silent clamp could desync.
+///
+/// `in_token_limit` is read from `preprocessor_config.json`, which is as
+/// untrusted as `config.json`. It is the *only* thing that engages the step-1
+/// aspect-preserving downscale, so an unbounded value leaves a single image
+/// bounded only by the `MAX_GRID_SIDE` envelope (about 261121 pre-merge
+/// patches, roughly 614 MB of f32 patch data at `patch_size: 14`, plus the
+/// resized RGB image and the MLX array copy).
+///
+/// 102400 is 4x upstream's 25600 and caps one image near 241 MB of f32 patch
+/// data at `patch_size: 14` (`102400 * 3 * 14 * 14 * 4` bytes), so it leaves
+/// real high-resolution checkpoints room while keeping the per-image envelope
+/// finite.
+const MAX_IN_TOKEN_LIMIT: usize = 102_400;
+
 /// LocateAnything native-resolution image processor.
 #[derive(Debug, Clone)]
 pub struct LocateAnythingProcessor {
@@ -63,11 +132,34 @@ pub struct LocateAnythingProcessor {
 }
 
 impl LocateAnythingProcessor {
+    /// Every geometry field originates in a model directory's JSON, so each is
+    /// clamped into a documented range rather than only floored at 1. The
+    /// released checkpoint (patch 14, merge `[2, 2]`, limit 25600) sits well
+    /// inside every bound and passes through unchanged; see [`MAX_PATCH_SIZE`],
+    /// [`MAX_MERGE_KERNEL`], and `MAX_IN_TOKEN_LIMIT` for what each ceiling
+    /// costs at its worst.
+    ///
+    /// For `patch_size` and `merge_kernel_size` this clamp is a backstop, not
+    /// the primary guard. The VLM loader range-checks both in
+    /// `LocateAnythingVisionConfig::to_moonvit_config` and refuses the
+    /// checkpoint outright, because those two values also size the MoonViT conv
+    /// patch-embed and patch merger: clamping only here would leave the
+    /// processor emitting a patch grid the tower does not apply. The clamp
+    /// stays because this constructor is `pub` and reachable without the loader
+    /// (`default_config`, tests, any direct caller), so a caller that bypasses
+    /// the loader still cannot build an unbounded processor.
+    ///
+    /// `in_token_limit` is different in kind: it is a per-image memory budget
+    /// the tower never sees, so the processor and the tower cannot disagree
+    /// about it and clamping is the right guard rather than a backstop.
     pub fn new(patch_size: usize, merge_kernel_size: [usize; 2], in_token_limit: usize) -> Self {
         Self {
-            patch_size: patch_size.max(1),
-            merge_kernel_size: [merge_kernel_size[0].max(1), merge_kernel_size[1].max(1)],
-            in_token_limit: in_token_limit.max(1),
+            patch_size: patch_size.clamp(1, MAX_PATCH_SIZE),
+            merge_kernel_size: [
+                merge_kernel_size[0].clamp(1, MAX_MERGE_KERNEL),
+                merge_kernel_size[1].clamp(1, MAX_MERGE_KERNEL),
+            ],
+            in_token_limit: in_token_limit.clamp(1, MAX_IN_TOKEN_LIMIT),
             mean: LOCATEANYTHING_MEAN,
             std: LOCATEANYTHING_STD,
         }

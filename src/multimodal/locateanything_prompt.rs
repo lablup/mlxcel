@@ -133,10 +133,25 @@ pub fn expand_locateanything_image_markers(
 
 /// Merged-token count for one `(grid_h, grid_w)` patch grid under a
 /// `merge_h x merge_w` kernel.
+///
+/// `merge_kernel_size` comes straight from a model directory's `config.json`,
+/// so it is not trusted to be small, and both arithmetic steps are widened
+/// accordingly:
+///
+/// - The merge product is computed with `saturating_mul` and clamped into
+///   `1..=i32::MAX` *before* the narrowing cast. A `usize` product such as
+///   `65536 * 65536` is exactly `2^32`, which a bare `as i32` truncates to 0
+///   and then divides by, panicking with "attempt to divide by zero". That
+///   pair is square and non-zero, so it passes every upstream shape guard.
+/// - The patch product is computed in `i64`, where two `i32` grid sides cannot
+///   overflow, rather than in the `i32` the grid is stored in.
 #[inline]
 pub fn merged_token_count(grid: (i32, i32), merge_kernel_size: [usize; 2]) -> usize {
-    let merge = (merge_kernel_size[0] * merge_kernel_size[1]).max(1) as i32;
-    ((grid.0 * grid.1) / merge).max(0) as usize
+    let merge = merge_kernel_size[0]
+        .saturating_mul(merge_kernel_size[1])
+        .clamp(1, i32::MAX as usize) as i64;
+    let patches = i64::from(grid.0.max(0)) * i64::from(grid.1.max(0));
+    (patches / merge).max(0) as usize
 }
 
 /// Build the `<img> + <IMG_CONTEXT> * count + </img>` run for one image.

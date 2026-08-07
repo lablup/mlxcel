@@ -134,6 +134,35 @@ fn connector_input_dim_matches_the_checkpoint_layer_norm_width() {
     // `multi_modal_projector.layer_norm.weight` is [4608] in the real
     // safetensors index.
     assert_eq!(input_dim, 4608);
+    assert_eq!(
+        connector_input_dim(raw.hidden_size, merge).expect("real config must resolve"),
+        4608
+    );
+}
+
+#[test]
+fn an_overflowing_connector_input_width_is_an_error_rather_than_a_truncation() {
+    // 1152 * 65536 * 65536 is 1152 * 2^32, whose low 32 bits are zero. A bare
+    // `as i32` yielded `input_dim == 0`, which reaches the connector's
+    // `reshape(image_features, &[-1, 0])` and throws inside MLX; a C++ throw
+    // across the cxx boundary aborts the process instead of unwinding.
+    let err = connector_input_dim(1152, [65_536, 65_536]).expect_err("must refuse");
+    let err = err.to_string();
+    assert!(err.contains("1152"), "error must name hidden_size: {err}");
+    assert!(err.contains("65536"), "error must name the merge: {err}");
+
+    // Saturating the multiply itself, not just the narrowing cast.
+    assert!(connector_input_dim(usize::MAX, [2, 2]).is_err());
+    // Just past i32::MAX, where the product is exact but unrepresentable.
+    assert!(connector_input_dim(i32::MAX as usize + 1, [1, 1]).is_err());
+    // A zero width is as fatal as a truncated one and is refused too.
+    assert!(connector_input_dim(0, [2, 2]).is_err());
+
+    // The largest representable width still resolves.
+    assert_eq!(
+        connector_input_dim(i32::MAX as usize, [1, 1]).expect("i32::MAX fits"),
+        i32::MAX
+    );
 }
 
 #[test]
@@ -152,6 +181,113 @@ fn rejects_a_non_square_merge_kernel() {
     let raw: LocateAnythingVisionConfig = serde_json::from_value(value).expect("parse");
     let err = raw.to_moonvit_config().expect_err("must refuse");
     assert!(err.contains("square"), "unexpected error: {err}");
+}
+
+#[test]
+fn rejects_a_patch_size_outside_the_documented_range() {
+    // `patch_size` sizes both the processor's resize and the MoonViT conv
+    // patch-embed, so an out-of-range value is refused here rather than clamped
+    // on one side only. Uncapped it drives an unbounded resize.
+    for bad in [0usize, MAX_PATCH_SIZE + 1, 100_000, usize::MAX] {
+        let mut value = real_vision_config();
+        value["patch_size"] = serde_json::json!(bad);
+        let raw: LocateAnythingVisionConfig = serde_json::from_value(value).expect("parse");
+        let err = raw
+            .to_moonvit_config()
+            .expect_err("patch_size must be refused");
+        assert!(err.contains("patch_size"), "unexpected error: {err}");
+        assert!(
+            err.contains(&bad.to_string()),
+            "the error must name the offending value {bad}: {err}"
+        );
+    }
+
+    // The boundary itself is accepted.
+    let mut value = real_vision_config();
+    value["patch_size"] = serde_json::json!(MAX_PATCH_SIZE);
+    let raw: LocateAnythingVisionConfig = serde_json::from_value(value).expect("parse");
+    assert_eq!(
+        raw.to_moonvit_config()
+            .expect("the boundary is valid")
+            .patch_size,
+        MAX_PATCH_SIZE
+    );
+}
+
+#[test]
+fn rejects_a_merge_kernel_axis_outside_the_documented_range() {
+    // 65536 * 65536 is exactly 2^32: square and non-zero, so it passes both the
+    // `.max(1)` floor and the square-kernel check, yet narrowing it to i32
+    // yields a zero divisor. The range check refuses it before either.
+    for bad in [
+        serde_json::json!([65_536, 65_536]),
+        serde_json::json!([0, 0]),
+        serde_json::json!([MAX_MERGE_KERNEL + 1, MAX_MERGE_KERNEL + 1]),
+    ] {
+        let mut value = real_vision_config();
+        value["merge_kernel_size"] = bad.clone();
+        let raw: LocateAnythingVisionConfig = serde_json::from_value(value).expect("parse");
+        let err = raw
+            .to_moonvit_config()
+            .expect_err("merge_kernel_size must be refused");
+        assert!(
+            err.contains("merge_kernel_size"),
+            "unexpected error for {bad}: {err}"
+        );
+    }
+
+    // The boundary itself is accepted, and is still required to be square.
+    let mut value = real_vision_config();
+    value["merge_kernel_size"] = serde_json::json!([MAX_MERGE_KERNEL, MAX_MERGE_KERNEL]);
+    let raw: LocateAnythingVisionConfig = serde_json::from_value(value).expect("parse");
+    assert_eq!(
+        raw.to_moonvit_config()
+            .expect("the boundary is valid")
+            .spatial_merge_size,
+        MAX_MERGE_KERNEL
+    );
+}
+
+#[test]
+fn the_loader_and_processor_geometry_bounds_stay_equal() {
+    // The loader rejects what the processor would otherwise clamp. If the two
+    // ceilings ever drift apart, the loader would accept a geometry the
+    // processor then quietly lowered, desyncing the emitted patch grid from the
+    // MoonViT tower that was built from the unlowered value.
+    use crate::vision::processors::locateanything as processor;
+    assert_eq!(MAX_PATCH_SIZE, processor::MAX_PATCH_SIZE);
+    assert_eq!(MAX_MERGE_KERNEL, processor::MAX_MERGE_KERNEL);
+}
+
+#[test]
+fn an_absent_merge_kernel_axis_still_defaults_instead_of_being_rejected() {
+    // Only axes the config actually declares are range-checked; a short vector
+    // keeps `merge_kernel()`'s square-fill behaviour.
+    let mut value = real_vision_config();
+    value["merge_kernel_size"] = serde_json::json!([3]);
+    let raw: LocateAnythingVisionConfig = serde_json::from_value(value).expect("parse");
+    assert_eq!(raw.merge_kernel(), [3, 3]);
+    let cfg = raw.to_moonvit_config().expect("a declared 3 is in range");
+    assert_eq!(cfg.spatial_merge_size, 3);
+}
+
+#[test]
+fn the_released_geometry_sits_inside_the_new_range_checks() {
+    // Guards the ceilings themselves: lowering either constant below the
+    // shipped checkpoint's geometry would reject the very model this loader
+    // exists for.
+    let raw: LocateAnythingVisionConfig =
+        serde_json::from_value(real_vision_config()).expect("parse");
+    assert!((1..=MAX_PATCH_SIZE).contains(&raw.patch_size));
+    assert!(
+        raw.merge_kernel_size
+            .iter()
+            .all(|axis| (1..=MAX_MERGE_KERNEL).contains(axis))
+    );
+    assert!(
+        raw.to_moonvit_config().is_ok(),
+        "the released config must keep parsing unchanged"
+    );
 }
 
 #[test]

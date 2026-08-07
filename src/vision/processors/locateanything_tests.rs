@@ -106,6 +106,82 @@ fn multiple_images_concatenate_in_order() {
 }
 
 #[test]
+fn the_released_checkpoint_geometry_passes_through_the_constructor_unchanged() {
+    // patch 14, 2x2 merge, 25600-patch budget: every value is well inside its
+    // ceiling, so none of the clamps may alter it.
+    let proc = LocateAnythingProcessor::new(14, [2, 2], 25_600);
+    assert_eq!(proc.patch_size, 14);
+    assert_eq!(proc.merge_kernel_size, [2, 2]);
+    assert_eq!(proc.in_token_limit, 25_600);
+    // `default_config` is the same geometry read from the constant defaults.
+    let default = LocateAnythingProcessor::default_config();
+    assert_eq!(default.patch_size, 14);
+    assert_eq!(default.merge_kernel_size, [2, 2]);
+    assert_eq!(default.in_token_limit, 25_600);
+}
+
+#[test]
+fn constructor_backstop_clamps_an_absurd_patch_size() {
+    // Backstop only: the VLM loader refuses an out-of-range `patch_size` in
+    // `LocateAnythingVisionConfig::to_moonvit_config` before a processor is
+    // ever built, because the same value also sizes the MoonViT conv
+    // patch-embed. This clamp covers direct callers of the `pub` constructor.
+    //
+    // Step 2 rounds every side up to a multiple of `merge * patch`, so an
+    // uncapped `patch_size: 100000` would resize a 1x1 image to 200000x200000
+    // (over 100 GB of RGB) before any patch buffer is even allocated. The
+    // `in_token_limit` downscale cannot bound it: `(w / p) * (h / p)` is 0 once
+    // `p` exceeds the image.
+    let proc = LocateAnythingProcessor::new(100_000, [2, 2], 25_600);
+    assert_eq!(proc.patch_size, MAX_PATCH_SIZE);
+    assert_eq!(
+        LocateAnythingProcessor::new(usize::MAX, [2, 2], 1).patch_size,
+        MAX_PATCH_SIZE
+    );
+    // The floor still holds: a zero patch size would divide by zero in
+    // `patchify`.
+    assert_eq!(
+        LocateAnythingProcessor::new(0, [2, 2], 25_600).patch_size,
+        1
+    );
+}
+
+#[test]
+fn constructor_backstop_clamps_an_absurd_merge_kernel_on_both_axes() {
+    // Backstop only, as above: the loader refuses an out-of-range
+    // `merge_kernel_size` outright rather than letting the processor clamp a
+    // value the MoonViT patch merger was already built from.
+    //
+    // 65536 * 65536 is exactly 2^32, which truncates to a zero divisor when
+    // narrowed to i32. Clamping here keeps this module from ever handing that
+    // product to the shared `merged_token_count` helper.
+    let proc = LocateAnythingProcessor::new(14, [65_536, 65_536], 25_600);
+    assert_eq!(proc.merge_kernel_size, [MAX_MERGE_KERNEL, MAX_MERGE_KERNEL]);
+    assert!(proc.merged_token_count((64, 64)) > 0);
+    // Each axis is clamped independently, and the floor is still 1.
+    let proc = LocateAnythingProcessor::new(14, [0, usize::MAX], 25_600);
+    assert_eq!(proc.merge_kernel_size, [1, MAX_MERGE_KERNEL]);
+}
+
+#[test]
+fn an_absurd_in_token_limit_is_clamped_so_one_image_stays_bounded() {
+    // Unlike the two geometry bounds above, this clamp is the primary guard
+    // rather than a backstop: `in_token_limit` is a per-image memory budget the
+    // MoonViT tower never sees, so the processor and the tower cannot disagree
+    // about it and there is nothing a clamp could desync.
+    //
+    // `in_token_limit` is the only thing that engages the step-1 downscale, so
+    // an unbounded value from `preprocessor_config.json` would leave a single
+    // image bounded only by the 511-patch grid envelope.
+    let proc = LocateAnythingProcessor::new(14, [2, 2], usize::MAX);
+    assert_eq!(proc.in_token_limit, MAX_IN_TOKEN_LIMIT);
+    assert_eq!(
+        LocateAnythingProcessor::new(14, [2, 2], 0).in_token_limit,
+        1
+    );
+}
+
+#[test]
 fn grid_side_is_clamped_below_the_position_embedding_limit() {
     // An extreme aspect ratio whose long side would exceed 511 patches even
     // though the total patch count stays inside the budget.

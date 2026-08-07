@@ -34,6 +34,36 @@ fn merged_token_count_matches_the_processor_formula() {
 }
 
 #[test]
+fn a_merge_kernel_whose_product_overflows_i32_does_not_divide_by_zero() {
+    // 65536 * 65536 is exactly 2^32: square, non-zero, and therefore past both
+    // the `.max(1)` floor and the square-kernel check, yet its low 32 bits are
+    // zero. Casting the product to i32 before dividing panicked with "attempt
+    // to divide by zero"; the widened path must return a value instead.
+    assert_eq!(merged_token_count((6, 6), [65_536, 65_536]), 0);
+    // The same shape one bit higher, where the product no longer fits in i32
+    // at all and is clamped rather than wrapped.
+    assert_eq!(merged_token_count((6, 6), [usize::MAX, 2]), 0);
+    // A merge that is large but representable still divides normally.
+    assert_eq!(merged_token_count((100, 100), [50, 2]), 100);
+}
+
+#[test]
+fn a_huge_patch_grid_does_not_overflow_the_patch_product() {
+    // grid_h * grid_w overflows i32 well before i32::MAX on each axis, so the
+    // product is formed in i64. 46341^2 > i32::MAX.
+    assert_eq!(
+        merged_token_count((46_341, 46_341), [1, 1]),
+        46_341 * 46_341
+    );
+    assert_eq!(
+        merged_token_count((i32::MAX, i32::MAX), [1, 1]),
+        (i32::MAX as usize) * (i32::MAX as usize)
+    );
+    // A negative grid side is nonsense rather than a huge count.
+    assert_eq!(merged_token_count((-4, 8), [2, 2]), 0);
+}
+
+#[test]
 fn rewrites_the_chat_template_image_markers() {
     // The shipped chat_template.jinja renders `<image-1>` for the first image
     // content part. It is plain text, not a vocabulary token, so it has to be

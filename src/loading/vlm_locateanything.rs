@@ -85,6 +85,36 @@ const DEFAULT_IMG_END_TOKEN_ID: i32 = 151_667; // </img>
 /// Qwen2 chat defaults: `<|endoftext|>` and `<|im_end|>`.
 const DEFAULT_EOS_TOKEN_IDS: [i32; 2] = [151_643, 151_645];
 
+/// Upper bound on `vision_config.patch_size`; the released checkpoint declares
+/// 14.
+///
+/// The ceiling exists so the geometry `patch_size` derives stays bounded.
+/// [`LocateAnythingProcessor`] rounds each image side *up* to a multiple of
+/// `merge * patch` and caps the result only with its own 511-patch grid
+/// envelope, so the worst-case resized side is about `MAX_GRID_SIDE *
+/// patch_size` pixels and the f32 patch buffer grows as `patch_size^2`. The
+/// `in_token_limit` downscale cannot bound it either, because `(w / p) * (h /
+/// p)` is 0 whenever `p` exceeds the image and the downscale never engages.
+/// Uncapped, a one-line `patch_size: 100000` asks for a ~200000x200000 RGB
+/// buffer and OOM-aborts the process.
+///
+/// 128 is generous next to every ViT/MoonViT patch size in this tree (14 and 16
+/// throughout, with a single 48), so the released geometry is untouched. It is
+/// kept equal to the processor's backstop constant of the same name.
+const MAX_PATCH_SIZE: usize = 128;
+
+/// Upper bound on each `vision_config.merge_kernel_size` axis; the released
+/// checkpoint declares `[2, 2]`.
+///
+/// The merge kernel sets the `merge * patch` pad unit the processor rounds up
+/// to, so it alone fixes the floor on the buffer even a 1x1 image
+/// materializes, and its product must stay far inside `i32` for the
+/// merged-token arithmetic in
+/// [`crate::multimodal::locateanything_prompt::merged_token_count`]. Real
+/// spatial merges are 1, 2 (LocateAnything and Kimi-VL), or 4. Kept equal to
+/// the processor's backstop constant of the same name.
+const MAX_MERGE_KERNEL: usize = 16;
+
 /// LocateAnything's MoonViT sub-config.
 ///
 /// The keys are the HuggingFace spelling (`num_hidden_layers`, `hidden_size`,
@@ -157,11 +187,42 @@ impl LocateAnythingVisionConfig {
     /// Translate into mlxcel's shared MoonViT config, applying the two genuine
     /// LocateAnything deltas: LayerNorm eps `1e-5` and the tanh-approximate
     /// GELU in the block MLP.
+    ///
+    /// This is also the one place `patch_size` and `merge_kernel_size` are
+    /// range-checked, and it **rejects** rather than clamps. Both values are
+    /// consumed twice and the two consumers have to agree: the processor
+    /// derives the patch grid from them ([`LocateAnythingProcessor::new`]),
+    /// while the MoonViT conv patch-embed and patch merger are sized from the
+    /// [`KimiVLVisionConfig`] built here. Silently clamping one side would
+    /// leave the processor emitting a grid the tower does not apply, which
+    /// turns a loud failure into a quiet mis-computation.
     pub(crate) fn to_moonvit_config(&self) -> Result<KimiVLVisionConfig, String> {
         if self.model_type != "moonvit" {
             return Err(format!(
                 "LocateAnything expects vision_config.model_type == \"moonvit\", got \"{}\"",
                 self.model_type
+            ));
+        }
+        if !(1..=MAX_PATCH_SIZE).contains(&self.patch_size) {
+            return Err(format!(
+                "LocateAnything requires vision_config.patch_size in 1..={MAX_PATCH_SIZE}, got {}",
+                self.patch_size
+            ));
+        }
+        // Only axes the config actually declares are range-checked; a short or
+        // absent `merge_kernel_size` is filled by `merge_kernel()`'s defaults
+        // below. An explicitly declared 0 is refused rather than floored to 1,
+        // because a silent 1x1 merge would quadruple the `<IMG_CONTEXT>` run
+        // while the connector still expects 4608-wide merged rows.
+        if self
+            .merge_kernel_size
+            .iter()
+            .any(|&axis| !(1..=MAX_MERGE_KERNEL).contains(&axis))
+        {
+            return Err(format!(
+                "LocateAnything requires every vision_config.merge_kernel_size axis in \
+                 1..={MAX_MERGE_KERNEL}, got {:?}",
+                self.merge_kernel_size
             ));
         }
         let merge = self.merge_kernel();
@@ -302,7 +363,7 @@ pub(crate) fn load_locateanything_vlm(model_path: &Path) -> Result<LoadedModel> 
     let vision_model = KimiVLVisionModel::from_weights(&weights, &vision_config, "vision_tower")
         .map_err(|e| anyhow::anyhow!("Failed to load LocateAnything MoonViT tower: {e}"))?;
 
-    let input_dim = (vision_config.hidden_size * merge_kernel[0] * merge_kernel[1]) as i32;
+    let input_dim = connector_input_dim(vision_config.hidden_size, merge_kernel)?;
     let connector = LocateAnythingConnector::from_weights(
         &weights,
         "multi_modal_projector",
@@ -353,6 +414,32 @@ pub(crate) fn load_locateanything_vlm(model_path: &Path) -> Result<LoadedModel> 
     };
 
     Ok(LoadedModel::LocateAnythingVLM(vlm))
+}
+
+/// Width of one merged row the patch merger hands the connector:
+/// `hidden_size * merge_h * merge_w` (4608 for the released checkpoint).
+///
+/// Both factors are read from `vision_config`, so the product is formed with
+/// `checked_mul` and narrowed with `i32::try_from` instead of a bare
+/// `as i32`. `hidden_size: 1152` with `merge_kernel_size: [65536, 65536]` is
+/// `1152 * 2^32`, whose low 32 bits are zero, and an `input_dim` of 0 reaches
+/// [`LocateAnythingConnector::forward`]'s `reshape(image_features, &[-1, 0])`
+/// and throws inside MLX. A C++ throw across the cxx boundary aborts the
+/// process rather than unwinding into a `Result`, so the value has to be
+/// rejected here, while it is still an `Err` a caller can report.
+fn connector_input_dim(hidden_size: usize, merge_kernel: [usize; 2]) -> Result<i32> {
+    hidden_size
+        .checked_mul(merge_kernel[0])
+        .and_then(|v| v.checked_mul(merge_kernel[1]))
+        .and_then(|v| i32::try_from(v).ok())
+        .filter(|&width| width > 0)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "LocateAnything connector input width must be a positive i32, but \
+                 vision_config.hidden_size {hidden_size} times merge_kernel_size \
+                 {merge_kernel:?} is not"
+            )
+        })
 }
 
 /// Collect only the `language_model.*` keys so the Qwen2 backbone loader never
