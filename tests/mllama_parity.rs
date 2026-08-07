@@ -251,6 +251,15 @@ fn cross_states() -> UniquePtr<MlxArray> {
     mlxcel_core::from_slice_f32(&fill(n, 42), &[1, KV_LEN, HIDDEN])
 }
 
+/// Tolerance for the one comparison in this file whose two sides reassociate a
+/// parallel reduction differently, so exact f32 equality is not a property the
+/// code can have. See `sub_max_real_tiles_keep_the_legacy_real_rows_byte_identical`.
+///
+/// Do not tighten this back to `0.0`. The sibling assertion in
+/// `src/models/mllama/text.rs` was moved off exact equality for the same reason
+/// in #953, and this file's case was missed at the time.
+const TILE_SELECTION_REASSOCIATION_TOL: f32 = 1e-6;
+
 /// Max absolute elementwise difference between two arrays.
 fn max_abs_diff(a: &MlxArray, b: &MlxArray) -> f32 {
     let diff = mlxcel_core::subtract(a, b);
@@ -521,10 +530,21 @@ fn states_rows(states: &MlxArray, start: i32, end: i32) -> UniquePtr<MlxArray> {
     mlxcel_core::slice(states, &[0, start, 0], &[1, end, HIDDEN])
 }
 
-/// (a) Sub-max real tiles: the real-tile states are byte-identical to the
-/// corresponding rows of the legacy all-tiles states (slicing before the
-/// per-position projector changes nothing), and only the padding-tile rows
-/// are dropped.
+/// (a) Sub-max real tiles: the real-tile states match the corresponding rows of
+/// the legacy all-tiles states (slicing before the per-position projector
+/// changes nothing), and only the padding-tile rows are dropped.
+///
+/// This one tolerates a last-bit difference where its siblings below assert
+/// exact equality, because it is the only case here where the surviving rows
+/// change lane position inside the reduction: selecting 1 real tile of 4 makes
+/// the vision encoder reduce over a 1-tile extent instead of a 4-tile one, and
+/// f32 addition is not associative, so the equivalence that holds in exact
+/// arithmetic does not imply bitwise equality. Measured on Apple M5 Max, the
+/// difference is 5.9604645e-8 (2^-24) against an output whose largest element
+/// is 1.1521907, where 1 ULP is 1.1920929e-7. That is 0.5 ULP, the smallest
+/// nonzero difference representable there. A real row-selection or padding
+/// error would surface at the 1e0 output scale, seven orders larger, so the
+/// 1e-6 bound stays loud on an actual defect.
 #[test]
 fn sub_max_real_tiles_keep_the_legacy_real_rows_byte_identical() {
     let model = tiny_vl_model();
@@ -542,10 +562,11 @@ fn sub_max_real_tiles_keep_the_legacy_real_rows_byte_identical() {
     assert_eq!(mlxcel_core::array_shape(&sub), vec![1, V_PATCHES, HIDDEN]);
 
     let expected = states_rows(&full, 0, V_PATCHES);
-    assert_eq!(
-        max_abs_diff(&sub, &expected),
-        0.0,
-        "real-tile states must be byte-identical to the legacy states' real rows"
+    let diff = max_abs_diff(&sub, &expected);
+    assert!(
+        diff <= TILE_SELECTION_REASSOCIATION_TOL,
+        "real-tile states diverged from the legacy states' real rows by {diff}, \
+         over the {TILE_SELECTION_REASSOCIATION_TOL} reassociation tolerance"
     );
 }
 

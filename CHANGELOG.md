@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `mllama_parity::sub_max_real_tiles_keep_the_legacy_real_rows_byte_identical` no longer demands exact f32 equality. Selecting 1 real tile of 4 makes the vision encoder reduce over a different extent than the all-tiles path, and f32 addition is not associative, so the equivalence that holds in exact arithmetic never implied bitwise equality. On Apple M5 Max the difference is 5.9604645e-8 (2^-24) against a largest output element of 1.1521907, which is 0.5 ULP; a real row-selection error would surface seven orders larger. The assertion moves to a named 1e-6 bound. This is the same defect #953 fixed for the sibling assertion in `src/models/mllama/text.rs`, which missed this file. The two chunked-SDPA assertions in `layers.rs` now also report the measured divergence instead of only naming the chunk size (#1065).
+
 ### Changed
 
 - The pinned Rust toolchain moves from 1.93.1 (2026-02-11) to 1.97.1 (2026-07-14), and the `dtolnay/rust-toolchain` tag in `ci.yml` tracks it as the comment there requires. The workflows that install `@stable` are unaffected and were never building at a different version: that action runs `rustup default` and never exports `RUSTUP_TOOLCHAIN`, so `rust-toolchain.toml` overrode it per directory and every cargo invocation in the tree already resolved to the pin. `cargo fmt` produces no diff at the new version, so the bump reformats nothing, but six new clippy lints fire under `-D warnings` and are fixed here: `question_mark` in `memory_estimate.rs` and `sanitize.rs`, `collapsible_match` in `chat_request.rs`, `for_kv_map` and `unnecessary_cast` in two test modules, and `unneeded_wildcard_pattern` in `pipeline_remote_real_models.rs`. All six are mechanical and behavior-preserving.
