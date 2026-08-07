@@ -6285,9 +6285,10 @@ mod tests {
                 chunk,
             );
             assert_eq!(ffi::array_shape(&chunked), ffi::array_shape(&full));
+            let diff = max_abs_diff(&full, &chunked);
             assert!(
-                max_abs_diff(&full, &chunked) < 1e-5,
-                "chunk={chunk} diverged from unchunked SDPA"
+                diff < 1e-5,
+                "chunk={chunk} diverged from unchunked SDPA by {diff}"
             );
         }
     }
@@ -6341,9 +6342,10 @@ mod tests {
             for chunk in [1, 2, 3] {
                 let chunked = chunked_causal_attention(&q, &k, &v, scale, chunk);
                 assert_eq!(ffi::array_shape(&chunked), ffi::array_shape(&native));
+                let diff = max_abs_diff(&native, &chunked);
                 assert!(
-                    max_abs_diff(&native, &chunked) < 1e-5,
-                    "q_len={q_len} k_len={k_len} chunk={chunk} diverged from do_causal SDPA"
+                    diff < 1e-5,
+                    "q_len={q_len} k_len={k_len} chunk={chunk} diverged from do_causal SDPA by {diff}"
                 );
             }
         }
