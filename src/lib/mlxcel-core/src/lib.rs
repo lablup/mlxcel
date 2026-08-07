@@ -1118,6 +1118,11 @@ mod ffi {
 
         /// Dequantize quantized weights to full precision
         /// biases: nullable for mxfp4/nvfp4/mxfp8 modes
+        ///
+        /// `biases` is normalized to row-contiguous before the call. MLX's
+        /// Metal dequantize path miscomputes silently on a strided `biases`,
+        /// so callers may pass a sliced or otherwise strided view safely; see
+        /// the comment on the `dequantize` shim in `cpp/mlx_cxx_bridge.cpp`.
         unsafe fn dequantize(
             w: &MlxArray,
             scales: &MlxArray,

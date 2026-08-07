@@ -1970,6 +1970,10 @@ std::unique_ptr<MlxArray> run_fused_moe_two_kernel(
         // compute w*scale+bias inline in f32 registers, so a bf16-dequant
         // truth would itself carry a per-weight rounding the production
         // paths do not have.
+        // The `biases` argument must stay an `astype(take(...))` result
+        // (row-contiguous): this calls MLX directly, so it does not inherit the
+        // row-contiguity guard on `biases` carried by the `dequantize` shim in
+        // mlx_cxx_bridge.cpp, and a strided `biases` there miscomputes silently.
         auto idx1 = astype(indices.inner, uint32);
         auto dq_sel = [&](const array& w_q, const array& s_q, const array& b_q,
                           int bits_q) {

@@ -147,6 +147,10 @@ void nemotron_decode_step(
     auto w_idx = take(m.embed_w->inner, flat_ids, 0);
     auto s_idx = take(m.embed_s->inner, flat_ids, 0);
     auto b_idx = take(m.embed_b->inner, flat_ids, 0);
+    // `b_idx` must stay a `take` result (row-contiguous) rather than a view:
+    // this calls MLX directly, so it does not inherit the row-contiguity guard
+    // on `biases` carried by the `dequantize` shim in mlx_cxx_bridge.cpp, and a
+    // strided `biases` there miscomputes silently.
     auto h = dequantize(w_idx, s_idx, b_idx, m.gs, m.bits, "affine");
     auto id_shape = input_ids.inner.shape();
     h = reshape(h, {id_shape[0], id_shape[1], (int)h.shape().back()});

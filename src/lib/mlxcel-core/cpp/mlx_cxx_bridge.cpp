@@ -2986,10 +2986,16 @@ std::unique_ptr<MlxArray> dequantize(
     // #1046 and is not in the pin before it.
     //
     // `biases` is the only input whose contiguity copy is enqueued after a
-    // binding, so it is the only one that needs the guard. `mlx::core::contiguous`
-    // is a graph-level no-op for an already row-contiguous input (`Contiguous`
-    // shares the buffer instead of copying), so this costs nothing on the
-    // common path. Re-check this when the pinned MLX commit moves; the
+    // binding, so it is the only one that needs the guard.
+    //
+    // The guard is unconditional on purpose. `array::flags()` is not meaningful
+    // until the array has been evaluated, and `biases` here is typically an
+    // unevaluated graph node, so a `flags().row_contiguous ? b : contiguous(b)`
+    // short-circuit would read a default-constructed flag and skip the copy
+    // exactly when it is needed. `Contiguous` costs an added graph node, and at
+    // eval it elides the data copy for a standalone row-contiguous input, so
+    // every in-tree caller (load time or absorb time, never per token) pays
+    // nothing measurable. Re-check this when the pinned MLX commit moves; the
     // regression test is
     // `mlxcel-core::ffi_tests::dequantize_commutes_with_output_axis_slice_on_strided_inputs`.
     std::optional<array> biases_opt =
@@ -3034,7 +3040,12 @@ std::unique_ptr<MlxArray> quantized_embedding(
 
     std::string mode_str(mode.data(), mode.size());
 
-    // Dequantize with explicit optional wrapping
+    // Dequantize with explicit optional wrapping. This calls MLX directly
+    // rather than the `dequantize` shim above, so it does not inherit that
+    // shim's row-contiguity guard on `biases`. It is safe because `take`
+    // allocates a fresh row-contiguous output; keep it that way. Substituting a
+    // slice or any other view for the `take` reintroduces the silent miscompute
+    // documented on the shim.
     auto result = mlx::core::dequantize(
         w_indexed,
         scales_indexed,

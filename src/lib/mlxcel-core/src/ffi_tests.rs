@@ -3842,6 +3842,14 @@ fn qmv_multirow_matches_per_row_qmv_bitwise() {
 ///
 /// Dequantization is elementwise over the group axis, so slicing the output
 /// axis must commute with it exactly: bit-identical, not merely close.
+///
+/// The test is differential, not tautological: the reference leg dequantizes
+/// the whole tensor (contiguous inputs, guard inert) and the leg under test
+/// dequantizes the slices (strided inputs, guard active). It was confirmed
+/// non-vacuous by reverting the guard, which makes it fail with a 3.71 max
+/// absolute difference. That failure is only reachable if `slice_axis` really
+/// does hand back strided views here, so it doubles as a check that the
+/// precondition still holds.
 #[test]
 fn dequantize_commutes_with_output_axis_slice_on_strided_inputs() {
     const BITS: i32 = 4;
