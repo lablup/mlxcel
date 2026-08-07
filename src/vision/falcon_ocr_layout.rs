@@ -95,6 +95,17 @@ impl OcrCategory {
 ///
 /// `LAYOUT_TO_OCR_CATEGORY` in the reference. `None` means the region carries
 /// no text and must be skipped (figures, charts, seals).
+///
+/// The reference's keys are PP-DocLayoutV3's spelling, which hyphenates the
+/// four two-word classes (`list-item`, `page-footer`, `page-header`,
+/// `section-header`). DocLayNet-derived detectors (docling-layout, and
+/// therefore anything routed through `mlxcel detect`) spell the same four with
+/// an underscore. Both are accepted: an unmapped class is silently skipped, so
+/// without the aliases a whole page's list items and running heads would
+/// disappear from the output with nothing to explain it. The single-word
+/// classes are unaffected, and `paragraph_title` / `doc_title` / `figure_title`
+/// keep their reference (underscore) spelling because no detector hyphenates
+/// them.
 pub fn layout_to_ocr_category(layout_class: &str) -> Option<OcrCategory> {
     match layout_class.trim().to_ascii_lowercase().as_str() {
         "text" | "header" | "number" | "reference_content" | "reference" | "abstract"
@@ -103,11 +114,11 @@ pub fn layout_to_ocr_category(layout_class: &str) -> Option<OcrCategory> {
         "formula" => Some(OcrCategory::Formula),
         "caption" | "figure_title" => Some(OcrCategory::Caption),
         "footnote" | "vision_footnote" => Some(OcrCategory::Footnote),
-        "list-item" => Some(OcrCategory::ListItem),
+        "list-item" | "list_item" => Some(OcrCategory::ListItem),
         "title" | "doc_title" => Some(OcrCategory::Title),
-        "footer" | "page-footer" => Some(OcrCategory::PageFooter),
-        "page-header" => Some(OcrCategory::PageHeader),
-        "paragraph_title" | "section-header" => Some(OcrCategory::SectionHeader),
+        "footer" | "page-footer" | "page_footer" => Some(OcrCategory::PageFooter),
+        "page-header" | "page_header" => Some(OcrCategory::PageHeader),
+        "paragraph_title" | "section-header" | "section_header" => Some(OcrCategory::SectionHeader),
         "image" | "picture" | "figure" | "chart" | "seal" => None,
         _ => None,
     }

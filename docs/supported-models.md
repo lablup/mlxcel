@@ -97,7 +97,7 @@ Implemented VLM variants include:
 - PaddleOCR-VL (`paddleocr_vl`): document-OCR VLM pairing a NaViT dynamic-resolution SigLIP-style vision encoder (Conv2d patch embedding, cached bilinearly interpolated learned position embeddings for repeated page grids, 2D vision RoPE, `cu_seqlens`-packed attention with uniform and length-bucketed batched fast paths, and a spatial-merge projector) with a lightweight ERNIE-4.5 text decoder that uses MRoPE. Best for plain OCR, tables, formulas, and chart understanding.
 - Step-3.7 (`step3p7`): StepFun's multimodal model. A 47-block `perception_encoder` ViT tower (Conv2d patchify, learned absolute position embeddings bilinearly resized for the patch grid, 2D vision RoPE, LayerScale, quick-GELU MLP) feeds two stride-2 conv downsamplers and a linear projector into the text hidden size. Each image runs a base pass (728 px, 52x52 grid collapsed to 169 tokens) and, when larger than 728 px, a tiled-patch pass (504 px windows, each 36x36 grid collapsed to 81 tokens); features are ordered patches-first then base per image and scattered into `<im_patch>` placeholders. The text decoder is the Step-3.5 MoE stack (`text_config.model_type: step3p5`), reused as the backbone. Text-only prompts work through the same checkpoint.
 - dots.ocr (`dots_ocr`): document-OCR VLM (rednote-hilab) pairing a 42-block `dots_vit` dynamic-resolution ViT with a Qwen2 text decoder. The tower shares the Qwen2-VL vision machinery (`cu_seqlens`-packed block-diagonal attention, 2D vision RoPE, merge-block patch ordering) but uses RMSNorm blocks, a SwiGLU vision MLP, a patch embed with bias and a trailing RMSNorm, and a `post_trunk_norm`; its merger projects each 2x2 patch block straight to the text width (no separate connector). Plain 1D RoPE text decode, no MRoPE. Best for layout analysis (bbox + category JSON), plain OCR, tables, formulas, and Markdown conversion.
-- Falcon-OCR (`falcon_ocr`): TII's 300M early-fusion document-OCR VLM, and the one VLM in the tree with no vision tower at all. Each 16x16 RGB patch is flattened and pushed through a single linear `img_projector` straight into the token stream, and one 22-layer decoder reads image and text together under a hybrid mask that is bidirectional inside every image block (`<|image_cls|>`, four register tokens, and the patch tokens) and causal everywhere else. The decoder is Llama-derived with five differences: a fused `wqkv`, weightless RMSNorm everywhere except the final norm (including the per-head Q/K norms, which is why the checkpoint ships only five tensors per layer), per-head learned attention sinks, a squared-ReLU gated MLP over a row-interleaved fused `w13` that the loader de-interleaves, and a 3-D rotary that puts a 1-D temporal rotary on the low half of each head and a 2-D per-head spatial rotary (driven by the shipped `freqs_cis_golden` table) on the high half. An entire image block collapses onto one temporal position, so intra-image geometry is carried by the spatial rotary alone. The checkpoint uses the raw `dim` / `n_layers` / `ffn_dim` config keys; the HF spellings are also accepted. Chunked prefill is disabled for this family, matching upstream. Prompts are expanded at the token level: image blocks are prepended (or substituted for an existing `<|image|>` placeholder) and `<|OCR_PLAIN|>` is appended when the prompt does not already end with it, since the model needs the task token to transcribe rather than describe. `src/vision/falcon_ocr_layout.rs` ports the layout-aware second stage (category routing, nested-box suppression, region cropping, per-category instructions); the PP-DocLayoutV3 detector that feeds it is a separate architecture and is not included.
+- Falcon-OCR (`falcon_ocr`): TII's 300M early-fusion document-OCR VLM, and the one VLM in the tree with no vision tower at all. Each 16x16 RGB patch is flattened and pushed through a single linear `img_projector` straight into the token stream, and one 22-layer decoder reads image and text together under a hybrid mask that is bidirectional inside every image block (`<|image_cls|>`, four register tokens, and the patch tokens) and causal everywhere else. The decoder is Llama-derived with five differences: a fused `wqkv`, weightless RMSNorm everywhere except the final norm (including the per-head Q/K norms, which is why the checkpoint ships only five tensors per layer), per-head learned attention sinks, a squared-ReLU gated MLP over a row-interleaved fused `w13` that the loader de-interleaves, and a 3-D rotary that puts a 1-D temporal rotary on the low half of each head and a 2-D per-head spatial rotary (driven by the shipped `freqs_cis_golden` table) on the high half. An entire image block collapses onto one temporal position, so intra-image geometry is carried by the spatial rotary alone. The checkpoint uses the raw `dim` / `n_layers` / `ffn_dim` config keys; the HF spellings are also accepted. Chunked prefill is disabled for this family, matching upstream. Prompts are expanded at the token level: image blocks are prepended (or substituted for an existing `<|image|>` placeholder) and `<|OCR_PLAIN|>` is appended when the prompt does not already end with it, since the model needs the task token to transcribe rather than describe. The layout-aware second stage (category routing, nested-box suppression, region cropping, per-category instructions) is wired to the CLI through `--layout-detections`; see [Falcon-OCR layout-aware OCR](#falcon-ocr-layout-aware-ocr) below. The PP-DocLayoutV3 detector that feeds it is a separate architecture and is not included, so the detections are an input rather than something mlxcel produces.
 - GLM-4V (`glm4v`): GLM-4V ViT vision tower (3D patch embedding, bilinear-resampled learned position embeddings, Conv2d spatial downsample, SwiGLU patch merger) plus a GLM-4 text backbone driven by sectioned even/odd MRoPE. Reuses the shared Qwen-VL image processor and prompt/token plumbing.
 - GLM-4V MoE (`glm4v_moe`): GLM-4.5V-class variant reusing the GLM-4V ViT vision tower with a GLM-4 MoE text backbone (grouped `noaux_tc` routing, shared experts, `first_k_dense_replace` dense layers) driven by sectioned half-split MRoPE. Reuses the GLM-4 MoE machinery and the shared Qwen-VL runtime.
 - Granite Vision (`granite_vision`, or `llava_next` with a `granite` text config): IBM's document VLM. A SigLIP vision tower with four intermediate feature taps (concatenated on the channel axis) feeds a 2-layer GELU projector; a learned `image_newline` embedding, LLaVA-Next AnyRes multi-tile preprocessing (`image_grid_pinpoints`), and a dense Granite text backbone (embedding / attention / residual / logits multipliers) complete the model. Both `config.json` spellings route to the same loader. Best for document understanding, charts, and tables.
@@ -129,6 +129,68 @@ Audio/video capability is model-specific. The server request types include
 `image_url`, `video_url`, and `input_audio` content blocks, but a loaded model
 must advertise support for the corresponding modality. Video frame extraction
 uses the system `ffmpeg`/`ffprobe` binaries at runtime.
+
+### Falcon-OCR layout-aware OCR
+
+Falcon-OCR transcribes a whole page in one pass by default. It also has a
+two-stage mode: detect the page's layout regions, then OCR each region on its
+own with the instruction that region's class was trained on, which is what
+produces per-region text instead of one undifferentiated block.
+
+**mlxcel does not ship a document-layout detector.** The reference's first stage
+loads PP-DocLayoutV3 through `transformers.AutoModelForObjectDetection`; that is
+a separate object-detection architecture and is not part of this port. Only the
+second stage is implemented, so the region boxes have to come from somewhere
+else and are supplied as a file:
+
+```bash
+mlxcel generate -m models/mlx/falcon-ocr \
+  --image page.png \
+  --layout-detections regions.json
+```
+
+`-p/--prompt` is unused on this path (it is ignored with a note if passed):
+every region's prompt is the OCR instruction its layout class maps to. Each
+region is cropped from `--image`, OCRed on its own, and printed with its class,
+score, and pixel box.
+
+The accepted JSON is the shape `mlxcel detect --format json` prints, so a
+detector mlxcel gains later feeds this path without a format change:
+
+```json
+{
+  "detections": [
+    {"label": "title", "confidence": 0.95,
+     "box": {"l": 60, "t": 55, "r": 940, "b": 140}},
+    {"label": "text", "confidence": 0.90,
+     "box": {"l": 60, "t": 295, "r": 940, "b": 450}}
+  ]
+}
+```
+
+A bare top-level array works too, as does the `{"category": ..., "bbox": [l, t,
+r, b], "score": ...}` spelling that mlx-vlm's `falcon_ocr/layout.py` emits.
+`score` is optional and defaults to 1.0. Malformed input is rejected by index
+(`detection #3: the bounding box is empty or inverted ...`) before the model is
+loaded.
+
+Class names route through the reference's `LAYOUT_TO_OCR_CATEGORY` table:
+`table`, `formula`, `caption`, `footnote`, `list-item`, `title`, and
+`section-header` each select their own instruction, aliases such as `abstract`,
+`doc_title`, and `figure_title` collapse onto the broader category, and the
+DocLayNet underscore spellings (`list_item`, `page_header`, `page_footer`,
+`section_header`) are accepted alongside the hyphenated ones. Classes that carry
+no text (`picture`, `figure`, `chart`, `seal`, `image`) are skipped, as is any
+class the table does not know. Boxes more than 80% contained in a strictly
+larger box are dropped so an inline formula is not transcribed twice, and crops
+under 16 px on a side (or that would fall under it once the long side is capped
+at the processor's 1024 px) are skipped. When nothing usable survives, the whole
+page is OCRed as one `plain` region, matching the reference. A one-line summary
+reports the counts, so a region that disappeared is visible rather than silent.
+
+Regions are OCRed and printed in the order the file lists them; nothing
+reorders them. The reference detector emits reading order, so supply the
+detections in reading order.
 
 ### Phi-4 Multimodal audio
 

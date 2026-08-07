@@ -60,6 +60,28 @@ fn layout_classes_route_to_the_reference_ocr_categories() {
     }
 }
 
+/// DocLayNet-derived detectors (docling-layout, and so anything routed through
+/// `mlxcel detect`) spell the four two-word classes with an underscore where
+/// PP-DocLayoutV3 hyphenates them. Both spellings must land on the same
+/// category, or those regions would be dropped as unknown with no diagnostic.
+#[test]
+fn the_underscore_spelling_of_a_two_word_class_maps_the_same_way() {
+    for (hyphenated, underscored) in [
+        ("list-item", "list_item"),
+        ("page-footer", "page_footer"),
+        ("page-header", "page_header"),
+        ("section-header", "section_header"),
+    ] {
+        let expected = layout_to_ocr_category(hyphenated);
+        assert!(expected.is_some(), "{hyphenated} must map");
+        assert_eq!(
+            layout_to_ocr_category(underscored),
+            expected,
+            "{underscored} must map like {hyphenated}"
+        );
+    }
+}
+
 #[test]
 fn every_category_keeps_its_reference_instruction() {
     assert_eq!(
