@@ -146,9 +146,11 @@ impl ChannelAttention {
         let q = mlxcel_core::multiply_scalar(&q, (n as f32).powf(-0.5));
         let attn = mlxcel_core::matmul(&mlxcel_core::transpose_axes(&q, &[0, 1, 3, 2]), &k);
         // The reduction runs over N (up to ~37k tokens at stage 0), so the
-        // logits can be large; take the softmax in f32 and cast back.
+        // logits can be large; `softmax_precise` accumulates the exp/sum in
+        // f32 internally. Its output dtype is still `at_least_float(attn's
+        // own dtype)`, i.e. unchanged here since `attn` is already a float
+        // tensor, so there is nothing to cast back afterward.
         let attn = mlxcel_core::softmax_precise(&attn, -1);
-        let attn = mlxcel_core::astype(&attn, mlxcel_core::array_dtype(x));
 
         let out = mlxcel_core::matmul(&attn, &mlxcel_core::transpose_axes(&v, &[0, 1, 3, 2]));
         let out = mlxcel_core::transpose_axes(&out, &[0, 1, 3, 2]);

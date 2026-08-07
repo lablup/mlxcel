@@ -392,6 +392,83 @@ fn synthetic_forward_follows_the_stage_shape_progression() {
     );
 }
 
+/// The real `Florence-2-base-ft` geometry (`window_size = 12` and the four
+/// real per-stage widths / heads / groups / patch settings) but with
+/// `depths` cut to one block per stage. Grid math depends only on
+/// `patch_size` / `patch_stride` / `patch_padding`, not on block count, so
+/// this keeps the stage progression identical to the real checkpoint while
+/// keeping the synthetic-weight forward fast.
+fn real_geometry_fast_config() -> Florence2VisionConfig {
+    let mut config = real_vision_config();
+    config["depths"] = json!([1, 1, 1, 1]);
+    Florence2VisionConfig::from_vision_config(&config).expect("real-shaped config parses")
+}
+
+/// At 768x768 (the size `tests/florence2_vision_parity.rs` uses against the
+/// real checkpoint) the four stage grids are 192/96/48/24, every one an
+/// exact multiple of `window_size = 12`, so `window_partition`'s pad branch
+/// and `window_unpartition`'s crop branch never run and stay numerically
+/// untested by that parity test. 704x704 does not have this property: the
+/// stage grids are 176/88/44/22 and none of them divides 12, so every stage
+/// forces `WindowAttention` through both the pad and the crop path. This
+/// needs only synthetic weights, so it runs unconditionally (unlike the
+/// checkpoint-gated parity test).
+#[test]
+fn synthetic_forward_exercises_window_padding_at_real_geometry() {
+    let config = real_geometry_fast_config();
+    let weights = tiny_weights(&config);
+    let model = Florence2DaViT::from_weights(&weights, &config, "")
+        .expect("build real-geometry DaViT backbone");
+
+    let pixels = seq_array(&[1, 3, 704, 704], 0.75);
+    let stages = model.forward_stages(&pixels);
+    assert_eq!(stages.len(), 4);
+
+    const EXPECTED: [((i32, i32), i32); 4] = [
+        ((176, 176), 128),
+        ((88, 88), 256),
+        ((44, 44), 512),
+        ((22, 22), 1024),
+    ];
+    for (i, ((out, size), (expected_hw, expected_c))) in
+        stages.iter().zip(EXPECTED.iter()).enumerate()
+    {
+        assert_eq!(*size, *expected_hw, "stage {i}: grid size");
+        assert_ne!(
+            expected_hw.0 % config.window_size,
+            0,
+            "stage {i}: grid {expected_hw:?} must NOT divide window_size {} for this test to \
+             exercise the pad path",
+            config.window_size
+        );
+        assert_eq!(
+            mlxcel_core::array_shape(out),
+            vec![1, expected_hw.0 * expected_hw.1, *expected_c],
+            "stage {i}: output shape"
+        );
+    }
+
+    let out = Florence2DaViT::forward(&model, &pixels);
+    assert_eq!(mlxcel_core::array_shape(&out), vec![1, 22 * 22, 1024]);
+
+    // A bug in the pad mask (for example the zero-padded positions leaking
+    // into the windowed-attention softmax) tends to surface as NaN/Inf
+    // rather than as a subtly wrong finite number, so this is the cheap,
+    // synthetic-weight-safe check for it.
+    let out_f32 = mlxcel_core::astype(&out, mlxcel_core::dtype::FLOAT32);
+    let nan_mask = mlxcel_core::isnan(&out_f32);
+    let inf_mask = mlxcel_core::isinf(&out_f32);
+    let bad_mask = mlxcel_core::logical_or(&nan_mask, &inf_mask);
+    let bad_count =
+        mlxcel_core::sum_all(&mlxcel_core::astype(&bad_mask, mlxcel_core::dtype::INT32));
+    mlxcel_core::eval(&bad_count);
+    assert_eq!(
+        mlxcel_core::item_i32(&bad_count),
+        0,
+        "backbone output must be finite everywhere on the padded-window path"
+    );
+}
+
 /// `Florence2DaViT` has no `Debug`, so `expect_err` is unavailable.
 fn load_error(result: Result<Florence2DaViT, String>, what: &str) -> String {
     match result {
