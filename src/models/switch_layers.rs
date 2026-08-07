@@ -30,12 +30,40 @@ use mlxcel_core::{MlxArray, UniquePtr, dtype};
 
 /// Whether the fused single-token decode-MoE kernel (#268) is enabled.
 ///
-/// Default-on as of #282: across the validated MoE set the kernel is
-/// byte-identical or within the documented f16 jitter class, never regresses
-/// decode, and gives a measured speedup on both M1 Ultra and M5 (Neural
-/// Accelerator) hardware. Set `MLXCEL_FUSED_MOE=0` (also `false`/`off`/`no`,
-/// case-insensitive) to force the proven `gather_qmm` / `SwitchGLU` path; any
-/// other value, or leaving it unset, keeps the kernel on.
+/// Default-on as of #282: across the validated MoE set the kernel stays within
+/// the documented f16 jitter class, never regresses decode, and gives a
+/// measured speedup on both M1 Ultra and M5 (Neural Accelerator) hardware. Set
+/// `MLXCEL_FUSED_MOE=0` (also `false`/`off`/`no`, case-insensitive) to force
+/// the `gather_qmm` / `SwitchGLU` path; any other value, or leaving it unset,
+/// keeps the kernel on.
+///
+/// **Byte-identical greedy output is NOT a general property, and never was**
+/// (#1045). It holds on `qwen3-30b-a3b`, re-confirmed at current HEAD: 64
+/// greedy tokens agree exactly with the kernel on and off. It does not hold on
+/// Klear, where the two paths pick different but equally coherent
+/// continuations. That is checkpoint-dependent, not a kernel defect. The
+/// `MLXCEL_FUSED_MOE_PARITY_CHECK=1` probe measured 96 decode MoE calls on each
+/// checkpoint against an all-f32 dequantize-and-matmul ground truth, and the
+/// fused kernel was CLOSER to that truth than `gather_qmm` in 96 of 96 calls on
+/// both:
+///
+/// | checkpoint | fused vs truth | gather_qmm vs truth | fused closer |
+/// |---|---|---|---|
+/// | Klear-46B-A2.5B (256 experts, top-8) | 1.655e-3 | 1.025e-2 | 96/96, 6.21x |
+/// | qwen3-30b-a3b (128 experts, top-8) | 1.650e-3 | 1.022e-2 | 96/96, 6.16x |
+///
+/// (normalized RMS, median over calls; every rerun was bitwise deterministic)
+///
+/// So the kernel is the more accurate of the two paths, and the fused-vs-
+/// `gather_qmm` disagreement is very nearly `gather_qmm`'s own distance from
+/// truth. Whether that difference flips a greedy argmax depends on how
+/// knife-edge the checkpoint's routing is, which is why a 256-expert top-8
+/// router with a learned shared-expert blend diverges where a 128-expert one
+/// does not.
+///
+/// When reference-diffing a new MoE port against mlx-lm, set
+/// `MLXCEL_FUSED_MOE=0` so the comparison is against the path mlx-lm actually
+/// mirrors. See `docs/adding-models.md`.
 ///
 /// #886 hardening: the original kernel rounded each per-expert partial to the
 /// activation dtype before the K-sum, which blew up to 5-13% relative error
@@ -760,8 +788,11 @@ impl SwitchGLU {
     ///
     /// Computes `sum_k scores[k] * down_k(silu(gate_k(x)) * up_k(x))` for the K
     /// selected experts as two all-cores Metal dispatches (gate/up+swiglu, then
-    /// down+score), beating gather_qmm by ~3.5% on qwen3-30b-a3b with
-    /// byte-identical greedy output. gate/up are 4/8-bit; down also handles
+    /// down+score), beating gather_qmm by ~3.5% on qwen3-30b-a3b. Greedy output
+    /// is byte-identical on that checkpoint but not on every family; see
+    /// [`fused_moe_enabled`] for the measured parity picture and for why
+    /// `MLXCEL_FUSED_MOE=0` is the right switch when reference-diffing a port.
+    /// gate/up are 4/8-bit; down also handles
     /// 6-bit, so mixed widths like dots.llm1 (gate/up 4-bit, down 6-bit) are
     /// supported. Returns `None` (caller falls back to `forward` +
     /// `moe_weighted_sum`) for any unsupported config: non-affine, gate/up not

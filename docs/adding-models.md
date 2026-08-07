@@ -83,6 +83,21 @@ template, Transformers may define the tensor/module contract, and vLLM may show
 the serving-time cache layout. Keep those responsibilities separate while
 porting.
 
+### Set `MLXCEL_FUSED_MOE=0` when reference-diffing a MoE port
+
+The fused single-token decode-MoE kernel (#268) is on by default and engages
+only at `l == 1`, so a prefill comparison is unaffected while a greedy decode
+comparison is not. It is not a defect: measured against an all-f32
+dequantize-and-matmul ground truth it is roughly 6x closer than `gather_qmm`
+on both Klear and `qwen3-30b-a3b` (#1045). But `gather_qmm` is the path mlx-lm
+mirrors, so diffing against mlx-lm with the kernel on compares two paths that
+were never meant to agree bit for bit.
+
+Whether the difference flips a greedy argmax is checkpoint-dependent:
+`qwen3-30b-a3b` is byte-identical either way, Klear is not. A port that looks
+exact at prefill and diverges at decode is very likely hitting this rather than
+a porting bug, so rule it out first by rerunning with the kernel off.
+
 Do not copy reference-code boundaries blindly:
 
 - Keep route selection in `src/model_metadata.rs` and `src/loading/`.
