@@ -487,6 +487,24 @@ impl Florence2Model {
         prompt_ids: &[i32],
         max_new_tokens: usize,
     ) -> Result<Vec<i32>> {
+        self.generate_greedy_with_cancel(pixel_values, prompt_ids, max_new_tokens, None)
+    }
+
+    /// [`Self::generate_greedy`] with a cooperative cancellation flag.
+    ///
+    /// The encoder pass runs exactly once per call; the flag is polled once
+    /// per decode step, so a cancelled caller (a disconnected HTTP client on
+    /// the server's seq2seq worker, issue #1073) aborts within one step
+    /// instead of decoding the full budget. The tokens generated before the
+    /// flag was observed are returned; the caller decides whether they are
+    /// worth anything. `None` behaves exactly like [`Self::generate_greedy`].
+    pub fn generate_greedy_with_cancel(
+        &self,
+        pixel_values: &MlxArray,
+        prompt_ids: &[i32],
+        max_new_tokens: usize,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<Vec<i32>> {
         let encoder_hidden = self
             .encode(pixel_values, prompt_ids)
             .map_err(|e| anyhow!("{e}"))?;
@@ -497,6 +515,9 @@ impl Florence2Model {
         let mut next = text_config.decoder_start_token_id;
         for _ in 0..max_new_tokens {
             if cache.offset() >= text_config.max_position_embeddings {
+                break;
+            }
+            if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
                 break;
             }
             let token = mlxcel_core::from_slice_i32(&[next], &[1, 1]);

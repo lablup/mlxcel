@@ -115,10 +115,11 @@ pub enum LoadedModel {
     MiniCPMV46VLM(vision::MiniCPMV46VLModel),
     Moondream3VLM(vision::Moondream3VLModel),
     Moondream2VLM(vision::Moondream2VLModel),
-    /// Florence-2 (issue #856): DaViT tower + BART encoder-decoder text
-    /// stack. Seq2seq, so the CLI routes it to the Florence-2 task pipeline
-    /// before the autoregressive loop and the server refuses it at startup;
-    /// the `LanguageModel` delegation below exists for trait completeness.
+    /// Florence-2 (issues #856, #1073): DaViT tower + BART encoder-decoder
+    /// text stack. Seq2seq, so the CLI routes it to the Florence-2 task
+    /// pipeline before the autoregressive loop and the server routes it to
+    /// its dedicated seq2seq worker before the batched/paged scheduler; the
+    /// `LanguageModel` delegation below exists for trait completeness.
     Florence2VLM(models::Florence2VlmModel),
     Gemma3n(models::Gemma3nModel),
     Gemma3nVLM(vision::Gemma3nVLModel),

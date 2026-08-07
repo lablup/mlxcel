@@ -332,6 +332,19 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                     );
                     return;
                 }
+                // Florence-2 (issue #1073): encoder-decoder (seq2seq) VLM
+                // whose decode cross-attends to a per-request encoder pass;
+                // it cannot join the BatchScheduler (`supports_batching() ==
+                // false`) and is served on its dedicated batch-1 seq2seq
+                // loop off the same request channel. This branch (and its
+                // legacy-worker twin below) is what guarantees a Florence-2
+                // checkpoint never reaches a decoder-only worker loop.
+                LoadedModel::Florence2VLM(florence2) => {
+                    crate::server::florence2_worker::run_florence2_worker_loop(
+                        &florence2, request_rx,
+                    );
+                    return;
+                }
                 other => other,
             };
 
@@ -925,6 +938,15 @@ pub(crate) fn spawn_legacy_model_worker(
                         request_rx,
                         None,
                         &config_eos,
+                    );
+                    return;
+                }
+                // Florence-2 (issue #1073): served on its dedicated batch-1
+                // seq2seq loop; see the batched-worker branch above. The
+                // seq2seq path has no serve-level flags to wire.
+                LoadedModel::Florence2VLM(florence2) => {
+                    crate::server::florence2_worker::run_florence2_worker_loop(
+                        &florence2, request_rx,
                     );
                     return;
                 }
@@ -2678,6 +2700,9 @@ pub(crate) fn build_generation_result_with_cache(
         finish_reason: finish_reason.to_string(),
         logprobs: None,
         cached_tokens,
+        // Structured coordinate output is produced only by the Florence-2
+        // seq2seq worker, which builds its result directly (issue #1073).
+        structured_output: None,
     }
 }
 

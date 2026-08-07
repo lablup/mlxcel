@@ -395,3 +395,61 @@ fn generate_greedy_round_trip_produces_valid_tokens() {
     let again = model.generate_greedy(&[0, 5, 6, 2], 8).unwrap();
     assert_eq!(out, again);
 }
+
+// ---------------------------------------------------------------------------
+// Serving isolation (issue #1073)
+// ---------------------------------------------------------------------------
+
+/// The server's seq2seq worker serves requests sequentially on one loaded
+/// model, with the encoder output and decode cache created inside each
+/// request's `generate_greedy` call and dropped with it. This test pins that
+/// per-request lifetime: request B served after request A must answer
+/// exactly as request B served on a freshly built model, and the two
+/// requests' encoder outputs must be shown to produce different decode
+/// logits. The second half is what gives the first half teeth: if the
+/// worker (or a refactor of the greedy loop) ever cached the encoder output
+/// across calls, request B would decode against request A's encoder state,
+/// which this test proves yields a different answer, so the equality
+/// assertion would fail.
+#[test]
+fn sequential_requests_reuse_no_encoder_state() {
+    let model = tiny_model();
+    let src_a = [0i32, 5, 6, 7, 2];
+    let src_b = [0i32, 9, 3, 4, 2];
+
+    // Request A, then request B, on the same loaded model, exactly as the
+    // seq2seq worker serves them.
+    let _out_a = model.generate_greedy(&src_a, 8).unwrap();
+    let out_b_after_a = model.generate_greedy(&src_b, 8).unwrap();
+
+    // Reference: request B served with no prior request on a fresh model
+    // instance (the synthetic weights are deterministic).
+    let out_b_fresh = tiny_model().generate_greedy(&src_b, 8).unwrap();
+    assert_eq!(
+        out_b_after_a, out_b_fresh,
+        "request B answered differently after request A: encoder or decode \
+         state leaked across requests"
+    );
+
+    // Distinguishability: the same decoder step against A's encoder output
+    // vs B's must produce different logits, i.e. a leaked encoder cache
+    // would actually change the answer rather than coincide with it.
+    let enc_a = model.encode_tokens(&mlxcel_core::from_slice_i32(&src_a, &[1, 5]));
+    let enc_b = model.encode_tokens(&mlxcel_core::from_slice_i32(&src_b, &[1, 5]));
+    let start = mlxcel_core::from_slice_i32(&[model.config().decoder_start_token_id], &[1, 1]);
+    let mut cache_a = model.make_cache();
+    let mut cache_b = model.make_cache();
+    let logits_a = to_vec_f32(&model.decode(&start, &enc_a, &mut cache_a));
+    let logits_b = to_vec_f32(&model.decode(&start, &enc_b, &mut cache_b));
+    let max_diff = logits_a
+        .iter()
+        .zip(&logits_b)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        max_diff > 1e-6,
+        "decoding against the two requests' encoder outputs produced \
+         indistinguishable logits (max abs diff {max_diff}); the isolation \
+         assertion above would not detect a leaked encoder cache"
+    );
+}

@@ -44,6 +44,7 @@ mod model;
 mod parse;
 mod postprocess;
 mod processor;
+mod render;
 mod runtime;
 mod scan;
 mod tasks;
@@ -63,6 +64,7 @@ pub use coords::{
 pub use model::Florence2Model;
 pub use postprocess::{Florence2PostProcessingType, Florence2TaskResult};
 pub use processor::{Florence2Output, Florence2Processor};
+pub use render::{render_task_result, structured_task_json};
 pub use runtime::{Florence2RunOutput, Florence2VlmModel, parse_task_prompt};
 pub use tasks::Florence2Task;
 

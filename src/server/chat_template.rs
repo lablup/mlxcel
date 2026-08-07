@@ -1150,6 +1150,32 @@ const JINA_VLM_CHAT_TEMPLATE: &str = concat!(
     "{%- if add_generation_prompt %}{{- 'Assistant:' }}{%- endif %}"
 );
 
+/// Florence-2's serving template (issue #1073): the messages' text, verbatim.
+///
+/// Florence-2 is not a chat model. Its encoder consumes a task prompt such as
+/// `<CAPTION>` or `<CAPTION_TO_PHRASE_GROUNDING> a green car`, which the
+/// seq2seq worker parses with the same `parse_task_prompt` the CLI `-p` flag
+/// uses; the fifteen task markers are expanded to trained English sentences
+/// by the task processor, never tokenized as-is. Any role prefix or
+/// generation prompt a conventional template adds would break that parse, so
+/// this template emits only the text content: strings verbatim, typed
+/// content lists as their `text` parts (the `image` parts travel out-of-band
+/// as pixels into the encoder; Florence-2 has no image placeholder token).
+/// Multi-message requests concatenate, so anything beyond a single user
+/// message carrying the task prompt is rejected downstream by the task
+/// parser with a message listing the valid markers.
+const FLORENCE2_CHAT_TEMPLATE: &str = concat!(
+    "{%- for message in messages %}",
+    "{%- if message['content'] is string %}",
+    "{{- message['content'] }}",
+    "{%- else %}",
+    "{%- for part in message['content'] %}",
+    "{%- if part['type'] == 'text' %}{{- part['text'] }}{%- endif %}",
+    "{%- endfor %}",
+    "{%- endif %}",
+    "{%- endfor %}"
+);
+
 /// A chat template for a checkpoint that ships none of its own.
 ///
 /// Reached only when `tokenizer_config.json`, `chat_template.jinja` and
@@ -1158,12 +1184,16 @@ const JINA_VLM_CHAT_TEMPLATE: &str = concat!(
 /// the generic `User:\n\nAssistant: ` fallback then renders a prompt shape the
 /// model never saw. On that checkpoint the difference is not subtle: asked for
 /// the capital of France it answers "17" under the generic template and "Paris"
-/// under its own.
+/// under its own. Florence-2 checkpoints ship a plain BART tokenizer config
+/// with no template either, and the generic fallback's `User:` prefix would
+/// break the task-marker parse, so the family carries its own text-verbatim
+/// template here.
 fn builtin_chat_template(model_path: &Path) -> Option<&'static str> {
     let config = std::fs::read_to_string(model_path.join("config.json")).ok()?;
     let config: serde_json::Value = serde_json::from_str(&config).ok()?;
     match config.get("model_type").and_then(|v| v.as_str())? {
         "jvlm" | "jina_vlm" => Some(JINA_VLM_CHAT_TEMPLATE),
+        "florence2" => Some(FLORENCE2_CHAT_TEMPLATE),
         _ => None,
     }
 }
@@ -1279,6 +1309,65 @@ mod tests {
             !rendered.contains("Assistant: Assistant:"),
             "got {rendered:?}"
         );
+    }
+
+    /// Florence-2's built-in template (issue #1073) must hand the task
+    /// prompt to the seq2seq worker verbatim: no role prefix and no
+    /// generation prompt, because `parse_task_prompt` requires the string to
+    /// begin with a task marker exactly as the CLI `-p` flag receives it.
+    #[test]
+    fn a_florence2_checkpoint_renders_the_task_prompt_verbatim() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"model_type": "florence2"}"#,
+        )
+        .unwrap();
+
+        let processor = ChatTemplateProcessor::from_model_path(dir.path())
+            .expect("template resolution succeeds")
+            .expect("a built-in template is supplied");
+        let rendered = processor
+            .apply(
+                &[ChatMessage {
+                    role: "user".to_string(),
+                    content: "<CAPTION>".to_string(),
+                }],
+                None,
+            )
+            .expect("render");
+        assert_eq!(rendered, "<CAPTION>");
+    }
+
+    /// A Florence-2 request always carries an image, so `content` arrives as
+    /// typed parts; only the text part reaches the encoder prompt (the image
+    /// travels out-of-band as pixels, there is no placeholder token), and an
+    /// input-taking task keeps its input text attached.
+    #[test]
+    fn a_florence2_typed_content_list_renders_only_the_text_part() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"model_type": "florence2"}"#,
+        )
+        .unwrap();
+
+        let processor = ChatTemplateProcessor::from_model_path(dir.path())
+            .expect("template resolution succeeds")
+            .expect("a built-in template is supplied");
+        let rendered = processor
+            .apply_raw(
+                &serde_json::json!([{
+                    "role": "user",
+                    "content": [
+                        {"type": "image"},
+                        {"type": "text", "text": "<CAPTION_TO_PHRASE_GROUNDING> a green car"},
+                    ],
+                }]),
+                None,
+            )
+            .expect("render");
+        assert_eq!(rendered, "<CAPTION_TO_PHRASE_GROUNDING> a green car");
     }
 
     #[test]
