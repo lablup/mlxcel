@@ -100,6 +100,12 @@ pub struct GenerationResult {
     /// scheduler adopted a detached cache for this request. Exposed in the
     /// OpenAI response body as `usage.prompt_tokens_details.cached_tokens`.
     pub cached_tokens: usize,
+    /// Structured task output for families whose parsed answer carries
+    /// coordinates (Florence-2 boxes / quad boxes / polygons / OCR regions,
+    /// issue #1073). `None` for every other family, which keeps the wire
+    /// shape unchanged. Surfaced on the non-streaming chat response as the
+    /// assistant message's `florence2_result` extension field.
+    pub structured_output: Option<serde_json::Value>,
 }
 
 // `pub` (not `pub(crate)`) so the offline interactive chat REPL

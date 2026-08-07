@@ -27,6 +27,7 @@ impl ModelProvider {
                             finish_reason: "stop".to_string(),
                             logprobs: None,
                             cached_tokens: 0,
+                            structured_output: None,
                         }));
                     }
                     ModelRequest::Shutdown => break,

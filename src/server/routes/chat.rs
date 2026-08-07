@@ -415,7 +415,7 @@ async fn non_stream_chat_completion(
     // For non-video models the route guard above already rejected the
     // request, so `prepared.videos` is always empty here unless the
     // model supports video.
-    let result = state
+    let mut result = state
         .model_provider
         .generate_with_media_and_videos_declared(
             prepared.prompt,
@@ -426,6 +426,12 @@ async fn non_stream_chat_completion(
             prepared.media,
         )
         .map_err(|e| ErrorResponse::new(format!("Generation error: {e}"), "server_error"))?;
+
+    // Structured Florence-2 task output (issue #1073): produced only by the
+    // seq2seq worker, `None` for every other family. Attached below as the
+    // assistant message's `florence2_result` extension field, next to the
+    // human-readable `content` that carries the same answer as text.
+    let florence2_result = result.structured_output.take();
 
     state.metrics.record_request(
         result.prompt_tokens,
@@ -524,7 +530,8 @@ async fn non_stream_chat_completion(
                 logprobs,
             )
             .with_cached_tokens(cached_tokens, prompt_cache_enabled)
-            .with_reasoning_content(reasoning.clone()),
+            .with_reasoning_content(reasoning.clone())
+            .with_florence2_result(florence2_result),
         ));
     }
 
@@ -548,7 +555,8 @@ async fn non_stream_chat_completion(
             logprobs,
         )
         .with_cached_tokens(cached_tokens, prompt_cache_enabled)
-        .with_reasoning_content(reasoning),
+        .with_reasoning_content(reasoning)
+        .with_florence2_result(florence2_result),
     ))
 }
 

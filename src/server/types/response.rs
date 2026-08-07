@@ -124,6 +124,18 @@ pub struct ChatMessage {
     /// Tool calls made by the assistant (present when finish_reason is "tool_calls")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallResponse>>,
+    /// Structured Florence-2 task output (issue #1073): the parsed boxes,
+    /// quad boxes, polygons, or OCR regions as JSON, in the shape built by
+    /// `crate::models::florence2::structured_task_json`. `content` carries
+    /// the same answer as human-readable text (identical to the CLI's
+    /// output), so a standard OpenAI client keeps working while a
+    /// coordinate-aware client reads this field instead of re-parsing the
+    /// formatted string. mlxcel-specific extension following the same
+    /// optional-field convention as `reasoning_content`: present only on
+    /// Florence-2 responses, omitted everywhere else so the wire shape is
+    /// unchanged for every other model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub florence2_result: Option<serde_json::Value>,
 }
 
 /// A single tool call in the response (OpenAI format)
@@ -201,6 +213,7 @@ impl ChatCompletionResponse {
                     content: Some(content),
                     reasoning_content: None,
                     tool_calls: None,
+                    florence2_result: None,
                 },
                 finish_reason,
                 logprobs,
@@ -248,6 +261,7 @@ impl ChatCompletionResponse {
                     content: message_content,
                     reasoning_content: None,
                     tool_calls: Some(tool_calls),
+                    florence2_result: None,
                 },
                 finish_reason: Some("tool_calls".to_string()),
                 logprobs,
@@ -292,6 +306,22 @@ impl ChatCompletionResponse {
     pub fn with_reasoning_content(mut self, reasoning: Option<String>) -> Self {
         if let Some(choice) = self.choices.first_mut() {
             choice.message.reasoning_content = reasoning;
+        }
+        self
+    }
+
+    /// Attach the structured Florence-2 task output (issue #1073) to the
+    /// first choice's message as the `florence2_result` extension field.
+    /// `None` leaves the field absent
+    /// (`#[serde(skip_serializing_if = "Option::is_none")]`), so every
+    /// non-Florence-2 response keeps the existing wire shape. Chaining
+    /// mirrors `with_reasoning_content`.
+    ///
+    /// Used by: chat.rs (non-streaming path)
+    #[must_use]
+    pub fn with_florence2_result(mut self, structured: Option<serde_json::Value>) -> Self {
+        if let Some(choice) = self.choices.first_mut() {
+            choice.message.florence2_result = structured;
         }
         self
     }
@@ -736,6 +766,62 @@ mod tests {
             "let me think about hash tables"
         );
         assert_eq!(message["content"], "the answer");
+    }
+
+    // -- florence2_result (structured task output, issue #1073) --
+
+    /// A non-Florence-2 response must omit `florence2_result` entirely so
+    /// the wire shape is unchanged for every other model.
+    #[test]
+    fn florence2_result_absent_when_none() {
+        let resp = ChatCompletionResponse::new(
+            "id".to_string(),
+            "model".to_string(),
+            "hello".to_string(),
+            10,
+            5,
+            Some("stop".to_string()),
+        )
+        .with_florence2_result(None);
+
+        let json = serde_json::to_value(&resp).unwrap();
+        let message = &json["choices"][0]["message"];
+        assert!(
+            !message
+                .as_object()
+                .unwrap()
+                .contains_key("florence2_result"),
+            "florence2_result must be absent when None, got: {message}"
+        );
+    }
+
+    /// A Florence-2 response carries both the rendered text in `content` and
+    /// the structured coordinates in `florence2_result`, side by side.
+    #[test]
+    fn florence2_result_present_alongside_text_content() {
+        let structured = serde_json::json!({
+            "task": "<OD>",
+            "kind": "bboxes",
+            "bboxes": [[9.6, 54.1, 316.5, 474.1]],
+            "labels": ["cat"],
+        });
+        let resp = ChatCompletionResponse::new(
+            "id".to_string(),
+            "model".to_string(),
+            "cat: [9.6, 54.1, 316.5, 474.1]".to_string(),
+            581,
+            25,
+            Some("stop".to_string()),
+        )
+        .with_florence2_result(Some(structured));
+
+        let json = serde_json::to_value(&resp).unwrap();
+        let message = &json["choices"][0]["message"];
+        assert_eq!(message["content"], "cat: [9.6, 54.1, 316.5, 474.1]");
+        assert_eq!(message["florence2_result"]["task"], "<OD>");
+        assert_eq!(message["florence2_result"]["kind"], "bboxes");
+        assert_eq!(message["florence2_result"]["bboxes"][0][0], 9.6);
+        assert_eq!(message["florence2_result"]["labels"][0], "cat");
     }
 
     #[test]

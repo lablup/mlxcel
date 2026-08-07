@@ -153,6 +153,28 @@ Responses use an OpenAI-like object shape:
 Several request fields are echoed back when present. Treat this as compatibility
 surface, not as proof that every echoed field changes runtime behavior.
 
+## mlxcel extension fields
+
+mlxcel adds a small number of non-OpenAI fields to its response bodies. Each is
+optional and omitted (`skip_serializing_if`) unless the loaded model produces
+it, so standard clients never see a changed wire shape. The convention started
+with `reasoning_content` on chat completions (mirroring vLLM) and now also
+covers:
+
+- `choices[0].message.florence2_result` on non-streaming
+  `POST /v1/chat/completions` (issue #1073): the structured form of a
+  Florence-2 task answer, present only when the loaded model is Florence-2.
+  `message.content` carries the same answer as the human-readable text the
+  CLI prints; this field carries the parsed coordinates as JSON so a client
+  does not have to re-parse the formatted string. The object is
+  `{"task": "<OD>", "kind": "bboxes" | "text" | "quad_boxes" | "polygons" |
+  "bboxes_or_polygons", ...}` with the coordinate arrays under upstream
+  mlx-vlm / HuggingFace key names (`bboxes`, `quad_boxes`, `polygons`,
+  `labels`, `bboxes_labels`, `polygons_labels`); coordinates are pixels in
+  the original image extent. Streaming chat responses and `/v1/responses`
+  return the rendered text only; the structured field is a non-streaming
+  chat-completions surface.
+
 ## Streaming events
 
 SSE frames are typed and include a monotonic `sequence_number` per response.

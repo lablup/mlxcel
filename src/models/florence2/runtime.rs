@@ -27,9 +27,11 @@
 //! `LoadedModel` family uses. The CLI routes this family to
 //! [`Florence2VlmModel::run_task`] before the standard generation loop
 //! (mirroring the DiffusionGemma early exit in `commands/generate.rs`), and
-//! `mlxcel-server` refuses the checkpoint at startup until a seq2seq worker
-//! path exists. The [`LanguageModel`] impl below exists for trait
-//! completeness (warmup, tooling), not as a generation path.
+//! `mlxcel-server` serves it on a dedicated single-stream seq2seq worker
+//! (`server/florence2_worker.rs`, issue #1073) that calls
+//! [`Florence2VlmModel::run_task_with_cancel`] per request, never the
+//! batched/paged scheduler. The [`LanguageModel`] impl below exists for
+//! trait completeness (warmup, tooling), not as a generation path.
 
 use std::path::Path;
 
@@ -54,12 +56,15 @@ pub struct Florence2VlmModel {
 }
 
 /// One [`Florence2VlmModel::run_task`] call: the parsed answer plus the
-/// generated-token count the CLI needs for its throughput line.
+/// token counts the CLI throughput line and the server usage block need.
 pub struct Florence2RunOutput {
     /// Raw decoded answer and its parsed form.
     pub output: Florence2Output,
     /// Number of decoder tokens generated (EOS excluded).
     pub generated_tokens: usize,
+    /// Number of encoder prompt tokens (the expanded task sentence,
+    /// `<s>`/`</s>` included; image feature tokens excluded).
+    pub prompt_tokens: usize,
 }
 
 impl Florence2VlmModel {
@@ -89,7 +94,7 @@ impl Florence2VlmModel {
     /// the original image size.
     ///
     /// Same pipeline as [`Florence2Processor::run`], kept separate so the
-    /// caller also gets the generated-token count for stats.
+    /// caller also gets the token counts for stats.
     pub fn run_task(
         &self,
         task: Florence2Task,
@@ -97,7 +102,29 @@ impl Florence2VlmModel {
         image: &DynamicImage,
         max_new_tokens: usize,
     ) -> Result<Florence2RunOutput> {
+        self.run_task_with_cancel(task, input, image, max_new_tokens, None)
+    }
+
+    /// [`Self::run_task`] with a cooperative cancellation flag, polled once
+    /// per decode step by
+    /// [`Florence2Model::generate_greedy_with_cancel`].
+    ///
+    /// All state built here (encoder output, the seq2seq decode cache, the
+    /// preprocessed pixel tensor) is local to this call and dropped when it
+    /// returns, so every request served through this entry starts from a
+    /// fresh encoder pass; nothing can leak into the next request. The
+    /// server's seq2seq worker (issue #1073) relies on that per-call
+    /// lifetime for request isolation.
+    pub fn run_task_with_cancel(
+        &self,
+        task: Florence2Task,
+        input: Option<&str>,
+        image: &DynamicImage,
+        max_new_tokens: usize,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<Florence2RunOutput> {
         let prompt_ids = self.processor.encode_prompt(task, input)?;
+        let prompt_tokens = prompt_ids.len();
         let processed = self
             .processor
             .image_processor()
@@ -107,9 +134,12 @@ impl Florence2VlmModel {
             .first()
             .ok_or_else(|| anyhow!("Florence-2: image preprocessing returned no images"))?;
 
-        let generated =
-            self.model
-                .generate_greedy(&processed.pixel_values, &prompt_ids, max_new_tokens)?;
+        let generated = self.model.generate_greedy_with_cancel(
+            &processed.pixel_values,
+            &prompt_ids,
+            max_new_tokens,
+            cancel,
+        )?;
         let generated_tokens = generated.len();
         let raw_text = self.processor.decode_answer(&generated)?;
         let result =
@@ -118,6 +148,7 @@ impl Florence2VlmModel {
         Ok(Florence2RunOutput {
             output: Florence2Output { raw_text, result },
             generated_tokens,
+            prompt_tokens,
         })
     }
 }
@@ -206,8 +237,9 @@ impl LanguageModel for Florence2VlmModel {
     /// so an incremental decode driven through this trait would silently
     /// re-encode each step. The CLI routes Florence-2 to
     /// [`Florence2VlmModel::run_task`] before the autoregressive loop and the
-    /// server refuses the checkpoint at startup, so this exists for trait
-    /// completeness (warmup, tooling) rather than as a generation path.
+    /// server routes it to its dedicated seq2seq worker before the
+    /// batched/paged scheduler, so this exists for trait completeness
+    /// (warmup, tooling) rather than as a generation path.
     ///
     /// The input is truncated to `max_position_embeddings` tokens. The learned
     /// BART position table has no rows past

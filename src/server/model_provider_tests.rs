@@ -35,6 +35,7 @@ fn sample_result() -> GenerationResult {
         finish_reason: "stop".to_string(),
         logprobs: None,
         cached_tokens: 0,
+        structured_output: None,
     }
 }
 
@@ -220,6 +221,7 @@ fn drain_generation_events_impl_survives_long_prefill_before_first_token() {
             finish_reason: "stop".to_string(),
             logprobs: None,
             cached_tokens: 0,
+            structured_output: None,
         }))
         .expect("send done");
     });
