@@ -2965,7 +2965,41 @@ std::unique_ptr<MlxArray> dequantize(
     int32_t bits,
     rust::Str mode
 ) {
-    std::optional<array> biases_opt = biases ? std::optional(biases->inner) : std::nullopt;
+    // Force `biases` row-contiguous before handing it to MLX.
+    //
+    // `quantize_impl` in
+    // https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/quantized.cpp
+    // binds `w` (buffer 0) and `scales` (buffer 1) on the shared compute
+    // encoder and only afterwards calls `ensure_row_contiguous` on `biases`.
+    // When `biases` is strided, that call enqueues a copy kernel on the SAME
+    // encoder, and the copy rebinds buffers 0 and 1 to its own operands. The
+    // dequantize dispatch that follows therefore reads `w` and `scales` from
+    // the copy's operands instead of its own, and the affine kernel degenerates
+    // to `biases * (q + 1)` with `q` decoded from the raw bias bytes. The
+    // result is silently wrong, not an error.
+    //
+    // This is an upstream ordering defect, not a contract on the caller:
+    // `QuantizedMatmul::eval_gpu` in the same file hoists every
+    // `ensure_row_contiguous*` above its first binding, and so did
+    // `fast::Quantize::eval_gpu` until ml-explore/mlx#3757 folded it into the
+    // shared `quantize_impl`. That upstream change is in the MLX pin adopted by
+    // #1046 and is not in the pin before it.
+    //
+    // `biases` is the only input whose contiguity copy is enqueued after a
+    // binding, so it is the only one that needs the guard.
+    //
+    // The guard is unconditional on purpose. `array::flags()` is not meaningful
+    // until the array has been evaluated, and `biases` here is typically an
+    // unevaluated graph node, so a `flags().row_contiguous ? b : contiguous(b)`
+    // short-circuit would read a default-constructed flag and skip the copy
+    // exactly when it is needed. `Contiguous` costs an added graph node, and at
+    // eval it elides the data copy for a standalone row-contiguous input, so
+    // every in-tree caller (load time or absorb time, never per token) pays
+    // nothing measurable. Re-check this when the pinned MLX commit moves; the
+    // regression test is
+    // `mlxcel-core::ffi_tests::dequantize_commutes_with_output_axis_slice_on_strided_inputs`.
+    std::optional<array> biases_opt =
+        biases ? std::optional(mlx::core::contiguous(biases->inner)) : std::nullopt;
     std::string mode_str(mode.data(), mode.size());
 
     return std::make_unique<MlxArray>(mlx::core::dequantize(
@@ -3006,7 +3040,12 @@ std::unique_ptr<MlxArray> quantized_embedding(
 
     std::string mode_str(mode.data(), mode.size());
 
-    // Dequantize with explicit optional wrapping
+    // Dequantize with explicit optional wrapping. This calls MLX directly
+    // rather than the `dequantize` shim above, so it does not inherit that
+    // shim's row-contiguity guard on `biases`. It is safe because `take`
+    // allocates a fresh row-contiguous output; keep it that way. Substituting a
+    // slice or any other view for the `take` reintroduces the silent miscompute
+    // documented on the shim.
     auto result = mlx::core::dequantize(
         w_indexed,
         scales_indexed,

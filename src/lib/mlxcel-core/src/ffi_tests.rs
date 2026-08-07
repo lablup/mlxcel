@@ -3824,3 +3824,88 @@ fn qmv_multirow_matches_per_row_qmv_bitwise() {
         }
     }
 }
+
+/// `dequantize` must not depend on the memory layout of its inputs.
+///
+/// Slicing an affine-quantized triplet along a non-contiguous axis (splitting a
+/// fused MoE `gate_up_proj` into its gate and up halves is the production case,
+/// see `sanitize_gemma4_unified_weights`) leaves `weight`, `scales`, and
+/// `biases` as strided views. MLX's Metal `quantize_impl`
+/// (<https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/quantized.cpp>)
+/// binds `w` and `scales` on the shared compute encoder before it materializes
+/// a row-contiguous copy of `biases`, and that copy kernel rebinds buffers 0
+/// and 1, so a strided `biases` silently turns the affine dequantization into
+/// `biases * (q + 1)`. The `dequantize` shim in `mlx_cxx_bridge.cpp` guards
+/// `biases` for exactly this reason; this test pins the guard so an MLX bump
+/// that reintroduces the ordering (or a refactor that drops the guard) fails
+/// here rather than in a model's output.
+///
+/// Dequantization is elementwise over the group axis, so slicing the output
+/// axis must commute with it exactly: bit-identical, not merely close.
+///
+/// The test is differential, not tautological: the reference leg dequantizes
+/// the whole tensor (contiguous inputs, guard inert) and the leg under test
+/// dequantizes the slices (strided inputs, guard active). It was confirmed
+/// non-vacuous by reverting the guard, which makes it fail with a 3.71 max
+/// absolute difference. That failure is only reachable if `slice_axis` really
+/// does hand back strided views here, so it doubles as a check that the
+/// precondition still holds.
+#[test]
+fn dequantize_commutes_with_output_axis_slice_on_strided_inputs() {
+    const BITS: i32 = 4;
+    const GROUP_SIZE: i32 = 32;
+    let (experts, rows, in_features) = (2i32, 8i32, 64i32);
+    let packed_cols = in_features * BITS / 32;
+    let groups = in_features / GROUP_SIZE;
+
+    // Distinct values per (expert, row, column/group) so that a mis-bound
+    // buffer or a wrong-axis split cannot coincidentally agree.
+    let mut weight_data: Vec<u32> = Vec::new();
+    let mut scales_data: Vec<f32> = Vec::new();
+    let mut biases_data: Vec<f32> = Vec::new();
+    for e in 0..experts as u32 {
+        for r in 0..rows as u32 {
+            for c in 0..packed_cols as u32 {
+                weight_data.push(0x1234_5678u32.wrapping_add(e * 131 + r * 17 + c));
+            }
+            for g in 0..groups as u32 {
+                scales_data.push(0.05 + 0.01 * e as f32 + 0.001 * r as f32 + 0.0003 * g as f32);
+                biases_data.push(-0.2 + 0.02 * e as f32 - 0.003 * r as f32 + 0.0007 * g as f32);
+            }
+        }
+    }
+    let weight = from_slice_u32(&weight_data, &[experts, rows, packed_cols]);
+    let scales = from_slice_f32(&scales_data, &[experts, rows, groups]);
+    let biases = from_slice_f32(&biases_data, &[experts, rows, groups]);
+
+    let dq = |w: &MlxArray, s: &MlxArray, b: &MlxArray| unsafe {
+        dequantize(w, s, b as *const MlxArray, GROUP_SIZE, BITS, "affine")
+    };
+
+    // Reference: dequantize the whole tensor, then slice the output axis.
+    let full = dq(&weight, &scales, &biases);
+    let half = rows / 2;
+
+    for (name, start, stop) in [("first half", 0, half), ("second half", half, rows)] {
+        let expected = crate::utils::slice_axis(&full, 1, start, stop);
+        let w_slice = crate::utils::slice_axis(&weight, 1, start, stop);
+        let s_slice = crate::utils::slice_axis(&scales, 1, start, stop);
+        let b_slice = crate::utils::slice_axis(&biases, 1, start, stop);
+        let actual = dq(&w_slice, &s_slice, &b_slice);
+        assert_eq!(
+            array_shape(&actual),
+            vec![experts, half, in_features],
+            "{name}: shape"
+        );
+        eval(&expected);
+        eval(&actual);
+        // Compare bytes for the verdict but report the numeric gap: the byte
+        // vectors are 2 KiB each and a raw `assert_eq!` on them is unreadable.
+        let max_abs_diff = item_f32(&max_all(&abs(&subtract(&actual, &expected))));
+        assert!(
+            array_to_raw_bytes(&actual) == array_to_raw_bytes(&expected),
+            "{name}: dequantize(slice(x)) must equal slice(dequantize(x)) bit for bit \
+             (max abs diff {max_abs_diff})"
+        );
+    }
+}

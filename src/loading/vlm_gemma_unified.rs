@@ -167,6 +167,14 @@ fn emit_component_suffix(component: &str) -> &str {
 ///   no group straddling. This mirrors the `mistral4` / `qwen3_5_moe` fused
 ///   splits, which likewise slice the output axis of the already-`[E, out, in]`
 ///   tensor without transposing.
+///
+/// Both legs are strided views of the fused parent, not copies. That is
+/// deliberate: `gather_qmm` / `quantized_matmul` receive the per-input batch
+/// strides explicitly, so they consume the views zero-copy, and materializing
+/// would allocate a second copy of every fused expert tensor at load time.
+/// Consumers must therefore not assume row-contiguity here; `mlxcel_core::dequantize`
+/// carries the one guard this requires (see the comment on the `dequantize`
+/// shim in `src/lib/mlxcel-core/cpp/mlx_cxx_bridge.cpp`).
 fn split_fused_gate_up_component(
     value: &mlxcel_core::MlxArray,
     component: &str,
