@@ -76,8 +76,12 @@ A drift guard pins the partition: `input_taking_task_set_matches_takes_input` wa
 | `response_format` accepted and silently ignored (shared with the other single-stream workers) | Medium | Documented, not fixed (see 8) |
 | `--max-queue-depth` not honored on any single-stream worker | Medium | Recorded, out of scope (see 8) |
 | Declared vs resolved image cardinality not cross-checked | Low | Recorded, matches the documented MLX-worker convention (see 8) |
+| `builtin_chat_template` matched the raw `model_type` string while `get_model_type` sanitizes and lowercases it, so a checkpoint routing to Florence-2 through the normalized path could fall back to the generic template and have every request rejected at the task-marker parse | Medium | Fixed in `94d5774a`: template selection now goes through `get_model_type` itself, with a mixed-case regression test |
+| The interactive REPL (`mlxcel chat`) rejected DiffusionGemma and LLaDA-2 but still admitted Florence-2 into its autoregressive loop, whose trait-completeness forward would re-encode every step | Medium | Fixed in `94d5774a`: the REPL refuses the family with a pointer to the task pipeline |
 
 An initial review pass reported that malformed client requests return HTTP 500 because the chat route labels generation errors `server_error`. That did not reproduce. `ErrorResponse::new` hard-codes `StatusCode::BAD_REQUEST`; only the `error.type` string reads `server_error`, which is a pre-existing cosmetic inaccuracy across the whole server and not specific to this path.
+
+The security pass also verified, without changes: `parse_region_bins` has no panic path on hostile input (the worker thread runs under `run_core_thread_or_abort`, so this is load-bearing); the 2048-byte input bound cannot produce an out-of-range position gather because `encode_fused` rejects over-long sequences before the table lookup; decode compute is bounded by `max_position_embeddings` independently of `max_tokens`; and the angle-bracket rejection covers every special token in the released tokenizer, all of which are angle-bracketed.
 
 ### 2.2 Performance
 

@@ -76,8 +76,12 @@ yet. Run it through the CLI instead: mlxcel generate -m <model> --image <image>
 | `response_format`을 받아 놓고 무시 (다른 단일 스트림 워커와 공통) | Medium | 문서화, 미수정 (8절 참조) |
 | 어떤 단일 스트림 워커도 `--max-queue-depth`를 지키지 않음 | Medium | 기록, 범위 밖 (8절 참조) |
 | 선언된 이미지 개수와 해석된 개수를 대조하지 않음 | Low | 기록, 문서화된 MLX 워커 관례와 일치 (8절 참조) |
+| `builtin_chat_template`이 `model_type` 원문 문자열을 대조하는 반면 `get_model_type`은 JSON 정제와 소문자 정규화를 먼저 거치므로, 정규화 경로로 Florence-2에 라우팅되는 체크포인트가 범용 템플릿으로 떨어져 모든 요청이 태스크 마커 파싱에서 거부될 수 있음 | Medium | `94d5774a`에서 수정: 템플릿 선택이 `get_model_type` 자체를 타며, 대소문자 혼용 회귀 테스트 추가 |
+| 대화형 REPL(`mlxcel chat`)이 DiffusionGemma와 LLaDA-2는 거부하면서 Florence-2는 자기회귀 루프에 받아들임 (trait 완결성용 forward는 매 스텝 재인코딩) | Medium | `94d5774a`에서 수정: REPL이 태스크 파이프라인 안내와 함께 거부 |
 
 초기 리뷰 한 번은 chat 라우트가 생성 오류를 `server_error`로 표시하므로 잘못된 클라이언트 요청이 HTTP 500을 받는다고 보고했다. 재현되지 않았다. `ErrorResponse::new`는 `StatusCode::BAD_REQUEST`를 상수로 넣는다. `error.type` 문자열만 `server_error`이며 이는 서버 전체에 걸친 기존 표기 부정확이지 이 경로만의 문제가 아니다.
+
+보안 검토는 수정 없이 다음도 확인했다. `parse_region_bins`는 악의적 입력에 패닉 경로가 없고(워커 스레드가 `run_core_thread_or_abort` 아래에서 돌므로 중요한 성질이다), 2048바이트 입력 상한은 `encode_fused`가 테이블 조회 전에 과길이 시퀀스를 거부하므로 위치 테이블 범위 밖 gather로 이어질 수 없으며, 디코드 연산량은 `max_tokens`와 무관하게 `max_position_embeddings`로 유계이고, 꺾쇠 거부는 릴리스된 토크나이저의 모든 특수 토큰(전부 꺾쇠 형태)을 덮는다.
 
 ### 2.2 성능 관점
 
