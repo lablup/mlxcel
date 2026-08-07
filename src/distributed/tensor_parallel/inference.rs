@@ -209,6 +209,9 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // Falcon-OCR has no separate text backbone: the early-fusion decoder is
         // the model. TP refuses VLM-kind models before this table is read.
         ModelType::FalconOcrVL => "falcon_ocr",
+        // Jina VLM's text backbone is Qwen2-class; TP refuses VLM-kind models
+        // before this table is read, so this only keeps the dispatch total.
+        ModelType::JinaVLM => "qwen2",
         ModelType::Ernie45Moe => "ernie4_5_moe",
         // ERNIE-4.5-VL text backbone; TP is refused for VLM-kind models earlier,
         // this keeps the dispatch table total.

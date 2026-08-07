@@ -89,6 +89,7 @@ pub mod hunyuan_vl;
 pub mod internlm2;
 pub mod internlm3;
 pub mod jamba;
+pub mod jina_vlm;
 pub mod kimi_linear;
 pub mod klear;
 pub mod lfm2;
@@ -210,6 +211,7 @@ pub use hunyuan_v1_dense::HunyuanV1DenseModel;
 pub use internlm2::InternLM2Model;
 pub use internlm3::InternLM3Model;
 pub use jamba::JambaModel;
+pub use jina_vlm::{JinaVlmTextConfig, JinaVlmTextModel};
 pub use kimi_linear::KimiLinearModel;
 pub use klear::KlearModel;
 pub use lfm2::Lfm2Model;
@@ -329,6 +331,7 @@ pub enum ModelType {
     PaddleOcrVL,       // PaddleOCR-VL (NaViT vision + ERNIE-4.5 w/ MRoPE)
     DotsOcrVL,         // dots.ocr (dots_vit ViT + Qwen2 text decoder)
     FalconOcrVL,       // Falcon-OCR (early-fusion patch projector, no vision tower)
+    JinaVLM,           // Jina VLM (SigLIP-class ViT + Molmo-style connector + Qwen2 text)
     Glm4v,             // GLM-4V (GLM-4V ViT + GLM-4 text w/ sectioned MRoPE)
     Glm4vMoe,          // GLM-4V MoE (GLM-4V ViT + GLM-4 MoE text w/ MRoPE)
     GlmOcr,            // GLM-OCR (GLM-OCR ViT + GLM-4 text w/ full-width MRoPE)
@@ -563,6 +566,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::PaddleOcrVL,
     ModelType::DotsOcrVL,
     ModelType::FalconOcrVL,
+    ModelType::JinaVLM,
     ModelType::Glm4v,
     ModelType::Glm4vMoe,
     ModelType::GlmOcr,
@@ -741,6 +745,10 @@ impl ModelType {
             ModelType::PaddleOcrVL => ("PaddleOCR-VL", "PaddleOCR VLM"),
             ModelType::DotsOcrVL => ("dots.ocr (dots_vit + Qwen2)", "Other VLM"),
             ModelType::FalconOcrVL => ("Falcon-OCR (early fusion)", "Other VLM"),
+            ModelType::JinaVLM => (
+                "Jina VLM (SigLIP-so400m + 2x2 attention pooling + Qwen2 text)",
+                "Other VLM",
+            ),
             ModelType::Glm4v => ("GLM-4V", "GLM VLM"),
             ModelType::Glm4vMoe => ("GLM-4V MoE", "GLM VLM"),
             ModelType::GlmOcr => ("GLM-OCR", "GLM VLM"),
@@ -1094,6 +1102,7 @@ mod metadata_tests {
             PaddleOcrVL,
             DotsOcrVL,
             FalconOcrVL,
+            JinaVLM,
             Glm4v,
             Glm4vMoe,
             GlmOcr,

@@ -211,6 +211,7 @@ fn try_load_vlm_model_from_dir(
         ModelType::Step3p7 => Some(load_step3p7_vl(model_path)?),
         ModelType::DotsOcrVL => Some(load_dots_ocr_vl(model_path)?),
         ModelType::FalconOcrVL => Some(load_falcon_ocr_vl(model_path)?),
+        ModelType::JinaVLM => Some(load_jina_vlm(model_path)?),
         ModelType::Glm4v => Some(load_glm4v(model_path)?),
         ModelType::Glm4vMoe => Some(load_glm4v_moe(model_path)?),
         ModelType::GlmOcr => Some(load_glm_ocr(model_path)?),

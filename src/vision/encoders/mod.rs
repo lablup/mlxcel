@@ -33,6 +33,7 @@ pub mod glm4v;
 pub mod glm_ocr;
 pub mod hunyuan_vl;
 pub mod internvl;
+pub mod jina_vlm;
 pub mod kimi_vl;
 pub mod lfm2_vl;
 pub mod llama4;
