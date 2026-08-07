@@ -24,9 +24,11 @@
 //! Reference:
 //! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/florence2/language.py
 
-use mlxcel_core::layers::{LayerNorm, Linear};
+use mlxcel_core::layers::{LayerNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
+
+use super::Florence2Quantization;
 
 /// Per-sublayer key/value cache holding `[batch, length, d_model]` tensors
 /// (projected but not yet split into heads). Self-attention caches append per
@@ -46,8 +48,59 @@ pub(crate) struct Florence2LayerCache {
     pub(crate) cross_kv: Option<KvCache>,
 }
 
-fn linear(weights: &WeightMap, prefix: &str) -> Result<Linear, String> {
-    Linear::from_weights(weights, prefix)
+/// Build one projection.
+///
+/// [`UnifiedLinear`] decides per prefix: it takes the quantized path when the
+/// weight map holds `{prefix}.scales` and falls back to a dense `Linear`
+/// otherwise, so this is the single call for both a bf16 export and a
+/// `-3bit` / `-4bit` / `-6bit` / `-8bit` one. `{prefix}.bias`, which every
+/// BART projection ships, is picked up on both arms.
+fn linear(
+    weights: &WeightMap,
+    prefix: &str,
+    quantization: Florence2Quantization,
+) -> Result<UnifiedLinear, String> {
+    UnifiedLinear::from_weights(weights, prefix, quantization.group_size, quantization.bits)
+}
+
+/// Check a loaded (possibly quantized) embedding table against the row count
+/// that bounds lookups into it and the width it must have, and return its
+/// actual row count.
+///
+/// Thin adapter over the shared `validate_embedding_table` guard. The reason
+/// Florence-2 needs it at all is that a packed table's `shape[1]` is a
+/// function of the bit depth rather than the model width, so the dense
+/// `cols == expected` comparison the family used before is wrong for a
+/// quantized checkpoint; the guard's quantized arm reconstructs the width MLX
+/// will compute from `scales` and the reconciled group size instead.
+///
+/// `claimed_rows` is the largest index the forward path can produce plus one
+/// (`POSITION_OFFSET + max_position_embeddings` for the BART position tables,
+/// `vocab_size` for the shared token table). Pass `1` for a table whose only
+/// bound is its own row count, which is how the fusion-stage 2-D position
+/// tables work.
+pub(crate) fn embedding_table_rows(
+    table: &UnifiedEmbedding,
+    key: &str,
+    claimed_rows: i64,
+    claimed_rows_field: &str,
+    expected_cols: i32,
+    width_field: &str,
+) -> Result<i32, String> {
+    let claimed_rows = usize::try_from(claimed_rows)
+        .map_err(|_| format!("Florence-2 {key}: negative row bound {claimed_rows}"))?;
+    let expected_cols = usize::try_from(expected_cols)
+        .map_err(|_| format!("Florence-2 {key}: negative expected width {expected_cols}"))?;
+    let rows = crate::models::gpt2::validate_embedding_table(
+        table,
+        key,
+        claimed_rows,
+        claimed_rows_field,
+        expected_cols,
+        width_field,
+    )
+    .map_err(|e| format!("Florence-2 {e}"))?;
+    i32::try_from(rows).map_err(|_| format!("Florence-2 {key}: {rows} rows does not fit in i32"))
 }
 
 pub(crate) fn layer_norm(weights: &WeightMap, prefix: &str) -> Result<LayerNorm, String> {
@@ -127,10 +180,10 @@ fn qkv_attention(
 /// exports also load).
 pub(crate) struct Florence2Attention {
     n_head: i32,
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
-    out_proj: Linear,
+    q_proj: UnifiedLinear,
+    k_proj: UnifiedLinear,
+    v_proj: UnifiedLinear,
+    out_proj: UnifiedLinear,
 }
 
 impl Florence2Attention {
@@ -138,13 +191,14 @@ impl Florence2Attention {
         weights: &WeightMap,
         prefix: &str,
         n_head: i32,
+        quantization: Florence2Quantization,
     ) -> Result<Self, String> {
         Ok(Self {
             n_head,
-            q_proj: linear(weights, &format!("{prefix}.q_proj"))?,
-            k_proj: linear(weights, &format!("{prefix}.k_proj"))?,
-            v_proj: linear(weights, &format!("{prefix}.v_proj"))?,
-            out_proj: linear(weights, &format!("{prefix}.out_proj"))?,
+            q_proj: linear(weights, &format!("{prefix}.q_proj"), quantization)?,
+            k_proj: linear(weights, &format!("{prefix}.k_proj"), quantization)?,
+            v_proj: linear(weights, &format!("{prefix}.v_proj"), quantization)?,
+            out_proj: linear(weights, &format!("{prefix}.out_proj"), quantization)?,
         })
     }
 
@@ -196,8 +250,8 @@ impl Florence2Attention {
 pub(crate) struct Florence2EncoderLayer {
     self_attn: Florence2Attention,
     self_attn_layer_norm: LayerNorm,
-    fc1: Linear,
-    fc2: Linear,
+    fc1: UnifiedLinear,
+    fc2: UnifiedLinear,
     final_layer_norm: LayerNorm,
 }
 
@@ -206,16 +260,18 @@ impl Florence2EncoderLayer {
         weights: &WeightMap,
         prefix: &str,
         n_head: i32,
+        quantization: Florence2Quantization,
     ) -> Result<Self, String> {
         Ok(Self {
             self_attn: Florence2Attention::from_weights(
                 weights,
                 &format!("{prefix}.self_attn"),
                 n_head,
+                quantization,
             )?,
             self_attn_layer_norm: layer_norm(weights, &format!("{prefix}.self_attn_layer_norm"))?,
-            fc1: linear(weights, &format!("{prefix}.fc1"))?,
-            fc2: linear(weights, &format!("{prefix}.fc2"))?,
+            fc1: linear(weights, &format!("{prefix}.fc1"), quantization)?,
+            fc2: linear(weights, &format!("{prefix}.fc2"), quantization)?,
             final_layer_norm: layer_norm(weights, &format!("{prefix}.final_layer_norm"))?,
         })
     }
@@ -244,8 +300,8 @@ pub(crate) struct Florence2DecoderLayer {
     self_attn_layer_norm: LayerNorm,
     encoder_attn: Florence2Attention,
     encoder_attn_layer_norm: LayerNorm,
-    fc1: Linear,
-    fc2: Linear,
+    fc1: UnifiedLinear,
+    fc2: UnifiedLinear,
     final_layer_norm: LayerNorm,
 }
 
@@ -254,25 +310,28 @@ impl Florence2DecoderLayer {
         weights: &WeightMap,
         prefix: &str,
         n_head: i32,
+        quantization: Florence2Quantization,
     ) -> Result<Self, String> {
         Ok(Self {
             self_attn: Florence2Attention::from_weights(
                 weights,
                 &format!("{prefix}.self_attn"),
                 n_head,
+                quantization,
             )?,
             self_attn_layer_norm: layer_norm(weights, &format!("{prefix}.self_attn_layer_norm"))?,
             encoder_attn: Florence2Attention::from_weights(
                 weights,
                 &format!("{prefix}.encoder_attn"),
                 n_head,
+                quantization,
             )?,
             encoder_attn_layer_norm: layer_norm(
                 weights,
                 &format!("{prefix}.encoder_attn_layer_norm"),
             )?,
-            fc1: linear(weights, &format!("{prefix}.fc1"))?,
-            fc2: linear(weights, &format!("{prefix}.fc2"))?,
+            fc1: linear(weights, &format!("{prefix}.fc1"), quantization)?,
+            fc2: linear(weights, &format!("{prefix}.fc2"), quantization)?,
             final_layer_norm: layer_norm(weights, &format!("{prefix}.final_layer_norm"))?,
         })
     }

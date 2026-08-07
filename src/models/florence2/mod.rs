@@ -54,7 +54,8 @@ pub use crate::vision::encoders::florence2_davit::{
     FLORENCE2_VISION_PREFIX, Florence2DaViT, Florence2VisionConfig,
 };
 
-pub use checkpoint::{Florence2Config, Florence2TextConfig, sanitize};
+pub(crate) use checkpoint::reject_unsupported_quantized_tensors;
+pub use checkpoint::{Florence2Config, Florence2Quantization, Florence2TextConfig, sanitize};
 pub use coords::{
     FLORENCE2_LOC_TOKEN_BASE, Florence2BoundingBox, Florence2ImageSize, Florence2Polygon,
     Florence2QuadBox, florence2_loc_token_id,
@@ -70,7 +71,7 @@ use std::path::Path;
 use anyhow::{Result, anyhow};
 use serde_json::Value;
 
-use mlxcel_core::layers::{Embedding, Linear};
+use mlxcel_core::layers::{UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -128,10 +129,10 @@ pub fn shift_tokens_right(
 pub struct Florence2TextModel {
     config: Florence2TextConfig,
     dtype: i32,
-    shared: Embedding,
+    shared: UnifiedEmbedding,
     encoder: Florence2Encoder,
     decoder: Florence2Decoder,
-    lm_head: Option<Linear>,
+    lm_head: Option<UnifiedLinear>,
 }
 
 impl Florence2TextModel {
@@ -152,8 +153,13 @@ impl Florence2TextModel {
             k.starts_with("language_model.")
         })
         .map_err(|e| anyhow!("Failed to load Florence-2 weights: {e}"))?;
-        // Apple Silicon precision policy: bf16 -> f16 for non-quantized weights.
-        let _ = super::convert_bf16_weights(&mut weights);
+        // Apple Silicon precision policy: bf16 -> f16, but only for a dense
+        // export. A quantized one keeps its scales and biases at the stored
+        // width; they are dequantization operands rather than activations, so
+        // rounding them changes every weight the stack reconstructs.
+        if !Florence2Quantization::config_is_quantized(&config) {
+            let _ = super::convert_bf16_weights(&mut weights);
+        }
 
         Self::from_weights(&weights, text_config, "language_model.")
             .map_err(|e| anyhow!("Failed to build Florence-2 text model: {e}"))
@@ -171,8 +177,30 @@ impl Florence2TextModel {
         config: Florence2TextConfig,
         prefix: &str,
     ) -> Result<Self, String> {
-        let shared = Embedding::from_weights(weights, &format!("{prefix}model.shared"))?;
-        let dtype = mlxcel_core::array_dtype(&shared.weight);
+        let shared_key = format!("{prefix}model.shared");
+        let shared = UnifiedEmbedding::from_weights(
+            weights,
+            &shared_key,
+            config.quantization.group_size,
+            config.quantization.bits,
+        )
+        .map_err(|e| format!("Florence-2 {e}"))?;
+        layers::embedding_table_rows(
+            &shared,
+            &shared_key,
+            config.vocab_size as i64,
+            "vocab_size",
+            config.d_model,
+            "d_model",
+        )?;
+        // The activation dtype has to come from the scales on the quantized
+        // arm: `weight` there is the packed `uint32` plane, and taking its
+        // dtype would make the decoder build its causal mask (and the fusion
+        // path cast its image features) to an integer type.
+        let dtype = match shared.quantized() {
+            Some(quantized) => mlxcel_core::array_dtype(&quantized.scales),
+            None => mlxcel_core::array_dtype(shared.weight()),
+        };
 
         let encoder =
             Florence2Encoder::from_weights(weights, &format!("{prefix}model.encoder"), &config)?;
@@ -187,7 +215,15 @@ impl Florence2TextModel {
         // a materialized `lm_head.weight` as well; use it when present and
         // fall back to the tied shared embedding otherwise.
         let lm_head = if weights.contains_key(&format!("{prefix}lm_head.weight")) {
-            Some(Linear::from_weights(weights, &format!("{prefix}lm_head"))?)
+            Some(
+                UnifiedLinear::from_weights(
+                    weights,
+                    &format!("{prefix}lm_head"),
+                    config.quantization.group_size,
+                    config.quantization.bits,
+                )
+                .map_err(|e| format!("Florence-2 {e}"))?,
+            )
         } else {
             None
         };

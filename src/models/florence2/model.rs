@@ -48,7 +48,9 @@ use mlxcel_core::layers::LayerNorm;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
-use super::checkpoint::{FLORENCE2_TEXT_PREFIX, Florence2Config, sanitize};
+use super::checkpoint::{
+    FLORENCE2_TEXT_PREFIX, Florence2Config, reject_unsupported_quantized_tensors, sanitize,
+};
 use super::fusion::{
     LearnedPositionEmbedding2D, PositionalEmbeddingCosine1D, additive_attention_mask,
 };
@@ -99,23 +101,27 @@ impl Florence2Model {
             .map_err(|e| anyhow!("Failed to parse Florence-2 config: {e}"))?;
         let parsed = Florence2Config::from_model_config(&config)?;
 
-        // Quantized Florence-2 checkpoints are rejected outright rather than
-        // half-loaded, and before spending time loading their weights: both
-        // halves of this family are built from dense `Linear` / `Embedding`,
-        // so a packed uint32 weight would reach MLX and abort the process
-        // instead of surfacing as an error here.
-        if crate::models::sanitize::config_has_quantization_metadata(&config) {
-            return Err(anyhow!(
-                "Florence-2 quantized checkpoints are not supported yet: the BART text stack and the DaViT tower are built from dense layers. Use a bf16 or f16 export, for example mlx-community/Florence-2-base-ft-bf16."
-            ));
-        }
-
         let weights = mlxcel_core::weights::load_weights_from_dir(model_path)
             .map_err(|e| anyhow!("Failed to load Florence-2 weights: {e}"))?;
         let mut weights = sanitize(weights);
 
-        // Apple Silicon precision policy: bf16 to f16 for the dense case.
-        let _ = crate::models::convert_bf16_weights(&mut weights);
+        // #854 refused every checkpoint that carried quantization metadata,
+        // because neither half of this family had a quantized code path and a
+        // packed uint32 weight reaching MLX aborts the process rather than
+        // raising a catchable error. Both halves now load quantized, so the
+        // refusal is narrowed to the tensors that are still consumed dense:
+        // the raw `image_projection` / temporal-embedding parameters and the
+        // conv stack, none of which upstream's `nn.quantize` walk touches.
+        reject_unsupported_quantized_tensors(&weights).map_err(|e| anyhow!("{e}"))?;
+
+        // Apple Silicon precision policy: bf16 to f16 for the dense case
+        // only. A quantized export keeps its scales and biases at the width
+        // the checkpoint stored them; they are dequantization operands rather
+        // than activations, so rounding them perturbs every reconstructed
+        // weight in both halves of the model.
+        if !super::Florence2Quantization::config_is_quantized(&config) {
+            let _ = crate::models::convert_bf16_weights(&mut weights);
+        }
 
         Self::from_weights(&weights, parsed)
             .map_err(|e| anyhow!("Failed to build Florence-2 model: {e}"))
@@ -157,8 +163,12 @@ impl Florence2Model {
                 "Florence-2 image_pos_embed type {pos_kind:?} not supported (expected learned_abs_2d)"
             ));
         }
-        let image_pos_embed =
-            LearnedPositionEmbedding2D::from_weights(weights, "image_pos_embed", image_dim)?;
+        let image_pos_embed = LearnedPositionEmbedding2D::from_weights(
+            weights,
+            "image_pos_embed",
+            image_dim,
+            config.vision.quantization,
+        )?;
 
         let temporal_spec = config
             .vision

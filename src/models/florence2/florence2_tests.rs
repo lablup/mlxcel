@@ -144,6 +144,7 @@ fn tiny_config() -> Florence2TextConfig {
         bos_token_id: 0,
         eos_token_id: 2,
         decoder_start_token_id: 2,
+        quantization: Florence2Quantization::DENSE,
     }
 }
 

@@ -33,9 +33,12 @@
 //! Reference:
 //! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/florence2/florence2.py
 
-use mlxcel_core::layers::Embedding;
+use mlxcel_core::layers::UnifiedEmbedding;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
+
+use super::Florence2Quantization;
+use super::layers::embedding_table_rows;
 
 /// Upper bound accepted for `max_temporal_embeddings`. Real Florence-2 exports
 /// ship 100, so this leaves ample headroom.
@@ -59,8 +62,8 @@ pub(crate) const MAX_TEMPORAL_EMBEDDINGS: i32 = 65_536;
 /// ported from), so swapping the halves would silently mis-place every
 /// image token.
 pub(crate) struct LearnedPositionEmbedding2D {
-    row_embeddings: Embedding,
-    column_embeddings: Embedding,
+    row_embeddings: UnifiedEmbedding,
+    column_embeddings: UnifiedEmbedding,
     /// Rows in each table, i.e. the largest grid side that can be embedded.
     num_pos: i32,
     row_dim: i32,
@@ -68,44 +71,71 @@ pub(crate) struct LearnedPositionEmbedding2D {
 }
 
 impl LearnedPositionEmbedding2D {
-    /// Load `{prefix}.row_embeddings.weight` and
-    /// `{prefix}.column_embeddings.weight`, checking that the two halves add
-    /// up to `embedding_dim` (the vision tower's output width).
+    /// Load `{prefix}.row_embeddings` and `{prefix}.column_embeddings`,
+    /// checking each against the half of `embedding_dim` (the vision tower's
+    /// output width) it is expected to carry.
+    ///
+    /// Both tables are `nn.Embedding` upstream and are therefore packed in a
+    /// quantized export, so they load through [`UnifiedEmbedding`] and the
+    /// width check runs through the shared guard: a packed table's stored
+    /// width is a function of the bit depth, so comparing it to a model width
+    /// directly would reject every quantized checkpoint. The split itself is
+    /// taken from the config rather than from the loaded shapes for the same
+    /// reason.
     pub(crate) fn from_weights(
         weights: &WeightMap,
         prefix: &str,
         embedding_dim: i32,
+        quantization: Florence2Quantization,
     ) -> Result<Self, String> {
-        let row_embeddings = Embedding::from_weights(weights, &format!("{prefix}.row_embeddings"))?;
-        let column_embeddings =
-            Embedding::from_weights(weights, &format!("{prefix}.column_embeddings"))?;
-        let row_shape = mlxcel_core::array_shape(&row_embeddings.weight);
-        let column_shape = mlxcel_core::array_shape(&column_embeddings.weight);
-        if row_shape.len() != 2 || column_shape.len() != 2 {
+        if embedding_dim < 2 {
             return Err(format!(
-                "Florence-2 {prefix}: position tables must be 2-D, got {row_shape:?} / {column_shape:?}"
-            ));
-        }
-        if row_shape[0] != column_shape[0] {
-            return Err(format!(
-                "Florence-2 {prefix}: row table has {} positions but column table has {}",
-                row_shape[0], column_shape[0]
+                "Florence-2 {prefix}: image feature width {embedding_dim} must be at least 2"
             ));
         }
         // Upstream splits as `embedding_dim // 2` rows and the remainder
         // columns; both halves are 512 for the 1024-wide base-ft tower.
-        if row_shape[1] + column_shape[1] != embedding_dim {
+        let row_dim = embedding_dim / 2;
+        let column_dim = embedding_dim - row_dim;
+
+        let (group_size, bits) = (quantization.group_size, quantization.bits);
+        let row_key = format!("{prefix}.row_embeddings");
+        let column_key = format!("{prefix}.column_embeddings");
+        let row_embeddings = UnifiedEmbedding::from_weights(weights, &row_key, group_size, bits)
+            .map_err(|e| format!("Florence-2 {e}"))?;
+        let column_embeddings =
+            UnifiedEmbedding::from_weights(weights, &column_key, group_size, bits)
+                .map_err(|e| format!("Florence-2 {e}"))?;
+
+        // Lookups are bounded by `num_pos` below, which is the row count read
+        // back here, so there is no separate config field to check against.
+        let row_pos = embedding_table_rows(
+            &row_embeddings,
+            &row_key,
+            1,
+            "the table's own row count",
+            row_dim,
+            "dim_embed[-1] / 2",
+        )?;
+        let column_pos = embedding_table_rows(
+            &column_embeddings,
+            &column_key,
+            1,
+            "the table's own row count",
+            column_dim,
+            "dim_embed[-1] - dim_embed[-1] / 2",
+        )?;
+        if row_pos != column_pos {
             return Err(format!(
-                "Florence-2 {prefix}: row width {} + column width {} != image feature width {embedding_dim}",
-                row_shape[1], column_shape[1]
+                "Florence-2 {prefix}: row table has {row_pos} positions but column table has {column_pos}"
             ));
         }
         Ok(Self {
             row_embeddings,
             column_embeddings,
-            num_pos: row_shape[0],
-            row_dim: row_shape[1],
-            column_dim: column_shape[1],
+            num_pos: row_pos,
+            row_dim,
+            column_dim,
         })
     }
 

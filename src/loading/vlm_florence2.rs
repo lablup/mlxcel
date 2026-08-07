@@ -17,10 +17,12 @@
 //! Loads the whole runtime unit through
 //! [`models::Florence2VlmModel::load`]: the DaViT tower plus BART seq2seq
 //! text stack from the checkpoint safetensors, and the processor (BART
-//! tokenizer plus 768x768 image preprocessor) from the same directory. The
-//! model rejects quantized checkpoints with a named error before any weight
-//! is loaded; only bf16 / f16 exports such as
-//! `mlx-community/Florence-2-base-ft-bf16` are supported.
+//! tokenizer plus 768x768 image preprocessor) from the same directory. Both
+//! dense and quantized exports load: the projections, embedding tables, and
+//! LM head go through the unified quantized layers, and a checkpoint that
+//! packs one of the handful of tensors this family consumes dense
+//! (`image_projection`, the cosine temporal buffer, the conv stack) is
+//! refused at load with the offending tensor named.
 
 use anyhow::Result;
 use std::path::Path;

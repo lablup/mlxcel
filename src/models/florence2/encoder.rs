@@ -26,22 +26,21 @@
 //! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/florence2/language.py
 //! (Florence2Encoder)
 
-use mlxcel_core::layers::LayerNorm;
+use mlxcel_core::layers::{LayerNorm, UnifiedEmbedding};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::Florence2TextConfig;
-use super::layers::{Florence2EncoderLayer, layer_norm};
+use super::layers::{Florence2EncoderLayer, embedding_table_rows, layer_norm};
 
 /// BART reserves the first two rows of the learned position table (a legacy
 /// of fairseq's padding-offset scheme); real positions start at row 2.
 pub(crate) const POSITION_OFFSET: i32 = 2;
 
 pub(crate) struct Florence2Encoder {
-    embed_positions: UniquePtr<MlxArray>,
+    embed_positions: UnifiedEmbedding,
     layernorm_embedding: LayerNorm,
     layers: Vec<Florence2EncoderLayer>,
-    d_model: i32,
 }
 
 impl Florence2Encoder {
@@ -50,31 +49,31 @@ impl Florence2Encoder {
         prefix: &str,
         config: &Florence2TextConfig,
     ) -> Result<Self, String> {
-        let embed_positions = weights
-            .get(&format!("{prefix}.embed_positions.weight"))
-            .map(|w| mlxcel_core::copy(w))
-            .ok_or_else(|| {
-                format!("Florence-2 weight not found: {prefix}.embed_positions.weight")
-            })?;
         // `Florence2Model` bounds both the fused encoder input length and the
         // decode offset against `config.max_position_embeddings`, and those
         // guards are only sound if the loaded table actually covers that
         // bound. Without this check a `config.json` that inflates
         // `max_position_embeddings` (or `d_model`) passes them and reaches MLX
-        // as an out-of-range slice, which throws across the cxx bridge and
-        // aborts the process instead of returning `Err`. Sum in i64 so the
-        // comparison cannot overflow on a hostile value.
-        let position_shape = mlxcel_core::array_shape(&embed_positions);
+        // as an out-of-range gather, which reads past the end of the table
+        // rather than faulting. Sum in i64 so the bound cannot overflow on a
+        // hostile value.
+        let key = format!("{prefix}.embed_positions");
+        let embed_positions = UnifiedEmbedding::from_weights(
+            weights,
+            &key,
+            config.quantization.group_size,
+            config.quantization.bits,
+        )
+        .map_err(|e| format!("Florence-2 {e}"))?;
         let required_rows = POSITION_OFFSET as i64 + config.max_position_embeddings as i64;
-        if position_shape.len() != 2
-            || position_shape[1] != config.d_model
-            || (position_shape[0] as i64) < required_rows
-        {
-            return Err(format!(
-                "Florence-2 {prefix}.embed_positions.weight: expected at least [{required_rows}, {}] (max_position_embeddings {} + POSITION_OFFSET {POSITION_OFFSET}), got {position_shape:?}",
-                config.d_model, config.max_position_embeddings
-            ));
-        }
+        embedding_table_rows(
+            &embed_positions,
+            &key,
+            required_rows,
+            "max_position_embeddings + POSITION_OFFSET",
+            config.d_model,
+            "d_model",
+        )?;
         let layernorm_embedding = layer_norm(weights, &format!("{prefix}.layernorm_embedding"))?;
 
         let mut layers = Vec::with_capacity(config.encoder_layers as usize);
@@ -83,6 +82,7 @@ impl Florence2Encoder {
                 weights,
                 &format!("{prefix}.layers.{i}"),
                 config.encoder_attention_heads,
+                config.quantization,
             )?);
         }
 
@@ -90,7 +90,6 @@ impl Florence2Encoder {
             embed_positions,
             layernorm_embedding,
             layers,
-            d_model: config.d_model,
         })
     }
 
@@ -106,11 +105,12 @@ impl Florence2Encoder {
         mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let seq = mlxcel_core::array_shape(inputs_embeds)[1];
-        let pos = mlxcel_core::slice(
-            &self.embed_positions,
-            &[POSITION_OFFSET, 0],
-            &[POSITION_OFFSET + seq, self.d_model],
-        );
+        // Rows `[POSITION_OFFSET, POSITION_OFFSET + seq)` of the learned
+        // table, gathered rather than sliced so the quantized and dense arms
+        // are the same call. On the dense arm the gather returns exactly the
+        // rows the previous slice returned.
+        let positions = mlxcel_core::arange_i32(POSITION_OFFSET, POSITION_OFFSET + seq, 1);
+        let pos = self.embed_positions.forward(&positions);
         let x = mlxcel_core::add(inputs_embeds, &pos);
         let mut x = self.layernorm_embedding.forward(&x);
         for layer in &self.layers {

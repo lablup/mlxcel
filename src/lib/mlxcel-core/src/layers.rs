@@ -448,8 +448,13 @@ impl UnifiedEmbedding {
     /// *reconciled* `group_size` / `bits` to reconstruct the dequantized width
     /// a packed table describes, which `is_quantized()` alone cannot give them.
     ///
+    /// Also the way a loader recovers the *activation* dtype of a quantized
+    /// table: `weight()` is the packed `uint32` plane there, so the float type
+    /// the lookup will actually produce is the one on `scales`.
+    ///
     /// Used by: the shared `validate_embedding_table` guard (BailingMoe, Gpt2,
-    ///          GptBigCode, GptNeoX, Mamba, Mamba2)
+    ///          GptBigCode, GptNeoX, Mamba, Mamba2, Florence2), and Florence2's
+    ///          text-stack dtype probe
     pub fn quantized(&self) -> Option<&QuantizedEmbedding> {
         match self {
             Self::Quantized(e) => Some(e),
