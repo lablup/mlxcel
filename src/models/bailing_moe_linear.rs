@@ -65,14 +65,20 @@
 //! ```
 //!
 //! a decayed, un-softmaxed attention over a chunk plus one carried state term,
-//! which [`gla_chunked`] evaluates in `O(T/C)` sequential steps at `C = 64`. It
-//! measures 2.6x to 4x faster on prefill and is the more accurate of the two in
-//! isolation, and it is still opt-in behind
-//! `MLXCEL_BAILING_LINEAR_CHUNKED_PREFILL=1`: reassociating the sum moves layer
-//! 0's activations by 0.04%, layer 3 amplifies its input ~23x, and the
-//! 256-expert top-8 router turns a sub-ulp score difference into a different
-//! expert, so the two paths decode different continuations from the same
-//! checkpoint. The default is the arithmetic the reference performs.
+//! which [`gla_chunked`] evaluates in `O(T/C)` sequential steps at `C = 64`.
+//! **That is the default as of #1040.** It measures 2.6x to 4x faster on
+//! prefill and also lower perplexity at every window length measured, by 1.5%
+//! at 128 tokens rising to 13.75% at 512, because the intra-chunk sum lands in
+//! a matmul accumulator instead of a bf16 running state that compounds its
+//! error over the sequence.
+//!
+//! The two paths do decode different continuations from one checkpoint, since
+//! reassociating the sum moves layer 0's activations by 0.04%, layer 3
+//! amplifies its input ~23x, and the 256-expert top-8 router turns a sub-ulp
+//! score difference into a different expert. The measurement is what settles
+//! which of the two differing answers to ship. Set
+//! `MLXCEL_BAILING_LINEAR_CHUNKED_PREFILL=0` for the reference's own
+//! arithmetic, which is what to use when diffing against mlx-lm.
 //! `chunked_gla_matches_the_sequential_recurrence` pins the two against a naive
 //! host-side reference.
 //!
@@ -1086,31 +1092,72 @@ pub fn gla_sequential(
 /// The decay factors are built in float32 and cast to the activation dtype at
 /// the end, mirroring upstream's `mx.exp(g).astype(q.dtype)`.
 ///
-/// # Why this is opt-in
+/// # Why this is the default (#1040)
 ///
 /// Measured against [`gla_sequential`] on `Ring-mini-linear-2.0-4bit`, this is
 /// 2.6x to 4x faster on prefill (0.07s vs 0.29s at 101 tokens, 1.07s vs 2.81s at
-/// 2048). It is also, in isolation, the *more* accurate of the two, because the
-/// intra-chunk sum lands in a matmul accumulator instead of a bf16 running
-/// state.
+/// 2048), because the intra-chunk sum lands in a matmul accumulator instead of a
+/// bf16 running state.
 ///
-/// It is still not the default. Reassociating the sum changes the result by
-/// well under one bf16 ulp per layer (layer 0's mean absolute activation moves
-/// by 0.04% on a 101-token prompt), and this stack amplifies that: layer 3
-/// multiplies its input magnitude by ~23x, and the 256-expert top-8 router
-/// converts a sub-ulp score difference into a different expert. Downstream of
-/// those two the trajectories separate, so the model decodes a different (not
-/// worse, just different) continuation. Shipping the reference's own
-/// arithmetic by default keeps a checkpoint decoded here comparable to the same
-/// checkpoint decoded under mlx-lm; set `MLXCEL_BAILING_LINEAR_CHUNKED_PREFILL=1`
-/// to trade that for the prefill speed.
+/// It shipped opt-in first, on the argument that reassociating the sum is a
+/// sub-ulp change per layer that this stack nonetheless amplifies (layer 3
+/// multiplies its input magnitude by ~23x, and the 256-expert top-8 router turns
+/// a sub-ulp score difference into a different expert), so the two paths decode
+/// different continuations from one checkpoint. That much is true. What the
+/// argument assumed, and #1040 measured, is that "different" meant "no better".
+/// It does not: the accumulator is not just faster but measurably more accurate,
+/// and the gap grows with how long the sequential recurrence runs in bf16.
+///
+/// Teacher-forced perplexity on a WikiText-2 excerpt, both paths, same
+/// checkpoint (`examples/perplexity`, deterministic, so a repeat of a
+/// configuration reproduces its number exactly):
+///
+/// | window x windows | tokens | sequential | chunked | delta |
+/// |---|---|---|---|---|
+/// | 128 x 1 | 128 | 115.83 | 114.09 | -1.50% |
+/// | 1024 x 1 | 1024 | 39.39 | 36.39 | **-7.62%** |
+/// | 256 x 32 | 8192 | 155.47 | 151.42 | -2.60% |
+/// | 512 x 32 | 16384 | 85.96 | 74.14 | **-13.75%** |
+///
+/// Chunked is better in every configuration, and within a fixed scoring shape
+/// the advantage grows with the window (128 to 1024 at one window, 256 to 512
+/// across 32), which is what a compounding bf16 accumulation error predicts.
+/// Absolute perplexity is not comparable across the rows because each scores a
+/// different corpus slice; only the within-row comparison is.
+///
+/// So the accuracy objection that kept this opt-in is answered in the opposite
+/// direction from the one it feared, and the faster path is also the better one.
+/// The cost is that a checkpoint decoded here no longer matches the same
+/// checkpoint decoded under mlx-lm token for token. Set
+/// `MLXCEL_BAILING_LINEAR_CHUNKED_PREFILL=0` (also `false`/`off`/`no`,
+/// case-insensitive) to restore upstream's sequential recurrence when that
+/// comparability is what you need.
 pub fn chunked_prefill_enabled() -> bool {
-    std::env::var("MLXCEL_BAILING_LINEAR_CHUNKED_PREFILL")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    chunked_prefill_enabled_from(
+        std::env::var("MLXCEL_BAILING_LINEAR_CHUNKED_PREFILL")
+            .ok()
+            .as_deref(),
+    )
 }
 
-/// See [`chunked_prefill_enabled`] for when this runs and why it is not the
+/// The env-var reading of [`chunked_prefill_enabled`], split out so the
+/// default and the off-spellings are testable without mutating the process
+/// environment (which would need `test_support::env_lock`).
+///
+/// Mirrors `switch_layers::fused_moe_enabled_from`: on unless explicitly
+/// switched off, so a pre-#1040 `=1` still selects chunked rather than
+/// becoming a surprise opt-out.
+pub(crate) fn chunked_prefill_enabled_from(value: Option<&str>) -> bool {
+    match value {
+        Some(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        None => true,
+    }
+}
+
+/// See [`chunked_prefill_enabled`] for when this runs and why it is the
 /// default.
 pub fn gla_chunked(
     q: &MlxArray,

@@ -43,8 +43,8 @@
 
 use super::{
     BailingLinearCache, BailingMoeLinearModel, GroupRMSNorm, LinearAttentionCache, ModelArgs,
-    Quantization, TokenIdField, alibi_slopes, gla_chunked, gla_sequential, gla_step, layer_decay,
-    validate_weights,
+    Quantization, TokenIdField, alibi_slopes, chunked_prefill_enabled_from, gla_chunked,
+    gla_sequential, gla_step, layer_decay, validate_weights,
 };
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::weights::WeightMap;
@@ -1168,4 +1168,30 @@ fn a_fresh_linear_cache_holds_no_state() {
     let cache = LinearAttentionCache::new();
     assert!(cache.state.is_none());
     assert_eq!(cache.offset, 0);
+}
+
+#[test]
+fn chunked_prefill_is_on_unless_explicitly_switched_off() {
+    // #1040 promoted the chunked closed form to the default on measured
+    // perplexity, so an unset variable must select it. This is the assertion
+    // that would catch the default silently flipping back.
+    assert!(chunked_prefill_enabled_from(None));
+
+    // The variable inverted rather than being renamed, so a pre-#1040 `=1`
+    // still means chunked instead of becoming a surprise opt-out.
+    for on in ["1", "true", "TRUE", "yes", "on", "anything else"] {
+        assert!(
+            chunked_prefill_enabled_from(Some(on)),
+            "{on:?} should keep the chunked default"
+        );
+    }
+
+    // Only the documented off-spellings restore upstream's sequential
+    // recurrence, which is what a mlx-lm reference diff needs.
+    for off in ["0", "false", "FALSE", "off", "no", "  no  "] {
+        assert!(
+            !chunked_prefill_enabled_from(Some(off)),
+            "{off:?} should select the sequential recurrence"
+        );
+    }
 }
