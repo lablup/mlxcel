@@ -836,14 +836,26 @@ fn is_qwen2_slow_tokenizer_dir(model_path: &Path) -> bool {
 /// `false`, matching `getattr(self.original_tokenizer, "add_prefix_space", False)`
 /// in the converter.
 ///
+/// `vocab.json` is checked to be densely numbered (every id in `0..len` used
+/// exactly once) before anything else is built, and a checkpoint that fails
+/// that check is refused. `tokenizers` derives the first added-token id from
+/// `BPE::get_vocab_size()`, which is `vocab.len()` no matter which ids the file
+/// actually occupies, so a gap below `len` hands the first added token an id the
+/// base vocab already owns: both contents then resolve to that id and the base
+/// one stops decoding. The library exposes no way to steer that starting id, so
+/// recomputing a base size here would not help and a sparse `vocab.json` simply
+/// cannot be loaded soundly through this path.
+///
 /// The added tokens (`added_tokens.json`, or `added_tokens_decoder` in
 /// `tokenizer_config.json` when it carries per-token flags) are registered in
 /// ascending id order and then verified: `tokenizers` assigns added-token ids
-/// sequentially from the base vocab size, so a gap or an out-of-order id in the
+/// sequentially from the base vocab size, so an out-of-order id in the
 /// checkpoint would silently shift every later token. LocateAnything's 1038
 /// added tokens include the 1001 coordinate tokens `<0>`..`<1000>` that carry
 /// its box output, so an off-by-one there would corrupt every box rather than
-/// fail loudly.
+/// fail loudly. Registration is batched over consecutive runs of the same
+/// `special` flag; the loop comment records the measured cost of not doing that
+/// and why runs rather than two groups.
 fn build_qwen2_bpe_tokenizer(model_path: &Path) -> Result<tokenizers::Tokenizer> {
     use tokenizers::Tokenizer;
     use tokenizers::models::bpe::BPE;
@@ -858,6 +870,7 @@ fn build_qwen2_bpe_tokenizer(model_path: &Path) -> Result<tokenizers::Tokenizer>
     if vocab.is_empty() {
         return Err(anyhow::anyhow!("{:?} contained no entries", vocab_path));
     }
+    validate_dense_vocab_ids(&vocab, &vocab_path)?;
 
     let merges_raw = std::fs::read_to_string(&merges_path)
         .map_err(|e| anyhow::anyhow!("Failed to read {:?}: {}", merges_path, e))?;
@@ -922,8 +935,9 @@ fn build_qwen2_bpe_tokenizer(model_path: &Path) -> Result<tokenizers::Tokenizer>
         tokenizers::processors::byte_level::ByteLevel::default().trim_offsets(false),
     ));
 
-    for (id, token) in read_added_tokens_sorted(model_path)? {
-        if id < base_vocab_size {
+    let added = read_added_tokens_sorted(model_path)?;
+    for (id, token) in &added {
+        if *id < base_vocab_size {
             return Err(anyhow::anyhow!(
                 "Added token {:?} claims id {} which is inside the {} entry base vocab",
                 token.content,
@@ -931,27 +945,122 @@ fn build_qwen2_bpe_tokenizer(model_path: &Path) -> Result<tokenizers::Tokenizer>
                 base_vocab_size
             ));
         }
-        let content = token.content.clone();
-        if token.special {
-            tokenizer.add_special_tokens(&[token]);
+    }
+
+    // Register the added tokens a run at a time rather than one at a time.
+    // Every `add_tokens` / `add_special_tokens` call ends in
+    // `AddedVocabulary::refresh_added_tokens`, which rebuilds both
+    // Aho-Corasick automatons over every token accumulated so far (and
+    // `add_tokens` first clones the whole existing set), so N separate calls
+    // cost N full rebuilds. Measured on the pinned `tokenizers` 0.22.2, release
+    // build: 1000 entries took 162 ms one at a time against 0.5 ms batched,
+    // 4000 took 2.42 s against 2.3 ms, and 16000 took 46.1 s against 10.4 ms,
+    // a clean 4x per doubling. That made a checkpoint with a large
+    // `added_tokens_decoder` able to wedge the loader for minutes with no error
+    // and no timeout, and it cost LocateAnything's own 1038 tokens 175 ms
+    // instead of 0.5 ms.
+    //
+    // The batches are consecutive runs of the same `special` flag, not one
+    // specials group plus one normals group. Ids are handed out in the order
+    // the tokens are passed, so regrouping `[A(special), B(normal),
+    // C(special)]` declared as 5, 6, 7 would assign A=5, C=6, B=7 and silently
+    // mis-map the vocabulary. Runs keep the sorted order intact: a uniformly
+    // special checkpoint (LocateAnything, and the common case generally)
+    // collapses to a single call, while a perfectly alternating one degrades to
+    // the previous one-call-per-token cost without ever moving an id.
+    for batch in added.chunk_by(|left, right| left.1.special == right.1.special) {
+        let tokens: Vec<tokenizers::AddedToken> =
+            batch.iter().map(|(_, token)| token.clone()).collect();
+        if batch[0].1.special {
+            tokenizer.add_special_tokens(&tokens);
         } else {
-            tokenizer.add_tokens(&[token]);
+            tokenizer.add_tokens(&tokens);
         }
-        let assigned = tokenizer.token_to_id(&content);
-        if assigned != Some(id) {
-            return Err(anyhow::anyhow!(
-                "Added token {:?} landed at id {:?} but the checkpoint declares {}; \
-                 the added-token ids in {:?} are not contiguous above the {} entry base vocab",
-                content,
-                assigned,
-                id,
-                model_path,
-                base_vocab_size
-            ));
+        for (id, token) in batch {
+            let assigned = tokenizer.token_to_id(&token.content);
+            if assigned != Some(*id) {
+                return Err(anyhow::anyhow!(
+                    "Added token {:?} landed at id {:?} but the checkpoint declares {}; \
+                     the added-token ids in {:?} are not contiguous above the {} entry base vocab",
+                    token.content,
+                    assigned,
+                    id,
+                    model_path,
+                    base_vocab_size
+                ));
+            }
         }
     }
 
     Ok(tokenizer)
+}
+
+/// Reject a `vocab.json` whose ids are not exactly `0..len`.
+///
+/// The file is a `content -> id` map and nothing in the format forces those ids
+/// to be dense, but `BPE::get_vocab_size()` reports `vocab.len()` and
+/// `AddedVocabulary` starts handing out added-token ids from that number. A gap
+/// below `len` therefore aliases: measured on `tokenizers` 0.22.2 with
+/// `{"Ġ":0,"h":1,"Ġh":2,"i":3,"COLLIDE":5}` plus an added token declaring id 5,
+/// the added token is assigned 5, the loader's contiguity check passes because
+/// 5 is what the checkpoint declared, and afterwards `token_to_id` returns 5 for
+/// both `COLLIDE` and the added token while `decode([5])` no longer yields
+/// `COLLIDE`. The starting id cannot be overridden, so refusing the input is the
+/// only sound outcome.
+fn validate_dense_vocab_ids(vocab: &HashMap<String, u32>, vocab_path: &Path) -> Result<()> {
+    let vocab_len = vocab.len();
+    let mut owner: Vec<Option<&str>> = vec![None; vocab_len];
+    // Sort so a malformed file always produces the same message, whatever order
+    // the hash map happens to iterate in.
+    let mut entries: Vec<(&str, u32)> = vocab
+        .iter()
+        .map(|(content, id)| (content.as_str(), *id))
+        .collect();
+    entries.sort_unstable_by(|left, right| (left.1, left.0).cmp(&(right.1, right.0)));
+
+    let mut out_of_range: Option<(&str, u32)> = None;
+    for (content, id) in entries {
+        match owner.get_mut(id as usize) {
+            None => {
+                out_of_range.get_or_insert((content, id));
+            }
+            Some(slot) => {
+                if let Some(previous) = slot.replace(content) {
+                    return Err(anyhow::anyhow!(
+                        "{:?} assigns id {} to both {:?} and {:?}; added-token ids are only \
+                         unambiguous when every id below the {} entry count is used exactly once",
+                        vocab_path,
+                        id,
+                        previous,
+                        content,
+                        vocab_len
+                    ));
+                }
+            }
+        }
+    }
+
+    let unused = owner.iter().position(Option::is_none);
+    if unused.is_none() && out_of_range.is_none() {
+        return Ok(());
+    }
+    let stray = out_of_range
+        .map(|(content, id)| format!("{content:?} claims id {id}"))
+        .unwrap_or_else(|| "no entry claims it".to_string());
+    let gap = unused
+        .map(|id| format!("id {id} is unused"))
+        .unwrap_or_else(|| "every id below the count is used".to_string());
+    Err(anyhow::anyhow!(
+        "{:?} is not densely numbered: it holds {} entries so its ids must be exactly 0..{}, \
+         but {} while {}. `tokenizers` starts assigning added-token ids at the entry count \
+         regardless, so loading this would alias an added token onto an id the base vocab \
+         already owns",
+        vocab_path,
+        vocab_len,
+        vocab_len,
+        gap,
+        stray
+    ))
 }
 
 /// Read the checkpoint's added tokens as `(id, AddedToken)` sorted by id.
@@ -1368,6 +1477,39 @@ mod tests {
         .unwrap();
     }
 
+    /// Write a Qwen2 slow-tokenizer directory with an explicit `vocab.json` id
+    /// assignment and an explicit `added_tokens_decoder`, for the cases that
+    /// need to control both rather than take the well-formed defaults above.
+    fn write_qwen2_dir_with_vocab(
+        dir: &std::path::Path,
+        vocab_pairs: &[(&str, u32)],
+        added_tokens_decoder: serde_json::Value,
+    ) {
+        std::fs::create_dir_all(dir).unwrap();
+
+        let mut vocab = serde_json::Map::new();
+        for (content, id) in vocab_pairs {
+            vocab.insert((*content).to_string(), serde_json::json!(id));
+        }
+        std::fs::write(
+            dir.join("vocab.json"),
+            serde_json::to_string(&serde_json::Value::Object(vocab)).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("merges.txt"), "#version: 0.2\nĠ h\n").unwrap();
+
+        let config = serde_json::json!({
+            "tokenizer_class": "Qwen2Tokenizer",
+            "add_prefix_space": false,
+            "added_tokens_decoder": added_tokens_decoder,
+        });
+        std::fs::write(
+            dir.join("tokenizer_config.json"),
+            serde_json::to_string(&config).unwrap(),
+        )
+        .unwrap();
+    }
+
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!("mlxcel-{tag}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&path).unwrap();
@@ -1533,6 +1675,204 @@ mod tests {
         assert_eq!(
             tokenizer.decode(&[7, 8], true).expect("decode"),
             "<|im_start|><0>"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rejects_a_vocab_json_whose_ids_are_not_dense() {
+        // Five entries but id 4 unused, so `COLLIDE` sits on 5.
+        // `BPE::get_vocab_size()` reports the entry count regardless, so
+        // `tokenizers` would assign the first added token id 5 as well: a
+        // checkpoint declaring 5 passes the contiguity check while `COLLIDE`
+        // and the added token end up sharing the id and `decode([5])` stops
+        // returning `COLLIDE`. The starting id cannot be steered, so the only
+        // sound answer is to refuse the file.
+        let dir = temp_dir("qwen2-sparse-vocab");
+        write_qwen2_dir_with_vocab(
+            &dir,
+            &[("Ġ", 0), ("h", 1), ("Ġh", 2), ("i", 3), ("COLLIDE", 5)],
+            serde_json::json!({
+                "5": { "content": "<x>", "special": true, "normalized": false }
+            }),
+        );
+
+        let err = build_qwen2_bpe_tokenizer(&dir).expect_err("must refuse a sparse vocab.json");
+        let message = err.to_string();
+        assert!(
+            message.contains("is not densely numbered"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            message.contains("id 4 is unused"),
+            "the gap must be named: {err}"
+        );
+        assert!(
+            message.contains("\"COLLIDE\" claims id 5"),
+            "the stray entry must be named: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rejects_a_vocab_json_that_assigns_one_id_twice() {
+        // A duplicate leaves the same hole a gap does: four entries covering
+        // only three ids means id 3 is free for an added token to alias onto.
+        let dir = temp_dir("qwen2-duplicate-vocab-id");
+        write_qwen2_dir_with_vocab(
+            &dir,
+            &[("Ġ", 0), ("h", 1), ("Ġh", 2), ("i", 2)],
+            serde_json::json!({}),
+        );
+
+        let err = build_qwen2_bpe_tokenizer(&dir).expect_err("must refuse a duplicated id");
+        let message = err.to_string();
+        assert!(
+            message.contains("assigns id 2 to both"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            message.contains("\"i\"") && message.contains("Ġh"),
+            "both colliding contents must be named: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_dense_vocab_registers_every_added_token_at_its_declared_id() {
+        // The happy path the density check must not break: a well-formed
+        // checkpoint still builds, and each added token answers to exactly the
+        // id its `added_tokens_decoder` declares in both directions.
+        let dir = temp_dir("qwen2-dense-vocab");
+        let declared = [
+            (7u32, "<|im_start|>"),
+            (8, "<|im_end|>"),
+            (9, "<0>"),
+            (10, "<1>"),
+            (11, "<2>"),
+            (12, "<3>"),
+        ];
+        let mut decoder = serde_json::Map::new();
+        for (id, content) in declared {
+            decoder.insert(
+                id.to_string(),
+                serde_json::json!({
+                    "content": content, "single_word": false, "lstrip": false,
+                    "rstrip": false, "normalized": false, "special": true
+                }),
+            );
+        }
+        write_qwen2_dir_with_vocab(
+            &dir,
+            &[
+                ("Ġ", 0),
+                ("h", 1),
+                ("i", 2),
+                ("!", 3),
+                ("Ġh", 4),
+                ("a", 5),
+                ("b", 6),
+            ],
+            serde_json::Value::Object(decoder),
+        );
+
+        let tokenizer = build_qwen2_bpe_tokenizer(&dir).expect("build");
+        for (id, content) in declared {
+            assert_eq!(
+                tokenizer.token_to_id(content),
+                Some(id),
+                "{content:?} must answer to its declared id"
+            );
+            assert_eq!(
+                tokenizer.decode(&[id], false).expect("decode"),
+                content,
+                "id {id} must decode back to {content:?}"
+            );
+        }
+
+        // The base vocab is untouched: nothing was aliased onto its ids.
+        assert_eq!(tokenizer.token_to_id("Ġh"), Some(4));
+        assert_eq!(tokenizer.token_to_id("b"), Some(6));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn mixed_special_and_plain_added_tokens_land_on_their_declared_ids() {
+        // Added tokens are registered a run at a time (one call per consecutive
+        // block of equal `special`) instead of one call per token, because each
+        // call rebuilds the added-vocabulary automatons from scratch. Ids are
+        // handed out in the order tokens are passed, so regrouping them into a
+        // specials batch plus a normals batch would renumber every token that
+        // crosses a boundary. This sequence alternates six times, which is the
+        // shape that would break under that regrouping.
+        let dir = temp_dir("qwen2-mixed-added");
+        let declared: [(u32, &str, bool); 9] = [
+            (7, "<a>", true),
+            (8, "<b>", false),
+            (9, "<c>", true),
+            (10, "<d>", true),
+            (11, "<e>", false),
+            (12, "<f>", false),
+            (13, "<g>", true),
+            (14, "<h>", false),
+            (15, "<i>", true),
+        ];
+        let mut decoder = serde_json::Map::new();
+        for (id, content, special) in declared {
+            decoder.insert(
+                id.to_string(),
+                serde_json::json!({
+                    "content": content, "single_word": false, "lstrip": false,
+                    "rstrip": false, "normalized": false, "special": special
+                }),
+            );
+        }
+        write_qwen2_dir_with_vocab(
+            &dir,
+            &[
+                ("Ġ", 0),
+                ("h", 1),
+                ("i", 2),
+                ("!", 3),
+                ("Ġh", 4),
+                ("a", 5),
+                ("b", 6),
+            ],
+            serde_json::Value::Object(decoder),
+        );
+
+        let tokenizer = build_qwen2_bpe_tokenizer(&dir).expect("build");
+        let added = tokenizer.get_added_tokens_decoder();
+        for (id, content, special) in declared {
+            assert_eq!(
+                tokenizer.token_to_id(content),
+                Some(id),
+                "{content:?} must keep its declared id across the run boundary"
+            );
+            let entry = added.get(&id).expect("added token entry");
+            assert_eq!(entry.content, content, "id {id} must hold {content:?}");
+            assert_eq!(
+                entry.special, special,
+                "{content:?} must keep its declared special flag"
+            );
+        }
+
+        // The flags survive where they are observable: a skip-special decode
+        // drops exactly the special half of the sequence.
+        let ids: Vec<u32> = declared.iter().map(|(id, _, _)| *id).collect();
+        let kept: String = declared
+            .iter()
+            .filter(|(_, _, special)| !special)
+            .map(|(_, content, _)| *content)
+            .collect();
+        assert_eq!(tokenizer.decode(&ids, true).expect("decode"), kept);
+        assert_eq!(
+            tokenizer.decode(&ids, false).expect("decode"),
+            declared.iter().map(|(_, c, _)| *c).collect::<String>()
         );
 
         let _ = std::fs::remove_dir_all(dir);
