@@ -49,7 +49,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use mlxcel_core::cache::SequenceId;
+use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
@@ -665,6 +665,22 @@ impl LanguageModel for FalconOcrTextModel {
 
     fn supports_batching(&self) -> bool {
         false
+    }
+
+    /// Falcon-OCR stores every request's KV in the caller-supplied slice, so the
+    /// scheduler has to allocate a dense per-layer cache set for it.
+    ///
+    /// The trait default derives the layout from `supports_batching()`, and this
+    /// model declines batching only because its per-request positional state is
+    /// single-row, not because it owns its state. Without this override the
+    /// server classifies it as a model-owned (SSM / recurrent) runtime and hands
+    /// `forward` an *empty* cache slice, which makes `layers.iter().zip(caches)`
+    /// run zero times: every decoder layer is skipped and the LM head reads the
+    /// raw token embedding. That is silent, so it looks like a quality problem
+    /// rather than a wiring one. Mirrors the same override on Phi4MM, which
+    /// declines batching for an unrelated reason.
+    fn sequence_state_layout(&self) -> SequenceStateLayout {
+        SequenceStateLayout::dense_kv_cache(self.layers.len())
     }
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {

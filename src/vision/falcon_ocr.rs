@@ -27,7 +27,7 @@ use crate::models::falcon_ocr_rope::{
 };
 use crate::vision::merge;
 use crate::vision::processors::falcon_ocr::FalconOcrProcessor;
-use mlxcel_core::cache::SequenceId;
+use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -190,6 +190,16 @@ impl LanguageModel for FalconOcrVlModel {
 
     fn supports_batching(&self) -> bool {
         false
+    }
+
+    /// Declare the dense external KV layout the decoder actually uses.
+    ///
+    /// Must be delegated: the scheduler asks the *loaded* model, and the trait
+    /// default would infer a model-owned placeholder from `supports_batching()`
+    /// and hand `forward` an empty cache slice. See the same override on
+    /// [`FalconOcrTextModel`].
+    fn sequence_state_layout(&self) -> SequenceStateLayout {
+        self.text_model.sequence_state_layout()
     }
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {

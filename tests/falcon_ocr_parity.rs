@@ -29,6 +29,9 @@ use mlxcel::models::falcon_ocr::{FalconOcrConfig, FalconOcrPrefillState, FalconO
 use mlxcel::models::falcon_ocr_rope::{
     build_hybrid_mask, rope_delta, spatial_positions, temporal_positions,
 };
+use mlxcel::vision::FalconOcrVlModel;
+use mlxcel::vision::processors::falcon_ocr::FalconOcrProcessor;
+use mlxcel_core::cache::SequenceStateBackend;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -305,5 +308,66 @@ fn a_text_only_prefill_is_causal_without_being_handed_a_mask() {
     assert!(
         max_delta < 1e-4,
         "appending a token changed an earlier position's logits (max delta {max_delta}); the prefill leaked future context"
+    );
+}
+
+/// The server allocates a sequence's KV set from `sequence_state_layout()`, and
+/// the trait default infers a *model-owned* placeholder (an empty cache slice)
+/// for any model that declines batching. Falcon-OCR declines batching because
+/// its positional state is single-row, not because it owns its KV, so it must
+/// declare the dense layout explicitly. Without this the scheduler hands
+/// `forward` zero caches, `layers.iter().zip(caches)` runs zero times, and the
+/// LM head reads the raw token embedding: the whole 22-layer decoder is skipped
+/// with no error anywhere.
+#[test]
+fn the_declared_sequence_state_layout_is_a_dense_cache_per_layer() {
+    let m = model(0.0);
+    let layout = m.sequence_state_layout();
+    assert_eq!(layout.backend, SequenceStateBackend::DenseKvCache);
+    assert_eq!(layout.num_layers, LAYERS);
+    assert_eq!(layout.num_layers, m.make_caches().len());
+
+    // The loaded model the scheduler actually asks is the VLM wrapper, so the
+    // delegation has to be there too.
+    let vlm = FalconOcrVlModel {
+        text_model: model(0.0),
+        processor: FalconOcrProcessor::new(PATCH as u32, CHANNELS as usize),
+        ocr_task_token_id: None,
+        eos_token_ids: vec![11],
+    };
+    let vlm_layout = LanguageModel::sequence_state_layout(&vlm);
+    assert_eq!(vlm_layout.backend, SequenceStateBackend::DenseKvCache);
+    assert_eq!(vlm_layout.num_layers, LAYERS);
+}
+
+/// A forward pass that was handed no caches must not silently return logits
+/// from the embedding table. This is the shape the empty-slice bug took: no
+/// panic, no error, just a decoder that never ran.
+#[test]
+fn a_forward_pass_actually_runs_every_decoder_layer() {
+    let m = model(0.0);
+    let tokens = image_prompt();
+    let grids = [(2, 2)];
+    let through_layers = full_pass(&m, &tokens, &grids);
+
+    install_state(&m, &tokens, &grids);
+    let mut no_caches: Vec<mlxcel_core::layers::KVCache> = Vec::new();
+    let mask = build_hybrid_mask(&tokens, &m.config.token_ids());
+    let skipped = m.forward_with_embeddings(
+        &ids_array(&tokens),
+        None,
+        &mut no_caches,
+        Some(mask.as_ref().unwrap()),
+    );
+    let skipped = read(&mlxcel_core::slice_last_logits(&skipped));
+
+    let max_delta = through_layers
+        .iter()
+        .zip(skipped.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        max_delta > 1e-4,
+        "an empty cache slice produced the same logits as a real forward (max delta {max_delta}); the layer loop is not observable"
     );
 }
