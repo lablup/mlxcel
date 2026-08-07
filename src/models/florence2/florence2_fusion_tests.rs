@@ -602,6 +602,44 @@ fn from_weights_rejects_mismatched_image_projection() {
     assert!(err.contains("image_projection"), "unexpected error: {err}");
 }
 
+/// `image_projection` has no fallback (it is a bare tensor with no `Linear`
+/// wrapper to synthesize a default from), so a checkpoint that omits it
+/// entirely must fail with the key named, distinct from the
+/// shape-mismatch case above.
+#[test]
+fn from_weights_rejects_missing_image_projection() {
+    let mut map = tiny_weights();
+    map.remove("image_projection");
+    let err = expect_err(Florence2Model::from_weights(
+        &map,
+        tiny_config(&["spatial_avg_pool"]),
+    ));
+    assert!(err.contains("image_projection"), "unexpected error: {err}");
+}
+
+/// The fusion stage cannot run without a position-embedding spec: unlike the
+/// optional embedding *type* checks below, a missing `image_pos_embed` /
+/// `visual_temporal_embedding` key in `vision_config` has to fail load with
+/// the missing field named rather than defaulting to some embedding kind.
+#[test]
+fn from_weights_rejects_missing_position_embedding_configs() {
+    let mut config = tiny_config(&["spatial_avg_pool"]);
+    config.vision.image_pos_embed = None;
+    let err = expect_err(Florence2Model::from_weights(&tiny_weights(), config));
+    assert!(
+        err.contains("missing image_pos_embed"),
+        "unexpected error: {err}"
+    );
+
+    let mut config = tiny_config(&["spatial_avg_pool"]);
+    config.vision.visual_temporal_embedding = None;
+    let err = expect_err(Florence2Model::from_weights(&tiny_weights(), config));
+    assert!(
+        err.contains("missing visual_temporal_embedding"),
+        "unexpected error: {err}"
+    );
+}
+
 #[test]
 fn from_weights_rejects_unsupported_embedding_types() {
     let mut config = tiny_config(&["spatial_avg_pool"]);
@@ -779,6 +817,34 @@ fn encode_image_rejects_non_square_feature_maps() {
     );
 }
 
+/// A backbone whose last `dim_embed` disagrees with the feature width it
+/// actually emits (a mismatched tower/fusion pairing) has to be caught before
+/// the position-embedding add, which would otherwise broadcast against the
+/// wrong axis instead of failing cleanly.
+#[test]
+fn encode_image_rejects_feature_width_mismatch() {
+    let model = tiny_model(&["spatial_avg_pool"]);
+    let features = mlxcel_core::from_slice_f32(
+        &vec![0.0; (GRID_TOKENS * (IMAGE_DIM + 2)) as usize],
+        &[1, GRID_TOKENS, IMAGE_DIM + 2],
+    );
+    let err = expect_err(model.encode_image_features(&features));
+    assert!(err.contains("dim_embed[-1]"), "unexpected error: {err}");
+}
+
+/// `image_feature_source` entries outside the three known pooling recipes
+/// have to fail at the point they are used, not silently pass through as one
+/// of the known pools.
+#[test]
+fn encode_image_rejects_unsupported_feature_source() {
+    let model = tiny_model(&["bogus_pool"]);
+    let err = expect_err(model.encode_image(&pixels()));
+    assert!(
+        err.contains("bogus_pool") && err.contains("not supported"),
+        "unexpected error: {err}"
+    );
+}
+
 /// Florence-2 concatenates rather than scattering into placeholder slots, so
 /// both halves of the fused sequence must survive byte for byte.
 #[test]
@@ -823,6 +889,39 @@ fn merge_without_prompt_returns_image_features_alone() {
     // A prompt made only of image placeholder ids is the same case.
     assert!(model.embed_prompt(&[VOCAB, VOCAB]).is_none());
     assert!(model.embed_prompt(&[]).is_none());
+}
+
+/// The rank check on `image_features` is what keeps a caller-supplied
+/// two-image-batch tensor (or any other unexpected rank) from panicking on
+/// `shape[2]` inside library code.
+#[test]
+fn merge_rejects_non_3d_image_features() {
+    let model = tiny_model(&["spatial_avg_pool"]);
+    let features = mlxcel_core::from_slice_f32(&vec![0.0; D_MODEL as usize], &[D_MODEL]);
+    let err = expect_err(model.merge_input_ids_with_image_features(&features, None));
+    assert!(
+        err.contains("[batch, tokens, dim]"),
+        "unexpected error: {err}"
+    );
+}
+
+/// A prompt embedding whose batch or feature width disagrees with the image
+/// features it is being concatenated with has to fail before the
+/// concatenate, which would otherwise either panic or silently broadcast.
+#[test]
+fn merge_rejects_incompatible_prompt_shape() {
+    let model = tiny_model(&["spatial_avg_pool"]);
+    let features = model.encode_image(&pixels()).unwrap();
+
+    let wrong_batch =
+        mlxcel_core::from_slice_f32(&vec![0.0; 3 * D_MODEL as usize], &[2, 3, D_MODEL]);
+    let err = expect_err(model.merge_input_ids_with_image_features(&features, Some(&wrong_batch)));
+    assert!(err.contains("not compatible"), "unexpected error: {err}");
+
+    let wrong_width =
+        mlxcel_core::from_slice_f32(&vec![0.0; 3 * (D_MODEL + 1) as usize], &[1, 3, D_MODEL + 1]);
+    let err = expect_err(model.merge_input_ids_with_image_features(&features, Some(&wrong_width)));
+    assert!(err.contains("not compatible"), "unexpected error: {err}");
 }
 
 /// The integrated path must be exactly "fuse, then run the text encoder over
@@ -897,6 +996,20 @@ fn encode_rejects_sequences_past_max_position_embeddings() {
     let err = expect_err(model.encode(&pixels(), &prompt));
     assert!(
         err.contains("max_position_embeddings"),
+        "unexpected error: {err}"
+    );
+}
+
+/// [`Florence2Model::encode_fused`] is a `pub` entry point a caller can drive
+/// directly with a hand-built tensor, so its own rank check (rather than a
+/// downstream MLX panic) has to be what catches a wrong-rank input.
+#[test]
+fn encode_fused_rejects_wrong_rank_input() {
+    let model = tiny_model(&["spatial_avg_pool"]);
+    let flat = mlxcel_core::from_slice_f32(&vec![0.0; D_MODEL as usize], &[1, D_MODEL]);
+    let err = expect_err(model.encode_fused(&flat, None));
+    assert!(
+        err.contains("[batch, seq, d_model]"),
         "unexpected error: {err}"
     );
 }
