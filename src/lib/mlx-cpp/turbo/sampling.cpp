@@ -420,9 +420,17 @@ mlx::core::array gumbel_max_sample(
     auto temp_arr =
         mlx::core::full(Shape{1}, temperature, mlx::core::float32);
 
+    // `LogitsType` keys the JIT cache on the logits dtype and is deliberately
+    // unreferenced by the kernel body (issue #1054). This one is reachable in
+    // production, not only from tests: `gumbel_max_sample_accepts` admits
+    // float32, float16 and bfloat16, while `NumSplits` depends only on
+    // (batch, vocab). Two models with the same vocabulary but different logits
+    // dtypes therefore hashed to one kernel name on CUDA, and the second one
+    // sampled from a buffer read through the wrong pointer type.
     std::vector<std::pair<std::string, TemplateArg>> template_args = {
         {"TgSize", GUMBEL_TG_SIZE},
         {"NumSplits", num_splits},
+        {"LogitsType", logits.dtype()},
     };
 
     std::vector<mlx::core::array> inputs = {logits, rng_key, temp_arr};
