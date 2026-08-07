@@ -177,8 +177,11 @@ pub use exaone_moe::ExaoneMoeModel;
 pub use exaone4::{ExaOne4Model, ExaOne4Wrapper};
 pub use falcon_h1::FalconH1Model;
 pub use florence2::{
-    FLORENCE2_VISION_PREFIX, Florence2Config, Florence2DaViT, Florence2Model, Florence2SeqCache,
-    Florence2TextConfig, Florence2TextModel, Florence2VisionConfig,
+    FLORENCE2_LOC_TOKEN_BASE, FLORENCE2_VISION_PREFIX, Florence2BoundingBox, Florence2Config,
+    Florence2DaViT, Florence2ImageSize, Florence2Model, Florence2Output, Florence2Polygon,
+    Florence2PostProcessingType, Florence2Processor, Florence2QuadBox, Florence2SeqCache,
+    Florence2Task, Florence2TaskResult, Florence2TextConfig, Florence2TextModel,
+    Florence2VisionConfig, florence2_loc_token_id,
 };
 pub use gemma::GemmaModel;
 pub use gemma2::Gemma2Model;

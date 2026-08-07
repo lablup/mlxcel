@@ -22,6 +22,7 @@ pub mod deepseekocr;
 pub mod dots_ocr;
 pub mod ernie4_5_vl;
 pub mod fastvlm;
+pub mod florence2;
 pub mod gemma4;
 pub mod gemma4_unified;
 pub mod hunyuan_vl;
