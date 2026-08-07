@@ -650,7 +650,7 @@ fn handle_node_failure_distributes_rerouted_requests() {
     // Force all requests onto prefill-0 for the test.
     {
         let mut requests = router.requests.write().unwrap();
-        for (_, tracked) in requests.iter_mut() {
+        for tracked in requests.values_mut() {
             tracked.phase = RequestPhase::Prefilling {
                 node_id: "prefill-0".to_string(),
             };

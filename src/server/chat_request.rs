@@ -286,16 +286,16 @@ fn validate_no_reserved_media_sentinels(request: &ChatCompletionRequest) -> Resu
             {
                 anyhow::bail!("message text contains a reserved ordered-media sentinel");
             }
-            MessageContent::Parts(parts) => {
+            MessageContent::Parts(parts)
                 if parts.iter().any(|part| {
                     matches!(
                         part,
                         ContentPart::Text { text }
                             if text.contains(super::types::request::ORDERED_MEDIA_PREFIX)
                     )
-                }) {
-                    anyhow::bail!("message text contains a reserved ordered-media sentinel");
-                }
+                }) =>
+            {
+                anyhow::bail!("message text contains a reserved ordered-media sentinel");
             }
             _ => {}
         }

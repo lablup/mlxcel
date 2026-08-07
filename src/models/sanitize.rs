@@ -329,10 +329,11 @@ fn normalize_nvfp4_keys(weights: &mut mlxcel_core::weights::WeightMap) {
                 format!("vision_tower.{rest}")
             } else if let Some(rest) = k.strip_prefix("model.embed_vision.") {
                 format!("embed_vision.{rest}")
-            } else if let Some(rest) = k.strip_prefix("model.lm_head.") {
-                format!("lm_head.{rest}")
             } else {
-                return None; // No remapping needed
+                // Anything that is not one of these prefixes needs no remapping,
+                // and `?` drops it from the collected set.
+                let rest = k.strip_prefix("model.lm_head.")?;
+                format!("lm_head.{rest}")
             };
             Some((k.clone(), new_key))
         })

@@ -314,9 +314,7 @@ fn clip_qkv_actually_clamps_the_projection() {
     assert_eq!(unclipped.clip_qkv, None);
 
     // Large inputs push the fused projection well past +/-8.
-    let big: Vec<f32> = (0..(args.d_model as usize))
-        .map(|i| 40.0 + i as f32)
-        .collect();
+    let big: Vec<f32> = (0..args.d_model).map(|i| 40.0 + i as f32).collect();
     let x = mlxcel_core::from_slice_f32(&big, &[1, 1, args.d_model as i32]);
 
     let mut cache_a = KVCache::new();

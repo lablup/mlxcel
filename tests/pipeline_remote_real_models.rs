@@ -183,11 +183,7 @@ fn pipeline_remote_runtime_llama_real_model_parity_and_cleanup() {
     let active_states = runtime.probe_stages().unwrap();
     assert!(active_states.iter().all(|state| matches!(
         state,
-        RemoteStageResponse::State {
-            state,
-            pending_entry_replies: _,
-            ..
-        } if state.in_flight_requests == 1
+        RemoteStageResponse::State { state, .. } if state.in_flight_requests == 1
     )));
 
     let atol = 1e-4f64;
