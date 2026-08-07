@@ -150,6 +150,7 @@ macro_rules! for_each_model_registration {
             MiniCPMV46VLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("MiniCPM-V 4.6 VLM does not support adapter loading; use load_model() instead") };
             Moondream3VLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Moondream3 VLM does not support adapter loading; use load_model() instead") };
             Moondream2VLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Moondream2 VLM does not support adapter loading; use load_model() instead") };
+            Florence2VLM => { kind: Vlm, directory: Vlm, weight: None, adapter: Some("Florence-2 does not support adapter loading; use load_model() instead") };
             GptOss => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::GptOssModel::load, args: models::gpt_oss::ModelArgs, weight_builder: models::GptOssModel::from_weights, wrap: |m| LoadedModel::GptOss(models::GptOssWrapper::new(m)) } };
             Qwen2Moe => { kind: Text, directory: ConfigBacked, weight: Some(WeightLoadRoute::ConfigBacked), adapter: None, config_backed: { dir_loader: models::Qwen2MoeModel::load, args: models::qwen2_moe::ModelArgs, weight_builder: models::Qwen2MoeModel::from_weights, wrap: LoadedModel::Qwen2Moe } };
             Gemma3n => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };

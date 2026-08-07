@@ -323,6 +323,8 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "molmo" => Ok(ModelType::MolmoVLM),
         "molmo2" => Ok(ModelType::Molmo2VLM),
         "molmo_point" => Ok(ModelType::MolmoPointVLM),
+        // Florence-2 (DaViT tower + BART encoder-decoder text stack).
+        "florence2" => Ok(ModelType::Florence2VLM),
         // Speech-to-text (encoder-decoder ASR).
         "whisper" => Ok(ModelType::Whisper),
         _ => Err(anyhow::anyhow!(
