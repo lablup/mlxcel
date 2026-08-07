@@ -415,6 +415,81 @@ fn f16_pools_match_the_gather_reference() {
 }
 
 #[test]
+fn two_pool_dtypes_at_one_geometry_do_not_share_a_compiled_kernel() {
+    // Issue #1053. Both backends generate the kernel's buffer parameter types
+    // from the runtime dtypes of the inputs, but only Metal folds those dtypes
+    // into the JIT cache key. On CUDA the key was
+    // `"custom_kernel_" + name + template_arguments_hash(template_args)` over
+    // int-only args, and `cu::get_jit_module` memoises per key in a
+    // process-global map, so an f32 pool and an f16 pool of the *same geometry*
+    // collided: whichever compiled first won for the life of the process and
+    // the other read its buffer through the wrong pointer type, returning
+    // numbers unrelated to its inputs (relative error ~1.0).
+    //
+    // The geometry is held fixed on purpose. Every int template arg (`Dim`,
+    // `PageSize`, `NRep`, `QHeads`, `QGroups`, `DimsPerThread`, `NumWarps`) is
+    // derived from it, so holding it fixed while moving only the pool dtype is
+    // precisely the case the old key could not tell apart.
+    //
+    // This guard cannot fail on Metal, whose key already carried the dtypes;
+    // it exists for the CUDA backend, where it reproduces the defect.
+    const PAGE_SIZE: usize = 32;
+    const HQ: i32 = 8;
+    const HKV: i32 = 2;
+    const DIM: i32 = 64;
+    const LENS: [usize; 2] = [200, 97];
+    const STARTS: [usize; 2] = [0, 0];
+    const SEED: u64 = 0x1053;
+
+    let f32_batch = Batch::new(
+        PAGE_SIZE,
+        HQ,
+        HKV,
+        DIM,
+        &LENS,
+        &STARTS,
+        dtype::FLOAT32,
+        SEED,
+    );
+    let f32_before = run_with_chunk(&f32_batch, 4);
+    let err = max_rel_error(&f32_before, &f32_batch.reference());
+    assert!(
+        err < 2e-3,
+        "f32 pool relative error {err} before the f16 run"
+    );
+
+    // Same geometry, same values, f16 storage. The reference is the f64 host
+    // attention over the pre-rounding values, so the tolerance is set by f16
+    // storage rounding alone; 3e-2 matches the sibling assertion in
+    // `sparse_tests::an_f16_cache_matches_the_reference_within_its_own_precision`.
+    let f16_batch = Batch::new(
+        PAGE_SIZE,
+        HQ,
+        HKV,
+        DIM,
+        &LENS,
+        &STARTS,
+        dtype::FLOAT16,
+        SEED,
+    );
+    let f16_out = run_with_chunk(&f16_batch, 4);
+    let err = max_rel_error(&f16_out, &f16_batch.reference());
+    assert!(
+        err < 3e-2,
+        "f16 pool relative error {err} at a geometry already compiled for f32"
+    );
+
+    // And the f32 launch still answers correctly afterwards, so the guard holds
+    // whichever dtype the process happened to compile first.
+    let f32_after = run_with_chunk(&f32_batch, 4);
+    let err = max_rel_error(&f32_after, &f32_batch.reference());
+    assert!(
+        err < 2e-3,
+        "f32 pool relative error {err} after the f16 run"
+    );
+}
+
+#[test]
 fn the_entry_point_declines_a_batch_with_no_visible_tokens() {
     let batch = Batch::new(16, 4, 2, 64, &[32], &[32], dtype::FLOAT32, 0x5);
     let q = batch.q_array(dtype::FLOAT32);

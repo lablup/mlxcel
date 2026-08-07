@@ -600,6 +600,28 @@ std::vector<mlx::core::array> paged_attention_decode_v2_partial(
     const bool use_cuda = !mlx::core::metal::is_available();
     auto& kernel = get_partial_kernel(use_cuda).get();
 
+    // `QType`/`KVType` are load-bearing even though the body never names them:
+    // they exist to put the input dtypes into the JIT cache key (issue #1053).
+    //
+    // Both backends generate the buffer parameter types from the *runtime*
+    // dtypes of `inputs`, but only Metal folds those dtypes into the cache key.
+    // `backend/common/metal_kernel.cpp` appends `get_type_string(arr.dtype())`
+    // per input to the kernel name; `backend/cuda/custom_kernel.cpp` builds its
+    // name as `"custom_kernel_" + name + template_arguments_hash(template_args)`
+    // and stops there, while `cu::get_jit_module` memoises the compiled module
+    // under exactly that name in a process-global map and only invokes the
+    // source builder on a miss. With int-only template args a `float` pool and
+    // an `f16` pool of the same geometry therefore hash to one name, and
+    // whichever dtype compiles first wins for the life of the process: the
+    // second one reads its buffer through the wrong pointer type and returns
+    // numbers unrelated to its inputs.
+    //
+    // `template_arguments_hash` does hash a `Dtype` arg, so naming the dtypes
+    // here restores the discrimination on CUDA. On Metal the key was already
+    // correct and this only adds an unused `typename` parameter. This mirrors
+    // the `{"T", T}` the fused decode-MoE kernels have always passed, which is
+    // why those kernels never had the defect. Do not drop these because the
+    // kernel body does not reference them.
     std::vector<std::pair<std::string, TemplateArg>> template_args = {
         {"Dim", dim},
         {"PageSize", page_size},
@@ -608,6 +630,9 @@ std::vector<mlx::core::array> paged_attention_decode_v2_partial(
         {"QGroups", q_groups},
         {"DimsPerThread", dims_per_thread},
         {"NumWarps", num_warps},
+        {"QType", q.dtype()},
+        {"KVType", k_pool.dtype()},
+        {"VType", v_pool.dtype()},
     };
 
     // Pack scale into a 1-element f32 array (metal_kernel inputs must be
