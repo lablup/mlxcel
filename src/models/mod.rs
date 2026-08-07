@@ -179,9 +179,9 @@ pub use falcon_h1::FalconH1Model;
 pub use florence2::{
     FLORENCE2_LOC_TOKEN_BASE, FLORENCE2_VISION_PREFIX, Florence2BoundingBox, Florence2Config,
     Florence2DaViT, Florence2ImageSize, Florence2Model, Florence2Output, Florence2Polygon,
-    Florence2PostProcessingType, Florence2Processor, Florence2QuadBox, Florence2SeqCache,
-    Florence2Task, Florence2TaskResult, Florence2TextConfig, Florence2TextModel,
-    Florence2VisionConfig, florence2_loc_token_id,
+    Florence2PostProcessingType, Florence2Processor, Florence2QuadBox, Florence2RunOutput,
+    Florence2SeqCache, Florence2Task, Florence2TaskResult, Florence2TextConfig, Florence2TextModel,
+    Florence2VisionConfig, Florence2VlmModel, florence2_loc_token_id,
 };
 pub use gemma::GemmaModel;
 pub use gemma2::Gemma2Model;
@@ -335,9 +335,13 @@ pub enum ModelType {
     MiniCPMV46VLM, // MiniCPM-V 4.6 (SigLIP + VitMerger + Merger + Qwen3.5 text)
     Moondream3VLM, // Moondream3 (custom ViT + custom text decoder, query/caption image path)
     Moondream2VLM, // Moondream2 (SigLIP-style ViT + Phi text decoder + crop tiling)
-    Gemma3n,  // Gemma 3n (text-only)
+    /// Florence-2 (`florence2`): DaViT vision tower + BART encoder-decoder
+    /// text stack. Encoder-decoder (seq2seq), so it is served through its own
+    /// task pipeline (CLI early exit), not the autoregressive decode loop.
+    Florence2VLM,
+    Gemma3n,    // Gemma 3n (text-only)
     Gemma3nVLM, // Gemma 3n VLM (MobileNetV5 + Gemma3n)
-    Phi,      // Phi 1/2
+    Phi,        // Phi 1/2
     /// Phixtral (`phi-msft` with `num_local_experts`): a Mixtral-style
     /// sparse MoE on the Phi-2 parallel-residual backbone. Shares the
     /// `phi-msft` model_type with dense Phi and is told apart by
@@ -563,6 +567,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::MiniCPMV46VLM,
     ModelType::Moondream3VLM,
     ModelType::Moondream2VLM,
+    ModelType::Florence2VLM,
     ModelType::Gemma3n,
     ModelType::Gemma3nVLM,
     ModelType::Phi,
@@ -969,6 +974,10 @@ impl ModelType {
             }
             ModelType::Moondream3VLM => ("Moondream 3 (custom ViT + custom decoder)", "Other VLM"),
             ModelType::Moondream2VLM => ("Moondream 2 (SigLIP-style ViT + Phi text)", "Other VLM"),
+            ModelType::Florence2VLM => (
+                "Florence-2 (DaViT + BART seq2seq, task prompts, bf16/f16 only)",
+                "Other VLM",
+            ),
             ModelType::MiniCPMOVLM => (
                 "MiniCPM-o (dynamic SigLIP + resampler + Qwen3-VL text)",
                 "Other VLM",
@@ -1082,6 +1091,7 @@ mod metadata_tests {
             MiniCPMV46VLM,
             Moondream3VLM,
             Moondream2VLM,
+            Florence2VLM,
             Gemma3n,
             Gemma3nVLM,
             Phi,

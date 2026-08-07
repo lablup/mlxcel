@@ -400,6 +400,11 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // worker loop, never routed to tensor-parallel text inference; the
         // planner's supported-architecture validation rejects this string.
         ModelType::Llada2Moe => "llada2_moe",
+        // Florence-2 is an encoder-decoder (seq2seq) VLM served through its
+        // own CLI task pipeline, never routed to tensor-parallel text
+        // inference; the planner's supported-architecture validation rejects
+        // this string. Placeholder keeps the dispatch table total.
+        ModelType::Florence2VLM => "florence2",
         // Whisper is an ASR model served through the audio endpoints, never
         // routed to tensor-parallel text inference; the loader rejects it
         // earlier. Return a placeholder so the dispatch table stays total.

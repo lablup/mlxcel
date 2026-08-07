@@ -88,6 +88,42 @@ fn whisper_model_type_is_detected() {
 }
 
 #[test]
+fn florence2_model_type_is_detected() {
+    // Florence-2 declares `model_type: "florence2"` at the top level. The
+    // real checkpoint's `vision_config.model_type` is an empty string, so
+    // detection must key off the top-level value alone (a `vision_config`
+    // is present but never consulted for this family).
+    let model_dir = temp_path("florence2_vlm");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "florence2",
+            "architectures": ["Florence2ForConditionalGeneration"],
+            "is_encoder_decoder": true,
+            "projection_dim": 768,
+            "text_config": {
+                "model_type": "florence2_language",
+                "d_model": 768,
+                "encoder_layers": 6,
+                "decoder_layers": 6,
+                "vocab_size": 51289
+            },
+            "vision_config": {
+                "model_type": "",
+                "dim_embed": [128, 256, 512, 1024]
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::Florence2VLM);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn gpt2_model_type_is_detected() {
     // GPT-2 configs use the original OpenAI field names (`n_embd` / `n_head` /
     // `n_layer`), so detection must key off `model_type` alone.

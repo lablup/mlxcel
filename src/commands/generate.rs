@@ -2077,6 +2077,18 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
                 &user_prompt,
             );
         }
+        // Florence-2 is an encoder-decoder (seq2seq) VLM: the decoder
+        // cross-attends to cached encoder output over the fused image+prompt
+        // sequence, so route it to its task pipeline before the
+        // autoregressive loop (issue #856). The raw `-p` string is the task
+        // prompt; the tokenized chat-template form above does not apply.
+        if let mlxcel::LoadedModel::Florence2VLM(florence2_model) = &model {
+            return super::generate_florence2::run_florence2_generation(
+                florence2_model,
+                &args,
+                &user_prompt,
+            );
+        }
         // Reject an off-ladder `--image-soft-tokens` before loading any image:
         // the budget drives the resize target, so an unsupported value is a
         // user error, not something to clamp silently.

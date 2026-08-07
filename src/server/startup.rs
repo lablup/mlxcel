@@ -1572,6 +1572,23 @@ fn install_surgery_pipeline_for_server(startup: &ServerStartupConfig) -> Result<
 pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     initialize_server_logging(&startup)?;
 
+    // Florence-2 (issue #856): the model loads through `load_model` for the
+    // CLI task pipeline, but its encoder-decoder (seq2seq) generation cannot
+    // run on the decoder-only worker loops this server spawns; letting a
+    // worker pick it up would serve garbage from the trait-completeness
+    // forward. Refuse the checkpoint here, before any worker starts, until a
+    // seq2seq worker path exists.
+    if matches!(
+        crate::models::get_model_type(&startup.model_path),
+        Ok(crate::models::ModelType::Florence2VLM)
+    ) {
+        anyhow::bail!(
+            "Florence-2 is an encoder-decoder (seq2seq) VLM that mlxcel-server cannot serve \
+             yet. Run it through the CLI instead: mlxcel generate -m <model> --image <image> \
+             -p '<CAPTION>' (or another task marker such as <OCR> or <OD>)."
+        );
+    }
+
     // Issue #688 (M1/M2 hardening): disable CUDA graph capture for hazard-family
     // models (Gemma 4) here, on the main startup thread, before any generation or
     // pipeline worker is spawned and before the first GPU eval latches MLX's
