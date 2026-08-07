@@ -669,11 +669,60 @@ fn e2e_scaling_analysis_basic() {
     let factor_1_to_2 = analysis.scaling_factor(0, 1).unwrap();
     assert!(factor_1_to_2 > 0.0);
 
-    // Scaling efficiency should be <= 1.0 (due to AR overhead).
-    for r in &analysis.results[1..] {
+    // Recompute the expected scaling efficiency from the throughputs the
+    // analysis itself recorded and compare against the stored value. This
+    // validates the efficiency computation rather than the wall-clock
+    // measurements: throughputs come from a spin_wait-based simulation, so
+    // an absolute bound (e.g. "efficiency <= 1.1") is nondeterministic on
+    // loaded CI runners where the tp_size=1 baseline run can be preempted.
+    let baseline = analysis.results[0].throughput_tok_per_sec;
+    let first_tp = analysis.results[0].tp_size as f64;
+    for r in &analysis.results {
+        let tp_size = r.tp_size;
+        let ideal = baseline * tp_size as f64 / first_tp;
+        let expected = r.throughput_tok_per_sec / ideal;
+        let actual = r.scaling_efficiency;
         assert!(
-            r.scaling_efficiency <= 1.1,
-            "scaling efficiency should be near or below 1.0"
+            (actual - expected).abs() < 1e-9,
+            "tp_size={tp_size}: stored scaling efficiency {actual} should equal \
+             throughput/ideal {expected}"
+        );
+        assert!(
+            actual.is_finite() && actual > 0.0,
+            "tp_size={tp_size}: scaling efficiency {actual} should be finite and positive"
+        );
+    }
+
+    // Physical invariant: scaling efficiency cannot exceed 1.0, because
+    // all-reduce overhead (present only for tp_size > 1) can only add time.
+    // `spin_wait` busy-loops until `elapsed >= duration`, so it only ever
+    // overshoots its requested duration, and `Instant`-based measurement
+    // only ever adds overhead. So measured throughput can only be <= the
+    // throughput implied by a zero-overshoot, zero-overhead nominal timing
+    // model -- deterministically, regardless of runner load. Compute the
+    // tp_size=1 nominal throughput analytically from the config, mirroring
+    // `run_tp_benchmark`'s accounting exactly, and check that no result's
+    // measured throughput exceeds `nominal_throughput(1) * tp_size`.
+    let batch = config.batch_sizes.first().copied().unwrap_or(1);
+    let seq_len = config.seq_lengths.first().copied().unwrap_or(128);
+    let prefill_steps = (seq_len + batch - 1) / batch.max(1);
+    let step_time_1 = config.layer_compute_time.as_secs_f64();
+    let nominal_time_1 = (prefill_steps + config.decode_steps as usize) as f64 * step_time_1;
+    let tokens_1 = (batch * config.decode_steps as usize) as f64;
+    let nominal_throughput_1 = tokens_1 / nominal_time_1;
+
+    for r in &analysis.results {
+        if r.tp_size <= 1 {
+            continue;
+        }
+        let nominal_bound = nominal_throughput_1 * r.tp_size as f64;
+        let ratio = r.throughput_tok_per_sec / nominal_bound;
+        assert!(
+            ratio <= 1.0 + 1e-9,
+            "tp_size={}: measured throughput {} exceeds the deterministic nominal \
+             upper bound {nominal_bound} (ratio={ratio})",
+            r.tp_size,
+            r.throughput_tok_per_sec,
         );
     }
 }
