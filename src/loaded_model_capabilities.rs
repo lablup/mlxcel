@@ -49,6 +49,8 @@ pub enum VlmRuntimeRef<'a> {
     /// Step-3.7 runtime (perception_encoder ViT + Step-3.5 MoE text).
     Step3p7(&'a vision::Step3p7VlModel),
     DotsOcr(&'a vision::DotsOcrVlModel),
+    /// Falcon-OCR runtime (early-fusion patch projector, no vision tower).
+    FalconOcr(&'a vision::FalconOcrVlModel),
     /// Youtu-VL runtime.
     YoutuVL(&'a vision::YoutuVLModel),
     /// InternVL (internvl_chat) runtime.
@@ -173,6 +175,7 @@ impl LoadedModel {
             Self::PaddleOcrVL(model) => Some(VlmRuntimeRef::PaddleOcr(model)),
             Self::Step3p7VL(model) => Some(VlmRuntimeRef::Step3p7(model)),
             Self::DotsOcrVL(model) => Some(VlmRuntimeRef::DotsOcr(model)),
+            Self::FalconOcrVL(model) => Some(VlmRuntimeRef::FalconOcr(model)),
             Self::MiniCPMOVLM(model) => Some(VlmRuntimeRef::MiniCPMO(model)),
             Self::MiniCPMV46VLM(model) => Some(VlmRuntimeRef::MiniCPMV46(model)),
             Self::Moondream3VLM(model) => Some(VlmRuntimeRef::Moondream3(model)),
@@ -244,6 +247,19 @@ impl LoadedModel {
             && let Some(qwen) = qwen_runtime(runtime)
         {
             qwen.bind_mrope_state_to_sequence(seq_id);
+        }
+    }
+
+    /// Bind the pending Falcon-OCR prefill state (temporal positions, spatial
+    /// coordinates and the rope delta just written by `input_embeddings`) to a
+    /// specific server sequence id.
+    ///
+    /// Falcon-OCR's rope delta is negative and image-size dependent, so an
+    /// unbound fallback slot would let one request's image geometry drive
+    /// another request's decode positions. No-op for every other model.
+    pub fn bind_falcon_ocr_state_to_sequence(&self, seq_id: mlxcel_core::cache::SequenceId) {
+        if let Some(VlmRuntimeRef::FalconOcr(falcon)) = self.vlm_runtime() {
+            falcon.bind_state_to_sequence(seq_id);
         }
     }
 

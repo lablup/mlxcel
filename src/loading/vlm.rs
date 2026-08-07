@@ -45,6 +45,8 @@ mod deepseekocr;
 mod dots_ocr;
 #[path = "vlm_ernie4_5_vl.rs"]
 mod ernie4_5_vl;
+#[path = "vlm_falcon_ocr.rs"]
+mod falcon_ocr;
 #[path = "vlm_fastvlm.rs"]
 mod fastvlm;
 #[path = "vlm_florence2.rs"]
@@ -100,6 +102,7 @@ pub(crate) use deepseekocr::{
 };
 pub(crate) use dots_ocr::load_dots_ocr_vl;
 pub(crate) use ernie4_5_vl::load_ernie4_5_moe_vlm;
+pub(crate) use falcon_ocr::load_falcon_ocr_vl;
 pub(crate) use fastvlm::load_fastvlm_vlm;
 pub(crate) use florence2::load_florence2_vlm;
 pub(crate) use gemma::{load_gemma3_vlm, load_gemma3n_vlm, load_gemma4_vlm};

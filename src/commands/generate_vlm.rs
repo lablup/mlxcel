@@ -51,6 +51,21 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
                 image_blocks, total_image_tokens
             );
         }
+        VlmPreparationSummary::FalconOcr {
+            image_blocks,
+            total_image_tokens,
+            appended_task_token,
+        } => {
+            let task = if appended_task_token {
+                ", OCR task token appended"
+            } else {
+                ""
+            };
+            println!(
+                "Falcon-OCR: inserted {} image block(s) ({} patch tokens{})",
+                image_blocks, total_image_tokens, task
+            );
+        }
         VlmPreparationSummary::MiniCPMO {
             image_slots,
             total_tokens,

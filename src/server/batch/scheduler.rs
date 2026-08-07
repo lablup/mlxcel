@@ -3241,6 +3241,13 @@ impl BatchScheduler {
         // everything that is not a Gemma 4 VLM.
         self.model.bind_gemma4_per_layer_inputs_to_sequence(seq_id);
 
+        // Same lifecycle invariant for Falcon-OCR: the prefill state
+        // (temporal positions, spatial coordinates, rope delta) is
+        // written to a fallback slot during embedding preparation and
+        // must be bound to this sequence before another request in the
+        // same drain tick overwrites it. No-op for everything else.
+        self.model.bind_falcon_ocr_state_to_sequence(seq_id);
+
         // Issue #85: same lifecycle invariant for Gemma 3n VLM. The
         // legacy `Gemma3nVLModel.cached_per_layer_inputs` cell was a
         // single fallback slot with no per-sequence binding; under a

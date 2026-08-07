@@ -61,6 +61,8 @@ pub mod exaone;
 pub mod exaone4;
 pub mod exaone_moe;
 pub mod falcon_h1;
+pub mod falcon_ocr;
+pub mod falcon_ocr_rope;
 pub mod florence2;
 pub mod gemma;
 pub mod gemma2;
@@ -176,6 +178,8 @@ pub use exaone::ExaOneModel;
 pub use exaone_moe::ExaoneMoeModel;
 pub use exaone4::{ExaOne4Model, ExaOne4Wrapper};
 pub use falcon_h1::FalconH1Model;
+pub use falcon_ocr::{FalconOcrConfig, FalconOcrTextModel};
+pub use falcon_ocr_rope::FalconOcrTokenIds;
 pub use florence2::{
     FLORENCE2_LOC_TOKEN_BASE, FLORENCE2_VISION_PREFIX, Florence2BoundingBox, Florence2Config,
     Florence2DaViT, Florence2ImageSize, Florence2Model, Florence2Output, Florence2Polygon,
@@ -324,6 +328,7 @@ pub enum ModelType {
     Qwen3OmniMoe,      // Qwen3-Omni MoE thinker (Qwen3-VL-MoE + audio tower)
     PaddleOcrVL,       // PaddleOCR-VL (NaViT vision + ERNIE-4.5 w/ MRoPE)
     DotsOcrVL,         // dots.ocr (dots_vit ViT + Qwen2 text decoder)
+    FalconOcrVL,       // Falcon-OCR (early-fusion patch projector, no vision tower)
     Glm4v,             // GLM-4V (GLM-4V ViT + GLM-4 text w/ sectioned MRoPE)
     Glm4vMoe,          // GLM-4V MoE (GLM-4V ViT + GLM-4 MoE text w/ MRoPE)
     GlmOcr,            // GLM-OCR (GLM-OCR ViT + GLM-4 text w/ full-width MRoPE)
@@ -557,6 +562,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Qwen3OmniMoe,
     ModelType::PaddleOcrVL,
     ModelType::DotsOcrVL,
+    ModelType::FalconOcrVL,
     ModelType::Glm4v,
     ModelType::Glm4vMoe,
     ModelType::GlmOcr,
@@ -734,6 +740,7 @@ impl ModelType {
             ModelType::Qwen3OmniMoe => ("Qwen3-Omni MoE (thinker)", "Qwen VLM"),
             ModelType::PaddleOcrVL => ("PaddleOCR-VL", "PaddleOCR VLM"),
             ModelType::DotsOcrVL => ("dots.ocr (dots_vit + Qwen2)", "Other VLM"),
+            ModelType::FalconOcrVL => ("Falcon-OCR (early fusion)", "Other VLM"),
             ModelType::Glm4v => ("GLM-4V", "GLM VLM"),
             ModelType::Glm4vMoe => ("GLM-4V MoE", "GLM VLM"),
             ModelType::GlmOcr => ("GLM-OCR", "GLM VLM"),
@@ -1086,6 +1093,7 @@ mod metadata_tests {
             Qwen3OmniMoe,
             PaddleOcrVL,
             DotsOcrVL,
+            FalconOcrVL,
             Glm4v,
             Glm4vMoe,
             GlmOcr,

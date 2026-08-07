@@ -62,6 +62,13 @@ pub enum VlmPreparationSummary {
         image_slots: usize,
         total_tokens: usize,
     },
+    /// Falcon-OCR expanded each image into a bidirectional block and, when the
+    /// user prompt did not already end with it, appended the OCR task token.
+    FalconOcr {
+        image_blocks: usize,
+        total_image_tokens: i32,
+        appended_task_token: bool,
+    },
     Moondream3 {
         mode: Moondream3PromptMode,
         total_tokens: usize,
@@ -501,6 +508,32 @@ where
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
             let embeddings = dots.input_embeddings(&input_ids_arr, &pixel_values, &grid_thw);
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation,
+            }))
+        }
+        VlmRuntimeRef::FalconOcr(falcon) => {
+            // Early fusion: "preprocessing" ends at a patch matrix, and the
+            // decoder's own projector is the encoder.
+            let (patches, grids) = falcon.processor.preprocess_with_grid(images);
+            let token_ids = falcon.token_ids();
+            let preparation = crate::falcon_ocr_prompt::insert_falcon_ocr_image_tokens(
+                prompt_tokens,
+                &grids,
+                &token_ids,
+                falcon.ocr_task_token_id,
+            )
+            .map(|stats| VlmPreparationSummary::FalconOcr {
+                image_blocks: stats.image_blocks,
+                total_image_tokens: stats.total_image_tokens,
+                appended_task_token: stats.appended_task_token,
+            });
+
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings =
+                falcon.input_embeddings(&input_ids_arr, prompt_tokens, &patches, &grids);
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,

@@ -21,6 +21,7 @@ pub mod deepseek_vl2;
 pub mod deepseekocr;
 pub mod dots_ocr;
 pub mod ernie4_5_vl;
+pub mod falcon_ocr;
 pub mod fastvlm;
 pub mod florence2;
 pub mod gemma4;
