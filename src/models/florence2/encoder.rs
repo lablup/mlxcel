@@ -56,6 +56,25 @@ impl Florence2Encoder {
             .ok_or_else(|| {
                 format!("Florence-2 weight not found: {prefix}.embed_positions.weight")
             })?;
+        // `Florence2Model` bounds both the fused encoder input length and the
+        // decode offset against `config.max_position_embeddings`, and those
+        // guards are only sound if the loaded table actually covers that
+        // bound. Without this check a `config.json` that inflates
+        // `max_position_embeddings` (or `d_model`) passes them and reaches MLX
+        // as an out-of-range slice, which throws across the cxx bridge and
+        // aborts the process instead of returning `Err`. Sum in i64 so the
+        // comparison cannot overflow on a hostile value.
+        let position_shape = mlxcel_core::array_shape(&embed_positions);
+        let required_rows = POSITION_OFFSET as i64 + config.max_position_embeddings as i64;
+        if position_shape.len() != 2
+            || position_shape[1] != config.d_model
+            || (position_shape[0] as i64) < required_rows
+        {
+            return Err(format!(
+                "Florence-2 {prefix}.embed_positions.weight: expected at least [{required_rows}, {}] (max_position_embeddings {} + POSITION_OFFSET {POSITION_OFFSET}), got {position_shape:?}",
+                config.d_model, config.max_position_embeddings
+            ));
+        }
         let layernorm_embedding = layer_norm(weights, &format!("{prefix}.layernorm_embedding"))?;
 
         let mut layers = Vec::with_capacity(config.encoder_layers as usize);
@@ -77,7 +96,15 @@ impl Florence2Encoder {
 
     /// Encode `[batch, seq, d_model]` input embeddings into encoder hidden
     /// states of the same shape.
-    pub(crate) fn forward(&self, inputs_embeds: &MlxArray) -> UniquePtr<MlxArray> {
+    ///
+    /// `mask` is the additive attention mask (`[batch, 1, 1, seq]`, `0` for a
+    /// real key and `-inf` for a padded one) applied by every block's
+    /// self-attention. Unpadded input passes `None`.
+    pub(crate) fn forward(
+        &self,
+        inputs_embeds: &MlxArray,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
         let seq = mlxcel_core::array_shape(inputs_embeds)[1];
         let pos = mlxcel_core::slice(
             &self.embed_positions,
@@ -87,7 +114,7 @@ impl Florence2Encoder {
         let x = mlxcel_core::add(inputs_embeds, &pos);
         let mut x = self.layernorm_embedding.forward(&x);
         for layer in &self.layers {
-            x = layer.forward(&x);
+            x = layer.forward(&x, mask);
         }
         x
     }

@@ -177,8 +177,8 @@ pub use exaone_moe::ExaoneMoeModel;
 pub use exaone4::{ExaOne4Model, ExaOne4Wrapper};
 pub use falcon_h1::FalconH1Model;
 pub use florence2::{
-    FLORENCE2_VISION_PREFIX, Florence2DaViT, Florence2SeqCache, Florence2TextConfig,
-    Florence2TextModel, Florence2VisionConfig,
+    FLORENCE2_VISION_PREFIX, Florence2Config, Florence2DaViT, Florence2Model, Florence2SeqCache,
+    Florence2TextConfig, Florence2TextModel, Florence2VisionConfig,
 };
 pub use gemma::GemmaModel;
 pub use gemma2::Gemma2Model;
