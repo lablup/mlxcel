@@ -511,6 +511,53 @@ fn config_defaults_image_token_id_to_vocab_size() {
     );
 }
 
+/// `Florence2Model::load` must reject a quantized checkpoint before it ever
+/// touches the weight files, since neither the BART text stack nor the DaViT
+/// tower has a quantized code path. A directory holding only `config.json`
+/// (no safetensors) is enough to exercise this: the check runs, and returns,
+/// before weight loading is attempted.
+#[test]
+fn load_rejects_quantized_checkpoint() {
+    let raw = json!({
+        "model_type": "florence2",
+        "quantization": { "group_size": 64, "bits": 4 },
+        "text_config": {
+            "d_model": D_MODEL,
+            "encoder_layers": 1,
+            "decoder_layers": 1,
+            "encoder_attention_heads": HEADS,
+            "decoder_attention_heads": HEADS,
+            "vocab_size": VOCAB,
+        },
+        "vision_config": {
+            "model_type": "",
+            "depths": [0],
+            "dim_embed": [IMAGE_DIM],
+            "num_heads": [HEADS],
+            "patch_size": [2],
+            "patch_stride": [2],
+            "patch_padding": [0],
+            "image_feature_source": ["spatial_avg_pool", "temporal_avg_pool"],
+        },
+    });
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("config.json"),
+        serde_json::to_string(&raw).unwrap(),
+    )
+    .expect("write config.json");
+
+    let err = match Florence2Model::load(dir.path()) {
+        Ok(_) => panic!("quantized checkpoint must be rejected"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        err.to_lowercase().contains("quantized"),
+        "error should mention the quantized-checkpoint rejection, got: {err}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Load-time validation
 // ---------------------------------------------------------------------------

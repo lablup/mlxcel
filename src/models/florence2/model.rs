@@ -77,9 +77,9 @@ pub struct Florence2Model {
     image_pos_embed: LearnedPositionEmbedding2D,
     visual_temporal_embed: PositionalEmbeddingCosine1D,
     /// Activation dtype of the text stack. Image features are cast to it
-    /// before the concatenation so a mixed-precision checkpoint (bf16 vision
-    /// tower alongside a quantized text stack) does not silently promote the
-    /// fused sequence to f32.
+    /// before the concatenation so a checkpoint where the vision tower and
+    /// text stack ended up on different dense dtypes does not silently
+    /// promote the fused sequence to f32.
     dtype: i32,
     /// Activation dtype of the vision tower, taken from its first conv
     /// weight. Pixel input is cast to it for the same reason.
@@ -99,20 +99,23 @@ impl Florence2Model {
             .map_err(|e| anyhow!("Failed to parse Florence-2 config: {e}"))?;
         let parsed = Florence2Config::from_model_config(&config)?;
 
+        // Quantized Florence-2 checkpoints are rejected outright rather than
+        // half-loaded, and before spending time loading their weights: both
+        // halves of this family are built from dense `Linear` / `Embedding`,
+        // so a packed uint32 weight would reach MLX and abort the process
+        // instead of surfacing as an error here.
+        if crate::models::sanitize::config_has_quantization_metadata(&config) {
+            return Err(anyhow!(
+                "Florence-2 quantized checkpoints are not supported yet: the BART text stack and the DaViT tower are built from dense layers. Use a bf16 or f16 export, for example mlx-community/Florence-2-base-ft-bf16."
+            ));
+        }
+
         let weights = mlxcel_core::weights::load_weights_from_dir(model_path)
             .map_err(|e| anyhow!("Failed to load Florence-2 weights: {e}"))?;
         let mut weights = sanitize(weights);
 
-        // Precision policy, matching `load_vlm_weights`: promote bf16 to f16
-        // on Apple Silicon for the non-quantized case, and leave a quantized
-        // checkpoint alone so its bf16 scales/biases stay dtype-consistent
-        // with the bf16 activation path the quantized kernels expect. A
-        // Florence-2 quant is mixed by construction (the DaViT tower stays
-        // dense), which is exactly why the fused path pins its activation
-        // dtype from the text stack rather than assuming one.
-        if !crate::models::sanitize::config_has_quantization_metadata(&config) {
-            let _ = crate::models::convert_bf16_weights(&mut weights);
-        }
+        // Apple Silicon precision policy: bf16 to f16 for the dense case.
+        let _ = crate::models::convert_bf16_weights(&mut weights);
 
         Self::from_weights(&weights, parsed)
             .map_err(|e| anyhow!("Failed to build Florence-2 model: {e}"))
@@ -343,11 +346,14 @@ impl Florence2Model {
     /// the joint attention mask.
     ///
     /// Returns `(inputs_embeds [batch, image + prompt, d_model],
-    /// attention_mask [batch, image + prompt])`. The mask is all ones here
-    /// because both segments are real content; it exists so a padded batch
-    /// can carry zeros through the same path, and
-    /// [`Self::encode_with_image_features`] converts it to the additive form
-    /// the encoder's attention consumes.
+    /// attention_mask [batch, image + prompt])`. The mask is applied by the
+    /// BART encoder's self-attention, via the additive form that
+    /// [`Self::encode_with_image_features`] converts it to; it is all ones
+    /// here because this model drives a single image and a single prompt
+    /// with no padding. Supporting a genuinely padded batch would also need
+    /// the same mask threaded into decoder cross-attention, which is not
+    /// implemented: `Florence2Attention::cross_attention` currently passes
+    /// `None`.
     pub fn merge_input_ids_with_image_features(
         &self,
         image_features: &MlxArray,

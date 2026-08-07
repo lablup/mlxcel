@@ -42,8 +42,9 @@
 //! does.
 //!
 //! To regenerate the pins, in a virtualenv holding `mlx`, `numpy`, and
-//! `Pillow`, with `references/mlx-vlm` on `sys.path` (the `mlx_vlm` package
-//! entry can be stubbed so `transformers` is not required): build
+//! `Pillow`, with a local checkout of https://github.com/Blaizzy/mlx-vlm on
+//! `sys.path` (the `mlx_vlm` package entry can be stubbed so `transformers`
+//! is not required): build
 //! `ModelConfig` as described above, instantiate `florence2.Model`, load
 //! `models/Florence-2-base-ft-bf16/model.safetensors`, pass it through
 //! `VisionModel.sanitize` then `Model.sanitize`, cast every tensor to
