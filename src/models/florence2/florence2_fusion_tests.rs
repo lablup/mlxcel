@@ -20,7 +20,8 @@
 //! exercised without a checkpoint.
 
 use super::super::fusion::{
-    LearnedPositionEmbedding2D, PositionalEmbeddingCosine1D, additive_attention_mask,
+    LearnedPositionEmbedding2D, MAX_TEMPORAL_EMBEDDINGS, PositionalEmbeddingCosine1D,
+    additive_attention_mask,
 };
 use super::super::{Florence2TextConfig, Florence2VisionConfig};
 use super::*;
@@ -391,6 +392,25 @@ fn cosine_temporal_embedding_rejects_wrong_shape_and_range() {
     assert!(embed.forward(0).is_err());
 }
 
+/// `max_temporal_embeddings` is untrusted `config.json` input that sizes a
+/// host buffer whenever the checkpoint omits `pos_idx_to_embed`. It has to be
+/// rejected before the allocation, not after: the synthesis fallback would
+/// otherwise ask the allocator for the declared size and fill it with a nested
+/// transcendental loop.
+#[test]
+fn cosine_temporal_embedding_rejects_oversized_max_temporal() {
+    let err = expect_err(PositionalEmbeddingCosine1D::from_weights(
+        &WeightMap::new(),
+        "temporal",
+        IMAGE_DIM,
+        MAX_TEMPORAL_EMBEDDINGS + 1,
+    ));
+    assert!(
+        err.contains("max_temporal_embeddings"),
+        "unexpected error: {err}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Joint attention mask
 // ---------------------------------------------------------------------------
@@ -398,13 +418,22 @@ fn cosine_temporal_embedding_rejects_wrong_shape_and_range() {
 #[test]
 fn additive_mask_maps_one_to_zero_and_zero_to_neg_inf() {
     let mask = mlxcel_core::from_slice_f32(&[1.0, 1.0, 0.0, 1.0], &[1, 4]);
-    let additive = additive_attention_mask(&mask, mlxcel_core::dtype::FLOAT32);
+    let additive = additive_attention_mask(&mask, mlxcel_core::dtype::FLOAT32).unwrap();
     assert_eq!(mlxcel_core::array_shape(&additive), vec![1, 1, 1, 4]);
     let values = to_vec_f32(&additive);
     assert_eq!(values[0], 0.0);
     assert_eq!(values[1], 0.0);
     assert!(values[2].is_infinite() && values[2].is_sign_negative());
     assert_eq!(values[3], 0.0);
+}
+
+/// The mask reshape reads two axes by index, so a wrong-rank mask has to
+/// surface as an error rather than a panic inside library code.
+#[test]
+fn additive_mask_rejects_non_2d_mask() {
+    let mask = mlxcel_core::from_slice_f32(&[1.0, 1.0, 1.0, 1.0], &[1, 2, 2]);
+    let err = expect_err(additive_attention_mask(&mask, mlxcel_core::dtype::FLOAT32));
+    assert!(err.contains("[batch, seq]"), "unexpected error: {err}");
 }
 
 // ---------------------------------------------------------------------------
@@ -586,6 +615,106 @@ fn from_weights_rejects_unsupported_embedding_types() {
     assert!(err.contains("COSINE"), "unexpected error: {err}");
 }
 
+/// `max_position_embeddings` is the bound both the fused-encoder length check
+/// and the decode-offset check are written against, but nothing forces the
+/// checkpoint's position table to actually cover it. A short table has to fail
+/// here, at load, with the shapes named: past those guards the slice reaches
+/// MLX out of range and aborts the process across the FFI boundary.
+#[test]
+fn from_weights_rejects_short_position_table() {
+    let mut map = tiny_weights();
+    // One row short of `POSITION_OFFSET + max_position_embeddings`.
+    synth(
+        &mut map,
+        "language_model.model.encoder.embed_positions.weight",
+        &[MAX_POSITIONS + 1, D_MODEL],
+    );
+    let err = expect_err(Florence2Model::from_weights(
+        &map,
+        tiny_config(&["spatial_avg_pool"]),
+    ));
+    assert!(
+        err.contains("embed_positions.weight") && err.contains("max_position_embeddings"),
+        "unexpected error: {err}"
+    );
+}
+
+/// A table whose width disagrees with `d_model` is the same hazard on the
+/// other axis: the slice takes `d_model` columns.
+#[test]
+fn from_weights_rejects_position_table_width_mismatch() {
+    let mut map = tiny_weights();
+    synth(
+        &mut map,
+        "language_model.model.decoder.embed_positions.weight",
+        &[MAX_POSITIONS + 2, D_MODEL + 1],
+    );
+    let err = expect_err(Florence2Model::from_weights(
+        &map,
+        tiny_config(&["spatial_avg_pool"]),
+    ));
+    assert!(
+        err.contains("embed_positions.weight"),
+        "unexpected error: {err}"
+    );
+}
+
+/// `encoder_attention_heads: 0` used to reach the divisibility check and
+/// panic there with a divide by zero, and a negative layer count reached
+/// `Vec::with_capacity` as `usize::MAX`. Both values come straight out of
+/// `config.json`, so both must return `Err`.
+#[test]
+fn text_config_rejects_degenerate_shape_fields() {
+    let zero_heads = json!({
+        "d_model": D_MODEL,
+        "encoder_layers": 1,
+        "decoder_layers": 1,
+        "encoder_attention_heads": 0,
+        "decoder_attention_heads": HEADS,
+        "vocab_size": VOCAB,
+    });
+    let err = Florence2TextConfig::from_model_config(&zero_heads)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("attention heads"), "unexpected error: {err}");
+
+    let negative_layers = json!({
+        "d_model": D_MODEL,
+        "encoder_layers": -1,
+        "decoder_layers": 1,
+        "encoder_attention_heads": HEADS,
+        "decoder_attention_heads": HEADS,
+        "vocab_size": VOCAB,
+    });
+    let err = Florence2TextConfig::from_model_config(&negative_layers)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("layer counts"), "unexpected error: {err}");
+}
+
+/// `pad_token_id` and `decoder_start_token_id` are used as literal gather
+/// indices into the shared embedding, so an out-of-vocabulary value is an
+/// out-of-range gather rather than a wrong-looking caption.
+#[test]
+fn text_config_rejects_out_of_vocabulary_token_ids() {
+    let base = json!({
+        "d_model": D_MODEL,
+        "encoder_layers": 1,
+        "decoder_layers": 1,
+        "encoder_attention_heads": HEADS,
+        "decoder_attention_heads": HEADS,
+        "vocab_size": VOCAB,
+    });
+
+    let mut oversized_start = base.clone();
+    oversized_start["decoder_start_token_id"] = json!(VOCAB);
+    assert!(Florence2TextConfig::from_model_config(&oversized_start).is_err());
+
+    let mut negative_pad = base;
+    negative_pad["pad_token_id"] = json!(-1);
+    assert!(Florence2TextConfig::from_model_config(&negative_pad).is_err());
+}
+
 #[test]
 fn from_weights_rejects_empty_image_feature_source() {
     let err = expect_err(Florence2Model::from_weights(
@@ -708,7 +837,7 @@ fn encode_matches_manual_fusion_then_text_encoder() {
     let (fused, mask) = model
         .merge_input_ids_with_image_features(&features, Some(&prompt_embeds))
         .unwrap();
-    let additive = additive_attention_mask(&mask, model.dtype());
+    let additive = additive_attention_mask(&mask, model.dtype()).unwrap();
     let manual = model
         .text_model()
         .encode_embeds_with_mask(&fused, Some(&additive));

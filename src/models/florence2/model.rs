@@ -415,7 +415,7 @@ impl Florence2Model {
             ));
         }
 
-        let additive = additive_attention_mask(&attention_mask, self.dtype);
+        let additive = additive_attention_mask(&attention_mask, self.dtype)?;
         Ok(self
             .text
             .encode_embeds_with_mask(&inputs_embeds, Some(&additive)))

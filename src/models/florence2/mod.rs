@@ -63,6 +63,23 @@ use decoder::Florence2Decoder;
 use encoder::Florence2Encoder;
 use layers::Florence2LayerCache;
 
+/// Upper bound accepted for `encoder_layers` / `decoder_layers`. Real
+/// Florence-2 exports ship 6 (base) or 12 (large). The cap exists because
+/// [`encoder::Florence2Encoder::from_weights`] and
+/// [`decoder::Florence2Decoder::from_weights`] size a `Vec` from this field
+/// before they look up a single weight, so a negative value out of a hostile
+/// `config.json` becomes `usize::MAX` and aborts with a capacity overflow.
+const MAX_LAYERS: i32 = 256;
+
+/// Upper bound accepted for `max_position_embeddings`. Florence-2 ships 1024.
+///
+/// The field bounds two separate allocations: the position-table slice the
+/// encoder and decoder take (validated against the loaded table at load time)
+/// and the O(n^2) host buffer [`layers::additive_causal_mask`] fills for a
+/// multi-token decoder call. An unbounded value out of a hostile `config.json`
+/// is an out-of-memory abort rather than an error return.
+const MAX_POSITION_EMBEDDINGS: i32 = 65_536;
+
 /// BART encoder-decoder shape parameters, parsed from the `text_config`
 /// object of a Florence-2 `config.json` (`model_type: florence2_language`).
 #[derive(Debug, Clone)]
@@ -114,6 +131,75 @@ impl Florence2TextConfig {
             eos_token_id: config_i32(config, "eos_token_id").unwrap_or(2),
             decoder_start_token_id: config_i32(config, "decoder_start_token_id").unwrap_or(2),
         };
+        // Every field below becomes a shape, an index, a divisor, or a `Vec`
+        // capacity somewhere downstream. MLX throws on an out-of-range shape
+        // and the throw crosses an FFI boundary that cannot carry it, so a bad
+        // value aborts the process rather than surfacing as an error; these
+        // checks are what keep an untrusted `config.json` from getting that
+        // far. They also have to run *before* the divisibility check below,
+        // which would itself divide by zero on `encoder_attention_heads: 0`.
+        if parsed.d_model < 1 {
+            return Err(anyhow!(
+                "Florence-2 text_config d_model must be positive, got {}",
+                parsed.d_model
+            ));
+        }
+        if parsed.encoder_attention_heads < 1 || parsed.decoder_attention_heads < 1 {
+            return Err(anyhow!(
+                "Florence-2 text_config attention heads must be positive, got {} enc / {} dec",
+                parsed.encoder_attention_heads,
+                parsed.decoder_attention_heads
+            ));
+        }
+        if !(1..=MAX_LAYERS).contains(&parsed.encoder_layers)
+            || !(1..=MAX_LAYERS).contains(&parsed.decoder_layers)
+        {
+            return Err(anyhow!(
+                "Florence-2 text_config layer counts {} enc / {} dec outside 1..={MAX_LAYERS}",
+                parsed.encoder_layers,
+                parsed.decoder_layers
+            ));
+        }
+        if parsed.encoder_ffn_dim < 1 || parsed.decoder_ffn_dim < 1 {
+            return Err(anyhow!(
+                "Florence-2 text_config ffn dims must be positive, got {} enc / {} dec",
+                parsed.encoder_ffn_dim,
+                parsed.decoder_ffn_dim
+            ));
+        }
+        if parsed.vocab_size < 1 {
+            return Err(anyhow!(
+                "Florence-2 text_config vocab_size must be positive, got {}",
+                parsed.vocab_size
+            ));
+        }
+        if !(1..=MAX_POSITION_EMBEDDINGS).contains(&parsed.max_position_embeddings) {
+            return Err(anyhow!(
+                "Florence-2 text_config max_position_embeddings {} outside 1..={MAX_POSITION_EMBEDDINGS}",
+                parsed.max_position_embeddings
+            ));
+        }
+        // Both of these reach the shared embedding gather as literal token ids
+        // (`generate_greedy` seeds the decoder with `decoder_start_token_id`,
+        // `shift_tokens_right` substitutes `pad_token_id`), so an
+        // out-of-vocabulary or negative value is an out-of-range gather.
+        // `bos_token_id` and `eos_token_id` are deliberately left unchecked:
+        // they are only ever compared, never used as an index, and some
+        // exports legitimately carry sentinel values there.
+        if !(0..parsed.vocab_size).contains(&parsed.pad_token_id) {
+            return Err(anyhow!(
+                "Florence-2 text_config pad_token_id {} outside 0..vocab_size {}",
+                parsed.pad_token_id,
+                parsed.vocab_size
+            ));
+        }
+        if !(0..parsed.vocab_size).contains(&parsed.decoder_start_token_id) {
+            return Err(anyhow!(
+                "Florence-2 text_config decoder_start_token_id {} outside 0..vocab_size {}",
+                parsed.decoder_start_token_id,
+                parsed.vocab_size
+            ));
+        }
         if parsed.d_model % parsed.encoder_attention_heads != 0
             || parsed.d_model % parsed.decoder_attention_heads != 0
         {

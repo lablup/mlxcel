@@ -37,6 +37,20 @@ use mlxcel_core::layers::Embedding;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
+/// Upper bound accepted for `max_temporal_embeddings`. Real Florence-2 exports
+/// ship 100, so this leaves ample headroom.
+///
+/// The field is untrusted `config.json` input
+/// (`vision_config.visual_temporal_embedding.max_temporal_embeddings`) that
+/// sizes a *host* buffer: when a checkpoint omits
+/// `visual_temporal_embed.pos_idx_to_embed`, which is the documented synthesis
+/// fallback, [`PositionalEmbeddingCosine1D::compute`] eagerly allocates
+/// `max_seq_len * embed_dim` floats and fills them with a nested sin/cos loop.
+/// A declared 2e9 against a 1024-wide tower asks for roughly 8 TB and ~10^12
+/// transcendental evaluations, so an unbounded value is an out-of-memory abort
+/// or an indefinite hang driven by a data file.
+pub(crate) const MAX_TEMPORAL_EMBEDDINGS: i32 = 65_536;
+
 /// Learned 2-D absolute position embedding over a `H x W` feature grid.
 ///
 /// The row and column tables are each half of the feature width; a token at
@@ -161,9 +175,9 @@ impl PositionalEmbeddingCosine1D {
                 "Florence-2 {prefix}: temporal embedding width {embed_dim} must be a positive even number"
             ));
         }
-        if max_seq_len < 1 {
+        if !(1..=MAX_TEMPORAL_EMBEDDINGS).contains(&max_seq_len) {
             return Err(format!(
-                "Florence-2 {prefix}: max_temporal_embeddings {max_seq_len} must be positive"
+                "Florence-2 {prefix}: max_temporal_embeddings {max_seq_len} outside 1..={MAX_TEMPORAL_EMBEDDINGS}"
             ));
         }
         let key = format!("{prefix}.pos_idx_to_embed");
@@ -226,13 +240,21 @@ impl PositionalEmbeddingCosine1D {
 /// exact zero to every logit and a masked-out key is driven to zero weight by
 /// the softmax. The reshape puts the key axis last so the tensor broadcasts
 /// across batch, head, and query axes of the `[b, h, lq, lk]` logits.
+///
+/// The rank check is what keeps a caller-supplied mask of the wrong rank from
+/// panicking on `shape[1]` inside library code.
 pub(crate) fn additive_attention_mask(
     attention_mask: &MlxArray,
     dtype: i32,
-) -> UniquePtr<MlxArray> {
+) -> Result<UniquePtr<MlxArray>, String> {
     let shape = mlxcel_core::array_shape(attention_mask);
+    if shape.len() != 2 {
+        return Err(format!(
+            "Florence-2 attention mask must be [batch, seq], got {shape:?}"
+        ));
+    }
     let as_f32 = mlxcel_core::astype(attention_mask, mlxcel_core::dtype::FLOAT32);
     let additive = mlxcel_core::log(&as_f32);
     let additive = mlxcel_core::astype(&additive, dtype);
-    mlxcel_core::reshape(&additive, &[shape[0], 1, 1, shape[1]])
+    Ok(mlxcel_core::reshape(&additive, &[shape[0], 1, 1, shape[1]]))
 }
