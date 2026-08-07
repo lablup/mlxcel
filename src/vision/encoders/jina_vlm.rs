@@ -460,6 +460,17 @@ impl JinaVlmVisionTower {
             .get(&format!("{prefix}.pos_embed"))
             .map(|w| mlxcel_core::copy(w))
             .ok_or_else(|| format!("Weight not found: {prefix}.pos_embed"))?;
+        // `forward_features` indexes `pe_shape[0]` and `pe_shape[1]` to broadcast
+        // the table over the batch. A 1-D table is a Rust panic on `[1]`, and a
+        // 3-D one silently drops elements and then aborts inside MLX's reshape,
+        // so the rank is pinned here where it is still an `Err`.
+        let pe_shape = mlxcel_core::array_shape(&pos_embed);
+        if pe_shape.len() != 2 {
+            return Err(format!(
+                "unexpected {prefix}.pos_embed shape {pe_shape:?}: expected a 2-D \
+                 [num_patches, hidden] table"
+            ));
+        }
 
         let mut layers = Vec::with_capacity(num_layers);
         for i in 0..num_layers {
@@ -539,6 +550,15 @@ pub struct JinaVlmVisionModel {
     projector: JinaVlmProjector,
     /// `[2, hidden * len(vit_layers)]`: row 0 for fully padded patches, row 1
     /// for partially padded ones (`padding_embed_type: pad_and_partial_pad`).
+    ///
+    /// Optional on purpose: `padding_embed_type` is a config choice and a
+    /// conversion that leaves it unset ships no `vl_connector.pad_embed`, so a
+    /// missing tensor must load rather than fail. When it is absent
+    /// [`JinaVlmVisionModel::apply_pad_embed`] is a no-op, which means padded
+    /// and partially padded patches carry the tower's raw features instead of
+    /// the learned pad markers. For a checkpoint that was trained with them,
+    /// that degrades output on any image whose tiling does not divide evenly,
+    /// silently and without a diagnostic.
     pad_embed: Option<UniquePtr<MlxArray>>,
     config: JinaVlmVisionConfig,
 }
@@ -706,9 +726,25 @@ impl JinaVlmVisionModel {
             config.group_size,
             config.bits,
         )?;
-        let pad_embed = weights
-            .get(&format!("{connector_prefix}.pad_embed"))
-            .map(|w| mlxcel_core::copy(w));
+        // Absence is allowed (see the field's doc comment); a wrong shape is not.
+        // `apply_pad_embed` reads `pe_shape[1]` and slices rows 0 and 1 out of
+        // the table: a 1-D tensor panics on the index, and a single-row one is
+        // silently clamped by MLX's `slice` to a zero-row result that then
+        // aborts in the following `reshape`.
+        let pad_embed = match weights.get(&format!("{connector_prefix}.pad_embed")) {
+            Some(w) => {
+                let shape = mlxcel_core::array_shape(w);
+                if shape.len() != 2 || shape[0] != 2 {
+                    return Err(format!(
+                        "unexpected {connector_prefix}.pad_embed shape {shape:?}: expected a 2-D \
+                         [2, hidden * len(vit_layers)] table, row 0 for fully padded patches and \
+                         row 1 for partially padded ones"
+                    ));
+                }
+                Some(mlxcel_core::copy(w))
+            }
+            None => None,
+        };
 
         Ok(Self {
             tower,

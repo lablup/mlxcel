@@ -115,8 +115,18 @@ impl JinaVlmTextConfig {
     ///
     /// Every field falls back to the released `jinaai/jina-vlm` value so a
     /// partially specified config still loads, and both the OLMo spelling
-    /// (`n_layers`) and the HF spelling (`num_hidden_layers`) are accepted
-    /// because the checkpoint carries both.
+    /// (`n_layers`, `block_config.attn_config.n_heads`, ...) and the HF spelling
+    /// (`num_hidden_layers`, `num_attention_heads`, ...) are accepted because
+    /// the released checkpoint carries both for some keys and only the OLMo one
+    /// for the rest. The nested OLMo spelling always wins where both are
+    /// present, so the released checkpoint never reaches an alias.
+    ///
+    /// The aliases matter because the fallback is silent: a variant that ships a
+    /// flat HF `text_config` with no `block_config` would otherwise resolve
+    /// `num_hidden_layers` correctly and then take the released 3B head geometry
+    /// for everything else, which produces wrong output rather than an error.
+    /// The private `validate_fused_qkv_geometry` below is the backstop for
+    /// whatever the aliases still miss.
     pub fn from_json(text_config: &serde_json::Value) -> Self {
         let d = Self::default();
         let block = text_config.get("block_config");
@@ -145,16 +155,40 @@ impl JinaVlmTextConfig {
         Self {
             hidden_size: usize_at(Some(text_config), "hidden_size", d.hidden_size),
             num_hidden_layers,
-            num_attention_heads: usize_at(attn, "n_heads", d.num_attention_heads),
-            num_key_value_heads: usize_at(attn, "n_kv_heads", d.num_key_value_heads),
-            head_dim: usize_at(attn, "head_dim", d.head_dim),
+            num_attention_heads: usize_at(
+                attn,
+                "n_heads",
+                usize_at(
+                    Some(text_config),
+                    "num_attention_heads",
+                    d.num_attention_heads,
+                ),
+            ),
+            num_key_value_heads: usize_at(
+                attn,
+                "n_kv_heads",
+                usize_at(
+                    Some(text_config),
+                    "num_key_value_heads",
+                    d.num_key_value_heads,
+                ),
+            ),
+            head_dim: usize_at(
+                attn,
+                "head_dim",
+                usize_at(Some(text_config), "head_dim", d.head_dim),
+            ),
             vocab_size: usize_at(Some(text_config), "vocab_size", d.vocab_size),
             additional_vocab_size: usize_at(
                 Some(text_config),
                 "additional_vocab_size",
                 d.additional_vocab_size,
             ),
-            intermediate_size: usize_at(ffn, "size", d.intermediate_size),
+            intermediate_size: usize_at(
+                ffn,
+                "size",
+                usize_at(Some(text_config), "intermediate_size", d.intermediate_size),
+            ),
             rms_norm_eps: lnorm
                 .and_then(|l| l.get("eps"))
                 .and_then(|v| v.as_f64())
@@ -201,6 +235,109 @@ fn default_group_size() -> i32 {
 }
 fn default_bits() -> i32 {
     4
+}
+
+/// Cross-check the fused `attn.qkv` tensor against the geometry `config.json`
+/// declares, before anything reaches MLX.
+///
+/// Every geometry field in [`JinaVlmTextConfig::from_json`] falls back to a
+/// released default when its key is missing, `null`, a string, or negative, so a
+/// config that contradicts the checkpoint does not fail to parse: it parses to
+/// the 3B numbers. [`JinaVlmAttention::forward`] then slices Q/K/V out of the
+/// fused projection at `q_dim`/`k_dim` offsets derived from those numbers. When
+/// the config understates the geometry every slice is still in range, so MLX
+/// clamps nothing and throws nothing, and the following reshape is
+/// self-consistent by construction. Attention simply runs on the wrong parts of
+/// Q/K/V and the model emits fluent nonsense with no error, no panic, and no
+/// warning. Comparing against the loaded tensor is the only place the
+/// disagreement is observable.
+///
+/// The output (row) axis carries the head geometry and is never the packed axis:
+/// affine quantization compresses the input axis only, so the released 4-bit
+/// `[4096, 256]` `uint32` plane still reports 4096 rows exactly like the bf16
+/// `[4096, 2048]` layer-0 tensor. The row check therefore covers the dense and
+/// the quantized case alike. The input width is the one that needs the two cases
+/// split: dense compares the axis directly, quantized goes through
+/// [`mlxcel_core::layers::validate_quantized_packing`], which reconstructs the
+/// width as `scales.shape(-1) * group_size` the way MLX itself does and whose
+/// mismatch would otherwise abort the process at the first forward pass.
+fn validate_fused_qkv_geometry(
+    weights: &WeightMap,
+    config: &JinaVlmTextConfig,
+    prefix: &str,
+) -> Result<(), String> {
+    let weight_name = format!("{prefix}.qkv.weight");
+    // A missing tensor is `UnifiedLinear::from_weights`'s error to report.
+    let Some(weight) = weights.get(&weight_name) else {
+        return Ok(());
+    };
+    let shape = mlxcel_core::array_shape(weight);
+    if shape.len() != 2 {
+        return Err(format!(
+            "Jina VLM {weight_name} has shape {shape:?}, but the fused QKV projection must be \
+             2-D [out, in]"
+        ));
+    }
+
+    let heads = config.num_attention_heads;
+    let kv_heads = config.num_key_value_heads;
+    let head_dim = config.head_dim;
+    if heads == 0 || kv_heads == 0 || head_dim == 0 {
+        return Err(format!(
+            "Jina VLM {prefix} needs a positive head geometry, but config.json gives \
+             num_attention_heads {heads}, num_key_value_heads {kv_heads}, head_dim {head_dim}"
+        ));
+    }
+
+    // Checked all the way: the row equality is what bounds `q_dim` and `k_dim`
+    // to an i32 further down, so it must not be reached through a wrapped
+    // product.
+    let expected = kv_heads
+        .checked_mul(2)
+        .and_then(|kv| heads.checked_add(kv))
+        .and_then(|fused_heads| fused_heads.checked_mul(head_dim));
+    let rows = usize::try_from(shape[0]).unwrap_or(0);
+    if expected != Some(rows) {
+        let expected = expected
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "an overflowing row count".to_string());
+        return Err(format!(
+            "Jina VLM {prefix}.qkv has {rows} output rows but the config implies \
+             (num_attention_heads {heads} + 2 * num_key_value_heads {kv_heads}) * head_dim \
+             {head_dim} = {expected}; the checkpoint and config.json disagree"
+        ));
+    }
+
+    let hidden_size = config.hidden_size;
+    if let Some(scales) = weights.get(&format!("{prefix}.qkv.scales")) {
+        let scales_shape = mlxcel_core::array_shape(scales);
+        let biases_shape = weights
+            .get(&format!("{prefix}.qkv.biases"))
+            .map(|b| mlxcel_core::array_shape(b));
+        let group_size = config.group_size();
+        let bits = config.bits();
+        let mode =
+            mlxcel_core::layers::infer_quantization_mode(biases_shape.is_some(), group_size, bits);
+        mlxcel_core::layers::validate_quantized_packing(
+            &format!("{prefix}.qkv"),
+            &mlxcel_core::layers::QuantizedTensorShapes {
+                weight: &shape,
+                scales: &scales_shape,
+                biases: biases_shape.as_deref(),
+            },
+            hidden_size,
+            group_size,
+            bits,
+            mode,
+        )?;
+    } else if usize::try_from(shape[1]).unwrap_or(0) != hidden_size {
+        return Err(format!(
+            "Jina VLM {weight_name} has shape {shape:?} but the config says hidden_size \
+             {hidden_size}; the checkpoint and config.json disagree"
+        ));
+    }
+
+    Ok(())
 }
 
 /// Fused-QKV attention with per-head Q/K RMSNorm and rotate-half RoPE.
@@ -283,6 +420,8 @@ impl JinaVlmAttention {
     ) -> Result<Self, String> {
         let group_size = config.group_size();
         let bits = config.bits();
+
+        validate_fused_qkv_geometry(weights, config, prefix)?;
 
         let qkv = UnifiedLinear::from_weights(weights, &format!("{prefix}.qkv"), group_size, bits)?;
         let out = UnifiedLinear::from_weights(weights, &format!("{prefix}.out"), group_size, bits)?;

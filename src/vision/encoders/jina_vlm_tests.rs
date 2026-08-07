@@ -279,6 +279,92 @@ pub(crate) fn build_tiny_vision_model() -> (JinaVlmVisionConfig, JinaVlmVisionMo
     (config, model)
 }
 
+/// The rejection message, or a panic naming what was wrongly accepted.
+/// `JinaVlmVisionModel` is not `Debug`, so `expect_err` is unavailable.
+fn vision_error(result: Result<JinaVlmVisionModel, String>, what: &str) -> String {
+    match result {
+        Ok(_) => panic!("{what}"),
+        Err(e) => e,
+    }
+}
+
+#[test]
+fn a_pos_embed_that_is_not_a_two_dimensional_table_is_rejected() {
+    // `forward_features` broadcasts the table with
+    // `reshape(pos_embed, [1, pe_shape[0], pe_shape[1]])`. A 1-D tensor is a
+    // Rust panic on `pe_shape[1]`, and a 3-D one drops elements and aborts
+    // inside MLX's reshape; both happen at the first image request, long after
+    // the checkpoint appeared to load.
+    let config = tiny_config();
+    let flat = config.crop_patches() * config.crop_patches() * config.hidden_size;
+
+    for shape in [
+        vec![flat],
+        vec![1, flat / config.hidden_size, config.hidden_size],
+    ] {
+        let mut weights = tiny_vision_weights(&config);
+        insert(
+            &mut weights,
+            "vision_model.pos_embed",
+            deterministic(flat as usize, 0.2),
+            &shape,
+        );
+        let err = vision_error(
+            JinaVlmVisionModel::from_weights(
+                &weights,
+                "vision_model",
+                "vl_connector",
+                config.clone(),
+            ),
+            "a mis-ranked pos_embed was accepted",
+        );
+        assert!(
+            err.contains("pos_embed") && err.contains("2-D"),
+            "shape {shape:?}: unexpected message: {err}"
+        );
+    }
+}
+
+#[test]
+fn a_pad_embed_without_exactly_two_rows_is_rejected_but_absence_is_allowed() {
+    let config = tiny_config();
+    let concat = config.hidden_size * config.vit_layers.len() as i32;
+
+    // One row: `slice(pad_embed, [1, 0], [2, feat])` is silently clamped by MLX
+    // to a zero-row result and the following reshape aborts the process.
+    // 1-D: a Rust panic on `pe_shape[1]`.
+    for shape in [vec![1, concat], vec![2 * concat]] {
+        let count: i32 = shape.iter().product();
+        let mut weights = tiny_vision_weights(&config);
+        insert(
+            &mut weights,
+            "vl_connector.pad_embed",
+            deterministic(count as usize, 0.9),
+            &shape,
+        );
+        let err = vision_error(
+            JinaVlmVisionModel::from_weights(
+                &weights,
+                "vision_model",
+                "vl_connector",
+                config.clone(),
+            ),
+            "a mis-shaped pad_embed was accepted",
+        );
+        assert!(
+            err.contains("pad_embed"),
+            "shape {shape:?}: unexpected message: {err}"
+        );
+    }
+
+    // A checkpoint that ships no pad embedding at all is still loadable; see the
+    // field's doc comment for what that costs.
+    let mut weights = tiny_vision_weights(&config);
+    weights.remove("vl_connector.pad_embed");
+    JinaVlmVisionModel::from_weights(&weights, "vision_model", "vl_connector", config)
+        .expect("pad_embed is optional on purpose");
+}
+
 fn to_vec_f32(a: &MlxArray) -> Vec<f32> {
     let f = mlxcel_core::astype(a, mlxcel_core::dtype::FLOAT32);
     mlxcel_core::eval(&f);

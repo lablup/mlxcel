@@ -205,7 +205,14 @@ impl JinaVlmProcessor {
             } else {
                 left_margin / self.pooling_h
             };
-            let mut crop_h = crop_patches_h - (right_margin + left_margin);
+            // Saturating for the same reason `crop_window_patches` above is: a
+            // margin pair wider than the crop underflows in release and wraps to
+            // ~1.8e19, which keeps `pooled_h` astronomically large and turns the
+            // `0..pooled_h` loop below into an effectively infinite one. The
+            // writes inside are bounds-guarded so nothing faults; the worker
+            // thread just spins and the server stops serving. The loader rejects
+            // such a config outright, so this is the second line of defence.
+            let mut crop_h = crop_patches_h.saturating_sub(right_margin + left_margin);
             if i == 0 {
                 crop_h += left_margin;
             }
@@ -220,7 +227,7 @@ impl JinaVlmProcessor {
                 } else {
                     left_margin / self.pooling_w
                 };
-                let mut crop_w = crop_patches_w - (right_margin + left_margin);
+                let mut crop_w = crop_patches_w.saturating_sub(right_margin + left_margin);
                 if j == 0 {
                     crop_w += left_margin;
                 }

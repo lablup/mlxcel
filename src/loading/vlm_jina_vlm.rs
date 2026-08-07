@@ -57,8 +57,8 @@ pub(crate) fn load_jina_vlm(model_path: &Path) -> Result<LoadedModel> {
     let mut text_config = JinaVlmTextConfig::from_json(text_value);
     text_config.quantization = Some(Quantization { group_size, bits });
 
-    let vision_config = parse_vision_config(vision_value, group_size, bits);
-    let processor = build_processor(model_path);
+    let vision_config = parse_vision_config(vision_value, group_size, bits)?;
+    let processor = build_processor(model_path)?;
 
     let mut weights = load_vlm_weights_common(model_path, None)?;
     // Apple Silicon runs f16 faster than bf16; quantization planes must stay
@@ -120,7 +120,44 @@ fn read_quantization(full_config: &Value) -> (i32, i32) {
     (group_size, bits)
 }
 
-fn parse_vision_config(vision: &Value, group_size: i32, bits: i32) -> JinaVlmVisionConfig {
+/// Upper bound for the three `vision_config` divisors.
+///
+/// The released config uses 14 / 2 / 2, and no plausible ViT patch or pooling
+/// window is a kilo-pixel wide, so anything past this is a malformed config
+/// rather than a variant worth supporting.
+const MAX_VISION_DIVISOR: i32 = 1024;
+
+/// Range-check one of the three `vision_config` values that divide the patch
+/// grid, **rejecting** rather than clamping.
+///
+/// `patch_size`, `pooling_h` and `pooling_w` are each consumed as a divisor:
+/// `JinaVlmVisionConfig::crop_patches` divides `image_size` by `patch_size`,
+/// `token_length` divides and takes the remainder against both pooling axes, and
+/// `pool_and_project` uses `grid % pooling_*` as a pad width and `grid_* /
+/// pooling_*` as a block count. A zero is an "attempt to divide by zero" panic
+/// on the first image request, which `[profile.release]`'s fail-fast worker
+/// threads turn into a process kill rather than a per-request error. A negative
+/// is worse: it makes the pad width negative, and `mlxcel_core::pad` throws
+/// inside MLX, which crosses the cxx bridge as an uncatchable abort instead of
+/// unwinding into this `Result`.
+///
+/// Clamping is deliberately not an option here, following the precedent in
+/// `vlm_locateanything`: these same three numbers are also read, independently,
+/// into the image processor from `preprocessor_config.json`. Silently flooring
+/// one of the two copies would desynchronize the pooled feature count the
+/// connector emits from the `<im_patch>` count the processor emitted, which
+/// trades a loud failure for a quiet mis-computation.
+fn check_vision_divisor(field: &str, value: i32) -> Result<i32> {
+    if !(1..=MAX_VISION_DIVISOR).contains(&value) {
+        anyhow::bail!(
+            "Jina VLM vision_config.{field} is {value}, but it divides the patch grid and must be \
+             in 1..={MAX_VISION_DIVISOR}"
+        );
+    }
+    Ok(value)
+}
+
+fn parse_vision_config(vision: &Value, group_size: i32, bits: i32) -> Result<JinaVlmVisionConfig> {
     let d = JinaVlmVisionConfig::default();
     let block = vision.get("block_config");
     let attn = block.and_then(|b| b.get("attn_config"));
@@ -163,12 +200,15 @@ fn parse_vision_config(vision: &Value, group_size: i32, bits: i32) -> JinaVlmVis
     let pooling_num_heads = i32_at(pooling_attn, "n_heads", d.pooling_num_heads);
     let pooling_head_dim = i32_at(pooling_attn, "head_dim", d.pooling_head_dim);
 
-    JinaVlmVisionConfig {
+    Ok(JinaVlmVisionConfig {
         hidden_size: i32_at(Some(vision), "hidden_size", d.hidden_size),
         num_hidden_layers: i32_at(Some(vision), "n_layers", d.num_hidden_layers as i32) as usize,
         num_attention_heads: i32_at(attn, "n_heads", d.num_attention_heads),
         head_dim: i32_at(attn, "head_dim", d.head_dim),
-        patch_size: i32_at(Some(vision), "patch_size", d.patch_size),
+        patch_size: check_vision_divisor(
+            "patch_size",
+            i32_at(Some(vision), "patch_size", d.patch_size),
+        )?,
         image_size,
         num_channels: i32_at(Some(vision), "n_channels", d.num_channels),
         intermediate_size: i32_at(ffn, "size", d.intermediate_size),
@@ -189,18 +229,21 @@ fn parse_vision_config(vision: &Value, group_size: i32, bits: i32) -> JinaVlmVis
         pooling_num_heads,
         pooling_head_dim,
         connector_hidden_size: i32_at(projector, "size", d.connector_hidden_size),
-        pooling_h: i32_at(connector, "pooling_h", d.pooling_h),
-        pooling_w: i32_at(connector, "pooling_w", d.pooling_w),
+        pooling_h: check_vision_divisor("pooling_h", i32_at(connector, "pooling_h", d.pooling_h))?,
+        pooling_w: check_vision_divisor("pooling_w", i32_at(connector, "pooling_w", d.pooling_w))?,
         group_size,
         bits,
-    }
+    })
 }
 
 /// Build the image processor from `preprocessor_config.json`.
 ///
 /// Special token ids come from the preprocessor config first (it names all four
 /// explicitly), then from `tokenizer.json`, then from the released defaults.
-fn build_processor(model_path: &Path) -> JinaVlmProcessor {
+///
+/// Geometry that only bounds itself is clamped; geometry that has to agree with
+/// the crop tiling is rejected. See the two blocks near the end.
+fn build_processor(model_path: &Path) -> Result<JinaVlmProcessor> {
     let d = JinaVlmProcessor::default();
     let config = read_optional_model_json(model_path, "preprocessor_config.json");
     let config = config.as_ref();
@@ -277,7 +320,27 @@ fn build_processor(model_path: &Path) -> JinaVlmProcessor {
     let token_length_h = usize_at("token_length_h", crop_patches_h.div_ceil(pooling_h));
     let token_length_w = usize_at("token_length_w", crop_patches_w.div_ceil(pooling_w));
 
-    JinaVlmProcessor {
+    // `crop_image` subtracts the two margins from the per-crop patch count to
+    // size the crop window, so their sum must leave at least one patch. It is
+    // rejected here rather than absorbed, because the degenerate config has no
+    // sensible interpretation: with no crop window `select_tiling` has nothing
+    // to tile against, and the saturating subtractions in `crop_image` would
+    // only stop it hanging, not make it produce a usable image.
+    let crop_patches = crop_patches_h.min(crop_patches_w);
+    let total_margin = overlap_margins.0.checked_add(overlap_margins.1);
+    if total_margin.is_none_or(|m| m >= crop_patches) {
+        anyhow::bail!(
+            "Jina VLM preprocessor_config.json overlap_margins {:?} leave no crop window: the two \
+             margins must sum to less than base_input_size {:?} / patch_size {} = {} patches per \
+             crop",
+            overlap_margins,
+            base_input_size,
+            patch_size,
+            crop_patches
+        );
+    }
+
+    Ok(JinaVlmProcessor {
         base_input_size,
         patch_size,
         max_crops: usize_at("max_crops", d.max_crops),
@@ -306,7 +369,7 @@ fn build_processor(model_path: &Path) -> JinaVlmProcessor {
             image_patch_id: token_at("patch_token_id", "<im_patch>", d.tokens.image_patch_id),
             image_col_id: token_at("column_token_id", "<im_col>", d.tokens.image_col_id),
         },
-    }
+    })
 }
 
 /// `generation_config.json` first (absent in the released MLX conversion), then

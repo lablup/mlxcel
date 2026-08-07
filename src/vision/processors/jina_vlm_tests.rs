@@ -218,6 +218,32 @@ fn a_wide_image_gets_more_columns_of_crops_than_rows() {
     );
 }
 
+#[test]
+fn an_overlap_margin_pair_wider_than_the_crop_cannot_spin_the_pooling_loop() {
+    // 378 / 14 = 27 patches per crop, so margins of 14 + 14 leave no crop
+    // window. The two per-crop subtractions used to be plain `-`: in a release
+    // build they wrapped to ~1.8e19, `pooled_h` stayed astronomically large and
+    // `for py in 0..pooled_h` never terminated. Every write inside is
+    // bounds-guarded, so nothing faulted; the model worker simply spun and the
+    // server stopped serving. The loader rejects this config outright now, and
+    // this pins the second line of defence.
+    let processor = JinaVlmProcessor {
+        overlap_margins: (14, 14),
+        ..JinaVlmProcessor::default()
+    };
+    let (h, w) = (378usize, 378usize);
+    let out = processor.crop_image(&vec![0.5f32; h * w * 3], h, w);
+
+    let [crops, patches, patch_dim] = out.pixel_values_shape;
+    assert!(crops >= 1, "no crop was produced");
+    assert_eq!(patches, 27 * 27);
+    assert_eq!(patch_dim, 14 * 14 * 3);
+    assert_eq!(
+        out.image_input_idx.len(),
+        crops as usize * processor.tokens_per_image()
+    );
+}
+
 /// The `u8` entry point exists so an attacker-sized source is never widened to
 /// `f32` at full resolution. It is only safe to use if it is *exactly* equal to
 /// the old convert-then-resize order, not merely close: the checkpoint's
