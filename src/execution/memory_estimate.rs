@@ -732,11 +732,9 @@ pub fn kv_cache_params_from_path(
     let explicit_head_dim = config_fields::get_u64(text_cfg, config_fields::HEAD_DIM_KEYS);
     let head_dim = if let Some(head_dim) = explicit_head_dim {
         head_dim
-    } else if let Some(hidden_size) = hidden_size {
-        // 64 is the historical fallback for malformed configs with zero heads.
-        hidden_size.checked_div(num_heads).unwrap_or(64)
     } else {
-        return None;
+        // 64 is the historical fallback for malformed configs with zero heads.
+        hidden_size?.checked_div(num_heads).unwrap_or(64)
     };
 
     Some(KvCacheParams {

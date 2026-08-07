@@ -107,7 +107,7 @@ jobs:
       # track `rust-toolchain.toml`'s `channel` rather than be bumped on its own.
       # Dependabot reads the tag as an ordinary version and will try to raise it;
       # `.github/dependabot.yml` ignores this action for that reason.
-      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -187,7 +187,7 @@ jobs:
       # parser resolves to the identical commit for that same input: the two
       # unit-test files below each cover one parser in isolation and cannot
       # catch a same-input value mismatch on their own.
-      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: dtolnay/rust-toolchain@1.97.1
       - name: Run the Rust pin parser's unit and cross-parser tests
         run: cargo test -p mlxcel-mlx-pin
 
