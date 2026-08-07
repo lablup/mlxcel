@@ -12,10 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! MoonViT vision encoder (Kimi-VL / Kimi-VL 2.5).
+//! MoonViT vision encoder (Kimi-VL / Kimi-VL 2.5 / LocateAnything).
 //!
 //! Faithful port of the image path of upstream
 //! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/kimi_vl/vision.py.
+//!
+//! LocateAnything (`model_type = "locateanything"`, issue #847) embeds the same
+//! MoonShot MoonViT-SO-400M tower and reuses this encoder unchanged apart from
+//! two config-carried deltas, which are the only places its upstream
+//! `mlx_vlm/models/locateanything/vision.py` differs: the LayerNorm epsilon is
+//! `1e-5` rather than `1e-6`, and the block MLP uses the tanh-approximate GELU
+//! (`nn.GELU(approx="precise")`) rather than the exact erf GELU. Both are
+//! expressed through [`KimiVLVisionConfig`] (`layer_norm_eps` and
+//! [`MoonViTMlpActivation`]), so the Kimi-VL defaults are untouched.
 //!
 //! MoonViT is a native-resolution ViT: each image is pre-patchified by the
 //! processor into `[num_patches, C, p, p]`, flattened per patch through a
@@ -112,6 +121,47 @@ impl KimiMediaGrid {
     }
 }
 
+/// Which GELU flavour the MoonViT block MLP applies.
+///
+/// Kimi-VL builds `nn.GELU()` (exact, erf-based); LocateAnything builds
+/// `nn.GELU(approx="precise")`, which is MLX's tanh approximation. The two
+/// differ by roughly `3e-4` at the peak of the error curve, so the flavour is
+/// carried explicitly rather than assumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MoonViTMlpActivation {
+    /// Exact erf GELU: `x * 0.5 * (1 + erf(x / sqrt(2)))`. Kimi-VL default.
+    #[default]
+    Gelu,
+    /// tanh-approximate GELU: `0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 x^3)))`.
+    GeluTanh,
+}
+
+impl MoonViTMlpActivation {
+    fn apply(self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        match self {
+            MoonViTMlpActivation::Gelu => mlxcel_core::gelu(x),
+            MoonViTMlpActivation::GeluTanh => gelu_tanh(x),
+        }
+    }
+}
+
+/// tanh-approximate GELU built from primitives.
+///
+/// `mlxcel_core` exposes only erf-based GELU (`gelu` and, despite its name,
+/// `gelu_approx`), so the tanh form is synthesised here the same way
+/// `models::kokoro::ops::gelu_new` does.
+fn gelu_tanh(x: &MlxArray) -> UniquePtr<MlxArray> {
+    const SQRT_2_OVER_PI: f32 = 0.797_884_6;
+    let x2 = mlxcel_core::multiply(x, x);
+    let x3 = mlxcel_core::multiply(&x2, x);
+    let inner = mlxcel_core::add(x, &mlxcel_core::multiply_scalar(&x3, 0.044_715));
+    let t = mlxcel_core::tanh(&mlxcel_core::multiply_scalar(&inner, SQRT_2_OVER_PI));
+    let one = mlxcel_core::full_f32(&[1], 1.0, mlxcel_core::array_dtype(&t));
+    let g = mlxcel_core::add(&t, &one);
+    mlxcel_core::multiply(&mlxcel_core::multiply_scalar(x, 0.5), &g)
+}
+
 /// MoonViT vision configuration.
 ///
 /// Mirrors `VisionConfig` in upstream
@@ -149,6 +199,10 @@ pub struct KimiVLVisionConfig {
     pub temporal_patch_size: usize,
     #[serde(default = "default_layer_norm_eps")]
     pub layer_norm_eps: f32,
+    /// GELU flavour used by the block MLP. Kimi-VL leaves this at the default
+    /// (exact erf); LocateAnything sets [`MoonViTMlpActivation::GeluTanh`].
+    #[serde(default)]
+    pub mlp_activation: MoonViTMlpActivation,
     /// Quantization group_size inherited from the top-level config (0 = unset).
     #[serde(default)]
     pub quant_group_size: i32,
@@ -397,22 +451,34 @@ impl VisionAttention {
     }
 }
 
-/// GELU MLP (`fc0 -> GELU -> fc1`). MoonViT uses the exact (erf) GELU.
+/// GELU MLP (`fc0 -> GELU -> fc1`). Kimi-VL uses the exact (erf) GELU;
+/// LocateAnything uses the tanh approximation. See [`MoonViTMlpActivation`].
 struct VisionMLP {
     fc0: UnifiedLinear,
     fc1: UnifiedLinear,
+    activation: MoonViTMlpActivation,
 }
 
 impl VisionMLP {
-    fn from_weights(weights: &WeightMap, prefix: &str, gs: i32, bits: i32) -> Result<Self, String> {
+    fn from_weights(
+        weights: &WeightMap,
+        prefix: &str,
+        gs: i32,
+        bits: i32,
+        activation: MoonViTMlpActivation,
+    ) -> Result<Self, String> {
         let fc0 = UnifiedLinear::from_weights(weights, &format!("{prefix}.fc0"), gs, bits)?;
         let fc1 = UnifiedLinear::from_weights(weights, &format!("{prefix}.fc1"), gs, bits)?;
-        Ok(Self { fc0, fc1 })
+        Ok(Self {
+            fc0,
+            fc1,
+            activation,
+        })
     }
 
     fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
         let x = self.fc0.forward(x);
-        let x = mlxcel_core::gelu(&x);
+        let x = self.activation.apply(&x);
         self.fc1.forward(&x)
     }
 }
@@ -437,7 +503,13 @@ impl VisionBlock {
         let norm1 = load_layer_norm(weights, &format!("{prefix}.norm1"), config.layer_norm_eps)?;
         let attn =
             VisionAttention::from_weights(weights, config, &format!("{prefix}.attn"), gs, bits)?;
-        let mlp = VisionMLP::from_weights(weights, &format!("{prefix}.mlp"), gs, bits)?;
+        let mlp = VisionMLP::from_weights(
+            weights,
+            &format!("{prefix}.mlp"),
+            gs,
+            bits,
+            config.mlp_activation,
+        )?;
         Ok(Self {
             norm0,
             norm1,

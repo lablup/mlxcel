@@ -329,6 +329,7 @@ pub enum ModelType {
     GlmOcr,            // GLM-OCR (GLM-OCR ViT + GLM-4 text w/ full-width MRoPE)
     YoutuVLM,          // Youtu-VL (SigLIP2 windowed-attn + DeepSeek-V3-style MLA)
     InternVLChatVLM,   // InternVL (internvl_chat): InternViT + pixel-shuffle mlp1 + Qwen2 text
+    LocateAnythingVLM, // LocateAnything: MoonViT + MLP connector + Qwen2 text (grounding)
     SmolVLM,  // SmolVLM/SmolVLM2 (smolvlm): SigLIP + pixel-shuffle connector + SmolLM2 text
     Idefics2, // Idefics2 (idefics2): SigLIP + perceiver-resampler connector + Mistral text
     MiniCPMOVLM, // MiniCPM-o (dynamic SigLIP + resampler + Qwen3-VL text)
@@ -561,6 +562,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::GlmOcr,
     ModelType::YoutuVLM,
     ModelType::InternVLChatVLM,
+    ModelType::LocateAnythingVLM,
     ModelType::SmolVLM,
     ModelType::Idefics2,
     ModelType::MiniCPMOVLM,
@@ -962,6 +964,10 @@ impl ModelType {
             ModelType::InternVLChatVLM => {
                 ("InternVL (InternViT + pixel-shuffle + Qwen2)", "Other VLM")
             }
+            ModelType::LocateAnythingVLM => (
+                "LocateAnything (MoonViT + MLP connector + Qwen2, grounding)",
+                "Other VLM",
+            ),
             ModelType::SmolVLM => ("SmolVLM (SigLIP + pixel-shuffle + SmolLM2)", "Other VLM"),
             ModelType::Idefics2 => (
                 "Idefics2 (SigLIP + perceiver resampler + Mistral)",
@@ -1085,6 +1091,7 @@ mod metadata_tests {
             GlmOcr,
             YoutuVLM,
             InternVLChatVLM,
+            LocateAnythingVLM,
             SmolVLM,
             Idefics2,
             MiniCPMOVLM,

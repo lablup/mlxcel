@@ -266,6 +266,10 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "kimi_linear" => Ok(ModelType::KimiLinear),
         "kimi_vl" => Ok(ModelType::KimiVL),
         "kimi_k25" => Ok(ModelType::KimiK25),
+        // LocateAnything: MoonViT tower + MLP connector + Qwen2 text decoder.
+        // The text sub-config also says "qwen2", so this arm must win at the
+        // top level or the grounding VLM would load as a text-only Qwen2.
+        "locateanything" => Ok(ModelType::LocateAnythingVLM),
         "longcat_flash" => Ok(ModelType::LongcatFlash),
         "longcat_flash_ngram" => Ok(ModelType::LongcatFlashNgram),
         "step3p5" => Ok(ModelType::Step3p5),

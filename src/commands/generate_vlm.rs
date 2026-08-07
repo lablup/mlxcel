@@ -199,6 +199,15 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
                 image_blocks, total_image_tokens
             );
         }
+        VlmPreparationSummary::LocateAnything {
+            image_blocks,
+            total_image_tokens,
+        } => {
+            println!(
+                "LocateAnything: inserted {} image block(s) ({} total image tokens)",
+                image_blocks, total_image_tokens
+            );
+        }
         VlmPreparationSummary::SmolVLM {
             image_blocks,
             total_image_tokens,

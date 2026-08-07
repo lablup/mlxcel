@@ -360,6 +360,9 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // supported for VLM-kind models (the loader refuses it earlier);
         // this keeps the planner dispatch table from panicking.
         | ModelType::InternVLChatVLM
+        // LocateAnything's text backbone is Qwen2 (llama family). TP is refused
+        // for VLM-kind models earlier; this keeps the dispatch table total.
+        | ModelType::LocateAnythingVLM
         // Llama 3.2 Vision's text backbone is Llama-3; TP is not supported for
         // VLM-kind models (the loader refuses it earlier).
         | ModelType::MllamaVLM => "llama",

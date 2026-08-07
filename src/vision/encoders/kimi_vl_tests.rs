@@ -18,7 +18,10 @@
 
 use super::pos_emb::{Learnable2DInterpPosEmb, temporal_sinusoid};
 use super::rope::{Rope2DPosEmb, apply_rope};
-use super::{KimiMediaGrid, KimiVLVisionConfig, KimiVLVisionModel, cu_seqlens, patch_merger};
+use super::{
+    KimiMediaGrid, KimiVLVisionConfig, KimiVLVisionModel, MoonViTMlpActivation, cu_seqlens,
+    patch_merger,
+};
 use mlxcel_core::weights::WeightMap;
 
 fn to_vec(a: &mlxcel_core::MlxArray) -> Vec<f32> {
@@ -129,6 +132,7 @@ fn tiny_config() -> KimiVLVisionConfig {
         spatial_merge_size: 2,
         temporal_patch_size: 2,
         layer_norm_eps: 1e-6,
+        mlp_activation: MoonViTMlpActivation::Gelu,
         quant_group_size: 0,
         quant_bits: 0,
     }
