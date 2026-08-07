@@ -14,7 +14,10 @@
 
 //! Unit tests for the Jina VLM image processor.
 
-use super::{JinaVlmProcessor, get_patches_from_tiling, select_tiling, smart_resize};
+use super::{
+    JinaVlmProcessor, get_patches_from_tiling, resize_bilinear, resize_bilinear_u8, select_tiling,
+    smart_resize,
+};
 use image::{DynamicImage, RgbImage};
 
 fn processor() -> JinaVlmProcessor {
@@ -213,4 +216,40 @@ fn a_wide_image_gets_more_columns_of_crops_than_rows() {
         per_row.iter().any(|&n| n > processor.token_length_w),
         "crop rows were not wider than the thumbnail: {per_row:?}"
     );
+}
+
+/// The `u8` entry point exists so an attacker-sized source is never widened to
+/// `f32` at full resolution. It is only safe to use if it is *exactly* equal to
+/// the old convert-then-resize order, not merely close: the checkpoint's
+/// `antialias: false` bilinear is reproduced by hand, and a resampler change
+/// would silently shift every output pixel.
+#[test]
+fn sampling_u8_at_read_time_is_bit_identical_to_converting_first() {
+    // Deterministic pseudo-random bytes: a gradient would hide ordering bugs by
+    // being locally linear, which bilinear reproduces exactly either way.
+    let (src_h, src_w) = (97usize, 61usize);
+    let source_u8: Vec<u8> = (0..src_h * src_w * 3)
+        .map(|i| ((i * 2_654_435_761usize) >> 7) as u8)
+        .collect();
+    let source_f32: Vec<f32> = source_u8.iter().map(|&v| v as f32 / 255.0).collect();
+
+    // Downscale, upscale, pure-height, pure-width, and the identity shortcut.
+    for &(dst_h, dst_w) in &[
+        (28usize, 14usize),
+        (196usize, 154usize),
+        (97usize, 14usize),
+        (14usize, 61usize),
+        (97usize, 61usize),
+    ] {
+        let widened = resize_bilinear(&source_f32, src_h, src_w, dst_h, dst_w);
+        let sampled = resize_bilinear_u8(&source_u8, src_h, src_w, dst_h, dst_w);
+        assert_eq!(widened.len(), sampled.len(), "{dst_h}x{dst_w}: length");
+        for (i, (a, b)) in widened.iter().zip(sampled.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "{dst_h}x{dst_w}: channel {i} drifted: {a} vs {b}"
+            );
+        }
+    }
 }

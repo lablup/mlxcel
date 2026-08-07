@@ -197,3 +197,111 @@ fn structural_image_tokens_are_suppressed_from_the_output() {
         assert!(suppressed.contains(&id), "token {id} was not suppressed");
     }
 }
+
+/// The merge used to be `one_hot(target_positions) @ active`, a dense
+/// `[seq_len, n_targets]` matrix plus a full GEMM, which made the cost
+/// quadratic in the image count. `scatter_add` replaces it. Pin that the
+/// substitution is bit-exact, not merely close, at both the `f32` and the
+/// `bf16` the real path runs in: every non-selected one-hot term was an exact
+/// `0.0 * x`, so the GEMM only ever reproduced the selected row.
+#[test]
+fn the_sparse_scatter_is_bit_identical_to_the_dense_one_hot_matmul() {
+    let seq_len = 37i32;
+    let h_dim = 24i32;
+    let targets: Vec<i32> = vec![0, 5, 6, 7, 19, 20, 36, 2];
+    let n_targets = targets.len() as i32;
+
+    let base: Vec<f32> = (0..seq_len * h_dim)
+        .map(|i| ((i as f32 * 0.37).sin()) * 0.75)
+        .collect();
+    let feats: Vec<f32> = (0..n_targets * h_dim)
+        .map(|i| ((i as f32 * 0.11).cos()) * 0.5)
+        .collect();
+
+    for dtype in [mlxcel_core::dtype::FLOAT32, mlxcel_core::dtype::BFLOAT16] {
+        let flat_x = mlxcel_core::astype(
+            &mlxcel_core::from_slice_f32(&base, &[seq_len, h_dim]),
+            dtype,
+        );
+        let active = mlxcel_core::astype(
+            &mlxcel_core::from_slice_f32(&feats, &[n_targets, h_dim]),
+            dtype,
+        );
+
+        // Reference: the dense form this replaced.
+        let rows: Vec<i32> = (0..seq_len).collect();
+        let row_arr = mlxcel_core::from_slice_i32(&rows, &[seq_len, 1]);
+        let wide_pos = mlxcel_core::from_slice_i32(&targets, &[1, n_targets]);
+        let one_hot = mlxcel_core::astype(&mlxcel_core::equal(&row_arr, &wide_pos), dtype);
+        let expected = to_vec_f32(&mlxcel_core::add(
+            &flat_x,
+            &mlxcel_core::matmul(&one_hot, &active),
+        ));
+
+        let pos_arr = mlxcel_core::from_slice_i32(&targets, &[n_targets]);
+        let updates = mlxcel_core::reshape(&active, &[n_targets, 1, h_dim]);
+        let got = to_vec_f32(&mlxcel_core::scatter_add(&flat_x, &pos_arr, &updates, 0));
+
+        assert_eq!(expected.len(), got.len(), "dtype {dtype}: length");
+        for (i, (a, b)) in expected.iter().zip(got.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "dtype {dtype}: element {i} drifted: {a} vs {b}"
+            );
+        }
+        // Guard the reference itself: a scatter that wrote nothing, or an
+        // all-zero `active`, would satisfy the equality above trivially.
+        // Compare against `flat_x` *after* the dtype cast, not the `f32`
+        // source, or bf16 rounding alone counts as a change on every row.
+        let before = to_vec_f32(&flat_x);
+        let h = h_dim as usize;
+        let changed: Vec<usize> = (0..seq_len as usize)
+            .filter(|r| (0..h).any(|c| got[r * h + c] != before[r * h + c]))
+            .collect();
+        let mut expected_rows = targets.clone();
+        expected_rows.sort_unstable();
+        expected_rows.dedup();
+        assert_eq!(
+            changed,
+            expected_rows
+                .iter()
+                .map(|&r| r as usize)
+                .collect::<Vec<usize>>(),
+            "dtype {dtype}: scatter wrote the wrong set of rows"
+        );
+    }
+}
+
+/// A feature row past the end of the connector output must be dropped on the
+/// host. MLX's `take` does not bounds-check, so letting it through would be an
+/// out-of-bounds device read rather than an error.
+#[test]
+fn feature_rows_past_the_connector_output_are_skipped() {
+    let model = build_model();
+    let ids = mlxcel_core::from_slice_i32(&[1, 2, 3], &[1, 3]);
+    // One crop pools to exactly one feature row, so rows 1..4 do not exist.
+    let (pixels, masks) = tiny_pixels(1);
+    let base = to_vec_f32(&model.text_model.embedding.forward(&ids));
+
+    // Row 0 -> position 2 is valid; rows 1, 2, 3 have no feature behind them.
+    let merged = to_vec_f32(
+        &model
+            .get_input_embeddings(&ids, &pixels, &[2, 0, 1, 0], &masks)
+            .inputs_embeds,
+    );
+
+    let hidden = 8usize;
+    for position in 0..3usize {
+        let range = position * hidden..(position + 1) * hidden;
+        let changed = base[range.clone()]
+            .iter()
+            .zip(merged[range].iter())
+            .any(|(a, b)| (a - b).abs() > 1e-5);
+        assert_eq!(
+            changed,
+            position == 2,
+            "position {position} changed={changed}; only the row-0 target is real"
+        );
+    }
+}

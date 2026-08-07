@@ -155,8 +155,13 @@ impl JinaVlmProcessor {
             self.min_pixels,
             self.max_pixels,
         );
-        let source: Vec<f32> = rgb.as_raw().iter().map(|&v| v as f32 / 255.0).collect();
-        let base = resize_bilinear(&source, src_h, src_w, resized_h, resized_w);
+        // Sample the 8-bit source directly instead of widening it first. The
+        // decoded image is sized by the request, so a full-resolution `f32` copy
+        // would cost 12 bytes per source pixel before anything has bounded it,
+        // while `smart_resize` has already capped the destination at
+        // `max_pixels`. Only the bounded destination is `f32`.
+        let base = resize_bilinear_u8(rgb.as_raw(), src_h, src_w, resized_h, resized_w);
+        drop(rgb);
 
         self.crop_image(&base, resized_h, resized_w)
     }
@@ -562,7 +567,44 @@ fn resize_bilinear(
     if src_h == dst_h && src_w == dst_w {
         return src.to_vec();
     }
+    resize_bilinear_sampled(src_h, src_w, dst_h, dst_w, |i| src[i])
+}
 
+/// [`resize_bilinear`] over an 8-bit source, scaling each sample into `[0, 1]`
+/// as it is read.
+///
+/// This exists so the first resize never materialises a full-resolution `f32`
+/// copy of the decoded image: that copy is 12 bytes per source pixel and is
+/// sized by whoever supplied the image, whereas the destination is already
+/// bounded by `smart_resize`.
+///
+/// The result is bit-identical to converting the whole source first: the same
+/// `v as f32 / 255.0` values are combined by the same weights in the same
+/// order, so every output channel is the same IEEE expression.
+fn resize_bilinear_u8(
+    src: &[u8],
+    src_h: usize,
+    src_w: usize,
+    dst_h: usize,
+    dst_w: usize,
+) -> Vec<f32> {
+    if src_h == dst_h && src_w == dst_w {
+        return src.iter().map(|&v| v as f32 / 255.0).collect();
+    }
+    resize_bilinear_sampled(src_h, src_w, dst_h, dst_w, |i| src[i] as f32 / 255.0)
+}
+
+/// Shared body of [`resize_bilinear`] and [`resize_bilinear_u8`]. `sample`
+/// returns the source channel at a flat row-major RGB index; everything else
+/// (weights, edge clamping, channel order, the final clip) is identical for
+/// both entry points.
+fn resize_bilinear_sampled(
+    src_h: usize,
+    src_w: usize,
+    dst_h: usize,
+    dst_w: usize,
+    sample: impl Fn(usize) -> f32,
+) -> Vec<f32> {
     let scale_y = src_h as f32 / dst_h as f32;
     let scale_x = src_w as f32 / dst_w as f32;
     let mut out = vec![0.0f32; dst_h * dst_w * 3];
@@ -588,8 +630,8 @@ fn resize_bilinear(
             let dst = (dy * dst_w + dx) * 3;
 
             for c in 0..3 {
-                let top = src[base00 + c] * (1.0 - lx) + src[base01 + c] * lx;
-                let bottom = src[base10 + c] * (1.0 - lx) + src[base11 + c] * lx;
+                let top = sample(base00 + c) * (1.0 - lx) + sample(base01 + c) * lx;
+                let bottom = sample(base10 + c) * (1.0 - lx) + sample(base11 + c) * lx;
                 out[dst + c] = top * (1.0 - ly) + bottom * ly;
             }
         }

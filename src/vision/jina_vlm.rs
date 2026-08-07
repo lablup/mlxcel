@@ -79,6 +79,14 @@ impl JinaVlmModel {
         let feat_shape = mlxcel_core::array_shape(&features);
         let hidden = feat_shape[feat_shape.len() - 1];
         let features = mlxcel_core::reshape(&features, &[-1, hidden]);
+        // Row count of the *reshaped* `[-1, hidden]` features. The gather below
+        // is unchecked: MLX's `take` only wraps negative indices, so a row past
+        // the end is an out-of-bounds device read, which is either silent
+        // garbage or an illegal-address fault that poisons the CUDA context and
+        // takes the whole process down rather than one request. The processor
+        // and the tower agree on this count today, but they parse it from
+        // separate config sources, so enforce it where the pairs are built.
+        let feature_row_count = mlxcel_core::array_shape(&features)[0].max(0) as usize;
         let text_dtype = mlxcel_core::array_dtype(&x);
         let features = if mlxcel_core::array_dtype(&features) != text_dtype {
             mlxcel_core::astype(&features, text_dtype)
@@ -92,8 +100,10 @@ impl JinaVlmModel {
         let mut target_positions: Vec<i32> = Vec::new();
         let mut feature_rows: Vec<i32> = Vec::new();
         for (row, &position) in image_input_idx.iter().enumerate() {
-            if position >= 0 && position < seq_len {
+            if position >= 0 && position < seq_len && row < feature_row_count {
                 target_positions.push(position);
+                // `row < feature_row_count` and the count came from an `i32`
+                // shape, so this cast cannot wrap.
                 feature_rows.push(row as i32);
             }
         }
@@ -108,19 +118,24 @@ impl JinaVlmModel {
         let h_dim = x_shape[x_shape.len() - 1];
         let flat_x = mlxcel_core::reshape(&x, &[seq_len, h_dim]);
 
-        let feat_idx = mlxcel_core::from_slice_i32(&feature_rows, &[feature_rows.len() as i32]);
+        let n_targets = feature_rows.len() as i32;
+        let feat_idx = mlxcel_core::from_slice_i32(&feature_rows, &[n_targets]);
         let active = mlxcel_core::take(&features, &feat_idx, 0);
 
-        // spread = one_hot(target_positions) @ active -> [seq_len, hidden]
-        let rows: Vec<i32> = (0..seq_len).collect();
-        let row_arr = mlxcel_core::from_slice_i32(&rows, &[seq_len, 1]);
-        let pos_arr =
-            mlxcel_core::from_slice_i32(&target_positions, &[1, target_positions.len() as i32]);
-        let one_hot = mlxcel_core::equal(&row_arr, &pos_arr);
-        let one_hot = mlxcel_core::astype(&one_hot, mlxcel_core::array_dtype(&active));
-        let spread = mlxcel_core::matmul(&one_hot, &active);
-        let spread = mlxcel_core::astype(&spread, text_dtype);
-        let merged = mlxcel_core::add(&flat_x, &spread);
+        // Sparse row scatter into the target positions. This replaces a dense
+        // `one_hot(target_positions) @ active`, whose cost was quadratic in the
+        // image count because both `seq_len` and the target count grow with it:
+        // a 16-image request built a multi-gigabyte one-hot matrix and ran a
+        // teraflop-scale GEMM on the serialized model thread just to move a few
+        // tens of thousands of rows. `scatter_add` is the same operation, since
+        // the merge is additive and every non-selected one-hot term was an exact
+        // `0.0 * x`, at the cost of the rows actually written.
+        //
+        // `features` was cast to `text_dtype` above, so `active` (and therefore
+        // `updates`) already matches `flat_x`.
+        let pos_arr = mlxcel_core::from_slice_i32(&target_positions, &[n_targets]);
+        let updates = mlxcel_core::reshape(&active, &[n_targets, 1, h_dim]);
+        let merged = mlxcel_core::scatter_add(&flat_x, &pos_arr, &updates, 0);
 
         InputEmbeddings {
             inputs_embeds: mlxcel_core::reshape(&merged, &x_shape),
