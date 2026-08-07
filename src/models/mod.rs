@@ -176,7 +176,10 @@ pub use exaone::ExaOneModel;
 pub use exaone_moe::ExaoneMoeModel;
 pub use exaone4::{ExaOne4Model, ExaOne4Wrapper};
 pub use falcon_h1::FalconH1Model;
-pub use florence2::{Florence2SeqCache, Florence2TextConfig, Florence2TextModel};
+pub use florence2::{
+    FLORENCE2_VISION_PREFIX, Florence2DaViT, Florence2SeqCache, Florence2TextConfig,
+    Florence2TextModel, Florence2VisionConfig,
+};
 pub use gemma::GemmaModel;
 pub use gemma2::Gemma2Model;
 pub use gemma3::{Gemma3Model, Gemma3Wrapper};

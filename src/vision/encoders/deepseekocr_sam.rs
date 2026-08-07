@@ -135,6 +135,8 @@ pub(crate) fn bicubic_resample(
 
 /// Partition `(B, H, W, C)` into `(B*nWin, win, win, C)` windows, padding H/W up
 /// to a multiple of `win` first. Returns the windows and the padded `(Hp, Wp)`.
+///
+/// Used by: DeepSeek-OCR SAM encoder, Florence-2 DaViT (SpatialBlock)
 pub(crate) fn window_partition(x: &MlxArray, win: i32) -> (UniquePtr<MlxArray>, (i32, i32)) {
     let s = mlxcel_core::array_shape(x);
     let (b, h, w, c) = (s[0], s[1], s[2], s[3]);
@@ -154,6 +156,8 @@ pub(crate) fn window_partition(x: &MlxArray, win: i32) -> (UniquePtr<MlxArray>, 
 
 /// Inverse of [`window_partition`]: `(B*nWin, win, win, C)` -> `(B, H, W, C)`,
 /// cropping the padding.
+///
+/// Used by: DeepSeek-OCR SAM encoder, Florence-2 DaViT (SpatialBlock)
 pub(crate) fn window_unpartition(
     windows: &MlxArray,
     win: i32,

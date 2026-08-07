@@ -37,6 +37,12 @@ mod decoder;
 mod encoder;
 pub(crate) mod layers;
 
+/// DaViT vision backbone, re-exported from the shared vision-encoder tree so
+/// the Florence-2 family directory exposes both halves of the model.
+pub use crate::vision::encoders::florence2_davit::{
+    FLORENCE2_VISION_PREFIX, Florence2DaViT, Florence2VisionConfig,
+};
+
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
