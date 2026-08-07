@@ -246,25 +246,17 @@ pub(crate) fn load_locateanything_vlm(model_path: &Path) -> Result<LoadedModel> 
         vision_config.quant_bits = bits;
     }
 
-    // Mixed precision: `load_vlm_weights_common` skipped its bf16 -> f16 pass
-    // because the checkpoint declares quantization, so convert the remaining
-    // plain-bf16 tensors (tower + connector + q/k/v linear biases) here while
-    // keeping quantization scales/biases at bf16.
-    let hw = mlxcel_core::hardware::get_hardware();
-    if hw.silicon_gen != mlxcel_core::hardware::AppleSiliconGen::Unknown {
-        let had_bf16 = models::convert_bf16_weights_with_keep(&mut weights, |key| {
-            key.ends_with(".scales") || key.ends_with(".biases")
-        });
-        if had_bf16 {
-            models::warn_bf16_precision();
-        }
-    }
-
     // The released conversion is `mixed_4_8`, not uniform 4-bit: `embed_tokens`
     // and some layers' `v_proj` / `down_proj` are 8-bit while the rest is
     // 4-bit. Every per-tensor loader reconciles its own width from the tensor
     // shapes, so those are fine, but the fused QKV projection concatenates
     // q/k/v along axis 0 and therefore needs one shared width.
+    //
+    // This has to run before the bf16 -> f16 pass below, not after it: MLX's
+    // `dequantize` returns an array carrying the scales' dtype, and the scales
+    // are bf16, so every dense q/k/v plane inserted here is a *new* bf16
+    // tensor. Densifying after the conversion pass would leave those planes
+    // bf16 with nothing left to convert them.
     let quant_mode = full_config
         .get("quantization")
         .and_then(|q| q.get("mode"))
@@ -282,6 +274,22 @@ pub(crate) fn load_locateanything_vlm(model_path: &Path) -> Result<LoadedModel> 
             "LocateAnything: dequantized mixed-precision q/k/v planes so the fused QKV \
              projection can concatenate them"
         );
+    }
+
+    // Mixed precision: `load_vlm_weights_common` skipped its bf16 -> f16 pass
+    // because the checkpoint declares quantization, so convert the remaining
+    // plain-bf16 tensors (tower + connector + q/k/v linear biases, plus the
+    // planes just densified above) here while keeping quantization
+    // scales/biases at bf16. The densified planes no longer carry `.scales` /
+    // `.biases` of their own, so the keep-predicate does not exempt them.
+    let hw = mlxcel_core::hardware::get_hardware();
+    if hw.silicon_gen != mlxcel_core::hardware::AppleSiliconGen::Unknown {
+        let had_bf16 = models::convert_bf16_weights_with_keep(&mut weights, |key| {
+            key.ends_with(".scales") || key.ends_with(".biases")
+        });
+        if had_bf16 {
+            models::warn_bf16_precision();
+        }
     }
 
     // Qwen2 text backbone. Keys arrive as `language_model.model.*`; the Qwen2

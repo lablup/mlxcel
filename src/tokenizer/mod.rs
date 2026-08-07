@@ -962,6 +962,15 @@ fn build_qwen2_bpe_tokenizer(model_path: &Path) -> Result<tokenizers::Tokenizer>
 /// is used when the decoder table is absent. Every LocateAnything added token
 /// is `normalized: false`, which is what keeps `<0>`..`<1000>` from being
 /// rewritten by the NFC normalizer.
+///
+/// `special` defaults to `false` in both branches, matching HuggingFace's
+/// `AddedToken` default. Defaulting it to `true` would be actively destructive:
+/// `added_tokens.json` carries no flags at all, so every one of its entries
+/// would be registered special, and `AddedVocabulary`'s `special_tokens_set` is
+/// insert-only (see `demote_tool_parser_markers` and issue #778), so those
+/// tokens would then be stripped from every `decode(.., skip_special_tokens =
+/// true)` with no way to undo it. LocateAnything is unaffected either way: its
+/// `added_tokens_decoder` carries an explicit `special` on all 1038 entries.
 fn read_added_tokens_sorted(model_path: &Path) -> Result<Vec<(u32, tokenizers::AddedToken)>> {
     use tokenizers::AddedToken;
 
@@ -987,7 +996,7 @@ fn read_added_tokens_sorted(model_path: &Path) -> Result<Vec<(u32, tokenizers::A
             let flag = |name: &str, default: bool| {
                 entry.get(name).and_then(|v| v.as_bool()).unwrap_or(default)
             };
-            let token = AddedToken::from(content.to_string(), flag("special", true))
+            let token = AddedToken::from(content.to_string(), flag("special", false))
                 .single_word(flag("single_word", false))
                 .lstrip(flag("lstrip", false))
                 .rstrip(flag("rstrip", false))
@@ -998,7 +1007,7 @@ fn read_added_tokens_sorted(model_path: &Path) -> Result<Vec<(u32, tokenizers::A
         let map: HashMap<String, u32> = serde_json::from_str(&raw)
             .map_err(|e| anyhow::anyhow!("Failed to parse added_tokens.json: {}", e))?;
         for (content, id) in map {
-            out.push((id, AddedToken::from(content, true).normalized(false)));
+            out.push((id, AddedToken::from(content, false).normalized(false)));
         }
     }
 
@@ -1309,8 +1318,8 @@ pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
 mod tests {
     use super::{
         MlxcelTokenizer, build_qwen2_bpe_tokenizer, is_qwen2_slow_tokenizer_dir,
-        remote_tokenizer_override_for_model, remote_tokenizer_repo_for_model,
-        remote_tokenizer_repo_for_model_type,
+        read_added_tokens_sorted, remote_tokenizer_override_for_model,
+        remote_tokenizer_repo_for_model, remote_tokenizer_repo_for_model_type,
     };
     use tokenizers::{AddedToken, Tokenizer, models::bpe::BPE};
 
@@ -1437,6 +1446,95 @@ mod tests {
             err.to_string().contains("declares 99"),
             "unexpected error: {err}"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn added_tokens_decoder_defaults_special_to_false() {
+        // HuggingFace's `AddedToken` defaults `special=False`, so an entry that
+        // omits the key must not be registered special. Defaulting the other
+        // way is unrecoverable: `AddedVocabulary`'s special set is insert-only
+        // (issue #778), so the token would be stripped from every
+        // `skip_special_tokens` decode with no way to demote it afterwards.
+        let dir = temp_dir("qwen2-special-default");
+        write_qwen2_slow_tokenizer_dir(&dir, "Qwen2Tokenizer");
+        let config = serde_json::json!({
+            "tokenizer_class": "Qwen2Tokenizer",
+            "added_tokens_decoder": {
+                "7": { "content": "<|im_start|>", "normalized": false, "special": true },
+                // No `special` key at all: this is the default under test.
+                "8": { "content": "<0>", "normalized": false }
+            }
+        });
+        std::fs::write(
+            dir.join("tokenizer_config.json"),
+            serde_json::to_string(&config).unwrap(),
+        )
+        .unwrap();
+
+        let parsed = read_added_tokens_sorted(&dir).expect("read added tokens");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].0, 7);
+        assert!(parsed[0].1.special, "an explicit special:true must survive");
+        assert_eq!(parsed[1].0, 8);
+        assert!(
+            !parsed[1].1.special,
+            "a missing `special` key must default to non-special"
+        );
+
+        let tokenizer = build_qwen2_bpe_tokenizer(&dir).expect("build");
+        let decoder = tokenizer.get_added_tokens_decoder();
+        assert!(decoder.get(&7).expect("<|im_start|> entry").special);
+        assert!(!decoder.get(&8).expect("<0> entry").special);
+
+        // The consequence that matters: the real control token is stripped from
+        // a skip-special decode while the content-bearing token survives.
+        assert_eq!(tokenizer.decode(&[7, 8], true).expect("decode"), "<0>");
+        assert_eq!(
+            tokenizer.decode(&[7, 8], false).expect("decode"),
+            "<|im_start|><0>"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn added_tokens_json_fallback_tokens_are_not_special() {
+        // `added_tokens.json` is a flat `content -> id` map that carries no
+        // flags, so nothing there justifies marking an entry special. Forcing
+        // `special = true` here would silently strip every added token of a
+        // Qwen2-family checkpoint that ships only this file.
+        let dir = temp_dir("qwen2-added-tokens-json");
+        write_qwen2_slow_tokenizer_dir(&dir, "Qwen2Tokenizer");
+        // Drop `added_tokens_decoder` so the fallback branch is the one taken.
+        std::fs::write(
+            dir.join("tokenizer_config.json"),
+            r#"{"tokenizer_class":"Qwen2Tokenizer","add_prefix_space":false}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("added_tokens.json"),
+            r#"{"<|im_start|>":7,"<0>":8}"#,
+        )
+        .unwrap();
+
+        let parsed = read_added_tokens_sorted(&dir).expect("read added tokens");
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed.iter().all(|(_, token)| !token.special));
+        // `normalized(false)` still applies, which is what keeps `<0>` intact
+        // through the NFC normalizer.
+        assert!(parsed.iter().all(|(_, token)| !token.normalized));
+
+        let tokenizer = build_qwen2_bpe_tokenizer(&dir).expect("build");
+        let decoder = tokenizer.get_added_tokens_decoder();
+        assert!(!decoder.get(&7).expect("<|im_start|> entry").special);
+        assert!(!decoder.get(&8).expect("<0> entry").special);
+        // Nothing was registered special, so a skip-special decode is lossless.
+        assert_eq!(
+            tokenizer.decode(&[7, 8], true).expect("decode"),
+            "<|im_start|><0>"
+        );
+
         let _ = std::fs::remove_dir_all(dir);
     }
 

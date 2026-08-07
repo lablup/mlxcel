@@ -146,10 +146,12 @@ impl LocateAnythingProcessor {
     }
 
     /// Number of merged tokens one `(grid_h, grid_w)` patch grid contributes.
+    ///
+    /// Delegates to the shared prompt-side helper so the processor and the
+    /// `<IMG_CONTEXT>` run builder can never disagree on the count.
     #[inline]
     pub fn merged_token_count(&self, grid: (i32, i32)) -> usize {
-        let merge = (self.merge_kernel_size[0] * self.merge_kernel_size[1]) as i32;
-        ((grid.0 * grid.1) / merge.max(1)).max(0) as usize
+        crate::multimodal::locateanything_prompt::merged_token_count(grid, self.merge_kernel_size)
     }
 
     /// Preprocess a batch of images. Returns the flattened patch tensor
