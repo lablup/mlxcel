@@ -1188,12 +1188,19 @@ const FLORENCE2_CHAT_TEMPLATE: &str = concat!(
 /// with no template either, and the generic fallback's `User:` prefix would
 /// break the task-marker parse, so the family carries its own text-verbatim
 /// template here.
+///
+/// Family detection goes through [`crate::models::get_model_type`] rather
+/// than reading `model_type` raw, so the match is definitionally in sync
+/// with the routing decision: the same JSON sanitization and lowercase
+/// normalization that pick the model's worker also pick its template. A raw
+/// string read here would let a checkpoint that routes to a family through
+/// the normalized path (mixed casing, tolerated JSON) silently fall back to
+/// the generic `User:`/`Assistant:` template, which for Florence-2 rejects
+/// every request at the task-marker parse.
 fn builtin_chat_template(model_path: &Path) -> Option<&'static str> {
-    let config = std::fs::read_to_string(model_path.join("config.json")).ok()?;
-    let config: serde_json::Value = serde_json::from_str(&config).ok()?;
-    match config.get("model_type").and_then(|v| v.as_str())? {
-        "jvlm" | "jina_vlm" => Some(JINA_VLM_CHAT_TEMPLATE),
-        "florence2" => Some(FLORENCE2_CHAT_TEMPLATE),
+    match crate::models::get_model_type(model_path).ok()? {
+        crate::models::ModelType::JinaVLM => Some(JINA_VLM_CHAT_TEMPLATE),
+        crate::models::ModelType::Florence2VLM => Some(FLORENCE2_CHAT_TEMPLATE),
         _ => None,
     }
 }
@@ -1368,6 +1375,35 @@ mod tests {
             )
             .expect("render");
         assert_eq!(rendered, "<CAPTION_TO_PHRASE_GROUNDING> a green car");
+    }
+
+    /// Built-in template selection must ride the same normalization as model
+    /// routing (`get_model_type` lowercases `model_type` and sanitizes the
+    /// JSON), so a checkpoint that routes to Florence-2 through the
+    /// normalized path can never fall back to the generic template, whose
+    /// `User:` prefix would make the task parser reject every request.
+    #[test]
+    fn builtin_template_selection_follows_model_type_normalization() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"model_type": "Florence2"}"#,
+        )
+        .unwrap();
+
+        let processor = ChatTemplateProcessor::from_model_path(dir.path())
+            .expect("template resolution succeeds")
+            .expect("the mixed-case model_type still selects the built-in template");
+        let rendered = processor
+            .apply(
+                &[ChatMessage {
+                    role: "user".to_string(),
+                    content: "<OD>".to_string(),
+                }],
+                None,
+            )
+            .expect("render");
+        assert_eq!(rendered, "<OD>");
     }
 
     #[test]

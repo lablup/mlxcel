@@ -191,6 +191,17 @@ pub fn run_chat(opts: ChatOptions) -> Result<()> {
              mlxcel generate -m <model> -p \"...\""
         ));
     }
+    if matches!(model, mlxcel::LoadedModel::Florence2VLM(_)) {
+        // Florence-2 is an image-task seq2seq model (issue #1073): its
+        // `LanguageModel` forward exists for trait completeness only, so the
+        // REPL's autoregressive loop would re-encode every step and answer
+        // nonsense. `generate` and the server route it to the task pipeline;
+        // there is no conversational surface to route a REPL to.
+        return Err(anyhow!(
+            "Florence-2 is an image-task model without a chat surface; run a task instead: \
+             mlxcel generate -m <model> --image <image> -p '<CAPTION>' (or <OD>, <OCR>, ...)"
+        ));
+    }
     let tokenizer = load_tokenizer(&model_path)?;
     println!(
         "Model loaded in {:.2}s.",
