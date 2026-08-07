@@ -135,6 +135,27 @@ jobs:
       - name: Check every version-tracking crate carries the root version
         run: python3 scripts/ci/check_crate_versions.py
 
+  kernel-dtype-keys:
+    name: kernel dtype keys
+    # Deliberately not behind the `changes` filter, for the same reason as
+    # `crate-versions`: it needs no toolchain, runs in seconds, and the defect it
+    # guards against is silent. MLX's CUDA JIT memoises a compiled kernel under a
+    # name that does not carry the input dtypes, so a launch whose template args
+    # are all ints serves the first dtype's compiled module to every later dtype
+    # at the same geometry, reading buffers through the wrong pointer type.
+    # Issues #1053 and #1054 are two symptoms of exactly that. macOS never sees
+    # it, because Metal's key does carry the dtypes, so this job is the only
+    # place the omission is caught without CUDA hardware.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check every CUDA JIT launch keys its cache on the input dtypes
+        run: python3 scripts/ci/check_kernel_dtype_keys.py
+
   mlx-pin:
     name: MLX pin extraction
     needs: changes

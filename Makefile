@@ -579,6 +579,11 @@ verify-versions: ## Assert every version-tracking workspace crate carries the ro
 	@echo "$(CYAN)[verify] workspace crate versions...$(RESET)"
 	@python3 scripts/ci/check_crate_versions.py
 
+.PHONY: verify-kernel-dtype-keys
+verify-kernel-dtype-keys: ## Assert every CUDA JIT kernel launch keys its cache on the input dtypes (issues #1053, #1054)
+	@echo "$(CYAN)[verify] kernel dtype cache keys...$(RESET)"
+	@python3 scripts/ci/check_kernel_dtype_keys.py
+
 .PHONY: bump-version
 bump-version: ## Release: set every version-tracking crate to VERSION and sync Cargo.lock (make bump-version VERSION=0.5.0)
 	@test -n "$(VERSION)" || { echo "$(RED)usage: make bump-version VERSION=0.5.0$(RESET)"; exit 1; }
@@ -587,7 +592,7 @@ bump-version: ## Release: set every version-tracking crate to VERSION and sync C
 	@$(MAKE) --no-print-directory verify-versions
 
 .PHONY: verify
-verify: verify-versions verify-fmt verify-clippy verify-test ## Run the full CI-faithful gate locally (recommended before push)
+verify: verify-versions verify-kernel-dtype-keys verify-fmt verify-clippy verify-test ## Run the full CI-faithful gate locally (recommended before push)
 	@echo "$(GREEN)[verify] OK: matches the nightly-verify GitHub Actions job$(RESET)"
 
 .PHONY: verify-clean

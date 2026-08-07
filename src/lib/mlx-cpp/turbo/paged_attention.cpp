@@ -488,11 +488,23 @@ mlx::core::array paged_attention_decode(
         num_splits = num_splits_override;
     }
 
+    // `QType`/`KVType`/`VType` exist to key the JIT cache on the input dtypes
+    // and are deliberately unreferenced by the kernel body (issue #1054, same
+    // mechanism as #1053). CUDA names a custom kernel
+    // `"custom_kernel_" + name + template_arguments_hash(template_args)` and
+    // memoises the compiled module under that name process-wide, while the
+    // buffer parameter types are generated from the runtime input dtypes. With
+    // int-only args, two callers that share this geometry but differ in pool
+    // dtype get one compiled module and the later one reads through the wrong
+    // pointer type. Metal already folds the dtypes into its key.
     std::vector<std::pair<std::string, TemplateArg>> template_args = {
         {"Dim", dim},
         {"NRep", n_rep},
         {"DimsPerThread", dims_per_thread},
         {"NumSplits", num_splits},
+        {"QType", q.dtype()},
+        {"KVType", k_pool.dtype()},
+        {"VType", v_pool.dtype()},
     };
 
     // Pack scale into a 1-element f32 array (metal_kernel inputs must be

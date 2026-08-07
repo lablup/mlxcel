@@ -749,9 +749,16 @@ RejectionSampleResult rejection_sample(
     // Philox key; the counter carries the (round, row) pair.
     auto rng_key = mlx::core::random::bits(Shape{2}, 4);
 
+    // `ProbsType`/`ParamsType` key the JIT cache on the input dtypes and are
+    // deliberately unreferenced by the kernel body (issue #1054). This is the
+    // widest exposure of the three sites fixed there: `rejection_sample_accepts`
+    // places no dtype restriction at all, so any float dtype reaches the kernel
+    // while `TgSize` is a constant and `MaxRounds` is a caller cap.
     std::vector<std::pair<std::string, TemplateArg>> template_args = {
         {"TgSize", REJECTION_TG_SIZE},
         {"MaxRounds", rounds},
+        {"ProbsType", probs.dtype()},
+        {"ParamsType", params.dtype()},
     };
 
     std::vector<mlx::core::array> inputs = {probs, params, rng_key};
