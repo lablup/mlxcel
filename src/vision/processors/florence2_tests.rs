@@ -235,6 +235,72 @@ fn resizes_without_preserving_aspect_ratio() {
     assert!(values[row + 7] < 0.1, "{}", values[row + 7]);
 }
 
+/// Regression coverage for the flat NCHW index `c*H*W + y*W + x`: every other
+/// test in this file either targets a square output (`height == width`) or
+/// checks a single axis, so a transposed `y`/`x` (or `H`/`W`) multiplier would
+/// not surface. Here the source image, the target resolution, and even the
+/// two axes of the target resolution are all pairwise distinct (80x40 source,
+/// 8x4 target), and the R channel marks the column half while the G channel
+/// marks the row half, so a swap on either axis flips a distinct assertion.
+#[test]
+fn preserves_nchw_offsets_for_a_non_square_target() {
+    let (src_width, src_height) = (80u32, 40u32);
+    let mut image = RgbImage::new(src_width, src_height);
+    for (x, y, pixel) in image.enumerate_pixels_mut() {
+        let r = if x < src_width / 2 { 255 } else { 0 };
+        let g = if y < src_height / 2 { 255 } else { 0 };
+        *pixel = Rgb([r, g, 0]);
+    }
+
+    let mut processor = from_json(REAL_CONFIG).expect("parse");
+    processor.height = 4;
+    processor.width = 8;
+    processor.do_normalize = false;
+    let processed = processor.preprocess_with_sizes(&[DynamicImage::ImageRgb8(image)]);
+
+    assert_eq!(
+        mlxcel_core::array_shape(&processed.pixel_values),
+        vec![1, 3, 4, 8]
+    );
+
+    let values = to_vec_f32(&processed.pixel_values);
+    assert_eq!(values.len(), 3 * 4 * 8);
+
+    let (height, width, plane) = (4usize, 8usize, 4usize * 8usize);
+    let offset = |channel: usize, y: usize, x: usize| channel * plane + y * width + x;
+
+    // Sample away from the resample-filter boundary on each axis: columns 1
+    // (left) and 6 (right) versus the width-8 midpoint at 4, rows 0 (top) and
+    // 3 (bottom) versus the height-4 midpoint at 2.
+    for &y in &[0usize, height - 1] {
+        // Red (channel 0) tracks the column half regardless of row.
+        assert!(
+            values[offset(0, y, 1)] > 0.9,
+            "left column should be red-high at row {y}: {values:?}"
+        );
+        assert!(
+            values[offset(0, y, 6)] < 0.1,
+            "right column should be red-low at row {y}: {values:?}"
+        );
+    }
+    for &x in &[1usize, 6usize] {
+        // Green (channel 1) tracks the row half regardless of column.
+        assert!(
+            values[offset(1, 0, x)] > 0.9,
+            "top row should be green-high at column {x}: {values:?}"
+        );
+        assert!(
+            values[offset(1, height - 1, x)] < 0.1,
+            "bottom row should be green-low at column {x}: {values:?}"
+        );
+    }
+    // Blue (channel 2) is never written, so the whole plane stays at zero.
+    assert!(
+        values[2 * plane..3 * plane].iter().all(|v| *v < 1e-5),
+        "{values:?}"
+    );
+}
+
 #[test]
 fn an_empty_batch_produces_an_empty_tensor() {
     let processor = from_json(REAL_CONFIG).expect("parse");

@@ -110,19 +110,20 @@ pub fn sanitize(weights: WeightMap) -> WeightMap {
 
 /// Upper bound accepted for `encoder_layers` / `decoder_layers`. Real
 /// Florence-2 exports ship 6 (base) or 12 (large). The cap exists because
-/// [`encoder::Florence2Encoder::from_weights`] and
-/// [`decoder::Florence2Decoder::from_weights`] size a `Vec` from this field
-/// before they look up a single weight, so a negative value out of a hostile
-/// `config.json` becomes `usize::MAX` and aborts with a capacity overflow.
+/// [`super::encoder::Florence2Encoder::from_weights`] and
+/// [`super::decoder::Florence2Decoder::from_weights`] size a `Vec` from this
+/// field before they look up a single weight, so a negative value out of a
+/// hostile `config.json` becomes `usize::MAX` and aborts with a capacity
+/// overflow.
 const MAX_LAYERS: i32 = 256;
 
 /// Upper bound accepted for `max_position_embeddings`. Florence-2 ships 1024.
 ///
 /// The field bounds two separate allocations: the position-table slice the
 /// encoder and decoder take (validated against the loaded table at load time)
-/// and the O(n^2) host buffer [`layers::additive_causal_mask`] fills for a
-/// multi-token decoder call. An unbounded value out of a hostile `config.json`
-/// is an out-of-memory abort rather than an error return.
+/// and the O(n^2) host buffer [`super::layers::additive_causal_mask`] fills
+/// for a multi-token decoder call. An unbounded value out of a hostile
+/// `config.json` is an out-of-memory abort rather than an error return.
 const MAX_POSITION_EMBEDDINGS: i32 = 65_536;
 
 /// BART encoder-decoder shape parameters, parsed from the `text_config`

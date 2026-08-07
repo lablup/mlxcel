@@ -219,6 +219,18 @@ impl Florence2ImageProcessor {
             } else {
                 image.clone()
             };
+            // Divergence from upstream: `resized` is resized in its source color
+            // type (RGBA stays RGBA through `resize_exact`), and `to_rgb8` here
+            // then drops the alpha channel unconditionally. Florence-2's
+            // `preprocessor_config.json` ships `"do_convert_rgb": null`, so
+            // upstream's `convert_to_rgb` step is skipped entirely and a
+            // non-opaque RGBA source is resized and fed to the model with alpha
+            // still attached instead of being flattened
+            // (https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/florence2/processing_florence2.py).
+            // We flatten unconditionally instead because this pipeline only
+            // consumes RGB pixel data downstream; that is the safer, deterministic
+            // choice, at the cost of not bit-matching upstream on RGBA inputs with
+            // partial transparency.
             let rgb = resized.to_rgb8();
             // A `do_resize: false` config can hand back a differently sized
             // buffer; clamp rather than index out of bounds.
