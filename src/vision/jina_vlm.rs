@@ -204,10 +204,9 @@ impl LanguageModel for JinaVlmModel {
         LanguageModel::supports_batching(&self.text_model)
     }
 
-    /// `<im_start>` / `<im_end>` / `<im_patch>` / `<im_col>` / `<|image|>` /
-    /// `<im_slice>` are structural: they only ever appear inside a processor
-    /// built image block, and sampling one would open a block with no features
-    /// behind it.
+    /// `<im_start>` / `<im_end>` / `<im_patch>` / `<im_col>` / `<|image|>` are
+    /// structural: they only ever appear inside a processor built image block,
+    /// and sampling one would open a block with no features behind it.
     fn output_suppressed_token_ids(&self) -> Vec<i32> {
         let tokens = &self.processor.tokens;
         vec![

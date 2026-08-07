@@ -1119,17 +1119,33 @@ fn extract_token(config: &serde_json::Value, key: &str) -> Option<String> {
 }
 
 /// Jina VLM's own chat template, transcribed from `jinaai/jina-vlm`'s
-/// `chat_template.jinja` for minijinja and for the flattened string `content`
-/// this module works with.
+/// `chat_template.jinja` for minijinja.
 ///
 /// Every turn renders as `" <Role>: <text> "` and the generation prompt is
 /// `"Assistant:"`. The doubled space between turns is upstream's, not a typo:
 /// the template emits a trailing space after each turn's text and a leading one
 /// before the next turn. The checkpoint sets `always_start_with_space`, so the
 /// leading space applies to the first turn too.
+///
+/// `content` arrives either flattened to a string (the text-only path) or as
+/// the list of typed parts the server builds for any request carrying media.
+/// The list branch mirrors upstream's `content['type']` loop and emits the
+/// literal `<|image|>` (upstream's `image_prompt_token`) per image part, which
+/// is the marker the Jina VLM runtime splices the processor-built image blocks
+/// at. Concatenating the list with `+` instead would raise a minijinja type
+/// error and drop every image request onto the generic fallback prompt.
 const JINA_VLM_CHAT_TEMPLATE: &str = concat!(
     "{%- for message in messages %}",
-    "{{- ' ' + (message['role'] | capitalize) + ': ' + message['content'] + ' ' }}",
+    "{{- ' ' + (message['role'] | capitalize) + ': ' }}",
+    "{%- if message['content'] is string %}",
+    "{{- message['content'] + ' ' }}",
+    "{%- else %}",
+    "{%- for part in message['content'] %}",
+    "{%- if part['type'] == 'image' %}{{- '<|image|>' }}",
+    "{%- elif part['type'] == 'text' %}{{- part['text'] + ' ' }}",
+    "{%- endif %}",
+    "{%- endfor %}",
+    "{%- endif %}",
     "{%- endfor %}",
     "{%- if add_generation_prompt %}{{- 'Assistant:' }}{%- endif %}"
 );
@@ -1204,6 +1220,65 @@ mod tests {
             )
             .expect("render");
         assert_eq!(rendered, " User: Describe the image. Assistant:");
+    }
+
+    /// Any server request carrying an image renders `content` as a list of
+    /// typed parts, so the built-in template has to walk it the way upstream's
+    /// `chat_template.jinja` does instead of concatenating it as a string.
+    #[test]
+    fn a_typed_image_content_list_renders_the_image_marker_in_place() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("config.json"), r#"{"model_type": "jvlm"}"#).unwrap();
+
+        let processor = ChatTemplateProcessor::from_model_path(dir.path())
+            .expect("template resolution succeeds")
+            .expect("a built-in template is supplied");
+        let rendered = processor
+            .apply_raw(
+                &serde_json::json!([{
+                    "role": "user",
+                    "content": [
+                        {"type": "image"},
+                        {"type": "text", "text": "Describe the image."},
+                    ],
+                }]),
+                None,
+            )
+            .expect("render");
+        assert_eq!(rendered, " User: <|image|>Describe the image. Assistant:");
+    }
+
+    #[test]
+    fn a_system_turn_is_rendered_before_the_user_turn_without_doubling_the_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("config.json"), r#"{"model_type": "jvlm"}"#).unwrap();
+
+        let processor = ChatTemplateProcessor::from_model_path(dir.path())
+            .expect("template resolution succeeds")
+            .expect("a built-in template is supplied");
+        let rendered = processor
+            .apply_raw(
+                &serde_json::json!([
+                    {"role": "system", "content": "Be brief."},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image"},
+                            {"type": "text", "text": "What is this?"},
+                        ],
+                    },
+                ]),
+                None,
+            )
+            .expect("render");
+        assert_eq!(
+            rendered,
+            " System: Be brief.  User: <|image|>What is this? Assistant:"
+        );
+        assert!(
+            !rendered.contains("Assistant: Assistant:"),
+            "got {rendered:?}"
+        );
     }
 
     #[test]

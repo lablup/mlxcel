@@ -14,7 +14,7 @@
 
 //! Unit tests for Jina VLM config normalization and routing.
 
-use super::{parse_vision_config, read_quantization, resolve_eos_token_ids};
+use super::{build_processor, parse_vision_config, read_quantization, resolve_eos_token_ids};
 use crate::models::ModelType;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -149,6 +149,28 @@ fn eos_ids_fall_back_to_the_config_when_generation_config_is_absent() {
         resolve_eos_token_ids(missing, &json!({})),
         crate::models::jina_vlm::JINA_VLM_DEFAULT_EOS_IDS.to_vec()
     );
+}
+
+#[test]
+fn a_zero_geometry_divisor_in_the_preprocessor_config_does_not_panic_the_load() {
+    // `patch_size` / `pooling_h` / `pooling_w` are divisors; a malformed config
+    // must fail into the defaults rather than take the process down.
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("preprocessor_config.json"),
+        serde_json::to_string(&json!({
+            "patch_size": 0,
+            "pooling_h": 0,
+            "pooling_w": 0
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let processor = build_processor(dir.path());
+    assert_eq!(processor.patch_size, 1);
+    assert_eq!(processor.pooling_h, 1);
+    assert_eq!(processor.pooling_w, 1);
 }
 
 #[test]

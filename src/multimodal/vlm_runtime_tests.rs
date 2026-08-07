@@ -15,9 +15,9 @@
 use super::{
     VlmPreparationSummary, expand_gemma3n_audio_tokens, expand_gemma4_audio_tokens_for_server,
     expand_gemma4_unified_video_tokens, expand_gemma4_video_tokens,
-    expand_nemotron_h_nano_omni_audio_tokens_for_server, format_jina_vlm_prompt,
-    format_molmo_v1_prompt_for_processor, prepared_embedding_refs,
-    shift_molmo_v1_image_input_idx_for_bos, should_prepare_vlm_embeddings,
+    expand_nemotron_h_nano_omni_audio_tokens_for_server, format_molmo_v1_prompt_for_processor,
+    prepared_embedding_refs, shift_molmo_v1_image_input_idx_for_bos, should_prepare_vlm_embeddings,
+    split_jina_vlm_prompt,
 };
 use crate::vlm_prompt::{ImageTokenBlockInfo, apply_image_token_blocks};
 
@@ -493,47 +493,92 @@ fn nemotron_server_audio_falls_back_before_last_token_without_end_of_turn() {
     assert_eq!(prompt, vec![2, 100, SO_CTX, SO_CTX, 8]);
 }
 
-// Jina VLM prompt template.
+// Jina VLM prompt segmentation.
 //
-// The checkpoint's `chat_template.jinja` renders one user turn as
-// `" User: " + <image> + text + " " + "Assistant:"`, with the leading space on
-// the first turn gated by `always_start_with_space`. The image block is spliced
-// between the two halves this returns.
+// The checkpoint's `chat_template.jinja` renders one turn as
+// `" <Role>: " + parts + "Assistant:"` and emits `<|image|>` per image part,
+// with the leading space on the first turn gated by `always_start_with_space`.
+// Image block `i` is spliced between segment `i` and segment `i + 1`, the way
+// the reference `_interleave_text_and_image_tokens` replaces each marker.
 
 #[test]
 fn the_jina_vlm_template_wraps_a_bare_prompt_in_one_user_turn() {
-    let (prefix, suffix) = format_jina_vlm_prompt("Describe the image.", true);
-    assert_eq!(prefix, " User: ");
-    assert_eq!(suffix, "Describe the image. Assistant:");
+    let segments = split_jina_vlm_prompt("Describe the image.", 1, true);
+    assert_eq!(segments, [" User: ", "Describe the image. Assistant:"]);
 }
 
 #[test]
 fn always_start_with_space_controls_only_the_leading_space() {
-    let (prefix, suffix) = format_jina_vlm_prompt("Describe the image.", false);
-    assert_eq!(prefix, "User: ");
-    assert_eq!(suffix, "Describe the image. Assistant:");
+    let segments = split_jina_vlm_prompt("Describe the image.", 1, false);
+    assert_eq!(segments, ["User: ", "Describe the image. Assistant:"]);
 }
 
 #[test]
-fn an_inline_image_placeholder_is_removed_rather_than_double_expanded() {
-    // The block is inserted between prefix and suffix, so a literal `<|image|>`
-    // left in the text would open a second, feature-less block.
-    let (prefix, suffix) = format_jina_vlm_prompt("<|image|>What is this?", true);
-    assert_eq!(prefix, " User: ");
-    assert_eq!(suffix, "What is this? Assistant:");
-    assert!(!suffix.contains("<|image|>"));
+fn an_inline_image_placeholder_becomes_the_split_point() {
+    let segments = split_jina_vlm_prompt("<|image|>What is this?", 1, true);
+    assert_eq!(segments, [" User: ", "What is this? Assistant:"]);
+    assert!(segments.iter().all(|s| !s.contains("<|image|>")));
 }
 
 #[test]
 fn an_already_templated_prompt_is_passed_through() {
-    let (prefix, suffix) = format_jina_vlm_prompt("User: Read the sign. Assistant:", true);
-    assert_eq!(prefix, " User: ");
-    assert_eq!(suffix, "Read the sign. Assistant:");
+    let segments = split_jina_vlm_prompt("User: Read the sign. Assistant:", 1, true);
+    assert_eq!(segments, [" User: ", "Read the sign. Assistant:"]);
 }
 
 #[test]
 fn a_prompt_that_only_looks_templated_still_gets_the_generation_marker() {
-    let (prefix, suffix) = format_jina_vlm_prompt("User: what now?", true);
-    assert_eq!(prefix, " User: ");
-    assert_eq!(suffix, "User: what now? Assistant:");
+    let segments = split_jina_vlm_prompt("User: what now?", 1, true);
+    assert_eq!(segments, [" User: ", "User: what now? Assistant:"]);
+}
+
+#[test]
+fn a_template_rendered_prompt_splits_exactly_where_the_marker_sits() {
+    // The server renders this; the CLI reaches the same segments from the bare
+    // prompt above, which is what keeps the two prompts byte-identical.
+    let segments = split_jina_vlm_prompt(" User: <|image|>Describe the image. Assistant:", 1, true);
+    assert_eq!(segments, [" User: ", "Describe the image. Assistant:"]);
+}
+
+#[test]
+fn text_placed_before_the_image_keeps_its_position() {
+    let segments = split_jina_vlm_prompt(" User: Look at <|image|> closely. Assistant:", 1, true);
+    assert_eq!(segments, [" User: Look at ", " closely. Assistant:"]);
+}
+
+#[test]
+fn a_system_led_conversation_is_preserved_without_a_second_generation_marker() {
+    let segments = split_jina_vlm_prompt(
+        " System: Be brief.  User: <|image|>What is this? Assistant:",
+        1,
+        true,
+    );
+    assert_eq!(
+        segments,
+        [" System: Be brief.  User: ", "What is this? Assistant:"]
+    );
+    assert!(
+        segments
+            .iter()
+            .all(|s| !s.contains("Assistant: Assistant:")),
+        "got {segments:?}"
+    );
+}
+
+#[test]
+fn two_images_split_the_prompt_into_three_segments_in_marker_order() {
+    let segments = split_jina_vlm_prompt(
+        " User: first <|image|> then <|image|> done. Assistant:",
+        2,
+        true,
+    );
+    assert_eq!(segments, [" User: first ", " then ", " done. Assistant:"]);
+}
+
+#[test]
+fn a_surplus_marker_with_no_image_behind_it_is_spliced_out() {
+    // A second marker would otherwise open a block with no features behind it.
+    let segments = split_jina_vlm_prompt(" User: <|image|>a<|image|>b Assistant:", 1, true);
+    assert_eq!(segments, [" User: ", "ab Assistant:"]);
+    assert!(segments.iter().all(|s| !s.contains("<|image|>")));
 }

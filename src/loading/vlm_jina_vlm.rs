@@ -263,9 +263,11 @@ fn build_processor(model_path: &Path) -> JinaVlmProcessor {
         .map(|v| v as usize)
         .unwrap_or(d.max_pixels);
 
-    let patch_size = usize_at("patch_size", d.patch_size);
-    let pooling_h = usize_at("pooling_h", d.pooling_h);
-    let pooling_w = usize_at("pooling_w", d.pooling_w);
+    // These three are divisors below; a malformed config must not panic the
+    // whole load.
+    let patch_size = usize_at("patch_size", d.patch_size).max(1);
+    let pooling_h = usize_at("pooling_h", d.pooling_h).max(1);
+    let pooling_w = usize_at("pooling_w", d.pooling_w).max(1);
 
     // `token_length_*` must equal ceil(crop_patches / pooling) or the pooled
     // feature count and the `<im_patch>` count disagree; derive rather than

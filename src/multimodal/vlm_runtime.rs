@@ -56,6 +56,12 @@ const MOLMO_V1_BOS_TOKEN_ID: i32 = 151643;
 /// processor falls back to `eos_token_id` (`<|endoftext|>`).
 const JINA_VLM_BOS_TOKEN_ID: i32 = 151643;
 
+/// The literal `<|image|>` placeholder the chat template renders per image
+/// content part. The processor-built block replaces it in place, mirroring the
+/// reference `JinaVLMProcessor._interleave_text_and_image_tokens`.
+const JINA_VLM_IMAGE_MARKER: &str = "<|image|>";
+const JINA_VLM_USER_TURN: &str = "User: ";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VlmPreparationSummary {
     QwenVlm {
@@ -1875,30 +1881,68 @@ struct PreparedJinaVlmInputs {
     image_tokens: usize,
 }
 
-/// Split the Jina VLM chat template around its `<|image|>` placeholder.
+/// Split the Jina VLM prompt at every `<|image|>` placeholder.
 ///
-/// The checkpoint's `chat_template.jinja` renders one user turn as
-/// `" User: " + <image tokens> + text + " " + "Assistant:"`, with the leading
-/// space on the first turn gated by `always_start_with_space`. A prompt that is
-/// already fully templated (starts with `User:`, ends with `Assistant:`) is
-/// passed through so callers can drive the format themselves.
+/// The checkpoint's `chat_template.jinja` renders one turn as
+/// `" <Role>: " + parts + "Assistant:"` and emits `<|image|>` for each image
+/// content part, with the leading space on the first turn gated by
+/// `always_start_with_space`. The reference
+/// `JinaVLMProcessor._interleave_text_and_image_tokens` then replaces each
+/// `<|image|>` token in place with that image's block, keeping the text before,
+/// between and after the markers exactly where the template put it.
 ///
-/// Returns `(prefix, suffix)`; the image blocks are inserted between them.
-pub(crate) fn format_jina_vlm_prompt(
+/// Returns `n_images + 1` segments: image block `i` is spliced between segment
+/// `i` and segment `i + 1`.
+pub(crate) fn split_jina_vlm_prompt(
     prompt: &str,
+    n_images: usize,
     always_start_with_space: bool,
-) -> (String, String) {
-    let cleaned = prompt.replace("<|image|>", "");
-    let cleaned = cleaned.trim();
+) -> Vec<String> {
     let lead = if always_start_with_space { " " } else { "" };
-    let prefix = format!("{lead}User: ");
+    let trimmed = prompt.trim();
+    let mut templated = if is_jina_vlm_templated(trimmed) {
+        format!("{lead}{trimmed}")
+    } else {
+        format!("{lead}{JINA_VLM_USER_TURN}{trimmed} Assistant:")
+    };
 
-    if let Some(rest) = cleaned.strip_prefix("User:")
-        && cleaned.ends_with("Assistant:")
-    {
-        return (prefix, rest.trim_start().to_string());
+    // An image with no placeholder still has to land somewhere. Put it at the
+    // head of the first user turn, which is where the checkpoint's own template
+    // renders `<|image|>` for the usual image-first content list.
+    if n_images > 0 && !templated.contains(JINA_VLM_IMAGE_MARKER) {
+        let at = templated
+            .find(JINA_VLM_USER_TURN)
+            .map(|start| start + JINA_VLM_USER_TURN.len())
+            .unwrap_or(0);
+        templated.insert_str(at, &JINA_VLM_IMAGE_MARKER.repeat(n_images));
     }
-    (prefix, format!("{cleaned} Assistant:"))
+
+    let mut segments: Vec<String> = templated
+        .split(JINA_VLM_IMAGE_MARKER)
+        .map(str::to_string)
+        .collect();
+    // A marker with no image behind it would open a feature-less block, and an
+    // image with no marker has to go somewhere; reconcile both against the
+    // image count so the caller always gets exactly `n_images + 1` segments.
+    while segments.len() > n_images + 1 {
+        let surplus = segments.remove(n_images + 1);
+        segments[n_images].push_str(&surplus);
+    }
+    while segments.len() < n_images + 1 {
+        let last = segments.len() - 1;
+        segments.insert(last, String::new());
+    }
+    segments
+}
+
+/// Whether the prompt already carries the rendered turn structure, in which
+/// case it is preserved verbatim so a system turn or an image in a later turn
+/// keeps its position.
+fn is_jina_vlm_templated(trimmed: &str) -> bool {
+    trimmed.ends_with("Assistant:")
+        && ["User:", "System:", "Assistant:"]
+            .iter()
+            .any(|role| trimmed.starts_with(role))
 }
 
 fn prepare_jina_vlm_inputs<E>(
@@ -1910,14 +1954,14 @@ fn prepare_jina_vlm_inputs<E>(
 where
     E: FnMut(&str, bool) -> Vec<i32>,
 {
-    let (prefix, suffix) = format_jina_vlm_prompt(prompt, jina.always_start_with_space);
-    let prefix_ids = encode(&prefix, false);
-    let suffix_ids = encode(&suffix, false);
+    let segments = split_jina_vlm_prompt(prompt, images.len(), jina.always_start_with_space);
 
     // The reference processor prepends BOS (`bos_token_id or eos_token_id`,
     // which is `<|endoftext|>` here) and shifts every image position by one.
     let mut tokens: Vec<i32> = vec![JINA_VLM_BOS_TOKEN_ID];
-    tokens.extend(prefix_ids);
+    if !segments[0].is_empty() {
+        tokens.extend(encode(&segments[0], false));
+    }
 
     let mut pixel_values: Vec<f32> = Vec::new();
     let mut image_masks: Vec<f32> = Vec::new();
@@ -1927,7 +1971,7 @@ where
     let mut patch_dim = 0i32;
     let mut image_tokens = 0usize;
 
-    for image in images {
+    for (index, image) in images.iter().enumerate() {
         let processed = jina.processor.preprocess_image(image);
         let block_start = tokens.len() as i32;
         image_input_idx.extend(
@@ -1944,9 +1988,14 @@ where
         total_crops += processed.pixel_values_shape[0];
         n_patches = processed.pixel_values_shape[1];
         patch_dim = processed.pixel_values_shape[2];
-    }
 
-    tokens.extend(suffix_ids);
+        // The text that followed this marker resumes right after its block, so
+        // the interleaving matches the reference processor.
+        let after = &segments[index + 1];
+        if !after.is_empty() {
+            tokens.extend(encode(after, false));
+        }
+    }
 
     PreparedJinaVlmInputs {
         tokens,
