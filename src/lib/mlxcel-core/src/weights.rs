@@ -344,7 +344,8 @@ pub fn load_weights_from_dir<P: AsRef<Path>>(dir: P) -> Result<WeightMap, String
 /// [`WeightMap`], avoiding the peak memory cost of loading a full checkpoint and
 /// filtering it afterwards.
 ///
-/// Used by: Qwen3-Omni speech sub-stack loader via `load_vlm_weights_common_filtered`.
+/// Used by: Qwen3-Omni speech sub-stack loader via `load_vlm_weights_common_filtered`,
+/// Florence-2 text-core loader (`Florence2TextModel::load`).
 pub fn load_weights_from_dir_filtered<P, F>(dir: P, mut keep: F) -> Result<WeightMap, String>
 where
     P: AsRef<Path>,
