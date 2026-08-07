@@ -346,14 +346,14 @@ impl Florence2Model {
     /// the joint attention mask.
     ///
     /// Returns `(inputs_embeds [batch, image + prompt, d_model],
-    /// attention_mask [batch, image + prompt])`. The mask is applied by the
-    /// BART encoder's self-attention, via the additive form that
-    /// [`Self::encode_with_image_features`] converts it to; it is all ones
-    /// here because this model drives a single image and a single prompt
-    /// with no padding. Supporting a genuinely padded batch would also need
-    /// the same mask threaded into decoder cross-attention, which is not
-    /// implemented: `Florence2Attention::cross_attention` currently passes
-    /// `None`.
+    /// attention_mask [batch, image + prompt])`. Hand the mask to
+    /// [`Self::encode_fused`], which converts it to the additive form the
+    /// BART encoder's self-attention applies. It is all ones here because
+    /// this model drives a single image and a single prompt with no padding,
+    /// so [`Self::encode_with_image_features`] skips the conversion; a
+    /// genuinely padded batch would also need the same mask threaded into
+    /// decoder cross-attention, which is not implemented
+    /// (`Florence2Attention::cross_attention` currently passes `None`).
     pub fn merge_input_ids_with_image_features(
         &self,
         image_features: &MlxArray,
@@ -404,10 +404,37 @@ impl Florence2Model {
         prompt_ids: &[i32],
     ) -> Result<UniquePtr<MlxArray>, String> {
         let prompt_embeds = self.embed_prompt(prompt_ids);
-        let (inputs_embeds, attention_mask) =
+        let (inputs_embeds, _attention_mask) =
             self.merge_input_ids_with_image_features(image_features, prompt_embeds.as_deref())?;
+        // The mask this just built is all ones by construction: the image half
+        // is all feature tokens and the prompt half is all prompt tokens, so
+        // there is nothing to mask out. Passing it anyway would add a provably
+        // all-zero `[batch, 1, 1, seq]` tensor into every encoder layer's
+        // `[batch, heads, seq, seq]` logits, an arithmetic identity costing
+        // tens of millions of elementwise f16 adds per encode. Callers that do
+        // have padding go through [`Self::encode_fused`] with their own mask.
+        self.encode_fused(&inputs_embeds, None)
+    }
 
-        let seq = mlxcel_core::array_shape(&inputs_embeds)[1];
+    /// Run the BART encoder over an already-fused `[batch, seq, d_model]`
+    /// embedding sequence.
+    ///
+    /// `attention_mask` is the 0/1 mask over the fused sequence, in the shape
+    /// [`Self::merge_input_ids_with_image_features`] returns it; it is
+    /// converted to the additive form the attention adds to its logits. Pass
+    /// `None` when every position is a real token.
+    pub fn encode_fused(
+        &self,
+        inputs_embeds: &MlxArray,
+        attention_mask: Option<&MlxArray>,
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        let shape = mlxcel_core::array_shape(inputs_embeds);
+        if shape.len() != 3 {
+            return Err(format!(
+                "Florence-2 fused encoder input must be [batch, seq, d_model], got {shape:?}"
+            ));
+        }
+        let seq = shape[1];
         let max_positions = self.config.text.max_position_embeddings;
         if seq > max_positions {
             return Err(format!(
@@ -415,10 +442,13 @@ impl Florence2Model {
             ));
         }
 
-        let additive = additive_attention_mask(&attention_mask, self.dtype)?;
+        let additive = match attention_mask {
+            Some(mask) => Some(additive_attention_mask(mask, self.dtype)?),
+            None => None,
+        };
         Ok(self
             .text
-            .encode_embeds_with_mask(&inputs_embeds, Some(&additive)))
+            .encode_embeds_with_mask(inputs_embeds, additive.as_deref()))
     }
 
     /// Fresh decode-loop cache sized to the decoder depth.

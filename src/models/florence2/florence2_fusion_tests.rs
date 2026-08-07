@@ -855,6 +855,41 @@ fn encode_matches_manual_fusion_then_text_encoder() {
     }
 }
 
+/// The integrated path skips the additive-mask conversion because the mask it
+/// builds is all ones. That is only sound if an all-ones mask really is the
+/// identity, and the conversion is only worth keeping if a mask with a zero
+/// really changes the answer. Pin both halves.
+#[test]
+fn encoder_mask_is_identity_when_all_ones_and_load_bearing_otherwise() {
+    let model = tiny_model(&["spatial_avg_pool", "temporal_avg_pool"]);
+    let prompt_ids = [3i32, 4, 5];
+
+    let features = model.encode_image(&pixels()).unwrap();
+    let prompt_embeds = model.embed_prompt(&prompt_ids).unwrap();
+    let (fused, mask) = model
+        .merge_input_ids_with_image_features(&features, Some(&prompt_embeds))
+        .unwrap();
+
+    let unmasked = to_vec_f32(&model.encode_fused(&fused, None).unwrap());
+    let all_ones = to_vec_f32(&model.encode_fused(&fused, Some(&mask)).unwrap());
+    assert_eq!(unmasked, all_ones, "an all-ones mask must be the identity");
+
+    // Drop the last prompt position out of the mask.
+    let seq = mlxcel_core::array_shape(&mask)[1];
+    let mut values = vec![1.0f32; seq as usize];
+    values[seq as usize - 1] = 0.0;
+    let padded = mlxcel_core::from_slice_f32(&values, &[1, seq]);
+    let masked = to_vec_f32(&model.encode_fused(&fused, Some(&padded)).unwrap());
+    assert_ne!(
+        unmasked, masked,
+        "masking a position out must change the encoder output"
+    );
+    assert!(
+        masked.iter().all(|v| v.is_finite()),
+        "masked encoder output must stay finite"
+    );
+}
+
 #[test]
 fn encode_rejects_sequences_past_max_position_embeddings() {
     let model = tiny_model(&["spatial_avg_pool", "temporal_avg_pool"]);
