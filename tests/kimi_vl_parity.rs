@@ -24,7 +24,9 @@
 use std::path::PathBuf;
 
 use mlxcel::models::{ModelType, get_model_type};
-use mlxcel::vision::encoders::kimi_vl::{KimiMediaGrid, KimiVLVisionConfig, KimiVLVisionModel};
+use mlxcel::vision::encoders::kimi_vl::{
+    KimiMediaGrid, KimiVLVisionConfig, KimiVLVisionModel, MoonViTMlpActivation,
+};
 use mlxcel::vision::kimi_vl::KimiVLMultiModalProjector;
 use mlxcel_core::weights::WeightMap;
 
@@ -98,6 +100,7 @@ fn tiny_config(depth: usize) -> KimiVLVisionConfig {
         spatial_merge_size: 2,
         temporal_patch_size: 2,
         layer_norm_eps: 1e-6,
+        mlp_activation: MoonViTMlpActivation::Gelu,
         quant_group_size: 0,
         quant_bits: 0,
     }
