@@ -37,6 +37,18 @@ fn location_bins_reads_every_token() {
     // Malformed tokens must be skipped without swallowing the next one.
     assert_eq!(location_bins("<loc_><loc_7>"), vec![7]);
     assert_eq!(location_bins("<loc_12<loc_8>"), vec![8]);
+    // Leading zeros are ordinary digits, not an overflow.
+    assert_eq!(location_bins("<loc_0000000000000005>"), vec![5]);
+}
+
+/// A digit run too wide for `i32` saturates instead of vanishing. Upstream's
+/// `int()` has no width limit, and dropping the token would shift every bin
+/// after it into the wrong slot of the four-at-a-time grouping.
+#[test]
+fn location_bins_saturates_instead_of_dropping_a_wide_run() {
+    assert_eq!(location_bins("<loc_99999999999><loc_7>"), vec![i32::MAX, 7]);
+    assert_eq!(parse_bin("999"), 999);
+    assert_eq!(parse_bin("99999999999"), i32::MAX);
 }
 
 #[test]

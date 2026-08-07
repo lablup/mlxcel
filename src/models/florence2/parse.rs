@@ -53,7 +53,7 @@ use super::coords::{
 };
 use super::scan::{
     PHRASE_GROUNDING_BLACKLIST, PHRASE_STOPS, PHRASE_STOPS_POLY, ascii_only, box_bins,
-    leading_phrase, location_bins, strip_bare_loc_prefix, strip_sequence_markers,
+    leading_phrase, location_bins, parse_bin, strip_bare_loc_prefix, strip_sequence_markers,
 };
 
 /// One detected box with its open-vocabulary label.
@@ -158,8 +158,8 @@ pub(crate) fn parse_ocr(text: &str, size: Florence2ImageSize) -> Vec<QuadInstanc
         let mut bins = [0i32; 8];
         let mut complete = true;
         for (slot, bin) in bins.iter_mut().enumerate() {
-            match captures.get(slot + 2).and_then(|g| g.as_str().parse().ok()) {
-                Some(value) => *bin = value,
+            match captures.get(slot + 2) {
+                Some(group) => *bin = parse_bin(group.as_str()),
                 None => complete = false,
             }
         }

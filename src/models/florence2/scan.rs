@@ -161,13 +161,25 @@ pub(super) fn leading_phrase<'a>(chunk: &'a str, stops: &[&str]) -> Option<&'a s
     None
 }
 
+/// Parse a `<loc_N>` digit run the way upstream's `int()` does.
+///
+/// Python integers are unbounded, so a digit run wider than `i32` still yields
+/// a value there. Saturating rather than discarding the token is what keeps
+/// the four-at-a-time grouping in [`box_bins`] and the eight-token OCR record
+/// aligned: dropping one bin would silently re-pair every bin after it in the
+/// same chunk. Unreachable on real output, because the vocabulary carries only
+/// `<loc_0>` .. `<loc_999>`.
+pub(super) fn parse_bin(digits: &str) -> i32 {
+    digits.parse::<i32>().unwrap_or(i32::MAX)
+}
+
 /// Read every `<loc_N>` bin in `text`, left to right.
 ///
 /// Hand-rolled rather than a regex because the pattern is a fixed literal with
-/// one digit run, and this is the innermost step of every parser. Values that
-/// overflow `i32` or exceed the 1000-bin range cannot occur in real output
-/// (the tokenizer has no token for them) but are accepted here rather than
-/// rejected, matching upstream's plain `int()`.
+/// one digit run, and this is the innermost step of every parser. Bins outside
+/// the 1000-bin range cannot occur in real output (the tokenizer has no token
+/// for them) but are accepted here rather than rejected, matching upstream's
+/// plain `int()`; see [`parse_bin`] for the width case.
 pub(super) fn location_bins(text: &str) -> Vec<i32> {
     let bytes = text.as_bytes();
     let mut out = Vec::new();
@@ -179,9 +191,7 @@ pub(super) fn location_bins(text: &str) -> Vec<i32> {
             cursor += 1;
         }
         if cursor > digits_start && bytes.get(cursor) == Some(&b'>') {
-            if let Ok(bin) = text[digits_start..cursor].parse::<i32>() {
-                out.push(bin);
-            }
+            out.push(parse_bin(&text[digits_start..cursor]));
             index = cursor + 1;
         } else {
             index = digits_start;
