@@ -45,6 +45,20 @@ use super::ImageProcessor;
 /// PIL's `Image.BICUBIC`, the only `resample` value Florence-2 ships.
 const PIL_BICUBIC: u32 = 3;
 
+/// Upper bound accepted for either edge of the `size` target. Real Florence-2
+/// exports ship 768 on both axes.
+///
+/// The cap exists because `size` is the only field in this file that becomes an
+/// allocation: [`Florence2ImageProcessor::preprocess_with_sizes`] sizes its
+/// host buffer as `batch * 3 * height * width` f32 before it looks at a single
+/// pixel. An unbounded value out of a hostile `preprocessor_config.json` is a
+/// multi-gigabyte allocation and an out-of-memory abort rather than an error
+/// return, and a value past `usize::MAX / 12` wraps that product in a release
+/// build, leaving a short buffer for a write loop that still runs to the
+/// configured extent. Same reasoning, and the same shape, as `MAX_LAYERS` and
+/// `MAX_POSITION_EMBEDDINGS` in `src/models/florence2/checkpoint.rs`.
+const MAX_SIZE_EDGE: usize = 8192;
+
 /// Preprocessing settings read from `preprocessor_config.json`.
 ///
 /// Every field is read from the file rather than hard-coded: the checkpoint is
@@ -154,6 +168,11 @@ impl Florence2ImageProcessor {
         if height == 0 || width == 0 {
             return Err(format!(
                 "Florence-2 preprocessor_config.json size {width}x{height} must be positive"
+            ));
+        }
+        if height > MAX_SIZE_EDGE || width > MAX_SIZE_EDGE {
+            return Err(format!(
+                "Florence-2 preprocessor_config.json size {width}x{height} exceeds the {MAX_SIZE_EDGE} per-edge limit"
             ));
         }
 

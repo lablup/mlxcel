@@ -295,3 +295,67 @@ fn empty_and_marker_only_answers_produce_nothing() {
         );
     }
 }
+
+/// Every parser runs over decoder output, which in a served deployment is
+/// attacker influenced through the image and the task input, so malformed and
+/// non-ASCII answers have to come back as "no instances" rather than as a
+/// process-killing panic.
+///
+/// The scanners in [`super::scan`] walk byte offsets rather than characters,
+/// so the cases below place multi-byte characters against every boundary those
+/// scanners take a slice at: the leading-whitespace cut, the stop-marker
+/// lookahead, the `<loc_` digit run, and the bare `loc_N>` prefix strip. The
+/// malformed-token cases pin the scanner's advance rule, which is what keeps
+/// [`super::scan::location_bins`] from looping on input it cannot consume.
+#[test]
+fn adversarial_answers_do_not_panic() {
+    let wide_digits = format!("<loc_{}>", "9".repeat(64));
+    let deep_prefix = "<loc_".repeat(512);
+    let long_run = locs(&[7i32; 4096]);
+    let cases: Vec<String> = vec![
+        // Multi-byte characters against each slicing boundary.
+        format!("\u{a0}\u{d55c}car{}", locs(&[1, 2, 3, 4])),
+        format!("\u{1f600}{}", locs(&[1, 2, 3, 4])),
+        format!("car\u{1f600}{}", locs(&[1, 2, 3, 4])),
+        format!("{}\u{1f600}", locs(&[1, 2, 3, 4])),
+        format!("<poly>\u{d55c}{}</poly>", locs(&[1, 2, 3, 4])),
+        format!("a\u{1f600}<sep>{}", locs(&[1, 2, 3, 4])),
+        "loc_\u{1f600}>car".to_string(),
+        format!("loc_12>\u{d55c}{}", locs(&[1, 2, 3, 4])),
+        // Malformed location tokens: no digits, no terminator, nested opens.
+        format!("car<loc_>{}", locs(&[1, 2, 3])),
+        format!("car<loc_12{}", locs(&[1, 2, 3])),
+        deep_prefix.clone(),
+        format!("car{deep_prefix}{}", locs(&[1, 2, 3, 4])),
+        // A digit run far wider than i32, which saturates rather than
+        // realigning the four-at-a-time grouping.
+        format!("car{}{}", wide_digits.repeat(4), locs(&[1, 2, 3, 4])),
+        // Unbalanced polygon and separator markers.
+        format!("car<poly>{}", locs(&[1, 2, 3, 4])),
+        format!("car</poly>{}<sep>", locs(&[1, 2, 3, 4])),
+        format!("car<sep><sep><sep>{}", locs(&[1, 2, 3, 4])),
+        // Sequence markers wedged between a phrase and its coordinates.
+        format!("car<s></s><pad>{}", locs(&[1, 2, 3, 4])),
+        // Newline before the first stop position, which drops the chunk.
+        format!("car\n{}", locs(&[1, 2, 3, 4])),
+        // Whitespace-only and marker-only phrases.
+        format!("   {}", locs(&[1, 2, 3, 4])),
+        format!("\u{a0}{}", locs(&[1, 2, 3, 4])),
+        // Long repetition, to keep the scanners' linear advance honest.
+        long_run.clone(),
+        format!("car{long_run}"),
+        format!("car{}", "<loc_1><sep>".repeat(2048)),
+    ];
+
+    for text in &cases {
+        for allow_empty in [false, true] {
+            let _ = parse_boxes(text, unit_size(), allow_empty);
+            let _ = parse_polygons(text, unit_size(), allow_empty);
+        }
+        let _ = parse_ocr(text, unit_size());
+        let _ = parse_phrase_grounding(text, unit_size());
+        for task in super::super::tasks::Florence2Task::ALL {
+            let _ = super::super::postprocess::post_process(text, task, unit_size());
+        }
+    }
+}

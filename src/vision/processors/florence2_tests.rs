@@ -99,6 +99,26 @@ fn rejects_configurations_it_would_silently_mishandle() {
         "\"size\": {\"height\": 0, \"width\": 0}",
     );
     assert!(from_json(&zero_size).is_err());
+
+    // `size` is the only field here that becomes an allocation, so an
+    // oversized one has to be refused at parse time rather than turned into a
+    // multi-gigabyte host buffer, and a value large enough to wrap the
+    // `batch * 3 * height * width` product has to be refused for the same
+    // reason it would otherwise be dangerous: the write loop still runs to the
+    // configured extent.
+    let huge_size = REAL_CONFIG.replace(
+        "\"size\": {\"height\": 768, \"width\": 768}",
+        "\"size\": {\"height\": 65536, \"width\": 65536}",
+    );
+    assert!(from_json(&huge_size).is_err());
+    let wrapping_size = REAL_CONFIG.replace(
+        "\"size\": {\"height\": 768, \"width\": 768}",
+        "\"size\": {\"height\": 4294967296, \"width\": 4294967296}",
+    );
+    assert!(from_json(&wrapping_size).is_err());
+
+    // The shipped 768 stays inside the cap.
+    assert!(from_json(REAL_CONFIG).is_ok());
 }
 
 #[test]
