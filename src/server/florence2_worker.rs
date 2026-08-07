@@ -67,6 +67,11 @@ pub(crate) const FLORENCE2_MEDIA_UNSUPPORTED_MSG: &str =
 pub(crate) const FLORENCE2_IMAGE_REQUIRED_MSG: &str = "Florence-2 requires exactly one image per request: attach one image_url content part and \
      set the message text to a task prompt such as <CAPTION>, <OCR>, or <OD>";
 
+/// Error message sent when the request's client already disconnected before
+/// the worker reached it in the queue.
+pub(crate) const FLORENCE2_CANCELLED_BEFORE_START_MSG: &str =
+    "Florence-2 request cancelled before generation started";
+
 /// Upper bound, in bytes, on the caller-supplied input text an input-taking
 /// task may interpolate into the encoder prompt.
 ///
@@ -74,8 +79,16 @@ pub(crate) const FLORENCE2_IMAGE_REQUIRED_MSG: &str = "Florence-2 requires exact
 /// `<CAPTION_TO_PHRASE_GROUNDING>` caption, e.g. a whole
 /// `<MORE_DETAILED_CAPTION>` paragraph fed back for grounding) while
 /// bounding request-boundary work. The encoder's own
-/// `max_position_embeddings` check remains the final token-level bound; this
-/// byte bound exists so a hostile payload is refused before tokenization.
+/// `max_position_embeddings` check remains the final token-level bound, and
+/// it can reject a shorter input than this one, because the fused encoder
+/// sequence carries the image's projected tokens ahead of the prompt.
+///
+/// This is not a pre-tokenization bound on the server path: the dispatch
+/// thread already pre-tokenizes the rendered prompt (issue #633) before the
+/// request reaches this worker, which discards those ids and tokenizes
+/// through the task processor instead. What the bound does refuse, before
+/// any model work, is oversized text reaching `Florence2Task::expand` and
+/// the encoder prompt.
 pub(crate) const MAX_TASK_INPUT_BYTES: usize = 2048;
 
 /// Validate the caller-supplied input text for a Florence-2 task at the
@@ -176,6 +189,48 @@ pub(crate) fn parse_region_bins(input: &str) -> Option<[u16; 4]> {
     rest.is_empty().then_some(bins)
 }
 
+/// Whether a Florence-2 request must be rejected for carrying audio or video.
+///
+/// Mirrors [`crate::server::diffusion_worker::reject_audio_video`]: the guard
+/// is a pure function over the two presence flags so the request-to-response
+/// mapping is unit-testable without constructing a `ModelRequest` and a live
+/// model.
+pub(crate) fn reject_media(audio_present: bool, video_present: bool) -> Option<&'static str> {
+    if audio_present || video_present {
+        Some(FLORENCE2_MEDIA_UNSUPPORTED_MSG)
+    } else {
+        None
+    }
+}
+
+/// Whether a Florence-2 request carries the exactly-one image the encoder
+/// needs, returning the rejection message when it does not.
+///
+/// Florence-2 fuses one image's projected tokens in front of the task-prompt
+/// embeddings and has no image placeholder token, so neither zero images nor
+/// a second image has a meaning on this path.
+pub(crate) fn reject_image_count(image_count: usize) -> Option<String> {
+    (image_count != 1).then(|| format!("{FLORENCE2_IMAGE_REQUIRED_MSG} (got {image_count} images)"))
+}
+
+/// Map the greedy decode outcome onto the server's `finish_reason` string.
+///
+/// [`crate::models::florence2::Florence2VlmModel::run_task_with_cancel`]
+/// pushes at most `max_new_tokens` ids and stops early on EOS, on the decoder
+/// position bound, or on cancellation, so an exhausted budget is the only
+/// case that reports `"length"`. A cancelled run reports `"stop"`, matching
+/// the diffusion workers' aborted-maps-to-stop convention.
+pub(crate) fn florence2_finish_reason(
+    generated_tokens: usize,
+    max_new_tokens: usize,
+) -> &'static str {
+    if generated_tokens >= max_new_tokens {
+        "length"
+    } else {
+        "stop"
+    }
+}
+
 /// Serve Florence-2 task generation one request at a time.
 ///
 /// Drives the shared `mpsc` request channel: each `Generate` is parsed into
@@ -244,17 +299,23 @@ fn handle_florence2_request(
     response_tx: &mpsc::Sender<GenerateEvent>,
     cancelled: &std::sync::Arc<AtomicBool>,
 ) {
-    if audio_present || video_present {
+    // Serving is serial, so a request can sit in the channel while its client
+    // goes away. The per-step poll inside `generate_greedy_with_cancel` only
+    // starts after the encoder pass, which is the expensive half (DaViT tower
+    // plus the bidirectional BART encoder over the fused sequence), so an
+    // already-abandoned request would still pay for it. Drop it here instead.
+    if cancelled.load(Ordering::Relaxed) {
         let _ = response_tx.send(GenerateEvent::Error(
-            FLORENCE2_MEDIA_UNSUPPORTED_MSG.to_string(),
+            FLORENCE2_CANCELLED_BEFORE_START_MSG.to_string(),
         ));
         return;
     }
-    if images.len() != 1 {
-        let _ = response_tx.send(GenerateEvent::Error(format!(
-            "{FLORENCE2_IMAGE_REQUIRED_MSG} (got {} images)",
-            images.len()
-        )));
+    if let Some(msg) = reject_media(audio_present, video_present) {
+        let _ = response_tx.send(GenerateEvent::Error(msg.to_string()));
+        return;
+    }
+    if let Some(msg) = reject_image_count(images.len()) {
+        let _ = response_tx.send(GenerateEvent::Error(msg));
         return;
     }
 
@@ -324,11 +385,7 @@ fn handle_florence2_request(
         let _ = response_tx.send(GenerateEvent::Token(rendered.clone()));
     }
 
-    let finish_reason = if run.generated_tokens >= max_new_tokens {
-        "length"
-    } else {
-        "stop"
-    };
+    let finish_reason = florence2_finish_reason(run.generated_tokens, max_new_tokens);
     let _ = response_tx.send(GenerateEvent::Done(GenerationResult {
         text: rendered,
         prompt_tokens: run.prompt_tokens,

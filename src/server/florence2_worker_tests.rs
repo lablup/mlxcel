@@ -13,12 +13,13 @@
 // limitations under the License.
 
 //! Request-boundary tests for the Florence-2 seq2seq worker (issue #1073):
-//! task-input validation for the 7 input-taking modes and the strict
-//! `<loc_*>` region-quadruple parser. The end-to-end loop (encoder pass,
-//! decode, response mapping) is validated against a real checkpoint through
-//! the server; the per-request encoder-state isolation property is covered
-//! at the model level in
-//! `models/florence2/florence2_tests.rs::sequential_requests_are_isolated`.
+//! task-input validation for the 7 input-taking modes, the strict `<loc_*>`
+//! region-quadruple parser, and the request-to-response mapping guards
+//! (media rejection, image cardinality, finish-reason selection). The
+//! generation half of the loop (encoder pass, decode, post-processing) is
+//! validated against a real checkpoint through the server; the per-request
+//! encoder-state isolation property is covered at the model level in
+//! `models/florence2/florence2_tests.rs::sequential_requests_reuse_no_encoder_state`.
 
 use super::*;
 use crate::models::florence2::Florence2Task;
@@ -196,4 +197,57 @@ fn max_input_bound_admits_a_long_grounding_caption() {
         )
         .is_ok()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Request-to-response mapping
+// ---------------------------------------------------------------------------
+
+/// Florence-2 is an image-task model: any audio or video payload is refused
+/// before the request reaches the encoder, matching
+/// `diffusion_worker::reject_audio_video`.
+#[test]
+fn media_guard_rejects_audio_and_video() {
+    assert_eq!(reject_media(false, false), None);
+    assert_eq!(
+        reject_media(true, false),
+        Some(FLORENCE2_MEDIA_UNSUPPORTED_MSG)
+    );
+    assert_eq!(
+        reject_media(false, true),
+        Some(FLORENCE2_MEDIA_UNSUPPORTED_MSG)
+    );
+    assert_eq!(
+        reject_media(true, true),
+        Some(FLORENCE2_MEDIA_UNSUPPORTED_MSG)
+    );
+}
+
+/// The fused encoder sequence carries exactly one image's projected tokens
+/// and Florence-2 has no image placeholder token, so zero images and two
+/// images are both meaningless on this path and are named as such.
+#[test]
+fn image_count_guard_requires_exactly_one_image() {
+    assert_eq!(reject_image_count(1), None);
+    for count in [0, 2, 7] {
+        let msg = reject_image_count(count).unwrap_or_else(|| panic!("{count} images accepted"));
+        assert!(msg.contains("exactly one image"), "{count}: {msg}");
+        assert!(
+            msg.contains(&format!("got {count} images")),
+            "{count}: {msg}"
+        );
+    }
+}
+
+/// An exhausted decode budget is the only outcome that reports `"length"`:
+/// EOS, the decoder position bound, and cancellation all stop short of the
+/// budget and report `"stop"`.
+#[test]
+fn finish_reason_reports_length_only_on_an_exhausted_budget() {
+    assert_eq!(florence2_finish_reason(256, 256), "length");
+    assert_eq!(florence2_finish_reason(25, 256), "stop");
+    assert_eq!(florence2_finish_reason(0, 256), "stop");
+    // Cancellation returns whatever was decoded before the flag was seen,
+    // which is by construction short of the budget.
+    assert_eq!(florence2_finish_reason(3, 1024), "stop");
 }
