@@ -261,6 +261,37 @@ impl FalconOcrRuntimeState {
         self.sequences.borrow_mut().remove(&seq_id);
     }
 
+    /// Read a field out of the resolved entry without duplicating it.
+    ///
+    /// Resolution order matches [`Self::resolve`]: the per-sequence map first,
+    /// then the fallback slot. The borrow lives only for the closure, which is
+    /// what lets a decode step look at the entry without cloning the prompt's
+    /// position vector or copying `pos_hw` across the FFI boundary.
+    fn with_entry<T>(
+        &self,
+        seq_id: Option<SequenceId>,
+        f: impl FnOnce(&FalconOcrPrefillState) -> T,
+    ) -> Option<T> {
+        if let Some(id) = seq_id {
+            let map = self.sequences.borrow();
+            if let Some(entry) = map.get(&id) {
+                return Some(f(entry));
+            }
+        }
+        self.fallback.borrow().as_ref().map(f)
+    }
+
+    /// The stashed rope delta for a decode step, or `None` when this row never
+    /// went through a Falcon-OCR image prefill.
+    ///
+    /// A decode step reads nothing else out of the entry, so it must not pay
+    /// for a full duplicate: the prompt's position vector is thousands of
+    /// entries for an image prompt, and duplicating it per generated token
+    /// makes decode quadratic in prompt length.
+    fn decode_rope_delta(&self, seq_id: Option<SequenceId>) -> Option<i32> {
+        self.with_entry(seq_id, |state| state.rope_delta)
+    }
+
     /// Resolve by sequence id first, then the fallback slot.
     fn resolve(&self, seq_id: Option<SequenceId>) -> Option<FalconOcrPrefillState> {
         if let Some(id) = seq_id
@@ -279,14 +310,17 @@ impl FalconOcrRuntimeState {
     /// the boundary: it belongs to a different prompt, so the old entry is
     /// dropped rather than left to drive the next decode's rope delta. This is
     /// what makes an image turn followed by a text-only turn safe.
+    ///
+    /// The length is compared through [`Self::with_entry`] so the eviction path
+    /// does not duplicate an entry it is about to throw away.
     fn take_for_prefill(
         &self,
         seq_id: Option<SequenceId>,
         len: usize,
     ) -> Option<FalconOcrPrefillState> {
-        match self.resolve(seq_id) {
-            Some(state) if state.positions.len() == len => Some(state),
-            Some(_) => {
+        match self.with_entry(seq_id, |state| state.positions.len() == len) {
+            Some(true) => self.resolve(seq_id),
+            Some(false) => {
                 if let Some(id) = seq_id {
                     self.sequences.borrow_mut().remove(&id);
                 }
@@ -544,32 +578,36 @@ impl FalconOcrTextModel {
         let l = shape[1];
         let offset = caches.first().map(|c| c.offset).unwrap_or(0);
 
-        let prefill = if l > 1 {
-            self.state.take_for_prefill(seq_id, l as usize)
-        } else {
-            self.state.resolve(seq_id)
-        };
-
         // Temporal positions: a stashed prefill vector when this row went
         // through a Falcon-OCR image prefill, otherwise the plain contiguous
         // run (which is exactly what `temporal_positions` yields for text).
-        let positions: Vec<i32> = match prefill.as_ref() {
-            Some(state) if l > 1 => state.positions.clone(),
-            Some(state) if l == 1 => vec![offset + state.rope_delta],
-            _ => (offset..offset + l).collect(),
+        //
+        // The spatial rotary rides along in the same match because it only ever
+        // fires during the prefill that carries image tokens: a decode step has
+        // no image position and the rotation would be the identity anyway.
+        // Deciding both at once is also what keeps the decode arm from touching
+        // the stashed entry at all beyond its scalar delta.
+        type GoldenTables = Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)>;
+        let (positions, golden): (Vec<i32>, GoldenTables) = if l > 1 {
+            match self.state.take_for_prefill(seq_id, l as usize) {
+                Some(state) => {
+                    let golden = state
+                        .pos_hw
+                        .as_ref()
+                        .map(|p| golden_cos_sin(&self.freqs_cis_golden, p));
+                    (state.positions, golden)
+                }
+                None => ((offset..offset + l).collect(), None),
+            }
+        } else if l == 1
+            && let Some(rope_delta) = self.state.decode_rope_delta(seq_id)
+        {
+            (vec![offset + rope_delta], None)
+        } else {
+            ((offset..offset + l).collect(), None)
         };
         let (cos_1d, sin_1d) = temporal_cos_sin(&positions, &self.inv_freq);
 
-        // The spatial rotary only ever fires during the prefill that carries
-        // image tokens: a decode step has no image position and the rotation
-        // would be the identity anyway.
-        let golden = match prefill.as_ref() {
-            Some(state) if l > 1 => state
-                .pos_hw
-                .as_ref()
-                .map(|p| golden_cos_sin(&self.freqs_cis_golden, p)),
-            _ => None,
-        };
         let golden_ref = golden
             .as_ref()
             .map(|(c, s)| (c.as_ref().unwrap(), s.as_ref().unwrap()));

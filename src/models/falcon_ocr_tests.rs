@@ -193,3 +193,63 @@ fn a_mismatched_prefill_evicts_the_sequence_entry_too() {
     assert!(state.take_for_prefill(Some(seq), 12).is_none());
     assert!(state.resolve(Some(seq)).is_none());
 }
+
+/// The eviction is what a following decode step relies on: once the mismatch
+/// cleared the entry, nothing may resurrect the stale delta.
+#[test]
+fn an_evicted_entry_stays_gone_for_the_next_prefill_and_decode() {
+    let state = FalconOcrRuntimeState::default();
+    let seq = SequenceId::from_raw(5);
+    state.set_current(FalconOcrPrefillState {
+        positions: vec![0, 0, 1],
+        pos_hw: None,
+        rope_delta: -1,
+    });
+    state.bind_to_sequence(seq);
+
+    assert!(state.take_for_prefill(Some(seq), 12).is_none());
+    assert!(state.take_for_prefill(Some(seq), 12).is_none());
+    assert_eq!(state.decode_rope_delta(Some(seq)), None);
+}
+
+/// A decode step needs only the scalar delta, so it reads it through the
+/// borrowing accessor rather than duplicating the whole prefill state.
+#[test]
+fn the_decode_delta_resolves_from_the_fallback_slot_and_from_a_sequence() {
+    let state = FalconOcrRuntimeState::default();
+    assert_eq!(state.decode_rope_delta(None), None);
+    assert_eq!(state.decode_rope_delta(Some(SequenceId::from_raw(1))), None);
+
+    state.set_current(FalconOcrPrefillState {
+        positions: vec![0, 0, 0, 1],
+        pos_hw: None,
+        rope_delta: -2,
+    });
+    assert_eq!(state.decode_rope_delta(None), Some(-2));
+
+    let seq = SequenceId::from_raw(1);
+    state.bind_to_sequence(seq);
+    assert_eq!(state.decode_rope_delta(Some(seq)), Some(-2));
+    // Binding drained the fallback, so an unbound reader sees nothing.
+    assert_eq!(state.decode_rope_delta(None), None);
+}
+
+/// Every generated token reads the delta again, so reading must not consume or
+/// clear the entry the way `take_for_prefill` can.
+#[test]
+fn reading_the_decode_delta_leaves_the_entry_in_place() {
+    let state = FalconOcrRuntimeState::default();
+    let seq = SequenceId::from_raw(2);
+    state.set_current(FalconOcrPrefillState {
+        positions: vec![0, 0, 1, 2],
+        pos_hw: None,
+        rope_delta: -6,
+    });
+    state.bind_to_sequence(seq);
+
+    for _ in 0..8 {
+        assert_eq!(state.decode_rope_delta(Some(seq)), Some(-6));
+    }
+    let still_there = state.resolve(Some(seq)).expect("entry survives decoding");
+    assert_eq!(still_there.positions, vec![0, 0, 1, 2]);
+}
