@@ -75,8 +75,19 @@ impl Florence2Quantization {
         bits: 4,
     };
 
-    /// Read the top-level `quantization` object. A checkpoint without one is
-    /// dense and gets [`Self::DENSE`].
+    /// Read the checkpoint's `quantization` object. A checkpoint without one
+    /// is dense and gets [`Self::DENSE`].
+    ///
+    /// The four locations searched are the four
+    /// [`Self::config_is_quantized`] accepts, and they have to stay the same
+    /// four. That predicate decides whether the bf16 to f16 conversion is
+    /// skipped; this one decides the stride everything is dequantized on. A
+    /// checkpoint nesting the block somewhere only the predicate looked would
+    /// keep its bf16 scales, correctly, and then dequantize the whole model at
+    /// the dense fallback of group 64 / 4 bits, which is the mis-stride the
+    /// struct comment warns about. Every published Florence-2 conversion puts
+    /// the block at the top level, so this is a guard against divergence
+    /// rather than a path any of them take.
     ///
     /// Both fields end up as a divisor and a shift width inside the packing
     /// reconciliation, so they are range-checked here where the offending
@@ -90,7 +101,13 @@ impl Florence2Quantization {
     /// model on the wrong stride and produces plausible-looking garbage
     /// instead of an error.
     pub fn from_model_config(config: &Value) -> Result<Self> {
-        let Some(quant) = config.get("quantization").filter(|v| v.is_object()) else {
+        let text_config = config.get("text_config");
+        let Some(quant) = ["quantization", "quantization_config"]
+            .into_iter()
+            .flat_map(|key| [config.get(key), text_config.and_then(|t| t.get(key))])
+            .flatten()
+            .find(|value| value.is_object())
+        else {
             return Ok(Self::DENSE);
         };
         let group_size = quant_field(quant, "group_size")?.unwrap_or(Self::DENSE.group_size);

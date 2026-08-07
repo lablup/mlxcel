@@ -149,10 +149,22 @@ impl Florence2TextModel {
             .map_err(|e| anyhow!("Failed to parse Florence-2 config: {e}"))?;
         let text_config = Florence2TextConfig::from_model_config(&config)?;
 
-        let mut weights = mlxcel_core::weights::load_weights_from_dir_filtered(model_path, |k| {
+        let weights = mlxcel_core::weights::load_weights_from_dir_filtered(model_path, |k| {
             k.starts_with("language_model.")
         })
         .map_err(|e| anyhow!("Failed to load Florence-2 weights: {e}"))?;
+        // Same three steps the whole-model loader runs, in the same order, so
+        // that loading the text half on its own is not a weaker path than
+        // loading it as part of `Florence2Model`. `sanitize` matters here for
+        // the shared-embedding fill: BART ties the encoder and decoder token
+        // tables to `model.shared` and exports vary in which of the three they
+        // materialize, so without it a checkpoint carrying only `embed_tokens`
+        // fails to find `model.shared`. The refusal matters because every
+        // LayerNorm in this stack is read as a raw weight and handed to
+        // `fast::layer_norm`, so a packed one aborts the process here exactly
+        // as it would through the fused loader.
+        let mut weights = sanitize(weights);
+        reject_unsupported_quantized_tensors(&weights).map_err(|e| anyhow!("{e}"))?;
         // Apple Silicon precision policy: bf16 -> f16, but only for a dense
         // export. A quantized one keeps its scales and biases at the stored
         // width; they are dequantization operands rather than activations, so

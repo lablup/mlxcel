@@ -159,6 +159,35 @@ fn quantization_defaults_only_absent_parameters() {
     assert_eq!(parsed.bits, 8);
 }
 
+/// `config_is_quantized` accepts the block in four places, so the parser has
+/// to read it from all four. A checkpoint whose block only the predicate
+/// found would keep its bf16 scales (right) and then dequantize the whole
+/// model at the dense fallback stride (wrong, and silent).
+#[test]
+fn quantization_is_read_from_every_location_the_predicate_accepts() {
+    let block = json!({ "group_size": 32, "bits": 8 });
+    let expected = Florence2Quantization {
+        group_size: 32,
+        bits: 8,
+    };
+    for config in [
+        json!({ "model_type": "florence2", "quantization": block }),
+        json!({ "model_type": "florence2", "quantization_config": block }),
+        json!({ "model_type": "florence2", "text_config": { "quantization": block } }),
+        json!({ "model_type": "florence2", "text_config": { "quantization_config": block } }),
+    ] {
+        assert!(
+            Florence2Quantization::config_is_quantized(&config),
+            "predicate must see the block in {config}"
+        );
+        assert_eq!(
+            Florence2Quantization::from_model_config(&config).expect("parse"),
+            expected,
+            "parser must read the same block the predicate saw in {config}"
+        );
+    }
+}
+
 /// The block sits beside `text_config` and `vision_config`, not inside
 /// either, so a parser that only descended into a sub-object would leave both
 /// halves on the dense default and mis-stride every dequantization.
