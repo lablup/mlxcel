@@ -786,6 +786,226 @@ fn build_plamo_tokenizer(model_path: &Path) -> Result<tokenizers::Tokenizer> {
     })
 }
 
+/// The pre-tokenization regex `Qwen2Tokenizer` splits on, copied verbatim from
+/// `transformers/models/qwen2/tokenization_qwen2.py` (`PRETOKENIZE_REGEX`).
+/// `Qwen2Converter` in `convert_slow_tokenizer.py` feeds exactly this string to
+/// a `Split(behavior="isolated")` pre-tokenizer.
+const QWEN2_PRETOKENIZE_REGEX: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+
+/// Does this directory hold a Qwen2-family slow tokenizer (`vocab.json` +
+/// `merges.txt`) rather than an exported `tokenizer.json`?
+///
+/// Both files plus a `tokenizer_class` naming the Qwen2 tokenizer are required.
+/// The class check keeps this narrow: `vocab.json` and `merges.txt` are the
+/// generic GPT-2 slow-tokenizer pair and other families that ship them (with a
+/// different normalizer, pre-tokenizer regex, or prefix-space convention) must
+/// not be silently tokenized with Qwen2's rules.
+fn is_qwen2_slow_tokenizer_dir(model_path: &Path) -> bool {
+    if !model_path.join("vocab.json").exists() || !model_path.join("merges.txt").exists() {
+        return false;
+    }
+    let Ok(raw) = std::fs::read_to_string(model_path.join("tokenizer_config.json")) else {
+        return false;
+    };
+    let Ok(config) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    matches!(
+        config.get("tokenizer_class").and_then(|v| v.as_str()),
+        Some("Qwen2Tokenizer") | Some("Qwen2TokenizerFast")
+    )
+}
+
+/// Build a HuggingFace [`tokenizers::Tokenizer`] from a Qwen2 slow-tokenizer
+/// directory (`vocab.json` + `merges.txt` + added tokens).
+///
+/// `nvidia/LocateAnything-3B` and its MLX conversions ship the slow-tokenizer
+/// files only, so `Tokenizer::from_file` has nothing to read. Transformers
+/// handles that by running `Qwen2Converter`
+/// (`transformers/convert_slow_tokenizer.py`) at load time; this is the same
+/// construction, component for component:
+///
+/// - model: byte-level `BPE` from `vocab.json` / `merges.txt`, no unk token,
+///   no subword prefix or suffix, `fuse_unk = false`, `byte_fallback = false`;
+/// - normalizer: `NFC`;
+/// - pre-tokenizer: `Sequence[Split(PRETOKENIZE_REGEX, isolated), ByteLevel(add_prefix_space, use_regex = false)]`;
+/// - decoder: `ByteLevel`;
+/// - post-processor: `ByteLevel(trim_offsets = false)`.
+///
+/// `add_prefix_space` comes from `tokenizer_config.json` and defaults to
+/// `false`, matching `getattr(self.original_tokenizer, "add_prefix_space", False)`
+/// in the converter.
+///
+/// The added tokens (`added_tokens.json`, or `added_tokens_decoder` in
+/// `tokenizer_config.json` when it carries per-token flags) are registered in
+/// ascending id order and then verified: `tokenizers` assigns added-token ids
+/// sequentially from the base vocab size, so a gap or an out-of-order id in the
+/// checkpoint would silently shift every later token. LocateAnything's 1038
+/// added tokens include the 1001 coordinate tokens `<0>`..`<1000>` that carry
+/// its box output, so an off-by-one there would corrupt every box rather than
+/// fail loudly.
+fn build_qwen2_bpe_tokenizer(model_path: &Path) -> Result<tokenizers::Tokenizer> {
+    use tokenizers::Tokenizer;
+    use tokenizers::models::bpe::BPE;
+
+    let vocab_path = model_path.join("vocab.json");
+    let merges_path = model_path.join("merges.txt");
+
+    let vocab_raw = std::fs::read_to_string(&vocab_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read {:?}: {}", vocab_path, e))?;
+    let vocab: HashMap<String, u32> = serde_json::from_str(&vocab_raw)
+        .map_err(|e| anyhow::anyhow!("Failed to parse {:?}: {}", vocab_path, e))?;
+    if vocab.is_empty() {
+        return Err(anyhow::anyhow!("{:?} contained no entries", vocab_path));
+    }
+
+    let merges_raw = std::fs::read_to_string(&merges_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read {:?}: {}", merges_path, e))?;
+    let mut merges: Vec<(String, String)> = Vec::new();
+    for line in merges_raw.lines() {
+        // The first line is a `#version:` header in every GPT-2-style export.
+        if line.is_empty() || line.starts_with("#version") {
+            continue;
+        }
+        let Some((left, right)) = line.split_once(' ') else {
+            return Err(anyhow::anyhow!(
+                "{:?} line {:?} is not a `left right` merge pair",
+                merges_path,
+                line
+            ));
+        };
+        merges.push((left.to_string(), right.to_string()));
+    }
+    if merges.is_empty() {
+        return Err(anyhow::anyhow!("{:?} contained no merges", merges_path));
+    }
+
+    let base_vocab_size = vocab.len() as u32;
+    // `BpeBuilder::vocab_and_merges` takes the crate's own `Vocab` alias
+    // (an `AHashMap`), so re-collect rather than passing the `std` map.
+    let vocab: tokenizers::models::bpe::Vocab = vocab.into_iter().collect();
+    let model = BPE::builder()
+        .vocab_and_merges(vocab, merges)
+        .fuse_unk(false)
+        .byte_fallback(false)
+        .continuing_subword_prefix(String::new())
+        .end_of_word_suffix(String::new())
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to build Qwen2 BPE model: {}", e))?;
+
+    let mut tokenizer = Tokenizer::new(model);
+    tokenizer.with_normalizer(Some(tokenizers::normalizers::unicode::NFC));
+
+    let add_prefix_space = std::fs::read_to_string(model_path.join("tokenizer_config.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|cfg| cfg.get("add_prefix_space").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+
+    let split = tokenizers::pre_tokenizers::split::Split::new(
+        tokenizers::pre_tokenizers::split::SplitPattern::Regex(QWEN2_PRETOKENIZE_REGEX.to_string()),
+        tokenizers::SplitDelimiterBehavior::Isolated,
+        false,
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to build Qwen2 Split pre-tokenizer: {}", e))?;
+    let byte_level = tokenizers::pre_tokenizers::byte_level::ByteLevel::new(
+        add_prefix_space,
+        /* trim_offsets */ true,
+        /* use_regex */ false,
+    );
+    tokenizer.with_pre_tokenizer(Some(tokenizers::pre_tokenizers::sequence::Sequence::new(
+        vec![split.into(), byte_level.into()],
+    )));
+
+    tokenizer.with_decoder(Some(tokenizers::decoders::byte_level::ByteLevel::default()));
+    tokenizer.with_post_processor(Some(
+        tokenizers::processors::byte_level::ByteLevel::default().trim_offsets(false),
+    ));
+
+    for (id, token) in read_added_tokens_sorted(model_path)? {
+        if id < base_vocab_size {
+            return Err(anyhow::anyhow!(
+                "Added token {:?} claims id {} which is inside the {} entry base vocab",
+                token.content,
+                id,
+                base_vocab_size
+            ));
+        }
+        let content = token.content.clone();
+        if token.special {
+            tokenizer.add_special_tokens(&[token]);
+        } else {
+            tokenizer.add_tokens(&[token]);
+        }
+        let assigned = tokenizer.token_to_id(&content);
+        if assigned != Some(id) {
+            return Err(anyhow::anyhow!(
+                "Added token {:?} landed at id {:?} but the checkpoint declares {}; \
+                 the added-token ids in {:?} are not contiguous above the {} entry base vocab",
+                content,
+                assigned,
+                id,
+                model_path,
+                base_vocab_size
+            ));
+        }
+    }
+
+    Ok(tokenizer)
+}
+
+/// Read the checkpoint's added tokens as `(id, AddedToken)` sorted by id.
+///
+/// `added_tokens_decoder` in `tokenizer_config.json` is preferred because it
+/// carries the per-token `special` / `lstrip` / `rstrip` / `normalized` /
+/// `single_word` flags; `added_tokens.json` is the flat `content -> id` map and
+/// is used when the decoder table is absent. Every LocateAnything added token
+/// is `normalized: false`, which is what keeps `<0>`..`<1000>` from being
+/// rewritten by the NFC normalizer.
+fn read_added_tokens_sorted(model_path: &Path) -> Result<Vec<(u32, tokenizers::AddedToken)>> {
+    use tokenizers::AddedToken;
+
+    let mut out: Vec<(u32, AddedToken)> = Vec::new();
+
+    let config = std::fs::read_to_string(model_path.join("tokenizer_config.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    let decoder = config
+        .as_ref()
+        .and_then(|cfg| cfg.get("added_tokens_decoder"))
+        .and_then(|v| v.as_object());
+
+    if let Some(decoder) = decoder {
+        for (id, entry) in decoder {
+            let id: u32 = id
+                .parse()
+                .map_err(|e| anyhow::anyhow!("added_tokens_decoder key {:?}: {}", id, e))?;
+            let content = entry
+                .get("content")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("added_tokens_decoder[{id}] has no content"))?;
+            let flag = |name: &str, default: bool| {
+                entry.get(name).and_then(|v| v.as_bool()).unwrap_or(default)
+            };
+            let token = AddedToken::from(content.to_string(), flag("special", true))
+                .single_word(flag("single_word", false))
+                .lstrip(flag("lstrip", false))
+                .rstrip(flag("rstrip", false))
+                .normalized(flag("normalized", false));
+            out.push((id, token));
+        }
+    } else if let Ok(raw) = std::fs::read_to_string(model_path.join("added_tokens.json")) {
+        let map: HashMap<String, u32> = serde_json::from_str(&raw)
+            .map_err(|e| anyhow::anyhow!("Failed to parse added_tokens.json: {}", e))?;
+        for (content, id) in map {
+            out.push((id, AddedToken::from(content, true).normalized(false)));
+        }
+    }
+
+    out.sort_by_key(|(id, _)| *id);
+    Ok(out)
+}
+
 /// Repair Gemma-family `tokenizer.json` exports that dropped the
 /// BOS-inserting post-processor (issue #686).
 ///
@@ -1058,6 +1278,15 @@ pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
         )?));
     }
 
+    // Fall back to the GPT-2-style slow-tokenizer pair (`vocab.json` +
+    // `merges.txt`) that Qwen2-family repositories ship when they never
+    // exported a fast tokenizer.
+    if is_qwen2_slow_tokenizer_dir(model_path) {
+        return Ok(MlxcelTokenizer::HuggingFace(build_qwen2_bpe_tokenizer(
+            model_path,
+        )?));
+    }
+
     if let Some(repo_id) = remote_tokenizer_repo_for_model(model_path) {
         let tokenizer = download_remote_tokenizer(repo_id).map_err(|err| {
             anyhow::anyhow!(
@@ -1071,7 +1300,7 @@ pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
     }
 
     Err(anyhow::anyhow!(
-        "No tokenizer found in {:?} (tried tokenizer.json, tokenizer.model, *.tiktoken, and tokenizer.jsonl)",
+        "No tokenizer found in {:?} (tried tokenizer.json, tokenizer.model, *.tiktoken, tokenizer.jsonl, and vocab.json + merges.txt)",
         model_path
     ))
 }
@@ -1079,10 +1308,137 @@ pub fn load_tokenizer(model_path: &Path) -> Result<MlxcelTokenizer> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MlxcelTokenizer, remote_tokenizer_override_for_model, remote_tokenizer_repo_for_model,
+        MlxcelTokenizer, build_qwen2_bpe_tokenizer, is_qwen2_slow_tokenizer_dir,
+        remote_tokenizer_override_for_model, remote_tokenizer_repo_for_model,
         remote_tokenizer_repo_for_model_type,
     };
     use tokenizers::{AddedToken, Tokenizer, models::bpe::BPE};
+
+    /// Write a minimal Qwen2 slow-tokenizer directory: a byte-level `vocab.json`
+    /// covering the ASCII letters plus a `Ġ` (space) marker, one merge, and two
+    /// added tokens above the base vocab.
+    fn write_qwen2_slow_tokenizer_dir(dir: &std::path::Path, tokenizer_class: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+
+        // Byte-level alphabet: the tokens the ByteLevel pre-tokenizer emits for
+        // " hi" are "Ġ", "h", "i" (and "Ġh" once the merge applies).
+        let mut vocab = serde_json::Map::new();
+        let mut next = 0u64;
+        for token in ["Ġ", "h", "i", "!", "Ġh", "a", "b"] {
+            vocab.insert(token.to_string(), serde_json::json!(next));
+            next += 1;
+        }
+        let base = next as u32;
+        std::fs::write(
+            dir.join("vocab.json"),
+            serde_json::to_string(&serde_json::Value::Object(vocab)).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("merges.txt"), "#version: 0.2\nĠ h\n").unwrap();
+
+        let config = serde_json::json!({
+            "tokenizer_class": tokenizer_class,
+            "add_prefix_space": false,
+            "added_tokens_decoder": {
+                base.to_string(): {
+                    "content": "<|im_start|>",
+                    "single_word": false, "lstrip": false, "rstrip": false,
+                    "normalized": false, "special": true
+                },
+                (base + 1).to_string(): {
+                    "content": "<0>",
+                    "single_word": false, "lstrip": false, "rstrip": false,
+                    "normalized": false, "special": true
+                }
+            }
+        });
+        std::fs::write(
+            dir.join("tokenizer_config.json"),
+            serde_json::to_string(&config).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("mlxcel-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn detects_a_qwen2_slow_tokenizer_directory() {
+        let dir = temp_dir("qwen2-slow");
+        write_qwen2_slow_tokenizer_dir(&dir, "Qwen2Tokenizer");
+        assert!(is_qwen2_slow_tokenizer_dir(&dir));
+
+        // A different family that happens to ship the same GPT-2 file pair must
+        // not be tokenized with Qwen2's rules.
+        let other = temp_dir("gpt2-slow");
+        write_qwen2_slow_tokenizer_dir(&other, "GPT2Tokenizer");
+        assert!(!is_qwen2_slow_tokenizer_dir(&other));
+
+        // Missing merges.txt disqualifies the directory.
+        let partial = temp_dir("qwen2-partial");
+        write_qwen2_slow_tokenizer_dir(&partial, "Qwen2Tokenizer");
+        std::fs::remove_file(partial.join("merges.txt")).unwrap();
+        assert!(!is_qwen2_slow_tokenizer_dir(&partial));
+
+        for path in [dir, other, partial] {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+
+    #[test]
+    fn builds_a_qwen2_tokenizer_from_vocab_and_merges() {
+        let dir = temp_dir("qwen2-build");
+        write_qwen2_slow_tokenizer_dir(&dir, "Qwen2Tokenizer");
+
+        let tokenizer = build_qwen2_bpe_tokenizer(&dir).expect("build");
+
+        // Added tokens must land on the ids the checkpoint declares, because
+        // `tokenizers` assigns them sequentially from the base vocab size.
+        assert_eq!(tokenizer.token_to_id("<|im_start|>"), Some(7));
+        assert_eq!(tokenizer.token_to_id("<0>"), Some(8));
+
+        // The merge `Ġ h` applies, so " hi" is ["Ġh", "i"] and not ["Ġ","h","i"].
+        let encoded = tokenizer.encode(" hi", false).expect("encode");
+        assert_eq!(encoded.get_tokens(), &["Ġh".to_string(), "i".to_string()]);
+
+        // ByteLevel decoding restores the original text, including the space.
+        let decoded = tokenizer.decode(encoded.get_ids(), false).expect("decode");
+        assert_eq!(decoded, " hi");
+
+        // An added token is matched whole rather than split into base pieces.
+        let encoded = tokenizer.encode("<0>hi", false).expect("encode");
+        assert_eq!(encoded.get_ids().first(), Some(&8));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rejects_added_token_ids_that_do_not_continue_the_base_vocab() {
+        let dir = temp_dir("qwen2-badids");
+        write_qwen2_slow_tokenizer_dir(&dir, "Qwen2Tokenizer");
+        // Renumber the added tokens so they leave a gap above the base vocab.
+        let config = serde_json::json!({
+            "tokenizer_class": "Qwen2Tokenizer",
+            "added_tokens_decoder": {
+                "99": { "content": "<|im_start|>", "special": true, "normalized": false }
+            }
+        });
+        std::fs::write(
+            dir.join("tokenizer_config.json"),
+            serde_json::to_string(&config).unwrap(),
+        )
+        .unwrap();
+
+        let err = build_qwen2_bpe_tokenizer(&dir).expect_err("must refuse a shifted id");
+        assert!(
+            err.to_string().contains("declares 99"),
+            "unexpected error: {err}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn remote_tokenizer_repo_for_model_type_matches_moondream3() {
