@@ -34,6 +34,213 @@ use super::Florence2VisionConfig;
 /// Weight-key prefix of the language model inside a Florence-2 checkpoint.
 pub(crate) const FLORENCE2_TEXT_PREFIX: &str = "language_model.";
 
+/// Affine quantization parameters of an `mlx-community` Florence-2 export,
+/// read from the top-level `quantization` object of `config.json`.
+///
+/// Every published quantized conversion (`-3bit`, `-4bit`, `-6bit`, `-8bit`,
+/// in both `base-ft` and `large-ft`) ships `{"group_size": 64, "bits": N}`,
+/// so in practice only `bits` varies. The group size is still read rather
+/// than assumed: [`mlxcel_core::layers::UnifiedLinear`] and
+/// [`mlxcel_core::layers::UnifiedEmbedding`] treat the declared group size as
+/// trusted and derive the bit width back from the packed shapes, so handing
+/// them a wrong group size would dequantize the whole model on the wrong
+/// stride and produce plausible-looking garbage rather than an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Florence2Quantization {
+    pub group_size: i32,
+    pub bits: i32,
+}
+
+/// Upper bound accepted for `quantization.group_size`. MLX's own affine
+/// kernels take 32, 64, or 128; the bound is looser than that so a future
+/// group size does not need a code change, while still keeping an absurd
+/// value out of the packing reconciliation.
+const MAX_QUANT_GROUP_SIZE: i32 = 4096;
+
+impl Default for Florence2Quantization {
+    fn default() -> Self {
+        Self::DENSE
+    }
+}
+
+impl Florence2Quantization {
+    /// What a checkpoint with no `quantization` object gets. Both fields are
+    /// inert in that case: the unified layers fall back to the dense
+    /// `Linear` / `Embedding` path for every prefix that has no `.scales`
+    /// sibling, and a dense checkpoint has none. The values are MLX's own
+    /// `nn.quantize` defaults so a hand-built config that omits the block on
+    /// a genuinely quantized export still lands on the common packing.
+    pub const DENSE: Self = Self {
+        group_size: 64,
+        bits: 4,
+    };
+
+    /// Read the checkpoint's `quantization` object. A checkpoint without one
+    /// is dense and gets [`Self::DENSE`].
+    ///
+    /// The four locations searched are the four
+    /// [`Self::config_is_quantized`] accepts, and they have to stay the same
+    /// four. That predicate decides whether the bf16 to f16 conversion is
+    /// skipped; this one decides the stride everything is dequantized on. A
+    /// checkpoint nesting the block somewhere only the predicate looked would
+    /// keep its bf16 scales, correctly, and then dequantize the whole model at
+    /// the dense fallback of group 64 / 4 bits, which is the mis-stride the
+    /// struct comment warns about. Every published Florence-2 conversion puts
+    /// the block at the top level, so this is a guard against divergence
+    /// rather than a path any of them take.
+    ///
+    /// Both fields end up as a divisor and a shift width inside the packing
+    /// reconciliation, so they are range-checked here where the offending
+    /// `config.json` field can be named.
+    ///
+    /// A field that is absent falls back to the [`Self::DENSE`] value, but a
+    /// field that is *present* and unreadable is an error rather than the same
+    /// fallback. Silently substituting 64 for an unparseable `group_size` is
+    /// the one failure mode this type cannot detect later: the unified layers
+    /// trust the declared group size, so a wrong one dequantizes the whole
+    /// model on the wrong stride and produces plausible-looking garbage
+    /// instead of an error.
+    pub fn from_model_config(config: &Value) -> Result<Self> {
+        let text_config = config.get("text_config");
+        let Some(quant) = ["quantization", "quantization_config"]
+            .into_iter()
+            .flat_map(|key| [config.get(key), text_config.and_then(|t| t.get(key))])
+            .flatten()
+            .find(|value| value.is_object())
+        else {
+            return Ok(Self::DENSE);
+        };
+        let group_size = quant_field(quant, "group_size")?.unwrap_or(Self::DENSE.group_size);
+        let bits = quant_field(quant, "bits")?.unwrap_or(Self::DENSE.bits);
+        if !(1..=MAX_QUANT_GROUP_SIZE).contains(&group_size) {
+            return Err(anyhow!(
+                "Florence-2 quantization.group_size {group_size} outside 1..={MAX_QUANT_GROUP_SIZE}"
+            ));
+        }
+        // Same range `mlxcel_core::layers::validate_quantization_params`
+        // accepts, and permissive for the same reason: the unified layers
+        // re-derive an effective bit width from the packed shapes, so an
+        // allowlist of the four widths mlx-community publishes today would
+        // reject a legitimate future export. The bound only keeps a value that
+        // can match no real tensor out of the reconciler.
+        if !(1..=32).contains(&bits) {
+            return Err(anyhow!(
+                "Florence-2 quantization.bits {bits} outside 1..=32"
+            ));
+        }
+        Ok(Self { group_size, bits })
+    }
+
+    /// True when `config.json` declares quantization metadata at all.
+    ///
+    /// Deliberately not `parsed != DENSE`: a genuinely 4-bit, group-64 export
+    /// declares exactly the values [`Self::DENSE`] carries, so comparing the
+    /// parsed parameters cannot separate it from a dense checkpoint. Only the
+    /// presence of the block can, and that is what gates the bf16 to f16
+    /// conversion in every `load` on this family.
+    pub fn config_is_quantized(config: &Value) -> bool {
+        crate::models::sanitize::config_has_quantization_metadata(config)
+    }
+}
+
+/// Read one integer field of the `quantization` object, separating "absent"
+/// from "present but unreadable".
+///
+/// `Ok(None)` means the key is not there and the caller's default applies.
+/// Everything else that is not a JSON integer fitting in `i32` is an error
+/// naming the field, which is the difference from the permissive
+/// [`config_i32`] used for the shape fields: those are all range-checked
+/// against the loaded tensors afterwards, whereas a quantization parameter is
+/// taken on trust by [`mlxcel_core::layers::UnifiedLinear`] and
+/// [`mlxcel_core::layers::UnifiedEmbedding`] and has no later contradiction to
+/// trip over. The `i32` conversion is checked for the same reason: the `as
+/// i32` cast [`config_i32`] performs truncates an out-of-range JSON integer
+/// into a plausible small number rather than rejecting it.
+fn quant_field(quant: &Value, key: &str) -> Result<Option<i32>> {
+    let Some(value) = quant.get(key) else {
+        return Ok(None);
+    };
+    let parsed = value.as_i64().and_then(|v| i32::try_from(v).ok());
+    parsed.map(Some).ok_or_else(|| {
+        anyhow!("Florence-2 quantization.{key} must be an integer that fits in i32, got {value}")
+    })
+}
+
+/// Tensors the Florence-2 forward path consumes densely, by weight key.
+///
+/// `image_projection` is a bare right-hand matmul operand and
+/// `visual_temporal_embed.pos_idx_to_embed` is a precomputed sinusoidal
+/// buffer; neither is an `nn.Linear` or an `nn.Embedding`, so upstream's
+/// `nn.quantize` walk leaves both dense and every published conversion does.
+/// A checkpoint that packed one anyway would hand a `uint32` tensor to
+/// `matmul` / `slice`, and MLX's eager throw cannot cross the cxx bridge, so
+/// it has to be refused here rather than surfacing as an error later.
+///
+/// Only the tensors matched by an exact key or a key prefix live in this list.
+/// The convolutions and the normalization weights are matched by shape of key
+/// instead, in [`reject_unsupported_quantized_tensors`], because they recur
+/// per block and per layer rather than at a fixed path. The normalization
+/// weights belong to the same category for the same reason: every LayerNorm
+/// here is read as a raw `{prefix}.weight` / `{prefix}.bias` pair and handed
+/// to `fast::layer_norm`, which takes a float weight and throws on a packed
+/// one.
+const FLORENCE2_DENSE_ONLY_TENSORS: &[&str] = &["image_projection", "visual_temporal_embed"];
+
+/// Refuse a quantized checkpoint that packs a tensor this implementation can
+/// only consume dense.
+///
+/// This is the narrowed form of the blanket refusal that #854 installed. The
+/// projections and embedding tables now load quantized, so the only remaining
+/// gap is the handful of raw parameters, LayerNorms, and convolutions listed
+/// above and detected below, all of which upstream leaves dense.
+pub(crate) fn reject_unsupported_quantized_tensors(weights: &WeightMap) -> Result<(), String> {
+    for key in weights.keys() {
+        let Some(stem) = key.strip_suffix(".scales") else {
+            continue;
+        };
+        let unsupported = FLORENCE2_DENSE_ONLY_TENSORS
+            .iter()
+            .any(|dense| stem == *dense || stem.starts_with(&format!("{dense}.")))
+            // The conv stack (`convs.*.proj`, the depthwise `*.dw` inside each
+            // block) reaches `mlxcel_core::conv2d`, which has no quantized
+            // form here. `nn.quantize` skips `nn.Conv2d`, so this is a guard
+            // against a non-standard export rather than a known one.
+            || (stem.contains("convs") && stem.ends_with("proj"))
+            || stem.ends_with(".dw")
+            // Every LayerNorm on this family is loaded as a raw weight/bias
+            // pair by `layers::layer_norm` or
+            // `florence2_davit_blocks::layer_norm_from_weights` and handed to
+            // `mlxcel_core::layers::LayerNorm`, i.e. to `fast::layer_norm`, so
+            // a packed one presents a `uint32` weight to that kernel and
+            // aborts the same way the conv arm would. `nn.quantize` skips
+            // `nn.LayerNorm`, so this guards a non-standard export rather than
+            // a known one.
+            //
+            // Matching on the last dot-separated segment containing `norm`
+            // covers every normalization prefix in the family:
+            // `layernorm_embedding` on both text stacks,
+            // `self_attn_layer_norm` / `encoder_attn_layer_norm` /
+            // `final_layer_norm` on every text block, `image_proj_norm` on the
+            // fusion stage, and the DaViT `convs.N.norm` /
+            // `window_attn.norm` / `channel_attn.norm` / `ffn.norm`. It cannot
+            // false-positive on a real conversion: every tensor `nn.quantize`
+            // packs here ends in one of `q_proj`, `k_proj`, `v_proj`,
+            // `out_proj`, `fc1`, `fc2`, `qkv`, `proj`, `shared`, `lm_head`,
+            // `embed_positions`, `row_embeddings`, or `column_embeddings`,
+            // none of which contains `norm`.
+            || stem
+                .rsplit('.')
+                .next()
+                .is_some_and(|segment| segment.contains("norm"));
+        if unsupported {
+            return Err(format!(
+                "Florence-2 quantized checkpoint packs {stem}, which this implementation consumes as a dense tensor. Projections, embedding tables, and the LM head load quantized; this one does not. Use a bf16 or f16 export, for example mlx-community/Florence-2-base-ft-bf16."
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Both halves of a Florence-2 `config.json` plus the fusion-stage fields.
 #[derive(Debug, Clone)]
 pub struct Florence2Config {
@@ -93,16 +300,26 @@ pub fn sanitize(weights: WeightMap) -> WeightMap {
         out.insert(key, value);
     }
 
+    // A quantized export carries three planes per table, so the fill has to
+    // copy `.scales` and `.biases` alongside `.weight`; leaving them behind
+    // would present `model.shared` as a dense table whose `.weight` is packed
+    // `uint32`, which reaches MLX and aborts instead of erroring.
     let shared = format!("{FLORENCE2_TEXT_PREFIX}model.shared.weight");
     if !out.contains_key(&shared) {
-        let source = [
-            format!("{FLORENCE2_TEXT_PREFIX}model.encoder.embed_tokens.weight"),
-            format!("{FLORENCE2_TEXT_PREFIX}model.decoder.embed_tokens.weight"),
+        let source_prefix = [
+            format!("{FLORENCE2_TEXT_PREFIX}model.encoder.embed_tokens"),
+            format!("{FLORENCE2_TEXT_PREFIX}model.decoder.embed_tokens"),
         ]
         .into_iter()
-        .find_map(|key| out.get(&key).map(|w| mlxcel_core::copy(w)));
-        if let Some(tensor) = source {
-            out.insert(shared, tensor);
+        .find(|prefix| out.contains_key(&format!("{prefix}.weight")));
+        if let Some(source_prefix) = source_prefix {
+            let target_prefix = format!("{FLORENCE2_TEXT_PREFIX}model.shared");
+            for plane in ["weight", "scales", "biases"] {
+                if let Some(tensor) = out.get(&format!("{source_prefix}.{plane}")) {
+                    let copied = mlxcel_core::copy(tensor);
+                    out.insert(format!("{target_prefix}.{plane}"), copied);
+                }
+            }
         }
     }
     out
@@ -144,6 +361,10 @@ pub struct Florence2TextConfig {
     pub bos_token_id: i32,
     pub eos_token_id: i32,
     pub decoder_start_token_id: i32,
+    /// Packing of the projections, the shared token table, the position
+    /// tables, and the LM head. [`Florence2Quantization::DENSE`] for a bf16 or
+    /// f16 export.
+    pub quantization: Florence2Quantization,
 }
 
 fn config_i32(config: &Value, key: &str) -> Option<i32> {
@@ -176,6 +397,12 @@ impl Florence2TextConfig {
             bos_token_id: config_i32(config, "bos_token_id").unwrap_or(0),
             eos_token_id: config_i32(config, "eos_token_id").unwrap_or(2),
             decoder_start_token_id: config_i32(config, "decoder_start_token_id").unwrap_or(2),
+            // A bare `text_config` sub-object carries no `quantization` block,
+            // so this resolves to `DENSE` on the usual path and
+            // `from_model_config` overwrites it from the top level. Reading it
+            // here as well means a caller that hands the *whole* document to
+            // `from_text_config` still gets the right packing.
+            quantization: Florence2Quantization::from_model_config(config)?,
         };
         // Every field below becomes a shape, an index, a divisor, or a `Vec`
         // capacity somewhere downstream. MLX throws on an out-of-range shape
@@ -264,9 +491,20 @@ impl Florence2TextConfig {
     /// `text_config` key) is also accepted so the sub-object can be passed
     /// directly.
     pub fn from_model_config(config: &Value) -> Result<Self> {
-        match config.get("text_config") {
-            Some(text) => Self::from_text_config(text),
-            None => Self::from_text_config(config),
-        }
+        let mut parsed = match config.get("text_config") {
+            Some(text) => Self::from_text_config(text)?,
+            None => Self::from_text_config(config)?,
+        };
+        // `quantization` sits at the top level of a Florence-2 `config.json`,
+        // not inside `text_config`, so it has to be read from the document we
+        // were handed rather than from the sub-object above. When a bare text
+        // config was passed directly this re-reads the same object and is a
+        // no-op.
+        parsed.quantization = Florence2Quantization::from_model_config(config)?;
+        Ok(parsed)
     }
 }
+
+#[cfg(test)]
+#[path = "florence2_quantized_tests.rs"]
+mod florence2_quantized_tests;

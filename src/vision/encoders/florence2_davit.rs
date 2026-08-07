@@ -42,6 +42,8 @@ use serde_json::Value;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
+use crate::models::florence2::Florence2Quantization;
+
 use super::florence2_davit_blocks::{Block, BlockParams, ConvEmbed};
 use super::{VisionEncoder, VisionEncoderOutput};
 
@@ -96,6 +98,14 @@ pub struct Florence2VisionConfig {
     /// Fusion-stage pooling recipe, e.g.
     /// `["spatial_avg_pool", "temporal_avg_pool"]`.
     pub image_feature_source: Vec<String>,
+    /// Packing of the tower's attention and MLP projections.
+    /// [`Florence2Quantization::DENSE`] for a bf16 or f16 export.
+    ///
+    /// The block lives at the top level of a Florence-2 `config.json`, not
+    /// inside `vision_config`, so only [`Self::from_model_config`] can fill
+    /// it; [`Self::from_vision_config`] leaves it at the dense default
+    /// because the sub-object it is handed cannot carry it.
+    pub quantization: Florence2Quantization,
 }
 
 fn i32_list(config: &Value, key: &str) -> Option<Vec<i32>> {
@@ -200,6 +210,7 @@ impl Florence2VisionConfig {
                         .collect()
                 })
                 .unwrap_or_default(),
+            quantization: Florence2Quantization::DENSE,
         };
         parsed.validate()?;
         Ok(parsed)
@@ -281,10 +292,15 @@ impl Florence2VisionConfig {
     /// passed directly, mirroring
     /// [`crate::models::Florence2TextConfig::from_model_config`].
     pub fn from_model_config(config: &Value) -> Result<Self> {
-        match config.get("vision_config") {
-            Some(vision) => Self::from_vision_config(vision),
-            None => Self::from_vision_config(config),
-        }
+        let mut parsed = match config.get("vision_config") {
+            Some(vision) => Self::from_vision_config(vision)?,
+            None => Self::from_vision_config(config)?,
+        };
+        // The `quantization` block is a property of the whole checkpoint and
+        // sits beside `vision_config`, not inside it, so it can only be read
+        // from the full document.
+        parsed.quantization = Florence2Quantization::from_model_config(config)?;
+        Ok(parsed)
     }
 
     /// Number of DaViT stages.
@@ -404,6 +420,7 @@ impl Florence2DaViT {
                 window_size: config.window_size,
                 conv_at_attn: config.conv_at_attn,
                 conv_at_ffn: config.conv_at_ffn,
+                quantization: config.quantization,
             };
             let mut stage_blocks = Vec::with_capacity(config.depths[stage].max(0) as usize);
             for depth in 0..config.depths[stage] {
@@ -441,8 +458,18 @@ impl Florence2DaViT {
         })
         .map_err(|e| anyhow!("Failed to load Florence-2 vision weights: {e}"))?;
         let mut weights = sanitize(weights);
-        // Apple Silicon precision policy: bf16 -> f16 for non-quantized weights.
-        let _ = crate::models::convert_bf16_weights(&mut weights);
+        // The tower's own dense-only tensors are the conv stack; a checkpoint
+        // that packed one would reach `conv2d` as `uint32` and abort.
+        crate::models::florence2::reject_unsupported_quantized_tensors(&weights)
+            .map_err(|e| anyhow!("{e}"))?;
+        // Apple Silicon precision policy: bf16 -> f16, but only for a dense
+        // export. A quantized one keeps its scales and biases at the width the
+        // checkpoint stored them, because those are dequantization operands
+        // rather than activations and rounding them changes every weight the
+        // tower reconstructs.
+        if !Florence2Quantization::config_is_quantized(&config) {
+            let _ = crate::models::convert_bf16_weights(&mut weights);
+        }
 
         Self::from_weights(&weights, &vision_config, FLORENCE2_VISION_PREFIX)
             .map_err(|e| anyhow!("Failed to build Florence-2 DaViT backbone: {e}"))

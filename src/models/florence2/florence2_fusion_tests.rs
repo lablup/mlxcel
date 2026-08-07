@@ -23,7 +23,7 @@ use super::super::fusion::{
     LearnedPositionEmbedding2D, MAX_TEMPORAL_EMBEDDINGS, PositionalEmbeddingCosine1D,
     additive_attention_mask,
 };
-use super::super::{Florence2TextConfig, Florence2VisionConfig};
+use super::super::{Florence2Quantization, Florence2TextConfig, Florence2VisionConfig};
 use super::*;
 use serde_json::json;
 
@@ -116,6 +116,7 @@ fn tiny_text_config() -> Florence2TextConfig {
         bos_token_id: 0,
         eos_token_id: 2,
         decoder_start_token_id: 2,
+        quantization: Florence2Quantization::DENSE,
     }
 }
 
@@ -146,6 +147,7 @@ fn tiny_vision_config(image_feature_source: &[&str]) -> Florence2VisionConfig {
             "max_temporal_embeddings": MAX_TEMPORAL,
         })),
         image_feature_source: image_feature_source.iter().map(|s| s.to_string()).collect(),
+        quantization: Florence2Quantization::DENSE,
     }
 }
 
@@ -259,7 +261,13 @@ fn learned_position_embedding_puts_column_first_then_row() {
         cols,
     );
 
-    let embed = LearnedPositionEmbedding2D::from_weights(&map, "pos", IMAGE_DIM).unwrap();
+    let embed = LearnedPositionEmbedding2D::from_weights(
+        &map,
+        "pos",
+        IMAGE_DIM,
+        Florence2Quantization::DENSE,
+    )
+    .unwrap();
     let out = embed.forward(3, 2).unwrap();
     assert_eq!(mlxcel_core::array_shape(&out), vec![1, 3, 2, IMAGE_DIM]);
 
@@ -284,8 +292,13 @@ fn learned_position_embedding_puts_column_first_then_row() {
 #[test]
 fn learned_position_embedding_rejects_oversized_grid() {
     let map = tiny_weights();
-    let embed =
-        LearnedPositionEmbedding2D::from_weights(&map, "image_pos_embed", IMAGE_DIM).unwrap();
+    let embed = LearnedPositionEmbedding2D::from_weights(
+        &map,
+        "image_pos_embed",
+        IMAGE_DIM,
+        Florence2Quantization::DENSE,
+    )
+    .unwrap();
     let err = expect_err(embed.forward(MAX_POS_EMBEDDINGS + 1, 2));
     assert!(
         err.contains("max_pos_embeddings"),
@@ -301,9 +314,10 @@ fn learned_position_embedding_rejects_width_mismatch() {
         &map,
         "image_pos_embed",
         IMAGE_DIM + 2,
+        Florence2Quantization::DENSE,
     ));
     assert!(
-        err.contains("image feature width"),
+        err.contains("image_pos_embed.row_embeddings") && err.contains("dim_embed[-1]"),
         "unexpected error: {err}"
     );
 }
@@ -540,13 +554,18 @@ fn config_defaults_image_token_id_to_vocab_size() {
     );
 }
 
-/// `Florence2Model::load` must reject a quantized checkpoint before it ever
-/// touches the weight files, since neither the BART text stack nor the DaViT
-/// tower has a quantized code path. A directory holding only `config.json`
-/// (no safetensors) is enough to exercise this: the check runs, and returns,
-/// before weight loading is attempted.
+/// Declaring quantization is no longer grounds for refusal.
+///
+/// #854 rejected a quantized checkpoint on the config alone, before touching
+/// the weight files, because neither half of the family had a quantized code
+/// path. Both do now, so the refusal moved to the weight map and covers only
+/// the tensors this implementation still consumes dense (see
+/// `reject_unsupported_quantized_tensors` and its tests in
+/// `florence2_quantized_tests.rs`). This pins that the config-level gate is
+/// gone: a directory holding only a quantizing `config.json` now fails on the
+/// missing weights, which is how a dense checkpoint in the same state fails.
 #[test]
-fn load_rejects_quantized_checkpoint() {
+fn load_no_longer_rejects_a_checkpoint_for_declaring_quantization() {
     let raw = json!({
         "model_type": "florence2",
         "quantization": { "group_size": 64, "bits": 4 },
@@ -578,12 +597,12 @@ fn load_rejects_quantized_checkpoint() {
     .expect("write config.json");
 
     let err = match Florence2Model::load(dir.path()) {
-        Ok(_) => panic!("quantized checkpoint must be rejected"),
+        Ok(_) => panic!("a checkpoint with no safetensors must still fail"),
         Err(e) => e.to_string(),
     };
     assert!(
-        err.to_lowercase().contains("quantized"),
-        "error should mention the quantized-checkpoint rejection, got: {err}"
+        err.contains("No safetensors files found"),
+        "load must now fail on the missing weights rather than on the quantization metadata, got: {err}"
     );
 }
 

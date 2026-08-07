@@ -1852,7 +1852,10 @@ pub fn warn_bf16_precision() {
 ///
 /// Returns `true` if any bf16 tensors were found and converted, `false` otherwise.
 ///
-/// Used by: load_text_weights, load_vlm_weights_common
+/// Used by: load_text_weights, load_vlm_weights_common, Florence-2 (called
+/// directly from `Florence2Model::load`, `Florence2TextModel::load`, and
+/// `Florence2DaViT::load`, each of which skips the conversion when the
+/// checkpoint declares quantization metadata)
 #[must_use]
 pub fn convert_bf16_weights(weights: &mut mlxcel_core::weights::WeightMap) -> bool {
     convert_bf16_weights_with_keep(weights, |_| false)

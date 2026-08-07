@@ -29,9 +29,11 @@
 //! Reference: mlx-vlm `mlx_vlm/models/florence2/vision.py`
 //! (<https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/florence2/vision.py>).
 
-use mlxcel_core::layers::{LayerNorm, Linear};
+use mlxcel_core::layers::{LayerNorm, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
+
+use crate::models::florence2::Florence2Quantization;
 
 use super::florence2_davit_attention::{ChannelAttention, WindowAttention};
 
@@ -199,15 +201,30 @@ impl DepthWiseConv2d {
 /// Two-layer feed-forward with the exact (erf-based) GELU that
 /// `mlx.nn.GELU()` defaults to. Weight path is `ffn.fn.net.fc{1,2}`.
 pub(crate) struct Mlp {
-    fc1: Linear,
-    fc2: Linear,
+    fc1: UnifiedLinear,
+    fc2: UnifiedLinear,
 }
 
 impl Mlp {
-    pub(crate) fn from_weights(weights: &WeightMap, prefix: &str) -> Result<Self, String> {
+    pub(crate) fn from_weights(
+        weights: &WeightMap,
+        prefix: &str,
+        quantization: Florence2Quantization,
+    ) -> Result<Self, String> {
+        let (group_size, bits) = (quantization.group_size, quantization.bits);
         Ok(Self {
-            fc1: Linear::from_weights(weights, &format!("{prefix}.net.fc1"))?,
-            fc2: Linear::from_weights(weights, &format!("{prefix}.net.fc2"))?,
+            fc1: UnifiedLinear::from_weights(
+                weights,
+                &format!("{prefix}.net.fc1"),
+                group_size,
+                bits,
+            )?,
+            fc2: UnifiedLinear::from_weights(
+                weights,
+                &format!("{prefix}.net.fc2"),
+                group_size,
+                bits,
+            )?,
         })
     }
 
@@ -247,6 +264,10 @@ pub(crate) struct BlockParams {
     pub window_size: i32,
     pub conv_at_attn: bool,
     pub conv_at_ffn: bool,
+    /// Packing of this stage's attention and MLP projections. Carried on the
+    /// block geometry so every projection constructor below sees it without a
+    /// second parameter threaded through three struct layers.
+    pub quantization: Florence2Quantization,
 }
 
 fn optional_dw(
@@ -282,6 +303,7 @@ impl SpatialBlock {
                 params.dim,
                 params.num_heads,
                 params.window_size,
+                params.quantization,
             )?,
             conv2: optional_dw(
                 weights,
@@ -290,7 +312,7 @@ impl SpatialBlock {
                 params.dim,
             )?,
             ffn_norm: layer_norm_from_weights(weights, &format!("{prefix}.ffn.norm"))?,
-            ffn: Mlp::from_weights(weights, &format!("{prefix}.ffn.fn"))?,
+            ffn: Mlp::from_weights(weights, &format!("{prefix}.ffn.fn"), params.quantization)?,
         })
     }
 
@@ -329,6 +351,7 @@ impl ChannelBlock {
                 weights,
                 &format!("{prefix}.channel_attn.fn"),
                 params.num_groups,
+                params.quantization,
             )?,
             conv2: optional_dw(
                 weights,
@@ -337,7 +360,7 @@ impl ChannelBlock {
                 params.dim,
             )?,
             ffn_norm: layer_norm_from_weights(weights, &format!("{prefix}.ffn.norm"))?,
-            ffn: Mlp::from_weights(weights, &format!("{prefix}.ffn.fn"))?,
+            ffn: Mlp::from_weights(weights, &format!("{prefix}.ffn.fn"), params.quantization)?,
         })
     }
 

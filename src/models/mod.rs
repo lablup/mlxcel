@@ -184,9 +184,9 @@ pub use falcon_ocr_rope::FalconOcrTokenIds;
 pub use florence2::{
     FLORENCE2_LOC_TOKEN_BASE, FLORENCE2_VISION_PREFIX, Florence2BoundingBox, Florence2Config,
     Florence2DaViT, Florence2ImageSize, Florence2Model, Florence2Output, Florence2Polygon,
-    Florence2PostProcessingType, Florence2Processor, Florence2QuadBox, Florence2RunOutput,
-    Florence2SeqCache, Florence2Task, Florence2TaskResult, Florence2TextConfig, Florence2TextModel,
-    Florence2VisionConfig, Florence2VlmModel, florence2_loc_token_id,
+    Florence2PostProcessingType, Florence2Processor, Florence2QuadBox, Florence2Quantization,
+    Florence2RunOutput, Florence2SeqCache, Florence2Task, Florence2TaskResult, Florence2TextConfig,
+    Florence2TextModel, Florence2VisionConfig, Florence2VlmModel, florence2_loc_token_id,
 };
 pub use gemma::GemmaModel;
 pub use gemma2::Gemma2Model;
@@ -996,7 +996,7 @@ impl ModelType {
             ModelType::Moondream3VLM => ("Moondream 3 (custom ViT + custom decoder)", "Other VLM"),
             ModelType::Moondream2VLM => ("Moondream 2 (SigLIP-style ViT + Phi text)", "Other VLM"),
             ModelType::Florence2VLM => (
-                "Florence-2 (DaViT + BART seq2seq, task prompts, bf16/f16 only)",
+                "Florence-2 (DaViT + BART seq2seq, task prompts)",
                 "Other VLM",
             ),
             ModelType::MiniCPMOVLM => (

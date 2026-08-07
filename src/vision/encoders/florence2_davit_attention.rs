@@ -23,9 +23,11 @@
 //! Reference: mlx-vlm `mlx_vlm/models/florence2/vision.py`
 //! (<https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/florence2/vision.py>).
 
-use mlxcel_core::layers::Linear;
+use mlxcel_core::layers::UnifiedLinear;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
+
+use crate::models::florence2::Florence2Quantization;
 
 use super::deepseekocr_sam::{window_partition, window_unpartition};
 
@@ -51,24 +53,35 @@ fn split_qkv(
 /// tiles, with the feature map padded up to a whole number of windows and
 /// cropped back afterwards.
 pub(crate) struct WindowAttention {
-    qkv: Linear,
-    proj: Linear,
+    qkv: UnifiedLinear,
+    proj: UnifiedLinear,
     num_heads: i32,
     window_size: i32,
     scale: f32,
 }
 
 impl WindowAttention {
+    /// `quantization` is the checkpoint's declared packing. Both projections
+    /// go through [`UnifiedLinear`], which falls back to a dense `Linear` for
+    /// a prefix that carries no `.scales` sibling, so a bf16 export loads
+    /// through the same call.
     pub(crate) fn from_weights(
         weights: &WeightMap,
         prefix: &str,
         dim: i32,
         num_heads: i32,
         window_size: i32,
+        quantization: Florence2Quantization,
     ) -> Result<Self, String> {
+        let (group_size, bits) = (quantization.group_size, quantization.bits);
         Ok(Self {
-            qkv: Linear::from_weights(weights, &format!("{prefix}.qkv"))?,
-            proj: Linear::from_weights(weights, &format!("{prefix}.proj"))?,
+            qkv: UnifiedLinear::from_weights(weights, &format!("{prefix}.qkv"), group_size, bits)?,
+            proj: UnifiedLinear::from_weights(
+                weights,
+                &format!("{prefix}.proj"),
+                group_size,
+                bits,
+            )?,
             num_heads,
             window_size,
             scale: ((dim / num_heads) as f32).powf(-0.5),
@@ -116,8 +129,8 @@ impl WindowAttention {
 /// `(B, g, N, C/g)` is `(B, groups, C/groups, C/groups)`, which is the whole
 /// point of channel attention. This port follows the code, not the comment.
 pub(crate) struct ChannelAttention {
-    qkv: Linear,
-    proj: Linear,
+    qkv: UnifiedLinear,
+    proj: UnifiedLinear,
     groups: i32,
 }
 
@@ -126,10 +139,17 @@ impl ChannelAttention {
         weights: &WeightMap,
         prefix: &str,
         groups: i32,
+        quantization: Florence2Quantization,
     ) -> Result<Self, String> {
+        let (group_size, bits) = (quantization.group_size, quantization.bits);
         Ok(Self {
-            qkv: Linear::from_weights(weights, &format!("{prefix}.qkv"))?,
-            proj: Linear::from_weights(weights, &format!("{prefix}.proj"))?,
+            qkv: UnifiedLinear::from_weights(weights, &format!("{prefix}.qkv"), group_size, bits)?,
+            proj: UnifiedLinear::from_weights(
+                weights,
+                &format!("{prefix}.proj"),
+                group_size,
+                bits,
+            )?,
             groups,
         })
     }

@@ -63,9 +63,11 @@ pub struct Florence2RunOutput {
 }
 
 impl Florence2VlmModel {
-    /// Load model and processor from a checkpoint directory. Quantized
-    /// checkpoints are rejected by [`Florence2Model::load`] with a named
-    /// error; use a bf16 or f16 export.
+    /// Load model and processor from a checkpoint directory. Both dense and
+    /// quantized exports load: the projections, embedding tables, and LM head
+    /// go through the unified quantized layers. [`Florence2Model::load`] still
+    /// refuses, with the offending tensor named, a checkpoint that packs one of
+    /// the handful of tensors this family consumes dense.
     pub fn load(model_path: &Path) -> Result<Self> {
         let model = Florence2Model::load(model_path)?;
         let processor = Florence2Processor::from_pretrained(model_path)?;
@@ -206,6 +208,15 @@ impl LanguageModel for Florence2VlmModel {
     /// [`Florence2VlmModel::run_task`] before the autoregressive loop and the
     /// server refuses the checkpoint at startup, so this exists for trait
     /// completeness (warmup, tooling) rather than as a generation path.
+    ///
+    /// The input is truncated to `max_position_embeddings` tokens. The learned
+    /// BART position table has no rows past
+    /// `POSITION_OFFSET + max_position_embeddings`, and both the encoder and
+    /// the decoder read their position rows with a gather into it, which MLX
+    /// does not range-check on a positive index: a longer sequence reads past
+    /// the end of the table rather than faulting. The trait signature returns
+    /// an array and cannot report an error, so bounding the input is the only
+    /// remedy available here.
     fn forward(
         &self,
         input_ids: &MlxArray,
@@ -213,10 +224,34 @@ impl LanguageModel for Florence2VlmModel {
         _mask: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let text = self.model.text_model();
-        let encoder_hidden = text.encode_tokens(input_ids);
 
         let shape = mlxcel_core::array_shape(input_ids);
-        let (batch, seq) = (shape[0], shape[1]);
+        let (batch, mut seq) = (shape[0], shape[1]);
+        // Every other caller of `encode_tokens` / `decode` bounds the sequence
+        // itself (`Florence2Model::encode_fused` rejects an over-long prompt,
+        // both greedy loops stop once the cache offset reaches the bound), and
+        // those entry points document the bound as a precondition because
+        // nothing below them can enforce it. This impl takes whatever the
+        // caller hands it, so it has to do the bounding. The same length also
+        // sizes the O(n^2) host buffer `layers::additive_causal_mask` fills
+        // for the multi-token decoder call below.
+        let max_positions = text.config().max_position_embeddings;
+        let truncated;
+        let input_ids: &MlxArray = if seq > max_positions {
+            tracing::warn!(
+                "Florence-2 trait forward: truncating a {seq}-token input to \
+                 max_position_embeddings {max_positions}; this path exists for warmup and \
+                 tooling, use Florence2VlmModel::run_task to generate"
+            );
+            truncated = mlxcel_core::slice(input_ids, &[0, 0], &[batch, max_positions]);
+            seq = max_positions;
+            &truncated
+        } else {
+            input_ids
+        };
+
+        let encoder_hidden = text.encode_tokens(input_ids);
+
         let start = text.config().decoder_start_token_id;
         let start_col =
             mlxcel_core::from_slice_i32(&vec![start; batch.max(1) as usize], &[batch, 1]);

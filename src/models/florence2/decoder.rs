@@ -22,19 +22,21 @@
 //! https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/florence2/language.py
 //! (Florence2Decoder)
 
-use mlxcel_core::layers::LayerNorm;
+use mlxcel_core::layers::{LayerNorm, UnifiedEmbedding};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::Florence2TextConfig;
 use super::encoder::POSITION_OFFSET;
-use super::layers::{Florence2DecoderLayer, Florence2LayerCache, additive_causal_mask, layer_norm};
+use super::layers::{
+    Florence2DecoderLayer, Florence2LayerCache, additive_causal_mask, embedding_table_rows,
+    layer_norm,
+};
 
 pub(crate) struct Florence2Decoder {
-    embed_positions: UniquePtr<MlxArray>,
+    embed_positions: UnifiedEmbedding,
     layernorm_embedding: LayerNorm,
     layers: Vec<Florence2DecoderLayer>,
-    d_model: i32,
     dtype: i32,
 }
 
@@ -45,31 +47,26 @@ impl Florence2Decoder {
         config: &Florence2TextConfig,
         dtype: i32,
     ) -> Result<Self, String> {
-        let embed_positions = weights
-            .get(&format!("{prefix}.embed_positions.weight"))
-            .map(|w| mlxcel_core::copy(w))
-            .ok_or_else(|| {
-                format!("Florence-2 weight not found: {prefix}.embed_positions.weight")
-            })?;
-        // `Florence2Model` bounds both the fused encoder input length and the
-        // decode offset against `config.max_position_embeddings`, and those
-        // guards are only sound if the loaded table actually covers that
-        // bound. Without this check a `config.json` that inflates
-        // `max_position_embeddings` (or `d_model`) passes them and reaches MLX
-        // as an out-of-range slice, which throws across the cxx bridge and
-        // aborts the process instead of returning `Err`. Sum in i64 so the
-        // comparison cannot overflow on a hostile value.
-        let position_shape = mlxcel_core::array_shape(&embed_positions);
+        // Same bound as the encoder table, and for the same reason: the
+        // decode offset is checked against `config.max_position_embeddings`,
+        // so that check is only sound if the loaded table covers it.
+        let key = format!("{prefix}.embed_positions");
+        let embed_positions = UnifiedEmbedding::from_weights(
+            weights,
+            &key,
+            config.quantization.group_size,
+            config.quantization.bits,
+        )
+        .map_err(|e| format!("Florence-2 {e}"))?;
         let required_rows = POSITION_OFFSET as i64 + config.max_position_embeddings as i64;
-        if position_shape.len() != 2
-            || position_shape[1] != config.d_model
-            || (position_shape[0] as i64) < required_rows
-        {
-            return Err(format!(
-                "Florence-2 {prefix}.embed_positions.weight: expected at least [{required_rows}, {}] (max_position_embeddings {} + POSITION_OFFSET {POSITION_OFFSET}), got {position_shape:?}",
-                config.d_model, config.max_position_embeddings
-            ));
-        }
+        embedding_table_rows(
+            &embed_positions,
+            &key,
+            required_rows,
+            "max_position_embeddings + POSITION_OFFSET",
+            config.d_model,
+            "d_model",
+        )?;
         let layernorm_embedding = layer_norm(weights, &format!("{prefix}.layernorm_embedding"))?;
 
         let mut layers = Vec::with_capacity(config.decoder_layers as usize);
@@ -78,6 +75,7 @@ impl Florence2Decoder {
                 weights,
                 &format!("{prefix}.layers.{i}"),
                 config.decoder_attention_heads,
+                config.quantization,
             )?);
         }
 
@@ -85,7 +83,6 @@ impl Florence2Decoder {
             embed_positions,
             layernorm_embedding,
             layers,
-            d_model: config.d_model,
             dtype,
         })
     }
@@ -108,11 +105,11 @@ impl Florence2Decoder {
     ) -> UniquePtr<MlxArray> {
         debug_assert_eq!(caches.len(), self.layers.len());
         let seq = mlxcel_core::array_shape(inputs_embeds)[1];
-        let pos = mlxcel_core::slice(
-            &self.embed_positions,
-            &[POSITION_OFFSET + offset, 0],
-            &[POSITION_OFFSET + offset + seq, self.d_model],
-        );
+        // Rows `[POSITION_OFFSET + offset, ... + seq)`, gathered so the dense
+        // and quantized tables go through one call. See the encoder.
+        let positions =
+            mlxcel_core::arange_i32(POSITION_OFFSET + offset, POSITION_OFFSET + offset + seq, 1);
+        let pos = self.embed_positions.forward(&positions);
         let x = mlxcel_core::add(inputs_embeds, &pos);
         let mut x = self.layernorm_embedding.forward(&x);
 
