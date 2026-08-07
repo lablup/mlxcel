@@ -150,6 +150,41 @@ fn a_sliver_that_would_collapse_after_resize_is_rejected() {
     assert!(crop_region(&img, &[0.0, 0.0, 5000.0, 20.0], MIN_CROP_DIM, 1024).is_none());
 }
 
+/// The lazy planner decides viability from `crop_rect` alone, so the two must
+/// not disagree: a box `crop_rect` accepts and `crop_region` rejects would be
+/// planned and then fail to cut, and the reverse would silently drop a region.
+#[test]
+fn the_geometry_predicate_agrees_with_the_actual_crop() {
+    let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(400, 300));
+    let sliver = image::DynamicImage::ImageRgb8(image::RgbImage::new(6000, 100));
+    let cases: [(&image::DynamicImage, [f32; 4]); 5] = [
+        // Ordinary interior box.
+        (&img, [10.0, 10.0, 110.0, 60.0]),
+        // Too small on a side.
+        (&img, [0.0, 0.0, 8.0, 40.0]),
+        // Extends past the right and bottom edges, so it clamps.
+        (&img, [350.0, 250.0, 900.0, 700.0]),
+        // Entirely past the edge, so it clamps to nothing.
+        (&img, [500.0, 400.0, 800.0, 700.0]),
+        // Sliver rejected by the post-resize check rather than by its raw size.
+        (&sliver, [0.0, 0.0, 5000.0, 20.0]),
+    ];
+    for (image, bbox) in cases {
+        let rect = crop_rect(image.width(), image.height(), &bbox, MIN_CROP_DIM, 1024);
+        let cropped = crop_region(image, &bbox, MIN_CROP_DIM, 1024);
+        match (rect, cropped) {
+            (Some((_, _, w, h)), Some(cropped)) => {
+                assert_eq!((w, h), (cropped.width(), cropped.height()), "{bbox:?}");
+            }
+            (None, None) => {}
+            (rect, cropped) => panic!(
+                "{bbox:?}: crop_rect gave {rect:?} but crop_region gave {:?}",
+                cropped.map(|c| (c.width(), c.height()))
+            ),
+        }
+    }
+}
+
 #[test]
 fn a_page_without_detections_falls_back_to_a_single_plain_region() {
     let img = page();

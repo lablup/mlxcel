@@ -15,10 +15,29 @@
 //! `--layout-detections` parsing and region-planning tests.
 
 use super::*;
-use mlxcel::vision::falcon_ocr_layout::OcrCategory;
+use mlxcel::vision::falcon_ocr_layout::{OcrCategory, plan_layout_regions};
+
+const PAGE_WIDTH: u32 = 1000;
+const PAGE_HEIGHT: u32 = 1300;
 
 fn page() -> image::DynamicImage {
-    image::DynamicImage::ImageRgb8(image::RgbImage::new(1000, 1300))
+    image::DynamicImage::ImageRgb8(image::RgbImage::new(PAGE_WIDTH, PAGE_HEIGHT))
+}
+
+/// Plan against the standard test page, the way the driver does.
+fn plan(detections: &[Detection]) -> Vec<LayoutOcrPlan> {
+    plan_layout_region_boxes(
+        PAGE_WIDTH,
+        PAGE_HEIGHT,
+        detections,
+        CONTAINMENT_THRESHOLD,
+        MIN_CROP_DIM,
+        1024,
+    )
+}
+
+fn kept(detections: &[Detection]) -> Vec<Detection> {
+    filter_nested_detections(detections, CONTAINMENT_THRESHOLD)
 }
 
 /// The exact shape `mlxcel detect --format json` prints, so the two commands
@@ -174,12 +193,108 @@ fn a_top_level_scalar_is_rejected() {
     assert!(error.to_string().contains("top level"), "got: {error}");
 }
 
+fn detections_json(count: usize) -> String {
+    let entries: Vec<String> = (0..count)
+        .map(|_| r#"{"label": "text", "bbox": [0, 0, 100, 100]}"#.to_string())
+        .collect();
+    format!("[{}]", entries.join(","))
+}
+
+/// The nested-box suppression is quadratic, so an unbounded array turns a small
+/// file into minutes of comparisons.
+#[test]
+fn an_array_over_the_detection_cap_is_rejected_with_both_numbers() {
+    let json = detections_json(MAX_LAYOUT_DETECTIONS + 1);
+    let error = parse_layout_detections(&json).expect_err("must fail");
+    let message = error.to_string();
+    assert!(
+        message.contains(&(MAX_LAYOUT_DETECTIONS + 1).to_string()),
+        "the actual count must be named, got: {message}"
+    );
+    assert!(
+        message.contains(&MAX_LAYOUT_DETECTIONS.to_string()),
+        "the cap must be named, got: {message}"
+    );
+}
+
+/// The cap is inclusive; pinned so a later refactor cannot quietly turn it into
+/// an off-by-one that rejects a legal file.
+#[test]
+fn exactly_the_detection_cap_still_parses() {
+    let json = detections_json(MAX_LAYOUT_DETECTIONS);
+    let parsed = parse_layout_detections(&json).expect("the cap itself is allowed");
+    assert_eq!(parsed.len(), MAX_LAYOUT_DETECTIONS);
+}
+
+/// The class name reaches the operator's terminal verbatim through the
+/// summary's `no text category:` list, so an escape sequence in it would repaint
+/// their screen. This is the injection guard.
+#[test]
+fn a_class_name_with_a_control_character_is_rejected() {
+    for raw in ["te\u{1b}[2Jxt", "te\u{7}xt", "te\nxt"] {
+        let json = format!(
+            r#"[{{"label": "ok", "bbox": [0, 0, 10, 10]}}, {{"label": {}, "bbox": [0, 0, 10, 10]}}]"#,
+            serde_json::to_string(raw).expect("string encodes")
+        );
+        let error = parse_layout_detections(&json).expect_err("must fail: {raw:?}");
+        let message = error.to_string();
+        assert!(message.contains("detection #1"), "got: {message}");
+        assert!(message.contains("control character"), "got: {message}");
+    }
+}
+
+#[test]
+fn an_over_long_class_name_is_rejected() {
+    let name = "t".repeat(MAX_LAYOUT_CLASS_NAME_CHARS + 1);
+    let json = format!(
+        r#"[{{"label": "ok", "bbox": [0, 0, 10, 10]}}, {{"label": "{name}", "bbox": [0, 0, 10, 10]}}]"#
+    );
+    let error = parse_layout_detections(&json).expect_err("must fail");
+    let message = error.to_string();
+    assert!(message.contains("detection #1"), "got: {message}");
+    assert!(message.contains("longer than"), "got: {message}");
+}
+
+/// An exponent past `f64::MAX` must not reach the planner as an infinite
+/// coordinate. The test pins "rejected either way" rather than a specific
+/// serde_json behavior: depending on the version, `1e400` either fails to parse
+/// as a number at all or yields an infinite one that the finiteness check
+/// catches.
+#[test]
+fn a_coordinate_that_overflows_to_infinity_is_rejected() {
+    let error = parse_layout_detections(r#"[{"label": "text", "bbox": [0, 0, 1e400, 10]}]"#)
+        .expect_err("must fail");
+    let message = error.to_string();
+    assert!(
+        message.contains("not valid JSON") || message.contains("non-finite"),
+        "got: {message}"
+    );
+}
+
 /// The parsed file must reach the planner as OCR-ready regions: the picture is
 /// dropped for carrying no text, and each survivor gets its category's
 /// instruction.
 #[test]
 fn parsed_detections_plan_into_regions_with_their_own_instruction() {
     let detections = parse_layout_detections(DETECT_JSON).expect("parses");
+    let plans = plan(&detections);
+    assert_eq!(plans.len(), 2, "the picture carries no text");
+    assert_eq!(plans[0].ocr_category, OcrCategory::Title);
+    assert_eq!(
+        plans[0].ocr_category.instruction(),
+        "Extract the title content from this image."
+    );
+    assert_eq!(plans[1].ocr_category, OcrCategory::Text);
+    assert_eq!(plans[1].crop, (60, 295, 880, 155));
+}
+
+/// The driver plans without cropping and cuts one region at a time, so the
+/// lazy planner has to agree with the eager one on every decision: which boxes
+/// survive, in what order, and what rectangle each one covers.
+#[test]
+fn the_lazy_plan_matches_the_eager_planner_region_for_region() {
+    let detections = parse_layout_detections(DETECT_JSON).expect("parses");
+    let plans = plan(&detections);
     let regions = plan_layout_regions(
         &page(),
         &detections,
@@ -187,17 +302,20 @@ fn parsed_detections_plan_into_regions_with_their_own_instruction() {
         MIN_CROP_DIM,
         1024,
     );
-    assert_eq!(regions.len(), 2, "the picture carries no text");
-    assert_eq!(regions[0].ocr_category, OcrCategory::Title);
-    assert_eq!(
-        regions[0].ocr_category.instruction(),
-        "Extract the title content from this image."
-    );
-    assert_eq!(regions[1].ocr_category, OcrCategory::Text);
-    assert_eq!(
-        (regions[1].image.width(), regions[1].image.height()),
-        (880, 155)
-    );
+
+    assert_eq!(plans.len(), regions.len());
+    for (plan, region) in plans.iter().zip(regions.iter()) {
+        assert_eq!(plan.category, region.category);
+        assert_eq!(plan.bbox, region.bbox);
+        assert_eq!(plan.score, region.score);
+        assert_eq!(plan.ocr_category, region.ocr_category);
+        let (_, _, width, height) = plan.crop;
+        assert_eq!(
+            (width, height),
+            (region.image.width(), region.image.height()),
+            "the planned rect must be the rect the eager crop produced"
+        );
+    }
 }
 
 /// Nothing reorders the detections, so the file's order is the output order.
@@ -210,16 +328,9 @@ fn regions_follow_the_files_order_not_a_geometric_sort() {
       {"label": "text", "bbox": [60, 295, 940, 450]}
     ]"#;
     let detections = parse_layout_detections(json).expect("parses");
-    let regions = plan_layout_regions(
-        &page(),
-        &detections,
-        CONTAINMENT_THRESHOLD,
-        MIN_CROP_DIM,
-        1024,
-    );
-    let order: Vec<&str> = regions
-        .iter()
-        .map(|region| region.category.as_str())
+    let order: Vec<String> = plan(&detections)
+        .into_iter()
+        .map(|plan| plan.category)
         .collect();
     assert_eq!(order, ["page_footer", "title", "text"]);
 }
@@ -230,15 +341,9 @@ fn regions_follow_the_files_order_not_a_geometric_sort() {
 fn a_page_of_figures_falls_back_and_the_summary_says_so() {
     let json = r#"[{"label": "picture", "bbox": [0, 0, 500, 500]}]"#;
     let detections = parse_layout_detections(json).expect("parses");
-    let regions = plan_layout_regions(
-        &page(),
-        &detections,
-        CONTAINMENT_THRESHOLD,
-        MIN_CROP_DIM,
-        1024,
-    );
-    assert!(is_whole_page_fallback(&regions));
-    let summary = plan_summary(&detections, &regions);
+    let plans = plan(&detections);
+    assert!(is_whole_page_fallback(&plans));
+    let summary = plan_summary(&detections, &kept(&detections), &plans);
     assert!(summary.contains("whole page"), "got: {summary}");
 }
 
@@ -250,15 +355,9 @@ fn the_summary_reports_nested_and_textless_boxes() {
       {"label": "chart", "bbox": [0, 400, 400, 800]}
     ]"#;
     let detections = parse_layout_detections(json).expect("parses");
-    let regions = plan_layout_regions(
-        &page(),
-        &detections,
-        CONTAINMENT_THRESHOLD,
-        MIN_CROP_DIM,
-        1024,
-    );
-    assert_eq!(regions.len(), 1, "only the enclosing text box survives");
-    let summary = plan_summary(&detections, &regions);
+    let plans = plan(&detections);
+    assert_eq!(plans.len(), 1, "only the enclosing text box survives");
+    let summary = plan_summary(&detections, &kept(&detections), &plans);
     assert!(summary.contains("3 detection(s)"), "got: {summary}");
     assert!(
         summary.contains("1 nested box(es) dropped"),

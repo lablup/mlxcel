@@ -32,6 +32,7 @@
 //! (it sorts by its `order_logits` head), and nothing here reorders, so the
 //! output preserves whatever order the caller supplied.
 
+use std::io::Read;
 use std::path::Path;
 use std::time::Instant;
 
@@ -40,8 +41,8 @@ use serde_json::{Map, Value};
 
 use mlxcel::vision::detection::Detection;
 use mlxcel::vision::falcon_ocr_layout::{
-    LayoutOcrRegion, MIN_CROP_DIM, filter_nested_detections, layout_to_ocr_category,
-    plan_layout_regions,
+    LayoutOcrPlan, MIN_CROP_DIM, filter_nested_detections, layout_to_ocr_category,
+    plan_layout_region_boxes,
 };
 use mlxcel::{LoadedModel, SamplingConfig};
 use mlxcel_core::cache::KVCacheMode;
@@ -57,12 +58,53 @@ const CONTAINMENT_THRESHOLD: f32 = 0.8;
 /// Trailing markers `generate_with_layout` strips from each region's answer.
 const ANSWER_TERMINATORS: [&str; 2] = ["<|end_of_query|>", "<|end_of_text|>"];
 
+/// Largest `--layout-detections` document that is read at all.
+///
+/// A real detector dump for one page is kilobytes, so this is three orders of
+/// magnitude of headroom. The ceiling exists because the alternative is reading
+/// whatever the path happens to be into memory unbounded: a truncated or
+/// hostile file, or a fifo that never ends.
+const MAX_LAYOUT_DETECTIONS_BYTES: usize = 32 * 1024 * 1024;
+
+/// Largest number of detections one page may carry.
+///
+/// A dense page yields low hundreds of boxes. The cap matters because the
+/// nested-box suppression is quadratic in the entry count, so an array that
+/// parses in a moment can still cost minutes of comparisons.
+const MAX_LAYOUT_DETECTIONS: usize = 4096;
+
+/// Longest layout class name accepted, in characters.
+///
+/// Real class names are under 20 characters. The bound is on the class name in
+/// particular because it is the one attacker-controlled string this command
+/// echoes back to the terminal, in the summary's `no text category:` list.
+const MAX_LAYOUT_CLASS_NAME_CHARS: usize = 64;
+
 /// Read and validate a `--layout-detections` file.
 ///
 /// Called before the model is loaded so a malformed file costs nothing.
+///
+/// The read is bounded rather than a plain `read_to_string`, and the bound is
+/// enforced on the bytes actually read rather than on `metadata().len()`, which
+/// reports zero for a fifo and for anything else that is not a regular file.
 pub(crate) fn load_layout_detections(path: &Path) -> Result<Vec<Detection>> {
-    let text = std::fs::read_to_string(path)
+    let read_bounded = || -> std::io::Result<String> {
+        let file = std::fs::File::open(path)?;
+        let mut text = String::new();
+        file.take(MAX_LAYOUT_DETECTIONS_BYTES as u64 + 1)
+            .read_to_string(&mut text)?;
+        Ok(text)
+    };
+    let text = read_bounded()
         .with_context(|| format!("--layout-detections: failed to read {}", path.display()))?;
+    if text.len() > MAX_LAYOUT_DETECTIONS_BYTES {
+        bail!(
+            "--layout-detections {}: the file is larger than the {} MiB limit; a detector \
+             dump for one page is kilobytes",
+            path.display(),
+            MAX_LAYOUT_DETECTIONS_BYTES / (1024 * 1024)
+        );
+    }
     parse_layout_detections(&text)
         .map_err(|error| anyhow!("--layout-detections {}: {error}", path.display()))
 }
@@ -99,6 +141,16 @@ fn parse_layout_detections(text: &str) -> Result<Vec<Detection>> {
         ),
     };
 
+    // Checked before the loop so an enormous array is rejected without first
+    // building the `Detection` vector it describes.
+    if items.len() > MAX_LAYOUT_DETECTIONS {
+        bail!(
+            "{} detections is more than the {MAX_LAYOUT_DETECTIONS} this command accepts \
+             for one page",
+            items.len()
+        );
+    }
+
     let mut detections = Vec::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
         let object = item.as_object().ok_or_else(|| {
@@ -134,6 +186,18 @@ fn parse_detection(object: &Map<String, Value>, index: usize) -> Result<Detectio
     };
     if class_name.is_empty() {
         bail!("detection #{index}: the layout class name is empty");
+    }
+    // The class name is the one piece of this file that is printed back to the
+    // operator verbatim (the summary's `no text category:` list), so a control
+    // character in it is an escape-sequence injection into their terminal.
+    if class_name.chars().any(char::is_control) {
+        bail!("detection #{index}: the layout class name contains a control character");
+    }
+    if class_name.chars().count() > MAX_LAYOUT_CLASS_NAME_CHARS {
+        bail!(
+            "detection #{index}: the layout class name is longer than \
+             {MAX_LAYOUT_CLASS_NAME_CHARS} characters"
+        );
     }
 
     let bbox = parse_bbox(object, index)?;
@@ -276,8 +340,11 @@ fn json_kind(value: &Value) -> &'static str {
 /// Regions that silently vanish are the failure mode of this pipeline (a page
 /// OCRs to half its text and nothing says why), so the counts are printed
 /// whether or not anything was dropped.
-fn plan_summary(detections: &[Detection], regions: &[LayoutOcrRegion]) -> String {
-    let kept = filter_nested_detections(detections, CONTAINMENT_THRESHOLD);
+///
+/// `kept` is the nested-box survivors, passed in rather than recomputed: the
+/// suppression is quadratic in the detection count and the planner has already
+/// paid for it once.
+fn plan_summary(detections: &[Detection], kept: &[Detection], plans: &[LayoutOcrPlan]) -> String {
     let nested = detections.len() - kept.len();
     let mut textless: Vec<&str> = kept
         .iter()
@@ -294,18 +361,18 @@ fn plan_summary(detections: &[Detection], regions: &[LayoutOcrRegion]) -> String
     if !textless.is_empty() {
         parts.push(format!("no text category: {}", textless.join(", ")));
     }
-    if is_whole_page_fallback(regions) {
+    if is_whole_page_fallback(plans) {
         parts.push("no usable region, OCRing the whole page as `plain`".to_string());
     } else {
-        parts.push(format!("{} region(s) to OCR", regions.len()));
+        parts.push(format!("{} region(s) to OCR", plans.len()));
     }
     parts.join("; ")
 }
 
 /// The planner returns a single `plain` region when nothing usable survived.
 /// No layout class maps onto `plain`, so the category is unambiguous.
-fn is_whole_page_fallback(regions: &[LayoutOcrRegion]) -> bool {
-    regions.len() == 1 && regions[0].category == "plain"
+fn is_whole_page_fallback(plans: &[LayoutOcrPlan]) -> bool {
+    plans.len() == 1 && plans[0].category == "plain"
 }
 
 /// Strip the reference's trailing task markers from one region's answer.
@@ -347,19 +414,30 @@ pub(crate) fn run_falcon_ocr_layout_generation(
         .pop()
         .ok_or_else(|| anyhow!("image decoding returned no image for {image_path:?}"))?;
 
-    let regions = plan_layout_regions(
-        &page,
+    // Planned without cropping, then cropped one region at a time below. A crop
+    // copies, so materializing the whole plan up front would hold one full-size
+    // image per detection before a single OCR token is generated, which for a
+    // page-sized box is megabytes each.
+    let kept = filter_nested_detections(detections, CONTAINMENT_THRESHOLD);
+    let plans = plan_layout_region_boxes(
+        page.width(),
+        page.height(),
         detections,
         CONTAINMENT_THRESHOLD,
         MIN_CROP_DIM,
         falcon.processor.max_dimension,
     );
-    println!("Falcon-OCR layout: {}", plan_summary(detections, &regions));
+    println!(
+        "Falcon-OCR layout: {}",
+        plan_summary(detections, &kept, &plans)
+    );
     println!();
 
     let started = Instant::now();
     let mut total_generated = 0usize;
-    for (position, region) in regions.iter().enumerate() {
+    for (position, plan) in plans.iter().enumerate() {
+        let (x, y, width, height) = plan.crop;
+        let crop = page.crop_imm(x, y, width, height);
         let (answer, generated) = ocr_region(
             model,
             args,
@@ -367,18 +445,19 @@ pub(crate) fn run_falcon_ocr_layout_generation(
             sampling_config,
             kv_cache_mode,
             token_bias,
-            region,
+            plan,
+            &crop,
         )?;
         total_generated += generated;
         println!(
             "[{}] {} (score {:.3}) bbox=[{:.1}, {:.1}, {:.1}, {:.1}]",
             position + 1,
-            region.category,
-            region.score,
-            region.bbox[0],
-            region.bbox[1],
-            region.bbox[2],
-            region.bbox[3]
+            plan.category,
+            plan.score,
+            plan.bbox[0],
+            plan.bbox[1],
+            plan.bbox[2],
+            plan.bbox[3]
         );
         println!("{answer}");
         println!();
@@ -392,7 +471,7 @@ pub(crate) fn run_falcon_ocr_layout_generation(
     };
     println!(
         "[Layout OCR: {} region(s), {} tokens in {:.2}s = {:.2} tok/s]",
-        regions.len(),
+        plans.len(),
         total_generated,
         elapsed,
         tokens_per_second
@@ -407,6 +486,10 @@ pub(crate) fn run_falcon_ocr_layout_generation(
 /// The prompt is the reference's `f"{instruction}\n"` followed by the OCR task
 /// token, which the Falcon-OCR prompt builder appends itself along with the
 /// image block for the crop.
+///
+/// `crop` is the caller's freshly made cut of `plan.crop`; it is a parameter
+/// rather than a field of the plan so it lives only as long as this one region
+/// is being generated.
 fn ocr_region(
     model: &LoadedModel,
     args: &GenerateArgs,
@@ -414,9 +497,10 @@ fn ocr_region(
     sampling_config: &SamplingConfig,
     kv_cache_mode: KVCacheMode,
     token_bias: &TokenBiasMap,
-    region: &LayoutOcrRegion,
+    plan: &LayoutOcrPlan,
+    crop: &image::DynamicImage,
 ) -> Result<(String, usize)> {
-    let prompt = format!("{}\n", region.ocr_category.instruction());
+    let prompt = format!("{}\n", plan.ocr_category.instruction());
     let mut prompt_tokens: Vec<i32> = tokenizer
         .encode(&prompt, true)
         .map_err(|error| anyhow!("Tokenization failed: {error}"))?
@@ -428,7 +512,7 @@ fn ocr_region(
         model,
         &mut prompt_tokens,
         &prompt,
-        std::slice::from_ref(&region.image),
+        std::slice::from_ref(crop),
         None,
         |text, add_special| {
             tokenizer

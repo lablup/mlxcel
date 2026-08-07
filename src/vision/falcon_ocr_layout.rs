@@ -164,18 +164,24 @@ pub fn filter_nested_detections(
         .collect()
 }
 
-/// Crop a detected region, or `None` when it is too small to be worth OCRing.
+/// The clamped `(x, y, width, height)` a bbox crops to, or `None` when the
+/// region is too small to be worth OCRing.
 ///
 /// Mirrors `layout.py::crop_region`: clamp to the image, reject anything under
 /// `min_dim` on a side, and also reject a region whose short side would fall
 /// below `min_dim` once the OCR resize caps the long side at `max_dim`.
-pub fn crop_region(
-    image: &image::DynamicImage,
+///
+/// Split out of [`crop_region`] because deciding a region's viability must not
+/// require allocating its pixels: `image::crop_imm` copies, so planning a page
+/// eagerly would hold one full crop per detection before any OCR runs.
+pub fn crop_rect(
+    image_width: u32,
+    image_height: u32,
     bbox: &[f32; 4],
     min_dim: u32,
     max_dim: u32,
-) -> Option<image::DynamicImage> {
-    let (w, h) = (image.width() as f32, image.height() as f32);
+) -> Option<(u32, u32, u32, u32)> {
+    let (w, h) = (image_width as f32, image_height as f32);
     let x1 = bbox[0].round().clamp(0.0, w) as u32;
     let y1 = bbox[1].round().clamp(0.0, h) as u32;
     let x2 = bbox[2].round().clamp(0.0, w) as u32;
@@ -191,7 +197,18 @@ pub fn crop_region(
     if long > max_dim && (short as f32 * (max_dim as f32 / long as f32)) < min_dim as f32 {
         return None;
     }
-    Some(image.crop_imm(x1, y1, cw, ch))
+    Some((x1, y1, cw, ch))
+}
+
+/// Crop a detected region, or `None` when it is too small to be worth OCRing.
+pub fn crop_region(
+    image: &image::DynamicImage,
+    bbox: &[f32; 4],
+    min_dim: u32,
+    max_dim: u32,
+) -> Option<image::DynamicImage> {
+    crop_rect(image.width(), image.height(), bbox, min_dim, max_dim)
+        .map(|(x, y, w, h)| image.crop_imm(x, y, w, h))
 }
 
 /// One OCR unit produced by the layout stage.
@@ -207,25 +224,47 @@ pub struct LayoutOcrRegion {
     pub image: image::DynamicImage,
 }
 
-/// Turn a page plus its detections into the ordered list of regions to OCR.
+/// One OCR unit, planned but not yet cropped.
+#[derive(Debug, Clone)]
+pub struct LayoutOcrPlan {
+    /// The detector's class name, or `"plain"` for the whole-page fallback.
+    pub category: String,
+    /// `(left, top, right, bottom)` in original-image pixels.
+    pub bbox: [f32; 4],
+    pub score: f32,
+    /// The instruction to prepend for this region.
+    pub ocr_category: OcrCategory,
+    /// The clamped `(x, y, width, height)` this region crops to.
+    pub crop: (u32, u32, u32, u32),
+}
+
+/// Turn a page's dimensions plus its detections into the ordered list of
+/// regions to OCR, without cropping any of them.
+///
+/// This is the planner proper; [`plan_layout_regions`] is it plus the crops.
+/// A caller that OCRs one region at a time should use this and crop inside its
+/// own loop, so peak image memory is the page plus one crop rather than the
+/// page plus every crop. A page-sized box costs megabytes, and a detections
+/// file listing twenty of them is a few kilobytes.
 ///
 /// The detections are consumed in the order the caller supplies, which for the
 /// reference detector is reading order. When nothing usable survives, the whole
 /// page is returned as a single `plain` region, matching the reference's
 /// "no detections, or one `image` detection" branch.
-pub fn plan_layout_regions(
-    image: &image::DynamicImage,
+pub fn plan_layout_region_boxes(
+    image_width: u32,
+    image_height: u32,
     detections: &[Detection],
     containment_threshold: f32,
     min_dim: u32,
     max_dim: u32,
-) -> Vec<LayoutOcrRegion> {
-    let whole_page = || LayoutOcrRegion {
+) -> Vec<LayoutOcrPlan> {
+    let whole_page = || LayoutOcrPlan {
         category: "plain".to_string(),
-        bbox: [0.0, 0.0, image.width() as f32, image.height() as f32],
+        bbox: [0.0, 0.0, image_width as f32, image_height as f32],
         score: 1.0,
         ocr_category: OcrCategory::Plain,
-        image: image.clone(),
+        crop: (0, 0, image_width, image_height),
     };
 
     let only_figure =
@@ -235,27 +274,61 @@ pub fn plan_layout_regions(
     }
 
     let kept = filter_nested_detections(detections, containment_threshold);
-    let mut regions = Vec::with_capacity(kept.len());
+    let mut plans = Vec::with_capacity(kept.len());
     for det in kept {
         let Some(ocr_category) = layout_to_ocr_category(&det.class_name) else {
             continue;
         };
-        let Some(crop) = crop_region(image, &det.bbox, min_dim, max_dim) else {
+        let Some(crop) = crop_rect(image_width, image_height, &det.bbox, min_dim, max_dim) else {
             continue;
         };
-        regions.push(LayoutOcrRegion {
+        plans.push(LayoutOcrPlan {
             category: det.class_name.clone(),
             bbox: det.bbox,
             score: det.score,
             ocr_category,
-            image: crop,
+            crop,
         });
     }
 
-    if regions.is_empty() {
+    if plans.is_empty() {
         return vec![whole_page()];
     }
-    regions
+    plans
+}
+
+/// Turn a page plus its detections into the ordered list of cropped regions.
+///
+/// Delegates to [`plan_layout_region_boxes`] so the two planners cannot drift
+/// apart. Every crop is materialized up front, which is only appropriate when
+/// the caller genuinely needs all of them at once.
+pub fn plan_layout_regions(
+    image: &image::DynamicImage,
+    detections: &[Detection],
+    containment_threshold: f32,
+    min_dim: u32,
+    max_dim: u32,
+) -> Vec<LayoutOcrRegion> {
+    plan_layout_region_boxes(
+        image.width(),
+        image.height(),
+        detections,
+        containment_threshold,
+        min_dim,
+        max_dim,
+    )
+    .into_iter()
+    .map(|plan| {
+        let (x, y, w, h) = plan.crop;
+        LayoutOcrRegion {
+            category: plan.category,
+            bbox: plan.bbox,
+            score: plan.score,
+            ocr_category: plan.ocr_category,
+            image: image.crop_imm(x, y, w, h),
+        }
+    })
+    .collect()
 }
 
 #[cfg(test)]
