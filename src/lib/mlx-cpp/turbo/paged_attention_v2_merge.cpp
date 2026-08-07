@@ -203,8 +203,15 @@ std::vector<mlx::core::array> paged_attention_merge_states(
     const bool use_cuda = !mlx::core::metal::is_available();
     auto& kernel = get_merge_kernel(use_cuda).get();
 
+    // `VType`/`LseType` key the JIT cache on the input dtypes; see the longer
+    // note on the same additions in `paged_attention_v2.cpp` (issue #1053).
+    // `Dim` alone is a far weaker key here than it is there, because head dims
+    // repeat across families, so two callers that differ only in partial dtype
+    // would otherwise share one compiled module on CUDA.
     std::vector<std::pair<std::string, TemplateArg>> template_args = {
         {"Dim", dim},
+        {"VType", v_in.dtype()},
+        {"LseType", lse_in.dtype()},
     };
 
     std::vector<mlx::core::array> inputs = {v_in, lse_in, o_indptr};
