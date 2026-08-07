@@ -117,31 +117,36 @@ impl Molmo2TextConfig {
 }
 
 // Molmo2 Embedding (base + new_embedding).
+//
+// The base table and the 128-row extension are concatenated ONCE at load time
+// and stored as a single table. Do not move the concatenation back into
+// `forward`: it runs once per decode step, and on the Jina VLM checkpoint the
+// base table is BF16 [151936, 2048] (622 MB), so a per-step concatenation
+// re-materializes a fresh ~623 MB array just to gather a single row.
 pub struct Molmo2Embedding {
-    pub embedding: UniquePtr<MlxArray>, // [vocab_size, hidden_size]
-    pub new_embedding: UniquePtr<MlxArray>, // [additional_vocab_size, hidden_size]
+    // Concatenated base + extension table: [vocab_size + additional_vocab_size, hidden_size]
+    pub table: UniquePtr<MlxArray>,
 }
 
 impl Molmo2Embedding {
     pub fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        // Concatenate base and new embedding tables, then index
-        let full_embedding = mlxcel_core::concatenate(&self.embedding, &self.new_embedding, 0);
-        mlxcel_core::embedding(&full_embedding, x)
+        mlxcel_core::embedding(&self.table, x)
     }
 
     pub fn from_weights(weights: &WeightMap, prefix: &str) -> Result<Self, String> {
         let embedding = weights
             .get(&format!("{}.embedding", prefix))
-            .map(|w| mlxcel_core::copy(w))
             .ok_or_else(|| format!("Weight not found: {}.embedding", prefix))?;
         let new_embedding = weights
             .get(&format!("{}.new_embedding", prefix))
-            .map(|w| mlxcel_core::copy(w))
             .ok_or_else(|| format!("Weight not found: {}.new_embedding", prefix))?;
-        Ok(Self {
-            embedding,
-            new_embedding,
-        })
+        // `concatenate` already yields a fresh owned array, so no `copy` of the
+        // two source tables is needed. Evaluate here so the concatenation is
+        // materialized at load time instead of re-entering the MLX graph on
+        // every decode step.
+        let table = mlxcel_core::concatenate(embedding, new_embedding, 0);
+        mlxcel_core::eval(&table);
+        Ok(Self { table })
     }
 }
 
