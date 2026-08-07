@@ -48,6 +48,13 @@ use super::{VisionEncoder, VisionEncoderOutput};
 /// Weight-key prefix of the DaViT tower inside a full Florence-2 checkpoint.
 pub const FLORENCE2_VISION_PREFIX: &str = "vision_tower.";
 
+/// Upper bound accepted for `depths[i]`. Real Florence-2 towers use at most 9
+/// blocks in a stage. The cap exists because [`Florence2DaViT::from_weights`]
+/// sizes a `Vec` from this field before it looks up a single weight, so an
+/// absurd value out of a hostile `config.json` would turn into an
+/// allocation-failure abort rather than an error return.
+const MAX_STAGE_DEPTH: i32 = 1024;
+
 /// DaViT geometry parsed from the `vision_config` object of a Florence-2
 /// `config.json`.
 ///
@@ -228,10 +235,41 @@ impl Florence2VisionConfig {
                 ));
             }
         }
+        for (stage, (&depth, ((&patch, &stride), &padding))) in self
+            .depths
+            .iter()
+            .zip(
+                self.patch_size
+                    .iter()
+                    .zip(self.patch_stride.iter())
+                    .zip(self.patch_padding.iter()),
+            )
+            .enumerate()
+        {
+            if !(0..=MAX_STAGE_DEPTH).contains(&depth) {
+                return Err(anyhow!(
+                    "Florence-2 vision_config stage {stage}: depths {depth} outside 0..={MAX_STAGE_DEPTH}"
+                ));
+            }
+            // These three reach MLX `conv2d` directly. MLX validates them
+            // eagerly and throws, and the throw crosses an FFI boundary that
+            // cannot carry it, so they have to be rejected here.
+            if patch < 1 || stride < 1 || padding < 0 {
+                return Err(anyhow!(
+                    "Florence-2 vision_config stage {stage}: patch_size {patch} must be >= 1, patch_stride {stride} must be >= 1, patch_padding {padding} must be >= 0"
+                ));
+            }
+        }
         if self.window_size <= 0 {
             return Err(anyhow!(
                 "Florence-2 vision_config window_size must be positive, got {}",
                 self.window_size
+            ));
+        }
+        if self.in_chans < 1 {
+            return Err(anyhow!(
+                "Florence-2 vision_config in_chans must be positive, got {}",
+                self.in_chans
             ));
         }
         Ok(())
@@ -327,19 +365,33 @@ impl Florence2DaViT {
     /// `prefix` is the key prefix in front of `convs.` / `blocks.`
     /// ([`FLORENCE2_VISION_PREFIX`] inside a full Florence-2 checkpoint, `""`
     /// for a bare tower export). The weights must already have been passed
-    /// through [`sanitize`].
+    /// through [`sanitize`]; every conv weight is checked against the layout
+    /// that pass produces, so a raw PyTorch export fails here with the
+    /// offending key named instead of reaching MLX and aborting the process.
     pub fn from_weights(
         weights: &WeightMap,
         config: &Florence2VisionConfig,
         prefix: &str,
     ) -> Result<Self, String> {
+        // `Florence2VisionConfig` has public fields, so a caller can hand this
+        // a struct that never went through `from_vision_config`. Re-check
+        // before any of it is used as a divisor or an allocation size.
+        config.validate().map_err(|e| e.to_string())?;
+
         let mut convs = Vec::with_capacity(config.num_stages());
         let mut blocks = Vec::with_capacity(config.num_stages());
 
         for stage in 0..config.num_stages() {
+            let in_channels = if stage == 0 {
+                config.in_chans
+            } else {
+                config.dim_embed[stage - 1]
+            };
             convs.push(ConvEmbed::from_weights(
                 weights,
                 &format!("{prefix}convs.{stage}"),
+                in_channels,
+                config.dim_embed[stage],
                 config.patch_stride[stage],
                 config.patch_padding[stage],
                 config.patch_prenorm[stage],
@@ -412,17 +464,19 @@ impl Florence2DaViT {
     ) -> Vec<(UniquePtr<MlxArray>, (i32, i32))> {
         let shape = mlxcel_core::array_shape(pixel_values);
         let mut size = (shape[2], shape[3]);
-        let mut current = mlxcel_core::copy(pixel_values);
+        let mut current: Option<UniquePtr<MlxArray>> = None;
         let mut stages = Vec::with_capacity(self.convs.len());
 
         for (conv, stage_blocks) in self.convs.iter().zip(self.blocks.iter()) {
-            let (embedded, new_size) = conv.forward(&current, size);
-            current = embedded;
+            let (embedded, new_size) =
+                conv.forward(current.as_deref().unwrap_or(pixel_values), size);
             size = new_size;
+            let mut stage_out = embedded;
             for block in stage_blocks {
-                current = block.forward(&current, size);
+                stage_out = block.forward(&stage_out, size);
             }
-            stages.push((mlxcel_core::copy(&current), size));
+            stages.push((mlxcel_core::copy(&stage_out), size));
+            current = Some(stage_out);
         }
         stages
     }
@@ -432,16 +486,20 @@ impl Florence2DaViT {
     pub fn forward(&self, pixel_values: &MlxArray) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(pixel_values);
         let mut size = (shape[2], shape[3]);
-        let mut current = mlxcel_core::copy(pixel_values);
+        let mut current: Option<UniquePtr<MlxArray>> = None;
         for (conv, stage_blocks) in self.convs.iter().zip(self.blocks.iter()) {
-            let (embedded, new_size) = conv.forward(&current, size);
-            current = embedded;
+            let (embedded, new_size) =
+                conv.forward(current.as_deref().unwrap_or(pixel_values), size);
             size = new_size;
+            let mut stage_out = embedded;
             for block in stage_blocks {
-                current = block.forward(&current, size);
+                stage_out = block.forward(&stage_out, size);
             }
+            current = Some(stage_out);
         }
-        current
+        // Validation rejects an empty `dim_embed`, so the fallback is only
+        // reachable for a hand-built zero-stage backbone.
+        current.unwrap_or_else(|| mlxcel_core::copy(pixel_values))
     }
 }
 

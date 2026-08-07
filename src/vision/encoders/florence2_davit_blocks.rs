@@ -74,12 +74,23 @@ impl ConvEmbed {
     pub(crate) fn from_weights(
         weights: &WeightMap,
         prefix: &str,
+        in_channels: i32,
+        out_channels: i32,
         stride: i32,
         padding: i32,
         pre_norm: bool,
     ) -> Result<Self, String> {
+        let proj_weight = get_weight(weights, &format!("{prefix}.proj.weight"))?;
+        let shape = mlxcel_core::array_shape(&proj_weight);
+        if shape.len() != 4 || shape[0] != out_channels || shape[3] != in_channels {
+            return Err(format!(
+                "Florence-2 DaViT {prefix}.proj.weight has shape {shape:?}, expected \
+                 channels-last [{out_channels}, kH, kW, {in_channels}]; pass the weight map \
+                 through `sanitize` first (a PyTorch export is [out, in, kH, kW])"
+            ));
+        }
         Ok(Self {
-            proj_weight: get_weight(weights, &format!("{prefix}.proj.weight"))?,
+            proj_weight,
             proj_bias: weights
                 .get(&format!("{prefix}.proj.bias"))
                 .map(|w| mlxcel_core::copy(w)),
@@ -152,8 +163,17 @@ impl DepthWiseConv2d {
         prefix: &str,
         channels: i32,
     ) -> Result<Self, String> {
+        let weight = get_weight(weights, &format!("{prefix}.dw.weight"))?;
+        let shape = mlxcel_core::array_shape(&weight);
+        if shape.len() != 4 || shape[0] != channels || shape[3] != 1 {
+            return Err(format!(
+                "Florence-2 DaViT {prefix}.dw.weight has shape {shape:?}, expected \
+                 channels-last [{channels}, kH, kW, 1]; pass the weight map through \
+                 `sanitize` first (a PyTorch export is [C, 1, kH, kW])"
+            ));
+        }
         Ok(Self {
-            weight: get_weight(weights, &format!("{prefix}.dw.weight"))?,
+            weight,
             bias: weights
                 .get(&format!("{prefix}.dw.bias"))
                 .map(|w| mlxcel_core::copy(w)),

@@ -392,15 +392,95 @@ fn synthetic_forward_follows_the_stage_shape_progression() {
     );
 }
 
+/// `Florence2DaViT` has no `Debug`, so `expect_err` is unavailable.
+fn load_error(result: Result<Florence2DaViT, String>, what: &str) -> String {
+    match result {
+        Ok(_) => panic!("{what}"),
+        Err(err) => err,
+    }
+}
+
+#[test]
+fn rejects_hostile_patch_geometry_and_depths() {
+    // A zero stride and a negative padding both reach MLX `conv2d`, which
+    // throws across an FFI boundary that cannot carry the throw, so the
+    // config parse has to be the thing that rejects them.
+    let mut zero_stride = real_vision_config();
+    zero_stride["patch_stride"] = json!([4, 0, 2, 2]);
+    let err = Florence2VisionConfig::from_vision_config(&zero_stride)
+        .expect_err("a zero patch_stride must be rejected");
+    assert!(err.to_string().contains("patch_stride"), "{err}");
+
+    let mut negative_padding = real_vision_config();
+    negative_padding["patch_padding"] = json!([3, 1, -1, 1]);
+    let err = Florence2VisionConfig::from_vision_config(&negative_padding)
+        .expect_err("a negative patch_padding must be rejected");
+    assert!(err.to_string().contains("patch_padding"), "{err}");
+
+    // `from_weights` sizes a Vec from `depths` before looking up any weight.
+    let mut absurd_depth = real_vision_config();
+    absurd_depth["depths"] = json!([1, 1, i32::MAX, 1]);
+    let err = Florence2VisionConfig::from_vision_config(&absurd_depth)
+        .expect_err("an absurd depth must not reach Vec::with_capacity");
+    assert!(err.to_string().contains("depths"), "{err}");
+
+    let mut zero_channels = real_vision_config();
+    zero_channels["in_chans"] = json!(0);
+    assert!(Florence2VisionConfig::from_vision_config(&zero_channels).is_err());
+}
+
+#[test]
+fn from_weights_revalidates_a_hand_built_config() {
+    // The struct has public fields, so a caller can bypass the parse-time
+    // check entirely. `num_heads` of zero is an integer divide-by-zero in
+    // `WindowAttention::from_weights` if it gets that far.
+    let mut config = tiny_config();
+    config.num_heads = vec![0, 4];
+    let weights = tiny_weights(&config);
+    let err = load_error(
+        Florence2DaViT::from_weights(&weights, &config, ""),
+        "a hand-built invalid config must be rejected",
+    );
+    assert!(err.contains("num_heads"), "{err}");
+}
+
+#[test]
+fn from_weights_rejects_unsanitized_conv_weights() {
+    let config = tiny_config();
+
+    // PyTorch layout (O, I, kH, kW) is what `sanitize` exists to remap. Left
+    // unremapped it reaches MLX `conv2d`, which throws at graph build.
+    let mut patch_embed = tiny_weights(&config);
+    patch_embed.insert("convs.1.proj.weight".into(), seq_array(&[16, 8, 3, 3], 7.0));
+    let err = load_error(
+        Florence2DaViT::from_weights(&patch_embed, &config, ""),
+        "an unsanitized patch-embed weight must fail the load",
+    );
+    assert!(err.contains("convs.1.proj.weight"), "{err}");
+    assert!(err.contains("sanitize"), "{err}");
+
+    let mut depthwise = tiny_weights(&config);
+    depthwise.insert(
+        "blocks.0.0.spatial_block.conv1.fn.dw.weight".into(),
+        seq_array(&[8, 1, 3, 3], 8.0),
+    );
+    let err = load_error(
+        Florence2DaViT::from_weights(&depthwise, &config, ""),
+        "an unsanitized depthwise weight must fail the load",
+    );
+    assert!(err.contains("dw.weight"), "{err}");
+    assert!(err.contains("sanitize"), "{err}");
+}
+
 #[test]
 fn missing_weight_reports_the_key() {
     let config = tiny_config();
     let mut weights = tiny_weights(&config);
     weights.remove("blocks.1.0.channel_block.channel_attn.fn.qkv.weight");
-    let err = match Florence2DaViT::from_weights(&weights, &config, "") {
-        Ok(_) => panic!("a missing block weight must fail the load"),
-        Err(err) => err,
-    };
+    let err = load_error(
+        Florence2DaViT::from_weights(&weights, &config, ""),
+        "a missing block weight must fail the load",
+    );
     assert!(
         err.contains("channel_attn.fn.qkv.weight"),
         "error should name the missing key: {err}"

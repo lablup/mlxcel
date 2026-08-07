@@ -39,18 +39,12 @@ fn split_qkv(
     head_dim: i32,
 ) -> [UniquePtr<MlxArray>; 3] {
     let packed = mlxcel_core::reshape(qkv, &[b, n, 3, heads, head_dim]);
-    let mut out = Vec::with_capacity(3);
-    for i in 0..3 {
+    std::array::from_fn(|i| {
+        let i = i as i32;
         let part = mlxcel_core::slice(&packed, &[0, 0, i, 0, 0], &[b, n, i + 1, heads, head_dim]);
         let part = mlxcel_core::reshape(&part, &[b, n, heads, head_dim]);
-        out.push(mlxcel_core::transpose_axes(&part, &[0, 2, 1, 3]));
-    }
-    let mut it = out.into_iter();
-    [
-        it.next().expect("qkv part 0"),
-        it.next().expect("qkv part 1"),
-        it.next().expect("qkv part 2"),
-    ]
+        mlxcel_core::transpose_axes(&part, &[0, 2, 1, 3])
+    })
 }
 
 /// Windowed multi-head self-attention over non-overlapping `window_size`
