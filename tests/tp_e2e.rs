@@ -678,15 +678,18 @@ fn e2e_scaling_analysis_basic() {
     let baseline = analysis.results[0].throughput_tok_per_sec;
     let first_tp = analysis.results[0].tp_size as f64;
     for r in &analysis.results {
-        let ideal = baseline * r.tp_size as f64 / first_tp;
+        let tp_size = r.tp_size;
+        let ideal = baseline * tp_size as f64 / first_tp;
         let expected = r.throughput_tok_per_sec / ideal;
+        let actual = r.scaling_efficiency;
         assert!(
-            (r.scaling_efficiency - expected).abs() < 1e-9,
-            "scaling efficiency should match baseline*tp_size/ideal computation"
+            (actual - expected).abs() < 1e-9,
+            "tp_size={tp_size}: stored scaling efficiency {actual} should equal \
+             throughput/ideal {expected}"
         );
         assert!(
-            r.scaling_efficiency.is_finite() && r.scaling_efficiency > 0.0,
-            "scaling efficiency should be a finite positive number"
+            actual.is_finite() && actual > 0.0,
+            "tp_size={tp_size}: scaling efficiency {actual} should be finite and positive"
         );
     }
 }
