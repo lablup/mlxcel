@@ -996,7 +996,7 @@ impl ModelType {
             ModelType::Moondream3VLM => ("Moondream 3 (custom ViT + custom decoder)", "Other VLM"),
             ModelType::Moondream2VLM => ("Moondream 2 (SigLIP-style ViT + Phi text)", "Other VLM"),
             ModelType::Florence2VLM => (
-                "Florence-2 (DaViT + BART seq2seq, task prompts, bf16/f16 only)",
+                "Florence-2 (DaViT + BART seq2seq, task prompts)",
                 "Other VLM",
             ),
             ModelType::MiniCPMOVLM => (

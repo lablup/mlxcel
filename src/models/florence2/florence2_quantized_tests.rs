@@ -115,6 +115,50 @@ fn quantization_rejects_out_of_range_parameters() {
     }
 }
 
+/// A present-but-unreadable parameter must not fall back to the dense default.
+/// The unified layers trust the declared group size, so substituting 64 for a
+/// `group_size` written as a float or a string dequantizes the whole model on
+/// the wrong stride and decodes to plausible-looking garbage rather than
+/// failing. The last case is the truncating `as i32` cast: a JSON integer past
+/// `i32::MAX` used to wrap into a small in-range number instead of being
+/// rejected.
+#[test]
+fn quantization_rejects_malformed_parameters() {
+    for (block, needle) in [
+        (json!({ "group_size": 64.5, "bits": 4 }), "group_size"),
+        (json!({ "group_size": "64", "bits": 4 }), "group_size"),
+        (json!({ "group_size": null, "bits": 4 }), "group_size"),
+        (json!({ "group_size": 64, "bits": "4" }), "bits"),
+        (
+            json!({ "group_size": 64, "bits": 4_294_967_296i64 }),
+            "bits",
+        ),
+        (
+            json!({ "group_size": 4_294_967_360i64, "bits": 4 }),
+            "group_size",
+        ),
+    ] {
+        let config = json!({ "model_type": "florence2", "quantization": block });
+        let err = Florence2Quantization::from_model_config(&config)
+            .expect_err("a malformed quantization parameter must be refused")
+            .to_string();
+        assert!(err.contains(needle), "{config}: unexpected error {err}");
+    }
+}
+
+/// The complement of the test above: an *absent* field still takes the dense
+/// default, so a config that declares only `bits` keeps loading.
+#[test]
+fn quantization_defaults_only_absent_parameters() {
+    let config = json!({
+        "model_type": "florence2",
+        "quantization": { "bits": 8 },
+    });
+    let parsed = Florence2Quantization::from_model_config(&config).expect("parse");
+    assert_eq!(parsed.group_size, Florence2Quantization::DENSE.group_size);
+    assert_eq!(parsed.bits, 8);
+}
+
 /// The block sits beside `text_config` and `vision_config`, not inside
 /// either, so a parser that only descended into a sub-object would leave both
 /// halves on the dense default and mis-stride every dequantization.
@@ -213,7 +257,46 @@ fn quantized_dense_only_tensors_are_refused_by_name() {
     }
 }
 
+/// Every LayerNorm on this family is loaded as a raw weight/bias pair and
+/// handed to `fast::layer_norm`, so a packed one aborts across the cxx bridge
+/// exactly like a packed conv weight. `nn.quantize` skips `nn.LayerNorm`, so
+/// no published conversion produces these, but the guard has to cover them for
+/// the same reason it covers the conv stack.
+///
+/// The two `layernorm_embedding` entries are the reason the guard matches on
+/// the last dot-separated segment *containing* `norm` rather than on the stem
+/// ending in it: that segment ends in `embedding`, so a suffix match would
+/// have let both of them through.
+#[test]
+fn quantized_layer_norms_are_refused_by_name() {
+    for prefix in [
+        "image_proj_norm",
+        "language_model.model.encoder.layernorm_embedding",
+        "language_model.model.decoder.layernorm_embedding",
+        "language_model.model.encoder.layers.0.self_attn_layer_norm",
+        "language_model.model.decoder.layers.0.self_attn_layer_norm",
+        "language_model.model.decoder.layers.0.encoder_attn_layer_norm",
+        "language_model.model.decoder.layers.0.final_layer_norm",
+        "vision_tower.convs.0.norm",
+        "vision_tower.blocks.0.0.spatial_block.ffn.norm",
+        "vision_tower.blocks.0.0.spatial_block.window_attn.norm",
+        "vision_tower.blocks.0.0.channel_block.channel_attn.norm",
+    ] {
+        let mut map = WeightMap::new();
+        quantized_triple(&mut map, prefix);
+        let err = reject_unsupported_quantized_tensors(&map)
+            .expect_err("a packed layer norm must be refused");
+        assert!(
+            err.contains(prefix),
+            "refusal for {prefix} must name the tensor, got: {err}"
+        );
+    }
+}
+
 /// A fully dense checkpoint has no `.scales` anywhere, so the guard is inert.
+/// The layer norms are here because they are the arm most likely to
+/// false-positive: they stay dense in every real export, and matching them by
+/// name must not reject the tensor that carries them.
 #[test]
 fn dense_checkpoints_pass_the_refusal_untouched() {
     let mut map = WeightMap::new();
@@ -225,6 +308,16 @@ fn dense_checkpoints_pass_the_refusal_untouched() {
     map.insert(
         "vision_tower.convs.0.proj.weight".to_string(),
         dummy(&[8, 3, 3, 3]),
+    );
+    map.insert("image_proj_norm.weight".to_string(), dummy(&[16]));
+    map.insert("image_proj_norm.bias".to_string(), dummy(&[16]));
+    map.insert(
+        "language_model.model.encoder.layers.0.self_attn_layer_norm.weight".to_string(),
+        dummy(&[16]),
+    );
+    map.insert(
+        "vision_tower.blocks.0.0.spatial_block.ffn.norm.weight".to_string(),
+        dummy(&[16]),
     );
     reject_unsupported_quantized_tensors(&map).expect("dense map must be accepted");
 }

@@ -214,18 +214,47 @@ impl Florence2TextModel {
         // `tie_word_embeddings` is true for Florence-2, but checkpoints ship
         // a materialized `lm_head.weight` as well; use it when present and
         // fall back to the tied shared embedding otherwise.
-        let lm_head = if weights.contains_key(&format!("{prefix}lm_head.weight")) {
-            Some(
-                UnifiedLinear::from_weights(
-                    weights,
-                    &format!("{prefix}lm_head"),
-                    config.quantization.group_size,
-                    config.quantization.bits,
+        let lm_head_key = format!("{prefix}lm_head");
+        let lm_head = match weights.get(&format!("{lm_head_key}.weight")) {
+            Some(head_weight) => {
+                // The head's output width is what bounds the next token id.
+                // `generate_greedy` takes `argmax_last_position` over these
+                // logits and feeds the result straight back into
+                // `embed_tokens`, which is a gather into `shared`, and the
+                // guard above only proves `shared` has *at least*
+                // `vocab_size` rows. A head wider than the token table would
+                // let the argmax return an id past the table's last row, and
+                // MLX does not range-check a positive gather index: that
+                // lookup reads past the end of the buffer instead of faulting.
+                // Requiring the two to agree is what closes the one-sided
+                // guard. Dimension 0 is the row axis on both arms, since
+                // quantization packs the input axis only.
+                let shape = mlxcel_core::array_shape(head_weight);
+                let [rows, _] = shape.as_slice() else {
+                    return Err(format!(
+                        "Florence-2 {lm_head_key}.weight must be a 2-D [vocab_size, d_model] \
+                         matrix, got shape {shape:?}"
+                    ));
+                };
+                if *rows != config.vocab_size {
+                    return Err(format!(
+                        "Florence-2 {lm_head_key}.weight has {rows} output rows but config \
+                         vocab_size is {}; the argmax over these logits indexes the shared token \
+                         table, whose gather does not range-check a positive index",
+                        config.vocab_size
+                    ));
+                }
+                Some(
+                    UnifiedLinear::from_weights(
+                        weights,
+                        &lm_head_key,
+                        config.quantization.group_size,
+                        config.quantization.bits,
+                    )
+                    .map_err(|e| format!("Florence-2 {e}"))?,
                 )
-                .map_err(|e| format!("Florence-2 {e}"))?,
-            )
-        } else {
-            None
+            }
+            None => None,
         };
 
         Ok(Self {
@@ -264,10 +293,15 @@ impl Florence2TextModel {
     /// Encode `[batch, seq]` token ids into encoder hidden states
     /// `[batch, seq, d_model]`.
     ///
-    /// Precondition: `seq` must not exceed
+    /// Precondition, memory safety: `seq` must not exceed
     /// [`Florence2TextConfig::max_position_embeddings`]; the learned position
-    /// table has no rows past that bound. [`Self::generate_greedy`] checks
-    /// this; callers embedding longer sequences must bound them first.
+    /// table has no rows past that bound. The encoder reads its position rows
+    /// with a gather into that table, and MLX does not range-check a positive
+    /// gather index, so violating this does not fault or error. It reads past
+    /// the end of the table (and, on a quantized checkpoint, past the packed
+    /// weight, scales, and biases planes) and the result reaches the hidden
+    /// states. [`Self::generate_greedy`] and [`Florence2Model::encode_fused`]
+    /// check this; every other caller must bound `seq` itself.
     pub fn encode_tokens(&self, input_ids: &MlxArray) -> UniquePtr<MlxArray> {
         let embeds = self.embed_tokens(input_ids);
         self.encoder.forward(&embeds, None)
@@ -277,9 +311,11 @@ impl Florence2TextModel {
     /// the entry point the vision-fusion path drives with concatenated
     /// image + text embeddings.
     ///
-    /// Precondition: `seq` must not exceed
-    /// [`Florence2TextConfig::max_position_embeddings`], as in
-    /// [`Self::encode_tokens`].
+    /// Precondition, memory safety: `seq` must not exceed
+    /// [`Florence2TextConfig::max_position_embeddings`], and for the same
+    /// reason as in [`Self::encode_tokens`]: the position lookup behind it is
+    /// an unchecked gather, so a longer sequence reads past the table rather
+    /// than failing.
     pub fn encode_embeds(&self, inputs_embeds: &MlxArray) -> UniquePtr<MlxArray> {
         self.encoder.forward(inputs_embeds, None)
     }
@@ -288,6 +324,11 @@ impl Florence2TextModel {
     /// (`[batch, 1, 1, seq]`, `0` for a real key and `-inf` for a padded
     /// one). [`Florence2Model`] builds the mask from the joint image + prompt
     /// attention mask; `None` is equivalent to [`Self::encode_embeds`].
+    ///
+    /// Carries the same memory-safety precondition on `seq` as
+    /// [`Self::encode_embeds`]. The mask bounds which keys are attended, not
+    /// which position rows are gathered, so it does not substitute for the
+    /// length check.
     pub fn encode_embeds_with_mask(
         &self,
         inputs_embeds: &MlxArray,
@@ -309,6 +350,16 @@ impl Florence2TextModel {
     /// cross-attention K/V from the encoder output; subsequent calls reuse
     /// them and only append self-attention K/V, so an incremental decode
     /// step costs O(1) encoder-side work.
+    ///
+    /// Precondition, memory safety: `cache.offset() + seq` must not exceed
+    /// [`Florence2TextConfig::max_position_embeddings`]. The decoder gathers
+    /// rows `[POSITION_OFFSET + offset, POSITION_OFFSET + offset + seq)` of
+    /// the learned position table, so the running offset counts against the
+    /// same bound the sequence length does. MLX does not range-check a
+    /// positive gather index, so exceeding it reads past the table instead of
+    /// faulting. [`Self::generate_greedy`] and
+    /// [`Florence2Model::generate_greedy`] hold the bound by breaking their
+    /// loop once `cache.offset()` reaches it.
     pub fn decode(
         &self,
         decoder_input_ids: &MlxArray,
