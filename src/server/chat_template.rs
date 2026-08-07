@@ -113,8 +113,15 @@ impl ChatTemplateProcessor {
             .or(jinja_template)
             .or(json_template);
 
-        let Some(template) = template else {
-            return Ok(None);
+        // A conversion can legitimately lose the template. Fall back to a
+        // built-in only after every declared source has come up empty, so this
+        // can never shadow what a checkpoint actually ships.
+        let template = match template {
+            Some(template) => template,
+            None => match builtin_chat_template(model_path) {
+                Some(builtin) => builtin.to_string(),
+                None => return Ok(None),
+            },
         };
 
         // Extract special tokens
@@ -1111,6 +1118,40 @@ fn extract_token(config: &serde_json::Value, key: &str) -> Option<String> {
     })
 }
 
+/// Jina VLM's own chat template, transcribed from `jinaai/jina-vlm`'s
+/// `chat_template.jinja` for minijinja and for the flattened string `content`
+/// this module works with.
+///
+/// Every turn renders as `" <Role>: <text> "` and the generation prompt is
+/// `"Assistant:"`. The doubled space between turns is upstream's, not a typo:
+/// the template emits a trailing space after each turn's text and a leading one
+/// before the next turn. The checkpoint sets `always_start_with_space`, so the
+/// leading space applies to the first turn too.
+const JINA_VLM_CHAT_TEMPLATE: &str = concat!(
+    "{%- for message in messages %}",
+    "{{- ' ' + (message['role'] | capitalize) + ': ' + message['content'] + ' ' }}",
+    "{%- endfor %}",
+    "{%- if add_generation_prompt %}{{- 'Assistant:' }}{%- endif %}"
+);
+
+/// A chat template for a checkpoint that ships none of its own.
+///
+/// Reached only when `tokenizer_config.json`, `chat_template.jinja` and
+/// `chat_template.json` are all silent. `jinaai/jina-vlm-mlx` is the case that
+/// forced this: the MLX conversion dropped upstream's `chat_template.jinja`, and
+/// the generic `User:\n\nAssistant: ` fallback then renders a prompt shape the
+/// model never saw. On that checkpoint the difference is not subtle: asked for
+/// the capital of France it answers "17" under the generic template and "Paris"
+/// under its own.
+fn builtin_chat_template(model_path: &Path) -> Option<&'static str> {
+    let config = std::fs::read_to_string(model_path.join("config.json")).ok()?;
+    let config: serde_json::Value = serde_json::from_str(&config).ok()?;
+    match config.get("model_type").and_then(|v| v.as_str())? {
+        "jvlm" | "jina_vlm" => Some(JINA_VLM_CHAT_TEMPLATE),
+        _ => None,
+    }
+}
+
 /// Default fallback template for models without chat_template
 pub fn default_chat_template() -> &'static str {
     r#"{% for message in messages %}{% if message.role == 'system' %}System: {{ message.content }}
@@ -1142,6 +1183,64 @@ impl std::fmt::Debug for ChatTemplateProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A checkpoint that ships no template at all still has to render the
+    /// prompt shape its model was trained on.
+    #[test]
+    fn a_template_less_jina_vlm_checkpoint_falls_back_to_its_own_template() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("config.json"), r#"{"model_type": "jvlm"}"#).unwrap();
+
+        let processor = ChatTemplateProcessor::from_model_path(dir.path())
+            .expect("template resolution succeeds")
+            .expect("a built-in template is supplied");
+        let rendered = processor
+            .apply(
+                &[ChatMessage {
+                    role: "user".to_string(),
+                    content: "Describe the image.".to_string(),
+                }],
+                None,
+            )
+            .expect("render");
+        assert_eq!(rendered, " User: Describe the image. Assistant:");
+    }
+
+    #[test]
+    fn a_declared_template_is_never_shadowed_by_the_built_in() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("config.json"), r#"{"model_type": "jvlm"}"#).unwrap();
+        std::fs::write(
+            dir.path().join("chat_template.jinja"),
+            "SHIPPED{% for m in messages %}{{ m['content'] }}{% endfor %}",
+        )
+        .unwrap();
+
+        let processor = ChatTemplateProcessor::from_model_path(dir.path())
+            .unwrap()
+            .unwrap();
+        let rendered = processor
+            .apply(
+                &[ChatMessage {
+                    role: "user".to_string(),
+                    content: "hi".to_string(),
+                }],
+                None,
+            )
+            .unwrap();
+        assert!(rendered.starts_with("SHIPPED"), "got {rendered:?}");
+    }
+
+    #[test]
+    fn an_unknown_template_less_model_still_reports_no_template() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("config.json"), r#"{"model_type": "llama"}"#).unwrap();
+        assert!(
+            ChatTemplateProcessor::from_model_path(dir.path())
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn standalone_typed_template_overrides_legacy_string_template() {

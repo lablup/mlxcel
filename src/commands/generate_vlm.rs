@@ -141,6 +141,16 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
                 image_slots, total_tokens
             );
         }
+        VlmPreparationSummary::JinaVlm {
+            image_blocks,
+            image_tokens,
+            total_tokens,
+        } => {
+            println!(
+                "Jina VLM: inserted {} image block(s) ({} image tokens, {} total tokens)",
+                image_blocks, image_tokens, total_tokens
+            );
+        }
         VlmPreparationSummary::Molmo { total_tokens } => {
             println!(
                 "Molmo: expanded prompt with image tokens ({} total tokens)",

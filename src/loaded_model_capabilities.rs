@@ -51,6 +51,8 @@ pub enum VlmRuntimeRef<'a> {
     DotsOcr(&'a vision::DotsOcrVlModel),
     /// Falcon-OCR runtime (early-fusion patch projector, no vision tower).
     FalconOcr(&'a vision::FalconOcrVlModel),
+    /// Jina VLM runtime (SigLIP-class ViT + Molmo-style connector + Qwen2 text).
+    JinaVlm(&'a vision::JinaVlmModel),
     /// Youtu-VL runtime.
     YoutuVL(&'a vision::YoutuVLModel),
     /// InternVL (internvl_chat) runtime.
@@ -176,6 +178,7 @@ impl LoadedModel {
             Self::Step3p7VL(model) => Some(VlmRuntimeRef::Step3p7(model)),
             Self::DotsOcrVL(model) => Some(VlmRuntimeRef::DotsOcr(model)),
             Self::FalconOcrVL(model) => Some(VlmRuntimeRef::FalconOcr(model)),
+            Self::JinaVLM(model) => Some(VlmRuntimeRef::JinaVlm(model)),
             Self::MiniCPMOVLM(model) => Some(VlmRuntimeRef::MiniCPMO(model)),
             Self::MiniCPMV46VLM(model) => Some(VlmRuntimeRef::MiniCPMV46(model)),
             Self::Moondream3VLM(model) => Some(VlmRuntimeRef::Moondream3(model)),

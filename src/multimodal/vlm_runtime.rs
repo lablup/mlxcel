@@ -52,6 +52,10 @@ use crate::{LanguageModel, LoadedModel, VlmRuntimeRef};
 
 const MOLMO_V1_BOS_TOKEN_ID: i32 = 151643;
 
+/// Jina VLM's BOS: the tokenizer declares no `bos_token`, so the reference
+/// processor falls back to `eos_token_id` (`<|endoftext|>`).
+const JINA_VLM_BOS_TOKEN_ID: i32 = 151643;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VlmPreparationSummary {
     QwenVlm {
@@ -106,6 +110,14 @@ pub enum VlmPreparationSummary {
         total_tokens: usize,
     },
     Molmo {
+        total_tokens: usize,
+    },
+    /// Jina VLM replaced each `<|image|>` placeholder with a processor-built
+    /// `<im_start> ... <im_end>` block and prepended the BOS the reference
+    /// processor adds.
+    JinaVlm {
+        image_blocks: usize,
+        image_tokens: usize,
         total_tokens: usize,
     },
     Molmo2 {
@@ -861,6 +873,31 @@ where
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,
                 preparation: Some(VlmPreparationSummary::Molmo {
+                    total_tokens: prompt_tokens.len(),
+                }),
+            }))
+        }
+        VlmRuntimeRef::JinaVlm(jina) => {
+            let prepared = prepare_jina_vlm_inputs(jina, prompt, images, &mut encode);
+            *prompt_tokens = prepared.tokens;
+
+            let pixel_values =
+                mlxcel_core::from_slice_f32(&prepared.pixel_values, &prepared.pixel_values_shape);
+            let image_masks =
+                mlxcel_core::from_slice_f32(&prepared.image_masks, &prepared.image_masks_shape);
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = jina.get_input_embeddings(
+                &input_ids_arr,
+                &pixel_values,
+                &prepared.image_input_idx,
+                &image_masks,
+            );
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation: Some(VlmPreparationSummary::JinaVlm {
+                    image_blocks: images.len(),
+                    image_tokens: prepared.image_tokens,
                     total_tokens: prompt_tokens.len(),
                 }),
             }))
@@ -1823,6 +1860,102 @@ fn format_molmo_v1_prompt_for_processor(prompt: &str) -> String {
         format!(" {prompt}")
     } else {
         format!(" User: {prompt} Assistant:")
+    }
+}
+
+/// Everything the Jina VLM merge needs, assembled from the processor output and
+/// the chat template.
+struct PreparedJinaVlmInputs {
+    tokens: Vec<i32>,
+    pixel_values: Vec<f32>,
+    pixel_values_shape: [i32; 3],
+    image_masks: Vec<f32>,
+    image_masks_shape: [i32; 2],
+    image_input_idx: Vec<i32>,
+    image_tokens: usize,
+}
+
+/// Split the Jina VLM chat template around its `<|image|>` placeholder.
+///
+/// The checkpoint's `chat_template.jinja` renders one user turn as
+/// `" User: " + <image tokens> + text + " " + "Assistant:"`, with the leading
+/// space on the first turn gated by `always_start_with_space`. A prompt that is
+/// already fully templated (starts with `User:`, ends with `Assistant:`) is
+/// passed through so callers can drive the format themselves.
+///
+/// Returns `(prefix, suffix)`; the image blocks are inserted between them.
+pub(crate) fn format_jina_vlm_prompt(
+    prompt: &str,
+    always_start_with_space: bool,
+) -> (String, String) {
+    let cleaned = prompt.replace("<|image|>", "");
+    let cleaned = cleaned.trim();
+    let lead = if always_start_with_space { " " } else { "" };
+    let prefix = format!("{lead}User: ");
+
+    if let Some(rest) = cleaned.strip_prefix("User:")
+        && cleaned.ends_with("Assistant:")
+    {
+        return (prefix, rest.trim_start().to_string());
+    }
+    (prefix, format!("{cleaned} Assistant:"))
+}
+
+fn prepare_jina_vlm_inputs<E>(
+    jina: &crate::vision::JinaVlmModel,
+    prompt: &str,
+    images: &[DynamicImage],
+    encode: &mut E,
+) -> PreparedJinaVlmInputs
+where
+    E: FnMut(&str, bool) -> Vec<i32>,
+{
+    let (prefix, suffix) = format_jina_vlm_prompt(prompt, jina.always_start_with_space);
+    let prefix_ids = encode(&prefix, false);
+    let suffix_ids = encode(&suffix, false);
+
+    // The reference processor prepends BOS (`bos_token_id or eos_token_id`,
+    // which is `<|endoftext|>` here) and shifts every image position by one.
+    let mut tokens: Vec<i32> = vec![JINA_VLM_BOS_TOKEN_ID];
+    tokens.extend(prefix_ids);
+
+    let mut pixel_values: Vec<f32> = Vec::new();
+    let mut image_masks: Vec<f32> = Vec::new();
+    let mut image_input_idx: Vec<i32> = Vec::new();
+    let mut total_crops = 0i32;
+    let mut n_patches = 0i32;
+    let mut patch_dim = 0i32;
+    let mut image_tokens = 0usize;
+
+    for image in images {
+        let processed = jina.processor.preprocess_image(image);
+        let block_start = tokens.len() as i32;
+        image_input_idx.extend(
+            processed
+                .image_input_idx
+                .iter()
+                .map(|&idx| if idx < 0 { idx } else { idx + block_start }),
+        );
+        image_tokens += processed.image_token_ids.len();
+        tokens.extend(processed.image_token_ids);
+
+        pixel_values.extend(processed.pixel_values);
+        image_masks.extend(processed.image_masks);
+        total_crops += processed.pixel_values_shape[0];
+        n_patches = processed.pixel_values_shape[1];
+        patch_dim = processed.pixel_values_shape[2];
+    }
+
+    tokens.extend(suffix_ids);
+
+    PreparedJinaVlmInputs {
+        tokens,
+        pixel_values,
+        pixel_values_shape: [total_crops, n_patches, patch_dim],
+        image_masks,
+        image_masks_shape: [total_crops, n_patches],
+        image_input_idx,
+        image_tokens,
     }
 }
 

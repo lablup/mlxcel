@@ -29,6 +29,7 @@ pub mod gemma4_unified;
 pub mod hunyuan_vl;
 pub mod idefics2;
 pub mod internvl;
+pub mod jina_vlm;
 pub mod kimi_vl;
 pub mod lfm2_vl;
 pub mod locateanything;

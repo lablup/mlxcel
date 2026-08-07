@@ -15,8 +15,9 @@
 use super::{
     VlmPreparationSummary, expand_gemma3n_audio_tokens, expand_gemma4_audio_tokens_for_server,
     expand_gemma4_unified_video_tokens, expand_gemma4_video_tokens,
-    expand_nemotron_h_nano_omni_audio_tokens_for_server, format_molmo_v1_prompt_for_processor,
-    prepared_embedding_refs, shift_molmo_v1_image_input_idx_for_bos, should_prepare_vlm_embeddings,
+    expand_nemotron_h_nano_omni_audio_tokens_for_server, format_jina_vlm_prompt,
+    format_molmo_v1_prompt_for_processor, prepared_embedding_refs,
+    shift_molmo_v1_image_input_idx_for_bos, should_prepare_vlm_embeddings,
 };
 use crate::vlm_prompt::{ImageTokenBlockInfo, apply_image_token_blocks};
 
@@ -490,4 +491,49 @@ fn nemotron_server_audio_falls_back_before_last_token_without_end_of_turn() {
     let mut prompt = vec![2, 100, 8];
     expand_nemotron_h_nano_omni_audio_tokens_for_server(&mut prompt, SO_CTX, 0, 0, 2, None);
     assert_eq!(prompt, vec![2, 100, SO_CTX, SO_CTX, 8]);
+}
+
+// Jina VLM prompt template.
+//
+// The checkpoint's `chat_template.jinja` renders one user turn as
+// `" User: " + <image> + text + " " + "Assistant:"`, with the leading space on
+// the first turn gated by `always_start_with_space`. The image block is spliced
+// between the two halves this returns.
+
+#[test]
+fn the_jina_vlm_template_wraps_a_bare_prompt_in_one_user_turn() {
+    let (prefix, suffix) = format_jina_vlm_prompt("Describe the image.", true);
+    assert_eq!(prefix, " User: ");
+    assert_eq!(suffix, "Describe the image. Assistant:");
+}
+
+#[test]
+fn always_start_with_space_controls_only_the_leading_space() {
+    let (prefix, suffix) = format_jina_vlm_prompt("Describe the image.", false);
+    assert_eq!(prefix, "User: ");
+    assert_eq!(suffix, "Describe the image. Assistant:");
+}
+
+#[test]
+fn an_inline_image_placeholder_is_removed_rather_than_double_expanded() {
+    // The block is inserted between prefix and suffix, so a literal `<|image|>`
+    // left in the text would open a second, feature-less block.
+    let (prefix, suffix) = format_jina_vlm_prompt("<|image|>What is this?", true);
+    assert_eq!(prefix, " User: ");
+    assert_eq!(suffix, "What is this? Assistant:");
+    assert!(!suffix.contains("<|image|>"));
+}
+
+#[test]
+fn an_already_templated_prompt_is_passed_through() {
+    let (prefix, suffix) = format_jina_vlm_prompt("User: Read the sign. Assistant:", true);
+    assert_eq!(prefix, " User: ");
+    assert_eq!(suffix, "Read the sign. Assistant:");
+}
+
+#[test]
+fn a_prompt_that_only_looks_templated_still_gets_the_generation_marker() {
+    let (prefix, suffix) = format_jina_vlm_prompt("User: what now?", true);
+    assert_eq!(prefix, " User: ");
+    assert_eq!(suffix, "User: what now? Assistant:");
 }
