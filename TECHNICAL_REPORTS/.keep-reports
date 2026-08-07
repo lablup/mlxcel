@@ -1,0 +1,10 @@
+# Presence of this file opts the repository into tracking TECHNICAL_REPORTS/ in git.
+#
+# TECHNICAL_REPORTS/ is listed in .gitignore, so reports stay local by default and
+# each one has to be force-added by hand. This marker flips that: the report
+# workflow may generate a report for a still-open PR, dates it today rather than by
+# mergedAt, and force-adds, commits and pushes it so the report lands inside the
+# squash merge instead of trailing behind it.
+#
+# Adopted after the #1053/#1054/#1045/#1040 chain (PR #1077), which tracked its
+# eight reports by hand and left the directory in a partially tracked state.
