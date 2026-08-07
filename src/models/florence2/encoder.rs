@@ -77,7 +77,15 @@ impl Florence2Encoder {
 
     /// Encode `[batch, seq, d_model]` input embeddings into encoder hidden
     /// states of the same shape.
-    pub(crate) fn forward(&self, inputs_embeds: &MlxArray) -> UniquePtr<MlxArray> {
+    ///
+    /// `mask` is the additive attention mask (`[batch, 1, 1, seq]`, `0` for a
+    /// real key and `-inf` for a padded one) applied by every block's
+    /// self-attention. Unpadded input passes `None`.
+    pub(crate) fn forward(
+        &self,
+        inputs_embeds: &MlxArray,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
         let seq = mlxcel_core::array_shape(inputs_embeds)[1];
         let pos = mlxcel_core::slice(
             &self.embed_positions,
@@ -87,7 +95,7 @@ impl Florence2Encoder {
         let x = mlxcel_core::add(inputs_embeds, &pos);
         let mut x = self.layernorm_embedding.forward(&x);
         for layer in &self.layers {
-            x = layer.forward(&x);
+            x = layer.forward(&x, mask);
         }
         x
     }

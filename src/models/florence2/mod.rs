@@ -20,10 +20,11 @@
 //! cross-attention, and the dual KV cache (per-step self-attention history
 //! plus one-shot cross-attention K/V) that the decode loop needs.
 //!
-//! The vision tower, image-feature fusion, and the task-prompt processor
-//! build on this foundation in follow-up work; they drive the same
-//! [`Florence2TextModel`] API exposed here, with fused image + text
-//! embeddings entering through [`Florence2TextModel::encode_embeds`].
+//! [`Florence2Model`] is the assembled vision-language model: it drives the
+//! DaViT tower, projects its features into the text embedding space, and
+//! feeds the fused image + prompt sequence into the [`Florence2TextModel`]
+//! API exposed here through [`Florence2TextModel::encode_embeds_with_mask`].
+//! The task-prompt processor and runtime registration build on top of it.
 //!
 //! Structure mirrors `crate::models::whisper`, mlxcel's other
 //! encoder-decoder family, adapted from audio-to-text to token-to-token and
@@ -33,15 +34,21 @@
 //! - https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/florence2/language.py
 //! - https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/florence2/config.py
 
+mod checkpoint;
 mod decoder;
 mod encoder;
+mod fusion;
 pub(crate) mod layers;
+mod model;
 
 /// DaViT vision backbone, re-exported from the shared vision-encoder tree so
 /// the Florence-2 family directory exposes both halves of the model.
 pub use crate::vision::encoders::florence2_davit::{
     FLORENCE2_VISION_PREFIX, Florence2DaViT, Florence2VisionConfig,
 };
+
+pub use checkpoint::{Florence2Config, sanitize};
+pub use model::Florence2Model;
 
 use std::path::Path;
 
@@ -288,7 +295,7 @@ impl Florence2TextModel {
     /// this; callers embedding longer sequences must bound them first.
     pub fn encode_tokens(&self, input_ids: &MlxArray) -> UniquePtr<MlxArray> {
         let embeds = self.embed_tokens(input_ids);
-        self.encoder.forward(&embeds)
+        self.encoder.forward(&embeds, None)
     }
 
     /// Encode pre-computed `[batch, seq, d_model]` input embeddings. This is
@@ -299,7 +306,19 @@ impl Florence2TextModel {
     /// [`Florence2TextConfig::max_position_embeddings`], as in
     /// [`Self::encode_tokens`].
     pub fn encode_embeds(&self, inputs_embeds: &MlxArray) -> UniquePtr<MlxArray> {
-        self.encoder.forward(inputs_embeds)
+        self.encoder.forward(inputs_embeds, None)
+    }
+
+    /// [`Self::encode_embeds`] with an additive attention mask
+    /// (`[batch, 1, 1, seq]`, `0` for a real key and `-inf` for a padded
+    /// one). [`Florence2Model`] builds the mask from the joint image + prompt
+    /// attention mask; `None` is equivalent to [`Self::encode_embeds`].
+    pub fn encode_embeds_with_mask(
+        &self,
+        inputs_embeds: &MlxArray,
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.encoder.forward(inputs_embeds, mask)
     }
 
     /// Fresh decode-loop cache sized to the decoder depth.
@@ -380,7 +399,7 @@ impl Florence2TextModel {
 /// graph is forced, routed through the fallible [`mlxcel_core::try_eval`]
 /// boundary so an MLX failure surfaces as `Err` instead of aborting the
 /// process with an uncaught C++ exception.
-fn argmax_last_position(logits: &MlxArray) -> Result<i32> {
+pub(crate) fn argmax_last_position(logits: &MlxArray) -> Result<i32> {
     let shape = mlxcel_core::array_shape(logits);
     let last = mlxcel_core::slice(logits, &[0, shape[1] - 1, 0], &[1, shape[1], shape[2]]);
     let last = mlxcel_core::astype(&last, mlxcel_core::dtype::FLOAT32);

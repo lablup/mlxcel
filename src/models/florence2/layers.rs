@@ -220,8 +220,12 @@ impl Florence2EncoderLayer {
         })
     }
 
-    pub(crate) fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        let y = self.self_attn.self_attention(x, None, &mut None);
+    /// `mask`, when present, is the additive attention mask broadcast over
+    /// the `[batch, head, query, key]` logits (`0` for a real key, `-inf` for
+    /// a padded one). The fused vision + prompt path builds it from the joint
+    /// attention mask; a plain text encode passes `None`.
+    pub(crate) fn forward(&self, x: &MlxArray, mask: Option<&MlxArray>) -> UniquePtr<MlxArray> {
+        let y = self.self_attn.self_attention(x, mask, &mut None);
         let x = mlxcel_core::add(x, &y);
         let x = self.self_attn_layer_norm.forward(&x);
 
