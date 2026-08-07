@@ -27,6 +27,9 @@ use mlxcel_core::MlxArray;
 
 use crate::internvl_prompt::insert_internvl_image_tokens;
 use crate::kimi_vl_prompt::{InsertedKimiVlTokens, insert_kimi_vl_media_tokens};
+use crate::locateanything_prompt::{
+    expand_locateanything_image_markers, insert_locateanything_image_tokens,
+};
 use crate::minicpmo_prompt::{
     prepare_minicpmo_prompt_tokens, prepare_minicpmo_prompt_tokens_with_image_feature_sizes,
 };
@@ -132,6 +135,12 @@ pub enum VlmPreparationSummary {
     /// InternVL expanded each `<image>`/`<IMG_CONTEXT>` placeholder
     /// into `<img> + <IMG_CONTEXT> * (num_image_token * tiles) + </img>`.
     InternVL {
+        image_blocks: usize,
+        total_image_tokens: usize,
+    },
+    /// LocateAnything expanded each image into
+    /// `<img> + <IMG_CONTEXT> * (grid_h*grid_w / merge_length) + </img>`.
+    LocateAnything {
         image_blocks: usize,
         total_image_tokens: usize,
     },
@@ -1496,6 +1505,79 @@ where
                 image_blocks: s.image_blocks,
                 total_image_tokens: s.total_image_tokens,
             });
+
+            Ok(Some(PreparedVlmEmbeddings {
+                embeddings,
+                preparation,
+            }))
+        }
+        VlmRuntimeRef::LocateAnything(model) => {
+            // Native-resolution MoonViT: every image gets its own patch grid,
+            // so the placeholder run is sized per image from the grid the
+            // processor actually produced. That keeps the `<IMG_CONTEXT>` run
+            // exactly as long as the connector's feature rows, which is what
+            // the LLaVA-style scatter depends on.
+            let (pixel_values, grids) = model.processor.preprocess_with_grid(images);
+            let per_image_counts: Vec<usize> = grids
+                .iter()
+                .map(|&grid| model.merged_token_count(grid))
+                .collect();
+
+            // The chat template renders one `<image-N>` marker per image, and
+            // that marker is plain text rather than a vocabulary token, so the
+            // expansion has to happen on the rendered prompt and be re-encoded
+            // (upstream `LocateAnythingProcessor.__call__` does the same
+            // `re.sub`). Only when no marker is present (a `--no-chat-template`
+            // run) does the token-level splice apply.
+            let expanded =
+                expand_locateanything_image_markers(prompt, &per_image_counts).map_err(|err| {
+                    anyhow::anyhow!("LocateAnything prompt preparation failed: {err}")
+                })?;
+            let preparation = match expanded {
+                Some((rewritten, stats)) => {
+                    *prompt_tokens = encode(&rewritten, true);
+                    Some(stats)
+                }
+                None => insert_locateanything_image_tokens(
+                    prompt_tokens,
+                    &per_image_counts,
+                    model.img_start_token_id,
+                    model.image_token_id,
+                    model.img_end_token_id,
+                ),
+            };
+
+            // The merge scatters one connector feature row per `<IMG_CONTEXT>`
+            // position, so a prompt whose run length drifted from the grid
+            // would silently mix image features into text positions. Check the
+            // encoded stream rather than trusting the rewrite.
+            if let Some(stats) = preparation.as_ref() {
+                let placeholders = prompt_tokens
+                    .iter()
+                    .filter(|&&t| t == model.image_token_id)
+                    .count();
+                if placeholders != stats.total_image_tokens {
+                    return Err(anyhow::anyhow!(
+                        "LocateAnything prompt has {placeholders} image placeholder token(s) but \
+                         the vision tower will emit {} feature row(s)",
+                        stats.total_image_tokens
+                    ));
+                }
+            }
+
+            let preparation = preparation.map(|stats| VlmPreparationSummary::LocateAnything {
+                image_blocks: stats.image_blocks,
+                total_image_tokens: stats.total_image_tokens,
+            });
+
+            // LocateAnything runs every image's patches in one tower call; skip
+            // the opportunistic vision cache for this first integration
+            // (mirrors the InternVL / Kimi-VL decision).
+            let _ = active_caches;
+            let _ = image_cache_keys;
+
+            let input_ids_arr = prompt_ids_array(prompt_tokens);
+            let embeddings = model.get_input_embeddings(&input_ids_arr, &pixel_values, &grids);
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,

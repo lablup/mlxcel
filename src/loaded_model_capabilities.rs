@@ -55,6 +55,8 @@ pub enum VlmRuntimeRef<'a> {
     InternVL(&'a vision::InternVLChatVLM),
     /// Kimi-VL / Kimi-VL 2.5 (MoonViT) runtime.
     KimiVL(&'a vision::KimiVLModel),
+    /// LocateAnything (MoonViT + Qwen2 grounding) runtime.
+    LocateAnything(&'a vision::LocateAnythingVLM),
     /// Llama 3.2 Vision (mllama) cross-attention runtime.
     Mllama(&'a vision::MllamaVLModel),
     /// SmolVLM / SmolVLM2 (smolvlm) runtime.
@@ -188,6 +190,7 @@ impl LoadedModel {
             Self::YoutuVL(model) => Some(VlmRuntimeRef::YoutuVL(model)),
             Self::InternVLChatVLM(model) => Some(VlmRuntimeRef::InternVL(model)),
             Self::KimiVL(model) => Some(VlmRuntimeRef::KimiVL(model)),
+            Self::LocateAnythingVLM(model) => Some(VlmRuntimeRef::LocateAnything(model)),
             Self::MllamaVLM(model) => Some(VlmRuntimeRef::Mllama(model)),
             Self::SmolVLM(model) => Some(VlmRuntimeRef::SmolVLM(model)),
             Self::Idefics2(model) => Some(VlmRuntimeRef::Idefics2(model)),
