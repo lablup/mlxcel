@@ -425,6 +425,7 @@ fn sample_generate_args(model_path: PathBuf) -> crate::GenerateArgs {
             prompt: Some("Hello".to_string()),
             image: Vec::new(),
             image_soft_tokens: None,
+            layout_detections: None,
             audio: None,
             video: Vec::new(),
             fps: 2.0,

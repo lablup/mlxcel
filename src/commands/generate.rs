@@ -835,7 +835,7 @@ fn generated_suffix<'a>(full_text: &'a str, prompt_text: &str) -> &'a str {
     full_text.strip_prefix(prompt_text).unwrap_or(full_text)
 }
 
-fn decode_generated_text(
+pub(super) fn decode_generated_text(
     tokenizer: &mlxcel::tokenizer::MlxcelTokenizer,
     prompt_tokens: &[i32],
     generated_tokens: &[i32],
@@ -1231,7 +1231,7 @@ fn generate_xla(
 // stays generic over `LanguageModel`; `LoadedModel` implements that trait, so
 // the monomorphized code for the non-MTP paths is identical to the prior generic
 // form. The sole caller already passes `&LoadedModel`.
-fn run_generation_mode(
+pub(super) fn run_generation_mode(
     model: &mlxcel::LoadedModel,
     args: &GenerateArgs,
     prompt_tokens: &[i32],
@@ -1737,7 +1737,7 @@ fn chat_options_from_args(args: &GenerateArgs) -> Result<crate::commands::ChatOp
     Ok(opts)
 }
 
-pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
+pub(crate) fn run_generate(mut args: GenerateArgs) -> Result<()> {
     // Epic #92 / issue #96: no `-p/--prompt` means "interactive chat". Route to
     // the reusable REPL entry point before any one-shot-only setup. The REPL
     // initializes its own runtime, resolves `-m` (repo-id auto-download), loads
@@ -1750,8 +1750,16 @@ pub(crate) fn run_generate(args: GenerateArgs) -> Result<()> {
             args.generation.output_audio.is_none(),
             "--output-audio requires a one-shot -p/--prompt run (not interactive chat)"
         );
-        let opts = chat_options_from_args(&args)?;
-        return crate::commands::run_chat(opts);
+        // `--layout-detections` builds every region's prompt from its layout
+        // class (issue #848), so it is the one one-shot mode with nothing for
+        // `-p` to carry. Give it an empty prompt rather than dropping the run
+        // into the interactive REPL, which would ignore the flag entirely.
+        if args.generation.layout_detections.is_some() {
+            args.generation.prompt = Some(String::new());
+        } else {
+            let opts = chat_options_from_args(&args)?;
+            return crate::commands::run_chat(opts);
+        }
     }
 
     run_generate_once(args)
@@ -1846,6 +1854,47 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             "--output-audio currently supports text-only prompts (no --image/--audio/--video)"
         );
     }
+
+    // Layout-aware Falcon-OCR (issue #848): validate the request and parse the
+    // detections file here, before the tokenizer and the model weights are
+    // touched, so a malformed or missing file costs nothing. The per-region
+    // prompts are derived from the layout classes, so the flag combinations
+    // that would silently do nothing are rejected rather than ignored.
+    let layout_detections = match args.generation.layout_detections.as_deref() {
+        Some(path) => {
+            ensure!(
+                !pipeline_requested,
+                "--layout-detections is not supported with pipeline parallelism"
+            );
+            ensure!(
+                args.model.draft_model.is_none(),
+                "--layout-detections does not support speculative decoding; drop --draft-model"
+            );
+            ensure!(
+                args.generation.audio.is_none() && args.generation.video.is_empty(),
+                "--layout-detections is an image-only path; drop --audio / --video"
+            );
+            ensure!(
+                args.generation.image.len() == 1,
+                "--layout-detections OCRs the regions of one page: pass exactly one --image, \
+                 got {}",
+                args.generation.image.len()
+            );
+            if args
+                .generation
+                .prompt
+                .as_deref()
+                .is_some_and(|p| !p.is_empty())
+            {
+                eprintln!(
+                    "NOTE: --layout-detections derives each region's instruction from its \
+                     layout class, so -p/--prompt is not used."
+                );
+            }
+            Some(super::generate_falcon_ocr::load_layout_detections(path)?)
+        }
+        None => None,
+    };
 
     let tokenizer = load_tokenizer(&args.model.model)?;
     let prompt = load_cli_prompt(
@@ -2087,6 +2136,22 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
                 florence2_model,
                 &args,
                 &user_prompt,
+            );
+        }
+        // Layout-aware Falcon-OCR (issue #848): one page becomes a sequence of
+        // per-region OCR runs, each with its own crop and category prompt, so
+        // it cannot share the single-prompt loop below. Detections were parsed
+        // before the model load; the driver plans them into regions and prints
+        // each one in file order.
+        if let Some(detections) = layout_detections {
+            return super::generate_falcon_ocr::run_falcon_ocr_layout_generation(
+                &model,
+                &args,
+                &tokenizer,
+                &sampling_config,
+                kv_cache_mode,
+                &token_bias,
+                &detections,
             );
         }
         // Reject an off-ladder `--image-soft-tokens` before loading any image:

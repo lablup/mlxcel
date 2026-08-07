@@ -84,9 +84,9 @@ pub use multimodal::host_preprocessor::{
     LlavaHostPreprocessor, XlaVisionBackend, load_xla_image_preprocessor,
 };
 pub use multimodal::{
-    internvl_prompt, kimi_vl_prompt, locateanything_prompt, minicpmo_prompt, moondream2_prompt,
-    moondream3_prompt, phi3v_prompt, phi4_siglip_prompt, phi4mm_prompt, pixtral_prompt, qwen_vl,
-    smolvlm_prompt, video, vlm_prompt, vlm_runtime, youtu_vl_prompt,
+    falcon_ocr_prompt, internvl_prompt, kimi_vl_prompt, locateanything_prompt, minicpmo_prompt,
+    moondream2_prompt, moondream3_prompt, phi3v_prompt, phi4_siglip_prompt, phi4mm_prompt,
+    pixtral_prompt, qwen_vl, smolvlm_prompt, video, vlm_prompt, vlm_runtime, youtu_vl_prompt,
 };
 
 // Re-export the compute-backend seam (issue #338, reframed to a session engine

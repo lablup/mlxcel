@@ -365,6 +365,29 @@ pub(crate) struct GenerationOptions {
     #[arg(long, value_name = "N", value_parser = parse_image_soft_tokens)]
     pub(crate) image_soft_tokens: Option<usize>,
 
+    /// Layout detections for region-wise OCR (Falcon-OCR only).
+    ///
+    /// Path to a JSON file of already-detected page regions. Each region is
+    /// cropped from `--image`, OCRed with the instruction its layout class maps
+    /// to, and printed in the order the file lists it, so supply the detections
+    /// in reading order. Boxes mostly contained in a larger box are dropped, and
+    /// classes that carry no text (`picture`, `chart`, `figure`, `seal`) are
+    /// skipped. `-p/--prompt` is not used on this path: every region's prompt
+    /// comes from its class.
+    ///
+    /// mlxcel ships no document-layout DETECTOR, so the detections must come
+    /// from elsewhere. The accepted shape is the one `mlxcel detect --format
+    /// json` prints:
+    ///
+    ///     {"detections": [{"label": "title", "confidence": 0.95,
+    ///                      "box": {"l": 60, "t": 55, "r": 940, "b": 140}}]}
+    ///
+    /// A bare top-level array works too, as does the `{"category": ...,
+    /// "bbox": [l, t, r, b], "score": ...}` spelling that mlx-vlm's
+    /// `falcon_ocr/layout.py` emits.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) layout_detections: Option<PathBuf>,
+
     /// Audio file path for audio-language models (e.g. Gemma4 with audio)
     #[arg(long, value_name = "PATH")]
     pub(crate) audio: Option<PathBuf>,

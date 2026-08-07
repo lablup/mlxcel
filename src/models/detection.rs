@@ -282,6 +282,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "qwen3_omni_moe" => Ok(ModelType::Qwen3OmniMoe),
         "paddleocr_vl" => Ok(ModelType::PaddleOcrVL),
         "dots_ocr" => Ok(ModelType::DotsOcrVL),
+        "falcon_ocr" => Ok(ModelType::FalconOcrVL),
         "glm4v" => Ok(ModelType::Glm4v),
         "glm4v_moe" => Ok(ModelType::Glm4vMoe),
         "glm_ocr" => Ok(ModelType::GlmOcr),
