@@ -275,6 +275,11 @@ impl Florence2TextModel {
 
     /// Encode `[batch, seq]` token ids into encoder hidden states
     /// `[batch, seq, d_model]`.
+    ///
+    /// Precondition: `seq` must not exceed
+    /// [`Florence2TextConfig::max_position_embeddings`]; the learned position
+    /// table has no rows past that bound. [`Self::generate_greedy`] checks
+    /// this; callers embedding longer sequences must bound them first.
     pub fn encode_tokens(&self, input_ids: &MlxArray) -> UniquePtr<MlxArray> {
         let embeds = self.embed_tokens(input_ids);
         self.encoder.forward(&embeds)
@@ -283,6 +288,10 @@ impl Florence2TextModel {
     /// Encode pre-computed `[batch, seq, d_model]` input embeddings. This is
     /// the entry point the vision-fusion path drives with concatenated
     /// image + text embeddings.
+    ///
+    /// Precondition: `seq` must not exceed
+    /// [`Florence2TextConfig::max_position_embeddings`], as in
+    /// [`Self::encode_tokens`].
     pub fn encode_embeds(&self, inputs_embeds: &MlxArray) -> UniquePtr<MlxArray> {
         self.encoder.forward(inputs_embeds)
     }
@@ -328,6 +337,16 @@ impl Florence2TextModel {
     /// generation through the vision path replaces the encoder input but
     /// drives the same [`Self::decode`] / [`Florence2SeqCache`] machinery.
     pub fn generate_greedy(&self, input_ids: &[i32], max_new_tokens: usize) -> Result<Vec<i32>> {
+        if input_ids.is_empty() {
+            return Err(anyhow!("Florence-2 encoder input is empty"));
+        }
+        if input_ids.len() > self.config.max_position_embeddings as usize {
+            return Err(anyhow!(
+                "Florence-2 encoder input length {} exceeds max_position_embeddings {}",
+                input_ids.len(),
+                self.config.max_position_embeddings
+            ));
+        }
         let prompt = mlxcel_core::from_slice_i32(input_ids, &[1, input_ids.len() as i32]);
         let encoder_hidden = self.encode_tokens(&prompt);
 

@@ -374,6 +374,14 @@ fn cross_cache_is_one_shot_and_self_cache_grows() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn generate_greedy_rejects_empty_and_overlong_prompts() {
+    let model = tiny_model();
+    assert!(model.generate_greedy(&[], 4).is_err());
+    let overlong = vec![0i32; (MAX_POS + 1) as usize];
+    assert!(model.generate_greedy(&overlong, 4).is_err());
+}
+
+#[test]
 fn generate_greedy_round_trip_produces_valid_tokens() {
     let model = tiny_model();
     let out = model.generate_greedy(&[0, 5, 6, 2], 8).unwrap();
