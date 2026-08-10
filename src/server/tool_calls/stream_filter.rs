@@ -27,7 +27,7 @@
 //! - Qwen-style reasoning: `<think>` / `</think>` — Qwen3.x, Exaone4, Hunyuan, GLM4, etc.
 //! - Hermes-style tool calls: `<tool_call>` / `</tool_call>` — Qwen/DeepSeek tool call format
 //! - Mistral Nemo: `[TOOL_CALLS]` — one-shot start marker (rest of output is tool call JSON)
-//! - Gemma 4: `<|channel>` / `<channel|>`, `<|tool_call>` / `<tool_call|>`,
+//! - Gemma 4: `<|channel>thought` / `<channel|>`, `<|tool_call>` / `<tool_call|>`,
 //!   `<|think|>`, `<|turn>` / `<turn|>`
 //! - Function-calling Gemma: `<start_function_call>` / `<end_function_call>`,
 //!   a distinct marker family from Gemma 4, sharing only the inner
@@ -225,8 +225,10 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     // a spurious Hermes hit on the Gemma 4 open tag.
     ("<|tool_call>", DelimiterAction::EnterToolCall),
     ("<tool_call|>", DelimiterAction::ExitToolCall),
-    // Gemma 4 reasoning channel and structural strip markers.
-    ("<|channel>", DelimiterAction::EnterThinking),
+    // Gemma 4 reasoning channel: consume the full `<|channel>thought` opener
+    // as one delimiter so the `thought` channel argument never leaks into
+    // `delta.reasoning_content`.
+    ("<|channel>thought", DelimiterAction::EnterThinking),
     ("<channel|>", DelimiterAction::ExitThinking),
     ("<|think|>", DelimiterAction::Strip),
     ("<|turn>", DelimiterAction::Strip),
@@ -303,7 +305,7 @@ enum FilterState {
 ///
 /// Covers Qwen-style (`<think>` / `</think>`), Hermes-style
 /// (`<tool_call>` / `</tool_call>`), Mistral Nemo (`[TOOL_CALLS]`), and
-/// Gemma 4 (`<|channel>` / `<channel|>`) reasoning families, plus Gemma 4
+/// Gemma 4 (`<|channel>thought` / `<channel|>`) reasoning families, plus Gemma 4
 /// tool-call and turn markers.
 ///
 /// Feed decoded text fragments via [`feed()`](StreamFilter::feed).  The
@@ -863,7 +865,7 @@ mod tests {
         // SSE chunks. Content after the close stays in `content`.
         let mut f = StreamFilter::new();
         let out = f.feed("<|channel>thought\nReasoning text<channel|>Answer text");
-        assert_eq!(out.reasoning.as_deref(), Some("thought\nReasoning text"));
+        assert_eq!(out.reasoning.as_deref(), Some("\nReasoning text"));
         assert_eq!(out.content.as_deref(), Some("Answer text"));
     }
 
@@ -1023,16 +1025,45 @@ mod tests {
 
     #[test]
     fn gemma4_regression_channel_reasoning_and_content() {
-        // Regression guard: Gemma 4 `<|channel>reasoning<channel|>content`
+        // Regression guard: Gemma 4 `<|channel>thought\nreasoning<channel|>content`
         // must still route correctly after the Qwen entries were added to
         // CHAT_DELIMITERS. Any change to the filter that silently breaks
         // Gemma 4 will be caught here.
         let mut f = StreamFilter::new();
         let out = f.feed("<|channel>thought\nReasoning text<channel|>Answer text");
-        assert_eq!(out.reasoning.as_deref(), Some("thought\nReasoning text"));
+        assert_eq!(out.reasoning.as_deref(), Some("\nReasoning text"));
         assert_eq!(out.content.as_deref(), Some("Answer text"));
         assert!(!out.content.as_deref().unwrap_or("").contains("<|channel>"));
         assert!(!out.content.as_deref().unwrap_or("").contains("<channel|>"));
+    }
+
+    #[test]
+    fn gemma4_streaming_delta_contract_only_drops_thought_residue() {
+        // Stream the Gemma 4 opener across token boundaries to prove the
+        // visible answer and reasoning delta framing stay identical to the old
+        // behavior except for removing the leaked `thought` residue.
+        let mut f = StreamFilter::new();
+        let fragments = [
+            "<|channel>",
+            "thought\n",
+            "first line",
+            "<channel|>",
+            "final answer",
+        ];
+        let mut reasoning = String::new();
+        let mut content = String::new();
+        for frag in fragments {
+            let out = f.feed(frag);
+            if let Some(r) = out.reasoning {
+                reasoning.push_str(&r);
+            }
+            if let Some(c) = out.content {
+                content.push_str(&c);
+            }
+        }
+
+        assert_eq!(reasoning, "\nfirst line");
+        assert_eq!(content, "final answer");
     }
 
     // -- Hermes / Qwen / DeepSeek tool-call markup suppression --

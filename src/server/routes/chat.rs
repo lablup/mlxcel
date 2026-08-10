@@ -1445,7 +1445,7 @@ mod tests {
         let raw = "<|channel>thought\ndeliberating<channel|>the answer";
         assert_eq!(
             extract_reasoning_content(raw, false),
-            Some("thought\ndeliberating".to_string())
+            Some("\ndeliberating".to_string())
         );
     }
 
