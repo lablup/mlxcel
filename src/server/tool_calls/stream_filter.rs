@@ -428,13 +428,31 @@ impl StreamFilter {
             self.fragment_lengths.clear();
             return FilterOutput::default();
         }
+
+        // At end of stream, a complete delimiter that is also a prefix of a
+        // longer delimiter is no longer ambiguous: no future fragment can
+        // complete the longer form. Resolve those fallbacks before emitting
+        // the remaining tail so a truncated bare `<|channel>` cannot leak as
+        // visible content.
+        let mut output = self.drain_buffer_inner(true);
         let remaining = std::mem::take(&mut self.buffer);
         self.fragment_lengths.clear();
         match self.state {
-            FilterState::Content if !remaining.is_empty() => FilterOutput::content(remaining),
-            FilterState::Thinking if !remaining.is_empty() => FilterOutput::reasoning(remaining),
-            _ => FilterOutput::default(),
+            FilterState::Content if !remaining.is_empty() => {
+                output
+                    .content
+                    .get_or_insert_with(String::new)
+                    .push_str(&remaining);
+            }
+            FilterState::Thinking if !remaining.is_empty() => {
+                output
+                    .reasoning
+                    .get_or_insert_with(String::new)
+                    .push_str(&remaining);
+            }
+            _ => {}
         }
+        output
     }
 
     /// Drain `n` bytes from the front of `fragment_lengths`, returning the
@@ -507,6 +525,10 @@ impl StreamFilter {
     /// `tok.match` is one token ID (one position); here we count how many
     /// `feed()` positions contributed bytes to the matched span.
     fn drain_buffer(&mut self) -> FilterOutput {
+        self.drain_buffer_inner(false)
+    }
+
+    fn drain_buffer_inner(&mut self, end_of_stream: bool) -> FilterOutput {
         let mut content = String::new();
         let mut reasoning = String::new();
         let mut suppressed_positions: usize = 0;
@@ -517,7 +539,7 @@ impl StreamFilter {
                 break;
             }
 
-            match self.find_earliest_delimiter() {
+            match self.find_earliest_delimiter(end_of_stream) {
                 Some((pos, delim_len, action)) => {
                     // Text before the delimiter is attributed to the current
                     // state so thinking fragments surface as reasoning and
@@ -582,12 +604,15 @@ impl StreamFilter {
     /// Find the earliest complete delimiter in the buffer.
     ///
     /// Returns `(byte_position, delimiter_len, action)`.
-    fn find_earliest_delimiter(&self) -> Option<(usize, usize, DelimiterAction)> {
+    fn find_earliest_delimiter(
+        &self,
+        end_of_stream: bool,
+    ) -> Option<(usize, usize, DelimiterAction)> {
         let mut earliest: Option<(usize, usize, DelimiterAction)> = None;
 
         for &(delim, action) in CHAT_DELIMITERS {
             if let Some(pos) = self.buffer.find(delim) {
-                if self.complete_prefix_is_still_ambiguous(pos, delim) {
+                if !end_of_stream && self.complete_prefix_is_still_ambiguous(pos, delim) {
                     continue;
                 }
                 match earliest {
@@ -1582,6 +1607,18 @@ mod tests {
             out.consumed_positions, 2,
             "`thought\\n` must not be counted once for the delimiter and again for the newline"
         );
+    }
+
+    #[test]
+    fn flush_resolves_bare_channel_fallback_at_end_of_stream() {
+        let mut f = StreamFilter::new();
+        assert_eq!(f.feed("<|channel>").content, None);
+
+        let out = f.flush();
+        assert_eq!(out.content, None);
+        assert_eq!(out.reasoning, None);
+        assert_eq!(out.suppressed_positions, 1);
+        assert_eq!(out.consumed_positions, 1);
     }
 
     // -- HIGH-1 regression: multi-fragment (multi-token) delimiter counting --
