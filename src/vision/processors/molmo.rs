@@ -141,7 +141,7 @@ impl MolmoProcessor {
         let (src, src_mask) = self.resize_and_pad(&img, target_h, target_w, orig_h, orig_w);
 
         let mut patches_arr: Vec<Vec<Vec<f32>>> = Vec::new(); // [crop][h*w][3]
-        let mut mask_arr: Vec<Vec<bool>> = Vec::new(); // [crop][h*w]
+        let mut mask_arr: Vec<Vec<f32>> = Vec::new(); // [crop][h*w]
         let mut patch_ordering: Vec<Vec<Vec<i32>>> = Vec::new(); // [crop][tok_h][tok_w]
 
         let mut on = 0i32;
@@ -275,9 +275,7 @@ impl MolmoProcessor {
         // mirroring upstream so output matches the mlx-vlm Python reference).
         let mut image_masks: Vec<f32> = Vec::with_capacity(n_crops * n_patches);
         for crop_mask in &mask_arr {
-            for &b in crop_mask {
-                image_masks.push(if b { 1.0 } else { 0.0 });
-            }
+            image_masks.extend_from_slice(crop_mask);
         }
         image_masks.extend(std::iter::repeat_n(-1.0, n_patches));
 
@@ -437,7 +435,12 @@ impl MolmoProcessor {
         let top = (target_h - scaled_h) / 2;
         let left = (target_w - scaled_w) / 2;
 
-        let mut out = vec![[0.0f32; 3]; target_h * target_w];
+        let normalized_black = [
+            (0.0 - self.image_mean[0]) / self.image_std[0],
+            (0.0 - self.image_mean[1]) / self.image_std[1],
+            (0.0 - self.image_mean[2]) / self.image_std[2],
+        ];
+        let mut out = vec![normalized_black; target_h * target_w];
         let mut mask = vec![false; target_h * target_w];
         for y in 0..scaled_h {
             for x in 0..scaled_w {
@@ -507,7 +510,7 @@ fn select_tiling(h: usize, w: usize, patch_size: usize, max_num_patches: usize) 
 }
 
 /// Rearrange one crop's pixels into `[h*w][dh*dw*3]` patches and average its
-/// mask into `[h*w]` (then thresholded later). `crop` is row-major [size*size].
+/// mask into `[h*w]`. `crop` is row-major [size*size].
 fn rearrange_crop(
     crop: &[[f32; 3]],
     mask: &[bool],
@@ -515,7 +518,7 @@ fn rearrange_crop(
     patch: usize,
     h: usize,
     w: usize,
-) -> (Vec<Vec<f32>>, Vec<bool>) {
+) -> (Vec<Vec<f32>>, Vec<f32>) {
     let mut patches = Vec::with_capacity(h * w);
     let mut mask_out = Vec::with_capacity(h * w);
     for ph in 0..h {
@@ -538,8 +541,7 @@ fn rearrange_crop(
                 }
             }
             patches.push(vals);
-            // Mean coverage > 0.5 marks the patch as real (matches mean(mask)).
-            mask_out.push(covered * 2 >= patch * patch);
+            mask_out.push(covered as f32 / (patch * patch) as f32);
         }
     }
     (patches, mask_out)
@@ -575,4 +577,88 @@ fn rearrange_global(
         }
     }
     patches
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MolmoImageTokens, MolmoProcessor, OPENAI_CLIP_MEAN, OPENAI_CLIP_STD};
+
+    const PATCH_DIM: usize = 14 * 14 * 3;
+    const N_PATCHES: usize = 24 * 24;
+
+    fn default_processor() -> MolmoProcessor {
+        MolmoProcessor::new(
+            12,
+            Some((4, 4)),
+            Some(14),
+            Some((336, 336)),
+            Some((12, 12)),
+            None,
+            None,
+            MolmoImageTokens::default(),
+        )
+    }
+
+    fn solid_image(width: u32, height: u32) -> image::DynamicImage {
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(width, height, |_, _| {
+            image::Rgb([128, 64, 32])
+        }))
+    }
+
+    #[test]
+    fn global_pad_pixels_are_normalized_black() {
+        let processor = default_processor();
+        let out = processor.preprocess_image(&solid_image(640, 480));
+
+        let expected = [
+            -OPENAI_CLIP_MEAN[0] / OPENAI_CLIP_STD[0],
+            -OPENAI_CLIP_MEAN[1] / OPENAI_CLIP_STD[1],
+            -OPENAI_CLIP_MEAN[2] / OPENAI_CLIP_STD[2],
+        ];
+        let first_global_patch = &out.pixel_values[..PATCH_DIM];
+
+        for (actual, expected) in first_global_patch[..3].iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() < 1e-6,
+                "padding must be normalized after raw black fill"
+            );
+        }
+    }
+
+    #[test]
+    fn high_res_masks_preserve_fractional_patch_coverage() {
+        let processor = default_processor();
+        let out = processor.preprocess_image(&solid_image(640, 480));
+
+        // The 640x480 control image selects 2x3 high-resolution crops plus the global crop.
+        assert_eq!(out.pixel_values_shape[0], 7);
+        assert_eq!(out.image_masks_shape, [7, N_PATCHES as i32]);
+
+        let high_res_len = (out.pixel_values_shape[0] as usize - 1) * N_PATCHES;
+        let high_res_masks = &out.image_masks[..high_res_len];
+        let sentinel = &out.image_masks[high_res_len..];
+
+        assert!(
+            high_res_masks.contains(&0.0),
+            "left/right padding should produce fully padded high-res patches"
+        );
+        assert!(
+            high_res_masks.contains(&1.0),
+            "real image regions should still produce fully covered patches"
+        );
+        assert!(
+            high_res_masks.iter().any(|&m| m > 0.0 && m < 1.0),
+            "border patches must preserve fractional coverage for pad_and_partial_pad"
+        );
+        let second_horizontal_patch = high_res_masks[1];
+        let expected = 9.0 / 14.0;
+        assert!(
+            (second_horizontal_patch - expected).abs() < 1e-6,
+            "19px side padding leaves 9/14 real pixels in the first crop's second horizontal patch"
+        );
+        assert!(
+            sentinel.iter().all(|&m| m == -1.0),
+            "the final mask row remains the reference sentinel for the global slot"
+        );
+    }
 }

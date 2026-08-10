@@ -21,9 +21,10 @@
 //! 1. **No per-head QK normalization.** Molmo2 applies `RMSNorm(head_dim)` to
 //!    Q and K after the reshape; Molmo v1 does not (the v1 tensors have no
 //!    `q_norm`/`k_norm`).
-//! 2. **Interleaved RoPE.** v1 config sets `rope_impl: "interleave"`, which maps
-//!    to `traditional=true` in the MLX fast RoPE kernel (Molmo2 uses the
-//!    rotate-half variant, `traditional=false`).
+//! 2. **Config-selectable RoPE layout.** Molmo-7B-D-0924 uses the LLaMA
+//!    rotate-half layout (`traditional=false` in MLX). Explicit
+//!    `rope_impl: "interleave"` checkpoints still select the consecutive-pair
+//!    layout (`traditional=true`).
 //! 3. **LM head location.** v1 stores the (untied) output projection at
 //!    `language_model.model.ff_out`, not a separate `language_model.lm_head`.
 //!
@@ -74,7 +75,7 @@ pub struct MolmoTextConfig {
     pub layer_norm_eps: f32,
     #[serde(default = "default_rope_theta")]
     pub rope_theta: f32,
-    /// `rope_impl: "interleave"` → traditional/interleaved RoPE.
+    /// RoPE implementation name from the checkpoint config.
     #[serde(default = "default_rope_impl")]
     pub rope_impl: String,
     #[serde(default = "default_qkv_bias")]
@@ -121,7 +122,10 @@ fn default_rope_theta() -> f32 {
     1_000_000.0
 }
 fn default_rope_impl() -> String {
-    "interleave".to_string()
+    // The affected flat MLX Molmo-7B-D-0924-4bit config omits `rope_impl`.
+    // The checkpoint's effective constructor sets `rope_impl="llama"`, which is
+    // MLX's rotate-half layout (`traditional=false`).
+    "llama".to_string()
 }
 fn default_qkv_bias() -> bool {
     true
@@ -149,7 +153,7 @@ impl MolmoTextConfig {
     }
 }
 
-// Molmo v1 Attention (fused biased QKV, NO QK norm, interleaved RoPE).
+// Molmo v1 Attention (fused biased QKV, NO QK norm, config-selected RoPE).
 pub struct MolmoAttention {
     pub att_proj: UnifiedLinear, // Fused QKV projection (with bias)
     pub attn_out: UnifiedLinear, // Output projection
@@ -195,7 +199,7 @@ impl MolmoAttention {
 
         let offset = cache.offset;
 
-        // Interleaved ("traditional") RoPE for Molmo v1.
+        // Molmo v1 checkpoints select either LLaMA rotate-half or interleaved RoPE.
         let q = mlxcel_core::fast_rope(
             &q,
             self.head_dim,
@@ -491,4 +495,56 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
         .get(name)
         .map(|w| mlxcel_core::copy(w))
         .ok_or_else(|| format!("Weight not found: {}", name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MolmoTextConfig;
+
+    fn parse_config(extra: &str) -> MolmoTextConfig {
+        let comma = if extra.trim().is_empty() { "" } else { "," };
+        serde_json::from_str(&format!(
+            r#"{{
+                "model_type": "molmo",
+                "hidden_size": 3584,
+                "num_hidden_layers": 28,
+                "intermediate_size": 37888,
+                "num_attention_heads": 28,
+                "num_key_value_heads": 4,
+                "vocab_size": 152064,
+                "embedding_size": 152064,
+                "additional_vocab_size": 128,
+                "layer_norm_eps": 0.00001,
+                "rope_theta": 1000000.0
+                {comma}
+                {extra}
+            }}"#
+        ))
+        .expect("parse Molmo config")
+    }
+
+    #[test]
+    fn flat_molmo_7b_config_without_rope_impl_uses_effective_llama_layout() {
+        let config = parse_config("");
+
+        assert_eq!(config.rope_impl, "llama");
+        assert!(
+            !config.rope_traditional(),
+            "Molmo-7B-D-0924 omits rope_impl but uses the LLaMA rotate-half layout"
+        );
+    }
+
+    #[test]
+    fn explicit_interleave_stays_traditional() {
+        let config = parse_config(r#""rope_impl": "interleave""#);
+
+        assert!(config.rope_traditional());
+    }
+
+    #[test]
+    fn explicit_llama_stays_rotate_half() {
+        let config = parse_config(r#""rope_impl": "llama""#);
+
+        assert!(!config.rope_traditional());
+    }
 }
