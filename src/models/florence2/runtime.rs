@@ -62,8 +62,8 @@ pub struct Florence2RunOutput {
     pub output: Florence2Output,
     /// Number of decoder tokens generated (EOS excluded).
     pub generated_tokens: usize,
-    /// Number of encoder prompt tokens (the expanded task sentence,
-    /// `<s>`/`</s>` included; image feature tokens excluded).
+    /// Number of fused encoder positions (projected image tokens plus the
+    /// expanded task sentence, with `<s>`/`</s>` included).
     pub prompt_tokens: usize,
 }
 
@@ -124,7 +124,6 @@ impl Florence2VlmModel {
         cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<Florence2RunOutput> {
         let prompt_ids = self.processor.encode_prompt(task, input)?;
-        let prompt_tokens = prompt_ids.len();
         let processed = self
             .processor
             .image_processor()
@@ -134,7 +133,7 @@ impl Florence2VlmModel {
             .first()
             .ok_or_else(|| anyhow!("Florence-2: image preprocessing returned no images"))?;
 
-        let generated = self.model.generate_greedy_with_cancel(
+        let (generated, prompt_tokens) = self.model.generate_greedy_with_cancel_and_prompt_len(
             &processed.pixel_values,
             &prompt_ids,
             max_new_tokens,

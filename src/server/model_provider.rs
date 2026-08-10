@@ -60,17 +60,65 @@ pub(crate) enum ModelRequest {
         videos: Vec<ResolvedVideo>,
         /// Declared and resolved media counts retained from the HTTP boundary.
         ///
-        /// MLX/diffusion workers ignore this metadata and keep their tolerant
-        /// resolver behavior. XLA validates it before deciding whether a
-        /// request is text-only.
+        /// HTTP request preparation already rejects image declaration/resolution
+        /// mismatches. The provider repeats that shared validation for internal
+        /// callers, and XLA also uses the metadata for backend capability checks.
         #[cfg_attr(not(feature = "xla-iree"), allow(dead_code))]
         media: MediaRequestMetadata,
+        /// Pending-depth reservation for dedicated single-stream workers.
+        ///
+        /// `None` for BatchScheduler and XLA paths, which own the same gauge
+        /// internally. Dedicated DiffusionGemma, LLaDA-2, and Florence-2 paths
+        /// drop this as soon as the request is dequeued.
+        queue_reservation: Option<SingleStreamQueueReservation>,
         response_tx: mpsc::Sender<GenerateEvent>,
         /// Cancellation flag set by the SSE sender when the client disconnects.
         /// The `BatchScheduler` polls this to abort orphaned sequences.
         cancelled: Arc<AtomicBool>,
     },
     Shutdown,
+}
+
+pub(crate) struct SingleStreamQueueReservation {
+    batch_metrics: Arc<BatchMetrics>,
+}
+
+enum QueueReservationMode {
+    Auto,
+    PreReserved(Option<SingleStreamQueueReservation>),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Queue depth limit reached: max_queue_depth={max_queue_depth}")]
+pub(crate) struct QueueFullError {
+    pub(crate) max_queue_depth: usize,
+}
+
+impl SingleStreamQueueReservation {
+    fn try_new(batch_metrics: Arc<BatchMetrics>, max_queue_depth: usize) -> Result<Self> {
+        if batch_metrics.try_reserve_queue_slot(max_queue_depth) {
+            Ok(Self { batch_metrics })
+        } else {
+            Err(anyhow::Error::new(QueueFullError { max_queue_depth }))
+        }
+    }
+}
+
+impl Drop for SingleStreamQueueReservation {
+    fn drop(&mut self) {
+        self.batch_metrics.release_queue_slot();
+    }
+}
+
+fn uses_single_stream_queue_admission(model_path: &std::path::Path) -> bool {
+    crate::models::get_model_type(model_path).is_ok_and(|model_type| {
+        matches!(
+            model_type,
+            crate::models::ModelType::DiffusionGemma
+                | crate::models::ModelType::Llada2Moe
+                | crate::models::ModelType::Florence2VLM
+        )
+    })
 }
 
 /// Events from generation
@@ -125,6 +173,8 @@ pub struct ModelProvider {
     loaded: Arc<AtomicBool>,
     batch_metrics: Arc<BatchMetrics>,
     batch_observability: Arc<BatchObservability>,
+    max_queue_depth: usize,
+    single_stream_queue_admission: Arc<AtomicBool>,
     /// Shared cross-request prompt-prefix KV cache.
     /// `None` when the feature is disabled by config.
     prompt_cache: Option<Arc<crate::server::prompt_cache::PromptCacheStore>>,
@@ -262,6 +312,7 @@ impl ModelProvider {
                 adapter_path,
                 config.tensor_parallel.clone(),
                 config.reasoning_budget,
+                config.max_queue_depth,
                 batch_metrics,
                 batch_observability,
             )?;
@@ -347,6 +398,7 @@ impl ModelProvider {
         adapter_path: Option<PathBuf>,
         tensor_parallel: crate::distributed::ShardConfig,
         reasoning_budget: Option<crate::server::thinking_budget::ThinkingBudget>,
+        max_queue_depth: usize,
         batch_metrics: Arc<BatchMetrics>,
         batch_observability: Arc<BatchObservability>,
     ) -> Result<Self> {
@@ -359,6 +411,9 @@ impl ModelProvider {
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
         let loaded = Arc::new(AtomicBool::new(false));
         let loaded_clone = loaded.clone();
+        let single_stream_queue_admission = Arc::new(AtomicBool::new(
+            uses_single_stream_queue_admission(&model_path),
+        ));
         let worker_model_id = model_id.clone();
         let metrics_clone = batch_metrics.clone();
         let obs_clone = batch_observability.clone();
@@ -373,6 +428,7 @@ impl ModelProvider {
             worker_model_id,
             metrics_clone,
             obs_clone,
+            single_stream_queue_admission.clone(),
         );
 
         Ok(Self {
@@ -382,6 +438,8 @@ impl ModelProvider {
             loaded,
             batch_metrics,
             batch_observability,
+            max_queue_depth,
+            single_stream_queue_admission,
             prompt_cache: None,
             prompt_tokenizer: None,
             decode_hang_timeout: DECODE_HANG_TIMEOUT,
@@ -414,6 +472,7 @@ impl ModelProvider {
         let created_at = chrono::Utc::now().timestamp();
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
         let loaded = Arc::new(AtomicBool::new(false));
+        let single_stream_queue_admission = Arc::new(AtomicBool::new(false));
 
         let worker_handle = model_worker::spawn_xla_model_worker(
             model_path,
@@ -432,6 +491,8 @@ impl ModelProvider {
             loaded,
             batch_metrics,
             batch_observability,
+            max_queue_depth: usize::MAX,
+            single_stream_queue_admission,
             prompt_cache: None,
             prompt_tokenizer: None,
             decode_hang_timeout: DECODE_HANG_TIMEOUT,
@@ -664,6 +725,9 @@ impl ModelProvider {
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
         let loaded = Arc::new(AtomicBool::new(false));
         let loaded_clone = loaded.clone();
+        let single_stream_queue_admission = Arc::new(AtomicBool::new(
+            uses_single_stream_queue_admission(&model_path),
+        ));
         let worker_model_id = model_id.clone();
         let metrics_clone = batch_metrics.clone();
         let obs_clone = batch_observability.clone();
@@ -725,6 +789,7 @@ impl ModelProvider {
             sched_config,
             metrics_clone,
             obs_clone,
+            single_stream_queue_admission.clone(),
         );
 
         Ok(Self {
@@ -734,6 +799,8 @@ impl ModelProvider {
             loaded,
             batch_metrics,
             batch_observability,
+            max_queue_depth,
+            single_stream_queue_admission,
             prompt_cache: prompt_cache_store,
             prompt_tokenizer: None,
             decode_hang_timeout: DECODE_HANG_TIMEOUT,
@@ -762,6 +829,9 @@ impl ModelProvider {
         // Shared loaded flag
         let loaded = Arc::new(AtomicBool::new(false));
         let loaded_clone = loaded.clone();
+        let single_stream_queue_admission = Arc::new(AtomicBool::new(
+            uses_single_stream_queue_admission(&model_path),
+        ));
 
         // Clone model_id for the worker thread
         let worker_model_id = model_id.clone();
@@ -816,6 +886,7 @@ impl ModelProvider {
             sched_config,
             metrics_clone,
             obs_clone,
+            single_stream_queue_admission.clone(),
         );
 
         Ok(Self {
@@ -825,6 +896,8 @@ impl ModelProvider {
             loaded,
             batch_metrics,
             batch_observability,
+            max_queue_depth,
+            single_stream_queue_admission,
             prompt_cache: None,
             prompt_tokenizer: None,
             decode_hang_timeout: DECODE_HANG_TIMEOUT,
@@ -840,6 +913,25 @@ impl ModelProvider {
     /// Get a reference to the shared batch observability counters.
     pub fn batch_observability(&self) -> &Arc<BatchObservability> {
         &self.batch_observability
+    }
+
+    /// Reserve a pending queue slot for dedicated single-stream workers.
+    ///
+    /// Streaming HTTP routes call this before constructing the SSE response so
+    /// the final race-safe admission check can still surface as a route-level
+    /// overload response. BatchScheduler and XLA paths return `None` because
+    /// they maintain the same metric internally.
+    pub(crate) fn reserve_single_stream_queue_slot(
+        &self,
+    ) -> Result<Option<SingleStreamQueueReservation>> {
+        if self.single_stream_queue_admission.load(Ordering::Acquire) {
+            Ok(Some(SingleStreamQueueReservation::try_new(
+                self.batch_metrics.clone(),
+                self.max_queue_depth,
+            )?))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Shared cross-request prompt-prefix KV cache store, if configured.
@@ -1085,7 +1177,45 @@ impl ModelProvider {
         F: FnMut(String, Option<TokenLogprobData>),
     {
         let response_rx = self.send_generate_request_with_cancellation_and_metadata(
-            prompt, options, images, audio, videos, media, cancelled,
+            prompt,
+            options,
+            images,
+            audio,
+            videos,
+            media,
+            cancelled,
+            QueueReservationMode::Auto,
+        )?;
+        drain_generation_events_with_logprobs(response_rx, self.decode_hang_timeout, callback)
+    }
+
+    /// Streaming entry that uses a route-level queue reservation acquired
+    /// before the SSE response is opened.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn generate_streaming_with_logprobs_cancellable_videos_declared_reserved<F>(
+        &self,
+        prompt: String,
+        options: ServerGenerateOptions,
+        images: Vec<Vec<u8>>,
+        audio: Vec<Vec<u8>>,
+        videos: Vec<ResolvedVideo>,
+        media: MediaRequestMetadata,
+        queue_reservation: Option<SingleStreamQueueReservation>,
+        cancelled: Arc<AtomicBool>,
+        callback: F,
+    ) -> Result<GenerationResult>
+    where
+        F: FnMut(String, Option<TokenLogprobData>),
+    {
+        let response_rx = self.send_generate_request_with_cancellation_and_metadata(
+            prompt,
+            options,
+            images,
+            audio,
+            videos,
+            media,
+            cancelled,
+            QueueReservationMode::PreReserved(queue_reservation),
         )?;
         drain_generation_events_with_logprobs(response_rx, self.decode_hang_timeout, callback)
     }
@@ -1119,6 +1249,7 @@ impl ModelProvider {
             videos,
             media,
             Arc::new(AtomicBool::new(false)),
+            QueueReservationMode::Auto,
         )
     }
 
@@ -1138,7 +1269,14 @@ impl ModelProvider {
     ) -> Result<mpsc::Receiver<GenerateEvent>> {
         let media = MediaRequestMetadata::from_resolved(images.len(), audio.len(), videos.len());
         self.send_generate_request_with_cancellation_and_metadata(
-            prompt, options, images, audio, videos, media, cancelled,
+            prompt,
+            options,
+            images,
+            audio,
+            videos,
+            media,
+            cancelled,
+            QueueReservationMode::Auto,
         )
     }
 
@@ -1152,8 +1290,12 @@ impl ModelProvider {
         videos: Vec<ResolvedVideo>,
         media: MediaRequestMetadata,
         cancelled: Arc<AtomicBool>,
+        queue_reservation_mode: QueueReservationMode,
     ) -> Result<mpsc::Receiver<GenerateEvent>> {
         let (response_tx, response_rx) = mpsc::channel();
+        media
+            .validate_resolved_image_count()
+            .map_err(anyhow::Error::from)?;
 
         // Tokenize on this (request-dispatch / HTTP-side) thread when a
         // pre-tokenizer is available, so a long prompt no longer stalls the
@@ -1176,19 +1318,25 @@ impl ModelProvider {
                 .ok()
         });
 
-        self.request_tx
-            .send(ModelRequest::Generate {
-                prompt,
-                prompt_token_ids,
-                options,
-                images,
-                audio,
-                videos,
-                media,
-                response_tx,
-                cancelled,
-            })
-            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
+        let queue_reservation = match queue_reservation_mode {
+            QueueReservationMode::Auto => self.reserve_single_stream_queue_slot()?,
+            QueueReservationMode::PreReserved(reservation) => reservation,
+        };
+
+        if let Err(err) = self.request_tx.send(ModelRequest::Generate {
+            prompt,
+            prompt_token_ids,
+            options,
+            images,
+            audio,
+            videos,
+            media,
+            queue_reservation,
+            response_tx,
+            cancelled,
+        }) {
+            return Err(anyhow::anyhow!("Failed to send request: {err}"));
+        }
 
         Ok(response_rx)
     }

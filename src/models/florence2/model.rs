@@ -396,6 +396,29 @@ impl Florence2Model {
         Ok((merged, mask))
     }
 
+    /// Number of encoder positions consumed by one fused image + prompt pass.
+    ///
+    /// This is the usage-accounting boundary for Florence-2 server requests:
+    /// the BART encoder reads every projected image token plus every prompt
+    /// token that remains after image-placeholder filtering.
+    pub fn fused_prompt_len(
+        &self,
+        image_features: &MlxArray,
+        prompt_ids: &[i32],
+    ) -> Result<usize, String> {
+        let image_shape = mlxcel_core::array_shape(image_features);
+        if image_shape.len() != 3 {
+            return Err(format!(
+                "Florence-2 image features must be [batch, tokens, dim], got {image_shape:?}"
+            ));
+        }
+        let prompt_len = prompt_ids
+            .iter()
+            .filter(|id| **id != self.config.image_token_id)
+            .count();
+        Ok(image_shape[1] as usize + prompt_len)
+    }
+
     /// Full encoder pass: tower -> fusion -> BART encoder. Returns encoder
     /// hidden states `[batch, image + prompt, d_model]`.
     pub fn encode(
@@ -505,8 +528,32 @@ impl Florence2Model {
         max_new_tokens: usize,
         cancel: Option<&std::sync::atomic::AtomicBool>,
     ) -> Result<Vec<i32>> {
+        self.generate_greedy_with_cancel_and_prompt_len(
+            pixel_values,
+            prompt_ids,
+            max_new_tokens,
+            cancel,
+        )
+        .map(|(generated, _)| generated)
+    }
+
+    /// [`Self::generate_greedy_with_cancel`] plus the actual fused encoder
+    /// length consumed by the model.
+    pub fn generate_greedy_with_cancel_and_prompt_len(
+        &self,
+        pixel_values: &MlxArray,
+        prompt_ids: &[i32],
+        max_new_tokens: usize,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<(Vec<i32>, usize)> {
+        let image_features = self
+            .encode_image(pixel_values)
+            .map_err(|e| anyhow!("{e}"))?;
+        let prompt_len = self
+            .fused_prompt_len(&image_features, prompt_ids)
+            .map_err(|e| anyhow!("{e}"))?;
         let encoder_hidden = self
-            .encode(pixel_values, prompt_ids)
+            .encode_with_image_features(&image_features, prompt_ids)
             .map_err(|e| anyhow!("{e}"))?;
 
         let text_config = &self.config.text;
@@ -528,7 +575,7 @@ impl Florence2Model {
             }
             generated.push(next);
         }
-        Ok(generated)
+        Ok((generated, prompt_len))
     }
 }
 

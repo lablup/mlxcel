@@ -72,7 +72,7 @@ impl Metrics {
     }
 }
 
-/// Batch-level metrics updated by the scheduler thread.
+/// Batch-level metrics updated by the scheduler and single-stream worker paths.
 ///
 /// All fields are atomic for lock-free reads from HTTP handlers and
 /// writes from the single scheduler thread.
@@ -168,6 +168,37 @@ impl BatchMetrics {
     /// Update queue depth (called by scheduler thread).
     pub fn set_queue_depth(&self, depth: usize) {
         self.queue_depth.store(depth, Ordering::Relaxed);
+    }
+
+    /// Reserve one queued single-stream request before enqueueing it.
+    ///
+    /// The DiffusionGemma, LLaDA-2, and Florence-2 workers bypass
+    /// `BatchScheduler`, so they publish their pending mpsc depth here to keep
+    /// route admission and observability on the same gauge as batched serving.
+    pub fn try_reserve_queue_slot(&self, max_queue_depth: usize) -> bool {
+        self.queue_depth
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |depth| {
+                (depth < max_queue_depth).then_some(depth + 1)
+            })
+            .is_ok()
+    }
+
+    /// Release one queued single-stream request after dequeue or failed send.
+    pub fn release_queue_slot(&self) {
+        loop {
+            let depth = self.queue_depth.load(Ordering::Relaxed);
+            assert!(
+                depth > 0,
+                "single-stream queue slot released without reservation"
+            );
+            if self
+                .queue_depth
+                .compare_exchange_weak(depth, depth - 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                break;
+            }
+        }
     }
 
     /// Record a completed sequence (called by scheduler thread).

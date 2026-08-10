@@ -28,6 +28,24 @@ fn route_test_app(config: ServerConfig) -> (axum::Router, mpsc::Receiver<ServerG
     (create_app(state), options_rx)
 }
 
+fn route_test_app_with_provider(
+    config: ServerConfig,
+    provider: Arc<ModelProvider>,
+) -> axum::Router {
+    let batch_metrics = provider.batch_metrics().clone();
+    let state = AppState::new(
+        provider,
+        config,
+        ChatTemplateProcessor::with_template(
+            "{% for message in messages %}{{ message.content }}{% endfor %}".to_string(),
+        ),
+        MlxcelTokenizer::stub(),
+        PathBuf::from("route-test-model"),
+        batch_metrics,
+    );
+    create_app(state)
+}
+
 async fn post_json(app: axum::Router, path: &str, body: Value) -> StatusCode {
     app.oneshot(
         Request::builder()
@@ -89,6 +107,54 @@ async fn explicit_over_cap_budget_is_clamped_on_all_generation_routes() {
             64,
             "{path}"
         );
+    }
+}
+
+#[tokio::test]
+async fn streaming_generation_routes_queue_full_after_snapshot_return_http_503() {
+    let cases = [
+        (
+            "/v1/chat/completions",
+            json!({
+                "model": "route-test-model",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": true,
+                "max_tokens": 1
+            }),
+        ),
+        (
+            "/v1/responses",
+            json!({
+                "model": "route-test-model",
+                "input": "hello",
+                "stream": true,
+                "max_output_tokens": 1
+            }),
+        ),
+        (
+            "/v1/messages",
+            json!({
+                "model": "route-test-model",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": true,
+                "max_tokens": 1
+            }),
+        ),
+    ];
+
+    for (path, body) in cases {
+        let (options_tx, options_rx) = mpsc::channel();
+        let provider = Arc::new(ModelProvider::recording_for_route_tests_with_admission(
+            options_tx, true, 0,
+        ));
+        let mut config = capped_config();
+        config.max_queue_depth = 1;
+        let app = route_test_app_with_provider(config, provider);
+
+        let status = post_json(app, path, body).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
+        assert!(options_rx.try_recv().is_err(), "{path}");
     }
 }
 

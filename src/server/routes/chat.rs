@@ -31,6 +31,7 @@ use crate::server::batch::RequestPriority;
 use crate::server::chat_request::{prepare_chat_request_with_cache, request_has_effective_input};
 use crate::server::chat_template_kwargs::{extract_request_kwargs, merge_server_and_request};
 use crate::server::config::{PromptCacheRequestContext, ReasoningBudgetOverride};
+use crate::server::model_provider::QueueFullError;
 use crate::server::prompt_cache::key::{
     multimodal_digest_from_vecs, resolve_session_key, template_sig,
 };
@@ -70,6 +71,14 @@ pub(crate) fn structured_error_to_response(err: StructuredOutputError) -> ErrorR
         StructuredOutputError::UnsupportedTokenizer(_) | StructuredOutputError::Matcher(_) => {
             ErrorResponse::new(err.to_string(), "server_error")
         }
+    }
+}
+
+fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
+    if err.downcast_ref::<QueueFullError>().is_some() {
+        ErrorResponse::service_unavailable("All slots are busy. Please try again later.")
+    } else {
+        ErrorResponse::new(format!("Generation error: {err}"), "server_error")
     }
 }
 
@@ -425,7 +434,7 @@ async fn non_stream_chat_completion(
             prepared.videos,
             prepared.media,
         )
-        .map_err(|e| ErrorResponse::new(format!("Generation error: {e}"), "server_error"))?;
+        .map_err(generation_error_to_response)?;
 
     // Structured Florence-2 task output (issue #1073): produced only by the
     // seq2seq worker, `None` for every other family. Attached below as the
@@ -665,6 +674,11 @@ async fn stream_chat_completion(
         };
     }
 
+    let queue_reservation = match state.model_provider.reserve_single_stream_queue_slot() {
+        Ok(reservation) => reservation,
+        Err(err) => return generation_error_to_response(err).into_response(),
+    };
+
     let parse_tools = tool_calls::should_parse_tool_calls(&request);
     let tools_for_parser = if parse_tools {
         request.tools.clone()
@@ -737,13 +751,14 @@ async fn stream_chat_completion(
 
         let result = state
             .model_provider
-            .generate_streaming_with_logprobs_cancellable_videos_declared(
+            .generate_streaming_with_logprobs_cancellable_videos_declared_reserved(
                 prepared.prompt,
                 options,
                 prepared.image_data,
                 prepared.audio_data,
                 prepared.videos,
                 prepared.media,
+                queue_reservation,
                 cancelled,
                 |token, lp_data| {
                     // Single lock per token (issue #633): accumulate raw text,

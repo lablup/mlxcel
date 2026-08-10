@@ -64,6 +64,40 @@ fn batch_metrics_set_queue_depth_is_reflected_by_getter() {
 }
 
 #[test]
+fn batch_metrics_queue_reservation_is_atomic_and_bounded() {
+    let zero = BatchMetrics::new();
+    assert!(!zero.try_reserve_queue_slot(0));
+    assert_eq!(zero.queue_depth(), 0);
+
+    let boundary = BatchMetrics::new();
+    assert!(boundary.try_reserve_queue_slot(2));
+    assert!(boundary.try_reserve_queue_slot(2));
+    assert!(!boundary.try_reserve_queue_slot(2));
+    assert_eq!(boundary.queue_depth(), 2);
+
+    let m = std::sync::Arc::new(BatchMetrics::new());
+    let mut workers = Vec::new();
+    for _ in 0..8 {
+        let metrics = m.clone();
+        workers.push(std::thread::spawn(move || {
+            metrics.try_reserve_queue_slot(3)
+        }));
+    }
+    let accepted = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .filter(|accepted| *accepted)
+        .count();
+    assert_eq!(accepted, 3);
+    assert_eq!(m.queue_depth(), 3);
+
+    m.release_queue_slot();
+    assert_eq!(m.queue_depth(), 2);
+    assert!(m.try_reserve_queue_slot(3));
+    assert_eq!(m.queue_depth(), 3);
+}
+
+#[test]
 fn batch_metrics_record_sequence_completed_accumulates() {
     let m = BatchMetrics::new();
     m.record_sequence_completed(10);

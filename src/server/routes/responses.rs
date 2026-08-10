@@ -39,6 +39,7 @@ use crate::server::AppState;
 use crate::server::chat_request::{prepare_chat_request_with_cache, request_has_effective_input};
 use crate::server::config::ReasoningBudgetOverride;
 use crate::server::conversation_store::ConversationItem;
+use crate::server::model_provider::QueueFullError;
 use crate::server::responses_store::StoredResponse;
 use crate::server::responses_translator::{
     OutboundContext, ResponsesTranslateError, build_response_object, responses_request_to_chat,
@@ -57,6 +58,14 @@ use crate::server::types::responses_response::{
     ResponseStatus,
 };
 use crate::server::types::responses_stream::ResponseStreamEvent;
+
+fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
+    if err.downcast_ref::<QueueFullError>().is_some() {
+        ErrorResponse::service_unavailable("All slots are busy. Please try again later.")
+    } else {
+        ErrorResponse::new(format!("Generation error: {err}"), "server_error")
+    }
+}
 
 use super::chat::{
     build_generate_options, build_prompt_cache_request_context, parse_priority_header,
@@ -250,10 +259,7 @@ async fn non_stream_create_response(
 
     let result = match result {
         Ok(r) => r,
-        Err(e) => {
-            return ErrorResponse::new(format!("Generation error: {e}"), "server_error")
-                .into_response();
-        }
+        Err(e) => return generation_error_to_response(e).into_response(),
     };
 
     state.metrics.record_request(
@@ -353,6 +359,11 @@ async fn stream_create_response(
         &prepared.audio_data,
     );
 
+    let queue_reservation = match state.model_provider.reserve_single_stream_queue_slot() {
+        Ok(reservation) => reservation,
+        Err(err) => return generation_error_to_response(err).into_response(),
+    };
+
     let (sender, stream, cancelled, keepalive) = responses_sse_channel(128);
 
     // Review H2: register this response in the in-flight registry so
@@ -434,13 +445,14 @@ async fn stream_create_response(
 
         let result = state_for_task
             .model_provider
-            .generate_streaming_with_logprobs_cancellable_videos_declared(
+            .generate_streaming_with_logprobs_cancellable_videos_declared_reserved(
                 prepared.prompt,
                 options,
                 prepared.image_data,
                 prepared.audio_data,
                 prepared.videos,
                 prepared.media,
+                queue_reservation,
                 cancelled,
                 |token, _lp| {
                     if let Ok(mut acc) = acc_clone.lock() {
@@ -587,12 +599,21 @@ async fn stream_create_response(
         let result = match result {
             Ok(r) => r,
             Err(err) => {
+                let queue_full = err.downcast_ref::<QueueFullError>().is_some();
                 if let Ok(mut em) = emitter_for_callback.lock() {
                     let seq = em.next_seq();
                     let _ = sender.send_event(&ResponseStreamEvent::Error {
                         sequence_number: seq,
-                        code: "server_error".to_string(),
-                        message: err.to_string(),
+                        code: if queue_full {
+                            "server_overloaded".to_string()
+                        } else {
+                            "server_error".to_string()
+                        },
+                        message: if queue_full {
+                            "All slots are busy. Please try again later.".to_string()
+                        } else {
+                            err.to_string()
+                        },
                     });
                 }
                 if let Some(store) = state_for_task.responses_store.as_ref() {

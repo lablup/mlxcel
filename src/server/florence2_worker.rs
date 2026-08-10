@@ -266,9 +266,11 @@ pub(crate) fn run_florence2_worker_loop(
                 audio,
                 videos,
                 media: _,
+                queue_reservation,
                 response_tx,
                 cancelled,
             } => {
+                drop(queue_reservation);
                 handle_florence2_request(
                     model,
                     &prompt,

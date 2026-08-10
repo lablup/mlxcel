@@ -896,6 +896,17 @@ fn merge_concatenates_image_then_prompt() {
 }
 
 #[test]
+fn fused_prompt_len_counts_image_features_and_filtered_text_tokens() {
+    let model = tiny_model(&["spatial_avg_pool", "temporal_avg_pool"]);
+    let features = model.encode_image(&pixels()).unwrap();
+    let prompt_ids = [3, model.config().image_token_id, 4, 5];
+
+    let len = model.fused_prompt_len(&features, &prompt_ids).unwrap();
+
+    assert_eq!(len, (1 + GRID_TOKENS) as usize + 3);
+}
+
+#[test]
 fn merge_without_prompt_returns_image_features_alone() {
     let model = tiny_model(&["spatial_avg_pool"]);
     let features = model.encode_image(&pixels()).unwrap();

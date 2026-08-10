@@ -2963,6 +2963,7 @@ impl BatchScheduler {
                 audio,
                 videos,
                 media: _,
+                queue_reservation: _,
                 response_tx,
                 cancelled,
             } => {

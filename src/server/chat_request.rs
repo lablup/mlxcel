@@ -82,9 +82,9 @@ pub(crate) struct PreparedChatRequest {
     pub(crate) image_data: Vec<Vec<u8>>,
     /// Cardinalities before and after the tolerant media resolver.
     ///
-    /// MLX consumers retain their historical behavior. XLA carries this
-    /// metadata to its worker so invalid or partially resolved media cannot be
-    /// mistaken for a text-only request.
+    /// Image declaration/resolution mismatches are rejected during request
+    /// preparation. XLA also carries this metadata to its worker for backend
+    /// capability checks.
     pub(crate) media: MediaRequestMetadata,
     /// Request-scoped Gemma 4 image soft-token budget, resolved from the
     /// `detail` / `max_soft_tokens` fields on the `image_url` content parts
@@ -267,6 +267,9 @@ pub(crate) async fn prepare_chat_request_with_cache(
         audio_data.len(),
         videos.len(),
     );
+    media
+        .validate_resolved_image_count()
+        .map_err(anyhow::Error::from)?;
 
     Ok(PreparedChatRequest {
         prompt,
