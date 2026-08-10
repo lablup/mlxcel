@@ -15,13 +15,14 @@
 //! Unit tests for the shape-bucketed kernel autotuner (issue #906).
 //!
 //! Every test here is CPU-only: the [`FakeOp`] double implements
-//! [`TunableOp`] by sleeping for a per-tactic duration and overrides `sync` to
-//! a no-op, so the harness, the cache, and the precedence chain are exercised
-//! without a GPU. The GPU-backed consumers are validated by benchmark runs,
-//! not here.
+//! [`TunableOp`] with either a deterministic per-tactic timer or a bounded
+//! sleep and overrides `sync` to a no-op, so the harness, the cache, and the
+//! precedence chain are exercised without a GPU. The GPU-backed consumers are
+//! validated by benchmark runs, not here.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Duration;
 
 use super::bucket::{MAX_BUCKET_DIM, ShapeBucket, powers_of_two_up_to, round_up_pow2};
@@ -31,22 +32,51 @@ use super::ops::cuda_kernel_knobs::{
 };
 use super::ops::paged_decode_splits::split_candidates;
 use super::profile::{
-    Measurement, ProfileConfig, median, median_absolute_deviation, profile, samples_this_round,
-    select,
+    Measurement, ProfileConfig, ProfileResult, ProfileTimer, median, median_absolute_deviation,
+    profile, profile_with_timer, samples_this_round, select,
 };
 use super::store::{
     TACTIC_VERSION, TacticRecord, TacticStore, TuneKey, mlx_commit, mlxcel_version,
 };
 use super::tactic::{Tactic, TunableOp, TuneError};
-use super::{Mode, Resolution, Source, clear_memo, parse_mode, resolve_with_mode};
+use super::{
+    Mode, Resolution, Source, clear_memo, parse_mode, resolve_with_mode,
+    resolve_with_mode_and_timer,
+};
 
 // ── Test double ──────────────────────────────────────────────────────────────
 
-/// A [`TunableOp`] whose "kernel" is a sleep of a per-tactic duration.
+#[derive(Clone, Default)]
+struct ManualTimer {
+    now_us: Rc<Cell<f64>>,
+}
+
+#[derive(Clone, Copy)]
+struct ManualMark(f64);
+
+impl ManualTimer {
+    fn advance_us(&self, micros: u64) {
+        self.now_us.set(self.now_us.get() + micros as f64);
+    }
+}
+
+impl ProfileTimer for ManualTimer {
+    type Mark = ManualMark;
+
+    fn now(&self) -> Self::Mark {
+        ManualMark(self.now_us.get())
+    }
+
+    fn elapsed_us(&self, start: Self::Mark) -> f64 {
+        self.now_us.get() - start.0
+    }
+}
+
+/// A [`TunableOp`] whose "kernel" costs the per-tactic duration in microseconds.
 ///
-/// Sleeping is what makes the min-latency selection observable without a
-/// backend. Durations are in the tens of microseconds so a full sweep stays
-/// well under a millisecond.
+/// Most tests run it against a manual timer so candidate ordering is exact and
+/// independent of host scheduling. Tests that verify real wall-clock budgets
+/// opt into sleeping explicitly.
 struct FakeOp {
     op: String,
     bucket: ShapeBucket,
@@ -58,6 +88,7 @@ struct FakeOp {
     /// Which tactics fail instead of running.
     failing: Vec<i64>,
     calls: RefCell<usize>,
+    timer: Option<ManualTimer>,
 }
 
 impl FakeOp {
@@ -72,6 +103,7 @@ impl FakeOp {
             lazy: true,
             failing: Vec::new(),
             calls: RefCell::new(0),
+            timer: Some(ManualTimer::default()),
         }
     }
 
@@ -95,8 +127,29 @@ impl FakeOp {
         self
     }
 
+    fn with_real_sleep(mut self) -> Self {
+        self.timer = None;
+        self
+    }
+
     fn calls(&self) -> usize {
         *self.calls.borrow()
+    }
+
+    fn profile(&self, cfg: ProfileConfig) -> Option<ProfileResult> {
+        if let Some(timer) = &self.timer {
+            profile_with_timer(self, cfg, timer)
+        } else {
+            profile(self, cfg)
+        }
+    }
+
+    fn resolve_with(&self, store: &TacticStore, mode: Mode) -> Resolution {
+        if let Some(timer) = &self.timer {
+            resolve_with_mode_and_timer(self, store, fast_cfg(), mode, timer)
+        } else {
+            resolve_with_mode(self, store, fast_cfg(), mode)
+        }
     }
 }
 
@@ -139,7 +192,11 @@ impl TunableOp for FakeOp {
             .iter()
             .find(|(pp, _)| *pp == p)
             .map_or(0, |(_, us)| *us);
-        std::thread::sleep(Duration::from_micros(micros));
+        if let Some(timer) = &self.timer {
+            timer.advance_us(micros);
+        } else {
+            std::thread::sleep(Duration::from_micros(micros));
+        }
         Ok(())
     }
     fn sync(&self) {
@@ -148,9 +205,8 @@ impl TunableOp for FakeOp {
 }
 
 /// Zero wall-clock budgets, so the adaptive sampler degenerates to exactly
-/// `reps` timed repetitions per candidate. These tests assert selection logic,
-/// not timing methodology, and a real budget would make their call counts
-/// depend on how accurately the host honors `thread::sleep`.
+/// `reps` timed repetitions per candidate. The deterministic fake timer keeps
+/// selection and call-count assertions independent of host scheduling.
 fn fast_cfg() -> ProfileConfig {
     ProfileConfig {
         warmup: 0,
@@ -267,7 +323,7 @@ fn median_handles_nan_without_panicking() {
 fn profile_picks_the_min_latency_candidate() {
     // Default (2) is slow; 8 is 10x faster, well past the noise margin.
     let op = FakeOp::new("fake_min_latency", vec![(2, 800), (4, 400), (8, 80)]);
-    let result = profile(&op, fast_cfg()).expect("sweep produced a result");
+    let result = op.profile(fast_cfg()).expect("sweep produced a result");
     assert_eq!(result.best, Tactic::scalar("p", 8));
     assert!(result.changed);
     assert_eq!(result.measurements.len(), 3);
@@ -277,18 +333,34 @@ fn profile_picks_the_min_latency_candidate() {
 }
 
 #[test]
+fn profile_selection_changes_when_synthetic_costs_are_inverted() {
+    let faster_tuned = FakeOp::new("fake_cost_order_tuned", vec![(2, 800), (8, 80)]);
+    let tuned_result = faster_tuned
+        .profile(fast_cfg())
+        .expect("sweep produced a result");
+    assert_eq!(tuned_result.best, Tactic::scalar("p", 8));
+    assert!(tuned_result.changed);
+
+    let faster_default = FakeOp::new("fake_cost_order_default", vec![(2, 80), (8, 800)]);
+    let default_result = faster_default
+        .profile(fast_cfg())
+        .expect("sweep produced a result");
+    assert_eq!(default_result.best, Tactic::scalar("p", 2));
+    assert!(!default_result.changed);
+}
+
+#[test]
 fn profile_keeps_the_default_inside_the_noise_band() {
     // Candidate 8 is genuinely ~2x faster, but the required margin here is 90%,
     // so the win does not clear it and the pre-tuner behavior must survive.
-    // This is the regression guard: a win inside the host's noise floor
-    // converges back to the default rather than to a coin flip. The margin is
-    // exaggerated so that `thread::sleep` jitter cannot decide the assertion.
+    // This is the regression guard: a win inside the measured noise floor
+    // converges back to the default rather than to a coin flip.
     let cfg = ProfileConfig {
         min_improvement: 0.9,
         ..fast_cfg()
     };
     let op = FakeOp::new("fake_noise_band", vec![(2, 400), (4, 300), (8, 200)]);
-    let result = profile(&op, cfg).expect("sweep produced a result");
+    let result = op.profile(cfg).expect("sweep produced a result");
     assert_eq!(result.best, Tactic::scalar("p", 2));
     assert!(!result.changed);
 }
@@ -296,7 +368,7 @@ fn profile_keeps_the_default_inside_the_noise_band() {
 #[test]
 fn profile_drops_failing_candidates_without_aborting() {
     let op = FakeOp::new("fake_failing", vec![(2, 800), (4, 80), (8, 400)]).failing(&[4]);
-    let result = profile(&op, fast_cfg()).expect("sweep survived the failure");
+    let result = op.profile(fast_cfg()).expect("sweep survived the failure");
     // 4 was the fastest but is infeasible, so 8 wins.
     assert_eq!(result.best, Tactic::scalar("p", 8));
     assert_eq!(result.measurements.len(), 2);
@@ -305,13 +377,13 @@ fn profile_drops_failing_candidates_without_aborting() {
 #[test]
 fn profile_returns_none_when_every_candidate_fails() {
     let op = FakeOp::new("fake_all_fail", vec![(2, 10), (4, 10)]).failing(&[2, 4]);
-    assert!(profile(&op, fast_cfg()).is_none());
+    assert!(op.profile(fast_cfg()).is_none());
 }
 
 #[test]
 fn profile_returns_none_without_candidates() {
     let op = FakeOp::new("fake_no_candidates", vec![]);
-    assert!(profile(&op, fast_cfg()).is_none());
+    assert!(op.profile(fast_cfg()).is_none());
 }
 
 #[test]
@@ -333,6 +405,25 @@ fn profile_config_sanitizes_degenerate_values() {
 }
 
 #[test]
+fn profile_config_bounds_warmup_by_the_rep_ceiling() {
+    let cfg = ProfileConfig {
+        warmup: 100,
+        warmup_budget_us: 0.0,
+        reps: 2,
+        max_reps: 5,
+        sample_budget_us: 0.0,
+        min_improvement: 0.02,
+    };
+    let op = FakeOp::new("fake_bounded_warmup", vec![(1, 1)]);
+    let _ = op.profile(cfg).expect("sweep produced a result");
+    assert_eq!(
+        op.calls(),
+        7,
+        "warmup is capped at 5 before the 2 timed reps run"
+    );
+}
+
+#[test]
 fn profile_runs_warmup_plus_reps_per_candidate() {
     // With both wall-clock budgets at zero the sampler falls back to the fixed
     // floors, which is what makes an exact call count assertable at all.
@@ -341,7 +432,7 @@ fn profile_runs_warmup_plus_reps_per_candidate() {
         ..fast_cfg()
     };
     let op = FakeOp::new("fake_call_count", vec![(1, 1), (2, 1)]);
-    let _ = profile(&op, cfg).expect("sweep produced a result");
+    let _ = op.profile(cfg).expect("sweep produced a result");
     assert_eq!(op.calls(), 2 * (2 + 5));
 }
 
@@ -368,7 +459,7 @@ fn timed_repetitions_scale_inversely_with_launch_cost() {
     // pass in isolation and fail under full-suite parallelism, where 1200+
     // tests contend; the property under test is that effort scales inversely
     // with launch cost, not that a cheap launch lands on one particular number.
-    let cheap = FakeOp::new("fake_cheap_launch", vec![(1, 100)]);
+    let cheap = FakeOp::new("fake_cheap_launch", vec![(1, 100)]).with_real_sleep();
     let cheap_result = profile(&cheap, cfg).expect("cheap sweep produced a result");
     assert!(
         cheap_result.reps >= 4 * cfg.reps,
@@ -386,7 +477,7 @@ fn timed_repetitions_scale_inversely_with_launch_cost() {
     // The costly direction is robust to load in a way the cheap one is not:
     // overshooting a 20ms sleep only exhausts the budget sooner, so the floor
     // is reached under any amount of contention.
-    let costly = FakeOp::new("fake_costly_launch", vec![(1, 20_000)]);
+    let costly = FakeOp::new("fake_costly_launch", vec![(1, 20_000)]).with_real_sleep();
     let costly_result = profile(&costly, cfg).expect("costly sweep produced a result");
     assert_eq!(
         costly_result.reps, cfg.reps,
@@ -526,7 +617,7 @@ fn select_falls_back_to_the_default_when_the_pick_is_not_actually_faster() {
 #[test]
 fn profile_records_the_spread_behind_every_measurement() {
     let op = FakeOp::new("fake_spread", vec![(2, 400), (4, 200)]);
-    let result = profile(&op, fast_cfg()).expect("sweep produced a result");
+    let result = op.profile(fast_cfg()).expect("sweep produced a result");
     assert!(result.default_spread.is_some());
     assert!(result.best_spread.is_finite() && result.best_spread >= 0.0);
     assert!(result.required_improvement >= fast_cfg().min_improvement);
@@ -696,9 +787,9 @@ fn mode_rejects_an_unrecognized_value() {
 
 // ── Resolution precedence ────────────────────────────────────────────────────
 
-fn resolve(op: &dyn TunableOp, store: &TacticStore, mode: Mode) -> Resolution {
+fn resolve(op: &FakeOp, store: &TacticStore, mode: Mode) -> Resolution {
     clear_memo();
-    resolve_with_mode(op, store, fast_cfg(), mode)
+    op.resolve_with(store, mode)
 }
 
 #[test]
@@ -830,9 +921,9 @@ fn resolve_memoizes_so_a_hot_path_reads_the_cache_once() {
     let store = tmp_store(&dir);
     let op = FakeOp::new("fake_memo", vec![(2, 400), (8, 40)]);
     clear_memo();
-    let first = resolve_with_mode(&op, &store, fast_cfg(), Mode::Tune);
+    let first = op.resolve_with(&store, Mode::Tune);
     let calls_after_first = op.calls();
-    let second = resolve_with_mode(&op, &store, fast_cfg(), Mode::Tune);
+    let second = op.resolve_with(&store, Mode::Tune);
     assert_eq!(first, second);
     assert_eq!(
         op.calls(),

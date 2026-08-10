@@ -34,9 +34,10 @@
 //!
 //! 1. **Warm up by wall clock, not by iteration count.** Warmup runs until
 //!    [`ProfileConfig::warmup_budget_us`] has elapsed (with
-//!    [`ProfileConfig::warmup`] as a floor), so a cheap launch gets thousands
-//!    of iterations and an expensive one gets a handful. Both end up on a
-//!    ramped clock; a fixed count only does that for expensive launches.
+//!    [`ProfileConfig::warmup`] as a floor capped by
+//!    [`ProfileConfig::max_reps`]), so a cheap launch gets thousands of
+//!    iterations and an expensive one gets a handful. Both end up on a ramped
+//!    clock; a fixed count only does that for expensive launches.
 //! 2. **Scale repetitions by measured cost.** The warmup doubles as a cost
 //!    probe, and each candidate then targets
 //!    [`ProfileConfig::sample_budget_us`] of timed work, clamped to
@@ -117,7 +118,8 @@ pub const MAD_TO_SIGMA: f64 = 1.4826;
 /// Knobs for one profiling sweep.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ProfileConfig {
-    /// Minimum untimed repetitions before measuring.
+    /// Minimum untimed repetitions before measuring, capped by `max_reps`
+    /// during sanitization.
     pub warmup: usize,
     /// Wall-clock budget for the warmup phase of one candidate, microseconds.
     /// Warmup keeps going past `warmup` until this elapses.
@@ -160,16 +162,18 @@ fn sane_budget(value: f64, fallback: f64) -> f64 {
 
 impl ProfileConfig {
     /// Clamp to at least one timed repetition, a rep ceiling no lower than the
-    /// floor, and finite non-negative budgets and margins, so a caller-supplied
-    /// config can never produce an empty sample set or a nonsense threshold.
+    /// floor, warmup no higher than that ceiling, and finite non-negative
+    /// budgets and margins, so a caller-supplied config can never produce an
+    /// empty sample set or a nonsense threshold.
     #[must_use]
     pub fn sanitized(self) -> Self {
         let reps = self.reps.max(1);
+        let max_reps = self.max_reps.max(reps);
         Self {
-            warmup: self.warmup,
+            warmup: self.warmup.min(max_reps),
             warmup_budget_us: sane_budget(self.warmup_budget_us, DEFAULT_WARMUP_BUDGET_US),
             reps,
-            max_reps: self.max_reps.max(reps),
+            max_reps,
             sample_budget_us: sane_budget(self.sample_budget_us, DEFAULT_SAMPLE_BUDGET_US),
             min_improvement: sane_budget(self.min_improvement, DEFAULT_MIN_IMPROVEMENT),
         }
@@ -308,8 +312,25 @@ pub fn median_absolute_deviation(samples: &[f64], center: f64) -> Option<f64> {
     median(&deviations)
 }
 
-fn elapsed_us(start: Instant) -> f64 {
-    start.elapsed().as_nanos() as f64 / 1000.0
+pub(super) trait ProfileTimer {
+    type Mark: Copy;
+
+    fn now(&self) -> Self::Mark;
+    fn elapsed_us(&self, start: Self::Mark) -> f64;
+}
+
+struct RealTimer;
+
+impl ProfileTimer for RealTimer {
+    type Mark = Instant;
+
+    fn now(&self) -> Self::Mark {
+        Instant::now()
+    }
+
+    fn elapsed_us(&self, start: Self::Mark) -> f64 {
+        start.elapsed().as_nanos() as f64 / 1000.0
+    }
 }
 
 /// Warm one candidate and probe its per-iteration cost.
@@ -321,13 +342,18 @@ fn elapsed_us(start: Instant) -> f64 {
 /// low-clock ramp at the start do not inflate it. `Ok(None)` means no warmup
 /// was configured and there is nothing to estimate from; `Err(())` means the
 /// candidate is infeasible and must be dropped.
-fn warm_up(op: &dyn TunableOp, tactic: &Tactic, cfg: &ProfileConfig) -> Result<Option<f64>, ()> {
+fn warm_up<T: ProfileTimer>(
+    op: &dyn TunableOp,
+    tactic: &Tactic,
+    cfg: &ProfileConfig,
+    timer: &T,
+) -> Result<Option<f64>, ()> {
     let mut samples_us: Vec<f64> = Vec::new();
-    let phase_start = Instant::now();
+    let phase_start = timer.now();
     while samples_us.len() < cfg.warmup
-        || (elapsed_us(phase_start) < cfg.warmup_budget_us && samples_us.len() < cfg.max_reps)
+        || (timer.elapsed_us(phase_start) < cfg.warmup_budget_us && samples_us.len() < cfg.max_reps)
     {
-        let start = Instant::now();
+        let start = timer.now();
         if let Err(e) = op.run(tactic) {
             tracing::debug!(
                 "autotune: dropping candidate {tactic} for {} during warmup: {e}",
@@ -336,7 +362,7 @@ fn warm_up(op: &dyn TunableOp, tactic: &Tactic, cfg: &ProfileConfig) -> Result<O
             return Err(());
         }
         op.sync();
-        samples_us.push(elapsed_us(start));
+        samples_us.push(timer.elapsed_us(start));
     }
     if samples_us.is_empty() {
         return Ok(None);
@@ -479,6 +505,15 @@ pub fn select(
 /// failed to run. Callers treat `None` as "use the default".
 #[must_use]
 pub fn profile(op: &dyn TunableOp, cfg: ProfileConfig) -> Option<ProfileResult> {
+    profile_with_timer(op, cfg, &RealTimer)
+}
+
+#[must_use]
+pub(super) fn profile_with_timer<T: ProfileTimer>(
+    op: &dyn TunableOp,
+    cfg: ProfileConfig,
+    timer: &T,
+) -> Option<ProfileResult> {
     let cfg = cfg.sanitized();
     let bucket = op.bucket();
     let candidates = op.candidates(&bucket);
@@ -491,7 +526,7 @@ pub fn profile(op: &dyn TunableOp, cfg: ProfileConfig) -> Option<ProfileResult> 
     // candidates drop out here, before they can perturb the timed phase.
     let mut targets: Vec<(usize, usize)> = Vec::with_capacity(candidates.len());
     for (i, tactic) in candidates.iter().enumerate() {
-        if let Ok(est_us) = warm_up(op, tactic, &cfg) {
+        if let Ok(est_us) = warm_up(op, tactic, &cfg, timer) {
             targets.push((i, target_reps(est_us, &cfg)));
         }
     }
@@ -513,7 +548,7 @@ pub fn profile(op: &dyn TunableOp, cfg: ProfileConfig) -> Option<ProfileResult> 
                 continue;
             }
             let tactic = &candidates[cand];
-            let start = Instant::now();
+            let start = timer.now();
             if let Err(e) = op.run(tactic) {
                 tracing::debug!(
                     "autotune: dropping candidate {tactic} for {}: {e}",
@@ -523,7 +558,7 @@ pub fn profile(op: &dyn TunableOp, cfg: ProfileConfig) -> Option<ProfileResult> 
                 continue;
             }
             op.sync();
-            samples[slot].push(elapsed_us(start));
+            samples[slot].push(timer.elapsed_us(start));
         }
     }
 
