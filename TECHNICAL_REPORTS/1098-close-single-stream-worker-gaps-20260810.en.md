@@ -65,11 +65,13 @@ This hardening matters because it closes the last externally visible inconsisten
 
 | Item | Value |
 |------|-------|
-| Files changed | 27 |
-| Lines added | +1001 |
-| Lines deleted | -82 |
-| Commits in PR | 2 |
-| Head commit | `cd3af51e18709ef9f3308486838f398881012957` |
+| Implementation files changed | 27 |
+| Implementation lines added | +1001 |
+| Implementation lines deleted | -82 |
+| Implementation commits | 2 |
+| Reviewed implementation head | `cd3af51e18709ef9f3308486838f398881012957` |
+
+The two bilingual report artifacts and their documentation commit are excluded from the implementation counts above.
 
 - Added shared, atomic queue-slot reservation and release for dedicated single-stream workers.
 - Moved route-boundary overload handling to pre-SSE reservation on chat, Responses, Anthropic/messages, OpenAI Completions, and native `/completion`.

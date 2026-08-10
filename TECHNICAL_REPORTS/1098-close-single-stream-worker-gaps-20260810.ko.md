@@ -65,11 +65,13 @@ head commit `cd3af51e`는 이 구멍을 다음 방식으로 닫는다.
 
 | 항목 | 값 |
 |------|----|
-| 변경 파일 | 27 |
-| 추가 라인 | +1001 |
-| 삭제 라인 | -82 |
-| PR 커밋 수 | 2 |
-| Head commit | `cd3af51e18709ef9f3308486838f398881012957` |
+| 구현 변경 파일 | 27 |
+| 구현 추가 라인 | +1001 |
+| 구현 삭제 라인 | -82 |
+| 구현 커밋 수 | 2 |
+| 검토한 구현 head | `cd3af51e18709ef9f3308486838f398881012957` |
+
+위 구현 집계에는 영문·국문 보고서 파일 두 개와 이를 추가한 문서 커밋을 포함하지 않았다.
 
 - dedicated single-stream worker용 shared atomic queue-slot reservation/release를 추가했다.
 - chat, Responses, Anthropic/messages, OpenAI Completions, native `/completion` 에서 overload 처리를 pre-SSE reservation으로 이동했다.
