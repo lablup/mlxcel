@@ -12,16 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use mlxcel_core::sampling::TokenLogprobData;
+use mlxcel_core::generate::SamplingConfig;
+use mlxcel_core::sampling::{LogprobsConfig, TokenLogprobData};
 
 use super::{
     DECODE_HANG_TIMEOUT, GenerateEvent, GenerationResult, ModelProvider, ModelRequest,
-    drain_generation_events, send_shutdown_signal, tokenize_prompt_for_generation,
+    QueueReservationMode, SingleStreamQueueReservation, drain_generation_events,
+    send_shutdown_signal, tokenize_prompt_for_generation,
     tokenize_prompt_for_generation_with_ordered_media, validated_decode_hang_timeout,
 };
+use crate::server::batch::BatchObservability;
+use crate::server::state::BatchMetrics;
 use crate::tokenizer::MlxcelTokenizer;
 
 fn sample_result() -> GenerationResult {
@@ -36,6 +42,24 @@ fn sample_result() -> GenerationResult {
         logprobs: None,
         cached_tokens: 0,
         structured_output: None,
+    }
+}
+
+fn sample_options() -> crate::server::ServerGenerateOptions {
+    crate::server::ServerGenerateOptions {
+        max_tokens: 1,
+        sampling: SamplingConfig::default(),
+        stop_sequences: None,
+        priority: crate::server::batch::RequestPriority::default(),
+        logprobs: LogprobsConfig {
+            enabled: false,
+            top_k: 0,
+        },
+        reasoning_budget: crate::server::config::ReasoningBudgetOverride::default(),
+        thinking_enter_block_on_start: false,
+        prompt_cache_ctx: None,
+        structured: None,
+        image_soft_tokens: None,
     }
 }
 
@@ -113,6 +137,186 @@ fn send_shutdown_signal_reports_closed_channel() {
 fn model_provider_relies_on_auto_traits_for_shared_state() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<ModelProvider>();
+}
+
+#[test]
+fn provider_media_cardinality_rejection_does_not_poison_worker() {
+    let (options_tx, options_rx) = mpsc::channel();
+    let provider = ModelProvider::recording_for_route_tests(options_tx);
+
+    let err = provider
+        .generate_with_media_and_videos_declared(
+            "bad".to_string(),
+            sample_options(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            crate::server::media::MediaRequestMetadata::new(1, 0, 0, 0, 0, 0),
+        )
+        .expect_err("declared image that resolved to zero payloads must reject");
+    assert!(
+        err.to_string()
+            .contains("image resolution cardinality mismatch")
+    );
+    assert!(
+        options_rx.try_recv().is_err(),
+        "rejected request must not dispatch to the worker"
+    );
+
+    let result = provider
+        .generate("good".to_string(), sample_options())
+        .expect("same live worker must serve the next valid request");
+    assert_eq!(result.text, "");
+    assert_eq!(
+        options_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("valid request must dispatch to the worker")
+            .max_tokens,
+        1
+    );
+}
+
+#[test]
+fn single_stream_queue_reservation_enforces_max_and_releases_on_drop() {
+    let metrics = Arc::new(BatchMetrics::new());
+    let reservation = SingleStreamQueueReservation::try_new(metrics.clone(), 1).unwrap();
+    assert_eq!(metrics.queue_depth(), 1);
+    assert!(SingleStreamQueueReservation::try_new(metrics.clone(), 1).is_err());
+    drop(reservation);
+    assert_eq!(metrics.queue_depth(), 0);
+}
+
+#[test]
+fn single_stream_queue_reservation_releases_after_failed_send() {
+    let metrics = Arc::new(BatchMetrics::new());
+    let reservation = SingleStreamQueueReservation::try_new(metrics.clone(), 1).unwrap();
+    let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
+    drop(request_rx);
+    let (response_tx, _response_rx) = mpsc::channel();
+
+    let send = request_tx.send(ModelRequest::Generate {
+        prompt: "hello".to_string(),
+        prompt_token_ids: None,
+        options: sample_options(),
+        images: Vec::new(),
+        audio: Vec::new(),
+        videos: Vec::new(),
+        media: crate::server::media::MediaRequestMetadata::default(),
+        queue_reservation: Some(reservation),
+        response_tx,
+        cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
+
+    assert!(send.is_err());
+    drop(send);
+    assert_eq!(metrics.queue_depth(), 0);
+}
+
+#[test]
+fn single_stream_queue_reservation_releases_on_dequeue_before_processing() {
+    let metrics = Arc::new(BatchMetrics::new());
+    let reservation = SingleStreamQueueReservation::try_new(metrics.clone(), 1).unwrap();
+    let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
+    let (response_tx, _response_rx) = mpsc::channel();
+
+    request_tx
+        .send(ModelRequest::Generate {
+            prompt: "hello".to_string(),
+            prompt_token_ids: None,
+            options: sample_options(),
+            images: Vec::new(),
+            audio: Vec::new(),
+            videos: Vec::new(),
+            media: crate::server::media::MediaRequestMetadata::default(),
+            queue_reservation: Some(reservation),
+            response_tx,
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        })
+        .unwrap();
+
+    assert_eq!(metrics.queue_depth(), 1);
+    let request = request_rx.recv().unwrap();
+    match request {
+        ModelRequest::Generate {
+            queue_reservation, ..
+        } => {
+            drop(queue_reservation);
+        }
+        ModelRequest::Shutdown => panic!("unexpected shutdown"),
+    }
+    assert_eq!(metrics.queue_depth(), 0);
+}
+
+#[test]
+fn pre_reserved_single_stream_enqueue_does_not_double_reserve() {
+    let metrics = Arc::new(BatchMetrics::new());
+    let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
+    let provider = ModelProvider {
+        request_tx,
+        model_id: "test-model".to_string(),
+        created_at: 0,
+        loaded: Arc::new(AtomicBool::new(true)),
+        batch_metrics: metrics.clone(),
+        batch_observability: Arc::new(BatchObservability::new()),
+        max_queue_depth: 1,
+        single_stream_queue_admission: Arc::new(AtomicBool::new(true)),
+        prompt_cache: None,
+        prompt_tokenizer: None,
+        decode_hang_timeout: DECODE_HANG_TIMEOUT,
+        _worker_handle: std::thread::spawn(|| {}),
+    };
+
+    let queue_reservation = provider.reserve_single_stream_queue_slot().unwrap();
+    assert_eq!(metrics.queue_depth(), 1);
+
+    let _response_rx = provider
+        .send_generate_request_with_cancellation_and_metadata(
+            "hello".to_string(),
+            sample_options(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            crate::server::media::MediaRequestMetadata::default(),
+            Arc::new(AtomicBool::new(false)),
+            QueueReservationMode::PreReserved(queue_reservation),
+        )
+        .unwrap();
+
+    assert_eq!(metrics.queue_depth(), 1);
+    let request = request_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    match request {
+        ModelRequest::Generate {
+            queue_reservation, ..
+        } => drop(queue_reservation),
+        ModelRequest::Shutdown => panic!("unexpected shutdown"),
+    }
+    assert_eq!(metrics.queue_depth(), 0);
+}
+
+#[test]
+fn scheduler_paths_do_not_create_single_stream_reservations() {
+    let provider = ModelProvider {
+        request_tx: mpsc::channel::<ModelRequest>().0,
+        model_id: "test-model".to_string(),
+        created_at: 0,
+        loaded: Arc::new(AtomicBool::new(true)),
+        batch_metrics: Arc::new(BatchMetrics::new()),
+        batch_observability: Arc::new(BatchObservability::new()),
+        max_queue_depth: 0,
+        single_stream_queue_admission: Arc::new(AtomicBool::new(false)),
+        prompt_cache: None,
+        prompt_tokenizer: None,
+        decode_hang_timeout: DECODE_HANG_TIMEOUT,
+        _worker_handle: std::thread::spawn(|| {}),
+    };
+
+    assert!(
+        provider
+            .reserve_single_stream_queue_slot()
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(provider.batch_metrics.queue_depth(), 0);
 }
 
 #[test]

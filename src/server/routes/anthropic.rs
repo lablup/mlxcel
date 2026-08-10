@@ -44,6 +44,7 @@ use crate::server::anthropic_translator::{
 };
 use crate::server::chat_request::{prepare_chat_request_with_cache, request_has_effective_input};
 use crate::server::config::ReasoningBudgetOverride;
+use crate::server::model_provider::QueueFullError;
 use crate::server::streaming_anthropic::{AnthropicBlockEmitter, anthropic_sse_channel};
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
 use crate::server::tool_calls;
@@ -60,6 +61,15 @@ use crate::server::types::anthropic_stream::{
 use super::chat::{
     MAX_TOOLS, build_generate_options, build_prompt_cache_request_context, parse_priority_header,
 };
+
+fn generation_error_to_response(err: anyhow::Error) -> Response {
+    if err.downcast_ref::<QueueFullError>().is_some() {
+        AnthropicErrorResponse::overloaded("All slots are busy. Please try again later.")
+            .into_response()
+    } else {
+        AnthropicErrorResponse::api_error(format!("Generation failed: {err}")).into_response()
+    }
+}
 use crate::server::request_options::{chat_carries_loop_amplifier, resolve_server_max_tokens};
 
 /// POST /v1/messages
@@ -209,10 +219,7 @@ async fn non_stream_messages(
             prepared.media,
         ) {
         Ok(r) => r,
-        Err(e) => {
-            return AnthropicErrorResponse::api_error(format!("Generation failed: {e}"))
-                .into_response();
-        }
+        Err(e) => return generation_error_to_response(e),
     };
 
     state.metrics.record_request(
@@ -324,6 +331,11 @@ async fn stream_messages(
         &prepared.audio_data,
     );
 
+    let queue_reservation = match state.model_provider.reserve_single_stream_queue_slot() {
+        Ok(reservation) => reservation,
+        Err(err) => return generation_error_to_response(err),
+    };
+
     let (sender, stream, cancelled, keepalive) = anthropic_sse_channel(128);
 
     let model_id_for_task = model_id.clone();
@@ -380,13 +392,14 @@ async fn stream_messages(
 
         let result = state
             .model_provider
-            .generate_streaming_with_logprobs_cancellable_videos_declared(
+            .generate_streaming_with_logprobs_cancellable_videos_declared_reserved(
                 prepared.prompt,
                 options,
                 prepared.image_data,
                 prepared.audio_data,
                 prepared.videos,
                 prepared.media,
+                queue_reservation,
                 cancelled,
                 |token, _lp| {
                     if let Ok(mut acc) = acc_clone.lock() {
@@ -439,13 +452,22 @@ async fn stream_messages(
         let result = match result {
             Ok(r) => r,
             Err(err) => {
+                let queue_full = err.downcast_ref::<QueueFullError>().is_some();
                 if let Ok(mut em) = emitter.lock() {
                     em.close_open_block(&sender);
                 }
                 let _ = sender.send_event(&AnthropicStreamEvent::Error {
                     error: AnthropicStreamError {
-                        error_type: "api_error".to_string(),
-                        message: err.to_string(),
+                        error_type: if queue_full {
+                            "overloaded_error".to_string()
+                        } else {
+                            "api_error".to_string()
+                        },
+                        message: if queue_full {
+                            "All slots are busy. Please try again later.".to_string()
+                        } else {
+                            err.to_string()
+                        },
                     },
                 });
                 return;

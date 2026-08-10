@@ -188,6 +188,67 @@ async fn prepare_chat_request_rejects_combined_audio_and_video_before_resolution
 }
 
 #[tokio::test]
+async fn prepare_chat_request_rejects_image_cardinality_mismatch_and_recovers() {
+    fn request_with_image_urls(urls: &[&str]) -> ChatCompletionRequest {
+        let mut parts = vec![ContentPart::Text {
+            text: "Look".to_string(),
+        }];
+        parts.extend(urls.iter().map(|url| ContentPart::ImageUrl {
+            image_url: ImageUrl::new((*url).to_string()),
+        }));
+        request_with_messages(vec![Message {
+            role: Role::User,
+            content: MessageContent::Parts(parts),
+            name: None,
+            tool_call_id: None,
+            reasoning: None,
+            tool_calls: None,
+        }])
+    }
+
+    let processor = ChatTemplateProcessor::with_template("ok".to_string());
+    let missing = "missing-image-for-cardinality-test.png";
+
+    let error = prepare_chat_request_with_cache(
+        &processor,
+        &request_with_image_urls(&[missing]),
+        None,
+        false,
+    )
+    .await
+    .err()
+    .expect("declared image that resolves to zero payloads must reject");
+    assert_eq!(
+        error.to_string(),
+        "image resolution cardinality mismatch: 1 image input(s) declared, 0 raw payload(s) resolved; request rejected"
+    );
+
+    let error = prepare_chat_request_with_cache(
+        &processor,
+        &request_with_image_urls(&["data:image/png;base64,aGVsbG8=", missing]),
+        None,
+        false,
+    )
+    .await
+    .err()
+    .expect("partial image resolution must reject");
+    assert_eq!(
+        error.to_string(),
+        "image resolution cardinality mismatch: 2 image input(s) declared, 1 raw payload(s) resolved; request rejected"
+    );
+
+    let prepared = prepare_chat_request_with_cache(
+        &processor,
+        &request_with_image_urls(&["data:image/png;base64,aGVsbG8="]),
+        None,
+        false,
+    )
+    .await
+    .expect("valid request after a rejection must still prepare");
+    assert_eq!(prepared.image_data, vec![b"hello".to_vec()]);
+}
+
+#[tokio::test]
 async fn prepare_chat_request_uses_template_output_and_extracts_images() {
     let request = request_with_messages(vec![Message {
         role: Role::User,

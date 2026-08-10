@@ -4,6 +4,14 @@ impl ModelProvider {
     pub(crate) fn recording_for_route_tests(
         options_tx: mpsc::Sender<ServerGenerateOptions>,
     ) -> Self {
+        Self::recording_for_route_tests_with_admission(options_tx, false, usize::MAX)
+    }
+
+    pub(crate) fn recording_for_route_tests_with_admission(
+        options_tx: mpsc::Sender<ServerGenerateOptions>,
+        single_stream_admission: bool,
+        max_queue_depth: usize,
+    ) -> Self {
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
         let loaded = Arc::new(AtomicBool::new(true));
         let batch_metrics = Arc::new(BatchMetrics::new());
@@ -13,9 +21,11 @@ impl ModelProvider {
                 match request {
                     ModelRequest::Generate {
                         options,
+                        queue_reservation,
                         response_tx,
                         ..
                     } => {
+                        drop(queue_reservation);
                         let _ = options_tx.send(options);
                         let _ = response_tx.send(GenerateEvent::Done(GenerationResult {
                             text: String::new(),
@@ -42,6 +52,8 @@ impl ModelProvider {
             loaded,
             batch_metrics,
             batch_observability,
+            max_queue_depth,
+            single_stream_queue_admission: Arc::new(AtomicBool::new(single_stream_admission)),
             prompt_cache: None,
             prompt_tokenizer: None,
             decode_hang_timeout: DECODE_HANG_TIMEOUT,

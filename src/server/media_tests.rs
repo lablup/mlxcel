@@ -352,6 +352,17 @@ fn xla_capability_remains_audio_false_and_video_rejection_is_unchanged() {
     assert!(video.contains("does not support video input yet"));
 }
 
+#[test]
+fn shared_image_cardinality_validator_rejects_dropped_images() {
+    let err = MediaRequestMetadata::new(2, 0, 0, 1, 0, 0)
+        .validate_resolved_image_count()
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("image resolution cardinality mismatch"));
+    assert!(msg.contains("2 image input(s) declared"));
+    assert!(msg.contains("1 raw payload(s) resolved"));
+}
+
 #[tokio::test]
 async fn xla_rejects_all_invalid_images_instead_of_text_fallback() {
     let images = try_collect_image_data_with_limits(
@@ -370,7 +381,7 @@ async fn xla_rejects_all_invalid_images_instead_of_text_fallback() {
         .validate_xla_raw_counts(images.len(), 0, 0)
         .unwrap_err();
     assert!(error.contains("2 image input(s) declared"));
-    assert!(error.contains("refusing text fallback"));
+    assert!(error.contains("request rejected"));
 }
 
 #[tokio::test]
@@ -410,7 +421,7 @@ async fn xla_rejects_oversized_image_dropped_by_tolerant_resolver() {
         media
             .validate_xla_raw_counts(images.len(), 0, 0)
             .unwrap_err()
-            .contains("refusing text fallback")
+            .contains("request rejected")
     );
 }
 

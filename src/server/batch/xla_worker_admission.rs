@@ -488,6 +488,7 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                 audio,
                 videos,
                 media,
+                queue_reservation: _,
                 response_tx,
                 cancelled,
             } => self.admit(

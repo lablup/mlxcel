@@ -106,7 +106,7 @@ Video and audio inputs are not supported and are rejected with a clear error mes
 
 ## Server mode
 
-`mlxcel-server --model <diffusion-model>` (or `mlxcel serve -m <diffusion-model>`) loads the checkpoint and serves `/v1/chat/completions` and `/v1/completions`. Both streaming (SSE) and non-streaming responses are supported. Requests are served serially: DiffusionGemma cannot join the batch scheduler, so the server queues them in arrival order and processes one at a time. That is the intended design, not a temporary limitation.
+`mlxcel-server --model <diffusion-model>` (or `mlxcel serve -m <diffusion-model>`) loads the checkpoint and serves `/v1/chat/completions` and `/v1/completions`. Both streaming (SSE) and non-streaming responses are supported. Requests are served serially: DiffusionGemma cannot join the batch scheduler, so the server queues them in arrival order and processes one at a time. The pending request queue still honors `--max-queue-depth` and returns the same overloaded response as batched serving when full. That is the intended design, not a temporary limitation.
 
 Serve-level flags that affect diffusion models:
 

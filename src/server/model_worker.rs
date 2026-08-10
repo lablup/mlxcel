@@ -199,6 +199,7 @@ pub(crate) fn spawn_model_worker_with_batch_config(
     sched_config: WorkerSchedulerConfig,
     batch_metrics: Arc<BatchMetrics>,
     batch_observability: Arc<BatchObservability>,
+    single_stream_queue_admission: Arc<AtomicBool>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         // Re-impose fail-fast on this core generation thread under release
@@ -296,6 +297,7 @@ pub(crate) fn spawn_model_worker_with_batch_config(
             // scheduler-specific setup below is skipped.
             let model = match model {
                 LoadedModel::DiffusionGemma(diffusion) => {
+                    single_stream_queue_admission.store(true, Ordering::Release);
                     let sampler = crate::server::diffusion_worker::parse_diffusion_sampler(
                         &sched_config.diffusion_sampler,
                     )
@@ -323,6 +325,7 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                 // serve-level `--max-denoising-steps` flag maps to the LLaDA-2
                 // per-block step count.
                 LoadedModel::Llada2Moe(llada2) => {
+                    single_stream_queue_admission.store(true, Ordering::Release);
                     crate::server::diffusion_worker::run_llada2_worker_loop(
                         &llada2,
                         &tokenizer,
@@ -340,6 +343,7 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                 // legacy-worker twin below) is what guarantees a Florence-2
                 // checkpoint never reaches a decoder-only worker loop.
                 LoadedModel::Florence2VLM(florence2) => {
+                    single_stream_queue_admission.store(true, Ordering::Release);
                     crate::server::florence2_worker::run_florence2_worker_loop(
                         &florence2, request_rx,
                     );
@@ -849,6 +853,7 @@ pub(crate) fn spawn_legacy_model_worker(
     worker_model_id: String,
     batch_metrics: Arc<BatchMetrics>,
     batch_observability: Arc<BatchObservability>,
+    single_stream_queue_admission: Arc<AtomicBool>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         // Same fail-fast posture as the batched worker above (issue #375): the
@@ -918,6 +923,7 @@ pub(crate) fn spawn_legacy_model_worker(
             // the default batched worker.
             let model = match model {
                 LoadedModel::DiffusionGemma(diffusion) => {
+                    single_stream_queue_admission.store(true, Ordering::Release);
                     crate::server::diffusion_worker::run_diffusion_worker_loop(
                         &diffusion,
                         &tokenizer,
@@ -932,6 +938,7 @@ pub(crate) fn spawn_legacy_model_worker(
                 // loop. The legacy worker has no serve-level diffusion flags, so
                 // the engine step default applies (steps_override = None).
                 LoadedModel::Llada2Moe(llada2) => {
+                    single_stream_queue_admission.store(true, Ordering::Release);
                     crate::server::diffusion_worker::run_llada2_worker_loop(
                         &llada2,
                         &tokenizer,
@@ -945,6 +952,7 @@ pub(crate) fn spawn_legacy_model_worker(
                 // seq2seq loop; see the batched-worker branch above. The
                 // seq2seq path has no serve-level flags to wire.
                 LoadedModel::Florence2VLM(florence2) => {
+                    single_stream_queue_admission.store(true, Ordering::Release);
                     crate::server::florence2_worker::run_florence2_worker_loop(
                         &florence2, request_rx,
                     );

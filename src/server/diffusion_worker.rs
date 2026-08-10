@@ -206,9 +206,11 @@ pub(crate) fn run_diffusion_worker_loop(
                 audio,
                 videos,
                 media: _,
+                queue_reservation,
                 response_tx,
                 cancelled,
             } => {
+                drop(queue_reservation);
                 handle_diffusion_request(
                     model,
                     tokenizer,
@@ -376,7 +378,7 @@ fn serve_streaming_request<G>(
             }
             let mut gen_result: GenerationResult = decode_state.finish_with_cache(
                 start,
-                engine_prompt.len(),
+                prompt_tokens_for_usage(engine_prompt),
                 max_new_tokens.max(1),
                 0,
             );
@@ -390,6 +392,10 @@ fn serve_streaming_request<G>(
 
     // Release the transient denoising allocations before the next request.
     mlxcel_core::clear_memory_cache();
+}
+
+fn prompt_tokens_for_usage(engine_prompt: &[i32]) -> usize {
+    engine_prompt.len()
 }
 
 // ---------------------------------------------------------------------------
@@ -512,9 +518,11 @@ pub(crate) fn run_llada2_worker_loop(
                 audio,
                 videos,
                 media: _,
+                queue_reservation,
                 response_tx,
                 cancelled,
             } => {
+                drop(queue_reservation);
                 handle_llada2_request(
                     model,
                     tokenizer,

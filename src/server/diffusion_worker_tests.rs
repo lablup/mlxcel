@@ -115,6 +115,15 @@ fn diffusion_serve_defaults_default_is_entropy_bound() {
     assert_eq!(d.max_denoising_steps, None);
 }
 
+#[test]
+fn diffusion_usage_counts_the_engine_prompt_slice_after_image_expansion() {
+    let expanded_prompt = [1, 2, 32000, 32001, 3, 4];
+    assert_eq!(
+        prompt_tokens_for_usage(&expanded_prompt),
+        expanded_prompt.len()
+    );
+}
+
 // -------------------------------------------------------------------------
 // LLaDA-2 MoE serving (issue #546)
 // -------------------------------------------------------------------------
@@ -157,6 +166,16 @@ fn reject_llada2_media_rejects_any_modality() {
         reject_llada2_media(false, false, true).is_some(),
         "video rejected"
     );
+}
+
+#[test]
+fn llada2_usage_count_is_text_prompt_only_because_media_is_rejected() {
+    assert_eq!(
+        reject_llada2_media(true, false, false),
+        Some(LLADA2_MEDIA_UNSUPPORTED_MSG)
+    );
+    let text_prompt = [1, 2, 3, 4];
+    assert_eq!(prompt_tokens_for_usage(&text_prompt), text_prompt.len());
 }
 
 #[test]

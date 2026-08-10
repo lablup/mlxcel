@@ -121,9 +121,9 @@ impl ResolvedVideo {
 
 /// Declared and successfully resolved media cardinality for one request.
 ///
-/// Generic MLX paths intentionally remain tolerant of resolver failures. XLA
-/// uses both halves at its admission boundary so an invalid media declaration
-/// cannot collapse to an empty vector and silently become a text request.
+/// The low-level resolver stays tolerant while acquiring URLs/files/data-URIs.
+/// HTTP request preparation and XLA admission use both halves to reject a
+/// declared image request that would otherwise collapse to fewer raw payloads.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct MediaRequestMetadata {
     pub(crate) declared_images: usize,
@@ -132,6 +132,15 @@ pub(crate) struct MediaRequestMetadata {
     pub(crate) resolved_images: usize,
     pub(crate) resolved_audio: usize,
     pub(crate) resolved_videos: usize,
+}
+
+/// Named request-boundary error for a declared/resolved media mismatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum MediaCardinalityError {
+    #[error(
+        "image resolution cardinality mismatch: {declared} image input(s) declared, {resolved} raw payload(s) resolved; request rejected"
+    )]
+    ImageMismatch { declared: usize, resolved: usize },
 }
 
 impl MediaRequestMetadata {
@@ -162,6 +171,23 @@ impl MediaRequestMetadata {
     #[must_use]
     pub(crate) const fn from_resolved(images: usize, audio: usize, videos: usize) -> Self {
         Self::new(images, audio, videos, images, audio, videos)
+    }
+
+    /// Validate the shared request boundary for every MLX server path.
+    ///
+    /// Image resolution remains tolerant while URLs/files/data-URIs are being
+    /// acquired, but dispatch must not silently turn a declared image request
+    /// into a text-only or partial-image request. Audio/video capability
+    /// checks stay family-specific because not every worker supports those
+    /// modalities yet.
+    pub(crate) fn validate_resolved_image_count(self) -> Result<(), MediaCardinalityError> {
+        if self.declared_images != self.resolved_images {
+            return Err(MediaCardinalityError::ImageMismatch {
+                declared: self.declared_images,
+                resolved: self.resolved_images,
+            });
+        }
+        Ok(())
     }
 
     /// Validate the XLA request seam without changing tolerant MLX resolution.
@@ -212,13 +238,8 @@ impl MediaRequestMetadata {
                 self.resolved_images, self.resolved_audio, self.resolved_videos
             ));
         }
-        if self.declared_images != self.resolved_images {
-            return Err(format!(
-                "OpenXLA image resolution cardinality mismatch: {} image input(s) declared, \
-                 {} raw payload(s) resolved; refusing text fallback",
-                self.declared_images, self.resolved_images
-            ));
-        }
+        self.validate_resolved_image_count()
+            .map_err(|err| format!("OpenXLA {err}"))?;
         if self.declared_audio != self.resolved_audio {
             return Err(format!(
                 "OpenXLA audio resolution cardinality mismatch: {} audio input(s) declared, \

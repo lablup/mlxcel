@@ -62,7 +62,9 @@ multiplied by the clip limit. WAV headers and Phi4MM polyphase filter/output
 work are preflighted before decoded or resampled vectors are allocated.
 
 Invalid audio is request-fatal rather than silently dropped into a text-only
-request. Existing tolerant image resolution behavior is unchanged.
+request. Image acquisition remains tolerant while resolving individual
+sources, but request preparation rejects any declared image that fails to
+produce a raw payload.
 
 Before scheduler admission, production HTTP cancellation follows Axum handler
 future lifetime: dropping the handler drops the acquisition future, partial
