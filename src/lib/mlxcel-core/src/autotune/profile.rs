@@ -165,11 +165,12 @@ impl ProfileConfig {
     #[must_use]
     pub fn sanitized(self) -> Self {
         let reps = self.reps.max(1);
+        let max_reps = self.max_reps.max(reps);
         Self {
-            warmup: self.warmup,
+            warmup: self.warmup.min(max_reps),
             warmup_budget_us: sane_budget(self.warmup_budget_us, DEFAULT_WARMUP_BUDGET_US),
             reps,
-            max_reps: self.max_reps.max(reps),
+            max_reps,
             sample_budget_us: sane_budget(self.sample_budget_us, DEFAULT_SAMPLE_BUDGET_US),
             min_improvement: sane_budget(self.min_improvement, DEFAULT_MIN_IMPROVEMENT),
         }

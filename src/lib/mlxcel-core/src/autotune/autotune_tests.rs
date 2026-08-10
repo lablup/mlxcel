@@ -405,6 +405,25 @@ fn profile_config_sanitizes_degenerate_values() {
 }
 
 #[test]
+fn profile_config_bounds_warmup_by_the_rep_ceiling() {
+    let cfg = ProfileConfig {
+        warmup: 100,
+        warmup_budget_us: 0.0,
+        reps: 2,
+        max_reps: 5,
+        sample_budget_us: 0.0,
+        min_improvement: 0.02,
+    };
+    let op = FakeOp::new("fake_bounded_warmup", vec![(1, 1)]);
+    let _ = op.profile(cfg).expect("sweep produced a result");
+    assert_eq!(
+        op.calls(),
+        7,
+        "warmup is capped at 5 before the 2 timed reps run"
+    );
+}
+
+#[test]
 fn profile_runs_warmup_plus_reps_per_candidate() {
     // With both wall-clock budgets at zero the sampler falls back to the fixed
     // floors, which is what makes an exact call count assertable at all.
