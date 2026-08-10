@@ -308,8 +308,25 @@ pub fn median_absolute_deviation(samples: &[f64], center: f64) -> Option<f64> {
     median(&deviations)
 }
 
-fn elapsed_us(start: Instant) -> f64 {
-    start.elapsed().as_nanos() as f64 / 1000.0
+pub(super) trait ProfileTimer {
+    type Mark: Copy;
+
+    fn now(&self) -> Self::Mark;
+    fn elapsed_us(&self, start: Self::Mark) -> f64;
+}
+
+struct RealTimer;
+
+impl ProfileTimer for RealTimer {
+    type Mark = Instant;
+
+    fn now(&self) -> Self::Mark {
+        Instant::now()
+    }
+
+    fn elapsed_us(&self, start: Self::Mark) -> f64 {
+        start.elapsed().as_nanos() as f64 / 1000.0
+    }
 }
 
 /// Warm one candidate and probe its per-iteration cost.
@@ -321,13 +338,18 @@ fn elapsed_us(start: Instant) -> f64 {
 /// low-clock ramp at the start do not inflate it. `Ok(None)` means no warmup
 /// was configured and there is nothing to estimate from; `Err(())` means the
 /// candidate is infeasible and must be dropped.
-fn warm_up(op: &dyn TunableOp, tactic: &Tactic, cfg: &ProfileConfig) -> Result<Option<f64>, ()> {
+fn warm_up<T: ProfileTimer>(
+    op: &dyn TunableOp,
+    tactic: &Tactic,
+    cfg: &ProfileConfig,
+    timer: &T,
+) -> Result<Option<f64>, ()> {
     let mut samples_us: Vec<f64> = Vec::new();
-    let phase_start = Instant::now();
+    let phase_start = timer.now();
     while samples_us.len() < cfg.warmup
-        || (elapsed_us(phase_start) < cfg.warmup_budget_us && samples_us.len() < cfg.max_reps)
+        || (timer.elapsed_us(phase_start) < cfg.warmup_budget_us && samples_us.len() < cfg.max_reps)
     {
-        let start = Instant::now();
+        let start = timer.now();
         if let Err(e) = op.run(tactic) {
             tracing::debug!(
                 "autotune: dropping candidate {tactic} for {} during warmup: {e}",
@@ -336,7 +358,7 @@ fn warm_up(op: &dyn TunableOp, tactic: &Tactic, cfg: &ProfileConfig) -> Result<O
             return Err(());
         }
         op.sync();
-        samples_us.push(elapsed_us(start));
+        samples_us.push(timer.elapsed_us(start));
     }
     if samples_us.is_empty() {
         return Ok(None);
@@ -479,6 +501,15 @@ pub fn select(
 /// failed to run. Callers treat `None` as "use the default".
 #[must_use]
 pub fn profile(op: &dyn TunableOp, cfg: ProfileConfig) -> Option<ProfileResult> {
+    profile_with_timer(op, cfg, &RealTimer)
+}
+
+#[must_use]
+pub(super) fn profile_with_timer<T: ProfileTimer>(
+    op: &dyn TunableOp,
+    cfg: ProfileConfig,
+    timer: &T,
+) -> Option<ProfileResult> {
     let cfg = cfg.sanitized();
     let bucket = op.bucket();
     let candidates = op.candidates(&bucket);
@@ -491,7 +522,7 @@ pub fn profile(op: &dyn TunableOp, cfg: ProfileConfig) -> Option<ProfileResult> 
     // candidates drop out here, before they can perturb the timed phase.
     let mut targets: Vec<(usize, usize)> = Vec::with_capacity(candidates.len());
     for (i, tactic) in candidates.iter().enumerate() {
-        if let Ok(est_us) = warm_up(op, tactic, &cfg) {
+        if let Ok(est_us) = warm_up(op, tactic, &cfg, timer) {
             targets.push((i, target_reps(est_us, &cfg)));
         }
     }
@@ -513,7 +544,7 @@ pub fn profile(op: &dyn TunableOp, cfg: ProfileConfig) -> Option<ProfileResult> 
                 continue;
             }
             let tactic = &candidates[cand];
-            let start = Instant::now();
+            let start = timer.now();
             if let Err(e) = op.run(tactic) {
                 tracing::debug!(
                     "autotune: dropping candidate {tactic} for {}: {e}",
@@ -523,7 +554,7 @@ pub fn profile(op: &dyn TunableOp, cfg: ProfileConfig) -> Option<ProfileResult> 
                 continue;
             }
             op.sync();
-            samples[slot].push(elapsed_us(start));
+            samples[slot].push(timer.elapsed_us(start));
         }
     }
 

@@ -286,6 +286,32 @@ pub fn resolve_with_mode(
     cfg: ProfileConfig,
     mode: Mode,
 ) -> Resolution {
+    resolve_with_mode_profiled(op, store, cfg, mode, profile)
+}
+
+#[cfg(test)]
+fn resolve_with_mode_and_timer<T: profile::ProfileTimer>(
+    op: &dyn TunableOp,
+    store: &TacticStore,
+    cfg: ProfileConfig,
+    mode: Mode,
+    timer: &T,
+) -> Resolution {
+    resolve_with_mode_profiled(op, store, cfg, mode, |op, cfg| {
+        profile::profile_with_timer(op, cfg, timer)
+    })
+}
+
+fn resolve_with_mode_profiled<F>(
+    op: &dyn TunableOp,
+    store: &TacticStore,
+    cfg: ProfileConfig,
+    mode: Mode,
+    profile_fn: F,
+) -> Resolution
+where
+    F: FnOnce(&dyn TunableOp, ProfileConfig) -> Option<ProfileResult>,
+{
     let bucket = op.bucket();
     let default = op.default_tactic(&bucket);
 
@@ -313,7 +339,7 @@ pub fn resolve_with_mode(
         return hit.clone();
     }
 
-    let resolution = resolve_uncached(op, store, cfg, mode, &key, &bucket, &default);
+    let resolution = resolve_uncached(op, store, cfg, mode, &key, &bucket, &default, profile_fn);
     if let Ok(mut guard) = memo().lock() {
         guard.insert(key, resolution.clone());
     }
@@ -329,6 +355,7 @@ fn resolve_uncached(
     key: &TuneKey,
     bucket: &ShapeBucket,
     default: &Tactic,
+    profile_fn: impl FnOnce(&dyn TunableOp, ProfileConfig) -> Option<ProfileResult>,
 ) -> Resolution {
     let candidates = op.candidates(bucket);
     if bucket.is_saturated() || candidates.is_empty() {
@@ -371,7 +398,7 @@ fn resolve_uncached(
         return Resolution::new(default.clone(), Source::Default);
     }
 
-    let Some(result) = profile(op, cfg) else {
+    let Some(result) = profile_fn(op, cfg) else {
         tracing::debug!(
             "autotune: {} bucket {bucket} produced no usable measurement; using default {default}",
             op.op_name()
