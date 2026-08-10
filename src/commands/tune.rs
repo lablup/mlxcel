@@ -112,13 +112,13 @@ pub(crate) struct TuneArgs {
     #[arg(long, default_value = "1024,4096,16384")]
     pub(crate) context_lengths: String,
 
-    /// Minimum untimed warmup repetitions per candidate.
+    /// Minimum untimed warmup repetitions per candidate, capped by `--max-reps`.
     #[arg(long, default_value_t = DEFAULT_WARMUP)]
     pub(crate) warmup: usize,
 
     /// Wall-clock warmup per candidate, milliseconds. Warmup runs past
-    /// `--warmup` until this elapses, which is what brings the GPU to a steady
-    /// clock before anything is recorded.
+    /// `--warmup` until this elapses or `--max-reps` is reached, which is what
+    /// brings the GPU to a steady clock before anything is recorded.
     #[arg(long, default_value_t = DEFAULT_WARMUP_BUDGET_US / 1000.0)]
     pub(crate) warmup_ms: f64,
 
@@ -462,8 +462,9 @@ pub(crate) fn run_tune(args: TuneArgs) -> Result<()> {
     }
     let cfg = args.profile_config();
     println!(
-        "profile: warmup>={} ({:.0}ms) reps {}..{} ({:.0}ms budget) min_improvement={:.3} (+ measured spread)",
+        "profile: warmup>={} capped@{} ({:.0}ms) reps {}..{} ({:.0}ms budget) min_improvement={:.3} (+ measured spread)",
         cfg.warmup,
+        cfg.max_reps,
         cfg.warmup_budget_us / 1000.0,
         cfg.reps,
         cfg.max_reps,

@@ -34,9 +34,10 @@
 //!
 //! 1. **Warm up by wall clock, not by iteration count.** Warmup runs until
 //!    [`ProfileConfig::warmup_budget_us`] has elapsed (with
-//!    [`ProfileConfig::warmup`] as a floor), so a cheap launch gets thousands
-//!    of iterations and an expensive one gets a handful. Both end up on a
-//!    ramped clock; a fixed count only does that for expensive launches.
+//!    [`ProfileConfig::warmup`] as a floor capped by
+//!    [`ProfileConfig::max_reps`]), so a cheap launch gets thousands of
+//!    iterations and an expensive one gets a handful. Both end up on a ramped
+//!    clock; a fixed count only does that for expensive launches.
 //! 2. **Scale repetitions by measured cost.** The warmup doubles as a cost
 //!    probe, and each candidate then targets
 //!    [`ProfileConfig::sample_budget_us`] of timed work, clamped to
@@ -117,7 +118,8 @@ pub const MAD_TO_SIGMA: f64 = 1.4826;
 /// Knobs for one profiling sweep.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ProfileConfig {
-    /// Minimum untimed repetitions before measuring.
+    /// Minimum untimed repetitions before measuring, capped by `max_reps`
+    /// during sanitization.
     pub warmup: usize,
     /// Wall-clock budget for the warmup phase of one candidate, microseconds.
     /// Warmup keeps going past `warmup` until this elapses.
@@ -160,8 +162,9 @@ fn sane_budget(value: f64, fallback: f64) -> f64 {
 
 impl ProfileConfig {
     /// Clamp to at least one timed repetition, a rep ceiling no lower than the
-    /// floor, and finite non-negative budgets and margins, so a caller-supplied
-    /// config can never produce an empty sample set or a nonsense threshold.
+    /// floor, warmup no higher than that ceiling, and finite non-negative
+    /// budgets and margins, so a caller-supplied config can never produce an
+    /// empty sample set or a nonsense threshold.
     #[must_use]
     pub fn sanitized(self) -> Self {
         let reps = self.reps.max(1);
