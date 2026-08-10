@@ -29,6 +29,8 @@ use axum::{
 
 use crate::server::batch::RequestPriority;
 use crate::server::config::ReasoningBudgetOverride;
+use crate::server::media::MediaRequestMetadata;
+use crate::server::model_provider::QueueFullError;
 use crate::server::request_options::{
     RequestOptionOverrides, build_server_generate_options, resolve_server_max_tokens,
 };
@@ -38,6 +40,14 @@ use crate::server::types::{
     ErrorResponse, NativeCompletionRequest, NativeCompletionResponse, TimingInfo,
 };
 use crate::server::{AppState, ServerConfig, ServerGenerateOptions};
+
+fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
+    if err.downcast_ref::<QueueFullError>().is_some() {
+        ErrorResponse::service_unavailable("All slots are busy. Please try again later.")
+    } else {
+        ErrorResponse::new(format!("Generation error: {err}"), "server_error")
+    }
+}
 
 /// POST /completion
 pub async fn native_completion(
@@ -130,7 +140,7 @@ async fn non_stream_native_completion(
     let result = state
         .model_provider
         .generate(request.prompt.clone(), options)
-        .map_err(|e| ErrorResponse::new(format!("Generation error: {}", e), "server_error"))?;
+        .map_err(generation_error_to_response)?;
 
     let prompt_ms = result.prompt_eval_ms as f64;
     let gen_ms = result.generation_only_ms as f64;
@@ -194,6 +204,11 @@ async fn stream_native_completion(
     options.reasoning_budget = budget_override;
     let prompt = request.prompt.clone();
 
+    let queue_reservation = match state.model_provider.reserve_single_stream_queue_slot() {
+        Ok(reservation) => reservation,
+        Err(err) => return generation_error_to_response(err).into_response(),
+    };
+
     // sse_channel also returns an SseKeepAlive for proxy
     // idle-timeout prevention during long prefill phases.
     let (events, stream, cancelled, keepalive) = sse_channel(100);
@@ -202,18 +217,25 @@ async fn stream_native_completion(
     tokio::task::spawn_blocking(move || {
         let token_events = finish_events.clone();
 
-        let result = state.model_provider.generate_streaming_cancellable(
-            prompt,
-            options,
-            cancelled,
-            |token| {
-                let chunk = serde_json::json!({
-                    "content": token,
-                    "stop": false,
-                });
-                let _ = token_events.json(&chunk);
-            },
-        );
+        let result = state
+            .model_provider
+            .generate_streaming_with_logprobs_cancellable_videos_declared_reserved(
+                prompt,
+                options,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                MediaRequestMetadata::default(),
+                queue_reservation,
+                cancelled,
+                |token, _lp| {
+                    let chunk = serde_json::json!({
+                        "content": token,
+                        "stop": false,
+                    });
+                    let _ = token_events.json(&chunk);
+                },
+            );
 
         // Send final chunk
         let stop = match &result {

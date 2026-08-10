@@ -140,6 +140,43 @@ fn model_provider_relies_on_auto_traits_for_shared_state() {
 }
 
 #[test]
+fn provider_media_cardinality_rejection_does_not_poison_worker() {
+    let (options_tx, options_rx) = mpsc::channel();
+    let provider = ModelProvider::recording_for_route_tests(options_tx);
+
+    let err = provider
+        .generate_with_media_and_videos_declared(
+            "bad".to_string(),
+            sample_options(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            crate::server::media::MediaRequestMetadata::new(1, 0, 0, 0, 0, 0),
+        )
+        .expect_err("declared image that resolved to zero payloads must reject");
+    assert!(
+        err.to_string()
+            .contains("image resolution cardinality mismatch")
+    );
+    assert!(
+        options_rx.try_recv().is_err(),
+        "rejected request must not dispatch to the worker"
+    );
+
+    let result = provider
+        .generate("good".to_string(), sample_options())
+        .expect("same live worker must serve the next valid request");
+    assert_eq!(result.text, "");
+    assert_eq!(
+        options_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("valid request must dispatch to the worker")
+            .max_tokens,
+        1
+    );
+}
+
+#[test]
 fn single_stream_queue_reservation_enforces_max_and_releases_on_drop() {
     let metrics = Arc::new(BatchMetrics::new());
     let reservation = SingleStreamQueueReservation::try_new(metrics.clone(), 1).unwrap();
