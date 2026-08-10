@@ -27,8 +27,9 @@
 //! - Qwen-style reasoning: `<think>` / `</think>` — Qwen3.x, Exaone4, Hunyuan, GLM4, etc.
 //! - Hermes-style tool calls: `<tool_call>` / `</tool_call>` — Qwen/DeepSeek tool call format
 //! - Mistral Nemo: `[TOOL_CALLS]` — one-shot start marker (rest of output is tool call JSON)
-//! - Gemma 4: `<|channel>thought` / `<channel|>`, `<|tool_call>` / `<tool_call|>`,
-//!   `<|think|>`, `<|turn>` / `<turn|>`
+//! - Gemma 4: `<|channel>thought` / `<channel|>` with a bare `<|channel>`
+//!   malformed-output fallback, `<|tool_call>` / `<tool_call|>`, `<|think|>`,
+//!   `<|turn>` / `<turn|>`
 //! - Function-calling Gemma: `<start_function_call>` / `<end_function_call>`,
 //!   a distinct marker family from Gemma 4, sharing only the inner
 //!   `call:name{...}` syntax
@@ -227,8 +228,13 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     ("<tool_call|>", DelimiterAction::ExitToolCall),
     // Gemma 4 reasoning channel: consume the full `<|channel>thought` opener
     // as one delimiter so the `thought` channel argument never leaks into
-    // `delta.reasoning_content`.
+    // `delta.reasoning_content`. Keep a bare `<|channel>` fallback for
+    // malformed channel output, but `find_earliest_delimiter` defers it when
+    // the current buffer ends exactly at that shorter prefix; otherwise a
+    // token boundary after `<|channel>` would prematurely enter Thinking and
+    // leak `thought` as reasoning.
     ("<|channel>thought", DelimiterAction::EnterThinking),
+    ("<|channel>", DelimiterAction::EnterThinking),
     ("<channel|>", DelimiterAction::ExitThinking),
     ("<|think|>", DelimiterAction::Strip),
     ("<|turn>", DelimiterAction::Strip),
@@ -305,8 +311,9 @@ enum FilterState {
 ///
 /// Covers Qwen-style (`<think>` / `</think>`), Hermes-style
 /// (`<tool_call>` / `</tool_call>`), Mistral Nemo (`[TOOL_CALLS]`), and
-/// Gemma 4 (`<|channel>thought` / `<channel|>`) reasoning families, plus Gemma 4
-/// tool-call and turn markers.
+/// Gemma 4 (`<|channel>thought` / `<channel|>`, with a malformed bare
+/// `<|channel>` fallback) reasoning families, plus Gemma 4 tool-call and turn
+/// markers.
 ///
 /// Feed decoded text fragments via [`feed()`](StreamFilter::feed).  The
 /// filter returns only the content that should be emitted to the client.
@@ -318,18 +325,24 @@ pub struct StreamFilter {
     /// Per-feed byte-length queue used to count how many token positions
     /// (i.e. `feed()` calls) contributed to the bytes currently in `buffer`.
     ///
-    /// Each `feed(fragment)` call appends `fragment.len()` to this queue.
+    /// Each `feed(fragment)` call appends a span for `fragment.len()` bytes.
     /// When `drain_buffer()` consumes bytes from the front of `buffer` (via
-    /// `buffer.drain(..N)`), it pops fragment-length entries from the front
-    /// of this queue until `N` bytes are accounted for. The number of entries
-    /// popped is the number of token positions whose text spanned that byte
-    /// range — used as `suppressed_positions` for delimiter matches.
+    /// `buffer.drain(..N)`), it pops spans from the front of this queue until
+    /// `N` bytes are accounted for. The number of uncounted spans popped is the
+    /// number of token positions whose text spanned that byte range — used as
+    /// `suppressed_positions` for delimiter matches.
     ///
-    /// Invariant: `fragment_lengths.iter().sum::<usize>() == buffer.len()`
+    /// Invariant: `fragment_lengths.iter().map(|s| s.remaining_bytes).sum::<usize>() == buffer.len()`
     /// before and after every `feed()` / `drain_buffer()` call.
-    fragment_lengths: std::collections::VecDeque<usize>,
+    fragment_lengths: std::collections::VecDeque<FragmentSpan>,
     /// Length of the longest delimiter (for partial-match buffering).
     max_delim_len: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FragmentSpan {
+    remaining_bytes: usize,
+    count_on_drain: bool,
 }
 
 impl Default for StreamFilter {
@@ -395,7 +408,10 @@ impl StreamFilter {
         }
 
         // Record the number of bytes this token contributes to the buffer.
-        self.fragment_lengths.push_back(fragment.len());
+        self.fragment_lengths.push_back(FragmentSpan {
+            remaining_bytes: fragment.len(),
+            count_on_drain: true,
+        });
         self.buffer.push_str(fragment);
         self.drain_buffer()
     }
@@ -445,15 +461,26 @@ impl StreamFilter {
         while n > 0 {
             match self.fragment_lengths.pop_front() {
                 Some(frag_len) => {
-                    count += 1;
-                    if frag_len <= n {
-                        n -= frag_len;
+                    if frag_len.remaining_bytes <= n {
+                        if frag_len.count_on_drain {
+                            count += 1;
+                        }
+                        n -= frag_len.remaining_bytes;
                     } else {
                         // This fragment straddles the boundary: `n` bytes were
-                        // consumed from it but `frag_len - n` bytes remain.
-                        // Push back the remainder so the invariant holds.
-                        let remainder = frag_len - n;
-                        self.fragment_lengths.push_front(remainder);
+                        // consumed from it but `remaining_bytes - n` bytes
+                        // remain. The token position has already been counted
+                        // for this drain, so the remainder must not count as a
+                        // second token position when it is emitted or
+                        // suppressed later.
+                        if frag_len.count_on_drain {
+                            count += 1;
+                        }
+                        let remainder = frag_len.remaining_bytes - n;
+                        self.fragment_lengths.push_front(FragmentSpan {
+                            remaining_bytes: remainder,
+                            count_on_drain: false,
+                        });
                         n = 0;
                     }
                 }
@@ -560,6 +587,9 @@ impl StreamFilter {
 
         for &(delim, action) in CHAT_DELIMITERS {
             if let Some(pos) = self.buffer.find(delim) {
+                if self.complete_prefix_is_still_ambiguous(pos, delim) {
+                    continue;
+                }
                 match earliest {
                     Some((best_pos, best_len, _)) => {
                         // Pick earliest position; on tie, pick longest delimiter
@@ -575,6 +605,16 @@ impl StreamFilter {
         }
 
         earliest
+    }
+
+    fn complete_prefix_is_still_ambiguous(&self, pos: usize, delim: &str) -> bool {
+        let suffix_from_match = &self.buffer[pos..];
+        CHAT_DELIMITERS.iter().any(|(other, _)| {
+            other.len() > delim.len()
+                && other.starts_with(delim)
+                && suffix_from_match.len() < other.len()
+                && other.starts_with(suffix_from_match)
+        })
     }
 
     /// Find how many bytes at the start of the buffer are safe to emit,
@@ -1054,6 +1094,10 @@ mod tests {
         let mut content = String::new();
         for frag in fragments {
             let out = f.feed(frag);
+            assert!(
+                out.consumed_positions <= 1 || out.suppressed_positions == out.consumed_positions,
+                "a token tail emitted after a delimiter must not be counted as a second position: {out:?}"
+            );
             if let Some(r) = out.reasoning {
                 reasoning.push_str(&r);
             }
@@ -1507,15 +1551,37 @@ mod tests {
         // suppressed_positions. This ensures position alignment is preserved
         // even when reasoning blocks appear before or between tool calls.
         let mut f = StreamFilter::new();
-        let out = f.feed("<think>reasoning</think>");
-        // The fragment contains TWO delimiters: <think> and </think>.
+        let open = f.feed("<think>");
+        let body = f.feed("reasoning");
+        let close = f.feed("</think>");
         assert_eq!(
-            out.suppressed_positions, 2,
+            open.suppressed_positions + close.suppressed_positions,
+            2,
             "<think>...</think> must produce suppressed_positions == 2 (one per delimiter match)"
         );
         // No content emitted from the markers; reasoning text goes to `reasoning`.
-        assert_eq!(out.content, None);
-        assert_eq!(out.reasoning.as_deref(), Some("reasoning"));
+        assert_eq!(open.content, None);
+        assert_eq!(close.content, None);
+        assert_eq!(body.content, None);
+        assert_eq!(body.reasoning.as_deref(), Some("reasoning"));
+    }
+
+    #[test]
+    fn delimiter_that_straddles_token_tail_counts_position_once() {
+        // The Gemma 4 opener commonly arrives as `<|channel>` followed by
+        // `thought\n`. The delimiter consumes `thought` but leaves `\n` as
+        // reasoning text from the same token; logprob position accounting must
+        // not count that token a second time when the newline is emitted.
+        let mut f = StreamFilter::new();
+        assert_eq!(f.feed("<|channel>").consumed_positions, 0);
+
+        let out = f.feed("thought\n");
+        assert_eq!(out.reasoning.as_deref(), Some("\n"));
+        assert_eq!(out.suppressed_positions, 2);
+        assert_eq!(
+            out.consumed_positions, 2,
+            "`thought\\n` must not be counted once for the delimiter and again for the newline"
+        );
     }
 
     // -- HIGH-1 regression: multi-fragment (multi-token) delimiter counting --
