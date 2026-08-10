@@ -1,6 +1,6 @@
 # Technical Report: PR #1099 - fix(models): correct Molmo v1 image decoding seams
 
-**Date**: 2026-08-10
+**Date**: 2026-08-11
 **Author**: mlxcel maintainers
 **Reviewer**: implementation, security, and finalizer review cycle
 **Status**: Completed for an open PR
