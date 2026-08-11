@@ -784,7 +784,7 @@ impl StreamFilter {
             if i == 0 && MUSE_PRIMED_SELF.starts_with(suffix) {
                 return 0;
             }
-            if i == 0 && MUSE_PRIMED_SELF_SPACED.starts_with(suffix) {
+            if i == 0 && suffix != " " && MUSE_PRIMED_SELF_SPACED.starts_with(suffix) {
                 return 0;
             }
             for &(delim, _) in CHAT_DELIMITERS {
@@ -1081,6 +1081,19 @@ mod tests {
         assert_eq!(f.feed("Hello").content, Some("Hello".to_string()));
         assert_eq!(f.feed(" ").content, Some(" ".to_string()));
         assert_eq!(f.feed("world").content, Some("world".to_string()));
+    }
+
+    #[test]
+    fn muse_primed_self_header_split_at_real_token_boundaries() {
+        let mut f = StreamFilter::new();
+        assert_eq!(f.feed(" to").content, None);
+        assert_eq!(f.feed("=self").content, None);
+        assert_eq!(f.feed("<|message|>").content, None);
+        assert_eq!(
+            f.feed("Need the weather.").reasoning.as_deref(),
+            Some("Need the weather.")
+        );
+        assert_eq!(f.feed("<|eom|>Done.").content.as_deref(), Some("Done."));
     }
 
     #[test]

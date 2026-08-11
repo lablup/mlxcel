@@ -4907,15 +4907,34 @@ impl BatchScheduler {
                 // window of the same composition (pinned by
                 // scheduler_cohort_parity_tests).
                 PrefillCohortKind::BatchedCold => {
+                    let remaining_capacity = self
+                        .active_batch
+                        .max_size()
+                        .saturating_sub(self.active_batch.len());
+                    if remaining_capacity == 0 {
+                        self.requeue_prefill_window_front(&mut slots);
+                        return;
+                    }
                     let group: Vec<SequenceInfo> = cohort
                         .members
                         .iter()
+                        .take(remaining_capacity)
                         .filter_map(|&i| slots[i].take())
                         .collect();
+                    if cohort.members.len() > remaining_capacity {
+                        self.requeue_prefill_window_front(&mut slots);
+                    }
                     self.run_padded_batched_prefill(group);
+                    if cohort.members.len() > remaining_capacity {
+                        return;
+                    }
                 }
                 PrefillCohortKind::Sequential => {
                     for &i in &cohort.members {
+                        if self.active_batch.is_full() {
+                            self.requeue_prefill_window_front(&mut slots);
+                            return;
+                        }
                         let Some(mut seq) = slots[i].take() else {
                             continue;
                         };
@@ -4927,6 +4946,26 @@ impl BatchScheduler {
                         self.execute_full_prefill(seq);
                     }
                 }
+            }
+        }
+    }
+
+    /// Return an already-drained prefill window to the front of the queue.
+    ///
+    /// Batched prefill drains optimistically, then cohort planning can route
+    /// VLM/adopted rows through the sequential prefill path. If earlier rows in
+    /// the same window filled the decode batch (for example `--parallel 1` with
+    /// two concurrent image requests), the untouched rows must wait for a later
+    /// tick instead of being prefilled into a nonexistent reserved slot.
+    fn requeue_prefill_window_front(&mut self, slots: &mut [Option<SequenceInfo>]) {
+        let mut remaining: Vec<SequenceInfo> = slots.iter_mut().filter_map(Option::take).collect();
+        for seq in remaining.drain(..).rev() {
+            if let Err(rejected) = self.prefill_queue.enqueue_front(seq) {
+                self.prompt_cache_seq_ctx.remove(&rejected.seq_id);
+                self.release_sequence_caches(rejected.seq_id);
+                let _ = rejected.response_tx.send(GenerateEvent::Error(
+                    "Server busy: prefill queue full".to_string(),
+                ));
             }
         }
     }
