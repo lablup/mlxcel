@@ -150,8 +150,11 @@ pub struct ServerStartupConfig {
 
     // Default sampling
     pub temperature: f32,
+    pub temperature_was_set: bool,
     pub top_k: i32,
+    pub top_k_was_set: bool,
     pub top_p: f32,
+    pub top_p_was_set: bool,
     pub min_p: f32,
     pub seed: Option<u64>,
     pub repeat_last_n: usize,
@@ -431,8 +434,11 @@ impl Default for ServerStartupConfig {
             enable_metrics: false,
             warmup: true,
             temperature: 0.8,
+            temperature_was_set: false,
             top_k: 40,
+            top_k_was_set: false,
             top_p: 0.9,
+            top_p_was_set: false,
             min_p: 0.1,
             seed: None,
             repeat_last_n: 64,
@@ -756,6 +762,77 @@ fn detect_model_media_support(model_path: &Path) -> ModelMediaSupport {
     ModelMediaSupport { video }
 }
 
+fn is_muse_glimmer_model_path(model_path: &Path) -> bool {
+    matches!(
+        crate::models::get_model_type(model_path),
+        Ok(crate::models::ModelType::MuseGlimmerVLM)
+    )
+}
+
+fn xla_backend_requested_from_env() -> bool {
+    std::env::var("MLXCEL_BACKEND")
+        .ok()
+        .is_some_and(|backend| backend.eq_ignore_ascii_case("xla"))
+}
+
+fn muse_glimmer_distributed_requested(startup: &ServerStartupConfig) -> bool {
+    startup.distributed_config.is_some()
+        || startup.node_role.is_some()
+        || !startup.peers.is_empty()
+        || !startup.prefill_peers.is_empty()
+        || !startup.decode_peers.is_empty()
+        || startup.serving_bind.is_some()
+}
+
+fn validate_muse_glimmer_unsupported_startup(startup: &ServerStartupConfig) -> Result<()> {
+    if !is_muse_glimmer_model_path(&startup.model_path) {
+        return Ok(());
+    }
+
+    anyhow::ensure!(
+        startup.adapter_path.is_none(),
+        "Muse Glimmer VLM does not support LoRA/adapters; remove --adapter/--lora"
+    );
+    anyhow::ensure!(
+        startup.draft_model_path.is_none()
+            && startup.draft_kind.is_none()
+            && startup.draft_block_size.is_none(),
+        "Muse Glimmer VLM does not support speculative decoding or DFlash; remove \
+         --draft-model/--model-draft, --draft-kind, and --draft-block-size"
+    );
+    anyhow::ensure!(
+        startup.kv_cache_mode == mlxcel_core::cache::KVCacheMode::Fp16
+            && !startup.batch_kv_quant.is_enabled(),
+        "Muse Glimmer VLM does not support INT8/Turbo KV cache modes or batch KV \
+         quantization because it owns mixed sliding/full caches; use fp16 KV cache \
+         mode and leave --kv-bits 0"
+    );
+    anyhow::ensure!(
+        startup.tp_size == 1,
+        "Muse Glimmer VLM does not support tensor-parallel inference yet; use --tp-size 1"
+    );
+    anyhow::ensure!(
+        startup.pp_layers.is_none()
+            && startup.pp_auto.is_none()
+            && !startup.pp_peer
+            && !startup.enable_elastic_pp,
+        "Muse Glimmer VLM does not support pipeline-parallel inference yet; remove \
+         --pp-* and elastic-PP flags"
+    );
+    anyhow::ensure!(
+        !muse_glimmer_distributed_requested(startup),
+        "Muse Glimmer VLM does not support distributed or disaggregated serving yet; \
+         run a single-process MLX server"
+    );
+    anyhow::ensure!(
+        !xla_backend_requested_from_env(),
+        "Muse Glimmer VLM does not support XLA/IREE/OpenXLA execution yet; unset \
+         MLXCEL_BACKEND=xla"
+    );
+
+    Ok(())
+}
+
 /// Resolve chat template from override string, file, or model's tokenizer metadata.
 pub(super) fn resolve_chat_template(
     template_override: Option<&str>,
@@ -817,6 +894,7 @@ pub(super) fn build_server_config(
         startup.no_batch,
     );
     let max_kv_size = resolve_context_kv_cap(context_size, startup.max_kv_size);
+    let sampling_defaults = resolve_generation_sampling_defaults(startup);
     // Derive the disaggregated serving role from `--node-role` (#126 B2). The
     // role string was already validated in `resolve_distributed_startup`, so a
     // parse failure here falls back to the single-node `Hybrid` default rather
@@ -849,9 +927,9 @@ pub(super) fn build_server_config(
         enable_slots_endpoint: startup.enable_slots,
         enable_props_endpoint: startup.enable_props,
         enable_metrics_endpoint: startup.enable_metrics,
-        default_temperature: startup.temperature,
-        default_top_p: startup.top_p,
-        default_top_k: startup.top_k,
+        default_temperature: sampling_defaults.temperature,
+        default_top_p: sampling_defaults.top_p,
+        default_top_k: sampling_defaults.top_k,
         default_min_p: startup.min_p,
         default_repetition_penalty: startup.repeat_penalty,
         default_repetition_context_size: startup.repeat_last_n,
@@ -950,6 +1028,36 @@ pub(super) fn build_server_config(
         // on the loop-detection default for protected traffic; plain and
         // grammar-only requests stay disabled.
         model_is_gemma4_family: detect_gemma4_family(&startup.model_path),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct ResolvedGenerationSamplingDefaults {
+    pub temperature: f32,
+    pub top_p: f32,
+    pub top_k: i32,
+}
+
+pub(super) fn resolve_generation_sampling_defaults(
+    startup: &ServerStartupConfig,
+) -> ResolvedGenerationSamplingDefaults {
+    let config_defaults = crate::read_generation_config_defaults(&startup.model_path);
+    ResolvedGenerationSamplingDefaults {
+        temperature: if startup.temperature_was_set {
+            startup.temperature
+        } else {
+            config_defaults.temperature.unwrap_or(startup.temperature)
+        },
+        top_p: if startup.top_p_was_set {
+            startup.top_p
+        } else {
+            config_defaults.top_p.unwrap_or(startup.top_p)
+        },
+        top_k: if startup.top_k_was_set {
+            startup.top_k
+        } else {
+            config_defaults.top_k.unwrap_or(startup.top_k)
+        },
     }
 }
 
@@ -1598,6 +1706,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // Unaffected model families and an explicit `MLX_USE_CUDA_GRAPHS` operator
     // override are left untouched.
     crate::loading::maybe_disable_cuda_graphs_for_model_for_path(&startup.model_path);
+    validate_muse_glimmer_unsupported_startup(&startup)?;
 
     super::media::configure_image_input_limits(super::media::ImageInputLimits {
         max_payload_bytes: startup.max_image_payload_size,
@@ -2070,3 +2179,7 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
 #[cfg(test)]
 #[path = "startup_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "muse_glimmer_startup_guard_tests.rs"]
+mod muse_glimmer_startup_guard_tests;

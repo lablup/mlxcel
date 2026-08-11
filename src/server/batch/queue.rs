@@ -91,6 +91,24 @@ impl PrefillQueue {
         Ok(())
     }
 
+    /// Push a sequence to the front of its priority lane.
+    ///
+    /// Used when the scheduler drains a prefill window optimistically but
+    /// later discovers that the active decode batch has no remaining slot for
+    /// one of the drained rows. Returning the row to the front preserves FIFO
+    /// order ahead of rows that were never drained from that lane.
+    pub fn enqueue_front(&mut self, seq: SequenceInfo) -> Result<(), Box<SequenceInfo>> {
+        if self.len() >= self.max_size {
+            return Err(Box::new(seq));
+        }
+        match seq.priority {
+            RequestPriority::High => self.high.push_front(seq),
+            RequestPriority::Normal => self.normal.push_front(seq),
+            RequestPriority::Low => self.low.push_front(seq),
+        }
+        Ok(())
+    }
+
     /// Pop the highest-priority, oldest sequence from the queue.
     ///
     /// Drains from the high lane first, then normal, then low.
@@ -355,6 +373,24 @@ mod tests {
         assert!(queue.enqueue(s3).is_ok());
 
         assert_eq!(queue.len(), 3);
+
+        assert_eq!(queue.dequeue().unwrap().seq_id.as_u64(), 10);
+        assert_eq!(queue.dequeue().unwrap().seq_id.as_u64(), 20);
+        assert_eq!(queue.dequeue().unwrap().seq_id.as_u64(), 30);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn enqueue_front_preserves_requeued_window_order() {
+        let mut queue = PrefillQueue::new();
+
+        let (s1, _r1) = make_test_sequence(10);
+        let (s2, _r2) = make_test_sequence(20);
+        let (s3, _r3) = make_test_sequence(30);
+
+        assert!(queue.enqueue(s3).is_ok());
+        assert!(queue.enqueue_front(s2).is_ok());
+        assert!(queue.enqueue_front(s1).is_ok());
 
         assert_eq!(queue.dequeue().unwrap().seq_id.as_u64(), 10);
         assert_eq!(queue.dequeue().unwrap().seq_id.as_u64(), 20);

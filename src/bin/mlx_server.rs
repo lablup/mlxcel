@@ -1355,8 +1355,12 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         warmup: args.warmup,
         no_warmup: args._no_warmup,
         temperature: args.temp,
+        temperature_was_set: long_cli_flag_was_set("temp"),
         top_k: args.top_k,
+        top_k_was_set: long_cli_flag_was_set("top-k")
+            || std::env::var_os("LLAMA_ARG_TOP_K").is_some(),
         top_p: args.top_p,
+        top_p_was_set: long_cli_flag_was_set("top-p"),
         min_p: args.min_p,
         seed: args.seed,
         repeat_last_n: args.repeat_last_n,

@@ -24,6 +24,7 @@ use minijinja::{Environment, ErrorKind, Value};
 use serde::{Deserialize, Serialize};
 
 use super::chat_template_kwargs::ChatTemplateKwargs;
+use super::tool_calls::{self, ToolCallFormat};
 use super::types::request::Tool;
 
 /// A message in the conversation
@@ -196,6 +197,38 @@ impl ChatTemplateProcessor {
     /// Used by: server/prompt_cache/key::template_sig
     pub fn template_source(&self) -> &str {
         &self.template
+    }
+
+    /// Default tool-call output format implied by this template.
+    ///
+    /// Muse Glimmer's pinned template declares the ATEM grammar directly, so
+    /// template identity is enough to select ATEM without relying on route-
+    /// local parser ordering.
+    pub fn default_tool_call_format(&self) -> Option<ToolCallFormat> {
+        tool_calls::infer_default_tool_call_format(None, None, Some(&self.template))
+    }
+
+    /// Resolve a tool-call format while preserving an explicit operator choice.
+    pub fn resolve_tool_call_format(
+        &self,
+        explicit: Option<ToolCallFormat>,
+    ) -> Option<ToolCallFormat> {
+        tool_calls::resolve_tool_call_format(explicit, None, None, Some(&self.template))
+    }
+
+    /// Name to expose as the active tool-call parser for diagnostics.
+    ///
+    /// An explicit parser name wins. Otherwise, a family-specific format name
+    /// (currently `atem` for Muse Glimmer) is preferred, falling back to the
+    /// generic auto-detecting `mlxcel` parser when the template merely supports
+    /// tools.
+    pub fn tool_call_parser_name(&self, explicit: Option<&str>) -> Option<String> {
+        if let Some(name) = explicit.map(str::trim).filter(|name| !name.is_empty()) {
+            return Some(name.to_string());
+        }
+        self.default_tool_call_format()
+            .map(|format| format.as_str().to_string())
+            .or_else(|| self.supports_tools_hint().then(|| "mlxcel".to_string()))
     }
 
     /// Detect the Gemma-4 "thinking channel" chat template.
@@ -771,6 +804,55 @@ fn preprocess_template(template: String) -> String {
         let escaped = format!("\"{marker}\\n\"");
         if out.contains(&multiline) {
             out = out.replace(&multiline, &escaped);
+        }
+    }
+    out = preprocess_python_conditional_expressions(out);
+    out
+}
+
+/// Rewrite Python/Jinja2 expression forms used by some HF templates into the
+/// block syntax MiniJinja accepts today.
+///
+/// Muse Glimmer's checkpoint template is a single-line HF Jinja template that
+/// uses Python's `a if cond else b` expression form in `{% set %}` and `{{ }}`
+/// sites. MiniJinja rejects that syntax at parse time, while the equivalent
+/// whitespace-trimmed block form renders identically.
+fn preprocess_python_conditional_expressions(mut out: String) -> String {
+    let replacements: &[(&str, &str)] = &[
+        (
+            "{%- set fn = tool.function if tool.function is defined else tool -%}",
+            "{%- if tool.function is defined -%}{%- set fn = tool.function -%}{%- else -%}{%- set fn = tool -%}{%- endif -%}",
+        ),
+        (
+            "{%- set nd = tool_namespace_descriptions if tool_namespace_descriptions is defined else {} -%}",
+            "{%- if tool_namespace_descriptions is defined -%}{%- set nd = tool_namespace_descriptions -%}{%- else -%}{%- set nd = {} -%}{%- endif -%}",
+        ),
+        (
+            "{%- set rs = reasoning_strength if reasoning_strength is defined and reasoning_strength else 'high' -%}",
+            "{%- if reasoning_strength is defined and reasoning_strength -%}{%- set rs = reasoning_strength -%}{%- else -%}{%- set rs = 'high' -%}{%- endif -%}",
+        ),
+        (
+            "{%- set kc = knowledge_cutoff if knowledge_cutoff is defined and knowledge_cutoff else '2026-01-04' -%}",
+            "{%- if knowledge_cutoff is defined and knowledge_cutoff -%}{%- set kc = knowledge_cutoff -%}{%- else -%}{%- set kc = '2026-01-04' -%}{%- endif -%}",
+        ),
+        (
+            "{%- set end_token = '<|eom|>' if (not loop.last and messages[loop.index0 + 1]['role'] == role) else '<|eot|>' -%}",
+            "{%- if not loop.last and messages[loop.index0 + 1]['role'] == role -%}{%- set end_token = '<|eom|>' -%}{%- else -%}{%- set end_token = '<|eot|>' -%}{%- endif -%}",
+        ),
+        (
+            "{%- set rns = namespace(name=tcid if tcid else '') -%}",
+            "{%- if tcid -%}{%- set rns = namespace(name=tcid) -%}{%- else -%}{%- set rns = namespace(name='') -%}{%- endif -%}",
+        ),
+        (
+            "{{- ('<|eot|>' if end_turn else '<|eom|>') -}}",
+            "{%- if end_turn -%}<|eot|>{%- else -%}<|eom|>{%- endif -%}",
+        ),
+        ("args is not mapping", "not (args is mapping)"),
+        ("v is not string", "not (v is string)"),
+    ];
+    for (from, to) in replacements {
+        if out.contains(from) {
+            out = out.replace(from, to);
         }
     }
     out

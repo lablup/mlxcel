@@ -1138,7 +1138,10 @@ fn strip_unclosed_primed_thinking(content: String, raw_output: &str, primed: boo
 /// otherwise (so the response omits `reasoning_content` for non-thinking
 /// models). Tool-call blocks are suppressed by the filter and never leak into
 /// reasoning; they are materialized by the parser path instead.
-fn extract_reasoning_content(raw_text: &str, primed_open_thinking: bool) -> Option<String> {
+pub(crate) fn extract_reasoning_content(
+    raw_text: &str,
+    primed_open_thinking: bool,
+) -> Option<String> {
     let mut filter = if primed_open_thinking {
         StreamFilter::new_primed_open_thinking()
     } else {

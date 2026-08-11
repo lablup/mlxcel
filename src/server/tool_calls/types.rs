@@ -16,6 +16,8 @@
 //!
 //! Used by: tool_calls::parser, tool_calls::formats, routes/chat
 
+use std::str::FromStr;
+
 /// A parsed tool call extracted from model output.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedToolCall {
@@ -29,6 +31,10 @@ pub struct ParsedToolCall {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ToolCallFormat {
+    /// ATEM (Muse/Onyx): `<atem:function_calls>` wrapping one or more
+    /// `<atem:invoke name="fn">` blocks with `<atem:parameter name="k">v`
+    /// `</atem:parameter>` values.
+    Atem,
     /// Hermes/Qwen: `<tool_call>{"name": ..., "arguments": ...}</tool_call>`
     Hermes,
     /// Llama 3.x: `{"name": ..., "parameters": ...}` possibly with `<|python_tag|>`
@@ -105,6 +111,70 @@ pub enum ToolCallFormat {
     /// `<longcat_tool_call>`, `<longcat_arg_key>`, and `<longcat_arg_value>`; a
     /// block body that starts with `{` is treated as a raw JSON tool object.
     Longcat,
+}
+
+impl ToolCallFormat {
+    /// Canonical lower-case identifier for diagnostics and tests.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Atem => "atem",
+            Self::Hermes => "hermes",
+            Self::Llama3 => "llama3",
+            Self::MistralNemo => "mistral_nemo",
+            Self::Mistral => "mistral",
+            Self::FunctionaryV31 => "functionary_v31",
+            Self::FunctionaryV32 => "functionary_v32",
+            Self::CommandR => "command_r",
+            Self::Granite => "granite",
+            Self::Gemma4 => "gemma4",
+            Self::FunctionGemma => "function_gemma",
+            Self::GenericJson => "generic_json",
+            Self::MinimaxM2 => "minimax_m2",
+            Self::MinimaxM3 => "minimax_m3",
+            Self::Qwen3Coder => "qwen3_coder",
+            Self::Harmony => "harmony",
+            Self::KimiK2 => "kimi_k2",
+            Self::Pythonic => "pythonic",
+            Self::Glm47 => "glm47",
+            Self::Longcat => "longcat",
+        }
+    }
+}
+
+impl std::fmt::Display for ToolCallFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ToolCallFormat {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "atem" => Ok(Self::Atem),
+            "hermes" => Ok(Self::Hermes),
+            "llama3" | "llama_3" => Ok(Self::Llama3),
+            "mistral_nemo" | "mistral-nemo" => Ok(Self::MistralNemo),
+            "mistral" => Ok(Self::Mistral),
+            "functionary_v31" | "functionary-v31" => Ok(Self::FunctionaryV31),
+            "functionary_v32" | "functionary-v32" => Ok(Self::FunctionaryV32),
+            "command_r" | "command-r" => Ok(Self::CommandR),
+            "granite" => Ok(Self::Granite),
+            "gemma4" | "gemma_4" => Ok(Self::Gemma4),
+            "function_gemma" | "function-gemma" => Ok(Self::FunctionGemma),
+            "generic_json" | "generic-json" => Ok(Self::GenericJson),
+            "minimax_m2" | "minimax-m2" => Ok(Self::MinimaxM2),
+            "minimax_m3" | "minimax-m3" => Ok(Self::MinimaxM3),
+            "qwen3_coder" | "qwen3-coder" => Ok(Self::Qwen3Coder),
+            "harmony" => Ok(Self::Harmony),
+            "kimi_k2" | "kimi-k2" => Ok(Self::KimiK2),
+            "pythonic" => Ok(Self::Pythonic),
+            "glm47" | "glm4.7" | "glm-4.7" => Ok(Self::Glm47),
+            "longcat" => Ok(Self::Longcat),
+            _ => Err(()),
+        }
+    }
 }
 
 /// Result of parsing model output for tool calls.

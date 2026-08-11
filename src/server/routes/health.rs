@@ -26,16 +26,13 @@ use crate::server::types::{BatchStatusInfo, HealthResponse};
 ///
 /// Returns `(context_size, tool_call_parser)`:
 /// - `context_size`: the effective per-slot context window (0 = model default).
-/// - `tool_call_parser`: `Some("mlxcel")` when the chat template supports
-///   tool calls; `None` when the template does not expose the `tools`
-///   variable and tool-call parsing will therefore never activate.
+/// - `tool_call_parser`: a family-specific parser name when template identity
+///   selects one (for example `atem` for Muse Glimmer), `Some("mlxcel")` when
+///   the template generically supports tools, or `None` when parsing will never
+///   activate.
 fn model_health_fields(state: &AppState) -> (usize, Option<String>) {
     let context_size = state.config.context_size;
-    let tool_call_parser = if state.chat_template.supports_tools_hint() {
-        Some("mlxcel".to_string())
-    } else {
-        None
-    };
+    let tool_call_parser = state.chat_template.tool_call_parser_name(None);
     (context_size, tool_call_parser)
 }
 

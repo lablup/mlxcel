@@ -554,6 +554,60 @@ fn validate_tensor_parallel_args(args: &GenerateArgs) -> Result<()> {
     .map(|_| ())
 }
 
+fn muse_glimmer_cli_target(model_path: &Path) -> bool {
+    matches!(
+        mlxcel::models::get_model_type(model_path),
+        Ok(mlxcel::models::ModelType::MuseGlimmerVLM)
+    )
+}
+
+fn xla_backend_requested_from_env() -> bool {
+    std::env::var("MLXCEL_BACKEND")
+        .ok()
+        .is_some_and(|backend| backend.eq_ignore_ascii_case("xla"))
+}
+
+pub(super) fn validate_muse_glimmer_cli_unsupported_options(
+    args: &GenerateArgs,
+    kv_cache_mode: KVCacheMode,
+) -> Result<()> {
+    if !muse_glimmer_cli_target(&args.model.model) {
+        return Ok(());
+    }
+
+    ensure!(
+        args.model.adapter.is_none(),
+        "Muse Glimmer VLM does not support LoRA/adapters; remove --adapter"
+    );
+    ensure!(
+        args.model.draft_model.is_none()
+            && args.speculative.draft_kind.is_none()
+            && args.speculative.draft_block_size.is_none(),
+        "Muse Glimmer VLM does not support speculative decoding or DFlash; remove \
+         --draft-model, --draft-kind, and --draft-block-size"
+    );
+    ensure!(
+        args.generation.video.is_empty(),
+        "Muse Glimmer VLM does not support video input yet; use --image for static images"
+    );
+    ensure!(
+        kv_cache_mode == KVCacheMode::Fp16,
+        "Muse Glimmer VLM does not support INT8/Turbo KV cache modes because it owns \
+         mixed sliding/full caches; use fp16 KV cache mode"
+    );
+    ensure!(
+        !cli_pipeline_requested(args),
+        "Muse Glimmer VLM does not support pipeline-parallel inference yet"
+    );
+    ensure!(
+        !xla_backend_requested_from_env(),
+        "Muse Glimmer VLM does not support XLA/IREE/OpenXLA execution yet; unset \
+         MLXCEL_BACKEND=xla"
+    );
+
+    Ok(())
+}
+
 fn apply_user_chat_template(processor: &ChatTemplateProcessor, user_prompt: &str) -> String {
     let messages = [ChatMessage {
         role: "user".to_string(),
@@ -801,11 +855,53 @@ fn resolve_cli_token_bias(
         .map_err(|e| anyhow::anyhow!("--lang-bias: resolve failed: {e}"))
 }
 
-fn build_cli_sampling_config(args: &GenerateArgs, stop_token_ids: Vec<i32>) -> SamplingConfig {
-    build_sampling_config(ResolvedSamplingParams {
-        temperature: args.sampling.temp,
-        top_k: args.sampling.top_k,
-        top_p: args.sampling.top_p,
+#[derive(Debug, Clone, Copy, Default)]
+struct CliSamplingFlagState {
+    temperature: bool,
+    top_p: bool,
+    top_k: bool,
+}
+
+fn current_cli_sampling_flags() -> CliSamplingFlagState {
+    CliSamplingFlagState {
+        temperature: mlxcel::server::long_cli_flag_was_set("temp") || short_cli_flag_was_set('t'),
+        top_p: mlxcel::server::long_cli_flag_was_set("top-p"),
+        top_k: mlxcel::server::long_cli_flag_was_set("top-k"),
+    }
+}
+
+fn short_cli_flag_was_set(name: char) -> bool {
+    let standalone = format!("-{name}");
+    std::env::args_os().any(|arg| {
+        let arg = arg.to_string_lossy();
+        arg == standalone || arg.starts_with(&standalone) && arg.len() > standalone.len()
+    })
+}
+
+fn resolved_cli_sampling_params(
+    args: &GenerateArgs,
+    stop_token_ids: Vec<i32>,
+    flags: CliSamplingFlagState,
+) -> ResolvedSamplingParams {
+    let generation_defaults = mlxcel::read_generation_config_defaults(&args.model.model);
+    ResolvedSamplingParams {
+        temperature: if flags.temperature {
+            args.sampling.temp
+        } else {
+            generation_defaults
+                .temperature
+                .unwrap_or(args.sampling.temp)
+        },
+        top_k: if flags.top_k {
+            args.sampling.top_k
+        } else {
+            generation_defaults.top_k.unwrap_or(args.sampling.top_k)
+        },
+        top_p: if flags.top_p {
+            args.sampling.top_p
+        } else {
+            generation_defaults.top_p.unwrap_or(args.sampling.top_p)
+        },
         min_p: args.sampling.min_p,
         seed: args.sampling.seed,
         repetition_penalty: args.sampling.repetition_penalty,
@@ -821,7 +917,28 @@ fn build_cli_sampling_config(args: &GenerateArgs, stop_token_ids: Vec<i32>) -> S
         xtc_probability: 0.0,
         xtc_threshold: 0.1,
         stop_token_ids,
-    })
+    }
+}
+
+fn build_cli_sampling_config(args: &GenerateArgs, stop_token_ids: Vec<i32>) -> SamplingConfig {
+    build_sampling_config(resolved_cli_sampling_params(
+        args,
+        stop_token_ids,
+        current_cli_sampling_flags(),
+    ))
+}
+
+#[allow(dead_code)]
+fn build_cli_sampling_config_with_flags(
+    args: &GenerateArgs,
+    stop_token_ids: Vec<i32>,
+    flags: CliSamplingFlagState,
+) -> SamplingConfig {
+    build_sampling_config(resolved_cli_sampling_params(args, stop_token_ids, flags))
+}
+
+fn build_cli_chat_sampling_params(args: &GenerateArgs) -> ResolvedSamplingParams {
+    resolved_cli_sampling_params(args, Vec::new(), current_cli_sampling_flags())
 }
 
 pub(super) fn print_generation_preamble(user_prompt: &str) -> Result<()> {
@@ -1705,25 +1822,7 @@ fn chat_options_from_args(args: &GenerateArgs) -> Result<crate::commands::ChatOp
     )
     .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    let sampling = ResolvedSamplingParams {
-        temperature: args.sampling.temp,
-        top_k: args.sampling.top_k,
-        top_p: args.sampling.top_p,
-        min_p: args.sampling.min_p,
-        seed: args.sampling.seed,
-        repetition_penalty: args.sampling.repetition_penalty,
-        dry_multiplier: args.sampling.dry_multiplier,
-        dry_base: args.sampling.dry_base,
-        dry_allowed_length: args.sampling.dry_allowed_length,
-        dry_penalty_last_n: args.sampling.dry_penalty_last_n,
-        dry_sequence_breakers: Vec::new(),
-        frequency_penalty: 0.0,
-        presence_penalty: 0.0,
-        // XTC is not yet exposed as a CLI flag; the REPL keeps it disabled.
-        xtc_probability: 0.0,
-        xtc_threshold: 0.1,
-        stop_token_ids: Vec::new(),
-    };
+    let sampling = build_cli_chat_sampling_params(args);
 
     let mut opts = crate::commands::ChatOptions::new(
         args.model.model.clone(),
@@ -1803,6 +1902,13 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
 
     validate_tensor_parallel_args(&args)?;
     validate_pipeline_parallel_args(&args)?;
+    let kv_cache_mode = resolve_kv_cache_mode(
+        args.generation.turbo.cache_type_k.as_deref(),
+        args.generation.turbo.cache_type_v.as_deref(),
+        args.generation.turbo.kv_cache_mode.as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
+    validate_muse_glimmer_cli_unsupported_options(&args, kv_cache_mode)?;
 
     // Parse and validate language bias arguments early (before model load).
     // Empty/absent CLI flags resolve to `None`, which keeps the generation
@@ -1975,17 +2081,6 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             );
         }
     }
-
-    // Resolve the effective KV cache mode from the shared TurboQuant flag
-    // group. The helper accepts the same precedence rules as `mlxcel serve`
-    // and `mlxcel-server` (split flags > legacy shorthand > FP16 default),
-    // so all three binaries route through one resolution path.
-    let kv_cache_mode = resolve_kv_cache_mode(
-        args.generation.turbo.cache_type_k.as_deref(),
-        args.generation.turbo.cache_type_v.as_deref(),
-        args.generation.turbo.kv_cache_mode.as_deref(),
-    )
-    .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     // SAFETY: translate `--turbo-boundary-v` into the `MLXCEL_KV_BOUNDARY_V_LAYERS`
     // env var BEFORE any generator or worker thread is spawned. mlxcel-core

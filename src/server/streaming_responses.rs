@@ -153,6 +153,8 @@ pub struct ResponseStreamEmitter {
     pub message_text_acc: String,
     /// Accumulated reasoning content for the active reasoning item.
     pub reasoning_text_acc: String,
+    /// Reasoning content from items that have already been closed.
+    completed_reasoning_text: String,
 }
 
 impl Default for ResponseStreamEmitter {
@@ -170,6 +172,7 @@ impl ResponseStreamEmitter {
             active_reasoning_id: None,
             message_text_acc: String::new(),
             reasoning_text_acc: String::new(),
+            completed_reasoning_text: String::new(),
         }
     }
 
@@ -204,7 +207,16 @@ impl ResponseStreamEmitter {
     pub fn close_reasoning(&mut self) -> Option<(String, String)> {
         let id = self.active_reasoning_id.take()?;
         let text = std::mem::take(&mut self.reasoning_text_acc);
+        self.completed_reasoning_text.push_str(&text);
         Some((id, text))
+    }
+
+    pub fn completed_reasoning_text(&self) -> Option<String> {
+        if self.completed_reasoning_text.is_empty() {
+            None
+        } else {
+            Some(self.completed_reasoning_text.clone())
+        }
     }
 }
 

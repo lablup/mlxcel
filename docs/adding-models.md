@@ -150,6 +150,39 @@ be possible at first, but the implementation should still prove that:
 If later a reference implementation appears, add a follow-up comparison against
 that implementation and tighten the tests or benchmark notes accordingly.
 
+### Large VLM Baselines
+
+Large VLM ports need explicit operational documentation before they are exposed
+as supported. In addition to the loader/runtime tests, update
+`docs/supported-models.md`, `mlxcel arch`, and any top-level help text that
+summarizes runtime capabilities with:
+
+- checkpoint identity: repository, pinned revision, local fixture/checkpoint
+  path when relevant, dtype, and approximate weight size
+- memory expectation: the smallest realistic hardware class and whether other
+  large jobs should be serialized during validation
+- context and cache semantics: actual maximum context and whether the family
+  uses standard growing KV, rotating/sliding KV, or a model-owned mixed cache
+- multimodal limits: image/video/audio support, visual-token caps, placeholder
+  expansion rules, and prompt-token accounting
+- serving surfaces: CLI, OpenAI Chat Completions, Responses, Anthropic
+  compatibility, streaming, batching, and tool-call format
+- generation defaults: EOS ids and sampling defaults read from
+  `generation_config.json`
+- unsupported paths: quantization, speculative/DFlash, adapters, TP, PP, XLA,
+  distributed/disaggregated serving, and any modality that is intentionally
+  rejected
+
+Muse Glimmer is the current example of this rule. Its first baseline targets
+`meta-models/Muse-Glimmer-30B` revision
+`97c77dff50b2797bcc558fa2d909761dbc575c59`, dense BF16 weights of about
+59.55 GB, 131072 context, 2048-token sliding layers plus growing full layers,
+4096 visual tokens per image, ATEM tool calls, and `reasoning_strength`
+`low`/`medium`/`high`/`xhigh` with `high` by default. Do not mark a large VLM
+as real-checkpoint qualified until the hardware gate records load, memory,
+throughput, text/image/multi-image, tool-call, long-context, and scheduler
+evidence against the actual checkpoint.
+
 ## Labelling a Model Issue
 
 Model-support issues carry three orthogonal labels beyond the usual

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 
 use super::{
     Cli, Commands, FAMILY_ORDER, PipelineParallelOptions, TensorParallelOptions,
@@ -110,6 +110,41 @@ fn supported_models_output_has_no_dead_doc_link() {
         !out.to_lowercase().contains("for the full list"),
         "rendered output should be self-contained; no `For the full list…` pointer"
     );
+}
+
+#[test]
+fn supported_models_output_describes_muse_glimmer_baseline() {
+    let mut out = String::new();
+    write_supported_models(&mut out).unwrap();
+
+    assert!(out.contains("Muse VLM:"), "missing Muse VLM family: {out}");
+    assert!(
+        out.contains("Muse Glimmer 30B VLM (BF16, mixed 2048 sliding/full cache, ATEM)"),
+        "missing Muse Glimmer operational summary: {out}"
+    );
+}
+
+#[test]
+fn top_level_help_mentions_muse_glimmer_limits() {
+    let mut command = Cli::command();
+    let help = command.render_long_help().to_string();
+
+    for expected in [
+        "Muse Glimmer 30B baseline",
+        "59.55 GB",
+        "GB10-class unified memory",
+        "reasoning strengths",
+        "ATEM tools",
+        "speculative/DFlash",
+        "TP/PP",
+        "XLA/distributed",
+        "qualified on the pinned BF16 checkpoint with NVIDIA GB10",
+    ] {
+        assert!(
+            help.contains(expected),
+            "missing {expected:?} in help:\n{help}"
+        );
+    }
 }
 
 /// `FAMILY_ORDER` controls the rendered section order. If a future

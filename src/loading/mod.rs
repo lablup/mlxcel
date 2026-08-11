@@ -96,6 +96,42 @@ fn parse_eos_token_ids(config: &serde_json::Value) -> Vec<i32> {
     }
 }
 
+/// Sampling and stop-token defaults read from `generation_config.json`.
+///
+/// Fields are optional because many checkpoints omit some or all sampling
+/// knobs. Callers should overlay these onto their historical defaults only
+/// when the user did not explicitly provide that knob.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GenerationConfigDefaults {
+    pub eos_token_ids: Vec<i32>,
+    pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub top_k: Option<i32>,
+}
+
+fn parse_generation_config_defaults(config: &serde_json::Value) -> GenerationConfigDefaults {
+    GenerationConfigDefaults {
+        eos_token_ids: parse_eos_token_ids(config),
+        temperature: parse_finite_f32_field(config, "temperature"),
+        top_p: parse_finite_f32_field(config, "top_p"),
+        top_k: parse_i32_field(config, "top_k"),
+    }
+}
+
+fn parse_finite_f32_field(config: &serde_json::Value, key: &str) -> Option<f32> {
+    let value = config.get(key)?.as_f64()?;
+    if value.is_finite() {
+        Some(value as f32)
+    } else {
+        None
+    }
+}
+
+fn parse_i32_field(config: &serde_json::Value, key: &str) -> Option<i32> {
+    let value = config.get(key)?.as_i64()?;
+    i32::try_from(value).ok()
+}
+
 pub(super) fn parse_model_config<T: DeserializeOwned>(config_str: &str) -> Result<T> {
     serde_json::from_str(config_str).map_err(|e| anyhow::anyhow!("Failed to parse config: {}", e))
 }
@@ -197,6 +233,7 @@ fn try_load_vlm_model_from_dir(
         ModelType::Ernie45MoeVLM => Some(load_ernie4_5_moe_vlm(model_path)?),
         ModelType::HunyuanVLM => Some(load_hunyuan_vlm(model_path)?),
         ModelType::MiniMaxM3VL => Some(load_minimax_m3_vl(model_path)?),
+        ModelType::MuseGlimmerVLM => Some(load_muse_glimmer_vlm(model_path)?),
         ModelType::LlavaBunnyVLM => Some(load_llava_bunny_vlm(model_path)?),
         ModelType::AyaVisionVLM => Some(load_aya_vision_vlm(model_path)?),
         ModelType::PaliGemmaVLM => Some(load_paligemma_vlm(model_path)?),
@@ -311,19 +348,27 @@ fn load_llama_family_from_weights(
     Ok(LoadedModel::Llama(model))
 }
 
+/// Read generation defaults from generation_config.json.
+///
+/// Returns an empty default set when the file is missing, unreadable, or
+/// malformed so legacy callers keep their built-in sampling defaults.
+pub fn read_generation_config_defaults(model_dir: &Path) -> GenerationConfigDefaults {
+    let config_path = model_dir.join("generation_config.json");
+    let Ok(content) = std::fs::read_to_string(&config_path) else {
+        return GenerationConfigDefaults::default();
+    };
+    let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return GenerationConfigDefaults::default();
+    };
+    parse_generation_config_defaults(&config)
+}
+
 /// Read EOS token IDs from generation_config.json
 ///
 /// Returns the token IDs from the `eos_token_id` field, which can be either
 /// a single integer or an array of integers. Returns empty vec if not found.
 pub fn read_eos_token_ids(model_dir: &Path) -> Vec<i32> {
-    let config_path = model_dir.join("generation_config.json");
-    let Ok(content) = std::fs::read_to_string(&config_path) else {
-        return Vec::new();
-    };
-    let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return Vec::new();
-    };
-    parse_eos_token_ids(&config)
+    read_generation_config_defaults(model_dir).eos_token_ids
 }
 
 /// Read the model's context window from `config.json`.
@@ -696,6 +741,10 @@ fn load_model_from_weights(model_path: &Path, weights: &mut WeightMap) -> Result
 
     Ok(model)
 }
+
+#[cfg(test)]
+#[path = "generation_config_tests.rs"]
+mod generation_config_tests;
 
 #[cfg(test)]
 #[path = "tests.rs"]

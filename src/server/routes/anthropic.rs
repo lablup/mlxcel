@@ -439,6 +439,13 @@ async fn stream_messages(
             .ok()
             .map(|mut f| f.flush())
             .unwrap_or_default();
+        if include_thinking
+            && let Some(reasoning) = trailing.reasoning.filter(|s| !s.is_empty())
+            && let Ok(mut em) = emitter.lock()
+        {
+            em.open_thinking(&sender);
+            em.emit_thinking_delta(&sender, reasoning);
+        }
         if let Some(text) = trailing.content.filter(|s| !s.is_empty())
             && let Ok(mut em) = emitter.lock()
         {
@@ -606,7 +613,7 @@ pub async fn anthropic_count_tokens(
 /// `content` is the visible text; otherwise structural tokens are stripped.
 /// Reasoning is recovered from a `<think>...</think>` block (inline or
 /// open-primed close-only) so it can populate a dedicated `thinking` block.
-fn split_visible_reasoning(
+pub(crate) fn split_visible_reasoning(
     raw: &str,
     parsed: Option<&tool_calls::ToolCallParseResult>,
 ) -> (String, Option<String>) {

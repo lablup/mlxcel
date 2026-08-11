@@ -50,6 +50,8 @@ pub mod locateanything_prompt;
 pub mod minicpmo_prompt;
 pub mod moondream2_prompt;
 pub mod moondream3_prompt;
+pub mod muse_glimmer_prompt;
+pub(crate) mod muse_glimmer_runtime;
 pub mod phi3v_prompt;
 pub mod phi4_siglip_prompt;
 pub mod phi4mm_prompt;

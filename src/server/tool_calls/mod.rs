@@ -20,6 +20,7 @@
 //!
 //! Used by: routes/chat, chat_request
 
+mod atem;
 mod formats;
 pub mod parser;
 pub mod stream_filter;
@@ -30,6 +31,45 @@ pub use types::{ParsedToolCall, ToolCallFormat, ToolCallParseResult};
 
 use super::types::request::ChatCompletionRequest;
 use super::types::response::{ToolCallFunctionResponse, ToolCallResponse};
+
+/// Infer a default tool-call format from model/config/template identity.
+///
+/// This is intentionally conservative and never handles an explicit operator
+/// parser choice; callers should pass explicit choices through
+/// [`resolve_tool_call_format`] so user configuration remains authoritative.
+pub fn infer_default_tool_call_format(
+    model_id: Option<&str>,
+    model_type: Option<&str>,
+    template_source: Option<&str>,
+) -> Option<ToolCallFormat> {
+    if template_source.is_some_and(template_uses_atem)
+        || model_type.is_some_and(is_muse_glimmer_identity)
+        || model_id.is_some_and(is_muse_glimmer_identity)
+    {
+        Some(ToolCallFormat::Atem)
+    } else {
+        None
+    }
+}
+
+/// Resolve the active tool-call format without overriding an explicit choice.
+pub fn resolve_tool_call_format(
+    explicit: Option<ToolCallFormat>,
+    model_id: Option<&str>,
+    model_type: Option<&str>,
+    template_source: Option<&str>,
+) -> Option<ToolCallFormat> {
+    explicit.or_else(|| infer_default_tool_call_format(model_id, model_type, template_source))
+}
+
+fn template_uses_atem(template: &str) -> bool {
+    template.contains("<atem:function_calls>") && template.contains("<atem:invoke")
+}
+
+fn is_muse_glimmer_identity(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase().replace('-', "_");
+    normalized.contains("muse_glimmer")
+}
 
 /// Check if tool call parsing should be attempted for this request.
 ///
