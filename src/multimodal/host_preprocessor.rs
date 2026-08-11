@@ -173,6 +173,12 @@ pub fn load_xla_image_preprocessor(
             model_path.display()
         ))
     })?;
+    if model_type == crate::models::ModelType::MuseGlimmerVLM {
+        return Err(HostPreprocessorError::InvalidConfig(
+            "Muse Glimmer VLM does not support OpenXLA image execution yet; use the MLX backend"
+                .to_string(),
+        ));
+    }
     if model_type == crate::models::ModelType::Qwen2VL {
         let policy = XlaVisionBackendPolicy::from_env()?;
         if policy == XlaVisionBackendPolicy::Host {

@@ -7396,3 +7396,15 @@ mod scheduler_cohort_parity_tests;
 #[cfg(test)]
 #[path = "scheduler_seed_determinism_tests.rs"]
 mod scheduler_seed_determinism_tests;
+
+#[cfg(test)]
+#[path = "scheduler_muse_glimmer_tests.rs"]
+mod scheduler_muse_glimmer_tests;
+
+#[cfg(test)]
+#[path = "scheduler_muse_glimmer_support.rs"]
+mod scheduler_muse_glimmer_support;
+
+#[cfg(test)]
+#[path = "scheduler_muse_glimmer_parallel_tests.rs"]
+mod scheduler_muse_glimmer_parallel_tests;

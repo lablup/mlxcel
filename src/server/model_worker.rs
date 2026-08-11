@@ -1186,6 +1186,13 @@ pub(crate) fn prepare_request_vlm_embeddings(
         ));
     }
     if !has_media || !model.is_vlm() {
+        if !has_media && let LoadedModel::MuseGlimmerVLM(muse) = model {
+            crate::multimodal::muse_glimmer_runtime::reject_muse_glimmer_text_fallback(
+                muse,
+                prompt_tokens,
+                0,
+            )?;
+        }
         // Moondream3 needs special prompt formatting even for text-only
         if images.is_empty() && matches!(model, LoadedModel::Moondream3VLM(_)) {
             let prepared = crate::moondream3_prompt::prepare_moondream3_prompt_tokens(

@@ -580,10 +580,65 @@ async fn stream_create_response(
             .ok()
             .map(|mut f| f.flush())
             .unwrap_or_default();
+        if let Some(text) = trailing.reasoning.filter(|s| !s.is_empty())
+            && let Ok(mut em) = emitter_for_callback.lock()
+        {
+            let r_id = if let Some(id) = em.active_reasoning_id.clone() {
+                id
+            } else {
+                let new_id = format!("rs_{}", short_uuid());
+                em.open_reasoning(new_id.clone());
+                let placeholder = ResponseOutputItem::Reasoning(ResponseReasoningOutput {
+                    id: new_id.clone(),
+                    status: ResponseItemStatus::InProgress,
+                    content: vec![],
+                });
+                let seq = em.next_seq();
+                let _ = sender.send_event(&ResponseStreamEvent::OutputItemAdded {
+                    sequence_number: seq,
+                    output_index: em.output_index(),
+                    item: placeholder,
+                });
+                new_id
+            };
+            em.reasoning_text_acc.push_str(&text);
+            let seq = em.next_seq();
+            let out_idx = em.output_index();
+            let _ = sender.send_event(&ResponseStreamEvent::ReasoningTextDelta {
+                sequence_number: seq,
+                item_id: r_id,
+                output_index: out_idx,
+                content_index: 0,
+                delta: text,
+            });
+        }
         if let Some(text) = trailing.content.filter(|s| !s.is_empty())
             && let Ok(mut em) = emitter_for_callback.lock()
-            && let Some(msg_id) = em.active_message_id.clone()
         {
+            let msg_id = if let Some(id) = em.active_message_id.clone() {
+                id
+            } else {
+                let new_id = format!("msg_{}", short_uuid());
+                em.open_message(new_id.clone());
+                let placeholder = ResponseOutputItem::Message(
+                    ResponseOutputMessage::new_assistant(new_id.clone(), vec![]),
+                );
+                let seq = em.next_seq();
+                let _ = sender.send_event(&ResponseStreamEvent::OutputItemAdded {
+                    sequence_number: seq,
+                    output_index: em.output_index(),
+                    item: placeholder,
+                });
+                let seq = em.next_seq();
+                let _ = sender.send_event(&ResponseStreamEvent::ContentPartAdded {
+                    sequence_number: seq,
+                    item_id: new_id.clone(),
+                    output_index: em.output_index(),
+                    content_index: 0,
+                    part: ResponseOutputContent::output_text(String::new()),
+                });
+                new_id
+            };
             em.message_text_acc.push_str(&text);
             let seq = em.next_seq();
             let out_idx = em.output_index();
@@ -705,11 +760,7 @@ async fn stream_create_response(
             em.advance_output_index();
         }
 
-        let reasoning_text_for_response = if em.reasoning_text_acc.is_empty() {
-            None
-        } else {
-            Some(em.reasoning_text_acc.clone())
-        };
+        let reasoning_text_for_response = em.completed_reasoning_text();
 
         if let Some(parsed) = parsed_tools.as_ref() {
             for call in &parsed.tool_calls {
@@ -921,7 +972,7 @@ fn translate_error_to_response(err: ResponsesTranslateError) -> ErrorResponse {
 ///   reply.
 /// - **No `<think>` at all**: visible text is the cleaned raw output;
 ///   no reasoning is emitted.
-fn split_reasoning(
+pub(crate) fn split_reasoning(
     raw: &str,
     parsed: Option<&crate::server::tool_calls::types::ToolCallParseResult>,
 ) -> (String, Option<String>) {

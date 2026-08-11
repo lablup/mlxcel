@@ -1807,6 +1807,10 @@ pub fn validate_supported_runtime(
         bail!("tensor-parallel runtime does not support LoRA adapters yet");
     }
 
+    if summary.model_type == ModelType::MuseGlimmerVLM {
+        bail!("Muse Glimmer VLM does not support tensor-parallel inference yet");
+    }
+
     ensure!(
         summary.shard_config.embedding_mode == EmbeddingMode::Replicated,
         "tensor-parallel runtime currently requires --tp-embedding-mode replicated"

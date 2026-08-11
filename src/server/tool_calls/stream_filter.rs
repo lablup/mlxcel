@@ -33,6 +33,8 @@
 //! - Function-calling Gemma: `<start_function_call>` / `<end_function_call>`,
 //!   a distinct marker family from Gemma 4, sharing only the inner
 //!   `call:name{...}` syntax
+//! - ATEM (Muse/Onyx): `<atem:function_calls>` plus attribute-bearing
+//!   `<atem:invoke name=...>` / `<atem:parameter name=...>` tags
 //!
 //! **Tool-call suppression behavior:** when the filter enters `ToolCall` state,
 //! all subsequent tokens are suppressed from `delta.content`. The tool-call
@@ -168,9 +170,33 @@ enum DelimiterAction {
     EnterToolCall,
     /// Exit tool call state — resume content emission.
     ExitToolCall,
+    /// End a Muse recipient-oriented message and resume visible content.
+    ExitMuseMessage,
     /// Strip the delimiter but don't change state.
     Strip,
+    /// Enter an ATEM tool-call block and increment ATEM nesting depth.
+    EnterAtemBlock,
+    /// Exit an ATEM tool-call block and decrement ATEM nesting depth.
+    ExitAtemBlock,
+    /// Enter an ATEM invoke tag and increment ATEM nesting depth.
+    EnterAtemInvoke,
+    /// Exit an ATEM invoke tag and decrement ATEM nesting depth.
+    ExitAtemInvoke,
+    /// Enter an ATEM parameter tag and increment ATEM nesting depth.
+    EnterAtemParameter,
+    /// Exit an ATEM parameter tag and decrement ATEM nesting depth.
+    ExitAtemParameter,
 }
+
+const ATEM_DYNAMIC_OPENERS: &[(&str, DelimiterAction)] = &[
+    ("<atem:invoke", DelimiterAction::EnterAtemInvoke),
+    ("<atem:parameter", DelimiterAction::EnterAtemParameter),
+];
+
+const MUSE_ASSISTANT_TO: &str = "<|start|>assistant to=";
+const MUSE_MESSAGE: &str = "<|message|>";
+const MUSE_PRIMED_SELF: &str = "to=self<|message|>";
+const MUSE_PRIMED_SELF_SPACED: &str = " to=self<|message|>";
 
 /// Delimiter table shared across reasoning model families.
 ///
@@ -214,10 +240,26 @@ enum DelimiterAction {
 ///   shares a prefix with any other entry in this table (the closest is
 ///   Gemma 4's `<|tool_call>` / `<tool_call|>`, which start with `<|` / `<t`
 ///   rather than `<s` / `<e`), so this family cannot partial-match another.
+/// - ATEM `<atem:function_calls>` is a regular fixed delimiter. The
+///   attribute-bearing `<atem:invoke ...>` and `<atem:parameter ...>` openers
+///   are matched dynamically from their fixed prefixes so arbitrary names do
+///   not grow the delimiter buffer before suppression begins.
 ///
 /// TODO: Consider extracting this into a startup-time configurable
 /// owned by the model worker so new reasoning families don't require a rebuild.
 const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
+    // Muse/Onyx recipient-oriented channels. The prompt may prime the first
+    // `<|start|>assistant`, leaving generation to begin at `to=self`.
+    (
+        "<|start|>assistant to=user<|message|>",
+        DelimiterAction::ExitMuseMessage,
+    ),
+    (
+        "<|start|>assistant to=self<|message|>",
+        DelimiterAction::EnterThinking,
+    ),
+    ("<|eom|>", DelimiterAction::ExitMuseMessage),
+    ("<|eot|>", DelimiterAction::ExitMuseMessage),
     // Qwen-style reasoning (Qwen3.x, Exaone4, Hunyuan, GLM4, Nemotron-H, SmolLM3, …)
     // Probe these first to mirror resolve_thinking_token_ids ordering.
     ("</think>", DelimiterAction::ExitThinking),
@@ -265,6 +307,14 @@ const CHAT_DELIMITERS: &[(&str, DelimiterAction)] = &[
     // longest delimiter, so the partial-match window is unchanged.
     ("</longcat_tool_call>", DelimiterAction::ExitToolCall),
     ("<longcat_tool_call>", DelimiterAction::EnterToolCall),
+    // ATEM (Muse/Onyx): the outer function-call wrapper is fixed. Invoke and
+    // parameter open tags carry attributes and are handled by the dynamic
+    // matcher below; their close tags are fixed and depth-aware so inner closes
+    // do not expose the rest of the outer block.
+    ("</atem:function_calls>", DelimiterAction::ExitAtemBlock),
+    ("<atem:function_calls>", DelimiterAction::EnterAtemBlock),
+    ("</atem:invoke>", DelimiterAction::ExitAtemInvoke),
+    ("</atem:parameter>", DelimiterAction::ExitAtemParameter),
     // Mistral Nemo: `[TOOL_CALLS] [...]` — no exit; the rest of output is JSON.
     ("[TOOL_CALLS]", DelimiterAction::EnterToolCall),
     // Kimi K2: `<|tool_calls_section_begin|>...<|tool_calls_section_end|>`.
@@ -337,6 +387,14 @@ pub struct StreamFilter {
     fragment_lengths: std::collections::VecDeque<FragmentSpan>,
     /// Length of the longest delimiter (for partial-match buffering).
     max_delim_len: usize,
+    /// Nesting depth for ATEM wrapper/invoke/parameter tags while suppressing
+    /// Muse tool-call payloads. Other delimiter-looking text inside an ATEM
+    /// payload is ignored until this returns to zero.
+    atem_depth: usize,
+    /// Number of active `<atem:function_calls>` wrappers. While this is
+    /// non-zero, only `</atem:function_calls>` may resume visible content; inner
+    /// invoke/parameter close tags cannot end suppression early.
+    atem_wrapper_depth: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -357,6 +415,8 @@ impl StreamFilter {
         let max_delim_len = CHAT_DELIMITERS
             .iter()
             .map(|(s, _)| s.len())
+            .chain(ATEM_DYNAMIC_OPENERS.iter().map(|(s, _)| s.len()))
+            .chain([MUSE_ASSISTANT_TO.len(), MUSE_MESSAGE.len()])
             .max()
             .unwrap_or(0);
 
@@ -365,6 +425,8 @@ impl StreamFilter {
             buffer: String::new(),
             fragment_lengths: std::collections::VecDeque::new(),
             max_delim_len,
+            atem_depth: 0,
+            atem_wrapper_depth: 0,
         }
     }
 
@@ -629,7 +691,67 @@ impl StreamFilter {
             }
         }
 
+        for &(prefix, action) in ATEM_DYNAMIC_OPENERS {
+            if let Some((pos, len)) = self.find_atem_dynamic_open(prefix, end_of_stream) {
+                earliest = choose_earlier(earliest, (pos, len, action));
+            }
+        }
+
+        if let Some(candidate) = self.find_muse_recipient_header(end_of_stream) {
+            earliest = choose_earlier(earliest, candidate);
+        }
+
         earliest
+    }
+
+    fn find_muse_recipient_header(
+        &self,
+        end_of_stream: bool,
+    ) -> Option<(usize, usize, DelimiterAction)> {
+        if self.buffer.starts_with(MUSE_PRIMED_SELF) {
+            return Some((0, MUSE_PRIMED_SELF.len(), DelimiterAction::EnterThinking));
+        }
+        if self.buffer.starts_with(MUSE_PRIMED_SELF_SPACED) {
+            return Some((
+                0,
+                MUSE_PRIMED_SELF_SPACED.len(),
+                DelimiterAction::EnterThinking,
+            ));
+        }
+        let pos = self.buffer.find(MUSE_ASSISTANT_TO)?;
+        let recipient_start = pos + MUSE_ASSISTANT_TO.len();
+        let Some(message_rel) = self.buffer[recipient_start..].find(MUSE_MESSAGE) else {
+            return end_of_stream.then_some((pos, self.buffer.len() - pos, DelimiterAction::Strip));
+        };
+        let recipient_end = recipient_start + message_rel;
+        let recipient = self.buffer[recipient_start..recipient_end].trim();
+        let action = match recipient {
+            "self" => DelimiterAction::EnterThinking,
+            "user" => DelimiterAction::ExitMuseMessage,
+            "" => DelimiterAction::Strip,
+            _ => DelimiterAction::EnterToolCall,
+        };
+        Some((pos, recipient_end + MUSE_MESSAGE.len() - pos, action))
+    }
+
+    fn find_atem_dynamic_open(&self, prefix: &str, end_of_stream: bool) -> Option<(usize, usize)> {
+        let mut search_from = 0usize;
+        while let Some(rel) = self.buffer[search_from..].find(prefix) {
+            let pos = search_from + rel;
+            let after = pos + prefix.len();
+            if after == self.buffer.len() {
+                if end_of_stream {
+                    return Some((pos, prefix.len()));
+                }
+                return None;
+            }
+            let next = self.buffer[after..].chars().next()?;
+            if next.is_whitespace() || next == '>' {
+                return Some((pos, prefix.len()));
+            }
+            search_from = after;
+        }
+        None
     }
 
     fn complete_prefix_is_still_ambiguous(&self, pos: usize, delim: &str) -> bool {
@@ -659,12 +781,44 @@ impl StreamFilter {
                 continue;
             }
             let suffix = &buf[i..];
+            if i == 0 && MUSE_PRIMED_SELF.starts_with(suffix) {
+                return 0;
+            }
+            if i == 0 && MUSE_PRIMED_SELF_SPACED.starts_with(suffix) {
+                return 0;
+            }
             for &(delim, _) in CHAT_DELIMITERS {
                 // A suffix is a partial match if it's a proper prefix of a
                 // delimiter (shorter, and the delimiter starts with it).
                 if suffix.len() < delim.len() && delim.starts_with(suffix) {
                     return i;
                 }
+            }
+            for &(prefix, _) in ATEM_DYNAMIC_OPENERS {
+                if suffix.len() < prefix.len() && prefix.starts_with(suffix) {
+                    return i;
+                }
+                if suffix == prefix {
+                    return i;
+                }
+                if suffix.starts_with(prefix) {
+                    let after = prefix.len();
+                    if suffix[after..]
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_whitespace() || c == '>' || suffix.len() == after)
+                    {
+                        return i;
+                    }
+                }
+            }
+            if MUSE_ASSISTANT_TO.starts_with(suffix) {
+                return i;
+            }
+            if suffix.starts_with(MUSE_ASSISTANT_TO)
+                && !suffix[MUSE_ASSISTANT_TO.len()..].contains(MUSE_MESSAGE)
+            {
+                return i;
             }
         }
 
@@ -674,12 +828,81 @@ impl StreamFilter {
     /// Apply a delimiter action to transition the state machine.
     fn apply_action(&mut self, action: DelimiterAction) {
         match action {
+            action if self.atem_depth > 0 && !action.is_atem() => {}
             DelimiterAction::EnterThinking => self.state = FilterState::Thinking,
             DelimiterAction::ExitThinking => self.state = FilterState::Content,
             DelimiterAction::EnterToolCall => self.state = FilterState::ToolCall,
-            DelimiterAction::ExitToolCall => self.state = FilterState::Content,
+            DelimiterAction::ExitToolCall => {
+                self.atem_depth = 0;
+                self.atem_wrapper_depth = 0;
+                self.state = FilterState::Content;
+            }
+            DelimiterAction::ExitMuseMessage => self.state = FilterState::Content,
             DelimiterAction::Strip => { /* consume delimiter, no state change */ }
+            DelimiterAction::EnterAtemBlock => {
+                self.atem_wrapper_depth = self.atem_wrapper_depth.saturating_add(1);
+                self.atem_depth = self.atem_depth.saturating_add(1);
+                self.state = FilterState::ToolCall;
+            }
+            DelimiterAction::EnterAtemInvoke | DelimiterAction::EnterAtemParameter => {
+                self.atem_depth = self.atem_depth.saturating_add(1);
+                self.state = FilterState::ToolCall;
+            }
+            DelimiterAction::ExitAtemBlock => {
+                if self.atem_wrapper_depth > 0 {
+                    self.atem_wrapper_depth -= 1;
+                }
+                if self.atem_wrapper_depth == 0 {
+                    self.atem_depth = 0;
+                    self.state = FilterState::Content;
+                } else if self.atem_depth > self.atem_wrapper_depth {
+                    self.atem_depth -= 1;
+                }
+            }
+            DelimiterAction::ExitAtemInvoke | DelimiterAction::ExitAtemParameter => {
+                if self.atem_wrapper_depth > 0 {
+                    if self.atem_depth > self.atem_wrapper_depth {
+                        self.atem_depth -= 1;
+                    }
+                } else if self.atem_depth > 0 {
+                    self.atem_depth -= 1;
+                    if self.atem_depth == 0 {
+                        self.state = FilterState::Content;
+                    }
+                }
+            }
         }
+    }
+}
+
+impl DelimiterAction {
+    fn is_atem(self) -> bool {
+        matches!(
+            self,
+            DelimiterAction::EnterAtemBlock
+                | DelimiterAction::ExitAtemBlock
+                | DelimiterAction::EnterAtemInvoke
+                | DelimiterAction::ExitAtemInvoke
+                | DelimiterAction::EnterAtemParameter
+                | DelimiterAction::ExitAtemParameter
+        )
+    }
+}
+
+fn choose_earlier(
+    current: Option<(usize, usize, DelimiterAction)>,
+    candidate: (usize, usize, DelimiterAction),
+) -> Option<(usize, usize, DelimiterAction)> {
+    match current {
+        Some((best_pos, best_len, best_action)) => {
+            let (pos, len, action) = candidate;
+            if pos < best_pos || (pos == best_pos && len > best_len) {
+                Some((pos, len, action))
+            } else {
+                Some((best_pos, best_len, best_action))
+            }
+        }
+        None => Some(candidate),
     }
 }
 
@@ -2114,3 +2337,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "atem_stream_tests.rs"]
+mod atem_stream_tests;

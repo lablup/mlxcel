@@ -60,6 +60,12 @@ Tensor Parallel Runtime:
                        LoRA unsupported, server batching supported for listed dense runtimes
                        except Gemma 4 E2B-style conservative fallback checkpoints
 
+Muse Glimmer 30B baseline:
+  dense BF16 only (~59.55 GB weights; GB10-class unified memory expected)
+  text, single-image, multi-image CLI/server routes, reasoning strengths, and ATEM tools
+  unsupported: video, quantization/Turbo KV, speculative/DFlash, LoRA/adapters, TP/PP, XLA/distributed
+  qualified on the pinned BF16 checkpoint with NVIDIA GB10; see supported-models.md for metrics
+
 For more information, visit: https://github.com/lablup/mlxcel"
 )]
 struct Cli {
@@ -1958,6 +1964,7 @@ const FAMILY_ORDER: &[&str] = &[
     "Kimi VLM",
     "PaddleOCR VLM",
     "MiniMax VLM",
+    "Muse VLM",
     "Step VLM",
     "Other VLM",
 ];

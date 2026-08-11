@@ -181,6 +181,7 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
         "minimax" => Ok(ModelType::MiniMax),
         "minimax_m3" => Ok(ModelType::MiniMaxM3),
         "minimax_m3_vl" => Ok(ModelType::MiniMaxM3VL),
+        "muse_glimmer" => Ok(ModelType::MuseGlimmerVLM),
         "gpt_oss" => Ok(ModelType::GptOss),
         "mixtral" => Ok(ModelType::Mixtral),
         "dbrx" => Ok(ModelType::Dbrx),

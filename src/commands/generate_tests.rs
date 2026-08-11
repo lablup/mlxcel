@@ -15,13 +15,16 @@
 #[cfg(feature = "xla-backend")]
 use super::decode_xla_cli_images;
 use super::{
-    apply_user_chat_template, apply_vlm_chat_template, cli_pipeline_requested,
-    estimate_delta_label_and_bytes, generated_suffix, generation_stats_from_duration,
-    memory_preflight_ctx_len, resolve_cli_pipeline_assignments, resolve_cli_prompt,
-    should_route_offline_mtp, strip_trailing_eos, validate_pipeline_parallel_args,
-    validate_tensor_parallel_args, validate_xla_cli_image_cardinality, validate_xla_output_audio,
+    CliSamplingFlagState, apply_user_chat_template, apply_vlm_chat_template,
+    build_cli_sampling_config_with_flags, cli_pipeline_requested, estimate_delta_label_and_bytes,
+    generated_suffix, generation_stats_from_duration, memory_preflight_ctx_len,
+    resolve_cli_pipeline_assignments, resolve_cli_prompt, should_route_offline_mtp,
+    strip_trailing_eos, validate_muse_glimmer_cli_unsupported_options,
+    validate_pipeline_parallel_args, validate_tensor_parallel_args,
+    validate_xla_cli_image_cardinality, validate_xla_output_audio,
 };
 use mlxcel::server::chat_template::ChatTemplateProcessor;
+use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::drafter::DrafterKind;
 use std::fs;
 use std::path::PathBuf;
@@ -472,6 +475,111 @@ fn sample_generate_args(model_path: PathBuf) -> crate::GenerateArgs {
         #[cfg(feature = "surgery")]
         surgery: None,
     }
+}
+
+fn muse_generate_args() -> crate::GenerateArgs {
+    let dir = temp_model_dir("muse-glimmer-guards");
+    fs::write(dir.join("config.json"), r#"{"model_type":"muse_glimmer"}"#).unwrap();
+    sample_generate_args(dir)
+}
+
+fn assert_muse_generate_rejects<F>(mutate: F, mode: KVCacheMode, expected: &str)
+where
+    F: FnOnce(&mut crate::GenerateArgs),
+{
+    let mut args = muse_generate_args();
+    mutate(&mut args);
+    let err = match validate_muse_glimmer_cli_unsupported_options(&args, mode) {
+        Ok(()) => panic!("Muse Glimmer generate options unexpectedly accepted"),
+        Err(err) => err.to_string(),
+    };
+    assert!(
+        err.contains(expected),
+        "expected error to contain {expected:?}, got {err:?}"
+    );
+}
+
+#[test]
+fn muse_glimmer_cli_generate_rejects_unsupported_baselines() {
+    let args = muse_generate_args();
+    if let Err(err) = validate_muse_glimmer_cli_unsupported_options(&args, KVCacheMode::Fp16) {
+        panic!("baseline Muse Glimmer generate options should be accepted: {err}");
+    }
+    assert_muse_generate_rejects(
+        |args| args.model.adapter = Some(PathBuf::from("adapter.safetensors")),
+        KVCacheMode::Fp16,
+        "LoRA/adapters",
+    );
+    assert_muse_generate_rejects(
+        |args| args.model.draft_model = Some(PathBuf::from("draft")),
+        KVCacheMode::Fp16,
+        "speculative decoding or DFlash",
+    );
+    assert_muse_generate_rejects(
+        |args| args.generation.video.push(PathBuf::from("clip.mp4")),
+        KVCacheMode::Fp16,
+        "video input",
+    );
+    assert_muse_generate_rejects(|_| {}, KVCacheMode::Turbo4Asym, "INT8/Turbo KV");
+    assert_muse_generate_rejects(
+        |args| args.pipeline_parallel.pp_layers = Some("0-24,25-49".to_string()),
+        KVCacheMode::Fp16,
+        "pipeline-parallel",
+    );
+}
+
+#[test]
+fn cli_sampling_uses_generation_config_when_flags_are_unset() {
+    let dir = temp_model_dir("generation-defaults");
+    fs::write(
+        dir.join("generation_config.json"),
+        include_str!("../../tests/fixtures/muse_glimmer/generation_config.json"),
+    )
+    .unwrap();
+    let args = sample_generate_args(dir.clone());
+
+    let sampling = build_cli_sampling_config_with_flags(
+        &args,
+        vec![200001, 200008],
+        CliSamplingFlagState::default(),
+    );
+
+    assert_eq!(sampling.temperature, 1.0);
+    assert_eq!(sampling.top_p, 0.95);
+    assert_eq!(sampling.top_k, 64);
+    assert_eq!(sampling.stop_token_ids, vec![200001, 200008]);
+
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn cli_sampling_explicit_flags_override_generation_config_per_key() {
+    let dir = temp_model_dir("generation-override");
+    fs::write(
+        dir.join("generation_config.json"),
+        include_str!("../../tests/fixtures/muse_glimmer/generation_config.json"),
+    )
+    .unwrap();
+    let mut args = sample_generate_args(dir.clone());
+    args.sampling.temp = 0.25;
+    args.sampling.top_p = 0.75;
+    args.sampling.top_k = 8;
+
+    let sampling = build_cli_sampling_config_with_flags(
+        &args,
+        Vec::new(),
+        CliSamplingFlagState {
+            temperature: true,
+            top_p: true,
+            top_k: true,
+        },
+    );
+
+    assert_eq!(sampling.temperature, 0.25);
+    assert_eq!(sampling.top_p, 0.75);
+    assert_eq!(sampling.top_k, 8);
+
+    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

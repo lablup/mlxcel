@@ -436,14 +436,16 @@ pub struct HealthResponse {
     /// Present only when the model is loaded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_size: Option<usize>,
-    /// Name of the active tool-call parser, or `null` when the loaded chat
-    /// template does not support tool calls.
+    /// Name of the active tool-call parser or family-specific format, or
+    /// `null` when the loaded chat template does not support tool calls.
     ///
     /// mlxcel's parser is output-format auto-detection (tries Hermes, Gemma 4,
     /// Mistral Nemo, Functionary, Llama 3, Command-R, and others in sequence).
     /// The field is always present once a model is loaded so that monitoring
     /// tools can distinguish "template does not support tools" (`null`) from
     /// "field missing because model has not finished loading" (field absent).
+    /// Family-specific defaults such as Muse Glimmer's `atem` are reported
+    /// when the model/template identity is precise enough to select one.
     ///
     /// Present only when the model is loaded.
     pub tool_call_parser: Option<String>,

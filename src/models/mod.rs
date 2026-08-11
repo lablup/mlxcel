@@ -114,6 +114,10 @@ pub mod molmo2;
 pub mod molmo_point;
 pub mod moondream2;
 pub mod moondream3;
+pub mod muse_glimmer;
+pub(crate) mod muse_glimmer_cache;
+pub mod muse_glimmer_config;
+pub(crate) mod muse_glimmer_layers;
 pub mod nemotron;
 pub mod nemotron_h;
 pub mod nemotron_nas;
@@ -235,6 +239,11 @@ pub use molmo2::Molmo2Model;
 pub use moondream2::Moondream2Model;
 pub use moondream3::Moondream3Model;
 pub use multimodal_placeholders::MultimodalPlaceholderTokens;
+pub use muse_glimmer::{
+    DEFAULT_IMAGE_END_TOKEN_ID, DEFAULT_IMAGE_PLACEHOLDER_TOKEN_ID, DEFAULT_IMAGE_START_TOKEN_ID,
+    DEFAULT_IMAGE_TOKEN_ID, MuseGlimmerConfig, MuseGlimmerTextConfig, MuseGlimmerTextModel,
+    MuseGlimmerTextWrapper, MuseGlimmerVisionConfig,
+};
 pub use nemotron::NemotronModel;
 pub use nemotron_h::NemotronHModel;
 pub use nemotron_nas::NemotronNASModel;
@@ -370,7 +379,8 @@ pub enum ModelType {
     GptOss,
     MiniMax,
     MiniMaxM3,
-    MiniMaxM3VL, // MiniMax-M3-VL (CLIP ViT + M3 hybrid dense/MoE text)
+    MiniMaxM3VL,    // MiniMax-M3-VL (CLIP ViT + M3 hybrid dense/MoE text)
+    MuseGlimmerVLM, // Muse Glimmer (Meta VLM, Muse text decoder + vision tower)
     Mixtral,
     Qwen2Moe,
     OLMoE,
@@ -598,6 +608,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::MiniMax,
     ModelType::MiniMaxM3,
     ModelType::MiniMaxM3VL,
+    ModelType::MuseGlimmerVLM,
     ModelType::Mixtral,
     ModelType::Qwen2Moe,
     ModelType::OLMoE,
@@ -882,6 +893,10 @@ impl ModelType {
                 "MiniMax-M3-VL (CLIP ViT + M3 hybrid dense/MoE)",
                 "MiniMax VLM",
             ),
+            ModelType::MuseGlimmerVLM => (
+                "Muse Glimmer 30B VLM (BF16, mixed 2048 sliding/full cache, ATEM)",
+                "Muse VLM",
+            ),
             ModelType::Mixtral => ("Mixtral (MoE)", "MoE (other)"),
             ModelType::Dbrx => ("Databricks DBRX (MoE)", "MoE (other)"),
             ModelType::KimiLinear => ("Kimi Linear (MLA + GatedDeltaNet hybrid)", "MoE (other)"),
@@ -1133,6 +1148,7 @@ mod metadata_tests {
             MiniMax,
             MiniMaxM3,
             MiniMaxM3VL,
+            MuseGlimmerVLM,
             Mixtral,
             Qwen2Moe,
             OLMoE,

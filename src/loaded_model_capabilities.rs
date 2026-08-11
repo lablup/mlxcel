@@ -81,6 +81,9 @@ pub enum VlmRuntimeRef<'a> {
     HunyuanVl(&'a vision::hunyuan_vl::HunyuanVlModel),
     /// MiniMax-M3-VL runtime (CLIP ViT + MiniMax-M3 hybrid dense/MoE text).
     MiniMaxM3Vl(&'a vision::MiniMaxM3VlModel),
+    /// Muse Glimmer runtime with dedicated placeholder expansion and ordered
+    /// multi-image feature scatter.
+    MuseGlimmer(&'a vision::MuseGlimmerVlmModel),
     /// Pixtral / Mistral3 dynamic aspect-ratio runtime. Shares the generic
     /// `VisionModule` storage but preserves each image's aspect ratio and emits
     /// `[IMG] / [IMG_BREAK] / [IMG_END]` row structure (see `pixtral_layout`).
@@ -220,6 +223,7 @@ impl LoadedModel {
             Self::Ernie45MoeVLM(model) => Some(VlmRuntimeRef::Ernie45MoeVl(model)),
             Self::HunyuanVLM(model) => Some(VlmRuntimeRef::HunyuanVl(model)),
             Self::MiniMaxM3VL(model) => Some(VlmRuntimeRef::MiniMaxM3Vl(model)),
+            Self::MuseGlimmerVLM(model) => Some(VlmRuntimeRef::MuseGlimmer(model)),
             _ => None,
         }
     }

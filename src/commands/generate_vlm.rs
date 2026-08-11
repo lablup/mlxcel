@@ -132,6 +132,16 @@ fn print_preparation_summary(summary: VlmPreparationSummary) {
                 video_count, frame_slots, total_tokens
             );
         }
+        VlmPreparationSummary::MuseGlimmer {
+            image_blocks,
+            image_tokens,
+            total_tokens,
+        } => {
+            println!(
+                "Muse Glimmer: expanded {} image placeholder(s) into {} patch token(s) ({} total tokens)",
+                image_blocks, image_tokens, total_tokens
+            );
+        }
         VlmPreparationSummary::Phi4MM {
             image_slots,
             total_tokens,

@@ -111,6 +111,14 @@ pub enum VlmPreparationSummary {
         frame_slots: usize,
         total_tokens: usize,
     },
+    /// Muse Glimmer expanded each `<|image|>` marker into
+    /// `<|image_start|> <|patch|>*N <|image_end|>` and scattered the
+    /// projected feature rows into the patch-token positions.
+    MuseGlimmer {
+        image_blocks: usize,
+        image_tokens: usize,
+        total_tokens: usize,
+    },
     Phi4MM {
         image_slots: usize,
         total_tokens: usize,
@@ -408,6 +416,13 @@ pub fn prepare_and_compute_vlm_embeddings_with_cache<E>(
 where
     E: FnMut(&str, bool) -> Vec<i32>,
 {
+    if let Some(VlmRuntimeRef::MuseGlimmer(model)) = model.vlm_runtime() {
+        crate::multimodal::muse_glimmer_runtime::reject_muse_glimmer_text_fallback(
+            model,
+            prompt_tokens,
+            images.len(),
+        )?;
+    }
     if !should_prepare_vlm_embeddings(images.len(), model.is_vlm())? {
         return Ok(None);
     }
@@ -420,6 +435,14 @@ where
     let active_caches = caches.filter(|c| c.enabled());
 
     match runtime {
+        VlmRuntimeRef::MuseGlimmer(model) => {
+            crate::multimodal::muse_glimmer_runtime::prepare_muse_glimmer_vlm_embeddings(
+                model,
+                prompt_tokens,
+                images,
+            )
+            .map(Some)
+        }
         VlmRuntimeRef::Qwen(qwen) => {
             let info = qwen.prompt_info();
             let (pixel_values, grid_thw) = info.processor.preprocess_with_grid(images);

@@ -177,6 +177,7 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         ModelType::MiniMax => "minimax",
         ModelType::MiniMaxM3 => "minimax_m3",
         ModelType::MiniMaxM3VL => "minimax_m3",
+        ModelType::MuseGlimmerVLM => "muse_glimmer",
         ModelType::Mixtral => "mixtral",
         // DBRX is not TP-enabled and this arm only keeps the dispatch table
         // total; the refusal comes from `validate_supported_runtime`, whose

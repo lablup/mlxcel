@@ -369,6 +369,9 @@ fn resolve_stage_family(model_dir: &Path) -> Result<StageFamily> {
         ModelType::Qwen35VLM => StageFamily::Qwen35Vlm,
         ModelType::Qwen35Moe => StageFamily::Qwen35Moe,
         ModelType::Qwen35MoeVLM => StageFamily::Qwen35MoeVlm,
+        ModelType::MuseGlimmerVLM => {
+            bail!("Muse Glimmer VLM does not support pipeline-parallel inference yet")
+        }
         ModelType::Jamba => StageFamily::Jamba,
         ModelType::NemotronH => StageFamily::NemotronH,
         other => bail!(

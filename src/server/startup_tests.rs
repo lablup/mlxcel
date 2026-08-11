@@ -18,10 +18,10 @@ use super::{
     MIN_PARALLEL_CONTEXT_SIZE, ServerStartupConfig, build_server_config,
     detect_model_media_support, effective_parallel_context_slots, resolve_api_key,
     resolve_chat_template, resolve_decode_storage_backend, resolve_default_max_tokens,
-    resolve_dry_penalty_last_n, resolve_loop_detection_env, resolve_parallel_context_size,
-    resolve_remote_pipeline_topology, resolve_tensor_parallel_runtime_support,
-    validate_parallel_context_startup, validate_pipeline_parallel_startup,
-    validate_tensor_parallel_startup,
+    resolve_dry_penalty_last_n, resolve_generation_sampling_defaults, resolve_loop_detection_env,
+    resolve_parallel_context_size, resolve_remote_pipeline_topology,
+    resolve_tensor_parallel_runtime_support, validate_parallel_context_startup,
+    validate_pipeline_parallel_startup, validate_tensor_parallel_startup,
 };
 use crate::distributed::{ClusterConfig, TransportBackend};
 use crate::server::chat_template::ChatMessage;
@@ -165,6 +165,55 @@ fn build_server_config_applies_normalized_startup_values() {
     assert_eq!(config.max_batch_size, 3);
     assert_eq!(config.max_queue_depth, 32);
     assert_eq!(config.max_kv_size, Some(682));
+}
+
+#[test]
+fn generation_config_sampling_defaults_fill_unset_server_knobs() {
+    let model_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        model_dir.path().join("generation_config.json"),
+        include_str!("../../tests/fixtures/muse_glimmer/generation_config.json"),
+    )
+    .unwrap();
+    let startup = ServerStartupConfig {
+        model_path: model_dir.path().to_path_buf(),
+        temperature: 0.8,
+        top_p: 0.9,
+        top_k: 40,
+        ..ServerStartupConfig::default()
+    };
+
+    let defaults = resolve_generation_sampling_defaults(&startup);
+
+    assert_eq!(defaults.temperature, 1.0);
+    assert_eq!(defaults.top_p, 0.95);
+    assert_eq!(defaults.top_k, 64);
+}
+
+#[test]
+fn explicit_server_sampling_knobs_override_generation_config() {
+    let model_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        model_dir.path().join("generation_config.json"),
+        include_str!("../../tests/fixtures/muse_glimmer/generation_config.json"),
+    )
+    .unwrap();
+    let startup = ServerStartupConfig {
+        model_path: model_dir.path().to_path_buf(),
+        temperature: 0.7,
+        temperature_was_set: true,
+        top_p: 0.8,
+        top_p_was_set: true,
+        top_k: 11,
+        top_k_was_set: true,
+        ..ServerStartupConfig::default()
+    };
+
+    let defaults = resolve_generation_sampling_defaults(&startup);
+
+    assert_eq!(defaults.temperature, 0.7);
+    assert_eq!(defaults.top_p, 0.8);
+    assert_eq!(defaults.top_k, 11);
 }
 
 #[test]

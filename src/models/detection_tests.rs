@@ -124,6 +124,41 @@ fn florence2_model_type_is_detected() {
 }
 
 #[test]
+fn muse_glimmer_model_type_is_detected() {
+    let model_dir = temp_path("muse_glimmer_vlm");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "muse_glimmer",
+            "architectures": ["MuseGlimmerForConditionalGeneration"],
+            "image_token_id": 200092,
+            "video_token_id": 200091,
+            "text_config": {
+                "model_type": "muse_glimmer_text",
+                "hidden_size": 6656,
+                "intermediate_size": 19968,
+                "num_hidden_layers": 52,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 2,
+                "head_dim": 128,
+                "rms_norm_eps": 1e-5,
+                "vocab_size": 202048
+            },
+            "vision_config": {
+                "model_type": "muse_glimmer_vision_model"
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::MuseGlimmerVLM);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn gpt2_model_type_is_detected() {
     // GPT-2 configs use the original OpenAI field names (`n_embd` / `n_head` /
     // `n_layer`), so detection must key off `model_type` alone.

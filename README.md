@@ -50,7 +50,7 @@ See the [changelog](CHANGELOG.md) for the full list.
 - **Serving features for real deployments.** Continuous batching, prompt-prefix caching, and automatic prefix caching are on by default; speculative decoding and KV-cache compression are available for supported model/runtime combinations.
 - **Differentiated runtime controls.** Default builds expose first-class YAML load-time model surgery through `--surgery` / `MLXCEL_SURGERY`, with operations such as `scale`, `add`, `prune`, `replace`, and `interpolate` for reproducible weight-space changes without retraining or writing converted checkpoints.
 - **Multi-device and distributed modes.** Tensor parallelism and pipeline parallelism are implemented for selected model families, including zero-config pipeline startup with static or mDNS-based discovery.
-- **Broad model-family coverage.** The runtime includes loaders for Llama, Qwen, Gemma, Phi, Mistral/Mixtral, DeepSeek, Cohere, InternLM, GLM, ExaOne, OLMo, ERNIE, Hunyuan, Mamba/RWKV/Jamba, Nemotron, MiniMax, Step, and Kimi, plus a broad vision-language and OCR set (Qwen3-Omni, GLM-4V, Llama 3.2 Vision, Hunyuan-VL, ERNIE-4.5 VL, DeepSeek-VL2, DeepSeek-OCR, PaddleOCR-VL, and more). See [Supported models](docs/supported-models.md) for the maintained list.
+- **Broad model-family coverage.** The runtime includes loaders for Llama, Qwen, Gemma, Phi, Mistral/Mixtral, DeepSeek, Cohere, InternLM, GLM, ExaOne, OLMo, ERNIE, Hunyuan, Mamba/RWKV/Jamba, Nemotron, MiniMax, Step, and Kimi, plus a broad vision-language and OCR set (Qwen3-Omni, Muse Glimmer, GLM-4V, Llama 3.2 Vision, Hunyuan-VL, ERNIE-4.5 VL, DeepSeek-VL2, DeepSeek-OCR, PaddleOCR-VL, and more). See [Supported models](docs/supported-models.md) for the maintained list.
 
 ## Quick start
 
@@ -281,7 +281,7 @@ Model support is architecture- and checkpoint-dependent. Run:
 mlxcel arch
 ```
 
-for the CLI summary, and see [Supported models](docs/supported-models.md) for the maintained architecture table, known limitations, and VLM coverage notes.
+for the CLI summary, and see [Supported models](docs/supported-models.md) for the maintained architecture table, known limitations, real-checkpoint qualification status, and VLM coverage notes.
 
 ## Python
 

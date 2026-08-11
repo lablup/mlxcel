@@ -96,3 +96,21 @@ pub use state::{AppState, BatchMetrics, Metrics, ModelMediaSupport};
 
 #[cfg(test)]
 mod max_tokens_route_tests;
+
+#[cfg(test)]
+mod muse_glimmer_template_tests;
+
+#[cfg(test)]
+mod muse_atem_roundtrip_tests;
+
+#[cfg(test)]
+mod muse_atem_stream_support;
+
+#[cfg(test)]
+mod muse_atem_stream_chat_tests;
+
+#[cfg(test)]
+mod muse_atem_stream_responses_tests;
+
+#[cfg(test)]
+mod muse_atem_stream_anthropic_tests;
