@@ -138,7 +138,7 @@ fn top_level_help_mentions_muse_glimmer_limits() {
         "speculative/DFlash",
         "TP/PP",
         "XLA/distributed",
-        "real-checkpoint qualification is pending",
+        "qualified on the pinned BF16 checkpoint with NVIDIA GB10",
     ] {
         assert!(
             help.contains(expected),
