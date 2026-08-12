@@ -12,15 +12,19 @@ High-performance LLM/VLM inference runtime and server for Apple Silicon / NVIDIA
 
 The project started as work on structural model fine-tuning and has grown into a general-purpose serving runtime for local and small-cluster inference.
 
-## New in v0.5.0-beta.1
+## New in v0.5.0
 
+- **Meta Muse Glimmer support.** The 52-layer mixed-cache decoder and the 50-layer vision and fusion path run single-image and multi-image prompts through both the CLI and the continuous-batching server, with ATEM reasoning channels parsed across the Chat Completions, Responses, and Anthropic-compatible routes. Both the bf16 checkpoint and `mlx-community/Muse-Glimmer-30B-4bit` are supported; the 4-bit decodes at about 3.1x the bf16 rate on NVIDIA GB10.
+- **Florence-2 end to end.** DaViT vision tower plus BART seq2seq decoder, fifteen task markers, 3/4/6/8-bit checkpoints, and HTTP serving through a dedicated seq2seq worker. Parsed coordinates ride the response as `message.florence2_result`.
+- **3 more new vision-language families:** LocateAnything grounding, Falcon-OCR early fusion, and Jina VLM.
+- **8 new text model families**, including Ling/Bailing, OpenELM, TeleChat3, DBRX, Phixtral, AFMoE, and Klear.
 - **Paged-attention decode v2 is now the production path.** Multi-CTA CSR-page-table decode scales with context length; batched decode is up to 1.47x faster on M1 Ultra. Set `MLXCEL_PAGED_ATTENTION_NATIVE=0` to restore the gather path.
 - **Unified sparse/shared-prefix decode.** Sparse decode uses page tables without gathering; MiniMax-M3 sees up to 2.06x speedup. Shared-prefix (cascade) decode is available but disabled by default.
 - **Faster sampling.** Sort-free top-p and Gumbel-max sampling improve performance, but may change fixed-seed outputs.
-- **8 new text model families**, including Ling/Bailing, OpenELM, TeleChat3, DBRX, Phixtral, AFMoE, and Klear.
-- **Generation-mask fix** for `deepseek_v2`, `internlm3`, `hunyuan`, and `gemma2`.
-- **Earlier quantization validation** at load time, plus Jamba MoE checkpoint fixes.
-- **Workspace-wide verification:** `make verify` now runs all workspace tests with a faster test profile.
+- **CUDA JIT kernels are keyed on their input dtypes.** Running one geometry at two dtypes in a single process no longer reuses the first compiled kernel and returns numbers unrelated to its inputs.
+- **Chunked GLA prefill is the `bailing_moe_linear` default:** 2.1x to 2.4x faster prefill and lower perplexity at every window measured.
+- **Generation-mask fix** for `deepseek_v2`, `internlm3`, `hunyuan`, and `gemma2`, plus earlier quantization validation at load time and Jamba MoE checkpoint fixes.
+- **Workspace-wide verification:** `make verify` runs all workspace tests with a faster test profile, and gates crate versions and CUDA kernel dtype keys.
 
 ## New in v0.4.3
 
