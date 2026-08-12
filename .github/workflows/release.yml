@@ -109,6 +109,21 @@ jobs:
             echo "Cargo target cache age: ${AGE_DAYS}d — keeping"
           fi
 
+      - name: Put Homebrew on PATH (self-hosted)
+        run: |
+          for BREW in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+            if [ -x "$BREW" ]; then
+              eval "$("$BREW" shellenv)"
+              echo "$HOMEBREW_PREFIX/bin" >> "$GITHUB_PATH"
+              echo "$HOMEBREW_PREFIX/sbin" >> "$GITHUB_PATH"
+              break
+            fi
+          done
+          command -v brew >/dev/null || {
+            echo "::error::Homebrew is not installed or its prefix is unavailable"
+            exit 1
+          }
+
       - name: Ensure build tools
         run: |
           # cmake is required by mlxcel-core and sentencepiece-sys build scripts
