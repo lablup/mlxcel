@@ -295,7 +295,10 @@ fn ensure_supported_muse_vlm_config(config: &MuseGlimmerConfig) -> Result<()> {
     Ok(())
 }
 
-fn ensure_supported_muse_weight_map(weights: &WeightMap, config: &MuseGlimmerConfig) -> Result<()> {
+pub(crate) fn ensure_supported_muse_weight_map(
+    weights: &WeightMap,
+    config: &MuseGlimmerConfig,
+) -> Result<()> {
     let mut scale_count = 0usize;
     for key in weights.keys() {
         let sidecar_suffix = [".scales", ".biases", ".global_scale"]
@@ -318,6 +321,11 @@ fn ensure_supported_muse_weight_map(weights: &WeightMap, config: &MuseGlimmerCon
                 "Muse Glimmer checkpoint contains quantization sidecar {key}, but config.json declares no quantization contract"
             ));
         }
+        if suffix == ".global_scale" {
+            return Err(anyhow::anyhow!(
+                "Muse Glimmer pinned affine-Q4 layout does not support global-scale sidecar {key}"
+            ));
+        }
         let prefix = key.strip_suffix(suffix).unwrap_or(key);
         if !weights.contains_key(&format!("{prefix}.weight")) {
             return Err(anyhow::anyhow!(
@@ -326,6 +334,11 @@ fn ensure_supported_muse_weight_map(weights: &WeightMap, config: &MuseGlimmerCon
         }
         if suffix == ".scales" {
             scale_count += 1;
+            if !weights.contains_key(&format!("{prefix}.biases")) {
+                return Err(anyhow::anyhow!(
+                    "Muse Glimmer affine quantization sidecar {key} has no matching {prefix}.biases"
+                ));
+            }
         } else if !weights.contains_key(&format!("{prefix}.scales")) {
             return Err(anyhow::anyhow!(
                 "Muse Glimmer quantization sidecar {key} has no matching {prefix}.scales"

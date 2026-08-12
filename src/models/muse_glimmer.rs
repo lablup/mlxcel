@@ -180,6 +180,8 @@ impl MuseGlimmerTextModel {
             crate::models::load_text_weights(model_dir, None)?,
         )
         .map_err(|err| err.to_string())?;
+        crate::loading::ensure_supported_muse_weight_map(&weights, &config)
+            .map_err(|err| err.to_string())?;
         let eos_token_ids = crate::loading::read_eos_token_ids(model_dir);
         let model = Self::from_weights(
             &weights,

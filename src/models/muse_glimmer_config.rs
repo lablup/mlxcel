@@ -354,12 +354,15 @@ pub(crate) fn inherit_muse_text_quantization(config: &mut Value) -> Result<(), S
     if let Some(mode) = text_config
         .get("quantization")
         .and_then(|quantization| quantization.get("mode"))
-        .and_then(Value::as_str)
-        && mode != "affine"
     {
-        return Err(format!(
-            "Muse Glimmer quantization.mode must be \"affine\" for the pinned mlx-community checkpoint layout, got {mode:?}"
-        ));
+        let mode = mode.as_str().ok_or_else(|| {
+            "Muse Glimmer quantization.mode must be a string when present".to_string()
+        })?;
+        if mode != "affine" {
+            return Err(format!(
+                "Muse Glimmer quantization.mode must be \"affine\" for the pinned mlx-community checkpoint layout, got {mode:?}"
+            ));
+        }
     }
     Ok(())
 }

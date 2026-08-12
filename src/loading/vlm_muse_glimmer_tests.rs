@@ -568,4 +568,36 @@ fn root_quantization_is_inherited_into_muse_text_config() {
         .map(|_| "unexpected success".to_string())
         .unwrap_or_else(|err| err);
     assert!(err.contains("must be \"affine\""));
+
+    let mut non_string_mode = serde_json::json!({
+        "quantization": {"group_size": 64, "bits": 4, "mode": 4},
+        "text_config": {}
+    });
+    let err = inherit_muse_text_quantization(&mut non_string_mode)
+        .map(|_| "unexpected success".to_string())
+        .unwrap_or_else(|err| err);
+    assert!(err.contains("must be a string"));
+}
+
+#[test]
+fn muse_affine_quantization_rejects_missing_biases_and_global_scale() {
+    let mut config = tiny_config();
+    config.text_config.quantization = Some(MuseQuantization {
+        group_size: 64,
+        bits: 4,
+    });
+    let mut weights = tiny_weights(&config);
+    put(&mut weights, "lm_head.scales", &[16, 1], 0.1);
+
+    let err = ensure_supported_muse_weight_map(&weights, &config)
+        .map(|_| "unexpected success".to_string())
+        .unwrap_or_else(|err| err.to_string());
+    assert!(err.contains("no matching lm_head.biases"));
+
+    put(&mut weights, "lm_head.biases", &[16, 1], 0.0);
+    put(&mut weights, "lm_head.global_scale", &[1], 1.0);
+    let err = ensure_supported_muse_weight_map(&weights, &config)
+        .map(|_| "unexpected success".to_string())
+        .unwrap_or_else(|err| err.to_string());
+    assert!(err.contains("does not support global-scale sidecar"));
 }
