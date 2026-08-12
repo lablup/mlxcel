@@ -125,7 +125,9 @@ pub(crate) use llava::{load_llava_bunny_vlm, load_llava_host_preprocessor, load_
 pub(crate) use locateanything::load_locateanything_vlm;
 pub(crate) use minimax_m3_vl::load_minimax_m3_vl;
 pub(crate) use mllama::load_mllama_vlm;
-pub(crate) use muse_glimmer::load_muse_glimmer_vlm;
+pub(crate) use muse_glimmer::{
+    ensure_supported_muse_weight_map, load_muse_glimmer_vlm, normalize_muse_glimmer_weights,
+};
 pub(crate) use nemotron_h_nano_omni::load_nemotron_h_nano_omni_vlm;
 pub(crate) use paddleocr::load_paddleocr_vl;
 pub(crate) use pixtral::{load_mistral3_vlm, load_pixtral_vlm};

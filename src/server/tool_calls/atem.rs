@@ -163,6 +163,43 @@ pub(super) fn split_muse_channels(text: &str) -> (String, Option<String>) {
     )
 }
 
+/// Render Muse/Onyx recipient-oriented channels for terminal display.
+///
+/// Returns `None` when `text` is not a Muse envelope so callers can fall back
+/// to the regular reasoning-marker filter. Reasoning addressed to `self` is
+/// hidden by default and shown before user-visible content when requested.
+pub fn render_muse_channels_for_display(
+    text: &str,
+    show_reasoning: bool,
+    dim_reasoning: bool,
+) -> Option<String> {
+    let trimmed = text.trim();
+    if !trimmed.contains("<|message|>")
+        || !(trimmed.starts_with("to=")
+            || trimmed.starts_with(" to=")
+            || trimmed.contains("<|start|>assistant"))
+    {
+        return None;
+    }
+
+    let (content, reasoning) = split_muse_channels(text);
+    let mut rendered = String::new();
+    if show_reasoning && let Some(reasoning) = reasoning {
+        if dim_reasoning {
+            rendered.push_str("\x1b[2m");
+            rendered.push_str(&reasoning);
+            rendered.push_str("\x1b[0m");
+        } else {
+            rendered.push_str(&reasoning);
+        }
+        if !content.is_empty() {
+            rendered.push('\n');
+        }
+    }
+    rendered.push_str(&content);
+    Some(rendered)
+}
+
 fn append_channel_text(target: &mut String, text: &str) {
     if text.is_empty() {
         return;

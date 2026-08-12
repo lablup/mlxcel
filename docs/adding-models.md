@@ -176,8 +176,12 @@ summarizes runtime capabilities with:
 Muse Glimmer is the current example of this rule. Its first baseline targets
 `meta-models/Muse-Glimmer-30B` revision
 `97c77dff50b2797bcc558fa2d909761dbc575c59`, dense BF16 weights of about
-59.55 GB, 131072 context, 2048-token sliding layers plus growing full layers,
-4096 visual tokens per image, ATEM tool calls, and `reasoning_strength`
+59.55 GB, and its quantized contract targets
+`mlx-community/Muse-Glimmer-30B-4bit` revision
+`3e7677d7a40d348a3daba263a2b1c0aa41910710`, MLX affine-Q4 text and fusion
+weights with a dense vision tower, and about 19.41 GB of tensors. Both expose
+131072 context, 2048-token sliding layers plus growing full layers, 4096 visual
+tokens per image, ATEM tool calls, and `reasoning_strength`
 `low`/`medium`/`high`/`xhigh` with `high` by default. Do not mark a large VLM
 as real-checkpoint qualified until the hardware gate records load, memory,
 throughput, text/image/multi-image, tool-call, long-context, and scheduler

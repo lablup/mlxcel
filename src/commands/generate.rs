@@ -992,6 +992,15 @@ fn filter_reasoning_for_display(
     generated_text: &str,
     show_reasoning: bool,
 ) -> String {
+    let dim = io::stdout().is_terminal();
+    if let Some(rendered) = mlxcel::server::tool_calls::render_muse_channels_for_display(
+        generated_text,
+        show_reasoning,
+        dim,
+    ) {
+        return rendered;
+    }
+
     let markers = tokenizer.infer_thinking_markers();
     // When the rendered prompt primed an open thinking marker (`<think>\n` for
     // Qwen-style, `<|channel>thought\n` for a thinking-on Gemma-4 channel) the
@@ -999,7 +1008,6 @@ fn filter_reasoning_for_display(
     // start the filter in the reasoning state to keep the primed thought body
     // and its raw close marker off the terminal.
     let primed = mlxcel::reasoning_stream::prompt_primed_open_thinking(&markers, prompt);
-    let dim = io::stdout().is_terminal();
     mlxcel::reasoning_stream::render_full(&markers, generated_text, primed, show_reasoning, dim)
 }
 

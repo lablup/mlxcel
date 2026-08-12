@@ -60,11 +60,11 @@ Tensor Parallel Runtime:
                        LoRA unsupported, server batching supported for listed dense runtimes
                        except Gemma 4 E2B-style conservative fallback checkpoints
 
-Muse Glimmer 30B baseline:
-  dense BF16 only (~59.55 GB weights; GB10-class unified memory expected)
+Muse Glimmer 30B checkpoints:
+  dense BF16 (~59.55 GB) and pinned mlx-community affine 4-bit (~19.41 GB)
   text, single-image, multi-image CLI/server routes, reasoning strengths, and ATEM tools
-  unsupported: video, quantization/Turbo KV, speculative/DFlash, LoRA/adapters, TP/PP, XLA/distributed
-  qualified on the pinned BF16 checkpoint with NVIDIA GB10; see supported-models.md for metrics
+  unsupported: video, quantized vision tower/Turbo KV, speculative/DFlash, LoRA/adapters, TP/PP, XLA/distributed
+  qualified checkpoints and GB10 metrics are recorded in supported-models.md
 
 For more information, visit: https://github.com/lablup/mlxcel"
 )]

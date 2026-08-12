@@ -14,7 +14,8 @@
 
 //! Muse Glimmer VLM loading boundary.
 //!
-//! Builds the concrete Muse model from the canonical dense checkpoint roots.
+//! Builds the concrete Muse model from the canonical BF16 checkpoint or the
+//! mlx-vlm affine-quantized checkpoint layout.
 //! Request-time image expansion and ordered feature scatter are provided by
 //! the dedicated Muse multimodal runtime.
 
@@ -27,6 +28,7 @@ use crate::LoadedModel;
 use crate::models::muse_glimmer::{
     MuseGlimmerConfig, MuseGlimmerTextModel, MuseGlimmerTextWrapper,
 };
+use crate::models::muse_glimmer_config::inherit_muse_text_quantization;
 use crate::vision::encoders::muse_glimmer::{
     MUSE_GLIMMER_VISION_TOWER_ROOT, MuseGlimmerVisionTower,
 };
@@ -64,8 +66,12 @@ pub(crate) fn load_muse_glimmer_vlm_model(model_path: &Path) -> Result<MuseGlimm
     }
     let processor = MuseGlimmerImageProcessor::from_model_dir(model_path, &config.vision_config)
         .map_err(anyhow::Error::msg)?;
-    let weights = load_vlm_weights_common_filtered(model_path, None, keep_muse_glimmer_weight)?;
-    ensure_dense_muse_weight_map(&weights)?;
+    let weights = normalize_muse_glimmer_weights(load_vlm_weights_common_filtered(
+        model_path,
+        None,
+        keep_muse_glimmer_weight,
+    )?)?;
+    ensure_supported_muse_weight_map(&weights, &config)?;
     build_muse_glimmer_vlm_from_weights(
         &weights,
         &config,
@@ -75,7 +81,8 @@ pub(crate) fn load_muse_glimmer_vlm_model(model_path: &Path) -> Result<MuseGlimm
 }
 
 pub(crate) fn parse_muse_glimmer_config(model_path: &Path) -> Result<MuseGlimmerConfig> {
-    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+    let (_config_str, mut full_config) = read_sanitized_vlm_config(model_path)?;
+    inherit_muse_text_quantization(&mut full_config).map_err(anyhow::Error::msg)?;
     serde_json::from_value(full_config)
         .map_err(|e| anyhow::anyhow!("Failed to parse Muse Glimmer config.json: {}", e))
 }
@@ -87,7 +94,7 @@ pub(crate) fn build_muse_glimmer_vlm_from_weights(
     eos_token_ids: Vec<i32>,
 ) -> Result<MuseGlimmerVlmModel> {
     ensure_supported_muse_vlm_config(config)?;
-    ensure_dense_muse_weight_map(weights)?;
+    ensure_supported_muse_weight_map(weights, config)?;
     let text_model = build_muse_glimmer_text_from_weights(weights, config, eos_token_ids)?;
     let text = MuseGlimmerTextWrapper::new(text_model);
     let vision_tower = MuseGlimmerVisionTower::from_weights(weights, &config.vision_config)
@@ -196,6 +203,7 @@ impl MuseWeightInventory {
 }
 
 pub(crate) fn classify_muse_weight_key(key: &str) -> Option<MuseWeightRoot> {
+    let key = normalize_muse_weight_key(key);
     MuseWeightRoot::all()
         .into_iter()
         .find(|root| key.starts_with(&format!("{}.", root.prefix())))
@@ -203,6 +211,43 @@ pub(crate) fn classify_muse_weight_key(key: &str) -> Option<MuseWeightRoot> {
 
 pub(crate) fn keep_muse_glimmer_weight(key: &str) -> bool {
     classify_muse_weight_key(key).is_some()
+}
+
+/// Normalize the two published Muse checkpoint layouts to the names consumed
+/// by the Rust model. Meta BF16 already uses the canonical `model.*` roots;
+/// mlx-vlm exports strip that wrapper and nests the head below
+/// `language_model.lm_head`.
+pub(crate) fn normalize_muse_weight_key(key: &str) -> String {
+    if let Some(rest) = key.strip_prefix("language_model.model.") {
+        return format!("{MUSE_GLIMMER_LANGUAGE_ROOT}.{rest}");
+    }
+    if let Some(rest) = key.strip_prefix("language_model.lm_head.") {
+        return format!("{MUSE_GLIMMER_LM_HEAD_ROOT}.{rest}");
+    }
+    for (raw_root, canonical_root) in [
+        ("vision_tower.", MUSE_GLIMMER_VISION_TOWER_ROOT),
+        ("vision_adapter.", MUSE_GLIMMER_VISION_ADAPTER_ROOT),
+        ("vision_projection.", MUSE_GLIMMER_VISION_PROJECTION_ROOT),
+    ] {
+        if let Some(rest) = key.strip_prefix(raw_root) {
+            return format!("{canonical_root}.{rest}");
+        }
+    }
+    key.to_string()
+}
+
+pub(crate) fn normalize_muse_glimmer_weights(raw_weights: WeightMap) -> Result<WeightMap> {
+    let mut weights = WeightMap::new();
+    for (raw_key, value) in raw_weights {
+        let key = normalize_muse_weight_key(&raw_key);
+        if weights.contains_key(&key) {
+            return Err(anyhow::anyhow!(
+                "Muse Glimmer checkpoint keys {raw_key:?} and another source both normalize to {key:?}"
+            ));
+        }
+        weights.insert(key, value);
+    }
+    Ok(weights)
 }
 
 pub(crate) fn read_muse_weight_inventory_from_index(
@@ -227,7 +272,6 @@ pub(crate) fn read_muse_weight_inventory_from_index(
         total: 0,
     };
     for key in weight_map.keys() {
-        ensure_dense_muse_key(key)?;
         let root = classify_muse_weight_key(key)
             .ok_or_else(|| anyhow::anyhow!("Unknown Muse Glimmer checkpoint weight root: {key}"))?;
         inventory.increment(root);
@@ -238,11 +282,6 @@ pub(crate) fn read_muse_weight_inventory_from_index(
 
 fn ensure_supported_muse_vlm_config(config: &MuseGlimmerConfig) -> Result<()> {
     config.validate().map_err(anyhow::Error::msg)?;
-    if config.text_config.quantization.is_some() {
-        return Err(anyhow::anyhow!(
-            "Muse Glimmer VLM supports only the canonical dense BF16 checkpoint; quantized text_config is not supported"
-        ));
-    }
     if config.vision_config.patch_temporal != 2 {
         return Err(anyhow::anyhow!(
             "Muse Glimmer VLM supports static image duplication only; video temporal layouts are not supported"
@@ -256,20 +295,59 @@ fn ensure_supported_muse_vlm_config(config: &MuseGlimmerConfig) -> Result<()> {
     Ok(())
 }
 
-fn ensure_dense_muse_weight_map(weights: &WeightMap) -> Result<()> {
+pub(crate) fn ensure_supported_muse_weight_map(
+    weights: &WeightMap,
+    config: &MuseGlimmerConfig,
+) -> Result<()> {
+    let mut scale_count = 0usize;
     for key in weights.keys() {
-        ensure_dense_muse_key(key)?;
+        let sidecar_suffix = [".scales", ".biases", ".global_scale"]
+            .into_iter()
+            .find(|suffix| key.ends_with(suffix));
+        let Some(suffix) = sidecar_suffix else {
+            continue;
+        };
+        if !key.starts_with(&format!("{MUSE_GLIMMER_LANGUAGE_ROOT}."))
+            && !key.starts_with(&format!("{MUSE_GLIMMER_LM_HEAD_ROOT}."))
+            && !key.starts_with(&format!("{MUSE_GLIMMER_VISION_ADAPTER_ROOT}."))
+            && !key.starts_with(&format!("{MUSE_GLIMMER_VISION_PROJECTION_ROOT}."))
+        {
+            return Err(anyhow::anyhow!(
+                "Muse Glimmer supports quantized text and vision-fusion weights only; found unsupported vision-tower sidecar {key}"
+            ));
+        }
+        if config.text_config.quantization.is_none() {
+            return Err(anyhow::anyhow!(
+                "Muse Glimmer checkpoint contains quantization sidecar {key}, but config.json declares no quantization contract"
+            ));
+        }
+        if suffix == ".global_scale" {
+            return Err(anyhow::anyhow!(
+                "Muse Glimmer pinned affine-Q4 layout does not support global-scale sidecar {key}"
+            ));
+        }
+        let prefix = key.strip_suffix(suffix).unwrap_or(key);
+        if !weights.contains_key(&format!("{prefix}.weight")) {
+            return Err(anyhow::anyhow!(
+                "Muse Glimmer quantization sidecar {key} has no matching {prefix}.weight"
+            ));
+        }
+        if suffix == ".scales" {
+            scale_count += 1;
+            if !weights.contains_key(&format!("{prefix}.biases")) {
+                return Err(anyhow::anyhow!(
+                    "Muse Glimmer affine quantization sidecar {key} has no matching {prefix}.biases"
+                ));
+            }
+        } else if !weights.contains_key(&format!("{prefix}.scales")) {
+            return Err(anyhow::anyhow!(
+                "Muse Glimmer quantization sidecar {key} has no matching {prefix}.scales"
+            ));
+        }
     }
-    Ok(())
-}
-
-fn ensure_dense_muse_key(key: &str) -> Result<()> {
-    if [".scales", ".biases", ".global_scale"]
-        .iter()
-        .any(|suffix| key.ends_with(suffix))
-    {
+    if config.text_config.quantization.is_some() && scale_count == 0 {
         return Err(anyhow::anyhow!(
-            "Muse Glimmer VLM supports only canonical dense BF16 weights; found quantization sidecar {key}"
+            "Muse Glimmer config.json declares quantization, but the checkpoint contains no supported .scales tensors"
         ));
     }
     Ok(())

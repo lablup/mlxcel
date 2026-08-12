@@ -112,12 +112,17 @@ Implemented VLM variants include:
 - Hunyuan-VL (`hunyuan_vl`, e.g. HunyuanOCR): Tencent's vision-language family. A ViT with a per-patch conv embedding, bilinearly interpolated learned position embeddings, and full attention over the packed patch sequence feeds a `perceive` merger: a stride-2 conv pair over the raster grid, a learned `image_newline` column, a linear to the decoder width, and learned `image_begin` / `image_end` rows. Per image that yields `mh * (mw + 1) + 2` feature rows, matching the prompt placeholder count exactly. The decoder is the Hunyuan dense stack (per-head Q/K RMSNorm after the rotation, DynamicNTK-alpha rope base) with XD-RoPE at prefill: 4D `[P, T, H, W]` position ids split across the frequency dims, degenerating to the standard rotation for text; decode uses sequential positions. Validated against `hadeseus/HunyuanOCR-mlx-4bit` (text 4-bit, vision bf16). Best for OCR: text spotting, document parsing, and grounded extraction.
 - MiniMax-M3-VL (`minimax_m3_vl`): MiniMax's vision-language model on top of the MiniMax-M3 text backbone. A CLIP-style ViT (hidden 1280, 16 heads, 32 layers, patch 14, `pre_layrnorm`, LayerNorm + exact-GELU blocks with separate `q/k/v/out` projections) runs native-resolution packing: Qwen2-VL-style dynamic `smart_resize` to `patch_size * spatial_merge_size = 28`-aligned dimensions, `image_grid_thw` patchify, per-image `cu_seqlens` variable-length attention, and 3D (t, h, w) vision RoPE (temporal axis inert for images, trailing dims unrotated). A two-stage projector then maps features to the text width: a per-patch `multi_modal_projector` (`linear_1 -> GELU -> linear_2`, into `projection_dim` 6144) followed by a `patch_merge_mlp` that folds each `spatial_merge_size^2 = 4` adjacent patches (`linear_1` [6144, 24576] `-> GELU -> linear_2`). Each `]<]image[>[` placeholder expands to `grid_t * (h/2) * (w/2)` tokens (`vision_start` 200029, `vision_end` 200030), which the merged features replace LLaVA-style; the MiniMax-M3 hybrid dense/MoE decoder then runs its standard partial 1D RoPE. The vision tower runs in f32 (non-quantized in the checkpoint) while the text tower may be quantized in community exports. Image and multi-image inputs are wired end to end (CLI and server); video is out of scope for this port. The only public checkpoint (`MiniMaxAI/MiniMax-M3`, 427B) exceeds the development machine, so image Q&A parity is deferred to a runtime validation once a fitting quantized conversion exists; the merge gate is the unit tests plus the real nested-config parse.
 - Muse Glimmer (`muse_glimmer`, `MuseGlimmerForConditionalGeneration`): Meta's
-  30B VLM, targeting the pinned public checkpoint
+  30B VLM, supporting the pinned public BF16 checkpoint
   `meta-models/Muse-Glimmer-30B` revision
   `97c77dff50b2797bcc558fa2d909761dbc575c59` and local path
-  `models/mlx/muse-glimmer-30b`. The baseline loads only the canonical dense
-  BF16 checkpoint (59,553,253,376 tensor bytes), so plan for a GB10-class /
-  128 GB unified-memory host and serialize other large jobs while testing it.
+  `models/mlx/muse-glimmer-30b`, plus the MLX affine-Q4 checkpoint
+  `mlx-community/Muse-Glimmer-30B-4bit` revision
+  `3e7677d7a40d348a3daba263a2b1c0aa41910710` and local path
+  `models/mlx/muse-glimmer-30b-4bit`. The BF16 weights occupy
+  59,553,253,376 tensor bytes. The Q4 conversion occupies 19,414,521,856 bytes,
+  packs the text embedding, decoder projections, untied LM head, vision adapter,
+  and vision projection at 4 bits with group size 64, while keeping the
+  50-layer vision tower dense.
   The text decoder exposes a 131072-token context window and owns a mixed cache:
   sliding layers keep a 2048-token rotating KV window while full-attention
   layers grow across the prompt/context. The vision path supports text-only,
@@ -134,9 +139,11 @@ Implemented VLM variants include:
   `200008`. OpenAI Chat Completions, Responses, Anthropic-compatible routes,
   classic CLI generation, continuous batching, streaming, expanded usage
   accounting, text/image/multi-image, ATEM replay, and reasoning output are
-  wired. Unsupported baseline paths are video, quantized checkpoints or
+  wired. Unsupported paths are video, quantized vision-tower weights,
   Turbo/INT8 KV quantization, DFlash/speculative decoding, LoRA/adapters, TP,
-  PP, XLA/IREE/OpenXLA, and distributed/disaggregated serving.
+  PP, XLA/IREE/OpenXLA, and distributed/disaggregated serving. Quantization
+  support is checkpoint-format specific; the pinned mlx-community affine-Q4
+  layout is the qualified contract, not arbitrary GGUF or external packings.
 
   The 2026-08-11 real-checkpoint gate ran on Linux/aarch64 with an NVIDIA GB10
   (CUDA 13.0, driver 580.173.02). Greedy CLI text generation was coherent at
@@ -148,6 +155,22 @@ Implemented VLM variants include:
   and process `VmHWM` reached 4.136 GiB. MLX's allocator counters report zero on
   this CUDA backend, so those OS measurements are recorded explicitly rather
   than presented as allocator/device-only memory.
+
+  The 2026-08-12 affine-Q4 smoke gate used the pinned mlx-community revision on
+  the same GB10. A 69-token text prompt prefixed at 7.22 tok/s and decoded 64
+  greedy tokens at 13.21 tok/s on the first measurement. A warm rerun reached
+  the final answer `The capital of France is Paris.` after 152 generated tokens,
+  prefilling at 12.43 tok/s and decoding at 13.34 tok/s. A real image expanded
+  to 64 patch tokens,
+  produced an accurate solid orange-red description, and measured 5.80 tok/s
+  over the 130-token multimodal prefill plus 13.15 decode tok/s; that cold image
+  run included first-use CUDA kernel compilation. This is approximately 3.1x
+  the BF16 text decode rate above. The CLI also separates Muse's `to=self`
+  reasoning from `to=user` content, hiding reasoning and envelope tokens unless
+  `--show-reasoning` is requested. A clean final-source release rebuild repeated
+  the same answer with no leaked control tokens at 12.97 decode tok/s; its cold
+  prefill was 3.15 tok/s, showing why cold and warm prefill are reported
+  separately.
 - FastVLM (`llava_qwen2` / `fastvlm`): Apple's low-latency VLM. A FastViTHD hybrid encoder runs entirely on channels-last maps: a conv stem, three RepMixer stages (depthwise token mixing plus a BatchNorm ConvFFN), two attention stages with channel LayerNorm and `head_dim` 32 self-attention, inter-stage large-kernel PatchEmbed downsamples, RepCPE position encoders, and a squeeze-excite `conv_exp` head. Each 1024x1024 pad-to-square image becomes a `(16, 16, 3072)` map flattened to 256 tokens, projected to the Qwen2 decoder width by an `mlp2x_gelu` MLP. The `<image>` placeholder is the fixed `-200` sentinel (not a vocabulary token); the runtime splices one sentinel per image, expands it to 256 tokens, and scatters the image embeddings (LLaVA merge). The text decoder is stock Qwen2, reused unchanged. The loader accepts both the genuine (`apple/FastVLM-0.5B`) and converted (`mlx-community/FastVLM-0.5B-bf16`) weight layouts. Best for fast image description and grounded chat.
 - GLM-OCR (`glm_ocr`): document-OCR sibling of GLM-4V. A 24-block ViT (3D patch embedding, per-head q/k RMSNorm on the packed `cu_seqlens` attention, 2D vision RoPE, Conv2d spatial downsample, SwiGLU patch merger) feeds a 16-layer GLM-4 text decoder driven by full-width even/odd MRoPE (`rope_parameters` with `mrope_section [16, 24, 24]`, `partial_rotary_factor 1.0`). The tower has no learned position embedding or post-conv norm, and the loader drops the next-n prediction (MTP) layer. Patches are reordered from the processor's raster order into spatial-merge-window order so the rotary, downsample, and merged-token grid stay spatially aligned (OCR reads scrambled patches wrong). Best for plain text, tables, and formula recognition.
 - Youtu-VL
@@ -453,9 +476,12 @@ The grapheme-to-phoneme front-end is a self-contained American-English phonemize
 Do not infer quality or speed from the ability to load a quantized checkpoint.
 Run a smoke test and, for release claims, a benchmark/quality gate.
 
-Muse Glimmer is deliberately narrower than the table above for its first
-baseline: only the canonical dense BF16 checkpoint is supported. Quantized Muse
-weights and non-FP16/Turbo KV-cache modes are follow-ups because the model owns a
+Muse Glimmer supports both the canonical dense BF16 checkpoint and the pinned
+`mlx-community/Muse-Glimmer-30B-4bit` affine-Q4 conversion. The Q4 path
+normalizes mlx-vlm's `language_model.*` roots and inherits the root-level
+quantization contract into the text decoder and fusion projections; the vision
+tower remains dense.
+Non-FP16/Turbo KV-cache modes are a separate follow-up because the model owns a
 mixed 2048-token sliding plus growing full-layer cache.
 
 ## Distributed support summary
@@ -467,7 +493,7 @@ mixed 2048-token sliding plus growing full-layer cache.
 | VLM under TP/PP | Partial. Vision tower / projector partitioning is not uniformly supported. |
 | Disaggregated inference | Infrastructure exists; validate per topology and workload. |
 
-Muse Glimmer is single-process dense BF16 only in this baseline: TP, PP,
+Muse Glimmer is single-process for both BF16 and affine Q4: TP, PP,
 XLA/IREE/OpenXLA, distributed, and disaggregated serving must remain disabled
 until each path has explicit mixed-cache and multimodal validation.
 

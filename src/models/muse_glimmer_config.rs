@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use serde::Deserialize;
+use serde_json::Value;
 
 pub const DEFAULT_IMAGE_TOKEN_ID: i32 = 200_092;
 pub const DEFAULT_IMAGE_PLACEHOLDER_TOKEN_ID: i32 = 200_090;
@@ -241,6 +242,13 @@ fn default_vision_rope_theta() -> f32 {
 
 impl MuseGlimmerTextConfig {
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(quantization) = &self.quantization {
+            mlxcel_core::layers::validate_quantization_params(
+                quantization.group_size,
+                quantization.bits,
+            )
+            .map_err(|err| format!("Muse Glimmer {err}"))?;
+        }
         if self.num_attention_heads == 0 {
             return Err("Muse Glimmer num_attention_heads must be non-zero".to_string());
         }
@@ -300,6 +308,63 @@ impl MuseGlimmerTextConfig {
             .or_else(|| self.rope_parameters.as_ref().map(|p| p.rope_theta))
             .or(Some(default_rope_theta()))
     }
+}
+
+/// Carry the MLX checkpoint's root-level quantization contract into the text
+/// sub-config consumed by the decoder.
+///
+/// `mlx-community/Muse-Glimmer-30B-4bit` follows mlx-vlm's common layout: the
+/// affine `{group_size, bits, mode}` block lives at the config root while the
+/// packed tensors live below `language_model.*`. The Rust decoder receives
+/// only `text_config`, so leaving the block at the root would make every
+/// `UnifiedLinear` interpret the packed weights with fallback parameters.
+pub(crate) fn inherit_muse_text_quantization(config: &mut Value) -> Result<(), String> {
+    let root_quantization = config.get("quantization").filter(|value| !value.is_null());
+    let compatibility_quantization = config
+        .get("quantization_config")
+        .filter(|value| !value.is_null());
+
+    if let (Some(root), Some(compatibility)) = (root_quantization, compatibility_quantization)
+        && root != compatibility
+    {
+        return Err("Muse Glimmer root quantization and quantization_config disagree".to_string());
+    }
+
+    let Some(quantization) = root_quantization.or(compatibility_quantization).cloned() else {
+        return Ok(());
+    };
+    let text_config = config
+        .get_mut("text_config")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "Muse Glimmer config.json has no text_config object".to_string())?;
+
+    if let Some(nested) = text_config
+        .get("quantization")
+        .filter(|value| !value.is_null())
+    {
+        if nested != &quantization {
+            return Err(
+                "Muse Glimmer root and text_config quantization contracts disagree".to_string(),
+            );
+        }
+    } else {
+        text_config.insert("quantization".to_string(), quantization);
+    }
+
+    if let Some(mode) = text_config
+        .get("quantization")
+        .and_then(|quantization| quantization.get("mode"))
+    {
+        let mode = mode.as_str().ok_or_else(|| {
+            "Muse Glimmer quantization.mode must be a string when present".to_string()
+        })?;
+        if mode != "affine" {
+            return Err(format!(
+                "Muse Glimmer quantization.mode must be \"affine\" for the pinned mlx-community checkpoint layout, got {mode:?}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl MuseGlimmerConfig {

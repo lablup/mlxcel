@@ -894,7 +894,7 @@ impl ModelType {
                 "MiniMax VLM",
             ),
             ModelType::MuseGlimmerVLM => (
-                "Muse Glimmer 30B VLM (BF16, mixed 2048 sliding/full cache, ATEM)",
+                "Muse Glimmer 30B VLM (BF16/MLX 4-bit, mixed 2048 sliding/full cache, ATEM)",
                 "Muse VLM",
             ),
             ModelType::Mixtral => ("Mixtral (MoE)", "MoE (other)"),
