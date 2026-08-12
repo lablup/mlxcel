@@ -27,6 +27,7 @@ use mlxcel_core::{MlxArray, UniquePtr};
 use std::path::Path;
 
 pub(crate) use super::muse_glimmer_cache::MuseCache;
+use super::muse_glimmer_config::inherit_muse_text_quantization;
 pub use super::muse_glimmer_config::{
     DEFAULT_IMAGE_END_TOKEN_ID, DEFAULT_IMAGE_PLACEHOLDER_TOKEN_ID, DEFAULT_IMAGE_START_TOKEN_ID,
     DEFAULT_IMAGE_TOKEN_ID, DEFAULT_PAD_TOKEN_ID, DEFAULT_VIDEO_TOKEN_ID, MuseGlimmerConfig,
@@ -170,9 +171,15 @@ impl MuseGlimmerTextModel {
         let model_dir = model_dir.as_ref();
         let config_str = std::fs::read_to_string(model_dir.join("config.json"))
             .map_err(|e| format!("Failed to read config.json: {e}"))?;
-        let config: MuseGlimmerConfig = serde_json::from_str(&config_str)
+        let mut config_value: serde_json::Value = serde_json::from_str(&config_str)
             .map_err(|e| format!("Failed to parse config.json: {e}"))?;
-        let weights = crate::models::load_text_weights(model_dir, None)?;
+        inherit_muse_text_quantization(&mut config_value)?;
+        let config: MuseGlimmerConfig = serde_json::from_value(config_value)
+            .map_err(|e| format!("Failed to parse config.json: {e}"))?;
+        let weights = crate::loading::normalize_muse_glimmer_weights(
+            crate::models::load_text_weights(model_dir, None)?,
+        )
+        .map_err(|err| err.to_string())?;
         let eos_token_ids = crate::loading::read_eos_token_ids(model_dir);
         let model = Self::from_weights(
             &weights,

@@ -62,6 +62,7 @@ pub(crate) use self::vlm::load_llava_iree_host_preprocessor;
 #[cfg(feature = "xla-iree")]
 pub(crate) use self::vlm::load_qwen2_vl_iree_host_preprocessor;
 pub use self::vlm::load_qwen3_omni_speech;
+pub(crate) use self::vlm::normalize_muse_glimmer_weights;
 #[cfg(feature = "xla-iree")]
 pub(crate) use self::vlm::{
     Phi4MMXlaVisionComponents, load_phi4mm_xla_media_components, load_phi4mm_xla_text_embeddings,

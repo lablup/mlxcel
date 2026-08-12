@@ -15,11 +15,10 @@
 //! Muse Glimmer post-tower visual-token fusion.
 
 use crate::models::muse_glimmer::MuseGlimmerConfig;
-use mlxcel_core::layers::Linear;
+use mlxcel_core::layers::UnifiedLinear;
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
-use super::muse_glimmer_layers::{BiasMode, load_linear};
 use super::qwen2_vl::concat_many;
 
 pub const MUSE_GLIMMER_VISION_ADAPTER_ROOT: &str = "model.vision_adapter";
@@ -27,7 +26,7 @@ pub const MUSE_GLIMMER_VISION_PROJECTION_ROOT: &str = "model.vision_projection";
 
 pub struct MuseGlimmerVisionFusion {
     adapter: MuseGlimmerVisionAdapter,
-    projection: Linear,
+    projection: UnifiedLinear,
     merge_size: usize,
     tower_hidden_size: usize,
     norm_eps: f32,
@@ -47,12 +46,13 @@ impl MuseGlimmerVisionFusion {
         }
 
         let adapter = MuseGlimmerVisionAdapter::from_weights(weights, config)?;
-        let projection = load_linear(
+        let projection = load_fusion_linear(
             weights,
             MUSE_GLIMMER_VISION_PROJECTION_ROOT,
-            BiasMode::Forbidden,
+            config.text_config.group_size(),
+            config.text_config.bits(),
         )?;
-        let projection_shape = mlxcel_core::array_shape(&projection.weight);
+        let projection_shape = unified_linear_shape(&projection)?;
         let expected_projection = vec![
             config.text_config.hidden_size as i32,
             config.projector_hidden_size as i32,
@@ -90,21 +90,23 @@ impl MuseGlimmerVisionFusion {
 }
 
 pub struct MuseGlimmerVisionAdapter {
-    fc1: Linear,
-    fc2: Linear,
+    fc1: UnifiedLinear,
+    fc2: UnifiedLinear,
 }
 
 impl MuseGlimmerVisionAdapter {
     pub fn from_weights(weights: &WeightMap, config: &MuseGlimmerConfig) -> Result<Self, String> {
-        let fc1 = load_linear(
+        let fc1 = load_fusion_linear(
             weights,
             &format!("{MUSE_GLIMMER_VISION_ADAPTER_ROOT}.fc1"),
-            BiasMode::Forbidden,
+            config.text_config.group_size(),
+            config.text_config.bits(),
         )?;
-        let fc2 = load_linear(
+        let fc2 = load_fusion_linear(
             weights,
             &format!("{MUSE_GLIMMER_VISION_ADAPTER_ROOT}.fc2"),
-            BiasMode::Forbidden,
+            config.text_config.group_size(),
+            config.text_config.bits(),
         )?;
         check_linear_shape(
             &fc1,
@@ -212,8 +214,45 @@ pub fn weightless_perception_norm(hidden_states: &MlxArray, eps: f32) -> UniqueP
     mlxcel_core::fast_rms_norm_no_weight(hidden_states, eps)
 }
 
-fn check_linear_shape(linear: &Linear, expected: &[i32], label: &str) -> Result<(), String> {
-    let actual = mlxcel_core::array_shape(&linear.weight);
+fn load_fusion_linear(
+    weights: &WeightMap,
+    prefix: &str,
+    group_size: i32,
+    bits: i32,
+) -> Result<UnifiedLinear, String> {
+    if weights.contains_key(&format!("{prefix}.bias")) {
+        return Err(format!(
+            "Muse Glimmer vision fusion linear must not have bias: {prefix}.bias"
+        ));
+    }
+    UnifiedLinear::from_weights(weights, prefix, group_size, bits)
+}
+
+fn unified_linear_shape(linear: &UnifiedLinear) -> Result<Vec<i32>, String> {
+    match linear {
+        UnifiedLinear::Regular(linear) => Ok(mlxcel_core::array_shape(&linear.weight)),
+        UnifiedLinear::Quantized { weight, .. } => {
+            let packed = mlxcel_core::array_shape(&weight.weight);
+            let scales = mlxcel_core::array_shape(&weight.scales);
+            if packed.len() != 2 || scales.len() != 2 || packed[0] != scales[0] {
+                return Err(format!(
+                    "Muse Glimmer quantized vision fusion linear has inconsistent weight/scales shapes: weight={packed:?}, scales={scales:?}"
+                ));
+            }
+            let logical_input = i64::from(scales[1]) * i64::from(weight.group_size);
+            let logical_input = i32::try_from(logical_input).map_err(|_| {
+                format!(
+                    "Muse Glimmer quantized vision fusion input width overflows i32: {} * {}",
+                    scales[1], weight.group_size
+                )
+            })?;
+            Ok(vec![packed[0], logical_input])
+        }
+    }
+}
+
+fn check_linear_shape(linear: &UnifiedLinear, expected: &[i32], label: &str) -> Result<(), String> {
+    let actual = unified_linear_shape(linear)?;
     if actual != expected {
         return Err(format!(
             "{label} weight must be {expected:?}, got {actual:?}"

@@ -119,7 +119,7 @@ fn supported_models_output_describes_muse_glimmer_baseline() {
 
     assert!(out.contains("Muse VLM:"), "missing Muse VLM family: {out}");
     assert!(
-        out.contains("Muse Glimmer 30B VLM (BF16, mixed 2048 sliding/full cache, ATEM)"),
+        out.contains("Muse Glimmer 30B VLM (BF16/MLX 4-bit, mixed 2048 sliding/full cache, ATEM)"),
         "missing Muse Glimmer operational summary: {out}"
     );
 }
@@ -130,15 +130,16 @@ fn top_level_help_mentions_muse_glimmer_limits() {
     let help = command.render_long_help().to_string();
 
     for expected in [
-        "Muse Glimmer 30B baseline",
+        "Muse Glimmer 30B checkpoints",
         "59.55 GB",
-        "GB10-class unified memory",
+        "19.41 GB",
+        "mlx-community affine 4-bit",
         "reasoning strengths",
         "ATEM tools",
         "speculative/DFlash",
         "TP/PP",
         "XLA/distributed",
-        "qualified on the pinned BF16 checkpoint with NVIDIA GB10",
+        "qualified checkpoints and GB10 metrics",
     ] {
         assert!(
             help.contains(expected),

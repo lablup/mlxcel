@@ -416,19 +416,50 @@ fn muse_glimmer_xla_image_preprocessor_rejects_family_explicitly() {
 }
 
 #[test]
-fn builder_rejects_quantization_and_video_temporal_layouts() {
+fn muse_quantization_contract_accepts_text_sidecars_and_rejects_unsafe_layouts() {
     let mut config = tiny_config();
     config.text_config.quantization = Some(MuseQuantization {
         group_size: 64,
         bits: 4,
     });
-    let weights = tiny_weights(&tiny_config());
-    let processor = MuseGlimmerImageProcessor::from_vision_config(&config.vision_config);
-    let err = build_muse_glimmer_vlm_from_weights(&weights, &config, processor, Vec::new())
+    let mut weights = tiny_weights(&config);
+    put(&mut weights, "lm_head.scales", &[16, 1], 0.1);
+    put(&mut weights, "lm_head.biases", &[16, 1], 0.0);
+    put(
+        &mut weights,
+        "model.vision_adapter.fc1.scales",
+        &[8, 1],
+        0.1,
+    );
+    put(
+        &mut weights,
+        "model.vision_adapter.fc1.biases",
+        &[8, 1],
+        0.0,
+    );
+    assert!(ensure_supported_muse_weight_map(&weights, &config).is_ok());
+
+    let dense_config = tiny_config();
+    let err = ensure_supported_muse_weight_map(&weights, &dense_config)
         .map(|_| "unexpected success".to_string())
         .unwrap_or_else(|err| err.to_string());
-    assert!(err.contains("dense BF16"));
+    assert!(err.contains("declares no quantization contract"));
 
+    put(
+        &mut weights,
+        "model.vision_tower.patch_embedder.patch_embedding.scales",
+        &[4, 1],
+        0.1,
+    );
+    let err = ensure_supported_muse_weight_map(&weights, &config)
+        .map(|_| "unexpected success".to_string())
+        .unwrap_or_else(|err| err.to_string());
+    assert!(err.contains("vision-tower sidecar"));
+}
+
+#[test]
+fn builder_rejects_video_temporal_layouts() {
+    let weights = tiny_weights(&tiny_config());
     let mut config = tiny_config();
     config.vision_config.patch_temporal = 4;
     let processor = MuseGlimmerImageProcessor::from_vision_config(&config.vision_config);
@@ -459,7 +490,7 @@ fn pinned_weight_index_classifies_each_source_weight_once() {
 }
 
 #[test]
-fn muse_weight_classifier_rejects_unknowns_and_quant_sidecars() {
+fn muse_weight_classifier_normalizes_mlx_vlm_roots_and_rejects_unknowns() {
     assert_eq!(
         classify_muse_weight_key("model.vision_tower.layers.0.attn.q_proj.weight"),
         Some(MuseWeightRoot::VisionTower)
@@ -481,9 +512,60 @@ fn muse_weight_classifier_rejects_unknowns_and_quant_sidecars() {
         Some(MuseWeightRoot::LmHead)
     );
     assert_eq!(classify_muse_weight_key("model.mm_projector.weight"), None);
+    assert_eq!(
+        normalize_muse_weight_key("language_model.model.layers.0.mlp.up_proj.scales"),
+        "model.language_model.layers.0.mlp.up_proj.scales"
+    );
+    assert_eq!(
+        normalize_muse_weight_key("language_model.lm_head.biases"),
+        "lm_head.biases"
+    );
+    assert_eq!(
+        normalize_muse_weight_key("vision_tower.layers.0.attn.q_proj.weight"),
+        "model.vision_tower.layers.0.attn.q_proj.weight"
+    );
+    assert_eq!(
+        classify_muse_weight_key("language_model.model.embed_tokens.scales"),
+        Some(MuseWeightRoot::LanguageModel)
+    );
+    assert_eq!(
+        classify_muse_weight_key("language_model.lm_head.weight"),
+        Some(MuseWeightRoot::LmHead)
+    );
+}
 
-    let err = ensure_dense_muse_key("model.language_model.layers.0.mlp.up_proj.scales")
+#[test]
+fn root_quantization_is_inherited_into_muse_text_config() {
+    let quantization = serde_json::json!({
+        "group_size": 64,
+        "bits": 4,
+        "mode": "affine"
+    });
+    let mut config = serde_json::json!({
+        "quantization": quantization,
+        "quantization_config": quantization,
+        "text_config": {}
+    });
+    if let Err(err) = inherit_muse_text_quantization(&mut config) {
+        panic!("root Muse quantization should be inherited: {err}");
+    }
+    assert_eq!(
+        config["text_config"]["quantization"],
+        serde_json::json!({"group_size": 64, "bits": 4, "mode": "affine"})
+    );
+
+    config["quantization_config"]["bits"] = serde_json::json!(8);
+    let err = inherit_muse_text_quantization(&mut config)
         .map(|_| "unexpected success".to_string())
-        .unwrap_or_else(|err| err.to_string());
-    assert!(err.contains("quantization sidecar"));
+        .unwrap_or_else(|err| err);
+    assert!(err.contains("disagree"));
+
+    let mut unsupported_mode = serde_json::json!({
+        "quantization": {"group_size": 64, "bits": 4, "mode": "mxfp4"},
+        "text_config": {}
+    });
+    let err = inherit_muse_text_quantization(&mut unsupported_mode)
+        .map(|_| "unexpected success".to_string())
+        .unwrap_or_else(|err| err);
+    assert!(err.contains("must be \"affine\""));
 }

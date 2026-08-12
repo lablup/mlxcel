@@ -65,6 +65,29 @@ fn muse_recipient_envelope_keeps_user_answer_content() {
     );
 }
 
+#[test]
+fn muse_cli_render_hides_reasoning_and_control_markers() {
+    let text = concat!(
+        " to=self<|message|>Think first.<|eom|>",
+        "<|start|>assistant to=user<|message|>Done.<|eot|>"
+    );
+
+    let hidden = render_muse_channels_for_display(text, false, false).unwrap();
+    assert_eq!(hidden, "Done.");
+
+    let shown = render_muse_channels_for_display(text, true, false).unwrap();
+    assert_eq!(shown, "Think first.\nDone.");
+    assert!(!shown.contains("<|"));
+}
+
+#[test]
+fn muse_cli_render_is_inert_for_plain_text() {
+    assert_eq!(
+        render_muse_channels_for_display("plain answer", false, false),
+        None
+    );
+}
+
 fn atem_block(body: &str) -> String {
     format!("<atem:function_calls>\n{body}</atem:function_calls>")
 }
