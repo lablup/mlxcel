@@ -236,7 +236,9 @@ pub(crate) fn build_server_generate_options(
         dry_penalty_last_n: overrides
             .dry_penalty_last_n
             .unwrap_or(config.default_dry_penalty_last_n),
-        dry_sequence_breakers: overrides.dry_sequence_breakers.unwrap_or_default(),
+        dry_sequence_breakers: overrides
+            .dry_sequence_breakers
+            .unwrap_or_else(|| config.default_dry_sequence_breakers.clone()),
         frequency_penalty: overrides
             .frequency_penalty
             .unwrap_or(config.default_frequency_penalty),
