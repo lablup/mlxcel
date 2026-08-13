@@ -824,9 +824,38 @@ webpage-deploy: ## Deploy download webpage to GitHub Pages
 # ============================================================================
 # Documentation (Zensical / MkDocs-compatible)
 # ============================================================================
+#
+# The docs-* targets below build the MkDocs manual. Its sources (docs/en,
+# docs/ko, docs/shared, docs/requirements.txt, docs/scripts) are maintained in a
+# separate documentation tree and are not part of this repository, so every one
+# of these targets depends on docs-guard. The guard is a presence check, not an
+# unconditional refusal: where the sources exist the targets run exactly as
+# before, and where they do not the build stops with an explanation instead of
+# an opaque uv, ln, or zensical failure. See docs/README.md for the split.
+
+DOCS_MANUAL_DIR := docs/en
+DOCS_MANUAL_URL := https://mlxcel.lablup.ai/en/manual/
+
+.PHONY: docs-guard
+docs-guard:
+	@test -d "$(DOCS_MANUAL_DIR)" || { \
+		echo "The MkDocs manual sources are not present in this checkout."; \
+		echo ""; \
+		echo "  '$(DOCS_MANUAL_DIR)' is missing, and so are docs/ko, docs/shared,"; \
+		echo "  docs/requirements.txt and docs/scripts. They are maintained in a"; \
+		echo "  separate documentation tree, along with its own copies of mkdocs.yml,"; \
+		echo "  mkdocs.ko.yml and the two PDF configs. The docs_dir, custom_dir and"; \
+		echo "  nav: entries in the configs kept here name paths in that tree, not the"; \
+		echo "  docs/*.md files in this repository, so no docs-* target can build"; \
+		echo "  anything from this checkout."; \
+		echo ""; \
+		echo "  Read the published manual instead: $(DOCS_MANUAL_URL)"; \
+		echo "  The documents that do live here are indexed in docs/README.md."; \
+		exit 1; \
+	}
 
 .PHONY: docs-install
-docs-install: ## Install documentation dependencies and create shared symlinks
+docs-install: docs-guard ## Install documentation dependencies and create shared symlinks (manual sources not in this checkout)
 	@command -v uv >/dev/null 2>&1 || { \
 		echo "Error: uv is not installed. Install it from https://docs.astral.sh/uv/"; \
 		exit 1; \
@@ -838,30 +867,30 @@ docs-install: ## Install documentation dependencies and create shared symlinks
 	@echo "Documentation dependencies installed and symlinks created. Run 'make docs-serve' to start the server."
 
 .PHONY: docs-serve
-docs-serve: ## Serve all docs locally (builds KO first, then serves EN)
+docs-serve: docs-guard ## Serve all docs locally, builds KO first then serves EN (manual sources not in this checkout)
 	@echo "Building Korean docs..."
 	uv run zensical build -f mkdocs.ko.yml
 	@echo "Serving English docs..."
 	uv run zensical serve -f mkdocs.yml
 
 .PHONY: docs-serve-en
-docs-serve-en: ## Serve English docs with live reload
+docs-serve-en: docs-guard ## Serve English docs with live reload (manual sources not in this checkout)
 	uv run zensical serve -f mkdocs.yml
 
 .PHONY: docs-serve-ko
-docs-serve-ko: ## Serve Korean docs with live reload
+docs-serve-ko: docs-guard ## Serve Korean docs with live reload (manual sources not in this checkout)
 	uv run zensical serve -f mkdocs.ko.yml
 
 .PHONY: docs-build
-docs-build: ## Build English docs
+docs-build: docs-guard ## Build English docs (manual sources not in this checkout)
 	uv run zensical build -f mkdocs.yml
 
 .PHONY: docs-build-ko
-docs-build-ko: ## Build Korean docs
+docs-build-ko: docs-guard ## Build Korean docs (manual sources not in this checkout)
 	uv run zensical build -f mkdocs.ko.yml
 
 .PHONY: docs-build-all
-docs-build-all: ## Build all docs (EN + KO)
+docs-build-all: docs-guard ## Build all docs, EN and KO (manual sources not in this checkout)
 	@echo "Building English docs..."
 	uv run zensical build -f mkdocs.yml
 	@echo "Building Korean docs..."
@@ -869,19 +898,19 @@ docs-build-all: ## Build all docs (EN + KO)
 	@echo "All docs built in site/"
 
 .PHONY: docs-build-strict
-docs-build-strict: ## Build all docs with strict mode (for CI)
+docs-build-strict: docs-guard ## Build all docs in strict mode for CI (manual sources not in this checkout)
 	uv run zensical build -f mkdocs.yml
 	uv run zensical build -f mkdocs.ko.yml
 
 .PHONY: docs-pdf-setup
-docs-pdf-setup: ## Install Playwright browser for PDF export (one-time setup)
+docs-pdf-setup: docs-guard ## Install Playwright browser for PDF export, one-time (manual sources not in this checkout)
 	uv venv --python 3.13
 	uv pip install -r docs/requirements.txt
 	uv run python -m playwright install chromium
 	@echo "PDF export dependencies ready."
 
 .PHONY: docs-pdf-en
-docs-pdf-en: ## Export English documentation as PDF
+docs-pdf-en: docs-guard ## Export English documentation as PDF (manual sources not in this checkout)
 	@echo "Building English documentation as PDF..."
 	uv run mkdocs build --config-file mkdocs.pdf.yml -d site/en/manual
 	@echo "Fixing PDF internal links..."
@@ -889,7 +918,7 @@ docs-pdf-en: ## Export English documentation as PDF
 	@echo "PDF generated: site/en/manual/mlxcel-Manual-en.pdf"
 
 .PHONY: docs-pdf-ko
-docs-pdf-ko: ## Export Korean documentation as PDF
+docs-pdf-ko: docs-guard ## Export Korean documentation as PDF (manual sources not in this checkout)
 	@echo "Building Korean documentation as PDF..."
 	uv run mkdocs build --config-file mkdocs.ko.pdf.yml -d site/ko/manual
 	@echo "Fixing PDF internal links..."
@@ -897,12 +926,12 @@ docs-pdf-ko: ## Export Korean documentation as PDF
 	@echo "PDF generated: site/ko/manual/mlxcel-Manual-ko.pdf"
 
 .PHONY: docs-pdf
-docs-pdf: docs-pdf-en docs-pdf-ko ## Export all documentation as PDF
+docs-pdf: docs-guard docs-pdf-en docs-pdf-ko ## Export all documentation as PDF (manual sources not in this checkout)
 	@echo "All PDFs generated:"
 	@echo "  - site/en/manual/mlxcel-Manual-en.pdf"
 	@echo "  - site/ko/manual/mlxcel-Manual-ko.pdf"
 
 .PHONY: docs-clean
-docs-clean: ## Remove built docs
+docs-clean: docs-guard ## Remove built docs (manual sources not in this checkout)
 	rm -rf site/
 	@echo "Built docs removed."
