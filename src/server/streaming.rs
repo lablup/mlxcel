@@ -27,9 +27,15 @@
 //! will drop the connection before the first token arrives.
 //!
 //! `sse_channel` returns a keepalive configuration via `SseKeepAlive` that
-//! route handlers must attach to the `Sse` response with `.keep_alive()`. The
-//! keepalive interval is 15 seconds — shorter than typical proxy idle timeouts
-//! and long enough not to spam comment events for short responses.
+//! route handlers must attach to the `Sse` response with `.keep_alive()`.
+//! Streams that do not come from `sse_channel` (`router_front.rs`) build the
+//! same newtype directly rather than reaching for `KeepAlive::default()`. The
+//! interval is [`SSE_KEEPALIVE_INTERVAL_SECS`], short enough to beat typical
+//! proxy idle timeouts and long enough not to spam comment events for short
+//! responses. That constant is the single definition for every SSE surface in
+//! the server, including the Responses and Anthropic-compatible ones, and the
+//! `< 60` invariant is asserted next to it so it cannot be raised past a proxy
+//! timeout on any of them.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -51,17 +57,43 @@ pub(crate) const DONE_MARKER: &str = "[DONE]";
 /// 15 seconds is shorter than virtually all proxy idle timeouts (nginx
 /// default 60 s, HAProxy 60 s, AWS ALB 60 s) while being long enough to
 /// avoid noticeable overhead for ordinary short responses.
+///
+/// This is the single definition for every SSE surface. `streaming_responses`
+/// and `streaming_anthropic` keep their own newtypes, so a route cannot attach
+/// another surface's keepalive, but they read the interval from here (#1105).
 pub(crate) const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 15;
+
+/// The SSE keepalive interval must stay under typical reverse-proxy idle
+/// timeouts (nginx 60 s, HAProxy 60 s, AWS ALB 60 s) or a long prefill will
+/// have its connection dropped before the first token arrives.
+///
+/// This lives next to the definition rather than in the test module so it
+/// covers every consumer by construction (#1105). It was previously in
+/// `streaming_tests.rs` and guarded only this constant, while
+/// `streaming_responses.rs` and `streaming_anthropic.rs` carried their own
+/// file-private copies that nothing checked.
+///
+/// Enforced as a `const` assertion so a regression fails the build rather than
+/// a test run. (Using `assert!` on a constant expression in a runtime test
+/// triggers `clippy::assertions_on_constants`.)
+const _: () = assert!(
+    SSE_KEEPALIVE_INTERVAL_SECS < 60,
+    "SSE keepalive interval must be less than the 60s default used by most reverse proxies"
+);
 
 /// Keepalive configuration attached to an `Sse` response.
 ///
-/// Constructed by `sse_channel` and passed through to route handlers so they
-/// can call `Sse::new(stream).keep_alive(keepalive.into_inner())`. Using a
+/// Usually constructed by `sse_channel` and passed through to a route handler,
+/// which calls `Sse::new(stream).keep_alive(keepalive.into_inner())`. Using a
 /// newtype keeps the keepalive wired to the same channel creation point and
 /// makes it impossible to forget to attach it. The inner `KeepAlive` is private
 /// to prevent callers from constructing a mismatched keepalive independently.
 ///
-/// Used by: chat.rs, completions.rs, native_completion.rs
+/// `router_front.rs` builds its own with `default_for_long_prefill` because its
+/// streams do not come from `sse_channel`, but it goes through this type rather
+/// than `KeepAlive::default()` so it tracks the shared interval (#1105).
+///
+/// Used by: chat.rs, completions.rs, native_completion.rs, router_front.rs
 pub(crate) struct SseKeepAlive(KeepAlive);
 
 impl SseKeepAlive {
@@ -109,9 +141,10 @@ pub(crate) struct BlockingSseSender {
 /// `BatchScheduler` can abort orphaned sequences.
 ///
 /// The `keepalive` value must be attached to the `Sse` response via
-/// `Sse::new(stream).keep_alive(keepalive.0)` in the route handler. This
-/// ensures proxy idle timeouts do not close the connection during long prefill
-/// phases before the first generated token arrives.
+/// `Sse::new(stream).keep_alive(keepalive.into_inner())` in the route handler
+/// (the inner field is private, so `.0` is not reachable from outside this
+/// module). This ensures proxy idle timeouts do not close the connection during
+/// long prefill phases before the first generated token arrives.
 ///
 /// Used by: chat.rs, completions.rs, native_completion.rs
 pub(crate) fn sse_channel(

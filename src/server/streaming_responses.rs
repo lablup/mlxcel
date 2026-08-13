@@ -47,9 +47,8 @@ use futures::{Stream, StreamExt};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::server::streaming::SSE_KEEPALIVE_INTERVAL_SECS;
 use crate::server::types::responses_stream::{ResponseStreamEvent, SequenceCounter};
-
-const KEEPALIVE_INTERVAL_SECS: u64 = 15;
 
 /// Cancellation token shared with the scheduler for client-disconnect detection.
 pub(crate) type CancellationToken = Arc<AtomicBool>;
@@ -92,7 +91,7 @@ pub struct ResponseSseKeepAlive(KeepAlive);
 
 impl ResponseSseKeepAlive {
     fn default_for_long_prefill() -> Self {
-        Self(KeepAlive::new().interval(Duration::from_secs(KEEPALIVE_INTERVAL_SECS)))
+        Self(KeepAlive::new().interval(Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)))
     }
 
     pub fn into_inner(self) -> KeepAlive {
