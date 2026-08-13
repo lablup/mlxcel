@@ -2,16 +2,20 @@
 
 **Date**: 2026-08-14
 **Status**: Completed
-**Languages**: Rust, Markdown
+**Languages**: Rust
 **Risk Level**: Low
 
 ---
 
 ## Executive Summary
 
-PR #1129 closes issue #1112. The 2D (pipeline x tensor) parallelism validator rejected an under-specified topology by instructing the user to pass `--tensor-parallel-size > 1`. No mlxcel binary has ever accepted that spelling, so a user who followed the instruction was answered with `error: unexpected argument '--tensor-parallel-size' found`. The message now names `--tp-size`.
+PR #1129 closes issue #1112. The 2D (pipeline x tensor) parallelism guard in `validate_pipeline_parallel_args` carried a message naming `--tensor-parallel-size`, a spelling no mlxcel binary accepts. The message now names `--tp-size`.
 
-The finding that carries the most weight is not the message itself. The same wrong spelling was also in `tests/pp_tp_2d_real_models.rs`, where the non-ignored test `pp_tp_2d_validator_accepts_combination` had been passing **vacuously**: clap rejected the flag at argument parsing, the process died before the validator ran, and the test's only assertion (that a specific old rejection string is absent from the output) held trivially. The test that existed to guard this code path could not have caught this defect, and its green result was evidence of nothing.
+Two findings from review materially changed the shape of this PR, and both are worth more than the original defect.
+
+**The guard is unreachable.** The `ensure!` condition is the exact logical negation of the early return eight lines above it, so it can never fail and the message can never be emitted. No user has ever seen the wrong flag name. This is a latent text defect, not a user-facing bug, which is why the change ships with no CHANGELOG entry.
+
+**The `docs/en/` paths the issue called nonexistent are real.** `mkdocs.yml` sets `docs_dir: docs/en` and its `nav:` names both files the comment cited. They are pages of the published operator manual whose sources live in a separate documentation repository, a split `docs/README.md` documents explicitly as "deliberate, not drift". An earlier draft of this PR deleted those references on the issue's false premise, which is precisely the failure mode PR #1122 recorded as a risk. They are retained and explained instead.
 
 ---
 
@@ -19,28 +23,36 @@ The finding that carries the most weight is not the message itself. The same wro
 
 ### 1.1 Background
 
-`validate_pipeline_parallel_args` in `src/commands/generate.rs` guards the 2D composition: a tensor-parallel run with `tp_size > 1` must also carry a pipeline topology, either `--pp-size >= 2` or an explicit `--pp-layers` spec. The guard itself is correct. Its message was not:
+`validate_pipeline_parallel_args` in `src/commands/generate.rs` guards the 2D composition. Its structure is:
 
 ```rust
-"2D parallelism requires --pp-size >= 2 (or an explicit --pp-layers spec) \
- alongside --tensor-parallel-size > 1"
+if pp.pp_layers.is_none() && pp.pp_size <= 1 {
+    return Ok(());
+}
+// ...
+if tp_size > 1 {
+    ensure!(
+        pp.pp_size >= 2 || pp.pp_layers.is_some(),
+        "2D parallelism requires --pp-size >= 2 (or an explicit --pp-layers spec) \
+         alongside --tensor-parallel-size > 1"
+    );
 ```
 
 The tensor-parallel rank count is `--tp-size`, defined in `src/main.rs` and `src/bin/mlx_server.rs`. `--tensor-parallel-size` exists nowhere as a clap flag or alias.
 
 ### 1.2 Existing Issues
 
-- **The one wrong name was more misleading than a vague message.** `--pp-size` and `--pp-layers`, named in the same sentence, are both real. A reader who spot-checked the message found two of three names correct, which is exactly the pattern that makes the third look trustworthy.
-- **The test surface reproduced the same error and hid it.** Both tests in `tests/pp_tp_2d_real_models.rs` passed `--tensor-parallel-size` on the command line. The parity test is `#[ignore]`d and needs real weights, so it never ran. `pp_tp_2d_validator_accepts_combination` is not ignored and did run, and passed for the wrong reason: it asserts only that the string `pipeline parallelism does not support tensor parallelism` is absent from stdout and stderr, which is trivially true of a process that died inside clap.
-- **A comment above the validator pointed at files that have never existed.** It cited `docs/en/distributed/pipeline-parallelism.md` and `docs/en/distributed/tensor-parallelism.md`. `git log --all -- docs/en` is empty; the directory has never been part of this repository. These were the only two `docs/en/` references anywhere in `src/`.
+- **The message named a flag the binary rejects.** `--pp-size` and `--pp-layers`, named in the same sentence, are both real, which is the pattern that makes a third name look trustworthy.
+- **The guard cannot fire.** Past the early return, `pp_layers.is_some() || pp_size >= 2` holds by construction, and that is exactly the `ensure!` condition. The repository's own unit test records the consequence: `validate_pipeline_parallel_args_rejects_2d_without_pp_enabled` (`src/commands/generate_tests.rs`) sets `pp_size = 1, tp_size = 2` and asserts `is_ok()`, with a comment noting the validator returns early. The test name says "rejects" and the assertion says the opposite.
+- **The integration test passed the same nonexistent flag, and passed anyway.** Both tests in `tests/pp_tp_2d_real_models.rs` used `--tensor-parallel-size`. The parity test is `#[ignore]`d. `pp_tp_2d_validator_accepts_combination` was not, and passed vacuously: its only assertion was that a particular old rejection string is absent from the output, which is trivially true of a process clap killed at argument parsing.
 
 ### 1.3 Risk Assessment
 
 | Risk | Impact | Likelihood |
 |---|---|---|
-| User follows the error message and hits a second, unrelated error | Medium | High |
-| A future 2D-validator change is "verified" by a test that never reaches the validator | High | Medium |
-| Reader follows the comment to a nonexistent operator guide | Low | Medium |
+| A future change makes the guard reachable and ships the wrong flag name to users | Medium | Medium |
+| A 2D-validator change is "verified" by a test that never reaches the validator | High | Medium |
+| Someone deletes the cross-tree manual references believing them dangling | Medium | Medium |
 
 ---
 
@@ -48,11 +60,11 @@ The tensor-parallel rank count is `--tp-size`, defined in `src/main.rs` and `src
 
 ### 2.1 Scope of the Message Change
 
-The `ensure!` condition, the surrounding `tp_size > 1` branch, the `total_ranks` sanity check, and every other arm of `validate_pipeline_parallel_args` are byte-identical. Only the string literal changed, satisfying the issue's fourth acceptance criterion directly.
+The `ensure!` condition, the `tp_size > 1` branch, the `total_ranks` sanity check, and every other arm of the function are byte-identical. Only the string literal changed, satisfying the issue's fourth acceptance criterion directly.
 
 ### 2.2 The Sweep
 
-The issue asked for a sweep of the neighbouring messages on the reasoning that one wrong name suggests checking the rest. Reading them is weaker evidence than asking the binary, so every `--flag` token appearing anywhere in `src/commands/generate.rs` was diffed against the long flags the built binary actually advertises:
+Every `--flag` token appearing anywhere in `src/commands/generate.rs` was diffed against the long flags the built binary advertises, rather than read by eye:
 
 ```
 $ grep -o -- '--[a-z][a-z0-9-]*' src/commands/generate.rs | sort -u \
@@ -60,50 +72,80 @@ $ grep -o -- '--[a-z][a-z0-9-]*' src/commands/generate.rs | sort -u \
 --tensor-parallel-size
 ```
 
-One line out. `--pp-micro-batch-size`, `--pp-size`, `--pp-layers`, `--estimate-memory`, `--no-memory-check`, `--max-tokens`, `--recommend-quant`, `--surgery` and the rest of the 64 advertised flags all resolve. The sweep is therefore complete for this file rather than sampled.
+One line out of 64 advertised flags. `--pp-micro-batch-size`, `--pp-size`, `--pp-layers`, `--estimate-memory`, `--no-memory-check`, `--max-tokens`, `--recommend-quant` and `--surgery` all resolve.
 
-### 2.3 The Vacuous Test
+### 2.3 Why the Integration Test Is Scoped to the Parser
 
-The failure mode is worth stating precisely, because it is a shape that recurs. The test asserts a **negative**: that a particular rejection string does not appear. A negative assertion over process output is satisfied by every path that produces different output, including every path that never reaches the code under test. Adding the flag-name defect to the command line moved the process's death from the validator to the argument parser, and the assertion did not notice.
-
-The fix is to make the precondition explicit. The test now asserts, before the original check, that the arguments were not rejected at parse time:
+`run_generate` resolves `-m` **before** it calls the validators, because the validators read the resolved model directory:
 
 ```rust
-assert!(
-    !stderr.contains("unexpected argument") && !stderr.contains("unrecognized"),
-    "the 2D flags were rejected by the argument parser, so the validator \
-     was never reached:\nstdout={stdout}\nstderr={stderr}"
-);
+args.model.model =
+    resolve_model_source_with_override(&args.model.model, args.model.models_dir.as_deref())?;
+
+validate_tensor_parallel_args(&args)?;
+validate_pipeline_parallel_args(&args)?;
 ```
 
-This was verified against the real binary rather than assumed: clap emits `error: unexpected argument '--tensor-parallel-size' found`, so the guard's substring matches the observed text. `unrecognized` is carried as a defensive second spelling.
+A subprocess invocation therefore cannot reach `validate_pipeline_parallel_args` without a real model on disk. Worse, the value the test used, `nonexistent-model-path-for-validator-only-check`, is a valid bare repo segment, so the resolver expands it against `$MLXCEL_DEFAULT_ORG` and goes to the network. Running the test's exact argv:
 
-### 2.4 Compatibility
+```
+[mlxcel] 'nonexistent-model-path-for-validator-only-check' -> mlx-community/nonexistent-...
+[mlxcel] model '...' not found locally; downloading into the mlxcel store...
+Error: failed to download model '...': authentication failed (HTTP 401).
+```
 
-No behavior changes for any command line that worked before. The validator accepts and rejects exactly the same inputs; only the text of one rejection differs. There is no CLI surface change, no serialization change, and no API change.
+Exit 1, before either validator. An intermediate draft of this PR fixed the flag name and added a parse-rejection guard while keeping this argv, which would have put an outbound HuggingFace request into the non-ignored CI surface on every run, timing out rather than failing on an offline runner. That draft was wrong and is not what shipped.
+
+The shipped test appends `--help`, so clap exits as soon as parsing succeeds. It is hermetic (no runtime initialization, no network) and asserts **positively** on exit status, so it cannot pass by dying early:
+
+- `--pp-size 2 --tp-size 2 --help` exits 0.
+- `--pp-size 2 --tensor-parallel-size 2 --help` exits 2 with a clap usage error.
+
+Nothing is lost by narrowing the scope, because the validator has direct unit coverage at `validate_pipeline_parallel_args_accepts_2d_pp_tp` in `src/commands/generate_tests.rs`. This also restores what the test's own comment had always claimed it did ("We invoke `mlxcel generate --help` plus the 2D flags"); the code had drifted from its comment.
+
+### 2.4 The `docs/en/` References Are Not Broken
+
+The issue asserted that `docs/en/` "has never been part of this repository" and made "no `docs/en/` reference remains in `src/`" an acceptance criterion. The first half is true of this git tree and the conclusion drawn from it is not:
+
+```
+mkdocs.yml:8:docs_dir: docs/en
+mkdocs.yml:160:      - Tensor Parallelism: distributed/tensor-parallelism.md
+mkdocs.yml:161:      - Pipeline Parallelism: distributed/pipeline-parallelism.md
+```
+
+Those two nav entries resolve, under `docs_dir: docs/en`, to exactly the two paths the comment cited. `docs/README.md` states that `docs/en`, `docs/ko` and `docs/shared` are maintained in a separate documentation repository, that the root mkdocs configs name paths into that tree, and, verbatim, "That is deliberate, not drift." `Makefile` carries a `docs-guard` target built on the same fact, added by PR #1122, whose own report lists "someone fixes the dangling navs by pointing them at `docs/*.md`, breaking the tree that owns them" as a high-impact risk.
+
+So the comment was pointing at real manual pages. The acceptance criterion is therefore not honoured as written, deliberately, and that is called out on the issue and in the PR description rather than being satisfied silently.
+
+### 2.5 Compatibility
+
+No behavior changes. The validator accepts and rejects exactly the same inputs, and the one message whose text changed cannot be emitted at all. No CLI surface change, no serialization change, no API change, no new dependency.
 
 ---
 
 ## 3. Technical Decisions
 
-### 3.1 Fix the Test Rather Than Only the Message
+### 3.1 No CHANGELOG Entry
+
+An earlier draft added one describing users hitting `error: unexpected argument '--tensor-parallel-size' found` after following the message. That cannot happen: a `--tp-size > 1` run without a pipeline topology returns `Ok(())` at the early return and never reaches the guard. The changelog is for user-visible change, and there is none here, so the entry was removed rather than reworded into something technically true but immaterial.
+
+### 3.2 Keep the Manual References, Add the In-Checkout One
 
 | Option | Pros | Cons |
 |---|---|---|
-| Fix the `ensure!` string only | Smallest possible diff; satisfies the issue as literally written (its criterion is scoped to `src/`) | Leaves a non-ignored test passing a flag the binary rejects, and leaves the vacuous pass in place for the next person |
-| **Chosen: fix the message, the test's flag, and the test's assertion** | The code path the test names is actually exercised; a reintroduction of the same defect now fails | Slightly wider diff than the issue's literal scope |
+| Delete the two `docs/en/` paths | Satisfies the issue's criterion literally | Deletes live pointers to the canonical operator manual on a false premise |
+| Repoint them at `docs/distributed.md` only | Short; every path is in-tree | Same information loss, and `docs/distributed.md` has no 2D section, so it does not replace them |
+| **Chosen: keep both manual pages, name `docs/distributed.md` as the in-checkout summary, and say why the sources are not here** | Nothing is lost; the next reader is told the paths are cross-tree by design | Leaves a `docs/en` string in `src/`, against the issue's criterion |
 
-The test is not incidental to this issue. It is the artifact that should have caught the defect and did not, and it failed for the same root cause. Fixing the message while leaving the test unable to detect the message being wrong again would close the issue without closing the gap.
+The comment now explains the split, so the next sweep of this kind does not rediscover these as dangling.
 
-### 3.2 Repoint the Comment Rather Than Delete It
+### 3.3 Fix the Test Rather Than Only the Message
 
-The issue offered both: repoint at `docs/distributed.md`, or drop the references if that document does not cover 2D composition. `docs/distributed.md` was read to decide. It documents tensor parallelism and pipeline parallelism in separate sections, with `--tp-size`, `--pp-size`, `--pp-layers` and `--pp-micro-batch-size` all present, but it contains no section on composing the two.
+The test is not incidental to this issue. It is the artifact that should have caught the wrong flag name and could not, and it failed for the same root cause. Fixing the message while leaving a test that cannot detect the message being wrong again would close the issue without closing the gap.
 
-Deleting the reference would lose a genuinely useful pointer; repointing it silently would overstate the document. The comment now points at `docs/distributed.md` and states that the 2D composition is not written up there yet, which is the accurate version of both.
+### 3.4 Leave the Unreachable Guard Alone
 
-### 3.3 Keep the Historical Flag Name Out of the Tree
-
-The new guard's comment explains why it exists by referring to the old spelling. It is worded as "a tensor-parallel flag spelling the binary has never accepted" rather than quoting the literal string, so `grep -rn -- "--tensor-parallel-size"` stays empty across the whole repository, not just under `src/`. A future sweep of the same kind will not rediscover this as a live hit.
+The dead `ensure!` is a real defect, but removing it or widening the early return is a logic change, and "message text only; the validation logic is unchanged" is an explicit acceptance criterion of this issue. It is filed as a follow-up instead, together with the misnamed unit test that documents the same tautology.
 
 ---
 
@@ -113,18 +155,16 @@ The new guard's comment explains why it exists by referring to the old spelling.
 
 | Item | Value |
 |---|---|
-| Files changed | 3 |
-| Lines added | +27 |
-| Lines deleted | -14 |
+| Files changed | 2 |
 | Behavior changes | 0 |
+| User-visible changes | 0 |
 
 ### Changes by Area
 
 | Area | File | Summary |
 |---|---|---|
-| CLI | `src/commands/generate.rs` | `ensure!` message names `--tp-size`; validator comment repointed from two nonexistent `docs/en/` paths to `docs/distributed.md` with an accurate note on 2D coverage |
-| Tests | `tests/pp_tp_2d_real_models.rs` | Both tests use `--tp-size`; `pp_tp_2d_validator_accepts_combination` gains a parse-rejection guard so it cannot pass without reaching the validator; stale line-number reference replaced with the function name |
-| Documentation | `CHANGELOG.md` | Entry under `## [Unreleased]` / `### Fixed` |
+| CLI | `src/commands/generate.rs` | `ensure!` message names `--tp-size`; the validator comment keeps both operator-manual pages, explains that their sources are in the separate documentation repository by design, and adds `docs/distributed.md` as the in-checkout summary |
+| Tests | `tests/pp_tp_2d_real_models.rs` | Parity test uses `--tp-size`; the non-ignored test is rescoped to the argument parser, made hermetic with `--help`, and asserts positively on exit status; module doc reflowed |
 
 ### Related Commits
 
@@ -138,14 +178,16 @@ The new guard's comment explains why it exists by referring to the old spelling.
 
 ### Passed
 
-- `MLX_CUDA_ARCHITECTURES=121 cargo test --profile test-fast --features cuda --test pp_tp_2d_real_models`: 1 passed, 0 failed, 1 ignored.
-- Old spelling rejected, as the issue predicted: `mlxcel generate -m /nonexistent -p x -n 1 --pp-size 2 --tensor-parallel-size 2` prints `error: unexpected argument '--tensor-parallel-size' found`.
-- New spelling accepted: the same command with `--tp-size 2` parses and proceeds to model resolution, failing there on the deliberately nonexistent path.
-- `grep -rn -- "--tensor-parallel-size" src/` empty; `grep -rn "docs/en/" src/` empty.
+- `MLX_CUDA_ARCHITECTURES=121 cargo test --profile test-fast --features cuda --test pp_tp_2d_real_models`: passing, 1 ignored.
+- Hermetic: the non-ignored test performs no network request. Its argv exits inside clap.
+- Non-vacuous, verified in both directions against the built binary: `--pp-size 2 --tp-size 2 --help` exits 0; substituting `--tensor-parallel-size` exits 2 with `error: unexpected argument '--tensor-parallel-size' found`.
+- `grep -rn -- "--tensor-parallel-size" src/` empty.
 - `cargo fmt --all -- --check` clean.
 - `cargo clippy --profile test-fast --features cuda --lib --tests -- -D warnings` clean.
 
 ### Follow-up Candidates
 
-- The vacuous-negative-assertion shape is not unique to this test. Any test whose only assertion is that a string is absent from process output passes when the process dies early for an unrelated reason. A sweep for that pattern across `tests/` would be a self-contained follow-up.
-- `docs/distributed.md` has no section on 2D (PP x TP) composition, which is why the repointed comment has to qualify itself. Writing that section would let the qualification be dropped.
+- **The unreachable guard.** The `ensure!` at the top of the `tp_size > 1` branch cannot fail, and `validate_pipeline_parallel_args_rejects_2d_without_pp_enabled` asserts `is_ok()` under a name saying it rejects. Either the early return is too broad or the guard is redundant; deciding which is a logic change and out of scope here.
+- **Machine-check the flag names.** The sweep in section 2.2 exists only as a shell pipeline. `tests/cli_help_consistency.rs` is the established home for CLI-surface invariants; a test asserting that every `--flag` named in an error-message literal appears in `--help` would close the class rather than this instance.
+- **Vacuous negative assertions.** Any test whose only assertion is that a string is absent from process output passes when the process dies early for an unrelated reason. A sweep of `tests/` for that shape is self-contained.
+- **2D composition is undocumented.** Neither `docs/distributed.md` nor, per its nav, the manual has a PP x TP section, which is why the comment has to qualify itself.
