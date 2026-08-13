@@ -46,7 +46,11 @@ pub(crate) async fn run_serve(mut args: crate::ServeArgs) -> anyhow::Result<()> 
     // / mlxcel store, or auto-downloaded into the mlxcel store on a miss. Done
     // here (not in `build_startup_input`) so the preflight estimate also sees
     // the resolved path.
-    args.model = resolve_model_source_with_override(&args.model, args.models_dir.as_deref())?;
+    args.model = resolve_model_source_with_override(
+        &args.model,
+        args.models_dir.as_deref(),
+        args.revision.as_deref(),
+    )?;
 
     // Issue #56: preflight memory check before the server begins
     // accepting connections. Refuses to start when total > available

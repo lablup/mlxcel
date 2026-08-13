@@ -190,6 +190,17 @@ struct ServerArgs {
     #[arg(long, value_name = "PATH")]
     models_dir: Option<PathBuf>,
 
+    /// Repository revision (branch, tag, or commit hash). Defaults to `main`.
+    ///
+    /// Resolves the HuggingFace cache snapshot for that revision, and fetches
+    /// that revision on a miss. The mlxcel store is not revision-namespaced, so
+    /// a repo already present there is not reused for a revision-qualified
+    /// request and the request is refused rather than answered with an unknown
+    /// revision; use `--models-dir` to give each revision its own root. Not
+    /// valid when `-m/--model` is an existing local path.
+    #[arg(long, value_name = "REV")]
+    revision: Option<String>,
+
     /// Model alias (shown in API responses instead of directory name)
     #[arg(
         short = 'a',
@@ -1340,7 +1351,11 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
              (set the LLAMA_ARG_MODEL env var or pass -m <PATH_OR_REPO_ID>)"
         )
     })?;
-    let model_path = resolve_model_source_with_override(&model_path, args.models_dir.as_deref())?;
+    let model_path = resolve_model_source_with_override(
+        &model_path,
+        args.models_dir.as_deref(),
+        args.revision.as_deref(),
+    )?;
 
     Ok(ServerStartupInput {
         model_path,

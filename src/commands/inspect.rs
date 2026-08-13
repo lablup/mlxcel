@@ -40,7 +40,11 @@ pub(crate) fn run_inspect(mut args: InspectArgs) -> Result<()> {
     // miss-and-error this returns a clear message; on success `args.model` is
     // guaranteed to name an existing snapshot, so the downstream estimator
     // path is unchanged.
-    args.model = resolve_model_source_with_override(&args.model, args.models_dir.as_deref())?;
+    args.model = resolve_model_source_with_override(
+        &args.model,
+        args.models_dir.as_deref(),
+        args.revision.as_deref(),
+    )?;
 
     // Translate the user-facing `--quant` label into the typed hint.
     let quant = parse_quant_hint(&args.quant)?;
