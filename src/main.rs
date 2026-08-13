@@ -609,7 +609,9 @@ pub(crate) struct SamplingOptions {
     #[arg(long, default_value_t = 1.0, value_name = "FLOAT")]
     pub(crate) repetition_penalty: f32,
 
-    /// DRY (Don't Repeat Yourself) penalty multiplier (0.0 = disabled)
+    /// DRY (Don't Repeat Yourself) penalty multiplier (0.0 = disabled).
+    /// CLI DRY matches across all boundaries; the server's
+    /// `--dry-sequence-breakers` has no CLI equivalent.
     #[arg(long, default_value_t = 0.0, value_name = "FLOAT")]
     pub(crate) dry_multiplier: f32,
 

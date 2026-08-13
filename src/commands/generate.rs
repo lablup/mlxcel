@@ -909,6 +909,16 @@ fn resolved_cli_sampling_params(
         dry_base: args.sampling.dry_base,
         dry_allowed_length: args.sampling.dry_allowed_length,
         dry_penalty_last_n: args.sampling.dry_penalty_last_n,
+        // The CLI runs DRY with no sequence breakers. This is a deliberate scope
+        // decision, not an oversight, and it differs in kind from the four
+        // "feature off" defaults below it. Those four are genuinely off because
+        // the CLI has no flag that could turn them on; this one is not, because
+        // the CLI does expose `--dry-multiplier`, so DRY can be switched on and
+        // then the empty vector is an unchangeable configuration rather than a
+        // disabled feature. With no breakers the backward match never stops at a
+        // newline or punctuation boundary, so `match_len` keeps growing and the
+        // penalty is stronger than the same nominal settings produce on the
+        // server, whose `--dry-sequence-breakers` has no CLI equivalent.
         dry_sequence_breakers: Vec::new(),
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
