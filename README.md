@@ -26,23 +26,6 @@ The project started as work on structural model fine-tuning and has grown into a
 - **Generation-mask fix** for `deepseek_v2`, `internlm3`, `hunyuan`, and `gemma2`, plus earlier quantization validation at load time and Jamba MoE checkpoint fixes.
 - **Workspace-wide verification:** `make verify` runs all workspace tests with a faster test profile, and gates crate versions and CUDA kernel dtype keys.
 
-## New in v0.4.3
-
-- **Deterministic CUDA 4-bit decode:** greedy output is now byte-identical across runs.
-- **Gemma 4 correctness fixes** for MoE accumulation, chunked prefill masking, and reasoning-channel display.
-- **4 new text models:** GPT-2, GPT-BigCode, GPT-NeoX, and Kyutai Helium.
-- **Expanded opt-in OpenXLA/IREE multimodal support** for Gemma3n, Phi4MM, LLaVA, Qwen2-VL, and more.
-- **IREE toolchain pinned** to 3.12.0rc20260721 with verified official wheels.
-
-## New in v0.4
-
-- **Experimental opt-in OpenXLA/IREE backend** for Metal and CUDA, including continuous batching.
-- **20+ new vision-language and OCR families**, with additional models added in 0.4.1 and 0.4.2.
-- **Tool calling** across major model formats and families.
-- **Batching enabled by default** for server/CLI, with prompt-prefix caching and automatic KV-cache budgeting.
-- **CUDA/GB10 kernel parity** for paged attention, SSM decode, MoE prefill, and Blackwell quantized matmul.
-- **Improved speculative decoding, NVFP4 support, new attention paths, server hardening, and resumable downloads.**
-
 See the [changelog](CHANGELOG.md) for the full list.
 
 ## Why mlxcel
