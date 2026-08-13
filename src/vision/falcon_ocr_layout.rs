@@ -145,6 +145,13 @@ fn containment_ratio(small: &[f32; 4], large: &[f32; 4]) -> f32 {
 ///
 /// Without this, an inline formula detected inside a paragraph is OCRed twice
 /// and the page text duplicates.
+///
+/// The container must be *strictly* larger, matching the reference: equal-area
+/// boxes would otherwise delete each other and the region would vanish
+/// entirely. Collapsing the same-box duplicates a DETR head emits is a separate
+/// concern handled in [`plan_layout_region_boxes`], which can consult the OCR
+/// category mapping that this pure-geometry filter has no business knowing
+/// about.
 pub fn filter_nested_detections(
     detections: &[Detection],
     containment_threshold: f32,
@@ -274,11 +281,28 @@ pub fn plan_layout_region_boxes(
     }
 
     let kept = filter_nested_detections(detections, containment_threshold);
-    let mut plans = Vec::with_capacity(kept.len());
+    let mut plans: Vec<LayoutOcrPlan> = Vec::with_capacity(kept.len());
     for det in kept {
         let Some(ocr_category) = layout_to_ocr_category(&det.class_name) else {
             continue;
         };
+        // One region, one OCR run. A DETR-style detection head takes no
+        // per-query argmax, so a single query whose sigmoid clears the
+        // threshold under several classes emits one detection per class, each
+        // carrying that query's box verbatim (see
+        // `rt_detr_v2::predictor::decode_detections`). Those entries are
+        // alternative labels for one region, not several regions, so OCRing
+        // each of them would repeat the same text once per label.
+        //
+        // The check runs after the category mapping, not before, so a box
+        // labelled both `picture` (no OCR category) and `text` still gets
+        // OCRed as text instead of being dropped on the un-OCRable label. The
+        // surviving entry is the first that both maps to a category and crops,
+        // which for `mlxcel detect` output is the highest-confidence such label
+        // for that box.
+        if plans.iter().any(|plan| plan.bbox == det.bbox) {
+            continue;
+        }
         let Some(crop) = crop_rect(image_width, image_height, &det.bbox, min_dim, max_dim) else {
             continue;
         };

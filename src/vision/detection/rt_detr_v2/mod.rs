@@ -30,10 +30,17 @@
 //! token stream, so it lives outside the `LanguageModel`/generate flow. It is
 //! driven through [`RtDetrV2Predictor`] (see the `detect` CLI subcommand).
 //!
-//! The whole forward path runs in float32 for box-coordinate precision,
-//! regardless of the stored checkpoint dtype (the shipped checkpoints are
-//! bf16). This matches the reference, whose dtype-sensitive ops (softmax, SDPA,
-//! anchor logits) are computed in f32 and whose predictor reads f32 anyway.
+//! Dtype: the forward graph inherits the checkpoint dtype. `pixel_values`
+//! enters as f32, but the first conv against a bf16 weight settles the graph
+//! into bf16, so `pred_logits` and `pred_boxes` come back as bf16 for the
+//! shipped bf16 checkpoints. This matches the reference, which also runs in the
+//! checkpoint dtype.
+//!
+//! Because the output dtype tracks the checkpoint rather than being fixed,
+//! anything that reads these arrays back as host floats must convert by dtype
+//! rather than assuming a width. [`predictor`]'s readback casts to f32 before
+//! touching raw bytes for exactly this reason; see the note on its `read_output_f32`
+//! for what a fixed-width parse does to a bf16 buffer.
 
 pub mod backbone;
 pub mod common;

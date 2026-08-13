@@ -226,3 +226,57 @@ fn detections_become_ordered_regions_with_their_own_instruction() {
         (300, 140)
     );
 }
+
+/// A DETR-style head emits one detection per class above threshold, all
+/// carrying the same query's box. Those are alternative labels for one region,
+/// so the planner must OCR that region once, not once per label (issue #1089).
+#[test]
+fn a_box_repeated_under_several_labels_becomes_one_region() {
+    let img = page();
+    // What `mlxcel detect` prints for a heading: one box, three labels,
+    // highest confidence first.
+    let heading = [10.0, 10.0, 300.0, 60.0];
+    let dets = vec![
+        det("section_header", heading, 0.71),
+        det("title", heading, 0.41),
+        det("page_header", heading, 0.40),
+        det("text", [10.0, 100.0, 300.0, 200.0], 0.95),
+    ];
+    let plans = plan_layout_regions(&img, &dets, 0.8, MIN_CROP_DIM, 1024);
+    assert_eq!(
+        plans.len(),
+        2,
+        "the heading must plan as one region, not three: {:?}",
+        plans.iter().map(|p| &p.category).collect::<Vec<_>>()
+    );
+    // The surviving label is the first one supplied for that box.
+    assert_eq!(plans[0].category, "section_header");
+    assert_eq!(plans[1].category, "text");
+}
+
+/// Collapsing duplicates must not drop a region whose highest-confidence label
+/// happens to be un-OCRable: the dedup runs after the category mapping, so a
+/// box labelled both `picture` and `text` is still read as text.
+#[test]
+fn a_duplicate_box_falls_through_to_its_first_ocrable_label() {
+    let img = page();
+    let region = [10.0, 10.0, 300.0, 120.0];
+    let dets = vec![det("picture", region, 0.80), det("text", region, 0.55)];
+    let plans = plan_layout_regions(&img, &dets, 0.8, MIN_CROP_DIM, 1024);
+    assert_eq!(plans.len(), 1, "{plans:?}");
+    assert_eq!(plans[0].category, "text");
+    assert_eq!(plans[0].ocr_category, OcrCategory::Text);
+}
+
+/// Two genuinely distinct regions that share a bounding-box *size* are not
+/// duplicates and must both survive.
+#[test]
+fn same_sized_boxes_at_different_positions_stay_separate() {
+    let img = page();
+    let dets = vec![
+        det("text", [10.0, 10.0, 210.0, 110.0], 0.9),
+        det("text", [10.0, 150.0, 210.0, 250.0], 0.9),
+    ];
+    let plans = plan_layout_regions(&img, &dets, 0.8, MIN_CROP_DIM, 1024);
+    assert_eq!(plans.len(), 2, "{plans:?}");
+}

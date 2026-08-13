@@ -250,8 +250,26 @@ page is OCRed as one `plain` region, matching the reference. A one-line summary
 reports the counts, so a region that disappeared is visible rather than silent.
 
 Regions are OCRed and printed in the order the file lists them; nothing
-reorders them. The reference detector emits reading order, so supply the
-detections in reading order.
+reorders them. The reference detector emits reading order, and so does `mlxcel
+detect` (top to bottom, then left to right), so the two commands pipe together
+directly:
+
+```bash
+mlxcel detect -m models/docling-layout-heron-mlx-bf16 -i page.png --format json > layout.json
+mlxcel generate -m models/falcon-ocr -i page.png --layout-detections layout.json
+```
+
+A hand-written file should likewise be supplied in reading order.
+
+One page element can arrive under several labels. A DETR-style detection head
+takes no per-query argmax, so a heading that scores above the threshold as
+`section_header`, `title`, and `page_header` is emitted three times, each entry
+carrying the same box; `mlxcel detect` prints them together, most confident
+first. That is the detector's intended output, not a duplicate, so the planner
+collapses same-box entries to one region rather than OCRing the text once per
+label. The label it keeps is the highest-confidence one that maps to an OCR
+category, so a box detected as both `picture` and `text` is still read as text
+instead of being skipped on the un-OCRable label.
 
 ### Phi-4 Multimodal audio
 

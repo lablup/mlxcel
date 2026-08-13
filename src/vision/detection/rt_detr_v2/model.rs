@@ -161,9 +161,12 @@ impl RtDetrV2Model {
 
     /// Forward pass.
     ///
-    /// `pixel_values`: (B, image_size, image_size, 3) NHWC in [0, 1]. The whole
-    /// graph runs in f32 for box-coordinate precision regardless of the stored
-    /// checkpoint dtype.
+    /// `pixel_values`: (B, image_size, image_size, 3) NHWC in [0, 1].
+    ///
+    /// The returned arrays carry the checkpoint's dtype, not f32: the input is
+    /// cast to f32 here, but the first conv against a bf16 weight settles the
+    /// graph into bf16 for the shipped bf16 checkpoints. Read the outputs
+    /// through a dtype-aware conversion.
     pub fn forward(&self, pixel_values: &MlxArray) -> DetectionOutput {
         let pixel_values = to_f32(pixel_values);
         let enc_features = self.vision.forward(&pixel_values);
