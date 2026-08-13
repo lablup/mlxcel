@@ -28,8 +28,12 @@
 //!
 //! `sse_channel` returns a keepalive configuration via `SseKeepAlive` that
 //! route handlers must attach to the `Sse` response with `.keep_alive()`. The
-//! keepalive interval is 15 seconds — shorter than typical proxy idle timeouts
-//! and long enough not to spam comment events for short responses.
+//! interval is [`SSE_KEEPALIVE_INTERVAL_SECS`], short enough to beat typical
+//! proxy idle timeouts and long enough not to spam comment events for short
+//! responses. That constant is the single definition for every SSE surface in
+//! the server, including the Responses and Anthropic-compatible ones, and the
+//! `< 60` invariant is asserted next to it so it cannot be raised past a proxy
+//! timeout on any of them.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -51,7 +55,29 @@ pub(crate) const DONE_MARKER: &str = "[DONE]";
 /// 15 seconds is shorter than virtually all proxy idle timeouts (nginx
 /// default 60 s, HAProxy 60 s, AWS ALB 60 s) while being long enough to
 /// avoid noticeable overhead for ordinary short responses.
+///
+/// This is the single definition for every SSE surface. `streaming_responses`
+/// and `streaming_anthropic` keep their own newtypes, so a route cannot attach
+/// another surface's keepalive, but they read the interval from here (#1105).
 pub(crate) const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 15;
+
+/// The SSE keepalive interval must stay under typical reverse-proxy idle
+/// timeouts (nginx 60 s, HAProxy 60 s, AWS ALB 60 s) or a long prefill will
+/// have its connection dropped before the first token arrives.
+///
+/// This lives next to the definition rather than in the test module so it
+/// covers every consumer by construction (#1105). It was previously in
+/// `streaming_tests.rs` and guarded only this constant, while
+/// `streaming_responses.rs` and `streaming_anthropic.rs` carried their own
+/// file-private copies that nothing checked.
+///
+/// Enforced as a `const` assertion so a regression fails the build rather than
+/// a test run. (Using `assert!` on a constant expression in a runtime test
+/// triggers `clippy::assertions_on_constants`.)
+const _: () = assert!(
+    SSE_KEEPALIVE_INTERVAL_SECS < 60,
+    "SSE keepalive interval must be less than the 60s default used by most reverse proxies"
+);
 
 /// Keepalive configuration attached to an `Sse` response.
 ///

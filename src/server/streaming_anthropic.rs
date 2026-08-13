@@ -37,10 +37,9 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::server::streaming::SSE_KEEPALIVE_INTERVAL_SECS;
 use crate::server::types::anthropic_response::AnthropicResponseBlock;
 use crate::server::types::anthropic_stream::{AnthropicBlockDelta, AnthropicStreamEvent};
-
-const KEEPALIVE_INTERVAL_SECS: u64 = 15;
 
 /// Cancellation token shared with the scheduler for client-disconnect detection.
 pub(crate) type CancellationToken = Arc<AtomicBool>;
@@ -84,7 +83,7 @@ impl AnthropicSseKeepAlive {
         // Anthropic clients accept `ping` events; the axum keepalive comment
         // frame is also tolerated. We use the standard keepalive comment to
         // match the Responses-API encoder.
-        Self(KeepAlive::new().interval(Duration::from_secs(KEEPALIVE_INTERVAL_SECS)))
+        Self(KeepAlive::new().interval(Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)))
     }
 
     pub fn into_inner(self) -> KeepAlive {
