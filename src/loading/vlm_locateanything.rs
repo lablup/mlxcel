@@ -68,11 +68,6 @@ use crate::vision::processors::locateanything::LocateAnythingProcessor;
 use super::{load_vlm_weights_common, parse_required_vlm_subconfig, read_sanitized_vlm_config};
 use crate::loading::conv2d_weight_is_channel_last;
 
-#[path = "vlm_locateanything_quant.rs"]
-mod quant;
-
-use quant::densify_mixed_precision_qkv;
-
 /// Upstream `LAYER_NORM_EPS` in `locateanything/vision.py`. Kimi-VL's MoonViT
 /// uses `1e-6`, so this cannot be left at the shared config default.
 const MOONVIT_LAYER_NORM_EPS: f32 = 1e-5;
@@ -309,34 +304,16 @@ pub(crate) fn load_locateanything_vlm(model_path: &Path) -> Result<LoadedModel> 
 
     // The released conversion is `mixed_4_8`, not uniform 4-bit: `embed_tokens`
     // and some layers' `v_proj` / `down_proj` are 8-bit while the rest is
-    // 4-bit. Every per-tensor loader reconciles its own width from the tensor
-    // shapes, so those are fine, but the fused QKV projection concatenates
-    // q/k/v along axis 0 and therefore needs one shared width. See
-    // `reconcile_mixed_precision_weights` for why the order this and the
-    // Apple Silicon bf16 -> f16 pass run in matters.
-    let quant_mode = full_config
-        .get("quantization")
-        .and_then(|q| q.get("mode"))
-        .and_then(|m| m.as_str())
-        .unwrap_or("affine")
-        .to_string();
+    // 4-bit. Nothing has to be normalized here for that: every per-tensor
+    // loader reconciles its own width from its own tensor shapes, and
+    // `FusedQKVLinear` keeps a layer's three projections separate when their
+    // widths disagree instead of requiring one shared width (issue #1090). This
+    // loader used to dequantize the mixed layers' q/k/v planes to dense so the
+    // fused projection could concatenate them, at about 190 MB on the released
+    // 3B checkpoint; the shared path costs nothing and keeps them packed.
     let hw = mlxcel_core::hardware::get_hardware();
     let convert_bf16 = hw.silicon_gen != mlxcel_core::hardware::AppleSiliconGen::Unknown;
-    let densified = reconcile_mixed_precision_weights(
-        &mut weights,
-        group_size,
-        bits,
-        &quant_mode,
-        convert_bf16,
-    )?;
-    if densified > 0 {
-        tracing::info!(
-            target: "mlxcel::quant",
-            layers = densified,
-            "LocateAnything: dequantized mixed-precision q/k/v planes so the fused QKV \
-             projection can concatenate them"
-        );
-    }
+    convert_plain_bf16_weights(&mut weights, convert_bf16);
 
     // Qwen2 text backbone. Keys arrive as `language_model.model.*`; the Qwen2
     // loader wants `model.*` / `lm_head.*`.
@@ -401,47 +378,28 @@ pub(crate) fn load_locateanything_vlm(model_path: &Path) -> Result<LoadedModel> 
     Ok(LoadedModel::LocateAnythingVLM(vlm))
 }
 
-/// Dequantize mixed-precision `q_proj`/`k_proj`/`v_proj` triples so the fused
-/// QKV projection can concatenate them, then, when `convert_bf16` is set,
-/// convert the remaining plain-bf16 tensors (the MoonViT tower, the
-/// connector, and the q/k/v linear biases) to f16.
+/// Convert the plain-bf16 tensors (the MoonViT tower, the connector, and the
+/// q/k/v linear biases) to f16, leaving the packed quantization planes alone.
 ///
-/// The order the two steps run in is load-bearing and is why they live in one
-/// function rather than two calls inlined at the call site in a particular
-/// sequence: MLX's `dequantize` returns an array carrying the scales' dtype,
-/// and the scales are bf16, so every dense q/k/v plane
-/// [`densify_mixed_precision_qkv`] inserts is a *new* bf16 tensor with no
-/// `.scales` / `.biases` of its own to exempt it from conversion. Running the
-/// bf16 -> f16 pass first would leave those planes bf16 with nothing left to
-/// convert them, which is exactly the M5 JIT crash the pass exists to avoid.
+/// `.scales` and `.biases` are exempt: they describe a packed `.weight` that
+/// this pass does not touch, and MLX reads them at the dtype the checkpoint
+/// stored. Every other bf16 tensor is converted because the M5 JIT crashes on
+/// bf16 inputs.
 ///
 /// `convert_bf16` is `hw.silicon_gen != AppleSiliconGen::Unknown` at the real
-/// call site (the bf16 -> f16 pass is an Apple Silicon optimization); it is a
-/// parameter, rather than read from the host directly here, so the ordering
-/// can be pinned by a test independent of the hardware the test happens to
-/// run on.
-fn reconcile_mixed_precision_weights(
-    weights: &mut WeightMap,
-    group_size: i32,
-    bits: i32,
-    quant_mode: &str,
-    convert_bf16: bool,
-) -> Result<usize> {
-    let densified =
-        densify_mixed_precision_qkv(weights, group_size, bits, quant_mode).map_err(|e| {
-            anyhow::anyhow!("Failed to normalize LocateAnything mixed-precision QKV: {e}")
-        })?;
-
-    if convert_bf16 {
-        let had_bf16 = models::convert_bf16_weights_with_keep(weights, |key| {
-            key.ends_with(".scales") || key.ends_with(".biases")
-        });
-        if had_bf16 {
-            models::warn_bf16_precision();
-        }
+/// call site (the pass is an Apple Silicon optimization); it is a parameter,
+/// rather than read from the host directly here, so the behavior can be pinned
+/// by a test independent of the hardware the test happens to run on.
+fn convert_plain_bf16_weights(weights: &mut WeightMap, convert_bf16: bool) {
+    if !convert_bf16 {
+        return;
     }
-
-    Ok(densified)
+    let had_bf16 = models::convert_bf16_weights_with_keep(weights, |key| {
+        key.ends_with(".scales") || key.ends_with(".biases")
+    });
+    if had_bf16 {
+        models::warn_bf16_precision();
+    }
 }
 
 /// Width of one merged row the patch merger hands the connector:

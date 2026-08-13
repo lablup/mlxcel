@@ -2228,6 +2228,178 @@ impl UnifiedLinear {
     }
 }
 
+/// Whether three q/k/v quantization layouts can share one packed plane.
+///
+/// The comparison is over the full `(bits, group_size)` pair rather than `bits`
+/// alone, because either axis alone decides the packed width: MLX packs a
+/// `[out, in]` plane to `[out, in * bits / 32]` and describes it with
+/// `[out, in / group_size]` scales, so two planes that agree on `bits` and
+/// disagree on `group_size` still describe different scales tensors, and the
+/// axis-0 concatenation of those is as wrong as the weight-side mismatch is.
+/// Only affine folds a divergent group size back into `bits`
+/// ([`reconcile_quantization_layout`] trusts `group_size` there); the
+/// block-float modes reconcile the other axis, so for them `group_size` is the
+/// only axis that can diverge.
+///
+/// An empty or single-element slice is trivially fusable.
+///
+/// Pure over the reconciled layouts so the policy is unit-testable without an
+/// MLX backend.
+///
+/// Used by: [`FusedQKVLinear::from_weights_separate_with_mode`].
+pub fn qkv_layouts_are_fusable(layouts: &[(i32, i32)]) -> bool {
+    match layouts.split_first() {
+        Some((first, rest)) => rest.iter().all(|l| l == first),
+        None => true,
+    }
+}
+
+/// Reconcile the three q/k/v planes' quantization layouts from their own shapes.
+///
+/// Returns `Some([(bits, group_size); 3])` in q/k/v order when all three planes
+/// carry a `weight` + `scales` pair that reconciles. Returns `None` when any
+/// plane is missing one of the two or fails to reconcile, so the caller falls
+/// through to the path that owns the diagnostics for a broken triple rather
+/// than pre-empting it with a worse message.
+fn reconciled_qkv_layouts(
+    weights: &crate::weights::WeightMap,
+    prefixes: [&str; 3],
+    group_size: i32,
+    bits: i32,
+    mode: &str,
+) -> Option<[(i32, i32); 3]> {
+    let mut layouts = [(0, 0); 3];
+    for (slot, prefix) in layouts.iter_mut().zip(prefixes) {
+        let weight = weights.get(&format!("{prefix}.weight"))?;
+        let scales = weights.get(&format!("{prefix}.scales"))?;
+        let layout = reconcile_quantization_layout(
+            &ffi::array_shape(weight),
+            &ffi::array_shape(scales),
+            group_size,
+            bits,
+            mode,
+        )
+        .ok()?;
+        *slot = (layout.bits, layout.group_size);
+    }
+    Some(layouts)
+}
+
+/// How a [`FusedQKVLinear`] stores its three projections.
+///
+/// [`Self::Fused`] is the norm and the fast path: one `[q | k | v]` weight
+/// concatenated along the output axis, so a single matmul covers all three
+/// projections and the fused projection+RoPE kernels have the one packed plane
+/// they take. It requires the three projections to share a quantization layout,
+/// because the packed form only concatenates when `(bits, group_size)` agree:
+/// a `[2048, 4096]` plane packs to `[2048, 512]` at 4 bits and to
+/// `[2048, 1024]` at 8, and concatenating those along axis 0 is a hard shape
+/// error inside MLX.
+///
+/// [`Self::Split`] exists because that is not hypothetical. `mlx_lm`'s
+/// `mixed_4_8` quantization predicate raises selected tensors (commonly
+/// `v_proj` and `down_proj`) to 8 bits while the rest of the model stays at 4,
+/// and such checkpoints are published (`mlx-community/LocateAnything-3B-4bit`
+/// stores `v_proj` at 8 bits in 18 of its 36 layers). A layer like that keeps
+/// its three planes separate, each in exactly the layout the checkpoint stored
+/// it in.
+///
+/// Keeping them separate is preferred over the two alternatives:
+///
+/// * Requantizing the narrow planes up to the wider width is **not** exact.
+///   MLX's affine quantizer snaps the group scale onto the larger-magnitude
+///   edge rather than using a plain `(max - min) / (2^bits - 1)`, so a 4-bit
+///   group does not land on the 8-bit grid; this was measured at 3.7e-3 on the
+///   LocateAnything checkpoint. It is never done.
+/// * Dequantizing all three planes to dense is exact (it is the stored
+///   representation's definition) but gives up the packed form: on the 3B
+///   LocateAnything checkpoint that is about 190 MB of extra resident weights.
+///
+/// The split representation converts nothing, so it is exact by construction
+/// and costs no extra memory. What it gives up is the single matmul and the
+/// fused projection kernels that need one packed weight; those return `None`
+/// for a split layer exactly as they already do for a dense one, and the caller
+/// falls back to its graph path.
+pub enum QkvProjection {
+    /// One `[q_dim | k_dim | v_dim, hidden_dim]` weight, the common case.
+    Fused(UnifiedLinear),
+    /// Three independently packed projections, kept apart because the
+    /// checkpoint stores them at quantization layouts that cannot concatenate.
+    Split {
+        q: UnifiedLinear,
+        k: UnifiedLinear,
+        v: UnifiedLinear,
+    },
+}
+
+impl QkvProjection {
+    /// The single fused projection, or `None` when the three planes are split.
+    pub fn fused(&self) -> Option<&UnifiedLinear> {
+        match self {
+            Self::Fused(proj) => Some(proj),
+            Self::Split { .. } => None,
+        }
+    }
+
+    /// Whether the three projections are stored separately.
+    pub fn is_split(&self) -> bool {
+        matches!(self, Self::Split { .. })
+    }
+
+    /// Project `x` and return the `[q | k | v]` concatenated activation, the
+    /// layout the fused weight would have produced directly.
+    ///
+    /// For a split layer this runs the three projections and concatenates their
+    /// outputs along the last axis. That is exact: a matmul against a
+    /// row-concatenated weight is the row concatenation of the three matmuls,
+    /// because every output column depends only on its own weight row and its
+    /// own scales. It costs one extra contiguous copy per call, which is why
+    /// [`Self::project_split`] (used by the plain forward, which wants the three
+    /// pieces anyway) does not go through here.
+    fn project_concat(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
+        match self {
+            Self::Fused(proj) => proj.forward(x),
+            Self::Split { q, k, v } => {
+                let q_out = q.forward(x);
+                let k_out = k.forward(x);
+                let v_out = v.forward(x);
+                let axis = (ffi::array_shape(&q_out).len() as i32 - 1).max(0);
+                let ptrs: &[*const MlxArray] = &[
+                    q_out.as_ref().unwrap() as *const MlxArray,
+                    k_out.as_ref().unwrap() as *const MlxArray,
+                    v_out.as_ref().unwrap() as *const MlxArray,
+                ];
+                // SAFETY: the three outputs are live for the whole call and the
+                // pointers are borrowed from them.
+                unsafe { ffi::concatenate(ptrs, axis) }
+            }
+        }
+    }
+
+    /// Run the three projections and return them separately.
+    fn project_split(
+        &self,
+        x: &MlxArray,
+        q_size: i32,
+        kv_size: i32,
+    ) -> (
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+    ) {
+        match self {
+            Self::Fused(proj) => {
+                let qkv = proj.forward(x);
+                let q = ffi::slice_last_dim(&qkv, 0, q_size);
+                let k = ffi::slice_last_dim(&qkv, q_size, q_size + kv_size);
+                let v = ffi::slice_last_dim(&qkv, q_size + kv_size, q_size + 2 * kv_size);
+                (q, k, v)
+            }
+            Self::Split { q, k, v } => (q.forward(x), k.forward(x), v.forward(x)),
+        }
+    }
+}
+
 /// Fused QKV linear layer for GQA models.
 ///
 /// Stores Q, K, V weights concatenated along the output dimension into a single
@@ -2238,11 +2410,18 @@ impl UnifiedLinear {
 ///   `[q_dim | k_dim | v_dim, hidden_dim]`  →  `q_dim = n_heads * head_dim`
 ///                                           →  `k_dim = v_dim = n_kv_heads * head_dim`
 ///
+/// A checkpoint whose three projections disagree on their quantization layout
+/// cannot be concatenated at all; such a layer keeps its planes separate
+/// instead. See [`QkvProjection`] for why that is preferred over converting
+/// them, and what it costs. Every method here works for both representations,
+/// except the fused-kernel launchers, which return `None` for a split layer on
+/// the same terms they already do for a dense one.
+///
 /// Used by: Llama3, Qwen2/3, Qwen3-VL, Qwen3-VL-MoE, Gemma v1/2/3, Mistral,
 /// Cohere2, StarCoder2, InternLM3, Jamba
 pub struct FusedQKVLinear {
-    /// Single concatenated QKV projection weight.
-    pub qkv_proj: UnifiedLinear,
+    /// The QKV projection, fused into one plane or kept as three.
+    pub qkv_proj: QkvProjection,
     pub n_heads: i32,
     pub n_kv_heads: i32,
     pub head_dim: i32,
@@ -2337,6 +2516,59 @@ impl FusedQKVLinear {
             // left open and it is one line to close.
             validate_quantization_params(group_size, bits)
                 .map_err(|e| format!("{q_prefix}: {e}"))?;
+
+            // A checkpoint whose three projections were quantized at different
+            // layouts cannot be concatenated: the packed planes have different
+            // widths and MLX's `concatenate` throws, which crosses the cxx
+            // bridge as an uncatchable abort rather than a load error. Such a
+            // layer keeps its planes separate instead of converting any of them
+            // (see [`QkvProjection`]). Nothing is dequantized and nothing is
+            // requantized, so the values the model computes with are exactly
+            // the checkpoint's and the extra memory cost is zero.
+            //
+            // Only the layouts the shapes actually imply can decide this, so
+            // each plane is reconciled on its own. A plane that fails to
+            // reconcile falls through to the fused path deliberately: that path
+            // owns the existing, more specific diagnostics for a broken triple,
+            // and this check must not pre-empt them with a worse message.
+            if let Some(layouts) = reconciled_qkv_layouts(
+                weights,
+                [&q_prefix, &k_prefix, &v_prefix],
+                group_size,
+                bits,
+                mode,
+            ) && !qkv_layouts_are_fusable(&layouts)
+            {
+                tracing::info!(
+                    target: "mlxcel::quant",
+                    prefix,
+                    mode,
+                    q_bits = layouts[0].0,
+                    q_group_size = layouts[0].1,
+                    k_bits = layouts[1].0,
+                    k_group_size = layouts[1].1,
+                    v_bits = layouts[2].0,
+                    v_group_size = layouts[2].1,
+                    "mixed-precision q/k/v: keeping the three projections separate \
+                     (packed planes of different widths cannot be concatenated)"
+                );
+                return Ok(Self {
+                    qkv_proj: QkvProjection::Split {
+                        q: UnifiedLinear::from_weights_with_mode(
+                            weights, &q_prefix, group_size, bits, mode,
+                        )?,
+                        k: UnifiedLinear::from_weights_with_mode(
+                            weights, &k_prefix, group_size, bits, mode,
+                        )?,
+                        v: UnifiedLinear::from_weights_with_mode(
+                            weights, &v_prefix, group_size, bits, mode,
+                        )?,
+                    },
+                    n_heads,
+                    n_kv_heads,
+                    head_dim,
+                });
+            }
 
             // Fused QKV concatenates along axis 0, so q/k/v must share bits; infer from q.
             let effective_bits = if mode == "affine" {
@@ -2463,7 +2695,7 @@ impl FusedQKVLinear {
         };
 
         Ok(Self {
-            qkv_proj,
+            qkv_proj: QkvProjection::Fused(qkv_proj),
             n_heads,
             n_kv_heads,
             head_dim,
@@ -2487,17 +2719,33 @@ impl FusedQKVLinear {
             bits,
         )?;
         Ok(Self {
-            qkv_proj,
+            qkv_proj: QkvProjection::Fused(qkv_proj),
             n_heads,
             n_kv_heads,
             head_dim,
         })
     }
 
+    /// The single packed `[q | k | v]` weight, when this layer is both fused
+    /// and quantized.
+    ///
+    /// `None` for a dense fused layer and for a [`QkvProjection::Split`] layer,
+    /// whose three planes have no single packed representation. Every caller is
+    /// a fused-kernel launcher that needs exactly one packed weight, so `None`
+    /// is the "fall back to the graph path" signal they already handle for
+    /// dense weights.
+    pub fn fused_quantized_weight(&self) -> Option<&QuantizedWeight> {
+        self.qkv_proj.fused()?.as_quantized_weight()
+    }
+
     /// Fused QKV projection + split.
     ///
     /// Returns `(q, k, v)` each shaped `[batch, seq_len, proj_dim]` (pre-reshape).
     /// The caller is responsible for reshape/transpose/RoPE.
+    ///
+    /// A [`QkvProjection::Split`] layer runs its three projections directly and
+    /// never forms the concatenated activation, so the split representation is
+    /// not just correct here but strictly cheaper than fusing and re-slicing.
     pub fn forward(
         &self,
         x: &MlxArray,
@@ -2506,16 +2754,9 @@ impl FusedQKVLinear {
         UniquePtr<MlxArray>,
         UniquePtr<MlxArray>,
     ) {
-        let qkv = self.qkv_proj.forward(x);
-
         let q_size = self.n_heads * self.head_dim;
         let kv_size = self.n_kv_heads * self.head_dim;
-
-        let q = ffi::slice_last_dim(&qkv, 0, q_size);
-        let k = ffi::slice_last_dim(&qkv, q_size, q_size + kv_size);
-        let v = ffi::slice_last_dim(&qkv, q_size + kv_size, q_size + 2 * kv_size);
-
-        (q, k, v)
+        self.qkv_proj.project_split(x, q_size, kv_size)
     }
 
     /// Concatenated QKV projection followed by the fused q/k RoPE +
@@ -2537,9 +2778,11 @@ impl FusedQKVLinear {
     /// `KVCache::offset` for the dense path, and is already absolute for
     /// `RingSlidingKVCache`, so no adjustment is needed for rotated caches.
     ///
-    /// Unlike [`Self::forward_split_rope`], this works for both quantized and
-    /// non-quantized weights: it only needs the projection's row-contiguous
-    /// output, not the packed weight.
+    /// Unlike [`Self::forward_split_rope`], this works for every representation
+    /// a [`QkvProjection`] can take (quantized or dense, fused or split): it
+    /// only needs the projection's row-contiguous output, not the packed
+    /// weight. A split layer pays one extra concatenate to build that output;
+    /// see [`QkvProjection::project_concat`] for why it is exact.
     ///
     /// Used by: Llama3-family (and Qwen2-family) dense decode path.
     #[allow(clippy::too_many_arguments)]
@@ -2571,7 +2814,7 @@ impl FusedQKVLinear {
         {
             return None;
         }
-        let qkv = self.qkv_proj.forward(x);
+        let qkv = self.qkv_proj.project_concat(x);
         let qkv_shape = ffi::array_shape(&qkv);
         if qkv_shape.len() != 3
             || qkv_shape[2] != (self.n_heads + 2 * self.n_kv_heads) * self.head_dim
@@ -2620,35 +2863,31 @@ impl FusedQKVLinear {
         if std::env::var("MLXCEL_ENABLE_FUSED_QKV_SPLIT_ROPE").is_err() {
             return None;
         }
-        match &self.qkv_proj {
-            UnifiedLinear::Quantized { weight, .. } => {
-                let mut q = cxx::UniquePtr::null();
-                let mut k = cxx::UniquePtr::null();
-                let mut v = cxx::UniquePtr::null();
-                unsafe {
-                    ffi::fused_qkv_project_split_rope(
-                        x,
-                        &weight.weight,
-                        &weight.scales,
-                        weight.biases_ptr(),
-                        self.n_heads,
-                        self.n_kv_heads,
-                        self.head_dim,
-                        rope_dims,
-                        rope_base,
-                        cache_offset,
-                        weight.group_size,
-                        weight.bits,
-                        &weight.mode,
-                        &mut q,
-                        &mut k,
-                        &mut v,
-                    );
-                }
-                Some((q, k, v))
-            }
-            UnifiedLinear::Regular(_) => None,
+        let weight = self.fused_quantized_weight()?;
+        let mut q = cxx::UniquePtr::null();
+        let mut k = cxx::UniquePtr::null();
+        let mut v = cxx::UniquePtr::null();
+        unsafe {
+            ffi::fused_qkv_project_split_rope(
+                x,
+                &weight.weight,
+                &weight.scales,
+                weight.biases_ptr(),
+                self.n_heads,
+                self.n_kv_heads,
+                self.head_dim,
+                rope_dims,
+                rope_base,
+                cache_offset,
+                weight.group_size,
+                weight.bits,
+                &weight.mode,
+                &mut q,
+                &mut k,
+                &mut v,
+            );
         }
+        Some((q, k, v))
     }
 
     /// Fused concatenated QKV projection + split + reshape + transpose + RoPE.
@@ -2668,35 +2907,31 @@ impl FusedQKVLinear {
         UniquePtr<MlxArray>,
         UniquePtr<MlxArray>,
     )> {
-        match &self.qkv_proj {
-            UnifiedLinear::Quantized { weight, .. } => {
-                let mut q = cxx::UniquePtr::null();
-                let mut k = cxx::UniquePtr::null();
-                let mut v = cxx::UniquePtr::null();
-                unsafe {
-                    ffi::fused_qkv_project_split_rope(
-                        x,
-                        &weight.weight,
-                        &weight.scales,
-                        weight.biases_ptr(),
-                        self.n_heads,
-                        self.n_kv_heads,
-                        self.head_dim,
-                        rope_dims,
-                        rope_base,
-                        cache_offset,
-                        weight.group_size,
-                        weight.bits,
-                        &weight.mode,
-                        &mut q,
-                        &mut k,
-                        &mut v,
-                    );
-                }
-                Some((q, k, v))
-            }
-            UnifiedLinear::Regular(_) => None,
+        let weight = self.fused_quantized_weight()?;
+        let mut q = cxx::UniquePtr::null();
+        let mut k = cxx::UniquePtr::null();
+        let mut v = cxx::UniquePtr::null();
+        unsafe {
+            ffi::fused_qkv_project_split_rope(
+                x,
+                &weight.weight,
+                &weight.scales,
+                weight.biases_ptr(),
+                self.n_heads,
+                self.n_kv_heads,
+                self.head_dim,
+                rope_dims,
+                rope_base,
+                cache_offset,
+                weight.group_size,
+                weight.bits,
+                &weight.mode,
+                &mut q,
+                &mut k,
+                &mut v,
+            );
         }
+        Some((q, k, v))
     }
 
     /// Fused concatenated QKV projection + split + reshape + transpose +
@@ -2735,49 +2970,45 @@ impl FusedQKVLinear {
         UniquePtr<MlxArray>,
         UniquePtr<MlxArray>,
     )> {
-        match &self.qkv_proj {
-            UnifiedLinear::Quantized { weight, .. } => {
-                // At the C++ boundary the primitive passes a single eps value for
-                // both the Q and K RMS norm. Assert (debug builds only) that the
-                // caller supplies identical eps on both sides; a mismatch would
-                // silently apply the wrong eps to K.
-                debug_assert_eq!(
-                    q_norm.rms_eps(),
-                    k_norm.rms_eps(),
-                    "fused QK-norm primitive uses a single eps; q_norm eps {:.2e} != k_norm eps {:.2e}",
-                    q_norm.rms_eps(),
-                    k_norm.rms_eps(),
-                );
-                let mut q = cxx::UniquePtr::null();
-                let mut k = cxx::UniquePtr::null();
-                let mut v = cxx::UniquePtr::null();
-                unsafe {
-                    ffi::fused_qkv_project_split_norm_rope(
-                        x,
-                        &weight.weight,
-                        &weight.scales,
-                        weight.biases_ptr(),
-                        q_norm.fused_norm_weight(),
-                        k_norm.fused_norm_weight(),
-                        self.n_heads,
-                        self.n_kv_heads,
-                        self.head_dim,
-                        rope_dims,
-                        rope_base,
-                        q_norm.rms_eps(),
-                        cache_offset,
-                        weight.group_size,
-                        weight.bits,
-                        &weight.mode,
-                        &mut q,
-                        &mut k,
-                        &mut v,
-                    );
-                }
-                Some((q, k, v))
-            }
-            UnifiedLinear::Regular(_) => None,
+        let weight = self.fused_quantized_weight()?;
+        // At the C++ boundary the primitive passes a single eps value for
+        // both the Q and K RMS norm. Assert (debug builds only) that the
+        // caller supplies identical eps on both sides; a mismatch would
+        // silently apply the wrong eps to K.
+        debug_assert_eq!(
+            q_norm.rms_eps(),
+            k_norm.rms_eps(),
+            "fused QK-norm primitive uses a single eps; q_norm eps {:.2e} != k_norm eps {:.2e}",
+            q_norm.rms_eps(),
+            k_norm.rms_eps(),
+        );
+        let mut q = cxx::UniquePtr::null();
+        let mut k = cxx::UniquePtr::null();
+        let mut v = cxx::UniquePtr::null();
+        unsafe {
+            ffi::fused_qkv_project_split_norm_rope(
+                x,
+                &weight.weight,
+                &weight.scales,
+                weight.biases_ptr(),
+                q_norm.fused_norm_weight(),
+                k_norm.fused_norm_weight(),
+                self.n_heads,
+                self.n_kv_heads,
+                self.head_dim,
+                rope_dims,
+                rope_base,
+                q_norm.rms_eps(),
+                cache_offset,
+                weight.group_size,
+                weight.bits,
+                &weight.mode,
+                &mut q,
+                &mut k,
+                &mut v,
+            );
         }
+        Some((q, k, v))
     }
 }
 
@@ -6062,7 +6293,13 @@ mod tests {
         )
         .expect("valid fused QKV weights");
 
-        match fused.qkv_proj {
+        let fused_proj = match fused.qkv_proj {
+            QkvProjection::Fused(proj) => proj,
+            QkvProjection::Split { .. } => {
+                panic!("uniform-width q/k/v must still fuse into one plane")
+            }
+        };
+        match fused_proj {
             UnifiedLinear::Quantized { weight, bias } => {
                 let bias = bias.expect("Qwen2-style q/k/v linear bias must be preserved");
                 assert_eq!(ffi::array_shape(&bias).as_slice(), &[16]);
@@ -6074,6 +6311,342 @@ mod tests {
             }
             UnifiedLinear::Regular(_) => panic!("expected quantized fused QKV"),
         }
+    }
+
+    // -- mixed-bit-width q/k/v projections (issue #1090) -----------------
+    //
+    // `mlx_lm`'s `mixed_4_8` predicate raises selected tensors (commonly
+    // `v_proj`) to 8 bits while the rest of the model stays at 4. The packed
+    // planes of such a layer have different widths and cannot be concatenated,
+    // so the loader keeps them separate. Everything below builds its planes
+    // with MLX's own quantizer, so the fixtures are real packings rather than
+    // shape stand-ins.
+
+    /// A deterministic dense plane of shape `[out, MIXED_IN]`.
+    fn mixed_dense_plane(out: i32, seed: i32) -> UniquePtr<MlxArray> {
+        let n = (out * MIXED_IN) as usize;
+        let data: Vec<f32> = (0..n)
+            .map(|i| (((i as i32 * 37 + seed * 11) % 97) as f32 - 48.0) * 0.01)
+            .collect();
+        ffi::from_slice_f32(&data, &[out, MIXED_IN])
+    }
+
+    /// In-features width of every fixture plane below. One quantization group
+    /// wide at `MIXED_GROUP`, so a 4-bit plane packs to `[out, 8]` and an 8-bit
+    /// plane to `[out, 16]`: concatenating those along axis 0 is exactly the
+    /// hard MLX shape error the split representation exists to avoid.
+    const MIXED_IN: i32 = 64;
+    const MIXED_GROUP: i32 = 64;
+
+    /// Insert `{prefix}.{weight,scales,biases}` quantized at `bits`.
+    fn insert_affine_plane(
+        weights: &mut crate::weights::WeightMap,
+        prefix: &str,
+        out: i32,
+        seed: i32,
+        bits: i32,
+    ) {
+        let dense = mixed_dense_plane(out, seed);
+        weights.insert(
+            format!("{prefix}.weight"),
+            ffi::quantize_weights_w(&dense, MIXED_GROUP, bits),
+        );
+        weights.insert(
+            format!("{prefix}.scales"),
+            ffi::quantize_weights_scales(&dense, MIXED_GROUP, bits),
+        );
+        weights.insert(
+            format!("{prefix}.biases"),
+            ffi::quantize_weights_biases(&dense, MIXED_GROUP, bits),
+        );
+    }
+
+    /// Dequantize `{prefix}` straight from the weight map at a known width,
+    /// independently of anything the loader decided.
+    fn reference_dequantize(
+        weights: &crate::weights::WeightMap,
+        prefix: &str,
+        bits: i32,
+    ) -> UniquePtr<MlxArray> {
+        let w = weights.get(&format!("{prefix}.weight")).unwrap();
+        let s = weights.get(&format!("{prefix}.scales")).unwrap();
+        let b = weights.get(&format!("{prefix}.biases")).unwrap();
+        // SAFETY: all three are borrowed from live map entries for the call.
+        unsafe {
+            ffi::dequantize(
+                w,
+                s,
+                b.as_ref().unwrap() as *const MlxArray,
+                MIXED_GROUP,
+                bits,
+                "affine",
+            )
+        }
+    }
+
+    fn plane_max_abs_diff(a: &MlxArray, b: &MlxArray) -> f32 {
+        let d = ffi::max_all(&ffi::abs(&ffi::subtract(a, b)));
+        ffi::eval(&d);
+        ffi::item_f32(&d)
+    }
+
+    /// A `mixed_4_8` attention layer: `q_proj` / `k_proj` at 4 bits, `v_proj` at
+    /// 8. `q_proj` is 8 rows and `k_proj` / `v_proj` 4 each, so the layer is a
+    /// GQA `n_heads = 2, n_kv_heads = 1, head_dim = 4`.
+    fn mixed_4_8_layer() -> crate::weights::WeightMap {
+        let mut weights = crate::weights::WeightMap::new();
+        insert_affine_plane(&mut weights, "l.self_attn.q_proj", 8, 1, 4);
+        insert_affine_plane(&mut weights, "l.self_attn.k_proj", 4, 2, 4);
+        insert_affine_plane(&mut weights, "l.self_attn.v_proj", 4, 3, 8);
+        weights
+    }
+
+    fn uniform_layer(bits: i32) -> crate::weights::WeightMap {
+        let mut weights = crate::weights::WeightMap::new();
+        insert_affine_plane(&mut weights, "l.self_attn.q_proj", 8, 1, bits);
+        insert_affine_plane(&mut weights, "l.self_attn.k_proj", 4, 2, bits);
+        insert_affine_plane(&mut weights, "l.self_attn.v_proj", 4, 3, bits);
+        weights
+    }
+
+    fn load_mixed(weights: &crate::weights::WeightMap) -> FusedQKVLinear {
+        FusedQKVLinear::from_weights_separate(weights, "l.self_attn", MIXED_GROUP, 4, 2, 1, 4)
+            .expect("mixed-width q/k/v must load")
+    }
+
+    /// The fusability predicate compares the full `(bits, group_size)` pair.
+    /// Comparing `bits` alone would call two planes fusable while their scales
+    /// tensors describe different group counts, and the axis-0 concatenation of
+    /// those is as wrong as the weight-side mismatch is.
+    #[test]
+    fn qkv_fusability_compares_bits_and_group_size_together() {
+        assert!(qkv_layouts_are_fusable(&[(4, 64), (4, 64), (4, 64)]));
+        assert!(qkv_layouts_are_fusable(&[(8, 128), (8, 128), (8, 128)]));
+        assert!(
+            !qkv_layouts_are_fusable(&[(4, 64), (4, 64), (8, 64)]),
+            "a divergent bit width is not fusable"
+        );
+        assert!(
+            !qkv_layouts_are_fusable(&[(4, 64), (4, 32), (4, 64)]),
+            "a divergent group size is not fusable either, even at equal bits"
+        );
+        assert!(qkv_layouts_are_fusable(&[]), "nothing to disagree about");
+        assert!(qkv_layouts_are_fusable(&[(4, 64)]));
+    }
+
+    /// A `mixed_4_8` layer loads (it used to abort inside MLX's `concatenate`)
+    /// and keeps its three planes in the widths the checkpoint stored them at.
+    #[test]
+    fn mixed_bit_width_qkv_keeps_its_three_planes_separate() {
+        let weights = mixed_4_8_layer();
+        let fused = load_mixed(&weights);
+
+        let QkvProjection::Split { q, k, v } = &fused.qkv_proj else {
+            panic!("a 4/4/8-bit layer cannot be concatenated into one plane");
+        };
+        for (name, plane, expected_bits) in [("q", q, 4), ("k", k, 4), ("v", v, 8)] {
+            let qw = plane
+                .as_quantized_weight()
+                .unwrap_or_else(|| panic!("{name}_proj must stay packed, not be densified"));
+            assert_eq!(
+                (qw.bits, qw.group_size),
+                (expected_bits, MIXED_GROUP),
+                "{name}_proj must keep the layout its own shapes imply"
+            );
+        }
+    }
+
+    /// Nothing is requantized across bit widths and nothing is dequantized and
+    /// re-packed, so every plane dequantizes to exactly what it did in the
+    /// checkpoint. Exact, not approximate: `assert_eq!(diff, 0.0)`.
+    #[test]
+    fn mixed_bit_width_qkv_planes_are_numerically_exact() {
+        let weights = mixed_4_8_layer();
+        let fused = load_mixed(&weights);
+        let QkvProjection::Split { q, k, v } = &fused.qkv_proj else {
+            panic!("expected a split projection");
+        };
+
+        for (name, plane, bits) in [("q", q, 4), ("k", k, 4), ("v", v, 8)] {
+            let expected =
+                reference_dequantize(&weights, &format!("l.self_attn.{name}_proj"), bits);
+            let actual = plane.dequantized_weight();
+            ffi::eval(&expected);
+            ffi::eval(&actual);
+            assert_eq!(
+                plane_max_abs_diff(&expected, &actual),
+                0.0,
+                "{name}_proj must be bit-exact against the checkpoint's own packing"
+            );
+        }
+    }
+
+    /// The split layer's `forward` is exactly three independent projections, so
+    /// it agrees element for element with running the three `UnifiedLinear`s the
+    /// same weight map produces.
+    #[test]
+    fn mixed_bit_width_qkv_forward_matches_independent_projections() {
+        let weights = mixed_4_8_layer();
+        let fused = load_mixed(&weights);
+
+        let x = ffi::from_slice_f32(
+            &(0..MIXED_IN)
+                .map(|i| ((i % 11) as f32 - 5.0) * 0.05)
+                .collect::<Vec<_>>(),
+            &[1, 1, MIXED_IN],
+        );
+        let (q, k, v) = fused.forward(&x);
+
+        for (name, actual) in [("q", &q), ("k", &k), ("v", &v)] {
+            let reference = UnifiedLinear::from_weights_with_mode(
+                &weights,
+                &format!("l.self_attn.{name}_proj"),
+                MIXED_GROUP,
+                4,
+                "affine",
+            )
+            .expect("plane loads standalone")
+            .forward(&x);
+            ffi::eval(&reference);
+            ffi::eval(actual);
+            assert_eq!(
+                plane_max_abs_diff(&reference, actual),
+                0.0,
+                "{name} must match its standalone projection"
+            );
+        }
+    }
+
+    /// The fused-kernel launchers need one packed plane. A split layer has
+    /// none, so they must report that the way they already do for a dense
+    /// layer, letting the caller fall back to its graph path rather than
+    /// silently projecting through the wrong weight.
+    #[test]
+    fn a_split_layer_offers_no_fused_packed_weight() {
+        let fused = load_mixed(&mixed_4_8_layer());
+        assert!(fused.qkv_proj.is_split());
+        assert!(fused.fused_quantized_weight().is_none());
+        let x = ffi::zeros(&[1, 1, MIXED_IN], crate::dtype::FLOAT32);
+        assert!(
+            fused
+                .forward_split_rope_quantized(&x, 4, 10000.0, 0)
+                .is_none()
+        );
+    }
+
+    /// Positive control, and the guarantee that this change is invisible to
+    /// every checkpoint that already worked: a layer whose three planes agree
+    /// still fuses into one plane, at the same width and group size the loader
+    /// chose before. Without this the split path could pass by never fusing
+    /// anything.
+    #[test]
+    fn uniform_precision_qkv_still_fuses_into_one_plane() {
+        for bits in [4, 8] {
+            let weights = uniform_layer(bits);
+            let fused = FusedQKVLinear::from_weights_separate(
+                &weights,
+                "l.self_attn",
+                MIXED_GROUP,
+                4,
+                2,
+                1,
+                4,
+            )
+            .expect("uniform q/k/v must load");
+            let proj = fused
+                .qkv_proj
+                .fused()
+                .unwrap_or_else(|| panic!("a uniform {bits}-bit layer must stay fused"));
+            let qw = proj
+                .as_quantized_weight()
+                .unwrap_or_else(|| panic!("a uniform {bits}-bit layer must stay quantized"));
+            assert_eq!(
+                (qw.bits, qw.group_size),
+                (bits, MIXED_GROUP),
+                "the fused plane's layout must not move"
+            );
+            // 8 + 4 + 4 rows concatenated along the output axis, packed to
+            // `MIXED_IN * bits / 32` columns.
+            assert_eq!(
+                ffi::array_shape(&qw.weight).as_slice(),
+                &[16, MIXED_IN * bits / 32]
+            );
+        }
+    }
+
+    /// A split projection and a fused one built from the same uniform weights
+    /// produce identical q/k/v, which is what makes the split representation a
+    /// drop-in for the fused one rather than a second, subtly different path.
+    #[test]
+    fn split_and_fused_projections_agree_on_uniform_weights() {
+        let weights = uniform_layer(4);
+        let fused =
+            FusedQKVLinear::from_weights_separate(&weights, "l.self_attn", MIXED_GROUP, 4, 2, 1, 4)
+                .expect("uniform q/k/v must load");
+        let plane = |name: &str| {
+            UnifiedLinear::from_weights_with_mode(
+                &weights,
+                &format!("l.self_attn.{name}_proj"),
+                MIXED_GROUP,
+                4,
+                "affine",
+            )
+            .expect("plane loads standalone")
+        };
+        let split = FusedQKVLinear {
+            qkv_proj: QkvProjection::Split {
+                q: plane("q"),
+                k: plane("k"),
+                v: plane("v"),
+            },
+            n_heads: 2,
+            n_kv_heads: 1,
+            head_dim: 4,
+        };
+
+        let x = ffi::from_slice_f32(
+            &(0..MIXED_IN)
+                .map(|i| ((i % 7) as f32 - 3.0) * 0.03)
+                .collect::<Vec<_>>(),
+            &[1, 1, MIXED_IN],
+        );
+        let (fq, fk, fv) = fused.forward(&x);
+        let (sq, sk, sv) = split.forward(&x);
+        for (name, a, b) in [("q", &fq, &sq), ("k", &fk, &sk), ("v", &fv, &sv)] {
+            ffi::eval(a);
+            ffi::eval(b);
+            assert_eq!(
+                plane_max_abs_diff(a, b),
+                0.0,
+                "{name} must be identical whether the planes are fused or split"
+            );
+        }
+    }
+
+    /// A partially quantized triple (no `v_proj.scales`) has no layout to
+    /// compare, so the detection must stay out of the way and let the existing
+    /// fused path report it. Its diagnostics for a broken triple are the more
+    /// specific ones.
+    #[test]
+    fn a_partially_quantized_triple_falls_through_to_the_fused_path() {
+        let mut weights = mixed_4_8_layer();
+        weights.remove("l.self_attn.v_proj.scales");
+        let err = match FusedQKVLinear::from_weights_separate(
+            &weights,
+            "l.self_attn",
+            MIXED_GROUP,
+            4,
+            2,
+            1,
+            4,
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("a triple missing v_proj.scales cannot load"),
+        };
+        assert!(
+            err.contains("v_proj.scales"),
+            "the fused path's own message must survive: {err}"
+        );
     }
 
     /// `Embedding::clone_shared` produces an independent handle whose
@@ -6863,7 +7436,7 @@ mod tests {
         let biases = ffi::quantize_weights_biases(&w, group_size, bits);
         let qweight = QuantizedWeight::new(weight, scales, biases, group_size, bits);
         FusedQKVLinear {
-            qkv_proj: UnifiedLinear::new(qweight, None),
+            qkv_proj: QkvProjection::Fused(UnifiedLinear::new(qweight, None)),
             n_heads,
             n_kv_heads,
             head_dim,
