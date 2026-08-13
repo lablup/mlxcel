@@ -137,8 +137,23 @@ fn nonexistent_non_repo_id_value_errors_clearly() {
     // arm now requires an illegal segment character such as a space.
     let err = resolve_model_source(Path::new("not a model name")).unwrap_err();
     let msg = format!("{err}");
-    assert!(msg.contains("neither an existing path"), "got: {msg}");
+    assert!(msg.contains("not a model mlxcel can resolve"), "got: {msg}");
+
+    // All three accepted forms must be named, not two (issue #1114). The bare
+    // name is the form this error arm is most likely to be reached from: a
+    // character outside `is_repo_segment`'s class (here, a space) is exactly
+    // what falls through to it.
+    assert!(msg.contains("local model directory"), "got: {msg}");
     assert!(msg.contains("owner/name"), "got: {msg}");
+    assert!(msg.contains("bare model name"), "got: {msg}");
+
+    // The character class is stated, matching `is_repo_segment` and the
+    // sibling `bad_default_org_error`.
+    assert!(msg.contains("[A-Za-z0-9._-]"), "got: {msg}");
+    assert!(msg.contains("MLXCEL_DEFAULT_ORG"), "got: {msg}");
+
+    // The pre-existing example is preserved.
+    assert!(msg.contains("mlx-community/Qwen3-4B-4bit"), "got: {msg}");
 }
 
 #[test]
@@ -146,7 +161,7 @@ fn nonexistent_multi_segment_path_errors_clearly() {
     // `a/b/c` has too many slashes to be a repo-id and does not exist.
     let err = resolve_model_source(Path::new("no/such/nested/path")).unwrap_err();
     let msg = format!("{err}");
-    assert!(msg.contains("neither an existing path"), "got: {msg}");
+    assert!(msg.contains("not a model mlxcel can resolve"), "got: {msg}");
 }
 
 // ── locate_cached_snapshot: branch 2a (legacy ./models/<basename>) ───────────

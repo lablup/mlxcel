@@ -448,13 +448,23 @@ fn is_repo_segment(segment: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-/// Build the "neither a path nor a repo-id" error for an unresolvable `-m`
-/// value.
+/// Build the terminal error for an `-m` value that matches none of the
+/// resolver's accepted forms.
+///
+/// The message names all **three** forms the resolver accepts, not two
+/// (issue #1114). The bare-name form is the one a user who typed a name with a
+/// stray character is most likely to want back, since a character outside
+/// [`is_repo_segment`]'s class is exactly what lands here, and telling them to
+/// type a full `owner/name` instead is strictly more work than the form the
+/// README puts in the quick start. The character class is stated explicitly,
+/// matching the sibling [`bad_default_org_error`] on the same path.
 fn not_a_model_error(value: &Path) -> anyhow::Error {
     anyhow!(
-        "model '{}' is neither an existing path nor a valid HuggingFace \
-         repo-id (expected `owner/name`, e.g. `mlx-community/Qwen3-4B-4bit`). \
-         Pass a local model directory or a repo-id to auto-download.",
+        "model '{}' is not a model mlxcel can resolve. Accepted forms: a local \
+         model directory; a HuggingFace repo-id `owner/name` (e.g. \
+         `mlx-community/Qwen3-4B-4bit`); or a bare model name made only of \
+         [A-Za-z0-9._-], which resolves against $MLXCEL_DEFAULT_ORG (default \
+         `mlx-community`). A repo-id or bare name is auto-downloaded.",
         value.display()
     )
 }
