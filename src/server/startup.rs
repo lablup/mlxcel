@@ -945,6 +945,12 @@ pub(super) fn build_server_config(
         default_dry_base: startup.dry_base,
         default_dry_allowed_length: startup.dry_allowed_length,
         default_dry_penalty_last_n: resolve_dry_penalty_last_n(startup.dry_penalty_last_n),
+        // Left empty here on purpose: `--dry-sequence-breaker` takes token
+        // strings and the sampler takes token IDs, so resolving it needs the
+        // tokenizer, which `run_server` loads after this function returns. It
+        // fills the field there and fails startup on a breaker it cannot
+        // represent (#1103).
+        default_dry_sequence_breakers: Vec::new(),
         draft_model_path: startup.draft_model_path.clone(),
         num_draft_tokens: startup.draft_max,
         // forward the speculative-decoding selector flags
@@ -1864,6 +1870,24 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         &startup.model_path,
     )?;
     let tokenizer = crate::tokenizer::load_tokenizer(&startup.model_path)?;
+
+    // `--dry-sequence-breaker` takes token strings and the sampler takes token
+    // IDs, so this is the first point in startup where the flag can be
+    // resolved. Failing here rather than dropping an unrepresentable breaker
+    // is deliberate: an inert breaker makes the DRY penalty stronger than the
+    // operator configured, with nothing in the logs or `/props` to say so
+    // (#1103).
+    config.default_dry_sequence_breakers = super::dry_breakers::resolve_dry_sequence_breakers(
+        &tokenizer,
+        &startup.dry_sequence_breakers,
+    )?;
+    if !config.default_dry_sequence_breakers.is_empty() {
+        tracing::info!(
+            breakers = ?startup.dry_sequence_breakers,
+            token_ids = ?config.default_dry_sequence_breakers,
+            "DRY sequence breakers resolved to token IDs"
+        );
+    }
 
     // align the chat-template `enable_thinking` Jinja kwarg
     // default with upstream `TokenizerWrapper.apply_chat_template`'s

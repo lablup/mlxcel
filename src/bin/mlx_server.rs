@@ -623,6 +623,18 @@ struct ServerArgs {
 
     /// DRY sequence breaker token strings (e.g. "\n", "\t")
     ///
+    /// Sets the server-wide default that a request without its own
+    /// `dry_sequence_breakers` field inherits; a request that sends the field
+    /// overrides it, including sending an empty list to run DRY with no
+    /// breakers. The resolved token IDs are reported by `/props`.
+    ///
+    /// Each value must encode to exactly ONE token for the loaded model,
+    /// because the sampler matches breakers by token id. A value that does not
+    /// fails startup and names itself, rather than being dropped silently. The
+    /// escapes `\n`, `\t`, `\r` and `\\` are interpreted, since a shell does
+    /// not expand them inside quotes; any other backslash sequence is taken
+    /// literally.
+    ///
     /// The singular `--dry-sequence-breaker` is the primary spelling on both
     /// server binaries, matching llama-server. The plural
     /// `--dry-sequence-breakers` is accepted as an alias on both, so no

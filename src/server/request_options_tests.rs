@@ -178,6 +178,69 @@ fn build_server_generate_options_applies_request_overrides() {
     assert_eq!(options.stop_sequences, Some(vec!["stop".to_string()]));
 }
 
+/// The server-wide `--dry-sequence-breaker` default must reach the sampler for
+/// a request that does not carry its own breakers (#1103). Before that, the
+/// field resolved through `unwrap_or_default()` with no server default behind
+/// it, so the flag was accepted at startup and then did nothing.
+#[test]
+fn server_dry_sequence_breaker_default_applies_when_the_request_omits_it() {
+    let config = ServerConfig {
+        default_dry_multiplier: 0.8,
+        default_dry_sequence_breakers: vec![198, 271],
+        ..Default::default()
+    };
+
+    let options = build_server_generate_options(&config, RequestOptionOverrides::default());
+
+    assert_eq!(options.sampling.dry_sequence_breakers, vec![198, 271]);
+    // The other DRY fields already resolved from the config; assert one of
+    // them alongside so the test states the whole fallback, not half of it.
+    assert_eq!(options.sampling.dry_multiplier, 0.8);
+}
+
+/// A per-request `dry_sequence_breakers` still wins over the server default,
+/// matching every other DRY field's `unwrap_or(config.default_*)` shape.
+#[test]
+fn request_dry_sequence_breakers_override_the_server_default() {
+    let config = ServerConfig {
+        default_dry_multiplier: 0.8,
+        default_dry_sequence_breakers: vec![198, 271],
+        ..Default::default()
+    };
+
+    let options = build_server_generate_options(
+        &config,
+        RequestOptionOverrides {
+            dry_sequence_breakers: Some(vec![13]),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(options.sampling.dry_sequence_breakers, vec![13]);
+}
+
+/// An explicitly empty request list is an override too, not an absent field:
+/// it turns the server default OFF for that request. `Some(vec![])` and `None`
+/// must not collapse to the same thing.
+#[test]
+fn an_explicitly_empty_request_breaker_list_disables_the_server_default() {
+    let config = ServerConfig {
+        default_dry_multiplier: 0.8,
+        default_dry_sequence_breakers: vec![198],
+        ..Default::default()
+    };
+
+    let options = build_server_generate_options(
+        &config,
+        RequestOptionOverrides {
+            dry_sequence_breakers: Some(Vec::new()),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(options.sampling.dry_sequence_breakers, Vec::<i32>::new());
+}
+
 #[test]
 fn explicit_max_tokens_clamps_to_per_slot_context_size() {
     let config = ServerConfig {

@@ -27,6 +27,7 @@ mod config;
 pub mod conversation_store;
 mod cors;
 pub(crate) mod diffusion_worker;
+mod dry_breakers;
 pub(crate) mod florence2_worker;
 pub mod kokoro_tts;
 mod media;
