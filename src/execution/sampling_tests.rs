@@ -67,15 +67,44 @@ fn build_sampling_config_uses_greedy_defaults_when_temperature_is_zero() {
     assert_eq!(config.temperature, 0.0);
     assert_eq!(config.top_k, 1);
     assert_eq!(config.top_p, 1.0);
-    assert_eq!(config.dry_sequence_breakers, Vec::<i32>::new());
     assert_eq!(config.min_p, params.min_p);
     assert_eq!(config.seed, params.seed);
     assert_eq!(config.repetition_penalty, params.repetition_penalty);
     assert_eq!(config.frequency_penalty, params.frequency_penalty);
     assert_eq!(config.presence_penalty, params.presence_penalty);
+    // DRY is applied whenever `dry_multiplier > 0.0`, independent of
+    // temperature, so the greedy branch threads all five DRY fields through.
+    // Stating the whole set here keeps the contract in one place instead of
+    // half-stated.
+    assert_eq!(config.dry_multiplier, params.dry_multiplier);
+    assert_eq!(config.dry_base, params.dry_base);
+    assert_eq!(config.dry_allowed_length, params.dry_allowed_length);
+    assert_eq!(config.dry_penalty_last_n, params.dry_penalty_last_n);
+    assert_eq!(config.dry_sequence_breakers, params.dry_sequence_breakers);
     // XTC is applied regardless of temperature, so the greedy branch still
     // threads the resolved probability/threshold through.
     assert_eq!(config.xtc_probability, params.xtc_probability);
     assert_eq!(config.xtc_threshold, params.xtc_threshold);
     assert_eq!(config.stop_token_ids, params.stop_token_ids);
+}
+
+/// Regression guard for the greedy branch dropping `dry_sequence_breakers`.
+///
+/// The breakers terminate the DRY backward match; an empty vector lets the
+/// match run past the intended boundary, so the penalty applied at
+/// `temperature: 0` was larger than the request asked for.
+#[test]
+fn build_sampling_config_keeps_dry_sequence_breakers_at_zero_temperature() {
+    let mut params = sample_params();
+    params.temperature = 0.0;
+    params.dry_multiplier = 0.8;
+    params.dry_sequence_breakers = vec![198];
+
+    let config = build_sampling_config(params);
+
+    assert_eq!(config.dry_multiplier, 0.8);
+    assert_eq!(config.dry_sequence_breakers, vec![198]);
+    // Greedy determinism is untouched: DRY is a logits pre-processing step.
+    assert_eq!(config.top_k, 1);
+    assert_eq!(config.top_p, 1.0);
 }

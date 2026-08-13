@@ -169,7 +169,10 @@ fn build_server_generate_options_applies_request_overrides() {
     assert_eq!(options.sampling.dry_base, 2.2);
     assert_eq!(options.sampling.dry_allowed_length, 5);
     assert_eq!(options.sampling.dry_penalty_last_n, 17);
-    assert_eq!(options.sampling.dry_sequence_breakers, Vec::<i32>::new());
+    // `temperature: 0` takes the greedy branch of `build_sampling_config`, which
+    // still has to forward the requested breakers: DRY runs whenever
+    // `dry_multiplier > 0.0`, and the breakers terminate its backward match.
+    assert_eq!(options.sampling.dry_sequence_breakers, vec![1, 2]);
     assert_eq!(options.sampling.xtc_probability, 0.7);
     assert_eq!(options.sampling.xtc_threshold, 0.2);
     assert_eq!(options.stop_sequences, Some(vec!["stop".to_string()]));
