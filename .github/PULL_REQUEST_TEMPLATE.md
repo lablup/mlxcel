@@ -1,6 +1,6 @@
 <!--
 Thanks for opening a pull request! Please fill out the sections below.
-For the full contributor contract see AGENTS.md and CONTRIBUTING.md.
+For the full contributor contract see CONTRIBUTING.md and docs/code-guidelines.md.
 -->
 
 ## Summary
