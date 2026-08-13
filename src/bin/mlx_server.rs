@@ -200,7 +200,7 @@ struct ServerArgs {
     alias: Option<String>,
 
     /// Path to LoRA adapter directory
-    #[arg(long = "lora", value_name = "PATH")]
+    #[arg(long = "lora", visible_alias = "adapter", value_name = "PATH")]
     lora: Option<PathBuf>,
 
     /// Host address to bind to (or Unix socket path when --port 0)
@@ -239,8 +239,15 @@ struct ServerArgs {
     /// of up to 7 rows (issue #725); keep this at 7 or below there (see
     /// docs/CONTINUOUS_BATCHING.md). The scheduler clamps this to 1 for model
     /// families that cannot batch (SSM / hybrid / mixed-cache). Use `--parallel
-    /// 1` (or `--no-batch`) to restore single-slot sequential serving.
-    #[arg(long = "parallel", env = "LLAMA_ARG_N_PARALLEL", default_value_t = 4)]
+    /// 1` (or `--no-batch`) to restore single-slot sequential serving. Both
+    /// `--parallel` and `--n-parallel` are accepted on `mlxcel serve` and on
+    /// `mlxcel-server`, so this flag parses on either binary.
+    #[arg(
+        long = "parallel",
+        visible_alias = "n-parallel",
+        env = "LLAMA_ARG_N_PARALLEL",
+        default_value_t = 4
+    )]
     parallel: usize,
 
     /// API key for authentication
@@ -615,7 +622,16 @@ struct ServerArgs {
     dry_penalty_last_n: i32,
 
     /// DRY sequence breaker token strings (e.g. "\n", "\t")
-    #[arg(long = "dry-sequence-breaker", value_delimiter = ',')]
+    ///
+    /// The singular `--dry-sequence-breaker` is the primary spelling on both
+    /// server binaries, matching llama-server. The plural
+    /// `--dry-sequence-breakers` is accepted as an alias on both, so no
+    /// command line that worked before stops working.
+    #[arg(
+        long = "dry-sequence-breaker",
+        visible_alias = "dry-sequence-breakers",
+        value_delimiter = ','
+    )]
     dry_sequence_breakers: Vec<String>,
 
     // Logging.
@@ -1681,5 +1697,115 @@ mod tests {
             "--draft and its --draft-max alias must resolve to the same token budget"
         );
         assert_eq!(primary.draft, 24);
+    }
+
+    // ── Server flag spelling parity (issue #1109) ───────────────
+    //
+    // Four flag spellings had drifted between this binary and `mlxcel
+    // serve`. `--parallel` / `--n-parallel` was the worst case: neither
+    // spelling worked on both binaries, so a command line copied between
+    // them failed to parse even though both flags read the same
+    // `LLAMA_ARG_N_PARALLEL` env var. These tests pin that each spelling
+    // now resolves to the identical `ServerArgs` field value here;
+    // `src/main_tests.rs` carries the matching assertions for `mlxcel
+    // serve`, and `tests/cli_help_consistency.rs` asserts the two
+    // binaries accept the same set of spellings so a fifth divergence
+    // cannot land silently.
+
+    /// Every long name, alias, and short form on `mlxcel-server` must be
+    /// distinct. clap detects a duplicate itself, but only behind a
+    /// `debug_assert` in `Command::_build_self`, and `[profile.test-fast]`
+    /// inherits `release`, so `debug-assertions` is off in the profile this
+    /// repository verifies with. A `visible_alias` that collided with an
+    /// existing flag would be silently last-wins rather than a panic, and
+    /// issue #1109 added two of them here.
+    #[test]
+    fn server_flag_names_and_aliases_are_unique() {
+        use clap::CommandFactory;
+
+        let command = Cli::command();
+
+        let mut longs: Vec<String> = Vec::new();
+        let mut shorts: Vec<char> = Vec::new();
+        for arg in command.get_arguments() {
+            if let Some(long) = arg.get_long() {
+                longs.push(long.to_string());
+            }
+            if let Some(aliases) = arg.get_all_aliases() {
+                longs.extend(aliases.into_iter().map(str::to_string));
+            }
+            if let Some(short) = arg.get_short() {
+                shorts.push(short);
+            }
+            if let Some(aliases) = arg.get_all_short_aliases() {
+                shorts.extend(aliases);
+            }
+        }
+
+        let duplicate_longs = duplicates(&longs);
+        assert!(
+            duplicate_longs.is_empty(),
+            "`mlxcel-server` declares these long names more than once: \
+             {duplicate_longs:?}. clap resolves a duplicate silently in this profile, so \
+             the second definition would shadow the first with no error."
+        );
+
+        let duplicate_shorts = duplicates(&shorts);
+        assert!(
+            duplicate_shorts.is_empty(),
+            "`mlxcel-server` declares these short forms more than once: {duplicate_shorts:?}"
+        );
+    }
+
+    /// Values appearing more than once in `items`, sorted and deduplicated.
+    fn duplicates<T: Clone + Ord>(items: &[T]) -> Vec<T> {
+        let mut sorted = items.to_vec();
+        sorted.sort();
+        let mut repeated: Vec<T> = sorted
+            .windows(2)
+            .filter(|w| w[0] == w[1])
+            .map(|w| w[0].clone())
+            .collect();
+        repeated.dedup();
+        repeated
+    }
+
+    #[test]
+    fn parallel_and_n_parallel_aliases_resolve_identically() {
+        let primary = parse_server_args(&["mlxcel-server", "--parallel", "2"]);
+        let aliased = parse_server_args(&["mlxcel-server", "--n-parallel", "2"]);
+
+        assert_eq!(
+            primary.parallel, aliased.parallel,
+            "--parallel and its --n-parallel alias must resolve to the same slot count"
+        );
+        assert_eq!(primary.parallel, 2);
+    }
+
+    #[test]
+    fn lora_and_adapter_aliases_resolve_identically() {
+        let primary = parse_server_args(&["mlxcel-server", "--lora", "adapters/foo"]);
+        let aliased = parse_server_args(&["mlxcel-server", "--adapter", "adapters/foo"]);
+
+        assert_eq!(
+            primary.lora, aliased.lora,
+            "--lora and its --adapter alias must resolve to the same adapter path"
+        );
+        assert_eq!(primary.lora, Some(PathBuf::from("adapters/foo")));
+    }
+
+    #[test]
+    fn dry_sequence_breaker_singular_and_plural_aliases_resolve_identically() {
+        let primary = parse_server_args(&["mlxcel-server", "--dry-sequence-breaker", "a,b"]);
+        let aliased = parse_server_args(&["mlxcel-server", "--dry-sequence-breakers", "a,b"]);
+
+        assert_eq!(
+            primary.dry_sequence_breakers, aliased.dry_sequence_breakers,
+            "both DRY breaker spellings must resolve to the same breaker list"
+        );
+        assert_eq!(
+            primary.dry_sequence_breakers,
+            vec!["a".to_string(), "b".to_string()]
+        );
     }
 }

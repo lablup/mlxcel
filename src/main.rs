@@ -611,7 +611,7 @@ pub(crate) struct SamplingOptions {
 
     /// DRY (Don't Repeat Yourself) penalty multiplier (0.0 = disabled).
     /// CLI DRY matches across all boundaries; the server's
-    /// `--dry-sequence-breakers` has no CLI equivalent.
+    /// `--dry-sequence-breaker` has no CLI equivalent.
     #[arg(long, default_value_t = 0.0, value_name = "FLOAT")]
     pub(crate) dry_multiplier: f32,
 
@@ -900,15 +900,22 @@ pub(crate) struct ServeArgs {
 
     /// Number of parallel request slots that share --ctx-size (default: 4)
     ///
-    /// Sets the maximum concurrent decode batch for multi-client serving.
-    /// Batched decode amortizes the per-step weight reads across the batch,
+    /// Sets the maximum concurrent decode batch for multi-client serving:
+    /// batched decode amortizes the per-step weight reads across the batch,
     /// raising aggregate throughput and keeping time-to-first-token low under
     /// concurrent load. On CUDA the amortizing kernel covers decode batches
     /// of up to 7 rows (issue #725); keep this at 7 or below there (see
-    /// docs/CONTINUOUS_BATCHING.md). Clamped to 1 for model families that
-    /// cannot batch. Use `--n-parallel 1` (or `--no-batch`) for single-slot
-    /// serving.
-    #[arg(long, env = "LLAMA_ARG_N_PARALLEL", default_value_t = 4)]
+    /// docs/CONTINUOUS_BATCHING.md). The scheduler clamps this to 1 for model
+    /// families that cannot batch (SSM / hybrid / mixed-cache). Use `--parallel
+    /// 1` (or `--no-batch`) to restore single-slot sequential serving. Both
+    /// `--parallel` and `--n-parallel` are accepted on `mlxcel serve` and on
+    /// `mlxcel-server`, so this flag parses on either binary.
+    #[arg(
+        long,
+        visible_alias = "parallel",
+        env = "LLAMA_ARG_N_PARALLEL",
+        default_value_t = 4
+    )]
     n_parallel: usize,
 
     /// Total context budget shared across parallel slots (0 = use model default)
@@ -916,7 +923,12 @@ pub(crate) struct ServeArgs {
     ctx_size: usize,
 
     /// Maximum tokens to predict (-1 = unlimited)
-    #[arg(long = "n-predict", env = "LLAMA_ARG_N_PREDICT", default_value_t = -1)]
+    #[arg(
+        long = "n-predict",
+        visible_alias = "predict",
+        env = "LLAMA_ARG_N_PREDICT",
+        default_value_t = -1
+    )]
     n_predict: i32,
 
     /// Path to drafter checkpoint for server speculative decoding
@@ -1259,7 +1271,16 @@ pub(crate) struct ServeArgs {
     dry_penalty_last_n: i32,
 
     /// DRY sequence breaker token strings (e.g. "\n", "\t")
-    #[arg(long, value_delimiter = ',')]
+    ///
+    /// The singular `--dry-sequence-breaker` is the primary spelling on both
+    /// server binaries, matching llama-server. The plural
+    /// `--dry-sequence-breakers` is accepted as an alias on both, so no
+    /// command line that worked before stops working.
+    #[arg(
+        long = "dry-sequence-breaker",
+        visible_alias = "dry-sequence-breakers",
+        value_delimiter = ','
+    )]
     dry_sequence_breakers: Vec<String>,
 
     // Logging.
