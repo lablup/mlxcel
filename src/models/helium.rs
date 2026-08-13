@@ -473,9 +473,8 @@ struct ProjectionShape {
 ///
 /// The declared `group_size` is the right one to check against, not a
 /// shape-derived one. The affine loader trusts the declared group size and
-/// re-derives `bits` from the shapes, and
-/// `FusedQKVLinear::from_weights_separate` does so unconditionally, so the
-/// declared value is what reaches MLX. That makes this stricter than the loader
+/// re-derives `bits` from the shapes, and `FusedQKVLinear` does so for every
+/// plane it loads, fused or split, so the declared value is what reaches MLX. That makes this stricter than the loader
 /// for one layout the loader would repair (a declared `group_size` of 16 at
 /// 4 bits, the NVFP4-fallback repack, where `reconcile_quantization_layout`
 /// re-derives the group size instead); no Helium checkpoint is packed that way,
@@ -674,11 +673,18 @@ fn validate_table(
 ///
 /// This has to run **before** [`Llama3Model::from_weights`], not after.
 /// `FusedQKVLinear::from_weights_separate` concatenates `q_proj`, `k_proj` and
-/// `v_proj` (and their `scales` and `biases`) along axis 0 with no shape check
-/// of its own, and `Attention::forward` then reshapes the result using
-/// config-derived head counts. Both a mismatched concatenate and a mismatched
-/// reshape throw inside MLX, and an MLX C++ exception crossing the cxx bridge is
-/// an uncatchable `std::terminate` rather than a load error.
+/// `v_proj` (and their `scales` and `biases`) along axis 0, and
+/// `Attention::forward` then reshapes the result using config-derived head
+/// counts. Both a mismatched concatenate and a mismatched reshape throw inside
+/// MLX, and an MLX C++ exception crossing the cxx bridge is an uncatchable
+/// `std::terminate` rather than a load error.
+///
+/// The loader compares the three planes' packed shapes itself and keeps them
+/// separate when they cannot be concatenated (issue #1090), so the packed-width
+/// case is no longer this validator's to catch. Everything the loader does not
+/// look at still is: the row counts against the config head geometry, each
+/// plane's logical input width against `hidden_size`, and the all-or-nothing
+/// bias rules below.
 pub fn validate_weights(weights: &WeightMap, args: &ModelArgs) -> Result<(), String> {
     let hidden = args.hidden_size;
     let head_dim = args.head_dim();
@@ -730,11 +736,19 @@ pub fn validate_weights(weights: &WeightMap, args: &ModelArgs) -> Result<(), Str
         )?;
 
         // The fused QKV loader decides "is this quantized?" from `q_proj.scales`
-        // alone and then concatenates all three, and it keeps the affine
+        // alone, and when it concatenates the three planes it keeps the affine
         // `biases` only when all three carry one. A checkpoint where q, k and v
         // disagree therefore either aborts inside `concatenate` or, worse for
         // the `biases` case, silently dequantizes K and V without their zero
         // points. Neither is recoverable downstream, so both are rejected here.
+        //
+        // A layer that takes the split path carries each plane's `biases` and
+        // `bias` on its own and would survive the asymmetry, so these two rules
+        // are stricter than that path needs. They are kept unconditional
+        // anyway: which path a layer takes is the loader's decision, not this
+        // validator's, and a checkpoint with a bias on some of q/k/v and not
+        // the others is malformed however it is loaded. Refusing it names the
+        // asymmetry; the alternative failure is silent.
         if q.quantized != k.quantized || q.quantized != v.quantized {
             return Err(format!(
                 "{attn}: q_proj, k_proj and v_proj must all be quantized or all be float; they \
@@ -742,15 +756,32 @@ pub fn validate_weights(weights: &WeightMap, args: &ModelArgs) -> Result<(), Str
                  take from q_proj alone"
             ));
         }
-        if q.cols != k.cols
-            || q.cols != v.cols
-            || q.scale_cols != k.scale_cols
-            || q.scale_cols != v.scale_cols
-        {
+        // The three planes are NOT required to share a packed width. `q.cols` is
+        // the second axis of `.weight`, which on the quantized path is the
+        // packed width and therefore scales with the bit width, and a checkpoint
+        // that quantizes q/k/v at different widths (`mlx_lm`'s `mixed_4_8`) is a
+        // layout `FusedQKVLinear` loads by keeping the three planes separate
+        // rather than concatenating them (issue #1090). Rejecting it here would
+        // block the shared fix for this family alone.
+        //
+        // What must still agree is the LOGICAL input width, which is invariant
+        // to the bit width: all three read the same activation.
+        // `validate_projection` already pinned each plane's scales to `hidden`
+        // on its own, so this restates that in one message naming all three,
+        // and it still catches a `.scales` plane that agrees with `hidden` by
+        // arithmetic accident on only some of the projections.
+        if q.scale_cols != k.scale_cols || q.scale_cols != v.scale_cols {
+            let groups = |cols: Option<i32>| {
+                cols.map(|c| c.to_string())
+                    .unwrap_or_else(|| "none (float)".to_string())
+            };
             return Err(format!(
-                "{attn}: q_proj, k_proj and v_proj must share an input width (got {}, {}, {}); \
-                 they are concatenated along the output axis",
-                q.cols, k.cols, v.cols
+                "{attn}: q_proj, k_proj and v_proj must describe the same input width, but their \
+                 scales carry different quantization group counts ({}, {}, {}); all three read \
+                 the same activation",
+                groups(q.scale_cols),
+                groups(k.scale_cols),
+                groups(v.scale_cols)
             ));
         }
         if q.has_quant_biases != k.has_quant_biases || q.has_quant_biases != v.has_quant_biases {

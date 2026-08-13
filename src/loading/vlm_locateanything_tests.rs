@@ -454,7 +454,7 @@ fn resolves_the_image_framing_tokens_from_added_tokens() {
     );
 }
 
-// --- bf16 ordering vs mixed-precision densification (fix commit 5ad34371) -
+// --- bf16 -> f16 conversion vs the packed mixed-precision planes ----------
 
 const MIXED_GROUP: i32 = 64;
 
@@ -501,44 +501,44 @@ fn insert_bf16_sourced_quantized(
     }
 }
 
-/// Regression for commit 5ad34371: `densify_mixed_precision_qkv` must run
-/// before the bf16 -> f16 conversion pass. MLX's `dequantize` returns an
-/// array carrying the scales' dtype, so a mixed-precision layer densified
-/// *after* conversion would insert new bf16 planes with nothing left to
-/// convert them, which was the M5 JIT crash both passes exist to avoid.
+/// The released conversion is `mixed_4_8`: some layers store `v_proj` at 8 bits
+/// while `q_proj` / `k_proj` stay at 4. This loader used to dequantize those
+/// layers' three planes to dense so the fused QKV projection could concatenate
+/// them. `FusedQKVLinear` now keeps mismatched planes separate itself (issue
+/// #1090), so the planes must arrive at the backbone loader still packed, and
+/// the bf16 -> f16 pass must leave the packing metadata alone while still
+/// converting ordinary bf16 tensors.
 #[test]
-fn densified_mixed_precision_planes_are_still_converted_to_f16() {
+fn mixed_precision_qkv_planes_reach_the_backbone_still_packed() {
     let prefix = "language_model.model.layers.0.self_attn";
     let mut weights = WeightMap::new();
-    insert_bf16_sourced_quantized(&mut weights, &format!("{prefix}.q_proj"), 8, 1, 8);
+    insert_bf16_sourced_quantized(&mut weights, &format!("{prefix}.q_proj"), 8, 1, 4);
     insert_bf16_sourced_quantized(&mut weights, &format!("{prefix}.k_proj"), 4, 2, 4);
-    insert_bf16_sourced_quantized(&mut weights, &format!("{prefix}.v_proj"), 4, 3, 4);
-    // An ordinary bf16 tensor untouched by densification (the MoonViT tower),
-    // so the test also proves the pass still does its normal job alongside
-    // the densified planes.
+    insert_bf16_sourced_quantized(&mut weights, &format!("{prefix}.v_proj"), 4, 3, 8);
+    // An ordinary bf16 tensor (the MoonViT tower), so the test also proves the
+    // pass still does its normal job alongside the packed planes.
     weights.insert(
         "vision_tower.blocks.0.mlp.fc0.weight".to_string(),
         bf16_dense_plane(4, 9),
     );
 
-    let densified = reconcile_mixed_precision_weights(&mut weights, MIXED_GROUP, 4, "affine", true)
-        .expect("reconcile");
-    assert_eq!(
-        densified, 1,
-        "exactly the mixed-precision layer needed densifying"
-    );
+    convert_plain_bf16_weights(&mut weights, true);
 
     for proj in ["q_proj", "k_proj", "v_proj"] {
         assert!(
-            !weights.contains_key(&format!("{prefix}.{proj}.scales")),
-            "{proj} must be dense after densification"
+            weights.contains_key(&format!("{prefix}.{proj}.scales")),
+            "{proj} must still look quantized: nothing densifies it any more"
+        );
+        assert_eq!(
+            mlxcel_core::array_dtype(weights.get(&format!("{prefix}.{proj}.scales")).unwrap()),
+            mlxcel_core::dtype::BFLOAT16,
+            "{proj}.scales describes a packed weight and is exempt from conversion"
         );
         let w = weights.get(&format!("{prefix}.{proj}.weight")).unwrap();
         assert_eq!(
             mlxcel_core::array_dtype(w),
-            mlxcel_core::dtype::FLOAT16,
-            "{proj}'s densified plane must be converted to f16, not left at the bf16 \
-             dtype `dequantize` gave it from the bf16 scales"
+            mlxcel_core::dtype::UINT32,
+            "{proj}'s packed plane must survive the pass untouched"
         );
     }
 
@@ -550,32 +550,23 @@ fn densified_mixed_precision_planes_are_still_converted_to_f16() {
     );
 }
 
-/// With the conversion flag off (the value the real call site passes on
-/// non-Apple hardware), densification still normalizes the mixed layer, but
-/// nothing is converted: the planes stay at whatever dtype `dequantize`
-/// produced. This is the control for the test above: it proves the f16
-/// dtype there comes from the conversion pass, not from densification
-/// itself.
+/// Control for the test above: with the conversion flag off (the value the real
+/// call site passes on non-Apple hardware) nothing is converted at all, which
+/// proves the f16 dtype there comes from the pass rather than from the fixture.
 #[test]
-fn densification_runs_even_when_bf16_conversion_is_skipped() {
-    let prefix = "language_model.model.layers.0.self_attn";
+fn plain_bf16_conversion_is_skipped_when_the_flag_is_off() {
     let mut weights = WeightMap::new();
-    insert_bf16_sourced_quantized(&mut weights, &format!("{prefix}.q_proj"), 8, 1, 8);
-    insert_bf16_sourced_quantized(&mut weights, &format!("{prefix}.k_proj"), 4, 2, 4);
-    insert_bf16_sourced_quantized(&mut weights, &format!("{prefix}.v_proj"), 4, 3, 4);
+    weights.insert(
+        "vision_tower.blocks.0.mlp.fc0.weight".to_string(),
+        bf16_dense_plane(4, 9),
+    );
 
-    let densified =
-        reconcile_mixed_precision_weights(&mut weights, MIXED_GROUP, 4, "affine", false)
-            .expect("reconcile");
-    assert_eq!(densified, 1);
+    convert_plain_bf16_weights(&mut weights, false);
 
-    for proj in ["q_proj", "k_proj", "v_proj"] {
-        assert!(!weights.contains_key(&format!("{prefix}.{proj}.scales")));
-        let w = weights.get(&format!("{prefix}.{proj}.weight")).unwrap();
-        assert_eq!(
-            mlxcel_core::array_dtype(w),
-            mlxcel_core::dtype::BFLOAT16,
-            "{proj} stays bf16 when the conversion pass is off"
-        );
-    }
+    let tower = weights.get("vision_tower.blocks.0.mlp.fc0.weight").unwrap();
+    assert_eq!(
+        mlxcel_core::array_dtype(tower),
+        mlxcel_core::dtype::BFLOAT16,
+        "the tower tensor stays bf16 when the conversion pass is off"
+    );
 }

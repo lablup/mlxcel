@@ -319,7 +319,7 @@ impl Attention {
             && !self.rope_traditional
             && std::env::var(FUSED_CAUSAL_PREFILL_ENV).is_ok()
             && let (Some(qkv_weight), Some(o_weight)) = (
-                self.qkv_proj.qkv_proj.as_quantized_weight(),
+                self.qkv_proj.fused_quantized_weight(),
                 self.o_proj.as_quantized_weight(),
             )
         {

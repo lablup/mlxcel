@@ -641,6 +641,43 @@ fn a_consistently_quantized_attention_block_is_accepted() {
 }
 
 #[test]
+fn a_mixed_bit_width_attention_block_is_accepted() {
+    // `mlx_lm`'s `mixed_4_8` predicate stores some layers' `v_proj` at 8 bits
+    // while `q_proj` / `k_proj` stay at 4. `FusedQKVLinear` loads that by
+    // keeping the three planes separate rather than concatenating them (issue
+    // #1090), so this validator must not reject it first. It used to: the
+    // second axis of a packed `.weight` is the packed width, which doubles from
+    // 4 to 8 bits, and an equality check across q/k/v therefore blocked exactly
+    // the layout the shared loader learned to handle.
+    //
+    // What still has to agree is the logical input width, which is invariant to
+    // the bit width: all three scales carry `hidden_size / group_size` groups,
+    // and the test below this one proves a violation of that is still caught.
+    let args = tiny_args();
+    let mut weights = tiny_weights(&args);
+    let cols = scale_cols(&args, args.hidden_size);
+    quantize_attention_block(&args, &mut weights, 0, cols);
+
+    // Real packed widths: `hidden * bits / 32` columns of uint32.
+    let hidden = args.hidden_size as i32;
+    let q_rows = (args.num_attention_heads * args.head_dim()) as i32;
+    let kv_rows = (args.num_kv_heads() * args.head_dim()) as i32;
+    for (name, rows, bits) in [
+        ("q_proj", q_rows, 4),
+        ("k_proj", kv_rows, 4),
+        ("v_proj", kv_rows, 8),
+        ("o_proj", hidden, 4),
+    ] {
+        weights.insert(
+            format!("model.layers.0.self_attn.{name}.weight"),
+            filled(&[rows, hidden * bits / 32]),
+        );
+    }
+
+    validate_weights(&weights, &args).expect("a mixed_4_8 attention block must load");
+}
+
+#[test]
 fn loading_rejects_a_quantized_projection_packed_for_a_different_input_width() {
     // Packing compresses the input axis only, so a projection built for a
     // different `hidden_size` still has exactly the right number of rows and

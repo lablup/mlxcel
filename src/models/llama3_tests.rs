@@ -424,11 +424,7 @@ fn a_traditional_rope_block_is_routed_around_the_fused_prefill_launcher() {
     // The gate is only reachable for quantized weights, so a float fixture
     // would make everything below pass for the wrong reason.
     assert!(
-        traditional
-            .qkv_proj
-            .qkv_proj
-            .as_quantized_weight()
-            .is_some()
+        traditional.qkv_proj.fused_quantized_weight().is_some()
             && traditional.o_proj.as_quantized_weight().is_some(),
         "the fixture must be quantized, or the fused branch is unreachable and this test is blind"
     );

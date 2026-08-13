@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Checkpoints that quantize `q_proj` / `k_proj` / `v_proj` at different bit widths now load on every family that shares the fused QKV projection** (#1090). `mlx_lm`'s `mixed_4_8` predicate raises selected tensors to 8 bits while the rest of a model stays at 4, and the loader concatenated the three packed planes along one axis and inferred a single width from `q_proj`, so such a layer died inside MLX's `concatenate` instead of loading. A layer whose planes cannot be concatenated now keeps them separate, each in exactly the layout the checkpoint stored it in: nothing is dequantized and nothing is requantized, so the values are the checkpoint's and the extra memory cost is zero. This reached all 16 families using this loader, including Llama, Mistral, Qwen2/3, Gemma v1 through v4, Cohere2, StarCoder2, InternLM3 and Jamba. Validated on a `mixed_4_8` Llama-3.2-1B checkpoint, which greedy-decodes byte-identically to the uniform 4-bit baseline. The decision is made on the packed shapes, which is what `concatenate` actually constrains, rather than on the reconciled bit width and group size, which can alias two different packings onto one pair.
+
+### Changed
+
+- **LocateAnything no longer dequantizes its mixed-precision attention layers at load** (#1090). The per-family workaround added in #1070 turned 18 of the released 3B checkpoint's 36 layers' q/k/v planes into dense bf16, about 190 MB, so the fused projection could concatenate them. Those planes now stay packed and the model loads through the shared path. Helium's pre-flight weight validator no longer rejects a `mixed_4_8` attention block either; it stopped comparing the packed width across q/k/v, which scales with the bit width, and still checks each plane's logical input width against `hidden_size`.
+
 ### Fixed
 
 - **Server token streams change at `temperature <= 0` when DRY is enabled with sequence breakers.** A per-request `dry_sequence_breakers` value was dropped by the greedy branch of `build_sampling_config` and replaced with an empty vector (#1102). DRY is not gated on temperature, and the breakers are the backward match's termination condition, so the match ran past the intended boundary and the penalty came out at or above what the request asked for. Output for those requests changes, toward the requested configuration. Requests that leave `dry_multiplier` at its `0.0` default, or that set no breakers, are byte-identical to before. The CLI is unaffected: it has no way to set breakers (#1108).
