@@ -761,10 +761,22 @@ fn resolve_worker_paged_block_budget(
             Some(n)
         }
         Some(_) => {
+            // #1091: for an explicit byte budget the usual cause is not model
+            // size but the paged decode v2 workspace reserve, which is charged
+            // to the budget before the remainder is divided into blocks (#899)
+            // and is 16.25 MiB for a typical geometry on every non-Metal host.
+            // Name the reserve so an operator whose `--kv-cache-budget 8MiB`
+            // silently did nothing can see what swallowed it.
+            let reserve = crate::memory_estimate::paged_v2_workspace_reserve_bytes(
+                model_path,
+                num_layers,
+                batch.max(1) as u64,
+            );
             tracing::warn!(
                 "--kv-cache-budget resolves to 0 KV blocks at this configuration \
-                 (model too large for a meaningful paged budget at this batch / \
-                 available memory); leaving the paged pool unbounded"
+                 (the budget does not cover the {reserve}-byte paged decode v2 \
+                 workspace reserve plus one {block_size}-token block on top of \
+                 it); leaving the paged pool unbounded"
             );
             None
         }

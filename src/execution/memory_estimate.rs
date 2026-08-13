@@ -872,6 +872,17 @@ pub fn resolve_paged_block_budget(
     // inside the same memory, so charge it to the KV budget before converting
     // the remainder into blocks. Admission then reserves blocks it can actually
     // back with memory.
+    //
+    // The subtraction has to saturate (#1091). The reserve is device-derived, so
+    // it is not bounded by anything the caller asked for: it scales with
+    // [`mlxcel_core::paged_v2::device_target_ctas`], which is 512 on every
+    // non-Metal host, putting it at 16.25 MiB for the common 8-kv-head /
+    // 128-head-dim geometry. A `--kv-cache-budget` in the low megabytes is
+    // therefore smaller than the reserve on any Linux or CUDA box, and a
+    // wrapping `-` would turn that shortfall into a ~2^64 budget and hand the
+    // pool `usize::MAX` blocks, the exact opposite of the requested cap.
+    // Saturating yields `Some(0)`, which `resolve_worker_paged_block_budget`
+    // maps to "leave the pool unbounded" with a warning.
     let workspace = paged_v2_workspace_reserve_bytes(model_dir, num_layers, batch);
     let budget_bytes = budget_bytes.saturating_sub(workspace);
     Some(usize::try_from(budget_bytes / per_block).unwrap_or(usize::MAX))
@@ -1737,8 +1748,17 @@ mod tests {
         // A budget that did not account for the workspace comes back short by
         // exactly the reserve, which is the point: the blocks it hands out are
         // blocks it can actually back.
-        let shortfall = usize::try_from((per_block * 100 - workspace) / per_block).unwrap();
-        assert!(shortfall < 100);
+        //
+        // The reserve is device-derived, so neither the request nor the
+        // expectation may assume it is small (#1091). `device_target_ctas()` is
+        // 512 on every non-Metal host and `gpu_core_count * 8` on Apple ones,
+        // which puts the reserve at 16.25 MiB for this geometry on a CUDA box
+        // against a 12.5 MiB 100-block budget. The expectation therefore mirrors
+        // the implementation's `saturating_sub` instead of re-deriving it with a
+        // `-` that wraps once the reserve exceeds the whole budget.
+        let reserve_blocks = workspace.div_ceil(per_block);
+        let shortfall =
+            usize::try_from((per_block * 100).saturating_sub(workspace) / per_block).unwrap();
         assert_eq!(
             resolve_paged_block_budget(
                 tmp.path(),
@@ -1749,6 +1769,86 @@ mod tests {
                 PagedBudgetDirective::Bytes(per_block * 100),
             ),
             Some(shortfall),
+        );
+        // The reserve costs exactly `ceil(workspace / per_block)` blocks, capped
+        // at the 100 on offer when it swallows the budget outright.
+        assert_eq!(
+            100 - shortfall,
+            usize::try_from(reserve_blocks.min(100)).unwrap(),
+            "a {workspace}-byte reserve should cost {reserve_blocks} of the 100 blocks requested",
+        );
+        // The same contract without the cap, so the exact-reserve case is
+        // exercised on large-CTA devices too: paying for the reserve in whole
+        // blocks on top of the 100 hands back exactly the 100 blocks asked for.
+        assert_eq!(
+            resolve_paged_block_budget(
+                tmp.path(),
+                32,
+                32,
+                1,
+                false,
+                PagedBudgetDirective::Bytes(per_block * (100 + reserve_blocks)),
+            ),
+            Some(100),
+        );
+    }
+
+    /// Regression for #1091: a byte budget smaller than the device-derived
+    /// paged decode v2 workspace reserve resolves to zero blocks, never to a
+    /// wrapped block count.
+    ///
+    /// This pins the `saturating_sub` in `resolve_paged_block_budget` directly.
+    /// The reserve is 16.25 MiB for this geometry on any non-Metal host
+    /// (`device_target_ctas() == 512`), so an explicit `--kv-cache-budget` in
+    /// the low megabytes reaches this path on any Linux or CUDA box. A wrapping
+    /// `-` would turn a one-byte shortfall into a ~2^64 budget and mint
+    /// `usize::MAX` blocks instead of capping the pool.
+    #[test]
+    fn resolve_block_budget_below_the_workspace_reserve_is_zero_blocks() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimal_config(tmp.path());
+        let per_block = paged_block_bytes(tmp.path(), 32, 32, false).unwrap();
+        let workspace = paged_v2_workspace_reserve_bytes(tmp.path(), 32, 1);
+        assert!(workspace > 0, "the minimal config has a derivable geometry");
+
+        for budget in [0, 1, workspace / 2, workspace - 1, workspace] {
+            assert_eq!(
+                resolve_paged_block_budget(
+                    tmp.path(),
+                    32,
+                    32,
+                    1,
+                    false,
+                    PagedBudgetDirective::Bytes(budget),
+                ),
+                Some(0),
+                "a {budget}-byte budget under a {workspace}-byte reserve must \
+                 resolve to 0 blocks, not a wrapped count",
+            );
+        }
+        // One whole block past the reserve is the first budget that mints
+        // anything, so the boundary is pinned from both sides.
+        assert_eq!(
+            resolve_paged_block_budget(
+                tmp.path(),
+                32,
+                32,
+                1,
+                false,
+                PagedBudgetDirective::Bytes(workspace + per_block - 1),
+            ),
+            Some(0),
+        );
+        assert_eq!(
+            resolve_paged_block_budget(
+                tmp.path(),
+                32,
+                32,
+                1,
+                false,
+                PagedBudgetDirective::Bytes(workspace + per_block),
+            ),
+            Some(1),
         );
     }
 
