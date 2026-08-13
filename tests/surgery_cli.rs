@@ -38,8 +38,8 @@ use std::process::Command;
 
 /// Reference model directory used for the bit-exactness check. Chosen
 /// because it is small (~0.5 B parameters), quantized (no bf16
-/// conversion to worry about), and is one of the recommended test
-/// models in `AGENTS.md`.
+/// conversion to worry about), and is one of the standard local
+/// smoke-test checkpoints.
 const REFERENCE_MODEL: &str = "models/qwen2.5-0.5b-4bit";
 
 /// Locate the freshly built `mlxcel` binary under `target/`.

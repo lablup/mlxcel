@@ -163,8 +163,9 @@ the runtime. The flag is inert for `fp16` and `int8` cache modes.
 ## Symmetric Turbo4 allowlist
 
 K-side quantization can strongly affect softmax quality. The code therefore has
-an allowlist helper in `src/lib/mlxcel-core/src/cache/turbo/allowlist.rs`.
-As of v0.0.27, the hard-coded allowlisted model-type prefixes are:
+an allowlist helper in `src/lib/mlxcel-core/src/cache/turbo/allowlist.rs`, which
+is the source of truth for this list. The hard-coded allowlisted model-type
+prefixes are:
 
 - `qwen3_5`
 - `qwen3_5_moe`

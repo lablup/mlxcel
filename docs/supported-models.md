@@ -1,7 +1,7 @@
 # Supported models
 
-This page summarizes model-family support in the v0.0.27 source tree. The
-runtime source of truth is the code, not this prose page:
+This page summarizes model-family support in the source tree. The runtime
+source of truth is the code, not this prose page:
 
 - detection: `src/models/detection.rs`
 - `ModelType` enum and module exports: `src/models/mod.rs`
