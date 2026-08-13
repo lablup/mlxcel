@@ -359,12 +359,12 @@ fn validate_pipeline_parallel_args(args: &GenerateArgs) -> Result<()> {
         return Ok(());
     }
 
-    // 2D (PP x TP) composition is now supported. The operator manual pages are
-    // `distributed/tensor-parallelism.md` and
+    // 2D (PP x TP) composition is now supported. The per-axis operator manual
+    // pages are `distributed/tensor-parallelism.md` and
     // `distributed/pipeline-parallelism.md` under the `docs/en` tree that
     // `mkdocs.yml` builds from. Those sources live in the separate
-    // documentation repository rather than here, which is deliberate and not
-    // drift (see `docs/README.md`). The in-checkout summary is
+    // documentation tree rather than here, which is deliberate and not drift
+    // (see `docs/README.md`). The in-checkout summary is
     // `docs/distributed.md`; it covers the PP and TP knobs in separate sections
     // and does not write up the 2D composition yet.
     let tp_size = args.tensor_parallel.tp_size;
