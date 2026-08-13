@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Server token streams change at `temperature <= 0` when DRY is enabled with sequence breakers.** A per-request `dry_sequence_breakers` value was dropped by the greedy branch of `build_sampling_config` and replaced with an empty vector (#1102). DRY is not gated on temperature, and the breakers are the backward match's termination condition, so the match ran past the intended boundary and the penalty came out at or above what the request asked for. Output for those requests changes, toward the requested configuration. Requests that leave `dry_multiplier` at its `0.0` default, or that set no breakers, are byte-identical to before. The CLI is unaffected: it has no way to set breakers (#1108).
+
 ## [v0.5.0] - 2026-08-12
 
 ### Added
