@@ -61,6 +61,13 @@ pub fn build_sampling_config(params: ResolvedSamplingParams) -> SamplingConfig {
             dry_base: params.dry_base,
             dry_allowed_length: params.dry_allowed_length,
             dry_penalty_last_n: params.dry_penalty_last_n,
+            // The breakers are the DRY backward-match termination condition
+            // (`mlxcel_core::sampling::apply_dry_penalty`), not a sampling knob.
+            // Leaving them to `SamplingConfig::greedy()`'s empty vector would let
+            // the match run past the intended boundary and inflate the penalty,
+            // so the greedy branch threads them through with the other four DRY
+            // fields above.
+            dry_sequence_breakers: params.dry_sequence_breakers,
             // XTC is a logits pre-processing step applied regardless of
             // temperature (like the repetition/DRY/frequency/presence
             // penalties above), so the greedy branch threads it through too.
