@@ -56,17 +56,18 @@ pub(crate) fn resolve_dry_sequence_breakers(
         }
 
         let text = unescape_breaker(entry);
-        let encoded = tokenizer.encode(&text, false).with_context(|| {
+        let encoded = encode_breaker(tokenizer, &text).with_context(|| {
             format!("failed to tokenize --dry-sequence-breaker value {entry:?}")
         })?;
 
         if encoded.len() != 1 {
             bail!(
-                "invalid --dry-sequence-breaker value {entry:?}: it encodes to {} tokens \
-                 ({encoded:?}) for this model, but a DRY sequence breaker must be exactly one \
-                 token because the sampler matches breakers by token id. Pass a single-token \
-                 string (\"\\n\" and \"\\t\" are the usual ones) or drop this entry.",
-                encoded.len()
+                "invalid --dry-sequence-breaker value {entry:?}: this model encodes it as {} \
+                 tokens ({}), but a DRY sequence breaker must be exactly one token because the \
+                 sampler matches breakers by token id. Pick a value this model represents as a \
+                 single token, or drop this entry.",
+                encoded.len(),
+                describe_tokens(tokenizer, &encoded)
             );
         }
 
@@ -82,12 +83,82 @@ pub(crate) fn resolve_dry_sequence_breakers(
     if !raw.is_empty() && ids.is_empty() {
         bail!(
             "--dry-sequence-breaker was set but contained no usable breaker (every entry was \
-             empty); remove the flag to run DRY without breakers, or pass at least one \
-             single-token string such as \"\\n\""
+             empty). Note that the flag splits its value on commas, so a bare \",\" produces \
+             two empty entries and a comma cannot itself be a breaker. Remove the flag to run \
+             DRY without breakers, or pass at least one single-token string."
         );
     }
 
     Ok(ids)
+}
+
+/// Anchor prepended to a breaker before tokenizing, so that what is measured is
+/// the breaker's own token contribution.
+///
+/// A single ASCII letter is used because it is present in every vocabulary this
+/// server can load, and because it is the least likely character to merge with
+/// an arbitrary breaker.
+const BREAKER_ANCHOR: &str = "a";
+
+/// Tokenize one breaker, discounting any fixed prefix the tokenizer's
+/// normalizer adds.
+///
+/// Encoding the breaker on its own is the obvious implementation and is wrong
+/// for a whole family of checkpoints. A SentencePiece-derived `tokenizer.json`
+/// carries a `Prepend "▁"` normalizer, usually alongside `Replace " " -> "▁"`,
+/// so the text handed to the model is not the text that was passed in:
+///
+/// - On Mixtral, `encode("\n")` yields `["▁", "<0x0A>"]`, two tokens, even
+///   though the newline is a single vocabulary entry (id 13). The breaker is
+///   perfectly representable; the bare encoding just asks the wrong question,
+///   and startup would fail on the example in this flag's own help text.
+/// - Worse, `encode(" ")` normalizes to `"▁▁"` and yields ONE token, the
+///   double-space entry (id 259). That passes a length check and installs a
+///   breaker the operator did not ask for, silently. It is the same class of
+///   failure this whole flag was inert for.
+///
+/// Encoding `anchor + breaker` and subtracting the anchor's own encoding
+/// measures the breaker's contribution instead, so a fixed prefix cannot
+/// inflate the count or shift the id. When the anchor does not survive as a
+/// prefix (it merged with the breaker) or encodes to nothing, there is nothing
+/// to subtract and the bare encoding is used, which is the previous behavior.
+fn encode_breaker(tokenizer: &MlxcelTokenizer, text: &str) -> Result<Vec<u32>> {
+    let bare = tokenizer.encode(text, false)?;
+
+    let anchor = tokenizer.encode(BREAKER_ANCHOR, false)?;
+    if anchor.is_empty() {
+        return Ok(bare);
+    }
+
+    let anchored = tokenizer.encode(&format!("{BREAKER_ANCHOR}{text}"), false)?;
+    Ok(anchored
+        .strip_prefix(anchor.as_slice())
+        .map_or(bare, <[u32]>::to_vec))
+}
+
+/// Render token ids with the pieces they decode to, for an error message.
+///
+/// The pieces are what make a normalizer artifact visible: `"▁"=28705,
+/// "<0x0A>"=13` tells an operator that their tokenizer prepended a word
+/// boundary marker, where a bare `[28705, 13]` does not.
+fn describe_tokens(tokenizer: &MlxcelTokenizer, ids: &[u32]) -> String {
+    ids.iter()
+        .map(|id| match tokenizer.token_piece(*id) {
+            Some(piece) => format!("{piece:?}={id}"),
+            None => format!("<unknown>={id}"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Public wrapper over [`describe_tokens`] for startup logging, so a resolved
+/// breaker can be read back as pieces rather than as bare ids.
+pub(crate) fn describe_resolved_breakers(tokenizer: &MlxcelTokenizer, ids: &[i32]) -> String {
+    let unsigned: Vec<u32> = ids
+        .iter()
+        .filter_map(|id| u32::try_from(*id).ok())
+        .collect();
+    describe_tokens(tokenizer, &unsigned)
 }
 
 /// Interpret the four C-style escapes an operator can realistically type at a

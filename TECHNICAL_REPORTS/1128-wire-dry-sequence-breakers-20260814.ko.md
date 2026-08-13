@@ -46,18 +46,31 @@ PR #1128은 이슈 #1103을 닫는다. #1102 / #1109 / #1103 체인의 세 번�
 `ServerConfig`는 `build_server_config`가 만들고, 그 함수는 모델 tokenizer가 로드되기 전에 돈다. 토큰 문자열에서 토큰 ID로의 변환에는 그 tokenizer가 필요하다. 배치 가능한 위치는 셋이었다.
 
 1. `build_server_config`에서 토큰화한다. 기각. 자체 tokenizer를 로드해야 하므로 작업이 중복되고, 지금은 없는 파일시스템 의존성이 함수에 생긴다.
-2. tokenizer 로드를 앞으로 옮긴다. 기각. `run_server`에는 현재 로드 지점보다 앞에 `serve_remote_pipeline_stage` 조기 반환이 있어서, 옮기면 원격 파이프라인 스테이지가 쓰지도 않을 tokenizer를 로드하게 된다.
-3. `build_server_config`에서는 비워 두고, `run_server`가 `load_tokenizer` 직후에 채운다. 선택.
+2. tokenizer 로드를 앞으로 옮긴다. 기각. `start_server`에는 현재 로드 지점보다 앞에 `serve_remote_pipeline_stage` 조기 반환이 있어서, 옮기면 원격 파이프라인 스테이지가 쓰지도 않을 tokenizer를 로드하게 된다.
+3. `build_server_config`에서는 비워 두고, `start_server`가 `load_tokenizer` 직후에 채운다. 선택.
 
 세 번째에는 실제 위험이 있다. 생성 시점과 이후 대입 사이에 필드가 유효하지 않다. 타입이 아니라 선례와 문서로 완화한다. 같은 모양이 이 함수 안 `config.pipeline_parallel_runtime`에 이미 있고, `request_options`의 `sampling.loop_detection`과 `sampling.xtc_special_token_ids`에도 있다. 셋 다 값을 결정하는 정보가 보이게 된 뒤에 해결된다. `ServerConfig`의 필드 문서 주석이 어디서 채워지는지 적고, `build_server_config` 쪽에는 왜 비어 있는지를 적은 주석이 붙는다.
 
-### 2.2 단일 토큰 요구는 정책 선택이 아니다
+### 2.2 resolver는 tokenizer의 normalizer를 상쇄해야 한다
+
+breaker를 단독으로 인코딩하고 토큰 하나를 요구하는 당연한 구현은 상당수 체크포인트에서 틀리고, 머지 전 리뷰가 그것을 잡았다. SentencePiece 계열 `tokenizer.json`은 `Prepend "▁"` normalizer를 갖고, 대개 `Replace " " -> "▁"`와 `Sequence`로 묶여 있다. 로컬 모델 스토어의 체크포인트 162개 중 11개가 그렇다. Mixtral, Phi-3 계열 셋, MiniCPM 둘, LLaVA 둘, Idefics2, InternLM3, ERNIE 4.5.
+
+그런 경우 모델에 전달되는 텍스트는 넘긴 텍스트가 아니고, 실패는 두 모양으로 나타난다.
+
+- **표현 가능한 값에서 실패한다.** Mixtral에서 `encode("\n")`은 `["▁", "<0x0A>"]` 두 토큰을 돌려준다. 개행은 id 13의 단일 어휘 항목인데도 그렇다. 단독 인코딩이 질문을 잘못 던진 것이다. 이 플래그 자신의 헬프 텍스트에 있는 예시에 대해 체크포인트 11개에서 부팅을 거부하게 되는데, 이는 고치려던 무력한 플래그보다 명백히 나쁜 결과다.
+- **잘못된 토큰으로 성공한다.** `encode(" ")`는 `"▁▁"`로 정규화돼 토큰 하나, id 259, 이중 공백 항목을 돌려준다. 길이 검사를 통과하고, startup이 성공하고, `/props`는 그럴듯한 id를 보고한다. `decode([259])`조차 공백 비슷한 것으로 되돌아온다. 운영자는 요청하지 않은 breaker를 얻고, 감지할 방법이 없다. 이 PR이 없애려던 바로 그 실패 부류가 수정 안에서 재현된 셈이다.
+
+그래서 `encode_breaker`는 `anchor + breaker`를 인코딩하고 anchor 자신의 인코딩을 빼서, normalizer의 고정 접두사가 아니라 breaker의 기여분을 잰다. anchor가 접두사로 살아남지 못하거나(breaker와 병합) 아무것도 인코딩하지 않으면 뺄 것이 없으므로 단독 인코딩을 쓴다.
+
+테스트 스위트에 대한 교훈은 2.6에 있다. 원래 픽스처는 이 버그가 나타날 수 없는 유일한 tokenizer 모양이었다.
+
+### 2.3 단일 토큰 요구는 정책 선택이 아니다
 
 샘플러의 breaker 검사는 `Vec<i32>`에 대한 `config.dry_sequence_breakers.contains(&window[p1])`이다. 다중 토큰 breaker는 그 타입에 표현 자체가 없다. llama.cpp는 토큰에서 후보 꼬리로 가는 맵을 만들어 다중 토큰을 지원하는데, 그것을 맞추는 일은 배선 변경이 아니라 샘플러 변경이고, 읽히지도 않는 플래그에 관한 이슈의 범위 밖이다. 이 데이터 모델에서 선택지는 거부하기, 조용히 버리기, 운영자가 요청하지 않은 여러 breaker로 확장하기뿐이었다. 오해를 낳지 않는 것은 거부뿐이다.
 
 토큰 0개로 인코딩되는 문자열도 같은 부류이며 동일하게 처리된다. 에러는 문제의 문자열을 지목하고, 실제로 나온 개수를 보고하고, 플래그 이름을 적는다.
 
-### 2.3 escape 처리는 편의가 아니라 필수다
+### 2.4 escape 처리는 편의가 아니라 필수다
 
 이슈가 요구하지 않았지만 구현이 뺄 수 없었던 부분이다. `--dry-sequence-breaker '\n'`은 `\`와 `n` 두 문자로 프로세스에 도착한다. 흔한 셸 중 작은따옴표 안에서 escape를 확장하는 것은 없고, POSIX 셸에서 `"\n"`도 같은 두 문자다. 그리고 이 플래그의 헬프 텍스트는 추가된 이래 `"\n"`과 `"\t"`를 예시로 광고해 왔다.
 
@@ -65,13 +78,17 @@ PR #1128은 이슈 #1103을 닫는다. #1102 / #1109 / #1103 체인의 세 번�
 
 규칙은 `\n`, `\t`, `\r`, `\\`을 해석하고 그 밖의 모든 백슬래시 시퀀스를 타이핑한 그대로 보존한다. 알 수 없는 시퀀스를 거부하지 않고 보존하면 실제로 백슬래시를 포함하는 breaker를 표현할 수 있고, `\\`은 그 넷 중 하나 앞에 오는 리터럴 백슬래시를 위한 탈출구다.
 
-### 2.4 `Some(vec![])`과 `None`은 뭉개지면 안 된다
+### 2.5 `Some(vec![])`과 `None`은 뭉개지면 안 된다
 
 폴백은 `unwrap_or_else(|| config.default_dry_sequence_breakers.clone())`이다. 부재한 요청 필드는 서버 기본값을 물려받고, 명시적으로 빈 요청 목록은 그 요청에 한해 기본값을 끈다. 비어 있는지 검사하는 대신 `unwrap_or_else`를 쓴 이유가 이것이고, `an_explicitly_empty_request_breaker_list_disables_the_server_default`가 그것을 고정한다. 둘을 뭉개면 요청 단위로 서버 기본값을 해제할 방법이 사라진다.
 
-### 2.5 테스트 픽스처는 빌려 오지 않고 만들어야 했다
+### 2.6 테스트 픽스처는 빌려 오지 않고 만들어야 했다
 
 `MlxcelTokenizer::stub_with_byte_fallback()`이 당연한 후보였고 여기서는 쓸 수 없다. BPE 모델에 merge가 없어서 `Hello`가 어휘 항목이 아니라 아무것도 아닌 것으로 토큰화되고, byte-fallback 문자 말고는 "정확히 한 토큰"을 표현하지 못한다. 테스트는 단일 문자(`a`, `b`, 개행, 탭, 공백) 어휘에 merge도 byte fallback도 없는 tokenizer를 만든다. 그러면 resolver가 구분해야 하는 세 결과가 체크포인트 없이 모두 도달 가능하다. 한 토큰, 여러 토큰, 없음. `fixture_tokenizer_behaves_as_the_tests_assume`가 그 인코딩들을 고정하므로, 픽스처가 바뀌면 실제 단언이 이상해 보이는 대신 거기서 그렇게 말하며 실패한다.
+
+그 픽스처는 필요했지만 충분하지 않았고, 부족했던 방식이 더 쓸모 있는 교훈이다. 그 `encode`는 문자별 어휘 조회에 불과한데, 그것이 바로 2.2의 결함이 발생할 수 없는 tokenizer 모양이다. 모든 테스트가 통과했고 그중 공허한 것은 없었는데도 resolver는 로컬 체크포인트 11개에서 여전히 틀렸다. 추론하기 쉽다는 이유로 고른 픽스처가 실은 실패할 수 없는 경우로 고른 픽스처였다.
+
+이제 두 번째 픽스처가 `Prepend "▁"`와 `Replace " " -> "▁"` 쌍을, `▁a`와 `▁▁`를 실제 항목으로 만드는 merge와 함께 갖는다. `prepend_normalizer_fixture_reproduces_both_bare_encoding_defects`가 단독 인코딩이 여전히 두 결함을 보인다는 것(`"\n"`은 두 토큰으로, `" "`는 이중 공백 토큰 하나로)을 단언하므로, 뒤따르는 두 테스트가 항진명제가 아니라 실제로 무언가를 지키고 있음이 드러난다.
 
 ---
 
@@ -105,15 +122,15 @@ PR #1128은 이슈 #1103을 닫는다. #1102 / #1109 / #1103 체인의 세 번�
 |---|---|
 | 변경된 파일 수 | 12 (신규 3) |
 | 신규 모듈 | `src/server/dry_breakers.rs` (136줄) |
-| 테스트 추가 | 17 |
+| 테스트 추가 | 22 |
 
 ### 영역별 변경
 
 | 영역 | 파일 | 내용 |
 |---|---|---|
-| Resolver | `src/server/dry_breakers.rs` (신규) | `resolve_dry_sequence_breakers`와 `unescape_breaker`. 정확히 한 토큰이 아닌 breaker, 쓸 만한 것을 하나도 만들지 못한 플래그, `i32`에 들어가지 않는 토큰 id에 대해 fail-closed |
-| Config | `src/server/config.rs` | `default_dry_sequence_breakers: Vec<i32>`. `build_server_config`가 아니라 `run_server`가 채운다는 문서 주석과 `Default` |
-| Startup | `src/server/startup.rs` | `build_server_config`는 이유를 적고 비워 둔다. `run_server`가 `load_tokenizer` 뒤에 해결하고 해석된 ID를 로그로 남긴다 |
+| Resolver | `src/server/dry_breakers.rs` (신규) | `resolve_dry_sequence_breakers`, `encode_breaker`(anchor-and-subtract로 normalizer의 고정 접두사가 토큰 수를 부풀리거나 id를 밀어내지 못하게 한다), `unescape_breaker`, 운영자용 진단을 위한 `describe_tokens`. 정확히 한 토큰이 아닌 breaker, 쓸 만한 것을 하나도 만들지 못한 플래그, `i32`에 들어가지 않는 토큰 id에 대해 fail-closed |
+| Config | `src/server/config.rs` | `default_dry_sequence_breakers: Vec<i32>`. `build_server_config`가 아니라 `start_server`가 채운다는 문서 주석과 `Default` |
+| Startup | `src/server/startup.rs` | `build_server_config`는 이유를 적고 비워 둔다. `start_server`가 `load_tokenizer` 뒤에 해결하고, id만으로는 검증할 수 없으므로 해석된 id와 디코드된 piece를 함께 로그로 남긴다 |
 | 요청 경로 | `src/server/request_options.rs` | `unwrap_or_default()`가 `unwrap_or_else(|| config.default_dry_sequence_breakers.clone())`로 |
 | 엔드포인트 | `src/server/routes/props.rs` | `dry_sequence_breakers` 추가. 페이로드 구성을 `default_generation_settings`로 분리 |
 | 헬프 텍스트 | `src/main.rs`, `src/bin/mlx_server.rs` | 두 바이너리에서 바이트 동일(#1109 parity 단언이 요구). 서버 전역 기본값, 요청 단위 override, 단일 토큰 요구, 해석되는 escape |
@@ -132,9 +149,10 @@ PR #1128은 이슈 #1103을 닫는다. #1102 / #1109 / #1103 체인의 세 번�
 
 ### 통과
 
-- `cargo test --profile test-fast --features cuda --lib server::dry_breakers`: 11 passed.
-- `--lib server::routes::props`: 3 passed.
-- `--lib server::request_options`: 38 passed (35에서 증가).
+- `cargo test --profile test-fast --features cuda --lib server::dry_breakers`: 15 passed.
+- `--lib server::routes::props`: 4 passed.
+- `--lib server::request_options`: 39 passed (35에서 증가).
+- `--test cli_help_consistency`: 25 passed. 헬프 텍스트 수정 후에도 두 바이너리의 `--dry-sequence-breaker` 산문이 바이트 동일함을 확인.
 - `--lib server::cli_input`: 93 passed.
 - `--lib execution::sampling`: 3 passed.
 - `cargo clippy --profile test-fast --features cuda --lib --bins --tests -- -D warnings`: clean.
@@ -146,7 +164,9 @@ PR #1128은 이슈 #1103을 닫는다. #1102 / #1109 / #1103 체인의 세 번�
 
 ### 다루지 않은 것
 
-실제 체크포인트 검증은 없다. 주어진 breaker 문자열이 한 토큰인지는 로드된 어휘의 성질이므로, 체크포인트 테스트는 resolver가 아니라 그 체크포인트에 관한 사실을 단언하게 된다. 인수 조건은 전부 설정 경계에 있고 테스트도 거기에 있다.
+테스트 스위트에 실제 체크포인트 검증은 없다. 주어진 breaker 문자열이 한 토큰인지는 부분적으로 로드된 어휘의 성질이므로, 체크포인트 테스트는 resolver만큼이나 그 체크포인트에 관한 사실을 단언하게 된다. 2.2의 normalizer 아티팩트는 체크포인트에 국한되지 않는 부분이고, 그것을 정확히 재현하는 픽스처가 덮는다.
+
+리뷰 중 로컬 체크포인트 162개를 훑어 `Prepend` normalizer를 가진 수(11개)를 확인했지만, 그 스캔은 커밋된 테스트가 아니며 CI에서 돌지 않는다.
 
 페널티 값이 달라지는지 확인하는 종단 단언도 없다. 모델과 토큰 히스토리가 필요하고 시드에 의존한다. #1102가 같은 이유로 같은 판단을 기록했다.
 

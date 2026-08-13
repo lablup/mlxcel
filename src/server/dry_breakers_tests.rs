@@ -51,6 +51,53 @@ fn fixture_tokenizer() -> MlxcelTokenizer {
     )
 }
 
+/// A tokenizer shaped like the SentencePiece-derived checkpoints in the model
+/// zoo: a `Prepend "▁"` normalizer followed by `Replace " " -> "▁"`, which is
+/// what Mixtral, Phi-3, MiniCPM, LLaVA and eight other local checkpoints carry.
+///
+/// This fixture exists because the obvious implementation (encode the breaker
+/// on its own) is wrong for exactly this shape, in two different ways, and the
+/// plain fixture above cannot express either. With the vocabulary and merges
+/// below:
+///
+/// - `encode("\n")` normalizes to `"▁\n"` and yields TWO tokens, so a newline
+///   would have failed startup even though it is a single vocabulary entry.
+/// - `encode(" ")` normalizes to `"▁▁"` and yields ONE token, the DOUBLE-space
+///   entry, so a space would have silently resolved to the wrong breaker.
+fn prepend_normalizer_tokenizer() -> MlxcelTokenizer {
+    let json = r#"{
+        "version": "1.0",
+        "truncation": null,
+        "padding": null,
+        "added_tokens": [],
+        "normalizer": {
+            "type": "Sequence",
+            "normalizers": [
+                {"type": "Prepend", "prepend": "▁"},
+                {"type": "Replace", "pattern": {"String": " "}, "content": "▁"}
+            ]
+        },
+        "pre_tokenizer": null,
+        "post_processor": null,
+        "decoder": null,
+        "model": {
+            "type": "BPE",
+            "dropout": null,
+            "unk_token": null,
+            "continuing_subword_prefix": null,
+            "end_of_word_suffix": null,
+            "fuse_unk": false,
+            "byte_fallback": false,
+            "vocab": {"▁": 0, "a": 1, "\n": 2, "▁a": 3, "▁▁": 4},
+            "merges": ["▁ a", "▁ ▁"]
+        }
+    }"#;
+    MlxcelTokenizer::HuggingFace(
+        tokenizers::Tokenizer::from_bytes(json.as_bytes())
+            .expect("prepend-normalizer fixture builds"),
+    )
+}
+
 fn breakers(entries: &[&str]) -> Vec<String> {
     entries.iter().map(|s| (*s).to_string()).collect()
 }
@@ -63,6 +110,87 @@ fn fixture_tokenizer_behaves_as_the_tests_assume() {
     assert_eq!(tokenizer.encode("\n", false).unwrap(), vec![2]);
     assert_eq!(tokenizer.encode("ab", false).unwrap(), vec![0, 1]);
     assert_eq!(tokenizer.encode("z", false).unwrap(), Vec::<u32>::new());
+}
+
+/// The two defects the prepend fixture exists to pin, asserted against the
+/// bare encoding so the fixture is shown to actually reproduce them. If either
+/// of these stops holding, the tests below are no longer proving anything.
+#[test]
+fn prepend_normalizer_fixture_reproduces_both_bare_encoding_defects() {
+    let tokenizer = prepend_normalizer_tokenizer();
+
+    // Defect 1: a newline is one vocabulary entry (id 2) but the bare encoding
+    // reports two tokens, because the normalizer prepended a word boundary.
+    assert_eq!(tokenizer.encode("\n", false).unwrap(), vec![0, 2]);
+
+    // Defect 2: a space encodes to ONE token, so a length check passes, but it
+    // is id 4, the double-space entry, not the single-space id 0.
+    assert_eq!(tokenizer.encode(" ", false).unwrap(), vec![4]);
+
+    // The anchor itself is a single token, which is what makes subtracting it
+    // well defined.
+    assert_eq!(tokenizer.encode("a", false).unwrap(), vec![3]);
+}
+
+/// A breaker that the model represents as one token must resolve to that token,
+/// even when the tokenizer prepends a word-boundary marker to everything it is
+/// handed. Before the anchor-and-subtract fix, this newline failed startup on
+/// eleven of the local checkpoints, which is the example in the flag's own help
+/// text.
+#[test]
+fn resolve_dry_sequence_breakers_discounts_a_prepended_word_boundary() {
+    let tokenizer = prepend_normalizer_tokenizer();
+
+    let resolved = resolve_dry_sequence_breakers(&tokenizer, &breakers(&["\\n"]))
+        .expect("a newline is a single token in this vocabulary and must resolve");
+
+    assert_eq!(
+        resolved,
+        vec![2],
+        "must resolve to the newline entry, not fail on the prepended marker"
+    );
+}
+
+/// The silent half, and the more dangerous one: a space passes a bare length
+/// check while resolving to the double-space token. Getting one token back is
+/// not evidence that it is the right token.
+#[test]
+fn resolve_dry_sequence_breakers_does_not_resolve_a_space_to_the_double_space_token() {
+    let tokenizer = prepend_normalizer_tokenizer();
+
+    let resolved = resolve_dry_sequence_breakers(&tokenizer, &breakers(&[" "]))
+        .expect("a space is a single token in this vocabulary");
+
+    assert_eq!(
+        resolved,
+        vec![0],
+        "must resolve to the single-space marker (id 0), not the double-space entry (id 4)"
+    );
+}
+
+/// The rejection message must show the decoded pieces, because that is what
+/// makes a normalizer artifact visible; bare ids do not.
+#[test]
+fn resolve_dry_sequence_breakers_names_the_decoded_pieces_when_it_rejects() {
+    let tokenizer = prepend_normalizer_tokenizer();
+
+    // `aa` is genuinely two tokens under this vocabulary even after the anchor
+    // is discounted, so this is a real rejection rather than a prefix artifact.
+    // (`ab` would not do: `b` is absent from the vocabulary and is dropped, so
+    // it would resolve to one token and pass.)
+    let error = resolve_dry_sequence_breakers(&tokenizer, &breakers(&["aa"]))
+        .expect_err("a genuinely multi-token breaker must still fail");
+    let message = error.to_string();
+
+    assert!(
+        message.contains('='),
+        "the error must render pieces as \"piece\"=id: {message}"
+    );
+    assert!(
+        !message.contains("are the usual ones"),
+        "the error must not recommend a value as a remedy, since the failing input may be \
+         exactly that value: {message}"
+    );
 }
 
 #[test]
@@ -83,8 +211,11 @@ fn unescape_breaker_leaves_everything_else_exactly_as_typed() {
     // which is a legitimate breaker in most vocabularies.
     assert_eq!(unescape_breaker(" "), " ");
     assert_eq!(unescape_breaker("Hello"), "Hello");
-    // An unrecognised escape is preserved rather than guessed at, so a
-    // Windows-style path fragment is never silently rewritten.
+    // An unrecognised escape is preserved rather than guessed at. This is not
+    // a claim that any backslash-bearing string survives: `C:\temp` still
+    // becomes `C:` + TAB + `emp`, as it would under any escape scheme. It is
+    // the narrower guarantee that a sequence the rule does not know is left
+    // alone instead of being rewritten into something else.
     assert_eq!(unescape_breaker("\\d"), "\\d");
     assert_eq!(unescape_breaker("a\\qb"), "a\\qb");
     // A trailing lone backslash keeps itself instead of being dropped.

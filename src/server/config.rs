@@ -287,12 +287,14 @@ pub struct ServerConfig {
     /// Server-wide DRY sequence breakers, as sampler token IDs, from
     /// `--dry-sequence-breaker`.
     ///
-    /// Resolved in `run_server` rather than in `build_server_config`: the flag
+    /// Resolved in `start_server` rather than in `build_server_config`: the flag
     /// takes token STRINGS and this takes token IDs, so the conversion needs
     /// the model's tokenizer, which is not loaded yet when the config is
     /// built. `build_server_config` therefore leaves this empty and
-    /// `run_server` fills it immediately after `load_tokenizer` returns (see
-    /// [`crate::server::dry_breakers::resolve_dry_sequence_breakers`]).
+    /// `start_server` fills it immediately after `load_tokenizer` returns, via
+    /// `server::dry_breakers::resolve_dry_sequence_breakers` (named in prose
+    /// rather than as an intra-doc link, because this field is public while
+    /// that module is private).
     pub default_dry_sequence_breakers: Vec<i32>,
     pub draft_model_path: Option<PathBuf>,
     pub num_draft_tokens: usize,

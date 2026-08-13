@@ -46,18 +46,31 @@ The three issues in this chain are the same defect seen from three positions. #1
 `ServerConfig` is built by `build_server_config`, which runs before the model's tokenizer is loaded. The conversion from token strings to token IDs needs that tokenizer. Three placements were possible:
 
 1. Tokenize in `build_server_config`. Rejected: it would have to load a tokenizer of its own, duplicating work and giving the function a filesystem dependency it does not currently have.
-2. Move the tokenizer load earlier. Rejected: `run_server` has an early return for `serve_remote_pipeline_stage` before the current load site, so moving the load would make a remote pipeline stage load a tokenizer it never uses.
-3. Leave the field empty in `build_server_config` and fill it in `run_server` immediately after `load_tokenizer` returns. Chosen.
+2. Move the tokenizer load earlier. Rejected: `start_server` has an early return for `serve_remote_pipeline_stage` before the current load site, so moving the load would make a remote pipeline stage load a tokenizer it never uses.
+3. Leave the field empty in `build_server_config` and fill it in `start_server` immediately after `load_tokenizer` returns. Chosen.
 
 The third has a real hazard: a field that is invalid between construction and a later assignment. It is mitigated by precedent and by documentation rather than by a type. The same shape already exists in this function for `config.pipeline_parallel_runtime`, and in `request_options` for `sampling.loop_detection` and `sampling.xtc_special_token_ids`, each of which is also resolved after the value that determines it becomes visible. The field's doc comment on `ServerConfig` says where it is filled, and the `build_server_config` site carries a comment saying why it is empty there.
 
-### 2.2 Why Single-Token Is Not a Policy Choice
+### 2.2 The Resolver Must Discount the Tokenizer's Normalizer
+
+The obvious implementation, encoding the breaker on its own and requiring one token, is wrong for a whole family of checkpoints, and review caught it before merge. A SentencePiece-derived `tokenizer.json` carries a `Prepend "▁"` normalizer, usually in a `Sequence` with `Replace " " -> "▁"`. Eleven of the 162 checkpoints in the local model store have it, including Mixtral, three Phi-3 variants, two MiniCPM, two LLaVA, Idefics2, InternLM3 and ERNIE 4.5.
+
+For those, the text handed to the model is not the text passed in, and the failure has two shapes:
+
+- **Fails on a value that is representable.** On Mixtral, `encode("\n")` returns `["▁", "<0x0A>"]`, two tokens, even though the newline is a single vocabulary entry at id 13. The bare encoding asks the wrong question. Startup would have refused to boot on the example in this flag's own help text, on eleven checkpoints, which is a strictly worse outcome than the inert flag being fixed.
+- **Succeeds with the wrong token.** `encode(" ")` normalizes to `"▁▁"` and returns ONE token, id 259, the double-space entry. It passes a length check, startup succeeds, and `/props` reports a plausible id. `decode([259])` even round-trips to something space-like. The operator gets a breaker they did not ask for, undetectably. That is precisely the failure class this PR exists to remove, reproduced inside the fix.
+
+`encode_breaker` therefore encodes `anchor + breaker` and subtracts the anchor's own encoding, so what is measured is the breaker's contribution rather than the normalizer's fixed prefix. When the anchor does not survive as a prefix (it merged with the breaker) or encodes to nothing, there is nothing to subtract and the bare encoding is used.
+
+The lesson for the test suite is in 2.5: the original fixture was the one tokenizer shape where the bug cannot appear.
+
+### 2.3 Why Single-Token Is Not a Policy Choice
 
 The sampler's breaker check is `config.dry_sequence_breakers.contains(&window[p1])` over a `Vec<i32>`. A multi-token breaker has no representation in that type at all. llama.cpp supports multi-token breakers by building a map from token to candidate tails; matching that would be a sampler change, not a wiring change, and is out of scope for an issue about a flag that is not read. Given the data model, the only choices were to reject, to drop silently, or to expand into several breakers that the operator did not ask for. Rejecting is the only one that cannot mislead.
 
 A string that encodes to zero tokens is the same class of failure and is handled identically. The error names the offending string, reports the count it actually got, and names the flag.
 
-### 2.3 The Escape Handling Is Load-Bearing, Not a Convenience
+### 2.4 The Escape Handling Is Load-Bearing, Not a Convenience
 
 This is the part of the change the issue did not ask for and the implementation could not omit. `--dry-sequence-breaker '\n'` reaches the process as the two characters `\` and `n`: no common shell expands an escape inside single quotes, and `"\n"` is the same two characters in POSIX shells. The flag's help text has advertised `"\n"` and `"\t"` as its examples since it was added.
 
@@ -65,13 +78,17 @@ So without escape handling, the fail-closed rule would reject the flag's own doc
 
 The rule interprets `\n`, `\t`, `\r` and `\\`, and preserves every other backslash sequence exactly as typed. Preserving unknown sequences rather than rejecting them keeps a breaker that genuinely contains a backslash expressible, and `\\` is the escape hatch for a literal backslash that precedes one of the four.
 
-### 2.4 `Some(vec![])` and `None` Must Not Collapse
+### 2.5 `Some(vec![])` and `None` Must Not Collapse
 
 The fallback is `unwrap_or_else(|| config.default_dry_sequence_breakers.clone())`, so an absent request field inherits the server default and an explicitly empty request list turns it off for that request. That distinction is the reason for `unwrap_or_else` rather than a check on emptiness, and `an_explicitly_empty_request_breaker_list_disables_the_server_default` pins it, because collapsing the two would make the server default impossible to opt out of per request.
 
-### 2.5 The Test Fixture Had to Be Built Rather Than Borrowed
+### 2.6 The Test Fixtures Had to Be Built Rather Than Borrowed
 
 `MlxcelTokenizer::stub_with_byte_fallback()` was the obvious fixture and is unusable here. Its BPE model has no merges, so `Hello` tokenizes to nothing rather than to its vocabulary entry, and it cannot express "exactly one token" for anything but a byte-fallback character. The tests build a tokenizer whose vocabulary is single characters (`a`, `b`, newline, tab, space) with no merges and no byte fallback, which makes all three outcomes the resolver must distinguish reachable without a checkpoint: one token, more than one, and none. `fixture_tokenizer_behaves_as_the_tests_assume` pins those encodings so a fixture change fails there, with a message saying so, instead of making the real assertions look wrong.
+
+That fixture is necessary and was not sufficient, and the way it fell short is the more useful lesson. Its `encode` is a pure per-character vocabulary lookup, which is exactly the tokenizer shape in which the 2.2 defect cannot occur. Every test passed, none of them vacuously, and the resolver was still wrong for eleven local checkpoints. A fixture chosen for being easy to reason about had been chosen for being the case that cannot fail.
+
+A second fixture now carries the `Prepend "▁"` and `Replace " " -> "▁"` normalizer pair with merges that make `▁a` and `▁▁` real entries. `prepend_normalizer_fixture_reproduces_both_bare_encoding_defects` asserts the bare encoding still exhibits both defects (`"\n"` to two tokens, `" "` to the single double-space token), so the two tests that follow it are demonstrably guarding something rather than asserting a tautology.
 
 ---
 
@@ -105,15 +122,15 @@ The third option is the tempting one and is the reason the issue specified the p
 |---|---|
 | Files changed | 12 (3 new) |
 | New module | `src/server/dry_breakers.rs` (136 lines) |
-| Tests added | 17 |
+| Tests added | 22 |
 
 ### Changes by Area
 
 | Area | File | Summary |
 |---|---|---|
-| Resolver | `src/server/dry_breakers.rs` (new) | `resolve_dry_sequence_breakers` and `unescape_breaker`; fail-closed on a breaker that is not exactly one token, on a flag that produced nothing usable, and on a token id that does not fit `i32` |
-| Config | `src/server/config.rs` | `default_dry_sequence_breakers: Vec<i32>`, documented as filled by `run_server` rather than by `build_server_config`, and its `Default` |
-| Startup | `src/server/startup.rs` | `build_server_config` leaves the field empty with the reason; `run_server` resolves it after `load_tokenizer` and logs the resolved IDs |
+| Resolver | `src/server/dry_breakers.rs` (new) | `resolve_dry_sequence_breakers`, `encode_breaker` (anchor-and-subtract, so a normalizer's fixed prefix cannot inflate the token count or shift the id), `unescape_breaker`, and `describe_tokens` for operator-facing diagnostics; fail-closed on a breaker that is not exactly one token, on a flag that produced nothing usable, and on a token id that does not fit `i32` |
+| Config | `src/server/config.rs` | `default_dry_sequence_breakers: Vec<i32>`, documented as filled by `start_server` rather than by `build_server_config`, and its `Default` |
+| Startup | `src/server/startup.rs` | `build_server_config` leaves the field empty with the reason; `start_server` resolves it after `load_tokenizer` and logs the resolved ids together with their decoded pieces, since an id on its own cannot be checked |
 | Request path | `src/server/request_options.rs` | `unwrap_or_default()` becomes `unwrap_or_else(|| config.default_dry_sequence_breakers.clone())` |
 | Endpoint | `src/server/routes/props.rs` | `dry_sequence_breakers` added; payload construction extracted into `default_generation_settings` |
 | Help text | `src/main.rs`, `src/bin/mlx_server.rs` | Byte-identical on both binaries (required by the #1109 parity assertion): server-wide default, per-request override, single-token requirement, interpreted escapes |
@@ -132,9 +149,10 @@ The third option is the tempting one and is the reason the issue specified the p
 
 ### Passed
 
-- `cargo test --profile test-fast --features cuda --lib server::dry_breakers`: 11 passed.
-- `--lib server::routes::props`: 3 passed.
-- `--lib server::request_options`: 38 passed, up from 35.
+- `cargo test --profile test-fast --features cuda --lib server::dry_breakers`: 15 passed.
+- `--lib server::routes::props`: 4 passed.
+- `--lib server::request_options`: 39 passed, up from 35.
+- `--test cli_help_consistency`: 25 passed, confirming the two binaries' `--dry-sequence-breaker` prose stayed byte-identical after the help-text edits.
 - `--lib server::cli_input`: 93 passed.
 - `--lib execution::sampling`: 3 passed.
 - `cargo clippy --profile test-fast --features cuda --lib --bins --tests -- -D warnings`: clean.
@@ -146,7 +164,9 @@ The third option is the tempting one and is the reason the issue specified the p
 
 ### Not Covered
 
-No real-checkpoint validation. Whether a given breaker string is one token is a property of the loaded vocabulary, so a checkpoint test would assert a fact about that checkpoint rather than about the resolver. The acceptance criteria are all at the configuration boundary, and that is where the tests sit.
+No real-checkpoint validation in the test suite. Whether a given breaker string is one token is partly a property of the loaded vocabulary, so a checkpoint test would assert a fact about that checkpoint as much as about the resolver. The normalizer artifact in 2.2 is the part that is NOT checkpoint-specific, and it is covered by a fixture that reproduces it exactly.
+
+The 162 local checkpoints were scanned during review to find how many carry the `Prepend` normalizer (eleven), but that scan is not a committed test and does not run in CI.
 
 No end-to-end assertion that the penalty value changes. That needs a model and a token history and would be seed-dependent; #1102 records the same reasoning for the same reason.
 

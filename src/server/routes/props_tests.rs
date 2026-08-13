@@ -45,6 +45,44 @@ fn props_reports_an_unset_breaker_list_as_empty_rather_than_omitting_it() {
     );
 }
 
+/// The reported key set is the contract this function was extracted to make
+/// assertable, so assert it. Without this, a regression that dropped `top_k`
+/// or `seed` from the payload would pass every other test in this file.
+#[test]
+fn props_reports_exactly_the_documented_key_set() {
+    let settings = default_generation_settings(&ServerConfig::default());
+    let mut keys: Vec<&str> = settings
+        .as_object()
+        .expect("default_generation_settings is a JSON object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+
+    assert_eq!(
+        keys,
+        vec![
+            "dry_allowed_length",
+            "dry_base",
+            "dry_multiplier",
+            "dry_penalty_last_n",
+            "dry_sequence_breakers",
+            "frequency_penalty",
+            "min_p",
+            "n_predict",
+            "presence_penalty",
+            "repeat_last_n",
+            "repeat_penalty",
+            "seed",
+            "temperature",
+            "top_k",
+            "top_p",
+        ],
+        "the /props payload key set changed. Adding a key is fine, update this list; \
+         losing one is a silent break for anyone reading it back."
+    );
+}
+
 #[test]
 fn props_reports_all_five_dry_fields() {
     let config = ServerConfig {

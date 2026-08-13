@@ -1282,7 +1282,8 @@ pub(crate) struct ServeArgs {
     /// fails startup and names itself, rather than being dropped silently. The
     /// escapes `\n`, `\t`, `\r` and `\\` are interpreted, since a shell does
     /// not expand them inside quotes; any other backslash sequence is taken
-    /// literally.
+    /// literally. The value is comma-separated, so a comma cannot itself be a
+    /// breaker.
     ///
     /// The singular `--dry-sequence-breaker` is the primary spelling on both
     /// server binaries, matching llama-server. The plural

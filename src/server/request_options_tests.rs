@@ -219,6 +219,38 @@ fn request_dry_sequence_breakers_override_the_server_default() {
     assert_eq!(options.sampling.dry_sequence_breakers, vec![13]);
 }
 
+/// The per-request opt-out only works if serde keeps an absent field and an
+/// empty array apart, and every other test in this file hand-builds
+/// `RequestOptionOverrides`, which is downstream of the only place they could
+/// collapse. Assert the deserialization itself, so a future `#[serde(...)]`
+/// attribute or custom deserializer cannot quietly merge the two while the
+/// tests below stay green.
+#[test]
+fn an_absent_and_an_empty_request_breaker_field_deserialize_differently() {
+    use crate::server::types::request::NativeCompletionRequest;
+
+    let absent: NativeCompletionRequest =
+        serde_json::from_str(r#"{"prompt": "hi"}"#).expect("absent field deserializes");
+    assert_eq!(
+        absent.dry_sequence_breakers, None,
+        "an absent field must stay None so it can inherit the server default"
+    );
+
+    let empty: NativeCompletionRequest =
+        serde_json::from_str(r#"{"prompt": "hi", "dry_sequence_breakers": []}"#)
+            .expect("empty array deserializes");
+    assert_eq!(
+        empty.dry_sequence_breakers,
+        Some(Vec::new()),
+        "an explicit empty array must stay Some so it can disable the server default"
+    );
+
+    let populated: NativeCompletionRequest =
+        serde_json::from_str(r#"{"prompt": "hi", "dry_sequence_breakers": [198]}"#)
+            .expect("populated array deserializes");
+    assert_eq!(populated.dry_sequence_breakers, Some(vec![198]));
+}
+
 /// An explicitly empty request list is an override too, not an absent field:
 /// it turns the server default OFF for that request. `Some(vec![])` and `None`
 /// must not collapse to the same thing.

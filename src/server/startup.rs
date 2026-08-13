@@ -947,7 +947,7 @@ pub(super) fn build_server_config(
         default_dry_penalty_last_n: resolve_dry_penalty_last_n(startup.dry_penalty_last_n),
         // Left empty here on purpose: `--dry-sequence-breaker` takes token
         // strings and the sampler takes token IDs, so resolving it needs the
-        // tokenizer, which `run_server` loads after this function returns. It
+        // tokenizer, which `start_server` loads after this function returns. It
         // fills the field there and fails startup on a breaker it cannot
         // represent (#1103).
         default_dry_sequence_breakers: Vec::new(),
@@ -1882,9 +1882,17 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         &startup.dry_sequence_breakers,
     )?;
     if !config.default_dry_sequence_breakers.is_empty() {
+        // The decoded pieces are logged alongside the ids because an id on its
+        // own cannot be checked. A tokenizer that prepends a word-boundary
+        // marker can resolve a plausible-looking id for the wrong token, and
+        // the piece is the only place that shows it.
         tracing::info!(
             breakers = ?startup.dry_sequence_breakers,
             token_ids = ?config.default_dry_sequence_breakers,
+            pieces = %super::dry_breakers::describe_resolved_breakers(
+                &tokenizer,
+                &config.default_dry_sequence_breakers,
+            ),
             "DRY sequence breakers resolved to token IDs"
         );
     }
