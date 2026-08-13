@@ -31,14 +31,14 @@ A second finding: `Some(0)` is reachable in production on any non-Metal host and
 - **The test hardcoded an assumption about the host.** `per_block` is 131072 for the minimal config, so the budget under test was `per_block * 100 = 13107200` bytes. With `PAGED_V2_MAX_N_REP = 16` and `PAGED_V2_CONCURRENT_LAUNCHES = 2`, a 512-CTA target gives a reserve of 17040384 bytes. The reserve exceeded the whole budget by 3933184 bytes, the `u64` subtraction wrapped, and `shortfall` became `2^47 - 31`, which still converts cleanly through `usize::try_from` on a 64-bit host. The guard `assert!(shortfall < 100)` was the only thing standing between the wrap and a silently wrong `assert_eq!`.
 - **The crossover is inside the Apple range, so macOS CI could not be trusted to catch it either.** At a reported core count of 48 the reserve is 12813312 bytes and the test passes; at 50 it is 13341696 and the test fails. The test's correctness depended on which Mac ran it.
 - **The assertion that failed was not the assertion that mattered.** `shortfall < 100` is a sanity check on the test's own arithmetic. The property worth pinning, that a budget which ignored the workspace comes back short by exactly the reserve, was carried only by the `assert_eq!` below it.
-- **The `Some(0)` contract was documented but never covered.** `resolve_paged_block_budget` documents that a budget rounding below one block returns `Some(0)`, and the `saturating_sub` is what makes a sub-reserve budget land there rather than at `usize::MAX`. No test asked for a budget below the reserve, so the saturation was covered only incidentally.
+- **The `Some(0)` contract was documented but never covered.** `resolve_paged_block_budget` documents that a budget rounding below one block returns `Some(0)`, and the `saturating_sub` is what makes a sub-reserve budget land there rather than near `2^47` blocks. No test asked for a budget below the reserve, so the saturation was covered only incidentally.
 
 ### 1.3 Risk Assessment
 
 | Risk | Impact | Likelihood |
 |---|---|---|
 | The failing test is dismissed as another host-specific numeric artifact and the module stops being trusted | Medium | High |
-| A future edit replaces the implementation's `saturating_sub` with `-`, minting `usize::MAX` blocks for a small budget | High | Low |
+| A future edit replaces the implementation's `saturating_sub` with `-`, minting roughly `2^47` blocks for a small budget | High | Low |
 | An operator sets a low `--kv-cache-budget`, gets an unbounded pool, and reads a warning that points at model size | Medium | Medium |
 
 ---
@@ -53,7 +53,7 @@ The audit is small enough to be exhaustive. `paged_v2_workspace_reserve_bytes` h
 - `src/execution/memory_estimate.rs:1697`, the failing test, which subtracted with `-`.
 - Two sites in `the_v2_workspace_reserve_is_small_and_scales_with_the_head_dim` that measure the reserve and never subtract it.
 
-There is exactly one subtraction of the reserve from a budget in non-test code, and it already saturated. The claim is not left resting on the grep, though: the new `resolve_block_budget_below_the_workspace_reserve_is_zero_blocks` calls the production function with budgets of `0`, `1`, `workspace / 2`, `workspace - 1` and `workspace`, and asserts `Some(0)` for each. A wrapping subtraction would return `Some(usize::MAX)` for the last three. The test is green, so the implementation is empirically clean, not merely clean by inspection.
+There is exactly one subtraction of the reserve from a budget in non-test code, and it already saturated. The claim is not left resting on the grep, though: the new `resolve_block_budget_below_the_workspace_reserve_is_zero_blocks` calls the production function with budgets of `0`, `1`, `workspace / 2`, `workspace - 1` and `workspace`, and asserts `Some(0)` for each. A wrapping subtraction would return a block count near `2^47` for the last three: a budget near `u64::MAX` divided by a 128 KiB block is not `usize::MAX` on a 64-bit host, which is worth stating precisely because the comment guarding this line exists to stop a future "simplification" back to `-`. The test is green, so the implementation is empirically clean, not merely clean by inspection.
 
 ### 2.2 Why the Environment Override Was Rejected
 
@@ -90,9 +90,11 @@ Scaling the whole test off the measured reserve was the issue's second option. I
 
 The below-reserve path is a different contract from "a byte budget floors to a block count", and it is the one that pins the `saturating_sub`. It gets its own test with the boundary pinned from both sides: `workspace + per_block - 1` yields `Some(0)` and `workspace + per_block` yields `Some(1)`.
 
-### 3.4 Name the Reserve in the Warning
+### 3.4 Split the Warning by Directive Instead of Writing One Accurate Sentence
 
-The message now reports the reserve in bytes and the one-block-on-top-of-it threshold. It is accurate for the `Auto` path as well, since a budget too small to cover the reserve plus a block is exactly what both paths ran into. No resolution logic changed.
+The first attempt gave both directives the reserve-naming message, on the grounds that it is accurate for `Auto` too: a budget too small to cover the reserve plus one block is literally what both paths ran into. Review rejected that, correctly. Accuracy is not the bar a diagnostic has to clear. `Auto` is the shipped default on both binaries, and it reaches zero blocks when the model leaves no room for KV at all, so naming a 16 MiB reserve when the real shortfall is tens of gigabytes points the operator at `MLXCEL_PAGED_DECODE_V2_TARGET_CTAS`, which is the wrong knob entirely.
+
+The arm now matches on the directive. `Auto` keeps its original wording, which was the right diagnosis for that case all along. `Bytes` reports the requested budget, the reserve, and the smallest budget that would mint one block, all rendered through the module's own `format_bytes` so they read as sizes rather than as raw byte counts. `PagedBudgetDirective` is `Copy` and the directive is still in scope, so the split costs two lines. No resolution logic changed on either path.
 
 ---
 
@@ -116,7 +118,7 @@ The message now reports the reserve in bytes and the one-block-on-top-of-it thre
 - `resolve_block_budget_below_the_workspace_reserve_is_zero_blocks`: new regression test.
 
 **`src/server/model_worker.rs`**
-- `resolve_worker_paged_block_budget`: the zero-block warning names the workspace reserve instead of blaming model size.
+- `resolve_worker_paged_block_budget`: the zero-block arm matches on the directive instead of emitting one message for both. `Auto` keeps its original wording; `Bytes` reports the requested budget, the workspace reserve, and the smallest budget that would mint one block, all through `format_bytes`.
 
 **`CHANGELOG.md`**
 - One entry under `## [Unreleased]` / `### Fixed` for the warning text, stating explicitly that no budget resolves to a different block count.

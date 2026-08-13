@@ -761,23 +761,58 @@ fn resolve_worker_paged_block_budget(
             Some(n)
         }
         Some(_) => {
-            // #1091: for an explicit byte budget the usual cause is not model
-            // size but the paged decode v2 workspace reserve, which is charged
-            // to the budget before the remainder is divided into blocks (#899)
-            // and is 16.25 MiB for a typical geometry on every non-Metal host.
-            // Name the reserve so an operator whose `--kv-cache-budget 8MiB`
-            // silently did nothing can see what swallowed it.
-            let reserve = crate::memory_estimate::paged_v2_workspace_reserve_bytes(
-                model_path,
-                num_layers,
-                batch.max(1) as u64,
-            );
-            tracing::warn!(
-                "--kv-cache-budget resolves to 0 KV blocks at this configuration \
-                 (the budget does not cover the {reserve}-byte paged decode v2 \
-                 workspace reserve plus one {block_size}-token block on top of \
-                 it); leaving the paged pool unbounded"
-            );
+            // #1091: the two directives reach zero blocks for different reasons
+            // and only one of them is actionable per message, so they get
+            // separate diagnoses. `Auto` lands here when the model leaves no
+            // room for KV at all, which is a sizing problem measured in tens of
+            // gigabytes; naming the workspace reserve there would point at a few
+            // megabytes and send the operator after the wrong knob. An explicit
+            // byte budget usually lands here because of the reserve itself,
+            // which is charged to the budget before the remainder is divided
+            // into blocks (#899) and is device-derived: roughly 16 MiB for a
+            // typical geometry on every non-Metal host, so a
+            // `--kv-cache-budget 8MiB` is swallowed whole regardless of how
+            // large the model is.
+            match directive {
+                crate::memory_estimate::PagedBudgetDirective::Bytes(requested) => {
+                    let reserve = crate::memory_estimate::paged_v2_workspace_reserve_bytes(
+                        model_path,
+                        num_layers,
+                        batch.max(1) as u64,
+                    );
+                    let per_block = crate::memory_estimate::paged_block_bytes(
+                        model_path, num_layers, block_size, false,
+                    );
+                    // Unreachable in practice: `resolve_paged_block_budget`
+                    // returns `None`, not `Some(0)`, when the per-block cost is
+                    // underivable, so reaching this arm means it was `Some`.
+                    // Kept total rather than unwrapped so a future change to
+                    // that contract degrades the message instead of panicking.
+                    let threshold = match per_block {
+                        Some(bytes) => {
+                            crate::memory_estimate::format_bytes(reserve.saturating_add(bytes))
+                        }
+                        None => "an underivable amount".to_string(),
+                    };
+                    tracing::warn!(
+                        "--kv-cache-budget {} resolves to 0 KV blocks: it does not cover the \
+                         {} paged decode v2 workspace reserve plus one {block_size}-token \
+                         block, which needs at least {threshold}; leaving the paged pool \
+                         unbounded",
+                        crate::memory_estimate::format_bytes(requested),
+                        crate::memory_estimate::format_bytes(reserve),
+                    );
+                }
+                // `Disabled` returned early above and never reaches this arm.
+                crate::memory_estimate::PagedBudgetDirective::Auto
+                | crate::memory_estimate::PagedBudgetDirective::Disabled => {
+                    tracing::warn!(
+                        "--kv-cache-budget resolves to 0 KV blocks at this configuration \
+                         (model too large for a meaningful paged budget at this batch / \
+                         available memory); leaving the paged pool unbounded"
+                    );
+                }
+            }
             None
         }
         None => {

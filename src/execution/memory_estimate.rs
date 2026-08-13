@@ -879,10 +879,13 @@ pub fn resolve_paged_block_budget(
     // non-Metal host, putting it at 16.25 MiB for the common 8-kv-head /
     // 128-head-dim geometry. A `--kv-cache-budget` in the low megabytes is
     // therefore smaller than the reserve on any Linux or CUDA box, and a
-    // wrapping `-` would turn that shortfall into a ~2^64 budget and hand the
-    // pool `usize::MAX` blocks, the exact opposite of the requested cap.
-    // Saturating yields `Some(0)`, which `resolve_worker_paged_block_budget`
-    // maps to "leave the pool unbounded" with a warning.
+    // wrapping `-` would turn that shortfall into a budget near `u64::MAX`. That
+    // divides down to roughly 2^47 blocks for a 128 KiB block, not to
+    // `usize::MAX`: the `unwrap_or` below only fires where the `try_from` can
+    // fail, which is a 32-bit target. Either way it is an admission cap that
+    // admits everything, the exact opposite of what was asked for. Saturating
+    // yields `Some(0)`, which `resolve_worker_paged_block_budget` maps to "leave
+    // the pool unbounded" with a warning naming the reserve.
     let workspace = paged_v2_workspace_reserve_bytes(model_dir, num_layers, batch);
     let budget_bytes = budget_bytes.saturating_sub(workspace);
     Some(usize::try_from(budget_bytes / per_block).unwrap_or(usize::MAX))
@@ -1707,6 +1710,13 @@ mod tests {
         // of KV has to ask for the workspace too.
         let workspace = paged_v2_workspace_reserve_bytes(tmp.path(), 32, 1);
         assert!(workspace > 0, "the minimal config has a derivable geometry");
+        // Every request below is derived from the device-measured reserve, and
+        // the `test-fast` profile inherits `release`, where overflow checks are
+        // off. A plain `*` or `+` would wrap silently into a wrong expectation
+        // rather than panicking on a device with an extreme CTA target, which is
+        // the class of defect this test exists to pin, so the arithmetic
+        // saturates throughout.
+        let blocks_worth = |n: u64| per_block.saturating_mul(n);
 
         // Exactly 100 blocks.
         assert_eq!(
@@ -1716,7 +1726,7 @@ mod tests {
                 32,
                 1,
                 false,
-                PagedBudgetDirective::Bytes(per_block * 100 + workspace),
+                PagedBudgetDirective::Bytes(blocks_worth(100).saturating_add(workspace)),
             ),
             Some(100),
         );
@@ -1728,7 +1738,11 @@ mod tests {
                 32,
                 1,
                 false,
-                PagedBudgetDirective::Bytes(per_block * 100 + per_block / 2 + workspace),
+                PagedBudgetDirective::Bytes(
+                    blocks_worth(100)
+                        .saturating_add(per_block / 2)
+                        .saturating_add(workspace),
+                ),
             ),
             Some(100),
         );
@@ -1741,7 +1755,7 @@ mod tests {
                 32,
                 1,
                 false,
-                PagedBudgetDirective::Bytes(per_block - 1 + workspace),
+                PagedBudgetDirective::Bytes(per_block.saturating_sub(1).saturating_add(workspace)),
             ),
             Some(0),
         );
@@ -1758,7 +1772,7 @@ mod tests {
         // `-` that wraps once the reserve exceeds the whole budget.
         let reserve_blocks = workspace.div_ceil(per_block);
         let shortfall =
-            usize::try_from((per_block * 100).saturating_sub(workspace) / per_block).unwrap();
+            usize::try_from(blocks_worth(100).saturating_sub(workspace) / per_block).unwrap();
         assert_eq!(
             resolve_paged_block_budget(
                 tmp.path(),
@@ -1766,7 +1780,7 @@ mod tests {
                 32,
                 1,
                 false,
-                PagedBudgetDirective::Bytes(per_block * 100),
+                PagedBudgetDirective::Bytes(blocks_worth(100)),
             ),
             Some(shortfall),
         );
@@ -1775,7 +1789,8 @@ mod tests {
         assert_eq!(
             100 - shortfall,
             usize::try_from(reserve_blocks.min(100)).unwrap(),
-            "a {workspace}-byte reserve should cost {reserve_blocks} of the 100 blocks requested",
+            "a {workspace}-byte reserve is {reserve_blocks} blocks, so it should cost \
+             min({reserve_blocks}, 100) of the 100 blocks requested",
         );
         // The same contract without the cap, so the exact-reserve case is
         // exercised on large-CTA devices too: paying for the reserve in whole
@@ -1787,7 +1802,7 @@ mod tests {
                 32,
                 1,
                 false,
-                PagedBudgetDirective::Bytes(per_block * (100 + reserve_blocks)),
+                PagedBudgetDirective::Bytes(blocks_worth(reserve_blocks.saturating_add(100))),
             ),
             Some(100),
         );
@@ -1801,8 +1816,9 @@ mod tests {
     /// The reserve is 16.25 MiB for this geometry on any non-Metal host
     /// (`device_target_ctas() == 512`), so an explicit `--kv-cache-budget` in
     /// the low megabytes reaches this path on any Linux or CUDA box. A wrapping
-    /// `-` would turn a one-byte shortfall into a ~2^64 budget and mint
-    /// `usize::MAX` blocks instead of capping the pool.
+    /// `-` would turn a one-byte shortfall into a budget near `u64::MAX`, which
+    /// divides down to roughly 2^47 blocks here: an admission cap that admits
+    /// everything instead of capping the pool.
     #[test]
     fn resolve_block_budget_below_the_workspace_reserve_is_zero_blocks() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1811,7 +1827,7 @@ mod tests {
         let workspace = paged_v2_workspace_reserve_bytes(tmp.path(), 32, 1);
         assert!(workspace > 0, "the minimal config has a derivable geometry");
 
-        for budget in [0, 1, workspace / 2, workspace - 1, workspace] {
+        for budget in [0, 1, workspace / 2, workspace.saturating_sub(1), workspace] {
             assert_eq!(
                 resolve_paged_block_budget(
                     tmp.path(),
@@ -1835,7 +1851,7 @@ mod tests {
                 32,
                 1,
                 false,
-                PagedBudgetDirective::Bytes(workspace + per_block - 1),
+                PagedBudgetDirective::Bytes(workspace.saturating_add(per_block).saturating_sub(1)),
             ),
             Some(0),
         );
@@ -1846,7 +1862,7 @@ mod tests {
                 32,
                 1,
                 false,
-                PagedBudgetDirective::Bytes(workspace + per_block),
+                PagedBudgetDirective::Bytes(workspace.saturating_add(per_block)),
             ),
             Some(1),
         );
