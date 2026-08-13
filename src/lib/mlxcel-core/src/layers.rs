@@ -2228,39 +2228,77 @@ impl UnifiedLinear {
     }
 }
 
-/// Whether three q/k/v quantization layouts can share one packed plane.
+/// The two trailing dimensions that decide whether one packed projection can be
+/// concatenated with another: `(packed_width, num_groups)`, the last axis of its
+/// `weight` and the last axis of its `scales`.
+pub type QkvPackedWidths = (i32, i32);
+
+/// Whether packed q/k/v projections can share one fused plane.
 ///
-/// The comparison is over the full `(bits, group_size)` pair rather than `bits`
-/// alone, because either axis alone decides the packed width: MLX packs a
-/// `[out, in]` plane to `[out, in * bits / 32]` and describes it with
-/// `[out, in / group_size]` scales, so two planes that agree on `bits` and
-/// disagree on `group_size` still describe different scales tensors, and the
-/// axis-0 concatenation of those is as wrong as the weight-side mismatch is.
-/// Only affine folds a divergent group size back into `bits`
-/// ([`reconcile_quantization_layout`] trusts `group_size` there); the
-/// block-float modes reconcile the other axis, so for them `group_size` is the
-/// only axis that can diverge.
+/// This is `concatenate`'s own precondition, stated directly: joining along
+/// axis 0 requires every other axis to agree, so the three `weight` tensors must
+/// share a packed width and the three `scales` must share a group count. MLX
+/// packs an `[out, in]` plane to `[out, in * bits / 32]` and describes it with
+/// `[out, in / group_size]` scales, so a divergence in `bits`, in `group_size`,
+/// or in both shows up here.
+///
+/// It is deliberately a shape test rather than a comparison of the three
+/// reconciled `(bits, group_size)` pairs, and it is strictly stronger than one.
+/// Comparing the pair is the natural way to *state* the rule, and the widths are
+/// what the load-time log reports, but the pair is a lossy summary of the
+/// packing: [`reconcile_quantization_layout`] normalizes every affine plane onto
+/// the single declared `group_size`, so under a declared group size of 64 an
+/// 8-bit plane at group size 32 reconciles to the same `(4, 64)` as a genuine
+/// 4-bit plane at 64 while packing to twice the width. Comparing pairs would
+/// call those two fusable and hand `concatenate` two different widths, which
+/// throws inside MLX and crosses the cxx bridge as an uncatchable abort. A plane
+/// whose shapes solve to no valid bit width reconciles to an `Err` rather than
+/// to a distinguishable pair, which is the same hole from the other side.
+///
+/// The converse cannot happen: reconciliation is a pure function of these two
+/// trailing dims (plus the declared pair and mode, which are shared across the
+/// three planes), so planes that agree here always reconcile to the same layout.
+/// Nothing that the pair comparison would have split is left fused.
 ///
 /// An empty or single-element slice is trivially fusable.
 ///
-/// Pure over the reconciled layouts so the policy is unit-testable without an
-/// MLX backend.
+/// Pure over the shapes so the policy is unit-testable without an MLX backend.
 ///
 /// Used by: [`FusedQKVLinear::from_weights_separate_with_mode`].
-pub fn qkv_layouts_are_fusable(layouts: &[(i32, i32)]) -> bool {
-    match layouts.split_first() {
-        Some((first, rest)) => rest.iter().all(|l| l == first),
+pub fn qkv_planes_are_fusable(planes: &[QkvPackedWidths]) -> bool {
+    match planes.split_first() {
+        Some((first, rest)) => rest.iter().all(|p| p == first),
         None => true,
     }
+}
+
+/// The three planes' `(packed_width, num_groups)` in q/k/v order.
+///
+/// `None` when any plane is missing its `weight` or its `scales`, so the caller
+/// falls through to the path that owns the diagnostics for a broken triple
+/// rather than pre-empting it with a worse message.
+fn qkv_packed_widths(
+    weights: &crate::weights::WeightMap,
+    prefixes: [&str; 3],
+) -> Option<[QkvPackedWidths; 3]> {
+    let mut widths = [(0, 0); 3];
+    for (slot, prefix) in widths.iter_mut().zip(prefixes) {
+        let weight_shape = ffi::array_shape(weights.get(&format!("{prefix}.weight"))?);
+        let scales_shape = ffi::array_shape(weights.get(&format!("{prefix}.scales"))?);
+        *slot = (weight_shape.last().copied()?, scales_shape.last().copied()?);
+    }
+    Some(widths)
 }
 
 /// Reconcile the three q/k/v planes' quantization layouts from their own shapes.
 ///
 /// Returns `Some([(bits, group_size); 3])` in q/k/v order when all three planes
-/// carry a `weight` + `scales` pair that reconciles. Returns `None` when any
-/// plane is missing one of the two or fails to reconcile, so the caller falls
-/// through to the path that owns the diagnostics for a broken triple rather
-/// than pre-empting it with a worse message.
+/// reconcile, and `None` otherwise. Only informative: the split decision is made
+/// by [`qkv_planes_are_fusable`] on the shapes themselves. What this feeds is the
+/// load-time log message, and the per-plane construction of a split layer, which
+/// passes each plane its own reconciled pair rather than the declared one so the
+/// plane loader does not warn about a divergence that has already been reported
+/// and handled.
 fn reconciled_qkv_layouts(
     weights: &crate::weights::WeightMap,
     prefixes: [&str; 3],
@@ -2283,6 +2321,17 @@ fn reconciled_qkv_layouts(
         *slot = (layout.bits, layout.group_size);
     }
     Some(layouts)
+}
+
+/// One plane's packing as the load-time log reports it, for example
+/// `"8-bit/gs64 (packed 512x32)"`, or just the shapes when the plane's layout
+/// could not be reconciled.
+fn describe_qkv_plane(packed: QkvPackedWidths, layout: Option<QkvPackedWidths>) -> String {
+    let (width, groups) = packed;
+    match layout {
+        Some((bits, group_size)) => format!("{bits}-bit/gs{group_size} (packed {width}x{groups})"),
+        None => format!("packed {width}x{groups}"),
+    }
 }
 
 /// How a [`FusedQKVLinear`] stores its three projections.
@@ -2526,43 +2575,57 @@ impl FusedQKVLinear {
             // requantized, so the values the model computes with are exactly
             // the checkpoint's and the extra memory cost is zero.
             //
-            // Only the layouts the shapes actually imply can decide this, so
-            // each plane is reconciled on its own. A plane that fails to
-            // reconcile falls through to the fused path deliberately: that path
-            // owns the existing, more specific diagnostics for a broken triple,
-            // and this check must not pre-empt them with a worse message.
-            if let Some(layouts) = reconciled_qkv_layouts(
-                weights,
-                [&q_prefix, &k_prefix, &v_prefix],
-                group_size,
-                bits,
-                mode,
-            ) && !qkv_layouts_are_fusable(&layouts)
+            // The decision is made on the packed shapes themselves rather than
+            // on the reconciled `(bits, group_size)` pairs, because the pair is
+            // a lossy summary that can alias two different packings onto one
+            // value; see [`qkv_planes_are_fusable`]. A plane missing its
+            // `weight` or `scales` falls through to the fused path deliberately:
+            // that path owns the existing, more specific diagnostics for a
+            // broken triple, and this check must not pre-empt them with a worse
+            // message.
+            let plane_prefixes = [q_prefix.as_str(), k_prefix.as_str(), v_prefix.as_str()];
+            if let Some(packed) = qkv_packed_widths(weights, plane_prefixes)
+                && !qkv_planes_are_fusable(&packed)
             {
+                // Informative only, and best-effort: a plane whose shapes solve
+                // to no valid bit width still has to load (and report its own
+                // error), it just cannot be named by width in the message.
+                let layouts =
+                    reconciled_qkv_layouts(weights, plane_prefixes, group_size, bits, mode);
                 tracing::info!(
                     target: "mlxcel::quant",
                     prefix,
                     mode,
-                    q_bits = layouts[0].0,
-                    q_group_size = layouts[0].1,
-                    k_bits = layouts[1].0,
-                    k_group_size = layouts[1].1,
-                    v_bits = layouts[2].0,
-                    v_group_size = layouts[2].1,
-                    "mixed-precision q/k/v: keeping the three projections separate \
-                     (packed planes of different widths cannot be concatenated)"
+                    declared_bits = bits,
+                    declared_group_size = group_size,
+                    q = %describe_qkv_plane(packed[0], layouts.map(|l| l[0])),
+                    k = %describe_qkv_plane(packed[1], layouts.map(|l| l[1])),
+                    v = %describe_qkv_plane(packed[2], layouts.map(|l| l[2])),
+                    "mixed-precision q/k/v: keeping the three projections separate; their \
+                     packed planes have different widths and cannot be concatenated"
                 );
+                // Each plane is built at its own reconciled layout rather than
+                // at the declared one. Passing the declared pair would make
+                // every widened plane trip the plane loader's divergence
+                // warning ("decoding may be degenerate"), which is exactly
+                // wrong here: the divergence is the thing this branch detected,
+                // reported, and handled.
+                let plane = |index: usize| {
+                    let (plane_group_size, plane_bits) =
+                        layouts.map_or((group_size, bits), |l| (l[index].1, l[index].0));
+                    UnifiedLinear::from_weights_with_mode(
+                        weights,
+                        plane_prefixes[index],
+                        plane_group_size,
+                        plane_bits,
+                        mode,
+                    )
+                };
                 return Ok(Self {
                     qkv_proj: QkvProjection::Split {
-                        q: UnifiedLinear::from_weights_with_mode(
-                            weights, &q_prefix, group_size, bits, mode,
-                        )?,
-                        k: UnifiedLinear::from_weights_with_mode(
-                            weights, &k_prefix, group_size, bits, mode,
-                        )?,
-                        v: UnifiedLinear::from_weights_with_mode(
-                            weights, &v_prefix, group_size, bits, mode,
-                        )?,
+                        q: plane(0)?,
+                        k: plane(1)?,
+                        v: plane(2)?,
                     },
                     n_heads,
                     n_kv_heads,
@@ -2734,6 +2797,10 @@ impl FusedQKVLinear {
     /// a fused-kernel launcher that needs exactly one packed weight, so `None`
     /// is the "fall back to the graph path" signal they already handle for
     /// dense weights.
+    ///
+    /// Used by: [`Self::forward_split_rope`], [`Self::forward_split_rope_quantized`],
+    /// [`Self::forward_split_norm_rope_quantized`], and the Llama3 fused
+    /// causal-prefill launcher in the consuming crate.
     pub fn fused_quantized_weight(&self) -> Option<&QuantizedWeight> {
         self.qkv_proj.fused()?.as_quantized_weight()
     }
@@ -6414,24 +6481,49 @@ mod tests {
             .expect("mixed-width q/k/v must load")
     }
 
-    /// The fusability predicate compares the full `(bits, group_size)` pair.
-    /// Comparing `bits` alone would call two planes fusable while their scales
-    /// tensors describe different group counts, and the axis-0 concatenation of
-    /// those is as wrong as the weight-side mismatch is.
+    /// The fusability predicate is over the packed shapes, which is
+    /// `concatenate`'s own precondition: `(packed_width, num_groups)` per plane.
+    /// A divergence in `bits`, in `group_size`, or in both shows up in one of
+    /// the two numbers.
     #[test]
-    fn qkv_fusability_compares_bits_and_group_size_together() {
-        assert!(qkv_layouts_are_fusable(&[(4, 64), (4, 64), (4, 64)]));
-        assert!(qkv_layouts_are_fusable(&[(8, 128), (8, 128), (8, 128)]));
+    fn qkv_fusability_is_decided_by_the_packed_shapes() {
+        assert!(qkv_planes_are_fusable(&[(256, 32), (256, 32), (256, 32)]));
         assert!(
-            !qkv_layouts_are_fusable(&[(4, 64), (4, 64), (8, 64)]),
-            "a divergent bit width is not fusable"
+            !qkv_planes_are_fusable(&[(256, 32), (256, 32), (512, 32)]),
+            "a divergent bit width doubles the packed weight width"
         );
         assert!(
-            !qkv_layouts_are_fusable(&[(4, 64), (4, 32), (4, 64)]),
-            "a divergent group size is not fusable either, even at equal bits"
+            !qkv_planes_are_fusable(&[(256, 32), (256, 64), (256, 32)]),
+            "a divergent group size changes the scales width even at an equal packed width"
         );
-        assert!(qkv_layouts_are_fusable(&[]), "nothing to disagree about");
-        assert!(qkv_layouts_are_fusable(&[(4, 64)]));
+        assert!(qkv_planes_are_fusable(&[]), "nothing to disagree about");
+        assert!(qkv_planes_are_fusable(&[(256, 32)]));
+    }
+
+    /// Why the predicate is over shapes rather than over the reconciled
+    /// `(bits, group_size)` pairs: under a declared group size of 64, an 8-bit
+    /// plane at group size 32 reconciles to the same `(4, 64)` as a genuine
+    /// 4-bit plane at 64 while packing to twice the width. A predicate over the
+    /// pairs would call those two fusable and hand `concatenate` two different
+    /// widths, which throws inside MLX and crosses the cxx bridge as an
+    /// uncatchable abort.
+    #[test]
+    fn planes_that_reconcile_alike_are_still_split_when_their_packings_differ() {
+        // Both describe a 512-wide input: 4-bit/gs64 packs to 64 columns over 8
+        // groups, 8-bit/gs32 packs to 128 columns over 16.
+        let narrow = reconcile_quantization_layout(&[64, 64], &[64, 8], 64, 4, "affine")
+            .expect("4-bit at the declared group size reconciles");
+        let wide = reconcile_quantization_layout(&[64, 128], &[64, 16], 64, 4, "affine")
+            .expect("8-bit at half the declared group size also reconciles");
+        assert_eq!(
+            (narrow.bits, narrow.group_size),
+            (wide.bits, wide.group_size),
+            "test premise: the two packings really do alias onto one reconciled pair"
+        );
+        assert!(
+            !qkv_planes_are_fusable(&[(64, 8), (64, 8), (128, 16)]),
+            "the shape predicate must split them anyway"
+        );
     }
 
     /// A `mixed_4_8` layer loads (it used to abort inside MLX's `concatenate`)
@@ -6574,6 +6666,40 @@ mod tests {
         }
     }
 
+    /// Build a split projection out of weights that would otherwise fuse, so a
+    /// test can compare the two representations of the same numbers directly.
+    fn split_from(weights: &crate::weights::WeightMap) -> FusedQKVLinear {
+        let plane = |name: &str| {
+            UnifiedLinear::from_weights_with_mode(
+                weights,
+                &format!("l.self_attn.{name}_proj"),
+                MIXED_GROUP,
+                4,
+                "affine",
+            )
+            .expect("plane loads standalone")
+        };
+        FusedQKVLinear {
+            qkv_proj: QkvProjection::Split {
+                q: plane("q"),
+                k: plane("k"),
+                v: plane("v"),
+            },
+            n_heads: 2,
+            n_kv_heads: 1,
+            head_dim: 4,
+        }
+    }
+
+    fn probe_input(step: i32, scale: f32) -> UniquePtr<MlxArray> {
+        ffi::from_slice_f32(
+            &(0..MIXED_IN)
+                .map(|i| ((i % step) as f32 - (step / 2) as f32) * scale)
+                .collect::<Vec<_>>(),
+            &[1, 1, MIXED_IN],
+        )
+    }
+
     /// A split projection and a fused one built from the same uniform weights
     /// produce identical q/k/v, which is what makes the split representation a
     /// drop-in for the fused one rather than a second, subtly different path.
@@ -6583,33 +6709,9 @@ mod tests {
         let fused =
             FusedQKVLinear::from_weights_separate(&weights, "l.self_attn", MIXED_GROUP, 4, 2, 1, 4)
                 .expect("uniform q/k/v must load");
-        let plane = |name: &str| {
-            UnifiedLinear::from_weights_with_mode(
-                &weights,
-                &format!("l.self_attn.{name}_proj"),
-                MIXED_GROUP,
-                4,
-                "affine",
-            )
-            .expect("plane loads standalone")
-        };
-        let split = FusedQKVLinear {
-            qkv_proj: QkvProjection::Split {
-                q: plane("q"),
-                k: plane("k"),
-                v: plane("v"),
-            },
-            n_heads: 2,
-            n_kv_heads: 1,
-            head_dim: 4,
-        };
+        let split = split_from(&weights);
 
-        let x = ffi::from_slice_f32(
-            &(0..MIXED_IN)
-                .map(|i| ((i % 7) as f32 - 3.0) * 0.03)
-                .collect::<Vec<_>>(),
-            &[1, 1, MIXED_IN],
-        );
+        let x = probe_input(7, 0.03);
         let (fq, fk, fv) = fused.forward(&x);
         let (sq, sk, sv) = split.forward(&x);
         for (name, a, b) in [("q", &fq, &sq), ("k", &fk, &sk), ("v", &fv, &sv)] {
@@ -6621,6 +6723,48 @@ mod tests {
                 "{name} must be identical whether the planes are fused or split"
             );
         }
+    }
+
+    /// `project_concat`'s split arm is the only new `unsafe` block and the only
+    /// place a split layer forms the concatenated `[q | k | v]` activation, which
+    /// is what feeds the fused RoPE-append kernel. It must reproduce what the
+    /// fused weight would have produced: a matmul against a row-concatenated
+    /// weight is the row concatenation of the three matmuls, because every output
+    /// column depends only on its own weight row and its own scales.
+    #[test]
+    fn split_project_concat_reproduces_the_fused_activation() {
+        let weights = uniform_layer(4);
+        let fused =
+            FusedQKVLinear::from_weights_separate(&weights, "l.self_attn", MIXED_GROUP, 4, 2, 1, 4)
+                .expect("uniform q/k/v must load");
+        let split = split_from(&weights);
+
+        let x = probe_input(11, 0.05);
+        let from_fused = fused.qkv_proj.project_concat(&x);
+        let from_split = split.qkv_proj.project_concat(&x);
+        ffi::eval(&from_fused);
+        ffi::eval(&from_split);
+        assert_eq!(
+            ffi::array_shape(&from_split).as_slice(),
+            &[1, 1, 16],
+            "8 + 4 + 4 output rows land on the last axis, in q/k/v order"
+        );
+        assert_eq!(
+            ffi::array_shape(&from_fused).as_slice(),
+            ffi::array_shape(&from_split).as_slice()
+        );
+        assert_eq!(
+            plane_max_abs_diff(&from_fused, &from_split),
+            0.0,
+            "the concatenated activation must be identical to the fused one"
+        );
+
+        // A genuinely mixed layer has no fused counterpart to compare against,
+        // so pin the layout instead: the same width, in the same q/k/v order.
+        let mixed = load_mixed(&mixed_4_8_layer());
+        let mixed_concat = mixed.qkv_proj.project_concat(&x);
+        ffi::eval(&mixed_concat);
+        assert_eq!(ffi::array_shape(&mixed_concat).as_slice(), &[1, 1, 16]);
     }
 
     /// A partially quantized triple (no `v_proj.scales`) has no layout to
