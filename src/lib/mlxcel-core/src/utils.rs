@@ -78,8 +78,6 @@ pub fn slice_axis(x: &MlxArray, axis: i32, start: i32, end: i32) -> UniquePtr<Ml
 
 // Attention Mask Utilities.
 /// Create a causal attention mask.
-/// Used by: Llama, Qwen, Mixtral, Gemma, Cohere, Phi, OLMo, Exaone, GLM4,
-/// MiniCPM, DeepSeek, Hunyuan, StarCoder2 and other causal attention callers
 ///
 /// Creates a lower triangular mask of shape [size, size + offset] where:
 /// - 1.0 indicates positions that can be attended to
@@ -91,6 +89,32 @@ pub fn slice_axis(x: &MlxArray, axis: i32, start: i32, end: i32) -> UniquePtr<Ml
 ///
 /// # Returns
 /// Mask of shape [size, size + offset] with -inf in upper triangular region
+///
+/// Used by: decoders that materialize an explicit prefill mask instead of
+/// leaving `mask: None` for fused SDPA to apply causality itself. At this
+/// commit that is 44 non-test files under `src/models`, in four groups.
+/// Hybrid and mixed-layer stacks that build one mask at the full-attention
+/// offset: Jamba, FalconH1, NemotronH, NemotronNas, Plamo2, Qwen3Next,
+/// KimiLinear, GraniteMoeHybrid, MiniMaxM3, Lfm2, RecurrentGemma.
+/// Sliding-window, chunked and dual-attention families that build a separate
+/// global mask per forward: Gemma3, Gemma4, Gemma3n, DiffusionGemma, Cohere2,
+/// Exaone4, Olmo3, Ministral3, Mistral4, Mellum, Llama4. VLM decoders that
+/// thread a mask down from the multimodal wrapper: Qwen2VL, Qwen3VL, GLM4V,
+/// Ernie4.5MoeVL, HunyuanVL, PaddleOcrVL, FalconOcr. MLA and custom-attention
+/// decoders that add the mask to scores by hand: DeepSeekV3, DeepSeekV3.2,
+/// MiniCPM3, GptOss, AFMoE, Step3P5, LongcatFlashNgram, BailingMoeLinear,
+/// GLM4MoeLite, Qwen3.5. Outside `src/models` the callers are `lib.rs`,
+/// `layers.rs`, the tensor-parallel Llama runtime, the GLM4 pipeline stage
+/// executor, and disaggregated handoff.
+///
+/// Not used by the mainstream dense decoders (Llama3, Mixtral, Gemma, Gemma2,
+/// Cohere, Phi, GLM4, StarCoder2, Qwen3Moe, OLMoE and similar): they pass
+/// `mask: None` for `seq_len > 1` and let fused SDPA apply causality, so they
+/// are unaffected by changes here.
+///
+/// The caller set is too large to enumerate by name without going stale, so
+/// the groups above are a summary. Regenerate the exact list with
+/// `grep -rln '\bcreate_causal_mask(' src --include='*.rs'`.
 pub fn create_causal_mask(size: i32, offset: i32) -> UniquePtr<MlxArray> {
     additive_causal_window_mask(size, offset, None)
 }
@@ -764,6 +788,15 @@ pub fn create_causal_bool_mask_with_window(
 ///
 /// # Returns
 /// Tensor of shape [batch, n_heads, seq_len, head_dim]
+///
+/// Used by: DeepSeekV2, MiniCPM3, NemotronNas, RecurrentGemma, GLM4V,
+/// GLM4VMoe, Qwen2VL, Qwen3VL, Qwen3VLMoe, Ernie4.5MoeVL, HunyuanVL and
+/// PaddleOcrVL under `src/models`, plus the DeepSeek-OCR Qwen2 vision encoder
+/// (`src/vision/encoders/deepseekocr_qwen2.rs`) and the Qwen3-Omni MoE speech
+/// layers (`src/audio/qwen3_omni_moe/speech_layers.rs`). Most decoders never
+/// call this: fused SDPA broadcasts KV heads internally, so only models that
+/// materialize attention scores themselves need an explicit repeat. Regenerate
+/// the list with `grep -rln '\brepeat_kv(' src --include='*.rs'`.
 pub fn repeat_kv(x: &MlxArray, n_rep: i32) -> UniquePtr<MlxArray> {
     if n_rep == 1 {
         // No repetition needed — return a zero-copy view via reshape
@@ -904,6 +937,11 @@ pub fn gegelu(x: &MlxArray, limit: f32) -> UniquePtr<MlxArray> {
 ///
 /// # Returns
 /// Softcapped array
+///
+/// Used by: RecurrentGemma (`src/models/recurrent_gemma.rs`) for final logit
+/// softcapping, and by the core unit tests. Gemma 2 and Gemma 3 apply the same
+/// math through the fused `compiled_softcap` / `compiled_softcap_sdpa` kernels
+/// rather than this helper, so a change here does not reach them.
 pub fn softcap(x: &MlxArray, cap: f32) -> UniquePtr<MlxArray> {
     let scaled = crate::divide_scalar(x, cap);
     let tanhed = ffi::tanh(&scaled);
