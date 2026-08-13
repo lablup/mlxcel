@@ -59,7 +59,8 @@ Escape hatches restore the previous single-client behavior: `--parallel 1`
 > (vs 40.5 / 49.8 / 49.6 with the kill switch off). Scaling stays sublinear
 > versus Metal because attention KV reads still grow with B; the small-M
 > `qmm_sm80` tile shape (`M*B >= 8`) remains upstream MLX territory. For the
-> same reason, keep `--n-parallel` (mlxcel-server: `--parallel`) at 7 or below
+> same reason, keep `--parallel` (or its `--n-parallel` alias; both binaries
+> accept both spellings) at 7 or below
 > on CUDA: the multirow window covers 2-7 rows, and a full batch of 8+ decode
 > rows crosses into the under-tiled `qmm_sm80` shape, which measures worse
 > than per-row decode until the upstream small-M tile lands. The shipped

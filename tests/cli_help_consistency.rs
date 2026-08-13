@@ -36,6 +36,19 @@
 //!
 //! When a future flag or mode is added to either shared group, all three
 //! binaries fail the test together, no drift is possible.
+//!
+//! A third invariant covers the two server surfaces specifically. `mlxcel
+//! serve` and `mlxcel-server` are two hand-maintained clap definitions of the
+//! same server rather than one flattened group, so nothing structural keeps
+//! their flag NAMES aligned, and four of them had drifted apart by issue
+//! #1109 (`--n-parallel` / `--parallel` shared no spelling at all, so a
+//! command line copied between the binaries failed to parse). The flag
+//! surfaces legitimately differ in places, so the contract is a named list,
+//! [`SHARED_SERVER_FLAG_GROUPS`]: for each concept there, both binaries must
+//! accept every spelling, whichever one each makes primary.
+//! [`SHARED_SERVER_FLAG_DESCRIPTIONS`] additionally requires the help prose to
+//! read identically, which is what stops the same paragraph from forking into
+//! two wordings and hiding the name drift the way it did before.
 
 use std::path::Path;
 use std::process::Command;
@@ -508,7 +521,14 @@ fn flag_help_entry<'a>(help: &'a str, flag_signature: &str) -> Option<&'a str> {
         }
         offset += line.len();
     }
-    let start = entry_start?;
+    entry_body(help, entry_start?)
+}
+
+/// Slice one flag entry out of `help`, given the byte offset its signature
+/// line starts at: the signature line plus every following line indented
+/// deeper than it. Shared by the two entry finders so they cannot disagree
+/// about where an entry ends.
+fn entry_body(help: &str, start: usize) -> Option<&str> {
     let rest = &help[start..];
 
     let mut lines = rest.split_inclusive('\n');
@@ -800,6 +820,333 @@ fn flag_help_entry_stops_at_the_next_flag() {
         flag_help_entry(help, "--draft").is_none(),
         "a prefix of another flag's signature must not match its entry"
     );
+}
+
+// ── Shared server flag spellings (issue #1109) ──────────────────
+//
+// `mlxcel serve` and `mlxcel-server` are two hand-maintained clap definitions
+// of the same server. Their flag surfaces legitimately differ (`mlxcel serve`
+// carries `--estimate-memory` and `--force`, which are subcommand-shaped), so
+// asserting over the whole surface would be noise that nobody could keep
+// green. The contract is a named list instead: for each concept below, BOTH
+// binaries must accept EVERY spelling, whichever one each makes primary. Add
+// a row when a concept gains a second spelling on either binary.
+
+/// Parallel request slots. Before issue #1109 neither spelling worked on both
+/// binaries, so a copied command line failed outright.
+const PARALLEL_GROUP: &[&str] = &["--n-parallel", "--parallel"];
+/// Predicted-token cap.
+const PREDICT_GROUP: &[&str] = &["--n-predict", "--predict"];
+/// LoRA adapter path.
+const ADAPTER_GROUP: &[&str] = &["--adapter", "--lora"];
+/// DRY sequence breakers. The singular is primary on both binaries (issue
+/// #1109 settled it there, matching llama-server); the plural is the spelling
+/// `mlxcel serve` used to require, kept as an alias.
+const DRY_BREAKER_GROUP: &[&str] = &["--dry-sequence-breaker", "--dry-sequence-breakers"];
+/// Drafter checkpoint path (issue #464, already symmetric before #1109).
+const DRAFT_MODEL_GROUP: &[&str] = &["--draft-model", "--model-draft"];
+/// Draft-token budget (issue #464, already symmetric before #1109).
+const DRAFT_MAX_GROUP: &[&str] = &["--draft-max", "--draft"];
+
+/// Every concept whose spellings must be interchangeable across the two
+/// server binaries. Order inside a group is irrelevant: the assertion compares
+/// sorted sets, because which spelling is primary is allowed to differ per
+/// binary (`--adapter` on `mlxcel serve`, `--lora` on `mlxcel-server`) as long
+/// as both are accepted on both.
+const SHARED_SERVER_FLAG_GROUPS: &[&[&str]] = &[
+    PARALLEL_GROUP,
+    PREDICT_GROUP,
+    ADAPTER_GROUP,
+    DRY_BREAKER_GROUP,
+    DRAFT_MODEL_GROUP,
+    DRAFT_MAX_GROUP,
+];
+
+/// The subset whose help PROSE must also read identically on both binaries.
+///
+/// The two drafter groups are deliberately excluded. Their descriptions name
+/// each binary's own primary and alias roles, and those roles are opposite by
+/// design (`--draft-model` is primary on `mlxcel serve`, `--model-draft` on
+/// `mlxcel-server`), so identical prose there would make one of the two wrong.
+/// Everything else describes the same knob and has no reason to diverge; the
+/// `--n-parallel` / `--parallel` pair had already forked into two wordings of
+/// the same paragraph before issue #1109.
+const SHARED_SERVER_FLAG_DESCRIPTIONS: &[&[&str]] = &[
+    PARALLEL_GROUP,
+    PREDICT_GROUP,
+    ADAPTER_GROUP,
+    DRY_BREAKER_GROUP,
+];
+
+/// The long name a clap `--help` signature line declares, or `None` when the
+/// line is not a signature line.
+///
+/// A signature line holds nothing but the flag: an optional two-character
+/// short form with a comma, the long name, and an optional value name (plus a
+/// `...` repetition marker). Requiring that exact shape is what keeps a prose
+/// line that happens to start with `--` from being mistaken for an entry.
+fn signature_long_name(trimmed: &str) -> Option<&str> {
+    let mut tokens = trimmed.split_whitespace();
+    let mut long = tokens.next()?;
+    // Optional short form, which clap renders as exactly `-s,`.
+    if long.len() == 3 && long.starts_with('-') && !long.starts_with("--") && long.ends_with(',') {
+        long = tokens.next()?;
+    }
+    if !long.starts_with("--") {
+        return None;
+    }
+    // Anything after the long name must be a value name or a repetition
+    // marker. A real word means this is prose, not a signature.
+    if tokens.any(|token| !(token.starts_with('<') || token == "...")) {
+        return None;
+    }
+    Some(long)
+}
+
+/// Slice the `--help` entry whose signature line declares `long_name`.
+///
+/// [`flag_help_entry`] anchors on the complete rendered signature, which is
+/// right when the value name is part of the contract. Here it is not: clap
+/// derives the value name from the Rust field name, so the same concept
+/// renders as `--parallel <PARALLEL>` on one binary and
+/// `--n-parallel <N_PARALLEL>` on the other. The anchor is the long name alone.
+///
+/// An alias has no entry of its own, so this resolves only the primary
+/// spelling. That is what makes it usable to find "the entry for this concept
+/// on this binary" without knowing which spelling that binary made primary.
+fn flag_entry_by_long_name<'a>(help: &'a str, long_name: &str) -> Option<&'a str> {
+    let mut offset = 0usize;
+    let mut entry_start = None;
+    for line in help.split_inclusive('\n') {
+        if signature_long_name(line.trim()) == Some(long_name) {
+            entry_start = Some(offset);
+            break;
+        }
+        offset += line.len();
+    }
+    entry_body(help, entry_start?)
+}
+
+/// Every spelling one binary accepts for a flag: the primary long name from
+/// the signature line plus every name in the entry's clap alias annotation.
+/// Sorted and deduplicated so two binaries that made opposite spellings
+/// primary still compare equal.
+fn accepted_spellings(entry: &str) -> Vec<String> {
+    let mut spellings = Vec::new();
+    if let Some(primary) = entry
+        .lines()
+        .next()
+        .and_then(|line| signature_long_name(line.trim()))
+    {
+        spellings.push(primary.to_string());
+    }
+    spellings.extend(documented_aliases(entry));
+    spellings.sort();
+    spellings.dedup();
+    spellings
+}
+
+/// The prose clap rendered for a flag, with the signature line, the bracketed
+/// annotations, and all line wrapping removed.
+///
+/// Those three are excluded by construction rather than by a hand-maintained
+/// allowlist: the signature line carries each binary's own primary spelling
+/// and derived value name, and the `[env: ...]` / `[default: ...]` /
+/// `[alias: ...]` annotations carry each binary's own env var, default, and
+/// alias. What is left is the description, which is the part that has to read
+/// the same on both binaries.
+fn flag_description(entry: &str) -> String {
+    entry
+        .lines()
+        .skip(1)
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('['))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Resolve one concept's entry on one binary, whichever spelling that binary
+/// made primary.
+fn shared_flag_entry<'a>(label: &str, help: &'a str, group: &[&str]) -> &'a str {
+    group
+        .iter()
+        .find_map(|spelling| flag_entry_by_long_name(help, spelling))
+        .unwrap_or_else(|| {
+            panic!(
+                "{label} --help has no flag entry for any spelling of {group:?}. \
+                 Both server binaries must carry this flag under one of these names."
+            )
+        })
+}
+
+/// The cross-binary contract: every spelling in each group is accepted by both
+/// `mlxcel serve` and `mlxcel-server` (issue #1109).
+///
+/// This is the assertion the four drifted flags needed and did not have. A
+/// command line copied between the two binaries used to fail with `error:
+/// unexpected argument '--parallel' found`, and nothing in the suite noticed.
+#[test]
+fn shared_server_flags_accept_the_same_spellings_on_both_binaries() {
+    let serve_help = help_output("mlxcel", &["serve", "--help"]);
+    let server_help = help_output("mlxcel-server", &["--help"]);
+
+    for group in SHARED_SERVER_FLAG_GROUPS {
+        let mut expected: Vec<String> = group.iter().map(|s| (*s).to_string()).collect();
+        expected.sort();
+
+        for (label, help) in [
+            ("mlxcel serve", &serve_help),
+            ("mlxcel-server", &server_help),
+        ] {
+            let entry = shared_flag_entry(label, help, group);
+            assert_eq!(
+                accepted_spellings(entry),
+                expected,
+                "{label} must accept every spelling of {group:?}, as a primary name or a \
+                 clap `visible_alias`, so a command line copied between the two server \
+                 binaries parses unchanged (issue #1109).\nEntry was:\n{entry}"
+            );
+        }
+    }
+}
+
+/// The shared server flags must also be DESCRIBED the same way on both
+/// binaries (issue #1109), so an operator reading either `--help` gets the
+/// same guidance about the same knob.
+///
+/// The `--n-parallel` / `--parallel` paragraph is the reason this exists: the
+/// two binaries carried the same paragraph in two wordings, forked to match
+/// their two spellings, which is how the flag-name drift stayed invisible.
+#[test]
+fn shared_server_flags_are_described_identically_on_both_binaries() {
+    let serve_help = help_output("mlxcel", &["serve", "--help"]);
+    let server_help = help_output("mlxcel-server", &["--help"]);
+
+    for group in SHARED_SERVER_FLAG_DESCRIPTIONS {
+        let serve_description =
+            flag_description(shared_flag_entry("mlxcel serve", &serve_help, group));
+        let server_description =
+            flag_description(shared_flag_entry("mlxcel-server", &server_help, group));
+
+        assert_eq!(
+            serve_description, server_description,
+            "the help prose for {group:?} must read identically on both server binaries \
+             (issue #1109). The signature line and the bracketed [env:] / [default:] / \
+             [alias:] annotations are excluded from this comparison, so each binary keeps \
+             its own primary spelling, value name, and alias."
+        );
+        assert!(
+            !serve_description.is_empty(),
+            "precondition: {group:?} must have a non-empty description to compare"
+        );
+    }
+}
+
+/// Mutation check on the real help text, the counterpart to
+/// [`removing_the_rendered_alias_annotation_leaves_the_alias_undocumented`]:
+/// prove the spelling-parity assertion would actually FAIL if one of the
+/// aliases were dropped, rather than passing because the matcher silently
+/// found nothing.
+///
+/// `--parallel` on `mlxcel-server` is the case worth pinning: before issue
+/// #1109 it was the flag with no shared spelling at all, so a regression here
+/// is the one that reproduces the original defect.
+#[test]
+fn dropping_a_shared_flag_alias_would_fail_the_spelling_parity_assertion() {
+    let server_help = help_output("mlxcel-server", &["--help"]);
+    let entry = shared_flag_entry("mlxcel-server", &server_help, PARALLEL_GROUP);
+
+    let mut expected: Vec<String> = PARALLEL_GROUP.iter().map(|s| (*s).to_string()).collect();
+    expected.sort();
+    assert_eq!(
+        accepted_spellings(entry),
+        expected,
+        "precondition: the live help must already satisfy the contract"
+    );
+
+    // Cut the rendered alias annotation, which is exactly what removing the
+    // `visible_alias` attribute from the clap definition would do.
+    let annotation_start = entry
+        .find("[alias")
+        .expect("precondition: the entry carries an alias annotation");
+    let annotation_end = annotation_start
+        + entry[annotation_start..]
+            .find(']')
+            .expect("alias annotation is unterminated")
+        + 1;
+    let without_annotation = format!("{}{}", &entry[..annotation_start], &entry[annotation_end..]);
+
+    assert_eq!(
+        accepted_spellings(&without_annotation),
+        vec!["--parallel".to_string()],
+        "a dropped visible_alias must leave the concept accepting only its primary \
+         spelling, which is what makes the parity assertion fail.\nEntry was:\n\
+         {without_annotation}"
+    );
+    assert_ne!(
+        accepted_spellings(&without_annotation),
+        expected,
+        "the parity assertion must not pass on an entry whose alias was removed"
+    );
+}
+
+/// Guard for the guard: `signature_long_name` must accept the shapes clap
+/// actually renders and reject prose that merely starts with a flag name.
+/// Without the shape check, a description line such as `--parallel is the
+/// llama-server spelling` would anchor an entry on prose.
+#[test]
+fn signature_long_name_accepts_clap_signatures_and_rejects_prose() {
+    assert_eq!(
+        signature_long_name("--parallel <PARALLEL>"),
+        Some("--parallel")
+    );
+    assert_eq!(signature_long_name("--no-batch"), Some("--no-batch"));
+    assert_eq!(
+        signature_long_name("-n, --predict <PREDICT>"),
+        Some("--predict")
+    );
+    assert_eq!(
+        signature_long_name("--dry-sequence-breaker <BREAKERS>..."),
+        Some("--dry-sequence-breaker")
+    );
+
+    assert_eq!(
+        signature_long_name("--parallel is the llama-server name"),
+        None
+    );
+    assert_eq!(
+        signature_long_name("- see also, --draft-max <DRAFT_MAX>"),
+        None
+    );
+    assert_eq!(signature_long_name("Options:"), None);
+    assert_eq!(signature_long_name(""), None);
+}
+
+/// Guard for the guard: `accepted_spellings` must report the primary name
+/// together with its aliases, and `flag_description` must drop exactly the
+/// signature line and the bracketed annotations.
+#[test]
+fn accepted_spellings_and_description_split_an_entry_correctly() {
+    let entry = "      --n-parallel <N_PARALLEL>\n          Number of parallel request slots\n          that share --ctx-size\n\n          [env: LLAMA_ARG_N_PARALLEL=]\n          [default: 4]\n          [alias: --parallel]\n";
+
+    assert_eq!(
+        accepted_spellings(entry),
+        vec!["--n-parallel".to_string(), "--parallel".to_string()]
+    );
+    assert_eq!(
+        flag_description(entry),
+        "Number of parallel request slots that share --ctx-size"
+    );
+
+    // The opposite binary: different primary, different value name, different
+    // alias annotation, same description. The description comparison must see
+    // these two as equal.
+    let mirrored = "      --parallel <PARALLEL>\n          Number of parallel request slots\n          that share --ctx-size\n\n          [env: LLAMA_ARG_N_PARALLEL=]\n          [default: 4]\n          [alias: --n-parallel]\n";
+    assert_eq!(accepted_spellings(mirrored), accepted_spellings(entry));
+    assert_eq!(flag_description(mirrored), flag_description(entry));
 }
 
 /// A hyphen-bulleted description line must not be mistaken for a flag entry.

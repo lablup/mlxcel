@@ -381,6 +381,138 @@ fn serve_draft_max_and_draft_aliases_resolve_identically() {
     assert_eq!(primary_args.draft_max, 24);
 }
 
+// ── Server flag spelling parity (issue #1109) ───────────────────
+//
+// `mlxcel serve` and `mlxcel-server` are two hand-maintained clap
+// definitions of the same server, and four flag spellings had drifted
+// apart. `--n-parallel` / `--parallel` was the worst case: neither
+// spelling worked on both binaries, so a command line copied between
+// them failed to parse even though both flags read the same
+// `LLAMA_ARG_N_PARALLEL` env var. These tests pin that each spelling
+// now resolves to the identical `ServeArgs` field value here;
+// `src/bin/mlx_server.rs`'s test module carries the matching assertions
+// for `mlxcel-server`, and `tests/cli_help_consistency.rs` asserts the
+// two binaries accept the same set of spellings so a fifth divergence
+// cannot land silently.
+
+#[test]
+fn serve_n_parallel_and_parallel_aliases_resolve_identically() {
+    let primary = Cli::try_parse_from(["mlxcel", "serve", "-m", "models/foo", "--n-parallel", "2"])
+        .expect("--n-parallel must parse on `mlxcel serve`");
+    let Commands::Serve(primary_args) = primary.command else {
+        panic!("expected serve command");
+    };
+
+    let aliased = Cli::try_parse_from(["mlxcel", "serve", "-m", "models/foo", "--parallel", "2"])
+        .expect("--parallel alias must parse on `mlxcel serve`");
+    let Commands::Serve(aliased_args) = aliased.command else {
+        panic!("expected serve command");
+    };
+
+    assert_eq!(
+        primary_args.n_parallel, aliased_args.n_parallel,
+        "--n-parallel and its --parallel alias must resolve to the same slot count"
+    );
+    assert_eq!(primary_args.n_parallel, 2);
+}
+
+#[test]
+fn serve_n_predict_and_predict_aliases_resolve_identically() {
+    let primary = Cli::try_parse_from(["mlxcel", "serve", "-m", "models/foo", "--n-predict", "64"])
+        .expect("--n-predict must parse on `mlxcel serve`");
+    let Commands::Serve(primary_args) = primary.command else {
+        panic!("expected serve command");
+    };
+
+    let aliased = Cli::try_parse_from(["mlxcel", "serve", "-m", "models/foo", "--predict", "64"])
+        .expect("--predict alias must parse on `mlxcel serve`");
+    let Commands::Serve(aliased_args) = aliased.command else {
+        panic!("expected serve command");
+    };
+
+    assert_eq!(
+        primary_args.n_predict, aliased_args.n_predict,
+        "--n-predict and its --predict alias must resolve to the same token cap"
+    );
+    assert_eq!(primary_args.n_predict, 64);
+}
+
+/// `--adapter` / `--lora` was already symmetric on this binary before issue
+/// #1109; the divergence was on `mlxcel-server`, which accepted only `--lora`.
+/// Pinning both directions keeps the whole table covered from both ends rather
+/// than only the end that had to change.
+#[test]
+fn serve_adapter_and_lora_aliases_resolve_identically() {
+    let primary = Cli::try_parse_from([
+        "mlxcel",
+        "serve",
+        "-m",
+        "models/foo",
+        "--adapter",
+        "lora/foo",
+    ])
+    .expect("--adapter must parse on `mlxcel serve`");
+    let Commands::Serve(primary_args) = primary.command else {
+        panic!("expected serve command");
+    };
+
+    let aliased =
+        Cli::try_parse_from(["mlxcel", "serve", "-m", "models/foo", "--lora", "lora/foo"])
+            .expect("--lora alias must parse on `mlxcel serve`");
+    let Commands::Serve(aliased_args) = aliased.command else {
+        panic!("expected serve command");
+    };
+
+    assert_eq!(
+        primary_args.adapter, aliased_args.adapter,
+        "--adapter and its --lora alias must resolve to the same adapter path"
+    );
+    assert_eq!(
+        primary_args.adapter,
+        Some(std::path::PathBuf::from("lora/foo"))
+    );
+}
+
+#[test]
+fn serve_dry_sequence_breaker_singular_and_plural_aliases_resolve_identically() {
+    let primary = Cli::try_parse_from([
+        "mlxcel",
+        "serve",
+        "-m",
+        "models/foo",
+        "--dry-sequence-breaker",
+        "a,b",
+    ])
+    .expect("the singular --dry-sequence-breaker must parse on `mlxcel serve`");
+    let Commands::Serve(primary_args) = primary.command else {
+        panic!("expected serve command");
+    };
+
+    // The plural was this binary's only spelling before issue #1109 made the
+    // singular primary, so it has to keep parsing.
+    let aliased = Cli::try_parse_from([
+        "mlxcel",
+        "serve",
+        "-m",
+        "models/foo",
+        "--dry-sequence-breakers",
+        "a,b",
+    ])
+    .expect("the plural --dry-sequence-breakers alias must parse on `mlxcel serve`");
+    let Commands::Serve(aliased_args) = aliased.command else {
+        panic!("expected serve command");
+    };
+
+    assert_eq!(
+        primary_args.dry_sequence_breakers, aliased_args.dry_sequence_breakers,
+        "both DRY breaker spellings must resolve to the same breaker list"
+    );
+    assert_eq!(
+        primary_args.dry_sequence_breakers,
+        vec!["a".to_string(), "b".to_string()]
+    );
+}
+
 #[test]
 fn list_command_parses_to_list() {
     let cli = Cli::try_parse_from(["mlxcel", "list"]).expect("bare `list` must parse");
