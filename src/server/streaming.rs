@@ -27,7 +27,9 @@
 //! will drop the connection before the first token arrives.
 //!
 //! `sse_channel` returns a keepalive configuration via `SseKeepAlive` that
-//! route handlers must attach to the `Sse` response with `.keep_alive()`. The
+//! route handlers must attach to the `Sse` response with `.keep_alive()`.
+//! Streams that do not come from `sse_channel` (`router_front.rs`) build the
+//! same newtype directly rather than reaching for `KeepAlive::default()`. The
 //! interval is [`SSE_KEEPALIVE_INTERVAL_SECS`], short enough to beat typical
 //! proxy idle timeouts and long enough not to spam comment events for short
 //! responses. That constant is the single definition for every SSE surface in
@@ -81,13 +83,17 @@ const _: () = assert!(
 
 /// Keepalive configuration attached to an `Sse` response.
 ///
-/// Constructed by `sse_channel` and passed through to route handlers so they
-/// can call `Sse::new(stream).keep_alive(keepalive.into_inner())`. Using a
+/// Usually constructed by `sse_channel` and passed through to a route handler,
+/// which calls `Sse::new(stream).keep_alive(keepalive.into_inner())`. Using a
 /// newtype keeps the keepalive wired to the same channel creation point and
 /// makes it impossible to forget to attach it. The inner `KeepAlive` is private
 /// to prevent callers from constructing a mismatched keepalive independently.
 ///
-/// Used by: chat.rs, completions.rs, native_completion.rs
+/// `router_front.rs` builds its own with `default_for_long_prefill` because its
+/// streams do not come from `sse_channel`, but it goes through this type rather
+/// than `KeepAlive::default()` so it tracks the shared interval (#1105).
+///
+/// Used by: chat.rs, completions.rs, native_completion.rs, router_front.rs
 pub(crate) struct SseKeepAlive(KeepAlive);
 
 impl SseKeepAlive {
@@ -135,9 +141,10 @@ pub(crate) struct BlockingSseSender {
 /// `BatchScheduler` can abort orphaned sequences.
 ///
 /// The `keepalive` value must be attached to the `Sse` response via
-/// `Sse::new(stream).keep_alive(keepalive.0)` in the route handler. This
-/// ensures proxy idle timeouts do not close the connection during long prefill
-/// phases before the first generated token arrives.
+/// `Sse::new(stream).keep_alive(keepalive.into_inner())` in the route handler
+/// (the inner field is private, so `.0` is not reachable from outside this
+/// module). This ensures proxy idle timeouts do not close the connection during
+/// long prefill phases before the first generated token arrives.
 ///
 /// Used by: chat.rs, completions.rs, native_completion.rs
 pub(crate) fn sse_channel(

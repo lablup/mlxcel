@@ -66,6 +66,8 @@ error[E0080]: evaluation panicked: SSE keepalive interval must be less than the 
 
 상수를 61로 두면 그 단언에서, 이름과 메시지를 그대로 달고 빌드가 실패한다. 값은 곧바로 되돌렸다. 이 확인을 실제로 돌린 이유는, 이번 변경 전에는 나머지 두 상수에 같은 수정을 해도 깨끗이 컴파일됐다는 데 있다. 바뀐 것은 가드의 문구가 아니라 사정거리다.
 
+들어갈 때는 보이지 않던 두 번째 축에서도 사정거리가 늘었다. `streaming_tests.rs`는 `#[cfg(test)] #[path = "streaming_tests.rs"] mod tests;`로 포함되므로 단언이 테스트 빌드에서만 const 평가됐다. `streaming.rs`의 모듈 수준 `const _`가 되면서 모든 빌드에서 평가된다. 위 확인이 평범한 `cargo check --lib`에서 재현되는 이유가 그것이다. 이제 가드는 표면 하나가 아니라 셋을, 테스트 빌드만이 아니라 모든 프로파일을 덮는다.
+
 ---
 
 ## 3. 기술적 결정

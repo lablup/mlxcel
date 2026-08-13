@@ -66,6 +66,8 @@ error[E0080]: evaluation panicked: SSE keepalive interval must be less than the 
 
 Setting the constant to 61 fails the build at the assertion, by name, with the message intact. The value was reverted immediately. The point of running it is that before this change the same edit to either of the other two constants compiled cleanly, so the guard's reach is what changed, not its wording.
 
+The reach widened on a second axis that was not obvious going in. `streaming_tests.rs` is included as `#[cfg(test)] #[path = "streaming_tests.rs"] mod tests;`, so the assertion was const-evaluated only in test builds. As a module-level `const _` in `streaming.rs` it is evaluated in every build, which is why the check above reproduces under a plain `cargo check --lib`. The guard now covers three surfaces instead of one and all profiles instead of test-only.
+
 ---
 
 ## 3. Technical Decisions
