@@ -81,7 +81,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use axum::extract::State;
-use axum::response::sse::{Event, Sse};
+use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -101,7 +101,7 @@ use crate::distributed::tcp_transport::TcpTransport;
 use crate::distributed::transport::{Transport, TransportBackend};
 use crate::server::ChatTemplateProcessor;
 use crate::server::config::{ServerConfig, ServerGenerateOptions};
-use crate::server::streaming::SseKeepAlive;
+use crate::server::streaming::{SseKeepAlive, sse_response};
 use crate::server::tool_calls::stream_filter::{FilterOutput, StreamFilter};
 use crate::server::types::request::ChatCompletionRequest;
 use crate::server::types::{CompletionChunk, CompletionRequest, CompletionResponse, ErrorResponse};
@@ -811,13 +811,17 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
             state2.finalize_request(&request_id_str2, completed);
         });
 
-        // Go through the shared newtype rather than `KeepAlive::default()`, so
-        // the router-front streams track `SSE_KEEPALIVE_INTERVAL_SECS` if it is
-        // ever lowered for proxy compatibility (#1105). `KeepAlive::default()`
-        // is 15s under axum 0.7.9 too, so this is not a behaviour change today.
-        Ok(Sse::new(UnboundedReceiverStream::new(chunk_rx))
-            .keep_alive(SseKeepAlive::default_for_long_prefill().into_inner())
-            .into_response())
+        // Go through the shared constructor rather than assembling
+        // `Sse::new(..).keep_alive(..)` here (#1107). These streams do not come
+        // from `sse_channel`, so the newtype is built directly, but the attach
+        // itself is the one every route uses. The interval is the shared
+        // `SSE_KEEPALIVE_INTERVAL_SECS` rather than the `KeepAlive::default()`
+        // these sites used to take (#1105); both are 15s under axum 0.7.9, so
+        // neither change moves behaviour today.
+        Ok(sse_response(
+            UnboundedReceiverStream::new(chunk_rx),
+            SseKeepAlive::default_for_long_prefill(),
+        ))
     } else {
         // Non-streaming: collect all tokens (filtered) then return a single
         // JSON object with `content`, `reasoning_content` when present, and a
@@ -1079,13 +1083,17 @@ async fn route_completion(state: Arc<RouterState>, request: CompletionRequest) -
             state2.finalize_request(&response_id2, result.is_ok());
         });
 
-        // Go through the shared newtype rather than `KeepAlive::default()`, so
-        // the router-front streams track `SSE_KEEPALIVE_INTERVAL_SECS` if it is
-        // ever lowered for proxy compatibility (#1105). `KeepAlive::default()`
-        // is 15s under axum 0.7.9 too, so this is not a behaviour change today.
-        Ok(Sse::new(UnboundedReceiverStream::new(chunk_rx))
-            .keep_alive(SseKeepAlive::default_for_long_prefill().into_inner())
-            .into_response())
+        // Go through the shared constructor rather than assembling
+        // `Sse::new(..).keep_alive(..)` here (#1107). These streams do not come
+        // from `sse_channel`, so the newtype is built directly, but the attach
+        // itself is the one every route uses. The interval is the shared
+        // `SSE_KEEPALIVE_INTERVAL_SECS` rather than the `KeepAlive::default()`
+        // these sites used to take (#1105); both are 15s under axum 0.7.9, so
+        // neither change moves behaviour today.
+        Ok(sse_response(
+            UnboundedReceiverStream::new(chunk_rx),
+            SseKeepAlive::default_for_long_prefill(),
+        ))
     } else {
         // Non-streaming: collect all tokens, then return a single
         // `CompletionResponse` JSON object identical in shape to single-node.

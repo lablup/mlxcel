@@ -47,7 +47,7 @@ use futures::{Stream, StreamExt};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::server::streaming::SSE_KEEPALIVE_INTERVAL_SECS;
+use crate::server::streaming::{IntoKeepAlive, SSE_KEEPALIVE_INTERVAL_SECS};
 use crate::server::types::responses_stream::{ResponseStreamEvent, SequenceCounter};
 
 /// Cancellation token shared with the scheduler for client-disconnect detection.
@@ -85,25 +85,27 @@ impl ResponseStreamSender {
     }
 }
 
-/// Newtype wrapping the keepalive configuration so it ships out of
-/// the channel constructor and into the `Sse` response handler.
+/// Newtype wrapping the keepalive configuration so it ships out of the channel
+/// constructor and into `sse_response`, which attaches it.
 pub struct ResponseSseKeepAlive(KeepAlive);
 
 impl ResponseSseKeepAlive {
     fn default_for_long_prefill() -> Self {
         Self(KeepAlive::new().interval(Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)))
     }
+}
 
-    pub fn into_inner(self) -> KeepAlive {
+impl IntoKeepAlive for ResponseSseKeepAlive {
+    fn into_keep_alive(self) -> KeepAlive {
         self.0
     }
 }
 
 /// Construct a Responses-API SSE channel.
 ///
-/// Returns `(sender, stream, cancelled, keepalive)`. The stream is fed
-/// into `Sse::new(stream).keep_alive(keepalive.into_inner())`. The
-/// sender accepts [`ResponseStreamEvent`] values from a blocking
+/// Returns `(sender, stream, cancelled, keepalive)`. The pair is handed to
+/// [`crate::server::streaming::sse_response`], which attaches the keepalive.
+/// The sender accepts [`ResponseStreamEvent`] values from a blocking
 /// generation task. The cancellation token flips when the receiver is
 /// dropped so the scheduler can abort orphaned sequences.
 pub fn responses_sse_channel(

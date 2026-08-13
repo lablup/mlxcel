@@ -32,7 +32,7 @@ use axum::{
     Json,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response, sse::Sse},
+    response::{IntoResponse, Response},
 };
 
 use crate::server::AppState;
@@ -45,6 +45,7 @@ use crate::server::responses_translator::{
     OutboundContext, ResponsesTranslateError, build_response_object, responses_request_to_chat,
     short_uuid,
 };
+use crate::server::streaming::sse_response;
 use crate::server::streaming_responses::{ResponseStreamEmitter, responses_sse_channel};
 use crate::server::structured::build_constraint_from_response_format;
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
@@ -849,9 +850,7 @@ async fn stream_create_response(
         }
     });
 
-    Sse::new(stream)
-        .keep_alive(keepalive.into_inner())
-        .into_response()
+    sse_response(stream, keepalive)
 }
 
 /// GET /v1/responses/:id
