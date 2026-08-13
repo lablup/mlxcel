@@ -22,6 +22,28 @@ fn repeat_kv(keys: &MlxArray, values: &MlxArray, n_rep: i32) -> ... {
 2. When modifying a shared function's behavior
 3. When discovering that a function is used by a model not listed
 
+**When the caller list is too long to enumerate:**
+
+Past roughly a dozen callers, a hand-written roster is wrong by the next release and nobody repairs it. Do not enumerate in that case. Write a rule that says *why* a caller is on the list, name a few representatives per group, name the families that are deliberately absent, and close with the `grep` one-liner that regenerates the exact set:
+
+```rust
+/// Used by: decoders that materialize an explicit prefill mask instead of
+/// leaving `mask: None` for fused SDPA to apply causality itself. At this
+/// commit that is 44 non-test files under `src/models`, in four groups.
+/// (groups and representatives ...)
+///
+/// Not used by the mainstream dense decoders (Llama3, Mixtral, Gemma2 and
+/// similar): they pass `mask: None` for `seq_len > 1`, so they are unaffected
+/// by changes here.
+///
+/// The caller set is too large to enumerate by name without going stale, so
+/// the groups above are a summary. Regenerate the exact list with
+/// `grep -rln '\bcreate_causal_mask(' src --include='*.rs'`.
+pub fn create_causal_mask(size: i32, offset: i32) -> UniquePtr<MlxArray> {
+```
+
+`create_causal_mask` in `utils.rs` is the worked example. The "not used by" half carries as much weight as the list: it is what stops a contributor from assuming a shared helper still covers a family that moved off it several releases ago. Derive every list by running the grep at the current commit, never from memory, and prefer `///` doc comments over `//` on public items so the annotation survives into rustdoc.
+
 **Key shared components to track:**
 - `src/lib/mlxcel-core/src/layers.rs` - KVCache, Attention, Normalization
 - `src/lib/mlxcel-core/src/utils.rs` - create_causal_mask, softcap, repeat_kv
