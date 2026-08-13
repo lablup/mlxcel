@@ -12,7 +12,7 @@
 
 PR #1125는 이슈 #1109를 닫는다. `mlxcel serve`와 `mlxcel-server`는 같은 서버를 손으로 각각 정의한 두 벌의 clap 정의이고, 플래그 철자 112개를 공유한다. 그중 넷이 갈라져 있었다. 최악의 경우는 공유 철자가 아예 없었다. `--n-parallel`은 `serve`에서만, `--parallel`은 `mlxcel-server`에서만 동작했다. 둘 다 같은 `LLAMA_ARG_N_PARALLEL` 환경변수를 읽는데도 두 바이너리 사이에서 복사한 명령줄이 파싱되지 않았다.
 
-넷 중 셋은 빠진 `visible_alias`를 추가해 해결한다. 주 철자는 하나도 바뀌지 않는다. 넷째인 DRY sequence breaker는 두 바이너리가 이름 자체를 다르게 쓰고 있었으므로 주 철자를 정해야 했다. 지속성 있는 절반은 `tests/cli_help_consistency.rs`다. 다섯 번째 분기가 생기면 실패하는 명시적 목록 계약이 들어갔다.
+넷 중 셋은 빠진 `visible_alias`를 추가해 해결한다. 주 철자는 하나도 바뀌지 않는다. 넷째인 DRY sequence breaker는 두 바이너리가 이름 자체를 다르게 쓰고 있었으므로 주 철자를 정해야 했다. 지속성 있는 절반은 `tests/cli_help_consistency.rs`다. 두 바이너리의 long 이름 표면 전체를 의도적 예외 세 개짜리 허용 목록과 대조하므로, 한쪽에만 추가되고 다른 쪽에서 잊힌 플래그는 즉시 실패한다.
 
 ---
 
@@ -70,9 +70,13 @@ DRY breaker 행만이 주 철자를 바꾸며, 그것도 `mlxcel serve`에서만
 
 일회성 실제 변이로 종단 경로도 확인했다. clap 정의에서 `visible_alias = "n-parallel"`을 지우고 다시 빌드하자 `shared_server_flags_accept_the_same_spellings_on_both_binaries`가 `left: ["--parallel"], right: ["--n-parallel", "--parallel"]`로 실패했고, 되돌리자 스위트가 다시 초록이 됐다.
 
-### 2.4 계약을 명시적 목록으로 둔 이유
+### 2.4 명시적 목록만으로는 이슈가 요구한 것을 주지 못한다
 
-이슈가 이미 예상한 지점이다. 플래그 표면 전체를 비교하면 잡음이다. 두 바이너리는 정당하게 다르다(`mlxcel serve`에는 서브커맨드 성격의 `--estimate-memory`와 `--force`가 있다). 전체 비교 단언은 영구히 빨갛거나, 실제 분기를 그 안에 숨길 만큼 긴 제외 목록을 달게 된다. 명시적 목록은 이를 뒤집는다. 무엇이 일치해야 하는지를 적으므로 틀릴 수 있는 방식은 누락뿐이고, 개념을 추가하는 일은 왜 들어가는지 설명하는 문서 주석이 붙은 한 줄 변경이다.
+이 변경의 첫 초안은 개념 여섯 개짜리 명시적 목록만 단언했다. 그것은 누군가 이미 적어 둔 짝의 회귀를 잡는다. 이슈가 실제로 요구한 것, 즉 미래의 분기는 잡지 못한다. 내일 한쪽 바이너리에만 추가된 플래그는 그 목록에 없을 뿐이고 스위트는 초록으로 남는다.
+
+이슈가 명시적 목록을 대안으로 제시한 근거는 전체 표면 비교가 너무 시끄러우리라는 가정이었다. 두 바이너리가 정당하게 다르기 때문이다. 재어 보니 그 가정이 깨졌다. 이번 변경 후 두 표면은 철자 134개를 공유하고 정확히 세 개만 다르다. `mlxcel serve` 쪽의 `--estimate-memory`와 `--force`(둘 다 서브커맨드 성격의 일회성 동작), 그리고 `mlxcel-server` 쪽의 `--version`(`mlxcel`은 최상위에 갖고 있다). 세 개짜리 허용 목록은 읽을 수 있는 크기이므로, 실제로 들어가는 것은 전체 표면 단언이다.
+
+두 불변식을 모두 유지하는 이유는 실패하는 대상이 다르기 때문이다. 표면 비교는 이름의 집합을 볼 뿐, 어떤 이름들이 한 개념의 두 철자인지는 보지 못한다. 한 변경에서 `mlxcel-server`의 `--parallel`과 `mlxcel serve`의 `--n-parallel`이 함께 사라지면 두 표면은 여전히 같고, 알아채는 것은 `SHARED_SERVER_FLAG_GROUPS`뿐이다. 명시적 목록은 회귀 가드이고, 표면 비교는 신규 분기 가드다.
 
 ---
 
@@ -114,17 +118,17 @@ drafter 두 그룹은 억지로 일치시키는 대신 의도적으로 제외한
 | 추가된 라인 | +587 |
 | 삭제된 라인 | -16 |
 | 변경된 clap 속성 | 5 |
-| 테스트 추가 | 9 |
+| 테스트 추가 | 13 |
 
 ### 영역별 변경
 
 | 영역 | 파일 | 내용 |
 |---|---|---|
 | clap 정의 | `src/main.rs` | `n_parallel`, `n_predict`에 `visible_alias`; DRY breaker에 `long = "dry-sequence-breaker"`와 복수 alias; `--n-parallel` 헬프 문단을 `mlxcel-server` 쪽과 일치; #1118 문장이 새 주 철자를 가리킴 |
-| clap 정의 | `src/bin/mlx_server.rs` | `parallel`, `lora`에 `visible_alias`; DRY breaker에 복수 alias와 공통 문서 주석; 파싱 수준 alias 테스트 셋 |
+| clap 정의 | `src/bin/mlx_server.rs` | `parallel`, `lora`에 `visible_alias`; DRY breaker에 복수 alias와 공통 문서 주석; 파싱 수준 alias 테스트 셋과 clap 이름 유일성 가드 |
 | 코드 주석 | `src/commands/generate.rs` | DRY 범위 주석이 새 주 철자를 가리킴 |
-| 단위 테스트 | `src/main_tests.rs` | `mlxcel serve`에 파싱 수준 alias 테스트 넷. 이미 대칭이던 `--adapter` / `--lora` 포함 |
-| 통합 테스트 | `tests/cli_help_consistency.rs` | `SHARED_SERVER_FLAG_GROUPS`, `SHARED_SERVER_FLAG_DESCRIPTIONS`, 계약 테스트 둘, 가드 테스트 셋, 헬퍼 셋, `entry_body` 리팩터 |
+| 단위 테스트 | `src/main_tests.rs` | `mlxcel serve`에 파싱 수준 alias 테스트 넷(이미 대칭이던 `--adapter` / `--lora` 포함)과 clap 이름 유일성 가드 |
+| 통합 테스트 | `tests/cli_help_consistency.rs` | 허용 목록 둘을 낀 전체 표면 비교, `SHARED_SERVER_FLAG_GROUPS`, `SHARED_SERVER_FLAG_DESCRIPTIONS`, 계약 테스트 셋, 가드 테스트 다섯, 헬퍼 여섯, `entry_body` 리팩터 |
 | 문서 | `docs/CONTINUOUS_BATCHING.md` | `--n-parallel`과 `--parallel`을 바이너리당 하나의 철자처럼 제시하지 않음 |
 
 ### 관련 커밋
@@ -139,16 +143,20 @@ drafter 두 그룹은 억지로 일치시키는 대신 의도적으로 제외한
 
 ### 통과
 
-- `cargo test --profile test-fast --features cuda --bin mlxcel aliases_resolve_identically`: 6 passed.
-- `cargo test --profile test-fast --features cuda --bin mlxcel-server aliases_resolve_identically`: 5 passed.
-- `cargo test --profile test-fast --features cuda --test cli_help_consistency`: 22 passed (기준선 17에서 증가).
+- `cargo test --profile test-fast --features cuda --bin mlxcel tests::serve_`: 13 passed.
+- `cargo test --profile test-fast --features cuda --bin mlxcel-server tests::`: 13 passed.
+- `cargo test --profile test-fast --features cuda --test cli_help_consistency`: 25 passed (기준선 17에서 증가).
 - `cargo clippy --profile test-fast --features cuda --lib --bins --tests -- -D warnings`: clean. 두 바이너리 크레이트가 모두 바뀌므로 `--bins`를 포함했다.
 - `cargo fmt --all -- --check`: clean.
-- 실제 변이: `visible_alias = "n-parallel"`을 지우면 예상한 메시지로 parity 단언이 실패하고, 되돌리면 스위트가 다시 초록.
+- 실제 변이 두 건. 각각 되돌린 뒤 다시 초록임을 확인했다. clap 정의에서 `visible_alias = "n-parallel"`을 지우면 명시적 목록 parity 단언이 `left: ["--parallel"], right: ["--n-parallel", "--parallel"]`로 실패한다. `SERVE_ONLY_FLAGS`에서 `--force`를 지우면 전체 표면 단언이 `left: {"--estimate-memory", "--force"}, right: {"--estimate-memory"}`로 실패하는데, 이것이 실제로 한쪽에만 생긴 신규 플래그가 만들 모양이다.
 
 ### 다루지 않은 것
 
 각 철자로 서버가 실제로 뜨는지 확인하는 종단 검사는 없다. 파싱 수준 테스트가 해석된 필드 값을 단언하며, 그것이 플래그 이름이 지배하는 경계다. `clap::Parser` 이후는 전부 Rust 필드 이름을 읽으므로 어느 철자가 그 값을 만들었는지 알 수 없다.
+
+short form은 범위 밖이고 여전히 갈라져 있다. `mlxcel-server`에는 `--ctx-size`의 `-c`와 `--predict`의 `-n`이 있고 `mlxcel serve`에는 둘 다 없으므로, `mlxcel-server -m X -c 4096 -n 256`은 아직 그대로 복사되지 않는다. `mlxcel serve`에서 두 글자 모두 비어 있어 닫는 비용은 낮지만, 이슈 #1109가 열거한 표와는 다른 표이고 헬프 텍스트도 더 이상 그렇게 주장하지 않는다. 계약은 long 이름만 비교한다.
+
+설명 일치는 공유 철자 134개 중 4개를 덮는다. 그 밖의 산문 어긋남은 존재하며 가드되지 않는다. 예로 `--prompt-cache-enabled`는 `mlxcel serve`에서 "when the CLI flag is absent", `mlxcel-server`에서 "is not explicitly provided"라고 적는다. 이번에 생긴 것은 아니고, 설명 부분집합이 남기는 공백의 구체적 크기다.
 
 ### 후속
 

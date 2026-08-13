@@ -437,6 +437,66 @@ fn serve_n_predict_and_predict_aliases_resolve_identically() {
     assert_eq!(primary_args.n_predict, 64);
 }
 
+/// Every long name, alias, and short form on `mlxcel serve` must be distinct.
+///
+/// clap detects a duplicate itself, but only behind a `debug_assert` in
+/// `Command::_build_self`, and `[profile.test-fast]` inherits `release`, so
+/// `debug-assertions` is off in the profile this repository verifies with. A
+/// `visible_alias` that collided with an existing flag would therefore be
+/// silently last-wins rather than a panic, and issue #1109 added four of them.
+/// Asserting uniqueness directly keeps the guard in every profile.
+#[test]
+fn serve_flag_names_and_aliases_are_unique() {
+    let command = Cli::command();
+    let serve = command
+        .find_subcommand("serve")
+        .expect("`mlxcel serve` subcommand exists");
+
+    let mut longs: Vec<String> = Vec::new();
+    let mut shorts: Vec<char> = Vec::new();
+    for arg in serve.get_arguments() {
+        if let Some(long) = arg.get_long() {
+            longs.push(long.to_string());
+        }
+        if let Some(aliases) = arg.get_all_aliases() {
+            longs.extend(aliases.into_iter().map(str::to_string));
+        }
+        if let Some(short) = arg.get_short() {
+            shorts.push(short);
+        }
+        if let Some(aliases) = arg.get_all_short_aliases() {
+            shorts.extend(aliases);
+        }
+    }
+
+    let duplicate_longs = duplicates(&longs);
+    assert!(
+        duplicate_longs.is_empty(),
+        "`mlxcel serve` declares these long names more than once: {duplicate_longs:?}. \
+         clap resolves a duplicate silently in this profile, so the second definition \
+         would shadow the first with no error."
+    );
+
+    let duplicate_shorts = duplicates(&shorts);
+    assert!(
+        duplicate_shorts.is_empty(),
+        "`mlxcel serve` declares these short forms more than once: {duplicate_shorts:?}"
+    );
+}
+
+/// Values appearing more than once in `items`, sorted and deduplicated.
+fn duplicates<T: Clone + Ord>(items: &[T]) -> Vec<T> {
+    let mut sorted = items.to_vec();
+    sorted.sort();
+    let mut repeated: Vec<T> = sorted
+        .windows(2)
+        .filter(|w| w[0] == w[1])
+        .map(|w| w[0].clone())
+        .collect();
+    repeated.dedup();
+    repeated
+}
+
 /// `--adapter` / `--lora` was already symmetric on this binary before issue
 /// #1109; the divergence was on `mlxcel-server`, which accepted only `--lora`.
 /// Pinning both directions keeps the whole table covered from both ends rather

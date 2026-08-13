@@ -241,8 +241,7 @@ struct ServerArgs {
     /// families that cannot batch (SSM / hybrid / mixed-cache). Use `--parallel
     /// 1` (or `--no-batch`) to restore single-slot sequential serving. Both
     /// `--parallel` and `--n-parallel` are accepted on `mlxcel serve` and on
-    /// `mlxcel-server`, so a command line copied between them parses
-    /// unchanged.
+    /// `mlxcel-server`, so this flag parses on either binary.
     #[arg(
         long = "parallel",
         visible_alias = "n-parallel",
@@ -1712,6 +1711,64 @@ mod tests {
     // serve`, and `tests/cli_help_consistency.rs` asserts the two
     // binaries accept the same set of spellings so a fifth divergence
     // cannot land silently.
+
+    /// Every long name, alias, and short form on `mlxcel-server` must be
+    /// distinct. clap detects a duplicate itself, but only behind a
+    /// `debug_assert` in `Command::_build_self`, and `[profile.test-fast]`
+    /// inherits `release`, so `debug-assertions` is off in the profile this
+    /// repository verifies with. A `visible_alias` that collided with an
+    /// existing flag would be silently last-wins rather than a panic, and
+    /// issue #1109 added two of them here.
+    #[test]
+    fn server_flag_names_and_aliases_are_unique() {
+        use clap::CommandFactory;
+
+        let command = Cli::command();
+
+        let mut longs: Vec<String> = Vec::new();
+        let mut shorts: Vec<char> = Vec::new();
+        for arg in command.get_arguments() {
+            if let Some(long) = arg.get_long() {
+                longs.push(long.to_string());
+            }
+            if let Some(aliases) = arg.get_all_aliases() {
+                longs.extend(aliases.into_iter().map(str::to_string));
+            }
+            if let Some(short) = arg.get_short() {
+                shorts.push(short);
+            }
+            if let Some(aliases) = arg.get_all_short_aliases() {
+                shorts.extend(aliases);
+            }
+        }
+
+        let duplicate_longs = duplicates(&longs);
+        assert!(
+            duplicate_longs.is_empty(),
+            "`mlxcel-server` declares these long names more than once: \
+             {duplicate_longs:?}. clap resolves a duplicate silently in this profile, so \
+             the second definition would shadow the first with no error."
+        );
+
+        let duplicate_shorts = duplicates(&shorts);
+        assert!(
+            duplicate_shorts.is_empty(),
+            "`mlxcel-server` declares these short forms more than once: {duplicate_shorts:?}"
+        );
+    }
+
+    /// Values appearing more than once in `items`, sorted and deduplicated.
+    fn duplicates<T: Clone + Ord>(items: &[T]) -> Vec<T> {
+        let mut sorted = items.to_vec();
+        sorted.sort();
+        let mut repeated: Vec<T> = sorted
+            .windows(2)
+            .filter(|w| w[0] == w[1])
+            .map(|w| w[0].clone())
+            .collect();
+        repeated.dedup();
+        repeated
+    }
 
     #[test]
     fn parallel_and_n_parallel_aliases_resolve_identically() {

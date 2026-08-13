@@ -37,19 +37,29 @@
 //! When a future flag or mode is added to either shared group, all three
 //! binaries fail the test together, no drift is possible.
 //!
-//! A third invariant covers the two server surfaces specifically. `mlxcel
+//! Further invariants cover the two server surfaces specifically. `mlxcel
 //! serve` and `mlxcel-server` are two hand-maintained clap definitions of the
 //! same server rather than one flattened group, so nothing structural keeps
 //! their flag NAMES aligned, and four of them had drifted apart by issue
 //! #1109 (`--n-parallel` / `--parallel` shared no spelling at all, so a
-//! command line copied between the binaries failed to parse). The flag
-//! surfaces legitimately differ in places, so the contract is a named list,
-//! [`SHARED_SERVER_FLAG_GROUPS`]: for each concept there, both binaries must
-//! accept every spelling, whichever one each makes primary.
-//! [`SHARED_SERVER_FLAG_DESCRIPTIONS`] additionally requires the help prose to
-//! read identically, which is what stops the same paragraph from forking into
-//! two wordings and hiding the name drift the way it did before.
+//! command line copied between the binaries failed to parse). Three
+//! assertions hold that surface together:
+//!
+//! 3. [`the_two_server_binaries_accept_the_same_flag_surface`] compares the
+//!    whole long-name surface of the two binaries, allowing only the three
+//!    names in [`SERVE_ONLY_FLAGS`] / [`SERVER_ONLY_FLAGS`]. This is what
+//!    catches a NEW divergence: a flag added to one binary and forgotten on
+//!    the other fails immediately, with no list to remember to update.
+//! 4. [`SHARED_SERVER_FLAG_GROUPS`] pins which alternate spellings belong to
+//!    one concept, which a set comparison cannot express. It catches a
+//!    REGRESSION of a pairing, including the case where both binaries lose
+//!    the same spelling and their surfaces stay equal.
+//! 5. [`SHARED_SERVER_FLAG_DESCRIPTIONS`] requires the help prose, the
+//!    environment variable, and the default value to match for the concepts
+//!    where they should. That is what stops one paragraph from forking into
+//!    two wordings and hiding the name drift the way it did before.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
 
@@ -825,12 +835,23 @@ fn flag_help_entry_stops_at_the_next_flag() {
 // ── Shared server flag spellings (issue #1109) ──────────────────
 //
 // `mlxcel serve` and `mlxcel-server` are two hand-maintained clap definitions
-// of the same server. Their flag surfaces legitimately differ (`mlxcel serve`
-// carries `--estimate-memory` and `--force`, which are subcommand-shaped), so
-// asserting over the whole surface would be noise that nobody could keep
-// green. The contract is a named list instead: for each concept below, BOTH
-// binaries must accept EVERY spelling, whichever one each makes primary. Add
-// a row when a concept gains a second spelling on either binary.
+// of the same server. Two invariants are asserted, and they catch different
+// things:
+//
+// 1. [`the_two_server_binaries_accept_the_same_flag_surface`] compares the
+//    WHOLE long-name surface of the two binaries against a three-name
+//    allowlist of deliberate exceptions. This is what catches a NEW
+//    divergence: a flag added to only one binary tomorrow fails immediately,
+//    with no list to remember to update. Adding a name to the allowlist is
+//    the deliberate act that marks a divergence as intentional.
+// 2. The named-concept lists below catch a REGRESSION of a specific pairing.
+//    They pin which alternate spellings must exist for a concept, which the
+//    surface comparison cannot express: it sees a set of names, not which
+//    names are two spellings of one thing. Losing `--parallel` from
+//    `mlxcel-server` while `mlxcel serve` also lost it would keep the two
+//    surfaces equal, and only [`SHARED_SERVER_FLAG_GROUPS`] would notice.
+//
+// Add a row below when a concept gains a second spelling on either binary.
 
 /// Parallel request slots. Before issue #1109 neither spelling worked on both
 /// binaries, so a copied command line failed outright.
@@ -878,6 +899,16 @@ const SHARED_SERVER_FLAG_DESCRIPTIONS: &[&[&str]] = &[
     DRY_BREAKER_GROUP,
 ];
 
+/// Long names that legitimately exist on `mlxcel serve` and not on
+/// `mlxcel-server`. Both are subcommand-shaped one-shot actions rather than
+/// server knobs.
+const SERVE_ONLY_FLAGS: &[&str] = &["--estimate-memory", "--force"];
+
+/// Long names that legitimately exist on `mlxcel-server` and not on `mlxcel
+/// serve`. `mlxcel` carries `--version` at the top level instead, where it
+/// belongs for a multi-subcommand binary.
+const SERVER_ONLY_FLAGS: &[&str] = &["--version"];
+
 /// The long name a clap `--help` signature line declares, or `None` when the
 /// line is not a signature line.
 ///
@@ -900,7 +931,13 @@ fn signature_long_name(trimmed: &str) -> Option<&str> {
     if tokens.any(|token| !(token.starts_with('<') || token == "...")) {
         return None;
     }
-    Some(long)
+    // An optional-value flag is rendered as ONE token, `--flag[=<VALUE>]`, so
+    // the value name has to be stripped off the name rather than skipped as a
+    // separate token. `--prompt-cache-enabled[=<BOOL>]` and
+    // `--apc-enabled[=<BOOL>]` are live examples on both server binaries; the
+    // whole-surface comparison would otherwise treat the rendered value name
+    // as part of the flag's identity.
+    Some(long.split_once("[=<").map_or(long, |(name, _)| name))
 }
 
 /// Slice the `--help` entry whose signature line declares `long_name`.
@@ -927,6 +964,62 @@ fn flag_entry_by_long_name<'a>(help: &'a str, long_name: &str) -> Option<&'a str
     entry_body(help, entry_start?)
 }
 
+/// Cut a `--help` output at the first flattened-subcommand section.
+///
+/// `mlxcel-server` sets `flatten_help`, so its `--help` renders each
+/// subcommand's own flags inline under a `mlxcel-server <sub>:` heading
+/// (`mlxcel-server download:` and `mlxcel-server help:` today). Those are a
+/// second flag surface with nothing to do with the server's own knobs, and
+/// `--models-dir` and `--help` already appear in both halves. Without the cut,
+/// a lookup for a name that is absent at the top level but present on a
+/// subcommand would silently resolve to the subcommand's entry and compare an
+/// unrelated description, and the whole-surface comparison would count the
+/// subcommand's flags as the server's.
+///
+/// The heading shape is exact (`<bin> <one-word>:` at column 0), so the
+/// epilogue sections that follow it, and any prose line mentioning the binary,
+/// cannot trigger the cut.
+fn top_level_help<'a>(help: &'a str, bin: &str) -> &'a str {
+    let prefix = format!("{bin} ");
+    let mut offset = 0usize;
+    for line in help.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches('\n');
+        if !trimmed.starts_with(' ')
+            && trimmed.ends_with(':')
+            && let Some(rest) = trimmed.strip_prefix(&prefix)
+        {
+            let subcommand = rest.trim_end_matches(':');
+            if !subcommand.is_empty() && !subcommand.contains(char::is_whitespace) {
+                return &help[..offset];
+            }
+        }
+        offset += line.len();
+    }
+    help
+}
+
+/// Every long-form spelling a binary's `--help` documents: each entry's
+/// primary long name plus every name in its clap alias annotation.
+///
+/// This is the whole flag surface, which is what makes the comparison catch a
+/// flag that was added to only one binary. A hidden `alias` (as opposed to
+/// `visible_alias`) is invisible here by design: an undocumented spelling is
+/// not part of the surface an operator can discover from `--help`.
+fn all_documented_spellings(help: &str) -> BTreeSet<String> {
+    let mut spellings = BTreeSet::new();
+    let mut offset = 0usize;
+    for line in help.split_inclusive('\n') {
+        if let Some(long) = signature_long_name(line.trim())
+            && let Some(entry) = entry_body(help, offset)
+        {
+            spellings.insert(long.to_string());
+            spellings.extend(documented_aliases(entry));
+        }
+        offset += line.len();
+    }
+    spellings
+}
+
 /// Every spelling one binary accepts for a flag: the primary long name from
 /// the signature line plus every name in the entry's clap alias annotation.
 /// Sorted and deduplicated so two binaries that made opposite spellings
@@ -949,12 +1042,14 @@ fn accepted_spellings(entry: &str) -> Vec<String> {
 /// The prose clap rendered for a flag, with the signature line, the bracketed
 /// annotations, and all line wrapping removed.
 ///
-/// Those three are excluded by construction rather than by a hand-maintained
-/// allowlist: the signature line carries each binary's own primary spelling
-/// and derived value name, and the `[env: ...]` / `[default: ...]` /
-/// `[alias: ...]` annotations carry each binary's own env var, default, and
-/// alias. What is left is the description, which is the part that has to read
-/// the same on both binaries.
+/// The signature line is excluded because it necessarily differs: it carries
+/// each binary's own primary spelling and the value name clap derived from the
+/// Rust field name. The bracketed annotations are excluded because
+/// `[alias: ...]` necessarily differs too.
+///
+/// The `[env: ...]` and `[default: ...]` annotations do NOT necessarily
+/// differ, and a divergence there would matter more than prose drift, so they
+/// are not left unchecked: [`flag_env_and_default`] compares them separately.
 fn flag_description(entry: &str) -> String {
     entry
         .lines()
@@ -966,6 +1061,24 @@ fn flag_description(entry: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The `[env: ...]` and `[default: ...]` annotations clap rendered for a flag.
+///
+/// A flag the suite declares "shared" while the two binaries give it different
+/// defaults, or read it from different environment variables, is a worse
+/// divergence than the prose drift [`flag_description`] catches, and issue
+/// #1109 turned on exactly this point: `--n-parallel` and `--parallel` read
+/// the same `LLAMA_ARG_N_PARALLEL`, so the divergence was purely in the name.
+/// Comparing these two annotations keeps that property asserted rather than
+/// assumed.
+fn flag_env_and_default(entry: &str) -> Vec<String> {
+    entry
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("[env:") || line.starts_with("[default:"))
+        .map(str::to_string)
+        .collect()
 }
 
 /// Resolve one concept's entry on one binary, whichever spelling that binary
@@ -990,17 +1103,16 @@ fn shared_flag_entry<'a>(label: &str, help: &'a str, group: &[&str]) -> &'a str 
 /// unexpected argument '--parallel' found`, and nothing in the suite noticed.
 #[test]
 fn shared_server_flags_accept_the_same_spellings_on_both_binaries() {
-    let serve_help = help_output("mlxcel", &["serve", "--help"]);
-    let server_help = help_output("mlxcel-server", &["--help"]);
+    let serve_raw = help_output("mlxcel", &["serve", "--help"]);
+    let server_raw = help_output("mlxcel-server", &["--help"]);
+    let serve_help = top_level_help(&serve_raw, "mlxcel serve");
+    let server_help = top_level_help(&server_raw, "mlxcel-server");
 
     for group in SHARED_SERVER_FLAG_GROUPS {
         let mut expected: Vec<String> = group.iter().map(|s| (*s).to_string()).collect();
         expected.sort();
 
-        for (label, help) in [
-            ("mlxcel serve", &serve_help),
-            ("mlxcel-server", &server_help),
-        ] {
+        for (label, help) in [("mlxcel serve", serve_help), ("mlxcel-server", server_help)] {
             let entry = shared_flag_entry(label, help, group);
             assert_eq!(
                 accepted_spellings(entry),
@@ -1022,27 +1134,95 @@ fn shared_server_flags_accept_the_same_spellings_on_both_binaries() {
 /// their two spellings, which is how the flag-name drift stayed invisible.
 #[test]
 fn shared_server_flags_are_described_identically_on_both_binaries() {
-    let serve_help = help_output("mlxcel", &["serve", "--help"]);
-    let server_help = help_output("mlxcel-server", &["--help"]);
+    let serve_raw = help_output("mlxcel", &["serve", "--help"]);
+    let server_raw = help_output("mlxcel-server", &["--help"]);
+    let serve_help = top_level_help(&serve_raw, "mlxcel serve");
+    let server_help = top_level_help(&server_raw, "mlxcel-server");
 
     for group in SHARED_SERVER_FLAG_DESCRIPTIONS {
-        let serve_description =
-            flag_description(shared_flag_entry("mlxcel serve", &serve_help, group));
-        let server_description =
-            flag_description(shared_flag_entry("mlxcel-server", &server_help, group));
+        let serve_entry = shared_flag_entry("mlxcel serve", serve_help, group);
+        let server_entry = shared_flag_entry("mlxcel-server", server_help, group);
+
+        let serve_description = flag_description(serve_entry);
+        let server_description = flag_description(server_entry);
 
         assert_eq!(
             serve_description, server_description,
             "the help prose for {group:?} must read identically on both server binaries \
-             (issue #1109). The signature line and the bracketed [env:] / [default:] / \
-             [alias:] annotations are excluded from this comparison, so each binary keeps \
-             its own primary spelling, value name, and alias."
+             (issue #1109). The signature line and the `[alias: ...]` annotation are \
+             excluded from this comparison, so each binary keeps its own primary \
+             spelling, value name, and alias."
         );
         assert!(
             !serve_description.is_empty(),
             "precondition: {group:?} must have a non-empty description to compare"
         );
+
+        assert_eq!(
+            flag_env_and_default(serve_entry),
+            flag_env_and_default(server_entry),
+            "{group:?} must resolve from the same environment variable and to the same \
+             default on both server binaries. A shared flag name with two different \
+             defaults is a worse divergence than the prose drift above, and nothing else \
+             in the suite would catch it."
+        );
     }
+}
+
+/// The whole-surface contract: apart from a named allowlist of deliberate
+/// exceptions, `mlxcel serve` and `mlxcel-server` accept exactly the same set
+/// of long-form flag spellings (issue #1109).
+///
+/// This is the invariant that catches a NEW divergence. The named-concept
+/// lists above can only catch a regression of a pairing someone already
+/// thought to write down; a flag added to one binary and forgotten on the
+/// other would simply be absent from them, and the suite would stay green.
+/// Here the default is the opposite: a one-sided flag fails until someone adds
+/// it to the other binary or records it as intentional in an allowlist.
+///
+/// The two binaries turn out to share 134 spellings and differ by three, so
+/// the allowlist stays small enough to read.
+#[test]
+fn the_two_server_binaries_accept_the_same_flag_surface() {
+    let serve_raw = help_output("mlxcel", &["serve", "--help"]);
+    let server_raw = help_output("mlxcel-server", &["--help"]);
+    let serve = all_documented_spellings(top_level_help(&serve_raw, "mlxcel serve"));
+    let server = all_documented_spellings(top_level_help(&server_raw, "mlxcel-server"));
+
+    // Sanity floor: if the matcher stopped resolving entries this assertion
+    // would otherwise pass with two empty sets.
+    assert!(
+        serve.len() > 100 && server.len() > 100,
+        "precondition: both binaries must expose a substantial flag surface, got \
+         {} on `mlxcel serve` and {} on `mlxcel-server`",
+        serve.len(),
+        server.len()
+    );
+
+    let serve_only: BTreeSet<&str> = serve
+        .difference(&server)
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let server_only: BTreeSet<&str> = server
+        .difference(&serve)
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        serve_only,
+        SERVE_ONLY_FLAGS.iter().copied().collect::<BTreeSet<_>>(),
+        "every flag on `mlxcel serve` must also exist on `mlxcel-server`, except the \
+         names recorded in SERVE_ONLY_FLAGS. Add the flag to `ServerArgs` in \
+         src/bin/mlx_server.rs, or record the exception with the reason it is one \
+         (issue #1109)."
+    );
+    assert_eq!(
+        server_only,
+        SERVER_ONLY_FLAGS.iter().copied().collect::<BTreeSet<_>>(),
+        "every flag on `mlxcel-server` must also exist on `mlxcel serve`, except the \
+         names recorded in SERVER_ONLY_FLAGS. Add the flag to `ServeArgs` in \
+         src/main.rs, or record the exception with the reason it is one (issue #1109)."
+    );
 }
 
 /// Mutation check on the real help text, the counterpart to
@@ -1113,6 +1293,19 @@ fn signature_long_name_accepts_clap_signatures_and_rejects_prose() {
         Some("--dry-sequence-breaker")
     );
 
+    // clap renders an optional-value flag as ONE token. `--apc-enabled` and
+    // `--prompt-cache-enabled` are live examples on both server binaries, so
+    // without these cases the helper looks covered while silently reporting
+    // the rendered value name as part of the flag's identity.
+    assert_eq!(
+        signature_long_name("--prompt-cache-enabled[=<BOOL>]"),
+        Some("--prompt-cache-enabled")
+    );
+    assert_eq!(
+        signature_long_name("--apc-enabled[=<BOOL>]"),
+        Some("--apc-enabled")
+    );
+
     assert_eq!(
         signature_long_name("--parallel is the llama-server name"),
         None
@@ -1123,6 +1316,69 @@ fn signature_long_name_accepts_clap_signatures_and_rejects_prose() {
     );
     assert_eq!(signature_long_name("Options:"), None);
     assert_eq!(signature_long_name(""), None);
+}
+
+/// Guard for the guard: `top_level_help` must cut at a flattened-subcommand
+/// heading and nowhere else. Over-cutting would shrink the surface comparison
+/// silently; under-cutting would let a subcommand's flags be counted as the
+/// server's own.
+#[test]
+fn top_level_help_cuts_at_a_flattened_subcommand_heading() {
+    let help = "Options:\n      --models-dir <PATH>\n          Store root\n\n\
+        mlxcel-server download:\n      --models-dir <PATH>\n          Other root\n";
+    let cut = top_level_help(help, "mlxcel-server");
+
+    assert!(cut.contains("Store root"));
+    assert!(
+        !cut.contains("Other root"),
+        "the subcommand's own flags must be excluded:\n{cut}"
+    );
+
+    // An epilogue heading, a prose line naming the binary, and a heading for
+    // the other binary must all leave the help intact.
+    for untouched in [
+        "Options:\n      --a\n\nModel store:\n  some prose\n",
+        "Options:\n      --a\n\nRun mlxcel-server with two slots:\n  example\n",
+        "Options:\n      --a\n\nmlxcel serve download:\n  other binary\n",
+        "Options:\n      --a <V>\n          Text\n",
+    ] {
+        assert_eq!(
+            top_level_help(untouched, "mlxcel-server"),
+            untouched,
+            "the cut fired on a line that is not a flattened-subcommand heading"
+        );
+    }
+}
+
+/// Guard for the guard: `all_documented_spellings` must collect primaries and
+/// aliases together, and `flag_env_and_default` must pick out exactly the two
+/// annotations the description comparison deliberately drops.
+#[test]
+fn surface_collection_and_annotation_extraction_are_exact() {
+    let help = "Options:\n      \
+        --n-parallel <N_PARALLEL>\n          Slots\n\n          [env: LLAMA_ARG_N_PARALLEL=]\n          [default: 4]\n          [alias: --parallel]\n\n      \
+        --apc-enabled[=<BOOL>]\n          Prefix caching\n\n      \
+        --force\n          Overwrite\n";
+
+    assert_eq!(
+        all_documented_spellings(help)
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["--apc-enabled", "--force", "--n-parallel", "--parallel"],
+        "the surface must include aliases and must strip an optional-value marker"
+    );
+
+    let entry = flag_help_entry(help, "--n-parallel <N_PARALLEL>").expect("entry not found");
+    assert_eq!(
+        flag_env_and_default(entry),
+        vec![
+            "[env: LLAMA_ARG_N_PARALLEL=]".to_string(),
+            "[default: 4]".to_string()
+        ],
+        "the env var and default must be extracted, and the alias annotation must not be"
+    );
+    assert_eq!(flag_description(entry), "Slots");
 }
 
 /// Guard for the guard: `accepted_spellings` must report the primary name

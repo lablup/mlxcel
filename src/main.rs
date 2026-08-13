@@ -909,8 +909,7 @@ pub(crate) struct ServeArgs {
     /// families that cannot batch (SSM / hybrid / mixed-cache). Use `--parallel
     /// 1` (or `--no-batch`) to restore single-slot sequential serving. Both
     /// `--parallel` and `--n-parallel` are accepted on `mlxcel serve` and on
-    /// `mlxcel-server`, so a command line copied between them parses
-    /// unchanged.
+    /// `mlxcel-server`, so this flag parses on either binary.
     #[arg(
         long,
         visible_alias = "parallel",

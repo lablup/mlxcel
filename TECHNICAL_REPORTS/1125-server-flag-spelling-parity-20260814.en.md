@@ -12,7 +12,7 @@
 
 PR #1125 closes issue #1109. `mlxcel serve` and `mlxcel-server` are two hand-maintained clap definitions of the same server sharing 112 flag spellings. Four had drifted, and the worst case had no shared spelling at all: `--n-parallel` worked only on `serve`, `--parallel` only on `mlxcel-server`, so a command line copied between the two failed to parse even though both flags read the same `LLAMA_ARG_N_PARALLEL` environment variable.
 
-Three of the four are repaired by adding the missing `visible_alias`, which changes no primary spelling. The fourth, the DRY sequence breakers, needed a primary chosen because the two binaries disagreed on the name itself. The durable half is `tests/cli_help_consistency.rs`, which now carries a named-list contract that fails when a fifth divergence appears.
+Three of the four are repaired by adding the missing `visible_alias`, which changes no primary spelling. The fourth, the DRY sequence breakers, needed a primary chosen because the two binaries disagreed on the name itself. The durable half is `tests/cli_help_consistency.rs`, which now compares the whole long-name surface of the two binaries against a three-name allowlist of deliberate exceptions, so a flag added to one binary and forgotten on the other fails immediately.
 
 ---
 
@@ -70,9 +70,13 @@ A cross-binary contract test that passes is worth nothing unless it fails on a r
 
 A one-off live mutation confirmed the end-to-end path: removing `visible_alias = "n-parallel"` from the clap definition and rebuilding made `shared_server_flags_accept_the_same_spellings_on_both_binaries` fail with `left: ["--parallel"], right: ["--n-parallel", "--parallel"]`, and restoring it returned the suite to green.
 
-### 2.4 Why the Contract Is a Named List
+### 2.4 A Named List Alone Would Not Have Delivered What the Issue Asked For
 
-The issue anticipated this: comparing the entire flag surface is noise, because the two binaries legitimately differ (`mlxcel serve` carries `--estimate-memory` and `--force`, which are subcommand-shaped). A whole-surface assertion would either be permanently red or carry an exclusion list long enough to hide a real divergence inside it. The named list inverts that: it states what must agree, so an entry can only be wrong by omission, and adding a concept is a one-line change with a doc comment explaining why it belongs.
+The first draft of this change asserted only a named list of six concepts. That catches a REGRESSION of a pairing someone already thought to write down. It cannot catch what the issue actually asked for, a FUTURE divergence: a flag added to one binary tomorrow is simply absent from the list, and the suite stays green.
+
+The reason the issue offered the named list as a fallback was an assumption that a whole-surface comparison would be too noisy, because the two binaries legitimately differ. Measuring it killed that assumption. After this change the two surfaces share 134 spellings and differ by exactly three: `--estimate-memory` and `--force` on `mlxcel serve` (both subcommand-shaped one-shot actions), and `--version` on `mlxcel-server` (`mlxcel` carries it at the top level instead). A three-name allowlist is small enough to read, so the whole-surface assertion is the one that ships.
+
+Both invariants are kept, because they fail on different things. The surface comparison sees a set of names, not which names are two spellings of one concept: if `--parallel` were dropped from `mlxcel-server` and `--n-parallel` from `mlxcel serve` in the same change, the two surfaces would stay equal and only `SHARED_SERVER_FLAG_GROUPS` would notice. The named list is the regression guard; the surface comparison is the new-divergence guard.
 
 ---
 
@@ -114,17 +118,17 @@ The pre-existing `flag_help_entry` matches a complete rendered signature such as
 | Lines added | +587 |
 | Lines deleted | -16 |
 | clap attributes changed | 5 |
-| Tests added | 9 |
+| Tests added | 13 |
 
 ### Changes by Area
 
 | Area | File | Summary |
 |---|---|---|
 | clap definition | `src/main.rs` | `visible_alias` on `n_parallel` and `n_predict`; DRY breakers get `long = "dry-sequence-breaker"` plus the plural alias; the `--n-parallel` help paragraph is reconciled with `mlxcel-server`'s; the #1118 sentence names the new primary |
-| clap definition | `src/bin/mlx_server.rs` | `visible_alias` on `parallel` and `lora`; DRY breakers get the plural alias and the shared doc comment; three parse-level alias tests |
+| clap definition | `src/bin/mlx_server.rs` | `visible_alias` on `parallel` and `lora`; DRY breakers get the plural alias and the shared doc comment; three parse-level alias tests and a clap name-uniqueness guard |
 | Code comment | `src/commands/generate.rs` | The DRY scope comment names the new primary spelling |
-| Unit tests | `src/main_tests.rs` | Four parse-level alias tests on `mlxcel serve`, including `--adapter` / `--lora`, which was already symmetric |
-| Integration tests | `tests/cli_help_consistency.rs` | `SHARED_SERVER_FLAG_GROUPS` and `SHARED_SERVER_FLAG_DESCRIPTIONS`, two contract tests, three guard tests, three new helpers, and the `entry_body` refactor |
+| Unit tests | `src/main_tests.rs` | Four parse-level alias tests on `mlxcel serve`, including `--adapter` / `--lora`, which was already symmetric, plus a clap name-uniqueness guard |
+| Integration tests | `tests/cli_help_consistency.rs` | The whole-surface comparison with its two allowlists, `SHARED_SERVER_FLAG_GROUPS` and `SHARED_SERVER_FLAG_DESCRIPTIONS`, three contract tests, five guard tests, six new helpers, and the `entry_body` refactor |
 | Docs | `docs/CONTINUOUS_BATCHING.md` | No longer presents `--n-parallel` and `--parallel` as one spelling per binary |
 
 ### Related Commits
@@ -139,16 +143,20 @@ The pre-existing `flag_help_entry` matches a complete rendered signature such as
 
 ### Passed
 
-- `cargo test --profile test-fast --features cuda --bin mlxcel aliases_resolve_identically`: 6 passed.
-- `cargo test --profile test-fast --features cuda --bin mlxcel-server aliases_resolve_identically`: 5 passed.
-- `cargo test --profile test-fast --features cuda --test cli_help_consistency`: 22 passed, up from 17 on the base.
+- `cargo test --profile test-fast --features cuda --bin mlxcel tests::serve_`: 13 passed.
+- `cargo test --profile test-fast --features cuda --bin mlxcel-server tests::`: 13 passed.
+- `cargo test --profile test-fast --features cuda --test cli_help_consistency`: 25 passed, up from 17 on the base.
 - `cargo clippy --profile test-fast --features cuda --lib --bins --tests -- -D warnings`: clean. `--bins` is included because both binary crates change.
 - `cargo fmt --all -- --check`: clean.
-- Live mutation: removing `visible_alias = "n-parallel"` makes the parity assertion fail with the expected message; restoring it returns the suite to green.
+- Two live mutations, each restored and re-run green afterwards. Removing `visible_alias = "n-parallel"` from the clap definition makes the named-list parity assertion fail with `left: ["--parallel"], right: ["--n-parallel", "--parallel"]`. Removing `--force` from `SERVE_ONLY_FLAGS` makes the whole-surface assertion fail with `left: {"--estimate-memory", "--force"}, right: {"--estimate-memory"}`, which is the shape a genuinely new one-sided flag would produce.
 
 ### Not Covered
 
 No end-to-end check that a server actually starts with each spelling. The parse-level tests assert the resolved field value, which is the boundary the flag name controls; everything past `clap::Parser` reads the Rust field name and cannot tell which spelling produced it.
+
+Short forms are out of scope and remain divergent: `mlxcel-server` carries `-c` for `--ctx-size` and `-n` for `--predict`, and `mlxcel serve` has neither, so `mlxcel-server -m X -c 4096 -n 256` still does not copy across. Both letters are free on `mlxcel serve`, so closing it is cheap, but it is a different table from the one issue #1109 enumerated and the help text no longer claims otherwise. The contract compares long names only.
+
+Description parity covers 4 of the 134 shared spellings. Prose drift exists elsewhere and is unguarded: `--prompt-cache-enabled`, for one, says "when the CLI flag is absent" on `mlxcel serve` and "is not explicitly provided" on `mlxcel-server`. Not introduced here, and a concrete measure of what the description subset leaves out.
 
 ### Follow-up
 
