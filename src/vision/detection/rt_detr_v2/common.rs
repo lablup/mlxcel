@@ -34,10 +34,13 @@ pub fn copy_weight_opt(weights: &WeightMap, key: &str) -> Option<UniquePtr<MlxAr
     weights.get(key).map(|w| mlxcel_core::copy(w))
 }
 
-/// Cast an array to float32 for numerically-sensitive sub-graphs (softmax,
-/// attention, anchor logits). The detection head's box coordinates are
-/// precision-sensitive, so the whole forward runs in f32 regardless of the
-/// checkpoint's stored dtype.
+/// Cast an array to float32.
+///
+/// Used to normalize the input image to f32 before the vision tower. Note that
+/// this does not pin the *graph* to f32: MLX settles each op on its operand
+/// dtypes, so the first conv against a bf16 weight brings the graph back to
+/// bf16 for a bf16 checkpoint. Anything reading model outputs back to the host
+/// must convert by dtype rather than assuming a width.
 pub fn to_f32(x: &MlxArray) -> UniquePtr<MlxArray> {
     mlxcel_core::astype(x, mlxcel_core::dtype::FLOAT32)
 }

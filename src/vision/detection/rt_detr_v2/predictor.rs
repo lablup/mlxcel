@@ -90,69 +90,121 @@ impl RtDetrV2Predictor {
         let q = logits_shape[1] as usize;
         let num_labels = logits_shape[2] as usize;
 
-        let logits = to_f32_vec(&out.pred_logits); // length B*Q*num_labels
-        let boxes = to_f32_vec(&out.pred_boxes); // length B*Q*4
+        let logits = read_output_f32(&out.pred_logits); // length B*Q*num_labels
+        let boxes = read_output_f32(&out.pred_boxes); // length B*Q*4
 
-        let detections =
-            self.decode_one(&logits, &boxes, q, num_labels, img_w as f32, img_h as f32);
+        // Guard the readback seam. A dtype or layout change that shortens
+        // either buffer used to sail through silently, because the decode
+        // indexes by `query * num_labels` / `query * 4` and simply saw fewer
+        // entries than the shapes advertise. Fail loudly instead.
+        if logits.len() != q * num_labels || boxes.len() != q * 4 {
+            return Err(format!(
+                "RT-DETRv2 output readback mismatch: pred_logits has {} values (expected \
+                 {q}x{num_labels}={}), pred_boxes has {} values (expected {q}x4={})",
+                logits.len(),
+                q * num_labels,
+                boxes.len(),
+                q * 4
+            ));
+        }
+
+        let detections = decode_detections(
+            &logits,
+            &boxes,
+            q,
+            num_labels,
+            img_w as f32,
+            img_h as f32,
+            self.threshold,
+            self.labels.as_deref(),
+        );
         Ok(DetectionResult { detections })
     }
+}
 
-    /// Top-K extraction across the flat `(queries x labels)` score space.
-    fn decode_one(
-        &self,
-        logits: &[f32],
-        boxes: &[f32],
-        q: usize,
-        num_labels: usize,
-        img_w: f32,
-        img_h: f32,
-    ) -> Vec<Detection> {
-        // scores = sigmoid(logits), flattened to q*num_labels.
-        let flat_len = q * num_labels;
-        let mut scored: Vec<(usize, f32)> = Vec::with_capacity(flat_len);
-        for (i, &l) in logits.iter().take(flat_len).enumerate() {
-            scored.push((i, sigmoid(l)));
-        }
-        // Top-K = top-`q` by score (upstream takes k = min(Q, flat.size) = Q).
-        let k = q.min(flat_len);
-        // Partial sort: select the k highest scores, then sort descending.
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(k);
+/// Map one normalized `(cx, cy, w, h)` box to `(left, top, right, bottom)` in
+/// original-image pixels.
+///
+/// The RT-DETRv2 preprocessor resizes straight to `image_size x image_size`
+/// with `do_pad: false` (no letterbox, no aspect-preserving padding), so the
+/// forward transform is an independent per-axis scale and its inverse is the
+/// same independent per-axis scale: x by the original width, y by the original
+/// height. There is no padding offset to subtract and no single shared scale
+/// factor; a tall page and a wide page go through the identical code path.
+pub fn denormalize_box(cxcywh: [f32; 4], img_w: f32, img_h: f32) -> [f32; 4] {
+    let cx = cxcywh[0] * img_w;
+    let cy = cxcywh[1] * img_h;
+    let bw = cxcywh[2] * img_w;
+    let bh = cxcywh[3] * img_h;
+    [
+        (cx - bw / 2.0).clamp(0.0, img_w),
+        (cy - bh / 2.0).clamp(0.0, img_h),
+        (cx + bw / 2.0).clamp(0.0, img_w),
+        (cy + bh / 2.0).clamp(0.0, img_h),
+    ]
+}
 
-        let mut detections = Vec::new();
-        for (flat_idx, score) in scored {
-            if score < self.threshold {
-                continue;
-            }
-            let query = flat_idx / num_labels;
-            let label = flat_idx % num_labels;
-
-            // box = boxes[query] = (cx, cy, w, h) normalized.
-            let bx = query * 4;
-            let cx = boxes[bx] * img_w;
-            let cy = boxes[bx + 1] * img_h;
-            let bw = boxes[bx + 2] * img_w;
-            let bh = boxes[bx + 3] * img_h;
-            let x1 = (cx - bw / 2.0).clamp(0.0, img_w);
-            let y1 = (cy - bh / 2.0).clamp(0.0, img_h);
-            let x2 = (cx + bw / 2.0).clamp(0.0, img_w);
-            let y2 = (cy + bh / 2.0).clamp(0.0, img_h);
-
-            let class_name = match &self.labels {
-                Some(names) if label < names.len() => names[label].clone(),
-                _ => label.to_string(),
-            };
-
-            detections.push(Detection {
-                bbox: [x1, y1, x2, y2],
-                score,
-                label,
-                class_name,
-            });
-        }
-        detections
+/// Top-K extraction across the flat `(queries x labels)` score space.
+///
+/// Mirrors `RTDetrImageProcessor.post_process_object_detection` for
+/// `use_focal_loss=True`: the top-K runs over the flattened
+/// `(queries x labels)` grid with no per-query argmax, so a single query whose
+/// sigmoid clears the threshold under several classes legitimately emits one
+/// detection per class, all sharing that query's box. This is the reference
+/// head's semantics, not a duplication bug; callers that need one label per
+/// region should pick the highest-scoring entry per box.
+#[allow(clippy::too_many_arguments)]
+pub fn decode_detections(
+    logits: &[f32],
+    boxes: &[f32],
+    q: usize,
+    num_labels: usize,
+    img_w: f32,
+    img_h: f32,
+    threshold: f32,
+    labels: Option<&[String]>,
+) -> Vec<Detection> {
+    // scores = sigmoid(logits), flattened to q*num_labels.
+    let flat_len = q * num_labels;
+    let mut scored: Vec<(usize, f32)> = Vec::with_capacity(flat_len);
+    for (i, &l) in logits.iter().take(flat_len).enumerate() {
+        scored.push((i, sigmoid(l)));
     }
+    // Top-K = top-`q` by score (upstream takes k = min(Q, flat.size) = Q).
+    let k = q.min(flat_len);
+    // Partial sort: select the k highest scores, then sort descending.
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(k);
+
+    let mut detections = Vec::new();
+    for (flat_idx, score) in scored {
+        if score < threshold {
+            continue;
+        }
+        let query = flat_idx / num_labels;
+        let label = flat_idx % num_labels;
+
+        // box = boxes[query] = (cx, cy, w, h) normalized.
+        let bx = query * 4;
+        let bbox = denormalize_box(
+            [boxes[bx], boxes[bx + 1], boxes[bx + 2], boxes[bx + 3]],
+            img_w,
+            img_h,
+        );
+
+        let class_name = match labels {
+            Some(names) if label < names.len() => names[label].clone(),
+            _ => label.to_string(),
+        };
+
+        detections.push(Detection {
+            bbox,
+            score,
+            label,
+            class_name,
+        });
+    }
+    detections
 }
 
 fn sigmoid(x: f32) -> f32 {
@@ -161,10 +213,18 @@ fn sigmoid(x: f32) -> f32 {
 
 /// Materialize an MLX array and read it back as a row-major `Vec<f32>`.
 ///
-/// The forward path produces f32 outputs, so a direct 4-byte LE parse is
-/// correct. `contiguous` guarantees row-major before extraction.
-fn to_f32_vec(arr: &MlxArray) -> Vec<f32> {
-    let contiguous = mlxcel_core::contiguous(arr, false);
+/// The forward graph inherits the checkpoint dtype: the shipped RT-DETRv2
+/// checkpoints are bf16, so `pred_logits` and `pred_boxes` come back as bf16
+/// even though `pixel_values` enters as f32. `array_to_raw_bytes` hands back
+/// the buffer verbatim, so the cast to f32 must happen *before* the 4-byte LE
+/// parse. Parsing a bf16 buffer 4 bytes at a time silently reinterprets each
+/// adjacent pair of values as one f32 (bf16 is the high half of an f32, so the
+/// result is the odd-indexed element polluted with the even one's bits) and
+/// halves the element count, which scrambles every query/label/box association
+/// downstream without erroring.
+pub(crate) fn read_output_f32(arr: &MlxArray) -> Vec<f32> {
+    let as_f32 = mlxcel_core::astype(arr, mlxcel_core::dtype::FLOAT32);
+    let contiguous = mlxcel_core::contiguous(&as_f32, false);
     let c = contiguous.as_ref().expect("contiguous returned null");
     mlxcel_core::eval(c);
     let bytes = mlxcel_core::array_to_raw_bytes(c);

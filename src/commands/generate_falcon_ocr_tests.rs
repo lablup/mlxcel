@@ -380,3 +380,81 @@ fn region_answers_drop_the_task_terminators() {
     );
     assert_eq!(clean_region_answer("plain text"), "plain text");
 }
+
+/// Verbatim `mlxcel detect --format json` output for a real multi-region page:
+/// a heading, a body paragraph, and a footer on a 1000x1300 portrait page, as
+/// produced by the docling-layout-heron checkpoint after the readback fix in
+/// issue #1089. Kept literal, not regenerated, so a change to either command's
+/// contract shows up here.
+const DETECT_PIPELINE_JSON: &str = r#"{
+  "image": "page.png",
+  "threshold": 0.30000001192092896,
+  "detections": [
+    {"label": "section_header", "label_id": 7, "confidence": 0.6150878667831421,
+     "box": {"l": 80.078125, "t": 58.3984375, "r": 771.484375, "b": 105.37109375}},
+    {"label": "title", "label_id": 10, "confidence": 0.4148988723754883,
+     "box": {"l": 80.078125, "t": 58.3984375, "r": 771.484375, "b": 105.37109375}},
+    {"label": "list_item", "label_id": 3, "confidence": 0.31742626428604126,
+     "box": {"l": 80.078125, "t": 58.3984375, "r": 771.484375, "b": 105.37109375}},
+    {"label": "text", "label_id": 9, "confidence": 0.9149009585380554,
+     "box": {"l": 62.5, "t": 197.412109375, "r": 953.125, "b": 335.791015625}},
+    {"label": "page_footer", "label_id": 4, "confidence": 0.5,
+     "box": {"l": 78.125, "t": 1200.341796875, "r": 671.875, "b": 1237.158203125}}
+  ]
+}"#;
+
+/// `mlxcel detect --format json | mlxcel generate --layout-detections` must
+/// plan one region per page element, in reading order (issue #1089).
+///
+/// This pins the composition of the two commands at the seam they share: the
+/// detector's JSON goes in unmodified, and what comes out is the region list
+/// the per-region OCR loop walks, in the order it prints them. Three things
+/// have to hold at once, and each was broken or unverified before: the boxes
+/// must be real page geometry rather than one collapsed rectangle, the heading
+/// must be OCRed once rather than once per label, and the footer must come last
+/// rather than first (it outranks nothing on confidence, but it is last on the
+/// page).
+#[test]
+fn detect_json_plans_into_reading_ordered_regions_without_repeats() {
+    let detections = parse_layout_detections(DETECT_PIPELINE_JSON).expect("detect JSON parses");
+    assert_eq!(detections.len(), 5, "all five entries survive parsing");
+
+    let plans = plan(&detections);
+
+    let categories: Vec<&str> = plans.iter().map(|p| p.category.as_str()).collect();
+    assert_eq!(
+        categories,
+        vec!["section_header", "text", "page_footer"],
+        "one region per page element, in reading order"
+    );
+
+    // Reading order: strictly increasing down the page.
+    let tops: Vec<f32> = plans.iter().map(|p| p.bbox[1]).collect();
+    assert!(
+        tops.windows(2).all(|w| w[0] < w[1]),
+        "regions must run down the page, got {tops:?}"
+    );
+
+    // Each region is a distinct rectangle: no collapse onto one box.
+    for (i, a) in plans.iter().enumerate() {
+        for b in plans.iter().skip(i + 1) {
+            assert_ne!(a.bbox, b.bbox, "two regions share a box");
+        }
+    }
+
+    // The footer reaches the bottom of a 1300-tall page. Before the fix every
+    // detection shared one box that stopped near the middle of the page.
+    let footer = plans.last().expect("a footer region");
+    assert_eq!(footer.category, "page_footer");
+    assert!(
+        footer.bbox[3] > 1200.0,
+        "footer must reach the bottom of the page, got {:?}",
+        footer.bbox
+    );
+
+    // Every region crops to something OCRable.
+    for plan in &plans {
+        let (_, _, w, h) = plan.crop;
+        assert!(w >= MIN_CROP_DIM && h >= MIN_CROP_DIM, "{plan:?}");
+    }
+}

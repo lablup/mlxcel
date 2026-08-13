@@ -57,13 +57,8 @@ pub(crate) fn run_detect(args: DetectArgs) -> Result<()> {
         .predict_path(&args.image)
         .map_err(|e| anyhow!("detection failed: {e}"))?;
 
-    // Sort detections by descending confidence for stable, readable output.
     let mut detections = result.detections;
-    detections.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    sort_reading_order(&mut detections);
 
     match args.format {
         OutputFormat::Text => {
@@ -121,6 +116,42 @@ pub(crate) fn run_detect(args: DetectArgs) -> Result<()> {
     Ok(())
 }
 
+/// Order detections top-to-bottom then left-to-right, so the emitted list is
+/// document reading order rather than detector confidence order.
+///
+/// This is what makes `mlxcel detect --format json | mlxcel generate
+/// --layout-detections` correct end to end: the Falcon-OCR layout path
+/// deliberately preserves the order of the file it is handed (the reference
+/// detector, PP-DocLayoutV3, carries an `order_logits` head and emits reading
+/// order directly), so whatever order this command prints becomes the order the
+/// per-region OCR output appears in. RT-DETRv2 has no order head, so the order
+/// is derived from geometry here instead.
+///
+/// The comparison is a strict total order so the output is reproducible:
+/// top edge, then left edge, then descending confidence, then class id. The
+/// confidence tiebreak keeps the several labels a single query can emit (see
+/// `decode_detections`) adjacent and most-confident-first, since they share one
+/// box and therefore compare equal on geometry.
+///
+/// Geometry-derived order is an approximation: it reads a multi-column page
+/// row-wise rather than column-wise, because nothing in the box coordinates
+/// distinguishes a two-column layout from a wide single-column one.
+fn sort_reading_order(detections: &mut [mlxcel::vision::detection::Detection]) {
+    detections.sort_by(|a, b| {
+        let key = |d: &mlxcel::vision::detection::Detection| (d.bbox[1], d.bbox[0]);
+        let (ka, kb) = (key(a), key(b));
+        ka.0.partial_cmp(&kb.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| ka.1.partial_cmp(&kb.1).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.label.cmp(&b.label))
+    });
+}
+
 /// Output format for the `detect` subcommand.
 #[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
 pub(crate) enum OutputFormat {
@@ -130,3 +161,7 @@ pub(crate) enum OutputFormat {
     /// Machine-readable JSON.
     Json,
 }
+
+#[cfg(test)]
+#[path = "detect_tests.rs"]
+mod tests;
