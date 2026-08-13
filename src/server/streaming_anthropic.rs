@@ -85,15 +85,11 @@ impl AnthropicSseKeepAlive {
         // match the Responses-API encoder.
         Self(KeepAlive::new().interval(Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)))
     }
-
-    pub fn into_inner(self) -> KeepAlive {
-        self.0
-    }
 }
 
 impl IntoKeepAlive for AnthropicSseKeepAlive {
     fn into_keep_alive(self) -> KeepAlive {
-        self.into_inner()
+        self.0
     }
 }
 

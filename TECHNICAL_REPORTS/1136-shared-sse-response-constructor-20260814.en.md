@@ -62,11 +62,15 @@ Splitting the property is what makes the decision obvious. "Does axum keep the c
 
 `sse_response(stream, keepalive)` takes the keepalive by value, and the newtypes' inner `KeepAlive` is private, so there is no public path from one of these streams to a `Response` that does not pass through it. A route that wanted to skip the keepalive would have to construct `Sse` itself, which means importing it, which is now visibly not what any route does. The guarantee is not that it is impossible to write, it is that it cannot be done by omission.
 
-### 2.3 The Trait Is Deliberately Minimal
+### 2.3 The Last Public Route to a Raw `KeepAlive` Is Closed
+
+Each newtype had an `into_inner()` accessor, two of them `pub` inside `pub mod`s. Once every route went through `sse_response`, their only caller was their own `IntoKeepAlive` impl, and they were the one remaining way for code outside this module to obtain a bare `KeepAlive` and hand-assemble an `Sse`. All three are gone; the trait impls return `self.0` directly. This was raised in review as optional. It is worth taking, because the PR's central claim is that hand assembly is unreachable, and leaving a public accessor open would have made that claim true only by convention at the exact point it is meant to be structural.
+
+### 2.4 The Trait Is Deliberately Minimal
 
 `IntoKeepAlive` has one method and exists for one reason: to let three distinct types reach one function. It does not unify the newtypes, which is the point. #1105 required that a route cannot attach another surface's keepalive, and that still holds, because the value a handler passes to `sse_response` is the one its own channel constructor returned. The trait widens what can be passed to the constructor; it does not widen what any given route has available to pass.
 
-### 2.4 The Compiler Confirmed the Result
+### 2.5 The Compiler Confirmed the Result
 
 Deleting the five tails made `sse::Sse` unused in all five route files, and clippy failed the build under `-D warnings` naming each one. That is worth recording as evidence rather than as a chore: it is the compiler stating that no route constructs an SSE response on its own any longer. The imports were removed.
 
@@ -103,6 +107,7 @@ A bare deletion loses the reasoning, and the next reader notices the same covera
 | Files changed | 10 |
 | Hand-assembled attach sites removed | 7 |
 | Attach sites remaining | 1 |
+| Public accessors to a raw `KeepAlive` removed | 3 |
 | New public API | 0 (both additions are `pub(crate)`) |
 | Behaviour changes | 0 |
 
@@ -144,3 +149,4 @@ A bare deletion loses the reasoning, and the next reader notices the same covera
 ### Follow-up
 
 - With #1133 and this change landed, the keepalive has one interval, one guard, and one attach site. A future surface gets all three by calling `sse_response`, and a surface that does not call it is visibly outside the arrangement rather than silently missing from it.
+- The invariant is enforced by construction within this crate, but `axum::response::sse::Sse` is a public third-party type, so nothing mechanically stops a future route from importing it directly. A `clippy.toml` with a `disallowed-types` entry for it, pointing at `sse_response`, would make the claim compiler-checked rather than reviewer-checked. Not done here: the repo has no `clippy.toml`, and introducing a workspace-wide lint config is a larger decision than this issue asked for. Raised in review and worth a separate look.

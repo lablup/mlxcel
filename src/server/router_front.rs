@@ -814,9 +814,10 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
         // Go through the shared constructor rather than assembling
         // `Sse::new(..).keep_alive(..)` here (#1107). These streams do not come
         // from `sse_channel`, so the newtype is built directly, but the attach
-        // itself is the same one every route uses and the interval is the
-        // shared `SSE_KEEPALIVE_INTERVAL_SECS` rather than axum's default
-        // (#1105).
+        // itself is the one every route uses. The interval is the shared
+        // `SSE_KEEPALIVE_INTERVAL_SECS` rather than the `KeepAlive::default()`
+        // these sites used to take (#1105); both are 15s under axum 0.7.9, so
+        // neither change moves behaviour today.
         Ok(sse_response(
             UnboundedReceiverStream::new(chunk_rx),
             SseKeepAlive::default_for_long_prefill(),
@@ -1085,9 +1086,10 @@ async fn route_completion(state: Arc<RouterState>, request: CompletionRequest) -
         // Go through the shared constructor rather than assembling
         // `Sse::new(..).keep_alive(..)` here (#1107). These streams do not come
         // from `sse_channel`, so the newtype is built directly, but the attach
-        // itself is the same one every route uses and the interval is the
-        // shared `SSE_KEEPALIVE_INTERVAL_SECS` rather than axum's default
-        // (#1105).
+        // itself is the one every route uses. The interval is the shared
+        // `SSE_KEEPALIVE_INTERVAL_SECS` rather than the `KeepAlive::default()`
+        // these sites used to take (#1105); both are 15s under axum 0.7.9, so
+        // neither change moves behaviour today.
         Ok(sse_response(
             UnboundedReceiverStream::new(chunk_rx),
             SseKeepAlive::default_for_long_prefill(),

@@ -346,12 +346,12 @@ fn long_prefill_channel_stays_open_before_first_token() {
     worker.join().expect("worker thread must not panic");
 }
 
-// A TODO here asked for an axum integration harness to check that every route
-// attaches the keepalive. It was removed with #1107: the hazard is gone
-// structurally rather than covered by a test. Every SSE response in the server
-// is built by `streaming::sse_response`, which takes the keepalive by value, so
-// a route cannot forget it. A test per route would have been five tests
-// guarding five copy-paste sites, and would still have missed the sixth route
-// nobody remembered to write a test for. The other half of the TODO, whether
-// axum emits a comment frame while the stream is idle, tests axum's
+// This is where a deferred note used to ask for an axum integration harness to
+// check that every route attaches the keepalive. It was removed with #1107: the
+// hazard is gone structurally rather than covered by a test. Every SSE response
+// in the server is built by `streaming::sse_response`, which takes the keepalive
+// by value, so a route cannot forget it. A test per route would have been five
+// tests guarding five copy-paste sites, and would still have missed the sixth
+// route nobody remembered to write a test for. The other half of that note,
+// whether axum emits a comment frame while the stream is idle, tests axum's
 // `KeepAlive` rather than mlxcel, and upstream already covers it.

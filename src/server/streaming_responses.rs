@@ -85,23 +85,19 @@ impl ResponseStreamSender {
     }
 }
 
-/// Newtype wrapping the keepalive configuration so it ships out of
-/// the channel constructor and into the `Sse` response handler.
+/// Newtype wrapping the keepalive configuration so it ships out of the channel
+/// constructor and into `sse_response`, which attaches it.
 pub struct ResponseSseKeepAlive(KeepAlive);
 
 impl ResponseSseKeepAlive {
     fn default_for_long_prefill() -> Self {
         Self(KeepAlive::new().interval(Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)))
     }
-
-    pub fn into_inner(self) -> KeepAlive {
-        self.0
-    }
 }
 
 impl IntoKeepAlive for ResponseSseKeepAlive {
     fn into_keep_alive(self) -> KeepAlive {
-        self.into_inner()
+        self.0
     }
 }
 

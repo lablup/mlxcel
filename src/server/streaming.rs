@@ -26,11 +26,13 @@
 //! `proxy_read_timeout`, HAProxy `timeout tunnel`, AWS ALB 60 s default, etc.)
 //! will drop the connection before the first token arrives.
 //!
-//! `sse_channel` returns a keepalive configuration via `SseKeepAlive` that
-//! route handlers must attach to the `Sse` response with `.keep_alive()`.
-//! Streams that do not come from `sse_channel` (`router_front.rs`) build the
-//! same newtype directly rather than reaching for `KeepAlive::default()`. The
-//! interval is [`SSE_KEEPALIVE_INTERVAL_SECS`], short enough to beat typical
+//! `sse_channel` returns a keepalive configuration via `SseKeepAlive`, which a
+//! route handler passes with its stream to [`sse_response`]. That constructor
+//! is the single place the keepalive is attached, so a route cannot omit it
+//! (#1107). Streams that do not come from `sse_channel` (`router_front.rs`)
+//! build the same newtype directly rather than reaching for
+//! `KeepAlive::default()`. The interval is
+//! [`SSE_KEEPALIVE_INTERVAL_SECS`], short enough to beat typical
 //! proxy idle timeouts and long enough not to spam comment events for short
 //! responses. That constant is the single definition for every SSE surface in
 //! the server, including the Responses and Anthropic-compatible ones, and the
@@ -84,11 +86,11 @@ const _: () = assert!(
 
 /// Keepalive configuration attached to an `Sse` response.
 ///
-/// Usually constructed by `sse_channel` and passed through to a route handler,
-/// which calls `Sse::new(stream).keep_alive(keepalive.into_inner())`. Using a
-/// newtype keeps the keepalive wired to the same channel creation point and
-/// makes it impossible to forget to attach it. The inner `KeepAlive` is private
-/// to prevent callers from constructing a mismatched keepalive independently.
+/// Usually constructed by `sse_channel` and handed, with the stream, to
+/// [`sse_response`], which is what attaches it (#1107). Using a newtype keeps
+/// the keepalive wired to the same channel creation point. The inner
+/// `KeepAlive` is private to prevent callers from constructing a mismatched
+/// keepalive independently.
 ///
 /// `router_front.rs` builds its own with `default_for_long_prefill` because its
 /// streams do not come from `sse_channel`, but it goes through this type rather
@@ -107,11 +109,10 @@ impl SseKeepAlive {
     pub(crate) fn default_for_long_prefill() -> Self {
         Self(KeepAlive::new().interval(Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS)))
     }
+}
 
-    /// Unwrap the inner `KeepAlive` for attaching to an `Sse` response.
-    ///
-    /// Consuming `self` ensures each `SseKeepAlive` is applied exactly once.
-    pub(crate) fn into_inner(self) -> KeepAlive {
+impl IntoKeepAlive for SseKeepAlive {
+    fn into_keep_alive(self) -> KeepAlive {
         self.0
     }
 }
@@ -141,11 +142,13 @@ pub(crate) struct BlockingSseSender {
 /// receiver dropped). Pass the token to `ModelRequest::Generate` so the
 /// `BatchScheduler` can abort orphaned sequences.
 ///
-/// The `keepalive` value must be attached to the `Sse` response via
-/// `Sse::new(stream).keep_alive(keepalive.into_inner())` in the route handler
-/// (the inner field is private, so `.0` is not reachable from outside this
-/// module). This ensures proxy idle timeouts do not close the connection during
-/// long prefill phases before the first generated token arrives.
+/// Hand the returned `stream` and `keepalive` to [`sse_response`], which builds
+/// the HTTP response and attaches the keepalive. Do not assemble
+/// `Sse::new(..).keep_alive(..)` in the route handler: that duplication is what
+/// #1107 removed, and `sse_response` is the only path that cannot forget the
+/// keepalive. Attaching it is what stops proxy idle timeouts from closing the
+/// connection during long prefill phases, before the first generated token
+/// arrives.
 ///
 /// Used by: chat.rs, completions.rs, native_completion.rs
 pub(crate) fn sse_channel(
@@ -170,21 +173,19 @@ pub(crate) fn sse_channel(
 /// keepalive (#1105). This trait is the only thing they share, and it exists so
 /// all three can reach one response constructor instead of each route
 /// assembling `Sse::new(..).keep_alive(..)` by hand (#1107).
+///
+/// Consuming `self` ensures each keepalive is applied exactly once. This is the
+/// only way to get at the inner `KeepAlive`, so there is no route from one of
+/// these newtypes to a hand-assembled `Sse`.
 pub(crate) trait IntoKeepAlive {
     fn into_keep_alive(self) -> KeepAlive;
-}
-
-impl IntoKeepAlive for SseKeepAlive {
-    fn into_keep_alive(self) -> KeepAlive {
-        self.into_inner()
-    }
 }
 
 /// Build the streaming HTTP response, attaching the keepalive that the matching
 /// `*_sse_channel` produced.
 ///
 /// Route handlers call this instead of assembling
-/// `Sse::new(stream).keep_alive(keepalive.into_inner()).into_response()` by
+/// `Sse::new(stream).keep_alive(..).into_response()` by
 /// hand. Five routes carried byte-identical copies of that tail, and a sixth
 /// that forgot the `.keep_alive(..)` would have compiled and passed the whole
 /// suite (#1107). Routing every surface through one constructor removes the
