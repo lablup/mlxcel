@@ -359,15 +359,15 @@ fn validate_pipeline_parallel_args(args: &GenerateArgs) -> Result<()> {
         return Ok(());
     }
 
-    // 2D (PP x TP) composition is now supported. See
-    // `docs/en/distributed/pipeline-parallelism.md` and
-    // `docs/en/distributed/tensor-parallelism.md` for the operator guide.
+    // 2D (PP x TP) composition is now supported. See `docs/distributed.md`
+    // for the operator guide. That document covers the PP and TP knobs
+    // separately; the 2D composition itself is not written up there yet.
     let tp_size = args.tensor_parallel.tp_size;
     if tp_size > 1 {
         ensure!(
             pp.pp_size >= 2 || pp.pp_layers.is_some(),
             "2D parallelism requires --pp-size >= 2 (or an explicit --pp-layers spec) \
-             alongside --tensor-parallel-size > 1"
+             alongside --tp-size > 1"
         );
         // Soft guard against obvious topology mistakes. A negative-like sanity
         // check here surfaces a clear error instead of a cryptic routing or

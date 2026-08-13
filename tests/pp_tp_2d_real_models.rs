@@ -15,7 +15,7 @@
 //! End-to-end 2D parallelism (PP × TP) parity test against a real model.
 //!
 //! The test uses the production `mlxcel` binary with
-//! `--pp-size 2 --tensor-parallel-size 2` (a 2×2 grid) and verifies that the
+//! `--pp-size 2 --tp-size 2` (a 2×2 grid) and verifies that the
 //! greedy-decoded token sequence matches a single-device reference on a fixed
 //! prompt. Marked `#[ignore]` because it requires local model weights and
 //! enough aggregate memory to host four shards concurrently.
@@ -84,7 +84,7 @@ fn pp_tp_2x2_llama_real_model_parity() {
         "--no-chat-template",
         "--pp-size",
         "2",
-        "--tensor-parallel-size",
+        "--tp-size",
         "2",
     ]);
     assert!(
@@ -101,7 +101,7 @@ fn pp_tp_2x2_llama_real_model_parity() {
 }
 
 /// Sanity check that the CLI accepts the 2D combination (the validator no
-/// longer rejects `--pp-size 2 --tensor-parallel-size 2`).
+/// longer rejects `--pp-size 2 --tp-size 2`).
 ///
 /// This test only asserts that the validator does not reject the combination
 /// upfront; it does not run the model. It is kept in the non-ignored test
@@ -110,10 +110,10 @@ fn pp_tp_2x2_llama_real_model_parity() {
 #[test]
 fn pp_tp_2d_validator_accepts_combination() {
     // Unlike the parity test above, this one does not require any model
-    // weights. We invoke `mlxcel generate --help` plus the 2D flags and
-    // confirm that the binary's argument parser accepts the combination.
-    // Runtime failures (e.g., model missing) are acceptable — only the
-    // validator rejection at src/commands/generate.rs:141 is under test.
+    // weights. We invoke the binary with the 2D flags and confirm that the
+    // argument parser accepts the combination. Runtime failures (the model
+    // is missing) are acceptable; what is under test is that
+    // `validate_pipeline_parallel_args` does not reject the combination.
     let output = Command::new(env!("CARGO_BIN_EXE_mlxcel"))
         .args([
             "generate",
@@ -125,17 +125,29 @@ fn pp_tp_2d_validator_accepts_combination() {
             "1",
             "--pp-size",
             "2",
-            "--tensor-parallel-size",
+            "--tp-size",
             "2",
         ])
         .output()
         .expect("failed to invoke mlxcel generate");
 
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Guard against a vacuous pass. If clap rejects one of the flags above
+    // the process dies before the validator runs, and the old-guard check
+    // below would then hold for the wrong reason. This is not hypothetical:
+    // the test previously passed a tensor-parallel flag spelling the binary
+    // has never accepted, so it never reached the validator at all.
+    assert!(
+        !stderr.contains("unexpected argument") && !stderr.contains("unrecognized"),
+        "the 2D flags were rejected by the argument parser, so the validator \
+         was never reached:\nstdout={stdout}\nstderr={stderr}"
+    );
+
     // We expect a failure (model is missing), but NOT because of the old
     // "CLI pipeline parallelism does not support tensor parallelism yet"
     // rejection.
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         !stderr.contains("pipeline parallelism does not support tensor parallelism")
             && !stdout.contains("pipeline parallelism does not support tensor parallelism"),
