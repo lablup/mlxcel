@@ -92,6 +92,10 @@ pub struct ChatOptions {
     /// `-m` resolver so a repo-id resolves to / downloads under this root. `None`
     /// keeps the `MLXCEL_MODELS_DIR`-then-cache-root resolution.
     pub models_dir: Option<PathBuf>,
+    /// Repository revision override (`--revision`, issue #1113) threaded into
+    /// the `-m` resolver. `None` means `main`. Only meaningful for a repo-id;
+    /// the resolver rejects it alongside an existing local path.
+    pub revision: Option<String>,
     /// Maximum number of tokens to generate per assistant turn.
     pub max_tokens: usize,
     /// Resolved sampling knobs (temperature / top-k / top-p / min-p /
@@ -120,6 +124,7 @@ impl ChatOptions {
         Self {
             model,
             models_dir: None,
+            revision: None,
             max_tokens,
             sampling,
             kv_cache_mode: KVCacheMode::Fp16,
@@ -175,6 +180,7 @@ pub fn run_chat(opts: ChatOptions) -> Result<()> {
     let model_path = mlxcel::downloader::resolve_model_source_with_override(
         &opts.model,
         opts.models_dir.as_deref(),
+        opts.revision.as_deref(),
     )?;
 
     println!("Loading model from {model_path:?}...");

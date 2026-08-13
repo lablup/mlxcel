@@ -51,6 +51,35 @@
 //! 4. **Neither** — a clear, actionable error (not an existing path, not a
 //!    valid `owner/name` repo-id, and not a bare single segment).
 //!
+//! # Revisions (issue #1113)
+//!
+//! The `-m/--model`-taking subcommands accept `--revision <REV>`, matching
+//! `mlxcel download --revision`. `None` means `main`.
+//!
+//! A revision is only honoured where it can be honoured *correctly*, because
+//! the reuse locations differ in whether they record one:
+//!
+//! - [`store::hf_cache_snapshot`] is revision-aware (it resolves
+//!   `refs/<revision>` or a snapshot directory named for the commit), so it
+//!   answers a revision-qualified request normally.
+//! - The legacy per-CWD `./models/<basename>` directory and the mlxcel global
+//!   store ([`store::model_dir_with_override`]) are keyed on `<owner>/<name>`
+//!   with **no revision component**. A hit there could be any revision, so for
+//!   a revision-qualified request they are skipped rather than allowed to
+//!   answer with the wrong bytes.
+//! - For the same reason, a revision-qualified miss will not download into an
+//!   occupied store directory. [`download_repo`] treats same-named non-zero
+//!   files as "already present" and skips the fetch, which would silently
+//!   return whichever revision was already on disk. That case is refused, and
+//!   `--models-dir` is the escape hatch for holding two revisions at once.
+//!
+//! Passing `--revision` with an existing local path is an error: step 1 returns
+//! such a path verbatim and has no revision to resolve against it.
+//!
+//! Revision-namespacing the store would remove these restrictions, but it
+//! changes an on-disk layout shared with `list`, `rm` and the `download` verb,
+//! so it is deliberately left as follow-up work.
+//!
 //! The "completeness" gate for the legacy and store directories verifies the
 //! full weight set, not just `config.json` (issue #465): every shard named by a
 //! local `model.safetensors.index.json` (or, for a single-file / repackaged
@@ -98,7 +127,7 @@ const DEFAULT_ORG_ENV: &str = "MLXCEL_DEFAULT_ORG";
 /// required but failed (network / auth / disk — the underlying
 /// [`download_repo`] error is propagated with context).
 pub fn resolve_model_source(value: &Path) -> Result<PathBuf> {
-    resolve_model_source_with_override(value, None)
+    resolve_model_source_with_override(value, None, None)
 }
 
 /// Override-aware variant of [`resolve_model_source`] (issue #107).
@@ -108,14 +137,31 @@ pub fn resolve_model_source(value: &Path) -> Result<PathBuf> {
 /// from / downloaded into the override-aware models root (see
 /// [`store::models_root`]). The existing-path and legacy-CWD / HF-cache reuse
 /// steps are unaffected. [`resolve_model_source`] delegates here with `None`.
+///
+/// `revision` is the inline `--revision <REV>` flag (issue #1113), matching
+/// `mlxcel download --revision`. `None` means `main`. Because the mlxcel store
+/// is not revision-namespaced, an explicit revision changes which reuse
+/// locations may answer: see [`resolve_repo_id`] and
+/// [`locate_cached_snapshot`]. Passing a revision alongside an existing local
+/// path is an error, since step 1 returns such a path verbatim and has no
+/// revision to honour.
 pub fn resolve_model_source_with_override(
     value: &Path,
     models_dir: Option<&Path>,
+    revision: Option<&str>,
 ) -> Result<PathBuf> {
     // 1. Existing on-disk path wins unconditionally — byte-identical to the
     //    pre-#94 local-path behavior. Checked before any repo-id shape test so
     //    a local directory literally named `owner/name` is still used as-is.
     if value.exists() {
+        // A revision cannot be applied to a directory that is already
+        // materialized: this branch returns it verbatim and never consults a
+        // revision. Refusing is clearer than ignoring, because silently
+        // ignoring it would leave a user believing they had pinned something
+        // (issue #1113).
+        if let Some(rev) = revision {
+            return Err(revision_with_local_path_error(value, rev));
+        }
         return Ok(value.to_path_buf());
     }
 
@@ -128,7 +174,7 @@ pub fn resolve_model_source_with_override(
     // 2. `owner/name` repo-id shape → reuse-or-download. An explicit
     //    `owner/name` always wins over the bare-name default org below.
     if is_repo_id_shape(value_str) {
-        return resolve_repo_id(value_str, None, models_dir);
+        return resolve_repo_id(value_str, revision, models_dir);
     }
 
     // 3. Bare, prefix-less model name (issue #112): a single valid segment with
@@ -139,7 +185,7 @@ pub fn resolve_model_source_with_override(
     //    an existing local path and an explicit `owner/name` are unaffected.
     if is_repo_segment(value_str) {
         let repo_id = expand_bare_name(value_str)?;
-        return resolve_repo_id(&repo_id, None, models_dir);
+        return resolve_repo_id(&repo_id, revision, models_dir);
     }
 
     // 4. Neither an existing path, a valid repo-id, nor a bare model name.
@@ -150,13 +196,29 @@ pub fn resolve_model_source_with_override(
 /// existing snapshot (legacy CWD → HF cache → mlxcel store) or download into
 /// the mlxcel global store on a miss.
 ///
-/// `revision` selects the HF-cache snapshot revision (branch / tag / commit);
-/// `None` means `main`. The CLI subcommands do not currently expose a
-/// `--revision` flag, so they pass `None`, matching `mlxcel download`'s default.
+/// `revision` selects the revision (branch / tag / commit) to resolve; `None`
+/// means `main`. Since issue #1113 the `-m/--model`-taking subcommands expose
+/// this as `--revision`, matching `mlxcel download --revision`.
+///
+/// An explicit revision narrows which reuse locations may answer, because only
+/// some of them record which revision they hold. [`store::hf_cache_snapshot`]
+/// is revision-aware and is consulted normally. The legacy per-CWD directory
+/// and the mlxcel store are keyed on `<owner>/<name>` with no revision
+/// component, so a hit there could be any revision; they are skipped rather
+/// than allowed to answer a revision-qualified request with the wrong bytes.
+/// For the same reason a revision-qualified miss will not download into an
+/// occupied store directory: `download_repo` treats same-named files as
+/// "already present" and would skip the fetch, silently yielding the revision
+/// that is already there. That case is refused with
+/// [`revision_store_occupied_error`]. Revision-namespacing the store is
+/// deliberately out of scope here (it would change the on-disk layout shared
+/// with `list`, `rm` and the `download` verb) and is left as follow-up work.
 ///
 /// `models_dir` is the inline `--models-dir <path>` override (issue #107),
 /// threaded into the store-probe (step 2c) and the download destination
-/// (step 2d) so reuse and writes target the override-aware models root.
+/// (step 2d) so reuse and writes target the override-aware models root. It
+/// doubles as the escape hatch for holding two revisions at once, by pointing
+/// each at its own root.
 fn resolve_repo_id(
     repo_id: &str,
     revision: Option<&str>,
@@ -167,6 +229,17 @@ fn resolve_repo_id(
     // 2a–2c: reuse an existing COMPLETE snapshot without re-downloading.
     if let Some(hit) = locate_cached_snapshot(repo_id, revision, &cwd_models, models_dir) {
         return Ok(hit);
+    }
+
+    // A revision-qualified request must not write into a store directory that
+    // already holds a snapshot: the store is not revision-namespaced, so the
+    // download would either be skipped as "already complete" or mix two
+    // revisions in one directory. Refuse with the workarounds instead.
+    if let Some(rev) = revision
+        && let Some(dest) = store::model_dir_with_override(repo_id, models_dir)
+        && !matches!(classify_snapshot(&dest), SnapshotState::Absent)
+    {
+        return Err(revision_store_occupied_error(repo_id, rev, &dest));
     }
 
     // 2d: no complete snapshot anywhere. A miss is one of two things: nothing on
@@ -195,7 +268,7 @@ fn resolve_repo_id(
     // HF cache (download_repo reuses an existing HF snapshot read-only) or the
     // mlxcel store. Re-run the same completeness-gated lookup to return the real
     // landing path.
-    if let Some(hit) = locate_cached_snapshot(repo_id, revision, &cwd_models, models_dir) {
+    if let Some(hit) = locate_landed_snapshot(repo_id, revision, &cwd_models, models_dir) {
         return Ok(hit);
     }
 
@@ -209,7 +282,7 @@ fn resolve_repo_id(
     download_repo(download_options(repo_id, revision, models_dir, true))
         .map_err(|err| anyhow!("failed to re-download model '{repo_id}': {err}"))?;
 
-    locate_cached_snapshot(repo_id, revision, &cwd_models, models_dir).ok_or_else(|| {
+    locate_landed_snapshot(repo_id, revision, &cwd_models, models_dir).ok_or_else(|| {
         anyhow!(
             "downloaded model '{repo_id}' but its snapshot is still incomplete \
              afterwards (expected under the mlxcel store or HuggingFace cache); \
@@ -236,14 +309,23 @@ fn locate_cached_snapshot(
     // 2a. Legacy per-CWD `./models/<basename>` (pre-#93 default location).
     //     Only a fully-materialized snapshot is a hit; an interrupted partial
     //     (config.json + only some shards) is skipped so 2d re-fetches it.
-    let legacy = cwd_models.join(repo_basename(repo_id));
-    if matches!(classify_snapshot(&legacy), SnapshotState::Complete) {
-        return Some(legacy);
+    //
+    //     Skipped entirely for a revision-qualified request (issue #1113):
+    //     this directory records no revision, so a hit could be any revision
+    //     and answering with it would be exactly the silent wrong-revision
+    //     result `--revision` exists to prevent.
+    if revision.is_none() {
+        let legacy = cwd_models.join(repo_basename(repo_id));
+        if matches!(classify_snapshot(&legacy), SnapshotState::Complete) {
+            return Some(legacy);
+        }
     }
 
     // 2b. Existing HuggingFace Hub cache snapshot (read-only reuse). Its own
     //     completeness gate keys on `config.json`; mlxcel never writes into that
     //     externally-managed layout, so it is left to HuggingFace tooling.
+    //     This probe IS revision-aware, so it answers a revision-qualified
+    //     request correctly and is consulted either way.
     if let Some(hf) = store::hf_cache_snapshot(repo_id, revision) {
         return Some(hf);
     }
@@ -252,13 +334,49 @@ fn locate_cached_snapshot(
     //     `--models-dir` / `MLXCEL_MODELS_DIR` root directly, or the legacy
     //     `${MLXCEL_CACHE_DIR}/models/<owner>/<name>`. Same full-weight gate as
     //     2a so an interrupted store download is re-fetched, not loaded.
-    if let Some(store_dir) = store::model_dir_with_override(repo_id, models_dir)
+    //
+    //     Skipped for a revision-qualified request for the same reason as 2a:
+    //     the store path carries no revision component.
+    if revision.is_none()
+        && let Some(store_dir) = store::model_dir_with_override(repo_id, models_dir)
         && matches!(classify_snapshot(&store_dir), SnapshotState::Complete)
     {
         return Some(store_dir);
     }
 
     None
+}
+
+/// Locate the snapshot a just-completed download produced.
+///
+/// Distinct from [`locate_cached_snapshot`] because the two answer different
+/// questions. That one asks "may this location answer a request for
+/// `revision`?", and for a revision-qualified request the answer is no for any
+/// location without revision provenance. This one asks "where did the bytes we
+/// just fetched land?", which is knowable: either [`download_repo`] reused an
+/// HF-cache snapshot at that revision read-only, or it wrote into the mlxcel
+/// store destination. For a revision-qualified request the store directory was
+/// verified [`SnapshotState::Absent`] before the download, so whatever is there
+/// now is the revision that was asked for.
+///
+/// The legacy per-CWD directory is never a download destination, so it is not
+/// consulted here; probing it could return an unrelated older snapshot.
+fn locate_landed_snapshot(
+    repo_id: &str,
+    revision: Option<&str>,
+    cwd_models: &Path,
+    models_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    if revision.is_none() {
+        return locate_cached_snapshot(repo_id, revision, cwd_models, models_dir);
+    }
+
+    if let Some(hf) = store::hf_cache_snapshot(repo_id, revision) {
+        return Some(hf);
+    }
+
+    store::model_dir_with_override(repo_id, models_dir)
+        .filter(|dir| matches!(classify_snapshot(dir), SnapshotState::Complete))
 }
 
 /// Emit the issue #465 "incomplete download detected" line naming the condition
@@ -338,6 +456,44 @@ fn not_a_model_error(value: &Path) -> anyhow::Error {
          repo-id (expected `owner/name`, e.g. `mlx-community/Qwen3-4B-4bit`). \
          Pass a local model directory or a repo-id to auto-download.",
         value.display()
+    )
+}
+
+/// Build the error for `--revision` passed alongside an `-m` value that is an
+/// existing local path (issue #1113).
+///
+/// Step 1 of the resolver returns such a path verbatim and has no revision to
+/// honour: the directory is whatever is on disk. Refusing names the mistake,
+/// where ignoring the flag would leave the user believing they had pinned a
+/// revision.
+fn revision_with_local_path_error(value: &Path, revision: &str) -> anyhow::Error {
+    anyhow!(
+        "--revision {revision} cannot be applied to '{}', which is an existing \
+         local path: mlxcel uses a local model directory exactly as given and \
+         has no revision to resolve against it. Drop --revision to use this \
+         directory, or pass a repo-id (`owner/name`) to resolve that revision.",
+        value.display()
+    )
+}
+
+/// Build the error for a revision-qualified request whose mlxcel store
+/// destination is already occupied by a snapshot of the same repo
+/// (issue #1113).
+///
+/// The store is keyed on `<owner>/<name>` with no revision component, so the
+/// existing snapshot's revision is unknown and the two cannot coexist. Letting
+/// the download proceed would be worse than failing: `download_repo` treats
+/// same-named, non-zero files as "already present" and skips the fetch, so the
+/// caller would silently receive whichever revision was already there.
+fn revision_store_occupied_error(repo_id: &str, revision: &str, dest: &Path) -> anyhow::Error {
+    anyhow!(
+        "cannot resolve '{repo_id}' at revision '{revision}': the mlxcel store \
+         already holds a snapshot of this repo at {}, and the store is not \
+         revision-namespaced, so mlxcel cannot tell which revision that is or \
+         keep both side by side. Remove it (`mlxcel rm {repo_id}`) and retry, \
+         or resolve this revision under its own root with \
+         `--models-dir <PATH>`.",
+        dest.display()
     )
 }
 

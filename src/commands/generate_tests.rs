@@ -420,6 +420,7 @@ fn sample_generate_args(model_path: PathBuf) -> crate::GenerateArgs {
         model: crate::ModelOptions {
             model: model_path,
             models_dir: None,
+            revision: None,
             adapter: None,
             draft_model: None,
             num_draft_tokens: 3,

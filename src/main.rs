@@ -331,6 +331,17 @@ pub(crate) struct ModelOptions {
     #[arg(long, value_name = "PATH")]
     pub(crate) models_dir: Option<PathBuf>,
 
+    /// Repository revision (branch, tag, or commit hash). Defaults to `main`.
+    ///
+    /// Resolves the HuggingFace cache snapshot for that revision, and fetches
+    /// that revision on a miss. The mlxcel store is not revision-namespaced, so
+    /// a repo already present there is not reused for a revision-qualified
+    /// request and the request is refused rather than answered with an unknown
+    /// revision; use `--models-dir` to give each revision its own root. Not
+    /// valid when the model argument is an existing local path.
+    #[arg(long, value_name = "REV")]
+    pub(crate) revision: Option<String>,
+
     /// Path to LoRA adapter directory (optional)
     #[arg(long, value_name = "PATH")]
     pub(crate) adapter: Option<PathBuf>,
@@ -538,6 +549,17 @@ pub(crate) struct InspectArgs {
     /// the model argument is already an existing local path.
     #[arg(long, value_name = "PATH")]
     pub(crate) models_dir: Option<PathBuf>,
+
+    /// Repository revision (branch, tag, or commit hash). Defaults to `main`.
+    ///
+    /// Resolves the HuggingFace cache snapshot for that revision, and fetches
+    /// that revision on a miss. The mlxcel store is not revision-namespaced, so
+    /// a repo already present there is not reused for a revision-qualified
+    /// request and the request is refused rather than answered with an unknown
+    /// revision; use `--models-dir` to give each revision its own root. Not
+    /// valid when the model argument is an existing local path.
+    #[arg(long, value_name = "REV")]
+    pub(crate) revision: Option<String>,
 
     /// Maximum number of tokens to estimate KV cache for.
     ///
@@ -873,6 +895,17 @@ pub(crate) struct ServeArgs {
     /// the model argument is already an existing local path.
     #[arg(long, value_name = "PATH")]
     models_dir: Option<PathBuf>,
+
+    /// Repository revision (branch, tag, or commit hash). Defaults to `main`.
+    ///
+    /// Resolves the HuggingFace cache snapshot for that revision, and fetches
+    /// that revision on a miss. The mlxcel store is not revision-namespaced, so
+    /// a repo already present there is not reused for a revision-qualified
+    /// request and the request is refused rather than answered with an unknown
+    /// revision; use `--models-dir` to give each revision its own root. Not
+    /// valid when the model argument is an existing local path.
+    #[arg(long, value_name = "REV")]
+    revision: Option<String>,
 
     /// Path to LoRA adapter directory
     #[arg(long, visible_alias = "lora", value_name = "PATH")]

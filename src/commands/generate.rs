@@ -359,12 +359,12 @@ fn validate_pipeline_parallel_args(args: &GenerateArgs) -> Result<()> {
         return Ok(());
     }
 
-    // 2D (PP x TP) composition is now supported. The operator manual pages are
-    // `distributed/tensor-parallelism.md` and
+    // 2D (PP x TP) composition is now supported. The per-axis operator manual
+    // pages are `distributed/tensor-parallelism.md` and
     // `distributed/pipeline-parallelism.md` under the `docs/en` tree that
     // `mkdocs.yml` builds from. Those sources live in the separate
-    // documentation repository rather than here, which is deliberate and not
-    // drift (see `docs/README.md`). The in-checkout summary is
+    // documentation tree rather than here, which is deliberate and not drift
+    // (see `docs/README.md`). The in-checkout summary is
     // `docs/distributed.md`; it covers the PP and TP knobs in separate sections
     // and does not write up the 2D composition yet.
     let tp_size = args.tensor_parallel.tp_size;
@@ -1853,6 +1853,7 @@ fn chat_options_from_args(args: &GenerateArgs) -> Result<crate::commands::ChatOp
         sampling,
     );
     opts.models_dir = args.model.models_dir.clone();
+    opts.revision = args.model.revision.clone();
     opts.kv_cache_mode = kv_cache_mode;
     opts.no_chat_template = args.generation.no_chat_template;
     opts.show_reasoning = args.generation.show_reasoning;
@@ -1920,8 +1921,11 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
     // tensor/pipeline-parallel validators and the quantization-advice,
     // tokenizer, memory-preflight, and model-load steps, all of which read
     // the model directory and therefore need the resolved path.
-    args.model.model =
-        resolve_model_source_with_override(&args.model.model, args.model.models_dir.as_deref())?;
+    args.model.model = resolve_model_source_with_override(
+        &args.model.model,
+        args.model.models_dir.as_deref(),
+        args.model.revision.as_deref(),
+    )?;
 
     validate_tensor_parallel_args(&args)?;
     validate_pipeline_parallel_args(&args)?;

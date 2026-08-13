@@ -401,7 +401,7 @@ fn resolve_model_source_with_override_reuses_override_store() {
     std::env::set_current_dir(&run_dir).unwrap();
 
     let resolved =
-        resolve_model_source_with_override(Path::new("owner/model"), Some(&override_root));
+        resolve_model_source_with_override(Path::new("owner/model"), Some(&override_root), None);
 
     if let Some(cwd) = prev_cwd {
         let _ = std::env::set_current_dir(cwd);
@@ -732,4 +732,152 @@ fn normalize_bare_name_with_invalid_default_org_errors() {
 
     assert!(msg.contains("MLXCEL_DEFAULT_ORG"), "got: {msg}");
     assert!(msg.contains("invalid repo-id"), "got: {msg}");
+}
+
+// ── --revision (issue #1113) ────────────────────────────────────────────────
+
+#[test]
+fn revision_with_existing_local_path_errors() {
+    // Step 1 returns an existing path verbatim and has no revision to resolve
+    // against it, so a revision passed alongside one can only be a mistaken
+    // expectation. Refusing names the mistake; ignoring it would leave the
+    // user believing they had pinned something.
+    let tmp = tempfile::tempdir().unwrap();
+    let model = tmp.path().join("local-model");
+    make_complete_snapshot(&model);
+
+    let err = resolve_model_source_with_override(&model, None, Some("v2")).unwrap_err();
+    let msg = format!("{err}");
+
+    assert!(msg.contains("--revision v2"), "got: {msg}");
+    assert!(msg.contains("existing local path"), "got: {msg}");
+}
+
+#[test]
+fn no_revision_with_existing_local_path_is_unchanged() {
+    // The pre-#1113 behavior for a local path must be byte-identical.
+    let tmp = tempfile::tempdir().unwrap();
+    let model = tmp.path().join("local-model");
+    make_complete_snapshot(&model);
+
+    let resolved = resolve_model_source_with_override(&model, None, None).unwrap();
+
+    assert_eq!(resolved, model);
+}
+
+#[test]
+fn locate_skips_legacy_cwd_dir_for_a_revision_request() {
+    // The legacy `./models/<basename>` directory records no revision, so it
+    // must not answer a revision-qualified request. Without a revision the
+    // same directory is a hit (see `locate_prefers_legacy_cwd_models_when_complete`).
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd_models = tmp.path().join("models");
+    let legacy = cwd_models.join("Qwen3-4B-4bit");
+    make_complete_snapshot(&legacy);
+
+    let _guard = env_lock();
+    let prev_cache_dir = std::env::var("MLXCEL_CACHE_DIR").ok();
+    let prev_hf_cache = std::env::var("HF_HUB_CACHE").ok();
+    let prev_hf_home = std::env::var("HF_HOME").ok();
+    let empty_store = tmp.path().join("store");
+    let empty_hf = tmp.path().join("hf");
+    fs::create_dir_all(&empty_hf).unwrap();
+    unsafe {
+        std::env::set_var("MLXCEL_CACHE_DIR", &empty_store);
+        std::env::set_var("HF_HUB_CACHE", &empty_hf);
+        std::env::remove_var("HF_HOME");
+    }
+
+    let without_revision =
+        locate_cached_snapshot("mlx-community/Qwen3-4B-4bit", None, &cwd_models, None);
+    let with_revision =
+        locate_cached_snapshot("mlx-community/Qwen3-4B-4bit", Some("v2"), &cwd_models, None);
+
+    restore_env("MLXCEL_CACHE_DIR", prev_cache_dir);
+    restore_env("HF_HUB_CACHE", prev_hf_cache);
+    restore_env("HF_HOME", prev_hf_home);
+
+    assert_eq!(without_revision, Some(legacy));
+    assert_eq!(with_revision, None);
+}
+
+#[test]
+fn locate_skips_mlxcel_store_for_a_revision_request() {
+    // Same reasoning as the legacy directory: `<models_root>/<owner>/<name>`
+    // carries no revision component, so it cannot answer for a specific one.
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd_models = tmp.path().join("models");
+    let models_root = tmp.path().join("store-root");
+    let store_dir = models_root.join("mlx-community").join("Qwen3-4B-4bit");
+    make_complete_snapshot(&store_dir);
+
+    let _guard = env_lock();
+    let prev_hf_cache = std::env::var("HF_HUB_CACHE").ok();
+    let prev_hf_home = std::env::var("HF_HOME").ok();
+    let empty_hf = tmp.path().join("hf");
+    fs::create_dir_all(&empty_hf).unwrap();
+    unsafe {
+        std::env::set_var("HF_HUB_CACHE", &empty_hf);
+        std::env::remove_var("HF_HOME");
+    }
+
+    let without_revision = locate_cached_snapshot(
+        "mlx-community/Qwen3-4B-4bit",
+        None,
+        &cwd_models,
+        Some(models_root.as_path()),
+    );
+    let with_revision = locate_cached_snapshot(
+        "mlx-community/Qwen3-4B-4bit",
+        Some("v2"),
+        &cwd_models,
+        Some(models_root.as_path()),
+    );
+
+    restore_env("HF_HUB_CACHE", prev_hf_cache);
+    restore_env("HF_HOME", prev_hf_home);
+
+    assert_eq!(without_revision, Some(store_dir));
+    assert_eq!(with_revision, None);
+}
+
+#[test]
+fn revision_request_refuses_to_download_into_an_occupied_store() {
+    // The store is not revision-namespaced, and `download_repo` skips the
+    // fetch when every wanted filename is already present and non-zero. So a
+    // revision-qualified request against an occupied store directory would
+    // silently return whichever revision is already there. It must fail
+    // instead, and it must fail WITHOUT touching the network.
+    let tmp = tempfile::tempdir().unwrap();
+    let models_root = tmp.path().join("store-root");
+    let store_dir = models_root.join("mlx-community").join("Qwen3-4B-4bit");
+    make_complete_snapshot(&store_dir);
+
+    let _guard = env_lock();
+    let prev_hf_cache = std::env::var("HF_HUB_CACHE").ok();
+    let prev_hf_home = std::env::var("HF_HOME").ok();
+    let empty_hf = tmp.path().join("hf");
+    fs::create_dir_all(&empty_hf).unwrap();
+    unsafe {
+        std::env::set_var("HF_HUB_CACHE", &empty_hf);
+        std::env::remove_var("HF_HOME");
+    }
+
+    let err = resolve_model_source_with_override(
+        Path::new("mlx-community/Qwen3-4B-4bit"),
+        Some(models_root.as_path()),
+        Some("v2"),
+    )
+    .unwrap_err();
+    let msg = format!("{err}");
+
+    restore_env("HF_HUB_CACHE", prev_hf_cache);
+    restore_env("HF_HOME", prev_hf_home);
+
+    assert!(msg.contains("revision 'v2'"), "got: {msg}");
+    assert!(msg.contains("not revision-namespaced"), "got: {msg}");
+    assert!(msg.contains("--models-dir"), "got: {msg}");
+    // The refusal must not be reported as a download failure: nothing was
+    // fetched.
+    assert!(!msg.contains("failed to download"), "got: {msg}");
 }
