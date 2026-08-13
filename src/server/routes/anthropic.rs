@@ -34,7 +34,7 @@ use axum::{
     Json,
     extract::State,
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response, sse::Sse},
+    response::{IntoResponse, Response},
 };
 
 use crate::server::AppState;
@@ -45,6 +45,7 @@ use crate::server::anthropic_translator::{
 use crate::server::chat_request::{prepare_chat_request_with_cache, request_has_effective_input};
 use crate::server::config::ReasoningBudgetOverride;
 use crate::server::model_provider::QueueFullError;
+use crate::server::streaming::sse_response;
 use crate::server::streaming_anthropic::{AnthropicBlockEmitter, anthropic_sse_channel};
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
 use crate::server::tool_calls;
@@ -549,9 +550,7 @@ async fn stream_messages(
         let _ = sender.send_event(&AnthropicStreamEvent::MessageStop);
     });
 
-    Sse::new(stream)
-        .keep_alive(keepalive.into_inner())
-        .into_response()
+    sse_response(stream, keepalive)
 }
 
 /// POST /v1/messages/count_tokens

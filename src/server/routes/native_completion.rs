@@ -24,7 +24,7 @@ use axum::{
     Json,
     extract::State,
     http::HeaderMap,
-    response::{IntoResponse, Response, sse::Sse},
+    response::{IntoResponse, Response},
 };
 
 use crate::server::batch::RequestPriority;
@@ -34,7 +34,7 @@ use crate::server::model_provider::QueueFullError;
 use crate::server::request_options::{
     RequestOptionOverrides, build_server_generate_options, resolve_server_max_tokens,
 };
-use crate::server::streaming::sse_channel;
+use crate::server::streaming::{sse_channel, sse_response};
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
 use crate::server::types::{
     ErrorResponse, NativeCompletionRequest, NativeCompletionResponse, TimingInfo,
@@ -250,9 +250,7 @@ async fn stream_native_completion(
         let _ = finish_events.json(&final_chunk);
     });
 
-    Sse::new(stream)
-        .keep_alive(keepalive.into_inner())
-        .into_response()
+    sse_response(stream, keepalive)
 }
 
 fn build_native_options(

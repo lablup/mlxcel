@@ -346,10 +346,12 @@ fn long_prefill_channel_stays_open_before_first_token() {
     worker.join().expect("worker thread must not panic");
 }
 
-// TODO: add a test that verifies the SSE keepalive comment frame is emitted
-// before the first event arrives (LOW #2). This requires an axum
-// integration test harness to drive `Sse::new(stream).keep_alive(...)` end-to-end
-// and read raw SSE frames from the response body. The existing unit-level
-// `payload_channel` tests cannot reach the axum `KeepAlive` layer. A suitable
-// approach would be `axum_test::TestClient` or `tower::ServiceExt::oneshot`
-// with `hyper::body::to_bytes`; skipped here to avoid the additional test infra.
+// A TODO here asked for an axum integration harness to check that every route
+// attaches the keepalive. It was removed with #1107: the hazard is gone
+// structurally rather than covered by a test. Every SSE response in the server
+// is built by `streaming::sse_response`, which takes the keepalive by value, so
+// a route cannot forget it. A test per route would have been five tests
+// guarding five copy-paste sites, and would still have missed the sixth route
+// nobody remembered to write a test for. The other half of the TODO, whether
+// axum emits a comment frame while the stream is idle, tests axum's
+// `KeepAlive` rather than mlxcel, and upstream already covers it.

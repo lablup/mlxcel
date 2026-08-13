@@ -23,7 +23,7 @@ use axum::{
     Json,
     extract::State,
     http::HeaderMap,
-    response::{IntoResponse, Response, sse::Sse},
+    response::{IntoResponse, Response},
 };
 
 use mlxcel_core::sampling::{LogprobsConfig, TokenLogprobData};
@@ -34,7 +34,7 @@ use crate::server::config::ReasoningBudgetOverride;
 use crate::server::media::MediaRequestMetadata;
 use crate::server::model_provider::QueueFullError;
 use crate::server::request_options::resolve_server_max_tokens;
-use crate::server::streaming::sse_channel;
+use crate::server::streaming::{sse_channel, sse_response};
 use crate::server::structured::build_constraint_from_response_format;
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
 use crate::server::types::response::CompletionLogprobs;
@@ -439,9 +439,7 @@ async fn stream_completion(
         finish_events.done();
     });
 
-    Sse::new(stream)
-        .keep_alive(keepalive.into_inner())
-        .into_response()
+    sse_response(stream, keepalive)
 }
 
 #[cfg(test)]

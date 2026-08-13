@@ -37,7 +37,7 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::server::streaming::SSE_KEEPALIVE_INTERVAL_SECS;
+use crate::server::streaming::{IntoKeepAlive, SSE_KEEPALIVE_INTERVAL_SECS};
 use crate::server::types::anthropic_response::AnthropicResponseBlock;
 use crate::server::types::anthropic_stream::{AnthropicBlockDelta, AnthropicStreamEvent};
 
@@ -91,12 +91,18 @@ impl AnthropicSseKeepAlive {
     }
 }
 
+impl IntoKeepAlive for AnthropicSseKeepAlive {
+    fn into_keep_alive(self) -> KeepAlive {
+        self.into_inner()
+    }
+}
+
 /// Construct an Anthropic-API SSE channel.
 ///
-/// Returns `(sender, stream, cancelled, keepalive)`. The stream is fed into
-/// `Sse::new(stream).keep_alive(keepalive.into_inner())`. The cancellation
-/// token flips when the receiver is dropped so the scheduler can abort
-/// orphaned sequences.
+/// Returns `(sender, stream, cancelled, keepalive)`. The pair is handed to
+/// [`crate::server::streaming::sse_response`], which attaches the keepalive.
+/// The cancellation token flips when the receiver is dropped so the scheduler
+/// can abort orphaned sequences.
 pub fn anthropic_sse_channel(
     buffer: usize,
 ) -> (

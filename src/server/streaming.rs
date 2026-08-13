@@ -42,7 +42,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use axum::response::sse::{Event, KeepAlive};
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt};
 use serde::Serialize;
 use tokio::sync::mpsc;
@@ -160,6 +161,47 @@ pub(crate) fn sse_channel(
     let stream = ReceiverStream::new(rx).map(|payload| payload.map(sse_event));
     let keepalive = SseKeepAlive::default_for_long_prefill();
     (sender, stream, cancelled, keepalive)
+}
+
+/// Unwrap a per-surface keepalive newtype into the axum [`KeepAlive`] that
+/// [`sse_response`] attaches.
+///
+/// The three newtypes stay distinct so a route cannot attach another surface's
+/// keepalive (#1105). This trait is the only thing they share, and it exists so
+/// all three can reach one response constructor instead of each route
+/// assembling `Sse::new(..).keep_alive(..)` by hand (#1107).
+pub(crate) trait IntoKeepAlive {
+    fn into_keep_alive(self) -> KeepAlive;
+}
+
+impl IntoKeepAlive for SseKeepAlive {
+    fn into_keep_alive(self) -> KeepAlive {
+        self.into_inner()
+    }
+}
+
+/// Build the streaming HTTP response, attaching the keepalive that the matching
+/// `*_sse_channel` produced.
+///
+/// Route handlers call this instead of assembling
+/// `Sse::new(stream).keep_alive(keepalive.into_inner()).into_response()` by
+/// hand. Five routes carried byte-identical copies of that tail, and a sixth
+/// that forgot the `.keep_alive(..)` would have compiled and passed the whole
+/// suite (#1107). Routing every surface through one constructor removes the
+/// hazard structurally rather than testing for it per route: this is the only
+/// way to turn one of these streams into a `Response`, and it takes the
+/// keepalive by value, so forgetting to attach it stops being expressible.
+///
+/// Deleting the `.keep_alive(..)` below is the one remaining way to break the
+/// invariant, and it breaks it for every route at once, which is exactly the
+/// property a per-route test could not give.
+pub(crate) fn sse_response<S>(stream: S, keepalive: impl IntoKeepAlive) -> Response
+where
+    S: Stream<Item = Result<Event, Infallible>> + Send + 'static,
+{
+    Sse::new(stream)
+        .keep_alive(keepalive.into_keep_alive())
+        .into_response()
 }
 
 impl BlockingSseSender {
