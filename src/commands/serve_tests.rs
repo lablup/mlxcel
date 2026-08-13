@@ -20,6 +20,7 @@ fn sample_args() -> crate::ServeArgs {
     crate::ServeArgs {
         model: PathBuf::from("models/foo"),
         models_dir: None,
+        revision: None,
         adapter: Some(PathBuf::from("adapters/bar")),
         alias: Some("alias".to_string()),
         host: "127.0.0.1".to_string(),
