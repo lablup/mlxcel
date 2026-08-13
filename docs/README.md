@@ -4,7 +4,8 @@ This directory is the shared documentation root for public release material.
 It may contain both:
 
 1. **GitHub-facing Markdown documents** linked directly from the root `README.md`.
-2. **MkDocs site content** added under the MkDocs-specific source trees.
+2. **MkDocs site content** under MkDocs-specific source trees. None is present
+   here; see "The MkDocs manual" below.
 3. **Git/GitHub workflow documents** for maintainers and contributors.
 
 The current top-level files are GitHub-facing documents linked from the root
@@ -37,9 +38,27 @@ Current GitHub-facing docs:
 
 `adr/` holds numbered Architecture Decision Records, one significant decision per file, immutable once Accepted. See `adr/README.md` for the index.
 
+## The MkDocs manual
+
+The manual published at <https://mlxcel.lablup.ai/en/manual/> is not built from
+this directory. Its sources (`docs/en`, `docs/ko`, `docs/shared`,
+`docs/requirements.txt`, `docs/scripts`) are maintained in a separate
+documentation tree and are not part of this repository.
+
+The four mkdocs configs at the repository root (`mkdocs.yml`, `mkdocs.ko.yml`,
+`mkdocs.pdf.yml`, `mkdocs.ko.pdf.yml`) belong to that tree and are kept here in
+sync with it. Read their `docs_dir`, `custom_dir`, and `nav:` entries as paths
+into that tree: none of them names a file listed above, and none of the files
+listed above appears in a `nav:`. That is deliberate, not drift. The
+GitHub-facing documents here are meant to read as plain Markdown on GitHub, and
+the manual is a separately authored artifact.
+
+The `docs-*` Makefile targets build the manual from those sources. In this
+repository they stop immediately with an explanation rather than failing partway
+through a `uv`, symlink, or site build. Read the published manual instead.
+
 Expected future layout examples:
 
-- `docs/en/...` and `docs/ko/...` for MkDocs/manual pages.
 - `docs/github/...` for GitHub issue/PR/release workflow notes.
 - `docs/git/...` for branch, commit, tag, and mirroring procedures.
 
