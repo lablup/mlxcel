@@ -6291,6 +6291,21 @@ impl BatchScheduler {
                 .model
                 .take_gemma3n_per_layer_inputs_entry(victim.seq_id);
 
+            // Drop the victim's prompt-cache context. Preemption reallocates
+            // the sequence under a fresh `SequenceId` below, and the context
+            // map is keyed by the old one — so an entry left here is
+            // unreachable for the rest of the process's life. The leak is
+            // pre-#1143 (every preemption of a chat request leaked one entry
+            // of strings), but that issue put a token vector in the context
+            // and made each leaked entry proportional to the conversation, so
+            // it is cleared here now.
+            //
+            // Deliberately a drop and not a re-key: preemption already
+            // discards the adopted prefix and re-prefills the victim cold (see
+            // the reset below), so declining its donate-back keeps this path
+            // exactly as consistent as it was.
+            self.prompt_cache_seq_ctx.remove(&victim.seq_id);
+
             // Release its KV cache
             self.release_sequence_caches(victim.seq_id);
 
