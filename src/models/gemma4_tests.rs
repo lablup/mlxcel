@@ -1059,6 +1059,148 @@ mod snapshot_prompt_cache {
             );
         }
     }
+
+    // -- partial (truncating) restore, issue #1145 ------------------------
+    //
+    // The fixture is one sliding-attention layer with sliding_window = 8, so
+    // a prefill under 8 tokens leaves the ring unwrapped and a prefill past it
+    // does not. That is the whole decision boundary in miniature.
+
+    fn prefill(wrapper: &super::super::Gemma4Wrapper, seq: SequenceId, ids: &[i32]) {
+        wrapper.prepare_sequence_state(seq);
+        let prompt = mlxcel_core::from_slice_i32(ids, &[1, ids.len() as i32]);
+        let _ = wrapper.forward_with_sequence_id(&prompt, Some(seq), &mut [], None);
+    }
+
+    #[test]
+    #[ignore = "requires serial MLX execution"]
+    fn gemma4_reports_truncatable_only_while_the_sliding_layer_is_unwrapped() {
+        let wrapper = super::build_synthetic_wrapper();
+
+        let unwrapped = SequenceId::from_raw(920);
+        prefill(&wrapper, unwrapped, &[1, 2, 3, 4, 5]);
+        let snap = wrapper
+            .snapshot_sequence_state(unwrapped, 5)
+            .expect("snapshot");
+        assert!(wrapper.snapshot_truncatable_to(&snap, 3));
+        assert!(
+            wrapper.snapshot_truncatable_to(&snap, 5),
+            "no-op truncation"
+        );
+        assert!(
+            !wrapper.snapshot_truncatable_to(&snap, 6),
+            "cannot invent tokens the snapshot never held"
+        );
+
+        // Past the sliding window the ring has dropped its oldest entries, so
+        // the prefix a truncation would need is simply gone.
+        let wrapped = SequenceId::from_raw(921);
+        prefill(&wrapper, wrapped, &[1, 2, 3, 4, 5, 6, 7, 1, 2, 3]);
+        let wrapped_snap = wrapper
+            .snapshot_sequence_state(wrapped, 10)
+            .expect("snapshot");
+        assert!(
+            !wrapper.snapshot_truncatable_to(&wrapped_snap, 5),
+            "a wrapped sliding layer must decline"
+        );
+        assert!(
+            wrapper
+                .restore_sequence_state_truncated(SequenceId::from_raw(922), &wrapped_snap, 5)
+                .is_err(),
+            "the restore re-checks rather than trusting the caller"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires serial MLX execution"]
+    fn gemma4_full_attention_layers_truncate_past_the_sliding_window() {
+        // Full-attention layers keep every token, so the window bound that
+        // constrains sliding layers does not apply to them.
+        let wrapper = super::build_synthetic_wrapper_with_layer("full_attention");
+        let seq = SequenceId::from_raw(930);
+        prefill(&wrapper, seq, &[1, 2, 3, 4, 5, 6, 7, 1, 2, 3]);
+        let snap = wrapper.snapshot_sequence_state(seq, 10).expect("snapshot");
+        assert!(wrapper.snapshot_truncatable_to(&snap, 4));
+    }
+
+    #[test]
+    #[ignore = "requires serial MLX execution"]
+    fn gemma4_truncation_tolerates_layers_that_stored_nothing() {
+        // KV-shared layers compute only Q and borrow K/V from an earlier
+        // layer, so they never populate their own cache: `snapshot_into`
+        // skips them and `restore_from` leaves them fresh. Truncation has to
+        // treat that as a no-op. gemma-4-e2b-it-4bit hits this on layer 15,
+        // and a single-layer synthetic fixture cannot reach it, so the case
+        // is pinned directly on the cache type.
+        let empty_rotating = Cache::Rotating(RotatingKVCache::new(8));
+        assert!(!empty_rotating.is_populated());
+        let mut empty_rotating = empty_rotating;
+        empty_rotating
+            .truncate_to(34)
+            .expect("an unpopulated rotating layer truncates to a no-op");
+
+        let mut empty_standard = Cache::Standard(KVCache::new());
+        assert!(!empty_standard.is_populated());
+        empty_standard
+            .truncate_to(34)
+            .expect("an unpopulated standard layer truncates to a no-op");
+
+        // A populated layer still rejects a target past what it holds.
+        let mut populated = Cache::Standard(KVCache::new());
+        if let Cache::Standard(cache) = &mut populated {
+            let keys = mlxcel_core::from_slice_f32(&[1.0, 2.0], &[1, 1, 2, 1]);
+            let values = mlxcel_core::from_slice_f32(&[10.0, 20.0], &[1, 1, 2, 1]);
+            cache.update_and_fetch(keys, values);
+        }
+        assert!(populated.is_populated());
+        assert!(
+            populated.truncate_to(34).is_err(),
+            "an empty-layer no-op must not become a blanket bypass"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires serial MLX execution"]
+    fn gemma4_truncated_restore_matches_a_cold_prefill_of_the_same_prefix() {
+        // The correctness bar for issue #1145: adopting a snapshot truncated
+        // to N tokens must decode identically to having only ever prefilled
+        // those N tokens. Anything less makes the optimization a correctness
+        // bug that only shows up as degraded output.
+        let source = super::build_synthetic_wrapper();
+        let seq_full = SequenceId::from_raw(940);
+        prefill(&source, seq_full, &[1, 2, 3, 4, 5]);
+        let snap = source
+            .snapshot_sequence_state(seq_full, 5)
+            .expect("snapshot");
+
+        let adopted = super::build_synthetic_wrapper();
+        let seq_adopted = SequenceId::from_raw(941);
+        adopted.prepare_sequence_state(seq_adopted);
+        adopted
+            .restore_sequence_state_truncated(seq_adopted, &snap, 3)
+            .expect("truncating restore must succeed for an unwrapped ring");
+
+        let control = super::build_synthetic_wrapper();
+        let seq_control = SequenceId::from_raw(942);
+        prefill(&control, seq_control, &[1, 2, 3]);
+
+        let decode = mlxcel_core::from_slice_i32(&[6], &[1, 1]);
+        let adopted_logits =
+            adopted.forward_with_sequence_id(&decode, Some(seq_adopted), &mut [], None);
+        let control_logits =
+            control.forward_with_sequence_id(&decode, Some(seq_control), &mut [], None);
+        let got = to_vec_f32(adopted_logits.as_ref().unwrap());
+        let want = to_vec_f32(control_logits.as_ref().unwrap());
+        assert_eq!(got.len(), want.len());
+        for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
+            let abs = (g - w).abs();
+            let rel = abs / w.abs().max(1.0);
+            assert!(
+                abs < 1e-3 || rel < 1e-3,
+                "logit[{i}] differs between an adopted truncated prefix and a cold prefill of the same prefix: adopted={g}, cold={w}, abs={abs}, rel={rel}"
+            );
+        }
+    }
 }
 
 // -----------------------------------------------------------------

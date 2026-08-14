@@ -1805,7 +1805,14 @@ impl BatchScheduler {
         let store = self.prompt_cache.as_ref()?.clone();
         let key = Self::compose_prompt_cache_key(ctx, tokens);
         let snapshot_outcome = if self.model.supports_snapshot_reuse() {
-            store.lookup_snapshot_outcome(&key, tokens)
+            // The truncation capability is the model's own answer (#1145):
+            // rotating-attention families can restore to the longest common
+            // prefix while their sliding layers are unwrapped, and every
+            // family whose recurrent state cannot be rewound returns false
+            // here and keeps exact-prefix semantics.
+            store.lookup_snapshot_outcome(&key, tokens, |snapshot, target_len| {
+                self.model.snapshot_truncatable_to(snapshot, target_len)
+            })
         } else {
             SnapshotLookupOutcome::NoCandidate
         };
@@ -1844,14 +1851,26 @@ impl BatchScheduler {
                     return None;
                 }
             };
-            let restore = snapshot_entry
-                .with_snapshot(|snapshot| self.model.restore_sequence_state(seq_id, snapshot));
+            // A `matched_len` shorter than the stored entry means the store
+            // adopted at the longest common prefix, which only happens when
+            // the model agreed it could truncate there (#1145).
+            let partial = matched_len < snapshot_entry.tokens.len();
+            let restore = snapshot_entry.with_snapshot(|snapshot| {
+                if partial {
+                    self.model
+                        .restore_sequence_state_truncated(seq_id, snapshot, matched_len)
+                } else {
+                    self.model.restore_sequence_state(seq_id, snapshot)
+                }
+            });
             match restore {
                 Ok(()) => {
                     tracing::debug!(
                         seq_id = %seq_id,
                         matched = matched_len,
+                        stored = snapshot_entry.tokens.len(),
                         total = tokens.len(),
+                        partial,
                         "prompt-cache snapshot hit: restored {matched_len}/{} tokens",
                         tokens.len()
                     );

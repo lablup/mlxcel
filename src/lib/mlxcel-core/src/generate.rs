@@ -537,6 +537,40 @@ pub trait LanguageModel {
         Err("model does not support exact-prefix state snapshots".to_string())
     }
 
+    /// Whether `snapshot` can be restored covering only its first
+    /// `target_len` tokens instead of all of them (issue #1145).
+    ///
+    /// This is the model's own answer, not something the prompt-cache store
+    /// may infer from a family name: only the model knows how its per-layer
+    /// state is laid out and whether dropping a tail is mechanically sound.
+    /// The default is `false`, so a family opts in explicitly. That default
+    /// is the safe one for the recurrent families (GatedDeltaNet, Mamba and
+    /// the SSM hybrids), whose state is a fixed-size summary of every token
+    /// consumed and cannot be rewound to an earlier boundary at all.
+    ///
+    /// Implementors must answer for the state actually stored in `snapshot`,
+    /// per layer, at this specific `target_len`. A blanket `true` would let
+    /// the caller install a corrupt cache.
+    fn snapshot_truncatable_to(&self, _snapshot: &ModelStateSnapshot, _target_len: usize) -> bool {
+        false
+    }
+
+    /// Restore `snapshot` into `seq_id` covering only its first `target_len`
+    /// tokens.
+    ///
+    /// Callers must have had [`Self::snapshot_truncatable_to`] agree for the
+    /// same snapshot and length first. Implementors should still re-check
+    /// rather than trust the caller, and return `Err` instead of installing a
+    /// partially truncated state.
+    fn restore_sequence_state_truncated(
+        &self,
+        _seq_id: SequenceId,
+        _snapshot: &ModelStateSnapshot,
+        _target_len: usize,
+    ) -> Result<(), String> {
+        Err("model does not support truncated state snapshot restore".to_string())
+    }
+
     /// Describe how one sequence's runtime state should be allocated.
     ///
     /// Phase 0 keeps the default behavior aligned with today's

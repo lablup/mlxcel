@@ -656,6 +656,32 @@ impl LanguageModel for Gemma4UnifiedModel {
         )
     }
 
+    fn snapshot_truncatable_to(
+        &self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+        target_len: usize,
+    ) -> bool {
+        mlxcel_core::generate::LanguageModel::snapshot_truncatable_to(
+            &self.text_model,
+            snapshot,
+            target_len,
+        )
+    }
+
+    fn restore_sequence_state_truncated(
+        &self,
+        seq_id: SequenceId,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+        target_len: usize,
+    ) -> Result<(), String> {
+        mlxcel_core::generate::LanguageModel::restore_sequence_state_truncated(
+            &self.text_model,
+            seq_id,
+            snapshot,
+            target_len,
+        )
+    }
+
     fn num_layers(&self) -> usize {
         self.text_model.num_layers_value()
     }
