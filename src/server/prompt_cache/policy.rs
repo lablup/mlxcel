@@ -96,6 +96,27 @@ pub fn boundary_snapshot_disabled() -> bool {
     })
 }
 
+/// Operator kill switch for the background prompt-cache warm-up (issue #1144).
+///
+/// Separate from [`boundary_snapshot_disabled`] on purpose. The boundary
+/// snapshot is foreground work that buys the next turn a hit; the warm-up is
+/// speculative background work that buys that hit a bigger prefix. An operator
+/// may reasonably want the first without the second: the warm-up spends idle
+/// GPU time and a second snapshot chain per conversation on a turn that may
+/// never arrive. Setting `MLXCEL_DISABLE_CACHE_WARMUP=1` keeps #1143 and drops
+/// #1144, which is also the arm separation a benchmark needs to attribute the
+/// warm-up's effect.
+///
+/// Read once per process; setting it after start has no effect.
+///
+/// Used by: `server::routes::chat::submit_next_turn_warmup`,
+/// `server::batch::scheduler::BatchScheduler::enqueue_prompt_cache_warmup`
+pub fn cache_warmup_disabled() -> bool {
+    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DISABLED
+        .get_or_init(|| std::env::var("MLXCEL_DISABLE_CACHE_WARMUP").ok().as_deref() == Some("1"))
+}
+
 /// Automatic Prefix Caching configuration knobs.
 ///
 /// Mirrors the upstream `mlx-vlm` PR #1114 / WIP #1103 surface so callers can

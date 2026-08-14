@@ -40,6 +40,7 @@ impl ModelProvider {
                             structured_output: None,
                         }));
                     }
+                    ModelRequest::PromptCacheWarmup { .. } => continue,
                     ModelRequest::Shutdown => break,
                 }
             }

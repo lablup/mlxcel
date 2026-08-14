@@ -192,6 +192,11 @@ pub(crate) fn run_diffusion_worker_loop(
 
     for request in request_rx {
         match request {
+            ModelRequest::PromptCacheWarmup { .. } => {
+                // Only the BatchScheduler owns a prompt cache; this worker has
+                // no snapshot state to warm and silently drops the job.
+                continue;
+            }
             ModelRequest::Shutdown => {
                 tracing::info!("DiffusionGemma worker received shutdown signal");
                 break;
@@ -504,6 +509,11 @@ pub(crate) fn run_llada2_worker_loop(
 
     for request in request_rx {
         match request {
+            ModelRequest::PromptCacheWarmup { .. } => {
+                // Only the BatchScheduler owns a prompt cache; this worker has
+                // no snapshot state to warm and silently drops the job.
+                continue;
+            }
             ModelRequest::Shutdown => {
                 tracing::info!("LLaDA-2 MoE worker received shutdown signal");
                 break;

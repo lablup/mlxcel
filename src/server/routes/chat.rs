@@ -393,6 +393,15 @@ async fn non_stream_chat_completion(
         &prepared.audio_data,
         prepared.history_prompt.as_deref(),
     );
+    // Retained for the post-completion warm-up (issue #1144); the context
+    // itself moves into `options` below. Cheap: the history string has already
+    // been handed to the context and the token vector is not filled until the
+    // dispatch thread.
+    let warmup_ctx = prompt_cache_ctx.as_ref().map(|ctx| {
+        let mut c = ctx.clone();
+        c.history_prompt = None;
+        c
+    });
     let primed_open_thinking = is_prompt_primed_open_thinking(&prepared.prompt);
     // Loop-detection amplifier signal (issues #967 and #977): only tool-shaped
     // prompts arm the family default. Grammar-only requests stay disabled.
@@ -563,6 +572,14 @@ async fn non_stream_chat_completion(
         primed_open_thinking,
     );
 
+    // Warm the next turn's history prefix in the background (issue #1144).
+    // Only the plain chat path does this: a tool-calling turn is echoed back as
+    // a tool result rather than as assistant content, so the reply text is not
+    // a reliable guess at the next prompt there.
+    if let Some(ref ctx) = warmup_ctx {
+        submit_next_turn_warmup(&state, &request, ctx, &cleaned_text);
+    }
+
     Ok(Json(
         ChatCompletionResponse::new_with_logprobs(
             request_id,
@@ -579,6 +596,66 @@ async fn non_stream_chat_completion(
     ))
 }
 
+/// Submit a background prompt-cache warm-up for the next turn (issue #1144).
+///
+/// Called after a healthy completion, once the reply text the client will echo
+/// back is known. Renders the next turn's history prefix, tokenizes it, and
+/// hands it to the worker; every step is best-effort and a failure at any point
+/// simply leaves the conversation with its #1143 boundary snapshot, which is
+/// still a hit on the next turn.
+///
+/// `ctx` is the same prompt-cache context the request carried, so the warm-up
+/// lands in the bucket the next turn will look in.
+fn submit_next_turn_warmup(
+    state: &AppState,
+    request: &ChatCompletionRequest,
+    ctx: &PromptCacheRequestContext,
+    reply: &str,
+) {
+    if state.prompt_cache.is_none()
+        || crate::server::prompt_cache::boundary_snapshot_disabled()
+        || crate::server::prompt_cache::cache_warmup_disabled()
+    {
+        return;
+    }
+    let Some(history) = crate::server::chat_request::render_next_turn_history(
+        &state.chat_template,
+        request,
+        state.config.chat_template_kwargs.as_ref(),
+        reply,
+    ) else {
+        return;
+    };
+    let tokenize = |text: &str| {
+        crate::server::model_provider::tokenize_prompt_for_generation(&state.tokenizer, text).ok()
+    };
+    let (Some(probe_a), Some(probe_b)) = (tokenize(&history.probe_a), tokenize(&history.probe_b))
+    else {
+        return;
+    };
+    // Keep only the head both renders agree on. `probe` is a real generation
+    // prompt for a hypothetical next turn, so the agreeing head is precisely
+    // what any next turn reproduces: everything past it depends on how the
+    // template renders the turn that follows, which this request cannot know.
+    let Some(keep) = crate::server::chat_request::clip_warmup_target(&probe_a, &probe_b) else {
+        return;
+    };
+    let tokens: Vec<i32> = probe_a[..keep].to_vec();
+    tracing::debug!(
+        probe = probe_a.len(),
+        kept = tokens.len(),
+        "prompt-cache warm-up submitted"
+    );
+    let mut warm_ctx = ctx.clone();
+    // The vector travels as the job payload; the context only carries key
+    // identity from here on.
+    warm_ctx.history_prompt = None;
+    warm_ctx.history_prefix_tokens = None;
+    state
+        .model_provider
+        .submit_prompt_cache_warmup(tokens, warm_ctx);
+}
+
 /// Per-request streaming callback state (issue #633).
 ///
 /// Collapses the three previously-separate `Arc<Mutex<…>>` values (tool-call
@@ -592,6 +669,12 @@ struct StreamCallbackState {
     /// Raw generated text accumulated for end-of-stream tool-call parsing. Only
     /// appended to when tool-call parsing is enabled.
     accumulated: String,
+    /// User-facing content accumulated for the post-completion prompt-cache
+    /// warm-up (issue #1144). This is the filtered `delta.content` stream, not
+    /// the raw generation, because it is what the client receives and therefore
+    /// what it echoes back as the assistant turn. Only appended to when a
+    /// warm-up is actually possible for this request.
+    warmup_content: String,
     /// Stream filter that splits reasoning/content and strips structural tokens.
     stream_filter: StreamFilter,
     /// Per-`feed()` logprob buffer, drained in lockstep with the filter's
@@ -642,6 +725,17 @@ async fn stream_chat_completion(
         &prepared.audio_data,
         prepared.history_prompt.as_deref(),
     );
+    // Retained for the post-completion warm-up (issue #1144), same as the
+    // non-streaming path. `warmup_enabled` gates the per-token accumulation in
+    // the callback so a request that can never warm up pays nothing for it.
+    let warmup_ctx = prompt_cache_ctx.as_ref().map(|ctx| {
+        let mut c = ctx.clone();
+        c.history_prompt = None;
+        c
+    });
+    let warmup_enabled = warmup_ctx.is_some()
+        && !crate::server::prompt_cache::boundary_snapshot_disabled()
+        && !tool_calls::should_parse_tool_calls(&request);
     let primed_open_thinking = is_prompt_primed_open_thinking(&prepared.prompt);
     // Loop-detection amplifier signal (issue #967): same derivation as the
     // non-streaming path, so both chat surfaces resolve identically.
@@ -710,6 +804,12 @@ async fn stream_chat_completion(
     let finish_events = events.clone();
     let tokenizer = state.tokenizer.clone();
 
+    // Clones for the post-completion warm-up (issue #1144), taken only when a
+    // warm-up is actually possible so the ordinary streaming path allocates
+    // nothing extra.
+    let warmup_state = warmup_enabled.then(|| state.clone());
+    let warmup_request = warmup_enabled.then(|| request.clone());
+
     // Spawn a blocking task to handle generation
     tokio::task::spawn_blocking(move || {
         // Send initial chunk with role
@@ -751,6 +851,7 @@ async fn stream_chat_completion(
         // clients aligning by `choices[].logprobs.content` keep position info.
         let cb_state = std::sync::Arc::new(std::sync::Mutex::new(StreamCallbackState {
             accumulated: String::new(),
+            warmup_content: String::new(),
             stream_filter: if primed_open_thinking {
                 StreamFilter::new_primed_open_thinking()
             } else {
@@ -833,6 +934,9 @@ async fn stream_chat_completion(
                         if let Some(text) = emit.content
                             && !text.is_empty()
                         {
+                            if warmup_enabled {
+                                cb.warmup_content.push_str(&text);
+                            }
                             let logprobs = if logprobs_enabled {
                                 lp_data.as_ref().map(|lp| {
                                     build_single_token_chat_logprobs(&tokenizer, lp, top_k)
@@ -954,6 +1058,22 @@ async fn stream_chat_completion(
 
                 finish_reason = "tool_calls".to_string();
             }
+        }
+
+        // Warm the next turn's history prefix in the background (issue #1144).
+        // Submitted after the stream's content is complete and before the
+        // terminal chunks, on the generation thread that is about to go idle.
+        // Skipped when the turn produced tool calls: that reply is echoed back
+        // as a tool result, not as assistant content.
+        if finish_reason != "tool_calls"
+            && let (Some(state), Some(request), Some(ctx)) =
+                (&warmup_state, &warmup_request, &warmup_ctx)
+        {
+            let reply = cb_state
+                .lock()
+                .map(|cb| cb.warmup_content.clone())
+                .unwrap_or_default();
+            submit_next_turn_warmup(state, request, ctx, &reply);
         }
 
         // Send finish chunk

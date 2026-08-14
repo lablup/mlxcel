@@ -74,6 +74,9 @@ pub use metrics::{
     AtomicPromptCacheMetrics, NoopPromptCacheMetrics, PromptCacheLastReject, PromptCacheMetrics,
     PromptCacheRejectCounters, PromptCacheRejectReason,
 };
-pub use policy::{ApcConfig, PromptCacheConfig, PromptCacheStats, boundary_snapshot_disabled};
+pub use policy::{
+    ApcConfig, PromptCacheConfig, PromptCacheStats, boundary_snapshot_disabled,
+    cache_warmup_disabled,
+};
 pub use store::{PromptCacheStore, SnapshotDivergence, SnapshotLookupOutcome};
 pub use types::{BucketKey, InsertError};

@@ -107,6 +107,8 @@ fn cache_stats_response_serializes_with_expected_keys() {
         snapshot_hits: 4,
         snapshot_lookups: 5,
         snapshot_hit_rate: 0.8,
+        snapshot_warmups_run: 0,
+        snapshot_warmups_skipped: 0,
         snapshot_inserts: 6,
         snapshot_evictions_lru: 1,
         snapshot_evictions_ttl: 0,
@@ -267,6 +269,8 @@ fn cache_stats_response_disabled_payload_uses_zero_counters() {
         snapshot_hits: 0,
         snapshot_lookups: 0,
         snapshot_hit_rate: 0.0,
+        snapshot_warmups_run: 0,
+        snapshot_warmups_skipped: 0,
         snapshot_inserts: 0,
         snapshot_evictions_lru: 0,
         snapshot_evictions_ttl: 0,
@@ -322,8 +326,13 @@ fn build_stats_response_surfaces_paged_pool_independent_of_store() {
     let cfg = PromptCacheConfig::default();
 
     // None store (prompt cache disabled) still reports the live paged pool.
-    let disabled =
-        super::super::cache::build_stats_response(None, &cfg, paged, RejectReasonStats::default());
+    let disabled = super::super::cache::build_stats_response(
+        None,
+        &cfg,
+        paged,
+        RejectReasonStats::default(),
+        super::super::cache::WarmupStats::default(),
+    );
     assert!(!disabled.enabled);
     assert_eq!(disabled.paged_block_size, 32);
     assert_eq!(disabled.paged_blocks_live, 150);
@@ -341,6 +350,7 @@ fn build_stats_response_surfaces_paged_pool_independent_of_store() {
         &cfg,
         paged,
         RejectReasonStats::default(),
+        super::super::cache::WarmupStats::default(),
     );
     assert_eq!(enabled.paged_blocks_allocated, 200);
     assert_eq!(enabled.paged_bytes_in_use, 98304);
@@ -405,8 +415,13 @@ fn snapshot_divergence_reject_reaches_the_stats_body_with_its_geometry() {
     assert_eq!(reject.last_entry_len, Some(139));
 
     let cfg = PromptCacheConfig::default();
-    let resp =
-        super::super::cache::build_stats_response(None, &cfg, PagedBlockStats::default(), reject);
+    let resp = super::super::cache::build_stats_response(
+        None,
+        &cfg,
+        PagedBlockStats::default(),
+        reject,
+        super::super::cache::WarmupStats::default(),
+    );
     assert_eq!(resp.reject_snapshot_diverged, 1);
     let json = serde_json::to_string(&resp).expect("serialize");
     for key in [
@@ -439,8 +454,13 @@ fn other_reject_reasons_leave_the_stats_divergence_counter_at_zero() {
     assert_eq!(reject.last_entry_len, None);
 
     let cfg = PromptCacheConfig::default();
-    let resp =
-        super::super::cache::build_stats_response(None, &cfg, PagedBlockStats::default(), reject);
+    let resp = super::super::cache::build_stats_response(
+        None,
+        &cfg,
+        PagedBlockStats::default(),
+        reject,
+        super::super::cache::WarmupStats::default(),
+    );
     assert_eq!(resp.reject_snapshot_diverged, 0);
     assert_eq!(resp.last_reject_entry_len, None);
     let json = serde_json::to_string(&resp).expect("serialize");
@@ -478,6 +498,7 @@ fn build_stats_response_disabled_when_store_is_none() {
         &cfg,
         PagedBlockStats::default(),
         RejectReasonStats::default(),
+        super::super::cache::WarmupStats::default(),
     );
     assert!(!resp.enabled);
     assert!(!resp.apc_enabled);
@@ -503,6 +524,7 @@ fn build_stats_response_reflects_live_store() {
         &cfg,
         PagedBlockStats::default(),
         RejectReasonStats::default(),
+        super::super::cache::WarmupStats::default(),
     );
     assert!(resp.enabled);
     assert!(
@@ -548,6 +570,7 @@ fn build_stats_response_reflects_apc_blocks_when_enabled() {
         &cfg,
         PagedBlockStats::default(),
         RejectReasonStats::default(),
+        super::super::cache::WarmupStats::default(),
     );
     assert!(resp.enabled);
     assert!(resp.apc_enabled, "APC must be enabled in this fixture");
@@ -584,6 +607,7 @@ fn build_stats_response_apc_zero_when_disabled_with_inserts() {
         &cfg,
         PagedBlockStats::default(),
         RejectReasonStats::default(),
+        super::super::cache::WarmupStats::default(),
     );
     assert!(!resp.apc_enabled);
     assert_eq!(resp.entries, 3);
@@ -631,6 +655,7 @@ fn apc_unique_block_hashes_reflects_dedup_potential() {
         &cfg,
         PagedBlockStats::default(),
         RejectReasonStats::default(),
+        super::super::cache::WarmupStats::default(),
     );
     assert_eq!(resp.entries, 2);
     assert_eq!(resp.apc_active_entries, 2);
@@ -708,6 +733,7 @@ async fn router_returns_stats_and_reset_with_correct_methods() {
             s.cfg.as_ref(),
             PagedBlockStats::default(),
             RejectReasonStats::default(),
+            super::super::cache::WarmupStats::default(),
         ))
     }
     async fn reset_handler(

@@ -251,6 +251,11 @@ pub(crate) fn run_florence2_worker_loop(
 
     for request in request_rx {
         match request {
+            ModelRequest::PromptCacheWarmup { .. } => {
+                // Only the BatchScheduler owns a prompt cache; this worker has
+                // no snapshot state to warm and silently drops the job.
+                continue;
+            }
             ModelRequest::Shutdown => {
                 tracing::info!("Florence-2 seq2seq worker received shutdown signal");
                 break;

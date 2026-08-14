@@ -242,6 +242,7 @@ fn single_stream_queue_reservation_releases_on_dequeue_before_processing() {
         } => {
             drop(queue_reservation);
         }
+        ModelRequest::PromptCacheWarmup { .. } => panic!("unexpected warm-up"),
         ModelRequest::Shutdown => panic!("unexpected shutdown"),
     }
     assert_eq!(metrics.queue_depth(), 0);
@@ -288,6 +289,7 @@ fn pre_reserved_single_stream_enqueue_does_not_double_reserve() {
         ModelRequest::Generate {
             queue_reservation, ..
         } => drop(queue_reservation),
+        ModelRequest::PromptCacheWarmup { .. } => panic!("unexpected warm-up"),
         ModelRequest::Shutdown => panic!("unexpected shutdown"),
     }
     assert_eq!(metrics.queue_depth(), 0);

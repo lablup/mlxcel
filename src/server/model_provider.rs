@@ -76,6 +76,23 @@ pub(crate) enum ModelRequest {
         /// The `BatchScheduler` polls this to abort orphaned sequences.
         cancelled: Arc<AtomicBool>,
     },
+    /// Background prompt-cache warm-up for the next turn's history prefix
+    /// (issue #1144).
+    ///
+    /// Carries no `response_tx` and no queue reservation: nothing waits on it
+    /// and no client is billed for it. The scheduler runs it only when it has
+    /// nothing else to do, and drops it silently under any pressure, because a
+    /// skipped warm-up degrades to the #1143 boundary-snapshot hit rather than
+    /// to an error.
+    PromptCacheWarmup {
+        /// The next turn's expected history prefix, already tokenized: the
+        /// conversation including the reply that just finished, re-rendered
+        /// with `add_generation_prompt = false`.
+        tokens: Vec<i32>,
+        /// Cache-key metadata, so the warm-up lands in the same bucket the
+        /// next turn will look in.
+        ctx: crate::server::config::PromptCacheRequestContext,
+    },
     Shutdown,
 }
 
@@ -1401,6 +1418,30 @@ pub(crate) fn tokenize_prompt_for_generation_with_ordered_media(
     let add_special = !plain_prompt.starts_with("<bos>") && !plain_prompt.starts_with("<s>");
     let ids = tokenizer.encode(&plain_prompt, add_special)?;
     Ok(ids.iter().map(|&x| x as i32).collect())
+}
+
+impl ModelProvider {
+    /// Submit a background prompt-cache warm-up (issue #1144).
+    ///
+    /// Fire and forget by design. The caller has already answered the client,
+    /// so a warm-up that cannot be delivered must not surface anywhere: a full
+    /// or closed channel just means the next turn falls back to the #1143
+    /// boundary snapshot, which is a hit, not an error.
+    ///
+    /// Used by: `server::routes::chat` (streaming and non-streaming)
+    pub(crate) fn submit_prompt_cache_warmup(
+        &self,
+        tokens: Vec<i32>,
+        ctx: crate::server::config::PromptCacheRequestContext,
+    ) {
+        if self
+            .request_tx
+            .send(ModelRequest::PromptCacheWarmup { tokens, ctx })
+            .is_err()
+        {
+            tracing::debug!("prompt-cache warm-up not submitted: worker channel closed");
+        }
+    }
 }
 
 fn send_shutdown_signal(request_tx: &mpsc::Sender<ModelRequest>) -> bool {
