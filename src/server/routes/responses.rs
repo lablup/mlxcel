@@ -245,6 +245,7 @@ async fn non_stream_create_response(
         &translated.chat_request,
         &prepared.image_data,
         &prepared.audio_data,
+        prepared.history_prompt.as_deref(),
     );
 
     let result = state
@@ -358,6 +359,7 @@ async fn stream_create_response(
         &translated.chat_request,
         &prepared.image_data,
         &prepared.audio_data,
+        prepared.history_prompt.as_deref(),
     );
 
     let queue_reservation = match state.model_provider.reserve_single_stream_queue_slot() {

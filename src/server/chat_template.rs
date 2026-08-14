@@ -473,6 +473,37 @@ impl ChatTemplateProcessor {
         tools: Option<&[Tool]>,
         kwargs: &ChatTemplateKwargs,
     ) -> Result<String> {
+        self.apply_raw_inner(messages, tools, kwargs, self.add_generation_prompt)
+    }
+
+    /// Render the raw-JSON message list as pure conversation **history**:
+    /// identical to [`Self::apply_raw_with_kwargs`] except that
+    /// `add_generation_prompt` is forced to `false`.
+    ///
+    /// This is the history-boundary render the prompt cache keys its
+    /// boundary snapshot on (issue #1143). Its output is prefix-stable across
+    /// turns: a template renders each message independently and concatenates,
+    /// so turn N's history render is a text prefix of turn N+1's prompt no
+    /// matter what generation-prompt scaffold, thinking priming, or
+    /// history-side thinking strip the template applies at the tail.
+    ///
+    /// Used by: chat_request::prepare_chat_request_with_cache
+    pub fn apply_raw_history_with_kwargs(
+        &self,
+        messages: &serde_json::Value,
+        tools: Option<&[Tool]>,
+        kwargs: &ChatTemplateKwargs,
+    ) -> Result<String> {
+        self.apply_raw_inner(messages, tools, kwargs, false)
+    }
+
+    fn apply_raw_inner(
+        &self,
+        messages: &serde_json::Value,
+        tools: Option<&[Tool]>,
+        kwargs: &ChatTemplateKwargs,
+        add_generation_prompt: bool,
+    ) -> Result<String> {
         let mut env = Environment::new();
         configure_environment(&mut env);
 
@@ -497,7 +528,7 @@ impl ChatTemplateProcessor {
             messages_val,
             &self.bos_token,
             &self.eos_token,
-            self.add_generation_prompt,
+            add_generation_prompt,
             tools_val,
             kwargs,
             self.default_enable_thinking,
@@ -538,6 +569,30 @@ impl ChatTemplateProcessor {
         tools: Option<&[Tool]>,
         kwargs: &ChatTemplateKwargs,
     ) -> Result<String> {
+        self.apply_inner(messages, tools, kwargs, self.add_generation_prompt)
+    }
+
+    /// Typed-message counterpart of [`Self::apply_raw_history_with_kwargs`]:
+    /// renders the conversation as history only, with `add_generation_prompt`
+    /// forced to `false`.
+    ///
+    /// Used by: chat_request::prepare_chat_request_with_cache
+    pub fn apply_history_with_kwargs(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[Tool]>,
+        kwargs: &ChatTemplateKwargs,
+    ) -> Result<String> {
+        self.apply_inner(messages, tools, kwargs, false)
+    }
+
+    fn apply_inner(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[Tool]>,
+        kwargs: &ChatTemplateKwargs,
+        add_generation_prompt: bool,
+    ) -> Result<String> {
         let mut env = Environment::new();
         configure_environment(&mut env);
 
@@ -562,7 +617,7 @@ impl ChatTemplateProcessor {
             messages_val,
             &self.bos_token,
             &self.eos_token,
-            self.add_generation_prompt,
+            add_generation_prompt,
             tools_val,
             kwargs,
             self.default_enable_thinking,

@@ -347,12 +347,36 @@ impl std::fmt::Debug for CacheEntry {
     }
 }
 
+/// Which producer stored a snapshot (issue #1143).
+///
+/// Load-bearing for the session-chain supersede rule in
+/// [`super::store::PromptCacheStore::insert_snapshot`], which removes stored
+/// snapshots whose token vector is a strict prefix of an incoming one. That
+/// rule's premise is "a longer vector from the same conversation replaces a
+/// shorter one", and it holds *within* a producer but not *across* the two:
+/// a turn's history-boundary vector is always a strict prefix of that same
+/// turn's completion vector, yet the boundary one is the only vector that can
+/// match the next turn. Superseding across producers therefore deletes the
+/// entry the whole feature depends on. Chains are kept per producer instead.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SnapshotOrigin {
+    /// Donated at end of generation: `prompt + generated`. The pre-#1143
+    /// producer, and the default so every existing caller keeps its behavior.
+    #[default]
+    Completion,
+    /// Captured mid-prefill at the history boundary: the tokenization of the
+    /// conversation re-rendered with `add_generation_prompt = false`.
+    Boundary,
+}
+
 /// A single exact-prefix recurrent/model-owned state snapshot.
 pub struct ModelSnapshotEntry {
     pub tokens: Vec<i32>,
     snapshot: Mutex<ModelSnapshotHolder>,
     pub last_used: Mutex<Instant>,
     pub size_bytes: usize,
+    /// Which producer stored this entry. See [`SnapshotOrigin`].
+    pub origin: SnapshotOrigin,
 }
 
 impl ModelSnapshotEntry {
@@ -363,7 +387,19 @@ impl ModelSnapshotEntry {
             snapshot: Mutex::new(ModelSnapshotHolder::new(snapshot)),
             last_used: Mutex::new(Instant::now()),
             size_bytes,
+            origin: SnapshotOrigin::Completion,
         }
+    }
+
+    /// Tag this entry with the producer that created it (issue #1143).
+    ///
+    /// Builder rather than a `new` parameter so the existing end-of-generation
+    /// callers and every test keep compiling against the pre-#1143 signature
+    /// and keep their pre-#1143 supersede behavior.
+    #[must_use]
+    pub fn with_origin(mut self, origin: SnapshotOrigin) -> Self {
+        self.origin = origin;
+        self
     }
 
     pub fn with_snapshot<R>(&self, f: impl FnOnce(&ModelStateSnapshot) -> R) -> R {
@@ -404,6 +440,7 @@ impl ModelSnapshotEntry {
             snapshot: Mutex::new(ModelSnapshotHolder::new(snapshot)),
             last_used: Mutex::new(Instant::now()),
             size_bytes,
+            origin: SnapshotOrigin::Completion,
         }
     }
 }

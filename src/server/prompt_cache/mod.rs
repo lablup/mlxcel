@@ -60,7 +60,7 @@ pub use apc_lookup::ApcStoreStats;
 pub use block_hash::{
     ApcBlockHash, ApcHashAlgo, BlockHashChain, DEFAULT_APC_BLOCK_SIZE, ParseApcHashError,
 };
-pub use entry::{CacheEntry, DetachedKvSet, ModelSnapshotEntry};
+pub use entry::{CacheEntry, DetachedKvSet, ModelSnapshotEntry, SnapshotOrigin};
 pub use hybrid_ssm::{
     HYBRID_SSM_MODEL_TYPES, detect_hybrid_ssm, detect_hybrid_ssm_from_path,
     is_hybrid_ssm_model_type,
@@ -74,6 +74,6 @@ pub use metrics::{
     AtomicPromptCacheMetrics, NoopPromptCacheMetrics, PromptCacheLastReject, PromptCacheMetrics,
     PromptCacheRejectCounters, PromptCacheRejectReason,
 };
-pub use policy::{ApcConfig, PromptCacheConfig, PromptCacheStats};
+pub use policy::{ApcConfig, PromptCacheConfig, PromptCacheStats, boundary_snapshot_disabled};
 pub use store::{PromptCacheStore, SnapshotDivergence, SnapshotLookupOutcome};
 pub use types::{BucketKey, InsertError};

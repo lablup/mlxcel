@@ -992,6 +992,8 @@ fn compose_prompt_cache_key_folds_request_multimodal_digest() {
         template_sig: "tpl".to_string(),
         session_key: "sess".to_string(),
         mm_digest: MultimodalDigest::empty(),
+        history_prompt: None,
+        history_prefix_tokens: None,
     };
     let image_a = PromptCacheRequestContext {
         mm_digest: multimodal_digest_from_vecs(&[b"IMAGE-A".to_vec()], &[]),
@@ -1706,4 +1708,100 @@ fn a_single_success_prevents_the_guard_from_tripping() {
     // A fresh single failure is nowhere near the threshold.
     count = advance_eval_failure_count(count, false);
     assert!(!eval_failures_reached_limit(count));
+}
+
+// ---------------------------------------------------------------------------
+// History-boundary prefix arithmetic (issue #1143)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn common_prefix_len_reports_the_shared_head() {
+    use super::common_prefix_len;
+
+    // Identical vectors: the whole thing.
+    assert_eq!(common_prefix_len(&[1, 2, 3], &[1, 2, 3]), 3);
+    // The history render is normally a strict prefix of the prompt: the
+    // generation-prompt scaffold is what follows.
+    assert_eq!(common_prefix_len(&[1, 2, 3], &[1, 2, 3, 9, 9]), 3);
+    // A prompt shorter than the history render still reports only the shared
+    // head, never an index past either slice.
+    assert_eq!(common_prefix_len(&[1, 2, 3, 4], &[1, 2]), 2);
+    // Divergence inside the shared region truncates there. This is the case
+    // that protects against a BPE merge across the history/scaffold seam:
+    // the merged token is not shared, so it is not stored.
+    assert_eq!(common_prefix_len(&[1, 2, 7], &[1, 2, 8, 8]), 2);
+    // No overlap at all, and empty inputs.
+    assert_eq!(common_prefix_len(&[5], &[6]), 0);
+    assert_eq!(common_prefix_len(&[], &[1, 2]), 0);
+    assert_eq!(common_prefix_len(&[1, 2], &[]), 0);
+}
+
+#[test]
+fn history_boundary_len_clips_and_declines() {
+    use super::history_boundary_len;
+
+    // The ordinary shape: history is a strict token prefix of the prompt and
+    // the generation-prompt scaffold is the tail. Boundary is the shared head.
+    let history: Vec<i32> = (0..40).collect();
+    let mut prompt = history.clone();
+    prompt.extend([900, 901]);
+    assert_eq!(history_boundary_len(&history, &prompt, 32), Some(40));
+
+    // Below `min_prefix_tokens` the store would decline the insert anyway, so
+    // the extra forward would buy nothing.
+    let short: Vec<i32> = (0..8).collect();
+    let mut short_prompt = short.clone();
+    short_prompt.extend([900, 901]);
+    assert_eq!(history_boundary_len(&short, &short_prompt, 32), None);
+    // Exactly at the minimum is accepted.
+    let at_min: Vec<i32> = (0..32).collect();
+    let mut at_min_prompt = at_min.clone();
+    at_min_prompt.push(900);
+    assert_eq!(history_boundary_len(&at_min, &at_min_prompt, 32), Some(32));
+
+    // A boundary covering the whole prompt leaves no suffix to prefill, and the
+    // sampler needs a non-empty final forward for fresh logits.
+    assert_eq!(history_boundary_len(&history, &history, 32), None);
+
+    // Divergence inside the shared region truncates there, which is what
+    // protects against a BPE merge across the history/scaffold seam. A late
+    // divergence still clears the minimum and the clipped prefix is kept.
+    let mut late = history.clone();
+    late[35] = 7777;
+    assert_eq!(history_boundary_len(&late, &prompt, 32), Some(35));
+
+    // An early divergence drops the surviving prefix under the minimum, and
+    // the request declines rather than storing a stub.
+    let mut early = history.clone();
+    early[20] = 7777;
+    assert_eq!(history_boundary_len(&early, &prompt, 32), None);
+    // The same divergence with a lower minimum keeps the clipped prefix.
+    assert_eq!(history_boundary_len(&early, &prompt, 8), Some(20));
+
+    // No history at all.
+    assert_eq!(history_boundary_len(&[], &prompt, 32), None);
+}
+
+#[test]
+fn boundary_capture_applies_respects_adopted_prefix() {
+    use super::boundary_capture_applies;
+
+    // Cold prefill: the whole boundary is still to be forwarded.
+    assert!(boundary_capture_applies(40, 0, 60));
+    // A prompt-cache hit that stops short of the boundary still leaves a
+    // segment worth forwarding and snapshotting.
+    assert!(boundary_capture_applies(40, 20, 60));
+
+    // An adopted prefix that already reaches or passes the boundary leaves an
+    // empty segment; the snapshot for it already exists.
+    assert!(!boundary_capture_applies(40, 40, 60));
+    assert!(!boundary_capture_applies(40, 45, 60));
+
+    // The degenerate whole-prompt-adoption backoff sets the offset to len - 1,
+    // which is past every valid boundary, so the capture declines there.
+    assert!(!boundary_capture_applies(40, 59, 60));
+
+    // A boundary at or past the prompt length would leave no suffix.
+    assert!(!boundary_capture_applies(60, 0, 60));
+    assert!(!boundary_capture_applies(61, 0, 60));
 }

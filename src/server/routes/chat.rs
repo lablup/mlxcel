@@ -98,11 +98,18 @@ fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
 /// slices, which yields `MultimodalDigest::empty()` and a key byte-identical to
 /// the pre-#124 path. Callers must therefore build the context **after**
 /// preparing the request so the resolved bytes are available.
+///
+/// `history_prompt` is the request re-rendered with `add_generation_prompt =
+/// false` (see [`crate::server::chat_request::PreparedChatRequest::history_prompt`]).
+/// It travels with the context so the scheduler can capture a history-boundary
+/// snapshot during prefill for snapshot-only families (issue #1143). Pass
+/// `None` to opt this request out.
 pub(crate) fn build_prompt_cache_request_context(
     state: &AppState,
     request: &ChatCompletionRequest,
     image_data: &[Vec<u8>],
     audio_data: &[Vec<u8>],
+    history_prompt: Option<&str>,
 ) -> Option<PromptCacheRequestContext> {
     state.prompt_cache.as_ref()?;
     // Mirror the kwargs merge that `prepare_chat_request_with_cache` performs
@@ -134,6 +141,8 @@ pub(crate) fn build_prompt_cache_request_context(
         template_sig: template_signature,
         session_key,
         mm_digest,
+        history_prompt: history_prompt.map(str::to_string),
+        history_prefix_tokens: None,
     })
 }
 
@@ -382,6 +391,7 @@ async fn non_stream_chat_completion(
         &request,
         &prepared.image_data,
         &prepared.audio_data,
+        prepared.history_prompt.as_deref(),
     );
     let primed_open_thinking = is_prompt_primed_open_thinking(&prepared.prompt);
     // Loop-detection amplifier signal (issues #967 and #977): only tool-shaped
@@ -630,6 +640,7 @@ async fn stream_chat_completion(
         &request,
         &prepared.image_data,
         &prepared.audio_data,
+        prepared.history_prompt.as_deref(),
     );
     let primed_open_thinking = is_prompt_primed_open_thinking(&prepared.prompt);
     // Loop-detection amplifier signal (issue #967): same derivation as the
