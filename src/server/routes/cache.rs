@@ -78,9 +78,11 @@ pub(crate) struct RejectReasonStats {
     pub empty_set: u64,
     pub layout_constraints: u64,
     pub block_boundary_floor: u64,
+    pub snapshot_diverged: u64,
     pub last_reason: Option<String>,
     pub last_seq_id: Option<u64>,
     pub last_context_len: Option<u64>,
+    pub last_entry_len: Option<u64>,
     pub last_at_unix_ms: Option<u64>,
 }
 
@@ -97,9 +99,11 @@ impl RejectReasonStats {
             empty_set: snap.prompt_cache_reject_empty_set,
             layout_constraints: snap.prompt_cache_reject_layout_constraints,
             block_boundary_floor: snap.prompt_cache_reject_block_boundary_floor,
+            snapshot_diverged: snap.prompt_cache_reject_snapshot_diverged,
             last_reason: last.map(|r| r.reason.to_string()),
             last_seq_id: last.and_then(|r| r.seq_id),
             last_context_len: last.map(|r| r.context_len),
+            last_entry_len: last.and_then(|r| r.entry_len),
             last_at_unix_ms: last.map(|r| r.at_unix_ms),
         }
     }
@@ -219,6 +223,16 @@ pub struct CacheStatsResponse {
     /// Paged pool block-size floor pushed the adoptable/donatable length
     /// below `min_prefix_tokens` (adopt path only).
     pub reject_block_boundary_floor: u64,
+    /// Structural snapshot-divergence declines (issue #1147, adopt path
+    /// only): a snapshot candidate existed in the request's own session
+    /// bucket but its stored token vector is not a prefix of the request, so
+    /// the exact-prefix snapshot path could not adopt it. This is what
+    /// separates the multi-turn miss of epic #1148 from an empty store: with
+    /// `snapshot_lookups` advancing and `snapshot_hits` at zero, a non-zero
+    /// count here means the entry was there and structurally unusable, while
+    /// a zero count means there was nothing to reuse. `last_reject_context_len`
+    /// and `last_reject_entry_len` carry the geometry of the most recent one.
+    pub reject_snapshot_diverged: u64,
     /// Reason label of the most recent reject/decline event, if any has
     /// happened yet.
     pub last_reject_reason: Option<String>,
@@ -226,8 +240,14 @@ pub struct CacheStatsResponse {
     /// decline site (see [`crate::server::prompt_cache::PromptCacheLastReject`]).
     pub last_reject_seq_id: Option<u64>,
     /// Matched-prefix length (adopt) or donated token count (donate) at the
-    /// time of the most recent reject.
+    /// time of the most recent reject. For `snapshot_diverged` this is the
+    /// longest common prefix between the stored entry and the request.
     pub last_reject_context_len: Option<u64>,
+    /// Token length of the stored entry involved in the most recent reject,
+    /// when the decline site had one specific entry in view. Populated for
+    /// `snapshot_diverged` (the stored snapshot's length) and `null` for the
+    /// other reasons.
+    pub last_reject_entry_len: Option<u64>,
     /// Unix epoch milliseconds of the most recent reject.
     pub last_reject_at_unix_ms: Option<u64>,
 }
@@ -336,9 +356,11 @@ pub(crate) fn build_stats_response(
                 reject_empty_set: reject.empty_set,
                 reject_layout_constraints: reject.layout_constraints,
                 reject_block_boundary_floor: reject.block_boundary_floor,
+                reject_snapshot_diverged: reject.snapshot_diverged,
                 last_reject_reason: reject.last_reason,
                 last_reject_seq_id: reject.last_seq_id,
                 last_reject_context_len: reject.last_context_len,
+                last_reject_entry_len: reject.last_entry_len,
                 last_reject_at_unix_ms: reject.last_at_unix_ms,
             }
         }
@@ -391,9 +413,11 @@ pub(crate) fn build_stats_response(
             reject_empty_set: reject.empty_set,
             reject_layout_constraints: reject.layout_constraints,
             reject_block_boundary_floor: reject.block_boundary_floor,
+            reject_snapshot_diverged: reject.snapshot_diverged,
             last_reject_reason: reject.last_reason,
             last_reject_seq_id: reject.last_seq_id,
             last_reject_context_len: reject.last_context_len,
+            last_reject_entry_len: reject.last_entry_len,
             last_reject_at_unix_ms: reject.last_at_unix_ms,
         },
     }
