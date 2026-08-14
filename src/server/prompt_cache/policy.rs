@@ -65,6 +65,37 @@ pub struct PromptCacheConfig {
     pub snapshot_ttl: Duration,
 }
 
+/// Operator kill switch for the history-boundary snapshot (issue #1143).
+///
+/// The feature is on by default: it is what makes the prompt cache hit at all
+/// for snapshot-only families. But it costs a second chat-template render and a
+/// second tokenization on the request-dispatch thread, plus an extra graph
+/// launch and a full model-state copy on the foreground prefill, and a
+/// deployment that serves only single-turn traffic pays all of that for reuse it
+/// will never claim. `MLXCEL_DISABLE_BOUNDARY_SNAPSHOT=1` restores the
+/// pre-#1143 request path end to end.
+///
+/// It lives here rather than in the scheduler because both ends of the feature
+/// have to honor it: the route decides whether to render the history form at
+/// all, and the scheduler decides whether to split the prefill. Gating only the
+/// scheduler would leave the render and the encode being paid for a snapshot
+/// that is then never taken.
+///
+/// Read once per process, so it costs nothing per request and setting it after
+/// start has no effect.
+///
+/// Used by: `server::chat_request::prepare_chat_request_with_cache`,
+/// `server::batch::scheduler::BatchScheduler::resolve_history_boundary`
+pub fn boundary_snapshot_disabled() -> bool {
+    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        std::env::var("MLXCEL_DISABLE_BOUNDARY_SNAPSHOT")
+            .ok()
+            .as_deref()
+            == Some("1")
+    })
+}
+
 /// Automatic Prefix Caching configuration knobs.
 ///
 /// Mirrors the upstream `mlx-vlm` PR #1114 / WIP #1103 surface so callers can

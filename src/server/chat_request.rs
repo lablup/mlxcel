@@ -221,9 +221,22 @@ pub(crate) async fn prepare_chat_request_with_cache(
     // Only worth doing when the prompt cache is live, and only sound for
     // text-only requests: a multimodal prompt's token stream is rewritten by
     // placeholder expansion after rendering, so a text-level prefix says
-    // nothing about the token-level one.
-    let render_history_prefix =
-        prompt_cache_enabled && declared_images == 0 && declared_audio == 0 && declared_videos == 0;
+    // nothing about the token-level one. The operator kill switch is checked
+    // here as well as in the scheduler, so disabling the feature really does
+    // remove this render and the tokenization that follows it, rather than
+    // paying for both and discarding the result on the worker thread.
+    //
+    // Known gap: this cannot yet tell whether the loaded model is one of the
+    // `supports_snapshot_reuse()` families, because that capability lives on
+    // the model behind the worker thread and is not published to the HTTP
+    // layer. On a dense-KV deployment the render and encode below are paid and
+    // then discarded by the scheduler. Tracked separately; the kill switch is
+    // the interim opt-out.
+    let render_history_prefix = prompt_cache_enabled
+        && !super::prompt_cache::boundary_snapshot_disabled()
+        && declared_images == 0
+        && declared_audio == 0
+        && declared_videos == 0;
 
     // Render the prompt, and — when the prompt cache is on — the same
     // conversation as history (`add_generation_prompt = false`). Both renders

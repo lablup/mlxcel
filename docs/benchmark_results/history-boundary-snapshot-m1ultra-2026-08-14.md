@@ -74,6 +74,14 @@ are not comparable cell to cell. The only thing this row establishes is that the
 boundary snapshot is being produced (`snapshot_inserts` doubles) and that adding
 it does not break a family that was already hitting.
 
+### The kill switch reproduces the baseline exactly
+
+Same binary as the fix arm, with `MLXCEL_DISABLE_BOUNDARY_SNAPSHOT=1`, same
+three-turn qwen3.5-0.8b-4bit probe: turn 2 `cached_tokens` 0 / 189, turn 3
+0 / 214, `snapshot_hits` 0, `snapshot_inserts` 3 (one per turn). Cell for cell
+identical to the `main` baseline arm above, which is what "restores the previous
+behavior" has to mean to be worth documenting.
+
 ### Greedy output is not bit-exact across the split
 
 Third arm pair, same binary, differing only in `MLXCEL_DISABLE_BOUNDARY_SNAPSHOT`

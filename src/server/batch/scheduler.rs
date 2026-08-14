@@ -224,23 +224,51 @@ fn common_prefix_len(a: &[i32], b: &[i32]) -> usize {
     a.iter().zip(b).take_while(|(x, y)| x == y).count()
 }
 
-/// Operator kill switch for the history-boundary snapshot (issue #1143).
+/// Decide the history boundary for a request from its two token vectors.
 ///
-/// The feature is on by default: it is what makes the prompt cache hit at all
-/// for snapshot-only families. But it puts an extra graph launch and a full
-/// model-state copy on the foreground prefill of every qualifying request, and
-/// a deployment that serves only single-turn traffic pays that for reuse it
-/// will never claim. `MLXCEL_DISABLE_BOUNDARY_SNAPSHOT=1` restores the
-/// pre-#1143 prefill without a rebuild. Read once, so it costs nothing per
-/// request.
-fn boundary_snapshot_disabled() -> bool {
-    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *DISABLED.get_or_init(|| {
-        std::env::var("MLXCEL_DISABLE_BOUNDARY_SNAPSHOT")
-            .ok()
-            .as_deref()
-            == Some("1")
-    })
+/// Split out from [`BatchScheduler::resolve_history_boundary`] so the
+/// arithmetic that decides whether a boundary snapshot is worth taking is a
+/// pure function with its own tests (issue #1143). Returns the clipped
+/// boundary length, or `None` when this request should not carry one.
+///
+/// `history` is the tokenized `add_generation_prompt = false` render and
+/// `prompt_tokens` is what the model will actually prefill. The result is the
+/// length of their longest common prefix, subject to two rejections:
+///
+/// * below `min_prefix_tokens` the store would decline the insert anyway, so
+///   the extra forward would be pure loss;
+/// * at or beyond the prompt length there is no suffix left to prefill, and
+///   the sampler needs a non-empty final forward to produce fresh logits.
+///
+/// Used by: `BatchScheduler::resolve_history_boundary`
+fn history_boundary_len(
+    history: &[i32],
+    prompt_tokens: &[i32],
+    min_prefix_tokens: usize,
+) -> Option<usize> {
+    let boundary = common_prefix_len(history, prompt_tokens);
+    if boundary < min_prefix_tokens || boundary >= prompt_tokens.len() {
+        return None;
+    }
+    Some(boundary)
+}
+
+/// Whether a resolved boundary is still worth capturing for this sequence at
+/// prefill time (issue #1143).
+///
+/// Separate from [`history_boundary_len`] because it depends on state that only
+/// exists once the sequence has been admitted: an adopted prompt-cache prefix
+/// may already reach past the boundary, in which case the segment forward would
+/// be empty and the snapshot already exists.
+///
+/// Used by: `BatchScheduler::capture_history_boundary_snapshot`
+#[inline]
+fn boundary_capture_applies(
+    boundary: usize,
+    prefill_start_offset: usize,
+    prompt_len: usize,
+) -> bool {
+    boundary > prefill_start_offset && boundary < prompt_len
 }
 
 #[inline]
@@ -2274,7 +2302,10 @@ impl BatchScheduler {
         is_multimodal: bool,
     ) {
         let history_prompt = ctx.history_prompt.take();
-        if !self.model.supports_snapshot_reuse() || is_multimodal || boundary_snapshot_disabled() {
+        if !self.model.supports_snapshot_reuse()
+            || is_multimodal
+            || crate::server::prompt_cache::boundary_snapshot_disabled()
+        {
             ctx.history_prefix_tokens = None;
             return;
         }
@@ -2299,16 +2330,14 @@ impl BatchScheduler {
             },
         };
 
-        let boundary = common_prefix_len(&history_tokens, prompt_tokens);
         let min_prefix = self
             .prompt_cache
             .as_ref()
             .map(|s| s.min_prefix_tokens())
             .unwrap_or(0);
-        if boundary < min_prefix || boundary >= prompt_tokens.len() {
-            return;
-        }
-        ctx.history_prefix_tokens = Some(prompt_tokens[..boundary].to_vec());
+        ctx.history_prefix_tokens =
+            history_boundary_len(&history_tokens, prompt_tokens, min_prefix)
+                .map(|boundary| prompt_tokens[..boundary].to_vec());
     }
 
     /// Copy the model-owned state of `seq_id` and insert it into the
@@ -2444,6 +2473,25 @@ impl BatchScheduler {
     /// returns `Ok(())` and leaves the sequence untouched, so the request
     /// simply prefills the way it did before this issue.
     ///
+    /// ## Where this does not run
+    ///
+    /// Only [`Self::execute_full_prefill`] and [`Self::start_chunked_prefill`]
+    /// call this. A `BatchedCold` cohort of two or more rows goes through
+    /// [`Self::run_padded_batched_prefill`], which forwards every row in one
+    /// pass and has no per-row split point, so those rows take no boundary
+    /// snapshot and their next turn misses. The same is true of the MTP
+    /// speculative burst.
+    ///
+    /// Left as a gap rather than fixed by marking boundary-eligible rows
+    /// non-cold in [`plan_prefill_cohorts`]: that would route essentially every
+    /// snapshot-family chat row to sequential prefill and give up batched
+    /// prefill for the whole family, which costs more than the missed reuse.
+    /// In practice the overlap is narrow, since a cohort only forms from rows
+    /// whose prompts are exactly equal in length on the families that report
+    /// `supports_padded_prefill() == false`. Every single-row and error
+    /// fallback in that function routes back through `execute_full_prefill`, so
+    /// the capture still happens there.
+    ///
     /// ## Not bit-exact, deliberately
     ///
     /// Two forwards do not reduce in the same order as one, so a split prefill
@@ -2465,11 +2513,15 @@ impl BatchScheduler {
         if seq.vlm_embeddings.is_some() {
             return Ok(());
         }
-        let mut ctx = match self.prompt_cache_seq_ctx.get(&seq.seq_id) {
-            Some(c) => c.clone(),
-            None => return Ok(()),
-        };
-        let Some(boundary_tokens) = ctx.history_prefix_tokens.take() else {
+        // `take` rather than clone: this is the only consumer of the vector, so
+        // moving it out both avoids copying it and releases the map's copy for
+        // the rest of the request. The context itself is cloned afterwards for
+        // the key, which is cheap once the vector is gone.
+        let Some(boundary_tokens) = self
+            .prompt_cache_seq_ctx
+            .get_mut(&seq.seq_id)
+            .and_then(|c| c.history_prefix_tokens.take())
+        else {
             return Ok(());
         };
         let boundary = boundary_tokens.len();
@@ -2477,7 +2529,7 @@ impl BatchScheduler {
         // boundary, and nothing to split when the boundary is the whole prompt
         // (the suffix forward must stay non-empty so the sampler still sees
         // fresh logits).
-        if boundary <= seq.prefill_start_offset || boundary >= seq.prompt_tokens.len() {
+        if !boundary_capture_applies(boundary, seq.prefill_start_offset, seq.prompt_tokens.len()) {
             return Ok(());
         }
         // The vector was clipped to a common prefix at enqueue time; re-checking
@@ -2515,12 +2567,38 @@ impl BatchScheduler {
             let logits =
                 self.model
                     .forward_with_sequence_id(&input, Some(seq.seq_id), caches, None);
-            mlxcel_core::try_eval(&logits).map_err(|e| e.to_string())
+            // Evaluate only the final position, not the whole
+            // `[1, segment_len, vocab]` block. The segment can be the entire
+            // conversation history, and making the full block the eval OUTPUT
+            // would force it to be materialized and held rather than freed as
+            // an intermediate: at 20k tokens and a 150k vocab that is several
+            // GB of peak for a tensor nothing reads. The last row still depends
+            // on every earlier position through attention and the recurrent
+            // scan, so the forward (and therefore every cache write the
+            // snapshot is about to copy) is computed either way. This mirrors
+            // the slice `execute_full_prefill` takes on its padded branch.
+            let shape = mlxcel_core::array_shape(&logits);
+            let last = mlxcel_core::slice(
+                &logits,
+                &[0, segment_len - 1, 0],
+                &[shape[0], segment_len, shape[2]],
+            );
+            mlxcel_core::try_eval(&last).map_err(|e| e.to_string())
         };
         self.record_eval_outcome(eval)?;
         self.sync_sequence_storage(seq.seq_id);
 
+        let ctx = match self.prompt_cache_seq_ctx.get(&seq.seq_id) {
+            Some(c) => c.clone(),
+            None => return Ok(()),
+        };
         self.insert_model_state_snapshot(seq.seq_id, &ctx, boundary_tokens, "boundary");
+
+        // Return the segment's intermediates to the allocator before the
+        // caller's suffix forward runs, the same way `execute_full_prefill`
+        // clears after its own forward. Without this the segment's buffers stay
+        // resident through the rest of the prefill.
+        mlxcel_core::clear_memory_cache();
 
         // Count the segment as prefill work so `total_prefill_tokens` still
         // sums to the prompt: the caller records only the suffix it runs.
@@ -5448,11 +5526,16 @@ impl BatchScheduler {
             self.eval_failures_exhausted();
             return;
         }
+        // `cached` reports the ADOPTED prefix only. `prefill_start_offset` may
+        // also have been advanced past a freshly-forwarded history-boundary
+        // segment (issue #1143), and reporting those as cached would misread as
+        // reuse in a trace. `start` carries the real cursor.
         let _span = tracing::info_span!(
             "prefill",
             seq_id = %seq.seq_id,
             prompt_len = seq.prompt_tokens.len(),
-            cached = seq.prefill_start_offset,
+            cached = seq.already_cached_tokens,
+            start = seq.prefill_start_offset,
         )
         .entered();
         // Only the suffix enters the prefill counters — the first
@@ -5634,7 +5717,8 @@ impl BatchScheduler {
             seq_id = %seq.seq_id,
             prompt_len = seq.prompt_tokens.len(),
             chunk_size = self.prefill_chunk_size,
-            cached = seq.prefill_start_offset,
+            cached = seq.already_cached_tokens,
+            start = seq.prefill_start_offset,
         )
         .entered();
 

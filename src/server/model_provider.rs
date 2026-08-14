@@ -1333,10 +1333,16 @@ impl ModelProvider {
             match tokenize_prompt_for_generation(tok, &history_prompt) {
                 Ok(ids) => ctx.history_prefix_tokens = Some(ids),
                 Err(err) => {
+                    // Hand the string back so the scheduler's own encode still
+                    // gets a chance, exactly as the prompt path above falls
+                    // back to scheduler-side tokenization. Dropping it here
+                    // would turn a transient encode failure into a permanent
+                    // silent decline for this request.
                     tracing::debug!(
                         "HTTP-side history-boundary tokenization failed ({err}); \
-                         skipping the boundary snapshot for this request"
+                         deferring to the scheduler"
                     );
+                    ctx.history_prompt = Some(history_prompt);
                 }
             }
         }
