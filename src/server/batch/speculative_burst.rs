@@ -1533,6 +1533,10 @@ fn run_dflash_burst(
     })
 }
 
+fn dflash_expected_cache_len(prompt_len: usize, round_loop_tokens: usize) -> usize {
+    prompt_len + round_loop_tokens
+}
+
 /// DFlash burst on a Qwen 3.5 text target (including a Qwen 3.5 VLM wrapper
 /// serving a text-only request) — handles prefill, first-bonus + first-hidden
 /// extraction, and `DFlashGenerator::run` driving.
@@ -1830,18 +1834,13 @@ where
             // Install the burst's caches into the model-owned slot so
             // `donate_finished_sequence_cache` (called by the scheduler)
             // finds non-empty state and can snapshot them for the prompt
-            // cache. Assert the length invariant per cache: every cache's
-            // visible length must equal prompt + round-loop token count.
-            //
-            // The first bonus is sampled from the prefill's last verify
-            // logits — it does NOT advance the cache. Only the round
-            // loop's tokens produce new cache positions.
-            // `round_loop_tokens` is the correct position delta; using
-            // `tokens.len()` (which includes first_bonus) would demand
-            // one more position than the cache can ever hold.
+            // cache. The first bonus is sampled from the final prefill
+            // logits and does not advance the target cache; only the
+            // round-loop tokens add cache positions (the runtime probe
+            // observed one fewer cache position than emitted tokens).
             {
                 let generated_len = round_loop_tokens;
-                let expected_len = prompt_tokens.len() + generated_len;
+                let expected_len = dflash_expected_cache_len(prompt_tokens.len(), generated_len);
                 for (i, c) in caches.iter().enumerate() {
                     let measured = match c {
                         crate::models::qwen3_next::Qwen3NextCache::Attention(kv) => {
@@ -1976,11 +1975,9 @@ fn finalize_burst_success(
     let mut stream = begin_burst_stream(ctx.model.eos_token_ids(), &seq);
     stream_burst_tokens(ctx.tokenizer, &mut seq, &mut stream, &tokens, &logprobs);
     let mut outcome = finalize_burst_stream(ctx.tokenizer, seq, &stream);
-    // The first-bonus token is sampled from the prefill's last verify
-    // logits — it does NOT advance the cache.  Strip it from
-    // `generated_tokens` so the scheduler's donate key matches the
-    // cache positions (prompt_len + round_loop_tokens), not the emitted
-    // token count (which is one larger).
+    // The first-bonus token is sampled from the prefill logits and does not
+    // advance the target cache. Remove it from the scheduler's donation vector
+    // while keeping it in the client-visible stream above.
     if !outcome.generated_tokens.is_empty() {
         outcome.generated_tokens.remove(0);
     }
@@ -3096,6 +3093,18 @@ mod tests {
             8 <= window,
             "max_prompt_len 8 == window 8 is eligible (non-capped)"
         );
+    }
+
+    #[test]
+    fn dflash_cache_length_excludes_first_bonus_token() {
+        let prompt_len = 1208;
+        let round_loop_tokens = 1122;
+        let emitted_tokens = round_loop_tokens + 1;
+
+        // The emitted stream includes the prefill-sampled bonus, but the
+        // target cache advances only for round-loop tokens.
+        assert_eq!(dflash_expected_cache_len(prompt_len, round_loop_tokens), 2330);
+        assert_ne!(dflash_expected_cache_len(prompt_len, emitted_tokens), 2330);
     }
 
     #[test]
