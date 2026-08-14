@@ -61,6 +61,14 @@ const NUM_TURNS: usize = 5;
 /// future tightening happens in one place.
 const PREFILL_LATENCY_UPPER_RATIO: f64 = 1.3;
 
+/// Mirror of `DEFAULT_APC_BLOCK_SIZE` in
+/// `src/server/prompt_cache/block_hash.rs`. This integration test crate has
+/// no `[lib]` dependency edge to `mlxcel-core` (the root `mlxcel` package
+/// carries no `[lib]` target either, only `[[bin]]`s), so the crate-internal
+/// constant is not importable here; keep this value in sync with the source
+/// of truth if the paged block size ever changes.
+const APC_BLOCK_SIZE: u64 = 16;
+
 fn reserve_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     let port = listener.local_addr().expect("local addr").port();
@@ -356,10 +364,24 @@ async fn multi_turn_chat_reports_cached_tokens_and_lowers_prefill_latency() {
         // prompt, up to the min_prefix_tokens cap. Allow a small slack
         // (min_prefix gate, template boundary) but flag regressions that
         // drop below the previous prompt length.
+        //
+        // The slack must cover one full block of dense-trie flooring, not
+        // just a template-boundary fudge factor: `cached_tokens` is
+        // block-floored to multiples of `APC_BLOCK_SIZE` (paged prefix-cache
+        // adoption only donates back whole blocks), so a re-render that
+        // diverges from the previous turn just past a block boundary can
+        // legitimately cost up to `APC_BLOCK_SIZE - 1` tokens versus the raw
+        // previous prompt length. This is exercised by the qwen3 thinking
+        // model at `max_tokens=16`, where the whole turn is consumed by an
+        // unterminated `<think>` block, the assistant content re-renders as
+        // empty, and the history text diverges right at the previous
+        // prompt's boundary.
         assert!(
-            cached + 4 >= prev_prompt_len,
+            cached + (APC_BLOCK_SIZE - 1) >= prev_prompt_len,
             "turn {turn_number}: cached_tokens ({cached}) should cover at least the \
-             previous turn's prompt length ({prev_prompt_len}) minus the min-prefix slack",
+             previous turn's prompt length ({prev_prompt_len}) minus one block's worth \
+             ({}) of dense-trie flooring slack",
+            APC_BLOCK_SIZE - 1,
         );
         prev_cached = cached;
     }
