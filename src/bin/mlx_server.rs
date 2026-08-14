@@ -1171,8 +1171,10 @@ struct ServerArgs {
     /// Maximum number of live snapshot entries (default: 4096).
     ///
     /// Once the limit is reached, the least-recently-used snapshot is evicted.
-    /// Multi-turn conversations collapse to one entry each, so this cap is
-    /// effectively a concurrent-conversation limit.
+    /// A conversation's turns collapse to one entry once each turn's snapshot
+    /// extends the previous turn's token vector, which the current donate path
+    /// does not yet produce, so budget for turns as well as for concurrent
+    /// conversations until turn-boundary capture lands.
     ///
     /// Also reads `MLXCEL_PROMPT_CACHE_SNAPSHOT_MAX_ENTRIES` when the CLI flag
     /// is absent. CLI flag takes precedence.

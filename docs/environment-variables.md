@@ -157,9 +157,13 @@ more on a 30B-class one, so the 512 MiB default holds many conversations for a
 small model and barely one for a large one. Size it from measurement: serve one
 conversation, read `snapshot_bytes` from `/v1/cache/stats`, and give the store
 two to three times that so concurrent conversations do not evict each other.
-Turns within one conversation cost nothing extra, since each turn's snapshot
-supersedes the previous one and `snapshot_entries` stays at one per
-conversation.
+Once a turn's snapshot strictly extends the previous turn's token vector the
+newer one supersedes the older, and `snapshot_entries` settles at one per
+conversation. The current donate path does not meet that condition yet: the
+stored vector ends with generated tokens that the next turn's re-rendered
+prompt does not reproduce, so for now every turn still holds its own entry.
+Budget for the turns you expect, and watch `snapshot_supersedes` on
+`/v1/cache/stats` to see when collapse starts.
 
 ## Server audio admission variables
 
