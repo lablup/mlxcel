@@ -1533,8 +1533,8 @@ fn run_dflash_burst(
     })
 }
 
-fn dflash_expected_cache_len(prompt_len: usize, round_loop_tokens: usize) -> usize {
-    prompt_len + round_loop_tokens
+fn dflash_expected_cache_len(prompt_len: usize, emitted_tokens: usize) -> usize {
+    prompt_len + emitted_tokens
 }
 
 /// DFlash burst on a Qwen 3.5 text target (including a Qwen 3.5 VLM wrapper
@@ -1834,13 +1834,12 @@ where
             // Install the burst's caches into the model-owned slot so
             // `donate_finished_sequence_cache` (called by the scheduler)
             // finds non-empty state and can snapshot them for the prompt
-            // cache. The first bonus is sampled from the final prefill
-            // logits and does not advance the target cache; only the
-            // round-loop tokens add cache positions (the runtime probe
-            // observed one fewer cache position than emitted tokens).
+            // cache. The first bonus is included in the model-owned cache
+            // state and must remain in the donation key so the snapshot's
+            // token length matches its visible cache length.
             {
-                let generated_len = round_loop_tokens;
-                let expected_len = dflash_expected_cache_len(prompt_tokens.len(), generated_len);
+                let emitted_tokens = tokens.len();
+                let expected_len = dflash_expected_cache_len(prompt_tokens.len(), emitted_tokens);
                 for (i, c) in caches.iter().enumerate() {
                     let measured = match c {
                         crate::models::qwen3_next::Qwen3NextCache::Attention(kv) => {
@@ -1854,7 +1853,7 @@ where
                         measured,
                         expected_len,
                         "DFlash cache[{i}] visible length mismatch: measured={measured} \
-                         expected={expected_len} (prompt={} + round_loop={generated_len})",
+                         expected={expected_len} (prompt={} + emitted={emitted_tokens})",
                         prompt_tokens.len(),
                     );
                 }
@@ -1863,7 +1862,7 @@ where
                     seq_id = %seq_id,
                     prompt_len = prompt_tokens.len(),
                     generated_len = tokens.len(),
-                    round_loop_tokens = generated_len,
+                    round_loop_tokens,
                     adopted_offset = prefill_start_offset,
                     tokens_prefilled = tokens_prefilled,
                     "DFlash caches installed for prompt-cache snapshot"
@@ -1974,13 +1973,7 @@ fn finalize_burst_success(
 ) -> FinalizeOutcome {
     let mut stream = begin_burst_stream(ctx.model.eos_token_ids(), &seq);
     stream_burst_tokens(ctx.tokenizer, &mut seq, &mut stream, &tokens, &logprobs);
-    let mut outcome = finalize_burst_stream(ctx.tokenizer, seq, &stream);
-    // The first-bonus token is sampled from the prefill logits and does not
-    // advance the target cache. Remove it from the scheduler's donation vector
-    // while keeping it in the client-visible stream above.
-    if !outcome.generated_tokens.is_empty() {
-        outcome.generated_tokens.remove(0);
-    }
+    let outcome = finalize_burst_stream(ctx.tokenizer, seq, &stream);
     outcome
 }
 
@@ -3096,15 +3089,15 @@ mod tests {
     }
 
     #[test]
-    fn dflash_cache_length_excludes_first_bonus_token() {
+    fn dflash_cache_length_includes_first_bonus_token() {
         let prompt_len = 1208;
         let round_loop_tokens = 1122;
         let emitted_tokens = round_loop_tokens + 1;
 
-        // The emitted stream includes the prefill-sampled bonus, but the
-        // target cache advances only for round-loop tokens.
-        assert_eq!(dflash_expected_cache_len(prompt_len, round_loop_tokens), 2330);
-        assert_ne!(dflash_expected_cache_len(prompt_len, emitted_tokens), 2330);
+        // The model-owned cache and prompt-cache donation key both include
+        // the client-visible first bonus token.
+        assert_eq!(dflash_expected_cache_len(prompt_len, emitted_tokens), 2331);
+        assert_ne!(dflash_expected_cache_len(prompt_len, round_loop_tokens), 2331);
     }
 
     #[test]
