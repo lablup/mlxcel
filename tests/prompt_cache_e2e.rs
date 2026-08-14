@@ -66,8 +66,10 @@ const PREFILL_LATENCY_UPPER_RATIO: f64 = 1.3;
 /// (`DEFAULT_APC_BLOCK_SIZE` in `src/server/prompt_cache/block_hash.rs`) so
 /// the under-allowance slack below follows the constant instead of a
 /// literal. `mlxcel-server` turns APC on by default
-/// (`--apc-enabled` defaults to `true`) and this test passes no
-/// `--apc-block-size`, so this is the block size the server under test uses.
+/// (`--apc-enabled` defaults to `true`), this test passes no
+/// `--apc-block-size`, and `spawn_server` scrubs the `APC_BLOCK_SIZE` /
+/// `APC_ENABLED` env fallbacks, so this is the block size the server under
+/// test uses.
 ///
 /// This is the right constant only because the test spawns the server with
 /// `--batch-size 1`, which resolves the decode backend to Dense. On the paged
@@ -103,6 +105,13 @@ async fn wait_for_health_soft(client: &reqwest::Client, base_url: &str, timeout:
 fn spawn_server(args: &[&str]) -> Child {
     Command::new(repo_binary_path("mlxcel-server"))
         .args(args)
+        // The server falls back to these env vars when the matching flags are
+        // absent. Scrub them so an exported APC_BLOCK_SIZE / APC_ENABLED in
+        // the invoking shell cannot silently change the block size (or
+        // disable APC) out from under the `APC_BLOCK_SIZE`-derived slack
+        // assertion below.
+        .env_remove("APC_BLOCK_SIZE")
+        .env_remove("APC_ENABLED")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
