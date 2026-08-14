@@ -61,6 +61,13 @@ where
 
 #[test]
 fn muse_glimmer_startup_allows_baseline_and_keeps_video_disabled() {
+    // `validate_muse_glimmer_unsupported_startup` reads `MLXCEL_BACKEND`, which
+    // `muse_glimmer_startup_rejects_xla_backend_selection` in this module
+    // mutates process-wide. Acquire the crate-wide env lock so this test
+    // never observes that sibling's transient `MLXCEL_BACKEND=xla` value
+    // under default parallel test execution.
+    let _env_guard = crate::test_support::env_lock::env_lock();
+
     let model_dir = muse_model_dir();
     let startup = startup_for(model_dir.path());
 

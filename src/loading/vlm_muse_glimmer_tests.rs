@@ -472,6 +472,16 @@ fn builder_rejects_video_temporal_layouts() {
 #[test]
 fn pinned_weight_index_classifies_each_source_weight_once() {
     let model_dir = Path::new("models/mlx/muse-glimmer-30b");
+    let index_path = model_dir.join("model.safetensors.index.json");
+    if !index_path.exists() {
+        eprintln!(
+            "Skipping pinned_weight_index_classifies_each_source_weight_once: pinned Muse \
+             Glimmer checkpoint index not present at {}",
+            index_path.display()
+        );
+        return;
+    }
+
     let inventory = match read_muse_weight_inventory_from_index(model_dir) {
         Ok(inventory) => inventory,
         Err(err) => panic!("Muse Glimmer pinned index classification failed: {err}"),
