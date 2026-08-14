@@ -87,6 +87,17 @@ fn insert(store: &PromptCacheStore, family: &str, tokens: &[i32]) {
         .expect("snapshot insert succeeds");
 }
 
+/// Exact-prefix lookup: the truncation capability is refused, which is what
+/// every family whose recurrent state cannot be rewound reports (issue #1145).
+/// The partial-adoption path has its own tests below.
+fn outcome(
+    store: &PromptCacheStore,
+    k: &PromptCacheKey<'_>,
+    tokens: &[i32],
+) -> SnapshotLookupOutcome {
+    store.lookup_snapshot_outcome(k, tokens, |_, _| false)
+}
+
 fn diverged(outcome: SnapshotLookupOutcome) -> SnapshotDivergence {
     match outcome {
         SnapshotLookupOutcome::Diverged(d) => d,
@@ -123,8 +134,11 @@ fn generation_prompt_scaffold_divergence_is_classified_with_its_geometry() {
     request.extend(run(5_000, 45));
     request.extend(run(7_000, 30));
 
-    let report =
-        diverged(store.lookup_snapshot_outcome(&key("m", Some(SESSION), &request), &request));
+    let report = diverged(outcome(
+        &store,
+        &key("m", Some(SESSION), &request),
+        &request,
+    ));
     assert_eq!(
         report.common_prefix_len, 90,
         "the classification must carry how far the vectors agreed"
@@ -159,8 +173,11 @@ fn thinking_stripped_from_history_divergence_is_classified() {
     request.extend(run(4_100, 40)); // answer only, no reasoning
     request.extend(run(8_000, 22)); // new user turn
 
-    let report =
-        diverged(store.lookup_snapshot_outcome(&key("m", Some(SESSION), &request), &request));
+    let report = diverged(outcome(
+        &store,
+        &key("m", Some(SESSION), &request),
+        &request,
+    ));
     assert_eq!(report.common_prefix_len, header.len());
     assert_eq!(report.stored_len, stored.len());
 }
@@ -186,8 +203,11 @@ fn retokenization_drift_divergence_is_classified() {
     request.extend(run(9_500, 18)); // same text, 18 tokens after re-tokenizing
     request.extend(run(11_000, 25));
 
-    let report =
-        diverged(store.lookup_snapshot_outcome(&key("m", Some(SESSION), &request), &request));
+    let report = diverged(outcome(
+        &store,
+        &key("m", Some(SESSION), &request),
+        &request,
+    ));
     assert_eq!(report.common_prefix_len, 230);
     assert_eq!(report.stored_len, 250);
     assert!(
@@ -203,7 +223,7 @@ fn cold_store_reports_no_candidate_not_a_divergence() {
     let store = store_with_snapshots();
     let request = run(1_000, 40);
     assert!(matches!(
-        store.lookup_snapshot_outcome(&key("m", Some(SESSION), &request), &request),
+        outcome(&store, &key("m", Some(SESSION), &request), &request),
         SnapshotLookupOutcome::NoCandidate
     ));
 }
@@ -219,12 +239,12 @@ fn foreign_session_bucket_reports_no_candidate_not_a_divergence() {
     // Same tokens, different session: the candidate is not this caller's to
     // diverge from, so classifying it would be a false positive.
     assert!(matches!(
-        store.lookup_snapshot_outcome(&key("m", Some("chat-2"), &request), &request),
+        outcome(&store, &key("m", Some("chat-2"), &request), &request),
         SnapshotLookupOutcome::NoCandidate
     ));
     // A sessionless caller must not see the session-bound entry either.
     assert!(matches!(
-        store.lookup_snapshot_outcome(&key("m", None, &request), &request),
+        outcome(&store, &key("m", None, &request), &request),
         SnapshotLookupOutcome::NoCandidate
     ));
 }
@@ -238,7 +258,11 @@ fn foreign_model_bucket_reports_no_candidate_not_a_divergence() {
     let mut request = run(1_000, 30);
     request.extend(run(20_000, 12));
     assert!(matches!(
-        store.lookup_snapshot_outcome(&key("other-model", Some(SESSION), &request), &request),
+        outcome(
+            &store,
+            &key("other-model", Some(SESSION), &request),
+            &request
+        ),
         SnapshotLookupOutcome::NoCandidate
     ));
 }
@@ -251,7 +275,7 @@ fn exact_prefix_still_hits_and_reports_no_divergence() {
 
     let mut request = stored.clone();
     request.extend(run(20_000, 12));
-    match store.lookup_snapshot_outcome(&key("m", Some(SESSION), &request), &request) {
+    match outcome(&store, &key("m", Some(SESSION), &request), &request) {
         SnapshotLookupOutcome::Hit { matched_len, entry } => {
             assert_eq!(matched_len, stored.len());
             assert_eq!(entry.tokens, stored);
@@ -275,7 +299,7 @@ fn a_hit_wins_over_a_sibling_divergence() {
     let mut request = usable.clone();
     request.extend(run(20_000, 12));
     assert!(matches!(
-        store.lookup_snapshot_outcome(&key("m", Some(SESSION), &request), &request),
+        outcome(&store, &key("m", Some(SESSION), &request), &request),
         SnapshotLookupOutcome::Hit { .. }
     ));
 }
@@ -293,8 +317,11 @@ fn the_longest_common_prefix_candidate_is_the_one_reported() {
 
     let mut request = shared.clone();
     request.extend(run(32_000, 20));
-    let report =
-        diverged(store.lookup_snapshot_outcome(&key("m", Some(SESSION), &request), &request));
+    let report = diverged(outcome(
+        &store,
+        &key("m", Some(SESSION), &request),
+        &request,
+    ));
     assert_eq!(report.common_prefix_len, 40, "best candidate is reported");
     assert_eq!(report.stored_len, deep.len());
 }
@@ -308,8 +335,11 @@ fn a_request_shorter_than_the_stored_entry_is_a_divergence() {
     insert(&store, "gemma4", &stored);
 
     let request = run(1_000, 25);
-    let report =
-        diverged(store.lookup_snapshot_outcome(&key("m", Some(SESSION), &request), &request));
+    let report = diverged(outcome(
+        &store,
+        &key("m", Some(SESSION), &request),
+        &request,
+    ));
     assert_eq!(report.common_prefix_len, 25);
     assert_eq!(report.stored_len, 40);
 }
@@ -321,7 +351,7 @@ fn a_disabled_store_reports_no_candidate() {
     let store = PromptCacheStore::with_config(cfg);
     let request = run(1_000, 40);
     assert!(matches!(
-        store.lookup_snapshot_outcome(&key("m", Some(SESSION), &request), &request),
+        outcome(&store, &key("m", Some(SESSION), &request), &request),
         SnapshotLookupOutcome::NoCandidate
     ));
 }
@@ -335,9 +365,186 @@ fn divergence_does_not_inflate_the_snapshot_hit_counters() {
 
     let mut request = run(1_000, 20);
     request.extend(run(40_000, 25));
-    let _ = store.lookup_snapshot_outcome(&key("m", Some(SESSION), &request), &request);
+    let _ = outcome(&store, &key("m", Some(SESSION), &request), &request);
 
     let stats = store.stats();
     assert_eq!(stats.snapshot_lookups, 1, "the lookup is still counted");
     assert_eq!(stats.snapshot_hits, 0, "a divergence is a miss, not a hit");
+}
+
+// -- partial adoption at the longest common prefix (issue #1145) ----------
+//
+// The store never decides truncatability itself; it asks the model. These
+// tests drive that seam directly with a stub capability, so they pin the
+// store's half of the contract: which candidate is offered, at what length,
+// and what happens when the answer is no. The rotating-cache rule the real
+// capability implements lives in `mlxcel_core::cache::rotating_truncation_tests`.
+
+/// Capability stub standing in for a rotating-attention model that can
+/// truncate anywhere (Gemma 4 with every sliding layer unwrapped).
+fn truncatable(
+    store: &PromptCacheStore,
+    k: &PromptCacheKey<'_>,
+    t: &[i32],
+) -> SnapshotLookupOutcome {
+    store.lookup_snapshot_outcome(k, t, |_, _| true)
+}
+
+#[test]
+fn a_diverging_candidate_is_adopted_at_the_longest_common_prefix() {
+    let store = store_with_snapshots();
+    let shared = run(1_000, 90);
+    let mut stored = shared.clone();
+    stored.extend([100, 45_518, 107, 101]);
+    stored.extend(run(5_000, 45));
+    insert(&store, "gemma4", &stored);
+
+    let mut request = shared.clone();
+    request.extend(run(5_000, 45));
+    request.extend(run(7_000, 30));
+
+    match truncatable(&store, &key("m", Some(SESSION), &request), &request) {
+        SnapshotLookupOutcome::Hit { matched_len, entry } => {
+            assert_eq!(matched_len, 90, "adopts exactly the common prefix");
+            assert_eq!(
+                entry.tokens.len(),
+                139,
+                "the stored entry is longer than what was adopted, which is how \
+                 the caller knows to use the truncating restore"
+            );
+        }
+        other => panic!("expected a partial adopt, got {other:?}"),
+    }
+
+    let stats = store.stats();
+    assert_eq!(stats.snapshot_hits, 1, "a partial adopt counts as a hit");
+    assert_eq!(stats.snapshot_lookups, 1);
+}
+
+#[test]
+fn recurrent_families_keep_exact_prefix_semantics() {
+    // Same store, same request, capability refused: this is the qwen3.5 /
+    // falcon-h1 side of the class, where the recurrent state cannot be
+    // rewound at all. It must stay a classified miss, never a partial adopt.
+    let store = store_with_snapshots();
+    let shared = run(1_000, 90);
+    let mut stored = shared.clone();
+    stored.extend(run(5_000, 49));
+    insert(&store, "qwen3_5", &stored);
+
+    let mut request = shared.clone();
+    request.extend(run(7_000, 30));
+
+    let report = diverged(outcome(
+        &store,
+        &key("m", Some(SESSION), &request),
+        &request,
+    ));
+    assert_eq!(report.common_prefix_len, 90);
+    assert_eq!(store.stats().snapshot_hits, 0);
+}
+
+#[test]
+fn a_declining_model_leaves_the_wrapped_case_as_a_classified_reject() {
+    // The capability is what a wrapped sliding layer reports. The decline has
+    // to surface as the divergence reject rather than a silent None, so the
+    // stats still say a candidate was there and was structurally unusable.
+    let store = store_with_snapshots();
+    let mut stored = run(1_000, 60);
+    stored.extend(run(30_000, 40));
+    insert(&store, "gemma4", &stored);
+
+    let mut request = run(1_000, 60);
+    request.extend(run(40_000, 25));
+
+    let report = diverged(store.lookup_snapshot_outcome(
+        &key("m", Some(SESSION), &request),
+        &request,
+        |_, _| false,
+    ));
+    assert_eq!(report.common_prefix_len, 60);
+    assert_eq!(report.stored_len, 100);
+    assert_eq!(store.stats().snapshot_hits, 0);
+}
+
+#[test]
+fn an_exact_prefix_candidate_wins_over_a_truncating_one() {
+    // Adopting whole is always better than adopting truncated: it covers more
+    // tokens and needs no trim. A usable exact candidate must therefore
+    // suppress the partial path even when the model would allow it.
+    let store = store_with_snapshots();
+    let usable = run(1_000, 40);
+    insert(&store, "gemma4", &usable);
+    let mut longer_but_diverging = run(1_000, 35);
+    longer_but_diverging.extend(run(30_000, 60));
+    insert(&store, "gemma4", &longer_but_diverging);
+
+    let mut request = usable.clone();
+    request.extend(run(20_000, 12));
+    match truncatable(&store, &key("m", Some(SESSION), &request), &request) {
+        SnapshotLookupOutcome::Hit { matched_len, entry } => {
+            assert_eq!(matched_len, 40);
+            assert_eq!(
+                entry.tokens.len(),
+                40,
+                "the whole-entry candidate was adopted, not the truncating one"
+            );
+        }
+        other => panic!("expected the exact-prefix hit, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_common_prefix_below_min_prefix_tokens_is_not_adopted() {
+    // min_prefix_tokens is 4 in this fixture. A 2-token agreement is not
+    // worth a truncating restore, and the store must not ask the model to
+    // perform one.
+    let cfg = PromptCacheConfig::new(true, 1 << 20, 64, Duration::from_secs(3600), 8)
+        .with_snapshot_limits(1 << 20, 64, Duration::from_secs(3600));
+    let store = PromptCacheStore::with_config(cfg);
+    let mut stored = run(1_000, 5);
+    stored.extend(run(30_000, 40));
+    store
+        .insert_snapshot(
+            &key("m", Some(SESSION), &stored),
+            snapshot(stored.clone(), "gemma4"),
+        )
+        .expect("insert");
+
+    let mut request = run(1_000, 5);
+    request.extend(run(40_000, 30));
+
+    let report = diverged(truncatable(
+        &store,
+        &key("m", Some(SESSION), &request),
+        &request,
+    ));
+    assert_eq!(report.common_prefix_len, 5, "below the 8-token floor");
+    assert_eq!(store.stats().snapshot_hits, 0);
+}
+
+#[test]
+fn the_capability_is_asked_about_the_adopted_length_not_the_stored_length() {
+    // The model must be able to answer "can you truncate to N", because that
+    // is the question that decides correctness. Passing the stored length
+    // instead would make the check vacuous.
+    use std::sync::Mutex;
+    let store = store_with_snapshots();
+    let mut stored = run(1_000, 70);
+    stored.extend(run(30_000, 30));
+    insert(&store, "gemma4", &stored);
+
+    let mut request = run(1_000, 70);
+    request.extend(run(40_000, 25));
+
+    let asked: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+    let _ = store.lookup_snapshot_outcome(&key("m", Some(SESSION), &request), &request, |_, n| {
+        asked.lock().expect("lock").push(n);
+        true
+    });
+    assert_eq!(
+        asked.into_inner().expect("lock"),
+        vec![70],
+        "asked about the common prefix, not the 100-token stored entry"
+    );
 }

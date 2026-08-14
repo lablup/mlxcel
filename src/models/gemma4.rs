@@ -1176,6 +1176,22 @@ impl Cache {
         }
     }
 
+    /// Whether this cache holds any K/V at all.
+    ///
+    /// KV-shared layers (`AttentionProjections::KvShared`) never populate
+    /// their own cache: they compute only Q and borrow K/V from an earlier
+    /// layer. `snapshot_into` skips such a layer entirely and `restore_from`
+    /// leaves it fresh, so any per-layer operation that follows a restore has
+    /// to tolerate an empty cache rather than assume a populated one.
+    ///
+    /// Used by: Gemma 4 [`Self::truncate_to`].
+    pub(crate) fn is_populated(&self) -> bool {
+        match self {
+            Self::Standard(cache) => cache.keys.is_some(),
+            Self::Rotating(cache) => cache.keys.is_some(),
+        }
+    }
+
     pub(crate) fn snapshot_into(
         &self,
         snapshot: &mut ModelStateSnapshot,
@@ -1329,6 +1345,131 @@ impl Cache {
                 };
                 cache.restore_fp16_snapshot_state(state, keys, values)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Whether the layer state stored under `prefix` can be restored covering
+    /// only its first `target_len` tokens (issue #1145).
+    ///
+    /// Answers from the snapshot's own scalars rather than from a live cache,
+    /// because the prompt-cache store has to decide before it allocates a
+    /// sequence. A prefix with no stored tensors is vacuously truncatable: the
+    /// layer captured nothing, so `restore_from` leaves a fresh cache and
+    /// there is no tail to drop.
+    ///
+    /// Full-attention layers keep every token at its own slot and truncate
+    /// unconditionally. Sliding layers defer to
+    /// [`RotatingKVCacheSnapshotState::can_truncate_to`], which is the
+    /// load-bearing check: it holds only while the ring has not wrapped.
+    ///
+    /// Used by: Gemma 4 `snapshot_truncatable_to`.
+    pub(crate) fn snapshot_truncatable_to(
+        snapshot: &ModelStateSnapshot,
+        prefix: &str,
+        target_len: i32,
+    ) -> bool {
+        if target_len < 0 {
+            return false;
+        }
+        if snapshot
+            .tensor(&format!("{prefix}.rotating.keys"))
+            .is_some()
+        {
+            let mode = match restore_i32(snapshot, format!("{prefix}.rotating.mode"))
+                .map(kv_cache_mode_from_i32)
+                .transpose()
+            {
+                Ok(mode) => mode.unwrap_or(KVCacheMode::Fp16),
+                Err(_) => return false,
+            };
+            let Some(max_size) = restore_i32(snapshot, format!("{prefix}.rotating.max_size"))
+            else {
+                return false;
+            };
+            let Some(offset) = restore_i32(snapshot, format!("{prefix}.rotating.offset")) else {
+                return false;
+            };
+            let Some(idx) = restore_i32(snapshot, format!("{prefix}.rotating.idx")) else {
+                return false;
+            };
+            let state = RotatingKVCacheSnapshotState {
+                max_size,
+                buffer_size: restore_i32(snapshot, format!("{prefix}.rotating.buffer_size"))
+                    .unwrap_or(0),
+                offset,
+                start_position: restore_i32(snapshot, format!("{prefix}.rotating.start_position"))
+                    .unwrap_or(0),
+                idx,
+                step: 256,
+                mode,
+                turbo_seed: 0,
+            };
+            return state.can_truncate_to(target_len);
+        }
+        if snapshot
+            .tensor(&format!("{prefix}.standard.keys"))
+            .is_some()
+        {
+            let mode = match restore_i32(snapshot, format!("{prefix}.standard.mode"))
+                .map(kv_cache_mode_from_i32)
+                .transpose()
+            {
+                Ok(mode) => mode.unwrap_or(KVCacheMode::Fp16),
+                Err(_) => return false,
+            };
+            if mode != KVCacheMode::Fp16 {
+                return false;
+            }
+            let Some(offset) = restore_i32(snapshot, format!("{prefix}.standard.offset")) else {
+                return false;
+            };
+            return target_len <= offset;
+        }
+        // Nothing stored for this layer.
+        true
+    }
+
+    /// Drop everything past `target_len` tokens, leaving the cache in the
+    /// state it would have had if only the first `target_len` tokens had ever
+    /// been processed (issue #1145).
+    ///
+    /// Both arms rewind through the existing `trim` implementations, so this
+    /// inherits their semantics exactly: the physical buffer keeps its
+    /// capacity and the next update overwrites the rewound tail in place.
+    ///
+    /// Used by: Gemma 4 `restore_sequence_state_truncated`.
+    pub(crate) fn truncate_to(&mut self, target_len: i32) -> Result<(), String> {
+        // A layer that stored nothing has nothing to drop. This is the
+        // KV-shared case: `snapshot_into` skipped it, `restore_from` left the
+        // cache fresh, and demanding `target_len <= offset` here would fail
+        // against an offset of 0 even though the restore is perfectly sound.
+        // Observed on gemma-4-e2b-it-4bit, whose layer 15 is KV-shared.
+        if !self.is_populated() {
+            return Ok(());
+        }
+        let offset = self.offset();
+        if target_len > offset {
+            return Err(format!(
+                "Gemma 4 truncate: target {target_len} exceeds cached offset {offset}"
+            ));
+        }
+        if let Self::Rotating(cache) = self
+            && !cache.is_trimmable()
+        {
+            return Err(
+                "Gemma 4 truncate: rotating cache has wrapped and cannot be trimmed".to_string(),
+            );
+        }
+        let drop = offset - target_len;
+        if drop == 0 {
+            return Ok(());
+        }
+        let trimmed = self.trim_speculative(drop);
+        if trimmed != drop {
+            return Err(format!(
+                "Gemma 4 truncate: trimmed {trimmed} of {drop} requested tokens"
+            ));
         }
         Ok(())
     }
@@ -5460,6 +5601,63 @@ impl LanguageModel for Gemma4Wrapper {
         let mut state = self.model.make_caches();
         for (idx, cache) in state.iter_mut().enumerate() {
             cache.restore_from(snapshot, &format!("layer{idx}"))?;
+        }
+        self.sequence_state.replace_sequence_state(seq_id, state);
+        Ok(())
+    }
+
+    /// Gemma 4 runs sliding and full attention layers in a fixed pattern, and
+    /// both are ordinary KV state. A truncating restore is therefore possible
+    /// whenever every sliding layer is still unwrapped at `target_len`, which
+    /// is the whole short-and-medium-conversation regime under the model's
+    /// sliding window (issue #1145).
+    ///
+    /// The check is per layer at the requested target, never a global
+    /// conversation-length heuristic: the layers do not share a window state,
+    /// and one wrapped sliding layer is enough to make the restore unsound.
+    fn snapshot_truncatable_to(&self, snapshot: &ModelStateSnapshot, target_len: usize) -> bool {
+        if snapshot.family() != "gemma4" {
+            return false;
+        }
+        if target_len > snapshot.token_len() {
+            return false;
+        }
+        let Ok(target) = i32::try_from(target_len) else {
+            return false;
+        };
+        (0..self.num_layers())
+            .all(|idx| Cache::snapshot_truncatable_to(snapshot, &format!("layer{idx}"), target))
+    }
+
+    fn restore_sequence_state_truncated(
+        &self,
+        seq_id: SequenceId,
+        snapshot: &ModelStateSnapshot,
+        target_len: usize,
+    ) -> Result<(), String> {
+        if snapshot.family() != "gemma4" {
+            return Err(format!(
+                "cannot restore {} snapshot into Gemma 4",
+                snapshot.family()
+            ));
+        }
+        let target = i32::try_from(target_len)
+            .map_err(|_| format!("Gemma 4 truncated restore: target {target_len} out of range"))?;
+        // Re-check rather than trust the caller: installing a partially
+        // truncated state would corrupt generation silently, while an error
+        // here just falls back to a cold prefill.
+        if !self.snapshot_truncatable_to(snapshot, target_len) {
+            return Err(format!(
+                "Gemma 4 truncated restore: snapshot cannot be truncated to {target_len} tokens"
+            ));
+        }
+        let mut state = self.model.make_caches();
+        for (idx, cache) in state.iter_mut().enumerate() {
+            let prefix = format!("layer{idx}");
+            cache.restore_from(snapshot, &prefix)?;
+            cache
+                .truncate_to(target)
+                .map_err(|err| format!("{prefix}: {err}"))?;
         }
         self.sequence_state.replace_sequence_state(seq_id, state);
         Ok(())

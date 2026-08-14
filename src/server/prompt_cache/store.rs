@@ -29,6 +29,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use mlxcel_core::cache::DetachedPagedCacheSet;
+use mlxcel_core::generate::ModelStateSnapshot;
 
 use super::apc_lookup::{ApcStoreStats, apc_consistent_prefix_len};
 use super::block_hash::{ApcBlockHash, BlockHashChain};
@@ -937,14 +938,15 @@ impl PromptCacheStore {
     /// token boundary.
     ///
     /// Thin wrapper over [`Self::lookup_snapshot_outcome`] for callers that
-    /// only care about the hit. Callers that also want the structural-miss
-    /// diagnosis (issue #1147) should use the outcome form directly.
+    /// only care about the hit and cannot truncate. Callers that also want the
+    /// structural-miss diagnosis (issue #1147) or partial adoption at the
+    /// longest common prefix (issue #1145) should use the outcome form.
     pub fn lookup_snapshot_prefix(
         &self,
         key: &PromptCacheKey<'_>,
         tokens: &[i32],
     ) -> Option<(Arc<ModelSnapshotEntry>, usize)> {
-        match self.lookup_snapshot_outcome(key, tokens) {
+        match self.lookup_snapshot_outcome(key, tokens, |_, _| false) {
             SnapshotLookupOutcome::Hit { entry, matched_len } => Some((entry, matched_len)),
             SnapshotLookupOutcome::Diverged(_) | SnapshotLookupOutcome::NoCandidate => None,
         }
@@ -965,11 +967,25 @@ impl PromptCacheStore {
     /// all still report [`SnapshotLookupOutcome::NoCandidate`]. When several
     /// candidates diverge, the one with the longest common prefix is reported
     /// (ties broken by recency), matching the hit path's preference order.
-    pub fn lookup_snapshot_outcome(
+    ///
+    /// `can_truncate(snapshot, target_len)` is the model's answer to "can this
+    /// stored state be restored covering only its first `target_len` tokens"
+    /// (issue #1145). When it agrees for the best diverging candidate and the
+    /// common prefix clears `min_prefix_tokens`, the lookup adopts at that
+    /// prefix and reports a `Hit` whose `matched_len` is shorter than the
+    /// stored entry, which is how the caller knows to use the truncating
+    /// restore. Passing `|_, _| false` keeps the exact-prefix behavior, which
+    /// is what every family whose recurrent state cannot be rewound must do.
+    /// An exact-prefix candidate always wins over a truncating one.
+    pub fn lookup_snapshot_outcome<F>(
         &self,
         key: &PromptCacheKey<'_>,
         tokens: &[i32],
-    ) -> SnapshotLookupOutcome {
+        can_truncate: F,
+    ) -> SnapshotLookupOutcome
+    where
+        F: Fn(&ModelStateSnapshot, usize) -> bool,
+    {
         {
             let now = Instant::now();
             let mut guard = self.inner.write().expect("prompt cache inner lock");
@@ -990,7 +1006,7 @@ impl PromptCacheStore {
             let guard = self.inner.read().expect("prompt cache inner lock");
             let min_len = guard.config.min_prefix_tokens;
             let mut best: Option<(PromptCacheKeyDigest, usize, Instant)> = None;
-            let mut diverged: Option<(SnapshotDivergence, Instant)> = None;
+            let mut diverged: Option<(PromptCacheKeyDigest, SnapshotDivergence, Instant)> = None;
             for (digest, slot) in &guard.snapshots {
                 if slot.sessionless != sessionless {
                     continue;
@@ -1018,14 +1034,14 @@ impl PromptCacheStore {
                     };
                     let replace = match &diverged {
                         None => true,
-                        Some((existing, existing_used)) => {
+                        Some((_, existing, existing_used)) => {
                             report.common_prefix_len > existing.common_prefix_len
                                 || (report.common_prefix_len == existing.common_prefix_len
                                     && last_used > *existing_used)
                         }
                     };
                     if replace {
-                        diverged = Some((report, last_used));
+                        diverged = Some((*digest, report, last_used));
                     }
                     continue;
                 }
@@ -1042,14 +1058,38 @@ impl PromptCacheStore {
                     best = Some((*digest, len, last_used));
                 }
             }
-            (best, diverged.map(|(report, _)| report))
+            (best, diverged.map(|(digest, report, _)| (digest, report)))
+        };
+
+        // No exact-prefix candidate, but a diverging one may still be usable:
+        // a rotating-attention model can restore its state truncated to the
+        // longest common prefix as long as no sliding layer has wrapped there
+        // (issue #1145). `can_truncate` is the model's own answer, so families
+        // whose recurrent state cannot be rewound (GatedDeltaNet, Mamba and
+        // the SSM hybrids) decline here and keep exact-prefix semantics.
+        let partial = match (best.is_none(), &diverged) {
+            (true, Some((digest, report))) => {
+                let guard = self.inner.read().expect("prompt cache inner lock");
+                let min_len = guard.config.min_prefix_tokens;
+                if report.common_prefix_len < min_len {
+                    None
+                } else {
+                    guard.snapshots.get(digest).and_then(|slot| {
+                        let usable = slot.entry.with_snapshot(|snapshot| {
+                            can_truncate(snapshot, report.common_prefix_len)
+                        });
+                        usable.then_some((*digest, report.common_prefix_len))
+                    })
+                }
+            }
+            _ => None,
         };
 
         let (entry, matched_len) = {
             let mut guard = self.inner.write().expect("prompt cache inner lock");
             guard.snapshot_lookups = guard.snapshot_lookups.saturating_add(1);
-            match best {
-                Some((digest, matched, _)) => {
+            match best.map(|(d, m, _)| (d, m)).or(partial) {
+                Some((digest, matched)) => {
                     let entry = match guard.snapshots.get(&digest) {
                         Some(slot) => Arc::clone(&slot.entry),
                         None => {
@@ -1075,7 +1115,7 @@ impl PromptCacheStore {
         match entry {
             Some(entry) => SnapshotLookupOutcome::Hit { entry, matched_len },
             None => match diverged {
-                Some(report) => SnapshotLookupOutcome::Diverged(report),
+                Some((_, report)) => SnapshotLookupOutcome::Diverged(report),
                 None => SnapshotLookupOutcome::NoCandidate,
             },
         }

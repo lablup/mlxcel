@@ -3881,6 +3881,47 @@ pub struct RotatingKVCacheSnapshotState {
     pub turbo_seed: u32,
 }
 
+impl RotatingKVCacheSnapshotState {
+    /// Whether the ring is still linear: every logical token `t` sits at
+    /// physical slot `t`, and nothing has been overwritten or dropped.
+    ///
+    /// Two independent things can break linearity, and both must be excluded:
+    ///
+    /// * **Wrap.** Once `idx` has rolled over (`update_in_place` resets it to
+    ///   `0` at `idx >= max_size`), the oldest live token no longer sits at
+    ///   slot 0 and `idx` stops tracking `offset`. `idx == offset` is exactly
+    ///   the not-yet-wrapped condition, and it stays true at the boundary
+    ///   `offset == max_size`, where the buffer is full but the rollover has
+    ///   not happened yet.
+    /// * **Over-window prefill.** `update_concat` deliberately stores more
+    ///   than `max_size` entries for one step after a prefill longer than the
+    ///   window, keeping `idx == offset`. That buffer is temporary: the next
+    ///   single-token update re-slices it from the back and pins `idx` to
+    ///   `max_size`. Trimming into that state would desynchronize `idx` from
+    ///   the physical layout, so `offset <= max_size` is required as well.
+    ///
+    /// Buffered speculative mode (`buffer_size > 0`) keeps its own compaction
+    /// invariants and is excluded outright; snapshots are captured outside
+    /// MTP, so this costs nothing in practice.
+    pub fn is_unwrapped(&self) -> bool {
+        self.buffer_size == 0 && self.idx == self.offset && self.offset <= self.max_size
+    }
+
+    /// Whether this rotating state can be restored covering only its first
+    /// `target_len` tokens (issue #1145).
+    ///
+    /// Follows the upstream mlx-lm `can_trim_prompt_cache` precedent
+    /// (https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/cache.py),
+    /// which allows a rotating trim only while the cache is unwrapped. Only
+    /// FP16 storage is snapshot-capable today, so any other mode declines.
+    pub fn can_truncate_to(&self, target_len: i32) -> bool {
+        self.mode == KVCacheMode::Fp16
+            && target_len >= 0
+            && target_len <= self.offset
+            && self.is_unwrapped()
+    }
+}
+
 impl RotatingKVCache {
     /// Create a new rotating KV cache with specified maximum size (FP16 mode).
     pub fn new(max_size: i32) -> Self {
@@ -5051,6 +5092,19 @@ impl RotatingKVCache {
     /// `max_size`).
     ///
     /// Used by: Gemma 4 MTP `rollback_speculative_cache`.
+    /// Whether this cache currently supports trimming.
+    ///
+    /// Mirrors upstream mlx-lm `RotatingKVCache.is_trimmable`, which gates on
+    /// the ring still being linear. Unlike [`KVCache::is_trimmable`] (always
+    /// `true`), a rotating cache that has wrapped has genuinely lost the
+    /// tokens a trim would need to expose, so the answer is state-dependent.
+    ///
+    /// Used by: `can_trim_prompt_cache`-style validation, and the Gemma 4
+    /// partial snapshot restore (issue #1145).
+    pub fn is_trimmable(&self) -> bool {
+        self.snapshot_state().is_unwrapped()
+    }
+
     pub fn trim(&mut self, n: i32) -> i32 {
         let n = if self.buffer_size > 0 {
             n.min(self.idx).min(self.offset)
@@ -6737,6 +6791,134 @@ impl CachePool {
         }
         self.paged_pool = Some(Rc::new(RefCell::new(pool)));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod rotating_truncation_tests {
+    //! Wrap-boundary rules for the partial snapshot restore (issue #1145).
+    //!
+    //! These operate on the scalar snapshot state alone, so they pin the
+    //! decision rule itself without needing MLX arrays or a loaded model.
+    use super::*;
+
+    fn state(max_size: i32, offset: i32, idx: i32) -> RotatingKVCacheSnapshotState {
+        RotatingKVCacheSnapshotState {
+            max_size,
+            buffer_size: 0,
+            offset,
+            start_position: 0,
+            idx,
+            step: 256,
+            mode: KVCacheMode::Fp16,
+            turbo_seed: 0,
+        }
+    }
+
+    #[test]
+    fn unwrapped_cache_truncates_to_any_earlier_boundary() {
+        let s = state(1024, 400, 400);
+        assert!(s.is_unwrapped());
+        for target in [0, 1, 90, 399, 400] {
+            assert!(s.can_truncate_to(target), "target {target} should be valid");
+        }
+    }
+
+    #[test]
+    fn truncation_target_past_the_stored_offset_is_refused() {
+        let s = state(1024, 400, 400);
+        assert!(!s.can_truncate_to(401));
+        assert!(!s.can_truncate_to(-1));
+    }
+
+    #[test]
+    fn the_wrap_boundary_is_inclusive_at_offset_equal_to_the_window() {
+        // At offset == max_size the ring is exactly full but `update_in_place`
+        // has not rolled `idx` over yet, so every token still sits at its own
+        // slot and a trim is mechanically identical to the dense case. This is
+        // the boundary the issue calls out: accepted here, refused one step
+        // later.
+        let full = state(1024, 1024, 1024);
+        assert!(full.is_unwrapped());
+        assert!(full.can_truncate_to(512));
+
+        // One token further the ring has wrapped: `idx` restarted at 0 and the
+        // token that used to be at slot 0 is gone.
+        let wrapped = state(1024, 1025, 1);
+        assert!(!wrapped.is_unwrapped());
+        assert!(!wrapped.can_truncate_to(512));
+    }
+
+    #[test]
+    fn a_wrapped_cache_is_refused_even_for_a_target_inside_the_live_window() {
+        // The live window still covers [1500, 2500), but truncating to 2000
+        // would need slots in temporal order from 0, which the ring no longer
+        // provides.
+        let s = state(1024, 2500, 452);
+        assert!(!s.is_unwrapped());
+        assert!(!s.can_truncate_to(2000));
+        assert!(!s.can_truncate_to(2500));
+    }
+
+    #[test]
+    fn an_over_window_prefill_buffer_is_refused_despite_idx_matching_offset() {
+        // `update_concat` stores more than `max_size` entries for one step
+        // after a long prefill, keeping idx == offset. The next single-token
+        // update re-slices that buffer from the back, so trimming into this
+        // state would desynchronize idx from the physical layout.
+        let s = state(1024, 3000, 3000);
+        assert!(!s.is_unwrapped());
+        assert!(!s.can_truncate_to(900));
+    }
+
+    #[test]
+    fn buffered_speculative_mode_is_excluded() {
+        let mut s = state(1024, 400, 400);
+        s.buffer_size = 128;
+        assert!(!s.is_unwrapped());
+        assert!(!s.can_truncate_to(200));
+    }
+
+    #[test]
+    fn non_fp16_storage_is_refused() {
+        // Only FP16 is snapshot-capable; the quantized sidecars do not travel
+        // in the snapshot container, so a truncating restore has nothing to
+        // rebuild them from.
+        let mut s = state(1024, 400, 400);
+        s.mode = KVCacheMode::Int8;
+        assert!(!s.can_truncate_to(200));
+    }
+
+    #[test]
+    fn an_empty_cache_truncates_only_to_zero() {
+        let s = state(1024, 0, 0);
+        assert!(s.can_truncate_to(0));
+        assert!(!s.can_truncate_to(1));
+    }
+
+    #[test]
+    fn is_trimmable_tracks_the_live_cache_through_its_wrap() {
+        let mut cache = RotatingKVCache::new(4);
+        assert!(cache.is_trimmable(), "a fresh cache is trivially trimmable");
+        for i in 0..4 {
+            let k = ffi::from_slice_f32(&[i as f32], &[1, 1, 1, 1]);
+            let v = ffi::from_slice_f32(&[(i * 10) as f32], &[1, 1, 1, 1]);
+            cache.update_and_fetch(k, v);
+        }
+        assert_eq!(cache.offset, 4);
+        assert!(
+            cache.is_trimmable(),
+            "a full but unwrapped ring is still trimmable"
+        );
+
+        let k = ffi::from_slice_f32(&[4.0], &[1, 1, 1, 1]);
+        let v = ffi::from_slice_f32(&[40.0], &[1, 1, 1, 1]);
+        cache.update_and_fetch(k, v);
+        assert_eq!(cache.offset, 5);
+        assert!(
+            !cache.is_trimmable(),
+            "past the window the ring has wrapped"
+        );
     }
 }
 

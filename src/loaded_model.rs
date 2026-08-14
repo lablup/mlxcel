@@ -475,6 +475,26 @@ impl LanguageModel for LoadedModel {
         delegate_language_model!(self, restore_sequence_state(seq_id, snapshot))
     }
 
+    fn snapshot_truncatable_to(
+        &self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+        target_len: usize,
+    ) -> bool {
+        delegate_language_model!(self, snapshot_truncatable_to(snapshot, target_len))
+    }
+
+    fn restore_sequence_state_truncated(
+        &self,
+        seq_id: mlxcel_core::cache::SequenceId,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+        target_len: usize,
+    ) -> Result<(), String> {
+        delegate_language_model!(
+            self,
+            restore_sequence_state_truncated(seq_id, snapshot, target_len)
+        )
+    }
+
     fn sequence_state_layout(&self) -> mlxcel_core::cache::SequenceStateLayout {
         delegate_language_model!(self, sequence_state_layout())
     }
