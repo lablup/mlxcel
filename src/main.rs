@@ -1773,9 +1773,11 @@ pub(crate) struct ServeArgs {
     /// state per conversation, and that state scales with model width, not with
     /// prompt length: a few MiB on a small model, 300 MB or more on a 30B-class
     /// one. The 512 MiB default suits small and medium models; for a large one,
-    /// budget two to three times a single conversation's snapshot so concurrent
-    /// sessions do not evict each other. Read the live figure from
-    /// `snapshot_bytes` on `/v1/cache/stats` after one conversation.
+    /// size the store from measurement: read `snapshot_bytes` on
+    /// `/v1/cache/stats` after one turn, then multiply by the number of entries
+    /// you expect to hold at once. Count turns as well as concurrent sessions,
+    /// because a conversation keeps one entry per turn until its snapshots
+    /// start superseding each other (see `--prompt-cache-snapshot-max-entries`).
     ///
     /// Also reads `MLXCEL_PROMPT_CACHE_SNAPSHOT_CAPACITY_BYTES` when the CLI
     /// flag is absent.
