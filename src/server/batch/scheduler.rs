@@ -224,6 +224,25 @@ fn common_prefix_len(a: &[i32], b: &[i32]) -> usize {
     a.iter().zip(b).take_while(|(x, y)| x == y).count()
 }
 
+/// Operator kill switch for the history-boundary snapshot (issue #1143).
+///
+/// The feature is on by default: it is what makes the prompt cache hit at all
+/// for snapshot-only families. But it puts an extra graph launch and a full
+/// model-state copy on the foreground prefill of every qualifying request, and
+/// a deployment that serves only single-turn traffic pays that for reuse it
+/// will never claim. `MLXCEL_DISABLE_BOUNDARY_SNAPSHOT=1` restores the
+/// pre-#1143 prefill without a rebuild. Read once, so it costs nothing per
+/// request.
+fn boundary_snapshot_disabled() -> bool {
+    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        std::env::var("MLXCEL_DISABLE_BOUNDARY_SNAPSHOT")
+            .ok()
+            .as_deref()
+            == Some("1")
+    })
+}
+
 #[inline]
 fn next_chunked_prefill_range(
     prompt_len: usize,
@@ -2255,7 +2274,7 @@ impl BatchScheduler {
         is_multimodal: bool,
     ) {
         let history_prompt = ctx.history_prompt.take();
-        if !self.model.supports_snapshot_reuse() || is_multimodal {
+        if !self.model.supports_snapshot_reuse() || is_multimodal || boundary_snapshot_disabled() {
             ctx.history_prefix_tokens = None;
             return;
         }
@@ -2424,6 +2443,19 @@ impl BatchScheduler {
     /// family, no boundary, boundary already covered by an adopted prefix)
     /// returns `Ok(())` and leaves the sequence untouched, so the request
     /// simply prefills the way it did before this issue.
+    ///
+    /// ## Not bit-exact, deliberately
+    ///
+    /// Two forwards do not reduce in the same order as one, so a split prefill
+    /// can flip an early near-tie token relative to an unsplit one. Measured on
+    /// qwen3.5-0.8b-4bit: greedy output matched for 168 characters and then
+    /// differed by one word, staying coherent; each configuration is itself
+    /// deterministic across repeats. This is the documented #203 / #325 / #326
+    /// jitter class, and it is already the status quo on this path for two
+    /// other reasons: `--prefill-chunk-size` splits prefills the same way, and
+    /// any prompt-cache hit forwards only the suffix. An operator who needs the
+    /// unsplit shape sets `MLXCEL_DISABLE_BOUNDARY_SNAPSHOT=1` (see
+    /// [`boundary_snapshot_disabled`]).
     fn capture_history_boundary_snapshot(&mut self, seq: &mut SequenceInfo) -> Result<(), String> {
         if !self.model.supports_snapshot_reuse() || !self.prompt_cache_active() {
             return Ok(());
@@ -2492,7 +2524,9 @@ impl BatchScheduler {
 
         // Count the segment as prefill work so `total_prefill_tokens` still
         // sums to the prompt: the caller records only the suffix it runs.
-        self.batch_observability.record_prefill_chunk();
+        // Deliberately NOT `record_prefill_chunk()`: that counter is the
+        // dispatch proof for the issue #908 / #1011 mixed-step work, and a
+        // boundary segment is not a chunk the chunked-prefill loop scheduled.
         self.batch_observability
             .record_prefill_tokens(boundary - start);
         seq.prefill_start_offset = boundary;

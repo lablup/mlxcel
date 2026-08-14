@@ -74,6 +74,26 @@ are not comparable cell to cell. The only thing this row establishes is that the
 boundary snapshot is being produced (`snapshot_inserts` doubles) and that adding
 it does not break a family that was already hitting.
 
+### Greedy output is not bit-exact across the split
+
+Third arm pair, same binary, differing only in `MLXCEL_DISABLE_BOUNDARY_SNAPSHOT`
+(`snapshot_inserts` after one turn: 1 with the split off, 2 with it on, so the
+arms are confirmed distinct). Single greedy turn against qwen3.5-0.8b-4bit,
+identical 155-token prompt and 120 completion tokens in both arms:
+
+- The two outputs agree for the first 168 characters and then differ by one
+  word (`**Task:**` versus `**Specific Task:**`), staying coherent and on topic
+  thereafter.
+- Each arm is deterministic in itself: three repeats of the split-on arm
+  produced byte-identical text.
+
+This is the documented #203 / #325 / #326 near-tie flip class, not corruption:
+two forwards do not reduce in the same order as one. It is also already the
+status quo on this path for two independent reasons, `--prefill-chunk-size`
+splits prefills the same way and any prompt-cache hit forwards only the suffix.
+Recorded here because the boundary split is on by default and a reader
+comparing outputs across versions deserves to know why they moved.
+
 ## Not measured
 
 - **Wall-clock latency and TTFT.** The box carried load average ~22 throughout;
