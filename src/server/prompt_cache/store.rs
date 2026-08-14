@@ -711,7 +711,14 @@ impl PromptCacheStore {
         // non-`None` `session_key`, and the stored vector must be a strict
         // prefix of the incoming one. A `None` session carries no conversation
         // identity to chain on, and two different sessions never touch each
-        // other. The one case this gives up is a mid-conversation fork (an
+        // other. "Session" here is the resolved key, not the caller: a request
+        // that sets neither `prompt_cache_key` nor `user` lands on
+        // `ANONYMOUS_SESSION_SENTINEL`, so all such callers share one bucket
+        // here exactly as they already do in `lookup_longest_prefix`. That
+        // sharing needs one caller's whole stored vector, prompt plus its
+        // generated tail, to be a strict prefix of another's, which in practice
+        // only holds for a genuine continuation of the same transcript.
+        // The one case this gives up is a mid-conversation fork (an
         // edited or regenerated earlier turn), where the dropped ancestor would
         // still have matched; that costs one re-prefill and is the price of
         // keeping a conversation's steady-state footprint at one entry.

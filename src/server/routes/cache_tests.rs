@@ -151,6 +151,7 @@ fn cache_stats_response_serializes_with_expected_keys() {
         "\"total_blocks_stored\":6",
         "\"unique_block_hashes\":5",
         "\"apc_active_entries\":3",
+        "\"snapshot_supersedes\":3",
         "\"paged_block_size\":32",
         "\"paged_blocks_allocated\":100",
         "\"paged_blocks_live\":80",
