@@ -79,6 +79,20 @@ use super::types::request::{
 
 pub(crate) struct PreparedChatRequest {
     pub(crate) prompt: String,
+    /// The same conversation re-rendered with `add_generation_prompt = false`
+    /// (issue #1143): the history-boundary form of this request's prompt.
+    ///
+    /// `Some` only when the prompt cache is enabled and the request is
+    /// text-only; `None` otherwise, and also `None` when the history render
+    /// failed or did not come out as a text prefix of `prompt` (a template
+    /// that reorders or rewrites history rather than appending to it).
+    ///
+    /// Everything the generation prompt adds beyond this point is exactly the
+    /// part that cannot survive to the next turn: thought scaffolds, primed
+    /// `<think>` markers, and any tail whose retokenization differs from the
+    /// sampled ids. Tokenizing this string is therefore the only way to obtain
+    /// a token vector that is guaranteed to prefix the next turn's prompt.
+    pub(crate) history_prompt: Option<String>,
     pub(crate) image_data: Vec<Vec<u8>>,
     /// Cardinalities before and after the tolerant media resolver.
     ///
@@ -203,7 +217,24 @@ pub(crate) async fn prepare_chat_request_with_cache(
 
     let preserve_thinking = merged_kwargs.preserve_thinking();
 
-    let prompt = if has_tool_fields(request)
+    // Whether to produce the extra history-boundary render (issue #1143).
+    // Only worth doing when the prompt cache is live, and only sound for
+    // text-only requests: a multimodal prompt's token stream is rewritten by
+    // placeholder expansion after rendering, so a text-level prefix says
+    // nothing about the token-level one.
+    let render_history_prefix =
+        prompt_cache_enabled && declared_images == 0 && declared_audio == 0 && declared_videos == 0;
+
+    // Render the prompt, and — when the prompt cache is on — the same
+    // conversation as history (`add_generation_prompt = false`). Both renders
+    // run over the identical message list and kwargs so the only difference
+    // between them is the template's own generation-prompt tail (issue #1143).
+    //
+    // The history render is skipped when the primary render fell back to
+    // `render_simple_fallback`: the fallback is not the template, so its
+    // "history" form carries no relationship to what the model was actually
+    // prompted with.
+    let (prompt, history_render) = if has_tool_fields(request)
         || has_reasoning_fields(request)
         || has_template_media_parts(request)
     {
@@ -217,9 +248,18 @@ pub(crate) async fn prepare_chat_request_with_cache(
         // Build the stripped ChatMessages in parallel so the fallback path can
         // use them without re-running strip_rolling_checkpoint.
         let stripped = build_chat_messages_with_thinking(request, preserve_thinking);
-        processor
-            .apply_raw_with_kwargs(&raw_messages, effective_tools, &merged_kwargs)
-            .unwrap_or_else(|err| {
+        match processor.apply_raw_with_kwargs(&raw_messages, effective_tools, &merged_kwargs) {
+            Ok(rendered) => {
+                let history = render_history_prefix.then(|| {
+                    processor.apply_raw_history_with_kwargs(
+                        &raw_messages,
+                        effective_tools,
+                        &merged_kwargs,
+                    )
+                });
+                (rendered, history)
+            }
+            Err(err) => {
                 tracing::warn!(
                     "Chat template render (raw) failed, using fallback: {:#}",
                     err
@@ -227,18 +267,46 @@ pub(crate) async fn prepare_chat_request_with_cache(
                 // Security (H-1): use pre-stripped messages so that a
                 // template-breaking payload cannot bypass rolling-checkpoint
                 // stripping and leak prior <think> blocks to the model prompt.
-                render_simple_fallback(&stripped)
-            })
+                (render_simple_fallback(&stripped), None)
+            }
+        }
     } else {
         let messages = build_chat_messages_with_thinking(request, preserve_thinking);
-        processor
-            .apply_with_kwargs(&messages, effective_tools, &merged_kwargs)
-            .unwrap_or_else(|err| {
+        match processor.apply_with_kwargs(&messages, effective_tools, &merged_kwargs) {
+            Ok(rendered) => {
+                let history = render_history_prefix.then(|| {
+                    processor.apply_history_with_kwargs(&messages, effective_tools, &merged_kwargs)
+                });
+                (rendered, history)
+            }
+            Err(err) => {
                 tracing::warn!("Chat template render failed, using fallback: {:#}", err);
                 // Security (H-1): use pre-stripped messages for the same reason.
-                render_simple_fallback(&messages)
-            })
+                (render_simple_fallback(&messages), None)
+            }
+        }
     };
+
+    // Keep the history render only when it really is a text prefix of the
+    // prompt. That is the whole invariant the boundary snapshot rests on: the
+    // snapshot is model state for `prompt[..history.len()]`, so a history
+    // render that is not a prefix would key a snapshot against state it does
+    // not describe. Templates that rewrite rather than append (or a render
+    // that failed) simply opt out.
+    let history_prompt = history_render.and_then(|rendered| match rendered {
+        Ok(history) if !history.is_empty() && prompt.starts_with(&history) => Some(history),
+        Ok(_) => {
+            tracing::debug!(
+                "history-boundary render is not a prefix of the generation prompt; \
+                 skipping the boundary snapshot for this request"
+            );
+            None
+        }
+        Err(err) => {
+            tracing::debug!("history-boundary render failed: {:#}", err);
+            None
+        }
+    });
 
     // Validate the per-request soft-token budget before any image is fetched or
     // decoded: an unsupported `detail` / `max_soft_tokens` is a client error, so
@@ -273,6 +341,7 @@ pub(crate) async fn prepare_chat_request_with_cache(
 
     Ok(PreparedChatRequest {
         prompt,
+        history_prompt,
         image_data,
         media,
         image_soft_tokens,

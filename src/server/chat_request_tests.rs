@@ -2329,3 +2329,136 @@ fn effective_input_accepts_normal_multi_turn_text_conversation() {
     ]);
     assert!(request_has_effective_input(&request));
 }
+
+// ---------------------------------------------------------------------------
+// History-boundary render (issue #1143)
+// ---------------------------------------------------------------------------
+
+/// A ChatML-shaped template that reproduces divergence class (a) from epic
+/// #1148: the generation prompt appends an assistant header plus a primed
+/// `<think>` marker, and neither ever appears when the same conversation is
+/// re-rendered as history on the following turn.
+fn generation_scaffold_template() -> String {
+    r#"{% for m in messages %}<|im_start|>{{ m.role }}
+{{ m.content }}<|im_end|>
+{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant
+<think>
+{% endif %}"#
+        .to_string()
+}
+
+fn cached_request(messages: Vec<Message>) -> ChatCompletionRequest {
+    request_with_messages(messages)
+}
+
+#[tokio::test]
+async fn history_render_is_a_prefix_of_the_next_turns_prompt() {
+    // The property the boundary snapshot rests on. Turn 2's history render
+    // must prefix turn 3's prompt even though turn 2's *prompt* does not,
+    // because the generation-prompt scaffold sits past the boundary.
+    let processor = ChatTemplateProcessor::with_template(generation_scaffold_template());
+
+    let messages_t2 = vec![
+        text_message(Role::User, "q1"),
+        text_message(Role::Assistant, "<think>think1</think>a1"),
+        text_message(Role::User, "q2"),
+    ];
+    let mut messages_t3 = messages_t2.clone();
+    messages_t3.push(text_message(Role::Assistant, "<think>think2</think>a2"));
+    messages_t3.push(text_message(Role::User, "q3"));
+
+    let prep_t2 =
+        prepare_chat_request_with_cache(&processor, &cached_request(messages_t2), None, true)
+            .await
+            .unwrap();
+    let prep_t3 =
+        prepare_chat_request_with_cache(&processor, &cached_request(messages_t3), None, true)
+            .await
+            .unwrap();
+
+    let history_t2 = prep_t2
+        .history_prompt
+        .as_deref()
+        .expect("prompt cache on and text-only: a history render must be produced");
+
+    // 1. The boundary is a prefix of this turn's own prompt, so a snapshot
+    //    taken at that token index describes exactly these tokens.
+    assert!(
+        prep_t2.prompt.starts_with(history_t2),
+        "history render must prefix its own prompt;\nhistory: {history_t2:?}\nprompt: {:?}",
+        prep_t2.prompt
+    );
+    // 2. The load-bearing property: it also prefixes the NEXT turn's prompt.
+    assert!(
+        prep_t3.prompt.starts_with(history_t2),
+        "history render must prefix the next turn's prompt;\nhistory: {history_t2:?}\nnext: {:?}",
+        prep_t3.prompt
+    );
+    // 3. And the reason the boundary is needed at all: the whole prompt does
+    //    not prefix the next turn, which is exactly why the end-of-generation
+    //    donate never hits for snapshot-only families.
+    assert!(
+        !prep_t3.prompt.starts_with(&prep_t2.prompt),
+        "the generation-prompt scaffold must break whole-prompt prefixing, \
+         otherwise this test is not exercising the reported failure"
+    );
+    // 4. The scaffold is what got dropped.
+    assert!(!history_t2.contains("<think>\n"));
+    assert!(history_t2.ends_with("<|im_end|>\n"));
+}
+
+#[tokio::test]
+async fn history_render_is_absent_when_the_prompt_cache_is_off() {
+    let processor = ChatTemplateProcessor::with_template(generation_scaffold_template());
+    let request = cached_request(vec![text_message(Role::User, "q1")]);
+
+    let prepared = prepare_chat_request_with_cache(&processor, &request, None, false)
+        .await
+        .unwrap();
+    assert!(
+        prepared.history_prompt.is_none(),
+        "no boundary render should be paid for when the store is not installed"
+    );
+}
+
+#[tokio::test]
+async fn history_render_is_absent_when_the_template_render_falls_back() {
+    // A broken template routes the prompt through `render_simple_fallback`.
+    // The fallback is not the template, so its history form would describe a
+    // prompt the model never saw; the boundary must be declined instead.
+    let processor = ChatTemplateProcessor::with_template(broken_template());
+    let request = cached_request(vec![text_message(Role::User, "q1")]);
+
+    let prepared = prepare_chat_request_with_cache(&processor, &request, None, true)
+        .await
+        .unwrap();
+    assert!(prepared.history_prompt.is_none());
+}
+
+#[tokio::test]
+async fn history_render_is_absent_for_multimodal_requests() {
+    // The token stream of a multimodal prompt is rewritten by placeholder
+    // expansion after rendering, so a text-level prefix carries no token-level
+    // guarantee and the boundary must not be offered.
+    let processor = ChatTemplateProcessor::with_template(generation_scaffold_template());
+    let request = request_with_messages(vec![Message {
+        role: Role::User,
+        content: MessageContent::Parts(vec![
+            ContentPart::Text {
+                text: "describe".to_string(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrl::new("data:image/png;base64,aGVsbG8=".to_string()),
+            },
+        ]),
+        name: None,
+        tool_call_id: None,
+        reasoning: None,
+        tool_calls: None,
+    }]);
+
+    let prepared = prepare_chat_request_with_cache(&processor, &request, None, true)
+        .await
+        .unwrap();
+    assert!(prepared.history_prompt.is_none());
+}

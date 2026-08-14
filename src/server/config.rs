@@ -91,6 +91,40 @@ pub struct PromptCacheRequestContext {
     /// collision; until that step lifts the scheduler's `is_multimodal` gate
     /// the digest is carried but multimodal requests still take the cold path.
     pub mm_digest: MultimodalDigest,
+
+    /// The conversation re-rendered with `add_generation_prompt = false`
+    /// (issue #1143), carried from the route to the tokenization boundary.
+    ///
+    /// Mirrors the `prompt` / `prompt_token_ids` split the generate request
+    /// already uses (issue #633): the dispatch thread tokenizes this into
+    /// [`Self::history_prefix_tokens`] and clears the string, and the
+    /// scheduler tokenizes it itself only when that pre-tokenization did not
+    /// happen. `None` whenever the route produced no usable history render.
+    pub history_prompt: Option<String>,
+
+    /// History-boundary token vector for this request (issue #1143).
+    ///
+    /// Two stages, one meaning throughout: "the leading tokens of this
+    /// prompt that are guaranteed to survive into the next turn".
+    ///
+    /// 1. Route / dispatch layer: the tokenization of
+    ///    [`crate::server::chat_request::PreparedChatRequest::history_prompt`],
+    ///    the same conversation re-rendered with `add_generation_prompt =
+    ///    false`. Producing it by tokenizing the history *render* is what makes
+    ///    it immune to the three divergence classes in epic #1148 (generation-
+    ///    prompt-only scaffolds, thinking stripped from history, and
+    ///    retokenization drift between sampled ids and canonical ids).
+    /// 2. Scheduler (`enqueue_request`): clipped to the longest common prefix
+    ///    with the request's live prompt tokens, so the vector is by
+    ///    construction a genuine prefix of what the model prefills. The clip
+    ///    also drops the one or two tokens that a BPE merge across the
+    ///    history/scaffold seam would otherwise make unstable.
+    ///
+    /// `None` when the route could not produce a usable history render
+    /// (multimodal request, template fallback, non-prefix render), when no
+    /// tokenizer was available on the dispatch thread, or when the clipped
+    /// prefix turned out too short to be worth a snapshot.
+    pub history_prefix_tokens: Option<Vec<i32>>,
 }
 
 /// Bridge between server request params and `mlxcel-core` `SamplingConfig`.

@@ -974,3 +974,84 @@ fn clear_drops_everything() {
 // `super::prefix_matcher_tests`; keeping them in a sibling test module
 // keeps this file focused on store-level invariants (insert/evict/lookup
 // mechanics) and cleanly below the 500-line code-file limit.
+
+// ---------------------------------------------------------------------------
+// History-boundary snapshot alongside the end-of-generation one (issue #1143)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn history_boundary_snapshot_hits_where_the_end_of_generation_one_cannot() {
+    // Reproduces the epic #1148 shape at the store level.
+    //
+    // Turn N stores two snapshots for the same session:
+    //   * the boundary snapshot, keyed by the tokenization of the history
+    //     render (everything up to the last user message);
+    //   * the end-of-generation snapshot, keyed by prompt + generated, where
+    //     the prompt tail is a generation-prompt scaffold and the generated
+    //     tail is a sampled (non-canonical) token sequence.
+    //
+    // Turn N+1's prompt continues from the history boundary with re-rendered
+    // history, so it shares the boundary vector and diverges from the
+    // end-of-generation vector at the scaffold. Only the boundary snapshot may
+    // be returned, and it must be returned rather than reported as a miss.
+    let store = PromptCacheStore::with_config(cfg(1 << 20, 64, 4));
+
+    let history: Vec<i32> = tokens(100, 24);
+    // Prompt = history + generation-prompt scaffold; the scaffold ids are
+    // deliberately outside the history range.
+    let mut prompt = history.clone();
+    prompt.extend([9001, 9002]);
+    // End-of-generation vector = prompt + sampled completion ids.
+    let mut generated_vec = prompt.clone();
+    generated_vec.extend([9101, 9102, 9103]);
+
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("sess"), &history),
+            snapshot_entry_for_test(history.clone(), "fam"),
+        )
+        .expect("boundary snapshot insert succeeds");
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("sess"), &generated_vec),
+            snapshot_entry_for_test(generated_vec.clone(), "fam"),
+        )
+        .expect("end-of-generation snapshot insert succeeds");
+    assert_eq!(store.stats().snapshot_entries, 2);
+
+    // Turn N+1: history + re-rendered assistant reply + new user turn +
+    // scaffold. The re-rendered reply retokenizes differently from the sampled
+    // ids, which is divergence class (c).
+    let mut next_prompt = history.clone();
+    next_prompt.extend([8201, 8202, 8203, 8204, 8205]);
+
+    let (entry, matched) = store
+        .lookup_snapshot_prefix(
+            &key_for_session("m", Some("sess"), &next_prompt),
+            &next_prompt,
+        )
+        .expect("the boundary snapshot must be reachable on the next turn");
+    assert_eq!(matched, history.len());
+    assert_eq!(entry.tokens, history);
+
+    // Counter-based confirmation, mirroring the /v1/cache/stats check the
+    // issue's acceptance criteria call for.
+    assert_eq!(store.stats().snapshot_hits, 1);
+
+    // Control: without the boundary entry the same lookup is a miss, which is
+    // the behavior this issue exists to change.
+    let bare = PromptCacheStore::with_config(cfg(1 << 20, 64, 4));
+    bare.insert_snapshot(
+        &key_for_session("m", Some("sess"), &generated_vec),
+        snapshot_entry_for_test(generated_vec.clone(), "fam"),
+    )
+    .expect("insert succeeds");
+    assert!(
+        bare.lookup_snapshot_prefix(
+            &key_for_session("m", Some("sess"), &next_prompt),
+            &next_prompt
+        )
+        .is_none()
+    );
+    assert_eq!(bare.stats().snapshot_hits, 0);
+}

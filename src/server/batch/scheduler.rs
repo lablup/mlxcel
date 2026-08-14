@@ -216,6 +216,14 @@ struct ChunkedPrefillRange {
     is_terminal: bool,
 }
 
+/// Length of the longest common prefix of two token vectors.
+///
+/// Used by: `BatchScheduler::resolve_history_boundary` (issue #1143)
+#[inline]
+fn common_prefix_len(a: &[i32], b: &[i32]) -> usize {
+    a.iter().zip(b).take_while(|(x, y)| x == y).count()
+}
+
 #[inline]
 fn next_chunked_prefill_range(
     prompt_len: usize,
@@ -2222,6 +2230,275 @@ impl BatchScheduler {
         }
     }
 
+    /// Turn the route's history-boundary render into the exact token vector
+    /// the boundary snapshot will be keyed by, or clear it (issue #1143).
+    ///
+    /// Runs once per request at enqueue time, while `prompt_tokens` is final
+    /// (post multimodal placeholder expansion). Three things happen here:
+    ///
+    /// * The history render is tokenized when the dispatch thread had no
+    ///   tokenizer to do it (mirrors the `prompt_token_ids` fallback).
+    /// * The result is clipped to the longest common prefix it shares with
+    ///   `prompt_tokens`. This is what makes the vector a genuine prefix of the
+    ///   state the boundary snapshot will describe. It also drops the tail
+    ///   tokens that a BPE merge across the history/generation-prompt seam
+    ///   would otherwise make unstable: a token that merged with the scaffold
+    ///   is not a token the next turn will reproduce either.
+    /// * Requests that cannot use a boundary snapshot are cleared to `None`
+    ///   so the prefill path pays nothing for them: dense-KV families (which
+    ///   already reuse through the longest-prefix trie), multimodal requests,
+    ///   and prefixes below the store's `min_prefix_tokens`.
+    fn resolve_history_boundary(
+        &self,
+        ctx: &mut PromptCacheRequestContext,
+        prompt_tokens: &[i32],
+        is_multimodal: bool,
+    ) {
+        let history_prompt = ctx.history_prompt.take();
+        if !self.model.supports_snapshot_reuse() || is_multimodal {
+            ctx.history_prefix_tokens = None;
+            return;
+        }
+        let history_tokens = match ctx.history_prefix_tokens.take() {
+            Some(ids) => ids,
+            None => match history_prompt {
+                // No pre-tokenizer on the dispatch thread; encode here with the
+                // same convention so the two vectors stay comparable.
+                Some(text) => {
+                    match crate::server::model_provider::tokenize_prompt_for_generation(
+                        &self.tokenizer,
+                        &text,
+                    ) {
+                        Ok(ids) => ids,
+                        Err(err) => {
+                            tracing::debug!("history-boundary tokenization failed: {err}");
+                            return;
+                        }
+                    }
+                }
+                None => return,
+            },
+        };
+
+        let boundary = common_prefix_len(&history_tokens, prompt_tokens);
+        let min_prefix = self
+            .prompt_cache
+            .as_ref()
+            .map(|s| s.min_prefix_tokens())
+            .unwrap_or(0);
+        if boundary < min_prefix || boundary >= prompt_tokens.len() {
+            return;
+        }
+        ctx.history_prefix_tokens = Some(prompt_tokens[..boundary].to_vec());
+    }
+
+    /// Copy the model-owned state of `seq_id` and insert it into the
+    /// prompt-cache snapshot bucket keyed by `tokens`.
+    ///
+    /// The caller guarantees `tokens` is exactly the token prefix the current
+    /// model state describes: the snapshot is restored later by matching that
+    /// vector against a future request's prompt, so a vector that does not
+    /// match the state would install a wrong recurrent history.
+    ///
+    /// `origin` only labels the log and trace lines ("donate" at end of
+    /// generation, "boundary" for the history-boundary capture) so a reader can
+    /// tell the two snapshot producers apart in a trace.
+    ///
+    /// Used by: `donate_finished_sequence_cache`,
+    /// `capture_history_boundary_snapshot`
+    fn insert_model_state_snapshot(
+        &mut self,
+        seq_id: SequenceId,
+        ctx: &PromptCacheRequestContext,
+        tokens: Vec<i32>,
+        origin: &'static str,
+    ) {
+        let store = match self.prompt_cache.as_ref() {
+            Some(s) => s.clone(),
+            None => return,
+        };
+        if tokens.len() < store.min_prefix_tokens() {
+            self.batch_observability.record_prompt_cache_reject(
+                PromptCacheRejectReason::PrefixTooShort,
+                Some(seq_id.as_u64()),
+                tokens.len(),
+            );
+            return;
+        }
+        let snapshot = match self.model.snapshot_sequence_state(seq_id, tokens.len()) {
+            Some(s) if !s.is_empty() => s,
+            Some(_) => {
+                tracing::debug!(
+                    seq_id = %seq_id,
+                    token_len = tokens.len(),
+                    origin,
+                    "prompt-cache snapshot skipped: captured snapshot was empty"
+                );
+                self.batch_observability.record_prompt_cache_reject(
+                    PromptCacheRejectReason::EmptySet,
+                    Some(seq_id.as_u64()),
+                    tokens.len(),
+                );
+                return;
+            }
+            None => {
+                tracing::debug!(
+                    seq_id = %seq_id,
+                    token_len = tokens.len(),
+                    origin,
+                    "prompt-cache snapshot skipped: no model-owned state for sequence"
+                );
+                self.batch_observability.record_prompt_cache_reject(
+                    PromptCacheRejectReason::EmptySet,
+                    Some(seq_id.as_u64()),
+                    tokens.len(),
+                );
+                return;
+            }
+        };
+        let entry = ModelSnapshotEntry::new(tokens, snapshot);
+        let key_tokens = entry.tokens.clone();
+        let key = Self::compose_prompt_cache_key(ctx, &key_tokens);
+        match store.insert_snapshot(&key, entry) {
+            Ok(()) => {
+                tracing::debug!(
+                    seq_id = %seq_id,
+                    token_len = key_tokens.len(),
+                    bytes = store.stats().snapshot_bytes,
+                    origin,
+                    "prompt-cache snapshot inserted"
+                );
+                self.batch_observability.record_prompt_cache_insert();
+                self.batch_metrics
+                    .update_prompt_cache_gauges(store.bytes(), store.len());
+                if apc_trace_enabled() {
+                    tracing::info!(
+                        apc_event = "store",
+                        seq_id = %seq_id,
+                        matched_len = key_tokens.len(),
+                        origin,
+                        "prompt-cache store (snapshot)"
+                    );
+                }
+            }
+            Err(err) => {
+                tracing::debug!("prompt-cache snapshot insert skipped ({origin}): {err}");
+                self.batch_observability.record_prompt_cache_insert_reject();
+                self.batch_observability.record_prompt_cache_reject(
+                    PromptCacheRejectReason::from(&err),
+                    Some(seq_id.as_u64()),
+                    key_tokens.len(),
+                );
+            }
+        }
+    }
+
+    /// Split this sequence's prefill at the history boundary and donate a
+    /// snapshot of the state at that point (issue #1143).
+    ///
+    /// ## Why a second snapshot exists at all
+    ///
+    /// For snapshot-only families the only reuse path is an exact-prefix match
+    /// against a stored token vector. The end-of-generation donate stores
+    /// `prompt + generated`, and epic #1148 measured that vector failing to
+    /// prefix the next turn on every family tested, for three independent
+    /// reasons: templates append generation-prompt-only scaffolds, templates
+    /// drop `<think>` blocks when re-rendering an assistant turn as history,
+    /// and a sampled token sequence is not the canonical tokenization of its
+    /// own text. All three live *after* the history boundary. The prefix
+    /// rendered with `add_generation_prompt = false` carries none of them, so a
+    /// snapshot keyed by the tokenization of that render is a prefix of every
+    /// follow-up turn by construction.
+    ///
+    /// ## What this does
+    ///
+    /// Runs one extra forward over `prompt_tokens[prefill_start_offset..
+    /// boundary]`, snapshots the model state there, inserts it, and advances
+    /// `prefill_start_offset` so the caller's normal prefill continues with the
+    /// remaining suffix. Total tokens forwarded are unchanged; the cost is one
+    /// additional graph launch plus the state copy.
+    ///
+    /// Returns `Err(msg)` only when the extra forward's eval threw, in which
+    /// case the caller must abort the sequence exactly as it does for its own
+    /// prefill eval failures. Every other decline (feature off, dense-KV
+    /// family, no boundary, boundary already covered by an adopted prefix)
+    /// returns `Ok(())` and leaves the sequence untouched, so the request
+    /// simply prefills the way it did before this issue.
+    fn capture_history_boundary_snapshot(&mut self, seq: &mut SequenceInfo) -> Result<(), String> {
+        if !self.model.supports_snapshot_reuse() || !self.prompt_cache_active() {
+            return Ok(());
+        }
+        // Embedding-bearing rows feed `forward_with_embeddings` over the whole
+        // prompt at once and cannot be split at a token index.
+        if seq.vlm_embeddings.is_some() {
+            return Ok(());
+        }
+        let mut ctx = match self.prompt_cache_seq_ctx.get(&seq.seq_id) {
+            Some(c) => c.clone(),
+            None => return Ok(()),
+        };
+        let Some(boundary_tokens) = ctx.history_prefix_tokens.take() else {
+            return Ok(());
+        };
+        let boundary = boundary_tokens.len();
+        // Nothing to capture when an adopted prefix already reaches the
+        // boundary, and nothing to split when the boundary is the whole prompt
+        // (the suffix forward must stay non-empty so the sampler still sees
+        // fresh logits).
+        if boundary <= seq.prefill_start_offset || boundary >= seq.prompt_tokens.len() {
+            return Ok(());
+        }
+        // The vector was clipped to a common prefix at enqueue time; re-checking
+        // here keeps the snapshot/state correspondence a local invariant of this
+        // function rather than a cross-function assumption.
+        if seq.prompt_tokens[..boundary] != boundary_tokens[..] {
+            return Ok(());
+        }
+
+        let start = seq.prefill_start_offset;
+        let _span = tracing::info_span!(
+            "history_boundary_prefill",
+            seq_id = %seq.seq_id,
+            start,
+            boundary,
+            prompt_len = seq.prompt_tokens.len(),
+        )
+        .entered();
+
+        // No NA-tile padding here: several snapshot-only families report
+        // `supports_padded_prefill() == false` because padding tokens corrupt
+        // their conv / SSM recurrent state, and a padded segment would make the
+        // captured state describe more tokens than the key claims.
+        let segment: Vec<i32> = seq.prompt_tokens[start..boundary].to_vec();
+        let segment_len = segment.len() as i32;
+        let input = mlxcel_core::from_slice_i32(&segment, &[1, segment_len]);
+        let eval = {
+            let caches = match self.cache_pool.get_caches_mut(seq.seq_id) {
+                Some(c) => c,
+                // Treated as a decline rather than an error: the caller's own
+                // prefill hits the same missing-cache condition immediately
+                // after and reports it with its own message.
+                None => return Ok(()),
+            };
+            let logits =
+                self.model
+                    .forward_with_sequence_id(&input, Some(seq.seq_id), caches, None);
+            mlxcel_core::try_eval(&logits).map_err(|e| e.to_string())
+        };
+        self.record_eval_outcome(eval)?;
+        self.sync_sequence_storage(seq.seq_id);
+
+        self.insert_model_state_snapshot(seq.seq_id, &ctx, boundary_tokens, "boundary");
+
+        // Count the segment as prefill work so `total_prefill_tokens` still
+        // sums to the prompt: the caller records only the suffix it runs.
+        self.batch_observability.record_prefill_chunk();
+        self.batch_observability
+            .record_prefill_tokens(boundary - start);
+        seq.prefill_start_offset = boundary;
+        Ok(())
+    }
+
     /// Donate a finished sequence's KV cache back to the store so future
     /// requests sharing a prefix can adopt it.
     ///
@@ -2275,80 +2552,7 @@ impl BatchScheduler {
         // placeholder even though the real state lives in
         // `ModelOwnedSequenceState` and cannot be detached as KV blocks.
         if self.model.supports_snapshot_reuse() {
-            let store = match self.prompt_cache.as_ref() {
-                Some(s) => s.clone(),
-                None => return,
-            };
-            if tokens.len() < store.min_prefix_tokens() {
-                self.batch_observability.record_prompt_cache_reject(
-                    PromptCacheRejectReason::PrefixTooShort,
-                    Some(seq_id.as_u64()),
-                    tokens.len(),
-                );
-                return;
-            }
-            let snapshot = match self.model.snapshot_sequence_state(seq_id, tokens.len()) {
-                Some(s) if !s.is_empty() => s,
-                Some(_) => {
-                    tracing::debug!(
-                        seq_id = %seq_id,
-                        token_len = tokens.len(),
-                        "prompt-cache snapshot donate skipped: captured snapshot was empty"
-                    );
-                    self.batch_observability.record_prompt_cache_reject(
-                        PromptCacheRejectReason::EmptySet,
-                        Some(seq_id.as_u64()),
-                        tokens.len(),
-                    );
-                    return;
-                }
-                None => {
-                    tracing::debug!(
-                        seq_id = %seq_id,
-                        token_len = tokens.len(),
-                        "prompt-cache snapshot donate skipped: no model-owned state for sequence"
-                    );
-                    self.batch_observability.record_prompt_cache_reject(
-                        PromptCacheRejectReason::EmptySet,
-                        Some(seq_id.as_u64()),
-                        tokens.len(),
-                    );
-                    return;
-                }
-            };
-            let entry = ModelSnapshotEntry::new(tokens, snapshot);
-            let key_tokens = entry.tokens.clone();
-            let key = Self::compose_prompt_cache_key(&ctx, &key_tokens);
-            match store.insert_snapshot(&key, entry) {
-                Ok(()) => {
-                    tracing::debug!(
-                        seq_id = %seq_id,
-                        token_len = key_tokens.len(),
-                        bytes = store.stats().snapshot_bytes,
-                        "prompt-cache snapshot inserted"
-                    );
-                    self.batch_observability.record_prompt_cache_insert();
-                    self.batch_metrics
-                        .update_prompt_cache_gauges(store.bytes(), store.len());
-                    if apc_trace_enabled() {
-                        tracing::info!(
-                            apc_event = "store",
-                            seq_id = %seq_id,
-                            matched_len = key_tokens.len(),
-                            "prompt-cache store (snapshot)"
-                        );
-                    }
-                }
-                Err(err) => {
-                    tracing::debug!("prompt-cache snapshot insert skipped: {err}");
-                    self.batch_observability.record_prompt_cache_insert_reject();
-                    self.batch_observability.record_prompt_cache_reject(
-                        PromptCacheRejectReason::from(&err),
-                        Some(seq_id.as_u64()),
-                        key_tokens.len(),
-                    );
-                }
-            }
+            self.insert_model_state_snapshot(seq_id, &ctx, tokens, "donate");
             return;
         }
 
@@ -3327,8 +3531,9 @@ impl BatchScheduler {
         // they keep opting out of the cache entirely.
         if self.prompt_cache_active()
             && (!is_multimodal || vlm_sharing_ok)
-            && let Some(ctx) = options.prompt_cache_ctx.clone()
+            && let Some(mut ctx) = options.prompt_cache_ctx.clone()
         {
+            self.resolve_history_boundary(&mut ctx, &prompt_tokens, is_multimodal);
             self.prompt_cache_seq_ctx.insert(seq_id, ctx);
         }
 
@@ -5200,6 +5405,15 @@ impl BatchScheduler {
     /// model. The VLM-prefix path deliberately opts out of cache adoption at
     /// the enqueue site, so this branch never has to mix the two.
     fn execute_full_prefill(&mut self, mut seq: SequenceInfo) {
+        // Split off the history-boundary segment first (issue #1143). On the
+        // vast majority of requests this is an early-return; when it does run
+        // it advances `prefill_start_offset`, so everything below sees the
+        // remaining suffix exactly as it would see an adopted-prefix suffix.
+        if let Err(msg) = self.capture_history_boundary_snapshot(&mut seq) {
+            self.abort_sequence(seq, &msg);
+            self.eval_failures_exhausted();
+            return;
+        }
         let _span = tracing::info_span!(
             "prefill",
             seq_id = %seq.seq_id,
@@ -5373,6 +5587,14 @@ impl BatchScheduler {
     /// leading tokens that the adopted prompt-cache entry already covers,
     /// so the first chunk starts *after* the cached prefix.
     fn start_chunked_prefill(&mut self, mut seq: SequenceInfo) {
+        // Same history-boundary split as `execute_full_prefill` (issue #1143).
+        // It advances `prefill_start_offset`, which is exactly the cursor the
+        // first chunk starts from, so the chunk loop below needs no changes.
+        if let Err(msg) = self.capture_history_boundary_snapshot(&mut seq) {
+            self.abort_sequence(seq, &msg);
+            self.eval_failures_exhausted();
+            return;
+        }
         let _span = tracing::info_span!(
             "chunked_prefill_start",
             seq_id = %seq.seq_id,

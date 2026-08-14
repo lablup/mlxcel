@@ -368,6 +368,20 @@ impl BatchObservability {
             .fetch_add(prompt_len as u64, Ordering::Relaxed);
     }
 
+    /// Add prefill tokens without opening a new sequence.
+    ///
+    /// [`Self::record_prefill_start`] also bumps `sequences_started`, so a
+    /// prefill that is split into segments before the sequence's own
+    /// "start" is recorded cannot use it without inflating that counter. The
+    /// history-boundary segment (issue #1143) uses this instead, which keeps
+    /// `total_prefill_tokens` summing to the tokens actually forwarded.
+    ///
+    /// Used by: `BatchScheduler::capture_history_boundary_snapshot`
+    pub fn record_prefill_tokens(&self, tokens: usize) {
+        self.total_prefill_tokens
+            .fetch_add(tokens as u64, Ordering::Relaxed);
+    }
+
     /// Record that a chunked prefill chunk was processed.
     pub fn record_prefill_chunk(&self) {
         self.prefill_chunks_processed

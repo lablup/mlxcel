@@ -1292,6 +1292,7 @@ impl ModelProvider {
         cancelled: Arc<AtomicBool>,
         queue_reservation_mode: QueueReservationMode,
     ) -> Result<mpsc::Receiver<GenerateEvent>> {
+        let mut options = options;
         let (response_tx, response_rx) = mpsc::channel();
         media
             .validate_resolved_image_count()
@@ -1317,6 +1318,28 @@ impl ModelProvider {
                 })
                 .ok()
         });
+
+        // Same treatment for the history-boundary render (issue #1143): it is
+        // rendered by the route but must be tokenized with the exact
+        // `tokenize_prompt_for_generation` convention the prompt itself uses,
+        // or the two token vectors could not be compared. Doing it here keeps
+        // the second encode off the scheduler thread alongside the first, and
+        // drops the string so the per-sequence context the scheduler retains
+        // carries ids only.
+        if let Some(tok) = self.prompt_tokenizer.as_ref()
+            && let Some(ctx) = options.prompt_cache_ctx.as_mut()
+            && let Some(history_prompt) = ctx.history_prompt.take()
+        {
+            match tokenize_prompt_for_generation(tok, &history_prompt) {
+                Ok(ids) => ctx.history_prefix_tokens = Some(ids),
+                Err(err) => {
+                    tracing::debug!(
+                        "HTTP-side history-boundary tokenization failed ({err}); \
+                         skipping the boundary snapshot for this request"
+                    );
+                }
+            }
+        }
 
         let queue_reservation = match queue_reservation_mode {
             QueueReservationMode::Auto => self.reserve_single_stream_queue_slot()?,

@@ -992,6 +992,8 @@ fn compose_prompt_cache_key_folds_request_multimodal_digest() {
         template_sig: "tpl".to_string(),
         session_key: "sess".to_string(),
         mm_digest: MultimodalDigest::empty(),
+        history_prompt: None,
+        history_prefix_tokens: None,
     };
     let image_a = PromptCacheRequestContext {
         mm_digest: multimodal_digest_from_vecs(&[b"IMAGE-A".to_vec()], &[]),
@@ -1706,4 +1708,30 @@ fn a_single_success_prevents_the_guard_from_tripping() {
     // A fresh single failure is nowhere near the threshold.
     count = advance_eval_failure_count(count, false);
     assert!(!eval_failures_reached_limit(count));
+}
+
+// ---------------------------------------------------------------------------
+// History-boundary prefix arithmetic (issue #1143)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn common_prefix_len_reports_the_shared_head() {
+    use super::common_prefix_len;
+
+    // Identical vectors: the whole thing.
+    assert_eq!(common_prefix_len(&[1, 2, 3], &[1, 2, 3]), 3);
+    // The history render is normally a strict prefix of the prompt: the
+    // generation-prompt scaffold is what follows.
+    assert_eq!(common_prefix_len(&[1, 2, 3], &[1, 2, 3, 9, 9]), 3);
+    // A prompt shorter than the history render still reports only the shared
+    // head, never an index past either slice.
+    assert_eq!(common_prefix_len(&[1, 2, 3, 4], &[1, 2]), 2);
+    // Divergence inside the shared region truncates there. This is the case
+    // that protects against a BPE merge across the history/scaffold seam:
+    // the merged token is not shared, so it is not stored.
+    assert_eq!(common_prefix_len(&[1, 2, 7], &[1, 2, 8, 8]), 2);
+    // No overlap at all, and empty inputs.
+    assert_eq!(common_prefix_len(&[5], &[6]), 0);
+    assert_eq!(common_prefix_len(&[], &[1, 2]), 0);
+    assert_eq!(common_prefix_len(&[1, 2], &[]), 0);
 }
