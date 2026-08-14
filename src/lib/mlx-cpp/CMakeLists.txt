@@ -79,19 +79,30 @@ endfunction()
 set(_mlx_cached_source_dir "${CMAKE_BINARY_DIR}/_deps/mlx-src")
 set(_mlx_cached_binary_dir "${CMAKE_BINARY_DIR}/_deps/mlx-build")
 
+# An explicit source directory is useful for offline rebuilds when a previous
+# Cargo target directory still has a verified MLX checkout.
+if(DEFINED ENV{MLXCEL_MLX_SOURCE_DIR} AND
+   EXISTS "$ENV{MLXCEL_MLX_SOURCE_DIR}/CMakeLists.txt")
+  set(mlx_SOURCE_DIR "$ENV{MLXCEL_MLX_SOURCE_DIR}")
+  get_filename_component(_mlx_override_deps_dir "${mlx_SOURCE_DIR}" DIRECTORY)
+  set(mlx_BINARY_DIR "${_mlx_cached_binary_dir}")
+  if(EXISTS "${_mlx_override_deps_dir}/metal_cpp-src/CMakeLists.txt")
+    set(FETCHCONTENT_BASE_DIR "${_mlx_override_deps_dir}")
+  endif()
+  message(STATUS "Using MLX source override from ${mlx_SOURCE_DIR}")
 # Reuse an already-populated source tree when present so offline rebuilds can
 # proceed without re-running FetchContent. This is especially useful when Cargo
 # changes the build hash but the developer already has a cached MLX checkout.
 # NOTE: Stale-cache validation is handled by build.rs (purge_stale_mlx_cache)
 # which runs *before* CMake, ensuring _deps/ is either valid or absent.
-if(EXISTS "${_mlx_cached_source_dir}/CMakeLists.txt")
+elseif(EXISTS "${_mlx_cached_source_dir}/CMakeLists.txt")
   set(mlx_SOURCE_DIR "${_mlx_cached_source_dir}")
   set(mlx_BINARY_DIR "${_mlx_cached_binary_dir}")
   message(STATUS "Using cached MLX source from ${mlx_SOURCE_DIR}")
 else()
   FetchContent_Declare(
     mlx
-    GIT_REPOSITORY "https://github.com/ml-explore/mlx.git"
+    GIT_REPOSITORY "https://github.com/chiuchris/mlx.git"
     GIT_TAG b7c3dd6d27f45b5365b08a840310187dc503f1db)
 
   # Use FetchContent_Populate + add_subdirectory so we can apply source
