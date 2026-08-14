@@ -70,7 +70,7 @@ use crate::server::model_provider::{GenerateEvent, ModelRequest};
 use crate::server::prompt_cache::key::PromptCacheKey;
 use crate::server::prompt_cache::metrics::PromptCacheRejectReason;
 use crate::server::prompt_cache::{
-    CacheEntry, DetachedKvSet, ModelSnapshotEntry, PromptCacheStore,
+    CacheEntry, DetachedKvSet, ModelSnapshotEntry, PromptCacheStore, SnapshotLookupOutcome,
 };
 use crate::server::state::BatchMetrics;
 use crate::server::thinking_budget::{
@@ -1804,8 +1804,36 @@ impl BatchScheduler {
 
         let store = self.prompt_cache.as_ref()?.clone();
         let key = Self::compose_prompt_cache_key(ctx, tokens);
-        if self.model.supports_snapshot_reuse()
-            && let Some((snapshot_entry, matched_len)) = store.lookup_snapshot_prefix(&key, tokens)
+        let snapshot_outcome = if self.model.supports_snapshot_reuse() {
+            store.lookup_snapshot_outcome(&key, tokens)
+        } else {
+            SnapshotLookupOutcome::NoCandidate
+        };
+        // A snapshot candidate that sits in this request's own session bucket
+        // but is not a prefix of it is a structural miss, not an empty store
+        // (issue #1147). Classify it so `/v1/cache/stats` can tell the two
+        // apart; the multi-turn miss class in epic #1148 is otherwise
+        // invisible. `NoCandidate` deliberately records nothing, so the
+        // counter never fires for a cold store or a foreign session bucket.
+        if let SnapshotLookupOutcome::Diverged(divergence) = &snapshot_outcome {
+            tracing::debug!(
+                common_prefix = divergence.common_prefix_len,
+                stored_len = divergence.stored_len,
+                request_len = tokens.len(),
+                "prompt-cache snapshot candidate diverged from request"
+            );
+            self.batch_observability
+                .record_prompt_cache_reject_detailed(
+                    PromptCacheRejectReason::SnapshotDiverged,
+                    None,
+                    divergence.common_prefix_len,
+                    Some(divergence.stored_len),
+                );
+        }
+        if let SnapshotLookupOutcome::Hit {
+            entry: snapshot_entry,
+            matched_len,
+        } = snapshot_outcome
         {
             let seq_id = match self.allocate_sequence_state() {
                 Ok(id) => id,

@@ -57,6 +57,43 @@ pub(super) struct SnapshotSlot {
     sessionless: SessionlessBucketKey,
 }
 
+/// Geometry of a structural snapshot miss (issue #1147).
+///
+/// Emitted when the request's own session bucket held a snapshot candidate
+/// whose stored token vector is not a prefix of the request. The two lengths
+/// are what makes the miss diagnosable without token-level detokenization:
+/// `common_prefix_len` is how far the stored vector and the request agreed,
+/// `stored_len` is how long the stored vector actually is, and the difference
+/// between them is the divergent tail that the exact-prefix path cannot use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotDivergence {
+    /// Longest common token prefix between the stored entry and the request.
+    pub common_prefix_len: usize,
+    /// Token count of the stored entry.
+    pub stored_len: usize,
+}
+
+/// Result of a snapshot lookup, with the miss reason preserved.
+///
+/// [`PromptCacheStore::lookup_snapshot_prefix`] collapses this to
+/// `Option<..>`; callers that report metrics should use
+/// [`PromptCacheStore::lookup_snapshot_outcome`] so a structural divergence
+/// is distinguishable from a genuinely cold store.
+#[derive(Debug, Clone)]
+pub enum SnapshotLookupOutcome {
+    /// A stored snapshot is an exact prefix of the request and was adopted.
+    Hit {
+        entry: Arc<ModelSnapshotEntry>,
+        /// Token count the restored snapshot covers.
+        matched_len: usize,
+    },
+    /// A same-session candidate existed but diverged from the request.
+    Diverged(SnapshotDivergence),
+    /// No candidate in this request's session bucket at all: an empty store,
+    /// a different model/template/session bucket, or a disabled cache.
+    NoCandidate,
+}
+
 struct Inner {
     config: PromptCacheConfig,
     // Primary map: digest -> entry.
@@ -898,16 +935,46 @@ impl PromptCacheStore {
     /// matches exactly. That preserves the recurrent-state invariant: a full
     /// SSM / linear-attention state cannot be truncated to an arbitrary earlier
     /// token boundary.
+    ///
+    /// Thin wrapper over [`Self::lookup_snapshot_outcome`] for callers that
+    /// only care about the hit. Callers that also want the structural-miss
+    /// diagnosis (issue #1147) should use the outcome form directly.
     pub fn lookup_snapshot_prefix(
         &self,
         key: &PromptCacheKey<'_>,
         tokens: &[i32],
     ) -> Option<(Arc<ModelSnapshotEntry>, usize)> {
+        match self.lookup_snapshot_outcome(key, tokens) {
+            SnapshotLookupOutcome::Hit { entry, matched_len } => Some((entry, matched_len)),
+            SnapshotLookupOutcome::Diverged(_) | SnapshotLookupOutcome::NoCandidate => None,
+        }
+    }
+
+    /// [`Self::lookup_snapshot_prefix`] with the miss reason attached.
+    ///
+    /// Distinguishing the two miss shapes is the whole point (issue #1147):
+    /// an empty store and a store holding an entry that diverges from the
+    /// request on a chat-template artifact both used to return a bare `None`,
+    /// so a structural multi-turn miss looked exactly like a cold cache in
+    /// `/v1/cache/stats`. When a candidate does exist in the request's own
+    /// session bucket but is not a prefix of the request, this reports the
+    /// divergence geometry so the caller can classify the reject.
+    ///
+    /// The divergence report is scoped to same-bucket candidates only, so a
+    /// cold store, a different model/template bucket, and a different session
+    /// all still report [`SnapshotLookupOutcome::NoCandidate`]. When several
+    /// candidates diverge, the one with the longest common prefix is reported
+    /// (ties broken by recency), matching the hit path's preference order.
+    pub fn lookup_snapshot_outcome(
+        &self,
+        key: &PromptCacheKey<'_>,
+        tokens: &[i32],
+    ) -> SnapshotLookupOutcome {
         {
             let now = Instant::now();
             let mut guard = self.inner.write().expect("prompt cache inner lock");
             if !guard.config.is_enabled() {
-                return None;
+                return SnapshotLookupOutcome::NoCandidate;
             }
             let (freed, count) = guard.sweep_snapshot_ttl(now);
             if let Some(per_entry) = freed.checked_div(count) {
@@ -919,10 +986,11 @@ impl PromptCacheStore {
         }
 
         let sessionless = SessionlessBucketKey::from_key(key);
-        let best = {
+        let (best, diverged) = {
             let guard = self.inner.read().expect("prompt cache inner lock");
             let min_len = guard.config.min_prefix_tokens;
             let mut best: Option<(PromptCacheKeyDigest, usize, Instant)> = None;
+            let mut diverged: Option<(SnapshotDivergence, Instant)> = None;
             for (digest, slot) in &guard.snapshots {
                 if slot.sessionless != sessionless {
                     continue;
@@ -936,13 +1004,34 @@ impl PromptCacheStore {
                     continue;
                 }
                 let len = slot.entry.tokens.len();
-                if len < min_len || len > tokens.len() {
-                    continue;
-                }
-                if slot.entry.tokens.as_slice() != &tokens[..len] {
-                    continue;
-                }
                 let last_used = slot.entry.last_used();
+                let is_prefix =
+                    len <= tokens.len() && slot.entry.tokens.as_slice() == &tokens[..len];
+                if !is_prefix {
+                    // Same bucket, same session, but the stored vector is not
+                    // a prefix of this request. Record how far the two agreed
+                    // so the caller can report a classified reject instead of
+                    // an indistinguishable miss.
+                    let report = SnapshotDivergence {
+                        common_prefix_len: common_prefix_len(slot.entry.tokens.as_slice(), tokens),
+                        stored_len: len,
+                    };
+                    let replace = match &diverged {
+                        None => true,
+                        Some((existing, existing_used)) => {
+                            report.common_prefix_len > existing.common_prefix_len
+                                || (report.common_prefix_len == existing.common_prefix_len
+                                    && last_used > *existing_used)
+                        }
+                    };
+                    if replace {
+                        diverged = Some((report, last_used));
+                    }
+                    continue;
+                }
+                if len < min_len {
+                    continue;
+                }
                 let replace = match best {
                     None => true,
                     Some((_, best_len, best_used)) => {
@@ -953,7 +1042,7 @@ impl PromptCacheStore {
                     best = Some((*digest, len, last_used));
                 }
             }
-            best
+            (best, diverged.map(|(report, _)| report))
         };
 
         let (entry, matched_len) = {
@@ -967,7 +1056,7 @@ impl PromptCacheStore {
                             drop(guard);
                             let metrics = Arc::clone(&self.metrics);
                             metrics.record_snapshot_lookup(false, 0);
-                            return None;
+                            return SnapshotLookupOutcome::NoCandidate;
                         }
                     };
                     guard.snapshot_hits = guard.snapshot_hits.saturating_add(1);
@@ -983,7 +1072,13 @@ impl PromptCacheStore {
             Some(_) => metrics.record_snapshot_lookup(true, matched_len),
             None => metrics.record_snapshot_lookup(false, 0),
         }
-        entry.map(|e| (e, matched_len))
+        match entry {
+            Some(entry) => SnapshotLookupOutcome::Hit { entry, matched_len },
+            None => match diverged {
+                Some(report) => SnapshotLookupOutcome::Diverged(report),
+                None => SnapshotLookupOutcome::NoCandidate,
+            },
+        }
     }
 
     /// Account a lookup miss and return `None`. Factored out so the
@@ -1151,11 +1246,14 @@ fn select_best_by_scan(
     }
 }
 
-/// Length of the longest common token prefix between `a` and `b`. Used by
-/// the APC partial-adoption scan path so a candidate whose
-/// stored prefix diverges inside the request still surfaces with its
-/// actual common-prefix length, ready for the block-hash discriminator
-/// to clamp.
+/// Length of the longest common token prefix between `a` and `b`.
+///
+/// Used by: [`select_best_by_scan`] (APC partial-adoption scan path, so a
+/// candidate whose stored prefix diverges inside the request still surfaces
+/// with its actual common-prefix length, ready for the block-hash
+/// discriminator to clamp) and
+/// [`PromptCacheStore::lookup_snapshot_outcome`] (issue #1147, to report how
+/// far a diverging snapshot candidate agreed with the request).
 fn common_prefix_len(a: &[i32], b: &[i32]) -> usize {
     a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
 }

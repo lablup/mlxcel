@@ -125,9 +125,11 @@ fn cache_stats_response_serializes_with_expected_keys() {
         reject_empty_set: 4,
         reject_layout_constraints: 5,
         reject_block_boundary_floor: 6,
+        reject_snapshot_diverged: 7,
         last_reject_reason: Some("oversized".to_string()),
         last_reject_seq_id: Some(42),
         last_reject_context_len: Some(128),
+        last_reject_entry_len: Some(139),
         last_reject_at_unix_ms: Some(1_700_000_000_000),
     };
     let json = serde_json::to_string(&resp).expect("serialize");
@@ -164,9 +166,11 @@ fn cache_stats_response_serializes_with_expected_keys() {
         "\"reject_empty_set\":4",
         "\"reject_layout_constraints\":5",
         "\"reject_block_boundary_floor\":6",
+        "\"reject_snapshot_diverged\":7",
         "\"last_reject_reason\":\"oversized\"",
         "\"last_reject_seq_id\":42",
         "\"last_reject_context_len\":128",
+        "\"last_reject_entry_len\":139",
         "\"last_reject_at_unix_ms\":1700000000000",
     ] {
         assert!(json.contains(key), "expected `{key}` in: {json}");
@@ -279,9 +283,11 @@ fn cache_stats_response_disabled_payload_uses_zero_counters() {
         reject_empty_set: 0,
         reject_layout_constraints: 0,
         reject_block_boundary_floor: 0,
+        reject_snapshot_diverged: 0,
         last_reject_reason: None,
         last_reject_seq_id: None,
         last_reject_context_len: None,
+        last_reject_entry_len: None,
         last_reject_at_unix_ms: None,
     };
     assert!(!resp.enabled);
@@ -369,6 +375,74 @@ fn paged_block_stats_projects_from_observability_snapshot() {
     assert_eq!(paged.bytes_reserved, 4096);
     assert_eq!(paged.bytes_in_use, 2048);
     assert_eq!(paged.block_budget, 16);
+}
+
+#[test]
+fn snapshot_divergence_reject_reaches_the_stats_body_with_its_geometry() {
+    // The full data path the route uses for issue #1147: the scheduler's
+    // classified reject → `BatchObservability` → snapshot →
+    // `RejectReasonStats::from_observability` → `build_stats_response` →
+    // JSON. The numbers are the gemma-4 two-turn scenario epic #1148
+    // measured: a 139-token stored entry sharing 90 tokens with the request.
+    use crate::server::batch::BatchObservability;
+    use crate::server::prompt_cache::PromptCacheRejectReason;
+
+    let obs = BatchObservability::new();
+    obs.record_prompt_cache_reject_detailed(
+        PromptCacheRejectReason::SnapshotDiverged,
+        None,
+        90,
+        Some(139),
+    );
+
+    let reject = RejectReasonStats::from_observability(&obs.snapshot());
+    assert_eq!(reject.snapshot_diverged, 1);
+    assert_eq!(reject.last_reason.as_deref(), Some("snapshot_diverged"));
+    assert_eq!(reject.last_context_len, Some(90));
+    assert_eq!(reject.last_entry_len, Some(139));
+
+    let cfg = PromptCacheConfig::default();
+    let resp =
+        super::super::cache::build_stats_response(None, &cfg, PagedBlockStats::default(), reject);
+    assert_eq!(resp.reject_snapshot_diverged, 1);
+    let json = serde_json::to_string(&resp).expect("serialize");
+    for key in [
+        "\"reject_snapshot_diverged\":1",
+        "\"last_reject_reason\":\"snapshot_diverged\"",
+        "\"last_reject_context_len\":90",
+        "\"last_reject_entry_len\":139",
+    ] {
+        assert!(json.contains(key), "expected `{key}` in: {json}");
+    }
+}
+
+#[test]
+fn other_reject_reasons_leave_the_stats_divergence_counter_at_zero() {
+    // The divergence counter must stay a specific signal: an operator seeing
+    // it non-zero has to be able to conclude a snapshot candidate really was
+    // there and really was unusable. Any other reject must not move it, and
+    // must leave `last_reject_entry_len` null rather than borrowing a stale
+    // length.
+    use crate::server::batch::BatchObservability;
+    use crate::server::prompt_cache::PromptCacheRejectReason;
+
+    let obs = BatchObservability::new();
+    obs.record_prompt_cache_reject(PromptCacheRejectReason::ModeMismatch, None, 12);
+    obs.record_prompt_cache_reject(PromptCacheRejectReason::EmptySet, Some(3), 0);
+
+    let reject = RejectReasonStats::from_observability(&obs.snapshot());
+    assert_eq!(reject.snapshot_diverged, 0);
+    assert_eq!(reject.last_reason.as_deref(), Some("empty_set"));
+    assert_eq!(reject.last_entry_len, None);
+
+    let cfg = PromptCacheConfig::default();
+    let resp =
+        super::super::cache::build_stats_response(None, &cfg, PagedBlockStats::default(), reject);
+    assert_eq!(resp.reject_snapshot_diverged, 0);
+    assert_eq!(resp.last_reject_entry_len, None);
+    let json = serde_json::to_string(&resp).expect("serialize");
+    assert!(json.contains("\"reject_snapshot_diverged\":0"), "{json}");
+    assert!(json.contains("\"last_reject_entry_len\":null"), "{json}");
 }
 
 #[test]

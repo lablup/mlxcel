@@ -53,6 +53,8 @@ mod types;
 mod apc_integration_tests;
 #[cfg(test)]
 mod prefix_matcher_tests;
+#[cfg(test)]
+mod snapshot_divergence_tests;
 
 pub use apc_lookup::ApcStoreStats;
 pub use block_hash::{
@@ -73,5 +75,5 @@ pub use metrics::{
     PromptCacheRejectCounters, PromptCacheRejectReason,
 };
 pub use policy::{ApcConfig, PromptCacheConfig, PromptCacheStats};
-pub use store::PromptCacheStore;
+pub use store::{PromptCacheStore, SnapshotDivergence, SnapshotLookupOutcome};
 pub use types::{BucketKey, InsertError};

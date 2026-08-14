@@ -60,12 +60,25 @@ pub enum PromptCacheRejectReason {
     /// The paged pool's block-size floor pushed the adoptable/donatable
     /// length below `min_prefix_tokens`.
     BlockBoundaryFloor,
+    /// A snapshot candidate existed in the request's own session bucket, but
+    /// its stored token vector is not a prefix of the request: the two
+    /// diverge before the stored entry ends, so the exact-prefix snapshot
+    /// path cannot adopt it (issue #1147).
+    ///
+    /// This is the structural multi-turn miss that epic #1148 documents. It
+    /// is emitted only when a same-bucket candidate was actually examined, so
+    /// a zero counter alongside advancing `snapshot_lookups` genuinely means
+    /// "nothing to reuse", not "reuse was silently declined". The reject
+    /// carries the divergence geometry: `context_len` is the longest common
+    /// prefix with the request, and the reject's `entry_len` is the stored
+    /// entry's token count.
+    SnapshotDiverged,
 }
 
 impl PromptCacheRejectReason {
     /// All variants, in the stable order used by Prometheus/`/v1/cache/stats`
     /// exposition helpers.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Oversized,
         Self::Disabled,
         Self::PrefixTooShort,
@@ -73,6 +86,7 @@ impl PromptCacheRejectReason {
         Self::EmptySet,
         Self::LayoutConstraints,
         Self::BlockBoundaryFloor,
+        Self::SnapshotDiverged,
     ];
 
     /// Stable lowercase snake_case label used as the Prometheus `reason`
@@ -86,6 +100,7 @@ impl PromptCacheRejectReason {
             Self::EmptySet => "empty_set",
             Self::LayoutConstraints => "layout_constraints",
             Self::BlockBoundaryFloor => "block_boundary_floor",
+            Self::SnapshotDiverged => "snapshot_diverged",
         }
     }
 }
@@ -108,11 +123,20 @@ impl From<&InsertError> for PromptCacheRejectReason {
 /// `context_len` carries whatever length context the call site has
 /// available: the matched-prefix length for adopt declines, or the donated
 /// token count for donate declines.
+///
+/// `entry_len` is the token length of the specific stored entry the decline
+/// was about, when the call site knows it. It is `None` for the declines that
+/// have no single stored entry in view (every reason except
+/// [`PromptCacheRejectReason::SnapshotDiverged`] today). Together with
+/// `context_len` it makes a divergence reject self-describing: "a stored
+/// entry of `entry_len` tokens shared `context_len` of them with the
+/// request".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptCacheLastReject {
     pub reason: &'static str,
     pub seq_id: Option<u64>,
     pub context_len: usize,
+    pub entry_len: Option<usize>,
     pub at_unix_ms: u64,
 }
 
@@ -133,6 +157,7 @@ pub struct PromptCacheRejectCounters {
     empty_set: AtomicU64,
     layout_constraints: AtomicU64,
     block_boundary_floor: AtomicU64,
+    snapshot_diverged: AtomicU64,
     last: Mutex<Option<PromptCacheLastReject>>,
 }
 
@@ -150,6 +175,7 @@ impl PromptCacheRejectCounters {
             PromptCacheRejectReason::EmptySet => &self.empty_set,
             PromptCacheRejectReason::LayoutConstraints => &self.layout_constraints,
             PromptCacheRejectReason::BlockBoundaryFloor => &self.block_boundary_floor,
+            PromptCacheRejectReason::SnapshotDiverged => &self.snapshot_diverged,
         }
     }
 
@@ -157,6 +183,19 @@ impl PromptCacheRejectCounters {
     /// snapshot. Cheap: one relaxed atomic increment plus a short-lived
     /// mutex hold to swap the small `Copy`-ish snapshot value.
     pub fn record(&self, reason: PromptCacheRejectReason, seq_id: Option<u64>, context_len: usize) {
+        self.record_detailed(reason, seq_id, context_len, None);
+    }
+
+    /// [`Self::record`] plus the stored entry's token length, for the decline
+    /// sites that have a specific stored entry in view (issue #1147). See
+    /// [`PromptCacheLastReject::entry_len`].
+    pub fn record_detailed(
+        &self,
+        reason: PromptCacheRejectReason,
+        seq_id: Option<u64>,
+        context_len: usize,
+        entry_len: Option<usize>,
+    ) {
         self.counter(reason).fetch_add(1, Ordering::Relaxed);
         let at_unix_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -167,6 +206,7 @@ impl PromptCacheRejectCounters {
                 reason: reason.as_str(),
                 seq_id,
                 context_len,
+                entry_len,
                 at_unix_ms,
             });
         }

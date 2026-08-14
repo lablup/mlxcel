@@ -455,14 +455,30 @@ impl BatchObservability {
         seq_id: Option<u64>,
         context_len: usize,
     ) {
+        self.record_prompt_cache_reject_detailed(reason, seq_id, context_len, None);
+    }
+
+    /// [`Self::record_prompt_cache_reject`] plus the stored entry's token
+    /// length, for decline sites that have one specific stored entry in view
+    /// (issue #1147). `entry_len` lands in the `last_reject` snapshot and is
+    /// surfaced as `last_reject_entry_len` on `/v1/cache/stats`; the counters
+    /// themselves are unchanged.
+    pub fn record_prompt_cache_reject_detailed(
+        &self,
+        reason: PromptCacheRejectReason,
+        seq_id: Option<u64>,
+        context_len: usize,
+        entry_len: Option<usize>,
+    ) {
         self.prompt_cache_reject_reasons
-            .record(reason, seq_id, context_len);
+            .record_detailed(reason, seq_id, context_len, entry_len);
         if apc_trace_enabled() {
             tracing::info!(
                 apc_event = "reject",
                 reason = reason.as_str(),
                 seq_id = ?seq_id,
                 context_len,
+                entry_len = ?entry_len,
                 "prompt-cache reject"
             );
         }
@@ -699,11 +715,15 @@ impl BatchObservability {
             prompt_cache_reject_block_boundary_floor: self
                 .prompt_cache_reject_reasons
                 .count(PromptCacheRejectReason::BlockBoundaryFloor),
+            prompt_cache_reject_snapshot_diverged: self
+                .prompt_cache_reject_reasons
+                .count(PromptCacheRejectReason::SnapshotDiverged),
             prompt_cache_last_reject: self.prompt_cache_reject_reasons.last().map(|r| {
                 PromptCacheLastRejectSnapshot {
                     reason: r.reason,
                     seq_id: r.seq_id,
                     context_len: r.context_len as u64,
+                    entry_len: r.entry_len.map(|len| len as u64),
                     at_unix_ms: r.at_unix_ms,
                 }
             }),
@@ -799,6 +819,12 @@ pub struct ObservabilitySnapshot {
     pub prompt_cache_reject_empty_set: u64,
     pub prompt_cache_reject_layout_constraints: u64,
     pub prompt_cache_reject_block_boundary_floor: u64,
+    /// Structural snapshot-divergence declines (issue #1147): a same-session
+    /// snapshot candidate existed but was not a prefix of the request. A
+    /// non-zero value here alongside `snapshot_hits = 0` is the signature of
+    /// the multi-turn miss class epic #1148 covers, and separates it from a
+    /// genuinely cold store.
+    pub prompt_cache_reject_snapshot_diverged: u64,
     /// Most recent prompt-cache reject/decline event, if any has happened
     /// yet.
     pub prompt_cache_last_reject: Option<PromptCacheLastRejectSnapshot>,
@@ -812,6 +838,12 @@ pub struct PromptCacheLastRejectSnapshot {
     pub reason: &'static str,
     pub seq_id: Option<u64>,
     pub context_len: u64,
+    /// Token length of the stored entry the decline was about, when the
+    /// decline site had one specific entry in view. `None` for every reason
+    /// except `snapshot_diverged` today; there it is the stored snapshot's
+    /// length, so `context_len` / `entry_len` reads as "agreed on N of M
+    /// stored tokens".
+    pub entry_len: Option<u64>,
     pub at_unix_ms: u64,
 }
 
@@ -989,6 +1021,7 @@ mod tests {
         assert_eq!(snap.prompt_cache_reject_empty_set, 0);
         assert_eq!(snap.prompt_cache_reject_layout_constraints, 0);
         assert_eq!(snap.prompt_cache_reject_block_boundary_floor, 0);
+        assert_eq!(snap.prompt_cache_reject_snapshot_diverged, 0);
         assert!(snap.prompt_cache_last_reject.is_none());
     }
 
@@ -1008,6 +1041,42 @@ mod tests {
         assert_eq!(snap.prompt_cache_reject_prefix_too_short, 0);
         assert_eq!(snap.prompt_cache_reject_empty_set, 0);
         assert_eq!(snap.prompt_cache_reject_layout_constraints, 0);
+        assert_eq!(snap.prompt_cache_reject_snapshot_diverged, 0);
+    }
+
+    #[test]
+    fn snapshot_divergence_reject_carries_both_lengths() {
+        // Issue #1147: the divergence reject is only useful if it says how
+        // far the stored entry and the request agreed AND how long the stored
+        // entry was. A bare counter would leave an operator back where the
+        // epic started, detokenizing by hand.
+        let obs = BatchObservability::new();
+        obs.record_prompt_cache_reject_detailed(
+            PromptCacheRejectReason::SnapshotDiverged,
+            None,
+            90,
+            Some(139),
+        );
+
+        let snap = obs.snapshot();
+        assert_eq!(snap.prompt_cache_reject_snapshot_diverged, 1);
+        let last = snap
+            .prompt_cache_last_reject
+            .expect("a reject has been recorded");
+        assert_eq!(last.reason, "snapshot_diverged");
+        assert_eq!(last.context_len, 90, "common prefix length");
+        assert_eq!(last.entry_len, Some(139), "stored entry length");
+    }
+
+    #[test]
+    fn rejects_without_a_stored_entry_leave_entry_len_unset() {
+        let obs = BatchObservability::new();
+        obs.record_prompt_cache_reject(PromptCacheRejectReason::LayoutConstraints, Some(4), 64);
+        let last = obs
+            .snapshot()
+            .prompt_cache_last_reject
+            .expect("a reject has been recorded");
+        assert_eq!(last.entry_len, None);
     }
 
     #[test]
