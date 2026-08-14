@@ -32,6 +32,8 @@ use mlxcel::server::{
     env_fallback_lang_bias, env_fallback_lang_bias_include_byte_fragments,
     env_fallback_prompt_cache_capacity_bytes, env_fallback_prompt_cache_enabled,
     env_fallback_prompt_cache_max_entries, env_fallback_prompt_cache_min_prefix,
+    env_fallback_prompt_cache_snapshot_capacity_bytes,
+    env_fallback_prompt_cache_snapshot_max_entries, env_fallback_prompt_cache_snapshot_ttl,
     env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, long_cli_flag_was_set,
     start_server,
 };
@@ -1150,6 +1152,46 @@ struct ServerArgs {
     #[arg(long = "prompt-cache-min-prefix", value_name = "N")]
     prompt_cache_min_prefix: Option<usize>,
 
+    /// Byte budget for the exact-prefix snapshot store (default: 512 MiB).
+    ///
+    /// Snapshot-only families (SSM / linear-attention) park a whole recurrent
+    /// state per conversation. That state scales with model width, not with
+    /// prompt length: a few MiB on a small model, 300 MB or more on a 30B-class
+    /// one. The 512 MiB default suits small and medium models; for a large one,
+    /// size the store from measurement: read `snapshot_bytes` on
+    /// `/v1/cache/stats` after one turn, then multiply by the number of entries
+    /// you expect to hold at once. Count turns as well as concurrent sessions,
+    /// because a conversation keeps one entry per turn until its snapshots
+    /// start superseding each other (see `--prompt-cache-snapshot-max-entries`).
+    ///
+    /// Also reads `MLXCEL_PROMPT_CACHE_SNAPSHOT_CAPACITY_BYTES` when the CLI
+    /// flag is absent. CLI flag takes precedence.
+    #[arg(long = "prompt-cache-snapshot-capacity-bytes", value_name = "BYTES")]
+    prompt_cache_snapshot_capacity_bytes: Option<usize>,
+
+    /// Maximum number of live snapshot entries (default: 4096).
+    ///
+    /// Once the limit is reached, the least-recently-used snapshot is evicted.
+    /// A conversation's turns collapse to one entry once each turn's snapshot
+    /// extends the previous turn's token vector, which the current donate path
+    /// does not yet produce, so budget for turns as well as for concurrent
+    /// conversations until turn-boundary capture lands.
+    ///
+    /// Also reads `MLXCEL_PROMPT_CACHE_SNAPSHOT_MAX_ENTRIES` when the CLI flag
+    /// is absent. CLI flag takes precedence.
+    #[arg(long = "prompt-cache-snapshot-max-entries", value_name = "N")]
+    prompt_cache_snapshot_max_entries: Option<usize>,
+
+    /// Time-to-live for a snapshot entry in seconds (default: 7200).
+    ///
+    /// Snapshots outlive detached KV entries by default because multi-turn
+    /// chat has longer gaps between turns than a burst of similar prompts.
+    ///
+    /// Also reads `MLXCEL_PROMPT_CACHE_SNAPSHOT_TTL` when the CLI flag is
+    /// absent. CLI flag takes precedence.
+    #[arg(long = "prompt-cache-snapshot-ttl", value_name = "SECONDS")]
+    prompt_cache_snapshot_ttl: Option<u64>,
+
     // Automatic Prefix Caching (APC) knobs.
     /// Enable Automatic Prefix Caching (APC) with block-granularity hash chains
     /// (default: true). Disable with `--apc-enabled=false`.
@@ -1300,6 +1342,11 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     env_fallback_prompt_cache_max_entries(&mut args.prompt_cache_max_entries);
     env_fallback_prompt_cache_ttl(&mut args.prompt_cache_ttl);
     env_fallback_prompt_cache_min_prefix(&mut args.prompt_cache_min_prefix);
+    env_fallback_prompt_cache_snapshot_capacity_bytes(
+        &mut args.prompt_cache_snapshot_capacity_bytes,
+    );
+    env_fallback_prompt_cache_snapshot_max_entries(&mut args.prompt_cache_snapshot_max_entries);
+    env_fallback_prompt_cache_snapshot_ttl(&mut args.prompt_cache_snapshot_ttl);
 
     // env-var fallbacks for the APC knobs (parity with upstream
     // mlx-vlm `APC_*` env vars).
@@ -1474,6 +1521,9 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         prompt_cache_max_entries: args.prompt_cache_max_entries,
         prompt_cache_ttl_seconds: args.prompt_cache_ttl,
         prompt_cache_min_prefix: args.prompt_cache_min_prefix,
+        prompt_cache_snapshot_capacity_bytes: args.prompt_cache_snapshot_capacity_bytes,
+        prompt_cache_snapshot_max_entries: args.prompt_cache_snapshot_max_entries,
+        prompt_cache_snapshot_ttl_seconds: args.prompt_cache_snapshot_ttl,
         // APC knobs already resolved via env-var fallbacks above.
         apc_enabled: args.apc_enabled,
         apc_block_size: args.apc_block_size,

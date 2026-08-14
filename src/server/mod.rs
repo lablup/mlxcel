@@ -67,9 +67,10 @@ pub use cli_input::{
     env_fallback_kv_quant_scheme, env_fallback_kv_skip_last_layer, env_fallback_lang_bias,
     env_fallback_lang_bias_include_byte_fragments, env_fallback_prompt_cache_capacity_bytes,
     env_fallback_prompt_cache_enabled, env_fallback_prompt_cache_max_entries,
-    env_fallback_prompt_cache_min_prefix, env_fallback_prompt_cache_ttl,
-    env_fallback_reasoning_budget, long_cli_flag_was_set, resolve_batch_kv_quant_config,
-    resolve_kv_cache_mode,
+    env_fallback_prompt_cache_min_prefix, env_fallback_prompt_cache_snapshot_capacity_bytes,
+    env_fallback_prompt_cache_snapshot_max_entries, env_fallback_prompt_cache_snapshot_ttl,
+    env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, long_cli_flag_was_set,
+    resolve_batch_kv_quant_config, resolve_kv_cache_mode,
 };
 pub use config::{
     DecodeStorageBackend, PipelineParallelRuntimeConfig, PreemptionPolicy,

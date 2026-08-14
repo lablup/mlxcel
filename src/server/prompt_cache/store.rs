@@ -123,6 +123,12 @@ struct Inner {
     snapshot_hits: u64,
     snapshot_evictions_lru: u64,
     snapshot_evictions_ttl: u64,
+    /// Snapshots removed by the session-chain supersede rule in
+    /// [`PromptCacheStore::insert_snapshot`]. Deliberately separate from
+    /// `snapshot_evictions_lru`: a supersede is a deterministic, in-session
+    /// replacement, not capacity pressure, so folding the two together would
+    /// make eviction counters unreadable for capacity tuning (issue #1146).
+    snapshot_supersedes: u64,
     /// Paged detached sets that an eviction or rejection path removed from
     /// the store but could not release: returning a paged set's pool block
     /// pins requires a `CachePool` handle, which the store does not hold.
@@ -153,6 +159,7 @@ impl Inner {
             snapshot_hits: 0,
             snapshot_evictions_lru: 0,
             snapshot_evictions_ttl: 0,
+            snapshot_supersedes: 0,
             pending_paged_releases: Vec::new(),
         }
     }
@@ -191,6 +198,7 @@ impl Inner {
             snapshot_hits: self.snapshot_hits,
             snapshot_evictions_lru: self.snapshot_evictions_lru,
             snapshot_evictions_ttl: self.snapshot_evictions_ttl,
+            snapshot_supersedes: self.snapshot_supersedes,
         }
     }
 
@@ -677,6 +685,13 @@ impl PromptCacheStore {
     /// detached KV entries, but they live in a separate bucket with independent
     /// LRU / TTL limits. Lookups only restore whole stored prefixes; no radix
     /// truncation or APC block adoption is attempted for recurrent state.
+    ///
+    /// A successful insert also supersedes every shorter snapshot from the
+    /// same session whose token vector is a strict prefix of this one, so a
+    /// multi-turn conversation keeps exactly one resident snapshot instead of
+    /// one per turn. Superseded entries are counted in
+    /// [`PromptCacheStats::snapshot_supersedes`], not in the LRU eviction
+    /// counter.
     pub fn insert_snapshot(
         &self,
         key: &PromptCacheKey<'_>,
@@ -717,6 +732,53 @@ impl PromptCacheStore {
                     .map(|g| g.config.snapshot_capacity_bytes)
                     .unwrap_or(0),
             });
+        }
+
+        // Session-chain supersede. A conversation stores one snapshot per turn
+        // and each turn's token vector extends the previous turn's, so without
+        // this the store holds the whole chain and lets LRU pick a victim under
+        // byte pressure, which can just as easily drop the entry being inserted
+        // as the one it replaces. Remove the shorter same-session ancestors
+        // explicitly instead.
+        //
+        // This runs *before* the new entry's bytes are accounted for, so
+        // `enforce_snapshot_caps` below sees the freed bytes and can admit an
+        // extension that would not have fit on top of its own ancestor.
+        //
+        // The rule is deliberately narrow: same sessionless bucket, same
+        // non-`None` `session_key`, and the stored vector must be a strict
+        // prefix of the incoming one. A `None` session carries no conversation
+        // identity to chain on, and two different sessions never touch each
+        // other. "Session" here is the resolved key, not the caller: a request
+        // that sets neither `prompt_cache_key` nor `user` lands on
+        // `ANONYMOUS_SESSION_SENTINEL`, so all such callers share one bucket
+        // here exactly as they already do in `lookup_longest_prefix`. That
+        // sharing needs one caller's whole stored vector, prompt plus its
+        // generated tail, to be a strict prefix of another's, which in practice
+        // only holds for a genuine continuation of the same transcript.
+        // The one case this gives up is a mid-conversation fork (an
+        // edited or regenerated earlier turn), where the dropped ancestor would
+        // still have matched; that costs one re-prefill and is the price of
+        // keeping a conversation's steady-state footprint at one entry.
+        if let Some(session_key) = key.session_key {
+            let new_tokens = entry.tokens.as_slice();
+            let superseded: Vec<PromptCacheKeyDigest> = guard
+                .snapshots
+                .iter()
+                .filter(|(_, slot)| {
+                    slot.sessionless == sessionless
+                        && slot.bucket.session_key.as_deref() == Some(session_key)
+                        && slot.entry.tokens.len() < new_tokens.len()
+                        && new_tokens.starts_with(slot.entry.tokens.as_slice())
+                })
+                .map(|(digest, _)| *digest)
+                .collect();
+            for superseded_digest in &superseded {
+                guard.remove_snapshot(superseded_digest);
+            }
+            guard.snapshot_supersedes = guard
+                .snapshot_supersedes
+                .saturating_add(superseded.len() as u64);
         }
 
         if guard.remove_snapshot(&digest).is_some() {
