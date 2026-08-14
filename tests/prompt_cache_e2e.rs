@@ -49,6 +49,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use common::{repo_binary_path, repo_model_dir};
+use mlxcel::server::prompt_cache::DEFAULT_APC_BLOCK_SIZE;
 
 /// Smallest Qwen3 weight bundle we keep locally.
 const QWEN3_MODEL: &str = "qwen3-0.6b-4bit";
@@ -60,6 +61,22 @@ const NUM_TURNS: usize = 5;
 /// The spec calls for <= 1.3x. We keep the literal here so any
 /// future tightening happens in one place.
 const PREFILL_LATENCY_UPPER_RATIO: f64 = 1.3;
+
+/// Tokens per APC block, taken from the server's own default
+/// (`DEFAULT_APC_BLOCK_SIZE` in `src/server/prompt_cache/block_hash.rs`) so
+/// the under-allowance slack below follows the constant instead of a
+/// literal. `mlxcel-server` turns APC on by default
+/// (`--apc-enabled` defaults to `true`), this test passes no
+/// `--apc-block-size`, and `spawn_server` scrubs the `APC_BLOCK_SIZE` /
+/// `APC_ENABLED` env fallbacks, so this is the block size the server under
+/// test uses.
+///
+/// This is the right constant only because the test spawns the server with
+/// `--batch-size 1`, which resolves the decode backend to Dense. On the paged
+/// backend the adopt path applies a second, coarser floor at the pool block
+/// size (`DEFAULT_PAGED_BLOCK_SIZE` = 32 in `src/server/batch/scheduler.rs`),
+/// so raising `--batch-size` here would also mean widening the slack below.
+const APC_BLOCK_SIZE: u64 = DEFAULT_APC_BLOCK_SIZE as u64;
 
 fn reserve_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
@@ -88,6 +105,13 @@ async fn wait_for_health_soft(client: &reqwest::Client, base_url: &str, timeout:
 fn spawn_server(args: &[&str]) -> Child {
     Command::new(repo_binary_path("mlxcel-server"))
         .args(args)
+        // The server falls back to these env vars when the matching flags are
+        // absent. Scrub them so an exported APC_BLOCK_SIZE / APC_ENABLED in
+        // the invoking shell cannot silently change the block size (or
+        // disable APC) out from under the `APC_BLOCK_SIZE`-derived slack
+        // assertion below.
+        .env_remove("APC_BLOCK_SIZE")
+        .env_remove("APC_ENABLED")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -356,10 +380,28 @@ async fn multi_turn_chat_reports_cached_tokens_and_lowers_prefill_latency() {
         // prompt, up to the min_prefix_tokens cap. Allow a small slack
         // (min_prefix gate, template boundary) but flag regressions that
         // drop below the previous prompt length.
+        //
+        // The slack must cover one full APC block, not just a
+        // template-boundary fudge factor. APC lookup credits only whole
+        // verified blocks: `apc_consistent_prefix_len` returns
+        // `consistent_blocks * block_size`
+        // (`src/server/prompt_cache/apc_lookup.rs`), and the adopt path then
+        // truncates the detached KV set to exactly that length
+        // (`Scheduler::try_adopt_cached_prefix` in
+        // `src/server/batch/scheduler.rs`). So `cached_tokens` is floored to
+        // a multiple of `APC_BLOCK_SIZE`, and a re-render that diverges from
+        // the previous turn just past a block boundary can legitimately cost
+        // up to `APC_BLOCK_SIZE - 1` tokens against the raw previous prompt
+        // length. The qwen3 thinking model at `max_tokens=16` exercises
+        // exactly that: the whole turn is consumed by an unterminated
+        // `<think>` block, the assistant content re-renders as empty, and the
+        // history text diverges right at the previous prompt's boundary.
         assert!(
-            cached + 4 >= prev_prompt_len,
+            cached + (APC_BLOCK_SIZE - 1) >= prev_prompt_len,
             "turn {turn_number}: cached_tokens ({cached}) should cover at least the \
-             previous turn's prompt length ({prev_prompt_len}) minus the min-prefix slack",
+             previous turn's prompt length ({prev_prompt_len}) minus one block's worth \
+             ({}) of APC block-flooring slack",
+            APC_BLOCK_SIZE - 1,
         );
         prev_cached = cached;
     }
