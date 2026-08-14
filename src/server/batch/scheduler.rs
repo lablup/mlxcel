@@ -530,6 +530,15 @@ pub struct BatchScheduler {
     /// removed from the map on finish / error.
     prompt_cache_seq_ctx: std::collections::HashMap<SequenceId, PromptCacheRequestContext>,
 
+    /// Pending background prompt-cache warm-ups (issue #1144).
+    ///
+    /// Each entry is the next turn's expected history prefix for a conversation
+    /// whose reply just finished. Bounded and newest-wins: a warm-up is an
+    /// optimization for a turn that may never arrive, so under a backlog the
+    /// freshest conversation is the one worth warming and the stale ones are
+    /// dropped rather than queued behind it.
+    prompt_cache_warmups: std::collections::VecDeque<(Vec<i32>, PromptCacheRequestContext)>,
+
     /// resolved speculative-decoding dispatch shape.
     ///
     /// Defaults to [`crate::server::SpeculativeDispatch::Disabled`]
@@ -1341,6 +1350,7 @@ impl BatchScheduler {
             thinking_token_ids: None,
             prompt_cache: None,
             prompt_cache_seq_ctx: std::collections::HashMap::new(),
+            prompt_cache_warmups: std::collections::VecDeque::new(),
             kv_cache_mode: KVCacheMode::Fp16,
             batch_kv_quant: BatchKvQuantConfig::default(),
             max_kv_size: None,
@@ -2442,6 +2452,153 @@ impl BatchScheduler {
         }
     }
 
+    /// Maximum queued background warm-ups (issue #1144).
+    ///
+    /// Small on purpose. A warm-up is only useful until its conversation's next
+    /// turn arrives, so a deep queue would mostly hold jobs whose turn already
+    /// came and went, spending idle time on snapshots nobody will look up.
+    const MAX_PENDING_WARMUPS: usize = 8;
+
+    /// Queue a background warm-up for the next turn's history prefix.
+    ///
+    /// Newest-wins: when the queue is full the oldest pending job is dropped,
+    /// because it is the one most likely to have been overtaken by its own next
+    /// turn. Dropping is always safe; the affected conversation falls back to
+    /// the #1143 boundary snapshot, which is still a hit.
+    fn enqueue_prompt_cache_warmup(&mut self, tokens: Vec<i32>, ctx: PromptCacheRequestContext) {
+        if !self.prompt_cache_active()
+            || !self.model.supports_snapshot_reuse()
+            || crate::server::prompt_cache::cache_warmup_disabled()
+        {
+            return;
+        }
+        while self.prompt_cache_warmups.len() >= Self::MAX_PENDING_WARMUPS {
+            self.prompt_cache_warmups.pop_front();
+            self.batch_observability.record_prompt_cache_warmup_skip();
+        }
+        self.prompt_cache_warmups.push_back((tokens, ctx));
+    }
+
+    /// Whether a queued warm-up may run on this tick.
+    ///
+    /// The bar is "the scheduler has nothing else to do at all": no live decode
+    /// batch, no queued prefill, and no chunked prefill parked mid-prompt.
+    /// Acceptance for issue #1144 is that warm-ups never delay foreground work,
+    /// and the only way to guarantee that for an uninterruptible forward pass is
+    /// to not start one while foreground work exists.
+    fn can_run_prompt_cache_warmup(&self) -> bool {
+        !self.prompt_cache_warmups.is_empty()
+            && self.active_batch.is_empty()
+            && self.prefill_queue.is_empty()
+            && self.chunked_prefill_seq.is_none()
+            && self.prompt_cache_active()
+    }
+
+    /// Run one queued warm-up: restore the longest stored snapshot for the
+    /// conversation, prefill only the delta up to the next turn's history
+    /// prefix, and store the result (issue #1144).
+    ///
+    /// The delta is normally the assistant reply as the template re-renders it
+    /// in history form, which is tens of tokens. Everything before it is
+    /// restored, not recomputed, so the cost stays bounded no matter how long
+    /// the conversation has grown.
+    ///
+    /// Every failure path is a silent return: the conversation keeps whatever
+    /// snapshot it already had, and its next turn still hits the #1143 boundary
+    /// entry. A warm-up must never turn into a client-visible error.
+    fn run_next_prompt_cache_warmup(&mut self) {
+        let Some((tokens, ctx)) = self.prompt_cache_warmups.pop_front() else {
+            return;
+        };
+        let Some(store) = self.prompt_cache.clone() else {
+            return;
+        };
+        if tokens.len() < store.min_prefix_tokens() {
+            self.batch_observability.record_prompt_cache_warmup_skip();
+            return;
+        }
+
+        // Start from the longest snapshot this conversation already has. With
+        // no ancestor to restore there is nothing incremental to do: warming
+        // would mean prefilling the whole history from cold, which is exactly
+        // the foreground work this is supposed to avoid, spent speculatively.
+        let key = Self::compose_prompt_cache_key(&ctx, &tokens);
+        let Some((entry, matched_len)) = store.lookup_snapshot_prefix(&key, &tokens) else {
+            self.batch_observability.record_prompt_cache_warmup_skip();
+            return;
+        };
+        if matched_len >= tokens.len() {
+            // Already warm: the stored vector covers the whole target.
+            self.batch_observability.record_prompt_cache_warmup_skip();
+            return;
+        }
+
+        let seq_id = match self.allocate_sequence_state() {
+            Ok(id) => id,
+            Err(_) => {
+                self.batch_observability.record_prompt_cache_warmup_skip();
+                return;
+            }
+        };
+        if entry
+            .with_snapshot(|snapshot| self.model.restore_sequence_state(seq_id, snapshot))
+            .is_err()
+        {
+            self.release_sequence_caches(seq_id);
+            self.batch_observability.record_prompt_cache_warmup_skip();
+            return;
+        }
+
+        let delta: Vec<i32> = tokens[matched_len..].to_vec();
+        let delta_len = delta.len() as i32;
+        let input = mlxcel_core::from_slice_i32(&delta, &[1, delta_len]);
+        let eval = {
+            let Some(caches) = self.cache_pool.get_caches_mut(seq_id) else {
+                self.release_sequence_caches(seq_id);
+                self.batch_observability.record_prompt_cache_warmup_skip();
+                return;
+            };
+            let logits = self
+                .model
+                .forward_with_sequence_id(&input, Some(seq_id), caches, None);
+            // Last position only, for the same reason the #1143 boundary
+            // segment does it: the full block is a tensor nothing reads.
+            let shape = mlxcel_core::array_shape(&logits);
+            let last = mlxcel_core::slice(
+                &logits,
+                &[0, delta_len - 1, 0],
+                &[shape[0], delta_len, shape[2]],
+            );
+            mlxcel_core::try_eval(&last).map_err(|e| e.to_string())
+        };
+        // A throw here is recorded against the backend health counter exactly
+        // like a foreground eval, but it fails nothing: there is no client.
+        if self.record_eval_outcome(eval).is_err() {
+            self.release_sequence_caches(seq_id);
+            self.batch_observability.record_prompt_cache_warmup_skip();
+            return;
+        }
+        self.sync_sequence_storage(seq_id);
+
+        // Stored as a Boundary snapshot because that is exactly what it is: the
+        // next turn's history prefix. It therefore supersedes this turn's
+        // boundary entry through the same per-producer chain, keeping the
+        // conversation at one boundary snapshot while making that one cover the
+        // previous reply as well.
+        let warmed_len = tokens.len();
+        self.insert_model_state_snapshot(seq_id, &ctx, tokens, SnapshotOrigin::Boundary);
+        self.release_sequence_caches(seq_id);
+        mlxcel_core::clear_memory_cache();
+
+        self.batch_observability.record_prompt_cache_warmup_run();
+        tracing::debug!(
+            restored = matched_len,
+            delta = warmed_len - matched_len,
+            warmed = warmed_len,
+            "prompt-cache warm-up completed"
+        );
+    }
+
     /// Split this sequence's prefill at the history boundary and donate a
     /// snapshot of the state at that point (issue #1143).
     ///
@@ -3010,6 +3167,15 @@ impl BatchScheduler {
                     self.speculative_slice_yielded = true;
                     self.publish_metrics();
                 }
+                BatchSchedulerAction::Idle if self.can_run_prompt_cache_warmup() => {
+                    // Strictly idle-time work (issue #1144). Reaching the Idle
+                    // arm already means no decode batch and no queued prefill,
+                    // so a warm-up here cannot delay a foreground request that
+                    // exists; the guard below re-checks in case a request
+                    // arrived between the decision and now.
+                    self.run_next_prompt_cache_warmup();
+                    self.publish_metrics();
+                }
                 BatchSchedulerAction::Idle => match self.request_rx.recv() {
                     Ok(req) => {
                         if self.handle_incoming(req) {
@@ -3346,6 +3512,10 @@ impl BatchScheduler {
                     response_tx,
                     cancelled,
                 );
+                false
+            }
+            ModelRequest::PromptCacheWarmup { tokens, ctx } => {
+                self.enqueue_prompt_cache_warmup(tokens, ctx);
                 false
             }
             ModelRequest::Shutdown => {

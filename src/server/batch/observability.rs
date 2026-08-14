@@ -166,6 +166,10 @@ pub struct BatchObservability {
     pub total_decode_tokens: AtomicU64,
     /// Number of prefill chunks processed (chunked prefill only).
     pub prefill_chunks_processed: AtomicU64,
+    /// Background prompt-cache warm-ups that ran to completion (issue #1144).
+    pub prompt_cache_warmups_run: AtomicU64,
+    /// Queued warm-ups dropped or declined before storing anything (#1144).
+    pub prompt_cache_warmups_skipped: AtomicU64,
     /// Number of decode steps executed (one per tick per batch).
     pub decode_steps_processed: AtomicU64,
     /// Number of mixed prefill/decode ticks executed (issue #908 prototype).
@@ -308,6 +312,8 @@ impl BatchObservability {
             total_prefill_tokens: AtomicU64::new(0),
             total_decode_tokens: AtomicU64::new(0),
             prefill_chunks_processed: AtomicU64::new(0),
+            prompt_cache_warmups_run: AtomicU64::new(0),
+            prompt_cache_warmups_skipped: AtomicU64::new(0),
             decode_steps_processed: AtomicU64::new(0),
             mixed_steps_processed: AtomicU64::new(0),
             prefill_grants_processed: AtomicU64::new(0),
@@ -380,6 +386,32 @@ impl BatchObservability {
     pub fn record_prefill_tokens(&self, tokens: usize) {
         self.total_prefill_tokens
             .fetch_add(tokens as u64, Ordering::Relaxed);
+    }
+
+    /// Record that a background prompt-cache warm-up ran to completion
+    /// (issue #1144).
+    ///
+    /// Together with [`Self::record_prompt_cache_warmup_skip`] this is the
+    /// attribution counter for the warm-up arm: it can only move when a warm-up
+    /// actually restored an ancestor snapshot, prefilled the delta, and stored
+    /// the result, so a benchmark comparing warm-up on against warm-up off can
+    /// prove the two arms differ instead of reporting noise.
+    ///
+    /// Used by: `BatchScheduler::run_next_prompt_cache_warmup`
+    pub fn record_prompt_cache_warmup_run(&self) {
+        self.prompt_cache_warmups_run
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record that a queued warm-up was dropped or declined before storing
+    /// anything (issue #1144): queue overflow, no ancestor snapshot to extend,
+    /// already warm, or any failure along the way.
+    ///
+    /// Used by: `BatchScheduler::{enqueue_prompt_cache_warmup,
+    /// run_next_prompt_cache_warmup}`
+    pub fn record_prompt_cache_warmup_skip(&self) {
+        self.prompt_cache_warmups_skipped
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record that a chunked prefill chunk was processed.
@@ -643,6 +675,8 @@ impl BatchObservability {
             total_prefill_tokens: self.total_prefill_tokens.load(Ordering::Relaxed),
             total_decode_tokens: self.total_decode_tokens.load(Ordering::Relaxed),
             prefill_chunks_processed: self.prefill_chunks_processed.load(Ordering::Relaxed),
+            prompt_cache_warmups_run: self.prompt_cache_warmups_run.load(Ordering::Relaxed),
+            prompt_cache_warmups_skipped: self.prompt_cache_warmups_skipped.load(Ordering::Relaxed),
             decode_steps_processed: self.decode_steps_processed.load(Ordering::Relaxed),
             mixed_steps_processed: self.mixed_steps_processed.load(Ordering::Relaxed),
             prefill_grants_processed: self.prefill_grants_processed.load(Ordering::Relaxed),
@@ -756,6 +790,10 @@ pub struct ObservabilitySnapshot {
     pub total_prefill_tokens: u64,
     pub total_decode_tokens: u64,
     pub prefill_chunks_processed: u64,
+    /// Background prompt-cache warm-ups that ran to completion (issue #1144).
+    pub prompt_cache_warmups_run: u64,
+    /// Queued warm-ups dropped or declined before storing anything (#1144).
+    pub prompt_cache_warmups_skipped: u64,
     pub decode_steps_processed: u64,
     /// Mixed prefill/decode ticks (issue #908 prototype); zero unless
     /// `MLXCEL_MIXED_STEP` is set.

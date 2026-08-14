@@ -171,6 +171,15 @@ pub struct CacheStatsResponse {
     pub snapshot_hit_rate: f64,
     /// Lifetime successful snapshot inserts.
     pub snapshot_inserts: u64,
+    /// Background prompt-cache warm-ups that ran to completion (issue #1144).
+    ///
+    /// The attribution counter for the warm-up arm: it can only move when a
+    /// warm-up actually restored an ancestor snapshot, prefilled the re-rendered
+    /// reply, and stored the extended snapshot.
+    pub snapshot_warmups_run: u64,
+    /// Queued warm-ups dropped or declined before storing anything (#1144):
+    /// queue overflow, no ancestor to extend, already warm, or any failure.
+    pub snapshot_warmups_skipped: u64,
     /// Lifetime snapshot LRU evictions.
     pub snapshot_evictions_lru: u64,
     /// Lifetime snapshot TTL evictions.
@@ -274,11 +283,13 @@ pub async fn cache_stats(State(state): State<AppState>) -> Json<CacheStatsRespon
     let obs_snapshot = state.batch_observability.snapshot();
     let paged = PagedBlockStats::from_observability(&obs_snapshot);
     let reject = RejectReasonStats::from_observability(&obs_snapshot);
+    let warmups = WarmupStats::from_observability(&obs_snapshot);
     Json(build_stats_response(
         state.prompt_cache.as_deref(),
         &state.config.prompt_cache,
         paged,
         reject,
+        warmups,
     ))
 }
 
@@ -294,11 +305,31 @@ pub async fn cache_reset(State(state): State<AppState>) -> Json<CacheResetRespon
 /// its configuration. Extracted so route-level integration tests can drive
 /// the handler logic without constructing a full [`AppState`] (which would
 /// require loading a real model).
+/// Warm-up counters lifted out of the batch observability snapshot
+/// (issue #1144), mirroring [`PagedBlockStats`] and [`RejectReasonStats`] so
+/// `build_stats_response` keeps taking plain values rather than the whole
+/// observability handle.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct WarmupStats {
+    pub(crate) run: u64,
+    pub(crate) skipped: u64,
+}
+
+impl WarmupStats {
+    pub(crate) fn from_observability(snap: &ObservabilitySnapshot) -> Self {
+        Self {
+            run: snap.prompt_cache_warmups_run,
+            skipped: snap.prompt_cache_warmups_skipped,
+        }
+    }
+}
+
 pub(crate) fn build_stats_response(
     store: Option<&crate::server::prompt_cache::PromptCacheStore>,
     cfg: &crate::server::prompt_cache::PromptCacheConfig,
     paged: PagedBlockStats,
     reject: RejectReasonStats,
+    warmups: WarmupStats,
 ) -> CacheStatsResponse {
     let apc = &cfg.apc;
     match store {
@@ -342,6 +373,8 @@ pub(crate) fn build_stats_response(
                 snapshot_lookups: stats.snapshot_lookups,
                 snapshot_hit_rate,
                 snapshot_inserts: stats.snapshot_inserts,
+                snapshot_warmups_run: warmups.run,
+                snapshot_warmups_skipped: warmups.skipped,
                 snapshot_evictions_lru: stats.snapshot_evictions_lru,
                 snapshot_evictions_ttl: stats.snapshot_evictions_ttl,
                 snapshot_supersedes: stats.snapshot_supersedes,
@@ -394,6 +427,8 @@ pub(crate) fn build_stats_response(
             snapshot_capacity_bytes: cfg.snapshot_capacity_bytes,
             snapshot_max_entries: cfg.snapshot_max_entries,
             snapshot_hits: 0,
+            snapshot_warmups_run: warmups.run,
+            snapshot_warmups_skipped: warmups.skipped,
             snapshot_lookups: 0,
             snapshot_hit_rate: 0.0,
             snapshot_inserts: 0,

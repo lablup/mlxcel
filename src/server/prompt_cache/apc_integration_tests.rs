@@ -357,6 +357,7 @@ fn apc_stats_reflect_block_chain_after_inserts() {
         &cfg,
         crate::server::routes::cache::PagedBlockStats::default(),
         crate::server::routes::cache::RejectReasonStats::default(),
+        crate::server::routes::cache::WarmupStats::default(),
     );
     assert!(resp.enabled);
     assert!(resp.apc_enabled);
@@ -409,6 +410,7 @@ fn apc_disabled_flow_still_works_but_apc_active_entries_is_zero() {
         &cfg,
         crate::server::routes::cache::PagedBlockStats::default(),
         crate::server::routes::cache::RejectReasonStats::default(),
+        crate::server::routes::cache::WarmupStats::default(),
     );
     assert!(resp.enabled);
     assert!(!resp.apc_enabled);

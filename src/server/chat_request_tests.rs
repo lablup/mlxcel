@@ -2462,3 +2462,118 @@ async fn history_render_is_absent_for_multimodal_requests() {
         .unwrap();
     assert!(prepared.history_prompt.is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Next-turn history render for the warm-up (issue #1144)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn next_turn_history_extends_this_turns_history_with_the_reply() {
+    use super::render_next_turn_history;
+
+    let processor = ChatTemplateProcessor::with_template(generation_scaffold_template());
+    let request = cached_request(vec![
+        text_message(Role::User, "q1"),
+        text_message(Role::Assistant, "<think>think1</think>a1"),
+        text_message(Role::User, "q2"),
+    ]);
+
+    let rendered = render_next_turn_history(&processor, &request, None, "a2 is the answer")
+        .expect("a plain text turn with a reply must produce a next-turn history");
+
+    // The two probes differ only in their trailing placeholder user text, so
+    // the head they agree on must still contain the reply: that is the whole
+    // point of probing twice instead of rendering the conversation with
+    // `add_generation_prompt = false`, which renders the final assistant
+    // message differently from an earlier one.
+    let common: String = rendered
+        .probe_a
+        .chars()
+        .zip(rendered.probe_b.chars())
+        .take_while(|(a, b)| a == b)
+        .map(|(a, _)| a)
+        .collect();
+    let next = common;
+
+    // It contains the reply as history, and it is strictly longer than this
+    // turn's own history render, which is the prefix the #1143 boundary
+    // snapshot already covers.
+    assert!(next.contains("a2 is the answer"));
+    assert!(next.contains("q2"));
+
+    // The load-bearing property: the real next turn's prompt starts with it.
+    let mut next_turn_messages = request.messages.clone();
+    next_turn_messages.push(text_message(Role::Assistant, "a2 is the answer"));
+    next_turn_messages.push(text_message(Role::User, "q3"));
+    let next_turn_prompt = processor
+        .apply_with_kwargs(
+            &super::build_chat_messages(&cached_request(next_turn_messages)),
+            None,
+            &crate::server::chat_template_kwargs::ChatTemplateKwargs::new(),
+        )
+        .unwrap();
+    assert!(
+        next_turn_prompt.starts_with(&next),
+        "the warm-up target must prefix a real next turn's prompt;\ntarget: {next:?}\nnext: {next_turn_prompt:?}"
+    );
+}
+
+#[test]
+fn next_turn_history_declines_without_a_usable_reply() {
+    use super::render_next_turn_history;
+
+    let processor = ChatTemplateProcessor::with_template(generation_scaffold_template());
+    let request = cached_request(vec![text_message(Role::User, "q1")]);
+
+    // An empty or whitespace-only reply adds nothing to warm.
+    assert!(render_next_turn_history(&processor, &request, None, "").is_none());
+    assert!(render_next_turn_history(&processor, &request, None, "   \n ").is_none());
+}
+
+#[test]
+fn next_turn_history_declines_for_multimodal_requests() {
+    use super::render_next_turn_history;
+
+    let processor = ChatTemplateProcessor::with_template(generation_scaffold_template());
+    let request = request_with_messages(vec![Message {
+        role: Role::User,
+        content: MessageContent::Parts(vec![
+            ContentPart::Text {
+                text: "describe".to_string(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrl::new("data:image/png;base64,aGVsbG8=".to_string()),
+            },
+        ]),
+        name: None,
+        tool_call_id: None,
+        reasoning: None,
+        tool_calls: None,
+    }]);
+
+    assert!(render_next_turn_history(&processor, &request, None, "a picture").is_none());
+}
+
+#[test]
+fn clip_warmup_target_keeps_only_what_any_next_turn_reproduces() {
+    use super::clip_warmup_target;
+
+    // Ordinary shape: the probe is the target plus whatever the next turn adds.
+    let target: Vec<i32> = (0..30).collect();
+    let mut probe = target.clone();
+    probe.extend([900, 901, 902]);
+    assert_eq!(clip_warmup_target(&target, &probe), Some(30));
+
+    // The template renders the reply differently once a turn follows it, so the
+    // renders diverge partway. Only the agreeing head may be stored: keeping
+    // more would supersede the boundary snapshot with a vector no turn matches.
+    let mut diverging = target.clone();
+    diverging[18] = 7777;
+    assert_eq!(clip_warmup_target(&target, &diverging), Some(18));
+
+    // Total divergence: this conversation cannot be warmed at all, and the
+    // caller must not store anything rather than store a stub.
+    assert_eq!(clip_warmup_target(&[1, 2, 3], &[9, 9, 9]), None);
+    assert_eq!(clip_warmup_target(&[], &probe), None);
+    assert_eq!(clip_warmup_target(&target, &[]), None);
+}

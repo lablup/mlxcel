@@ -72,10 +72,10 @@ use super::media::{
     try_extract_chat_image_data,
 };
 use super::prompt_cache::key::resolve_session_key;
-use super::types::ChatCompletionRequest;
 use super::types::request::{
     ContentPart, Message, MessageContent, Tool, ordered_audio_sentinel, ordered_image_sentinel,
 };
+use super::types::{ChatCompletionRequest, Role};
 
 pub(crate) struct PreparedChatRequest {
     pub(crate) prompt: String,
@@ -362,6 +362,184 @@ pub(crate) async fn prepare_chat_request_with_cache(
         videos,
     })
 }
+
+/// Render the history prefix the NEXT turn of this conversation will start
+/// with: the request's messages plus the assistant reply that just finished,
+/// rendered with `add_generation_prompt = false` (issue #1144).
+///
+/// This is what the background warm-up prefills toward. It must be produced by
+/// re-rendering rather than by appending the generated token ids, because the
+/// history form of a reply differs from the generated form in all three ways
+/// epic #1148 documented: the generation prompt's scaffold is absent, a
+/// `<think>` block may be dropped, and the same text re-tokenizes differently
+/// from the sampled sequence.
+///
+/// `reply` is the assistant `content` as the response carried it. That is what
+/// an OpenAI-shaped client echoes back on the following turn, so it is the
+/// right guess at the next prompt. A client that sends something else simply
+/// misses the warm-up entry and falls back to the #1143 boundary snapshot, so a
+/// wrong guess costs one background prefill and never correctness.
+///
+/// Returns `None` whenever the render is not usable: no reply text, a template
+/// that failed, or a result that is not an extension of this turn's own history
+/// prefix. That last check is what keeps a warm-up from storing a snapshot
+/// under a vector the next turn cannot match.
+///
+/// Used by: `server::routes::chat` (streaming and non-streaming)
+/// Two probe renders of the next turn, differing only in the placeholder user
+/// text they append (issue #1144).
+///
+/// Both are real generation prompts for a hypothetical next turn, so both
+/// render the just-finished reply in the position it will actually occupy: an
+/// earlier assistant message, not the last one. That distinction is the whole
+/// reason two probes exist rather than one render of
+/// `messages + reply` with `add_generation_prompt = false`.
+///
+/// Measured on qwen3.5-0.8b-4bit: the `add_generation_prompt = false` form
+/// renders the final assistant message differently from an earlier one, so
+/// clipping it against a probe kept only three tokens past the history
+/// boundary, making the warm-up worth +3 cached tokens. Taking the common
+/// prefix of two probes instead keeps the reply itself, because the only thing
+/// that differs between them is the placeholder text at the very end.
+pub(crate) struct NextTurnHistory {
+    pub(crate) probe_a: String,
+    pub(crate) probe_b: String,
+}
+
+pub(crate) fn render_next_turn_history(
+    processor: &ChatTemplateProcessor,
+    request: &ChatCompletionRequest,
+    server_default_kwargs: Option<&ChatTemplateKwargs>,
+    reply: &str,
+) -> Option<NextTurnHistory> {
+    if reply.trim().is_empty() {
+        tracing::debug!("warmup: empty reply");
+        return None;
+    }
+    // Multimodal turns are excluded for the same reason the boundary render is:
+    // placeholder expansion rewrites the token stream after rendering.
+    if !request.image_urls().is_empty()
+        || !request.audio_inputs().is_empty()
+        || !request.video_urls().is_empty()
+    {
+        tracing::debug!("warmup: multimodal");
+        return None;
+    }
+
+    let merged_extra_body = request.merged_extra_body();
+    let per_request_kwargs = extract_request_kwargs(
+        request.chat_template_kwargs.as_ref(),
+        merged_extra_body.as_ref(),
+    );
+    let mut merged_kwargs = merge_server_and_request(server_default_kwargs, &per_request_kwargs);
+    // Mirror the prompt-cache defaulting that `prepare_chat_request_with_cache`
+    // applied to the request this reply answered, or the two renders would
+    // disagree about thinking retention and the warm-up would key a vector the
+    // next turn never produces.
+    if !merged_kwargs.as_map().contains_key("preserve_thinking") {
+        merged_kwargs.set_preserve_thinking(true);
+    }
+    let preserve_thinking = merged_kwargs.preserve_thinking();
+    let effective_tools = effective_tools(request);
+
+    // This turn's own history prefix, for the extension check below.
+    let this_turn = {
+        let messages = build_chat_messages_with_thinking(request, preserve_thinking);
+        match processor.apply_history_with_kwargs(&messages, effective_tools, &merged_kwargs) {
+            Ok(v) => v,
+            Err(err) => {
+                tracing::debug!("warmup: this-turn history render failed: {err:#}");
+                return None;
+            }
+        }
+    };
+
+    let mut with_reply = request.clone();
+    with_reply.messages.push(Message {
+        role: Role::Assistant,
+        content: MessageContent::Text(reply.to_string()),
+        name: None,
+        tool_call_id: None,
+        reasoning: None,
+        tool_calls: None,
+    });
+    // Render two probe turns. Both put the reply where the next turn will put
+    // it (an earlier assistant message), and they differ only in the trailing
+    // placeholder user text, so their common prefix is exactly the part of the
+    // next turn's prompt that does not depend on what the user says next.
+    //
+    // Rendering `messages + reply` with `add_generation_prompt = false` and
+    // clipping that against a single probe does NOT work: templates routinely
+    // render the final assistant message differently from an earlier one, so
+    // the two disagree immediately after the assistant header and the reply
+    // itself is clipped away. Measured on qwen3.5-0.8b-4bit, that construction
+    // was worth +3 cached tokens over the #1143 boundary alone.
+    let render_probe = |text: &str| {
+        let mut probed = with_reply.clone();
+        probed.messages.push(Message {
+            role: Role::User,
+            content: MessageContent::Text(text.to_string()),
+            name: None,
+            tool_call_id: None,
+            reasoning: None,
+            tool_calls: None,
+        });
+        let msgs = build_chat_messages_with_thinking(&probed, preserve_thinking);
+        processor.apply_with_kwargs(&msgs, effective_tools, &merged_kwargs)
+    };
+    let (Ok(probe_a), Ok(probe_b)) = (
+        render_probe(NEXT_TURN_PROBE_A),
+        render_probe(NEXT_TURN_PROBE_B),
+    ) else {
+        tracing::debug!("warmup: probe render failed");
+        return None;
+    };
+    // Both probes must still start with this turn's history, or the template is
+    // rewriting rather than appending and nothing can be warmed safely.
+    if !probe_a.starts_with(&this_turn) {
+        tracing::debug!("warmup: probe does not extend this turn's history");
+        return None;
+    }
+
+    Some(NextTurnHistory { probe_a, probe_b })
+}
+
+/// Placeholder user texts for the two next-turn probe renders.
+///
+/// Their content is irrelevant and only their *difference* is load-bearing:
+/// the clip keeps the head the two agree on, which ends where the placeholder
+/// text begins. They are deliberately ordinary and unequal in both wording and
+/// length so no template branch keyed on content or size can make them agree
+/// further than they should.
+/// Length of the head two next-turn probe renders agree on (issue #1144).
+///
+/// The probes differ only in the placeholder user text they append, so their
+/// common prefix ends exactly where the next turn's own words begin. Everything
+/// up to that point is what any next turn reproduces: the whole conversation
+/// including the just-finished reply, rendered in the position it will occupy.
+///
+/// This clip is load-bearing, not defensive. A warm-up snapshot supersedes the
+/// history-boundary snapshot it chains from, so storing a vector the next turn
+/// cannot match does not merely waste a background prefill, it destroys a
+/// working hit. Measured on qwen3.5-0.8b-4bit with an unclipped target,
+/// `cached_tokens` went from 150 to 0.
+///
+/// Returns `None` when nothing survives, which means the template's rendering
+/// depends on the next turn's content from the very start and this conversation
+/// cannot be warmed.
+///
+/// Used by: `server::routes::chat::submit_next_turn_warmup`
+pub(crate) fn clip_warmup_target(probe_a: &[i32], probe_b: &[i32]) -> Option<usize> {
+    let keep = probe_a
+        .iter()
+        .zip(probe_b)
+        .take_while(|(a, b)| a == b)
+        .count();
+    (keep > 0).then_some(keep)
+}
+
+const NEXT_TURN_PROBE_A: &str = "ok";
+const NEXT_TURN_PROBE_B: &str = "could you expand on that a little further please";
 
 fn validate_no_reserved_media_sentinels(request: &ChatCompletionRequest) -> Result<()> {
     for message in &request.messages {
