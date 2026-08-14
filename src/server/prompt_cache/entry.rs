@@ -390,6 +390,24 @@ impl ModelSnapshotEntry {
     }
 }
 
+#[cfg(test)]
+impl ModelSnapshotEntry {
+    /// Test-only constructor that fabricates a tensor-free snapshot and
+    /// overrides the reported `size_bytes`. [`ModelSnapshotEntry::new`] derives
+    /// the size from the captured MLX tensors, which a unit test cannot
+    /// allocate, so budget and supersede tests need this to control the number
+    /// the store accounts against `snapshot_capacity_bytes`.
+    pub(crate) fn new_for_test(tokens: Vec<i32>, family: &str, size_bytes: usize) -> Self {
+        let snapshot = ModelStateSnapshot::new(family, tokens.len());
+        Self {
+            tokens,
+            snapshot: Mutex::new(ModelSnapshotHolder::new(snapshot)),
+            last_used: Mutex::new(Instant::now()),
+            size_bytes,
+        }
+    }
+}
+
 impl std::fmt::Debug for ModelSnapshotEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ModelSnapshotEntry")

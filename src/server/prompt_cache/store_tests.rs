@@ -721,6 +721,216 @@ fn snapshot_lru_cap_is_independent_from_kv_entries() {
     );
 }
 
+// ── session-chain supersede (issue #1146) ───────────────────────────────────
+//
+// A conversation stores one snapshot per turn and every turn's token vector
+// extends the previous turn's, so the store would otherwise accumulate the
+// whole chain and let LRU pick a victim under byte pressure. These tests pin
+// the four boundaries of the supersede rule (fires on a same-session strict
+// extension, and only there) plus the byte accounting that lets a freed
+// ancestor admit its successor.
+
+/// Snapshot config with a caller-chosen byte budget, entry cap fixed high
+/// enough to stay out of the way.
+fn snapshot_cfg(snapshot_capacity_bytes: usize) -> PromptCacheConfig {
+    cfg(1 << 20, 64, 4).with_snapshot_limits(snapshot_capacity_bytes, 64, Duration::from_secs(3600))
+}
+
+#[test]
+fn session_chain_supersede_keeps_only_the_longest_snapshot() {
+    let store = PromptCacheStore::with_config(snapshot_cfg(1 << 20));
+    let turn1 = tokens(0, 16);
+    let turn2 = tokens(0, 24);
+    let turn3 = tokens(0, 32);
+
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("chat-a"), &turn1),
+            ModelSnapshotEntry::new_for_test(turn1.clone(), "mamba", 4096),
+        )
+        .unwrap();
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("chat-a"), &turn2),
+            ModelSnapshotEntry::new_for_test(turn2.clone(), "mamba", 6144),
+        )
+        .unwrap();
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("chat-a"), &turn3),
+            ModelSnapshotEntry::new_for_test(turn3.clone(), "mamba", 8192),
+        )
+        .unwrap();
+
+    let stats = store.stats();
+    assert_eq!(stats.snapshot_inserts, 3);
+    assert_eq!(
+        stats.snapshot_entries, 1,
+        "three turns of one conversation must collapse to one resident snapshot"
+    );
+    assert_eq!(
+        stats.snapshot_bytes, 8192,
+        "only the longest turn's bytes stay accounted"
+    );
+    assert_eq!(stats.snapshot_supersedes, 2);
+    assert_eq!(
+        stats.snapshot_evictions_lru, 0,
+        "collapsing a chain is a supersede, not capacity pressure"
+    );
+
+    let (entry, matched) = store
+        .lookup_snapshot_prefix(&key_for_session("m", Some("chat-a"), &turn3), &turn3)
+        .expect("the surviving snapshot is the longest one");
+    assert_eq!(matched, turn3.len());
+    assert_eq!(entry.tokens, turn3);
+}
+
+#[test]
+fn supersede_does_not_reach_across_sessions() {
+    let store = PromptCacheStore::with_config(snapshot_cfg(1 << 20));
+    let short = tokens(0, 16);
+    let long = tokens(0, 24);
+
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("chat-a"), &short),
+            ModelSnapshotEntry::new_for_test(short.clone(), "mamba", 4096),
+        )
+        .unwrap();
+    // Same model/lora/template bucket and a strict token extension, but a
+    // different conversation. Session "chat-a" must be left alone.
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("chat-b"), &long),
+            ModelSnapshotEntry::new_for_test(long.clone(), "mamba", 6144),
+        )
+        .unwrap();
+
+    let stats = store.stats();
+    assert_eq!(
+        stats.snapshot_entries, 2,
+        "two concurrent conversations hold snapshots simultaneously"
+    );
+    assert_eq!(stats.snapshot_bytes, 4096 + 6144);
+    assert_eq!(stats.snapshot_supersedes, 0);
+    assert_eq!(stats.snapshot_evictions_lru, 0);
+    assert!(
+        store
+            .lookup_snapshot_prefix(&key_for_session("m", Some("chat-a"), &short), &short)
+            .is_some(),
+        "the other session's snapshot must survive untouched"
+    );
+    assert!(
+        store
+            .lookup_snapshot_prefix(&key_for_session("m", Some("chat-b"), &long), &long)
+            .is_some()
+    );
+}
+
+#[test]
+fn supersede_does_not_fire_without_a_session_key() {
+    let store = PromptCacheStore::with_config(snapshot_cfg(1 << 20));
+    let short = tokens(0, 16);
+    let long = tokens(0, 24);
+
+    // A `None` session carries no conversation identity, so a longer prefix is
+    // not evidence that it came from the same chat and may not evict the
+    // shorter one.
+    store
+        .insert_snapshot(
+            &key_for("m", &short),
+            ModelSnapshotEntry::new_for_test(short.clone(), "mamba", 4096),
+        )
+        .unwrap();
+    store
+        .insert_snapshot(
+            &key_for("m", &long),
+            ModelSnapshotEntry::new_for_test(long.clone(), "mamba", 6144),
+        )
+        .unwrap();
+
+    let stats = store.stats();
+    assert_eq!(stats.snapshot_entries, 2);
+    assert_eq!(stats.snapshot_supersedes, 0);
+    assert!(
+        store
+            .lookup_snapshot_prefix(&key_for("m", &short), &short)
+            .is_some()
+    );
+}
+
+#[test]
+fn supersede_requires_a_strict_token_extension() {
+    let store = PromptCacheStore::with_config(snapshot_cfg(1 << 20));
+    let original = tokens(0, 16);
+    // Same session, longer, sharing the first 8 tokens but diverging after
+    // that. The stored vector is not a prefix of the new one, so the stored
+    // snapshot is still the right match for its own branch and must survive.
+    let mut forked = tokens(0, 8);
+    forked.extend(tokens(500, 16));
+
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("chat-a"), &original),
+            ModelSnapshotEntry::new_for_test(original.clone(), "mamba", 4096),
+        )
+        .unwrap();
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("chat-a"), &forked),
+            ModelSnapshotEntry::new_for_test(forked.clone(), "mamba", 6144),
+        )
+        .unwrap();
+
+    let stats = store.stats();
+    assert_eq!(
+        stats.snapshot_entries, 2,
+        "same session is not enough; the new vector must extend the stored one"
+    );
+    assert_eq!(stats.snapshot_supersedes, 0);
+    assert!(
+        store
+            .lookup_snapshot_prefix(&key_for_session("m", Some("chat-a"), &original), &original)
+            .is_some()
+    );
+}
+
+#[test]
+fn supersede_frees_bytes_before_the_capacity_check() {
+    // Budget fits either turn alone but not both at once. Supersede runs
+    // before the new entry's bytes are accounted, so the extension is admitted
+    // outright rather than being admitted and then fought over by LRU.
+    let store = PromptCacheStore::with_config(snapshot_cfg(10_000));
+    let turn1 = tokens(0, 16);
+    let turn2 = tokens(0, 24);
+
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("chat-a"), &turn1),
+            ModelSnapshotEntry::new_for_test(turn1.clone(), "mamba", 8_000),
+        )
+        .unwrap();
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("chat-a"), &turn2),
+            ModelSnapshotEntry::new_for_test(turn2.clone(), "mamba", 9_000),
+        )
+        .expect("the extension fits once its own ancestor's bytes are freed");
+
+    let stats = store.stats();
+    assert_eq!(stats.snapshot_entries, 1);
+    assert_eq!(stats.snapshot_bytes, 9_000);
+    assert_eq!(stats.snapshot_supersedes, 1);
+    assert_eq!(
+        stats.snapshot_evictions_lru, 0,
+        "no LRU eviction should have been needed to make room"
+    );
+    let (_, matched) = store
+        .lookup_snapshot_prefix(&key_for_session("m", Some("chat-a"), &turn2), &turn2)
+        .expect("the newest turn is the resident snapshot");
+    assert_eq!(matched, turn2.len());
+}
+
 #[test]
 fn idempotent_insert_replaces_existing_entry() {
     let store = PromptCacheStore::with_config(cfg(1 << 20, 64, 4));

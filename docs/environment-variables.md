@@ -128,6 +128,9 @@ These variables are applied when the corresponding CLI flag is absent.
 | `MLXCEL_PROMPT_CACHE_MAX_ENTRIES` | unsigned integer | `1024` | `--prompt-cache-max-entries` |
 | `MLXCEL_PROMPT_CACHE_TTL` | unsigned integer seconds | `3600` | `--prompt-cache-ttl` |
 | `MLXCEL_PROMPT_CACHE_MIN_PREFIX` | unsigned integer tokens | `32` | `--prompt-cache-min-prefix` |
+| `MLXCEL_PROMPT_CACHE_SNAPSHOT_CAPACITY_BYTES` | unsigned integer bytes | `536870912` | `--prompt-cache-snapshot-capacity-bytes` |
+| `MLXCEL_PROMPT_CACHE_SNAPSHOT_MAX_ENTRIES` | unsigned integer | `4096` | `--prompt-cache-snapshot-max-entries` |
+| `MLXCEL_PROMPT_CACHE_SNAPSHOT_TTL` | unsigned integer seconds | `7200` | `--prompt-cache-snapshot-ttl` |
 | `MLXCEL_ENABLE_VLM_PREFIX_CACHE` | boolean | `false` | `--enable-vlm-prefix-cache` |
 | `APC_ENABLED` | boolean | `true` | `--apc-enabled` |
 | `APC_BLOCK_SIZE` | unsigned integer tokens | `16` | `--apc-block-size` |
@@ -145,6 +148,18 @@ is then reusable only when it is fully contained in the new request). The
 
 `MLXCEL_ENABLE_VLM_PREFIX_CACHE` opts same-image multimodal follow-up turns into
 prompt-prefix sharing while leaving text-only prompt-cache behavior unchanged.
+
+The three `SNAPSHOT` variables budget a separate store: whole recurrent-state
+snapshots for SSM and linear-attention families, which cannot share KV blocks
+and are therefore kept as exact-prefix entries. A snapshot's size tracks model
+width rather than prompt length, from a few MiB on a small model to 300 MB or
+more on a 30B-class one, so the 512 MiB default holds many conversations for a
+small model and barely one for a large one. Size it from measurement: serve one
+conversation, read `snapshot_bytes` from `/v1/cache/stats`, and give the store
+two to three times that so concurrent conversations do not evict each other.
+Turns within one conversation cost nothing extra, since each turn's snapshot
+supersedes the previous one and `snapshot_entries` stays at one per
+conversation.
 
 ## Server audio admission variables
 

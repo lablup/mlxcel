@@ -248,6 +248,11 @@ pub struct PromptCacheStats {
     pub snapshot_evictions_lru: u64,
     /// Lifetime count of snapshot TTL evictions.
     pub snapshot_evictions_ttl: u64,
+    /// Lifetime count of snapshots removed because a longer snapshot from the
+    /// same session superseded them. Held apart from `snapshot_evictions_lru`
+    /// so capacity tuning can tell deterministic in-session replacement from
+    /// genuine budget pressure.
+    pub snapshot_supersedes: u64,
 }
 
 impl fmt::Display for PromptCacheStats {

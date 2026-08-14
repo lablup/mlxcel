@@ -132,6 +132,9 @@ fn sample_input() -> ServerStartupInput {
         prompt_cache_max_entries: None,
         prompt_cache_ttl_seconds: None,
         prompt_cache_min_prefix: None,
+        prompt_cache_snapshot_capacity_bytes: None,
+        prompt_cache_snapshot_max_entries: None,
+        prompt_cache_snapshot_ttl_seconds: None,
         // APC knobs — the fixture keeps APC off so existing whole-prefix
         // expectations stay exact (the serve binaries default it ON).
         apc_enabled: false,
@@ -681,6 +684,50 @@ fn prompt_cache_min_prefix_cli_overrides_default() {
     assert_eq!(startup.prompt_cache.min_prefix_tokens, 64);
 }
 
+/// The three snapshot-store knobs reach `PromptCacheConfig` from the CLI
+/// fields, and each one is independent of the others (issue #1146).
+#[test]
+fn prompt_cache_snapshot_limits_cli_override_defaults() {
+    let mut input = sample_input();
+    input.prompt_cache_snapshot_capacity_bytes = Some(3 * 1024 * 1024 * 1024);
+    input.prompt_cache_snapshot_max_entries = Some(64);
+    input.prompt_cache_snapshot_ttl_seconds = Some(900);
+
+    let startup = input.into_startup_config().expect("valid input");
+    assert_eq!(
+        startup.prompt_cache.snapshot_capacity_bytes,
+        3 * 1024 * 1024 * 1024
+    );
+    assert_eq!(startup.prompt_cache.snapshot_max_entries, 64);
+    assert_eq!(startup.prompt_cache.snapshot_ttl.as_secs(), 900);
+}
+
+/// Leaving the snapshot knobs unset keeps the compiled-in defaults, and does
+/// not disturb the sibling KV-cache budget.
+#[test]
+fn prompt_cache_snapshot_limits_default_when_unset() {
+    use crate::server::prompt_cache::PromptCacheConfig;
+
+    let startup = sample_input().into_startup_config().expect("valid input");
+    assert_eq!(
+        startup.prompt_cache.snapshot_capacity_bytes,
+        PromptCacheConfig::DEFAULT_SNAPSHOT_CAPACITY_BYTES
+    );
+    assert_eq!(
+        startup.prompt_cache.snapshot_max_entries,
+        PromptCacheConfig::DEFAULT_SNAPSHOT_MAX_ENTRIES
+    );
+    assert_eq!(
+        startup.prompt_cache.snapshot_ttl.as_secs(),
+        PromptCacheConfig::DEFAULT_SNAPSHOT_TTL_SECONDS
+    );
+    assert_eq!(
+        startup.prompt_cache.capacity_bytes,
+        PromptCacheConfig::DEFAULT_CAPACITY_BYTES,
+        "the snapshot budget is separate from the KV budget"
+    );
+}
+
 /// Disabling via CLI produces `enabled = false` in the config.
 #[test]
 fn prompt_cache_disabled_cli_propagates_through() {
@@ -844,6 +891,58 @@ fn prompt_cache_min_prefix_env_var_applied() {
     let mut value: Option<usize> = None;
     env_fallback_prompt_cache_min_prefix(&mut value);
     assert_eq!(value, Some(16));
+}
+
+/// `MLXCEL_PROMPT_CACHE_SNAPSHOT_CAPACITY_BYTES` is applied when the CLI flag
+/// is absent, and the CLI flag wins when both are present.
+#[test]
+fn prompt_cache_snapshot_capacity_bytes_env_var_applied() {
+    use super::env_fallback_prompt_cache_snapshot_capacity_bytes;
+
+    let _env_guard = env_lock();
+    let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_SNAPSHOT_CAPACITY_BYTES", "1048576");
+
+    let mut value: Option<usize> = None;
+    env_fallback_prompt_cache_snapshot_capacity_bytes(&mut value);
+    assert_eq!(value, Some(1_048_576));
+
+    let mut from_cli = Some(4096);
+    env_fallback_prompt_cache_snapshot_capacity_bytes(&mut from_cli);
+    assert_eq!(from_cli, Some(4096), "CLI flag beats env var");
+}
+
+/// `MLXCEL_PROMPT_CACHE_SNAPSHOT_MAX_ENTRIES` is applied when the CLI flag is
+/// absent.
+#[test]
+fn prompt_cache_snapshot_max_entries_env_var_applied() {
+    use super::env_fallback_prompt_cache_snapshot_max_entries;
+
+    let _env_guard = env_lock();
+    let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_SNAPSHOT_MAX_ENTRIES", "12");
+
+    let mut value: Option<usize> = None;
+    env_fallback_prompt_cache_snapshot_max_entries(&mut value);
+    assert_eq!(value, Some(12));
+}
+
+/// `MLXCEL_PROMPT_CACHE_SNAPSHOT_TTL` is applied when the CLI flag is absent,
+/// and an unparseable value is ignored rather than failing startup.
+#[test]
+fn prompt_cache_snapshot_ttl_env_var_applied() {
+    use super::env_fallback_prompt_cache_snapshot_ttl;
+
+    let _env_guard = env_lock();
+    {
+        let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_SNAPSHOT_TTL", "5400");
+        let mut value: Option<u64> = None;
+        env_fallback_prompt_cache_snapshot_ttl(&mut value);
+        assert_eq!(value, Some(5400));
+    }
+
+    let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_SNAPSHOT_TTL", "forever");
+    let mut value: Option<u64> = None;
+    env_fallback_prompt_cache_snapshot_ttl(&mut value);
+    assert_eq!(value, None, "unparseable TTL is ignored");
 }
 
 /// Unparseable `MLXCEL_PROMPT_CACHE_ENABLED` is ignored and the original value

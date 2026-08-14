@@ -171,6 +171,11 @@ pub struct CacheStatsResponse {
     pub snapshot_evictions_lru: u64,
     /// Lifetime snapshot TTL evictions.
     pub snapshot_evictions_ttl: u64,
+    /// Lifetime snapshots dropped because a longer snapshot from the same
+    /// session superseded them. A multi-turn conversation advances this once
+    /// per turn while `snapshot_entries` stays flat; that pairing is what
+    /// distinguishes healthy chain collapse from budget thrash.
+    pub snapshot_supersedes: u64,
     /// Lifetime snapshot insert rejections due to size.
     pub snapshot_rejections_oversized: u64,
 
@@ -319,6 +324,7 @@ pub(crate) fn build_stats_response(
                 snapshot_inserts: stats.snapshot_inserts,
                 snapshot_evictions_lru: stats.snapshot_evictions_lru,
                 snapshot_evictions_ttl: stats.snapshot_evictions_ttl,
+                snapshot_supersedes: stats.snapshot_supersedes,
                 snapshot_rejections_oversized: stats.snapshot_rejections_oversized,
                 // Paged block-pool gauges are store-independent.
                 paged_block_size: paged.block_size,
@@ -371,6 +377,7 @@ pub(crate) fn build_stats_response(
             snapshot_inserts: 0,
             snapshot_evictions_lru: 0,
             snapshot_evictions_ttl: 0,
+            snapshot_supersedes: 0,
             snapshot_rejections_oversized: 0,
             // Paged decode can run with the prompt cache disabled, so these
             // still reflect the live pool even on the `None` branch.

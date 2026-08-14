@@ -301,6 +301,29 @@ pub struct ServerStartupInput {
     /// Also accepts `MLXCEL_PROMPT_CACHE_MIN_PREFIX`.
     pub prompt_cache_min_prefix: Option<usize>,
 
+    // exact-prefix snapshot store knobs. Snapshots hold whole recurrent
+    // model states for SSM / linear-attention families and are budgeted
+    // separately from detached KV entries, because their per-entry size
+    // scales with model width rather than with prompt length. One
+    // conversation's snapshot ranges from a few MiB on a small model to
+    // several hundred MiB on a 30B-class one, so the compiled-in default
+    // cannot be right for every deployment and these three knobs exist to
+    // size the store per model.
+    /// Byte budget for the exact-prefix snapshot store.
+    /// `None` means "use the compiled-in default (512 MiB)".
+    /// Also accepts `MLXCEL_PROMPT_CACHE_SNAPSHOT_CAPACITY_BYTES`.
+    pub prompt_cache_snapshot_capacity_bytes: Option<usize>,
+
+    /// Maximum number of live snapshot entries.
+    /// `None` means "use the compiled-in default (4096)".
+    /// Also accepts `MLXCEL_PROMPT_CACHE_SNAPSHOT_MAX_ENTRIES`.
+    pub prompt_cache_snapshot_max_entries: Option<usize>,
+
+    /// Time-to-live for a snapshot entry in seconds.
+    /// `None` means "use the compiled-in default (7200 s)".
+    /// Also accepts `MLXCEL_PROMPT_CACHE_SNAPSHOT_TTL`.
+    pub prompt_cache_snapshot_ttl_seconds: Option<u64>,
+
     // Automatic Prefix Caching (APC) knobs.
     //
     // APC layers block-granularity hash chains on top of the existing
@@ -478,6 +501,9 @@ impl ServerStartupInput {
             self.apc_block_size,
             self.apc_num_blocks,
             self.apc_hash.as_deref(),
+            self.prompt_cache_snapshot_capacity_bytes,
+            self.prompt_cache_snapshot_max_entries,
+            self.prompt_cache_snapshot_ttl_seconds,
         )
         .map_err(|e| anyhow::anyhow!("--apc-hash: {e}"))?;
 
@@ -1056,6 +1082,11 @@ pub fn resolve_seed(seed: i64) -> Option<u64> {
 /// `apc_num_blocks`, `apc_hash`) and assembles them into the
 /// [`crate::server::prompt_cache::ApcConfig`] sub-struct. Returns an error
 /// when `apc_hash` is supplied but cannot be parsed.
+///
+/// The three `snapshot_*` parameters size the separate exact-prefix snapshot
+/// store. They are resolved here rather than after the model loads: this runs
+/// during CLI parsing, before any weights are read, so the operator (or the
+/// launch script that knows which model is being served) owns the sizing.
 pub(super) fn build_prompt_cache_config(
     enabled: bool,
     capacity_bytes: Option<usize>,
@@ -1066,6 +1097,9 @@ pub(super) fn build_prompt_cache_config(
     apc_block_size: Option<usize>,
     apc_num_blocks: Option<usize>,
     apc_hash: Option<&str>,
+    snapshot_capacity_bytes: Option<usize>,
+    snapshot_max_entries: Option<usize>,
+    snapshot_ttl_seconds: Option<u64>,
 ) -> Result<crate::server::prompt_cache::PromptCacheConfig, String> {
     use crate::server::prompt_cache::{ApcConfig, ApcHashAlgo, PromptCacheConfig};
     let defaults = PromptCacheConfig::default();
@@ -1090,7 +1124,14 @@ pub(super) fn build_prompt_cache_config(
         std::time::Duration::from_secs(ttl_seconds.unwrap_or(defaults.ttl.as_secs())),
         min_prefix.unwrap_or(defaults.min_prefix_tokens),
     )
-    .with_apc(apc);
+    .with_apc(apc)
+    .with_snapshot_limits(
+        snapshot_capacity_bytes.unwrap_or(defaults.snapshot_capacity_bytes),
+        snapshot_max_entries.unwrap_or(defaults.snapshot_max_entries),
+        std::time::Duration::from_secs(
+            snapshot_ttl_seconds.unwrap_or(defaults.snapshot_ttl.as_secs()),
+        ),
+    );
 
     Ok(cfg)
 }
@@ -1224,6 +1265,52 @@ pub fn env_fallback_prompt_cache_min_prefix(value: &mut Option<usize>) {
         "MLXCEL_PROMPT_CACHE_MIN_PREFIX",
         "prompt-cache-min-prefix",
     );
+}
+
+/// Apply `MLXCEL_PROMPT_CACHE_SNAPSHOT_CAPACITY_BYTES` env var fallback.
+///
+/// CLI flag beats env var. Unparseable env values are warn-logged and ignored.
+pub fn env_fallback_prompt_cache_snapshot_capacity_bytes(value: &mut Option<usize>) {
+    apply_optional_usize_env_fallback(
+        value,
+        "MLXCEL_PROMPT_CACHE_SNAPSHOT_CAPACITY_BYTES",
+        "prompt-cache-snapshot-capacity-bytes",
+    );
+}
+
+/// Apply `MLXCEL_PROMPT_CACHE_SNAPSHOT_MAX_ENTRIES` env var fallback.
+///
+/// CLI flag beats env var. Unparseable env values are warn-logged and ignored.
+pub fn env_fallback_prompt_cache_snapshot_max_entries(value: &mut Option<usize>) {
+    apply_optional_usize_env_fallback(
+        value,
+        "MLXCEL_PROMPT_CACHE_SNAPSHOT_MAX_ENTRIES",
+        "prompt-cache-snapshot-max-entries",
+    );
+}
+
+/// Apply `MLXCEL_PROMPT_CACHE_SNAPSHOT_TTL` env var fallback (value in seconds).
+///
+/// CLI flag beats env var. Unparseable env values are warn-logged and ignored.
+pub fn env_fallback_prompt_cache_snapshot_ttl(value: &mut Option<u64>) {
+    const KEY: &str = "MLXCEL_PROMPT_CACHE_SNAPSHOT_TTL";
+    if value.is_some() {
+        if std::env::var_os(KEY).is_some() {
+            tracing::info!(
+                "{KEY} env var is set but --prompt-cache-snapshot-ttl CLI flag takes precedence"
+            );
+        }
+        return;
+    }
+    if let Ok(raw) = std::env::var(KEY) {
+        match raw.trim().parse::<u64>() {
+            Ok(v) => *value = Some(v),
+            Err(_) => tracing::warn!(
+                "{KEY} has unparseable value {:?}; ignoring (expected unsigned integer seconds)",
+                raw
+            ),
+        }
+    }
 }
 
 // ── — Automatic Prefix Caching env-var fallbacks ─────────────────

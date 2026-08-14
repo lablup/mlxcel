@@ -1767,6 +1767,35 @@ pub(crate) struct ServeArgs {
     #[arg(long = "prompt-cache-min-prefix", value_name = "N")]
     prompt_cache_min_prefix: Option<usize>,
 
+    /// Byte budget for the exact-prefix snapshot store (default: 512 MiB).
+    ///
+    /// Snapshot-only families (SSM / linear-attention) park a whole recurrent
+    /// state per conversation, and that state scales with model width, not with
+    /// prompt length: a few MiB on a small model, 300 MB or more on a 30B-class
+    /// one. The 512 MiB default suits small and medium models; for a large one,
+    /// budget two to three times a single conversation's snapshot so concurrent
+    /// sessions do not evict each other. Read the live figure from
+    /// `snapshot_bytes` on `/v1/cache/stats` after one conversation.
+    ///
+    /// Also reads `MLXCEL_PROMPT_CACHE_SNAPSHOT_CAPACITY_BYTES` when the CLI
+    /// flag is absent.
+    #[arg(long = "prompt-cache-snapshot-capacity-bytes", value_name = "BYTES")]
+    prompt_cache_snapshot_capacity_bytes: Option<usize>,
+
+    /// Maximum number of live snapshot entries (default: 4096).
+    ///
+    /// Also reads `MLXCEL_PROMPT_CACHE_SNAPSHOT_MAX_ENTRIES` when the CLI flag
+    /// is absent.
+    #[arg(long = "prompt-cache-snapshot-max-entries", value_name = "N")]
+    prompt_cache_snapshot_max_entries: Option<usize>,
+
+    /// Time-to-live for a snapshot entry in seconds (default: 7200).
+    ///
+    /// Also reads `MLXCEL_PROMPT_CACHE_SNAPSHOT_TTL` when the CLI flag is
+    /// absent.
+    #[arg(long = "prompt-cache-snapshot-ttl", value_name = "SECONDS")]
+    prompt_cache_snapshot_ttl: Option<u64>,
+
     // Automatic Prefix Caching (APC) knobs.
     /// Enable Automatic Prefix Caching (APC) with block-granularity hash chains
     /// (default: true). Disable with `--apc-enabled=false`.
