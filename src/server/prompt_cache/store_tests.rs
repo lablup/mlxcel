@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use mlxcel_core::generate::ModelStateSnapshot;
 
-use super::super::entry::{CacheEntry, ModelSnapshotEntry};
+use super::super::entry::{CacheEntry, ModelSnapshotEntry, SnapshotOrigin};
 use super::super::key::{MultimodalDigest, PromptCacheKey};
 use super::super::metrics::AtomicPromptCacheMetrics;
 use super::super::policy::PromptCacheConfig;
@@ -1005,16 +1005,19 @@ fn history_boundary_snapshot_hits_where_the_end_of_generation_one_cannot() {
     let mut generated_vec = prompt.clone();
     generated_vec.extend([9101, 9102, 9103]);
 
+    // Tag each entry with its real producer: the session-chain supersede rule
+    // (#1146) is scoped per producer, and an untagged pair would collapse.
     store
         .insert_snapshot(
             &key_for_session("m", Some("sess"), &history),
-            snapshot_entry_for_test(history.clone(), "fam"),
+            snapshot_entry_for_test(history.clone(), "fam").with_origin(SnapshotOrigin::Boundary),
         )
         .expect("boundary snapshot insert succeeds");
     store
         .insert_snapshot(
             &key_for_session("m", Some("sess"), &generated_vec),
-            snapshot_entry_for_test(generated_vec.clone(), "fam"),
+            snapshot_entry_for_test(generated_vec.clone(), "fam")
+                .with_origin(SnapshotOrigin::Completion),
         )
         .expect("end-of-generation snapshot insert succeeds");
     assert_eq!(store.stats().snapshot_entries, 2);
@@ -1043,7 +1046,8 @@ fn history_boundary_snapshot_hits_where_the_end_of_generation_one_cannot() {
     let bare = PromptCacheStore::with_config(cfg(1 << 20, 64, 4));
     bare.insert_snapshot(
         &key_for_session("m", Some("sess"), &generated_vec),
-        snapshot_entry_for_test(generated_vec.clone(), "fam"),
+        snapshot_entry_for_test(generated_vec.clone(), "fam")
+            .with_origin(SnapshotOrigin::Completion),
     )
     .expect("insert succeeds");
     assert!(
@@ -1054,4 +1058,83 @@ fn history_boundary_snapshot_hits_where_the_end_of_generation_one_cannot() {
         .is_none()
     );
     assert_eq!(bare.stats().snapshot_hits, 0);
+}
+
+#[test]
+fn completion_snapshot_does_not_supersede_the_boundary_snapshot_of_its_own_turn() {
+    // Cross-issue regression guard for #1143 against #1146's session-chain
+    // supersede rule.
+    //
+    // A turn's history-boundary vector is ALWAYS a strict prefix of that same
+    // turn's completion vector, because the completion vector is
+    // `history + generation-prompt scaffold + sampled reply`. An unscoped
+    // supersede rule therefore deletes the boundary entry the moment the turn
+    // finishes, and the boundary entry is the only one that can match the next
+    // turn. That combination was measured live: turn 2 `cached_tokens` fell
+    // back to 0 of 189 with both features present and no LRU eviction
+    // involved. Scoping the chain per producer is what keeps both alive.
+    let store = PromptCacheStore::with_config(cfg(1 << 20, 64, 4));
+
+    let history: Vec<i32> = tokens(100, 24);
+    let mut completion = history.clone();
+    completion.extend([9001, 9002, 9101, 9102, 9103]);
+
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("sess"), &history),
+            snapshot_entry_for_test(history.clone(), "fam").with_origin(SnapshotOrigin::Boundary),
+        )
+        .expect("boundary snapshot insert succeeds");
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("sess"), &completion),
+            snapshot_entry_for_test(completion.clone(), "fam")
+                .with_origin(SnapshotOrigin::Completion),
+        )
+        .expect("completion snapshot insert succeeds");
+
+    // Both survive: the completion entry did not chain over the boundary one.
+    assert_eq!(store.stats().snapshot_entries, 2);
+    assert_eq!(store.stats().snapshot_supersedes, 0);
+
+    // And the boundary entry is still reachable from the next turn, which is
+    // the whole point of keeping it.
+    let mut next_prompt = history.clone();
+    next_prompt.extend([8201, 8202, 8203, 8204, 8205]);
+    let (entry, matched) = store
+        .lookup_snapshot_prefix(
+            &key_for_session("m", Some("sess"), &next_prompt),
+            &next_prompt,
+        )
+        .expect("the boundary snapshot must survive its own turn's completion donate");
+    assert_eq!(matched, history.len());
+    assert_eq!(entry.tokens, history);
+}
+
+#[test]
+fn boundary_snapshots_still_chain_against_each_other() {
+    // The other half of the scoping rule: per-producer chains must still
+    // collapse, or #1146's bounded steady-state footprint is lost and a long
+    // conversation accumulates one boundary entry per turn.
+    let store = PromptCacheStore::with_config(cfg(1 << 20, 64, 4));
+
+    let turn1: Vec<i32> = tokens(100, 24);
+    let mut turn2 = turn1.clone();
+    turn2.extend([700, 701, 702, 703]);
+
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("sess"), &turn1),
+            snapshot_entry_for_test(turn1.clone(), "fam").with_origin(SnapshotOrigin::Boundary),
+        )
+        .expect("turn 1 boundary insert succeeds");
+    store
+        .insert_snapshot(
+            &key_for_session("m", Some("sess"), &turn2),
+            snapshot_entry_for_test(turn2.clone(), "fam").with_origin(SnapshotOrigin::Boundary),
+        )
+        .expect("turn 2 boundary insert succeeds");
+
+    assert_eq!(store.stats().snapshot_entries, 1);
+    assert_eq!(store.stats().snapshot_supersedes, 1);
 }

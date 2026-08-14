@@ -760,14 +760,28 @@ impl PromptCacheStore {
         // edited or regenerated earlier turn), where the dropped ancestor would
         // still have matched; that costs one re-prefill and is the price of
         // keeping a conversation's steady-state footprint at one entry.
+        //
+        // The rule is also scoped to one producer (issue #1143). A conversation
+        // now stores two snapshots per turn: the history-boundary vector
+        // captured during prefill, and the completion vector donated at finish.
+        // The boundary vector is always a strict prefix of its own turn's
+        // completion vector, so an unscoped rule would supersede it away the
+        // moment the turn finished, and the boundary vector is precisely the
+        // one that can match the next turn (the completion vector's tail is the
+        // generation-prompt scaffold and a sampled, non-canonical tokenization
+        // of the reply). Chaining per producer keeps both intact while still
+        // bounding each chain to one entry: turn N+1's boundary supersedes turn
+        // N's boundary, and likewise for completions.
         if let Some(session_key) = key.session_key {
             let new_tokens = entry.tokens.as_slice();
+            let new_origin = entry.origin;
             let superseded: Vec<PromptCacheKeyDigest> = guard
                 .snapshots
                 .iter()
                 .filter(|(_, slot)| {
                     slot.sessionless == sessionless
                         && slot.bucket.session_key.as_deref() == Some(session_key)
+                        && slot.entry.origin == new_origin
                         && slot.entry.tokens.len() < new_tokens.len()
                         && new_tokens.starts_with(slot.entry.tokens.as_slice())
                 })

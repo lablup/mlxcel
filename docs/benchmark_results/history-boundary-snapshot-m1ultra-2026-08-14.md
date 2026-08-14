@@ -74,6 +74,25 @@ are not comparable cell to cell. The only thing this row establishes is that the
 boundary snapshot is being produced (`snapshot_inserts` doubles) and that adding
 it does not break a family that was already hitting.
 
+### Interaction with the session-chain supersede rule (#1146)
+
+While this branch was in review, #1146 merged a session-chain supersede rule
+that removes stored snapshots whose token vector is a strict prefix of an
+incoming one from the same session. A turn's history-boundary vector is always
+a strict prefix of that same turn's completion vector, so rebasing onto it
+regressed this feature completely, measured on the same probe:
+
+| Build | Turn 2 `cached_tokens` | Turn 3 | `snapshot_inserts` | `snapshot_entries` | `snapshot_hits` |
+|---|---|---|---|---|---|
+| rebased, unscoped supersede | 0 / 189 | 0 / 214 | 6 | 3 | 0 |
+| rebased, supersede scoped per producer | 150 / 189 | 184 / 214 | 6 | 4 | 2 |
+
+The inserts are identical in both rows: the boundary snapshots were being
+created and then deleted by the completion donate of their own turn.
+`snapshot_evictions_lru` stayed at 0 throughout, so this was the supersede rule
+and not byte pressure. Scoping the chain per producer keeps both chains bounded
+to one entry each while leaving the boundary entry reachable.
+
 ### The kill switch reproduces the baseline exactly
 
 Same binary as the fix arm, with `MLXCEL_DISABLE_BOUNDARY_SNAPSHOT=1`, same

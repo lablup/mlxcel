@@ -71,6 +71,7 @@ use crate::server::prompt_cache::key::PromptCacheKey;
 use crate::server::prompt_cache::metrics::PromptCacheRejectReason;
 use crate::server::prompt_cache::{
     CacheEntry, DetachedKvSet, ModelSnapshotEntry, PromptCacheStore, SnapshotLookupOutcome,
+    SnapshotOrigin,
 };
 use crate::server::state::BatchMetrics;
 use crate::server::thinking_budget::{
@@ -2348,9 +2349,9 @@ impl BatchScheduler {
     /// vector against a future request's prompt, so a vector that does not
     /// match the state would install a wrong recurrent history.
     ///
-    /// `origin` only labels the log and trace lines ("donate" at end of
-    /// generation, "boundary" for the history-boundary capture) so a reader can
-    /// tell the two snapshot producers apart in a trace.
+    /// `origin` records which producer this snapshot came from. It labels the
+    /// log and trace lines, and it scopes the store's session-chain supersede
+    /// rule so the two producers do not delete each other's entries.
     ///
     /// Used by: `donate_finished_sequence_cache`,
     /// `capture_history_boundary_snapshot`
@@ -2359,7 +2360,7 @@ impl BatchScheduler {
         seq_id: SequenceId,
         ctx: &PromptCacheRequestContext,
         tokens: Vec<i32>,
-        origin: &'static str,
+        origin: SnapshotOrigin,
     ) {
         let store = match self.prompt_cache.as_ref() {
             Some(s) => s.clone(),
@@ -2379,7 +2380,7 @@ impl BatchScheduler {
                 tracing::debug!(
                     seq_id = %seq_id,
                     token_len = tokens.len(),
-                    origin,
+                    origin = ?origin,
                     "prompt-cache snapshot skipped: captured snapshot was empty"
                 );
                 self.batch_observability.record_prompt_cache_reject(
@@ -2393,7 +2394,7 @@ impl BatchScheduler {
                 tracing::debug!(
                     seq_id = %seq_id,
                     token_len = tokens.len(),
-                    origin,
+                    origin = ?origin,
                     "prompt-cache snapshot skipped: no model-owned state for sequence"
                 );
                 self.batch_observability.record_prompt_cache_reject(
@@ -2404,7 +2405,7 @@ impl BatchScheduler {
                 return;
             }
         };
-        let entry = ModelSnapshotEntry::new(tokens, snapshot);
+        let entry = ModelSnapshotEntry::new(tokens, snapshot).with_origin(origin);
         let key_tokens = entry.tokens.clone();
         let key = Self::compose_prompt_cache_key(ctx, &key_tokens);
         match store.insert_snapshot(&key, entry) {
@@ -2413,7 +2414,7 @@ impl BatchScheduler {
                     seq_id = %seq_id,
                     token_len = key_tokens.len(),
                     bytes = store.stats().snapshot_bytes,
-                    origin,
+                    origin = ?origin,
                     "prompt-cache snapshot inserted"
                 );
                 self.batch_observability.record_prompt_cache_insert();
@@ -2424,13 +2425,13 @@ impl BatchScheduler {
                         apc_event = "store",
                         seq_id = %seq_id,
                         matched_len = key_tokens.len(),
-                        origin,
+                        origin = ?origin,
                         "prompt-cache store (snapshot)"
                     );
                 }
             }
             Err(err) => {
-                tracing::debug!("prompt-cache snapshot insert skipped ({origin}): {err}");
+                tracing::debug!(?origin, "prompt-cache snapshot insert skipped: {err}");
                 self.batch_observability.record_prompt_cache_insert_reject();
                 self.batch_observability.record_prompt_cache_reject(
                     PromptCacheRejectReason::from(&err),
@@ -2592,7 +2593,12 @@ impl BatchScheduler {
             Some(c) => c.clone(),
             None => return Ok(()),
         };
-        self.insert_model_state_snapshot(seq.seq_id, &ctx, boundary_tokens, "boundary");
+        self.insert_model_state_snapshot(
+            seq.seq_id,
+            &ctx,
+            boundary_tokens,
+            SnapshotOrigin::Boundary,
+        );
 
         // Return the segment's intermediates to the allocator before the
         // caller's suffix forward runs, the same way `execute_full_prefill`
@@ -2664,7 +2670,7 @@ impl BatchScheduler {
         // placeholder even though the real state lives in
         // `ModelOwnedSequenceState` and cannot be detached as KV blocks.
         if self.model.supports_snapshot_reuse() {
-            self.insert_model_state_snapshot(seq_id, &ctx, tokens, "donate");
+            self.insert_model_state_snapshot(seq_id, &ctx, tokens, SnapshotOrigin::Completion);
             return;
         }
 
