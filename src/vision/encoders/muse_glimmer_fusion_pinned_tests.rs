@@ -47,7 +47,11 @@ const PINNED_POST_TOWER_WEIGHT_KEYS: [&str; 3] = [
 /// `model.safetensors.index.json` rather than opening it twice.
 #[derive(Debug)]
 struct PinnedCheckpoint {
-    config: MuseGlimmerConfig,
+    /// Raw `config.json` body, deliberately left as `Value` rather than a
+    /// parsed `MuseGlimmerConfig`. A config that is valid JSON but does not
+    /// deserialize into this model's schema is a drifted or wrong checkpoint,
+    /// which the contract assertions must fail on rather than skip.
+    config: Value,
     weight_map: serde_json::Map<String, Value>,
 }
 
@@ -60,7 +64,8 @@ struct PinnedCheckpoint {
 /// skips with a reason instead of panicking on an opaque `unwrap`.
 ///
 /// Contract violations are deliberately NOT detected here. An absent
-/// `weight_map`, an omitted pinned weight root, a config `validate()` rejects,
+/// `weight_map`, an omitted pinned weight root, a config that is valid JSON but
+/// does not deserialize into `MuseGlimmerConfig`, a config `validate()` rejects,
 /// and a wrong recorded shape all flow through to the caller's assertions so
 /// they still fail the test. Availability is the only thing this may veto.
 fn load_pinned_checkpoint(model_dir: &Path) -> Result<PinnedCheckpoint, String> {
@@ -71,12 +76,14 @@ fn load_pinned_checkpoint(model_dir: &Path) -> Result<PinnedCheckpoint, String> 
 
     let config_path = model_dir.join("config.json");
     let config_text = read_checkpoint_file(&config_path)?;
-    let config: MuseGlimmerConfig = serde_json::from_str(&config_text).map_err(|err| {
-        format!(
-            "{} does not parse as a Muse Glimmer config: {err}",
-            config_path.display()
-        )
-    })?;
+    // Only JSON syntax is checked here. Deserializing into `MuseGlimmerConfig`
+    // is deferred to the assertions on purpose: an interrupted download leaves
+    // a truncated config, which is a syntax error and a genuine availability
+    // problem, but a config that parses and still does not fit the schema means
+    // the pinned directory holds the wrong or a drifted model, which is exactly
+    // the divergence this contract test exists to catch.
+    let config: Value = serde_json::from_str(&config_text)
+        .map_err(|err| format!("{} does not parse as JSON: {err}", config_path.display()))?;
 
     // A missing or non-object `weight_map` is a malformed index rather than a
     // missing file: hand the caller an empty map so the weight-root assertion
@@ -152,6 +159,11 @@ fn pinned_post_tower_weight_roots_and_shapes_match_published_contract() {
 fn assert_post_tower_contract(model_dir: &Path, checkpoint: PinnedCheckpoint) {
     let PinnedCheckpoint { config, weight_map } = checkpoint;
 
+    // Schema drift in the pinned config, or a different model dropped into the
+    // pinned directory, surfaces here as a failure rather than as a skip.
+    let config: MuseGlimmerConfig = serde_json::from_value(config).unwrap_or_else(|err| {
+        panic!("config.json does not deserialize into a Muse Glimmer config: {err}")
+    });
     config.validate().unwrap();
     let mut actual_keys = weight_map
         .keys()
@@ -382,6 +394,8 @@ fn pinned_precheck_names_an_unparseable_index() {
 
 #[test]
 fn pinned_precheck_names_an_unparseable_config() {
+    // Truncated mid-object, which is what an interrupted download leaves. A
+    // syntax error is an availability problem, so it skips.
     let dir = tempfile::tempdir().unwrap();
     write_synthetic_index(dir.path(), &PINNED_POST_TOWER_WEIGHT_KEYS, SYNTHETIC_SHARD);
     std::fs::write(dir.path().join("config.json"), "{\"text_config\": {").unwrap();
@@ -389,10 +403,42 @@ fn pinned_precheck_names_an_unparseable_config() {
     let err = load_pinned_checkpoint(dir.path()).unwrap_err();
 
     assert!(err.contains("config.json"), "{err}");
-    assert!(
-        err.contains("does not parse as a Muse Glimmer config"),
-        "{err}"
-    );
+    assert!(err.contains("does not parse as JSON"), "{err}");
+}
+
+#[test]
+fn pinned_precheck_leaves_a_schema_mismatched_config_to_the_contract_assertion() {
+    // Valid JSON that is not a Muse Glimmer config. This is a wrong or drifted
+    // checkpoint rather than a missing one, so the pre-check must pass it
+    // through instead of vetoing it as an availability problem.
+    let dir = tempfile::tempdir().unwrap();
+    write_synthetic_index(dir.path(), &PINNED_POST_TOWER_WEIGHT_KEYS, SYNTHETIC_SHARD);
+    write_synthetic_shard(dir.path(), &PINNED_POST_TOWER_WEIGHT_KEYS, &[6, 4]);
+    std::fs::write(
+        dir.path().join("config.json"),
+        "{\"model_type\": \"something_else\"}",
+    )
+    .unwrap();
+
+    load_pinned_checkpoint(dir.path()).expect("schema mismatch must not be treated as unavailable");
+}
+
+#[test]
+#[should_panic(expected = "does not deserialize into a Muse Glimmer config")]
+fn contract_assertion_still_fails_on_a_schema_mismatched_config() {
+    // The companion to the pre-check test above: once passed through, the
+    // assertion body must fail on it, never skip.
+    let dir = tempfile::tempdir().unwrap();
+    write_synthetic_index(dir.path(), &PINNED_POST_TOWER_WEIGHT_KEYS, SYNTHETIC_SHARD);
+    write_synthetic_shard(dir.path(), &PINNED_POST_TOWER_WEIGHT_KEYS, &[6, 4]);
+    std::fs::write(
+        dir.path().join("config.json"),
+        "{\"model_type\": \"something_else\"}",
+    )
+    .unwrap();
+    let checkpoint = load_pinned_checkpoint(dir.path()).unwrap();
+
+    assert_post_tower_contract(dir.path(), checkpoint);
 }
 
 #[test]
@@ -401,7 +447,7 @@ fn pinned_precheck_accepts_a_complete_synthetic_checkpoint() {
 
     let checkpoint = load_pinned_checkpoint(dir.path()).unwrap();
 
-    assert_eq!(checkpoint.config.text_config.hidden_size, 6);
+    assert_eq!(checkpoint.config["text_config"]["hidden_size"], 6);
     assert_eq!(
         checkpoint.weight_map.len(),
         PINNED_POST_TOWER_WEIGHT_KEYS.len()
@@ -442,6 +488,24 @@ fn pinned_precheck_leaves_an_absent_weight_map_to_the_contract_assertion() {
 }
 
 #[test]
+#[should_panic(expected = "model.vision_adapter.fc1.weight")]
+fn contract_assertion_still_fails_on_an_absent_weight_map() {
+    // Companion to the pre-check test above, matching the missing-weight-root
+    // pair: an index carrying no `weight_map` must fail the weight-root
+    // assertion rather than skip.
+    let dir = tempfile::tempdir().unwrap();
+    write_synthetic_config(dir.path());
+    std::fs::write(
+        dir.path().join("model.safetensors.index.json"),
+        "{\"metadata\": {}}",
+    )
+    .unwrap();
+    let checkpoint = load_pinned_checkpoint(dir.path()).unwrap();
+
+    assert_post_tower_contract(dir.path(), checkpoint);
+}
+
+#[test]
 #[should_panic(expected = "model.vision_projection.weight")]
 fn contract_assertion_still_fails_on_a_missing_weight_root() {
     let dir = complete_synthetic_checkpoint(&PINNED_POST_TOWER_WEIGHT_KEYS[..2], &[4, 8]);
@@ -451,7 +515,11 @@ fn contract_assertion_still_fails_on_a_missing_weight_root() {
 }
 
 #[test]
-#[should_panic(expected = "model.vision_adapter.fc1.weight")]
+// The `failed: ` prefix is the suffix `assert_eq!` emits for its custom
+// message, so this can only pass on the shape assertion. The bare key name
+// also appears in the weight-root assertion and in the "must name a shard"
+// panic, either of which would let this test pass for the wrong reason.
+#[should_panic(expected = "failed: model.vision_adapter.fc1.weight")]
 fn contract_assertion_still_fails_on_a_wrong_recorded_shape() {
     // Every file is present and readable, so the pre-check passes. A recorded
     // shape that disagrees with the config must fail, never skip.
