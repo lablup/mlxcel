@@ -274,6 +274,25 @@ Passing `--draft-kind` explicitly does **not** get you a DFlash round loop in
 `mlxcel generate`; it returns an error saying the offline path does not
 construct one.
 
+**A real DFlash drafter is rejected before the load.** The auto-detected
+`dflash` above is the `DEFAULT_DRAFTER_KIND` fallback applied to an ordinary
+small full model, which is exactly what the classic `SpeculativeGenerator`
+wants, so that pairing keeps working. An actual DFlash drafter checkpoint is a
+different object: it ships no `embed_tokens` and no `lm_head` because it borrows
+both from the target when it binds, so the classic path cannot load it as a
+`LoadedModel` at all. The CLI now refuses it up front, with or without
+`--draft-kind`, and names `mlxcel-server` as the path that does drive the DFlash
+round loop (#1168). Before that check existed, the drafter's ordinary
+`"model_type": "qwen3"` sent it to the Qwen 3 loader, which failed with
+`Weight not found: model.embed_tokens.weight`.
+
+The discriminator is structural (a `dflash_config` block and/or
+`architectures: ["DFlashDraftModel"]` in the drafter's `config.json`), not the
+resolved `DrafterKind`. Keying on the resolved kind would reject every ordinary
+classic drafter along with it, since they all auto-resolve to `dflash`. The same
+structural check runs inside `get_model_type`, so `mlxcel generate -m
+<dflash-dir>` is rejected as "not a standalone model" too.
+
 ## Regression guards
 
 In `src/lib/mlxcel-core/src/speculative/`:

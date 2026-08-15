@@ -1437,6 +1437,12 @@ pub(super) fn run_generation_mode(
             );
         }
 
+        // The classic `SpeculativeGenerator` below needs a full `LoadedModel`
+        // for the drafter, which a DFlash checkpoint is not. Reject it here,
+        // before the load prints a "Loading draft model" line it cannot honor
+        // (#1168).
+        reject_dflash_drafter_offline(draft_model_path)?;
+
         println!("Loading draft model from {:?}...", draft_model_path);
         let (draft_model, _draft_tokenizer) = select_backend().load_model(draft_model_path)?;
         println!("Draft model loaded.");
@@ -1581,6 +1587,52 @@ fn should_route_offline_mtp(
     resolved_kind: DrafterKind,
 ) -> bool {
     user_requested_explicit_kind && resolved_kind == DrafterKind::Mtp
+}
+
+/// Reject a DFlash speculative drafter before the offline path tries to load
+/// it as a full standalone model (#1168).
+///
+/// The offline `--draft-model` path has always called `load_model` on the
+/// drafter directory, because the classic `SpeculativeGenerator` it falls
+/// through to drives a full `LoadedModel`. A DFlash checkpoint is not one: it
+/// ships no `embed_tokens` and no `lm_head`, and its tensors carry no `model.`
+/// prefix. It nevertheless declares `"model_type": "qwen3"`, so it used to be
+/// classified as an ordinary Qwen 3 model and die on
+/// `Weight not found: model.embed_tokens.weight`, naming a tensor instead of
+/// the problem. The same pair works on `mlxcel-server`, which routes the
+/// drafter through `load_drafter` and drives the DFlash round loop.
+///
+/// The gate is [`mlxcel_core::drafter::dflash::is_dflash_drafter_dir`], a
+/// **structural** probe of the drafter's `config.json`, not the resolved
+/// [`DrafterKind`]. `DEFAULT_DRAFTER_KIND` is `Dflash`, so every drafter that
+/// is not a Gemma 4 assistant auto-resolves to `Dflash`, including an ordinary
+/// small full model used as a classic drafter. Rejecting on the resolved kind
+/// would break that legitimate, currently-working pairing; rejecting on the
+/// checkpoint's own DFlash markers does not.
+///
+/// Called after the explicit `--draft-kind mtp` gate, which is a different
+/// request with its own targeted errors, and before `load_model`. Everything
+/// that reaches `load_model` here (no `--draft-kind`, or an explicit
+/// `--draft-kind dflash`) passes through this check.
+fn reject_dflash_drafter_offline(draft_model_path: &Path) -> Result<()> {
+    if !mlxcel_core::drafter::dflash::is_dflash_drafter_dir(draft_model_path) {
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "--draft-model {path} is a DFlash speculative drafter, not a standalone \
+         model, and the offline `mlxcel generate` path does not construct the \
+         `DFlashGenerator` round loop. Loading it here would route it through the \
+         standalone model loader, which fails on the drafter's missing \
+         embed_tokens (a DFlash drafter borrows embed_tokens and lm_head from the \
+         target when it binds). The offline runtime wiring lands with the \
+         DFlashGenerator round loop and the per-target SpeculativeTarget impls. \
+         To use this drafter today, run `mlxcel-server` with the same -m target \
+         and `--draft-model {path} --draft-kind dflash`. For an offline \
+         speculative run, pass a small full model as --draft-model instead, which \
+         keeps the classic SpeculativeGenerator path.",
+        path = draft_model_path.display(),
+    ))
 }
 
 /// Drive a constructed [`mlxcel_core::speculative::mtp::target::MtpTarget`]

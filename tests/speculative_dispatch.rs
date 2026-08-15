@@ -63,6 +63,49 @@ fn make_drafter_dir(model_type: Option<&str>) -> (TempDir, PathBuf) {
     (dir, path)
 }
 
+/// Structurally-DFlash drafter fixture: the shape of the published
+/// `qwen3.5-27b-dflash` `config.json`, trimmed to what detection and the
+/// structural probe read. Note that `model_type` is an ordinary `"qwen3"`;
+/// the DFlash markers are `architectures` and the nested `dflash_config`.
+fn make_dflash_drafter_dir() -> (TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{
+            "architectures": ["DFlashDraftModel"],
+            "auto_map": {"AutoModel": "dflash.DFlashDraftModel"},
+            "block_size": 16,
+            "dflash_config": {"mask_token_id": 248070, "target_layer_ids": [1, 16, 31, 46, 61]},
+            "hidden_size": 5120,
+            "model_type": "qwen3",
+            "num_hidden_layers": 5,
+            "num_target_layers": 64,
+            "vocab_size": 248320
+        }"#,
+    )
+    .expect("write config.json");
+    let path = dir.path().to_path_buf();
+    (dir, path)
+}
+
+/// Ordinary small full model used as a classic `--draft-model` drafter. It
+/// carries no DFlash marker, and it must stay loadable as a standalone model.
+fn make_ordinary_full_model_dir() -> (TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{
+            "architectures": ["Qwen3ForCausalLM"],
+            "model_type": "qwen3",
+            "hidden_size": 1024,
+            "num_hidden_layers": 28
+        }"#,
+    )
+    .expect("write config.json");
+    let path = dir.path().to_path_buf();
+    (dir, path)
+}
+
 fn base_server_config() -> ServerConfig {
     ServerConfig::default()
 }
@@ -387,4 +430,94 @@ fn dispatch_classic_fallback_is_not_burstable() {
     let cfg = base_server_config();
     let dispatch = SpeculativeDispatch::resolve(&cfg).expect("resolve");
     assert!(!dispatch.is_kind_specific());
+}
+
+// =============================================================================
+// DFlash drafter is not a standalone model (#1168)
+//
+// `mlxcel generate --draft-model <dflash-dir>` used to load the drafter as a
+// full standalone model and die on `Weight not found:
+// model.embed_tokens.weight`, and `mlxcel generate -m <dflash-dir>` died the
+// same way, because the published drafter declares `"model_type": "qwen3"`.
+// These tests pin the two halves of the fix: the structural discriminator the
+// CLI precheck keys on, and the detection-level rejection every `-m` entry
+// point shares. They also pin that the server dispatch, which never routes a
+// drafter through `get_model_type`, is unaffected.
+// =============================================================================
+
+#[test]
+fn dflash_drafter_directory_is_structurally_identifiable() {
+    let (_dir, dflash) = make_dflash_drafter_dir();
+    assert!(
+        mlxcel_core::drafter::dflash::is_dflash_drafter_dir(&dflash),
+        "the published drafter shape must be recognized",
+    );
+}
+
+#[test]
+fn ordinary_full_model_is_not_mistaken_for_a_dflash_drafter() {
+    // The regression this discriminator exists to avoid. `DEFAULT_DRAFTER_KIND`
+    // is `Dflash`, so this directory resolves to `DrafterKind::Dflash` even
+    // though it is an ordinary full model: a check keyed on the resolved kind
+    // would reject a working classic-drafter pairing.
+    let (_dir, ordinary) = make_ordinary_full_model_dir();
+    assert_eq!(
+        mlxcel_core::drafter::resolve_drafter_kind(&ordinary, None).expect("resolve"),
+        DrafterKind::Dflash,
+        "an ordinary full model auto-resolves to Dflash; that is why the \
+         discriminator must be structural",
+    );
+    assert!(
+        !mlxcel_core::drafter::dflash::is_dflash_drafter_dir(&ordinary),
+        "an ordinary full model is not a DFlash drafter",
+    );
+}
+
+#[test]
+fn dflash_drafter_passed_to_dash_m_is_rejected_as_not_a_standalone_model() {
+    let (_dir, dflash) = make_dflash_drafter_dir();
+
+    let error = mlxcel::models::get_model_type(&dflash)
+        .expect_err("a DFlash drafter is not a standalone model")
+        .to_string();
+
+    assert!(
+        error.contains("DFlash speculative drafter"),
+        "the error must name the real problem, got: {error}",
+    );
+    assert!(
+        !error.contains("Weight not found"),
+        "the weight-lookup symptom must not be what a user sees, got: {error}",
+    );
+}
+
+#[test]
+fn ordinary_full_model_still_detects_as_a_standalone_model() {
+    let (_dir, ordinary) = make_ordinary_full_model_dir();
+    assert_eq!(
+        mlxcel::models::get_model_type(&ordinary).expect("ordinary full model still detects"),
+        mlxcel::models::ModelType::Qwen3,
+    );
+}
+
+#[test]
+fn server_dispatch_still_accepts_a_real_dflash_drafter_directory() {
+    // Non-regression guard for the path that works: the server resolves the
+    // drafter through `resolve_drafter_kind` / `load_drafter` and never calls
+    // `get_model_type` on it, so the detection-level rejection above must not
+    // change server dispatch for the same directory.
+    let (_dir, dflash) = make_dflash_drafter_dir();
+    let mut cfg = base_server_config();
+    cfg.draft_model_path = Some(dflash.clone());
+    cfg.draft_kind = Some("dflash".to_string());
+
+    let dispatch = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    assert!(dispatch.is_kind_specific());
+    assert_eq!(dispatch.drafter_kind(), Some(DrafterKind::Dflash));
+    assert_eq!(dispatch.draft_model_path(), Some(dflash.as_path()));
+
+    // Auto-detect (no `--draft-kind`) must reach the same DFlash dispatch.
+    cfg.draft_kind = None;
+    let auto = SpeculativeDispatch::resolve(&cfg).expect("resolve");
+    assert_eq!(auto.drafter_kind(), Some(DrafterKind::Dflash));
 }

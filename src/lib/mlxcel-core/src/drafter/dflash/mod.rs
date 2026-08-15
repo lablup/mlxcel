@@ -72,7 +72,9 @@ pub mod round_loop_batched;
 
 pub use attention::DFlashAttention;
 pub use cache::DFlashKVCache;
-pub use config::DFlashConfig;
+pub use config::{
+    DFLASH_DRAFT_ARCHITECTURE, DFlashConfig, is_dflash_drafter_config, is_dflash_drafter_dir,
+};
 pub use drafter::DFlashDrafter;
 pub use layer::DFlashDecoderLayer;
 pub use mlp::DFlashMlp;
