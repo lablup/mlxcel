@@ -117,6 +117,7 @@ pub(crate) fn try_load_special_model_from_weights(
             let text_config = qwen35_text_config(&value)?;
             let args: models::qwen3_5::Qwen35Config = serde_json::from_value(text_config)
                 .map_err(|err| anyhow::anyhow!("Failed to parse config: {}", err))?;
+            args.validate_supported()?;
             let owned = copy_weight_map(weights);
             let owned = models::qwen3_5::sanitize_moe_weights(owned, &args);
             let model = models::Qwen35Model::from_weights(&owned, &args)

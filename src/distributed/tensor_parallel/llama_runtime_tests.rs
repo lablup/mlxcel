@@ -107,6 +107,7 @@ fn make_test_qwen35_args() -> Qwen35Config {
         quantization: None,
         mlp_only_layers: Vec::new(),
         norm_topk_prob: true,
+        output_gate_type: None,
     }
 }
 

@@ -625,12 +625,95 @@ fn qwen_vl_token_ids(full_config: &Value, defaults: QwenVisionTokenIds) -> QwenV
     }
 }
 
-fn qwen35_vlm_token_defaults() -> QwenVisionTokenIds {
-    QwenVisionTokenIds {
-        image_token_id: 248056,
-        video_token_id: 248057,
-        vision_start_token_id: 248045,
+/// `image_token_id` for the Qwen3.5 VLM family, used only when the config
+/// omits the key. Every published checkpoint in the family supplies it.
+const QWEN35_IMAGE_TOKEN_ID: i64 = 248056;
+
+/// `video_token_id` for the Qwen3.5 VLM family, used only when the config
+/// omits the key. Every published checkpoint in the family supplies it.
+const QWEN35_VIDEO_TOKEN_ID: i64 = 248057;
+
+/// Resolve the vision token ids for a Qwen3.5-family VLM.
+///
+/// Unlike [`qwen_vl_token_ids`], `vision_start_token_id` has **no default**
+/// here. mlxcel used to fall back to the Qwen3.5-era constant 248045, which
+/// is wrong for every shipped checkpoint in the family: Qwen3.5-0.8B through
+/// Qwen3.5-27B, the Qwen3.5/3.6 MoE builds, and Qwen3.8-27B all declare
+/// `vision_start_token_id: 248053`. A wrong start id does not fail loudly. It
+/// mis-segments the vision spans that drive MRoPE position assignment, so the
+/// model reads the image at the wrong positions and degrades quietly.
+/// Requiring the key turns that into a load-time error.
+///
+/// `image_token_id` and `video_token_id` keep their defaults: those constants
+/// do match every shipped checkpoint, and both ids are also validated
+/// downstream by the image-token insertion count.
+///
+/// `vocab_size` bounds all three ids: each is required to be non-negative and
+/// below the checkpoint's own vocabulary. Without this, an out-of-range value
+/// (or one large enough to overflow `i32` in the old truncating `as i32`
+/// cast) reproduces the exact silent-misassignment failure this function was
+/// written to close: `vision_start_token_id: 1099511627776` (2^40) used to
+/// truncate to 0 and `vision_start_token_id: -5` used to load unchanged, both
+/// with no diagnostic.
+fn qwen35_vl_token_ids(
+    full_config: &Value,
+    vocab_size: usize,
+) -> anyhow::Result<QwenVisionTokenIds> {
+    let vision_start_raw = full_config
+        .get("vision_start_token_id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Qwen3.5-family config.json is missing `vision_start_token_id`. mlxcel does not \
+                 default it for this family: the Qwen3.5-era constant 248045 is wrong for every \
+                 published checkpoint (they use 248053), and a wrong start id silently \
+                 mis-segments vision spans in MRoPE position assignment instead of failing. Add \
+                 `vision_start_token_id` to config.json."
+            )
+        })?;
+    let vision_start_token_id =
+        qwen35_vl_token_id_in_range("vision_start_token_id", vision_start_raw, vocab_size)?;
+
+    let image_token_id = match full_config.get("image_token_id").and_then(|v| v.as_i64()) {
+        Some(raw) => qwen35_vl_token_id_in_range("image_token_id", raw, vocab_size)?,
+        None => QWEN35_IMAGE_TOKEN_ID as i32,
+    };
+    let video_token_id = match full_config.get("video_token_id").and_then(|v| v.as_i64()) {
+        Some(raw) => qwen35_vl_token_id_in_range("video_token_id", raw, vocab_size)?,
+        None => QWEN35_VIDEO_TOKEN_ID as i32,
+    };
+
+    Ok(QwenVisionTokenIds {
+        image_token_id,
+        video_token_id,
+        vision_start_token_id,
+    })
+}
+
+/// Convert a raw `i64` vision token id from `config.json` into a validated
+/// `i32`, rejecting anything that would previously have been silently
+/// truncated by `as i32` or that falls outside the checkpoint's own
+/// vocabulary.
+///
+/// `field` names the offending key in the error text.
+fn qwen35_vl_token_id_in_range(field: &str, raw: i64, vocab_size: usize) -> anyhow::Result<i32> {
+    let id = i32::try_from(raw).map_err(|_| {
+        anyhow::anyhow!(
+            "Qwen3.5-family config.json has `{field}={raw}`, which does not fit in a 32-bit \
+             token id. mlxcel used to truncate values like this with a lossy `as i32` cast \
+             instead of failing, which silently mis-segments vision spans in MRoPE position \
+             assignment."
+        )
+    })?;
+    if id < 0 || (id as usize) >= vocab_size {
+        anyhow::bail!(
+            "Qwen3.5-family config.json has `{field}={id}`, which is outside the checkpoint's \
+             vocabulary (vocab_size={vocab_size}). An out-of-range vision token id silently \
+             mis-segments vision spans in MRoPE position assignment instead of failing loudly, so \
+             mlxcel rejects it at load time."
+        );
     }
+    Ok(id)
 }
 
 fn wrap_qwen35_vlm(vlm: vision::Qwen35VLModel, variant: Qwen35VlmVariant) -> LoadedModel {

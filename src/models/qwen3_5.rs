@@ -102,6 +102,178 @@ pub struct Qwen35Config {
     pub quantization: Option<Quantization>,
     #[serde(default)]
     pub mlp_only_layers: Vec<usize>,
+
+    /// Output-gate activation for the gated-delta (linear attention) layers.
+    ///
+    /// Originates in vLLM's `qwen_gdn_linear_attn.py`, which selects the gate
+    /// from `{silu, swish, sigmoid}` and treats `swish` as an alias for
+    /// `silu`. mlxcel hardcodes SiLU in `RMSNormGated::forward`
+    /// (`src/models/gated_delta.rs`), so only the SiLU-equivalent spellings
+    /// are implementable today. Absent in every Qwen3.5 checkpoint and
+    /// `"swish"` in Qwen3.8-27B; both resolve to the hardcoded path.
+    /// [`Qwen35Config::validate_supported`] rejects anything else instead of
+    /// dropping the key and generating silently wrong output.
+    #[serde(default)]
+    pub output_gate_type: Option<String>,
+}
+
+/// Config values a Qwen3.5-family checkpoint can declare that mlxcel has no
+/// code path for.
+///
+/// Every variant here used to be a silently dropped key: `Qwen35Config` has
+/// no `deny_unknown_fields`, so a checkpoint asking for behavior mlxcel does
+/// not implement would load and then produce wrong output or a confusing
+/// downstream failure. Each variant converts one of those into a named error
+/// at load time.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Qwen35UnsupportedConfig {
+    /// `text_config.output_gate_type` names an activation other than SiLU.
+    #[error(
+        "Qwen3.5-family config declares output_gate_type={0:?}, which mlxcel does not implement. \
+         The gated-delta output gate is hardcoded to SiLU in RMSNormGated::forward, so only \
+         \"silu\" and its alias \"swish\" (or an absent key) load correctly. Loading this \
+         checkpoint would produce silently wrong output."
+    )]
+    OutputGateType(String),
+
+    /// `text_config.rope_parameters.mrope_interleaved` is explicitly `false`.
+    #[error(
+        "Qwen3.5-family config declares rope_parameters.mrope_interleaved=false, which mlxcel \
+         does not implement. The multimodal RoPE section is applied by InterleavedMRoPE \
+         unconditionally (src/models/qwen3_next.rs), so a non-interleaved checkpoint would be \
+         given interleaved positions and produce silently wrong output."
+    )]
+    MropeInterleavedDisabled,
+
+    /// `text_config.rope_parameters.mrope_interleaved` is present but is not
+    /// a JSON boolean (for example the string `"false"` or the number `0`).
+    #[error(
+        "Qwen3.5-family config declares rope_parameters.mrope_interleaved={0}, which is not a \
+         JSON boolean. mlxcel treats a present-but-wrong-typed value as a load error instead of \
+         silently treating it as absent: a checkpoint that means mrope_interleaved=false but \
+         spells it as a string or a number would otherwise be given interleaved positions and \
+         produce silently wrong output, exactly the failure mode MropeInterleavedDisabled exists \
+         to catch."
+    )]
+    MropeInterleavedWrongType(String),
+
+    /// Top-level `language_model_only` is `true` on a VLM wrapper config.
+    #[error(
+        "Qwen3.5-family config declares language_model_only=true, which mlxcel does not \
+         implement. The Qwen3.5 VLM loader always builds the vision tower from the checkpoint's \
+         model.visual.* weights, which a vision-stripped build does not ship. Upstream has the \
+         same gap (Blaizzy/mlx-vlm#1812)."
+    )]
+    LanguageModelOnly,
+
+    /// Top-level `language_model_only` is present but is not a JSON boolean.
+    #[error(
+        "Qwen3.5-family config declares language_model_only={0}, which is not a JSON boolean. \
+         mlxcel treats a present-but-wrong-typed value as a load error instead of silently \
+         treating it as absent: a checkpoint that means language_model_only=true but spells it \
+         as a string or a number would otherwise load through the vision path this flag exists \
+         to opt out of."
+    )]
+    LanguageModelOnlyWrongType(String),
+}
+
+/// Cap an untrusted config value's textual representation before it is
+/// embedded in an error message.
+///
+/// `config.json` is attacker- or mistake-controlled input. Without a cap, one
+/// oversized value turns a single failed load into an oversized error: a
+/// 1,002,990-byte `output_gate_type` string reproduced as 1,000,568 bytes of
+/// process output before this existed.
+fn truncate_for_error(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        text.to_string()
+    } else {
+        let truncated: String = text.chars().take(max_chars).collect();
+        format!("{truncated}...")
+    }
+}
+
+/// Maximum length of a config value echoed back into an
+/// [`Qwen35UnsupportedConfig`] error message. Long enough to show the
+/// offending value; short enough that a hostile or malformed config cannot
+/// inflate load-time error output.
+const MAX_ERROR_VALUE_CHARS: usize = 64;
+
+/// Reject VLM wrapper-config values that the Qwen3.5 VLM loader cannot honour.
+///
+/// `full_config` is the whole `config.json`, not `text_config`:
+/// `language_model_only` lives at the top level next to `vision_config`.
+/// Only the VLM loader calls this. On the text-only path a vision-stripped
+/// checkpoint is exactly what the caller asked for, so the flag is not an
+/// error there.
+///
+/// A present-but-wrong-typed value (the JSON string `"true"`, the number `1`,
+/// an object, ...) is rejected rather than read as absent via `.as_bool()`:
+/// on a release binary, `language_model_only: "true"`, `1`, and `{}` all used
+/// to pass this check and load.
+pub fn validate_qwen35_wrapper_config(
+    full_config: &serde_json::Value,
+) -> Result<(), Qwen35UnsupportedConfig> {
+    if let Some(value) = full_config.get("language_model_only") {
+        match value.as_bool() {
+            Some(true) => return Err(Qwen35UnsupportedConfig::LanguageModelOnly),
+            Some(false) => {}
+            None => {
+                return Err(Qwen35UnsupportedConfig::LanguageModelOnlyWrongType(
+                    truncate_for_error(&value.to_string(), MAX_ERROR_VALUE_CHARS),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Where the MRoPE `position_ids` for one forward pass come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MRopePositionSource {
+    /// Reuse the stored `[3, batch, total_len]` tensor by slicing the
+    /// half-open window `[start, end)` off its last axis.
+    SliceStored { start: i32, end: i32 },
+    /// The stored tensor cannot serve this window (absent, wrong rank, wrong
+    /// batch, or too short). Recompute from the cached `rope_deltas`.
+    Recompute,
+}
+
+/// Decide whether a stored MRoPE `position_ids` tensor can serve the window
+/// this forward pass needs, and which window to take.
+///
+/// Chunked prefill calls `forward` repeatedly with `cache_offset > 0`, so the
+/// stored tensor covers the whole prompt while each call needs only
+/// `[cache_offset, cache_offset + seq_len)`. Reuse is valid when the stored
+/// tensor is 3-D `[3, batch, total_len]`, carries the same batch dimension as
+/// this request, and is long enough to cover the window. Anything else falls
+/// back to the delta-based recompute.
+///
+/// Mirrors mlx-vlm's `position_ids` reuse condition, which checks both
+/// `shape[1] == batch_size` (Blaizzy/mlx-vlm#1040) and
+/// `shape[-1] >= cache_offset + seq_length` (Blaizzy/mlx-vlm#1048), and slices
+/// rather than recomputing when the stored tensor overshoots
+/// (Blaizzy/mlx-vlm#1741).
+///
+/// Split out of `forward_with_mrope_state` so the reuse condition is unit
+/// testable without a checkpoint.
+pub fn mrope_position_source(
+    stored_shape: Option<&[i32]>,
+    batch: i32,
+    seq_len: i32,
+    cache_offset: i32,
+) -> MRopePositionSource {
+    let Some(shape) = stored_shape else {
+        return MRopePositionSource::Recompute;
+    };
+    if shape.len() == 3 && shape[1] == batch && shape[2] >= cache_offset + seq_len {
+        MRopePositionSource::SliceStored {
+            start: cache_offset,
+            end: cache_offset + seq_len,
+        }
+    } else {
+        MRopePositionSource::Recompute
+    }
 }
 
 fn default_rms_norm_eps() -> f32 {
@@ -169,6 +341,72 @@ impl Qwen35Config {
 
     pub fn rope_dims(&self) -> i32 {
         (self.head_dim_resolved() as f32 * self.partial_rotary_factor()) as i32
+    }
+
+    /// `rope_parameters.mrope_interleaved`, when the checkpoint spells it out
+    /// as a JSON boolean.
+    ///
+    /// `None` means either the key is absent (every Qwen3.5 checkpoint and
+    /// the text-only Qwen3.5 configs) or it is present but not a boolean.
+    /// This permissive accessor is for call sites that only care about the
+    /// `true`/absent common case; [`Qwen35Config::validate_supported`] uses
+    /// the stricter [`Qwen35Config::mrope_interleaved_checked`] instead, so a
+    /// wrong-typed value is a named error rather than silently equivalent to
+    /// absent.
+    pub fn mrope_interleaved(&self) -> Option<bool> {
+        self.rope_parameters
+            .as_ref()
+            .and_then(|rp| rp.get("mrope_interleaved"))
+            .and_then(|v| v.as_bool())
+    }
+
+    /// Strict variant of [`Qwen35Config::mrope_interleaved`]: a present value
+    /// that is not a JSON boolean (the string `"false"`, the number `0`, ...)
+    /// is a named error instead of `Ok(None)`. On a release binary,
+    /// `mrope_interleaved: "false"` and `mrope_interleaved: 0` both used to
+    /// pass validation and load through the plain `.as_bool()` read, which is
+    /// precisely the silently-wrong case `MropeInterleavedDisabled` exists to
+    /// catch.
+    fn mrope_interleaved_checked(&self) -> Result<Option<bool>, Qwen35UnsupportedConfig> {
+        match self
+            .rope_parameters
+            .as_ref()
+            .and_then(|rp| rp.get("mrope_interleaved"))
+        {
+            None => Ok(None),
+            Some(value) => value.as_bool().map(Some).ok_or_else(|| {
+                Qwen35UnsupportedConfig::MropeInterleavedWrongType(truncate_for_error(
+                    &value.to_string(),
+                    MAX_ERROR_VALUE_CHARS,
+                ))
+            }),
+        }
+    }
+
+    /// Reject text-config values that mlxcel reads but cannot honour.
+    ///
+    /// Call this immediately after deserializing a Qwen3.5-family text config
+    /// so an unimplementable checkpoint fails at load time with a named error
+    /// rather than running with the wrong activation or the wrong RoPE layout.
+    /// Absent keys are always accepted: they are the Qwen3.5 shape.
+    pub fn validate_supported(&self) -> Result<(), Qwen35UnsupportedConfig> {
+        if let Some(gate) = self.output_gate_type.as_deref() {
+            // vLLM treats "swish" as an alias for "silu" and lowercases
+            // neither before comparing; accept any casing of either spelling
+            // so a checkpoint spelling it "SiLU" does not hard-fail a load
+            // the implemented path handles correctly. "sigmoid" is the one
+            // spelling that would change the math.
+            if !gate.eq_ignore_ascii_case("silu") && !gate.eq_ignore_ascii_case("swish") {
+                return Err(Qwen35UnsupportedConfig::OutputGateType(truncate_for_error(
+                    gate,
+                    MAX_ERROR_VALUE_CHARS,
+                )));
+            }
+        }
+        if self.mrope_interleaved_checked()? == Some(false) {
+            return Err(Qwen35UnsupportedConfig::MropeInterleavedDisabled);
+        }
+        Ok(())
     }
 
     pub fn is_linear_layer(&self, layer_idx: usize) -> bool {
@@ -1300,52 +1538,41 @@ impl Qwen35Model {
         let batch = ids_shape[0];
         let seq_len = ids_shape[1];
 
-        // Compute position_ids with sufficiency check for chunked prefill.
-        // This matches upstream mlx-vlm PR #1048 (commit 1bf7742): the cached
-        // _position_ids entry is reusable when shape[-1] >= cache_offset + seq_length,
-        // not only when cache_offset == 0.  During chunked prefill (cache_offset > 0)
-        // the stored array is sliced to the needed window rather than recomputed.
+        // Resolve position_ids through `mrope_position_source`, which carries
+        // the reuse condition and its upstream lineage
+        // (Blaizzy/mlx-vlm#1040, Blaizzy/mlx-vlm#1048, Blaizzy/mlx-vlm#1741).
         //
-        // the MRoPE entry is resolved per `SequenceId` so a row
-        // that just finished a VL prefill cannot poison a subsequent
-        // text-only sequence's decode delta.
-        //
-        // (upstream mlx-vlm PR #1040, commit 58e2435): also validate
-        // pos_shape[1] == batch before reusing, matching the upstream Python check:
-        //   self._position_ids.shape[1] == batch_size
-        //   and self._position_ids.shape[-1] >= cache_offset + seq_length
-        // Without this, a sequential request with a different batch_size would
-        // silently reuse stale position IDs and crash on broadcast_shapes.
+        // The MRoPE entry is resolved per `SequenceId` so a row that just
+        // finished a VL prefill cannot poison a subsequent text-only
+        // sequence's decode delta.
         let position_ids = self.mrope_state.with_entry(seq_id, |entry| {
-            if let Some(ref stored_pos) = entry.position_ids {
-                let pos_shape = mlxcel_core::array_shape(stored_pos);
-                // Sufficient when the stored tensor covers [cache_offset, cache_offset+seq_len)
-                // and has the same batch dimension as the current request.
-                if pos_shape.len() == 3
-                    && pos_shape[1] == batch
-                    && pos_shape[2] >= cache_offset + seq_len
-                {
-                    return Some(mlxcel_core::slice(
+            let stored_shape = entry
+                .position_ids
+                .as_ref()
+                .map(|stored_pos| mlxcel_core::array_shape(stored_pos));
+            match mrope_position_source(stored_shape.as_deref(), batch, seq_len, cache_offset) {
+                MRopePositionSource::SliceStored { start, end } => {
+                    let stored_pos = entry
+                        .position_ids
+                        .as_ref()
+                        .expect("SliceStored is only returned for a stored tensor");
+                    let shape = stored_shape
+                        .as_ref()
+                        .expect("SliceStored is only returned for a stored tensor");
+                    Some(mlxcel_core::slice(
                         stored_pos,
-                        &[0, 0, cache_offset],
-                        &[pos_shape[0], pos_shape[1], cache_offset + seq_len],
-                    ));
+                        &[0, 0, start],
+                        &[shape[0], shape[1], end],
+                    ))
                 }
-                // Stored ids no longer cover this window; fall back to delta-based compute.
-                Self::compute_decode_position_ids_with_delta(
+                // Stored ids are absent or no longer cover this window; fall
+                // back to delta-based compute.
+                MRopePositionSource::Recompute => Self::compute_decode_position_ids_with_delta(
                     entry.rope_deltas,
                     batch,
                     seq_len,
                     cache_offset,
-                )
-            } else {
-                // No stored position_ids; use delta-based compute when rope_deltas is set.
-                Self::compute_decode_position_ids_with_delta(
-                    entry.rope_deltas,
-                    batch,
-                    seq_len,
-                    cache_offset,
-                )
+                ),
             }
         });
 
@@ -1379,6 +1606,7 @@ impl Qwen35Model {
 
         let config: Qwen35Config = serde_json::from_value(text_config_val)
             .map_err(|e| format!("Failed to parse config: {}", e))?;
+        config.validate_supported().map_err(|e| e.to_string())?;
 
         println!(
             "[Qwen3.5] Config loaded: {} layers ({} full attention, {} linear attention)",
@@ -2109,6 +2337,7 @@ impl Qwen35StageModel {
         }
         let config: Qwen35Config = serde_json::from_value(text_config_val)
             .map_err(|e| format!("Failed to parse config: {}", e))?;
+        config.validate_supported().map_err(|e| e.to_string())?;
 
         let mut weights = crate::models::load_text_weights(model_dir, None)?;
         weights = sanitize_moe_weights(weights, &config);

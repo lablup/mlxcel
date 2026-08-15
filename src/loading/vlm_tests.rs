@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use super::{
-    QwenVisionTokenIds, inherit_qwen_vision_quantization, qwen_vl_token_ids,
-    qwen35_vlm_token_defaults, require_object_mut, rewrite_qwen3_vl_weight_key,
+    QwenVisionTokenIds, inherit_qwen_vision_quantization, qwen_vl_token_ids, qwen35_vl_token_ids,
+    require_object_mut, rewrite_qwen3_vl_weight_key,
 };
 use crate::vision::encoders::qwen3_vl::Qwen3VLVisionConfig;
 use serde_json::json;
@@ -131,14 +131,194 @@ fn qwen_vl_token_ids_applies_defaults_and_overrides() {
     );
 }
 
+/// The older Qwen VL families still resolve their token ids through
+/// [`qwen_vl_token_ids`] with per-family defaults, and #1163 must not change
+/// that. The `vision_start_token_id` requirement is scoped to the Qwen3.5
+/// family, where the historical default was stale.
+///
+/// The default triples below are exactly the ones the loaders pass in
+/// `src/loading/vlm_qwen.rs`, and they match the shipped checkpoints
+/// (`qwen2-vl-2b-4bit`, `qwen2.5-vl-3b-4bit`, `qwen3-vl-4b-4bit` all declare
+/// 151652).
 #[test]
-fn qwen35_vlm_token_defaults_match_reference_config() {
+fn older_qwen_vl_families_still_resolve_token_ids_from_defaults() {
+    let qwen_vl = QwenVisionTokenIds {
+        image_token_id: 151655,
+        video_token_id: 151656,
+        vision_start_token_id: 151652,
+    };
+    let glm4v = QwenVisionTokenIds {
+        image_token_id: 151363,
+        video_token_id: 151364,
+        vision_start_token_id: 151339,
+    };
+
+    for (family, defaults) in [
+        ("qwen2_vl", qwen_vl),
+        ("qwen2_5_vl", qwen_vl),
+        ("qwen3_vl", qwen_vl),
+        ("qwen3_vl_moe", qwen_vl),
+        ("glm4v", glm4v),
+    ] {
+        // A config that omits every id must still load, from the defaults.
+        assert_eq!(
+            qwen_vl_token_ids(&json!({}), defaults),
+            defaults,
+            "{family}: an empty config must fall back to the family defaults"
+        );
+
+        // A config that supplies them must win over the defaults.
+        let overridden = qwen_vl_token_ids(
+            &json!({
+                "image_token_id": 7,
+                "video_token_id": 8,
+                "vision_start_token_id": 9
+            }),
+            defaults,
+        );
+        assert_eq!(
+            overridden,
+            QwenVisionTokenIds {
+                image_token_id: 7,
+                video_token_id: 8,
+                vision_start_token_id: 9,
+            },
+            "{family}: explicit ids must be read from the config"
+        );
+    }
+}
+
+/// The Qwen3.5 family requires `vision_start_token_id` from the config. The
+/// removed 248045 default was stale for every shipped checkpoint in the
+/// family, and a wrong start id mis-segments MRoPE vision spans silently
+/// rather than failing.
+#[test]
+fn qwen35_vl_token_ids_requires_vision_start_from_config() {
+    let err = qwen35_vl_token_ids(
+        &json!({
+            "image_token_id": 248056,
+            "video_token_id": 248057
+        }),
+        248320,
+    )
+    .expect_err("a Qwen3.5 config without vision_start_token_id must not load");
+    let message = err.to_string();
+    assert!(
+        message.contains("vision_start_token_id"),
+        "error must name the missing key, got: {message}"
+    );
+    assert!(
+        message.contains("248045"),
+        "error must name the stale default it replaces, got: {message}"
+    );
+}
+
+/// Pinned to the published `config.json` of `mlx-community/Qwen3.8-27B-4bit`
+/// and `mlx-community/Qwen3.5-27B-4bit`, which agree on all three ids.
+#[test]
+fn qwen35_vl_token_ids_read_the_published_checkpoint_ids() {
+    let ids = qwen35_vl_token_ids(
+        &json!({
+            "image_token_id": 248056,
+            "video_token_id": 248057,
+            "vision_start_token_id": 248053,
+            "vision_end_token_id": 248054
+        }),
+        248320,
+    )
+    .expect("the published Qwen3.8-27B config supplies vision_start_token_id");
+
     assert_eq!(
-        qwen35_vlm_token_defaults(),
+        ids,
         QwenVisionTokenIds {
             image_token_id: 248056,
             video_token_id: 248057,
-            vision_start_token_id: 248045,
+            // Not the old 248045 default.
+            vision_start_token_id: 248053,
         }
+    );
+}
+
+/// `image_token_id` and `video_token_id` keep their defaults for this family:
+/// those constants do match every shipped checkpoint.
+#[test]
+fn qwen35_vl_token_ids_default_only_the_image_and_video_ids() {
+    let ids = qwen35_vl_token_ids(&json!({ "vision_start_token_id": 248053 }), 248320)
+        .expect("vision_start_token_id alone is enough to load");
+    assert_eq!(
+        ids,
+        QwenVisionTokenIds {
+            image_token_id: 248056,
+            video_token_id: 248057,
+            vision_start_token_id: 248053,
+        }
+    );
+}
+
+/// `vision_start_token_id` used to be cast from `i64` to `i32` with a
+/// silently truncating `as i32`. `2^40` (1099511627776) truncates to 0 under
+/// that cast and used to load with no diagnostic, reproducing exactly the
+/// silent-misassignment failure `qwen35_vl_token_ids` exists to close.
+#[test]
+fn qwen35_vl_token_ids_rejects_an_overflowing_vision_start() {
+    let err = qwen35_vl_token_ids(
+        &json!({ "vision_start_token_id": 1_099_511_627_776i64 }),
+        248320,
+    )
+    .expect_err("a vision_start_token_id that overflows i32 must not load");
+    let message = err.to_string();
+    assert!(
+        message.contains("vision_start_token_id") && message.contains("1099511627776"),
+        "error must name the key and the offending value, got: {message}"
+    );
+}
+
+/// A negative id used to pass through the old unchecked cast unchanged; it is
+/// not a valid index into the checkpoint's vocabulary.
+#[test]
+fn qwen35_vl_token_ids_rejects_a_negative_vision_start() {
+    let err = qwen35_vl_token_ids(&json!({ "vision_start_token_id": -5 }), 248320)
+        .expect_err("a negative vision_start_token_id must not load");
+    assert!(
+        err.to_string().contains("vision_start_token_id"),
+        "error must name the offending key, got: {err}"
+    );
+}
+
+/// An id that fits in `i32` and is non-negative but exceeds the checkpoint's
+/// own vocabulary is still a wrong start id: it mis-segments MRoPE vision
+/// spans just as surely as an overflowing or negative one.
+#[test]
+fn qwen35_vl_token_ids_rejects_a_vision_start_beyond_vocab_size() {
+    let err = qwen35_vl_token_ids(&json!({ "vision_start_token_id": 300_000 }), 248320)
+        .expect_err("a vision_start_token_id past vocab_size must not load");
+    assert!(
+        err.to_string().contains("vocab_size"),
+        "error must name the vocabulary bound, got: {err}"
+    );
+}
+
+/// `image_token_id` and `video_token_id` get the same range treatment as
+/// `vision_start_token_id`, not just presence-checking.
+#[test]
+fn qwen35_vl_token_ids_range_checks_image_and_video_ids_too() {
+    let err = qwen35_vl_token_ids(
+        &json!({ "vision_start_token_id": 248053, "image_token_id": -1 }),
+        248320,
+    )
+    .expect_err("a negative image_token_id must not load");
+    assert!(
+        err.to_string().contains("image_token_id"),
+        "error must name image_token_id, got: {err}"
+    );
+
+    let err = qwen35_vl_token_ids(
+        &json!({ "vision_start_token_id": 248053, "video_token_id": 9_999_999_999i64 }),
+        248320,
+    )
+    .expect_err("an overflowing video_token_id must not load");
+    assert!(
+        err.to_string().contains("video_token_id"),
+        "error must name video_token_id, got: {err}"
     );
 }
