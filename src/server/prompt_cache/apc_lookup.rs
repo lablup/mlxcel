@@ -43,7 +43,18 @@ use super::block_hash::{ApcBlockHash, ApcHashAlgo, BlockHashChain};
 /// onward — so the function returns `k * block_size`, the last block boundary
 /// where both chains agreed.
 ///
-/// If every covered block agrees, the input `matched_len` is preserved.
+/// The return value is always a multiple of `block_size`, never a
+/// pass-through of the raw input `matched_len`, even when every covered
+/// block agrees: the result is `consistent_blocks * block_size`, where
+/// `consistent_blocks` is capped by the blocks covered by `matched_len`
+/// (`floor(matched_len / block_size)`), by the candidate chain's length,
+/// and by the request's own recomputed chain length. An already
+/// block-aligned `matched_len` comes back numerically equal only because
+/// the arithmetic lines up, not because it was preserved. Any tokens past
+/// the last agreeing block boundary are dropped, including a
+/// non-block-aligned tail of `matched_len`. This flooring is deliberate and
+/// should not be "fixed" to pass `matched_len` through unchanged.
+///
 /// `matched_len` smaller than `block_size` short-circuits to `0` because no
 /// full block can be verified without `block_size` tokens of agreement.
 pub(super) fn apc_consistent_prefix_len(
