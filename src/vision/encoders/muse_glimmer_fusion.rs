@@ -264,3 +264,9 @@ fn check_linear_shape(linear: &UnifiedLinear, expected: &[i32], label: &str) -> 
 #[cfg(test)]
 #[path = "muse_glimmer_fusion_tests.rs"]
 mod tests;
+
+// Contract check against the pinned Muse Glimmer checkpoint, kept in its own
+// module because it reads files off disk rather than exercising fusion math.
+#[cfg(test)]
+#[path = "muse_glimmer_fusion_pinned_tests.rs"]
+mod pinned_tests;
