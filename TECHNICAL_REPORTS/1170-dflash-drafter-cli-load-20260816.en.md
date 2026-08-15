@@ -64,7 +64,7 @@ None. This is a pre-load guard on the config-inspection path (a `serde_json` par
 
 - **Test Coverage**: new tests across four locations (`src/commands/generate_tests.rs`, `src/models/detection_tests.rs`, `src/lib/mlxcel-core/src/drafter/dflash/config.rs`, `tests/speculative_dispatch.rs`), each carrying an ordinary-full-model control that must keep resolving through the classic path. A mutation test (guarding the new detection arm as `if false && ...`) confirmed the new tests are real assertions rather than tautologies: both the `-m` and `--draft-model` rejection tests failed with the pre-fix classification.
 - **Code Complexity**: the structural probe is two small pure functions (`is_dflash_drafter_config`, `is_dflash_drafter_dir`) plus one shared error constructor; no control flow changes to any existing load path.
-- **Technical Debt**: decreased on both counts addressed here — the CI-relevant test hygiene inconsistency (M3) is closed, and the offline entry point no longer silently misroutes a class of checkpoint it was never built to run.
+- **Technical Debt**: decreased on both counts addressed here: the CI-relevant test hygiene inconsistency (M3) is closed, and the offline entry point no longer silently misroutes a class of checkpoint it was never built to run.
 
 ---
 
