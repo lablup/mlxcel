@@ -205,13 +205,25 @@ fn assert_post_tower_contract(model_dir: &Path, checkpoint: PinnedCheckpoint) {
     }
 }
 
+/// Absolute ceiling on a declared safetensors header, mirroring the guard
+/// `read_safetensors_header_bytes` in `mlxcel-core` already applies to the same
+/// eight-byte prefix. The file-relative bound in `safetensors_shape` cannot
+/// stand alone here: the pinned shards run to 50 GB, so a corrupt prefix inside
+/// one of them can declare a multi-gigabyte header that is still smaller than
+/// the file, and the allocation that follows would either abort the test
+/// process on allocation failure or pull gigabytes of tensor payload into
+/// memory. Real headers are kilobytes to a few megabytes, and the safetensors
+/// reference implementation caps them at 100 MB.
+const MAX_SAFETENSORS_HEADER_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Read the recorded shape of `key` out of the safetensors header at `path`.
 ///
 /// `Err` covers availability and readability only: a shard that cannot be
-/// opened, a header truncated by an interrupted download, or a header that does
-/// not parse as JSON. A header that parses but does not describe `key` as a
-/// shaped tensor is a wrong checkpoint rather than a missing one, so it panics
-/// and fails the test. Only the file header is read, never the tensor payload.
+/// opened, a header truncated by an interrupted download, a declared header
+/// length no real checkpoint carries, or a header that does not parse as JSON.
+/// A header that parses but does not describe `key` as a shaped tensor is a
+/// wrong checkpoint rather than a missing one, so it panics and fails the test.
+/// Only the file header is read, never the tensor payload.
 fn safetensors_shape(path: &Path, key: &str) -> Result<Vec<usize>, String> {
     let mut file = std::fs::File::open(path)
         .map_err(|err| format!("shard {} could not be opened: {err}", path.display()))?;
@@ -228,8 +240,17 @@ fn safetensors_shape(path: &Path, key: &str) -> Result<Vec<usize>, String> {
         )
     })?;
     let header_len = u64::from_le_bytes(header_len);
-    // Bound the declared header against the file itself before allocating, so a
-    // corrupt length cannot turn into a multi-gigabyte allocation.
+    // Bound the declared header before allocating it, so a corrupt length
+    // cannot turn into a multi-gigabyte allocation: against a fixed ceiling
+    // first, because a 50 GB shard leaves the file-relative bound below far too
+    // loose, then against the file itself.
+    if header_len > MAX_SAFETENSORS_HEADER_BYTES {
+        return Err(format!(
+            "shard {} declares a {header_len}-byte safetensors header, over the \
+             {MAX_SAFETENSORS_HEADER_BYTES}-byte ceiling this reader will allocate",
+            path.display()
+        ));
+    }
     if header_len > file_len.saturating_sub(8) {
         return Err(format!(
             "shard {} declares a {header_len}-byte safetensors header but holds {file_len} bytes",
@@ -553,6 +574,21 @@ fn safetensors_shape_reports_a_truncated_header() {
         err.contains("declares a 4096-byte safetensors header"),
         "{err}"
     );
+}
+
+#[test]
+fn safetensors_shape_refuses_a_header_over_the_allocation_ceiling() {
+    // A corrupt eight-byte prefix inside a genuine multi-gigabyte shard can
+    // declare a header that is enormous and still smaller than the file, which
+    // the file-relative bound alone would wave through. Reproduced with a tiny
+    // file, so the test itself never allocates anything large either.
+    let dir = tempfile::tempdir().unwrap();
+    let shard = write_shard(dir.path(), u64::MAX, b"{}");
+
+    let err = safetensors_shape(&shard, "model.vision_projection.weight").unwrap_err();
+
+    assert!(err.contains(SYNTHETIC_SHARD), "{err}");
+    assert!(err.contains("ceiling this reader will allocate"), "{err}");
 }
 
 #[test]
