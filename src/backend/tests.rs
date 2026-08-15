@@ -41,6 +41,16 @@ const _: () = {
 
 #[test]
 fn select_backend_resolves_to_mlx_under_default_features() {
+    // Under default features `select_backend()` reads no environment variable
+    // (it const-folds to the single MLX variant), so this lock looks
+    // superfluous here. It is not: under the opt-in `xla-backend` /
+    // `experimental-backend` features, `select_backend()` reads
+    // `MLXCEL_BACKEND`, and `muse_glimmer_startup_rejects_xla_backend_selection`
+    // transiently sets that var to "xla" while holding this same lock. Taking
+    // it here too keeps this test from observing that transient value under a
+    // parallel full-suite run with those features enabled. Do not remove this
+    // guard just because it appears unused under default features.
+    let _env_guard = crate::test_support::env_lock::env_lock();
     let backend = select_backend();
     assert!(
         matches!(backend, Backend::Mlx(_)),
@@ -59,6 +69,11 @@ fn seam_delegates_to_real_mlx_loader_on_missing_dir() {
     // Proves the seam reaches the existing MLX loader rather than a
     // backend-level shim: a nonexistent directory surfaces the loader's own
     // error (no real checkpoint is loaded, so this stays fast and bridge-free).
+    // Held for the same reason as `select_backend_resolves_to_mlx_under_default_features`
+    // above: under the opt-in `xla-backend` feature a racing `MLXCEL_BACKEND=xla`
+    // mutation could hand this test an XLA backend, which would silently defeat
+    // the "reaches the MLX loader" claim this test makes without failing it.
+    let _env_guard = crate::test_support::env_lock::env_lock();
     let backend = select_backend();
     let missing = std::path::Path::new("/nonexistent/mlxcel-backend-seam-338");
     // `(LoadedModel, MlxcelTokenizer)` is not `Debug`, so match instead of
@@ -78,6 +93,11 @@ fn mlx_backend_creates_a_session_and_advertises_batched_serving() {
     // The session is constructed without loading a checkpoint (the wrapped
     // `CxxGenerator` only allocates KV caches), so this stays fast and bridge
     // light, like the existing `CxxGenerator::new` unit tests.
+    // Held for the same reason as `select_backend_resolves_to_mlx_under_default_features`
+    // above: under the opt-in `xla-backend` feature a racing `MLXCEL_BACKEND=xla`
+    // mutation could hand this test an XLA backend, whose `supports_batched_serving()`
+    // and session capabilities differ from the MLX assertions below.
+    let _env_guard = crate::test_support::env_lock::env_lock();
     let backend = select_backend();
     assert!(
         backend.supports_batched_serving(),
@@ -102,6 +122,12 @@ fn mlx_backend_creates_a_session_and_advertises_batched_serving() {
 
 #[test]
 fn mlx_session_threads_the_token_bias_through() {
+    // Under the opt-in `xla-backend` feature, `select_backend()` reads
+    // `MLXCEL_BACKEND`, and `muse_glimmer_startup_rejects_xla_backend_selection`
+    // transiently sets that var to "xla" while holding this same lock. Without
+    // taking it here too, a parallel full-suite run could hand this test an
+    // XLA session and hit the `unreachable!` arm below.
+    let _env_guard = crate::test_support::env_lock::env_lock();
     let mut bias = TokenBiasMap::new();
     bias.insert(5, -2.0);
     let session = select_backend()
