@@ -96,16 +96,17 @@ fn should_route_offline_mtp_rejects_other_explicit_kinds() {
 // =============================================================================
 
 /// Write a drafter fixture directory carrying `config`, and return it.
-fn drafter_fixture_dir(name: &str, config: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "mlxcel_generate_drafter_{name}_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("config.json"), config).unwrap();
+///
+/// Backed by `tempfile::tempdir()` rather than a predictable path under
+/// `env::temp_dir()`: the latter is a symlink/pre-existing-directory hazard
+/// (CWE-377/379) on a shared `TMPDIR`, and only cleans up on the success path,
+/// leaking the fixture on an assertion failure. `TempDir` removes the
+/// directory on drop regardless of how the test exits, matching the pattern
+/// the `mlxcel-core` `drafter::dflash::config` tests added in this same PR
+/// already use.
+fn drafter_fixture_dir(config: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("temp dir");
+    fs::write(dir.path().join("config.json"), config).unwrap();
     dir
 }
 
@@ -115,7 +116,6 @@ fn offline_draft_model_rejects_a_dflash_drafter_directory() {
     // only honest markers are the DFlashDraftModel architecture and the nested
     // `dflash_config` block.
     let dir = drafter_fixture_dir(
-        "dflash",
         r#"{
             "architectures": ["DFlashDraftModel"],
             "auto_map": {"AutoModel": "dflash.DFlashDraftModel"},
@@ -126,7 +126,7 @@ fn offline_draft_model_rejects_a_dflash_drafter_directory() {
         }"#,
     );
 
-    let error = reject_dflash_drafter_offline(&dir)
+    let error = reject_dflash_drafter_offline(dir.path())
         .expect_err("a DFlash drafter cannot be loaded as a standalone model")
         .to_string();
 
@@ -146,8 +146,6 @@ fn offline_draft_model_rejects_a_dflash_drafter_directory() {
         !error.contains("Weight not found"),
         "the weight-lookup symptom must not reach the user, got: {error}",
     );
-
-    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -162,12 +160,11 @@ fn offline_draft_model_rejects_a_dflash_drafter_on_either_marker_alone() {
             r#"{"model_type": "qwen3", "dflash_config": {"mask_token_id": 248070}}"#,
         ),
     ] {
-        let dir = drafter_fixture_dir(name, config);
+        let dir = drafter_fixture_dir(config);
         assert!(
-            reject_dflash_drafter_offline(&dir).is_err(),
+            reject_dflash_drafter_offline(dir.path()).is_err(),
             "{name} must be rejected",
         );
-        fs::remove_dir_all(dir).unwrap();
     }
 }
 
@@ -178,7 +175,6 @@ fn offline_draft_model_still_accepts_an_ordinary_full_model_drafter() {
     // (`DEFAULT_DRAFTER_KIND`), so a rejection keyed on the resolved kind would
     // break it. Keyed on checkpoint structure, it passes through untouched.
     let dir = drafter_fixture_dir(
-        "ordinary",
         r#"{
             "architectures": ["Qwen3ForCausalLM"],
             "model_type": "qwen3",
@@ -188,11 +184,9 @@ fn offline_draft_model_still_accepts_an_ordinary_full_model_drafter() {
     );
 
     assert!(
-        reject_dflash_drafter_offline(&dir).is_ok(),
+        reject_dflash_drafter_offline(dir.path()).is_ok(),
         "an ordinary full model must keep loading as a classic drafter",
     );
-
-    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -200,20 +194,11 @@ fn offline_draft_model_check_defers_missing_or_broken_configs_to_the_loader() {
     // The probe is a pre-load guard, not a config validator: a directory with
     // no `config.json` (or an unparseable one) must fall through to the real
     // loader, which reports the I/O or parse error with its own diagnostics.
-    let empty = std::env::temp_dir().join(format!(
-        "mlxcel_generate_drafter_empty_{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&empty).unwrap();
-    assert!(reject_dflash_drafter_offline(&empty).is_ok());
-    fs::remove_dir_all(&empty).unwrap();
+    let empty = tempfile::tempdir().expect("temp dir");
+    assert!(reject_dflash_drafter_offline(empty.path()).is_ok());
 
-    let broken = drafter_fixture_dir("broken", "{ not json");
-    assert!(reject_dflash_drafter_offline(&broken).is_ok());
-    fs::remove_dir_all(broken).unwrap();
+    let broken = drafter_fixture_dir("{ not json");
+    assert!(reject_dflash_drafter_offline(broken.path()).is_ok());
 }
 
 // issue #166: the offline MTP loop must exclude the terminal EOS / stop token so
