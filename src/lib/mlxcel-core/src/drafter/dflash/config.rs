@@ -37,6 +37,7 @@
 //! `mask_token_id` and `target_layer_ids`.
 
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 /// Upstream DFlash default target-layer capture list.
 ///
@@ -242,6 +243,69 @@ impl DFlashConfig {
     }
 }
 
+/// Architecture name every published DFlash drafter declares in the
+/// `architectures` array of its `config.json`, and the class the checkpoint's
+/// `auto_map` points `AutoModel` at (`dflash.DFlashDraftModel`).
+pub const DFLASH_DRAFT_ARCHITECTURE: &str = "DFlashDraftModel";
+
+/// Whether a parsed `config.json` describes a DFlash speculative drafter
+/// rather than a standalone model.
+///
+/// The discriminator is deliberately **structural**. Two tempting
+/// alternatives are both wrong:
+///
+/// - **`model_type` is not a discriminator.** The published z-lab DFlash
+///   checkpoints declare `"model_type": "qwen3"`, byte-identical to what an
+///   ordinary Qwen 3 full model declares. That is precisely how a drafter
+///   directory reaches `Qwen3Model::load` and dies on `model.embed_tokens`.
+/// - **The resolved [`DrafterKind`](crate::drafter::DrafterKind) is worse.**
+///   [`DEFAULT_DRAFTER_KIND`](crate::drafter::DEFAULT_DRAFTER_KIND) is
+///   `Dflash` and `drafter_kind_by_model_type` maps only the two Gemma 4
+///   assistant types, so *every* drafter that is not a Gemma 4 assistant
+///   auto-resolves to `Dflash`, including an ordinary small full model used as
+///   a classic drafter. Keying on the resolved kind would reject that
+///   legitimate, currently-working pairing.
+///
+/// What a DFlash drafter really carries is a nested `dflash_config` object
+/// and/or `architectures: ["DFlashDraftModel"]`. Either marker alone is
+/// sufficient: `dflash_config` is what [`DFlashConfig::from_json`] itself
+/// keys on, and `architectures` is what HuggingFace `AutoModel` dispatch keys
+/// on. A checkpoint carrying neither is not a DFlash drafter.
+pub fn is_dflash_drafter_config(config: &serde_json::Value) -> bool {
+    if config
+        .get("dflash_config")
+        .is_some_and(serde_json::Value::is_object)
+    {
+        return true;
+    }
+
+    config
+        .get("architectures")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|architectures| {
+            architectures
+                .iter()
+                .any(|arch| arch.as_str() == Some(DFLASH_DRAFT_ARCHITECTURE))
+        })
+}
+
+/// Whether `path` holds a DFlash speculative drafter checkpoint.
+///
+/// Reads `path/config.json` and applies [`is_dflash_drafter_config`].
+///
+/// Returns `false` when the config is missing or unparseable: this is a
+/// pre-load guard, and a config that cannot be read is the general loader's
+/// error to report with its own diagnostics, not this probe's to swallow.
+pub fn is_dflash_drafter_dir(path: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(path.join("config.json")) else {
+        return false;
+    };
+    let Ok(config) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    is_dflash_drafter_config(&config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,6 +452,105 @@ mod tests {
             cfg.hidden_size,
             "default DFlashConfig is asymmetric: q out (4096) != hidden_size (2560). \
              A future patch that 'fixes' this is a regression."
+        );
+    }
+
+    // =========================================================================
+    // Structural DFlash-drafter probe (#1168)
+    // =========================================================================
+
+    /// The `config.json` of the published `qwen3.5-27b-dflash` drafter,
+    /// trimmed to the fields the probe and its negative controls care about.
+    fn published_dflash_config() -> serde_json::Value {
+        json!({
+            "architectures": ["DFlashDraftModel"],
+            "auto_map": {"AutoModel": "dflash.DFlashDraftModel"},
+            "block_size": 16,
+            "dflash_config": {
+                "mask_token_id": 248070,
+                "target_layer_ids": [1, 16, 31, 46, 61],
+            },
+            "hidden_size": 5120,
+            "model_type": "qwen3",
+            "num_hidden_layers": 5,
+            "num_target_layers": 64,
+            "vocab_size": 248320,
+        })
+    }
+
+    #[test]
+    fn probe_accepts_the_published_dflash_drafter_config() {
+        assert!(is_dflash_drafter_config(&published_dflash_config()));
+    }
+
+    #[test]
+    fn probe_accepts_either_marker_on_its_own() {
+        // `architectures` alone (a drafter export that inlines its DFlash
+        // fields at the top level instead of nesting them).
+        assert!(is_dflash_drafter_config(&json!({
+            "architectures": ["DFlashDraftModel"],
+            "model_type": "qwen3",
+            "mask_token_id": 248070,
+        })));
+
+        // `dflash_config` alone (an export that omits `architectures`, which
+        // `DFlashConfig::from_json` still loads because it keys on this block).
+        assert!(is_dflash_drafter_config(&json!({
+            "model_type": "qwen3",
+            "dflash_config": {"mask_token_id": 248070},
+        })));
+    }
+
+    #[test]
+    fn probe_rejects_an_ordinary_qwen3_full_model() {
+        // The regression this whole probe exists to avoid: an ordinary small
+        // full model used as a classic `--draft-model` drafter resolves to
+        // `DrafterKind::Dflash` by default, but it is NOT a DFlash drafter and
+        // must keep loading through the standalone model loader.
+        assert!(!is_dflash_drafter_config(&json!({
+            "architectures": ["Qwen3ForCausalLM"],
+            "model_type": "qwen3",
+            "hidden_size": 1024,
+            "num_hidden_layers": 28,
+        })));
+    }
+
+    #[test]
+    fn probe_rejects_non_object_and_non_array_marker_shapes() {
+        // A scalar `dflash_config` is not the nested block the loader reads,
+        // and a string `architectures` is not the HuggingFace array shape.
+        assert!(!is_dflash_drafter_config(&json!({"dflash_config": true})));
+        assert!(!is_dflash_drafter_config(&json!({"dflash_config": null})));
+        assert!(!is_dflash_drafter_config(&json!({
+            "architectures": "DFlashDraftModel",
+        })));
+        assert!(!is_dflash_drafter_config(&json!({})));
+    }
+
+    #[test]
+    fn probe_reads_config_json_from_a_directory() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("config.json"),
+            serde_json::to_string(&published_dflash_config()).unwrap(),
+        )
+        .expect("write config.json");
+        assert!(is_dflash_drafter_dir(dir.path()));
+    }
+
+    #[test]
+    fn probe_returns_false_for_missing_or_unparseable_config() {
+        let empty = tempfile::tempdir().expect("temp dir");
+        assert!(
+            !is_dflash_drafter_dir(empty.path()),
+            "a directory without config.json is not this probe's error to report",
+        );
+
+        let broken = tempfile::tempdir().expect("temp dir");
+        std::fs::write(broken.path().join("config.json"), "{ not json").expect("write");
+        assert!(
+            !is_dflash_drafter_dir(broken.path()),
+            "an unparseable config is the general loader's error to report",
         );
     }
 }

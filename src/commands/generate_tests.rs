@@ -18,8 +18,8 @@ use super::{
     CliSamplingFlagState, apply_user_chat_template, apply_vlm_chat_template,
     build_cli_sampling_config_with_flags, cli_pipeline_requested, estimate_delta_label_and_bytes,
     generated_suffix, generation_stats_from_duration, memory_preflight_ctx_len,
-    resolve_cli_pipeline_assignments, resolve_cli_prompt, should_route_offline_mtp,
-    strip_trailing_eos, validate_muse_glimmer_cli_unsupported_options,
+    reject_dflash_drafter_offline, resolve_cli_pipeline_assignments, resolve_cli_prompt,
+    should_route_offline_mtp, strip_trailing_eos, validate_muse_glimmer_cli_unsupported_options,
     validate_pipeline_parallel_args, validate_tensor_parallel_args,
     validate_xla_cli_image_cardinality, validate_xla_output_audio,
 };
@@ -89,6 +89,116 @@ fn should_route_offline_mtp_rejects_other_explicit_kinds() {
     assert!(!should_route_offline_mtp(true, DrafterKind::Dflash));
     assert!(!should_route_offline_mtp(true, DrafterKind::InternalMtp));
     assert!(!should_route_offline_mtp(false, DrafterKind::Dflash));
+}
+
+// =============================================================================
+// Offline `--draft-model <dflash-drafter>` rejection (#1168)
+// =============================================================================
+
+/// Write a drafter fixture directory carrying `config`, and return it.
+///
+/// Backed by `tempfile::tempdir()` rather than a predictable path under
+/// `env::temp_dir()`: the latter is a symlink/pre-existing-directory hazard
+/// (CWE-377/379) on a shared `TMPDIR`, and only cleans up on the success path,
+/// leaking the fixture on an assertion failure. `TempDir` removes the
+/// directory on drop regardless of how the test exits, matching the pattern
+/// the `mlxcel-core` `drafter::dflash::config` tests added in this same PR
+/// already use.
+fn drafter_fixture_dir(config: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("temp dir");
+    fs::write(dir.path().join("config.json"), config).unwrap();
+    dir
+}
+
+#[test]
+fn offline_draft_model_rejects_a_dflash_drafter_directory() {
+    // The published drafter shape: `model_type` is an ordinary `qwen3`, and the
+    // only honest markers are the DFlashDraftModel architecture and the nested
+    // `dflash_config` block.
+    let dir = drafter_fixture_dir(
+        r#"{
+            "architectures": ["DFlashDraftModel"],
+            "auto_map": {"AutoModel": "dflash.DFlashDraftModel"},
+            "block_size": 16,
+            "dflash_config": {"mask_token_id": 248070, "target_layer_ids": [1, 16, 31, 46, 61]},
+            "model_type": "qwen3",
+            "num_hidden_layers": 5
+        }"#,
+    );
+
+    let error = reject_dflash_drafter_offline(dir.path())
+        .expect_err("a DFlash drafter cannot be loaded as a standalone model")
+        .to_string();
+
+    assert!(
+        error.contains("DFlash speculative drafter"),
+        "the error must say what the directory is, got: {error}",
+    );
+    assert!(
+        error.contains("does not construct the `DFlashGenerator` round loop"),
+        "the error must say why the offline path refuses it, got: {error}",
+    );
+    assert!(
+        error.contains("mlxcel-server"),
+        "the error must point at the path that does run this drafter, got: {error}",
+    );
+    assert!(
+        !error.contains("Weight not found"),
+        "the weight-lookup symptom must not reach the user, got: {error}",
+    );
+}
+
+#[test]
+fn offline_draft_model_rejects_a_dflash_drafter_on_either_marker_alone() {
+    for (name, config) in [
+        (
+            "arch-only",
+            r#"{"architectures": ["DFlashDraftModel"], "model_type": "qwen3"}"#,
+        ),
+        (
+            "dflash-config-only",
+            r#"{"model_type": "qwen3", "dflash_config": {"mask_token_id": 248070}}"#,
+        ),
+    ] {
+        let dir = drafter_fixture_dir(config);
+        assert!(
+            reject_dflash_drafter_offline(dir.path()).is_err(),
+            "{name} must be rejected",
+        );
+    }
+}
+
+#[test]
+fn offline_draft_model_still_accepts_an_ordinary_full_model_drafter() {
+    // Non-regression guard for the classic `SpeculativeGenerator` workflow.
+    // An ordinary small full model auto-resolves to `DrafterKind::Dflash`
+    // (`DEFAULT_DRAFTER_KIND`), so a rejection keyed on the resolved kind would
+    // break it. Keyed on checkpoint structure, it passes through untouched.
+    let dir = drafter_fixture_dir(
+        r#"{
+            "architectures": ["Qwen3ForCausalLM"],
+            "model_type": "qwen3",
+            "hidden_size": 1024,
+            "num_hidden_layers": 28
+        }"#,
+    );
+
+    assert!(
+        reject_dflash_drafter_offline(dir.path()).is_ok(),
+        "an ordinary full model must keep loading as a classic drafter",
+    );
+}
+
+#[test]
+fn offline_draft_model_check_defers_missing_or_broken_configs_to_the_loader() {
+    // The probe is a pre-load guard, not a config validator: a directory with
+    // no `config.json` (or an unparseable one) must fall through to the real
+    // loader, which reports the I/O or parse error with its own diagnostics.
+    let empty = tempfile::tempdir().expect("temp dir");
+    assert!(reject_dflash_drafter_offline(empty.path()).is_ok());
+
+    let broken = drafter_fixture_dir("{ not json");
+    assert!(reject_dflash_drafter_offline(broken.path()).is_ok());
 }
 
 // issue #166: the offline MTP loop must exclude the terminal EOS / stop token so

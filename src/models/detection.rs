@@ -19,11 +19,38 @@
 //! model implementations and exported types.
 
 use anyhow::Result;
+use mlxcel_core::drafter::dflash::is_dflash_drafter_config;
 use serde_json::Value;
 use std::path::Path;
 
 use super::ModelType;
 use super::sanitize::sanitize_config_json;
+
+/// Canonical error for "this directory is a DFlash speculative drafter, not a
+/// model you can load standalone" (#1168).
+///
+/// Every entry point that resolves a checkpoint directory goes through
+/// [`get_model_type`], so raising the rejection there gives the offline
+/// `mlxcel generate -m`, server startup, and the distributed stage loaders one
+/// shared message instead of each one surfacing a different weight-map symptom.
+///
+/// Before this arm existed, a DFlash drafter passed to `-m` (or reached by the
+/// offline `--draft-model` path, which loads the drafter as a full model) was
+/// classified `ModelType::Qwen3` from its `"model_type": "qwen3"`, routed to
+/// `Qwen3Model::load`, and died on its first weight lookup with
+/// `Weight not found: model.embed_tokens.weight`. That message names a tensor,
+/// not the problem.
+fn dflash_drafter_not_standalone_error(model_path: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{path} is a DFlash speculative drafter checkpoint, not a standalone model. \
+         Its config.json declares the DFlashDraftModel architecture and/or a \
+         dflash_config block, and its weights carry no embed_tokens and no lm_head \
+         because a DFlash drafter borrows both from the target model when it binds. \
+         Pass a full model to -m, and pass this directory to --draft-model on \
+         `mlxcel-server` (with --draft-kind dflash) to use it as a drafter.",
+        path = model_path.display(),
+    )
+}
 
 pub(crate) fn has_vision_config(config: &serde_json::Value) -> bool {
     config.get("vision_config").is_some()
@@ -99,6 +126,18 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
     let config_str = std::fs::read_to_string(config_path)?;
     let config_str = sanitize_config_json(&config_str);
     let v: serde_json::Value = serde_json::from_str(&config_str)?;
+
+    // A DFlash speculative drafter is structurally not a standalone model, but
+    // it declares an ordinary `"model_type": "qwen3"`, so it would otherwise
+    // fall through to the Qwen 3 arm below (#1168). Reject it before any
+    // `model_type` dispatch runs. The discriminator is structural (a
+    // `dflash_config` block and/or the `DFlashDraftModel` architecture) rather
+    // than the resolved `DrafterKind`, because `DEFAULT_DRAFTER_KIND` is
+    // `Dflash`: keying on the resolved kind would also reject an ordinary small
+    // full model used as a classic drafter, which loads and runs fine.
+    if is_dflash_drafter_config(&v) {
+        return Err(dflash_drafter_not_standalone_error(model_path));
+    }
 
     // Kokoro TTS checkpoints carry no top-level `model_type`, so detect them by
     // architecture signal (the `istftnet` config block or the canonical weight

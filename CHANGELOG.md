@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **`mlxcel generate --draft-model <dflash-drafter>` now fails with a named error instead of a misleading `Weight not found: model.embed_tokens.weight`** (#1168). A DFlash drafter borrows `embed_tokens` and `lm_head` from its target when it binds, so it ships neither, but its `config.json` still declares an ordinary `model_type` (`qwen3`, say), so the offline path classified it as a standalone model and drove it through the full `LoadedModel` loader, which failed on the first missing tensor with a message that named a tensor rather than the problem. Detection now rejects a directory that is structurally a DFlash drafter (a nested `dflash_config` object and/or `architectures: ["DFlashDraftModel"]`) before dispatch, both for `-m/--model` (`get_model_type`, which also covers server startup and the distributed stage loaders) and for offline `--draft-model` (a new pre-load check in `mlxcel generate`), and points at `mlxcel-server --draft-kind dflash` instead. The discriminator is the checkpoint's own markers, not the resolved `DrafterKind`: an ordinary small full model still auto-resolves to `DrafterKind::Dflash` by default (`DEFAULT_DRAFTER_KIND`) and keeps loading through the classic `SpeculativeGenerator` path unaffected, confirmed by a non-regression run (`qwen3-0.6b-4bit` as both target and drafter, acceptance_rate 1.0000, 137.54 tok/s). `docs/supported-models.md` and `docs/speculative-acceptance.md` are corrected to match: DFlash's offline entry is `mlxcel-server` only.
+
 ## [v0.5.1] - 2026-08-15
 
 ### Added

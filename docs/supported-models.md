@@ -519,11 +519,17 @@ until each path has explicit mixed-cache and multimodal validation.
 
 | Drafter | Target families | Notes |
 |---------|-----------------|-------|
-| MTP | Gemma 4 target paths | Available through shared speculative decoding flags. |
-| DFlash | Qwen 3.5 text/VLM paths | Available through shared speculative decoding flags. |
+| MTP | Gemma 4 target paths | Available through shared speculative decoding flags, on `mlxcel-server` and on offline `mlxcel generate --draft-kind mtp`. |
+| DFlash | Qwen 3.5 text/VLM paths | `mlxcel-server` only. Available through shared speculative decoding flags there; offline `mlxcel generate` rejects a DFlash drafter with a named error because it does not construct the DFlash round loop. |
 
 Use auto-detection by default. Override only when you know the target and drafter
 checkpoint pair are compatible.
+
+A DFlash drafter checkpoint is not a standalone model: it ships no `embed_tokens`
+and no `lm_head`, borrowing both from the target when it binds. Passing one to
+`-m` is rejected with that explanation rather than with a weight-lookup failure.
+See [`speculative-acceptance.md`](speculative-acceptance.md) for what the offline
+path does and does not construct.
 
 Muse Glimmer is not a speculative or DFlash target in this baseline.
 

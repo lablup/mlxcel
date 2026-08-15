@@ -759,3 +759,104 @@ fn llava_next_without_granite_stays_llava() {
 
     fs::remove_dir_all(model_dir).unwrap();
 }
+
+// =============================================================================
+// DFlash speculative drafter rejection (#1168)
+// =============================================================================
+
+/// `config.json` of the published `qwen3.5-27b-dflash` drafter, trimmed to the
+/// fields detection reads. The point of the fixture is that `model_type` says
+/// `qwen3`: without the structural DFlash arm this routes to `ModelType::Qwen3`
+/// and then to `Qwen3Model::load`, which dies on
+/// `Weight not found: model.embed_tokens.weight`.
+const DFLASH_DRAFTER_CONFIG: &str = r#"{
+    "architectures": ["DFlashDraftModel"],
+    "auto_map": {"AutoModel": "dflash.DFlashDraftModel"},
+    "block_size": 16,
+    "dflash_config": {"mask_token_id": 248070, "target_layer_ids": [1, 16, 31, 46, 61]},
+    "hidden_size": 5120,
+    "model_type": "qwen3",
+    "num_hidden_layers": 5,
+    "num_target_layers": 64,
+    "vocab_size": 248320
+}"#;
+
+#[test]
+fn dflash_drafter_is_rejected_as_a_standalone_model() {
+    let model_dir = temp_path("dflash_drafter");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(model_dir.join("config.json"), DFLASH_DRAFTER_CONFIG).unwrap();
+
+    let error = super::detection::get_model_type(&model_dir)
+        .expect_err("a DFlash drafter is not a standalone model")
+        .to_string();
+
+    assert!(
+        error.contains("DFlash speculative drafter"),
+        "the error must name the real problem, got: {error}",
+    );
+    assert!(
+        error.contains("--draft-model"),
+        "the error must point at the flag that does take a drafter, got: {error}",
+    );
+    assert!(
+        !error.contains("Weight not found"),
+        "the weight-lookup symptom must not be what a user sees, got: {error}",
+    );
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
+fn dflash_drafter_is_rejected_on_either_marker_alone() {
+    for (name, config) in [
+        (
+            "architectures_only",
+            r#"{"architectures": ["DFlashDraftModel"], "model_type": "qwen3"}"#,
+        ),
+        (
+            "dflash_config_only",
+            r#"{"model_type": "qwen3", "dflash_config": {"mask_token_id": 248070}}"#,
+        ),
+    ] {
+        let model_dir = temp_path(name);
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(model_dir.join("config.json"), config).unwrap();
+
+        let error = super::detection::get_model_type(&model_dir)
+            .expect_err("marker alone is sufficient")
+            .to_string();
+        assert!(
+            error.contains("DFlash speculative drafter"),
+            "{name}: {error}"
+        );
+
+        fs::remove_dir_all(model_dir).unwrap();
+    }
+}
+
+#[test]
+fn ordinary_qwen3_full_model_still_detects_as_qwen3() {
+    // Non-regression control for the classic `--draft-model` path: a small
+    // Qwen 3 full model used as a classic drafter carries neither DFlash
+    // marker and must keep loading exactly as before. It resolves to
+    // `DrafterKind::Dflash` by default, which is why the rejection above keys
+    // on checkpoint structure and not on the resolved drafter kind.
+    let model_dir = temp_path("ordinary_qwen3_drafter");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "architectures": ["Qwen3ForCausalLM"],
+            "model_type": "qwen3",
+            "hidden_size": 1024,
+            "num_hidden_layers": 28
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::Qwen3);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
