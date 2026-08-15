@@ -31,8 +31,14 @@
 //!    `extra_body` — secondary DashScope/OpenAI-SDK flat shape. **Only**
 //!    recognized for the `preserve_thinking` key, not a general-purpose
 //!    fallback for other kwargs.
-//! 4. Server-wide default from `--chat-template-kwargs` CLI flag.
-//! 5. Server-wide default from `LLAMA_ARG_CHAT_TEMPLATE_KWARGS` env var (CLI
+//! 4. Per-request top-level `reasoning_effort` (OpenAI-standard field), mapped
+//!    onto the `reasoning_effort` key only when the loaded template reads that
+//!    name. Applied by
+//!    [`crate::server::chat_request::resolve_effective_kwargs`], which folds it
+//!    into the per-request map before the server-default merge below, so it
+//!    loses to (1)-(3) and wins over (5)-(6).
+//! 5. Server-wide default from `--chat-template-kwargs` CLI flag.
+//! 6. Server-wide default from `LLAMA_ARG_CHAT_TEMPLATE_KWARGS` env var (CLI
 //!    wins on conflict).
 //!
 //! The merge rule is "per-request wins per-key, unrelated server-default keys
@@ -148,6 +154,18 @@ impl ChatTemplateKwargs {
     pub fn set_preserve_thinking(&mut self, value: bool) {
         self.values
             .insert("preserve_thinking".to_string(), Value::Bool(value));
+    }
+
+    /// Set an arbitrary kwarg, overwriting any existing value for `key`.
+    ///
+    /// The generic counterpart to [`Self::set_preserve_thinking`], used when a
+    /// non-kwarg request field is mapped onto a template kwarg, today the
+    /// OpenAI-standard `reasoning_effort` (see
+    /// [`crate::server::chat_request::resolve_effective_kwargs`]). Callers own
+    /// the precedence decision: this overwrites unconditionally, so check for
+    /// the key first when a caller-supplied value must win.
+    pub fn set(&mut self, key: &str, value: Value) {
+        self.values.insert(key.to_string(), value);
     }
 
     /// Merge `other` into `self` with "other wins per-key".

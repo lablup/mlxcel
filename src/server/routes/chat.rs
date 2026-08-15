@@ -28,8 +28,9 @@ use axum::{
 use mlxcel_core::sampling::{LogprobsConfig, TokenLogprobData};
 
 use crate::server::batch::RequestPriority;
-use crate::server::chat_request::{prepare_chat_request_with_cache, request_has_effective_input};
-use crate::server::chat_template_kwargs::{extract_request_kwargs, merge_server_and_request};
+use crate::server::chat_request::{
+    prepare_chat_request_with_cache, request_has_effective_input, resolve_effective_kwargs,
+};
 use crate::server::config::{PromptCacheRequestContext, ReasoningBudgetOverride};
 use crate::server::model_provider::QueueFullError;
 use crate::server::prompt_cache::key::{
@@ -112,16 +113,17 @@ pub(crate) fn build_prompt_cache_request_context(
     history_prompt: Option<&str>,
 ) -> Option<PromptCacheRequestContext> {
     state.prompt_cache.as_ref()?;
-    // Mirror the kwargs merge that `prepare_chat_request_with_cache` performs
-    // so the digest sees the same canonicalized map as the rendering pipeline.
-    let merged_extra_body = request.merged_extra_body();
-    let per_request_kwargs = extract_request_kwargs(
-        request.chat_template_kwargs.as_ref(),
-        merged_extra_body.as_ref(),
-    );
-    let merged_kwargs = merge_server_and_request(
+    // Share the kwargs resolution with `prepare_chat_request_with_cache` so the
+    // digest sees the same canonicalized map as the rendering pipeline. Calling
+    // the helper rather than re-deriving the merge here keeps a mapped
+    // `reasoning_effort` (issue #1164) inside `template_sig`, so two requests
+    // that differ only in reasoning effort land in different cache buckets
+    // instead of sharing one and re-prefilling past the divergence point.
+    let merged_kwargs = resolve_effective_kwargs(
+        &state.chat_template,
+        request,
         state.config.chat_template_kwargs.as_ref(),
-        &per_request_kwargs,
+        &request.merged_extra_body(),
     );
 
     let template_signature = template_sig(
@@ -1715,6 +1717,7 @@ mod tests {
             extra_body: None,
             prompt_cache_key: None,
             user: None,
+            reasoning_effort: None,
             extra_body_fields: serde_json::Map::new(),
             response_format: None,
             params: SamplingParams::default(),

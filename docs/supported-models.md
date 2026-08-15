@@ -449,6 +449,18 @@ overrides the derived alias.
 
 Some chat templates check a `thinking_mode` string (for example `thinking_mode == "enabled"`) instead of the `enable_thinking` boolean, so mlxcel also detects that identifier in the loaded template and injects `thinking_mode: "enabled"` whenever the resolved `enable_thinking` value is true. Nothing is injected when thinking is off, and an explicit `thinking_mode` entry in `chat_template_kwargs` always overrides the derived value.
 
+### `reasoning_effort` and templates that validate their own kwargs
+
+The OpenAI-standard top-level `reasoning_effort` request field is forwarded to the chat template as a `reasoning_effort` Jinja kwarg, but only when the loaded template actually reads that name. Precedence, highest first: an explicit `chat_template_kwargs.reasoning_effort`, then the top-level field (including the flattened and nested `extra_body` spellings the OpenAI SDK produces), then the server-wide `--chat-template-kwargs` default. A checkpoint whose template never mentions `reasoning_effort` is unaffected: no kwarg is injected and the field has no effect, which is the same behavior as before.
+
+The value is passed through verbatim. OpenAI's vocabulary is `minimal` / `low` / `medium` / `high`, and a checkpoint's vocabulary need not match: Qwen3.8 accepts `xhigh` / `medium` / `low`, so `high` is valid OpenAI and invalid there while `xhigh` is the reverse. mlxcel does not translate between the two. The value sets the model's reasoning budget, and picking a different budget than the caller asked for is a silent rewrite the caller cannot detect.
+
+A template that refuses the value calls Jinja's `raise_exception`, and that now fails the request with `400` carrying the template's own message, which names the set the template accepts. Before, the refusal was swallowed: rendering fell back to a plain `User: ... Assistant:` prompt with no chat framing, no system message, and no tool declarations, and the model answered from it with `200`. Only a server-side `WARN` recorded the degradation.
+
+The `400` is specific to a deliberate refusal, not to render failures in general. mlxcel tells the two apart at the type level: `raise_exception` attaches a private sentinel as the error's source, so a template that mlxcel genuinely cannot render (an unimplemented filter, a malformed template) still degrades to the plain prompt exactly as it did before. The rule applies to any template that validates a caller-supplied value, not just to `reasoning_effort`: templates that reject an `enable_thinking` value, a tool-choice value, or an unsupported role behave the same way.
+
+The Responses API's `reasoning.effort` remains advisory and is not mapped onto the template kwarg. Send `reasoning_effort` on `/v1/chat/completions`, or `chat_template_kwargs` on either surface, to set it.
+
 ### Loop-detection default-on for the Gemma 4 family
 
 Gemma 4 (31B Dense and 26B-A4B MoE, including the QAT 4-bit checkpoints) has an upstream, weights-level token-repetition collapse documented in [google-deepmind/gemma#622](https://github.com/google-deepmind/gemma/issues/622) and reproduced across other engines, including [vllm-project/vllm#40080](https://github.com/vllm-project/vllm/issues/40080). Generation can degenerate into a single repeated token (or short fragment) that fills the token budget, most often inside the thought channel. Tool declarations and `json_schema` structured-output requests amplify it strongly, and those are the conditions #432's reproduction could trigger reliably, but the defect is upstream and in the weights, so a collapse without either is possible. Sampling penalties do not reliably recover it, because once the logits collapse the top-k candidates are themselves garbage.

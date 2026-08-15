@@ -724,6 +724,25 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub user: Option<String>,
 
+    /// OpenAI-standard reasoning-effort hint.
+    ///
+    /// Forwarded to the chat template as a `reasoning_effort` Jinja kwarg by
+    /// [`crate::server::chat_request::resolve_effective_kwargs`], but only when
+    /// the loaded template actually reads that name and only when the request
+    /// did not already set `chat_template_kwargs.reasoning_effort` (which wins).
+    /// The value is passed through verbatim: OpenAI's vocabulary
+    /// (`minimal` / `low` / `medium` / `high`) and a checkpoint's vocabulary do
+    /// not always agree, and translating between them would silently change the
+    /// model's reasoning budget on the caller's behalf. A template that refuses
+    /// the value raises, and the request fails with a 400 naming the set the
+    /// template accepts.
+    ///
+    /// Resolved through the same three-tier chain as [`Self::resolve_user`]:
+    /// this field, then the flattened OpenAI-SDK `extra_body`, then a nested
+    /// `extra_body`. See [`Self::resolve_reasoning_effort`].
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+
     /// OpenAI SDK `extra_body={...}` flattened into the request root.
     ///
     /// The official OpenAI Python client merges `extra_body` into the top-level
@@ -862,6 +881,40 @@ impl ChatCompletionRequest {
         }
         if let Some(body) = self.extra_body.as_ref()
             && let Some(s) = body.get("user").and_then(serde_json::Value::as_str)
+            && !s.is_empty()
+        {
+            return Some(s);
+        }
+        None
+    }
+
+    /// Resolve the request-level OpenAI-standard `reasoning_effort` hint.
+    ///
+    /// Same precedence rules as [`Self::resolve_prompt_cache_key`] and
+    /// [`Self::resolve_user`]: top-level field, then flattened `extra_body`,
+    /// then nested `extra_body`. Empty strings are ignored so a caller cannot
+    /// push an empty value at a template that would then reject it.
+    ///
+    /// Non-string values in either `extra_body` shape are ignored rather than
+    /// rejected, matching how the other two resolvers treat them.
+    pub fn resolve_reasoning_effort(&self) -> Option<&str> {
+        if let Some(e) = self.reasoning_effort.as_deref()
+            && !e.is_empty()
+        {
+            return Some(e);
+        }
+        if let Some(s) = self
+            .extra_body_fields
+            .get("reasoning_effort")
+            .and_then(serde_json::Value::as_str)
+            && !s.is_empty()
+        {
+            return Some(s);
+        }
+        if let Some(body) = self.extra_body.as_ref()
+            && let Some(s) = body
+                .get("reasoning_effort")
+                .and_then(serde_json::Value::as_str)
             && !s.is_empty()
         {
             return Some(s);

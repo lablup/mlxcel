@@ -72,7 +72,7 @@ with client.responses.stream(
 | `tool_choice` | supported subset | String or named function choice compatible with chat-completions tooling. |
 | `parallel_tool_calls` | accepted | Forwarded to existing tool-call handling. |
 | `text.format` | supported subset | `text` and `json_schema` shapes are handled through existing structured-output code. |
-| `reasoning` | echoed/advisory | Recorded and echoed; model-specific thinking behavior remains template/runtime dependent. |
+| `reasoning` | echoed/advisory | Recorded and echoed; model-specific thinking behavior remains template/runtime dependent. `reasoning.effort` is **not** mapped onto the `reasoning_effort` chat-template kwarg, unlike the chat-completions field of the same name (see [supported-models.md](supported-models.md)); use `chat_template_kwargs` to set it here. |
 | `conversation` | supported | String id or `{ "id": "..." }`; uses in-memory conversation store. |
 | `previous_response_id` | supported | Rehydrates stored prior input/output items. Mutually exclusive with `conversation`. |
 | `store` | supported | Defaults to `true`; `false` skips persistence. |
