@@ -15,14 +15,14 @@
 use super::{
     cap_molmo2_vit_num_layers, dequantize_moondream3_weight, flatten_phi4mm_patch_embedding,
     inherit_quantization_if_missing, llama4_mm_tokens_per_image, llama4_quantization_params,
-    llama4_token_ids, llama4_vision_prefix, minicpmv4_6_text_weights, molmo2_max_crops,
-    moondream2_text_config_value, moondream3_text_config_value, moondream3_vision_config_value,
-    parse_molmo2_vit_layers, phi3_num_crops, phi4_siglip_text_config_value,
-    phi4mm_text_config_value, phi4mm_vision_config_value, remap_minicpmo_text_weights,
-    remap_minicpmv4_6_weights, remap_phi4mm_weights, resolve_moondream2_eos_token_id,
-    rewrite_molmo2_weight_key, rewrite_moondream2_weight_key, rewrite_moondream3_weight_key,
-    rewrite_phi3_weight_key, rewrite_phi4_siglip_weight_key, rewrite_phi4mm_weight_key,
-    should_transpose_phi3_patch_embedding,
+    llama4_token_ids, llama4_vision_prefix, load_minicpmv4_6_vlm, minicpmv4_6_text_weights,
+    molmo2_max_crops, moondream2_text_config_value, moondream3_text_config_value,
+    moondream3_vision_config_value, parse_molmo2_vit_layers, phi3_num_crops,
+    phi4_siglip_text_config_value, phi4mm_text_config_value, phi4mm_vision_config_value,
+    remap_minicpmo_text_weights, remap_minicpmv4_6_weights, remap_phi4mm_weights,
+    resolve_moondream2_eos_token_id, rewrite_molmo2_weight_key, rewrite_moondream2_weight_key,
+    rewrite_moondream3_weight_key, rewrite_phi3_weight_key, rewrite_phi4_siglip_weight_key,
+    rewrite_phi4mm_weight_key, should_transpose_phi3_patch_embedding,
 };
 use crate::moondream2_prompt::Moondream2PromptStyle;
 use mlxcel_core::dtype;
@@ -867,4 +867,55 @@ fn llama4_mm_tokens_per_image_applies_pixel_shuffle_ratio() {
         .unwrap();
 
     assert_eq!(llama4_mm_tokens_per_image(&config), 1600);
+}
+
+// ---------------------------------------------------------------------------
+// `load_minicpmv4_6_vlm` — wiring `Qwen35Config::validate_supported` into
+// the MiniCPM-V 4.6 loader (S-M1, PR #1174 finalization).
+// ---------------------------------------------------------------------------
+
+/// Before S-M1, `load_minicpmv4_6_vlm` parsed `text_config` and handed it
+/// straight to `Qwen35Model::from_weights` without ever calling
+/// `validate_supported`, so a MiniCPM-V 4.6 checkpoint declaring
+/// `output_gate_type: "sigmoid"` would load and silently produce wrong
+/// output instead of failing. `validate_supported` runs before any weight
+/// file is read, so a fabricated `config.json` with no accompanying weight
+/// files is enough to drive the real loader entry point end to end (rather
+/// than only the shared `Qwen35Config` helper, which never had this gap).
+/// This test fails without the `text_config.validate_supported()?` call
+/// S-M1 adds: `load_minicpmv4_6_vlm` would instead fail later, and
+/// differently, once `parse_required_vlm_subconfig` looks for the
+/// `vision_config` this fixture deliberately omits.
+#[test]
+fn load_minicpmv4_6_vlm_rejects_an_unsupported_output_gate_type() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let config = json!({
+        "model_type": "minicpmv4_6",
+        "text_config": {
+            "model_type": "qwen3_5_text",
+            "hidden_size": 1024,
+            "num_hidden_layers": 24,
+            "num_attention_heads": 8,
+            "num_key_value_heads": 2,
+            "vocab_size": 248094,
+            "output_gate_type": "sigmoid"
+        }
+    });
+    std::fs::write(
+        dir.path().join("config.json"),
+        serde_json::to_string(&config).unwrap(),
+    )
+    .unwrap();
+
+    // `LoadedModel` does not implement `Debug`, so `expect_err`/`unwrap_err`
+    // (which require it on the `Ok` type) are not usable here.
+    let err = match load_minicpmv4_6_vlm(dir.path()) {
+        Err(e) => e,
+        Ok(_) => panic!("output_gate_type: sigmoid has no code path and must not load"),
+    };
+    let message = err.to_string();
+    assert!(
+        message.contains("output_gate_type") && message.contains("sigmoid"),
+        "error must name the key and the offending value, got: {message}"
+    );
 }

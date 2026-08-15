@@ -699,6 +699,53 @@ fn output_gate_type_sigmoid_is_a_named_error() {
     );
 }
 
+/// vLLM's `qwen_gdn_linear_attn.py` treats `swish` as an alias for `silu` and
+/// does not lowercase either before comparing. A checkpoint spelling either
+/// alias differently (`"SiLU"`) selects the exact math mlxcel already
+/// implements and must not hard-fail.
+#[test]
+fn output_gate_type_matching_is_case_insensitive() {
+    for gate in ["SiLU", "SILU", "Swish", "SWISH", "sIlU"] {
+        config_with(serde_json::json!({ "output_gate_type": gate }))
+            .validate_supported()
+            .unwrap_or_else(|e| panic!("output_gate_type={gate:?} must load: {e}"));
+    }
+
+    // Case-insensitivity is scoped to the two implemented aliases; a
+    // differently-cased spelling of the rejected value is still rejected.
+    let err = config_with(serde_json::json!({ "output_gate_type": "SIGMOID" }))
+        .validate_supported()
+        .expect_err("SIGMOID has no code path regardless of casing and must not load");
+    assert_eq!(
+        err,
+        Qwen35UnsupportedConfig::OutputGateType("SIGMOID".to_string())
+    );
+}
+
+/// A 1,002,990-byte `output_gate_type` used to reproduce as 1,000,568 bytes
+/// of process output. The error must cap the echoed value instead.
+#[test]
+fn output_gate_type_error_truncates_an_oversized_value() {
+    let huge = "x".repeat(1_000_000);
+    let err = config_with(serde_json::json!({ "output_gate_type": huge.clone() }))
+        .validate_supported()
+        .expect_err("an unrecognized output_gate_type must not load");
+    let message = err.to_string();
+    assert!(
+        message.len() < 1_000,
+        "error text must not echo the full oversized value, got {} bytes",
+        message.len()
+    );
+    assert!(
+        message.contains("..."),
+        "a truncated value must be marked with an ellipsis, got: {message}"
+    );
+    assert!(
+        !message.contains(&huge),
+        "error text must not contain the full untruncated value"
+    );
+}
+
 #[test]
 fn mrope_interleaved_accepts_true_and_absent() {
     config_with(serde_json::json!({
@@ -738,6 +785,36 @@ fn mrope_interleaved_false_is_a_named_error() {
     assert_eq!(err, Qwen35UnsupportedConfig::MropeInterleavedDisabled);
 }
 
+/// Verified on a release binary before this fix: `mrope_interleaved: "false"`
+/// and `mrope_interleaved: 0` both passed validation and loaded, because the
+/// plain `.as_bool()` read treats a present-but-wrong-typed value the same as
+/// an absent one. `mrope_interleaved: "false"` is precisely the
+/// silently-wrong case `MropeInterleavedDisabled` exists to catch.
+#[test]
+fn mrope_interleaved_wrong_type_is_a_named_error_not_absent() {
+    for bad_value in [serde_json::json!("false"), serde_json::json!(0)] {
+        let config = config_with(serde_json::json!({
+            "rope_parameters": {
+                "mrope_interleaved": bad_value,
+                "mrope_section": [11, 11, 10],
+                "rope_theta": 10000000
+            }
+        }));
+        // The permissive accessor reads a wrong-typed value as absent; that
+        // is documented behavior for call sites that only need the
+        // true/absent common case.
+        assert_eq!(config.mrope_interleaved(), None);
+        // validate_supported must not treat it as if the key were absent.
+        let err = config
+            .validate_supported()
+            .expect_err("a wrong-typed mrope_interleaved must not load as if it were absent");
+        assert!(
+            matches!(err, Qwen35UnsupportedConfig::MropeInterleavedWrongType(_)),
+            "expected MropeInterleavedWrongType, got: {err:?}"
+        );
+    }
+}
+
 #[test]
 fn language_model_only_true_is_a_named_error() {
     let mut wrapper = qwen3_8_27b_wrapper_config();
@@ -753,6 +830,141 @@ fn language_model_only_true_is_a_named_error() {
         message.contains("language_model_only"),
         "error must name the key, got: {message}"
     );
+}
+
+/// Verified on a release binary before this fix: `language_model_only:
+/// "true"`, `1`, and `{}` all passed validation and loaded, because the plain
+/// `.as_bool()` read treats a present-but-wrong-typed value the same as an
+/// absent one.
+#[test]
+fn language_model_only_wrong_type_is_a_named_error_not_absent() {
+    for bad_value in [
+        serde_json::json!("true"),
+        serde_json::json!(1),
+        serde_json::json!({}),
+    ] {
+        let mut wrapper = qwen3_8_27b_wrapper_config();
+        wrapper
+            .as_object_mut()
+            .expect("wrapper config is an object")
+            .insert("language_model_only".to_string(), bad_value.clone());
+        let err = validate_qwen35_wrapper_config(&wrapper).expect_err(&format!(
+            "language_model_only={bad_value:?} must not load as if the key were absent"
+        ));
+        assert!(
+            matches!(err, Qwen35UnsupportedConfig::LanguageModelOnlyWrongType(_)),
+            "expected LanguageModelOnlyWrongType for {bad_value:?}, got: {err:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MiniCPM-V 4.6's `text_config` reuses `Qwen35Config` as its language
+// backbone (`load_minicpmv4_6_vlm` in `src/loading/vlm_special.rs`). The
+// gated-delta / MRoPE invariants `validate_supported` enforces belong to
+// `Qwen35Model`, not to the `qwen3_5` model_type string, so this path must
+// reject the same unimplementable values the other five Qwen3.5-family sites
+// do (S-M1).
+// ---------------------------------------------------------------------------
+
+/// Pinned to the published `text_config` of `mlx-community/MiniCPM-V-4_6`'s
+/// Qwen3.5-Text backbone (verified against a local checkpoint's
+/// `config.json`). `output_gate_type` and `rope_parameters.mrope_interleaved`
+/// are both absent, matching every currently published checkpoint.
+fn minicpmv4_6_text_config() -> serde_json::Value {
+    serde_json::json!({
+        "attention_bias": false,
+        "attention_dropout": 0.0,
+        "attn_output_gate": true,
+        "full_attention_interval": 4,
+        "head_dim": 256,
+        "hidden_act": "silu",
+        "hidden_size": 1024,
+        "initializer_range": 0.02,
+        "intermediate_size": 3584,
+        "linear_conv_kernel_dim": 4,
+        "linear_key_head_dim": 128,
+        "linear_num_key_heads": 16,
+        "linear_num_value_heads": 16,
+        "linear_value_head_dim": 128,
+        "mamba_ssm_dtype": "float32",
+        "max_position_embeddings": 262144,
+        "mlp_only_layers": [],
+        "model_type": "qwen3_5_text",
+        "mtp_num_hidden_layers": 1,
+        "mtp_use_dedicated_embeddings": false,
+        "num_attention_heads": 8,
+        "num_hidden_layers": 24,
+        "num_key_value_heads": 2,
+        "partial_rotary_factor": 0.25,
+        "rms_norm_eps": 1e-06,
+        "rope_parameters": {
+            "partial_rotary_factor": 0.25,
+            "rope_theta": 10000000,
+            "rope_type": "default"
+        },
+        "tie_word_embeddings": true,
+        "vocab_size": 248094
+    })
+}
+
+/// The published MiniCPM-V 4.6 checkpoint must still load: it declares no
+/// value `validate_supported` rejects. This is the check S-M1 asked for
+/// before wiring the call in, so a working load does not turn into a
+/// startup failure.
+#[test]
+fn minicpmv4_6_text_config_passes_validate_supported() {
+    let config: Qwen35Config = serde_json::from_value(minicpmv4_6_text_config())
+        .expect("the published MiniCPM-V 4.6 text_config must deserialize as Qwen35Config");
+    assert_eq!(config.output_gate_type, None);
+    assert_eq!(config.mrope_interleaved(), None);
+    config
+        .validate_supported()
+        .expect("the published MiniCPM-V 4.6 checkpoint must pass validation");
+}
+
+/// Before S-M1, `load_minicpmv4_6_vlm` parsed this exact shape and handed it
+/// straight to `Qwen35Model::from_weights` without calling
+/// `validate_supported`, so a MiniCPM-V 4.6 checkpoint declaring
+/// `output_gate_type: "sigmoid"` would load and silently produce wrong
+/// output instead of failing. This test fails without the call this fix
+/// adds.
+#[test]
+fn minicpmv4_6_text_config_output_gate_type_sigmoid_is_a_named_error() {
+    let mut value = minicpmv4_6_text_config();
+    value
+        .as_object_mut()
+        .expect("text config is an object")
+        .insert("output_gate_type".to_string(), serde_json::json!("sigmoid"));
+    let config: Qwen35Config =
+        serde_json::from_value(value).expect("overridden config must still deserialize");
+    let err = config
+        .validate_supported()
+        .expect_err("sigmoid has no code path and must not load, even via the MiniCPM-V shape");
+    assert_eq!(
+        err,
+        Qwen35UnsupportedConfig::OutputGateType("sigmoid".to_string())
+    );
+}
+
+/// Same as above for the other implemented guard: `mrope_interleaved: false`
+/// on the MiniCPM-V shape must be a named error, not a silent load.
+#[test]
+fn minicpmv4_6_text_config_mrope_interleaved_false_is_a_named_error() {
+    let mut value = minicpmv4_6_text_config();
+    value
+        .as_object_mut()
+        .expect("text config is an object")
+        .get_mut("rope_parameters")
+        .and_then(|rp| rp.as_object_mut())
+        .expect("rope_parameters is an object")
+        .insert("mrope_interleaved".to_string(), serde_json::json!(false));
+    let config: Qwen35Config =
+        serde_json::from_value(value).expect("overridden config must still deserialize");
+    let err = config.validate_supported().expect_err(
+        "InterleavedMRoPE is hardcoded, so a non-interleaved MiniCPM-V config must not load",
+    );
+    assert_eq!(err, Qwen35UnsupportedConfig::MropeInterleavedDisabled);
 }
 
 // ---------------------------------------------------------------------------

@@ -434,7 +434,7 @@ fn load_qwen3_5_vlm_with_variant(
             .map_err(|e| anyhow::anyhow!("Failed to load Qwen3.5 vision encoder: {}", e))?;
 
     let processor = qwen_vl_processor_with_norm(&vision_config, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]);
-    let token_ids = qwen35_vl_token_ids(&full_config)?;
+    let token_ids = qwen35_vl_token_ids(&full_config, text_config.vocab_size)?;
 
     let vlm = vision::Qwen35VLModel {
         text_model,

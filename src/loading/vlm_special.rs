@@ -509,6 +509,13 @@ pub(crate) fn load_minicpmv4_6_vlm(model_path: &Path) -> Result<LoadedModel> {
         .unwrap_or_else(|| full_config.clone());
     let text_config: models::qwen3_5::Qwen35Config = serde_json::from_value(text_config_value)
         .map_err(|e| anyhow::anyhow!("Failed to parse MiniCPM-V 4.6 text config: {}", e))?;
+    // The gated-delta / MRoPE invariants `validate_supported` enforces belong
+    // to `Qwen35Model`, which this loader builds via `from_weights` below,
+    // not to the `qwen3_5` model_type string. A MiniCPM-V 4.6 checkpoint that
+    // declares `output_gate_type: "sigmoid"` (or a non-interleaved MRoPE
+    // layout) would otherwise hit the same silently-wrong-output path this
+    // guard was written to close for the other five Qwen3.5-family sites.
+    text_config.validate_supported()?;
 
     let vision_config: MiniCPMV46VisionConfig =
         parse_required_vlm_subconfig(&full_config, "vision_config", "MiniCPM-V 4.6 vision config")?;

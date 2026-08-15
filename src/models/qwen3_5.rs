@@ -145,6 +145,18 @@ pub enum Qwen35UnsupportedConfig {
     )]
     MropeInterleavedDisabled,
 
+    /// `text_config.rope_parameters.mrope_interleaved` is present but is not
+    /// a JSON boolean (for example the string `"false"` or the number `0`).
+    #[error(
+        "Qwen3.5-family config declares rope_parameters.mrope_interleaved={0}, which is not a \
+         JSON boolean. mlxcel treats a present-but-wrong-typed value as a load error instead of \
+         silently treating it as absent: a checkpoint that means mrope_interleaved=false but \
+         spells it as a string or a number would otherwise be given interleaved positions and \
+         produce silently wrong output, exactly the failure mode MropeInterleavedDisabled exists \
+         to catch."
+    )]
+    MropeInterleavedWrongType(String),
+
     /// Top-level `language_model_only` is `true` on a VLM wrapper config.
     #[error(
         "Qwen3.5-family config declares language_model_only=true, which mlxcel does not \
@@ -153,7 +165,39 @@ pub enum Qwen35UnsupportedConfig {
          same gap (Blaizzy/mlx-vlm#1812)."
     )]
     LanguageModelOnly,
+
+    /// Top-level `language_model_only` is present but is not a JSON boolean.
+    #[error(
+        "Qwen3.5-family config declares language_model_only={0}, which is not a JSON boolean. \
+         mlxcel treats a present-but-wrong-typed value as a load error instead of silently \
+         treating it as absent: a checkpoint that means language_model_only=true but spells it \
+         as a string or a number would otherwise load through the vision path this flag exists \
+         to opt out of."
+    )]
+    LanguageModelOnlyWrongType(String),
 }
+
+/// Cap an untrusted config value's textual representation before it is
+/// embedded in an error message.
+///
+/// `config.json` is attacker- or mistake-controlled input. Without a cap, one
+/// oversized value turns a single failed load into an oversized error: a
+/// 1,002,990-byte `output_gate_type` string reproduced as 1,000,568 bytes of
+/// process output before this existed.
+fn truncate_for_error(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        text.to_string()
+    } else {
+        let truncated: String = text.chars().take(max_chars).collect();
+        format!("{truncated}...")
+    }
+}
+
+/// Maximum length of a config value echoed back into an
+/// [`Qwen35UnsupportedConfig`] error message. Long enough to show the
+/// offending value; short enough that a hostile or malformed config cannot
+/// inflate load-time error output.
+const MAX_ERROR_VALUE_CHARS: usize = 64;
 
 /// Reject VLM wrapper-config values that the Qwen3.5 VLM loader cannot honour.
 ///
@@ -162,15 +206,24 @@ pub enum Qwen35UnsupportedConfig {
 /// Only the VLM loader calls this. On the text-only path a vision-stripped
 /// checkpoint is exactly what the caller asked for, so the flag is not an
 /// error there.
+///
+/// A present-but-wrong-typed value (the JSON string `"true"`, the number `1`,
+/// an object, ...) is rejected rather than read as absent via `.as_bool()`:
+/// on a release binary, `language_model_only: "true"`, `1`, and `{}` all used
+/// to pass this check and load.
 pub fn validate_qwen35_wrapper_config(
     full_config: &serde_json::Value,
 ) -> Result<(), Qwen35UnsupportedConfig> {
-    if full_config
-        .get("language_model_only")
-        .and_then(|v| v.as_bool())
-        == Some(true)
-    {
-        return Err(Qwen35UnsupportedConfig::LanguageModelOnly);
+    if let Some(value) = full_config.get("language_model_only") {
+        match value.as_bool() {
+            Some(true) => return Err(Qwen35UnsupportedConfig::LanguageModelOnly),
+            Some(false) => {}
+            None => {
+                return Err(Qwen35UnsupportedConfig::LanguageModelOnlyWrongType(
+                    truncate_for_error(&value.to_string(), MAX_ERROR_VALUE_CHARS),
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -290,15 +343,44 @@ impl Qwen35Config {
         (self.head_dim_resolved() as f32 * self.partial_rotary_factor()) as i32
     }
 
-    /// `rope_parameters.mrope_interleaved`, when the checkpoint spells it out.
+    /// `rope_parameters.mrope_interleaved`, when the checkpoint spells it out
+    /// as a JSON boolean.
     ///
-    /// `None` means the key is absent, which every Qwen3.5 checkpoint and the
-    /// text-only Qwen3.5 configs do. Qwen3.8-27B ships `true`.
+    /// `None` means either the key is absent (every Qwen3.5 checkpoint and
+    /// the text-only Qwen3.5 configs) or it is present but not a boolean.
+    /// This permissive accessor is for call sites that only care about the
+    /// `true`/absent common case; [`Qwen35Config::validate_supported`] uses
+    /// the stricter [`Qwen35Config::mrope_interleaved_checked`] instead, so a
+    /// wrong-typed value is a named error rather than silently equivalent to
+    /// absent.
     pub fn mrope_interleaved(&self) -> Option<bool> {
         self.rope_parameters
             .as_ref()
             .and_then(|rp| rp.get("mrope_interleaved"))
             .and_then(|v| v.as_bool())
+    }
+
+    /// Strict variant of [`Qwen35Config::mrope_interleaved`]: a present value
+    /// that is not a JSON boolean (the string `"false"`, the number `0`, ...)
+    /// is a named error instead of `Ok(None)`. On a release binary,
+    /// `mrope_interleaved: "false"` and `mrope_interleaved: 0` both used to
+    /// pass validation and load through the plain `.as_bool()` read, which is
+    /// precisely the silently-wrong case `MropeInterleavedDisabled` exists to
+    /// catch.
+    fn mrope_interleaved_checked(&self) -> Result<Option<bool>, Qwen35UnsupportedConfig> {
+        match self
+            .rope_parameters
+            .as_ref()
+            .and_then(|rp| rp.get("mrope_interleaved"))
+        {
+            None => Ok(None),
+            Some(value) => value.as_bool().map(Some).ok_or_else(|| {
+                Qwen35UnsupportedConfig::MropeInterleavedWrongType(truncate_for_error(
+                    &value.to_string(),
+                    MAX_ERROR_VALUE_CHARS,
+                ))
+            }),
+        }
     }
 
     /// Reject text-config values that mlxcel reads but cannot honour.
@@ -309,13 +391,19 @@ impl Qwen35Config {
     /// Absent keys are always accepted: they are the Qwen3.5 shape.
     pub fn validate_supported(&self) -> Result<(), Qwen35UnsupportedConfig> {
         if let Some(gate) = self.output_gate_type.as_deref() {
-            // vLLM treats "swish" as an alias for "silu"; "sigmoid" is the
-            // one spelling that would change the math.
-            if !matches!(gate, "silu" | "swish") {
-                return Err(Qwen35UnsupportedConfig::OutputGateType(gate.to_string()));
+            // vLLM treats "swish" as an alias for "silu" and lowercases
+            // neither before comparing; accept any casing of either spelling
+            // so a checkpoint spelling it "SiLU" does not hard-fail a load
+            // the implemented path handles correctly. "sigmoid" is the one
+            // spelling that would change the math.
+            if !gate.eq_ignore_ascii_case("silu") && !gate.eq_ignore_ascii_case("swish") {
+                return Err(Qwen35UnsupportedConfig::OutputGateType(truncate_for_error(
+                    gate,
+                    MAX_ERROR_VALUE_CHARS,
+                )));
             }
         }
-        if self.mrope_interleaved() == Some(false) {
+        if self.mrope_interleaved_checked()? == Some(false) {
             return Err(Qwen35UnsupportedConfig::MropeInterleavedDisabled);
         }
         Ok(())
