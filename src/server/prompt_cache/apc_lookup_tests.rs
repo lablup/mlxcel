@@ -25,9 +25,13 @@ fn empty_extra() -> [u8; 32] {
 }
 
 #[test]
-fn matching_chains_preserve_matched_len() {
-    // Both sides see the same tokens and same extra_hash → every block
-    // hash agrees → matched_len passes through unchanged.
+fn aligned_matching_chains_return_the_block_floored_len() {
+    // Both sides see the same tokens and same extra_hash → every block hash
+    // agrees. matched_len (64) is already block-aligned to BLOCK (16), so
+    // the block-floored result happens to equal matched_len here — this test
+    // alone cannot distinguish "matched_len preserved" from "floored to
+    // block granularity". See `non_aligned_matched_len_floors_to_covered_blocks`
+    // below for a case that tells the two apart.
     let tokens: Vec<i32> = (0..64).collect();
     let extra = empty_extra();
     let candidate_chain = BlockHashChain::compute(&tokens, BLOCK, ApcHashAlgo::Sha256, &extra);
@@ -40,6 +44,31 @@ fn matching_chains_preserve_matched_len() {
         tokens.len(),
     );
     assert_eq!(consistent, tokens.len());
+}
+
+#[test]
+fn non_aligned_matched_len_floors_to_covered_blocks() {
+    // 73 tokens, BLOCK = 16, matched_len = 73, fully agreeing chains. The
+    // candidate chain has ceil(73/16) = 5 hashes (the 5th is a 9-token
+    // partial trailing block), but coverable_blocks = 73/16 = 4 caps the
+    // comparison at 4 blocks, so that 5th, partial block is never compared.
+    // The result is 4 * 16 = 64, not 73: even with full agreement across
+    // every block that gets checked, the non-block-aligned tail of
+    // matched_len is dropped.
+    let tokens: Vec<i32> = (0..73).collect();
+    let extra = empty_extra();
+    let candidate_chain = BlockHashChain::compute(&tokens, BLOCK, ApcHashAlgo::Sha256, &extra);
+    assert_eq!(candidate_chain.hashes.len(), 5);
+    let consistent = apc_consistent_prefix_len(
+        &tokens,
+        &candidate_chain.hashes,
+        BLOCK,
+        ApcHashAlgo::Sha256,
+        &extra,
+        tokens.len(),
+    );
+    assert_eq!(consistent, 64);
+    assert_ne!(consistent, tokens.len());
 }
 
 #[test]
