@@ -12,6 +12,17 @@ High-performance LLM/VLM inference runtime and server for Apple Silicon / NVIDIA
 
 The project started as work on structural model fine-tuning and has grown into a general-purpose serving runtime for local and small-cluster inference.
 
+## New in v0.5.1
+
+- **Multi-turn prompt-cache reuse for snapshot-only families.** A second snapshot is taken during prefill at the history boundary, so the next turn of a conversation matches it by construction instead of missing on template scaffolds, dropped `<think>` blocks, or retokenized replies. On `qwen3.5-0.8b-4bit` turn 2 goes from 0 to 150 cached tokens of 189. `MLXCEL_DISABLE_BOUNDARY_SNAPSHOT=1` restores the previous prefill.
+- **Background warm-up of the next turn's prefix.** After a completion the server prefills the expected history prefix while it is idle, taking turn 2 to 194 cached tokens of 227 and cutting uncached tokens 57%. Warm-ups never start while foreground work exists. `MLXCEL_DISABLE_CACHE_WARMUP=1` turns it off.
+- **Snapshot budget is operator-controlled and conversations no longer evict each other.** A newer snapshot supersedes its own ancestor within a session, and `--prompt-cache-snapshot-capacity-bytes`, `--prompt-cache-snapshot-max-entries`, and `--prompt-cache-snapshot-ttl` are on both binaries with `MLXCEL_*` equivalents.
+- **Gemma 4 restores from a snapshot at the longest common prefix**, not only an exact one, so a diverging turn still reuses what it shares. Recurrent families are unchanged.
+- **`-m/--model` accepts `--revision <REV>`** on `generate`, `run`, `serve`, `inspect`, and `mlxcel-server`.
+- **`mixed_4_8` checkpoints load on all 16 families sharing the fused QKV projection**, with nothing dequantized or requantized.
+- **DRY sequence breakers reach the sampler.** `--dry-sequence-breaker` was parsed and discarded, and per-request breakers were dropped at `temperature <= 0`; both configurations now generate what they ask for.
+- **`mlxcel detect` returns boxes that match the page.** RT-DETRv2 outputs were read as f32 from a bf16 buffer, which misaligned every query, label, and box.
+
 ## New in v0.5.0
 
 - **Meta Muse Glimmer support.** The 52-layer mixed-cache decoder and the 50-layer vision and fusion path run single-image and multi-image prompts through both the CLI and the continuous-batching server, with ATEM reasoning channels parsed across the Chat Completions, Responses, and Anthropic-compatible routes. Both the bf16 checkpoint and `mlx-community/Muse-Glimmer-30B-4bit` are supported; the 4-bit decodes at about 3.1x the bf16 rate on NVIDIA GB10.

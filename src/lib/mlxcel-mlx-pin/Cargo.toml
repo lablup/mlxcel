@@ -18,7 +18,7 @@
 # caches that are already valid.
 [package]
 name = "mlxcel-mlx-pin"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 description = "Unit-test host for mlxcel-core's build-script MLX pin resolution"
 license = "Apache-2.0"
