@@ -39,8 +39,8 @@ use super::{
     Qwen35VlmVariant, QwenVisionTokenIds, inherit_qwen_text_quantization,
     inherit_qwen_vision_quantization, load_vlm_weights_common, load_vlm_weights_common_filtered,
     parse_required_vlm_subconfig, parse_vlm_config, qwen_vl_processor, qwen_vl_processor_with_norm,
-    qwen_vl_token_ids, qwen35_vlm_token_defaults, read_sanitized_vlm_config,
-    remap_qwen3_vl_weights, strip_language_model_prefix, wrap_qwen35_vlm,
+    qwen_vl_token_ids, qwen35_vl_token_ids, read_sanitized_vlm_config, remap_qwen3_vl_weights,
+    strip_language_model_prefix, wrap_qwen35_vlm,
 };
 
 /// Load a Qwen2-VL model (custom ViT + Qwen2 language model with MRoPE)
@@ -357,6 +357,7 @@ fn load_qwen3_5_vlm_with_variant(
     use vision::encoders::qwen3_vl::{Qwen3VLVisionConfig, Qwen3VLVisionEncoder};
 
     let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+    models::qwen3_5::validate_qwen35_wrapper_config(&full_config)?;
 
     let mut vision_config: Qwen3VLVisionConfig =
         parse_required_vlm_subconfig(&full_config, "vision_config", "Qwen3.5 vision config")?;
@@ -399,6 +400,7 @@ fn load_qwen3_5_vlm_with_variant(
 
     let text_config: models::qwen3_5::Qwen35Config = serde_json::from_value(text_config_val)
         .map_err(|e| anyhow::anyhow!("Failed to parse Qwen3.5 text config: {}", e))?;
+    text_config.validate_supported()?;
 
     let mut text_weights = models::qwen3_5::sanitize_weights(text_weights, &text_config);
     models::sanitize_tied_embeddings(&mut text_weights, &full_config);
@@ -432,7 +434,7 @@ fn load_qwen3_5_vlm_with_variant(
             .map_err(|e| anyhow::anyhow!("Failed to load Qwen3.5 vision encoder: {}", e))?;
 
     let processor = qwen_vl_processor_with_norm(&vision_config, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]);
-    let token_ids = qwen_vl_token_ids(&full_config, qwen35_vlm_token_defaults());
+    let token_ids = qwen35_vl_token_ids(&full_config)?;
 
     let vlm = vision::Qwen35VLModel {
         text_model,

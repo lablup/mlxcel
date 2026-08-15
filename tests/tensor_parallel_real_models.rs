@@ -417,6 +417,20 @@ fn qwen3_5_27b_tp4_matches_single_rank_stepwise() {
     );
 }
 
+/// Qwen3.8-27B is architecturally identical to Qwen3.5-27B and rides the same
+/// `qwen3_5` path (#1163). It is here so a change to that path is checked
+/// against both generations, not only the one it was written for.
+#[test]
+#[ignore = "requires local model weights and extended real-model generation"]
+fn qwen3_8_27b_tp4_matches_single_rank_stepwise() {
+    assert_tp_matches_single_rank_stepwise(
+        &repo_model_dir("qwen3.8-27b-4bit"),
+        "Continue this sequence with more entries separated by commas: alpha, beta, gamma,",
+        4,
+        11,
+    );
+}
+
 #[test]
 #[ignore = "requires local model weights and extended real-model generation"]
 fn ernie45_tp2_matches_single_rank_greedy_long_generation() {

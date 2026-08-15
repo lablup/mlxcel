@@ -317,6 +317,7 @@ impl TensorParallelQwen35Model {
         }
         let args: crate::models::qwen3_5::Qwen35Config =
             serde_json::from_value(text_config).context("failed to parse qwen3.5 config")?;
+        args.validate_supported()?;
         let mut weights = load_qwen35_tp_text_weights(model_dir, &config_json, &args)?;
         ensure_qwen35_lm_head_weights(&mut weights);
         let mrope = qwen35_mrope_params(&args);

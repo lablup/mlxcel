@@ -126,6 +126,34 @@ fn byte_level_tokenizer_json() -> String {
     serde_json::to_string(&tokenizer).expect("serialise minimal byte-level tokenizer.json")
 }
 
+/// Same hand-rolled byte-level tokenizer, grown to `vocab_size` entries by
+/// appending unique multi-byte tokens after the 256 single-byte ones.
+///
+/// Used to reproduce a production-scale vocabulary so the padded-`lm_head`
+/// mask case can be pinned at its real magnitudes rather than at a toy gap.
+fn padded_byte_level_tokenizer(vocab_size: usize) -> tokenizers::Tokenizer {
+    assert!(
+        vocab_size > 256,
+        "padding only grows the vocabulary; use build_byte_level_tokenizer for 256"
+    );
+    let mut json: serde_json::Value = serde_json::from_str(&byte_level_tokenizer_json())
+        .expect("base byte-level tokenizer.json parses");
+    let vocab = json["model"]["vocab"]
+        .as_object_mut()
+        .expect("byte-level tokenizer.json has a vocab object");
+    for id in 256..vocab_size {
+        // ASCII-only spellings round-trip through the byte-level char map,
+        // so each padding entry is a well-formed multi-byte token.
+        vocab.insert(format!("pad{id}"), serde_json::Value::from(id as u32));
+    }
+    tokenizers::Tokenizer::from_bytes(
+        serde_json::to_string(&json)
+            .expect("padded tokenizer.json serialises")
+            .as_bytes(),
+    )
+    .expect("padded byte-level tokenizer.json must parse")
+}
+
 /// HuggingFace's byte-level char map. Reproduced here so the test does not
 /// depend on internal modules of the `tokenizers` crate.
 fn byte_level_char(byte: u8) -> char {
@@ -938,4 +966,81 @@ fn structured_output_error_display_is_concise() {
         let rendered = err.to_string();
         assert_message_is_sanitized(&rendered);
     }
+}
+
+/// Qwen3.5/Qwen3.8 pad the `lm_head` output rows past the tokenizer's real
+/// vocabulary: `mlx-community/Qwen3.8-27B-4bit` declares `vocab_size: 248320`
+/// while its `tokenizer.json` carries 248,077 entries, leaving 243 logits
+/// positions no token id can name.
+///
+/// The bias must therefore be sized from the model's logits axis, never from
+/// the matcher's vocabulary, or `mlxcel_core::add` gets a `[1, 248077]` bias
+/// against `[1, 248320]` logits and fails inside the FFI on every constrained
+/// request against this family. The 243 unnameable positions must come back
+/// masked, because an id the grammar has never seen cannot satisfy it.
+///
+/// The generic direction is covered by
+/// `apply_mask_with_model_vocab_larger_than_matcher_vocab`; this test pins the
+/// production magnitudes so a refactor that starts sizing the bias from the
+/// matcher fails here with the checkpoint's own numbers.
+/// Upstream analogue: Blaizzy/mlx-vlm#1805.
+#[test]
+fn apply_mask_covers_the_qwen3_8_padded_lm_head() {
+    const QWEN3_8_TOKENIZER_VOCAB: usize = 248_077;
+    const QWEN3_8_LM_HEAD_ROWS: usize = 248_320;
+
+    let hf = padded_byte_level_tokenizer(QWEN3_8_TOKENIZER_VOCAB);
+    let mlxcel = mlxcel_tokenizer_from_hf(hf);
+    let constraint = mlxcel::server::structured::build_json_schema_constraint(
+        &mlxcel,
+        json!({"type": "string"}),
+    )
+    .expect("simple schema compiles over a production-sized vocabulary");
+
+    let mut guard = constraint.lock().expect("uncontended");
+    assert_eq!(
+        guard.vocab_size(),
+        QWEN3_8_TOKENIZER_VOCAB,
+        "the matcher must expose the tokenizer's real vocabulary, not the padded row count"
+    );
+
+    let logits = mlxcel_core::from_slice_f32(
+        &vec![0.0f32; QWEN3_8_LM_HEAD_ROWS],
+        &[1, QWEN3_8_LM_HEAD_ROWS as i32],
+    );
+    let masked = mlxcel::server::structured::apply_structured_mask_to_logits(
+        &mut guard,
+        &logits,
+        QWEN3_8_LM_HEAD_ROWS,
+    )
+    .expect("the matcher still has reachable allowed tokens");
+
+    let host = read_f32_array_to_vec(&masked);
+    assert_eq!(
+        host.len(),
+        QWEN3_8_LM_HEAD_ROWS,
+        "the bias must be sized from the model's logits axis (248320), not the matcher's \
+         vocabulary (248077); any other length is a hard FFI failure in mlxcel_core::add"
+    );
+
+    // The 243 padded rows carry no token id, so none of them may survive.
+    for (i, value) in host
+        .iter()
+        .enumerate()
+        .take(QWEN3_8_LM_HEAD_ROWS)
+        .skip(QWEN3_8_TOKENIZER_VOCAB)
+    {
+        assert!(
+            value.is_infinite() && value.is_sign_negative(),
+            "padded lm_head row {i} has no token id and must be masked, got {value}"
+        );
+    }
+
+    // The grammar is still usable: at least one real token id survives.
+    assert!(
+        host[..QWEN3_8_TOKENIZER_VOCAB]
+            .iter()
+            .any(|value| value.is_finite()),
+        "an unstarted string schema must leave at least one real token id allowed"
+    );
 }

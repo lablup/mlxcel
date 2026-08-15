@@ -625,12 +625,53 @@ fn qwen_vl_token_ids(full_config: &Value, defaults: QwenVisionTokenIds) -> QwenV
     }
 }
 
-fn qwen35_vlm_token_defaults() -> QwenVisionTokenIds {
-    QwenVisionTokenIds {
-        image_token_id: 248056,
-        video_token_id: 248057,
-        vision_start_token_id: 248045,
-    }
+/// `image_token_id` for the Qwen3.5 VLM family, used only when the config
+/// omits the key. Every published checkpoint in the family supplies it.
+const QWEN35_IMAGE_TOKEN_ID: i64 = 248056;
+
+/// `video_token_id` for the Qwen3.5 VLM family, used only when the config
+/// omits the key. Every published checkpoint in the family supplies it.
+const QWEN35_VIDEO_TOKEN_ID: i64 = 248057;
+
+/// Resolve the vision token ids for a Qwen3.5-family VLM.
+///
+/// Unlike [`qwen_vl_token_ids`], `vision_start_token_id` has **no default**
+/// here. mlxcel used to fall back to the Qwen3.5-era constant 248045, which
+/// is wrong for every shipped checkpoint in the family: Qwen3.5-0.8B through
+/// Qwen3.5-27B, the Qwen3.5/3.6 MoE builds, and Qwen3.8-27B all declare
+/// `vision_start_token_id: 248053`. A wrong start id does not fail loudly. It
+/// mis-segments the vision spans that drive MRoPE position assignment, so the
+/// model reads the image at the wrong positions and degrades quietly.
+/// Requiring the key turns that into a load-time error.
+///
+/// `image_token_id` and `video_token_id` keep their defaults: those constants
+/// do match every shipped checkpoint, and both ids are also validated
+/// downstream by the image-token insertion count.
+fn qwen35_vl_token_ids(full_config: &Value) -> anyhow::Result<QwenVisionTokenIds> {
+    let vision_start_token_id = full_config
+        .get("vision_start_token_id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Qwen3.5-family config.json is missing `vision_start_token_id`. mlxcel does not \
+                 default it for this family: the Qwen3.5-era constant 248045 is wrong for every \
+                 published checkpoint (they use 248053), and a wrong start id silently \
+                 mis-segments vision spans in MRoPE position assignment instead of failing. Add \
+                 `vision_start_token_id` to config.json."
+            )
+        })? as i32;
+
+    Ok(QwenVisionTokenIds {
+        image_token_id: full_config
+            .get("image_token_id")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(QWEN35_IMAGE_TOKEN_ID) as i32,
+        video_token_id: full_config
+            .get("video_token_id")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(QWEN35_VIDEO_TOKEN_ID) as i32,
+        vision_start_token_id,
+    })
 }
 
 fn wrap_qwen35_vlm(vlm: vision::Qwen35VLModel, variant: Qwen35VlmVariant) -> LoadedModel {
