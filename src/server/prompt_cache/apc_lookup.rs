@@ -49,7 +49,7 @@ use super::block_hash::{ApcBlockHash, ApcHashAlgo, BlockHashChain};
 /// the blocks covered by `matched_len` (`floor(matched_len / block_size)`),
 /// by the candidate chain's length, and by the request's own recomputed
 /// chain length. Any tokens past the last agreeing block boundary are
-/// dropped, including a non-block-aligned tail of `matched_len` — this
+/// dropped, including a non-block-aligned tail of `matched_len`. This
 /// flooring is deliberate and should not be "fixed" to pass `matched_len`
 /// through unchanged.
 /// `matched_len` smaller than `block_size` short-circuits to `0` because no

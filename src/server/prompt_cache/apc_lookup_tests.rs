@@ -28,8 +28,8 @@ fn empty_extra() -> [u8; 32] {
 fn aligned_matching_chains_return_the_block_floored_len() {
     // Both sides see the same tokens and same extra_hash → every block hash
     // agrees. matched_len (64) is already block-aligned to BLOCK (16), so
-    // the block-floored result happens to equal matched_len here — this test
-    // alone cannot distinguish "matched_len preserved" from "floored to
+    // the block-floored result happens to equal matched_len here, so this
+    // test alone cannot distinguish "matched_len preserved" from "floored to
     // block granularity". See `non_aligned_matched_len_floors_to_covered_blocks`
     // below for a case that tells the two apart.
     let tokens: Vec<i32> = (0..64).collect();
