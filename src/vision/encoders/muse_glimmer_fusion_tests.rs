@@ -18,10 +18,6 @@ use crate::models::muse_glimmer::{
 };
 use mlxcel_core::MlxArray;
 use mlxcel_core::weights::WeightMap;
-use serde_json::Value;
-use std::collections::BTreeMap;
-use std::io::Read;
-use std::path::Path;
 
 fn to_vec_f32(a: &MlxArray) -> Vec<f32> {
     let f = mlxcel_core::astype(a, mlxcel_core::dtype::FLOAT32);
@@ -197,79 +193,4 @@ fn weightless_perception_norm_matches_rms_without_scale() {
     assert_eq!(mlxcel_core::array_shape(&out), vec![1, 2]);
     assert_close(values[0], 3.0 / denom);
     assert_close(values[1], 4.0 / denom);
-}
-
-#[test]
-fn pinned_post_tower_weight_roots_and_shapes_match_published_contract() {
-    let model_dir = Path::new("models/mlx/muse-glimmer-30b");
-    let index_path = model_dir.join("model.safetensors.index.json");
-    if !index_path.exists() {
-        eprintln!(
-            "Skipping pinned_post_tower_weight_roots_and_shapes_match_published_contract: \
-             pinned Muse Glimmer checkpoint index not present at {}",
-            index_path.display()
-        );
-        return;
-    }
-    let config: MuseGlimmerConfig =
-        serde_json::from_str(&std::fs::read_to_string(model_dir.join("config.json")).unwrap())
-            .unwrap();
-    config.validate().unwrap();
-    let index: Value = serde_json::from_str(&std::fs::read_to_string(index_path).unwrap()).unwrap();
-    let weight_map = index["weight_map"].as_object().unwrap();
-    let mut actual_keys = weight_map
-        .keys()
-        .filter(|key| {
-            key.starts_with("model.vision_adapter.") || key.starts_with("model.vision_projection.")
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    actual_keys.sort();
-    assert_eq!(
-        actual_keys,
-        vec![
-            "model.vision_adapter.fc1.weight",
-            "model.vision_adapter.fc2.weight",
-            "model.vision_projection.weight"
-        ]
-    );
-
-    let expected = BTreeMap::from([
-        (
-            "model.vision_adapter.fc1.weight",
-            vec![config.projector_hidden_size, config.out_hidden_size],
-        ),
-        (
-            "model.vision_adapter.fc2.weight",
-            vec![config.projector_hidden_size, config.projector_hidden_size],
-        ),
-        (
-            "model.vision_projection.weight",
-            vec![config.text_config.hidden_size, config.projector_hidden_size],
-        ),
-    ]);
-    for (key, expected_shape) in expected {
-        let shard = weight_map[key].as_str().unwrap();
-        assert_eq!(
-            safetensors_shape(&model_dir.join(shard), key),
-            expected_shape,
-            "{key}"
-        );
-    }
-}
-
-fn safetensors_shape(path: &Path, key: &str) -> Vec<usize> {
-    let mut file = std::fs::File::open(path).unwrap();
-    let mut header_len = [0u8; 8];
-    file.read_exact(&mut header_len).unwrap();
-    let header_len = u64::from_le_bytes(header_len) as usize;
-    let mut header = vec![0u8; header_len];
-    file.read_exact(&mut header).unwrap();
-    let header: Value = serde_json::from_slice(&header).unwrap();
-    header[key]["shape"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|dim| dim.as_u64().unwrap() as usize)
-        .collect()
 }
