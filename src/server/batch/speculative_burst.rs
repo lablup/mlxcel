@@ -624,6 +624,34 @@ fn ragged_target_sliding_window(model: &LoadedModel) -> Option<usize> {
     }
 }
 
+/// Whether `model` implements the B = 1 [`MtpTarget`] surface, i.e. can be
+/// driven by `run_mtp_burst` and the tick-cooperative slice path.
+///
+/// This is the single source of truth for the pure-boolean MTP capability
+/// gates (`can_wait_for_slice_grant`, `start_mtp_slice_b1`'s variant gate,
+/// the offline CLI gate). The arm-bearing matches that construct the
+/// per-family adapters (`run_mtp_burst`, the slice start/step dispatch, the
+/// offline adapter selection) necessarily repeat the variant list — when
+/// adding a new MTP-capable family, extend this helper AND every
+/// adapter-constructing match, or the family silently declines to classic on
+/// the paths you missed.
+///
+/// Batched (B > 1) MTP capability is narrower: only the Gemma 4 family
+/// implements the batched adapter today (`run_mtp_burst_batched`'s own gate);
+/// Qwen 3.5 MTP is B = 1 only (#1165).
+pub(crate) fn mtp_capable_target(model: &LoadedModel) -> bool {
+    matches!(
+        model,
+        LoadedModel::Gemma4(_)
+            | LoadedModel::Gemma4VLM(_)
+            | LoadedModel::Gemma4Unified(_)
+            | LoadedModel::Qwen35(_)
+            | LoadedModel::Qwen35Moe(_)
+            | LoadedModel::Qwen35VLM(_)
+            | LoadedModel::Qwen35MoeVLM(_)
+    )
+}
+
 /// Successful burst outcome returned to the scheduler.
 ///
 /// The scheduler uses `tokens_generated` to update the per-request
@@ -992,10 +1020,18 @@ fn run_mtp_burst(
         LoadedModel::Gemma4(wrapper) => wrapper as &dyn LanguageModel,
         LoadedModel::Gemma4VLM(vlm) => vlm as &dyn LanguageModel,
         LoadedModel::Gemma4Unified(unified) => unified as &dyn LanguageModel,
+        // Qwen 3.5 family targets (text + VLM wrappers, dense + MoE) pair
+        // with the qwen3_5_mtp drafter (#1165). The drafter binds against
+        // the text backbone's embed_tokens / lm_head, which the VLM wrapper
+        // exposes through its LanguageModel impl exactly like the text
+        // model.
+        LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => qwen as &dyn LanguageModel,
+        LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => vlm as &dyn LanguageModel,
         _ => {
             tracing::warn!(
                 "MTP speculative dispatch declined: target is {:?}, expected \
-                 Gemma 4 (text, VLM, or Unified); falling back to classic decode",
+                 Gemma 4 (text, VLM, or Unified) or Qwen 3.5 (text or VLM); \
+                 falling back to classic decode",
                 model_variant_label(ctx.model),
             );
             return Err(BurstOutcome::DeclineToClassic);
@@ -1161,9 +1197,51 @@ fn run_mtp_burst(
                 profile_probe_rounds,
             )
         }
+        // Qwen 3.5 family (#1165): the adapter routes through the model's
+        // per-sequence cache slot; there is no rotating-cache buffer to arm
+        // (Qwen attention caches are plain growing KVCaches), so no
+        // block-size-derived constructor parameter.
+        LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => {
+            let adapter = crate::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter::new(
+                qwen,
+                Some(seq.seq_id),
+            )
+            .with_prefill_start_offset(prefill_start_offset);
+            drive_mtp_generator(
+                adapter,
+                owned_drafter,
+                &prompt,
+                max_tokens,
+                &sampling,
+                &token_history,
+                block_size,
+                cancel,
+                &logprobs_config,
+                profile_probe_rounds,
+            )
+        }
+        LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => {
+            let adapter = crate::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::new(
+                vlm,
+                Some(seq.seq_id),
+            )
+            .with_prefill_start_offset(prefill_start_offset);
+            drive_mtp_generator(
+                adapter,
+                owned_drafter,
+                &prompt,
+                max_tokens,
+                &sampling,
+                &token_history,
+                block_size,
+                cancel,
+                &logprobs_config,
+                profile_probe_rounds,
+            )
+        }
         // Unreachable: the hoisted variant check above already
-        // returned for any model that is neither `Gemma4` nor
-        // `Gemma4VLM`. Keeping a defensive arm rather than
+        // returned for any model outside the Gemma 4 / Qwen 3.5 MTP
+        // families. Keeping a defensive arm rather than
         // `unreachable!()` so a future LoadedModel variant added to
         // the enum surfaces as a clean burst error instead of a
         // panic at request time.
@@ -2285,10 +2363,15 @@ fn run_mtp_burst_batched(
         LoadedModel::Gemma4(wrapper) => wrapper as &dyn LanguageModel,
         LoadedModel::Gemma4VLM(vlm) => vlm as &dyn LanguageModel,
         LoadedModel::Gemma4Unified(unified) => unified as &dyn LanguageModel,
+        // Qwen 3.5 MTP is B = 1 only (#1165): its batched MtpTarget methods
+        // keep the erroring trait defaults, so the batched arm declines here
+        // rather than failing mid-burst. Rows fall back to classic decode;
+        // singleton Qwen requests still take the B = 1 MTP arm.
         _ => {
             tracing::warn!(
                 "MTP batched speculative dispatch declined: target is {:?}, expected \
-                 Gemma 4 (text, VLM, or Unified); falling back to classic decode",
+                 Gemma 4 (text, VLM, or Unified; Qwen 3.5 MTP is B = 1 only); \
+                 falling back to classic decode",
                 model_variant_label(ctx.model),
             );
             return Err(BurstOutcome::DeclineToClassic);

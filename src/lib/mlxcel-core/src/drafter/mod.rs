@@ -94,14 +94,14 @@ pub mod dflash;
 /// Concrete Gemma 4 MTP "assistant" drafter implementation. Wired into
 /// [`load_drafter`]'s `Mtp` arm.
 pub mod gemma4_assistant;
-/// Concrete Qwen 3.5 / 3.6 / 3.8 MTP drafter implementation (the split-out
-/// `qwen3_5_mtp` head). Wired into [`load_drafter`]'s `Mtp` arm.
-pub mod qwen3_5_mtp;
 /// Centroid-routed sparse softmax LM head used by Gemma 4 E2B / E4B
 /// assistant drafters. Wired into `Gemma4AssistantDraftModel` in sub-3
 /// — landed here independently so the layer can
 /// be unit-tested in isolation before integration.
 pub mod masked_embedder;
+/// Concrete Qwen 3.5 / 3.6 / 3.8 MTP drafter implementation (the split-out
+/// `qwen3_5_mtp` head). Wired into [`load_drafter`]'s `Mtp` arm.
+pub mod qwen3_5_mtp;
 /// Test-only capture of this module's `tracing` output, used by the
 /// assertions on [`resolve_drafter_kind`]'s operator-facing diagnostics.
 #[cfg(test)]

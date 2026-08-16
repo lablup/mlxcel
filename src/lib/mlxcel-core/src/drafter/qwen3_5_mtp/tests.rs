@@ -67,7 +67,12 @@ fn tiny_weights() -> WeightMap {
     insert_val(&mut w, "pre_fc_norm_hidden.weight", &[8], 1.0);
     insert_val(&mut w, "norm.weight", &[8], 1.0);
     insert_val(&mut w, "layers.0.input_layernorm.weight", &[8], 1.0);
-    insert_val(&mut w, "layers.0.post_attention_layernorm.weight", &[8], 1.0);
+    insert_val(
+        &mut w,
+        "layers.0.post_attention_layernorm.weight",
+        &[8],
+        1.0,
+    );
     insert_val(&mut w, "layers.0.self_attn.q_proj.weight", &[16, 8], 0.05);
     insert_val(&mut w, "layers.0.self_attn.k_proj.weight", &[4, 8], 0.05);
     insert_val(&mut w, "layers.0.self_attn.v_proj.weight", &[4, 8], 0.05);
@@ -224,7 +229,12 @@ fn from_weights_rejects_missing_tensor() {
 #[test]
 fn from_weights_rejects_unknown_extra_tensor() {
     let mut w = tiny_weights();
-    insert_val(&mut w, "model.layers.0.self_attn.q_proj.weight", &[4, 4], 0.0);
+    insert_val(
+        &mut w,
+        "model.layers.0.self_attn.q_proj.weight",
+        &[4, 4],
+        0.0,
+    );
     let err = Qwen35MtpDraftModel::from_weights(&w, tiny_config()).expect_err("must fail");
     let msg = format!("{err}");
     assert!(msg.contains("unexpected tensor"), "got: {msg}");

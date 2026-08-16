@@ -799,20 +799,19 @@ impl<T: MtpTarget> MtpGenerator<T> {
         // hook failure degrades draft quality only (the drafter continues
         // with an empty history), never correctness — greedy parity rests on
         // the target's verify pass alone — so it is logged, not fatal.
-        if let Some(prompt_tokens) = state.drafter_prefill_tokens.take() {
-            if let Some(hidden_full) = state.verify_out.verify_hidden_full.as_ref() {
-                if let Err(e) = self.drafter.prefill_from_target_hidden(
-                    &prompt_tokens,
-                    hidden_full,
-                    state.bonus,
-                    sampling,
-                ) {
-                    tracing::warn!(
-                        "MTP drafter prompt prefill failed: {e}; continuing with an empty \
-                         drafter history"
-                    );
-                }
-            }
+        if let (Some(prompt_tokens), Some(hidden_full)) = (
+            state.drafter_prefill_tokens.take(),
+            state.verify_out.verify_hidden_full.as_ref(),
+        ) && let Err(e) = self.drafter.prefill_from_target_hidden(
+            &prompt_tokens,
+            hidden_full,
+            state.bonus,
+            sampling,
+        ) {
+            tracing::warn!(
+                "MTP drafter prompt prefill failed: {e}; continuing with an empty \
+                 drafter history"
+            );
         }
         // [#736] Classic-step probe rounds. While the adaptive policy is
         // profiling, the first `profile_probe_rounds` rounds skip the
@@ -988,18 +987,16 @@ impl<T: MtpTarget> MtpGenerator<T> {
         // Early-finish rounds returned above without this call — the drafter
         // is reset before its next session, so nothing is lost. Failures
         // degrade draft quality only and are logged, not fatal.
-        if let Some(hidden_full) = state.verify_out.verify_hidden_full.as_ref() {
-            if let Err(e) = self.drafter.accept_verified_tokens(
+        if let Some(hidden_full) = state.verify_out.verify_hidden_full.as_ref()
+            && let Err(e) = self.drafter.accept_verified_tokens(
                 hidden_full,
                 &draft_tokens,
                 walk.accepted,
                 &new_tokens,
                 sampling,
-            ) {
-                tracing::warn!(
-                    "MTP drafter accept_verified_tokens failed: {e}; drafter history reset"
-                );
-            }
+            )
+        {
+            tracing::warn!("MTP drafter accept_verified_tokens failed: {e}; drafter history reset");
         }
 
         // Next round's bonus is the last emitted token. `walk.new_tokens`

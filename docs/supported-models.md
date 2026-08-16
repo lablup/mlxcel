@@ -533,7 +533,8 @@ until each path has explicit mixed-cache and multimodal validation.
 | Drafter | Target families | Notes |
 |---------|-----------------|-------|
 | MTP | Gemma 4 target paths | Available through shared speculative decoding flags, on `mlxcel-server` and on offline `mlxcel generate --draft-kind mtp`. |
-| DFlash | Qwen 3.5 text/VLM paths | `mlxcel-server` only. Available through shared speculative decoding flags there; offline `mlxcel generate` rejects a DFlash drafter with a named error because it does not construct the DFlash round loop. Qwen3.8 rides the same `qwen3_5` path but has no published DFlash drafter, and its MTP tensors are dropped by the mlx-community conversion, so it runs unspeculated (#1165). |
+| MTP | Qwen 3.5 / 3.6 / 3.8 text and VLM paths (B = 1) | Requires the split-out `qwen3_5_mtp` drafter checkpoint (for Qwen3.8-27B: [`mlx-community/Qwen3.8-27B-MTP-bf16`](https://huggingface.co/mlx-community/Qwen3.8-27B-MTP-bf16); the mlx-community target conversions drop the in-model `mtp.*` tensors, so the drafter is always a separate directory). Auto-detected from the drafter's `model_type` with no `--draft-kind`, on `mlxcel-server` and offline `mlxcel generate`. Single-request only: batched (B > 1) MTP windows decline to classic decode. Image/video prefill runs on the target; MTP accelerates only the text decode tail. |
+| DFlash | Qwen 3.5 text/VLM paths | `mlxcel-server` only. Available through shared speculative decoding flags there; offline `mlxcel generate` rejects a DFlash drafter with a named error because it does not construct the DFlash round loop. Qwen3.8 rides the same `qwen3_5` path but has no published DFlash drafter; pair it with the MTP drafter row above instead (#1165). |
 
 Use auto-detection by default. Override only when you know the target and drafter
 checkpoint pair are compatible.

@@ -182,8 +182,10 @@ impl Qwen35MtpDraftModel {
                     reason: format!("Weight not found: {key}"),
                 })
         };
-        let pre_fc_norm_embedding =
-            RMSNorm::new(norm_w("pre_fc_norm_embedding.weight")?, text_cfg.rms_norm_eps);
+        let pre_fc_norm_embedding = RMSNorm::new(
+            norm_w("pre_fc_norm_embedding.weight")?,
+            text_cfg.rms_norm_eps,
+        );
         let pre_fc_norm_hidden =
             RMSNorm::new(norm_w("pre_fc_norm_hidden.weight")?, text_cfg.rms_norm_eps);
         let norm = RMSNorm::new(norm_w("norm.weight")?, text_cfg.rms_norm_eps);
@@ -443,12 +445,11 @@ fn strip_weight(key: &str) -> &str {
 
 impl Drafter for Qwen35MtpDraftModel {
     fn bind(&mut self, target: &dyn LanguageModel) -> Result<(), DrafterError> {
-        let embed =
-            target
-                .embed_tokens_module()
-                .ok_or(DrafterError::TargetMissingFeature {
-                    feature: "embed_tokens_module",
-                })?;
+        let embed = target
+            .embed_tokens_module()
+            .ok_or(DrafterError::TargetMissingFeature {
+                feature: "embed_tokens_module",
+            })?;
         // Upstream: `lm_head = target.lm_head or embed_tokens.as_linear`.
         self.lm_head = Some(match target.lm_head_module() {
             Some(lm) => MtpLmHead::Linear(lm),
@@ -468,11 +469,12 @@ impl Drafter for Qwen35MtpDraftModel {
     fn validate_target_compat(&self, target: &dyn LanguageModel) -> Result<(), DrafterError> {
         let expected_hidden = self.config.text_config().hidden_size as i32;
         let sentinel = ffi::from_slice_i32(&[0_i32], &[1, 1]);
-        let embedded = target
-            .embed_tokens(&sentinel)
-            .ok_or(DrafterError::TargetMissingFeature {
-                feature: "embed_tokens",
-            })?;
+        let embedded =
+            target
+                .embed_tokens(&sentinel)
+                .ok_or(DrafterError::TargetMissingFeature {
+                    feature: "embed_tokens",
+                })?;
         let target_hidden = ffi::array_shape(&embedded).last().copied().unwrap_or(0);
         if target_hidden != expected_hidden {
             return Err(DrafterError::BindFailed {
@@ -662,8 +664,8 @@ impl Drafter for Qwen35MtpDraftModel {
                 Some(prev) => crate::ops::concatenate(&prev, &s, 1),
             });
         };
-        for draft_idx in keep..accepted {
-            tokens.push(draft_tokens[draft_idx]);
+        for (draft_idx, &draft_tok) in draft_tokens.iter().enumerate().take(accepted).skip(keep) {
+            tokens.push(draft_tok);
             push_slice(draft_idx, &mut hidden_cat);
         }
         if let Some(&last) = new_tokens.last() {
