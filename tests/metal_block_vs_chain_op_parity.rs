@@ -165,6 +165,23 @@ const HEAD_DIM: i32 = 128;
 /// Cached prefix length the verify block attends over.
 const PREFIX: i32 = 64;
 
+/// Seed for the synthetic operands, overridable with
+/// `MLXCEL_TEST_OP_PARITY_SEED`.
+///
+/// Not decoration. When a kernel pair differs by only a byte or two out of
+/// ten thousand, whether *any* byte differs on a given draw is itself
+/// draw-dependent, so a single seed can report `equal` for a shape that is
+/// genuinely on a different kernel. Sweeping the seed is how that gets
+/// separated from a real equality (M5 Max, 2026-08-17: the mxfp4 row read
+/// `equal` on one harness and `DIVERGES` at 1 to 9 bytes on four seeds of
+/// this one).
+fn operand_seed() -> u64 {
+    std::env::var("MLXCEL_TEST_OP_PARITY_SEED")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(1165)
+}
+
 fn randn(shape: &[i32], dt: i32) -> UniquePtr<MlxArray> {
     unsafe { mlxcel_core::random_normal(shape, dt, std::ptr::null()) }
 }
@@ -356,7 +373,7 @@ fn per_op_block_vs_chain_parity_at_block_three() {
         return;
     }
     let _runtime = initialize_runtime();
-    mlxcel_core::random_seed(1165);
+    mlxcel_core::random_seed(operand_seed());
 
     let t = BLOCK_T;
     let x_f16 = randn(&[1, t, HIDDEN], dtype::FLOAT16);
@@ -496,7 +513,7 @@ fn matmul_block_width_sweep() {
         return;
     }
     let _runtime = initialize_runtime();
-    mlxcel_core::random_seed(1165);
+    mlxcel_core::random_seed(operand_seed());
 
     // One representative per distinct (operand bucket, bits) combination
     // across the two families, plus an unquantized control.
