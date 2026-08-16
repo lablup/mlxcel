@@ -1,5 +1,35 @@
 # Code Modification Guidelines
 
+## File Size and Module Structure
+
+Guidance for when a file should stay as one unit, when to extract a helpers file, and when to split into a directory module. This section is the authoritative source for the numeric thresholds; `.claude/skills/mlxcel-code-structure/SKILL.md` links here instead of restating them.
+
+A feature that is self-contained and small is fine as a single file, for example `src/models/qwen2.rs` (a complete model in around 600 lines) or `src/distributed/heartbeat.rs` (a complete feature in around 300 lines). Beyond that, apply the following thresholds.
+
+| Size | Action |
+|------|--------|
+| Under 800 lines | Fine as a single file |
+| 800 to 1,200 lines | Acceptable for complex models; consider extracting a helpers file |
+| 1,200+ lines | Extract helpers into `<name>_helpers.rs` |
+| 1,500+ lines | Strongly consider splitting into a directory module |
+| 2,000+ lines with no helpers file | Anti-pattern; extract `<name>_helpers.rs` |
+
+These are guidelines, not gates. Two files exceed them deliberately, and the reasons are the actual lesson:
+
+- `nemotron_h.rs` (2,342 lines): a hybrid Mamba+Transformer model, where splitting would break the layer-interleaving logic.
+- `llama4.rs` (1,499 lines): MoE, iGQA and ChunkedKV are tightly coupled in this model.
+
+### Inline tests versus a sibling `_tests.rs` file
+
+Keep tests inline in `#[cfg(test)] mod tests { ... }` while they stay short and tightly coupled to the module, roughly under 100 lines. Once a module's tests grow past that, and by 200 lines at the latest, move them to a sibling file (`config.rs` gets `config_tests.rs`), wired in with `#[cfg(test)] mod config_tests;` or a `#[path = "config_tests.rs"] mod config_tests;` attribute.
+
+### Naming
+
+| Pattern | Example | When |
+|---------|---------|------|
+| `<name>_helpers.rs` | `gemma3n_helpers.rs` | Extracted helpers for a large model |
+| `<name>_tests.rs` | `config_tests.rs` | Sibling test file, once inline tests outgrow the module |
+
 ## Shared Function Comments
 
 When modifying shared/common functions that multiple models depend on (e.g., attention implementations, normalization, KV cache, activation functions), **always add or update comments** indicating which models use that function.
