@@ -435,3 +435,45 @@ fn atem_unknown_tool_is_dropped_before_route_responses_are_built() {
     assert_eq!(response_json["choices"][0]["finish_reason"], "stop");
     assert_no_atem(&response_json);
 }
+
+#[test]
+fn atem_replay_with_empty_string_tool_call_arguments_does_not_raise() {
+    // Issue #1175 follow-up: this file's fixture template raises inside
+    // `render_atem` when `tool_call.function.arguments` is not a mapping.
+    // Before `normalize_tool_call_arguments` learned to treat an empty
+    // string as "no arguments", the common zero-argument spelling an
+    // agentic client echoes back on a replayed tool call reached the
+    // template as a raw string and blew up the render. The failure was
+    // sticky: the offending `tool_calls` entry lives on in conversation
+    // history, so every later turn in the same conversation would have
+    // failed the same way.
+    let request: ChatCompletionRequest = serde_json::from_value(json!({
+        "model": MODEL,
+        "messages": [
+            {"role": "user", "content": "What's the weather?"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "weather.get_current", "arguments": ""}
+                }]
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "{\"temp_c\":29}"},
+            {"role": "user", "content": "Thanks, now schedule lunch."}
+        ],
+        "tools": tools()
+    }))
+    .expect("chat request");
+
+    let prompt = render_chat_request(&request);
+    assert!(
+        prompt.contains("<atem:invoke name=\"weather.get_current\">"),
+        "the replayed empty-arguments tool call must still render: {prompt:?}"
+    );
+    assert!(
+        !prompt.contains("Onyx ATEM chat template requires"),
+        "the template's mapping-required raise must not fire: {prompt:?}"
+    );
+}

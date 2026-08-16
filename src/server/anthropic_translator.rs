@@ -150,6 +150,7 @@ pub fn anthropic_request_to_chat(request: &AnthropicRequest) -> AnthropicTransla
             .and_then(|m| m.get("user_id"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
+        reasoning_effort: None,
         extra_body_fields: serde_json::Map::new(),
         response_format: None,
         params,

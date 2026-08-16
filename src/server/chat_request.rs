@@ -62,7 +62,7 @@ use std::sync::{Mutex, OnceLock};
 
 use anyhow::Result;
 
-use super::chat_template::{ChatMessage, ChatTemplateProcessor};
+use super::chat_template::{ChatMessage, ChatTemplateProcessor, template_rejection_message};
 use super::chat_template_kwargs::{
     ChatTemplateKwargs, extract_request_kwargs, merge_server_and_request, strip_rolling_checkpoint,
     strip_think_block,
@@ -143,6 +143,127 @@ pub(super) fn log_once_sessions() -> &'static Mutex<HashSet<String>> {
     LOGGED.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// Turn a template-raised refusal into a request error; leave every other
+/// render failure to the caller's fallback (issue #1164).
+///
+/// [`render_simple_fallback`] exists for checkpoints whose template mlxcel
+/// cannot render at all, and dropping to a bare prompt is the right call there:
+/// the alternative is refusing to serve a model that otherwise works. It is the
+/// wrong call when the template rendered fine and deliberately rejected a
+/// caller-supplied value. That produced an HTTP 200 whose prompt had no chat
+/// framing, no system message, and no tool declarations, so the client got a
+/// plausible answer it had no way to tell apart from a real one, and the only
+/// record was a server-side `WARN`.
+///
+/// The discriminator is [`template_rejection_message`], which downcasts to the
+/// sentinel that `raise_exception` attaches as the error's source. It is exact:
+/// it cannot fire on an engine failure the way `ErrorKind::InvalidOperation`
+/// would, and it does not depend on how a template author worded the message.
+///
+/// The returned error propagates out of [`prepare_chat_request_with_cache`],
+/// which every chat, Responses, and Anthropic route already maps to a 400
+/// before any generation starts, so the streaming routes emit it in place of
+/// the SSE stream rather than mid-stream.
+fn reject_if_template_rejection(err: &anyhow::Error) -> Result<()> {
+    let Some(message) = template_rejection_message(err) else {
+        return Ok(());
+    };
+    tracing::info!("Chat template rejected the request: {message}");
+    anyhow::bail!("the model's chat template rejected this request: {message}");
+}
+
+/// Resolve the chat-template kwargs a request renders with.
+///
+/// Single source of truth for the kwargs map, shared by the rendering pipeline
+/// in [`prepare_chat_request_with_cache`], by the prompt-cache context builder
+/// in [`super::routes::chat::build_prompt_cache_request_context`], and by the
+/// next-turn warm-up render in [`render_next_turn_history`], so the
+/// `template_sig` hash, the served prompt, and the warmed vector are all taken
+/// over the same map. A caller that derives the merge by hand instead warms or
+/// keys a prompt the other two never produce.
+///
+/// Precedence, highest first:
+///
+/// 1. Per-request `chat_template_kwargs` (top-level, then nested/flattened
+///    `extra_body.chat_template_kwargs`, then the DashScope/OpenAI-SDK
+///    `preserve_thinking` alias); see [`extract_request_kwargs`].
+/// 2. Per-request top-level `reasoning_effort` (OpenAI-standard field), mapped
+///    onto the `reasoning_effort` kwarg by [`map_reasoning_effort_kwarg`].
+/// 3. Server-default `--chat-template-kwargs` / `LLAMA_ARG_CHAT_TEMPLATE_KWARGS`.
+///
+/// Steps 1 and 2 are both per-request, so they are resolved into the
+/// per-request map before the server-default merge. That keeps the module's
+/// "per-request wins per-key, unrelated server-default keys persist" rule
+/// (see [`super::chat_template_kwargs`]) intact for the new field.
+///
+/// The prompt-cache `preserve_thinking=true` defaulting is deliberately **not**
+/// part of this helper: it is applied by the caller after the merge, and only
+/// the rendering pipeline applies it today. Folding it in here would change
+/// every existing deployment's `template_sig` on upgrade, which is a cache
+/// invalidation this change has no reason to cause. [`render_next_turn_history`]
+/// applies the same default itself, for the same reason and with the same
+/// value, so the warm-up and the render it mirrors stay in step.
+// Used by: chat_request (prepare_chat_request_with_cache, render_next_turn_history), routes/chat
+pub(crate) fn resolve_effective_kwargs(
+    processor: &ChatTemplateProcessor,
+    request: &ChatCompletionRequest,
+    server_default_kwargs: Option<&ChatTemplateKwargs>,
+    merged_extra_body: &Option<serde_json::Map<String, serde_json::Value>>,
+) -> ChatTemplateKwargs {
+    let mut per_request_kwargs = extract_request_kwargs(
+        request.chat_template_kwargs.as_ref(),
+        merged_extra_body.as_ref(),
+    );
+    map_reasoning_effort_kwarg(processor, request, &mut per_request_kwargs);
+    merge_server_and_request(server_default_kwargs, &per_request_kwargs)
+}
+
+/// Map the OpenAI-standard top-level `reasoning_effort` request field onto the
+/// `reasoning_effort` chat-template kwarg (issue #1164).
+///
+/// Three guards, each deliberate:
+///
+/// * **An explicit `chat_template_kwargs.reasoning_effort` wins.** The kwarg is
+///   the checkpoint-specific channel and the caller who reached for it knows
+///   the template's vocabulary; the OpenAI field is the portable, lower-
+///   precedence one.
+/// * **The template must mention the name.** Templates that never read
+///   `reasoning_effort` do not silently acquire a kwarg, mirroring how
+///   `supports_image_content` and friends gate on template content. This also
+///   means the field cannot start failing requests on a checkpoint that never
+///   looked at it.
+/// * **No value translation.** OpenAI's vocabulary is
+///   `{minimal, low, medium, high}` and Qwen3.8's is `{xhigh, medium, low}`, so
+///   `high` is valid OpenAI and invalid Qwen3.8 while `xhigh` is the reverse.
+///   Remapping `high` to `xhigh` would silently change the model's reasoning
+///   budget to something the caller did not ask for. The value goes through
+///   verbatim, the template decides, and a refusal surfaces as a 400 carrying
+///   the template's own message and its accepted set. Same reasoning as
+///   `resolve_drafter_kind`'s refusal to guess a drafter
+///   (`src/lib/mlxcel-core/src/drafter/mod.rs`).
+fn map_reasoning_effort_kwarg(
+    processor: &ChatTemplateProcessor,
+    request: &ChatCompletionRequest,
+    per_request_kwargs: &mut ChatTemplateKwargs,
+) {
+    const KEY: &str = "reasoning_effort";
+
+    let Some(effort) = request.resolve_reasoning_effort() else {
+        return;
+    };
+    if per_request_kwargs.as_map().contains_key(KEY) {
+        return;
+    }
+    if !processor.template_mentions(KEY) {
+        tracing::debug!(
+            "request set reasoning_effort but the loaded chat template does not \
+             reference it; leaving the request unchanged"
+        );
+        return;
+    }
+    per_request_kwargs.set(KEY, serde_json::Value::String(effort.to_string()));
+}
+
 /// Legacy wrapper preserved for tests and any callers outside the hot
 /// route path. Delegates to [`prepare_chat_request_with_cache`] with
 /// the cache-enabled flag set to `false`, matching earlier behavior.
@@ -190,19 +311,16 @@ pub(crate) async fn prepare_chat_request_with_cache(
     let effective_tools = effective_tools(request);
     let merged_extra_body = request.merged_extra_body();
 
-    // resolve merged kwargs once up-front.
-    //
-    // Precedence: top-level `chat_template_kwargs` >
-    // nested/flattened `extra_body.chat_template_kwargs` >
-    // nested/flattened DashScope/OpenAI-SDK `preserve_thinking` aliases. The
-    // merge with server-default kwargs follows the "per-request wins per-key,
-    // unrelated server-default keys persist" rule so every future kwarg
-    // inherits the same plumbing.
-    let per_request_kwargs = extract_request_kwargs(
-        request.chat_template_kwargs.as_ref(),
-        merged_extra_body.as_ref(),
+    // resolve merged kwargs once up-front. See
+    // `resolve_effective_kwargs` for the precedence chain; the prompt-cache
+    // context builder calls the same helper so the cache key is derived from
+    // the same map this render uses.
+    let mut merged_kwargs = resolve_effective_kwargs(
+        processor,
+        request,
+        server_default_kwargs,
+        &merged_extra_body,
     );
-    let mut merged_kwargs = merge_server_and_request(server_default_kwargs, &per_request_kwargs);
 
     // default preserve_thinking=true when the prompt cache is on
     // and no layer of the precedence chain set it. The per-request-kwargs
@@ -273,6 +391,10 @@ pub(crate) async fn prepare_chat_request_with_cache(
                 (rendered, history)
             }
             Err(err) => {
+                // A deliberate template refusal is a client error, not a render
+                // failure: fail the request instead of answering from a
+                // stripped prompt. See `reject_if_template_rejection`.
+                reject_if_template_rejection(&err)?;
                 tracing::warn!(
                     "Chat template render (raw) failed, using fallback: {:#}",
                     err
@@ -293,6 +415,10 @@ pub(crate) async fn prepare_chat_request_with_cache(
                 (rendered, history)
             }
             Err(err) => {
+                // Same split as the raw/multimodal arm above: a template that
+                // refused a caller-supplied value must not degrade to a
+                // fallback prompt.
+                reject_if_template_rejection(&err)?;
                 tracing::warn!("Chat template render failed, using fallback: {:#}", err);
                 // Security (H-1): use pre-stripped messages for the same reason.
                 (render_simple_fallback(&messages), None)
@@ -426,12 +552,18 @@ pub(crate) fn render_next_turn_history(
         return None;
     }
 
-    let merged_extra_body = request.merged_extra_body();
-    let per_request_kwargs = extract_request_kwargs(
-        request.chat_template_kwargs.as_ref(),
-        merged_extra_body.as_ref(),
+    // Resolve the kwargs through the same helper the render pipeline and the
+    // prompt-cache context builder use, so a mapped top-level
+    // `reasoning_effort` (issue #1164) is present in the probe renders too.
+    // Deriving the merge separately here would warm a vector rendered with a
+    // different effort than the bucket's `template_sig` describes, and the next
+    // turn would miss it.
+    let mut merged_kwargs = resolve_effective_kwargs(
+        processor,
+        request,
+        server_default_kwargs,
+        &request.merged_extra_body(),
     );
-    let mut merged_kwargs = merge_server_and_request(server_default_kwargs, &per_request_kwargs);
     // Mirror the prompt-cache defaulting that `prepare_chat_request_with_cache`
     // applied to the request this reply answered, or the two renders would
     // disagree about thinking retention and the warm-up would key a vector the
@@ -943,6 +1075,21 @@ fn template_text_content(content: &serde_json::Value) -> String {
 /// templates that serialize arguments via `tojson` then emit the original
 /// object shape, while malformed/scalar arguments stay strings for templates
 /// that treat them as text. Mirrors mlx-serve's `chat.zig` workaround.
+///
+/// Two zero-argument spellings get the same treatment even though neither
+/// parses to an object: an empty (or whitespace-only) string, the common
+/// spelling agentic clients echo back for a call that takes no parameters,
+/// and the literal string `"null"`, the same intent from a client that
+/// `JSON.stringify()`s a `null` arguments value. Both are unambiguous "there
+/// were no arguments" signals, unlike `"[1,2]"` or a truncated payload, which
+/// stay strings because there is no safe reading of them as "no arguments".
+/// Before this, a template macro that requires `arguments` to be a mapping
+/// (e.g. Onyx ATEM's `render_atem`, see
+/// `tests/fixtures/muse_glimmer/chat_template.jinja`) raised on either
+/// spelling. That turned a routine zero-argument tool call into an HTTP 400
+/// the caller could not act on, and the failure was sticky: the offending
+/// `tool_calls` entry lives on in conversation history and replays on every
+/// later turn.
 fn normalize_tool_call_arguments(tool_calls: &mut serde_json::Value) {
     let serde_json::Value::Array(calls) = tool_calls else {
         return;
@@ -951,8 +1098,15 @@ fn normalize_tool_call_arguments(tool_calls: &mut serde_json::Value) {
         let Some(args) = call.pointer_mut("/function/arguments") else {
             continue;
         };
-        if let serde_json::Value::String(s) = args
-            && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s)
+        let serde_json::Value::String(s) = args else {
+            continue;
+        };
+        let trimmed = s.trim();
+        if trimmed.is_empty() || trimmed == "null" {
+            *args = serde_json::json!({});
+            continue;
+        }
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s)
             && parsed.is_object()
         {
             *args = parsed;

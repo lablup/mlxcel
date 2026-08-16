@@ -240,6 +240,7 @@ pub fn responses_request_to_chat(
         extra_body: None,
         prompt_cache_key: request.prompt_cache_key.clone(),
         user,
+        reasoning_effort: None,
         extra_body_fields: serde_json::Map::new(),
         response_format,
         params: sampling,

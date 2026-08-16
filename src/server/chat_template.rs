@@ -34,6 +34,91 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+/// Sentinel attached as the [`std::error::Error::source`] of every error a
+/// chat template raises through the `raise_exception(...)` callable.
+///
+/// A template calls `raise_exception` to refuse a **caller-supplied** value it
+/// does not accept: an unknown `reasoning_effort`, an unsupported role, a role
+/// order it forbids. That is a 400-class client error and must be told apart
+/// from an engine-side render failure (an unimplemented filter, a malformed
+/// template), which is a server-side limitation that legitimately degrades to
+/// `chat_request::render_simple_fallback`.
+///
+/// `minijinja::ErrorKind::InvalidOperation` cannot be that discriminator on its
+/// own: minijinja raises the same kind for genuine engine problems, so keying
+/// on the kind would convert real render failures into 400s, which is the
+/// opposite mistake. Keying on the message text is worse still, since a template
+/// author picks that wording freely. Attaching this sentinel instead gives an
+/// exact, type-level answer with no string matching, recovered by
+/// [`template_rejection_message`].
+///
+/// The sentinel survives to the render call site. minijinja's VM annotates a
+/// propagating error with file and line information in place (`process_err` in
+/// `minijinja::vm`) rather than replacing it, and the few paths that do wrap
+/// (include, loop recursion, `super()`) attach the original through
+/// `with_source`, so the sentinel stays reachable through `source()` links in
+/// every case. `template_rejection_message` walks the whole chain rather than
+/// checking one level for exactly that reason.
+#[derive(Debug, Clone)]
+pub struct TemplateRejection {
+    message: String,
+}
+
+impl TemplateRejection {
+    /// Cap on the template message copied into the client-facing 400.
+    ///
+    /// Rejection messages routinely interpolate the offending caller value
+    /// (`'Unexpected reasoning effort ' ~ reasoning_effort ~ ...`), so the text
+    /// is partly client-controlled. Bounding the copy keeps a multi-megabyte
+    /// kwarg value out of the HTTP error body. It also bounds what reaches the
+    /// server log on this path: [`super::chat_request`]'s
+    /// `reject_if_template_rejection` logs this already-truncated message at
+    /// `INFO` and then returns, so the untruncated `WARN ... using fallback`
+    /// line its caller would otherwise log is unreachable for a
+    /// `raise_exception` rejection. That `WARN` line still fires, untruncated,
+    /// for a genuine render failure that degrades to the fallback prompt
+    /// instead of being rejected.
+    const MAX_MESSAGE_CHARS: usize = 512;
+
+    fn new(message: &str) -> Self {
+        Self {
+            message: truncate_chars(message, Self::MAX_MESSAGE_CHARS),
+        }
+    }
+
+    /// The template's own message, truncated to [`Self::MAX_MESSAGE_CHARS`].
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl std::fmt::Display for TemplateRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the chat template rejected this request")
+    }
+}
+
+impl std::error::Error for TemplateRejection {}
+
+/// Recover a template's own rejection message from a render error.
+///
+/// Returns `Some` only when the render failed because the template itself
+/// called `raise_exception(...)` (see [`TemplateRejection`]), and `None` for
+/// every engine-side failure. Callers use this to split a client error (400,
+/// message echoed back) from a server-side render limitation (fall back to a
+/// plain prompt, as before).
+///
+/// Works on the `anyhow::Error` returned by the `apply*` entry points: those
+/// add a `Context` layer over the `minijinja::Error`, and `anyhow`'s chain
+/// walks `source()` links, so the sentinel is reachable from the outermost
+/// error.
+// Used by: chat_request
+pub fn template_rejection_message(err: &anyhow::Error) -> Option<&str> {
+    err.chain()
+        .find_map(|cause| cause.downcast_ref::<TemplateRejection>())
+        .map(TemplateRejection::message)
+}
+
 /// Chat template processor
 #[derive(Clone)]
 pub struct ChatTemplateProcessor {
@@ -432,6 +517,20 @@ impl ChatTemplateProcessor {
         self.template.contains("'audio'") || self.template.contains("\"audio\"")
     }
 
+    /// Check whether the template source mentions the variable `name`.
+    ///
+    /// Same shape of heuristic as [`Self::supports_image_content`] above: a raw
+    /// substring probe over the template source rather than a parse. It gates
+    /// whether an OpenAI-standard request field is forwarded as a template
+    /// kwarg at all, so a false positive costs one unused Jinja context entry
+    /// and a false negative leaves the pre-existing "field has no effect"
+    /// behavior in place. Neither can change a rendered prompt for a template
+    /// that does not read the name.
+    // Used by: chat_request
+    pub fn template_mentions(&self, name: &str) -> bool {
+        self.template.contains(name)
+    }
+
     /// Apply the chat template with raw JSON messages (for multimodal content).
     ///
     /// This allows passing messages with list-type content entries (e.g.,
@@ -781,10 +880,30 @@ fn build_template_context(
 /// keeps each log record small regardless of input.
 fn truncate_key_for_log(key: &str) -> String {
     const MAX_CHARS: usize = 64;
-    let mut chars = key.chars();
-    let truncated: String = chars.by_ref().take(MAX_CHARS).collect();
+    truncate_chars(key, MAX_CHARS)
+}
+
+/// Bound a partly caller-controlled string to `max_chars` Unicode scalar
+/// values, appending an ellipsis when anything was dropped, and replace every
+/// control character (`\n`, `\r`, `\t`, the ANSI `ESC` that opens a terminal
+/// escape sequence, ...) with a plain space.
+///
+/// Shared by [`truncate_key_for_log`] and [`TemplateRejection::new`]: both take
+/// text an HTTP client can grow without limit and put it somewhere with a cost
+/// per byte (a log record, an error body), and both land in a single-line
+/// plaintext `tracing_subscriber::fmt` record or an HTTP error body. Without
+/// the filter, a caller value carrying a newline can forge a fake log line and
+/// one carrying an ANSI escape can rewrite terminal/log-viewer state in
+/// `--log-file` output; filtering both call sites here closes that sink in one
+/// place instead of at each of the two. Compare
+/// `src/server/florence2_worker.rs`'s `validate_task_input`, which rejects a
+/// control character outright: that call sits at a request boundary that can
+/// afford to refuse the request, while this one bounds text already accepted
+/// and headed for a log/error sink, so it filters instead.
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars().map(|c| if c.is_control() { ' ' } else { c });
+    let truncated: String = chars.by_ref().take(max_chars).collect();
     if chars.next().is_some() {
-        // Key had more than MAX_CHARS chars — append ellipsis.
         format!("{truncated}\u{2026}")
     } else {
         truncated
@@ -944,13 +1063,21 @@ fn configure_environment(env: &mut Environment<'_>) {
     // itself cap memory from a single very large emit; that is out of scope.
     env.set_fuel(Some(50_000_000));
 
+    // A template calls `raise_exception` to refuse a caller-supplied value, not
+    // because mlxcel failed to render it. Attach a `TemplateRejection` sentinel
+    // as the error's source so `template_rejection_message` can recognise that
+    // intent at the type level; without it the only signals are
+    // `ErrorKind::InvalidOperation` (which minijinja also raises for genuine
+    // engine problems) and the message text (which the template author writes).
+    // The `minijinja::Error` keeps the full untruncated message for the log.
     env.add_function(
         "raise_exception",
         |msg: String| -> std::result::Result<Value, minijinja::Error> {
-            Err(minijinja::Error::new(
-                minijinja::ErrorKind::InvalidOperation,
-                msg,
-            ))
+            let rejection = TemplateRejection::new(&msg);
+            Err(
+                minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, msg)
+                    .with_source(rejection),
+            )
         },
     );
 
@@ -2577,6 +2704,80 @@ TOOL
         let out = truncate_key_for_log(&key);
         assert!(out.ends_with('\u{2026}'));
         assert_eq!(out.chars().count(), 65); // 64 CJK + ellipsis
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #1175 follow-up: truncate_chars control-character filtering, and
+    // the 512-char TemplateRejection message cap it feeds.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn truncate_chars_filters_control_characters() {
+        // A caller-supplied value carrying a newline or an ANSI escape must
+        // not reach a single-line plaintext log record intact: either can
+        // forge a fake log line or rewrite terminal/log-viewer state in
+        // `--log-file` output. Each control character becomes one space
+        // rather than being dropped, so the visible character count is
+        // unchanged.
+        let hostile = "line one\nline two\x1b[31mred\x1b[0m\ttabbed";
+        let out = truncate_chars(hostile, 1000);
+        assert!(!out.contains('\n'), "newline must be filtered: {out:?}");
+        assert!(!out.contains('\x1b'), "ESC must be filtered: {out:?}");
+        assert!(!out.contains('\t'), "tab must be filtered: {out:?}");
+        assert_eq!(out.chars().count(), hostile.chars().count());
+    }
+
+    #[test]
+    fn template_rejection_message_caps_at_512_chars() {
+        // Pin the cap named in `TemplateRejection::MAX_MESSAGE_CHARS`: a
+        // message longer than 512 chars must come back truncated with a
+        // trailing ellipsis, and never longer than 512 chars plus that
+        // ellipsis.
+        let long_message: String = "a".repeat(1000);
+        let rejection = TemplateRejection::new(&long_message);
+        let msg = rejection.message();
+        assert_eq!(
+            msg.chars().count(),
+            513, // 512 chars + 1 ellipsis character
+            "message must be capped at 512 chars plus the ellipsis, got: {msg:?}"
+        );
+        assert!(msg.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn template_rejection_message_multibyte_boundary_does_not_panic() {
+        // The 512th character is the first of a run of 3-byte-in-UTF-8 CJK
+        // characters, so the byte offset a naive `&s[..512]` slice would cut
+        // at (byte 512) falls in the middle of that character's encoding
+        // (which starts at byte 511). `chars().take()` makes that panic
+        // impossible today, but nothing stops a later refactor to byte
+        // slicing from reintroducing it, so this pins the char-counted
+        // behavior directly at the boundary that would break first.
+        let mut long_message = "x".repeat(511);
+        long_message.push_str(&"\u{4e2d}".repeat(200));
+        let rejection = TemplateRejection::new(&long_message);
+        let msg = rejection.message();
+        assert_eq!(
+            msg.chars().count(),
+            513, // 511 'x' + 1 CJK char = 512, + 1 ellipsis
+            "got: {msg:?}"
+        );
+        assert!(msg.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn template_rejection_message_filters_control_characters() {
+        // Fixing `truncate_chars` fixes both of its call sites at once: a
+        // rejection message a template interpolates from caller input (e.g.
+        // `raise_exception('Unexpected reasoning effort ' ~ reasoning_effort ~
+        // '...')`) must not carry a raw newline or ANSI escape into the
+        // `INFO`-level "Chat template rejected the request" log line or the
+        // client-facing 400 body.
+        let hostile = "Unexpected reasoning effort evil\nWARN fake log line injected\x1b[0m";
+        let rejection = TemplateRejection::new(hostile);
+        let msg = rejection.message();
+        assert!(!msg.contains('\n'), "newline must be filtered: {msg:?}");
+        assert!(!msg.contains('\x1b'), "ESC must be filtered: {msg:?}");
     }
 
     #[test]

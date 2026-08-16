@@ -103,6 +103,9 @@ mod max_tokens_route_tests;
 mod muse_glimmer_template_tests;
 
 #[cfg(test)]
+mod reasoning_effort_tests;
+
+#[cfg(test)]
 mod muse_atem_roundtrip_tests;
 
 #[cfg(test)]
