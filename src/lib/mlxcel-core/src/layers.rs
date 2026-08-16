@@ -3796,9 +3796,39 @@ pub fn compiled_swiglu_mlp(
 
 // ── Metal 4 fused attention dispatch ─────────────────────────────────────────
 
-fn should_use_metal4_attention() -> bool {
+/// Whether the M5 neural-accelerator fused attention route is taken.
+///
+/// The hardware half follows the project's Apple Silicon rule: gate on
+/// `has_neural_accelerator && macos_supports_na`, never on
+/// `cfg(target_arch)`.
+///
+/// `MLXCEL_METAL4_ATTENTION=0` forces the route off on hardware that has
+/// it. That switch exists because this dispatch is a prime suspect
+/// whenever an M5 disagrees numerically with an earlier generation, and
+/// until now the only way to test the hypothesis was to patch this
+/// function and rebuild. Issue #1065 asks for exactly this override; the
+/// M5 investigation on #1182 had to patch and revert it by hand, which is
+/// how a diagnostic gets skipped on the next machine that needs it.
+///
+/// Read once per process. Off-switch only: the variable cannot turn the
+/// route **on** where the hardware lacks it, so a stray value on an M1 can
+/// only be inert.
+pub(crate) fn should_use_metal4_attention() -> bool {
     let hw = crate::hardware::get_hardware();
-    hw.has_neural_accelerator && hw.macos_supports_na
+    hw.has_neural_accelerator && hw.macos_supports_na && metal4_attention_enabled()
+}
+
+fn metal4_attention_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| {
+        !matches!(
+            std::env::var("MLXCEL_METAL4_ATTENTION")
+                .map(|v| v.trim().to_ascii_lowercase())
+                .ok()
+                .as_deref(),
+            Some("0" | "false" | "no" | "off")
+        )
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -8204,5 +8234,28 @@ mod tests {
                 "packed key must never equal the empty sentinel"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod metal4_attention_switch_tests {
+    use super::should_use_metal4_attention;
+
+    #[test]
+    fn the_route_never_engages_without_the_hardware() {
+        // The switch is an off-switch. On a host without the neural
+        // accelerator the predicate must be false regardless of what
+        // `MLXCEL_METAL4_ATTENTION` says, so a stray value can only ever be
+        // inert rather than routing an M1 into an M5 kernel.
+        let hw = crate::hardware::get_hardware();
+        if hw.has_neural_accelerator && hw.macos_supports_na {
+            // On NA hardware the value is whatever the ambient env says;
+            // asserting a fixed answer here would pin the test to one host.
+            return;
+        }
+        assert!(
+            !should_use_metal4_attention(),
+            "no neural accelerator, so the Metal 4 attention route must decline"
+        );
     }
 }
