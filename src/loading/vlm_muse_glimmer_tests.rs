@@ -474,10 +474,12 @@ fn pinned_weight_index_classifies_each_source_weight_once() {
     let model_dir = Path::new("models/mlx/muse-glimmer-30b");
     let index_path = model_dir.join("model.safetensors.index.json");
     if !index_path.exists() {
-        eprintln!(
-            "Skipping pinned_weight_index_classifies_each_source_weight_once: pinned Muse \
-             Glimmer checkpoint index not present at {}",
-            index_path.display()
+        crate::test_support::pinned_checkpoint::skip_or_fail_pinned_checkpoint(
+            "pinned_weight_index_classifies_each_source_weight_once",
+            &format!(
+                "pinned Muse Glimmer checkpoint index not present at {}",
+                index_path.display()
+            ),
         );
         return;
     }
