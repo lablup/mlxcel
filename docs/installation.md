@@ -81,6 +81,10 @@ Prerequisites:
 - Xcode Command Line Tools (`xcode-select --install`).
 - Metal toolchain component.
 - CMake available on `PATH`.
+- `ffmpeg` 5.0 or newer, only if you need video input (`brew install ffmpeg`).
+  It is a runtime dependency, not a build one: the build and every text, image,
+  and audio path work without it, and `--video` reports a named error when it
+  is absent. See [Video input and ffmpeg](#video-input-and-ffmpeg).
 
 ```bash
 # One-time: install the Metal shader compiler if it is not already present.
@@ -114,6 +118,9 @@ Prerequisites vary by distribution and CUDA version. At minimum you need:
 - BLAS and LAPACK development packages, including the C headers. MLX's CMake
   resolves `cblas.h` and `lapacke.h`, so the `lapacke` headers must be present,
   not only the runtime libraries.
+- `ffmpeg` 5.0 or newer, only if you need video input
+  (`sudo apt-get install -y ffmpeg`). Runtime only, same as on macOS; see
+  [Video input and ffmpeg](#video-input-and-ffmpeg).
 
 On Debian/Ubuntu (x86_64 or aarch64) the build packages are:
 
@@ -252,6 +259,42 @@ MLXCEL_CXX_MARCH=none cargo build --release --features cuda
 
 For the complete `MLXCEL_*` reference, see
 [Environment variables](environment-variables.md).
+
+## Video input and ffmpeg
+
+Video frame extraction shells out to the system `ffmpeg` and `ffprobe`. Both
+must be on `PATH`, and both must come from **ffmpeg 5.0 (2022) or newer**.
+Neither is a build-time dependency: a build without ffmpeg is complete and
+every text, image, and audio path works, and `--video` (CLI) or a `video_url`
+content block (server) returns a named error rather than failing obscurely.
+
+```bash
+# macOS
+brew install ffmpeg
+# Debian / Ubuntu
+sudo apt-get install -y ffmpeg
+
+ffmpeg -version | head -1   # must report 5.0 or newer
+```
+
+The floor is set by one flag. Extraction passes `-fps_mode vfr`, which ffmpeg
+added in 5.0 at the same time it deprecated the older `-vsync`; ffmpeg 8
+removed `-vsync` outright. On 4.x and older, `-fps_mode` is unrecognized and
+video input is unsupported, so upgrade the system binary rather than trying to
+work around it. There is no upper bound; releases through 9.x work unchanged.
+
+A wrong-version ffmpeg fails at argument parsing, before any frame is decoded,
+so the error names the option rather than the video:
+
+```text
+Unrecognized option 'fps_mode'.
+Error splitting the argument list: Option not found
+```
+
+Contributors touching the video path should run `make verify-test-video`, which
+runs the ffmpeg-backed tests for real. They are `#[ignore]` in the normal suite,
+so a machine without ffmpeg reports them as ignored instead of silently passing
+(#1172).
 
 ## Verifying the build
 

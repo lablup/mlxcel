@@ -192,6 +192,20 @@ Audio/video capability is model-specific. The server request types include
 must advertise support for the corresponding modality. Video frame extraction
 uses the system `ffmpeg`/`ffprobe` binaries at runtime.
 
+**Supported ffmpeg range: 5.0 (2022) or newer**, on both the CLI (`--video`)
+and the server (`video_url`). Both binaries must be on `PATH`; neither is a
+build-time dependency, and a missing one produces a named error rather than a
+crash. The floor is set by one flag: the extraction command passes
+`-fps_mode vfr`, which ffmpeg added in 5.0 at the same time it deprecated the
+older `-vsync`. ffmpeg 8 removed `-vsync` outright, so the previous spelling
+made every video request fail at argument parsing, before a frame was decoded
+(#1172). Because `-fps_mode` is accepted by every release from 5.0 on, mlxcel
+passes it unconditionally rather than probing the binary or parsing its version
+banner. Nothing else in the video path depends on a version-gated feature, so
+5.0 is the whole requirement, and there is no upper bound: releases through
+ffmpeg 9.x work unchanged. On ffmpeg 4.x and older, video input is not
+supported; upgrade the system binary.
+
 ### Falcon-OCR layout-aware OCR
 
 Falcon-OCR transcribes a whole page in one pass by default. It also has a

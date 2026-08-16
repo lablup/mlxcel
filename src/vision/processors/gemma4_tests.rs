@@ -14,14 +14,25 @@
 
 //! Unit tests for the Gemma 4 image / video preprocessor.
 //!
-//! These tests use synthetic in-memory frames so they run on any
-//! platform without an actual video file or `ffmpeg` install.
+//! Most of these tests use synthetic in-memory frames, so they run on any
+//! platform without an actual video file or `ffmpeg` install. One does not:
+//! `process_videos_pixel_values_match_input_color` encodes a clip with ffmpeg
+//! and decodes it back through `crate::multimodal::video::load_video` before
+//! it reaches the processor, which is the whole point of that test. It carries
+//!
+//!     #[ignore = "needs ffmpeg 5.0+ on PATH; run `make verify-test-video`"]
+//!
+//! so a host without ffmpeg reports it as ignored rather than passed, and
+//! `make verify-test-video` names it explicitly next to the `multimodal::video`
+//! filter so the gate still selects it. See `crate::test_support::video_gate`
+//! for why a runtime skip is not an acceptable substitute (#1172).
 
 use std::process::Command;
 
 use image::{DynamicImage, ImageBuffer, Rgb, RgbImage};
 
 use super::*;
+use crate::test_support::video_gate::{skip_or_fail_video_fixture, video_capability_available};
 
 fn synthetic_rgb(width: u32, height: u32, fill: u8) -> DynamicImage {
     let img = RgbImage::from_pixel(width, height, image::Rgb([fill, fill, fill]));
@@ -184,18 +195,6 @@ fn process_videos_existing_image_path_unchanged() {
 
 // ─── Full-pipeline pixel-content test (requires ffmpeg) ──────────────────────
 
-/// Return true if ffmpeg is on PATH. Matches the gating pattern used in
-/// video_tests.rs so tests skip cleanly on systems without ffmpeg.
-fn ffmpeg_available() -> bool {
-    Command::new("ffmpeg")
-        .arg("-version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
 /// Synthesize a single-color video (R, G, B) of `frames` frames at `fps` into
 /// `out`. Returns true on success. Writes per-frame PNGs to a temp dir and
 /// encodes with ffmpeg.
@@ -257,9 +256,9 @@ fn synth_solid_color_video(
 /// NCHW packing, channel 0 would contain ~50/255 ≈ 0.196 instead of
 /// ~200/255 ≈ 0.784 — well outside the ±20/255 tolerance.
 #[test]
+#[ignore = "needs ffmpeg 5.0+ on PATH; run `make verify-test-video`"]
 fn process_videos_pixel_values_match_input_color() {
-    if !ffmpeg_available() {
-        eprintln!("SKIP: ffmpeg not available");
+    if !video_capability_available("process_videos_pixel_values_match_input_color") {
         return;
     }
 
@@ -284,7 +283,10 @@ fn process_videos_pixel_values_match_input_color() {
         TARGET_G,
         TARGET_B,
     ) {
-        eprintln!("SKIP: could not synthesize solid-color video");
+        skip_or_fail_video_fixture(
+            "process_videos_pixel_values_match_input_color",
+            "could not synthesize the solid-color video",
+        );
         return;
     }
 
@@ -292,13 +294,17 @@ fn process_videos_pixel_values_match_input_color() {
     let frames = crate::multimodal::video::load_video(&video_path, Some(2.0), None);
     let _ = std::fs::remove_file(&video_path);
 
-    let frames = match frames {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("SKIP: load_video failed: {e}");
-            return;
-        }
-    };
+    // A decode error is a failure, never a skip. This arm used to `return`, and
+    // that is why the full Gemma 4 video pipeline stayed green through #1172:
+    // ffmpeg rejected the argument list, `load_video` returned `Extract
+    // { "Unrecognized option 'vsync'" }`, and this test reported the swallowed
+    // error as a pass while every video path in the runtime was broken. Only
+    // availability problems may skip; a clip that will not decode is the bug
+    // these assertions exist to catch.
+    let frames = frames.expect(
+        "load_video must succeed for the synthetic solid-color video; a decode error here \
+         means the extraction command itself is broken, not that the host is unequipped",
+    );
 
     assert!(!frames.is_empty(), "should have at least one decoded frame");
 
