@@ -310,7 +310,9 @@ fn per_op_block_vs_chain_parity_at_block_three() {
         p.verdict()
     );
     println!(
-        "    f32 digests: block {:#018x}  chain {:#018x}",
+        // `0x` written out rather than via `{:#...}`: the `#` in a hex format
+        // spec reads as a bare issue reference to `scripts/ci/check_cross_repo_refs.py`.
+        "    f32 digests: block 0x{:016x}  chain 0x{:016x}",
         p.block_digest, p.chain_digest
     );
 
