@@ -32,7 +32,7 @@ Current GitHub-facing docs:
 16. `mla-absorbed-decode.md` — DeepSeek-family matrix-absorbed MLA decode over a compressed-latent KV cache: the identity, the cache layout, the flags, and what is and is not verified.
 17. `cascade-attention.md` — shared-prompt-prefix (cascade) decode: computing a prefix shared by several concurrent sequences once per step instead of once per sequence, the two-level decomposition, the flags, and how to tell which path a launch took.
 18. `sparse-paged-decode.md` — sparse attention reduced to page indirection over the fused v2 decode kernel: the addressing argument, the MiniMax-M3 routing, why DeepSeek Sparse Attention is not routed, where the dispatch floor sits, the kill switch, and the benchmark harness.
-19. `code-guidelines.md`: the `// Used by:` annotation convention for shared functions, and the JIT kernel rule that every varying input dtype must appear in `template_args` because CUDA keys the compiled-module cache on it.
+19. `code-guidelines.md`: the file-size and module-split thresholds, including when to extract a `<name>_helpers.rs` and when inline tests move to a sibling `_tests.rs`, the `// Used by:` annotation convention for shared functions, and the JIT kernel rule that every varying input dtype must appear in `template_args` because CUDA keys the compiled-module cache on it.
 
 ## Architecture Decision Records
 

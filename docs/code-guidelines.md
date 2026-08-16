@@ -16,10 +16,12 @@ A feature that is self-contained and small is fine as a single file, for example
 
 These are guidelines, not gates. The reasons a file is allowed past them matter more than the numbers:
 
-- `src/models/nemotron_h.rs` (about 2,900 lines, no helpers file) is the standing exception. It is a hybrid Mamba plus Transformer model, and splitting it would break the layer-interleaving logic that makes it one thing.
-- `src/models/llama4.rs` (about 1,860 lines) is not an exception but an illustration of the table working: MoE, iGQA and ChunkedKV are tightly coupled, so the model stayed one file, and the bulk that could be lifted out went to `src/models/llama4_helpers.rs` as the 1,200+ row prescribes. `src/models/gemma3n_helpers.rs` and `src/models/qwen3_next_helpers.rs` are the other two extractions.
+- `src/models/nemotron_h.rs` (about 2,900 lines, no helpers file) is a documented exception. It is a hybrid Mamba plus Transformer model, and splitting it would break the layer-interleaving logic that makes it one thing.
+- `src/models/llama4.rs` (about 1,860 lines) shows the 1,200+ row applied: MoE, iGQA and ChunkedKV are tightly coupled, so the model itself stayed one file, and the mask construction and weight loading that were separable moved out to `src/models/llama4_helpers.rs`. Under `src/models/` the only other such extractions are `gemma3n_helpers.rs` and `qwen3_next_helpers.rs`.
 
-Line counts drift as models are edited, so treat the figures above as approximate and check the file rather than trusting a number quoted elsewhere.
+Several files sit well past these numbers with no recorded justification: `src/models/gemma4.rs` (about 6,700 lines) and `src/models/qwen3_5.rs` (about 3,500 lines) have no helpers file, and `src/models/gemma3n.rs` is about 5,600 lines. Read those as debt rather than as precedent. The largest file in the tree is not evidence of what the project permits, and it is not a number you can cite in a review.
+
+Line counts drift as models are edited, so treat every figure above as approximate and check the file rather than trusting a number quoted anywhere, this section included.
 
 ### Inline tests versus a sibling `_tests.rs` file
 
