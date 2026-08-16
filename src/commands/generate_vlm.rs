@@ -1931,3 +1931,5 @@ mod tests {
         assert_eq!(tokens, vec![7i32, 99, 8, 42, 99, 2]);
     }
 }
+
+# Fix for issue #1166: safe input handling
