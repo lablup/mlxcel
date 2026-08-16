@@ -165,7 +165,10 @@ impl DFlashDrafter {
 ///
 /// `weights` is mutated in place; non-bf16 tensors and quantization
 /// auxiliaries (scales, biases) are untouched.
-fn convert_bf16_to_f16_non_quantized(weights: &mut WeightMap) {
+///
+/// Used by: DFlash drafter load, Qwen 3.5 MTP drafter load
+/// (`crate::drafter::qwen3_5_mtp::model::Qwen35MtpDraftModel::from_path`).
+pub(crate) fn convert_bf16_to_f16_non_quantized(weights: &mut WeightMap) {
     let bf16_keys: Vec<String> = weights
         .iter()
         .filter(|(k, v)| {

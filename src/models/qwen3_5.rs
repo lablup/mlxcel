@@ -2097,6 +2097,155 @@ impl Qwen35Model {
 
         max_a
     }
+
+    // === Sequence-routed speculative hooks (MTP target adapter) ============
+    //
+    // The MtpTarget trait is `&self`-only with no cache parameter: the target
+    // resolves its own per-sequence cache. These wrappers route the existing
+    // caller-owned-slice speculative hooks above through
+    // `ModelOwnedSequenceState`, exactly like `forward_with_sequence_caches`
+    // does for the classic path, so the MTP adapter
+    // (`crate::models::qwen3_5_mtp_target`) stays a stateless view over the
+    // model — the shape the tick-cooperative slice path requires (it
+    // reconstructs the adapter every scheduler tick).
+
+    /// Prefill `input_ids` through the standard batched-attention forward
+    /// while also returning the last decoder layer's **pre-final-norm**
+    /// hidden for every position.
+    ///
+    /// This is deliberately NOT [`Self::forward_speculative`]: that path runs
+    /// the per-position target-verify attention (`attend_per_position`),
+    /// which is byte-aligned with single-token *decode* but is O(seq_len)
+    /// attention dispatches and does not match the classic *prefill*
+    /// numerics. The classic path's first token is sampled from the batched
+    /// causal prefill logits, so MTP's first bonus must come from the same
+    /// computation to stay byte-identical — upstream's MTP prefill likewise
+    /// runs the plain forward (`capture_layer_ids=None`, so
+    /// `target_verify=False`). GDN rollback snapshots are not captured: a
+    /// prefill needs no rollback, and holding every linear layer's
+    /// full-prompt q/k/v tensors alive simultaneously would balloon memory.
+    ///
+    /// Keep the loop in lockstep with [`Self::forward_internal`] (mask
+    /// construction, layer dispatch, final norm, LM head).
+    ///
+    /// Used by: `Qwen35MtpTargetAdapter::prefill_and_seed`.
+    pub(crate) fn forward_prefill_with_last_hidden(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Qwen3NextCache],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let mut h = self.embed_tokens.forward(input_ids);
+
+        let shape = mlxcel_core::array_shape(&h);
+        let seq_len = shape[1];
+
+        let fa_idx = self.config.full_attention_interval - 1;
+        let fa_mask = if seq_len > 1 {
+            let offset = if fa_idx < caches.len() {
+                caches[fa_idx].offset()
+            } else {
+                0
+            };
+            Some(create_causal_mask(seq_len, offset))
+        } else {
+            None
+        };
+
+        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
+            let mask = if layer.is_linear {
+                None
+            } else {
+                fa_mask.as_deref()
+            };
+            h = layer.forward(&h, mask, cache, None);
+        }
+
+        let normed = self.norm.forward(&h);
+        let logits = if let Some(ref lm_head) = self.lm_head {
+            lm_head.forward(&normed)
+        } else {
+            self.embed_tokens.as_linear(&normed)
+        };
+        (logits, h)
+    }
+
+    /// Apply the final RMSNorm to a captured pre-norm hidden block.
+    ///
+    /// The MTP drafter consumes the target's **post-final-norm** hidden:
+    /// upstream's `return_hidden` appends the model output (`self.model(...)`
+    /// ends in `self.norm(h)`), and the Qwen 3.5 family has no
+    /// `speculative_draft_hidden` hook to do this in the round loop. The
+    /// hidden captured by [`Self::forward_speculative`] /
+    /// [`Self::forward_prefill_with_last_hidden`] is pre-norm, so the MTP
+    /// adapter normalizes it here before handing it to the drafter.
+    ///
+    /// Used by: `Qwen35MtpTargetAdapter`.
+    pub(crate) fn apply_final_norm(&self, hidden: &MlxArray) -> UniquePtr<MlxArray> {
+        self.norm.forward(hidden)
+    }
+
+    /// Sequence-routed [`Self::forward_prefill_with_last_hidden`].
+    ///
+    /// Used by: `Qwen35MtpTargetAdapter::prefill_and_seed`.
+    pub(crate) fn forward_prefill_with_last_hidden_for_sequence(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.make_internal_caches(),
+            |caches| self.forward_prefill_with_last_hidden(input_ids, caches),
+        )
+    }
+
+    /// Sequence-routed [`Self::forward_speculative`].
+    ///
+    /// Used by: `Qwen35MtpTargetAdapter::verify_forward`.
+    pub(crate) fn forward_speculative_for_sequence(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        capture_layer_ids: &[usize],
+    ) -> VerifyOutput {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.make_internal_caches(),
+            |caches| self.forward_speculative(input_ids, caches, capture_layer_ids),
+        )
+    }
+
+    /// Sequence-routed [`Self::rollback_speculative_cache`].
+    ///
+    /// Used by: `Qwen35MtpTargetAdapter::verify_finalize`.
+    pub(crate) fn rollback_speculative_cache_for_sequence(
+        &self,
+        seq_id: Option<SequenceId>,
+        gdn_states: &[GdnRollbackSnapshot],
+        accepted: &[i32],
+        block_size: i32,
+    ) -> i32 {
+        self.sequence_state.with_sequence_state(seq_id, |caches| {
+            self.rollback_speculative_cache(caches, gdn_states, accepted, block_size)
+        })
+    }
+
+    /// Absolute offset of the sequence's first attention-layer KV cache
+    /// (the value upstream reads as `prompt_cache[0].offset` when rebinding
+    /// the drafter after a rollback).
+    ///
+    /// Used by: `Qwen35MtpTargetAdapter::{prefill_and_seed, verify_finalize}`.
+    pub(crate) fn speculative_cache_offset_for_sequence(&self, seq_id: Option<SequenceId>) -> i32 {
+        self.sequence_state.with_sequence_state(seq_id, |caches| {
+            caches
+                .iter()
+                .find_map(|c| match c {
+                    Qwen3NextCache::Attention(kv) => Some(kv.offset),
+                    _ => None,
+                })
+                .unwrap_or(0)
+        })
+    }
 }
 
 /// DFlash speculative-decoding target adapter for the Qwen 3.5 text

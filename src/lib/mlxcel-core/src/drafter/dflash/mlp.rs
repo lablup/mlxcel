@@ -21,6 +21,9 @@ use cxx::UniquePtr;
 
 /// SwiGLU MLP block reused by every drafter layer.
 ///
+/// Used by: DFlash drafter layers, Qwen 3.5 MTP drafter layer
+/// (`crate::drafter::qwen3_5_mtp::layer::Qwen35MtpDecoderLayer`).
+///
 /// Mirrors upstream `Qwen3MLP(config.hidden_size, config.intermediate_size)`
 /// (`gate_proj`, `up_proj`, `down_proj`, all bias-free). The non-quantized
 /// path uses the fused compiled FP MLP (`compiled_swiglu_mlp_fp16`), so

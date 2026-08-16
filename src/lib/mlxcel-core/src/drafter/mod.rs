@@ -94,6 +94,9 @@ pub mod dflash;
 /// Concrete Gemma 4 MTP "assistant" drafter implementation. Wired into
 /// [`load_drafter`]'s `Mtp` arm.
 pub mod gemma4_assistant;
+/// Concrete Qwen 3.5 / 3.6 / 3.8 MTP drafter implementation (the split-out
+/// `qwen3_5_mtp` head). Wired into [`load_drafter`]'s `Mtp` arm.
+pub mod qwen3_5_mtp;
 /// Centroid-routed sparse softmax LM head used by Gemma 4 E2B / E4B
 /// assistant drafters. Wired into `Gemma4AssistantDraftModel` in sub-3
 /// — landed here independently so the layer can
@@ -215,6 +218,13 @@ pub fn drafter_kind_by_model_type() -> &'static HashMap<&'static str, DrafterKin
         // `Gemma4AssistantDraftModel` class (identical centroid head + 4-layer
         // shared-K/V stack) and therefore resolves to the same MTP round loop.
         m.insert("gemma4_unified_assistant", DrafterKind::Mtp);
+        // The Qwen 3.5 / 3.6 / 3.8 split-out MTP head (e.g.
+        // mlx-community/Qwen3.8-27B-MTP-bf16). Without this entry a
+        // `qwen3_5_mtp` drafter auto-resolves to the DFlash default and dies
+        // in the generic loader with "Unsupported model type". Loads with
+        // `Qwen35MtpDraftModel` via [`load_drafter`]'s per-model_type Mtp
+        // dispatch.
+        m.insert("qwen3_5_mtp", DrafterKind::Mtp);
         m
     })
 }
@@ -627,6 +637,53 @@ pub trait Drafter {
         Vec::new()
     }
 
+    /// Prefill a **stateful** MTP drafter's own cache from the target's
+    /// prompt hidden states, and compute its first seed proposal.
+    ///
+    /// **Qwen 3.5 MTP only.** The Qwen MTP head accumulates one cache entry
+    /// per emitted target position; its history begins with the shifted
+    /// prompt (`prompt_tokens[1..] ++ first_bonus`) paired with the target's
+    /// post-final-norm hidden for the whole prompt (`[1, P, H]`). The MTP
+    /// round loop calls this once, on the first round of a session, and only
+    /// when the target advertised a full prompt hidden
+    /// ([`crate::speculative::mtp::target::MtpVerifyOutput::verify_hidden_full`]).
+    /// Stateless drafters (Gemma 4 assistant, DFlash) keep the no-op
+    /// default; a hook failure degrades draft quality only — the round loop
+    /// logs and continues with an empty drafter history.
+    #[allow(unused_variables)]
+    fn prefill_from_target_hidden(
+        &mut self,
+        prompt_tokens: &[i32],
+        hidden: &MlxArray,
+        first_bonus: i32,
+        sampler: &crate::generate::SamplingConfig,
+    ) -> Result<(), DrafterError> {
+        Ok(())
+    }
+
+    /// Extend a **stateful** MTP drafter's cache after a verify round.
+    ///
+    /// **Qwen 3.5 MTP only.** Called by the MTP round loop after the
+    /// speculative walk and the target-side rollback, with the target's full
+    /// post-final-norm verify hidden (`[1, block, H]`, one slot per verify
+    /// position), the round's draft proposals, the walk's `accepted` count,
+    /// and the emitted `new_tokens`. The drafter trims the rejected in-round
+    /// cache tail, appends the accepted tokens (paired with the target's
+    /// true hidden), and precomputes the next round's seed proposal.
+    /// Stateless drafters keep the no-op default; failures degrade draft
+    /// quality only.
+    #[allow(unused_variables)]
+    fn accept_verified_tokens(
+        &mut self,
+        verify_hidden: &MlxArray,
+        draft_tokens: &[i32],
+        accepted: usize,
+        new_tokens: &[i32],
+        sampler: &crate::generate::SamplingConfig,
+    ) -> Result<(), DrafterError> {
+        Ok(())
+    }
+
     /// Reset the drafter's own KV cache between full generation calls.
     ///
     /// **DFlash- and InternalMtp-only.** Default no-op for MTP.
@@ -817,9 +874,23 @@ pub fn load_drafter(path: &Path, kind: Option<DrafterKind>) -> Result<LoadedDraf
             Ok((Box::new(drafter), resolved))
         }
         DrafterKind::Mtp => {
-            // Wired in — Gemma 4 MTP assistant drafter.
-            let model = gemma4_assistant::Gemma4AssistantDraftModel::from_path(path)?;
-            Ok((Box::new(model), resolved))
+            // Two concrete MTP drafter families share the kind; dispatch on
+            // the drafter's own `model_type`. `qwen3_5_mtp` loads the Qwen
+            // MTP head; the Gemma 4 assistant loader remains the fallback for
+            // the two `gemma4*_assistant` spellings AND for unknown/missing
+            // model_types under an explicit `--draft-kind mtp` (preserving
+            // the pre-existing behavior for hand-rolled Gemma fixtures).
+            let model_type = peek_drafter_model_type(path)?;
+            match model_type.as_deref() {
+                Some("qwen3_5_mtp") => {
+                    let model = qwen3_5_mtp::Qwen35MtpDraftModel::from_path(path)?;
+                    Ok((Box::new(model), resolved))
+                }
+                _ => {
+                    let model = gemma4_assistant::Gemma4AssistantDraftModel::from_path(path)?;
+                    Ok((Box::new(model), resolved))
+                }
+            }
         }
         // Remaining variant lands in peer — returning a typed
         // error rather than `unimplemented!()` here gives users an
@@ -935,10 +1006,41 @@ mod tests {
         assert_eq!(map.get("gemma4_assistant"), Some(&DrafterKind::Mtp));
         // The Gemma 4 Unified assistant resolves to the same MTP round loop.
         assert_eq!(map.get("gemma4_unified_assistant"), Some(&DrafterKind::Mtp));
-        // Both assistant spellings, nothing else: parity with upstream
-        // `DRAFTER_KIND_BY_MODEL_TYPE = {"gemma4_assistant": "mtp",
-        // "gemma4_unified_assistant": "mtp"}`.
-        assert_eq!(map.len(), 2);
+        // The Qwen 3.5 / 3.6 / 3.8 split-out MTP head also resolves to the
+        // MTP round loop (upstream `"qwen3_5_mtp": "mtp"`).
+        assert_eq!(map.get("qwen3_5_mtp"), Some(&DrafterKind::Mtp));
+        // The three MTP spellings, nothing else: parity with upstream
+        // `DRAFTER_KIND_BY_MODEL_TYPE`.
+        assert_eq!(map.len(), 3);
+    }
+
+    #[test]
+    fn auto_detect_qwen3_5_mtp_resolves_to_mtp() {
+        let dir = tempdir().unwrap();
+        write_drafter_config(&dir, Some("qwen3_5_mtp"));
+        let resolved = resolve(dir.path(), None).unwrap();
+        assert_eq!(resolved, DrafterKind::Mtp);
+    }
+
+    #[test]
+    fn load_drafter_routes_qwen3_5_mtp_to_qwen_loader() {
+        // A `qwen3_5_mtp` model_type must dispatch into
+        // `Qwen35MtpDraftModel::from_path`, not the Gemma 4 assistant loader.
+        // The bare fixture (no text_config) fails inside the Qwen config
+        // normalize with a message naming `text_config`, which the Gemma
+        // loader's error does not produce for this model_type.
+        let dir = tempdir().unwrap();
+        write_drafter_config(&dir, Some("qwen3_5_mtp"));
+        let err = load(dir.path(), None).expect_err("bare fixture has no text_config");
+        match err {
+            DrafterError::Config(msg) => {
+                assert!(
+                    msg.contains("Qwen35MtpConfig"),
+                    "expected the Qwen MTP loader's config error, got: {msg}"
+                );
+            }
+            other => panic!("expected Config error from the Qwen MTP loader, got {other:?}"),
+        }
     }
 
     // ----- resolve_drafter_kind -------------------------------------------

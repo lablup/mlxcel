@@ -535,6 +535,7 @@ impl MockMtpTarget {
             next_shared_kv,
             kv_offset,
             bonus_position: kv_offset,
+            verify_hidden_full: None,
         }
     }
 }
