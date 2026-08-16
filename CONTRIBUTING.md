@@ -1,6 +1,6 @@
 # Contributing to mlxcel
 
-Thank you for your interest in contributing to mlxcel! This document covers the basics for getting started. The deeper working contract lives in the `docs/` directory: [`docs/architecture.md`](docs/architecture.md) for the runtime and module map, [`docs/code-guidelines.md`](docs/code-guidelines.md) for the shared-function rules, and [`docs/adding-models.md`](docs/adding-models.md) for the model-porting checklist.
+Thank you for your interest in contributing to mlxcel! This document covers the basics for getting started. The deeper working contract lives in the `docs/` directory: [`docs/architecture.md`](docs/architecture.md) for the runtime and module map, [`docs/code-guidelines.md`](docs/code-guidelines.md) for the shared-function conventions and the file-size and module-split thresholds, and [`docs/adding-models.md`](docs/adding-models.md) for the model-porting checklist.
 
 ## Quick links
 
@@ -11,7 +11,7 @@ Thank you for your interest in contributing to mlxcel! This document covers the 
 | Build and test locally | [`docs/installation.md`](docs/installation.md) |
 | Understand the architecture | [`docs/architecture.md`](docs/architecture.md) |
 | Add a new model family | [`docs/adding-models.md`](docs/adding-models.md) |
-| Understand the shared-function conventions | [`docs/code-guidelines.md`](docs/code-guidelines.md) |
+| Understand the code guidelines (shared functions, file size and module splits) | [`docs/code-guidelines.md`](docs/code-guidelines.md) |
 
 ## How to contribute
 
@@ -80,6 +80,7 @@ Write commits, PR titles, and issue comments in **English**. Use Conventional Co
 - Follow standard Rust conventions: `rustfmt`, `clippy -D warnings`, idiomatic ownership and error handling.
 - Tests live next to the code (`_tests.rs` files) for unit tests, and under `tests/` for end-to-end integration.
 - When modifying a function shared by multiple models, update the `// Used by: Model1, Model2, …` comment above it. See [`docs/code-guidelines.md`](docs/code-guidelines.md).
+- Keep files under the size and module-split thresholds in [`docs/code-guidelines.md`](docs/code-guidelines.md#file-size-and-module-structure); move inline tests to a sibling `_tests.rs` file once they outgrow the guidance there.
 - Do not introduce Python on the inference request path. Python is acceptable only for benchmarks and out-of-band tooling.
 
 ### Cross-repository issue references

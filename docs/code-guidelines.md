@@ -1,5 +1,39 @@
 # Code Modification Guidelines
 
+## File Size and Module Structure
+
+Guidance for when a file should stay as one unit, when to extract a helpers file, and when to split into a directory module. This section is the authoritative source for the numeric thresholds. Anything else that cites them, including agent-facing tooling under `.claude/skills/`, should link here rather than restate them, so the numbers cannot drift apart.
+
+A feature that is self-contained and small is fine as a single file, for example `src/models/dbrx.rs` (a complete model in about 600 lines) or `src/distributed/heartbeat.rs` (a complete feature in about 310 lines). Beyond that, apply the following thresholds.
+
+| Size | Action |
+|------|--------|
+| Under 800 lines | Fine as a single file |
+| 800 to 1,200 lines | Acceptable for complex models; consider extracting a helpers file |
+| 1,200+ lines | Extract helpers into `<name>_helpers.rs` |
+| 1,500+ lines | Strongly consider splitting into a directory module |
+| 2,000+ lines with no helpers file | Anti-pattern; extract `<name>_helpers.rs` |
+
+These are guidelines, not gates. The reasons a file is allowed past them matter more than the numbers:
+
+- `src/models/nemotron_h.rs` (about 2,900 lines, no helpers file) is a documented exception. It is a hybrid Mamba plus Transformer model, and splitting it would break the layer-interleaving logic that makes it one thing.
+- `src/models/llama4.rs` (about 1,860 lines) shows the 1,200+ row applied: MoE, iGQA and ChunkedKV are tightly coupled, so the model itself stayed one file, and the mask construction and weight loading that were separable moved out to `src/models/llama4_helpers.rs`. Under `src/models/` the only other such extractions are `gemma3n_helpers.rs` and `qwen3_next_helpers.rs`.
+
+Several files sit well past these numbers with no recorded justification: `src/models/gemma4.rs` (about 6,700 lines) and `src/models/qwen3_5.rs` (about 3,500 lines) have no helpers file, and `src/models/gemma3n.rs` is about 5,600 lines. Read those as debt rather than as precedent. The largest file in the tree is not evidence of what the project permits, and it is not a number you can cite in a review.
+
+Line counts drift as models are edited, so treat every figure above as approximate and check the file rather than trusting a number quoted anywhere, this section included.
+
+### Inline tests versus a sibling `_tests.rs` file
+
+Keep tests inline in `#[cfg(test)] mod tests { ... }` while they stay short and tightly coupled to the module, roughly under 100 lines. Once a module's tests grow past that, and by 200 lines at the latest, move them to a sibling file (`config.rs` gets `config_tests.rs`), wired in with `#[cfg(test)] mod config_tests;` or a `#[path = "config_tests.rs"] mod config_tests;` attribute.
+
+### Naming
+
+| Pattern | Example | When |
+|---------|---------|------|
+| `<name>_helpers.rs` | `gemma3n_helpers.rs` | Extracted helpers for a large model |
+| `<name>_tests.rs` | `config_tests.rs` | Sibling test file, once inline tests outgrow the module |
+
 ## Shared Function Comments
 
 When modifying shared/common functions that multiple models depend on (e.g., attention implementations, normalization, KV cache, activation functions), **always add or update comments** indicating which models use that function.
