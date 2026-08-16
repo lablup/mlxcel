@@ -707,10 +707,13 @@ fn build_raw_json_messages_leaves_non_object_tool_call_arguments_as_string() {
 
 #[test]
 fn build_raw_json_messages_leaves_json_scalar_or_array_arguments_as_string() {
-    // Only object-valued JSON strings are promoted to mappings. Other valid
-    // JSON shapes are still OpenAI wire-format strings from the request model's
-    // point of view and must survive byte-for-byte.
-    for arguments in ["[1,2]", "42", "true", "null", r#""quoted""#] {
+    // Only object-valued JSON strings are promoted to mappings, plus the two
+    // zero-argument spellings covered by the dedicated tests below. Other
+    // valid JSON shapes are still OpenAI wire-format strings from the request
+    // model's point of view and must survive byte-for-byte: there is no safe
+    // reading of `[1,2]`, a bare scalar, or a quoted string as "no arguments"
+    // or as an object.
+    for arguments in ["[1,2]", "42", "true", r#""quoted""#] {
         let request = req_with_tool_call_arguments(arguments);
         let raw = build_raw_json_messages(&request);
         let args = &raw.as_array().unwrap()[0]["tool_calls"][0]["function"]["arguments"];
@@ -720,6 +723,58 @@ fn build_raw_json_messages_leaves_json_scalar_or_array_arguments_as_string() {
         );
         assert_eq!(args.as_str().unwrap(), arguments);
     }
+}
+
+#[test]
+fn build_raw_json_messages_leaves_malformed_arguments_as_string() {
+    // Truncated / non-JSON arguments are genuinely ambiguous (could be a
+    // cut-off object, a cut-off array, garbage) and must stay a string rather
+    // than be guessed at.
+    let request = req_with_tool_call_arguments(r#"{"path":"/foo", "recurs"#);
+    let raw = build_raw_json_messages(&request);
+    let args = &raw.as_array().unwrap()[0]["tool_calls"][0]["function"]["arguments"];
+    assert!(
+        args.is_string(),
+        "malformed/truncated arguments must remain a string, got: {args}"
+    );
+    assert_eq!(args.as_str().unwrap(), r#"{"path":"/foo", "recurs"#);
+}
+
+#[test]
+fn build_raw_json_messages_normalizes_empty_or_whitespace_arguments_to_empty_object() {
+    // Issue #1175 follow-up: an empty (or whitespace-only) `arguments` string
+    // is the common zero-argument spelling agentic clients echo back on a
+    // tool call that takes no parameters. Left as a string, a template macro
+    // that requires `arguments` to be a mapping (e.g. Onyx ATEM's
+    // `render_atem` in `tests/fixtures/muse_glimmer/chat_template.jinja`)
+    // raises on it, turning a routine zero-argument call into a hard 400.
+    for arguments in ["", "   ", "\t\n"] {
+        let request = req_with_tool_call_arguments(arguments);
+        let raw = build_raw_json_messages(&request);
+        let args = &raw.as_array().unwrap()[0]["tool_calls"][0]["function"]["arguments"];
+        assert!(
+            args.is_object(),
+            "empty/whitespace arguments must normalize to an object, got {args} for {arguments:?}"
+        );
+        assert_eq!(args.as_object().unwrap().len(), 0);
+    }
+}
+
+#[test]
+fn build_raw_json_messages_normalizes_null_arguments_to_empty_object() {
+    // Issue #1175 follow-up: a literal `"null"` is the same "no arguments"
+    // intent as the empty string, from a client that `JSON.stringify()`s a
+    // `null` arguments value rather than an empty one. Unlike `"[1,2]"` or a
+    // malformed payload, this is unambiguous, so it gets the same treatment
+    // as the empty-string spelling rather than staying a string.
+    let request = req_with_tool_call_arguments("null");
+    let raw = build_raw_json_messages(&request);
+    let args = &raw.as_array().unwrap()[0]["tool_calls"][0]["function"]["arguments"];
+    assert!(
+        args.is_object(),
+        "\"null\" arguments must normalize to an object, got: {args}"
+    );
+    assert_eq!(args.as_object().unwrap().len(), 0);
 }
 
 #[tokio::test]

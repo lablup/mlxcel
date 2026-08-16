@@ -1075,6 +1075,21 @@ fn template_text_content(content: &serde_json::Value) -> String {
 /// templates that serialize arguments via `tojson` then emit the original
 /// object shape, while malformed/scalar arguments stay strings for templates
 /// that treat them as text. Mirrors mlx-serve's `chat.zig` workaround.
+///
+/// Two zero-argument spellings get the same treatment even though neither
+/// parses to an object: an empty (or whitespace-only) string, the common
+/// spelling agentic clients echo back for a call that takes no parameters,
+/// and the literal string `"null"`, the same intent from a client that
+/// `JSON.stringify()`s a `null` arguments value. Both are unambiguous "there
+/// were no arguments" signals, unlike `"[1,2]"` or a truncated payload, which
+/// stay strings because there is no safe reading of them as "no arguments".
+/// Before this, a template macro that requires `arguments` to be a mapping
+/// (e.g. Onyx ATEM's `render_atem`, see
+/// `tests/fixtures/muse_glimmer/chat_template.jinja`) raised on either
+/// spelling. That turned a routine zero-argument tool call into an HTTP 400
+/// the caller could not act on, and the failure was sticky: the offending
+/// `tool_calls` entry lives on in conversation history and replays on every
+/// later turn.
 fn normalize_tool_call_arguments(tool_calls: &mut serde_json::Value) {
     let serde_json::Value::Array(calls) = tool_calls else {
         return;
@@ -1083,8 +1098,15 @@ fn normalize_tool_call_arguments(tool_calls: &mut serde_json::Value) {
         let Some(args) = call.pointer_mut("/function/arguments") else {
             continue;
         };
-        if let serde_json::Value::String(s) = args
-            && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s)
+        let serde_json::Value::String(s) = args else {
+            continue;
+        };
+        let trimmed = s.trim();
+        if trimmed.is_empty() || trimmed == "null" {
+            *args = serde_json::json!({});
+            continue;
+        }
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s)
             && parsed.is_object()
         {
             *args = parsed;
