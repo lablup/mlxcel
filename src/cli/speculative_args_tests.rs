@@ -117,14 +117,70 @@ fn default_block_size_for_internal_mtp_shares_dflash_default() {
 
 #[test]
 fn resolve_draft_block_size_uses_override_when_provided() {
-    assert_eq!(resolve_draft_block_size(Some(8), DrafterKind::Mtp), 8);
-    assert_eq!(resolve_draft_block_size(Some(32), DrafterKind::Dflash), 32);
+    // An explicit override always wins, even against a drafter path whose
+    // own config declares a different value.
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{"model_type": "qwen3_5_mtp", "block_size": 3}"#,
+    )
+    .expect("write config.json");
+    assert_eq!(
+        resolve_draft_block_size(Some(8), DrafterKind::Mtp, dir.path()),
+        8
+    );
+    assert_eq!(
+        resolve_draft_block_size(Some(32), DrafterKind::Dflash, dir.path()),
+        32
+    );
 }
 
 #[test]
-fn resolve_draft_block_size_falls_back_to_per_kind_default() {
-    assert_eq!(resolve_draft_block_size(None, DrafterKind::Mtp), 4);
-    assert_eq!(resolve_draft_block_size(None, DrafterKind::Dflash), 16);
+fn resolve_draft_block_size_falls_back_to_per_kind_default_without_a_drafter_hint() {
+    // No config.json at all (nonexistent path). DFlash never peeks, and
+    // an MTP drafter with no discoverable config falls back to the flat
+    // Gemma-4-derived constant.
+    let missing = std::path::Path::new("/nonexistent/mlxcel-drafter-test-path");
+    assert_eq!(resolve_draft_block_size(None, DrafterKind::Mtp, missing), 4);
+    assert_eq!(
+        resolve_draft_block_size(None, DrafterKind::Dflash, missing),
+        16
+    );
+}
+
+#[test]
+fn resolve_draft_block_size_honors_the_qwen35_mtp_drafters_own_configured_value() {
+    // Issue #1165 hardening: a Qwen 3.5 MTP drafter's own `block_size`
+    // (the published checkpoint declares 3) must win over the flat
+    // Gemma-4-derived MTP constant (4) when the operator passes no
+    // explicit `--draft-block-size` override.
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{"model_type": "qwen3_5_mtp", "block_size": 3}"#,
+    )
+    .expect("write config.json");
+    assert_eq!(
+        resolve_draft_block_size(None, DrafterKind::Mtp, dir.path()),
+        3
+    );
+}
+
+#[test]
+fn resolve_draft_block_size_ignores_block_size_from_a_non_qwen35_mtp_drafter() {
+    // A Gemma 4 assistant drafter (or any non-`qwen3_5_mtp` model_type)
+    // must not have a same-named `block_size` field misread as the hint;
+    // the flat per-kind default still applies.
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{"model_type": "gemma4_assistant", "block_size": 7}"#,
+    )
+    .expect("write config.json");
+    assert_eq!(
+        resolve_draft_block_size(None, DrafterKind::Mtp, dir.path()),
+        4
+    );
 }
 
 #[test]

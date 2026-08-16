@@ -289,6 +289,54 @@ fn parity_kernel_block_is_bitwise_equal_to_single_token_chain() {
     );
 }
 
+/// Arm-attribution guard for [`parity_kernel_cost_vs_standard`].
+///
+/// `gated_delta_update_chain_parity` reads the `MLXCEL_GDN_CHAIN_PARITY` env
+/// var (default on, see `chain_parity_enabled` in `src/models/gated_delta.rs`)
+/// and silently degrades to the standard kernel when it is set to `0`. If
+/// that happens, the "parity" arm below is bit-for-bit the same dispatch as
+/// the "standard" arm and any cost ratio printed would be a path compared
+/// against itself, indistinguishable from dispatch noise. This is precisely
+/// the failure mode CLAUDE.md's "prove the two arms differ before reporting
+/// any number" rule exists to prevent (see epic #909, three prior
+/// benchmarks that reported self-comparison noise as a result).
+///
+/// The discriminator: the two kernels are defined to diverge in their final
+/// recurrent state whenever `T > 1` (the parity kernel rounds state through
+/// the storage dtype after every in-block step; the standard kernel carries
+/// float32 state across the whole block and only rounds once at the end).
+/// `T = 1` is documented to be byte-identical BY DESIGN, with no in-block
+/// state carry to round differently, so it cannot serve as the
+/// discriminator; this check therefore always runs at `T = 3`, matching the
+/// shape already pinned bitwise-equal-vs-different by
+/// [`parity_kernel_block_is_bitwise_equal_to_single_token_chain`] and
+/// [`block_verify_chain_matches_single_token_chain`] respectively. A failure
+/// here means the whole table below would be unattributable, so the test
+/// panics instead of printing it.
+fn assert_parity_and_standard_arms_are_distinguishable() {
+    let t = 3;
+    let (q, k, v, a, b) = gdn_inputs(t, 0.777);
+    let a_log_v: Vec<f32> = (0..GDN_HV).map(|i| (i as f32 * 0.05).cos() * 0.5).collect();
+    let dt_v: Vec<f32> = (0..GDN_HV).map(|i| (i as f32 * 0.03).sin() * 0.5).collect();
+    let a_log = mlxcel_core::from_slice_f32(&a_log_v, &[GDN_HV]);
+    let dt_bias = mlxcel_core::from_slice_f32(&dt_v, &[GDN_HV]);
+
+    let (_, state_std) = gated_delta_update(&q, &k, &v, &a, &b, &a_log, &dt_bias, None, None);
+    let (_, state_par) =
+        gated_delta_update_chain_parity(&q, &k, &v, &a, &b, &a_log, &dt_bias, None, None);
+    assert_ne!(
+        raw_bytes(&state_std),
+        raw_bytes(&state_par),
+        "arm-attribution guard failed: the parity kernel produced the SAME final state as the \
+         standard kernel at T={t}, so the two arms are indistinguishable in this run and no \
+         cost ratio below would be attributable to the parity kernel. This almost always means \
+         MLXCEL_GDN_CHAIN_PARITY=0 is set in the environment, which makes \
+         `gated_delta_update_chain_parity` silently fall back to the standard kernel (see \
+         `chain_parity_enabled` in src/models/gated_delta.rs). Unset it (or set it to a value \
+         other than \"0\") and re-run."
+    );
+}
+
 /// Isolated cost of the parity kernel vs the standard kernel on the real
 /// verify shapes (medians over repeated dispatches). Run manually:
 ///
@@ -303,6 +351,7 @@ fn parity_kernel_cost_vs_standard() {
         return;
     }
     let _runtime = initialize_runtime();
+    assert_parity_and_standard_arms_are_distinguishable();
     let a_log_v: Vec<f32> = (0..GDN_HV).map(|i| (i as f32 * 0.05).cos() * 0.5).collect();
     let dt_v: Vec<f32> = (0..GDN_HV).map(|i| (i as f32 * 0.03).sin() * 0.5).collect();
     let a_log = mlxcel_core::from_slice_f32(&a_log_v, &[GDN_HV]);

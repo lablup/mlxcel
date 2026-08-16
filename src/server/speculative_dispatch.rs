@@ -245,7 +245,8 @@ impl SpeculativeDispatch {
             })?;
 
         let user_requested_explicit_kind = explicit_kind.is_some();
-        let block_size = resolve_draft_block_size(config.draft_block_size, resolved_kind);
+        let block_size =
+            resolve_draft_block_size(config.draft_block_size, resolved_kind, &draft_model_path);
 
         // Dispatch matrix:
         // - explicit MTP / DFlash → kind-specific generator

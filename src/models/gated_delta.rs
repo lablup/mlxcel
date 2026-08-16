@@ -281,6 +281,7 @@ fn gated_delta_ops_with_parity(
         // mask_ptr is null when mask is None, which the C++ side handles correctly.
         unsafe {
             if chain_parity {
+                warn_if_chain_parity_forfeited_by_shape(g, mask);
                 mlxcel_core::metal_gated_delta_forward_chain_parity(
                     q,
                     k,
@@ -676,8 +677,9 @@ fn gated_delta_chunked(
 /// lane, so `Dk` must cover at least one full SIMD group and be exactly
 /// divisible by 32. Its GQA mapping also requires an integral `Hv / Hk`.
 ///
-/// Used by: Qwen3Next, Qwen3.5, KimiLinear
-fn supports_metal_gated_delta_kernel(hk: i32, hv: i32, dk: i32, dv: i32) -> bool {
+/// Used by: Qwen3Next, Qwen3.5, KimiLinear, `speculative_burst::mtp_capable_target`
+/// (the Qwen 3.5 MTP capability gate, issue #1165 hardening)
+pub(crate) fn supports_metal_gated_delta_kernel(hk: i32, hv: i32, dk: i32, dv: i32) -> bool {
     hk > 0 && hv > 0 && dv > 0 && dk >= 32 && dk % 32 == 0 && hv >= hk && hv % hk == 0
 }
 
@@ -754,6 +756,57 @@ fn chain_parity_enabled() -> bool {
             .map(|v| v != "0")
             .unwrap_or(true)
     })
+}
+
+/// Warn once when a chain-parity request cannot be honored by shape.
+///
+/// The C++ dispatch (`metal_gated_delta_forward_impl` in
+/// `src/lib/mlxcel-core/cpp/mlx_cxx_kernels.cpp`) only defines the
+/// chain-parity kernel variant for the scalar-gate, no-mask shape; a
+/// vectorized gate (`g` is 4-dim, `[B, T, Hv, Dk]`) or an explicit mask
+/// silently falls through to the standard kernel regardless of the
+/// `chain_parity` argument, forfeiting the T=K-block-equals-K-single-steps
+/// byte-identity contract with no signal at the call site. Neither shape is
+/// reachable from the Qwen 3.5 MTP verify/rollback paths today (`mask =
+/// None`, `g` is always 3-dim there), so this has never fired in
+/// production; the warning exists so a future caller that adds a mask or a
+/// vectorized gate to a chain-parity-requesting path fails loudly instead
+/// of silently losing exactness (issue #1165 hardening).
+///
+/// `eprintln!` rather than `tracing::warn!`: only `mlxcel-server` installs a
+/// tracing subscriber unconditionally, the offline `mlxcel` CLI only does so
+/// when `RUST_LOG` is set (see `init_cli_tracing` in `src/main.rs`), and this
+/// path is reachable from both binaries.
+///
+/// Mirrors the C++ shape dispatch in `metal_gated_delta_forward_impl`
+/// exactly: `vectorized || has_mask` takes the standard kernel branches
+/// (`gated_delta_step_vec[_mask]` / `gated_delta_step_mask`) even when the
+/// caller passed `chain_parity = true`; only `!vectorized && !has_mask`
+/// reaches the `chain_parity` check and dispatches
+/// `gated_delta_step_seqpar`. Pulled out as a pure function (rather than
+/// inlined into the warn helper) so the shape predicate is unit-testable
+/// without a Metal device or a live `MlxArray`.
+fn chain_parity_forfeited_by_shape(vectorized_gate: bool, has_mask: bool) -> bool {
+    vectorized_gate || has_mask
+}
+
+fn warn_if_chain_parity_forfeited_by_shape(g: &MlxArray, mask: Option<&MlxArray>) {
+    let vectorized_gate = mlxcel_core::array_ndim(g) == 4;
+    if !chain_parity_forfeited_by_shape(vectorized_gate, mask.is_some()) {
+        return;
+    }
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        eprintln!(
+            "mlxcel: chain-parity gated-delta kernel was requested but the input shape \
+             (vectorized_gate={vectorized_gate}, masked={}) is outside the parity kernel's \
+             contract; the C++ dispatch silently falls back to the standard kernel, which \
+             does NOT guarantee T=K-block byte-identity with K single-token decode steps. \
+             The MTP temperature-0 exactness contract is forfeited for this call. See \
+             `metal_gated_delta_forward_impl` in src/lib/mlxcel-core/cpp/mlx_cxx_kernels.cpp.",
+            mask.is_some()
+        );
+    });
 }
 
 /// Fast RMS normalization without a learned scale, followed by scalar scaling.

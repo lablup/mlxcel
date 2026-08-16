@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use super::{
-    GatedDeltaCache, RMSNormGated, compute_g, gated_delta_chunked, gated_delta_ops,
-    gated_delta_step, precise_swiglu_gate, restore_dtype, supports_metal_gated_delta_kernel,
+    GatedDeltaCache, RMSNormGated, chain_parity_forfeited_by_shape, compute_g, gated_delta_chunked,
+    gated_delta_ops, gated_delta_step, precise_swiglu_gate, restore_dtype,
+    supports_metal_gated_delta_kernel,
 };
 use mlxcel_core::{dtype, generate::ModelStateSnapshot};
 
@@ -201,6 +202,27 @@ fn metal_gated_delta_shape_gate_rejects_unsupported_contracts() {
     assert!(!supports_metal_gated_delta_kernel(1, 1, 33, 2));
     assert!(!supports_metal_gated_delta_kernel(4, 2, 64, 2));
     assert!(!supports_metal_gated_delta_kernel(3, 4, 64, 2));
+}
+
+// Issue #1165 hardening: the C++ dispatch (`metal_gated_delta_forward_impl`)
+// silently ignores `chain_parity=true` whenever the gate is vectorized or a
+// mask is present, taking the standard kernel instead of
+// `gated_delta_step_seqpar`. `chain_parity_forfeited_by_shape` is the pure
+// predicate behind the one-time warning that makes that forfeiture loud;
+// pin it directly against every combination the C++ `if`/`else if` chain in
+// `metal_gated_delta_forward_impl` distinguishes.
+#[test]
+fn chain_parity_forfeited_by_shape_matches_the_cpp_dispatch_branches() {
+    // Scalar gate, no mask: the ONLY shape that reaches
+    // `gated_delta_step_seqpar`. Parity is honored, nothing to warn about.
+    assert!(!chain_parity_forfeited_by_shape(false, false));
+    // Vectorized gate (with or without a mask) takes `gated_delta_step_vec`
+    // / `gated_delta_step_vec_mask` before the `chain_parity` check is ever
+    // reached.
+    assert!(chain_parity_forfeited_by_shape(true, false));
+    assert!(chain_parity_forfeited_by_shape(true, true));
+    // Scalar gate with a mask takes `gated_delta_step_mask`, same forfeiture.
+    assert!(chain_parity_forfeited_by_shape(false, true));
 }
 
 #[test]

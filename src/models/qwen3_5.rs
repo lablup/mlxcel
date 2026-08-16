@@ -455,6 +455,24 @@ impl Qwen35Config {
     }
 }
 
+/// Whether a Qwen 3.5-family config's GDN geometry satisfies the Metal
+/// chain-parity kernel's shape contract
+/// ([`crate::models::gated_delta::supports_metal_gated_delta_kernel`]).
+///
+/// Free function (rather than a method taking `&self`) so it can be
+/// exercised against a bare [`Qwen35Config`] in unit tests without
+/// constructing a full [`Qwen35Model`] with real weights.
+///
+/// Used by: [`Qwen35Model::supports_chain_parity_kernel`]
+fn qwen35_config_supports_chain_parity_kernel(config: &Qwen35Config) -> bool {
+    crate::models::gated_delta::supports_metal_gated_delta_kernel(
+        config.linear_num_key_heads as i32,
+        config.linear_num_value_heads as i32,
+        config.linear_key_head_dim as i32,
+        config.linear_value_head_dim as i32,
+    )
+}
+
 // GatedDeltaNet - Qwen3.5 variant with separate projections.
 /// GatedDeltaNet for Qwen3.5 with separate in_proj_qkv, in_proj_z, in_proj_b, in_proj_a
 #[allow(dead_code)]
@@ -1431,6 +1449,25 @@ impl Qwen35Model {
     #[doc(hidden)]
     pub fn make_speculative_caches_for_test(&self) -> Vec<Qwen3NextCache> {
         self.make_internal_caches()
+    }
+
+    /// Whether this checkpoint's GDN geometry satisfies the Metal chain-parity
+    /// kernel's shape contract (`dk >= 32 && dk % 32 == 0 && hv % hk == 0`,
+    /// [`crate::models::gated_delta::supports_metal_gated_delta_kernel`]).
+    ///
+    /// MTP speculative decoding's temperature-0 byte-identity guarantee rests
+    /// entirely on `gated_delta_update_chain_parity` taking the Metal kernel
+    /// path (issue #1165). `metal_is_available()` alone does not imply that:
+    /// a shape outside the kernel's contract silently falls back to the
+    /// ops-based path, which carries float32 state across a verify block
+    /// instead of rounding per step, forfeiting byte-identity with no signal.
+    /// Callers that gate MTP eligibility on Metal availability must also
+    /// check this so an incompatible checkpoint declines to classic decode
+    /// instead of silently violating the exactness contract.
+    ///
+    /// Used by: `speculative_burst::mtp_capable_target`
+    pub(crate) fn supports_chain_parity_kernel(&self) -> bool {
+        qwen35_config_supports_chain_parity_kernel(&self.config)
     }
 
     fn visible_len(cache: &Qwen3NextCache) -> usize {
@@ -3615,5 +3652,59 @@ mod sanitize_tests {
             SwitchGLU::from_weights(&sanitized, &next_config, "model.layers.0.mlp.switch_mlp")
                 .unwrap_or_else(|e| panic!("SwitchGLU must load after sanitize for {label}: {e}"));
         }
+    }
+}
+
+/// Regression coverage for the `mtp_capable_target` hardening (issue #1165
+/// review): `metal_is_available()` is necessary but not sufficient for MTP
+/// byte-identity, the checkpoint's GDN geometry must also satisfy the
+/// chain-parity kernel's shape contract. This module pins the config-level
+/// predicate directly, without needing a Metal device or a full model.
+#[cfg(test)]
+mod chain_parity_gate_tests {
+    use super::{Qwen35Config, qwen35_config_supports_chain_parity_kernel};
+
+    /// `linear_key_head_dim` matches the published `mlx-community` Qwen 3.5 /
+    /// 3.8 checkpoints (Dk=128); the shape the parity kernel was built for.
+    fn published_shape_config() -> Qwen35Config {
+        serde_json::from_value(serde_json::json!({
+            "model_type": "qwen3_5",
+            "hidden_size": 16,
+            "num_hidden_layers": 1,
+            "intermediate_size": 32,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "linear_num_value_heads": 48,
+            "linear_num_key_heads": 16,
+            "linear_key_head_dim": 128,
+            "linear_value_head_dim": 128,
+            "full_attention_interval": 4,
+            "vocab_size": 100
+        }))
+        .expect("minimal qwen3.5 test config")
+    }
+
+    #[test]
+    fn accepts_the_published_checkpoint_geometry() {
+        assert!(qwen35_config_supports_chain_parity_kernel(
+            &published_shape_config()
+        ));
+    }
+
+    #[test]
+    fn declines_a_key_head_dim_not_a_multiple_of_32() {
+        // Mirrors the `linear_key_head_dim: 4` shape already exercised by
+        // `sanitize_output_loads_through_switch_glu_for_all_naming_conventions`.
+        // Not hypothetical: a shape this small tree already tests with.
+        let mut config = published_shape_config();
+        config.linear_key_head_dim = 4;
+        assert!(!qwen35_config_supports_chain_parity_kernel(&config));
+    }
+
+    #[test]
+    fn declines_a_non_integral_value_to_key_head_ratio() {
+        let mut config = published_shape_config();
+        config.linear_num_value_heads = 15; // 15 % 16 != 0
+        assert!(!qwen35_config_supports_chain_parity_kernel(&config));
     }
 }

@@ -1406,7 +1406,11 @@ pub(super) fn run_generation_mode(
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         let resolved_kind = resolve_drafter_kind(draft_model_path, explicit_kind)
             .map_err(|e| anyhow::anyhow!("--draft-kind / drafter config: {e}"))?;
-        let block_size = resolve_draft_block_size(args.speculative.draft_block_size, resolved_kind);
+        let block_size = resolve_draft_block_size(
+            args.speculative.draft_block_size,
+            resolved_kind,
+            draft_model_path,
+        );
         let user_requested_explicit_kind = explicit_kind.is_some();
 
         // issue #166 / #1165: when the resolved kind is MTP (explicit

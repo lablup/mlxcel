@@ -65,6 +65,15 @@
 //!   [`crate::models::gemma4_mtp_target::Gemma4MtpTargetAdapter`] /
 //!   [`crate::models::gemma4_mtp_target::Gemma4VLMtpTargetAdapter`] /
 //!   [`crate::models::gemma4_mtp_target::Gemma4UnifiedMtpTargetAdapter`].
+//! - **MTP / Qwen 3.5** (issue #1165): [`crate::LoadedModel::Qwen35`],
+//!   [`crate::LoadedModel::Qwen35Moe`], and their Qwen 3.5 VLM-wrapped
+//!   variants, gated additionally on the Metal backend (see
+//!   [`mtp_capable_target`]). Drives
+//!   [`mlxcel_core::speculative::mtp::MtpGenerator`] through
+//!   [`crate::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter`] /
+//!   [`crate::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter`], paired
+//!   with the `qwen3_5_mtp` drafter (a DIFFERENT drafter family from the
+//!   DFlash bullet below despite targeting the same model family).
 //! - **DFlash / Qwen 3.5** — [`crate::LoadedModel::Qwen35`],
 //!   [`crate::LoadedModel::Qwen35Moe`], and their Qwen 3.5 VLM-wrapped
 //!   variants for text-only requests. True multimodal requests still
@@ -646,13 +655,24 @@ fn ragged_target_sliding_window(model: &LoadedModel) -> Option<usize> {
 /// kernel today. On CUDA/CPU builds the multi-token verify block would not
 /// be bit-identical to the classic decode chain, so the family declines to
 /// classic decode rather than silently violating the contract.
+///
+/// Metal availability alone is not sufficient, either: the chain-parity
+/// kernel additionally requires the checkpoint's GDN geometry to satisfy
+/// `supports_metal_gated_delta_kernel` (`dk >= 32 && dk % 32 == 0 &&
+/// hv % hk == 0`). A Metal host whose `linear_key_head_dim` falls outside
+/// that contract would otherwise silently take the ops-based fallback and
+/// forfeit byte-identity with no signal (issue #1165 hardening). Every
+/// published `mlx-community` Qwen 3.5 checkpoint satisfies the shape today
+/// (`dk = 128`), but the gate checks it rather than assuming it.
 pub(crate) fn mtp_capable_target(model: &LoadedModel) -> bool {
     match model {
         LoadedModel::Gemma4(_) | LoadedModel::Gemma4VLM(_) | LoadedModel::Gemma4Unified(_) => true,
-        LoadedModel::Qwen35(_)
-        | LoadedModel::Qwen35Moe(_)
-        | LoadedModel::Qwen35VLM(_)
-        | LoadedModel::Qwen35MoeVLM(_) => mlxcel_core::metal_is_available(),
+        LoadedModel::Qwen35(m) | LoadedModel::Qwen35Moe(m) => {
+            mlxcel_core::metal_is_available() && m.supports_chain_parity_kernel()
+        }
+        LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => {
+            mlxcel_core::metal_is_available() && vlm.text_model.supports_chain_parity_kernel()
+        }
         _ => false,
     }
 }
@@ -975,7 +995,8 @@ impl<'a> BurstContext<'a> {
     }
 }
 
-/// MTP B=1 burst — Gemma 4 / Gemma 4 VLM target.
+/// MTP B=1 burst: Gemma 4 (assistant drafter) or Qwen 3.5 (`qwen3_5_mtp`
+/// drafter, issue #1165) target.
 ///
 /// **Variant gate runs before drafter load.** Surfacing
 /// "unsupported target" is cheap (no IO) and the operator should see
@@ -984,9 +1005,9 @@ impl<'a> BurstContext<'a> {
 /// wrong (e.g. `--model qwen3.5 --draft-kind mtp`). This ordering also
 /// matches the DFlash burst's intent below.
 ///
-/// **Drafter bind happens before MtpGenerator construction.** The
-/// underlying [`Gemma4AssistantDraftModel`] (the only currently
-/// supported MTP drafter shape) requires
+/// **Drafter bind happens before MtpGenerator construction.** Every
+/// MTP-style drafter shape ([`Gemma4AssistantDraftModel`] and, since issue
+/// #1165, `Qwen35MtpDraftModel`) requires
 /// [`mlxcel_core::drafter::Drafter::bind`] to be called before its
 /// first [`mlxcel_core::drafter::Drafter::draft_block`] call — bind
 /// captures the target's `embed_tokens` and resolves the drafter's

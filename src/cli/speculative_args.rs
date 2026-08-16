@@ -54,6 +54,12 @@ use mlxcel_core::drafter::{DrafterKind, KNOWN_DRAFTER_KINDS};
 ///
 /// - **MTP** → `4`: the Gemma 4 MTP "assistant" draft block length used
 ///   by https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/drafters/gemma4_assistant/config.py.
+///   `DrafterKind::Mtp` also covers the unrelated Qwen 3.5 MTP family; for
+///   that family [`resolve_draft_block_size`] prefers the drafter
+///   checkpoint's own configured `block_size`
+///   (`mlxcel_core::drafter::peek_qwen35_mtp_configured_block_size`) over
+///   this constant, so this Gemma-4-derived value is only the fallback
+///   when no Qwen 3.5 MTP hint is found.
 /// - **DFlash** → `16`: the Qwen 3.5 DFlash drafter's `block_size`
 ///   declared in https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/speculative/drafters/qwen3_dflash/config.py#L31.
 ///   Mirrors [`mlxcel_core::drafter::dflash::DEFAULT_BLOCK_SIZE`].
@@ -189,15 +195,41 @@ pub fn default_block_size_for_kind(kind: DrafterKind) -> u32 {
     }
 }
 
-/// Resolve the effective draft block size given an explicit CLI override
-/// and the resolved drafter kind.
+/// Resolve the effective draft block size given an explicit CLI override,
+/// the resolved drafter kind, and the drafter checkpoint path.
 ///
 /// When `override_value` is `Some(n)`, returns `n` (with no further
 /// validation here; concrete generators enforce their own minimums).
-/// When `override_value` is `None`, returns
-/// [`default_block_size_for_kind`] for `kind`.
-pub fn resolve_draft_block_size(override_value: Option<u32>, kind: DrafterKind) -> u32 {
-    override_value.unwrap_or_else(|| default_block_size_for_kind(kind))
+///
+/// When `override_value` is `None` AND `kind == DrafterKind::Mtp`, this
+/// first tries [`mlxcel_core::drafter::peek_qwen35_mtp_configured_block_size`]:
+/// `DrafterKind::Mtp` covers two unrelated drafter families (Gemma 4
+/// assistant and Qwen 3.5 MTP), and [`DEFAULT_MTP_BLOCK_SIZE`] is the
+/// Gemma-4-derived constant. Applying it unconditionally to a Qwen 3.5 MTP
+/// drafter ships whatever that constant happens to be rather than the
+/// checkpoint's own declared block size. Issue #1165's own measurement
+/// found the published checkpoint's configured block size (3) faster than
+/// the flat constant (4): 16.48 vs 13.81 tok/s, 0.591 vs 0.465 acceptance
+/// (`docs/benchmark_results/qwen38-mtp-m1ultra-2026-08-16.md`). When the
+/// peek finds no Qwen 3.5 MTP `block_size` (wrong family, missing config,
+/// or the checkpoint omits an explicit value), falls back to
+/// [`default_block_size_for_kind`] as before.
+pub fn resolve_draft_block_size(
+    override_value: Option<u32>,
+    kind: DrafterKind,
+    model_path: &std::path::Path,
+) -> u32 {
+    if let Some(n) = override_value {
+        return n;
+    }
+    if kind == DrafterKind::Mtp
+        && let Some(configured) =
+            mlxcel_core::drafter::peek_qwen35_mtp_configured_block_size(model_path)
+        && let Ok(n) = u32::try_from(configured)
+    {
+        return n;
+    }
+    default_block_size_for_kind(kind)
 }
 
 /// Apply the `MLXCEL_DRAFT_KIND` env-var fallback to the raw

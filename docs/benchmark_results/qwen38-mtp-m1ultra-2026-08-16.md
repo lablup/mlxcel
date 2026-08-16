@@ -36,6 +36,21 @@ Exactness: temperature-0 output is byte-identical to classic decode on a
 5-prompt gate (offline CLI) and token-identical on the server path (see the
 detokenizer note below).
 
+**Not measured: acceptance under concurrent slice-grant rotation.** The
+0.591 acceptance rate above is single-request only (offline CLI, one
+sequence at a time, no grant rotation). `Qwen35MtpDraftModel::reset`
+(`src/lib/mlxcel-core/src/drafter/qwen3_5_mtp/model.rs`) DESTROYS the
+drafter's accumulated KV history, unlike the Gemma 4 assistant drafter's
+`reset` (the trait-default no-op), and it fires on every park (tick-slice
+grant rotation, `super::speculative_slice`) and every `return_drafter`. Under
+the server's continuous-batching scheduler with more than one concurrent MTP
+request, a parked drafter resumes via `set_shared_kv` re-anchoring into the
+empty-cache mode rather than resuming its history, so the drafter repeatedly
+restarts from reduced context between rounds. Acceptance under that load
+regime is therefore structurally worse than the 0.591 measured here, and by
+how much is uncharacterized: this run did not exercise concurrent grant
+rotation, and no number for it is reported anywhere in this document.
+
 ## Where the time goes (per-round split, from the round-loop diagnostics)
 
 Block 4 run: 125 rounds, decode 21.67 s -> 173 ms/round emitting 2.39 tokens.
@@ -95,10 +110,28 @@ bit-identical to K single-token steps (pinned bitwise in
 ONLY by the speculative verify capture path and the rollback replay; classic
 prefill and decode are untouched.
 
-- Isolated kernel cost (27B GDN geometry, medians over 100 dispatches):
-  ratios parity/standard 1.089 (T=1), 1.117 (T=3), 0.834 (T=4), 1.008
-  (T=64) — inside the dispatch-noise band; the kernel's time loop was already
-  sequential in T, the variant only adds a per-step register round.
+- Isolated kernel cost (27B GDN geometry, medians over 100 dispatches per
+  run). **Corrected numbers**: the test (`parity_kernel_cost_vs_standard`,
+  `tests/qwen38_mtp_chain_parity.rs`) originally had no arm-attribution
+  guard. With `MLXCEL_GDN_CHAIN_PARITY=0` in the environment both the
+  "standard" and "parity" arms silently resolve to the same standard kernel,
+  and the test would compare that path against itself without noticing. It
+  now runs `assert_parity_and_standard_arms_are_distinguishable` first,
+  which dispatches both kernels once at `T=3` and panics if their final GDN
+  state is bitwise equal (the two kernels are defined to diverge whenever
+  `T > 1`); the run this table is drawn from confirmed the guard passes
+  (arms are distinguishable) before printing any ratio. Five repeated runs,
+  medians of each run's 100-dispatch-median shown, min-max across the five
+  runs in parens: ratios parity/standard 0.979 (0.877-1.013, T=1), 1.007
+  (0.987-1.024, T=3), 0.994 (0.922-1.003, T=4), 1.022 (0.995-1.043, T=64),
+  still inside the dispatch-noise band. The qualitative conclusion is
+  unchanged from the originally recorded (unattributed) 1.089 / 1.117 /
+  0.834 / 1.008: the kernel's time loop was already sequential in T, the
+  variant only adds a per-step register round. The absolute ratios moved
+  run-to-run on this box (load 4.8-5.2 during the corrected run) by more
+  than the originally reported figures suggested, which is itself evidence
+  the earlier single-sample numbers were not attributable to anything more
+  precise than noise.
 - End-to-end attribution through the production MTP path
   (`MLXCEL_GDN_CHAIN_PARITY=0` diagnostic toggle, 3 reps): 14.29 tok/s
   without parity vs 13.81 with, ~3.4% — the price of byte-exactness, and not
