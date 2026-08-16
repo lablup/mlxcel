@@ -310,7 +310,7 @@ fn parity_kernel_cost_vs_standard() {
 
     for t in [1_i32, 3, 4, 64] {
         let (q, k, v, a, b) = gdn_inputs(t, 0.5);
-        let mut time = |parity: bool| -> f64 {
+        let time = |parity: bool| -> f64 {
             // Warmup (includes the one-time kernel JIT).
             for _ in 0..20 {
                 let (y, s) = if parity {
@@ -392,7 +392,7 @@ fn verify_forward_cost_scaling() {
         let tokens: Vec<i32> = (0..t).map(|i| 700 + i).collect();
         let arr = mlxcel_core::from_slice_i32(&tokens, &[1, t]);
 
-        let mut time_shape = |capture: bool| -> f64 {
+        let time_shape = |capture: bool| -> f64 {
             let mut caches = model.make_speculative_caches_for_test();
             let prompt =
                 mlxcel_core::from_slice_i32(PROMPT_TOKENS, &[1, PROMPT_TOKENS.len() as i32]);
