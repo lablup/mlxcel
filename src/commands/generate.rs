@@ -1406,17 +1406,22 @@ pub(super) fn run_generation_mode(
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         let resolved_kind = resolve_drafter_kind(draft_model_path, explicit_kind)
             .map_err(|e| anyhow::anyhow!("--draft-kind / drafter config: {e}"))?;
-        let block_size = resolve_draft_block_size(args.speculative.draft_block_size, resolved_kind);
+        let block_size = resolve_draft_block_size(
+            args.speculative.draft_block_size,
+            resolved_kind,
+            draft_model_path,
+        );
         let user_requested_explicit_kind = explicit_kind.is_some();
 
-        // issue #166: when the operator explicitly passes `--draft-kind mtp`,
+        // issue #166 / #1165: when the resolved kind is MTP (explicit
+        // `--draft-kind mtp`, or auto-detected from an MTP `model_type`),
         // drive the kind-specific `MtpGenerator` round loop here, reusing the
         // SAME per-target `MtpTarget` adapters the server burst path uses
-        // (`src/models/gemma4_mtp_target.rs`). This runs BEFORE
-        // `load_model(draft_model_path)` because an MTP assistant is loaded as a
-        // `Drafter` (via `load_drafter`), not as a full `LoadedModel`. DFlash /
-        // InternalMtp explicit kinds and the auto-detect classic path are
-        // untouched and fall through below.
+        // (`src/models/gemma4_mtp_target.rs`, `src/models/qwen3_5_mtp_target.rs`).
+        // This runs BEFORE `load_model(draft_model_path)` because an MTP
+        // drafter is loaded as a `Drafter` (via `load_drafter`), not as a full
+        // `LoadedModel`. DFlash / InternalMtp explicit kinds and the
+        // auto-detect classic path are untouched and fall through below.
         if should_route_offline_mtp(user_requested_explicit_kind, resolved_kind) {
             if vlm_embeddings.is_some() {
                 return Err(anyhow!(
@@ -1583,10 +1588,19 @@ pub(super) fn run_generation_mode(
 /// through to the deferred-error branch. Extracted as a pure function so the
 /// loop-construction decision is unit-testable without loading a model.
 fn should_route_offline_mtp(
-    user_requested_explicit_kind: bool,
+    _user_requested_explicit_kind: bool,
     resolved_kind: DrafterKind,
 ) -> bool {
-    user_requested_explicit_kind && resolved_kind == DrafterKind::Mtp
+    // Route on the RESOLVED kind, explicit or auto-detected (#1165
+    // acceptance: a `qwen3_5_mtp` drafter auto-resolves to MTP with no
+    // `--draft-kind`). Auto-detect only resolves to `Mtp` for a genuinely
+    // MTP `model_type` (`gemma4_assistant`, `gemma4_unified_assistant`,
+    // `qwen3_5_mtp`), none of which can load as a standalone model, so the
+    // classic fall-through those drafters used to hit was always a
+    // downstream load error, never a working path. Unknown model_types
+    // still auto-resolve to the DFlash default and keep the classic
+    // SpeculativeGenerator (the small-full-model-as-drafter workflow).
+    resolved_kind == DrafterKind::Mtp
 }
 
 /// Reject a DFlash speculative drafter before the offline path tries to load
@@ -1726,12 +1740,31 @@ fn run_offline_mtp(
         LoadedModel::Gemma4(wrapper) => wrapper as &dyn LanguageModel,
         LoadedModel::Gemma4VLM(vlm) => vlm as &dyn LanguageModel,
         LoadedModel::Gemma4Unified(unified) => unified as &dyn LanguageModel,
+        // Metal-only for the Qwen 3.5 family: the temperature-0 exactness
+        // contract rests on the Metal chain-parity gated-delta kernel
+        // (issue #1165); on other backends the verify block is not
+        // bit-identical to classic decode, so fail closed with the reason.
+        LoadedModel::Qwen35(_)
+        | LoadedModel::Qwen35Moe(_)
+        | LoadedModel::Qwen35VLM(_)
+        | LoadedModel::Qwen35MoeVLM(_)
+            if !mlxcel_core::metal_is_available() =>
+        {
+            return Err(anyhow!(
+                "Qwen 3.5 MTP speculative decoding requires the Metal backend: its \
+                 temperature-0 exactness guarantee rests on the Metal chain-parity \
+                 gated-delta kernel, which has no CUDA/CPU port yet. Omit \
+                 --draft-model to run classic decode."
+            ));
+        }
+        LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => qwen as &dyn LanguageModel,
+        LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => vlm as &dyn LanguageModel,
         _ => {
             return Err(anyhow!(
                 "--draft-kind mtp is only supported for Gemma 4 (text, VLM, or \
-                 Unified) targets; the loaded target is not MTP-capable. Omit \
-                 --draft-kind to use the classic SpeculativeGenerator with your \
-                 --draft-model drafter."
+                 Unified) and Qwen 3.5 (text or VLM) targets; the loaded target \
+                 is not MTP-capable. Omit --draft-kind to use the classic \
+                 SpeculativeGenerator with your --draft-model drafter."
             ));
         }
     };
@@ -1794,6 +1827,27 @@ fn run_offline_mtp(
         ),
         LoadedModel::Gemma4Unified(unified) => drive_offline_mtp(
             Gemma4UnifiedMtpTargetAdapter::new_with_block_size(unified, None, block_size),
+            drafter,
+            prompt_tokens,
+            max_tokens,
+            &sampling,
+            &token_history,
+            block_size,
+        ),
+        // Qwen 3.5 family (#1165): `seq_id = None` selects the model's
+        // internal fallback cache slot, the documented offline / single-row
+        // CLI shape.
+        LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => drive_offline_mtp(
+            mlxcel::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter::new(qwen, None),
+            drafter,
+            prompt_tokens,
+            max_tokens,
+            &sampling,
+            &token_history,
+            block_size,
+        ),
+        LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => drive_offline_mtp(
+            mlxcel::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::new(vlm, None),
             drafter,
             prompt_tokens,
             max_tokens,

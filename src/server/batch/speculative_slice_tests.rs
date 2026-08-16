@@ -115,6 +115,7 @@ impl MockMtpTarget {
             ],
             kv_offset,
             bonus_position: kv_offset,
+            verify_hidden_full: None,
         }
     }
 }

@@ -67,21 +67,23 @@ fn xla_cli_accepts_empty_image_list_for_audio_only_requests() {
     assert!(decode_xla_cli_images(&[]).unwrap().is_empty());
 }
 
-// issue #166: the offline MTP loop is constructed only when the operator
-// explicitly passes `--draft-kind mtp`. An auto-detected MTP shape (no explicit
-// flag) keeps the classic SpeculativeGenerator path, and DFlash / InternalMtp
-// explicit kinds fall through to the deferred-error branch. These pins guard the
-// routing decision without loading a model.
+// issue #166 / #1165: the offline MTP loop is constructed whenever the
+// RESOLVED kind is MTP — an explicit `--draft-kind mtp`, or an auto-detected
+// MTP `model_type` (`gemma4_assistant`, `gemma4_unified_assistant`,
+// `qwen3_5_mtp`), none of which can load as a standalone model, so the
+// classic fall-through was always a downstream load error. DFlash /
+// InternalMtp explicit kinds fall through to the deferred-error branch. These
+// pins guard the routing decision without loading a model.
 #[test]
-fn should_route_offline_mtp_only_for_explicit_mtp() {
+fn should_route_offline_mtp_for_explicit_mtp() {
     assert!(should_route_offline_mtp(true, DrafterKind::Mtp));
 }
 
 #[test]
-fn should_route_offline_mtp_rejects_auto_detected_mtp() {
-    // Auto-detect resolved to MTP but no explicit `--draft-kind`: stay on the
-    // classic path for backward compatibility.
-    assert!(!should_route_offline_mtp(false, DrafterKind::Mtp));
+fn should_route_offline_mtp_for_auto_detected_mtp() {
+    // #1165 acceptance: a qwen3_5_mtp drafter with no --draft-kind
+    // auto-resolves to MTP and takes the MTP round loop.
+    assert!(should_route_offline_mtp(false, DrafterKind::Mtp));
 }
 
 #[test]

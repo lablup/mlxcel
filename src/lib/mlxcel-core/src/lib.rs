@@ -1809,6 +1809,26 @@ mod ffi {
             new_state: &mut UniquePtr<MlxArray>,
         );
 
+        /// Chain-parity GatedDeltaNet forward for the speculative verify /
+        /// rollback replay paths (issue #1165): rounds the recurrent state
+        /// through the storage dtype after every in-block step so a T=K
+        /// block is bit-identical to K consecutive T=1 decode calls (the
+        /// classic greedy chain the exactness gate compares against).
+        /// Identical to `metal_gated_delta_forward` at T=1.
+        /// Used by: Qwen3.5 `forward_speculative` and rollback replay.
+        #[allow(clippy::too_many_arguments)]
+        unsafe fn metal_gated_delta_forward_chain_parity(
+            q: &MlxArray,
+            k: &MlxArray,
+            v: &MlxArray,
+            g: &MlxArray,
+            beta: &MlxArray,
+            state: &MlxArray,
+            mask: *const MlxArray, // nullable
+            output: &mut UniquePtr<MlxArray>,
+            new_state: &mut UniquePtr<MlxArray>,
+        );
+
         // Fused Mamba2 mixer forward for single-token decode.
         /// Combines in_proj + conv1d + SSM kernel + MambaRMSNormGated + out_proj into one C++ call.
         /// Replaces ~23 FFI round-trips for the hot decode path.

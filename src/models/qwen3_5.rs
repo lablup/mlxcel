@@ -29,7 +29,8 @@ use crate::distributed::pipeline::LayerFilter;
 use crate::distributed::pipeline::StageExecutionOutput;
 use crate::distributed::pipeline::partial_loading::filter_weight_map;
 use crate::models::gated_delta::{
-    GatedDeltaCache, RMSNormGated, gated_delta_update, scaled_fast_rms_norm_no_weight,
+    GatedDeltaCache, RMSNormGated, gated_delta_update, gated_delta_update_chain_parity,
+    scaled_fast_rms_norm_no_weight,
 };
 use crate::models::model_owned::ModelOwnedSequenceState;
 use crate::models::qwen_mrope_state::MRopeState;
@@ -454,6 +455,24 @@ impl Qwen35Config {
     }
 }
 
+/// Whether a Qwen 3.5-family config's GDN geometry satisfies the Metal
+/// chain-parity kernel's shape contract
+/// ([`crate::models::gated_delta::supports_metal_gated_delta_kernel`]).
+///
+/// Free function (rather than a method taking `&self`) so it can be
+/// exercised against a bare [`Qwen35Config`] in unit tests without
+/// constructing a full [`Qwen35Model`] with real weights.
+///
+/// Used by: [`Qwen35Model::supports_chain_parity_kernel`]
+fn qwen35_config_supports_chain_parity_kernel(config: &Qwen35Config) -> bool {
+    crate::models::gated_delta::supports_metal_gated_delta_kernel(
+        config.linear_num_key_heads as i32,
+        config.linear_num_value_heads as i32,
+        config.linear_key_head_dim as i32,
+        config.linear_value_head_dim as i32,
+    )
+}
+
 // GatedDeltaNet - Qwen3.5 variant with separate projections.
 /// GatedDeltaNet for Qwen3.5 with separate in_proj_qkv, in_proj_z, in_proj_b, in_proj_a
 #[allow(dead_code)]
@@ -864,8 +883,16 @@ impl Qwen35GatedDeltaNet {
             conv_input: mlxcel_core::copy(&conv_input),
         });
 
-        // Run gated_delta_update for the full verify block.
-        let (out, new_state) = gated_delta_update(
+        // Run the gated-delta update for the full verify block through the
+        // CHAIN-PARITY kernel (issue #1165): the standard kernel carries
+        // float32 state across the block and quantizes once at the end,
+        // which is not bit-identical to the per-token quantization of the
+        // classic decode chain the verify argmax must match at temperature
+        // 0. The parity kernel rounds the state through the storage dtype
+        // after every in-block step, so a T=K verify block equals K
+        // single-token decode steps bit-for-bit (and equals the standard
+        // kernel exactly at T=1).
+        let (out, new_state) = gated_delta_update_chain_parity(
             &q,
             &k,
             &v,
@@ -1422,6 +1449,25 @@ impl Qwen35Model {
     #[doc(hidden)]
     pub fn make_speculative_caches_for_test(&self) -> Vec<Qwen3NextCache> {
         self.make_internal_caches()
+    }
+
+    /// Whether this checkpoint's GDN geometry satisfies the Metal chain-parity
+    /// kernel's shape contract (`dk >= 32 && dk % 32 == 0 && hv % hk == 0`,
+    /// [`crate::models::gated_delta::supports_metal_gated_delta_kernel`]).
+    ///
+    /// MTP speculative decoding's temperature-0 byte-identity guarantee rests
+    /// entirely on `gated_delta_update_chain_parity` taking the Metal kernel
+    /// path (issue #1165). `metal_is_available()` alone does not imply that:
+    /// a shape outside the kernel's contract silently falls back to the
+    /// ops-based path, which carries float32 state across a verify block
+    /// instead of rounding per step, forfeiting byte-identity with no signal.
+    /// Callers that gate MTP eligibility on Metal availability must also
+    /// check this so an incompatible checkpoint declines to classic decode
+    /// instead of silently violating the exactness contract.
+    ///
+    /// Used by: `speculative_burst::mtp_capable_target`
+    pub(crate) fn supports_chain_parity_kernel(&self) -> bool {
+        qwen35_config_supports_chain_parity_kernel(&self.config)
     }
 
     fn visible_len(cache: &Qwen3NextCache) -> usize {
@@ -2040,7 +2086,11 @@ impl Qwen35Model {
                 ],
             );
 
-            let (_y, replayed_state) = gated_delta_update(
+            // Chain-parity replay (issue #1165): the replayed prefix state
+            // must equal the state a classic decode chain would hold after
+            // the accepted tokens, so the replay uses the same per-step
+            // rounding kernel as the verify pass that captured the block.
+            let (_y, replayed_state) = gated_delta_update_chain_parity(
                 &q_n,
                 &k_n,
                 &v_n,
@@ -2096,6 +2146,161 @@ impl Qwen35Model {
         }
 
         max_a
+    }
+
+    // === Sequence-routed speculative hooks (MTP target adapter) ============
+    //
+    // The MtpTarget trait is `&self`-only with no cache parameter: the target
+    // resolves its own per-sequence cache. These wrappers route the existing
+    // caller-owned-slice speculative hooks above through
+    // `ModelOwnedSequenceState`, exactly like `forward_with_sequence_caches`
+    // does for the classic path, so the MTP adapter
+    // (`crate::models::qwen3_5_mtp_target`) stays a stateless view over the
+    // model — the shape the tick-cooperative slice path requires (it
+    // reconstructs the adapter every scheduler tick).
+
+    /// Prefill `input_ids` through the standard batched-attention forward
+    /// while also returning the last decoder layer's **pre-final-norm**
+    /// hidden for every position.
+    ///
+    /// This is deliberately NOT [`Self::forward_speculative`]: that path runs
+    /// the per-position target-verify attention (`attend_per_position`),
+    /// which is byte-aligned with single-token *decode* but is O(seq_len)
+    /// attention dispatches and does not match the classic *prefill*
+    /// numerics. The classic path's first token is sampled from the batched
+    /// causal prefill logits, so MTP's first bonus must come from the same
+    /// computation to stay byte-identical — upstream's MTP prefill likewise
+    /// runs the plain forward (`capture_layer_ids=None`, so
+    /// `target_verify=False`). GDN rollback snapshots are not captured: a
+    /// prefill needs no rollback, and holding every linear layer's
+    /// full-prompt q/k/v tensors alive simultaneously would balloon memory.
+    ///
+    /// Keep the loop in lockstep with [`Self::forward_internal`] (mask
+    /// construction, layer dispatch, final norm, LM head).
+    ///
+    /// Used by: `Qwen35MtpTargetAdapter::prefill_and_seed`.
+    /// Public test seam: out-of-crate diagnostics (the chain-parity /
+    /// verify-cost tests in `tests/`) time this batched-attention path
+    /// against `forward_speculative`'s per-position verify path. Not for
+    /// production callers outside this module — use the sequence-routed
+    /// wrappers.
+    #[doc(hidden)]
+    pub fn forward_prefill_with_last_hidden(
+        &self,
+        input_ids: &MlxArray,
+        caches: &mut [Qwen3NextCache],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        let mut h = self.embed_tokens.forward(input_ids);
+
+        let shape = mlxcel_core::array_shape(&h);
+        let seq_len = shape[1];
+
+        let fa_idx = self.config.full_attention_interval - 1;
+        let fa_mask = if seq_len > 1 {
+            let offset = if fa_idx < caches.len() {
+                caches[fa_idx].offset()
+            } else {
+                0
+            };
+            Some(create_causal_mask(seq_len, offset))
+        } else {
+            None
+        };
+
+        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
+            let mask = if layer.is_linear {
+                None
+            } else {
+                fa_mask.as_deref()
+            };
+            h = layer.forward(&h, mask, cache, None);
+        }
+
+        let normed = self.norm.forward(&h);
+        let logits = if let Some(ref lm_head) = self.lm_head {
+            lm_head.forward(&normed)
+        } else {
+            self.embed_tokens.as_linear(&normed)
+        };
+        (logits, h)
+    }
+
+    /// Apply the final RMSNorm to a captured pre-norm hidden block.
+    ///
+    /// The MTP drafter consumes the target's **post-final-norm** hidden:
+    /// upstream's `return_hidden` appends the model output (`self.model(...)`
+    /// ends in `self.norm(h)`), and the Qwen 3.5 family has no
+    /// `speculative_draft_hidden` hook to do this in the round loop. The
+    /// hidden captured by [`Self::forward_speculative`] /
+    /// [`Self::forward_prefill_with_last_hidden`] is pre-norm, so the MTP
+    /// adapter normalizes it here before handing it to the drafter.
+    ///
+    /// Used by: `Qwen35MtpTargetAdapter`.
+    pub(crate) fn apply_final_norm(&self, hidden: &MlxArray) -> UniquePtr<MlxArray> {
+        self.norm.forward(hidden)
+    }
+
+    /// Sequence-routed [`Self::forward_prefill_with_last_hidden`].
+    ///
+    /// Used by: `Qwen35MtpTargetAdapter::prefill_and_seed`.
+    pub(crate) fn forward_prefill_with_last_hidden_for_sequence(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.make_internal_caches(),
+            |caches| self.forward_prefill_with_last_hidden(input_ids, caches),
+        )
+    }
+
+    /// Sequence-routed [`Self::forward_speculative`].
+    ///
+    /// Used by: `Qwen35MtpTargetAdapter::verify_forward`.
+    pub(crate) fn forward_speculative_for_sequence(
+        &self,
+        input_ids: &MlxArray,
+        seq_id: Option<SequenceId>,
+        capture_layer_ids: &[usize],
+    ) -> VerifyOutput {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.make_internal_caches(),
+            |caches| self.forward_speculative(input_ids, caches, capture_layer_ids),
+        )
+    }
+
+    /// Sequence-routed [`Self::rollback_speculative_cache`].
+    ///
+    /// Used by: `Qwen35MtpTargetAdapter::verify_finalize`.
+    pub(crate) fn rollback_speculative_cache_for_sequence(
+        &self,
+        seq_id: Option<SequenceId>,
+        gdn_states: &[GdnRollbackSnapshot],
+        accepted: &[i32],
+        block_size: i32,
+    ) -> i32 {
+        self.sequence_state.with_sequence_state(seq_id, |caches| {
+            self.rollback_speculative_cache(caches, gdn_states, accepted, block_size)
+        })
+    }
+
+    /// Absolute offset of the sequence's first attention-layer KV cache
+    /// (the value upstream reads as `prompt_cache[0].offset` when rebinding
+    /// the drafter after a rollback).
+    ///
+    /// Used by: `Qwen35MtpTargetAdapter::{prefill_and_seed, verify_finalize}`.
+    pub(crate) fn speculative_cache_offset_for_sequence(&self, seq_id: Option<SequenceId>) -> i32 {
+        self.sequence_state.with_sequence_state(seq_id, |caches| {
+            caches
+                .iter()
+                .find_map(|c| match c {
+                    Qwen3NextCache::Attention(kv) => Some(kv.offset),
+                    _ => None,
+                })
+                .unwrap_or(0)
+        })
     }
 }
 
@@ -3447,5 +3652,59 @@ mod sanitize_tests {
             SwitchGLU::from_weights(&sanitized, &next_config, "model.layers.0.mlp.switch_mlp")
                 .unwrap_or_else(|e| panic!("SwitchGLU must load after sanitize for {label}: {e}"));
         }
+    }
+}
+
+/// Regression coverage for the `mtp_capable_target` hardening (issue #1165
+/// review): `metal_is_available()` is necessary but not sufficient for MTP
+/// byte-identity, the checkpoint's GDN geometry must also satisfy the
+/// chain-parity kernel's shape contract. This module pins the config-level
+/// predicate directly, without needing a Metal device or a full model.
+#[cfg(test)]
+mod chain_parity_gate_tests {
+    use super::{Qwen35Config, qwen35_config_supports_chain_parity_kernel};
+
+    /// `linear_key_head_dim` matches the published `mlx-community` Qwen 3.5 /
+    /// 3.8 checkpoints (Dk=128); the shape the parity kernel was built for.
+    fn published_shape_config() -> Qwen35Config {
+        serde_json::from_value(serde_json::json!({
+            "model_type": "qwen3_5",
+            "hidden_size": 16,
+            "num_hidden_layers": 1,
+            "intermediate_size": 32,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "linear_num_value_heads": 48,
+            "linear_num_key_heads": 16,
+            "linear_key_head_dim": 128,
+            "linear_value_head_dim": 128,
+            "full_attention_interval": 4,
+            "vocab_size": 100
+        }))
+        .expect("minimal qwen3.5 test config")
+    }
+
+    #[test]
+    fn accepts_the_published_checkpoint_geometry() {
+        assert!(qwen35_config_supports_chain_parity_kernel(
+            &published_shape_config()
+        ));
+    }
+
+    #[test]
+    fn declines_a_key_head_dim_not_a_multiple_of_32() {
+        // Mirrors the `linear_key_head_dim: 4` shape already exercised by
+        // `sanitize_output_loads_through_switch_glu_for_all_naming_conventions`.
+        // Not hypothetical: a shape this small tree already tests with.
+        let mut config = published_shape_config();
+        config.linear_key_head_dim = 4;
+        assert!(!qwen35_config_supports_chain_parity_kernel(&config));
+    }
+
+    #[test]
+    fn declines_a_non_integral_value_to_key_head_ratio() {
+        let mut config = published_shape_config();
+        config.linear_num_value_heads = 15; // 15 % 16 != 0
+        assert!(!qwen35_config_supports_chain_parity_kernel(&config));
     }
 }

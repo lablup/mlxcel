@@ -1607,9 +1607,11 @@ impl BatchScheduler {
     ///    MTP) or
     ///    [`mlxcel_core::drafter::dflash::SpeculativeTarget`] (for
     ///    DFlash). Today that means:
-    ///    - **MTP**: `Gemma4Wrapper` / `Gemma4VLModel` — see the
-    ///      `MtpTarget` impls in
-    ///      [`crate::models::gemma4_mtp_target`].
+    ///    - **MTP**: `Gemma4Wrapper` / `Gemma4VLModel` (Gemma 4 assistant
+    ///      drafter, see the `MtpTarget` impls in
+    ///      [`crate::models::gemma4_mtp_target`]) and, since issue #1165,
+    ///      `Qwen35Model` / `Qwen35VLModel` (`qwen3_5_mtp` drafter, Metal
+    ///      only, see [`crate::models::qwen3_5_mtp_target`]).
     ///    - **DFlash**: `Qwen35Model` / `Qwen35VLModel` — see the
     ///      `SpeculativeTarget` impl in `crate::models::qwen3_5`.
     /// 3. The drafter weights are loadable at the recorded
@@ -4256,10 +4258,7 @@ impl BatchScheduler {
         };
         block_size >= 2
             && super::speculative_slice::mtp_tick_slice_enabled()
-            && matches!(
-                self.model,
-                LoadedModel::Gemma4(_) | LoadedModel::Gemma4VLM(_) | LoadedModel::Gemma4Unified(_)
-            )
+            && super::speculative_burst::mtp_capable_target(&self.model)
             && !seq.prompt_tokens.is_empty()
             && super::speculative_burst::mtp_prefill_suffix_start(
                 seq.prefill_start_offset,
@@ -4539,7 +4538,8 @@ impl BatchScheduler {
             let seq = window.into_iter().next().expect("window has the head");
 
             // Tick-cooperative MTP slice (issue #734): a B=1 MTP request on
-            // the Gemma 4 family is served one speculative round per
+            // any `mtp_capable_target` family (Gemma 4 assistant, and since
+            // issue #1165 Qwen 3.5 MTP) is served one speculative round per
             // scheduler tick instead of a run-to-completion burst, so
             // concurrent classic rows advance between rounds. The DFlash
             // arm keeps the legacy burst (its generator has no resumable
@@ -4689,6 +4689,12 @@ impl BatchScheduler {
             LoadedModel::Gemma4(wrapper) => compat_and_bind(drafter, wrapper),
             LoadedModel::Gemma4VLM(vlm) => compat_and_bind(drafter, vlm),
             LoadedModel::Gemma4Unified(unified) => compat_and_bind(drafter, unified),
+            LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => {
+                compat_and_bind(drafter, qwen)
+            }
+            LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => {
+                compat_and_bind(drafter, vlm)
+            }
             // Unreachable per the callers' variant gates; produce a clean
             // per-request error rather than panicking.
             _ => Err(
@@ -4732,13 +4738,11 @@ impl BatchScheduler {
         // Variant gate BEFORE any drafter IO, same rationale and message
         // as `run_mtp_burst`: an unsupported pairing declines to classic
         // without surfacing a confusing drafter-load error.
-        if !matches!(
-            self.model,
-            LoadedModel::Gemma4(_) | LoadedModel::Gemma4VLM(_) | LoadedModel::Gemma4Unified(_)
-        ) {
+        if !super::speculative_burst::mtp_capable_target(&self.model) {
             tracing::warn!(
                 "MTP speculative dispatch declined: target is not \
-                 Gemma 4 (text, VLM, or Unified); falling back to classic decode",
+                 Gemma 4 (text, VLM, or Unified) or Qwen 3.5 (text or VLM); \
+                 falling back to classic decode",
             );
             return Some(seq);
         }
@@ -4877,6 +4881,46 @@ impl BatchScheduler {
                     &token_history,
                 ))
             }
+            // Qwen 3.5 family (#1165): same slice-0 shape; the adapter is a
+            // stateless per-tick view over the model's sequence slot, which
+            // is exactly why the cache-ownership design routes through
+            // `*_for_sequence` wrappers instead of an adapter-owned cache.
+            LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => {
+                let adapter = crate::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter::new(
+                    qwen,
+                    Some(seq.seq_id),
+                )
+                .with_prefill_start_offset(prefill_start_offset);
+                Ok(super::speculative_slice::begin_slice_session(
+                    adapter,
+                    drafter,
+                    seq,
+                    &self.tokenizer,
+                    model_eos,
+                    block_size,
+                    probe_rounds,
+                    prefill_start_offset,
+                    &token_history,
+                ))
+            }
+            LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => {
+                let adapter = crate::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::new(
+                    vlm,
+                    Some(seq.seq_id),
+                )
+                .with_prefill_start_offset(prefill_start_offset);
+                Ok(super::speculative_slice::begin_slice_session(
+                    adapter,
+                    drafter,
+                    seq,
+                    &self.tokenizer,
+                    model_eos,
+                    block_size,
+                    probe_rounds,
+                    prefill_start_offset,
+                    &token_history,
+                ))
+            }
             // Defensive arm rather than `unreachable!()` so a future
             // LoadedModel variant admitted by the gate above surfaces as a
             // clean per-request error instead of a worker panic.
@@ -4992,11 +5036,30 @@ impl BatchScheduler {
                 super::speculative_slice::step_slice_session(adapter, &mut job, &self.tokenizer);
                 true
             }
+            LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => {
+                let adapter = crate::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter::new(
+                    qwen,
+                    Some(job.seq.seq_id),
+                )
+                .with_prefill_start_offset(job.prefill_start_offset);
+                super::speculative_slice::step_slice_session(adapter, &mut job, &self.tokenizer);
+                true
+            }
+            LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => {
+                let adapter = crate::models::qwen3_5_mtp_target::Qwen35VLMtpTargetAdapter::new(
+                    vlm,
+                    Some(job.seq.seq_id),
+                )
+                .with_prefill_start_offset(job.prefill_start_offset);
+                super::speculative_slice::step_slice_session(adapter, &mut job, &self.tokenizer);
+                true
+            }
             _ => false,
         };
         if !stepped {
             // Defensive: the model cannot change mid-flight (slice 0 only
-            // starts on the Gemma 4 family). Fail the request cleanly; the
+            // starts on an `mtp_capable_target` family: Gemma 4 assistant or
+            // Qwen 3.5 MTP). Fail the request cleanly; the
             // drafter is dropped with the job so the next speculative
             // request lazily reloads it.
             self.fail_inflight_slice_job(
@@ -5035,12 +5098,21 @@ impl BatchScheduler {
     /// `Drafter::reset` is the trait default no-op for the MTP assistant
     /// drafter; see `MtpSliceJob::attach_drafter` for the correctness
     /// argument) and push the job onto the grant backlog ring.
+    ///
+    /// The Qwen 3.5 MTP drafter's reset is NOT a no-op: it clears the
+    /// drafter-owned KV history. That is still correct at a park boundary —
+    /// the shared worker handle may serve other grantees before this job is
+    /// promoted, so per-session drafter state cannot survive rotation, and
+    /// the resumed session's `set_shared_kv` re-anchors into the documented
+    /// empty-cache mode (reduced draft context, identical output).
     fn park_speculative_slice(&mut self, mut job: Box<super::speculative_slice::MtpSliceJob>) {
         if let Some(drafter) = job.take_drafter() {
             let target_lm: Option<&dyn LanguageModel> = match &self.model {
                 LoadedModel::Gemma4(wrapper) => Some(wrapper),
                 LoadedModel::Gemma4VLM(vlm) => Some(vlm),
                 LoadedModel::Gemma4Unified(unified) => Some(unified),
+                LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => Some(qwen),
+                LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => Some(vlm),
                 _ => None,
             };
             match target_lm {
@@ -5127,9 +5199,13 @@ impl BatchScheduler {
                     // Re-acquire the worker drafter returned at park time.
                     // `ensure_loaded` is a no-op while the handle sits in
                     // the slot; it reloads from disk only if the park-time
-                    // reset failed and dropped the handle (cannot happen
-                    // for the MTP arm, whose reset is the trait default
-                    // no-op, but handled for symmetry with the burst
+                    // reset failed and dropped the handle. For the Gemma 4
+                    // assistant drafter (trait-default no-op reset) this
+                    // cannot happen; for the Qwen 3.5 MTP drafter, whose
+                    // reset re-binds against the target and is therefore
+                    // fallible in principle, this branch is the defensive
+                    // path (not expected to fire against an already-bound
+                    // live target, but handled for symmetry with the burst
                     // paths). A cancelled parked job is promoted normally:
                     // its next `step_session` observes the cancel at the
                     // round top and finishes with the tokens emitted so
@@ -5258,14 +5334,19 @@ impl BatchScheduler {
         // holds the slot, the BETWEEN-slice holds skip `return_drafter`
         // (there is nothing to hand off); the END-of-session return here
         // resets, exactly like the legacy burst, and the park boundary
-        // (issue #746) routes through the same `return_drafter` plumbing
-        // (safe for the MTP arm because its reset is the trait default
-        // no-op; see `MtpSliceJob::attach_drafter`).
+        // (issue #746) routes through the same `return_drafter` plumbing.
+        // Correctness does not depend on what `reset` does to drafter-side
+        // state either way (the Gemma 4 assistant drafter's reset is the
+        // trait default no-op; the Qwen 3.5 MTP drafter's reset destroys
+        // its accumulated KV history instead): see
+        // `MtpSliceJob::attach_drafter` for the full argument.
         if let Some(drafter) = job.take_drafter() {
             let target_lm: Option<&dyn LanguageModel> = match &self.model {
                 LoadedModel::Gemma4(wrapper) => Some(wrapper),
                 LoadedModel::Gemma4VLM(vlm) => Some(vlm),
                 LoadedModel::Gemma4Unified(unified) => Some(unified),
+                LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => Some(qwen),
+                LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => Some(vlm),
                 _ => None,
             };
             match target_lm {

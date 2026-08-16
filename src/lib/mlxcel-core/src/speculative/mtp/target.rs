@@ -156,6 +156,16 @@ pub struct MtpVerifyOutput {
     pub kv_offset: usize,
     /// Position id of the bonus token.
     pub bonus_position: usize,
+    /// Full multi-position hidden for **stateful** drafters (Qwen 3.5 MTP):
+    /// the target's post-final-norm hidden at every forwarded position of
+    /// the pass that produced this output — `[1, P, H]` over the prompt for
+    /// the `prefill_and_seed` seed, `[1, block, H]` over the verify block
+    /// afterwards. `None` for targets whose drafters are stateless (Gemma 4
+    /// family) and for seeds whose prefill only covered an adopted-prefix
+    /// suffix; the round loop then skips the corresponding drafter-history
+    /// hook ([`crate::drafter::Drafter::prefill_from_target_hidden`] /
+    /// [`crate::drafter::Drafter::accept_verified_tokens`]).
+    pub verify_hidden_full: Option<UniquePtr<MlxArray>>,
 }
 
 impl std::fmt::Debug for MtpVerifyOutput {
@@ -164,6 +174,7 @@ impl std::fmt::Debug for MtpVerifyOutput {
             .field("next_shared_kv_len", &self.next_shared_kv.len())
             .field("kv_offset", &self.kv_offset)
             .field("bonus_position", &self.bonus_position)
+            .field("has_verify_hidden_full", &self.verify_hidden_full.is_some())
             .finish()
     }
 }

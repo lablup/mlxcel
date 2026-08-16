@@ -535,6 +535,7 @@ impl MockMtpTarget {
             next_shared_kv,
             kv_offset,
             bonus_position: kv_offset,
+            verify_hidden_full: None,
         }
     }
 }
@@ -1778,4 +1779,201 @@ fn sampling_config_eq_excludes_history_dependent_penalty_configs() {
             "penalty exclusion must be symmetric"
         );
     }
+}
+
+// ===========================================================================
+// MTP dispatch-site coverage (issue #1165)
+// ===========================================================================
+//
+// Every MTP dispatch site is a `match` over `LoadedModel` with a `_ =>`
+// decline/defensive arm, so omitting a family from one of them does NOT fail
+// to compile: the family silently declines to classic decode on the path that
+// was missed. `mtp_capable_target` is the single source of truth for the
+// pure-boolean gates, but the arm-bearing matches that construct the
+// per-family adapters necessarily repeat the variant list, and nothing in the
+// type system keeps the two in agreement.
+//
+// This test closes that gap mechanically: it reads the variant list out of
+// `mtp_capable_target` and asserts every one of those variants is named in
+// every adapter-constructing / drafter-routing site. Adding a family to the
+// helper without wiring it into a site now fails at `cargo test` time instead
+// of producing a silent decline in production.
+
+/// Source of the three files that carry an MTP dispatch site.
+const SRC_SPECULATIVE_BURST: &str = include_str!("speculative_burst.rs");
+const SRC_SCHEDULER: &str = include_str!("scheduler.rs");
+const SRC_OFFLINE_GENERATE: &str = include_str!("../../commands/generate.rs");
+
+/// Every function that must handle every MTP-capable `LoadedModel` variant,
+/// as `(human label, source, `fn` anchor)`.
+///
+/// A site belongs here when omitting a variant from it makes that family
+/// silently take a non-MTP path. Sites that are deliberately Gemma-only
+/// (the B > 1 batched burst, `ragged_target_sliding_window`) are excluded:
+/// Qwen 3.5 MTP is B = 1 only (#1165).
+const MTP_DISPATCH_SITES: &[(&str, &str, &str)] = &[
+    (
+        "run_mtp_burst (variant gate + adapter selection)",
+        SRC_SPECULATIVE_BURST,
+        "fn run_mtp_burst(",
+    ),
+    (
+        "BatchScheduler::bind_drafter_to_target (compat_and_bind)",
+        SRC_SCHEDULER,
+        "fn bind_drafter_to_target(",
+    ),
+    (
+        "BatchScheduler::start_mtp_slice_b1 (slice 0 adapter)",
+        SRC_SCHEDULER,
+        "fn start_mtp_slice_b1(",
+    ),
+    (
+        "BatchScheduler::execute_speculative_slice_round (per-tick adapter)",
+        SRC_SCHEDULER,
+        "fn execute_speculative_slice_round(",
+    ),
+    (
+        "BatchScheduler::park_speculative_slice (drafter return)",
+        SRC_SCHEDULER,
+        "fn park_speculative_slice(",
+    ),
+    (
+        "BatchScheduler::finalize_speculative_slice (drafter return)",
+        SRC_SCHEDULER,
+        "fn finalize_speculative_slice(",
+    ),
+    (
+        "run_offline_mtp (offline CLI gate + adapter selection)",
+        SRC_OFFLINE_GENERATE,
+        "fn run_offline_mtp(",
+    ),
+];
+
+/// Extract the brace-delimited body that follows `anchor` in `src`.
+///
+/// Brace matching skips `//` line comments, `/* */` block comments, and
+/// double-quoted string literals so a `format!("{x}")` or a brace in prose
+/// cannot unbalance the scan.
+fn mtp_fn_body<'a>(src: &'a str, anchor: &str) -> &'a str {
+    let start = src
+        .find(anchor)
+        .unwrap_or_else(|| panic!("MTP dispatch-site anchor {anchor:?} not found; if the function was renamed, update MTP_DISPATCH_SITES"));
+    let bytes = src.as_bytes();
+    let open = start
+        + src[start..]
+            .find('{')
+            .unwrap_or_else(|| panic!("no opening brace after {anchor:?}"));
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 2;
+            }
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            b'{' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &src[open..=i];
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    panic!("unbalanced braces in the body following {anchor:?}");
+}
+
+/// Collect every `LoadedModel::<Variant>` identifier named in `body`.
+fn loaded_model_variants(body: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = body;
+    while let Some(idx) = rest.find("LoadedModel::") {
+        let tail = &rest[idx + "LoadedModel::".len()..];
+        let end = tail
+            .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .unwrap_or(tail.len());
+        let name = &tail[..end];
+        if !name.is_empty() && !out.iter().any(|v| v == name) {
+            out.push(name.to_string());
+        }
+        rest = &tail[end..];
+    }
+    out
+}
+
+/// The variant list `mtp_capable_target` accepts. The helper must name only
+/// MTP-capable variants and decline everything else through its `_ =>` arm;
+/// an explicit `LoadedModel::X => false` arm would be read here as capable.
+fn mtp_capable_variants() -> Vec<String> {
+    let body = mtp_fn_body(SRC_SPECULATIVE_BURST, "fn mtp_capable_target(");
+    let variants = loaded_model_variants(body);
+    assert!(
+        variants.len() >= 3,
+        "mtp_capable_target should name at least the three Gemma 4 variants, found {variants:?}"
+    );
+    variants
+}
+
+#[test]
+fn mtp_capable_target_names_the_qwen35_family() {
+    // Guards the #1165 wiring itself: the four Qwen 3.5 variants (dense and
+    // MoE, text and VLM) must be MTP-capable alongside the Gemma 4 three.
+    let variants = mtp_capable_variants();
+    for expected in [
+        "Gemma4",
+        "Gemma4VLM",
+        "Gemma4Unified",
+        "Qwen35",
+        "Qwen35Moe",
+        "Qwen35VLM",
+        "Qwen35MoeVLM",
+    ] {
+        assert!(
+            variants.iter().any(|v| v == expected),
+            "mtp_capable_target must accept LoadedModel::{expected}; found {variants:?}"
+        );
+    }
+}
+
+#[test]
+fn every_mtp_dispatch_site_covers_every_capable_variant() {
+    let capable = mtp_capable_variants();
+    let mut missing: Vec<String> = Vec::new();
+    for (label, src, anchor) in MTP_DISPATCH_SITES {
+        let body = mtp_fn_body(src, anchor);
+        let named = loaded_model_variants(body);
+        for variant in &capable {
+            if !named.iter().any(|v| v == variant) {
+                missing.push(format!("{label}: LoadedModel::{variant}"));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "these MTP-capable variants are accepted by `mtp_capable_target` but are not \
+         handled at every dispatch site, so they would SILENTLY decline to classic \
+         decode on the paths below:\n  {}\n\
+         Add the missing arm(s), or narrow `mtp_capable_target`.",
+        missing.join("\n  "),
+    );
 }

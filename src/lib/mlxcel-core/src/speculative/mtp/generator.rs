@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! [`MtpGenerator`] — round-loop driver for Gemma 4 MTP speculative decoding
+//! [`MtpGenerator`]: round-loop driver for MTP speculative decoding.
+//! Generic over any [`MtpTarget`] implementation: originally the Gemma 4
+//! assistant family, and since issue #1165 also the Qwen 3.5 MTP family.
 //!
 //! Top-level lifecycle (single-batch path):
 //!
@@ -257,6 +259,13 @@ pub struct MtpSessionState {
     verify_out: MtpVerifyOutput,
     /// Current bonus token (the last emitted token).
     bonus: i32,
+    /// Prompt tokens pending a one-time stateful-drafter prompt prefill
+    /// ([`crate::drafter::Drafter::prefill_from_target_hidden`]). `Some` only
+    /// when the seed capture carried a full prompt hidden
+    /// ([`MtpVerifyOutput::verify_hidden_full`]); consumed by the first
+    /// round (probe or speculative). `None` for stateless-drafter targets
+    /// (Gemma 4 family), keeping their sessions byte-identical.
+    drafter_prefill_tokens: Option<Vec<i32>>,
     /// Tokens emitted so far, including the first bonus. The session does
     /// not keep the token stream itself: each step hands its new tokens to
     /// the caller, who owns accumulation/streaming.
@@ -332,14 +341,15 @@ impl MtpStepOutput {
     }
 }
 
-/// Round-loop driver for Gemma 4 MTP speculative decoding (B=1).
+/// Round-loop driver for MTP speculative decoding (B=1): Gemma 4 assistant
+/// and, since issue #1165, Qwen 3.5 MTP.
 ///
 /// Generic over `T: MtpTarget` so we get static dispatch into the target's
 /// sink-aware forward / rollback hooks (one v-table hop per call would
 /// otherwise show up as measurable noise at K=4 and decode-bound rounds).
 /// The drafter is held as `Box<dyn Drafter>` so the call site can swap in
-/// Gemma 4 assistant / DFlash / future MTP shapes without touching the
-/// generator type.
+/// the Gemma 4 assistant drafter, the Qwen 3.5 MTP drafter, or a future MTP
+/// shape without touching the generator type.
 ///
 /// ## Construction
 ///
@@ -646,9 +656,18 @@ impl<T: MtpTarget> MtpGenerator<T> {
             new_logprobs.push(first_bonus_lp);
         }
         let finished = eos_tokens.contains(&first_bonus) || max_tokens == 1;
+        // Stash the prompt for the one-time stateful-drafter prefill hook
+        // only when the target advertised a full prompt hidden. Stateless
+        // targets (Gemma 4) leave `verify_hidden_full` as `None`, so this is
+        // `None` and the first round is unchanged for them.
+        let drafter_prefill_tokens = verify_out
+            .verify_hidden_full
+            .is_some()
+            .then(|| prompt_tokens.to_vec());
         let state = MtpSessionState {
             verify_out,
             bonus: first_bonus,
+            drafter_prefill_tokens,
             emitted_count: 1,
             accept_lens: Vec::new(),
             probes_remaining: self.profile_probe_rounds,
@@ -774,6 +793,41 @@ impl<T: MtpTarget> MtpGenerator<T> {
         if cancel.load(Ordering::Relaxed) {
             state.finished = true;
             return MtpStepOutput::finished_empty();
+        }
+        // One-time stateful-drafter prompt prefill (Qwen 3.5 MTP). Runs on
+        // the FIRST round of the session — before the probe branch, because
+        // probe rounds also extend the drafter history through the accept
+        // hook below and need the prompt prefix in place. Consuming the
+        // stashed prompt makes this idempotent across resumed sessions. A
+        // hook failure degrades draft quality only (the drafter continues
+        // with an empty history), never correctness — greedy parity rests on
+        // the target's verify pass alone — so it is logged, not fatal.
+        //
+        // `verify_hidden_full` is taken (not borrowed) here for the same
+        // one-shot reason: this hook is its only consumer, and at
+        // P = 32k prompt tokens / H = 5120 the `[1, P, H]` f16 seed hidden
+        // is about 335 MB. Taking it clears `state.verify_out` immediately
+        // instead of letting it ride, still allocated, through the rest of
+        // this round until `verify_finalize` overwrites `state.verify_out`
+        // wholesale at the end. This is unrelated to the PER-ROUND
+        // `verify_hidden_full` that `verify_finalize` sets below (a much
+        // smaller `[1, block, H]` slab consumed every round by
+        // `accept_verified_tokens`); that one is untouched by this take,
+        // because on any round after the first `drafter_prefill_tokens` is
+        // already `None` and this whole block does not run.
+        if let Some(prompt_tokens) = state.drafter_prefill_tokens.take()
+            && let Some(hidden_full) = state.verify_out.verify_hidden_full.take()
+            && let Err(e) = self.drafter.prefill_from_target_hidden(
+                &prompt_tokens,
+                &hidden_full,
+                state.bonus,
+                sampling,
+            )
+        {
+            tracing::warn!(
+                "MTP drafter prompt prefill failed: {e}; continuing with an empty \
+                 drafter history"
+            );
         }
         // [#736] Classic-step probe rounds. While the adaptive policy is
         // profiling, the first `profile_probe_rounds` rounds skip the
@@ -935,6 +989,30 @@ impl<T: MtpTarget> MtpGenerator<T> {
                     finished: true,
                 };
             }
+        }
+
+        // Stateful-drafter history extension (Qwen 3.5 MTP): after the
+        // rollback, hand the drafter the full verify hidden so it trims its
+        // rejected in-round tail, appends the accepted tokens paired with the
+        // target's true hidden, and precomputes the next round's seed.
+        // `state.verify_out` was just replaced by `verify_finalize`, so its
+        // `verify_hidden_full` is THIS round's block hidden. Probe rounds
+        // take the same path (draft_tokens is empty, accepted == 0), which
+        // keeps the drafter history position-synchronized with the target
+        // cache across probes. Stateless targets carry `None` and skip.
+        // Early-finish rounds returned above without this call — the drafter
+        // is reset before its next session, so nothing is lost. Failures
+        // degrade draft quality only and are logged, not fatal.
+        if let Some(hidden_full) = state.verify_out.verify_hidden_full.as_ref()
+            && let Err(e) = self.drafter.accept_verified_tokens(
+                hidden_full,
+                &draft_tokens,
+                walk.accepted,
+                &new_tokens,
+                sampling,
+            )
+        {
+            tracing::warn!("MTP drafter accept_verified_tokens failed: {e}; drafter history reset");
         }
 
         // Next round's bonus is the last emitted token. `walk.new_tokens`

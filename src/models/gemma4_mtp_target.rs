@@ -415,7 +415,7 @@ impl<'a> Gemma4MtpTargetAdapter<'a> {
     ///
     /// Returns `None` when `logprobs_config.enabled` is false (the
     /// zero-overhead path — no slicing, no log-softmax).
-    fn per_position_logprobs(
+    pub(crate) fn per_position_logprobs(
         logits: &MlxArray,
         target_tokens: &[i32],
         logprobs_config: &mlxcel_core::sampling::LogprobsConfig,
@@ -558,6 +558,10 @@ impl<'a> MtpTarget for Gemma4MtpTargetAdapter<'a> {
             next_shared_kv,
             kv_offset,
             bonus_position,
+            // The Gemma 4 assistant drafter is stateless per round; no
+            // full-block hidden is advertised, so the round loop skips the
+            // stateful-drafter history hooks.
+            verify_hidden_full: None,
         };
         (first_bonus, seed, first_bonus_lp)
     }
@@ -763,6 +767,7 @@ impl<'a> MtpTarget for Gemma4MtpTargetAdapter<'a> {
             next_shared_kv,
             kv_offset,
             bonus_position,
+            verify_hidden_full: None,
         }
     }
 
