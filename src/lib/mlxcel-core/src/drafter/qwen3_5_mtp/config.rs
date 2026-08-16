@@ -117,9 +117,31 @@ impl Qwen35MtpTextConfig {
     }
 
     /// Per-head dimension, falling back to `hidden_size / num_attention_heads`.
+    ///
+    /// The fallback is lazy and division-safe. It used to be
+    /// `unwrap_or(self.hidden_size / self.num_attention_heads)`, and
+    /// `Option::unwrap_or` takes a *value*: the division was evaluated on every
+    /// call, including when `head_dim` was `Some`. A `num_attention_heads: 0` in
+    /// a drafter `config.json` therefore panicked here with "attempt to divide
+    /// by zero" even for a config that otherwise specified the head geometry in
+    /// full. That mattered because the drafter is loaded from disk inside the
+    /// batch worker at the first speculative request rather than at startup, and
+    /// every core inference worker runs under `run_core_thread_or_abort`, which
+    /// converts an uncaught panic into `std::process::abort()`: a config scalar
+    /// took down the whole server process.
+    ///
+    /// [`Qwen35MtpConfig::normalize`] is the real gate (it rejects a zero head
+    /// count with a named error before any weight is touched). The `checked_div`
+    /// here is defense in depth for any path that resolves head geometry without
+    /// having normalized first: 0 is a benign sentinel because every downstream
+    /// consumer of a head dim is a reshape or a projection load that rejects it
+    /// with a shape error, which is recoverable where a panic is not.
     pub fn head_dim_resolved(&self) -> usize {
-        self.head_dim
-            .unwrap_or(self.hidden_size / self.num_attention_heads)
+        self.head_dim.unwrap_or_else(|| {
+            self.hidden_size
+                .checked_div(self.num_attention_heads)
+                .unwrap_or(0)
+        })
     }
 
     /// Rotary dimensions per head (`head_dim * partial_rotary_factor`),
@@ -134,6 +156,83 @@ impl Qwen35MtpTextConfig {
     /// `switch_mlp` weight.
     pub fn is_moe(&self) -> bool {
         self.model_type.contains("moe")
+    }
+
+    /// Bounds-check the numeric fields the drafter actually consumes.
+    ///
+    /// Called from [`Qwen35MtpConfig::normalize`], which is the single gate
+    /// every load path goes through, so a rejected value never reaches a
+    /// division, a reshape, or an allocation. Checks are ordered so the most
+    /// specific message wins: the zero checks on the two head counts precede the
+    /// GQA divisibility check, whose `%` would itself divide by zero on
+    /// `num_key_value_heads: 0`.
+    fn validate_bounds(&self) -> Result<(), String> {
+        if self.hidden_size == 0 {
+            return Err(format!(
+                "Qwen35MtpConfig.text_config.hidden_size ({}) must be > 0: it sizes every \
+                 projection and the residual stream",
+                self.hidden_size
+            ));
+        }
+        if self.num_attention_heads == 0 {
+            return Err(format!(
+                "Qwen35MtpConfig.text_config.num_attention_heads ({}) must be > 0: it is the \
+                 divisor in the head_dim fallback and a reshape extent in the MTP attention \
+                 layer, so zero is an uncatchable abort at first draft rather than a load error",
+                self.num_attention_heads
+            ));
+        }
+        if self.num_key_value_heads == 0 {
+            return Err(format!(
+                "Qwen35MtpConfig.text_config.num_key_value_heads ({}) must be > 0: it is a \
+                 reshape extent for the K/V projections in the MTP attention layer",
+                self.num_key_value_heads
+            ));
+        }
+        if !self
+            .num_attention_heads
+            .is_multiple_of(self.num_key_value_heads)
+        {
+            return Err(format!(
+                "Qwen35MtpConfig.text_config.num_attention_heads ({}) must be a multiple of \
+                 num_key_value_heads ({}): the MTP attention layer reshapes on both counts and \
+                 repeats K/V across each query group, which has no meaning for a ragged layout",
+                self.num_attention_heads, self.num_key_value_heads
+            ));
+        }
+        if let Some(head_dim) = self.head_dim
+            && head_dim == 0
+        {
+            return Err(
+                "Qwen35MtpConfig.text_config.head_dim (0) must be > 0 when present: it is a \
+                 reshape extent and the denominator of the attention scale"
+                    .to_string(),
+            );
+        }
+        if self.vocab_size == 0 {
+            return Err(format!(
+                "Qwen35MtpConfig.text_config.vocab_size ({}) must be > 0: it sizes the drafter's \
+                 embedding table and LM head",
+                self.vocab_size
+            ));
+        }
+        if self.intermediate_size == 0 {
+            return Err(format!(
+                "Qwen35MtpConfig.text_config.intermediate_size ({}) must be > 0: it sizes the \
+                 SwiGLU MLP in the MTP decoder layer",
+                self.intermediate_size
+            ));
+        }
+        if !(1..=MAX_MTP_NUM_HIDDEN_LAYERS).contains(&self.mtp_num_hidden_layers) {
+            return Err(format!(
+                "Qwen35MtpConfig.text_config.mtp_num_hidden_layers ({}) must be between 1 and \
+                 {MAX_MTP_NUM_HIDDEN_LAYERS}: the count is used as an allocation size before any \
+                 weight is read, so an unbounded value is an allocation-failure abort rather than \
+                 a load error, and 0 layers builds a drafter that cannot draft",
+                self.mtp_num_hidden_layers
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -165,6 +264,32 @@ fn default_tie_word_embeddings() -> bool {
     true
 }
 
+/// Upper bound on `text_config.mtp_num_hidden_layers`.
+///
+/// This is an allocation bound, not a claim about how deep an MTP head can
+/// usefully be. Every published Qwen 3.5 / 3.6 / 3.8 MTP checkpoint ships
+/// `mtp_num_hidden_layers: 1`, and upstream derives `block_size` from it as
+/// `mtp_num_hidden_layers + 2`, so the field is a draft depth rather than a
+/// model dimension: it does not grow with parameter count the way
+/// `num_hidden_layers` does.
+///
+/// The bound is needed because the count is consumed as an allocation size
+/// *before* any weight is consulted. `Qwen35MtpDraftModel::from_weights` builds
+/// an expected-weight inventory of eleven formatted `String`s per layer and a
+/// `Vec::with_capacity` of this size, so a hostile `mtp_num_hidden_layers:
+/// 100000000` asks for on the order of 1.1e9 allocations up front. Allocation
+/// failure in Rust is an abort, not a catchable panic, and the drafter loads
+/// inside the batch worker at first request, so that is a whole-server abort
+/// driven by a config scalar.
+///
+/// 8 leaves eight times the headroom over every checkpoint that exists while
+/// keeping the worst case at a few hundred small allocations. If a real
+/// checkpoint ever ships a deeper head, raise this constant: that makes the
+/// change one reviewed line rather than a silently unbounded capacity, and the
+/// rejection names the field and the cap so the reason is obvious from the
+/// error alone.
+const MAX_MTP_NUM_HIDDEN_LAYERS: usize = 8;
+
 impl Qwen35MtpConfig {
     /// Validate and apply the upstream post-init fixups:
     ///
@@ -174,6 +299,26 @@ impl Qwen35MtpConfig {
     ///   (upstream `__post_init__`).
     /// - MoE text configs are rejected: the dense drafter has no
     ///   `Qwen3_5MoeDecoderLayer` port.
+    /// - Numeric fields are bounds-checked (see below).
+    ///
+    /// The numeric checks exist because two `text_config` scalars reach code
+    /// that aborts the process rather than returning an error. A
+    /// `num_attention_heads: 0` divides by zero in
+    /// [`Qwen35MtpTextConfig::head_dim_resolved`], and an unbounded
+    /// `mtp_num_hidden_layers` is used as an allocation size in
+    /// `Qwen35MtpDraftModel::from_weights` before any weight is read (see
+    /// [`MAX_MTP_NUM_HIDDEN_LAYERS`]). The drafter is loaded lazily inside the
+    /// batch worker at the first speculative request, and core worker threads
+    /// run under `run_core_thread_or_abort`, which turns an uncaught panic into
+    /// `std::process::abort()`; an allocation failure aborts outright. So a
+    /// malformed drafter `config.json` used to take down the whole server on
+    /// first request instead of declining to classic decode with a named error.
+    ///
+    /// Rejecting at normalize time is the same policy the tree already applies
+    /// to quantization scalars in `crate::layers::validate_quantization_params`
+    /// (issue #929): refuse a config-driven value that can only fail
+    /// uncatchably later, at parse time, with the field and the value in the
+    /// message.
     pub fn normalize(mut self) -> Result<Self, String> {
         let text_cfg = self
             .text_config
@@ -186,6 +331,7 @@ impl Qwen35MtpConfig {
                 text_cfg.model_type
             ));
         }
+        text_cfg.validate_bounds()?;
         if self.block_size.is_none() {
             self.block_size = Some(text_cfg.mtp_num_hidden_layers + 2);
         }
@@ -309,5 +455,103 @@ mod tests {
         let cfg: Qwen35MtpConfig = serde_json::from_str(json).expect("parse");
         let err = cfg.normalize().expect_err("must reject MoE");
         assert!(err.contains("MoE"), "got: {err}");
+    }
+
+    /// `num_attention_heads: 0` must be rejected at normalize time, not divided
+    /// by at first draft.
+    ///
+    /// `head_dim` is explicitly `256` here, which is the point of the fixture:
+    /// the config looks fully specified, so nothing should ever need the
+    /// `hidden_size / num_attention_heads` fallback. The old
+    /// `unwrap_or(hidden_size / num_attention_heads)` evaluated that division
+    /// eagerly anyway, and `head_dim_resolved()` panicked with "attempt to
+    /// divide by zero" on a config that never asked for the fallback.
+    #[test]
+    fn normalize_rejects_zero_attention_heads() {
+        let json = r#"{
+            "model_type": "qwen3_5_mtp",
+            "text_config": {
+                "model_type": "qwen3_5_text",
+                "head_dim": 256,
+                "hidden_size": 64,
+                "intermediate_size": 128,
+                "num_attention_heads": 0,
+                "num_key_value_heads": 2,
+                "vocab_size": 512
+            }
+        }"#;
+        let cfg: Qwen35MtpConfig = serde_json::from_str(json).expect("parse");
+        let err = cfg
+            .normalize()
+            .expect_err("must reject zero attention heads");
+        assert!(err.contains("num_attention_heads"), "got: {err}");
+    }
+
+    /// [`Qwen35MtpTextConfig::head_dim_resolved`] must not panic even when
+    /// called without a preceding `normalize()`. Reaching this assertion at all
+    /// is the test: the pre-fix implementation aborted the process here.
+    #[test]
+    fn head_dim_resolved_does_not_divide_by_zero() {
+        let tc = Qwen35MtpTextConfig {
+            model_type: "qwen3_5_text".to_string(),
+            hidden_size: 64,
+            num_attention_heads: 0,
+            num_key_value_heads: 2,
+            head_dim: None,
+            rms_norm_eps: 1e-6,
+            intermediate_size: 128,
+            vocab_size: 512,
+            rope_parameters: None,
+            mtp_num_hidden_layers: 1,
+            tie_word_embeddings: false,
+            quantization: None,
+        };
+        assert_eq!(tc.head_dim_resolved(), 0);
+        assert_eq!(tc.rope_dims(), 0);
+    }
+
+    /// An unbounded `mtp_num_hidden_layers` is an allocation size the model
+    /// loader consumes before reading any weight, so it is bounded here.
+    #[test]
+    fn normalize_rejects_absurd_mtp_layer_count() {
+        let json = r#"{
+            "model_type": "qwen3_5_mtp",
+            "text_config": {
+                "model_type": "qwen3_5_text",
+                "hidden_size": 64,
+                "intermediate_size": 128,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 2,
+                "vocab_size": 512,
+                "mtp_num_hidden_layers": 100000000
+            }
+        }"#;
+        let cfg: Qwen35MtpConfig = serde_json::from_str(json).expect("parse");
+        let err = cfg
+            .normalize()
+            .expect_err("must reject absurd mtp layer count");
+        assert!(err.contains("mtp_num_hidden_layers"), "got: {err}");
+        assert!(err.contains("100000000"), "got: {err}");
+    }
+
+    /// GQA layout: `Qwen35MtpAttention` reshapes on both head counts and
+    /// repeats K/V across each query group, so a ragged layout is rejected.
+    #[test]
+    fn normalize_rejects_non_divisible_gqa_head_counts() {
+        let json = r#"{
+            "model_type": "qwen3_5_mtp",
+            "text_config": {
+                "model_type": "qwen3_5_text",
+                "hidden_size": 64,
+                "intermediate_size": 128,
+                "num_attention_heads": 6,
+                "num_key_value_heads": 4,
+                "vocab_size": 512
+            }
+        }"#;
+        let cfg: Qwen35MtpConfig = serde_json::from_str(json).expect("parse");
+        let err = cfg.normalize().expect_err("must reject ragged GQA layout");
+        assert!(err.contains("num_attention_heads"), "got: {err}");
+        assert!(err.contains("num_key_value_heads"), "got: {err}");
     }
 }
