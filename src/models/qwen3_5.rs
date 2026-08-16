@@ -2142,7 +2142,13 @@ impl Qwen35Model {
     /// construction, layer dispatch, final norm, LM head).
     ///
     /// Used by: `Qwen35MtpTargetAdapter::prefill_and_seed`.
-    pub(crate) fn forward_prefill_with_last_hidden(
+    /// Public test seam: out-of-crate diagnostics (the chain-parity /
+    /// verify-cost tests in `tests/`) time this batched-attention path
+    /// against `forward_speculative`'s per-position verify path. Not for
+    /// production callers outside this module — use the sequence-routed
+    /// wrappers.
+    #[doc(hidden)]
+    pub fn forward_prefill_with_last_hidden(
         &self,
         input_ids: &MlxArray,
         caches: &mut [Qwen3NextCache],

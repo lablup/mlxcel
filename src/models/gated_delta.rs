@@ -737,7 +737,23 @@ pub fn gated_delta_update_chain_parity(
 ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
     let beta = mlxcel_core::sigmoid(b);
     let g = compute_g(a_log, a, dt_bias);
-    gated_delta_ops_with_parity(q, k, v, &g, &beta, state, mask, true)
+    gated_delta_ops_with_parity(q, k, v, &g, &beta, state, mask, chain_parity_enabled())
+}
+
+/// Diagnostic escape hatch for the chain-parity kernel, mirroring the
+/// `MLXCEL_ENABLE_MTP_DEFERRED` parity-experiment precedent:
+/// `MLXCEL_GDN_CHAIN_PARITY=0` restores the pre-#1165 block numerics
+/// (float32 in-block state carry) on the speculative verify / rollback
+/// paths for A/B attribution of the parity kernel's cost and acceptance
+/// effect. Default ON — turning it off forfeits the temperature-0
+/// byte-identity of speculative output against classic decode.
+fn chain_parity_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("MLXCEL_GDN_CHAIN_PARITY")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+    })
 }
 
 /// Fast RMS normalization without a learned scale, followed by scalar scaling.

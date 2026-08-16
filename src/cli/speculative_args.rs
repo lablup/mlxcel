@@ -83,14 +83,16 @@ pub struct SpeculativeArgs {
     /// `mlxcel-server`), the kind is auto-detected from the drafter's
     /// `config.json::model_type` via
     /// `mlxcel_core::drafter::resolve_drafter_kind`. Auto-detect maps
-    /// `gemma4_assistant -> mtp`; everything else falls back to
-    /// `dflash` (matching the upstream
-    /// `DEFAULT_DRAFTER_KIND = "dflash"` convention).
+    /// `gemma4_assistant`, `gemma4_unified_assistant`, and `qwen3_5_mtp`
+    /// to `mtp`; everything else falls back to `dflash` (matching the
+    /// upstream `DEFAULT_DRAFTER_KIND = "dflash"` convention).
     ///
     /// When unset AND no drafter path is supplied, mlxcel runs without a
     /// speculative drafter. The offline `mlxcel generate` command keeps the
-    /// classic non-MTP / non-DFlash `SpeculativeGenerator` path when a
-    /// drafter is supplied without an explicit kind.
+    /// classic `SpeculativeGenerator` path when a drafter without an MTP
+    /// `model_type` is supplied without an explicit kind; an auto-detected
+    /// MTP drafter routes to the MTP round loop (none of the MTP drafter
+    /// checkpoints can load as a standalone classic draft model).
     ///
     /// Parity note (offline `mlxcel generate` with `--draft-kind mtp`):
     /// at temperature 0 with no sampling penalties the output matches the

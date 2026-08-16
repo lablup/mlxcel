@@ -639,17 +639,22 @@ fn ragged_target_sliding_window(model: &LoadedModel) -> Option<usize> {
 /// Batched (B > 1) MTP capability is narrower: only the Gemma 4 family
 /// implements the batched adapter today (`run_mtp_burst_batched`'s own gate);
 /// Qwen 3.5 MTP is B = 1 only (#1165).
+///
+/// The Qwen 3.5 family additionally requires the Metal backend: its
+/// temperature-0 exactness contract rests on the chain-parity gated-delta
+/// kernel (`gated_delta_update_chain_parity`), which only exists as a Metal
+/// kernel today. On CUDA/CPU builds the multi-token verify block would not
+/// be bit-identical to the classic decode chain, so the family declines to
+/// classic decode rather than silently violating the contract.
 pub(crate) fn mtp_capable_target(model: &LoadedModel) -> bool {
-    matches!(
-        model,
-        LoadedModel::Gemma4(_)
-            | LoadedModel::Gemma4VLM(_)
-            | LoadedModel::Gemma4Unified(_)
-            | LoadedModel::Qwen35(_)
-            | LoadedModel::Qwen35Moe(_)
-            | LoadedModel::Qwen35VLM(_)
-            | LoadedModel::Qwen35MoeVLM(_)
-    )
+    match model {
+        LoadedModel::Gemma4(_) | LoadedModel::Gemma4VLM(_) | LoadedModel::Gemma4Unified(_) => true,
+        LoadedModel::Qwen35(_)
+        | LoadedModel::Qwen35Moe(_)
+        | LoadedModel::Qwen35VLM(_)
+        | LoadedModel::Qwen35MoeVLM(_) => mlxcel_core::metal_is_available(),
+        _ => false,
+    }
 }
 
 /// Successful burst outcome returned to the scheduler.
@@ -1024,7 +1029,21 @@ fn run_mtp_burst(
         // with the qwen3_5_mtp drafter (#1165). The drafter binds against
         // the text backbone's embed_tokens / lm_head, which the VLM wrapper
         // exposes through its LanguageModel impl exactly like the text
-        // model.
+        // model. Metal-only: the exactness contract needs the chain-parity
+        // gated-delta kernel (see `mtp_capable_target`).
+        LoadedModel::Qwen35(_)
+        | LoadedModel::Qwen35Moe(_)
+        | LoadedModel::Qwen35VLM(_)
+        | LoadedModel::Qwen35MoeVLM(_)
+            if !mlxcel_core::metal_is_available() =>
+        {
+            tracing::warn!(
+                "MTP speculative dispatch declined: Qwen 3.5 MTP requires the Metal \
+                 backend (its temperature-0 exactness rests on the Metal chain-parity \
+                 gated-delta kernel); falling back to classic decode"
+            );
+            return Err(BurstOutcome::DeclineToClassic);
+        }
         LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => qwen as &dyn LanguageModel,
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => vlm as &dyn LanguageModel,
         _ => {

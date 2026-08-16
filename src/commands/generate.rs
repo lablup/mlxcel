@@ -1736,6 +1736,23 @@ fn run_offline_mtp(
         LoadedModel::Gemma4(wrapper) => wrapper as &dyn LanguageModel,
         LoadedModel::Gemma4VLM(vlm) => vlm as &dyn LanguageModel,
         LoadedModel::Gemma4Unified(unified) => unified as &dyn LanguageModel,
+        // Metal-only for the Qwen 3.5 family: the temperature-0 exactness
+        // contract rests on the Metal chain-parity gated-delta kernel
+        // (issue #1165); on other backends the verify block is not
+        // bit-identical to classic decode, so fail closed with the reason.
+        LoadedModel::Qwen35(_)
+        | LoadedModel::Qwen35Moe(_)
+        | LoadedModel::Qwen35VLM(_)
+        | LoadedModel::Qwen35MoeVLM(_)
+            if !mlxcel_core::metal_is_available() =>
+        {
+            return Err(anyhow!(
+                "Qwen 3.5 MTP speculative decoding requires the Metal backend: its \
+                 temperature-0 exactness guarantee rests on the Metal chain-parity \
+                 gated-delta kernel, which has no CUDA/CPU port yet. Omit \
+                 --draft-model to run classic decode."
+            ));
+        }
         LoadedModel::Qwen35(qwen) | LoadedModel::Qwen35Moe(qwen) => qwen as &dyn LanguageModel,
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => vlm as &dyn LanguageModel,
         _ => {
