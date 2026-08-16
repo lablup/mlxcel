@@ -224,6 +224,30 @@ pub fn gated_delta_ops(
     state: Option<&MlxArray>,
     mask: Option<&MlxArray>,
 ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    gated_delta_ops_with_parity(q, k, v, g, beta, state, mask, false)
+}
+
+/// Body of [`gated_delta_ops`] with the chain-parity switch.
+///
+/// `chain_parity == true` routes the Metal path through the chain-parity
+/// kernel (per-step storage-dtype state rounding, issue #1165) so a `T = K`
+/// block is bit-identical to `K` consecutive `T = 1` calls. The non-Metal
+/// fallback ignores the flag: the parity guarantee is Metal-only today, and
+/// the speculative verify paths that need it are Metal-gated in practice.
+///
+/// Used by: [`gated_delta_ops`], [`gated_delta_update`],
+/// [`gated_delta_update_chain_parity`]
+#[allow(clippy::too_many_arguments)]
+fn gated_delta_ops_with_parity(
+    q: &MlxArray,
+    k: &MlxArray,
+    v: &MlxArray,
+    g: &MlxArray,
+    beta: &MlxArray,
+    state: Option<&MlxArray>,
+    mask: Option<&MlxArray>,
+    chain_parity: bool,
+) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
     let shape = mlxcel_core::array_shape(q);
     let b = shape[0];
     let t = shape[1] as usize;
@@ -256,17 +280,31 @@ pub fn gated_delta_ops(
         // SAFETY: Metal kernel reads from valid input arrays, writes to output/new_state.
         // mask_ptr is null when mask is None, which the C++ side handles correctly.
         unsafe {
-            mlxcel_core::metal_gated_delta_forward(
-                q,
-                k,
-                v,
-                g,
-                beta,
-                &current_state,
-                mask_ptr,
-                &mut output,
-                &mut new_state,
-            );
+            if chain_parity {
+                mlxcel_core::metal_gated_delta_forward_chain_parity(
+                    q,
+                    k,
+                    v,
+                    g,
+                    beta,
+                    &current_state,
+                    mask_ptr,
+                    &mut output,
+                    &mut new_state,
+                );
+            } else {
+                mlxcel_core::metal_gated_delta_forward(
+                    q,
+                    k,
+                    v,
+                    g,
+                    beta,
+                    &current_state,
+                    mask_ptr,
+                    &mut output,
+                    &mut new_state,
+                );
+            }
         }
         return (output, new_state);
     }
@@ -668,6 +706,38 @@ pub fn gated_delta_update(
 
     // Run the ops-based implementation
     gated_delta_ops(q, k, v, &g, &beta, state, mask)
+}
+
+/// Chain-parity variant of [`gated_delta_update`] for the speculative verify
+/// and rollback-replay paths (issue #1165).
+///
+/// The standard Metal kernel carries float32 recurrent state across a `T = K`
+/// block and quantizes it to the storage dtype only at the final store, while
+/// the classic decode chain quantizes after every token — so a verify block
+/// is NOT bit-identical to the single-token chain it must match at
+/// temperature 0, and last-ulp state differences flip near-tie argmaxes.
+/// This variant rounds the state through the storage dtype at the end of
+/// every in-block step, making `T = K` bit-equal to `K` consecutive `T = 1`
+/// calls. For `T = 1` it is byte-identical to [`gated_delta_update`].
+///
+/// Used by: `Qwen35GatedDeltaNet::forward_hidden_internal_with_capture`
+/// (the speculative verify pass), `Qwen35Model::rollback_speculative_cache`
+/// (the GDN replay).
+#[allow(clippy::too_many_arguments)]
+pub fn gated_delta_update_chain_parity(
+    q: &MlxArray,
+    k: &MlxArray,
+    v: &MlxArray,
+    a: &MlxArray,
+    b: &MlxArray,
+    a_log: &MlxArray,
+    dt_bias: &MlxArray,
+    state: Option<&MlxArray>,
+    mask: Option<&MlxArray>,
+) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    let beta = mlxcel_core::sigmoid(b);
+    let g = compute_g(a_log, a, dt_bias);
+    gated_delta_ops_with_parity(q, k, v, &g, &beta, state, mask, true)
 }
 
 /// Fast RMS normalization without a learned scale, followed by scalar scaling.

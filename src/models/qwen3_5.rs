@@ -29,7 +29,8 @@ use crate::distributed::pipeline::LayerFilter;
 use crate::distributed::pipeline::StageExecutionOutput;
 use crate::distributed::pipeline::partial_loading::filter_weight_map;
 use crate::models::gated_delta::{
-    GatedDeltaCache, RMSNormGated, gated_delta_update, scaled_fast_rms_norm_no_weight,
+    GatedDeltaCache, RMSNormGated, gated_delta_update, gated_delta_update_chain_parity,
+    scaled_fast_rms_norm_no_weight,
 };
 use crate::models::model_owned::ModelOwnedSequenceState;
 use crate::models::qwen_mrope_state::MRopeState;
@@ -864,8 +865,16 @@ impl Qwen35GatedDeltaNet {
             conv_input: mlxcel_core::copy(&conv_input),
         });
 
-        // Run gated_delta_update for the full verify block.
-        let (out, new_state) = gated_delta_update(
+        // Run the gated-delta update for the full verify block through the
+        // CHAIN-PARITY kernel (issue #1165): the standard kernel carries
+        // float32 state across the block and quantizes once at the end,
+        // which is not bit-identical to the per-token quantization of the
+        // classic decode chain the verify argmax must match at temperature
+        // 0. The parity kernel rounds the state through the storage dtype
+        // after every in-block step, so a T=K verify block equals K
+        // single-token decode steps bit-for-bit (and equals the standard
+        // kernel exactly at T=1).
+        let (out, new_state) = gated_delta_update_chain_parity(
             &q,
             &k,
             &v,
@@ -2040,7 +2049,11 @@ impl Qwen35Model {
                 ],
             );
 
-            let (_y, replayed_state) = gated_delta_update(
+            // Chain-parity replay (issue #1165): the replayed prefix state
+            // must equal the state a classic decode chain would hold after
+            // the accepted tokens, so the replay uses the same per-step
+            // rounding kernel as the verify pass that captured the block.
+            let (_y, replayed_state) = gated_delta_update_chain_parity(
                 &q_n,
                 &k_n,
                 &v_n,

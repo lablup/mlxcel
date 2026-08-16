@@ -605,6 +605,95 @@ namespace {
         }
     )";
 
+    // Variant 1b: scalar gate, no mask, CHAIN-PARITY state rounding.
+    //
+    // Identical arithmetic to variant 1 except the recurrent state is
+    // rounded through the storage dtype (InT, f16/bf16 in practice) at the
+    // END of every in-block step. The standard kernel carries float32 state
+    // across the whole T-block and quantizes only at the final store, so a
+    // T=K block is NOT bit-identical to K consecutive T=1 calls (each of
+    // which round-trips the state through InT between steps). The MTP /
+    // DFlash speculative verify pass and the rollback replay need exactly
+    // that bit-identity: at temperature 0 the verify block's argmax must
+    // match the classic single-token decode chain, and a last-ulp state
+    // difference flips near-tie logits (issue #1165's exactness gate).
+    // Rounding at each step end makes T=K bit-equal to the T=1 chain; for
+    // T=1 the round is idempotent with the store cast, so the kernel is
+    // byte-identical to variant 1 in the decode shape.
+    static const char* GATED_DELTA_METAL_SOURCE_SEQPAR = R"(
+        auto n = thread_position_in_grid.z;
+        auto b_idx = n / Hv;
+        auto hv_idx = n % Hv;
+        auto hk_idx = hv_idx / (Hv / Hk);
+        constexpr int n_per_t = Dk / 32;
+
+        // q, k: [B, T, Hk, Dk]
+        auto q_ = q + b_idx * T * Hk * Dk + hk_idx * Dk;
+        auto k_ = k + b_idx * T * Hk * Dk + hk_idx * Dk;
+
+        // v, y: [B, T, Hv, Dv]
+        auto v_ = v + b_idx * T * Hv * Dv + hv_idx * Dv;
+        y += b_idx * T * Hv * Dv + hv_idx * Dv;
+
+        auto dk_idx = thread_position_in_threadgroup.x;
+        auto dv_idx = thread_position_in_grid.y;
+
+        // state_in, state_out: [B, Hv, Dv, Dk]
+        auto i_state = state_in + (n * Dv + dv_idx) * Dk;
+        auto o_state = state_out + (n * Dv + dv_idx) * Dk;
+
+        float state[n_per_t];
+        for (int i = 0; i < n_per_t; ++i) {
+            auto s_idx = n_per_t * dk_idx + i;
+            state[i] = static_cast<float>(i_state[s_idx]);
+        }
+
+        // g: [B, T, Hv]
+        auto g_ = g + b_idx * T * Hv;
+        auto beta_ = beta + b_idx * T * Hv;
+
+        for (int t = 0; t < T; ++t) {
+            if (true) {
+                float kv_mem = 0.0f;
+                for (int i = 0; i < n_per_t; ++i) {
+                    auto s_idx = n_per_t * dk_idx + i;
+                    state[i] = state[i] * g_[hv_idx];
+                    kv_mem += state[i] * k_[s_idx];
+                }
+                kv_mem = simd_sum(kv_mem);
+
+                auto delta = (v_[dv_idx] - kv_mem) * beta_[hv_idx];
+
+                float out = 0.0f;
+                for (int i = 0; i < n_per_t; ++i) {
+                    auto s_idx = n_per_t * dk_idx + i;
+                    state[i] = state[i] + k_[s_idx] * delta;
+                    out += state[i] * q_[s_idx];
+                }
+                out = simd_sum(out);
+                if (thread_index_in_simdgroup == 0) {
+                    y[dv_idx] = static_cast<InT>(out);
+                }
+                // Chain parity: round the state through the storage dtype at
+                // the end of every step, exactly where the T=1 chain's store
+                // + reload would round it.
+                for (int i = 0; i < n_per_t; ++i) {
+                    state[i] = static_cast<float>(static_cast<InT>(state[i]));
+                }
+            }
+            q_ += Hk * Dk;
+            k_ += Hk * Dk;
+            v_ += Hv * Dv;
+            y += Hv * Dv;
+            g_ += Hv;
+            beta_ += Hv;
+        }
+        for (int i = 0; i < n_per_t; ++i) {
+            auto s_idx = n_per_t * dk_idx + i;
+            o_state[s_idx] = static_cast<InT>(state[i]);
+        }
+    )";
+
     // Variant 2: scalar gate, with mask
     static const char* GATED_DELTA_METAL_SOURCE_MASK = R"(
         auto n = thread_position_in_grid.z;
@@ -831,6 +920,10 @@ namespace {
         static GatedDeltaKernelHolder holder;
         return holder;
     }
+    static GatedDeltaKernelHolder& get_gd_kernel_seqpar() {
+        static GatedDeltaKernelHolder holder;
+        return holder;
+    }
     static GatedDeltaKernelHolder& get_gd_kernel_mask() {
         static GatedDeltaKernelHolder holder;
         return holder;
@@ -889,7 +982,7 @@ void metal_stop_capture() {
     mlx::core::metal::stop_capture();
 }
 
-void metal_gated_delta_forward(
+static void metal_gated_delta_forward_impl(
     const MlxArray& q,
     const MlxArray& k,
     const MlxArray& v,
@@ -897,6 +990,7 @@ void metal_gated_delta_forward(
     const MlxArray& beta,
     const MlxArray& state,
     const MlxArray* mask,
+    bool chain_parity,
     std::unique_ptr<MlxArray>& output,
     std::unique_ptr<MlxArray>& new_state
 ) {
@@ -954,6 +1048,17 @@ void metal_gated_delta_forward(
         holder = &get_gd_kernel_mask();
         kernel_name = "gated_delta_step_mask";
         kernel_source = GATED_DELTA_METAL_SOURCE_MASK;
+    } else if (chain_parity) {
+        // Chain-parity variant: per-step state rounding so a T=K verify
+        // block is bit-identical to K consecutive T=1 decode calls. Only
+        // defined for the scalar-gate/no-mask shape the speculative verify
+        // and rollback-replay paths use; the vectorized/masked shapes above
+        // take the standard kernels (their callers never request parity).
+        input_names = {"q", "k", "v", "g", "beta", "state_in", "T"};
+        inputs = {q.inner, k.inner, v.inner, g_cast, beta_cast, state_cast, T_arr};
+        holder = &get_gd_kernel_seqpar();
+        kernel_name = "gated_delta_step_seqpar";
+        kernel_source = GATED_DELTA_METAL_SOURCE_SEQPAR;
     } else {
         input_names = {"q", "k", "v", "g", "beta", "state_in", "T"};
         inputs = {q.inner, k.inner, v.inner, g_cast, beta_cast, state_cast, T_arr};
@@ -995,6 +1100,41 @@ void metal_gated_delta_forward(
 
     output = std::make_unique<MlxArray>(std::move(results[0]));
     new_state = std::make_unique<MlxArray>(std::move(results[1]));
+}
+
+void metal_gated_delta_forward(
+    const MlxArray& q,
+    const MlxArray& k,
+    const MlxArray& v,
+    const MlxArray& g,
+    const MlxArray& beta,
+    const MlxArray& state,
+    const MlxArray* mask,
+    std::unique_ptr<MlxArray>& output,
+    std::unique_ptr<MlxArray>& new_state
+) {
+    metal_gated_delta_forward_impl(q, k, v, g, beta, state, mask, false, output, new_state);
+}
+
+// Chain-parity gated-delta forward for the speculative verify / rollback
+// replay paths (issue #1165): a T=K block is bit-identical to K consecutive
+// T=1 decode calls because the recurrent state is rounded through the
+// storage dtype after every in-block step. Behaviour is identical to
+// metal_gated_delta_forward for T=1. Parity is only defined for the
+// scalar-gate / no-mask shape; vectorized or masked inputs fall back to the
+// standard kernels.
+void metal_gated_delta_forward_chain_parity(
+    const MlxArray& q,
+    const MlxArray& k,
+    const MlxArray& v,
+    const MlxArray& g,
+    const MlxArray& beta,
+    const MlxArray& state,
+    const MlxArray* mask,
+    std::unique_ptr<MlxArray>& output,
+    std::unique_ptr<MlxArray>& new_state
+) {
+    metal_gated_delta_forward_impl(q, k, v, g, beta, state, mask, true, output, new_state);
 }
 
 // Compiled MoE gate: sigmoid + bias + topk + normalize + scale

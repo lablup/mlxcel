@@ -71,8 +71,8 @@ const CANDIDATE_TARGETS: &[&str] = &[
 const PROMPT_TOKENS: &[i32] = &[785, 3974, 13876, 8533, 4290, 374, 264, 1273];
 
 /// Chain length. Long enough to catch the observed divergence density
-/// (first flips showed up within 40-80 generated tokens at 27B).
-const CHAIN_LEN: usize = 96;
+/// (flips showed up within 40-200 generated tokens at 27B).
+const CHAIN_LEN: usize = 240;
 
 /// Verify-block width for the block chain (draft 2 + bonus, the published
 /// `block_size: 3` shape).
@@ -174,4 +174,160 @@ fn block_verify_chain_matches_single_token_chain() {
             first.2,
         );
     }
+}
+
+// ===========================================================================
+// Adapter-level chain parity: the REAL MtpTarget adapter vs classic decode.
+// ===========================================================================
+
+use mlxcel::models::qwen3_5_mtp_target::Qwen35MtpTargetAdapter;
+use mlxcel_core::generate::{LanguageModel, SamplingConfig};
+use mlxcel_core::sampling::LogprobsConfig;
+use mlxcel_core::speculative::mtp::target::MtpTarget;
+
+/// Classic-path chain: prefill via `LanguageModel::forward` (the exact
+/// numeric path the drafter-less CLI decode takes for a text-only request on
+/// this family) then `T = 1` decode steps, greedy argmax throughout.
+fn classic_chain(model: &Qwen35Model, prompt: &[i32], len: usize) -> Vec<i32> {
+    <Qwen35Model as LanguageModel>::reset_runtime_state(model);
+    let prompt_arr = mlxcel_core::from_slice_i32(prompt, &[1, prompt.len() as i32]);
+    let logits = <Qwen35Model as LanguageModel>::forward(model, &prompt_arr, &mut [], None);
+    let mut chain = vec![*argmax_positions(&logits).last().expect("prefill argmax")];
+    for _ in 0..len {
+        let last = *chain.last().expect("non-empty");
+        let arr = mlxcel_core::from_slice_i32(&[last], &[1, 1]);
+        let logits = <Qwen35Model as LanguageModel>::forward(model, &arr, &mut [], None);
+        chain.push(argmax_positions(&logits)[0]);
+    }
+    chain
+}
+
+fn greedy() -> SamplingConfig {
+    SamplingConfig {
+        temperature: 0.0,
+        ..SamplingConfig::default()
+    }
+}
+
+/// Drive the real [`Qwen35MtpTargetAdapter`] with **perfect drafts** (the
+/// classic chain's own tokens): every round fully accepts, no rollback ever
+/// runs. Any divergence from the classic chain is therefore in the adapter's
+/// prefill or the multi-token verify forward itself.
+#[test]
+#[ignore]
+fn adapter_chain_with_perfect_drafts_matches_classic_chain() {
+    let Some(target_dir) = CANDIDATE_TARGETS
+        .iter()
+        .map(|name| repo_model_dir(name))
+        .find(|dir| dir.join("config.json").exists())
+    else {
+        eprintln!("skipping: no candidate Qwen 3.5-family checkpoint under models/");
+        return;
+    };
+    let _runtime = initialize_runtime();
+    let (loaded, _tokenizer) = load_model(&target_dir).expect("load target");
+    let model = as_qwen35(&loaded).expect("expected a Qwen 3.5-family target");
+
+    let chain = classic_chain(model, PROMPT_TOKENS, 240);
+
+    <Qwen35Model as LanguageModel>::reset_runtime_state(model);
+    let adapter = Qwen35MtpTargetAdapter::new(model, None);
+    let sampler = greedy();
+    let logprobs = LogprobsConfig::default();
+    let (bonus, _seed, _lp) = adapter.prefill_and_seed(PROMPT_TOKENS, &sampler, &[], &logprobs);
+    assert_eq!(
+        bonus, chain[0],
+        "first bonus from the adapter prefill differs from the classic prefill argmax"
+    );
+
+    let mut mismatches: Vec<(usize, i32, i32)> = Vec::new();
+    let mut pos = 0usize;
+    while pos + BLOCK < chain.len() {
+        let verify_input: Vec<i32> = chain[pos..pos + BLOCK].to_vec();
+        let out = adapter.verify_forward(&verify_input, &sampler, &logprobs);
+        for (offset, &got) in out.target_tokens.iter().enumerate() {
+            let expect = chain[pos + offset + 1];
+            if got != expect {
+                mismatches.push((pos + offset + 1, expect, got));
+            }
+        }
+        // Fully accepted: BLOCK - 1 drafts all matched (by construction the
+        // drafts ARE the classic tokens; a target mismatch is recorded above
+        // but the chain replay continues on the classic tokens).
+        let _ = adapter.verify_finalize(BLOCK - 1, BLOCK, out.captured);
+        pos += BLOCK;
+    }
+
+    assert!(
+        mismatches.is_empty(),
+        "adapter verify chain (perfect drafts, no rollback) diverged from classic decode at \
+         {} position(s); first at chain index {} (classic {}, verify {})",
+        mismatches.len(),
+        mismatches[0].0,
+        mismatches[0].1,
+        mismatches[0].2,
+    );
+    eprintln!(
+        "adapter perfect-draft chain matches classic decode over {} tokens",
+        chain.len()
+    );
+}
+
+/// Drive the adapter with **always-wrong drafts**: every round rejects both
+/// drafts (`accepted = 0`), so `verify_finalize` runs the KV trim + GDN
+/// rollback replay on every round. Position 0 of each verify block only
+/// conditions on the accepted prefix, so its argmax must still follow the
+/// classic chain; any divergence isolates the rollback path.
+#[test]
+#[ignore]
+fn adapter_chain_with_rejected_drafts_matches_classic_chain() {
+    let Some(target_dir) = CANDIDATE_TARGETS
+        .iter()
+        .map(|name| repo_model_dir(name))
+        .find(|dir| dir.join("config.json").exists())
+    else {
+        eprintln!("skipping: no candidate Qwen 3.5-family checkpoint under models/");
+        return;
+    };
+    let _runtime = initialize_runtime();
+    let (loaded, _tokenizer) = load_model(&target_dir).expect("load target");
+    let model = as_qwen35(&loaded).expect("expected a Qwen 3.5-family target");
+
+    let chain = classic_chain(model, PROMPT_TOKENS, 160);
+
+    <Qwen35Model as LanguageModel>::reset_runtime_state(model);
+    let adapter = Qwen35MtpTargetAdapter::new(model, None);
+    let sampler = greedy();
+    let logprobs = LogprobsConfig::default();
+    let (bonus, _seed, _lp) = adapter.prefill_and_seed(PROMPT_TOKENS, &sampler, &[], &logprobs);
+    assert_eq!(bonus, chain[0], "first bonus differs from classic prefill");
+
+    let mut mismatches: Vec<(usize, i32, i32)> = Vec::new();
+    for pos in 0..chain.len() - 1 {
+        // Drafts guaranteed wrong: shift the classic continuation by one id.
+        let wrong = |tok: i32| (tok + 1) % 1000 + 10;
+        let verify_input = vec![chain[pos], wrong(chain[pos + 1]), wrong(chain[pos + 1])];
+        let out = adapter.verify_forward(&verify_input, &sampler, &logprobs);
+        let got = out.target_tokens[0];
+        let expect = chain[pos + 1];
+        if got != expect {
+            mismatches.push((pos + 1, expect, got));
+        }
+        // Zero accepted: rollback replay runs every round.
+        let _ = adapter.verify_finalize(0, BLOCK, out.captured);
+    }
+
+    assert!(
+        mismatches.is_empty(),
+        "adapter verify chain (rejected drafts, rollback every round) diverged from classic \
+         decode at {} position(s); first at chain index {} (classic {}, verify {})",
+        mismatches.len(),
+        mismatches[0].0,
+        mismatches[0].1,
+        mismatches[0].2,
+    );
+    eprintln!(
+        "adapter rejected-draft chain matches classic decode over {} tokens",
+        chain.len()
+    );
 }

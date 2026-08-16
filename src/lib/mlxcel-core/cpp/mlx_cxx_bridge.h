@@ -1798,6 +1798,25 @@ void metal_gated_delta_forward(
     std::unique_ptr<MlxArray>& new_state    // [B, Hv, Dv, Dk]
 );
 
+// Chain-parity variant for the speculative verify / rollback replay paths
+// (issue #1165): rounds the recurrent state through the storage dtype after
+// every in-block step so a T=K block is bit-identical to K consecutive T=1
+// decode calls. Identical to metal_gated_delta_forward at T=1. Only the
+// scalar-gate / no-mask shape gets the parity kernel; other shapes fall back
+// to the standard kernels.
+// Used by: Qwen3.5 forward_speculative + rollback replay.
+void metal_gated_delta_forward_chain_parity(
+    const MlxArray& q,
+    const MlxArray& k,
+    const MlxArray& v,
+    const MlxArray& g,
+    const MlxArray& beta,
+    const MlxArray& state,
+    const MlxArray* mask,    // nullable: [B, T]
+    std::unique_ptr<MlxArray>& output,
+    std::unique_ptr<MlxArray>& new_state
+);
+
 // Quantization mode is "affine" (standard mlx-community models).
 void fused_mamba2_forward(
     // Input
