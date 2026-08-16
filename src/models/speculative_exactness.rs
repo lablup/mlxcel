@@ -30,13 +30,19 @@
 //!   is `mode != "affine" || arch_gen >= 15`. When it holds, `M >= 2`
 //!   takes `qmv_wide` while `M == 1` takes `qmv`, and the two reduce over
 //!   K with different lane counts. Measured: an affine 4-bit projection is
-//!   byte-equal at every `M` on an M1 Ultra (generation 13) and diverges
-//!   from `M = 2` on an M5 Max (generation 17+). An mxfp4 projection
-//!   diverges from `M = 2` on **both**.
+//!   byte-equal below the batch limit on an M1 Ultra (generation 13) and
+//!   diverges from `M = 2` on an M5 Max (generation 17+). An mxfp4
+//!   projection diverges from `M = 2` on **both**, by 1 to 11 bytes of
+//!   10240 rather than the 39% the affine row moves once it breaks.
 //! - `get_qmv_batch_limit` decides where the matrix-matrix kernel takes
-//!   over. On an M1 Ultra with both operands above 4096 that is 12, so a
-//!   block width of 12 or more forfeits byte-identity even there, and
-//!   `--draft-block-size` is user-settable.
+//!   over, and it is 10, 12, 18 or 32 depending on architecture size and
+//!   generation, not one number. With both operands above 4096 it is 12
+//!   on an M1 Ultra (`arch_size == 'd'`) and 10 on an M5 Max (the
+//!   `default` branch), so a wide enough block forfeits byte-identity
+//!   even on a generation whose `qmv` path is otherwise exact, and
+//!   `--draft-block-size` is user-settable. This threshold is only
+//!   observable where `use_qmv_wide` is false: from generation 15 the
+//!   `M >= 2` split fires first and hides it.
 //!
 //! Encoding those rules on our side would be correct today and would go
 //! stale the next time MLX retunes a threshold, which is the same failure
@@ -47,16 +53,30 @@
 //!
 //! ## What a passing probe does and does not prove
 //!
-//! The probe compares logits, not sampled tokens, and byte-equal logits
-//! imply an equal argmax at every position for *that* input. It runs one
-//! block on one synthetic prompt, so it does not prove equality for every
-//! future input directly. What it establishes is that the two arms take
-//! the same kernels: MLX dispatch is a function of shape, dtype,
-//! quantization mode and `M`, none of which vary with the token values.
-//! A byte-equal probe therefore means the block arm and the chain arm are
-//! running the same code on the same shapes, which is the mechanism the
-//! contract rests on. A diverging probe is conclusive in the other
-//! direction: the arms provably differ.
+//! A diverging probe is conclusive: the arms provably differ, and no
+//! amount of further sampling can make them agree.
+//!
+//! A passing probe is weaker than it first looks, and the earlier version
+//! of this note overstated it. It said that byte-equal logits mean both
+//! arms took the same kernels, since MLX dispatch depends on shape,
+//! dtype, quantization mode and `M` and not on token values. The
+//! dispatch half is true; the inference from it is not. Two *different*
+//! kernels can still produce byte-identical output on a particular input
+//! when their disagreement is small enough. Measured at op level on
+//! 2026-08-17: mxfp4 group 32 at 5120 -> 5120 moves 1 to 11 bytes of
+//! 10240 depending only on the operand draw, while the affine row at the
+//! same shape moves about 39%. In that low-amplitude regime a single
+//! input is a coin toss, and one M5 Max harness did read it as equal
+//! before a seed sweep showed otherwise.
+//!
+//! So the probe compares several independent inputs
+//! (`PROBE_DRAWS` in `models::qwen3_5`) and only reports equality when
+//! every one of them agrees. Model-level amplification helps too: a
+//! per-projection last-ulp difference propagates through 60-odd layers
+//! before it reaches the logits, so the amplitude at the point of
+//! comparison is far above the fragile regime. Neither argument is a
+//! proof for every future input; together they are what this gate rests
+//! on, and the failure they guard against is a false *pass*.
 //!
 //! ## Failure policy
 //!

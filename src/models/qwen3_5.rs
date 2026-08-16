@@ -57,6 +57,17 @@ use std::path::Path;
 /// a fraction of a second on a 27B target.
 const PROBE_PROMPT_LEN: usize = 8;
 
+/// Independent synthetic inputs the exactness probe compares before it
+/// is allowed to report equality.
+///
+/// One is not enough. A kernel pair can differ by a byte or two out of
+/// ten thousand, and at that amplitude whether any byte differs depends
+/// on the draw, so a single input can report equality for arms that are
+/// on different kernels. Three, because the failure the extra draws
+/// guard against is a false *pass*, and each one costs about a second on
+/// a 27B target at worker startup.
+const PROBE_DRAWS: usize = 3;
+
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Qwen35Config {
@@ -1525,11 +1536,25 @@ impl Qwen35Model {
     /// for the reasons in
     /// [`crate::models::speculative_exactness`].
     ///
-    /// Cost: two 8-token prefills plus `block_size + 1` forwards on
-    /// throwaway caches. Measured on `models/qwen3.8-27b-4bit` on an M1
-    /// Ultra: 4.9 s for the first call in a process and 1.3 s for a later
-    /// one at a different width, the difference being MLX's one-time
-    /// kernel compilation for these shapes. Callers memoize through
+    /// Repeated over [`PROBE_DRAWS`] independent synthetic inputs, and
+    /// any single divergence is the answer. One draw is not enough: a
+    /// kernel pair can differ by only a byte or two out of ten thousand,
+    /// and at that amplitude whether *any* byte differs is itself
+    /// draw-dependent, so a single input can read `equal` for arms that
+    /// are genuinely on different kernels (measured at op level on
+    /// 2026-08-17: mxfp4 group 32 at 5120 -> 5120 moves 1 to 11 bytes of
+    /// 10240 depending on the draw, where the affine row at the same
+    /// shape moves 39%). Model-level amplification across 60-odd layers
+    /// makes a false `equal` far less likely here than at op level, but
+    /// "less likely" is not the property a correctness gate should rest
+    /// on when extra draws cost about a second each.
+    ///
+    /// Cost: per draw, two 8-token prefills plus `block_size + 1`
+    /// forwards on throwaway caches. Measured on
+    /// `models/qwen3.8-27b-4bit` on an M1 Ultra: 4.9 s for the first call
+    /// in a process and 1.3 s for a later one at a different width, the
+    /// difference being MLX's one-time kernel compilation for these
+    /// shapes. Callers memoize through
     /// [`crate::models::speculative_exactness::mtp_exactness_gate`] and
     /// the server warms it at worker startup, so it runs once per
     /// process and never on the request path.
@@ -1548,11 +1573,26 @@ impl Qwen35Model {
             return BlockChainExactness::NotRun("degenerate vocabulary");
         }
 
-        // Fixed synthetic ids. Values do not matter: MLX kernel dispatch
-        // is a function of shape, dtype, quantization mode and `M`, none
-        // of which vary with the tokens. Wrapped into the vocabulary so a
-        // tiny test config is still valid.
-        let wrap = |i: usize, stride: usize, offset: usize| ((i * stride + offset) % vocab) as i32;
+        for draw in 0..PROBE_DRAWS {
+            let verdict = self.probe_one_draw(block_size, vocab, draw);
+            if !verdict.is_equal() {
+                return verdict;
+            }
+        }
+        BlockChainExactness::Equal
+    }
+
+    /// One (prompt, block) draw of [`Self::probe_block_chain_exactness`].
+    fn probe_one_draw(&self, block_size: usize, vocab: usize, draw: usize) -> BlockChainExactness {
+        // Synthetic ids, varied per draw. Kernel *dispatch* does not
+        // depend on the values (it is a function of shape, dtype,
+        // quantization mode and `M`), but whether a small last-ulp
+        // difference lands on a byte that differs does, which is the
+        // whole reason for more than one draw. Wrapped into the
+        // vocabulary so a tiny test config stays valid.
+        let salt = draw * 977 + 1;
+        let wrap =
+            |i: usize, stride: usize, offset: usize| ((i * stride + offset + salt) % vocab) as i32;
         let prompt: Vec<i32> = (0..PROBE_PROMPT_LEN).map(|i| wrap(i, 7, 1)).collect();
         let block: Vec<i32> = (0..block_size).map(|i| wrap(i, 13, 3)).collect();
 
