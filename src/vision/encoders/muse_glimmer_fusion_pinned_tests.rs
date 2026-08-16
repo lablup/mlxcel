@@ -33,6 +33,12 @@ use std::path::{Path, PathBuf};
 /// is validated against. Absent on machines that never downloaded it.
 const PINNED_MODEL_DIR: &str = "models/mlx/muse-glimmer-30b";
 
+/// Name of the `#[test]` this module's pinned checkpoint gate reports as
+/// skipped or failed, passed to the shared
+/// `crate::test_support::pinned_checkpoint::skip_or_fail_pinned_checkpoint`
+/// helper so its message still names this test.
+const TEST_NAME: &str = "pinned_post_tower_weight_roots_and_shapes_match_published_contract";
+
 /// The exact post-tower weight roots the published contract pins. Used both to
 /// enumerate the shards the check will open and as the expected value of the
 /// weight-root assertion itself.
@@ -119,35 +125,14 @@ fn read_checkpoint_file(path: &Path) -> Result<String, String> {
     })
 }
 
-/// Report that the pinned checkpoint is not usable. Machines that never
-/// downloaded it skip, so the rest of the suite still runs there. Machines that
-/// own it can set `MLXCEL_REQUIRE_PINNED_CHECKPOINTS=1` to turn the skip into a
-/// failure, so a half-downloaded or corrupted checkpoint cannot quietly disable
-/// this contract check forever on the one machine positioned to enforce it.
-fn skip_or_fail_pinned_checkpoint(reason: &str) {
-    // The crate-wide env lock serializes this read against the tests that
-    // mutate the process environment with `unsafe set_var`; on Rust 2024 an
-    // unsynchronized concurrent read of the env block is undefined behavior.
-    let required = {
-        let _env_guard = crate::test_support::env_lock::env_lock();
-        std::env::var("MLXCEL_REQUIRE_PINNED_CHECKPOINTS").is_ok_and(|value| value == "1")
-    };
-    assert!(
-        !required,
-        "MLXCEL_REQUIRE_PINNED_CHECKPOINTS=1 but the pinned Muse Glimmer checkpoint is not usable: \
-         {reason}"
-    );
-    eprintln!(
-        "Skipping pinned_post_tower_weight_roots_and_shapes_match_published_contract: {reason}"
-    );
-}
-
 #[test]
 fn pinned_post_tower_weight_roots_and_shapes_match_published_contract() {
     let model_dir = Path::new(PINNED_MODEL_DIR);
     match load_pinned_checkpoint(model_dir) {
         Ok(checkpoint) => assert_post_tower_contract(model_dir, checkpoint),
-        Err(reason) => skip_or_fail_pinned_checkpoint(&reason),
+        Err(reason) => crate::test_support::pinned_checkpoint::skip_or_fail_pinned_checkpoint(
+            TEST_NAME, &reason,
+        ),
     }
 }
 
@@ -197,7 +182,9 @@ fn assert_post_tower_contract(model_dir: &Path, checkpoint: PinnedCheckpoint) {
         let shape = match safetensors_shape(&model_dir.join(shard), key) {
             Ok(shape) => shape,
             Err(reason) => {
-                skip_or_fail_pinned_checkpoint(&reason);
+                crate::test_support::pinned_checkpoint::skip_or_fail_pinned_checkpoint(
+                    TEST_NAME, &reason,
+                );
                 return;
             }
         };

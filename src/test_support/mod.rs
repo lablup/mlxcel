@@ -19,3 +19,4 @@
 //! production builds never see it.
 
 pub(crate) mod env_lock;
+pub(crate) mod pinned_checkpoint;
