@@ -19,7 +19,9 @@
 //! scheduler tick, so every concurrent classic-decode row stalls for the
 //! whole burst (the head-of-line block measured by
 //! `BurstFinalized::burst_wall_ms`, issue #638 / PR #733). This module
-//! removes that block for the B=1 MTP arm on the Gemma 4 family: the
+//! removes that block for the B=1 MTP arm on every family
+//! [`super::speculative_burst::mtp_capable_target`] accepts (the Gemma 4
+//! assistant drafter and, since issue #1165, the Qwen 3.5 MTP drafter): the
 //! request is served as a sequence of SLICES, one per scheduler tick:
 //! slice 0 is the prefill + seed
 //! ([`mlxcel_core::speculative::mtp::MtpGenerator::begin_session`]), and
@@ -31,10 +33,11 @@
 //!
 //! ## Why the generator is reconstructed every tick
 //!
-//! `MtpGenerator<T>` owns its target adapter, and the Gemma 4 adapters
-//! (`Gemma4MtpTargetAdapter` and friends) BORROW the model, so the
-//! generator is self-referential with respect to the scheduler and cannot
-//! be stashed across ticks (the blocker PR #733 documented). What CAN be
+//! `MtpGenerator<T>` owns its target adapter, and every B=1 adapter
+//! (`Gemma4MtpTargetAdapter` and friends, and `Qwen35MtpTargetAdapter` /
+//! `Qwen35VLMtpTargetAdapter`) BORROWS the model, so the generator is
+//! self-referential with respect to the scheduler and cannot be stashed
+//! across ticks (the blocker PR #733 documented). What CAN be
 //! stashed is everything the round loop actually carries between rounds:
 //!
 //! - [`MtpSliceJob`] owns the request's `SequenceInfo`, the generator's
@@ -53,9 +56,17 @@
 //! the resetting
 //! [`super::speculative_burst::WorkerDrafterSlot::return_drafter`] runs
 //! when the whole session finishes, and (since issue #746) at every
-//! park boundary when the slot rotates to another grantee, which is safe
-//! because the MTP assistant drafter's reset is the trait default no-op
-//! (see [`MtpSliceJob::attach_drafter`]).
+//! park boundary when the slot rotates to another grantee. Correctness
+//! does not depend on what `reset` does to drafter-side state: the next
+//! slice always re-anchors via `set_shared_kv` regardless. The two families
+//! differ in what a park boundary costs, though. The Gemma 4 assistant
+//! drafter's `reset` is the trait-default no-op, so a park loses nothing.
+//! The Qwen 3.5 MTP drafter's `reset` DESTROYS its accumulated KV history
+//! (see `Qwen35MtpDraftModel::reset`), so a park under grant rotation
+//! restarts that drafter's draft context from empty; acceptance under
+//! concurrent rotation for that family is correspondingly worse than a
+//! single-request measurement shows (see
+//! `docs/benchmark_results/qwen38-mtp-m1ultra-2026-08-16.md`, issue #1165).
 //!
 //! ## Streaming
 //!
@@ -68,10 +79,12 @@
 //!
 //! ## Scope
 //!
-//! B=1 MTP on the Gemma 4 family only. The DFlash arm and the B>1 batched
-//! arms keep the legacy run-to-completion burst (their generators do not
-//! expose a resumable step API yet), and `MLXCEL_MTP_TICK_SLICE=0` forces
-//! the MTP arm back onto the legacy burst as an operator escape hatch.
+//! B=1 MTP for every [`super::speculative_burst::mtp_capable_target`]
+//! family: the Gemma 4 assistant drafter and, since issue #1165, the
+//! Qwen 3.5 MTP drafter. The DFlash arm and the B>1 batched arms keep the
+//! legacy run-to-completion burst (their generators do not expose a
+//! resumable step API yet), and `MLXCEL_MTP_TICK_SLICE=0` forces the MTP
+//! arm back onto the legacy burst as an operator escape hatch.
 //!
 //! ## Slot rotation (issue #746)
 //!
@@ -390,18 +403,28 @@ impl MtpSliceJob {
     /// Correctness of the round-trip through
     /// [`super::speculative_burst::WorkerDrafterSlot::return_drafter`]
     /// (which calls [`Drafter::reset`]) and back: `step_session`'s
-    /// resumability contract requires that nothing the shared-KV re-arm
-    /// does not rebuild is destroyed between rounds. For the MTP arm this
-    /// holds because (a) the Gemma 4 assistant drafter does not override
-    /// `reset`, so its reset is the trait default no-op (verified: it
-    /// unloads no weights and unbinds nothing), (b) its bind state
-    /// (captured target embedding + resolved LM head) is derived from the
-    /// worker's one target model and is recomputed identically by the
-    /// promotion-time re-bind, and (c) every per-round value the drafter
-    /// consumes (`shared_kv`, offsets, RoPE position) is a stateless
-    /// overwrite performed by `set_shared_kv` at the top of EVERY round
-    /// from the session's own stored `MtpVerifyOutput`, so rounds of
-    /// another session in between cannot leak state into this one.
+    /// resumability contract requires only that nothing `set_shared_kv`'s
+    /// per-round overwrite does not already rebuild is load-bearing across
+    /// the round-trip. For the MTP arm this holds because (a) what `reset`
+    /// does to drafter-side history varies by family and correctness does
+    /// NOT depend on it either way: the Gemma 4 assistant drafter does not
+    /// override `reset` (trait default no-op, verified: it unloads no
+    /// weights and unbinds nothing), while the Qwen 3.5 MTP drafter's
+    /// `reset` DESTROYS its accumulated KV history (see
+    /// `Qwen35MtpDraftModel::reset`) rather than preserving it, (b) its
+    /// bind state (captured target embedding + resolved LM head) is derived
+    /// from the worker's one target model and is recomputed identically by
+    /// the promotion-time re-bind, and (c) every per-round value the
+    /// drafter consumes (`shared_kv`, offsets, RoPE position) is a
+    /// stateless overwrite performed by `set_shared_kv` at the top of EVERY
+    /// round from the session's own stored `MtpVerifyOutput`, so rounds of
+    /// another session in between cannot leak state into this one. What
+    /// destroyed history costs the Qwen 3.5 MTP family is not correctness
+    /// but draft quality: a park boundary restarts that drafter's draft
+    /// context from empty, so acceptance under grant rotation is worse than
+    /// a single-request measurement shows (see
+    /// `docs/benchmark_results/qwen38-mtp-m1ultra-2026-08-16.md`, issue
+    /// #1165, uncharacterized).
     pub(crate) fn attach_drafter(&mut self, drafter: Box<dyn Drafter>) {
         debug_assert!(
             self.drafter.is_none(),

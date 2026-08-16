@@ -653,33 +653,31 @@ namespace {
         auto beta_ = beta + b_idx * T * Hv;
 
         for (int t = 0; t < T; ++t) {
-            if (true) {
-                float kv_mem = 0.0f;
-                for (int i = 0; i < n_per_t; ++i) {
-                    auto s_idx = n_per_t * dk_idx + i;
-                    state[i] = state[i] * g_[hv_idx];
-                    kv_mem += state[i] * k_[s_idx];
-                }
-                kv_mem = simd_sum(kv_mem);
+            float kv_mem = 0.0f;
+            for (int i = 0; i < n_per_t; ++i) {
+                auto s_idx = n_per_t * dk_idx + i;
+                state[i] = state[i] * g_[hv_idx];
+                kv_mem += state[i] * k_[s_idx];
+            }
+            kv_mem = simd_sum(kv_mem);
 
-                auto delta = (v_[dv_idx] - kv_mem) * beta_[hv_idx];
+            auto delta = (v_[dv_idx] - kv_mem) * beta_[hv_idx];
 
-                float out = 0.0f;
-                for (int i = 0; i < n_per_t; ++i) {
-                    auto s_idx = n_per_t * dk_idx + i;
-                    state[i] = state[i] + k_[s_idx] * delta;
-                    out += state[i] * q_[s_idx];
-                }
-                out = simd_sum(out);
-                if (thread_index_in_simdgroup == 0) {
-                    y[dv_idx] = static_cast<InT>(out);
-                }
-                // Chain parity: round the state through the storage dtype at
-                // the end of every step, exactly where the T=1 chain's store
-                // + reload would round it.
-                for (int i = 0; i < n_per_t; ++i) {
-                    state[i] = static_cast<float>(static_cast<InT>(state[i]));
-                }
+            float out = 0.0f;
+            for (int i = 0; i < n_per_t; ++i) {
+                auto s_idx = n_per_t * dk_idx + i;
+                state[i] = state[i] + k_[s_idx] * delta;
+                out += state[i] * q_[s_idx];
+            }
+            out = simd_sum(out);
+            if (thread_index_in_simdgroup == 0) {
+                y[dv_idx] = static_cast<InT>(out);
+            }
+            // Chain parity: round the state through the storage dtype at
+            // the end of every step, exactly where the T=1 chain's store
+            // + reload would round it.
+            for (int i = 0; i < n_per_t; ++i) {
+                state[i] = static_cast<float>(static_cast<InT>(state[i]));
             }
             q_ += Hk * Dk;
             k_ += Hk * Dk;

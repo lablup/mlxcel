@@ -1607,9 +1607,11 @@ impl BatchScheduler {
     ///    MTP) or
     ///    [`mlxcel_core::drafter::dflash::SpeculativeTarget`] (for
     ///    DFlash). Today that means:
-    ///    - **MTP**: `Gemma4Wrapper` / `Gemma4VLModel` — see the
-    ///      `MtpTarget` impls in
-    ///      [`crate::models::gemma4_mtp_target`].
+    ///    - **MTP**: `Gemma4Wrapper` / `Gemma4VLModel` (Gemma 4 assistant
+    ///      drafter, see the `MtpTarget` impls in
+    ///      [`crate::models::gemma4_mtp_target`]) and, since issue #1165,
+    ///      `Qwen35Model` / `Qwen35VLModel` (`qwen3_5_mtp` drafter, Metal
+    ///      only, see [`crate::models::qwen3_5_mtp_target`]).
     ///    - **DFlash**: `Qwen35Model` / `Qwen35VLModel` — see the
     ///      `SpeculativeTarget` impl in `crate::models::qwen3_5`.
     /// 3. The drafter weights are loadable at the recorded
@@ -4536,7 +4538,8 @@ impl BatchScheduler {
             let seq = window.into_iter().next().expect("window has the head");
 
             // Tick-cooperative MTP slice (issue #734): a B=1 MTP request on
-            // the Gemma 4 family is served one speculative round per
+            // any `mtp_capable_target` family (Gemma 4 assistant, and since
+            // issue #1165 Qwen 3.5 MTP) is served one speculative round per
             // scheduler tick instead of a run-to-completion burst, so
             // concurrent classic rows advance between rounds. The DFlash
             // arm keeps the legacy burst (its generator has no resumable
@@ -5055,7 +5058,8 @@ impl BatchScheduler {
         };
         if !stepped {
             // Defensive: the model cannot change mid-flight (slice 0 only
-            // starts on the Gemma 4 family). Fail the request cleanly; the
+            // starts on an `mtp_capable_target` family: Gemma 4 assistant or
+            // Qwen 3.5 MTP). Fail the request cleanly; the
             // drafter is dropped with the job so the next speculative
             // request lazily reloads it.
             self.fail_inflight_slice_job(
@@ -5195,9 +5199,13 @@ impl BatchScheduler {
                     // Re-acquire the worker drafter returned at park time.
                     // `ensure_loaded` is a no-op while the handle sits in
                     // the slot; it reloads from disk only if the park-time
-                    // reset failed and dropped the handle (cannot happen
-                    // for the MTP arm, whose reset is the trait default
-                    // no-op, but handled for symmetry with the burst
+                    // reset failed and dropped the handle. For the Gemma 4
+                    // assistant drafter (trait-default no-op reset) this
+                    // cannot happen; for the Qwen 3.5 MTP drafter, whose
+                    // reset re-binds against the target and is therefore
+                    // fallible in principle, this branch is the defensive
+                    // path (not expected to fire against an already-bound
+                    // live target, but handled for symmetry with the burst
                     // paths). A cancelled parked job is promoted normally:
                     // its next `step_session` observes the cancel at the
                     // round top and finishes with the tokens emitted so
@@ -5326,9 +5334,12 @@ impl BatchScheduler {
         // holds the slot, the BETWEEN-slice holds skip `return_drafter`
         // (there is nothing to hand off); the END-of-session return here
         // resets, exactly like the legacy burst, and the park boundary
-        // (issue #746) routes through the same `return_drafter` plumbing
-        // (safe for the MTP arm because its reset is the trait default
-        // no-op; see `MtpSliceJob::attach_drafter`).
+        // (issue #746) routes through the same `return_drafter` plumbing.
+        // Correctness does not depend on what `reset` does to drafter-side
+        // state either way (the Gemma 4 assistant drafter's reset is the
+        // trait default no-op; the Qwen 3.5 MTP drafter's reset destroys
+        // its accumulated KV history instead): see
+        // `MtpSliceJob::attach_drafter` for the full argument.
         if let Some(drafter) = job.take_drafter() {
             let target_lm: Option<&dyn LanguageModel> = match &self.model {
                 LoadedModel::Gemma4(wrapper) => Some(wrapper),

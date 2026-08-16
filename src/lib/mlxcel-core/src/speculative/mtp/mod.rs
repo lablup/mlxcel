@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Multi-Token Prediction (MTP) round-loop generator for the Gemma 4
-//! assistant drafter family.
+//! Multi-Token Prediction (MTP) round-loop generator. Originally built for
+//! the Gemma 4 assistant drafter family; since issue #1165 also drives the
+//! Qwen 3.5 MTP drafter family through the same generic [`MtpGenerator`],
+//! parameterized over any target implementing [`target::MtpTarget`].
 //!
 //! This module is a **peer** to [`crate::speculative::SpeculativeGenerator`],
 //! not an extension. The classic speculative path and the MTP path differ in
@@ -21,11 +23,11 @@
 //!
 //! | Aspect                    | Classic speculative           | MTP                                       |
 //! |---------------------------|-------------------------------|-------------------------------------------|
-//! | Drafter KV cache          | Owns its own KV cache         | Has no own KV cache                       |
+//! | Drafter KV cache          | Owns its own KV cache         | Gemma 4: no own KV cache (shares the target's). Qwen 3.5 MTP: owns accumulated KV history, destroyed on `reset` |
 //! | Drafter input             | Last accepted token           | Bonus token + target's last hidden        |
 //! | Verify                    | Single batched forward        | Single batched forward (same)             |
 //! | Rollback                  | `trim_caches`                 | `rollback_speculative_cache` (per-row)    |
-//! | Cross-attention           | Each model attends own cache  | Drafter attends target's shared K/V       |
+//! | Cross-attention           | Each model attends own cache  | Gemma 4: drafter attends target's shared K/V. Qwen 3.5 MTP: no cross-attention, consumes the target's post-norm hidden state |
 //!
 //! Both paths satisfy the same external contract — the
 //! [`crate::generate::LanguageModel`] target trait + a [`crate::drafter::Drafter`]
@@ -41,10 +43,12 @@
 //!
 //! - [`walk`] — `_speculative_walk` accept logic (standalone, well-tested).
 //! - [`generator`] — [`MtpGenerator`] round-loop driver.
-//! - [`target`] — [`MtpTarget`] trait that the Gemma 4 wrapper implements
-//!   to expose its speculative hooks (`forward_with_speculative_sinks`,
-//!   `rollback_speculative_cache`) to the round-loop driver without
-//!   forcing this crate to depend on the outer `mlxcel` crate.
+//! - [`target`]: [`MtpTarget`] trait that a target model implements to
+//!   expose its speculative hooks (`forward_with_speculative_sinks`,
+//!   `rollback_speculative_cache`) to the round-loop driver without forcing
+//!   this crate to depend on the outer `mlxcel` crate. Implemented by the
+//!   Gemma 4 wrapper and, since issue #1165, the Qwen 3.5 (dense and MoE,
+//!   text and VLM) targets.
 
 pub(crate) mod adaptive;
 pub mod generator;
