@@ -175,9 +175,12 @@ fn reject_if_template_rejection(err: &anyhow::Error) -> Result<()> {
 /// Resolve the chat-template kwargs a request renders with.
 ///
 /// Single source of truth for the kwargs map, shared by the rendering pipeline
-/// in [`prepare_chat_request_with_cache`] and by the prompt-cache context
-/// builder in [`super::routes::chat::build_prompt_cache_request_context`], so
-/// the `template_sig` hash is taken over the same map that produced the prompt.
+/// in [`prepare_chat_request_with_cache`], by the prompt-cache context builder
+/// in [`super::routes::chat::build_prompt_cache_request_context`], and by the
+/// next-turn warm-up render in [`render_next_turn_history`], so the
+/// `template_sig` hash, the served prompt, and the warmed vector are all taken
+/// over the same map. A caller that derives the merge by hand instead warms or
+/// keys a prompt the other two never produce.
 ///
 /// Precedence, highest first:
 ///
@@ -197,8 +200,10 @@ fn reject_if_template_rejection(err: &anyhow::Error) -> Result<()> {
 /// part of this helper: it is applied by the caller after the merge, and only
 /// the rendering pipeline applies it today. Folding it in here would change
 /// every existing deployment's `template_sig` on upgrade, which is a cache
-/// invalidation this change has no reason to cause.
-// Used by: chat_request, routes/chat
+/// invalidation this change has no reason to cause. [`render_next_turn_history`]
+/// applies the same default itself, for the same reason and with the same
+/// value, so the warm-up and the render it mirrors stay in step.
+// Used by: chat_request (prepare_chat_request_with_cache, render_next_turn_history), routes/chat
 pub(crate) fn resolve_effective_kwargs(
     processor: &ChatTemplateProcessor,
     request: &ChatCompletionRequest,
@@ -547,12 +552,18 @@ pub(crate) fn render_next_turn_history(
         return None;
     }
 
-    let merged_extra_body = request.merged_extra_body();
-    let per_request_kwargs = extract_request_kwargs(
-        request.chat_template_kwargs.as_ref(),
-        merged_extra_body.as_ref(),
+    // Resolve the kwargs through the same helper the render pipeline and the
+    // prompt-cache context builder use, so a mapped top-level
+    // `reasoning_effort` (issue #1164) is present in the probe renders too.
+    // Deriving the merge separately here would warm a vector rendered with a
+    // different effort than the bucket's `template_sig` describes, and the next
+    // turn would miss it.
+    let mut merged_kwargs = resolve_effective_kwargs(
+        processor,
+        request,
+        server_default_kwargs,
+        &request.merged_extra_body(),
     );
-    let mut merged_kwargs = merge_server_and_request(server_default_kwargs, &per_request_kwargs);
     // Mirror the prompt-cache defaulting that `prepare_chat_request_with_cache`
     // applied to the request this reply answered, or the two renders would
     // disagree about thinking retention and the warm-up would key a vector the

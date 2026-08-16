@@ -37,9 +37,12 @@
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-use super::chat_request::prepare_chat_request;
+use super::chat_request::{
+    prepare_chat_request, render_next_turn_history, resolve_effective_kwargs,
+};
 use super::chat_template::{ChatTemplateProcessor, template_rejection_message};
 use super::chat_template_kwargs::ChatTemplateKwargs;
+use super::prompt_cache::key::template_sig;
 use super::types::{ChatCompletionRequest, Message, MessageContent, Role, SamplingParams};
 
 const QWEN3_8_TEMPLATE: &str = include_str!("../../tests/fixtures/qwen3_8/chat_template.jinja");
@@ -58,6 +61,29 @@ const PLAIN_TEMPLATE: &str = "{% for m in messages %}<|{{ m.role }}|>{{ m.conten
 /// would have turned into a 400.
 const ENGINE_FAILURE_TEMPLATE: &str =
     "{% for m in messages %}{{ m.content | mlxcel_unknown_filter_probe }}{% endfor %}";
+
+/// The two reasoning-instruction sentences the fixture template emits. Every
+/// assertion that reads them first checks that the *real* rendered prompt
+/// carries the same text, so a template edit fails the pin above rather than
+/// leaving these silently matching nothing.
+const LOW_INSTRUCTION: &str = "Reasoning effort is set to low";
+const XHIGH_INSTRUCTION: &str = "Reasoning effort is set to xhigh";
+
+/// `raise_exception` reached from inside a `{% for %}` body.
+const LOOP_REJECTION_TEMPLATE: &str =
+    "{% for m in messages %}{{ raise_exception('loop refusal for ' ~ m.role) }}{% endfor %}";
+
+/// `raise_exception` reached from inside a `{% macro %}` called by the body.
+/// This is the shape the fixture template itself uses (`render_content` raises
+/// on an unexpected content item).
+const MACRO_REJECTION_TEMPLATE: &str = "{% macro guard(role) %}\
+{{ raise_exception('macro refusal for ' ~ role) }}{% endmacro %}{{ guard('user') }}";
+
+/// Nested bounded loops whose iteration count dwarfs the 50M-instruction fuel
+/// budget `configure_environment` installs. Same shape as
+/// `chat_template::tests::test_pathological_template_is_bounded_by_fuel`.
+const FUEL_EXHAUSTION_TEMPLATE: &str =
+    "{% for a in range(100000) %}{% for b in range(100000) %}{% endfor %}{% endfor %}";
 
 fn qwen3_8() -> ChatTemplateProcessor {
     let mut processor = ChatTemplateProcessor::with_template(QWEN3_8_TEMPLATE.to_string());
@@ -500,4 +526,166 @@ fn reasoning_effort_is_not_a_reserved_context_key() {
         )
         .expect("must render");
     assert!(rendered.contains("Reasoning effort is set to low"));
+}
+
+// ---------------------------------------------------------------------------
+// The next-turn warm-up must render with the same kwargs
+// ---------------------------------------------------------------------------
+
+/// The issue #1144 warm-up prefills a guess at the next turn's prompt and files
+/// it under the bucket `build_prompt_cache_request_context` describes, whose
+/// `template_sig` now covers the mapped `reasoning_effort`. So the warm-up has
+/// to resolve its kwargs through the same helper: if it derived the merge by
+/// hand it would store a vector rendered at the template's `xhigh` default
+/// under a bucket that says `low`, and the next turn would match nothing past
+/// the shared head.
+#[tokio::test]
+async fn next_turn_warmup_renders_with_the_mapped_reasoning_effort() {
+    let processor = qwen3_8();
+    let mut req = request(user_hi());
+    req.reasoning_effort = Some("low".to_string());
+
+    // Take the marker from the prompt this reply actually answered, so the
+    // probe assertion below is pinned to the served render rather than to a
+    // sentence transcribed from the template by hand.
+    let served = prompt_for(&processor, &req)
+        .await
+        .expect("a top-level `low` must render");
+    assert!(
+        served.contains(LOW_INSTRUCTION) && !served.contains(XHIGH_INSTRUCTION),
+        "the served prompt must carry the low instruction, got: {served}"
+    );
+
+    let warmed = render_next_turn_history(&processor, &req, None, "hello")
+        .expect("a text-only turn with a reply must produce a next-turn history");
+    assert!(
+        warmed.probe_a.contains(LOW_INSTRUCTION),
+        "the warm-up probe must carry the same reasoning instruction the served \
+         prompt does, got: {}",
+        warmed.probe_a
+    );
+    assert!(
+        !warmed.probe_a.contains(XHIGH_INSTRUCTION),
+        "the warm-up probe must not fall back to the template's xhigh default"
+    );
+}
+
+/// Negative control for the above: with no `reasoning_effort` anywhere, the
+/// warm-up must still land on the template's own `default('xhigh')`, proving
+/// the assertion moves with the request rather than always holding.
+#[tokio::test]
+async fn next_turn_warmup_without_an_effort_keeps_the_template_default() {
+    let processor = qwen3_8();
+    let req = request(user_hi());
+
+    let served = prompt_for(&processor, &req)
+        .await
+        .expect("an unset effort must render");
+    assert!(served.contains(XHIGH_INSTRUCTION));
+
+    let warmed = render_next_turn_history(&processor, &req, None, "hello")
+        .expect("a text-only turn with a reply must produce a next-turn history");
+    assert!(
+        warmed.probe_a.contains(XHIGH_INSTRUCTION),
+        "an unset effort must warm the template's xhigh default, got: {}",
+        warmed.probe_a
+    );
+    assert!(!warmed.probe_a.contains(LOW_INSTRUCTION));
+}
+
+// ---------------------------------------------------------------------------
+// The rejection sentinel survives nesting; fuel exhaustion is not a rejection
+// ---------------------------------------------------------------------------
+
+/// The whole design rests on the `TemplateRejection` source surviving from the
+/// `raise_exception` call to the render call site, so the nesting minijinja
+/// actually applies must not swallow it. These are the shapes reachable here:
+/// `ChatTemplateProcessor` builds a fresh single-template environment with only
+/// `"chat"` registered, so `{% include %}` and `super()` (the other two paths
+/// that wrap rather than annotate in place) cannot occur.
+#[test]
+fn nested_raise_exception_is_still_a_template_rejection() {
+    let messages = json!([{"role": "user", "content": "hi"}]);
+
+    for (shape, template, expected) in [
+        (
+            "for-loop body",
+            LOOP_REJECTION_TEMPLATE,
+            "loop refusal for user",
+        ),
+        (
+            "macro body",
+            MACRO_REJECTION_TEMPLATE,
+            "macro refusal for user",
+        ),
+    ] {
+        let err = ChatTemplateProcessor::with_template(template.to_string())
+            .apply_raw(&messages, None)
+            .expect_err("a raise_exception must fail the render");
+        let message = template_rejection_message(&err).unwrap_or_else(|| {
+            panic!("a rejection raised from a {shape} must keep its sentinel: {err:#}")
+        });
+        assert_eq!(
+            message, expected,
+            "a rejection raised from a {shape} must carry the template's own message"
+        );
+    }
+}
+
+/// Fuel exhaustion is the third arm, and it belongs with the engine failures:
+/// `configure_environment` caps a render at 50M instructions as a DoS control,
+/// and a template that blows that budget has told us nothing about the caller's
+/// values. It must keep degrading to the plain prompt rather than turning into
+/// a 400 that blames the client for the operator's template.
+#[test]
+fn fuel_exhaustion_is_not_a_template_rejection() {
+    let messages = json!([{"role": "user", "content": "hi"}]);
+
+    let err = ChatTemplateProcessor::with_template(FUEL_EXHAUSTION_TEMPLATE.to_string())
+        .apply_raw(&messages, None)
+        .expect_err("a template exceeding the fuel budget must fail to render");
+    assert_eq!(
+        err.downcast_ref::<minijinja::Error>().map(|e| e.kind()),
+        Some(minijinja::ErrorKind::OutOfFuel),
+        "the failure under test must be fuel exhaustion, got: {err:#}"
+    );
+    assert!(
+        template_rejection_message(&err).is_none(),
+        "fuel exhaustion is an engine limit, not a template rejection"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The prompt-cache bucket separates two efforts
+// ---------------------------------------------------------------------------
+
+/// The cache-bucket half of the mapping: because the mapped kwarg is resolved
+/// before `template_sig` is taken, two requests that differ only in top-level
+/// `reasoning_effort` land in different buckets. Without this they would share
+/// a bucket while rendering different prompts, which is a wrong-prefix reuse
+/// rather than a miss.
+#[test]
+fn template_sig_separates_two_top_level_efforts() {
+    let sig_for = |processor: &ChatTemplateProcessor, effort: &str| -> String {
+        let mut req = request(user_hi());
+        req.reasoning_effort = Some(effort.to_string());
+        let resolved = resolve_effective_kwargs(processor, &req, None, &req.merged_extra_body());
+        template_sig(processor.template_source(), &resolved, None, None)
+    };
+
+    let qwen = qwen3_8();
+    assert_ne!(
+        sig_for(&qwen, "low"),
+        sig_for(&qwen, "medium"),
+        "a template that reads reasoning_effort must key two efforts apart"
+    );
+
+    // Control: a template that never mentions the name gets no injected kwarg,
+    // so the two requests render identically and must share a bucket.
+    let plain = ChatTemplateProcessor::with_template(PLAIN_TEMPLATE.to_string());
+    assert_eq!(
+        sig_for(&plain, "low"),
+        sig_for(&plain, "medium"),
+        "a template that ignores reasoning_effort must not fragment its cache"
+    );
 }
