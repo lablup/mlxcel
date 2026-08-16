@@ -37,6 +37,9 @@ use crate::models::qwen_mrope_state::MRopeState;
 use crate::models::qwen3_next::{
     MLP, Quantization, Qwen3NextAttention, Qwen3NextCache, Qwen3NextConfig, SparseMoeBlock,
 };
+use crate::models::speculative_exactness::{
+    BlockChainExactness, ProbeKey, compare_block_against_chain, mtp_exactness_gate,
+};
 use mlxcel_core::cache::{CachePool, SequenceId, SequenceStateLayout};
 use mlxcel_core::dtype;
 use mlxcel_core::generate::LanguageModel;
@@ -46,6 +49,13 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr, concatenate};
 use serde::Deserialize;
 use std::path::Path;
+
+/// Prompt length the exactness probe prefills before comparing arms.
+///
+/// Long enough that the attention layers hold a real KV prefix rather
+/// than the empty-cache special case, short enough that the probe stays
+/// a fraction of a second on a 27B target.
+const PROBE_PROMPT_LEN: usize = 8;
 
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
@@ -1468,6 +1478,111 @@ impl Qwen35Model {
     /// Used by: `speculative_burst::mtp_capable_target`
     pub(crate) fn supports_chain_parity_kernel(&self) -> bool {
         qwen35_config_supports_chain_parity_kernel(&self.config)
+    }
+
+    /// Whether MTP may engage on this checkpoint at `block_size`.
+    ///
+    /// The **whole** Qwen 3.5 MTP eligibility condition, static and
+    /// measured, behind one call: Metal availability and the gated-delta
+    /// geometry (which decide whether the chain-parity kernel is reachable
+    /// at all), then [`Self::probe_block_chain_exactness`] for everything
+    /// else in the forward. Deliberately not three separate predicates for
+    /// callers to assemble: the server burst gate and the out-of-crate
+    /// `mlxcel` CLI gate previously checked different subsets, and the CLI
+    /// was missing the geometry half.
+    ///
+    /// The probe runs at most once per (model, block width) per process
+    /// through
+    /// [`mtp_exactness_gate`](crate::models::speculative_exactness::mtp_exactness_gate),
+    /// which also owns the decline logging and the
+    /// `MLXCEL_MTP_ALLOW_INEXACT` override. The static checks are first so
+    /// a host that cannot run the kernel never pays for a measurement.
+    ///
+    /// Used by: `speculative_burst::mtp_capable_target`, the offline
+    /// `run_offline_mtp` gate.
+    pub fn mtp_exactness_allows(&self, block_size: usize) -> bool {
+        if !mlxcel_core::metal_is_available() || !self.supports_chain_parity_kernel() {
+            return false;
+        }
+        let key = ProbeKey {
+            block_size: block_size as u32,
+            hidden_size: self.config.hidden_size as u32,
+            num_hidden_layers: self.config.num_hidden_layers as u32,
+        };
+        mtp_exactness_gate(key, || self.probe_block_chain_exactness(block_size))
+    }
+
+    /// Measure, on this loaded checkpoint, whether a `T = block_size`
+    /// verify block produces byte-identical logits to `block_size`
+    /// consecutive single-token decode steps.
+    ///
+    /// This is the runtime half of the MTP exactness gate. The static
+    /// half ([`Self::supports_chain_parity_kernel`] plus Metal
+    /// availability) covers the gated-delta kernel; it cannot cover the
+    /// quantized projections, whose `M = 1` versus `M = K` kernel choice
+    /// is decided inside MLX by GPU generation, quantization mode,
+    /// operand size and the block width. Measured rather than predicted,
+    /// for the reasons in
+    /// [`crate::models::speculative_exactness`].
+    ///
+    /// Cost: two 8-token prefills plus `block_size + 1` forwards on
+    /// throwaway caches. Measured on `models/qwen3.8-27b-4bit` on an M1
+    /// Ultra: 4.9 s for the first call in a process and 1.3 s for a later
+    /// one at a different width, the difference being MLX's one-time
+    /// kernel compilation for these shapes. Callers memoize through
+    /// [`crate::models::speculative_exactness::mtp_exactness_gate`] and
+    /// the server warms it at worker startup, so it runs once per
+    /// process and never on the request path.
+    ///
+    /// Both arms use fresh internal caches and `&self`, so no
+    /// per-sequence server state is touched.
+    ///
+    /// Used by: [`Self::mtp_exactness_allows`], and the
+    /// `metal_block_vs_chain_op_parity` diagnostic's model-level sibling.
+    pub fn probe_block_chain_exactness(&self, block_size: usize) -> BlockChainExactness {
+        if block_size < 2 {
+            return BlockChainExactness::NotRun("block width below 2 drafts nothing");
+        }
+        let vocab = self.config.vocab_size;
+        if vocab < 2 {
+            return BlockChainExactness::NotRun("degenerate vocabulary");
+        }
+
+        // Fixed synthetic ids. Values do not matter: MLX kernel dispatch
+        // is a function of shape, dtype, quantization mode and `M`, none
+        // of which vary with the tokens. Wrapped into the vocabulary so a
+        // tiny test config is still valid.
+        let wrap = |i: usize, stride: usize, offset: usize| ((i * stride + offset) % vocab) as i32;
+        let prompt: Vec<i32> = (0..PROBE_PROMPT_LEN).map(|i| wrap(i, 7, 1)).collect();
+        let block: Vec<i32> = (0..block_size).map(|i| wrap(i, 13, 3)).collect();
+
+        let as_input =
+            |tokens: &[i32]| mlxcel_core::from_slice_i32(tokens, &[1, tokens.len() as i32]);
+        let position_bytes = |logits: &MlxArray, index: i32| -> Vec<u8> {
+            let shape = mlxcel_core::array_shape(logits);
+            let row = mlxcel_core::slice(logits, &[0, index, 0], &[shape[0], index + 1, shape[2]]);
+            mlxcel_core::array_to_raw_bytes(&row)
+        };
+
+        // Chain arm: prefill, then one token at a time. This is the
+        // shape classic decode runs, and it is the contract's reference.
+        let mut chain_caches = self.make_internal_caches();
+        let _ = self.forward_speculative(&as_input(&prompt), &mut chain_caches, &[]);
+        let mut chain_positions: Vec<Vec<u8>> = Vec::with_capacity(block_size);
+        for token in &block {
+            let out = self.forward_speculative(&as_input(&[*token]), &mut chain_caches, &[]);
+            chain_positions.push(position_bytes(&out.logits, 0));
+        }
+
+        // Block arm: fresh caches, same prefill, the whole block at once.
+        let mut block_caches = self.make_internal_caches();
+        let _ = self.forward_speculative(&as_input(&prompt), &mut block_caches, &[]);
+        let out = self.forward_speculative(&as_input(&block), &mut block_caches, &[]);
+        let block_positions: Vec<Vec<u8>> = (0..block_size)
+            .map(|i| position_bytes(&out.logits, i as i32))
+            .collect();
+
+        compare_block_against_chain(&block_positions, &chain_positions)
     }
 
     fn visible_len(cache: &Qwen3NextCache) -> usize {

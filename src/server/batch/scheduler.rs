@@ -1630,6 +1630,22 @@ impl BatchScheduler {
         self.speculative_drafter_slot =
             super::speculative_burst::WorkerDrafterSlot::from_dispatch(&dispatch);
         self.speculative_dispatch = dispatch;
+
+        // Warm the block-vs-chain exactness probe here rather than letting
+        // the first request pay for it. The probe is memoized per (model,
+        // block width), so this is the same call the per-request gate
+        // makes; running it at worker startup keeps a few hundred
+        // milliseconds of GPU work off the request path and puts the
+        // verdict in the startup log, where an operator will see a decline
+        // before wondering why throughput looks like classic decode.
+        if let crate::server::SpeculativeDispatch::Mtp { block_size, .. } =
+            &self.speculative_dispatch
+        {
+            let block_size = *block_size as usize;
+            if block_size >= 2 {
+                let _ = super::speculative_burst::mtp_capable_target(&self.model, block_size);
+            }
+        }
         self
     }
 
@@ -4258,7 +4274,7 @@ impl BatchScheduler {
         };
         block_size >= 2
             && super::speculative_slice::mtp_tick_slice_enabled()
-            && super::speculative_burst::mtp_capable_target(&self.model)
+            && super::speculative_burst::mtp_capable_target(&self.model, block_size)
             && !seq.prompt_tokens.is_empty()
             && super::speculative_burst::mtp_prefill_suffix_start(
                 seq.prefill_start_offset,
@@ -4738,11 +4754,13 @@ impl BatchScheduler {
         // Variant gate BEFORE any drafter IO, same rationale and message
         // as `run_mtp_burst`: an unsupported pairing declines to classic
         // without surfacing a confusing drafter-load error.
-        if !super::speculative_burst::mtp_capable_target(&self.model) {
+        if !super::speculative_burst::mtp_capable_target(&self.model, block_size) {
             tracing::warn!(
                 "MTP speculative dispatch declined: target is not \
-                 Gemma 4 (text, VLM, or Unified) or Qwen 3.5 (text or VLM); \
-                 falling back to classic decode",
+                 Gemma 4 (text, VLM, or Unified) or Qwen 3.5 (text or VLM), \
+                 or its verify block is not byte-identical to classic decode \
+                 at block_size={block_size} on this hardware (see the \
+                 exactness-probe log line above); falling back to classic decode",
             );
             return Some(seq);
         }

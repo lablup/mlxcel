@@ -664,14 +664,24 @@ fn ragged_target_sliding_window(model: &LoadedModel) -> Option<usize> {
 /// forfeit byte-identity with no signal (issue #1165 hardening). Every
 /// published `mlx-community` Qwen 3.5 checkpoint satisfies the shape today
 /// (`dk = 128`), but the gate checks it rather than assuming it.
-pub(crate) fn mtp_capable_target(model: &LoadedModel) -> bool {
+///
+/// Neither static condition is sufficient. The contract also depends on
+/// which MLX kernel each **quantized projection** dispatches to at
+/// `M = block_size` versus `M = 1`, which varies by GPU generation,
+/// quantization mode, operand size and the block width itself. The Qwen 3.5
+/// arms therefore delegate the whole condition, static and measured, to
+/// [`Qwen35Model::mtp_exactness_allows`], which runs a block-vs-chain
+/// measurement at the block width actually configured and memoizes it
+/// process-wide. `block_size` is threaded in for exactly that reason: on
+/// an M1 Ultra the same checkpoint is byte-identical at 3 and is not at 12.
+/// Keeping the condition in one place is deliberate; the offline CLI gate
+/// used to check a different subset of it.
+pub(crate) fn mtp_capable_target(model: &LoadedModel, block_size: usize) -> bool {
     match model {
         LoadedModel::Gemma4(_) | LoadedModel::Gemma4VLM(_) | LoadedModel::Gemma4Unified(_) => true,
-        LoadedModel::Qwen35(m) | LoadedModel::Qwen35Moe(m) => {
-            mlxcel_core::metal_is_available() && m.supports_chain_parity_kernel()
-        }
+        LoadedModel::Qwen35(m) | LoadedModel::Qwen35Moe(m) => m.mtp_exactness_allows(block_size),
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => {
-            mlxcel_core::metal_is_available() && vlm.text_model.supports_chain_parity_kernel()
+            vlm.text_model.mtp_exactness_allows(block_size)
         }
         _ => false,
     }

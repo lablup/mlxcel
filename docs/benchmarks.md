@@ -216,8 +216,16 @@ detected rather than assumed.
 MTP speculative decoding pairs a decode target with a small assistant drafter
 that proposes a block of tokens, which the target then verifies in a single
 forward pass. At `temperature 0` the accelerated output is byte-identical to
-classic decode, so the only metric that moves is decode throughput; confirm
-correctness by diffing the two completions.
+classic decode **where the runtime exactness probe says it is**, so on a probe
+that passes the only metric that moves is decode throughput; confirm correctness
+by diffing the two completions. The probe is not a formality: whether a `T = K`
+verify block is bit-equal to `K` single-token steps depends on which MLX kernel
+each quantized projection dispatches to at `M = K` versus `M = 1`, which varies
+by Apple GPU generation, quantization mode and block width. The Qwen 3.5 family
+declines to classic decode when the probe fails (#1186). The Gemma 4 arms are not
+probed yet and their byte-identity has not been measured on Apple GPU generation
+15 or newer (#1188), so treat the claim there as unverified on M3, M4 and M5
+rather than established.
 
 For each pairing, record both the baseline (no drafter) and the MTP run:
 
@@ -254,7 +262,13 @@ size 4, `temperature 0`, 200 decode tokens:
 | classic decode (no drafter) |         ~39  |  1.00x  |
 | MTP                         |         ~74  | ~1.87x  |
 
-The accelerated output is byte-identical to classic decode. B=1 (single-request)
+The accelerated output is byte-identical to classic decode where the startup
+exactness probe says it is, which the runtime measures rather than assumes: an
+affine 4-bit target on Apple GPU generation 13/14 is byte-identical for block
+widths below 12, while generation 15 and newer (M3, M4, M5) diverge from block
+width 2 because MLX routes `M >= 2` quantized projections to a different
+reduction. A declining probe falls back to classic decode unless
+`MLXCEL_MTP_ALLOW_INEXACT=1` is set. B=1 (single-request)
 MTP runs by default for every MTP target; the Gemma 4 Unified target cannot batch
 at all, so B=1 is also its only decode path. The batch-capable 31B + bf16
 assistant measures ~1.2 to 1.4x on the same host. Set `MLXCEL_ENABLE_MTP_B1=0` to
@@ -282,8 +296,8 @@ per-hardware default above. The settled verdict (enable/decline plus the coarse
 acceptance rate, never prompt data) is cached under
 `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/mtp-policy/`, so profiling is a
 one-time cost per pairing and survives restarts. MTP stays mathematically
-exact: the policy only chooses when to run it, so temperature-0 output is still
-byte-identical to classic decode. `MLXCEL_ENABLE_MTP_B1` pins the decision in
+exact: the policy only chooses when to run it, so it neither creates nor removes
+the byte-identity the exactness probe above establishes. `MLXCEL_ENABLE_MTP_B1` pins the decision in
 either direction (and suppresses profiling); `MLXCEL_MTP_ADAPTIVE=0` restores
 the pre-#333 static gates. When recording benchmark numbers, discard the
 profiling window and report the settled-verdict steady state.

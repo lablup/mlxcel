@@ -76,7 +76,23 @@ const CHAIN_LEN: usize = 240;
 
 /// Verify-block width for the block chain (draft 2 + bonus, the published
 /// `block_size: 3` shape).
+///
+/// `MLXCEL_TEST_CHAIN_BLOCK` overrides it. The block width is a user-facing
+/// knob (`--draft-block-size`), and MLX's quantized-matmul dispatch changes
+/// kernel above `get_qmv_batch_limit` (12 for these operand sizes on an M1
+/// Ultra), so the byte-identity this test pins is width-dependent and the
+/// override is how that boundary gets measured on a given GPU. The
+/// rejected-drafts test keeps the fixed [`BLOCK`] width because it builds a
+/// literal three-token verify input.
 const BLOCK: usize = 3;
+
+fn block_width() -> usize {
+    std::env::var("MLXCEL_TEST_CHAIN_BLOCK")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v >= 2)
+        .unwrap_or(3)
+}
 
 fn argmax_positions(logits: &mlxcel_core::MlxArray) -> Vec<i32> {
     let shape = mlxcel_core::array_shape(logits);
@@ -134,13 +150,14 @@ fn block_verify_chain_matches_single_token_chain() {
     }
 
     // Block chain: fresh caches, same prefill, replay the reference tokens
-    // in fully-accepted T=BLOCK verify rounds.
+    // in fully-accepted T=block_t verify rounds (see `block_width`).
+    let block_t = block_width();
     let mut blk_caches = model.make_speculative_caches_for_test();
     let _ = forward_tokens(model, PROMPT_TOKENS, &mut blk_caches);
     let mut mismatches: Vec<(usize, i32, i32)> = Vec::new();
     let mut pos = 0usize; // index into `chain`: the block starts at chain[pos]
-    while pos + BLOCK < chain.len() {
-        let block: Vec<i32> = chain[pos..pos + BLOCK].to_vec();
+    while pos + block_t < chain.len() {
+        let block: Vec<i32> = chain[pos..pos + block_t].to_vec();
         let argmax = forward_tokens(model, &block, &mut blk_caches);
         for (offset, &got) in argmax.iter().enumerate() {
             let expect = chain[pos + offset + 1];
@@ -148,14 +165,14 @@ fn block_verify_chain_matches_single_token_chain() {
                 mismatches.push((pos + offset + 1, expect, got));
             }
         }
-        pos += BLOCK;
+        pos += block_t;
     }
 
     if mismatches.is_empty() {
         eprintln!(
             "block chain matches the single-token chain over {} tokens (block={})",
             chain.len(),
-            BLOCK
+            block_t
         );
     } else {
         let first = mismatches[0];
@@ -164,12 +181,95 @@ fn block_verify_chain_matches_single_token_chain() {
              (block={}); first at chain index {} (single-token argmax {}, block argmax {})",
             mismatches.len(),
             chain.len(),
-            BLOCK,
+            block_t,
             first.0,
             first.1,
             first.2,
         );
     }
+}
+
+/// The runtime exactness gate must agree with this file's own chain test,
+/// in the direction that matters: **the probe may never report `Equal`
+/// where the chain diverges.**
+///
+/// The absolute verdicts are hardware-specific by design (an M1 Ultra is
+/// equal at block 3 and diverges at 12; an M5 Max diverges at both), so
+/// asserting a fixed answer would pin the wrong thing. What must hold on
+/// every GPU is that a passing probe implies a passing chain, because the
+/// gate turns MTP on off the back of it.
+#[test]
+#[ignore]
+fn the_exactness_probe_never_passes_where_the_block_chain_diverges() {
+    let target_dir = CANDIDATE_TARGETS
+        .iter()
+        .map(|name| repo_model_dir(name))
+        .find(|dir| dir.join("config.json").exists());
+    let Some(target_dir) = target_dir else {
+        eprintln!("skipping: no candidate Qwen 3.5-family checkpoint under models/");
+        return;
+    };
+
+    let _runtime = initialize_runtime();
+    let (loaded, _tokenizer) = load_model(&target_dir).expect("load target");
+    let model = as_qwen35(&loaded).expect("expected a Qwen 3.5-family target");
+
+    // A block width below 2 drafts nothing, so the probe must decline
+    // rather than vacuously agree.
+    assert!(
+        !model.probe_block_chain_exactness(1).is_equal(),
+        "block width 1 must not report Equal"
+    );
+
+    // 3 is the published drafter width; 12 is `get_qmv_batch_limit` for the
+    // 27B operand sizes on an M1 Ultra, which is where that machine leaves
+    // the `qmv` kernel. Both are cheap and they bracket the interesting range.
+    for width in [3usize, 12] {
+        let started = std::time::Instant::now();
+        let verdict = model.probe_block_chain_exactness(width);
+        let probe_ms = started.elapsed().as_secs_f64() * 1e3;
+        let chain_diverges = short_block_chain_diverges(model, width);
+        eprintln!(
+            "block {width}: probe={verdict:?} in {probe_ms:.0} ms, chain_diverges={chain_diverges}"
+        );
+        if chain_diverges {
+            assert!(
+                !verdict.is_equal(),
+                "probe reported Equal at block {width} while the chain diverges: \
+                 the gate would enable MTP on a host that breaks the contract"
+            );
+        }
+    }
+}
+
+/// Short block-vs-chain argmax comparison, the same construction as
+/// [`block_verify_chain_matches_single_token_chain`] but bounded so the
+/// probe agreement test stays inexpensive.
+fn short_block_chain_diverges(model: &Qwen35Model, block: usize) -> bool {
+    const SHORT_CHAIN: usize = 60;
+
+    let mut ref_caches = model.make_speculative_caches_for_test();
+    let prefill_argmax = forward_tokens(model, PROMPT_TOKENS, &mut ref_caches);
+    let mut chain: Vec<i32> = vec![*prefill_argmax.last().expect("prefill argmax")];
+    for _ in 0..SHORT_CHAIN {
+        let last = *chain.last().expect("non-empty chain");
+        let next = forward_tokens(model, &[last], &mut ref_caches);
+        chain.push(next[0]);
+    }
+
+    let mut blk_caches = model.make_speculative_caches_for_test();
+    let _ = forward_tokens(model, PROMPT_TOKENS, &mut blk_caches);
+    let mut pos = 0usize;
+    while pos + block < chain.len() {
+        let argmax = forward_tokens(model, &chain[pos..pos + block], &mut blk_caches);
+        for (offset, &got) in argmax.iter().enumerate() {
+            if got != chain[pos + offset + 1] {
+                return true;
+            }
+        }
+        pos += block;
+    }
+    false
 }
 
 // ===========================================================================
@@ -535,10 +635,11 @@ fn adapter_chain_with_perfect_drafts_matches_classic_chain() {
         "first bonus from the adapter prefill differs from the classic prefill argmax"
     );
 
+    let block_t = block_width();
     let mut mismatches: Vec<(usize, i32, i32)> = Vec::new();
     let mut pos = 0usize;
-    while pos + BLOCK < chain.len() {
-        let verify_input: Vec<i32> = chain[pos..pos + BLOCK].to_vec();
+    while pos + block_t < chain.len() {
+        let verify_input: Vec<i32> = chain[pos..pos + block_t].to_vec();
         let out = adapter.verify_forward(&verify_input, &sampler, &logprobs);
         for (offset, &got) in out.target_tokens.iter().enumerate() {
             let expect = chain[pos + offset + 1];
@@ -546,11 +647,11 @@ fn adapter_chain_with_perfect_drafts_matches_classic_chain() {
                 mismatches.push((pos + offset + 1, expect, got));
             }
         }
-        // Fully accepted: BLOCK - 1 drafts all matched (by construction the
+        // Fully accepted: block_t - 1 drafts all matched (by construction the
         // drafts ARE the classic tokens; a target mismatch is recorded above
         // but the chain replay continues on the classic tokens).
-        let _ = adapter.verify_finalize(BLOCK - 1, BLOCK, out.captured);
-        pos += BLOCK;
+        let _ = adapter.verify_finalize(block_t - 1, block_t, out.captured);
+        pos += block_t;
     }
 
     assert!(

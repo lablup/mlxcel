@@ -1730,6 +1730,39 @@ fn run_offline_mtp(
         ));
     }
 
+    // Qwen 3.5 exactness gate: the same single call the server's
+    // `mtp_capable_target` makes, so the two paths cannot drift on the
+    // condition they check (before this, the offline path checked only
+    // Metal availability and skipped the gated-delta geometry entirely).
+    // Beyond those static checks it measures, on this checkpoint at this
+    // block width, whether the multi-token verify block is byte-identical
+    // to the single-token chain; that depends on which MLX kernel each
+    // quantized projection dispatches to at `M = K` versus `M = 1` and
+    // cannot be predicted from the checkpoint (see
+    // `models::speculative_exactness`). Runs before any drafter IO and
+    // fails closed. The Metal guard keeps the non-Metal case on the
+    // dedicated error arm below, which names the real reason.
+    if let LoadedModel::Qwen35(qwen)
+    | LoadedModel::Qwen35Moe(qwen)
+    | LoadedModel::Qwen35VLM(mlxcel::vision::Qwen35VLModel {
+        text_model: qwen, ..
+    })
+    | LoadedModel::Qwen35MoeVLM(mlxcel::vision::Qwen35VLModel {
+        text_model: qwen, ..
+    }) = model
+        && mlxcel_core::metal_is_available()
+        && !qwen.mtp_exactness_allows(block_size)
+    {
+        return Err(anyhow!(
+            "Qwen 3.5 MTP speculative decoding declined: at --draft-block-size \
+             {block_size} this GPU's multi-token verify block is not byte-identical \
+             to the single-token decode chain, so temperature-0 output would \
+             silently differ from `mlxcel generate` without --draft-model. Try a \
+             smaller --draft-block-size, or set MLXCEL_MTP_ALLOW_INEXACT=1 to \
+             engage anyway and forfeit the byte-identity contract."
+        ));
+    }
+
     // Resolve the concrete target reference the drafter binds to, and reject any
     // non-MTP-capable target. Mirrors the server burst dispatch
     // (`run_mtp_burst`): bind to the same concrete Gemma 4 model the adapter

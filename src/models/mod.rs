@@ -149,6 +149,8 @@ pub mod rwkv7;
 pub mod seed_oss;
 pub mod smollm3;
 pub mod solar_open;
+/// Runtime block-vs-chain exactness gate shared by the MTP speculative paths.
+pub mod speculative_exactness;
 pub mod stablelm;
 pub mod starcoder2;
 pub mod step3p5;
