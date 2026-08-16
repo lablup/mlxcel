@@ -4,7 +4,7 @@
 
 Guidance for when a file should stay as one unit, when to extract a helpers file, and when to split into a directory module. This section is the authoritative source for the numeric thresholds. Anything else that cites them, including agent-facing tooling under `.claude/skills/`, should link here rather than restate them, so the numbers cannot drift apart.
 
-A feature that is self-contained and small is fine as a single file, for example `src/models/qwen2.rs` (a complete model in around 600 lines) or `src/distributed/heartbeat.rs` (a complete feature in around 300 lines). Beyond that, apply the following thresholds.
+A feature that is self-contained and small is fine as a single file, for example `src/models/dbrx.rs` (a complete model in about 600 lines) or `src/distributed/heartbeat.rs` (a complete feature in about 310 lines). Beyond that, apply the following thresholds.
 
 | Size | Action |
 |------|--------|
@@ -14,10 +14,12 @@ A feature that is self-contained and small is fine as a single file, for example
 | 1,500+ lines | Strongly consider splitting into a directory module |
 | 2,000+ lines with no helpers file | Anti-pattern; extract `<name>_helpers.rs` |
 
-These are guidelines, not gates. Two files exceed them deliberately, and the reasons are the actual lesson:
+These are guidelines, not gates. The reasons a file is allowed past them matter more than the numbers:
 
-- `nemotron_h.rs` (2,342 lines): a hybrid Mamba+Transformer model, where splitting would break the layer-interleaving logic.
-- `llama4.rs` (1,499 lines): MoE, iGQA and ChunkedKV are tightly coupled in this model.
+- `src/models/nemotron_h.rs` (about 2,900 lines, no helpers file) is the standing exception. It is a hybrid Mamba plus Transformer model, and splitting it would break the layer-interleaving logic that makes it one thing.
+- `src/models/llama4.rs` (about 1,860 lines) is not an exception but an illustration of the table working: MoE, iGQA and ChunkedKV are tightly coupled, so the model stayed one file, and the bulk that could be lifted out went to `src/models/llama4_helpers.rs` as the 1,200+ row prescribes. `src/models/gemma3n_helpers.rs` and `src/models/qwen3_next_helpers.rs` are the other two extractions.
+
+Line counts drift as models are edited, so treat the figures above as approximate and check the file rather than trusting a number quoted elsewhere.
 
 ### Inline tests versus a sibling `_tests.rs` file
 
