@@ -2,7 +2,7 @@
 
 ## File Size and Module Structure
 
-Guidance for when a file should stay as one unit, when to extract a helpers file, and when to split into a directory module. This section is the authoritative source for the numeric thresholds; `.claude/skills/mlxcel-code-structure/SKILL.md` links here instead of restating them.
+Guidance for when a file should stay as one unit, when to extract a helpers file, and when to split into a directory module. This section is the authoritative source for the numeric thresholds. Anything else that cites them, including agent-facing tooling under `.claude/skills/`, should link here rather than restate them, so the numbers cannot drift apart.
 
 A feature that is self-contained and small is fine as a single file, for example `src/models/qwen2.rs` (a complete model in around 600 lines) or `src/distributed/heartbeat.rs` (a complete feature in around 300 lines). Beyond that, apply the following thresholds.
 
