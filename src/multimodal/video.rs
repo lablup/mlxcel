@@ -57,9 +57,17 @@
 //!
 //! ## Runtime requirements
 //!
-//! Both `ffmpeg` and `ffprobe` must be on PATH at runtime. They are not
-//! build-time dependencies. Missing binaries produce a clear error via
-//! [`VideoError::FfmpegMissing`] / [`VideoError::FfprobeMissing`].
+//! Both `ffmpeg` and `ffprobe` must be on PATH at runtime, and must be
+//! **ffmpeg 5.0 (2022) or newer**. They are not build-time dependencies.
+//! Missing binaries produce a clear error via [`VideoError::FfmpegMissing`] /
+//! [`VideoError::FfprobeMissing`].
+//!
+//! The 5.0 floor comes from the frame-rate mode flag. 5.0 introduced
+//! `-fps_mode` and deprecated `-vsync`; ffmpeg 8 removed `-vsync`. Since
+//! `-fps_mode` is accepted by every release from 5.0 onward, the extraction
+//! command uses it unconditionally (see `FPS_MODE_ARG`) instead of probing
+//! or parsing a version string. Nothing else in this module depends on a
+//! version-gated ffmpeg feature, so 5.0 is the whole requirement.
 //!
 //! ## Drop guard for temp files
 //!
@@ -82,9 +90,18 @@
 //!
 //! When `ffmpeg` is not present on the runtime PATH, [`load_video`] returns
 //! a clear error so callers can degrade gracefully or surface a
-//! configuration message to the user. Tests that exercise the subprocess
-//! path are gated by [`ffmpeg_available`] and skip cleanly on machines
-//! without `ffmpeg`.
+//! configuration message to the user.
+//!
+//! ## Test gating
+//!
+//! Tests that exercise the subprocess path are gated by
+//! [`ffmpeg_available`], but that gate is not a plain skip. It routes through
+//! `crate::test_support::video_gate`, which turns the skip into a hard
+//! failure when `MLXCEL_TEST_VIDEO=1` is set. Before #1172 these tests simply
+//! printed a line and returned, so they counted as passing and a host without
+//! `ffmpeg` reported the same all-green result as a host that had genuinely
+//! decoded video. That is how a flag rejection which broke every video path
+//! in the runtime survived in `main`.
 
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -1046,6 +1063,46 @@ fn uniform_indices(total_frames: usize, nframes: usize) -> Vec<usize> {
         .collect()
 }
 
+/// Frame-rate mode flag for the extraction invocation.
+///
+/// ffmpeg 5.0 (2022) introduced `-fps_mode` and deprecated `-vsync` in the
+/// same release; ffmpeg 8 removed `-vsync` outright. A build newer than that
+/// rejects the old spelling before decoding a single frame:
+///
+/// ```text
+/// Unrecognized option 'vsync'.
+/// Error splitting the argument list: Option not found
+/// ```
+///
+/// Because that is an argument-parsing failure, it took down every video
+/// input path in the runtime at once (#1172). `-fps_mode` is the spelling
+/// every supported ffmpeg accepts, so this is a straight substitution rather
+/// than a version-conditional branch. See the "Runtime requirements" section
+/// of the module docs for the supported range.
+const FPS_MODE_ARG: &str = "-fps_mode";
+
+/// Build the output-side ffmpeg arguments for a frame-extraction run.
+///
+/// Split out of [`extract_frames_single_pass`] so the flag contract can be
+/// asserted without an ffmpeg binary on PATH. The host running the unit tests
+/// is frequently not the host that has ffmpeg installed, and #1172 was
+/// precisely a case where the flag list was wrong on every host while the
+/// suite stayed green, so the spelling needs coverage that does not depend on
+/// the subprocess actually being runnable.
+fn frame_extraction_args(select_expr: &str) -> Vec<String> {
+    vec![
+        "-vf".to_string(),
+        format!("select='{select_expr}',setpts=N/FRAME_RATE/TB"),
+        FPS_MODE_ARG.to_string(),
+        "vfr".to_string(),
+        "-f".to_string(),
+        "image2pipe".to_string(),
+        "-vcodec".to_string(),
+        "png".to_string(),
+        "-".to_string(),
+    ]
+}
+
 /// Extract the requested frames in a **single** `ffmpeg` invocation.
 ///
 /// Uses the ffmpeg `select` filter to pick exactly the frames at `indices`
@@ -1117,17 +1174,7 @@ fn extract_frames_single_pass(
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-loglevel", "error", "-i"])
         .arg(source.ffmpeg_input())
-        .args([
-            "-vf",
-            &format!("select='{select_expr}',setpts=N/FRAME_RATE/TB"),
-            "-vsync",
-            "vfr",
-            "-f",
-            "image2pipe",
-            "-vcodec",
-            "png",
-            "-",
-        ])
+        .args(frame_extraction_args(&select_expr))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     source.configure_child(&mut cmd);

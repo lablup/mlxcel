@@ -20,3 +20,4 @@
 
 pub(crate) mod env_lock;
 pub(crate) mod pinned_checkpoint;
+pub(crate) mod video_gate;

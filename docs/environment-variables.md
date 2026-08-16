@@ -269,6 +269,10 @@ declines to serve, see
 
 These apply to video-capable VLM request handling.
 
+Frame extraction shells out to the system `ffmpeg` and `ffprobe`, which must
+both be on `PATH` and must be **ffmpeg 5.0 (2022) or newer**. See
+[`supported-models.md`](supported-models.md) for what that floor is and why.
+
 | Variable | Values | Default | Notes |
 |----------|--------|---------|-------|
 | `MLXCEL_VIDEO_DIR_ALLOWLIST` | comma-separated directories | unset | Local `video_url` file paths are rejected unless they resolve under one of these canonicalized directories. Keep directories owner-writable only; group/world-writable entries warn at startup. |
@@ -378,6 +382,7 @@ normal end-user operation.
 | `MLXCEL_BENCH_MACHINE` | Metadata override for Turbo KV benchmark tests. |
 | `MLXCEL_ALLOW_PARALLEL_CUDA_TESTS` | Downgrades the CUDA serialization guard to a warning. The guard fails when the `mlxcel-core` suite is about to run with more than one test thread under `--features cuda`, which aborts inside MLX partway through (#1048). Set it only to reproduce that abort, or when a narrow filter happens to match the guard's own name on a run that would have been safe. |
 | `MLXCEL_ALLOW_CONCURRENT_GPU_TESTS` | Downgrades the GPU-exclusivity guard to a warning. The guard fails when a second `mlxcel-core` test binary is running, because two suites on one device corrupt each other and can report failures that do not exist (#1008). |
+| `MLXCEL_TEST_VIDEO` | Turns the graceful skip in an ffmpeg-backed video test into a hard test failure. Only the exact string `1` enables it. The video tests in `src/multimodal/video_tests.rs` are `#[ignore]`, so selecting them at all needs `--include-ignored`; this variable then asserts that the host can actually run them instead of skipping when `ffmpeg`/`ffprobe` is missing. `make verify-test-video` sets both, and `nightly-verify.yml` runs that target after installing ffmpeg. Test-only: no production code path reads it. |
 | `MLXCEL_REQUIRE_PINNED_CHECKPOINTS` | Turns the graceful skip in a pinned-checkpoint contract test into a hard test failure. Only the exact string `1` enables it, which is narrower than the truthy parsing most variables on this page accept; unset leaves skips as skips. Currently gates `pinned_post_tower_weight_roots_and_shapes_match_published_contract` (`src/vision/encoders/muse_glimmer_fusion_pinned_tests.rs`) and `pinned_weight_index_classifies_each_source_weight_once` (`src/loading/vlm_muse_glimmer_tests.rs`), both of which validate the pinned Muse Glimmer checkpoint under `models/mlx/muse-glimmer-30b` against a published contract. Test-only: it has no effect outside `cargo test` and no production code path reads it. |
 
 This is a test-only gate: set it in a shell or CI job that runs `cargo test`, never in a runtime environment for `mlxcel` or `mlxcel-server`. It is meant to be enabled on a machine that owns the pinned checkpoint, because that is the only machine where the guarded tests do real work; everywhere else the checkpoint is absent by design, and skipping there is correct rather than a loss. On a checkpoint-owning machine, an unconditional skip silently disables the only coverage that checkpoint has, so leaving the gate off there hides exactly the failures it exists to catch.

@@ -38,8 +38,18 @@
 #
 # `make verify` (fmt + clippy + test), driven through the same Makefile targets
 # CONTRIBUTING.md tells contributors to run, so CI and the local gate cannot
-# drift apart. The three steps run independently so one failure does not mask
-# the other two.
+# drift apart, plus `make verify-test-video`. The four steps run independently
+# so one failure does not mask the others.
+#
+# `verify-test-video` is here and not inside `verify` because it requires the
+# system ffmpeg, which a contributor may not have. That exemption is what #1172
+# exploited: the ffmpeg-backed tests skipped on a host without the binary,
+# libtest counted each skip as a pass, and this job reported green for as long
+# as it took ffmpeg 8 to remove `-vsync` and break every video path in the
+# runtime. The tests are `#[ignore]` now so a skip is visible in the summary
+# rather than indistinguishable from a pass, "Ensure build tools" installs
+# ffmpeg, and this step runs them with `MLXCEL_TEST_VIDEO=1` so a host that
+# somehow lacks ffmpeg fails loudly instead of quietly covering nothing.
 #
 # The runner carries no model weights, which is fine: the real-checkpoint
 # integration tests under tests/ self-skip on a missing `models/<name>` dir or
@@ -148,7 +158,7 @@ concurrency:
 
 jobs:
   verify:
-    name: fmt + clippy + test (macOS Apple Silicon)
+    name: fmt + clippy + test + video (macOS Apple Silicon)
     # Scheduled workflows run from the default branch of whatever repository
     # holds them. A fork that enables Actions would otherwise queue forever
     # against runner labels it does not own.
@@ -172,6 +182,7 @@ jobs:
       fmt: ${{ steps.fmt.outcome }}
       clippy: ${{ steps.clippy.outcome }}
       test: ${{ steps.test.outcome }}
+      video: ${{ steps.video.outcome }}
 
     steps:
       - name: Checkout code
@@ -226,6 +237,24 @@ jobs:
           fi
           echo "cmake: $(cmake --version | head -1)"
 
+          # ffmpeg/ffprobe are runtime dependencies of the video input path,
+          # not build dependencies, so nothing above needs them and the job
+          # ran for a long time without noticing they were absent. That is the
+          # #1172 hole: the ffmpeg-backed tests skipped, libtest counted the
+          # skip as a pass, and this gate reported green while every video path
+          # in the runtime was broken by ffmpeg 8 removing `-vsync`. Install
+          # them so the `video` step below actually decodes something.
+          if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
+            if ! command -v brew >/dev/null 2>&1; then
+              echo "::error::Neither ffmpeg nor brew is on PATH after adding the Homebrew prefixes." >&2
+              echo "This is a runner provisioning problem, not a code failure." >&2
+              exit 1
+            fi
+            echo "ffmpeg not found, installing via Homebrew..."
+            brew install ffmpeg
+          fi
+          echo "ffmpeg: $(ffmpeg -version | head -1)"
+
           # Every later step gets the same PATH; `export` above is scoped to
           # this step's shell only.
           echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
@@ -278,8 +307,9 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      # The three steps below are `make verify` split apart. Each runs even if
-      # an earlier one failed, so a fmt violation does not hide a red suite.
+      # The four steps below are `make verify` split apart, plus the video gate
+      # that `verify` deliberately omits. Each runs even if an earlier one
+      # failed, so a fmt violation does not hide a red suite.
       - name: cargo fmt
         id: fmt
         if: ${{ !cancelled() }}
@@ -294,6 +324,15 @@ jobs:
         id: test
         if: ${{ !cancelled() }}
         run: make verify-test
+
+      # Separate from `verify-test` because the ffmpeg-backed tests are
+      # `#[ignore]` and need `--include-ignored` to be selected at all. Its own
+      # step and its own reported outcome, so "video was not exercised" can
+      # never again be reported as a green suite.
+      - name: cargo test (video, ffmpeg required)
+        id: video
+        if: ${{ !cancelled() }}
+        run: make verify-test-video
 
   # Reporting is a separate job, not a step of `verify` with a wider condition.
   # A wider condition would have fixed the timeout case on its own (see the
@@ -364,6 +403,7 @@ jobs:
           FMT_OUTCOME: ${{ needs.verify.outputs.fmt }}
           CLIPPY_OUTCOME: ${{ needs.verify.outputs.clippy }}
           TEST_OUTCOME: ${{ needs.verify.outputs.test }}
+          VIDEO_OUTCOME: ${{ needs.verify.outputs.video }}
         run: |
           set -euo pipefail
 
@@ -386,7 +426,7 @@ jobs:
             HEADLINE='The nightly `make verify` run did not finish. GitHub reports a `timeout-minutes` kill and a human cancel with the same `cancelled` conclusion, so compare the duration below against `timeout-minutes` in `.github/workflows/nightly-verify.yml`: at or just under the budget means the job ran out of time, anything well short of it means someone cancelled the run.'
           else
             TITLE="[nightly-verify] ${SUBJECT} is red${SCOPE}"
-            # Deliberately not "at least one of the three gates is red": a setup
+            # Deliberately not "at least one of the gates is red": a setup
             # step (toolchain, build tools) can fail the job before any gate
             # runs, and then the gates report `failure` only because cargo was
             # never installed. Run 30870790330 was exactly that, and a headline
@@ -424,6 +464,7 @@ jobs:
             echo "| \`make verify-fmt\` | \`${FMT_OUTCOME:-unknown}\` |"
             echo "| \`make verify-clippy\` | \`${CLIPPY_OUTCOME:-unknown}\` |"
             echo "| \`make verify-test\` | \`${TEST_OUTCOME:-unknown}\` |"
+            echo "| \`make verify-test-video\` | \`${VIDEO_OUTCOME:-unknown}\` |"
             echo "| Trigger | \`${EVENT_NAME}\` |"
             echo
             echo "$DURATION_LINE"

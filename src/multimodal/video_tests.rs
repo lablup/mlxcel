@@ -16,6 +16,20 @@ use std::path::Path;
 use std::process::Command;
 
 use super::*;
+use crate::test_support::video_gate::{skip_or_fail_video_fixture, video_capability_available};
+
+// Every test below that shells out to ffmpeg carries
+//
+//     #[ignore = "needs ffmpeg 5.0+ on PATH; run `make verify-test-video`"]
+//
+// rather than inspecting PATH and returning early. Stable libtest counts an
+// early return as a pass, so before #1172 a host with no ffmpeg reported
+// `34 passed; 0 failed` while a host with ffmpeg reported `31 passed;
+// 3 failed`, and the broken host was the one that looked healthy. `#[ignore]`
+// is resolved at compile time and is the only skip that reaches the summary
+// line. The `video_capability_available` gate then makes the opt-in run fail
+// loudly when `MLXCEL_TEST_VIDEO=1` is set but ffmpeg is missing, so the
+// exercising run cannot silently degrade back into a no-op either.
 
 // ─── Extension detection ─────────────────────────────────────────────────────
 
@@ -133,7 +147,13 @@ fn load_video_without_ffmpeg_returns_clear_error() {
     }
     let path = Path::new("/tmp/does-not-exist.mp4");
     let err = load_video(path, None, None).unwrap_err();
-    matches!(err, VideoError::FfmpegMissing);
+    // `matches!` alone is an expression, not a check. Written bare it
+    // evaluated to a discarded `bool` and asserted nothing, so this test could
+    // not have failed on any host.
+    assert!(
+        matches!(err, VideoError::FfmpegMissing),
+        "expected FfmpegMissing on a host without ffmpeg, got {err:?}"
+    );
 }
 
 // ─── PNG stream splitter unit test ───────────────────────────────────────────
@@ -206,6 +226,67 @@ fn temp_file_drop_on_panic_cleanup() {
     );
 }
 
+// ─── Extraction flag contract (no ffmpeg needed) ─────────────────────────────
+
+/// The frame-rate mode flag must be `-fps_mode`, never `-vsync`.
+///
+/// ffmpeg 5.0 deprecated `-vsync` and ffmpeg 8 removed it, so a build newer
+/// than that rejects the argument list outright and every video input path
+/// fails before decoding a frame (#1172). This assertion runs on any host,
+/// with or without ffmpeg installed, because the whole point of #1172 is that
+/// the hosts running the suite were the ones without ffmpeg. The live decode
+/// tests below cover the behaviour; this one covers the spelling.
+#[test]
+fn frame_extraction_uses_fps_mode_not_the_removed_vsync() {
+    let args = frame_extraction_args("eq(n\\,0)+eq(n\\,5)");
+
+    assert!(
+        !args.iter().any(|arg| arg == "-vsync"),
+        "-vsync was removed in ffmpeg 8 and makes ffmpeg reject the whole argument list; \
+         args were {args:?}"
+    );
+
+    let fps_mode_at = args
+        .iter()
+        .position(|arg| arg == "-fps_mode")
+        .expect("frame extraction must pass -fps_mode");
+    assert_eq!(
+        args.get(fps_mode_at + 1).map(String::as_str),
+        Some("vfr"),
+        "-fps_mode must be followed by its value"
+    );
+}
+
+/// The rest of the extraction argument list is a behavioural contract too: the
+/// PNG-over-stdout pipeline in `split_png_stream` only works because of this
+/// exact combination, so a change here has to be deliberate.
+#[test]
+fn frame_extraction_args_carry_the_png_pipe_contract() {
+    let args = frame_extraction_args("eq(n\\,0)");
+
+    assert_eq!(
+        args.first().map(String::as_str),
+        Some("-vf"),
+        "the select filter must lead the output arguments"
+    );
+    assert_eq!(
+        args.get(1).map(String::as_str),
+        Some("select='eq(n\\,0)',setpts=N/FRAME_RATE/TB"),
+        "the select expression must be embedded verbatim, with the comma escaped"
+    );
+    assert_eq!(
+        args.last().map(String::as_str),
+        Some("-"),
+        "output must go to stdout"
+    );
+    for expected in ["-f", "image2pipe", "-vcodec", "png"] {
+        assert!(
+            args.iter().any(|arg| arg == expected),
+            "missing {expected} from the PNG pipe contract; args were {args:?}"
+        );
+    }
+}
+
 // ─── Resolution / duration cap tests (require ffmpeg) ────────────────────────
 
 /// Create a minimal synthetic video file via ffmpeg. Returns the temp path.
@@ -250,9 +331,9 @@ fn make_test_video(
 }
 
 #[test]
+#[ignore = "needs ffmpeg 5.0+ on PATH; run `make verify-test-video`"]
 fn load_video_rejects_oversized_resolution() {
-    if !ffmpeg_available() {
-        eprintln!("SKIP: ffmpeg not available");
+    if !video_capability_available("load_video_rejects_oversized_resolution") {
         return;
     }
 
@@ -261,7 +342,10 @@ fn load_video_rejects_oversized_resolution() {
     let video_path = match make_test_video(100, 100, 5, 2.0) {
         Some(p) => p,
         None => {
-            eprintln!("SKIP: could not create test video");
+            skip_or_fail_video_fixture(
+                "load_video_rejects_oversized_resolution",
+                "could not create the 100x100 test video",
+            );
             return;
         }
     };
@@ -295,9 +379,9 @@ fn load_video_rejects_oversized_resolution() {
 }
 
 #[test]
+#[ignore = "needs ffmpeg 5.0+ on PATH; run `make verify-test-video`"]
 fn load_video_rejects_overlong_duration() {
-    if !ffmpeg_available() {
-        eprintln!("SKIP: ffmpeg not available");
+    if !video_capability_available("load_video_rejects_overlong_duration") {
         return;
     }
 
@@ -305,7 +389,10 @@ fn load_video_rejects_overlong_duration() {
     let video_path = match make_test_video(64, 64, 5, 4.0) {
         Some(p) => p,
         None => {
-            eprintln!("SKIP: could not create test video");
+            skip_or_fail_video_fixture(
+                "load_video_rejects_overlong_duration",
+                "could not create the 64x64 4-second test video",
+            );
             return;
         }
     };
@@ -340,12 +427,15 @@ fn load_video_rejects_overlong_duration() {
 }
 
 #[test]
+#[ignore = "needs ffmpeg 5.0+ on PATH; run `make verify-test-video`"]
 fn load_video_single_pass_produces_correct_frame_count() {
     // Verify that the single-pass implementation produces the expected
     // number of frames for a short synthetic video. This is the key
-    // regression test for the single-pass refactor.
-    if !ffmpeg_available() {
-        eprintln!("SKIP: ffmpeg not available");
+    // regression test for the single-pass refactor, and the test that
+    // catches a rejected extraction flag: #1172's `-vsync` removal surfaced
+    // here first, as an `Extract` error carrying ffmpeg's
+    // "Unrecognized option" complaint.
+    if !video_capability_available("load_video_single_pass_produces_correct_frame_count") {
         return;
     }
 
@@ -354,7 +444,10 @@ fn load_video_single_pass_produces_correct_frame_count() {
     let video_path = match make_test_video(64, 64, 10, 10.0) {
         Some(p) => p,
         None => {
-            eprintln!("SKIP: could not create test video");
+            skip_or_fail_video_fixture(
+                "load_video_single_pass_produces_correct_frame_count",
+                "could not create the 64x64 10fps 10s test video",
+            );
             return;
         }
     };
@@ -578,14 +671,14 @@ fn video_limits_from_raw_parses_overrides_and_falls_back() {
 /// 3. Wraps it in `VideoSource::Fd`.
 /// 4. Calls `load_video_source` and asserts a non-empty frame vector.
 ///
-/// On a machine without ffmpeg the test SKIPs gracefully (it does not
-/// fail), matching the pattern used by the resolution / duration cap
-/// tests in this file.
+/// The test is `#[ignore]` so a machine without ffmpeg reports it as ignored
+/// rather than passed, matching the pattern used by the resolution / duration
+/// cap tests in this file.
 #[cfg(unix)]
 #[test]
+#[ignore = "needs ffmpeg 5.0+ on PATH; run `make verify-test-video`"]
 fn load_video_source_fd_variant_decodes_via_dev_fd_n() {
-    if !ffmpeg_available() {
-        eprintln!("SKIP: ffmpeg not available");
+    if !video_capability_available("load_video_source_fd_variant_decodes_via_dev_fd_n") {
         return;
     }
 
@@ -593,7 +686,10 @@ fn load_video_source_fd_variant_decodes_via_dev_fd_n() {
     let video_path = match make_test_video(64, 64, 5, 2.0) {
         Some(p) => p,
         None => {
-            eprintln!("SKIP: could not create test video");
+            skip_or_fail_video_fixture(
+                "load_video_source_fd_variant_decodes_via_dev_fd_n",
+                "could not create the 64x64 2-second test video",
+            );
             return;
         }
     };
@@ -629,9 +725,10 @@ fn load_video_source_fd_variant_decodes_via_dev_fd_n() {
 /// path (e.g., partial decode, different sampling).
 #[cfg(unix)]
 #[test]
+#[ignore = "needs ffmpeg 5.0+ on PATH; run `make verify-test-video`"]
 fn load_video_source_fd_variant_matches_path_variant_frame_count() {
-    if !ffmpeg_available() {
-        eprintln!("SKIP: ffmpeg not available");
+    if !video_capability_available("load_video_source_fd_variant_matches_path_variant_frame_count")
+    {
         return;
     }
 
@@ -639,7 +736,10 @@ fn load_video_source_fd_variant_matches_path_variant_frame_count() {
     let video_path = match make_test_video(48, 48, 10, 4.0) {
         Some(p) => p,
         None => {
-            eprintln!("SKIP: could not create test video");
+            skip_or_fail_video_fixture(
+                "load_video_source_fd_variant_matches_path_variant_frame_count",
+                "could not create the 48x48 10fps 4s test video",
+            );
             return;
         }
     };
@@ -763,11 +863,15 @@ fn source_ffmpeg_input_for_test(source: &VideoSource) -> std::path::PathBuf {
 /// and asserts the wall time is below 500 ms. The assertion is intentionally
 /// generous; on developer hardware the single-pass path typically completes
 /// in well under 300 ms for a short lavfi source.
+/// Ignored for a different reason than the correctness tests above: this one
+/// asserts a wall-clock bound, so it is a measurement rather than a gate and a
+/// loaded machine would make it flaky. `make verify-test-video` passes
+/// `--skip bench_single_pass_768_frames` for exactly that reason, so
+/// `--include-ignored` does not sweep it into the correctness run.
 #[test]
-#[ignore]
+#[ignore = "wall-clock benchmark, not a gate; run by hand with --ignored --nocapture"]
 fn bench_single_pass_768_frames() {
-    if !ffmpeg_available() {
-        eprintln!("SKIP: ffmpeg not available");
+    if !video_capability_available("bench_single_pass_768_frames") {
         return;
     }
 
@@ -775,7 +879,10 @@ fn bench_single_pass_768_frames() {
     let video_path = match make_test_video(320, 240, 60, 12.9) {
         Some(p) => p,
         None => {
-            eprintln!("SKIP: could not create test video");
+            skip_or_fail_video_fixture(
+                "bench_single_pass_768_frames",
+                "could not create the 320x240 60fps 12.9s test video",
+            );
             return;
         }
     };
@@ -832,7 +939,9 @@ fn synth_color_increment_video(
     // Create temp directory for per-frame PNGs.
     let tmp_dir = std::env::temp_dir().join(format!("mlxcel-synth-color-{fps}fps-{frames}f"));
     if let Err(e) = std::fs::create_dir_all(&tmp_dir) {
-        eprintln!("SKIP: could not create temp dir: {e}");
+        // Diagnostic only. The caller decides skip vs fail via
+        // `skip_or_fail_video_fixture`.
+        eprintln!("fixture: could not create temp dir: {e}");
         return false;
     }
 
@@ -845,7 +954,7 @@ fn synth_color_increment_video(
             ImageBuffer::from_pixel(width, height, Rgb([r, g, b]));
         let frame_path: PathBuf = tmp_dir.join(format!("frame_{i:03}.png"));
         if img.save(&frame_path).is_err() {
-            eprintln!("SKIP: could not save frame {i}");
+            eprintln!("fixture: could not save frame {i}");
             let _ = std::fs::remove_dir_all(&tmp_dir);
             return false;
         }
@@ -891,7 +1000,9 @@ fn synth_moving_square_video(
 
     let tmp_dir = std::env::temp_dir().join(format!("mlxcel-synth-square-{fps}fps-{frames}f"));
     if let Err(e) = std::fs::create_dir_all(&tmp_dir) {
-        eprintln!("SKIP: could not create temp dir: {e}");
+        // Diagnostic only. The caller decides skip vs fail via
+        // `skip_or_fail_video_fixture`.
+        eprintln!("fixture: could not create temp dir: {e}");
         return false;
     }
 
@@ -909,7 +1020,7 @@ fn synth_moving_square_video(
         }
         let frame_path = tmp_dir.join(format!("frame_{i:03}.png"));
         if img.save(&frame_path).is_err() {
-            eprintln!("SKIP: could not save moving-square frame {i}");
+            eprintln!("fixture: could not save moving-square frame {i}");
             let _ = std::fs::remove_dir_all(&tmp_dir);
             return false;
         }
@@ -965,9 +1076,9 @@ fn rgb_channel_means(img: &image::DynamicImage) -> (f64, f64, f64) {
 /// rounding. YUV420 chroma is shared across 2x2 pixel blocks, which can shift
 /// individual channel values by up to ~10 counts; we add a few counts of slack.
 #[test]
+#[ignore = "needs ffmpeg 5.0+ on PATH; run `make verify-test-video`"]
 fn extract_frames_preserves_color_increment_per_frame() {
-    if !ffmpeg_available() {
-        eprintln!("SKIP: ffmpeg not available");
+    if !video_capability_available("extract_frames_preserves_color_increment_per_frame") {
         return;
     }
 
@@ -981,7 +1092,10 @@ fn extract_frames_preserves_color_increment_per_frame() {
     let video_path = std::env::temp_dir().join("mlxcel-test-color-increment.mp4");
     let _ = std::fs::remove_file(&video_path);
     if !synth_color_increment_video(&video_path, TOTAL_FRAMES, VIDEO_FPS, WIDTH, HEIGHT) {
-        eprintln!("SKIP: could not synthesize color-increment video");
+        skip_or_fail_video_fixture(
+            "extract_frames_preserves_color_increment_per_frame",
+            "could not synthesize the color-increment video",
+        );
         return;
     }
 
@@ -991,13 +1105,16 @@ fn extract_frames_preserves_color_increment_per_frame() {
     let frames = load_video(&video_path, Some(5.0), None);
     let _ = std::fs::remove_file(&video_path);
 
-    let frames = match frames {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("SKIP: load_video failed: {e}");
-            return;
-        }
-    };
+    // A decode error is a failure, never a skip. This arm used to `return`,
+    // and that is why the suite stayed green through #1172: ffmpeg rejected
+    // the argument list, `load_video` returned `Extract { "Unrecognized
+    // option 'vsync'" }`, and this test reported the swallowed error as a
+    // pass. Only availability problems may skip; a video that will not decode
+    // is the bug these assertions exist to catch.
+    let frames = frames.expect(
+        "load_video must succeed for the synthetic color-increment video; a decode error here \
+         means the extraction command itself is broken, not that the host is unequipped",
+    );
 
     assert!(!frames.is_empty(), "should have decoded at least one frame");
 
@@ -1042,9 +1159,9 @@ fn extract_frames_preserves_color_increment_per_frame() {
 ///
 /// Tolerance of ±15 accounts for YUV420 chroma subsampling and codec rounding.
 #[test]
+#[ignore = "needs ffmpeg 5.0+ on PATH; run `make verify-test-video`"]
 fn extract_frames_preserves_channel_order() {
-    if !ffmpeg_available() {
-        eprintln!("SKIP: ffmpeg not available");
+    if !video_capability_available("extract_frames_preserves_channel_order") {
         return;
     }
 
@@ -1081,7 +1198,10 @@ fn extract_frames_preserves_channel_order() {
     let _ = std::fs::remove_dir_all(&tmp_dir);
 
     if !status.map(|s| s.success()).unwrap_or(false) {
-        eprintln!("SKIP: could not synthesize channel-order video");
+        skip_or_fail_video_fixture(
+            "extract_frames_preserves_channel_order",
+            "could not synthesize the channel-order video",
+        );
         return;
     }
 
@@ -1089,13 +1209,12 @@ fn extract_frames_preserves_channel_order() {
     let frames = load_video(&video_path, Some(2.0), None);
     let _ = std::fs::remove_file(&video_path);
 
-    let frames = match frames {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("SKIP: load_video failed: {e}");
-            return;
-        }
-    };
+    // A decode error is a failure, never a skip. See the equivalent comment in
+    // `extract_frames_preserves_color_increment_per_frame`.
+    let frames = frames.expect(
+        "load_video must succeed for the synthetic channel-order video; a decode error here \
+         means the extraction command itself is broken, not that the host is unequipped",
+    );
 
     assert!(!frames.is_empty(), "should have decoded at least one frame");
 
@@ -1134,9 +1253,9 @@ fn extract_frames_preserves_channel_order() {
 /// We sample all 20 frames (target fps = 10) and verify that the brightest
 /// region of each frame overlaps the expected 8x8 window.
 #[test]
+#[ignore = "needs ffmpeg 5.0+ on PATH; run `make verify-test-video`"]
 fn extract_frames_preserves_moving_square_position() {
-    if !ffmpeg_available() {
-        eprintln!("SKIP: ffmpeg not available");
+    if !video_capability_available("extract_frames_preserves_moving_square_position") {
         return;
     }
 
@@ -1150,7 +1269,10 @@ fn extract_frames_preserves_moving_square_position() {
     let video_path = std::env::temp_dir().join("mlxcel-test-moving-square.mp4");
     let _ = std::fs::remove_file(&video_path);
     if !synth_moving_square_video(&video_path, TOTAL_FRAMES, VIDEO_FPS, WIDTH, HEIGHT) {
-        eprintln!("SKIP: could not synthesize moving-square video");
+        skip_or_fail_video_fixture(
+            "extract_frames_preserves_moving_square_position",
+            "could not synthesize the moving-square video",
+        );
         return;
     }
 
@@ -1158,13 +1280,12 @@ fn extract_frames_preserves_moving_square_position() {
     let frames = load_video(&video_path, Some(10.0), None);
     let _ = std::fs::remove_file(&video_path);
 
-    let frames = match frames {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("SKIP: load_video failed: {e}");
-            return;
-        }
-    };
+    // A decode error is a failure, never a skip. See the equivalent comment in
+    // `extract_frames_preserves_color_increment_per_frame`.
+    let frames = frames.expect(
+        "load_video must succeed for the synthetic moving-square video; a decode error here \
+         means the extraction command itself is broken, not that the host is unequipped",
+    );
 
     assert!(!frames.is_empty(), "should have decoded at least one frame");
 
