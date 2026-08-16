@@ -567,6 +567,14 @@ pre-commit: fmt clippy test ## Pre-commit checks
 # loaded runner turns a timing bound into a red build. Run it by hand when you
 # want the number.
 #
+# The filter list carries a second entry that is not under `multimodal::video`:
+# `vision::processors::gemma4::tests::process_videos_pixel_values_match_input_color`.
+# That test calls `load_video` on the same path and swallowed a decode failure
+# the same way, so #1172 hid there too, and a module-scoped filter would leave
+# the one ffmpeg-backed test outside `multimodal::video` ungated. libtest ORs
+# positional filters, but `cargo test` itself accepts only one TESTNAME, so both
+# filters have to sit after the `--`.
+#
 # Run `make verify` before opening or updating a PR. Run `make verify-clean`
 # (which prepends `cargo clean`) when you suspect clippy's per-crate result
 # cache is masking a regression — most often after editing shared code in
@@ -590,10 +598,12 @@ verify-test: ## CI-faithful: cargo test --workspace --profile test-fast --featur
 
 .PHONY: verify-test-video
 verify-test-video: ## Video gate: run the ffmpeg-backed video tests for real (needs ffmpeg 5.0+ on PATH, issue #1172)
-	@echo "$(CYAN)[verify] video (multimodal::video, ffmpeg required)...$(RESET)"
+	@echo "$(CYAN)[verify] video (multimodal::video + gemma4 pixel content, ffmpeg required)...$(RESET)"
 	MLXCEL_TEST_VIDEO=1 $(CARGO) test --profile test-fast --features metal,accelerate \
-		-p mlxcel --lib multimodal::video -- --include-ignored \
-		--skip bench_single_pass_768_frames
+		-p mlxcel --lib -- --include-ignored \
+		--skip bench_single_pass_768_frames \
+		multimodal::video \
+		vision::processors::gemma4::tests::process_videos_pixel_values_match_input_color
 
 .PHONY: verify-test-cuda
 verify-test-cuda: ## CUDA gate: cargo test --workspace --profile test-fast --features cuda --no-fail-fast -- --test-threads=1 (issue #1048)
