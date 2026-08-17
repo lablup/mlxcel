@@ -5,16 +5,17 @@
 // exceeds the gridDim.y/z limit of 65535 and no `l = out.size()/(m*n)` int32
 // multiply overflows (see lablup/mlxcel#648); (3) route sorted M==1 GatherQMM
 // (MoE prefill) through dequant + CUTLASS grouped GEMM (lablup/mlxcel#629).
-// Synced to upstream 2c46b953 (lablup/mlxcel#1042). The only upstream change to
-// this file since the previous sync is #3757 (Add gather_qqmm), which inserted a
-// `const std::optional<array>& global_scale` parameter into qmm_naive at
-// position 5, right after `biases`. Both qmm_naive call sites below pass
-// std::nullopt there, matching upstream. Every other dispatch entry point
-// consumed here (qmm_sm90, qmm_sm80, qmv, gather_qmv, fp_qmv) kept its
-// signature: the full diff of quantized/qmm/qmm.h across that range is the one
-// global_scale line. Re-verify these call sites against qmm.h on the next pin
-// bump; an overlay that silently reverts an upstream change is how #830 / #831
-// happened.
+// Synced to upstream 9a795735. Upstream did not touch
+// mlx/backend/cuda/quantized/ at all between 2c46b953 and 9a795735, so this
+// overlay carries the same delta it did at the previous sync and the call sites
+// below need no adjustment. qmm.h is byte-identical across that range, which
+// means every dispatch entry point consumed here (qmm_naive, qmm_sm90,
+// qmm_sm80, qmv, gather_qmv, fp_qmv) kept its signature, including the
+// `const std::optional<array>& global_scale` parameter #3757 added to qmm_naive
+// at position 5 that both call sites below pass std::nullopt for.
+//
+// Re-verify these call sites against qmm.h on the next pin bump; an overlay
+// that silently reverts an upstream change is how #830 / #831 happened.
 
 #include "mlx/backend/cuda/quantized/quantized.h"
 #include "mlx/backend/cuda/device.h"
