@@ -420,6 +420,29 @@ impl LanguageModel for Qwen35VLModel {
         mlxcel_core::generate::LanguageModel::supports_batching(&self.text_model)
     }
 
+    /// Delegated, not defaulted: the trait's default is `true` and the
+    /// Qwen 3.5 backbone answers `false`, because it is a hybrid whose
+    /// GatedDeltaNet layers carry a recurrent state. Tile-aligned padded
+    /// prefill appends up to 31 pad positions, and while the causal mask and
+    /// `trim_caches_to_actual_len` undo their effect on the KV caches, a
+    /// recurrent state that has already absorbed them cannot be rewound. A
+    /// wrapper that inherits the default silently re-enables an optimization
+    /// its own backbone disabled for correctness, which is what this fixes
+    /// (#1201): on Neural Accelerator hardware a text-only run through this
+    /// wrapper produced different greedy output than the same prompt padded
+    /// to a tile boundary.
+    fn supports_padded_prefill(&self) -> bool {
+        mlxcel_core::generate::LanguageModel::supports_padded_prefill(&self.text_model)
+    }
+
+    /// Delegated for the same reason as [`Self::supports_padded_prefill`]:
+    /// the maskless variant is only consulted once padding is allowed, but
+    /// leaving it defaulted would put the two predicates on different
+    /// sources of truth.
+    fn supports_maskless_padded_prefill(&self) -> bool {
+        mlxcel_core::generate::LanguageModel::supports_maskless_padded_prefill(&self.text_model)
+    }
+
     fn supports_batched_prefill(&self) -> bool {
         mlxcel_core::generate::LanguageModel::supports_batched_prefill(&self.text_model)
     }
