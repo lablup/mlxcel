@@ -17,6 +17,19 @@
 #include <unordered_set>
 #include <utility>
 
+#ifdef MLXCEL_BRIDGE_METAL_BACKEND
+// Defined by the mlx/backend/metal/quantized.cpp overlay (issue #1187).
+// Declared here rather than pulled from a header because upstream owns every
+// header in that tree and an overlay that added one would drift on the next
+// pin bump. It must sit at global scope: declaring `namespace mlx::core`
+// inside `namespace mlx_cxx` creates `mlx_cxx::mlx::core` and shadows the
+// real one for the rest of the file.
+namespace mlx::core {
+void mlxcel_set_qmv_wide(bool enabled);
+bool mlxcel_qmv_wide(void);
+} // namespace mlx::core
+#endif
+
 namespace mlx_cxx {
 
 using namespace mlx::core;
@@ -928,6 +941,22 @@ std::unique_ptr<MlxArray> equal(const MlxArray& a, const MlxArray& b) {
 void random_seed(uint64_t seed) {
     mlx::core::random::seed(seed);
 }
+
+#ifdef MLXCEL_BRIDGE_METAL_BACKEND
+void set_qmv_wide(bool enabled) {
+    ::mlx::core::mlxcel_set_qmv_wide(enabled);
+}
+
+bool qmv_wide_enabled() {
+    return ::mlx::core::mlxcel_qmv_wide();
+}
+#else
+void set_qmv_wide(bool) {}
+
+bool qmv_wide_enabled() {
+    return true;
+}
+#endif
 
 std::unique_ptr<MlxArray> random_categorical(const MlxArray& logits, int32_t axis) {
     return std::make_unique<MlxArray>(mlx::core::random::categorical(logits.inner, axis));

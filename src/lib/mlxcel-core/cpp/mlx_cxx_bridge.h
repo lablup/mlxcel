@@ -378,6 +378,17 @@ std::unique_ptr<MlxArray> equal(const MlxArray& a, const MlxArray& b);
 // Seed the global MLX random number generator
 void random_seed(uint64_t seed);
 
+// The qmv_wide off-switch carried by the mlx/backend/metal/quantized.cpp
+// overlay (issue #1187). Disabling it forces every quantized matmul with
+// M >= 2 onto plain qmv, the kernel M == 1 already takes, which is what makes
+// a speculative verify block bitwise equal to the single-token chain on GPU
+// generation 15 and later. Costs about 17 to 20 percent on that forward.
+//
+// No-ops and reports true on a build without the Metal backend, where the
+// overlay is not compiled and the distinction does not exist.
+void set_qmv_wide(bool enabled);
+bool qmv_wide_enabled();
+
 // Random categorical sampling
 std::unique_ptr<MlxArray> random_categorical(const MlxArray& logits, int32_t axis);
 
