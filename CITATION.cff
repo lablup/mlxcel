@@ -26,5 +26,5 @@ keywords:
   - cuda
   - rust
 license: Apache-2.0
-version: "0.5.1"
-date-released: "2026-08-15"
+version: "0.5.2"
+date-released: "2026-08-18"

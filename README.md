@@ -12,16 +12,13 @@ High-performance LLM/VLM inference runtime and server for Apple Silicon / NVIDIA
 
 The project started as work on structural model fine-tuning and has grown into a general-purpose serving runtime for local and small-cluster inference.
 
-## New in v0.5.1
+## New in v0.5.2
 
-- **Multi-turn prompt-cache reuse for snapshot-only families.** A second snapshot is taken during prefill at the history boundary, so the next turn of a conversation matches it by construction instead of missing on template scaffolds, dropped `<think>` blocks, or retokenized replies. On `qwen3.5-0.8b-4bit` turn 2 goes from 0 to 150 cached tokens of 189. `MLXCEL_DISABLE_BOUNDARY_SNAPSHOT=1` restores the previous prefill.
-- **Background warm-up of the next turn's prefix.** After a completion the server prefills the expected history prefix while it is idle, taking turn 2 to 194 cached tokens of 227 and cutting uncached tokens 57%. Warm-ups never start while foreground work exists. `MLXCEL_DISABLE_CACHE_WARMUP=1` turns it off.
-- **Snapshot budget is operator-controlled and conversations no longer evict each other.** A newer snapshot supersedes its own ancestor within a session, and `--prompt-cache-snapshot-capacity-bytes`, `--prompt-cache-snapshot-max-entries`, and `--prompt-cache-snapshot-ttl` are on both binaries with `MLXCEL_*` equivalents.
-- **Gemma 4 restores from a snapshot at the longest common prefix**, not only an exact one, so a diverging turn still reuses what it shares. Recurrent families are unchanged.
-- **`-m/--model` accepts `--revision <REV>`** on `generate`, `run`, `serve`, `inspect`, and `mlxcel-server`.
-- **`mixed_4_8` checkpoints load on all 16 families sharing the fused QKV projection**, with nothing dequantized or requantized.
-- **DRY sequence breakers reach the sampler.** `--dry-sequence-breaker` was parsed and discarded, and per-request breakers were dropped at `temperature <= 0`; both configurations now generate what they ask for.
-- **`mlxcel detect` returns boxes that match the page.** RT-DETRv2 outputs were read as f32 from a bf16 buffer, which misaligned every query, label, and box.
+- **Two silent correctness fixes on M5-class hardware.** A VLM wrapper and three server prefill paths padded prompts to a 32-token tile on models whose recurrent state cannot survive it, so Qwen 3.5, Mamba, Jamba, RWKV, Nemotron-H, Falcon-H1 and the other hybrid families produced changed greedy output whenever a prompt was not already tile-aligned. Nothing failed; the text just differed.
+- **MTP speculative decoding works on Apple GPU generation 15 and later.** The exactness gate used to decline there every time, so MTP was off on the hardware it pays on. It now recovers byte-identity by selecting the kernel that has it, at about 1.04x classic decode where declining is 1.00x.
+- **The MTP drafter is quantized at load, 810 MiB to 228 MiB.** The drafter step drops from 10.5 to 2.7 ms per round and throughput goes to roughly 1.5x classic decode, with acceptance unmoved and output byte-identical.
+- **MLX moves to upstream `9a795735`,** 168 commits on, with the four drifted in-tree overlays rebased against it.
+- **`MLXCEL_METAL4_ATTENTION=0`** turns off the M5 neural-accelerator attention route, so its effect can be measured instead of patched out and rebuilt.
 
 ## New in v0.5.0
 
