@@ -29,9 +29,14 @@ function(mlx_apply_source_overlays mlx_source_dir)
   # The steel/gemm/mma.h overlay (issue #217: upstream safe-load fix
   # cherry-pick, PRs #3560/#3565) was retired when the pin moved to
   # 2026-06-11 upstream main, which carries the fix natively (issue #222).
+  # quantized.cpp carries one delta, the MLXCEL_QMV_WIDE off-switch on
+  # `use_qmv_wide` (issue #1187). Upstream has no equivalent knob and the
+  # predicate is unchanged as of pin 9a795735, so it has to be overlaid here.
+  # Refresh the file wholesale on a bump and re-apply that one hunk.
   set(_metal_patch_files
       "mlx/backend/metal/compiled.cpp"
-      "mlx/backend/metal/kernels/utils.h")
+      "mlx/backend/metal/kernels/utils.h"
+      "mlx/backend/metal/quantized.cpp")
   foreach(_patch_file ${_metal_patch_files})
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/patches/${_patch_file}")
       configure_file(
