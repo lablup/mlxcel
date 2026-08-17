@@ -65,6 +65,15 @@ struct MtpRoundDiagnostics {
     verify_forward_ms: f64,
     speculative_walk_ms: f64,
     verify_finalize_ms: f64,
+    /// Cumulative [`Drafter::accept_verified_tokens`] wall-clock (ms).
+    ///
+    /// Before issue #1185 this had no counter, so the accept hook was
+    /// invisible and landed in the round residual alongside sampling and
+    /// argmax. For the Qwen 3.5 MTP drafter the hook is a second drafter
+    /// forward per round (it appends the accepted tokens against the
+    /// target's true hidden and precomputes the next seed), which makes it
+    /// one of the larger uninstrumented pieces rather than bookkeeping.
+    accept_hook_ms: f64,
     /// Classic-step probe rounds executed (issue #736): drafterless rounds
     /// whose `[1, 1]` verify forward stands in for a classic decode step.
     /// Kept out of `rounds`/acceptance so probes never dilute the
@@ -142,6 +151,7 @@ impl MtpRoundDiagnostics {
         prompt_tokens: usize,
         generated_tokens: usize,
         decode_time: Duration,
+        draft_profile: Option<crate::drafter::DraftStepProfile>,
     ) {
         tracing::info!(
             block_size,
@@ -162,10 +172,47 @@ impl MtpRoundDiagnostics {
             verify_forward_ms = self.verify_forward_ms,
             speculative_walk_ms = self.speculative_walk_ms,
             verify_finalize_ms = self.verify_finalize_ms,
+            accept_hook_ms = self.accept_hook_ms,
             probe_rounds = self.probe_rounds,
             probe_ms = self.probe_ms,
             decode_ms = duration_ms(decode_time),
             "MTP round-loop diagnostics",
+        );
+
+        // Second line rather than more fields on the first: the drafter
+        // split only exists for drafters that instrument themselves, and
+        // its interpretation depends on `synchronized`, which needs saying
+        // next to the numbers rather than three fields away (issue #1185,
+        // Phase 0).
+        let Some(profile) = draft_profile.filter(|p| p.steps > 0) else {
+            return;
+        };
+        tracing::info!(
+            steps = profile.steps,
+            ids_ms = profile.step.ids_ms,
+            layers_ms = profile.step.layers_ms,
+            lm_head_ms = profile.step.lm_head_ms,
+            sample_ms = profile.step.sample_ms,
+            readback_ms = profile.step.readback_ms,
+            components_ms = profile.step.components_ms(),
+            total_ms = profile.total_ms,
+            per_step_ms = profile.per_step_ms(),
+            other_forwards = profile.other_forwards,
+            other_ids_ms = profile.other.ids_ms,
+            other_layers_ms = profile.other.layers_ms,
+            other_lm_head_ms = profile.other.lm_head_ms,
+            other_sample_ms = profile.other.sample_ms,
+            other_readback_ms = profile.other.readback_ms,
+            other_components_ms = profile.other.components_ms(),
+            other_dominant = profile.other.dominant(),
+            synchronized = profile.synchronized,
+            dominant = profile.dominant_component().unwrap_or("unattributed"),
+            "MTP drafter step profile{}",
+            if profile.synchronized {
+                ""
+            } else {
+                " (MLXCEL_MTP_DRAFT_PROFILE unset: components are graph-build                  time, only total_ms and per_step_ms are load-bearing)"
+            },
         );
     }
 }
@@ -757,6 +804,7 @@ impl<T: MtpTarget> MtpGenerator<T> {
             state.prompt_len,
             state.emitted_count,
             state.decode_elapsed,
+            self.drafter.draft_profile(),
         );
         let summary = state.diagnostics.summary();
         self.last_acceptance = Some(summary);
@@ -1003,16 +1051,24 @@ impl<T: MtpTarget> MtpGenerator<T> {
         // Early-finish rounds returned above without this call — the drafter
         // is reset before its next session, so nothing is lost. Failures
         // degrade draft quality only and are logged, not fatal.
-        if let Some(hidden_full) = state.verify_out.verify_hidden_full.as_ref()
-            && let Err(e) = self.drafter.accept_verified_tokens(
+        if let Some(hidden_full) = state.verify_out.verify_hidden_full.as_ref() {
+            let accept_started = Instant::now();
+            let outcome = self.drafter.accept_verified_tokens(
                 hidden_full,
                 &draft_tokens,
                 walk.accepted,
                 &new_tokens,
                 sampling,
-            )
-        {
-            tracing::warn!("MTP drafter accept_verified_tokens failed: {e}; drafter history reset");
+            );
+            // Charged whether or not the hook succeeded: a failing hook
+            // still spent the time, and hiding that would understate the
+            // round exactly where issue #1185 needs it accounted for.
+            state.diagnostics.accept_hook_ms += duration_ms(accept_started.elapsed());
+            if let Err(e) = outcome {
+                tracing::warn!(
+                    "MTP drafter accept_verified_tokens failed: {e}; drafter history reset"
+                );
+            }
         }
 
         // Next round's bonus is the last emitted token. `walk.new_tokens`

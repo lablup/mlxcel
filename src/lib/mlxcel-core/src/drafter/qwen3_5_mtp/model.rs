@@ -54,13 +54,16 @@
 //! verify pass alone.
 
 use crate::cache::KVCache;
-use crate::drafter::{Drafter, DrafterError, DrafterKind, SharedKv};
+use crate::drafter::{
+    DraftForwardCost, DraftStepProfile, Drafter, DrafterError, DrafterKind, SharedKv,
+};
 use crate::ffi::{self, MlxArray};
 use crate::generate::{LanguageModel, SamplingConfig};
 use crate::layers::{RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use crate::weights::WeightMap;
 use cxx::UniquePtr;
 use std::path::Path;
+use std::time::Instant;
 
 use super::config::Qwen35MtpConfig;
 use super::layer::Qwen35MtpDecoderLayer;
@@ -71,6 +74,26 @@ enum MtpLmHead {
     Linear(UnifiedLinear),
     /// Tied checkpoints project through the target embedding table.
     TiedEmbed(UnifiedEmbedding),
+}
+
+/// Force `array` to evaluate when `MLXCEL_MTP_DRAFT_PROFILE` is on, so the
+/// next timer measures its own GPU work rather than the previous stage's
+/// deferred graph.
+///
+/// A no-op by default. The syncs are what make the component split real
+/// and also what make the profiled total run above the honest step cost,
+/// which is why the mode is opt-in and the log line reports which one
+/// produced the numbers (issue #1185, Phase 0).
+#[inline]
+fn maybe_sync(array: &MlxArray) {
+    if crate::drafter::draft_step_profiling_enabled() {
+        ffi::eval(array);
+    }
+}
+
+#[inline]
+fn ms_since(start: Instant, end: Instant) -> f64 {
+    end.saturating_duration_since(start).as_secs_f64() * 1e3
 }
 
 /// Qwen 3.5 MTP drafter — `fc`-fused single-decoder-layer head with its own
@@ -116,6 +139,15 @@ pub struct Qwen35MtpDraftModel {
     /// Diagnostics only — the trait's `kv_offset` / `position` arguments.
     kv_valid_len: i32,
     position: i32,
+    /// Per-component attribution for this drafter's steps (issue #1185,
+    /// Phase 0). Accumulates across the session; the round loop reads it
+    /// through [`Drafter::draft_profile`] at the end of a run.
+    profile: DraftStepProfile,
+    /// Whether the forward currently running belongs to a `draft_block`
+    /// step. `forward_hidden_stack` is also reached from the accept hook
+    /// and the prefill seed, and charging those to the step bucket makes
+    /// the step components sum above the step total.
+    in_draft_step: bool,
 }
 
 impl std::fmt::Debug for Qwen35MtpDraftModel {
@@ -217,6 +249,11 @@ impl Qwen35MtpDraftModel {
             round_appended: 0,
             kv_valid_len: 0,
             position: 0,
+            profile: DraftStepProfile {
+                synchronized: crate::drafter::draft_step_profiling_enabled(),
+                ..DraftStepProfile::default()
+            },
+            in_draft_step: false,
         })
     }
 
@@ -336,6 +373,21 @@ impl Qwen35MtpDraftModel {
     /// pre_fc_norm_hidden(hidden)))))`. Appends `S` entries to every layer
     /// cache and advances `next_position` by `S`. Returns the post-`norm`
     /// hidden `[1, S, H]`.
+    /// The component bucket the current forward belongs to.
+    ///
+    /// `forward_hidden_stack` serves three callers with different meanings
+    /// to the round loop: a `draft_block` step, the accept hook's append
+    /// forward, and the prefill seed. Only the first is what
+    /// `per_step_ms` describes.
+    fn active_cost(&mut self) -> &mut DraftForwardCost {
+        if self.in_draft_step {
+            &mut self.profile.step
+        } else {
+            self.profile.other_forwards += 1;
+            &mut self.profile.other
+        }
+    }
+
     fn forward_hidden_stack(
         &mut self,
         token_ids: &[i32],
@@ -353,11 +405,15 @@ impl Qwen35MtpDraftModel {
             "hidden seq len must match token count"
         );
 
+        let ids_started = Instant::now();
         let ids = ffi::from_slice_i32(token_ids, &[1, s]);
         let mut tok_embed = target_embed.forward(&ids);
         if self.target_embed_scale != 1.0 {
             tok_embed = crate::ops::multiply_scalar(&tok_embed, self.target_embed_scale);
         }
+        maybe_sync(&tok_embed);
+        let layers_started = Instant::now();
+        self.active_cost().ids_ms += ms_since(ids_started, layers_started);
 
         let a = self.pre_fc_norm_embedding.forward(&tok_embed);
         let b = self.pre_fc_norm_hidden.forward(hidden);
@@ -381,6 +437,8 @@ impl Qwen35MtpDraftModel {
             h = layer.forward(&h, mask.as_deref(), cache, rope_offset);
         }
         let h = self.norm.forward(&h);
+        maybe_sync(&h);
+        self.active_cost().layers_ms += layers_started.elapsed().as_secs_f64() * 1e3;
         self.next_position += s;
         Ok(h)
     }
@@ -408,6 +466,36 @@ impl Qwen35MtpDraftModel {
         );
         ffi::eval(&tok);
         ffi::item_i32(&tok)
+    }
+
+    /// [`Self::sample_one`] with the fused-sample build and the readback
+    /// charged to separate buckets.
+    ///
+    /// The `eval` here is unconditional and is not a profiling artifact:
+    /// the drafter must have the sampled id on the host to feed the next
+    /// step. It is the one place a drafter step synchronizes by
+    /// construction, which is why an unprofiled run attributes all GPU
+    /// work to `readback_ms`.
+    fn sample_one_profiled(
+        &mut self,
+        logits: &MlxArray,
+        sampler: &SamplingConfig,
+        started: Instant,
+    ) -> i32 {
+        let last = ffi::slice_last_logits(logits);
+        let tok = ffi::fused_sample(
+            &last,
+            sampler.temperature,
+            sampler.top_k,
+            sampler.top_p,
+            sampler.min_p,
+        );
+        let readback_started = Instant::now();
+        self.active_cost().sample_ms += ms_since(started, readback_started);
+        ffi::eval(&tok);
+        let id = ffi::item_i32(&tok);
+        self.active_cost().readback_ms += readback_started.elapsed().as_secs_f64() * 1e3;
+        id
     }
 
     /// Compute and stash the next-round seed from the last position of a
@@ -716,16 +804,29 @@ impl Drafter for Qwen35MtpDraftModel {
                 }
             };
 
+        self.in_draft_step = true;
         while tokens.len() < block_size - 1 {
+            let step_started = Instant::now();
             let h = self.forward_hidden_stack(&[tok], &h_prev)?;
             self.round_appended += 1;
+            let lm_head_started = Instant::now();
             let logits = self.project_logits(&h)?;
-            tok = Self::sample_one(&logits, sampler);
+            maybe_sync(&logits);
+            let sampled_started = Instant::now();
+            tok = self.sample_one_profiled(&logits, sampler, sampled_started);
+            self.active_cost().lm_head_ms += ms_since(lm_head_started, sampled_started);
+            self.profile.total_ms += step_started.elapsed().as_secs_f64() * 1e3;
+            self.profile.steps += 1;
             tokens.push(tok);
             h_prev = h;
         }
+        self.in_draft_step = false;
         tokens.truncate(block_size - 1);
         Ok(tokens)
+    }
+
+    fn draft_profile(&self) -> Option<DraftStepProfile> {
+        Some(self.profile)
     }
 
     fn sanitize(&mut self, weights: &mut WeightMap) -> Result<(), DrafterError> {

@@ -573,6 +573,152 @@ impl<'a> std::fmt::Debug for SharedKv<'a> {
 /// [`reset`]: Drafter::reset
 /// [`draft_block`]: Drafter::draft_block
 /// [`sanitize`]: Drafter::sanitize
+/// Per-component wall-clock attribution for one drafter's `draft_block`
+/// steps (issue #1185, Phase 0).
+///
+/// ## The measurement problem this type exists to state honestly
+///
+/// MLX is lazily evaluated. Inside a drafter step the only synchronization
+/// is the `eval` before the sampled id is read back to the host, so timing
+/// the stages as written attributes almost everything to that last bucket:
+/// the earlier timers measure graph *construction*, not the GPU work they
+/// name. A profile collected that way is not wrong, it just does not
+/// answer "which component dominates".
+///
+/// So there are two modes, and the log line says which one produced the
+/// numbers:
+///
+/// - **Default (no extra syncs).** `total_ms` is the honest per-step cost,
+///   identical to what the round loop already charges as `draft_ms`. The
+///   component fields are graph-build time and are reported for
+///   completeness, not for ranking.
+/// - **`MLXCEL_MTP_DRAFT_PROFILE=1`.** Each component evaluates before the
+///   next begins, so its timer captures its own GPU work and the split is
+///   real. The cost is that the syncs break pipelining, so `total_ms` in
+///   this mode runs *above* the unprofiled step cost. The gap between the
+///   two totals is itself the measurement: it is what pipelining buys.
+///
+/// Ranking Phases 1 through 4 of #1185 needs the profiled split; quoting a
+/// step cost needs the unprofiled total. Neither number substitutes for
+/// the other, and reporting one as the other is the error this doc exists
+/// to prevent.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DraftForwardCost {
+    /// Token id upload plus the borrowed target embedding lookup.
+    pub ids_ms: f64,
+    /// Everything from the pre-FC norms through the decoder layers and the
+    /// final norm.
+    pub layers_ms: f64,
+    /// The borrowed target LM head projection.
+    pub lm_head_ms: f64,
+    /// Last-position slice plus `fused_sample`.
+    pub sample_ms: f64,
+    /// `eval` plus the `item_i32` device-to-host readback.
+    pub readback_ms: f64,
+}
+
+impl DraftForwardCost {
+    pub fn components_ms(&self) -> f64 {
+        self.ids_ms + self.layers_ms + self.lm_head_ms + self.sample_ms + self.readback_ms
+    }
+
+    pub fn merge(&mut self, other: &Self) {
+        self.ids_ms += other.ids_ms;
+        self.layers_ms += other.layers_ms;
+        self.lm_head_ms += other.lm_head_ms;
+        self.sample_ms += other.sample_ms;
+        self.readback_ms += other.readback_ms;
+    }
+
+    /// Name of the largest component.
+    pub fn dominant(&self) -> &'static str {
+        [
+            ("ids", self.ids_ms),
+            ("layers", self.layers_ms),
+            ("lm_head", self.lm_head_ms),
+            ("sample", self.sample_ms),
+            ("readback", self.readback_ms),
+        ]
+        .into_iter()
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(name, _)| name)
+        .unwrap_or("none")
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DraftStepProfile {
+    /// `draft_block` steps folded into [`Self::step`].
+    pub steps: usize,
+    /// Component split for the `draft_block` steps.
+    pub step: DraftForwardCost,
+    /// Drafter forwards outside `draft_block`: the accept hook's append
+    /// forward and the prefill seed. Counted separately because the round
+    /// loop charges them to a different bucket (`accept_hook_ms`) and
+    /// folding them into the step split makes the components sum above the
+    /// step total, which is exactly the accounting error this field exists
+    /// to prevent.
+    pub other_forwards: usize,
+    /// Component split for those non-step forwards.
+    pub other: DraftForwardCost,
+    /// Wall-clock across `draft_block` steps, measured end to end rather
+    /// than as the sum of [`Self::step`]'s components, so a gap between the
+    /// two is visible instead of silently absorbed.
+    pub total_ms: f64,
+    /// Whether the components were separated by explicit `eval` calls. When
+    /// false, treat the component fields as graph-build time only.
+    pub synchronized: bool,
+}
+
+impl DraftStepProfile {
+    /// Mean `draft_block` step cost, or 0 when nothing was measured.
+    pub fn per_step_ms(&self) -> f64 {
+        if self.steps == 0 {
+            0.0
+        } else {
+            self.total_ms / self.steps as f64
+        }
+    }
+
+    /// Fold `other` into `self`. `synchronized` is sticky-false: mixing a
+    /// profiled run with an unprofiled one yields the weaker claim.
+    pub fn merge(&mut self, other: &Self) {
+        self.steps += other.steps;
+        self.step.merge(&other.step);
+        self.other_forwards += other.other_forwards;
+        self.other.merge(&other.other);
+        self.total_ms += other.total_ms;
+        self.synchronized = self.synchronized && other.synchronized;
+    }
+
+    /// Name of the largest step component, or `None` when nothing was
+    /// measured or the split is not trustworthy.
+    pub fn dominant_component(&self) -> Option<&'static str> {
+        if self.steps == 0 || !self.synchronized {
+            return None;
+        }
+        Some(self.step.dominant())
+    }
+}
+
+/// `MLXCEL_MTP_DRAFT_PROFILE`: evaluate each drafter-step component before
+/// the next begins, so [`DraftStepProfile`]'s split is real GPU time
+/// rather than graph-build time.
+///
+/// Off by default because the extra syncs break pipelining and inflate the
+/// step cost. Read once per process.
+pub fn draft_step_profiling_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("MLXCEL_MTP_DRAFT_PROFILE")
+            .map(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                matches!(v.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false)
+    })
+}
+
 pub trait Drafter {
     /// Bind the drafter to its target for embed and LM-head resolution.
     ///
@@ -697,6 +843,18 @@ pub trait Drafter {
         sampler: &crate::generate::SamplingConfig,
     ) -> Result<(), DrafterError> {
         Ok(())
+    }
+
+    /// Per-component attribution for the drafter steps run so far, when
+    /// this drafter collects it (issue #1185, Phase 0).
+    ///
+    /// `None` is "this drafter does not instrument its step", not "the
+    /// step was free". Only the Qwen 3.5 MTP drafter implements it today;
+    /// the round loop logs whatever it gets and omits the fields
+    /// otherwise, so adding a second implementation needs no round-loop
+    /// change.
+    fn draft_profile(&self) -> Option<DraftStepProfile> {
+        None
     }
 
     /// Extend a **stateful** MTP drafter's cache after a verify round.
@@ -1425,5 +1583,108 @@ mod tests {
         // the contract is exercised in the trait object-safety check
         // above plus the make_cache assertion here.
         let _ = &mut d;
+    }
+}
+
+#[cfg(test)]
+mod draft_step_profile_tests {
+    use super::{DraftForwardCost, DraftStepProfile};
+
+    fn cost(ids: f64, layers: f64, lm_head: f64, sample: f64, readback: f64) -> DraftForwardCost {
+        DraftForwardCost {
+            ids_ms: ids,
+            layers_ms: layers,
+            lm_head_ms: lm_head,
+            sample_ms: sample,
+            readback_ms: readback,
+        }
+    }
+
+    #[test]
+    fn components_sum_the_five_buckets() {
+        assert_eq!(cost(1.0, 2.0, 4.0, 8.0, 16.0).components_ms(), 31.0);
+    }
+
+    #[test]
+    fn dominant_names_the_largest_bucket() {
+        assert_eq!(cost(1.0, 2.0, 4.0, 8.0, 16.0).dominant(), "readback");
+        // The measured M1 Ultra shape: the drafter's own layers dominate,
+        // with the borrowed LM head second.
+        assert_eq!(cost(34.3, 387.1, 111.8, 0.7, 32.8).dominant(), "layers");
+    }
+
+    #[test]
+    fn an_unsynchronized_profile_refuses_to_name_a_dominant_component() {
+        // Without the per-stage evals every stage but the readback measures
+        // graph-build time, so naming a winner would be a false claim. This
+        // is the guard that keeps the log line honest by default.
+        let profile = DraftStepProfile {
+            steps: 48,
+            step: cost(2.6, 7.0, 0.2, 0.3, 491.3),
+            total_ms: 501.6,
+            synchronized: false,
+            ..DraftStepProfile::default()
+        };
+        assert_eq!(profile.dominant_component(), None);
+
+        let synced = DraftStepProfile {
+            synchronized: true,
+            ..profile
+        };
+        assert_eq!(synced.dominant_component(), Some("readback"));
+    }
+
+    #[test]
+    fn a_profile_with_no_steps_names_nothing_and_divides_by_nothing() {
+        let empty = DraftStepProfile {
+            synchronized: true,
+            ..DraftStepProfile::default()
+        };
+        assert_eq!(empty.dominant_component(), None);
+        assert_eq!(empty.per_step_ms(), 0.0);
+    }
+
+    #[test]
+    fn per_step_ms_divides_the_wall_clock_by_the_step_count() {
+        let profile = DraftStepProfile {
+            steps: 48,
+            total_ms: 567.8,
+            synchronized: true,
+            ..DraftStepProfile::default()
+        };
+        assert!((profile.per_step_ms() - 11.829).abs() < 1e-3);
+    }
+
+    #[test]
+    fn merging_keeps_the_buckets_apart_and_weakens_synchronized() {
+        // The bucket separation is the fix for an accounting error that
+        // shipped in the first cut: the accept hook's forward landed in the
+        // step components, making them sum to 2.3x the step total.
+        let mut a = DraftStepProfile {
+            steps: 2,
+            step: cost(1.0, 1.0, 1.0, 1.0, 1.0),
+            other_forwards: 4,
+            other: cost(2.0, 2.0, 0.0, 0.0, 0.0),
+            total_ms: 10.0,
+            synchronized: true,
+        };
+        let b = DraftStepProfile {
+            steps: 3,
+            step: cost(1.0, 1.0, 1.0, 1.0, 1.0),
+            other_forwards: 1,
+            other: cost(1.0, 1.0, 0.0, 0.0, 0.0),
+            total_ms: 20.0,
+            synchronized: false,
+        };
+        a.merge(&b);
+        assert_eq!(a.steps, 5);
+        assert_eq!(a.other_forwards, 5);
+        assert_eq!(a.step.components_ms(), 10.0);
+        assert_eq!(a.other.components_ms(), 6.0);
+        assert_eq!(a.total_ms, 30.0);
+        assert!(
+            !a.synchronized,
+            "mixing a profiled run with an unprofiled one must yield the weaker claim"
+        );
     }
 }
