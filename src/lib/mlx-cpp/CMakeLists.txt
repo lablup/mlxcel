@@ -114,7 +114,7 @@ else()
     #     `)` as ending the declaration, so one there would hide the tag
     #     instead of being read past.
     # Both parsers fail loudly rather than guess when the shape does not hold.
-    GIT_TAG 2c46b953db88965c4270cc7306eda6887a3247f2)
+    GIT_TAG 9a795735ad9a42664e08f42361b405ed570bcf1a)
 
   # Use FetchContent_Populate + add_subdirectory so we can apply source
   # overlays before the MLX build system processes the files.

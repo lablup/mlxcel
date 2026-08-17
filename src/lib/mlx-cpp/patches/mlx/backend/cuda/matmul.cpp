@@ -333,8 +333,8 @@ void GatherMM::eval_gpu(const std::vector<array>& inputs, array& out) {
   auto& lhs_indices = inputs[2];
   auto& rhs_indices = inputs[3];
 
-  // Return 0s if either input is empty.
-  if (a.size() == 0 || b.size() == 0) {
+  // Return 0s if the output or either input is empty.
+  if (out.size() == 0 || a.size() == 0 || b.size() == 0) {
     array zero(0, a.dtype());
     encoder.add_temporary(zero);
     fill_gpu(zero, out, s);
