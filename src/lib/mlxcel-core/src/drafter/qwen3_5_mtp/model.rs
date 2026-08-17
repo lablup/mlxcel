@@ -165,6 +165,24 @@ impl std::fmt::Debug for Qwen35MtpDraftModel {
     }
 }
 
+/// `MLXCEL_MTP_QUANTIZE_DRAFTER=0` keeps a dense drafter dense.
+///
+/// On by default because the measurement says the cost is throughput-only:
+/// the target verifies every proposal, so the switch trades acceptance, not
+/// correctness, and acceptance did not move measurably (#1185 Phase 3). Read
+/// once per process, matching the other `MLXCEL_*` switches.
+fn quantize_drafter_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("MLXCEL_MTP_QUANTIZE_DRAFTER")
+            .map(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                !matches!(v.as_str(), "0" | "false" | "no" | "off")
+            })
+            .unwrap_or(true)
+    })
+}
+
 impl Qwen35MtpDraftModel {
     /// Construct from a checkpoint directory containing `config.json` and
     /// safetensors shards. Used by [`crate::drafter::load_drafter`]'s `Mtp`
@@ -185,6 +203,13 @@ impl Qwen35MtpDraftModel {
         let mut weights = crate::weights::load_weights_from_dir(path)
             .map_err(|reason| DrafterError::WeightLoad { reason })?;
         Self::sanitize_weights(&mut weights);
+        // Quantize the drafter's own projections before the dtype pass, so a
+        // dense checkpoint costs what a 4-bit one costs (issue #1185 Phase 3).
+        // Must run first: the bf16 -> f16 conversion below deliberately skips
+        // quantization auxiliaries, and the packed payload is uint32 either
+        // way, so ordering it after would only leave scales as f16 where every
+        // shipped checkpoint keeps them bf16.
+        Self::quantize_dense_projections(&mut weights, &config);
         // Apple Silicon precision: bf16 → f16 on non-quantized tensors at
         // the weight-loading boundary, matching the target model loaders and
         // the DFlash drafter loader. The published drafter is bf16; the
@@ -192,6 +217,80 @@ impl Qwen35MtpDraftModel {
         // concat/matmul would silently promote to f32.
         crate::drafter::dflash::drafter::convert_bf16_to_f16_non_quantized(&mut weights);
         Self::from_weights(&weights, config)
+    }
+
+    /// Quantize the drafter's dense 2-D projections in place, to the scheme
+    /// its own config declares (group 64, 4-bit affine by default).
+    ///
+    /// The drafter is memory-bound and ships bf16: 810 MiB of weights read
+    /// once per drafted token. Quantizing to 4-bit takes that to 228 MiB, and
+    /// measured on an M5 Max the drafter step went from 10.5 to 2.7 ms per
+    /// round while the target verify forward was unchanged (#1185).
+    ///
+    /// Safe by construction rather than by tolerance: the drafter only
+    /// proposes and the target verifies every proposal, so drafter numerics
+    /// cannot reach the output. The exposure is acceptance rate, and that was
+    /// measured across two generation lengths: 0.683 to 0.660 at 120 tokens
+    /// and 0.650 to 0.659 at 300, which is noise in both directions. Output
+    /// stayed byte-identical to classic decode.
+    ///
+    /// Skips a tensor whose `.scales` sibling already exists (a pre-converted
+    /// checkpoint) and one whose contraction axis is not a multiple of the
+    /// group size, leaving those dense rather than failing the load.
+    ///
+    /// `MLXCEL_MTP_QUANTIZE_DRAFTER=0` keeps the checkpoint's own precision,
+    /// for an acceptance A/B on a pairing this has not been measured on.
+    fn quantize_dense_projections(weights: &mut WeightMap, config: &Qwen35MtpConfig) {
+        if !quantize_drafter_enabled() {
+            return;
+        }
+        let text_cfg = config.text_config();
+        let (group_size, bits) = (text_cfg.group_size(), text_cfg.bits());
+
+        let candidates: Vec<String> = weights
+            .iter()
+            .filter(|(key, value)| {
+                key.ends_with(".weight")
+                    && ffi::array_shape(value).len() == 2
+                    && !weights.contains_key(&format!("{}.scales", key.trim_end_matches(".weight")))
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+
+        let mut converted = 0usize;
+        for key in candidates {
+            let prefix = key.trim_end_matches(".weight").to_string();
+            let shape = weights.get(&key).map(|w| ffi::array_shape(w));
+            let Some(shape) = shape else { continue };
+            if shape[shape.len() - 1] % group_size != 0 {
+                continue;
+            }
+            let quantized = {
+                let Some(w) = weights.get(&key) else { continue };
+                ffi::quantize_weights_with_mode(w, group_size, bits, "affine")
+            };
+            let packed = ffi::quantized_weights_w(&quantized);
+            let scales = ffi::quantized_weights_scales(&quantized);
+            let has_biases = ffi::quantized_weights_has_biases(&quantized);
+            weights.insert(key.clone(), packed);
+            weights.insert(format!("{prefix}.scales"), scales);
+            if has_biases {
+                weights.insert(
+                    format!("{prefix}.biases"),
+                    ffi::quantized_weights_biases(&quantized),
+                );
+            }
+            converted += 1;
+        }
+
+        if converted > 0 {
+            tracing::debug!(
+                converted,
+                group_size,
+                bits,
+                "quantized the MTP drafter's dense projections at load"
+            );
+        }
     }
 
     /// Construct from an in-memory weight map (already sanitized). Used by
