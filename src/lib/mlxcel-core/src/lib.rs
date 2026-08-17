@@ -535,6 +535,17 @@ mod ffi {
         /// Seed the global MLX random number generator
         fn random_seed(seed: u64);
 
+        /// Force every quantized matmul with `M >= 2` onto plain `qmv`
+        /// instead of `qmv_wide`, which is what restores block-vs-chain
+        /// bitwise equality on Apple GPU generation 15 and later (#1187).
+        /// Process-wide and immediate. A build without the Metal backend
+        /// ignores it.
+        fn set_qmv_wide(enabled: bool);
+
+        /// Whether `qmv_wide` is currently enabled. `true` on a build
+        /// without the Metal backend.
+        fn qmv_wide_enabled() -> bool;
+
         /// Random categorical sampling
         fn random_categorical(logits: &MlxArray, axis: i32) -> UniquePtr<MlxArray>;
 

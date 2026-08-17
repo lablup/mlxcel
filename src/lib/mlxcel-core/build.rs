@@ -114,6 +114,16 @@ fn main() {
         // included by the generated cxx bridge, so suppress it for all profiles.
         .flag_if_supported("-Wno-deprecated-copy");
 
+    // The qmv_wide off-switch (issue #1187) lives in the
+    // mlx/backend/metal/quantized.cpp overlay, so its symbol exists only when
+    // the Metal backend is actually compiled. `__APPLE__` is not that
+    // condition: a macOS build without the `metal` feature sets
+    // MLX_BUILD_METAL=OFF and would link against a symbol that was never
+    // emitted. Gate on the feature that decides whether the file is built.
+    if std::env::var("CARGO_FEATURE_METAL").is_ok() {
+        bridge.define("MLXCEL_BRIDGE_METAL_BACKEND", None);
+    }
+
     // Add optimization flags for release builds
     #[cfg(not(debug_assertions))]
     {

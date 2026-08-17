@@ -177,9 +177,101 @@ fn verdict_cache() -> &'static Mutex<HashMap<ProbeKey, bool>> {
 /// process and never on the request path after that. The decision, not the raw verdict, is what gets cached: with
 /// `MLXCEL_MTP_ALLOW_INEXACT` set a diverging probe still returns `true`,
 /// and the log line says so.
-pub fn mtp_exactness_gate<F>(key: ProbeKey, probe: F) -> bool
+/// Whether the operator pinned `MLXCEL_QMV_WIDE` themselves.
+///
+/// An explicit setting wins over the gate's own retry: someone who asked for
+/// a kernel selection gets it, and finds out from the decline message that
+/// the contract was unreachable under it, rather than silently getting the
+/// other one.
+fn qmv_wide_pinned_by_operator() -> bool {
+    static PINNED: OnceLock<bool> = OnceLock::new();
+    *PINNED.get_or_init(|| std::env::var("MLXCEL_QMV_WIDE").is_ok())
+}
+
+/// The `qmv_wide` switch, indirected so the gate's control flow is testable
+/// without touching a process-wide kernel selection.
+///
+/// Under `cfg(test)` this is a thread-local, so a test that drives the retry
+/// cannot perturb the numeric tests libtest runs beside it. That matters here:
+/// turning the switch off makes concurrent block-vs-chain comparisons *more*
+/// exact, so a leaked toggle would flip unrelated known-failing tests to
+/// passing at random and cost the suite its determinism. The live path is
+/// covered by the CLI runs recorded on #1187, not by these unit tests.
+#[cfg(not(test))]
+fn qmv_wide_switch_get() -> bool {
+    mlxcel_core::qmv_wide_enabled()
+}
+
+#[cfg(not(test))]
+fn qmv_wide_switch_set(enabled: bool) {
+    mlxcel_core::set_qmv_wide(enabled);
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_QMV_WIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+#[cfg(test)]
+fn qmv_wide_switch_get() -> bool {
+    TEST_QMV_WIDE.with(|c| c.get())
+}
+
+#[cfg(test)]
+fn qmv_wide_switch_set(enabled: bool) {
+    TEST_QMV_WIDE.with(|c| c.set(enabled));
+}
+
+/// Re-probe with `qmv_wide` disabled, keeping it off when that is what makes
+/// the block byte-identical.
+///
+/// `qmv_wide` is MLX's faster kernel for `M >= 2` quantized matmuls on Apple
+/// GPU generation 15 and later, and it reduces along K in a different order
+/// than the `qmv` that `M == 1` takes. That difference is the whole reason a
+/// verify block stops matching the single-token chain on this hardware, so
+/// turning it off is the one lever that buys the contract back without
+/// giving up speculative decoding (#1187).
+///
+/// Returns `true` when the retry was exact, in which case the switch is left
+/// off for the rest of the process. It is deliberately not restored: it is a
+/// per-process kernel selection, the exact arm stays correct for every other
+/// caller, and re-enabling it would break the very block this gate just
+/// approved. The cost is real and measured, about 17 to 20 percent on the
+/// verify forward, so the log line says what was traded for what.
+fn retry_without_qmv_wide<F>(
+    key: ProbeKey,
+    probe: &mut F,
+    first: &BlockChainExactness,
+) -> Option<bool>
 where
-    F: FnOnce() -> BlockChainExactness,
+    F: FnMut() -> BlockChainExactness,
+{
+    if qmv_wide_pinned_by_operator() || !qmv_wide_switch_get() {
+        return None;
+    }
+
+    qmv_wide_switch_set(false);
+    let retry = probe();
+    if retry.is_equal() {
+        tracing::info!(
+            block_size = key.block_size,
+            "MTP exactness probe failed under qmv_wide ({}) and passed without it. \
+             Disabling qmv_wide for this process to keep the temperature-0 \
+             byte-identity contract; the verify forward costs about 17 to 20 \
+             percent more. Set MLXCEL_QMV_WIDE=1 to pin the faster kernel and \
+             decline MTP instead.",
+            first.reason()
+        );
+        Some(true)
+    } else {
+        qmv_wide_switch_set(true);
+        Some(false)
+    }
+}
+
+pub fn mtp_exactness_gate<F>(key: ProbeKey, mut probe: F) -> bool
+where
+    F: FnMut() -> BlockChainExactness,
 {
     if let Ok(cache) = verdict_cache().lock()
         && let Some(decision) = cache.get(&key)
@@ -188,7 +280,13 @@ where
     }
 
     let verdict = probe();
-    let decision = verdict.is_equal() || allow_inexact();
+    let retried = if verdict.is_equal() {
+        None
+    } else {
+        retry_without_qmv_wide(key, &mut probe, &verdict)
+    };
+    let exact = verdict.is_equal() || retried == Some(true);
+    let decision = exact || allow_inexact();
 
     if verdict.is_equal() {
         tracing::info!(
@@ -196,6 +294,8 @@ where
             "MTP exactness probe passed: {}",
             verdict.reason()
         );
+    } else if exact {
+        // The retry logged what it traded; nothing to add here.
     } else if decision {
         tracing::warn!(
             block_size = key.block_size,
@@ -205,12 +305,20 @@ where
             verdict.reason()
         );
     } else {
+        let also_tried = match retried {
+            Some(false) => " Disabling qmv_wide did not make it exact either.",
+            None if qmv_wide_pinned_by_operator() => {
+                " The qmv_wide retry was skipped because MLXCEL_QMV_WIDE is pinned."
+            }
+            _ => "",
+        };
         tracing::warn!(
             block_size = key.block_size,
-            "MTP declined: {}. Falling back to classic decode. Set \
+            "MTP declined: {}.{} Falling back to classic decode. Set \
              MLXCEL_MTP_ALLOW_INEXACT=1 to engage anyway and forfeit the \
              temperature-0 byte-identity contract.",
-            verdict.reason()
+            verdict.reason(),
+            also_tried
         );
     }
 

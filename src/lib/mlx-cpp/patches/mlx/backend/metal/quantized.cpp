@@ -19,6 +19,7 @@
 // upstream, and the value is read once per process because this sits on the
 // dispatch path of every quantized matmul.
 
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 
@@ -556,24 +557,31 @@ void qmv(
   compute_encoder.dispatch_threadgroups(grid_dims, group_dims);
 }
 
-// mlxcel: MLXCEL_QMV_WIDE=0 (or false/no/off) forces every mode and every
-// generation onto plain qmv. Evaluated once; a static local initializer is
-// thread-safe since C++11 and this is read from the dispatch path.
-inline bool qmv_wide_enabled() {
-  static const bool enabled = [] {
+// mlxcel: the qmv_wide off-switch. Seeded from MLXCEL_QMV_WIDE on first
+// touch, then settable at runtime through mlxcel_set_qmv_wide so the MTP
+// gate can decide by measurement instead of asking the operator.
+//
+// Relaxed ordering is deliberate. The flag selects between two kernels that
+// compute the same function to different last-ulp results, so a stale read
+// costs precision, never correctness, and this sits on the dispatch path of
+// every quantized matmul. Callers must set it before the work whose kernel
+// choice they mean to pin, and MLX evaluates lazily, so "before the work"
+// means before the eval that forces it, not before the graph is built.
+std::atomic<bool>& mlxcel_qmv_wide_flag() {
+  static std::atomic<bool> flag{[] {
     const char* raw = std::getenv("MLXCEL_QMV_WIDE");
     if (raw == nullptr) {
       return true;
     }
     return !(std::strcmp(raw, "0") == 0 || std::strcmp(raw, "false") == 0 ||
              std::strcmp(raw, "no") == 0 || std::strcmp(raw, "off") == 0);
-  }();
-  return enabled;
+  }()};
+  return flag;
 }
 
 // affine qmv_wide only beats qmv on gen-15+; fp benefits on every gen.
 inline bool use_qmv_wide(const std::string& mode, metal::Device& d) {
-  return qmv_wide_enabled() &&
+  return mlxcel_qmv_wide_flag().load(std::memory_order_relaxed) &&
       (mode != "affine" || d.get_architecture_gen() >= 15);
 }
 
@@ -2156,6 +2164,18 @@ void fast::ConvertFP8::eval_gpu(
   auto& in = inputs[0];
   auto& out = outputs[0];
   unary_op_gpu(inputs, out, name(), stream());
+}
+
+// mlxcel: runtime entry point for the qmv_wide off-switch, called through
+// the cxx bridge (mlxcel_core::set_qmv_wide). Declared here rather than in a
+// header because upstream owns every header in this tree and an overlay that
+// adds one would drift on the next pin bump.
+void mlxcel_set_qmv_wide(bool enabled) {
+  mlxcel_qmv_wide_flag().store(enabled, std::memory_order_relaxed);
+}
+
+bool mlxcel_qmv_wide(void) {
+  return mlxcel_qmv_wide_flag().load(std::memory_order_relaxed);
 }
 
 } // namespace mlx::core

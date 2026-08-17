@@ -117,6 +117,71 @@ fn a_diverging_probe_declines_unless_the_override_is_set() {
     );
 }
 
+/// A probe that diverges under `qmv_wide` and agrees without it must engage
+/// MTP rather than decline, because that is the whole point of the retry
+/// (#1187): on Apple GPU generation 15 and later the `M >= 2` kernel split is
+/// the only thing breaking the contract, and turning it off restores it.
+///
+/// The control flow is what this pins, not the kernel selection. On a build
+/// without the Metal backend the switch is inert, so the second call sees the
+/// same hardware as the first; the stateful closure stands in for the change
+/// the switch makes on hardware that has it. Both builds must reach the probe
+/// exactly twice and engage.
+#[test]
+fn a_probe_that_only_diverges_under_qmv_wide_engages_after_the_retry() {
+    let k = key(9005);
+    let mut calls = 0;
+    let decision = mtp_exactness_gate(k, || {
+        calls += 1;
+        if calls == 1 {
+            BlockChainExactness::Diverges {
+                position: 0,
+                differing_bytes: 165_506,
+                total_bytes: 496_640,
+            }
+        } else {
+            BlockChainExactness::Equal
+        }
+    });
+    assert!(
+        decision,
+        "an exact retry without qmv_wide must engage MTP, not decline"
+    );
+    assert_eq!(calls, 2, "the gate must re-probe exactly once");
+}
+
+/// The retry must not fire when the operator pinned the kernel themselves.
+///
+/// Only assertable when `MLXCEL_QMV_WIDE` is actually set in the ambient
+/// environment, because the pin is read once per process like the other
+/// switches; otherwise this asserts the ordinary diverging-probe contract,
+/// which is the same thing the retry-less build does.
+#[test]
+fn a_pinned_qmv_wide_skips_the_retry() {
+    let pinned = std::env::var("MLXCEL_QMV_WIDE").is_ok();
+    let k = key(9006);
+    let mut calls = 0;
+    let decision = mtp_exactness_gate(k, || {
+        calls += 1;
+        if calls == 1 {
+            BlockChainExactness::Diverges {
+                position: 0,
+                differing_bytes: 4,
+                total_bytes: 1024,
+            }
+        } else {
+            BlockChainExactness::Equal
+        }
+    });
+    if pinned {
+        assert_eq!(calls, 1, "a pinned MLXCEL_QMV_WIDE must skip the re-probe");
+        assert_eq!(decision, super::allow_inexact());
+    } else {
+        assert_eq!(calls, 2, "an unpinned build must re-probe");
+        assert!(decision);
+    }
+}
+
 #[test]
 fn different_block_widths_are_measured_separately() {
     // The whole point of probing: byte-identity holds at one block width
