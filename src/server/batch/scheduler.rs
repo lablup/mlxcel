@@ -5851,27 +5851,29 @@ impl BatchScheduler {
         // text backbone then builds a causal mask sized to the embeddings,
         // matching the CLI generate path. Token-id (text-only) prefill — for
         // VLMs and plain text models alike — is unaffected.
-        let (effective_tokens, pad_mask_opt) =
-            if should_align_prefill() && seq.vlm_embeddings.is_none() {
-                let padded_len = align_to_na_tile(actual_len);
-                if padded_len > actual_len {
-                    let mut padded = suffix_tokens.clone();
-                    padded.resize(padded_len, 0);
-                    // The padding mask anchors to the adopted cache offset so
-                    // the newly-prefilled positions see the correct KV-history
-                    // positions on M5+ hardware.
-                    let mask = create_padded_prefill_mask(
-                        actual_len as i32,
-                        padded_len as i32,
-                        seq.prefill_start_offset as i32,
-                    );
-                    (padded, Some(mask))
-                } else {
-                    (suffix_tokens.clone(), None)
-                }
+        let (effective_tokens, pad_mask_opt) = if self.model.supports_padded_prefill()
+            && should_align_prefill()
+            && seq.vlm_embeddings.is_none()
+        {
+            let padded_len = align_to_na_tile(actual_len);
+            if padded_len > actual_len {
+                let mut padded = suffix_tokens.clone();
+                padded.resize(padded_len, 0);
+                // The padding mask anchors to the adopted cache offset so
+                // the newly-prefilled positions see the correct KV-history
+                // positions on M5+ hardware.
+                let mask = create_padded_prefill_mask(
+                    actual_len as i32,
+                    padded_len as i32,
+                    seq.prefill_start_offset as i32,
+                );
+                (padded, Some(mask))
             } else {
                 (suffix_tokens.clone(), None)
-            };
+            }
+        } else {
+            (suffix_tokens.clone(), None)
+        };
 
         let eff_len = effective_tokens.len() as i32;
         let input = mlxcel_core::from_slice_i32(&effective_tokens, &[1, eff_len]);
@@ -6024,25 +6026,26 @@ impl BatchScheduler {
 
         // Align the first chunk to a 32-token tile boundary on M5+ hardware.
         let actual_chunk_len = chunk.len();
-        let (eff_chunk, pad_mask_opt) = if should_align_prefill() {
-            let padded_len = align_to_na_tile(actual_chunk_len);
-            if padded_len > actual_chunk_len {
-                let mut padded = chunk.to_vec();
-                padded.resize(padded_len, 0);
-                // Mask anchored to the KV offset the adopted prefix already
-                // installed (starts at zero for cold prefills).
-                let mask = create_padded_prefill_mask(
-                    actual_chunk_len as i32,
-                    padded_len as i32,
-                    start as i32,
-                );
-                (padded, Some(mask))
+        let (eff_chunk, pad_mask_opt) =
+            if self.model.supports_padded_prefill() && should_align_prefill() {
+                let padded_len = align_to_na_tile(actual_chunk_len);
+                if padded_len > actual_chunk_len {
+                    let mut padded = chunk.to_vec();
+                    padded.resize(padded_len, 0);
+                    // Mask anchored to the KV offset the adopted prefix already
+                    // installed (starts at zero for cold prefills).
+                    let mask = create_padded_prefill_mask(
+                        actual_chunk_len as i32,
+                        padded_len as i32,
+                        start as i32,
+                    );
+                    (padded, Some(mask))
+                } else {
+                    (chunk.to_vec(), None)
+                }
             } else {
                 (chunk.to_vec(), None)
-            }
-        } else {
-            (chunk.to_vec(), None)
-        };
+            };
 
         let eff_len = eff_chunk.len() as i32;
         let input = mlxcel_core::from_slice_i32(&eff_chunk, &[1, eff_len]);
@@ -6241,23 +6244,24 @@ impl BatchScheduler {
                 offset as i32
             }
         };
-        let (eff_chunk, pad_mask_opt) = if should_align_prefill() {
-            let padded_len = align_to_na_tile(actual_chunk_len);
-            if padded_len > actual_chunk_len {
-                let mut padded = chunk.to_vec();
-                padded.resize(padded_len, 0);
-                let mask = create_padded_prefill_mask(
-                    actual_chunk_len as i32,
-                    padded_len as i32,
-                    kv_offset,
-                );
-                (padded, Some(mask))
+        let (eff_chunk, pad_mask_opt) =
+            if self.model.supports_padded_prefill() && should_align_prefill() {
+                let padded_len = align_to_na_tile(actual_chunk_len);
+                if padded_len > actual_chunk_len {
+                    let mut padded = chunk.to_vec();
+                    padded.resize(padded_len, 0);
+                    let mask = create_padded_prefill_mask(
+                        actual_chunk_len as i32,
+                        padded_len as i32,
+                        kv_offset,
+                    );
+                    (padded, Some(mask))
+                } else {
+                    (chunk.to_vec(), None)
+                }
             } else {
                 (chunk.to_vec(), None)
-            }
-        } else {
-            (chunk.to_vec(), None)
-        };
+            };
 
         let eff_len = eff_chunk.len() as i32;
         let input = mlxcel_core::from_slice_i32(&eff_chunk, &[1, eff_len]);

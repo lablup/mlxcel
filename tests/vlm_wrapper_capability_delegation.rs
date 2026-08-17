@@ -193,3 +193,89 @@ fn a_vision_wrapper_delegates_padded_prefill_when_its_backbone_refuses_it() {
         violations.join("\n  ")
     );
 }
+
+/// Every tile-aligned padded prefill must be guarded on the model predicate.
+///
+/// The wrapper test above covers one way to lose the guard: a type that
+/// answers the trait default instead of forwarding. This covers the other:
+/// a call site that never asks. `src/server/batch/scheduler.rs` had three,
+/// `execute_full_prefill` and both chunked-prefill paths, each gated on
+/// hardware alone, so every hybrid model served on Neural Accelerator
+/// hardware had its recurrent state corrupted by pad positions. The same
+/// file's boundary-snapshot path documents the hazard in a comment and
+/// declines to pad, which is what makes the omission a slip rather than a
+/// disagreement.
+///
+/// The rule is deliberately shallow: the guard must appear within the dozen
+/// lines before the call, either as the predicate itself or as a local bound
+/// to it (`let can_pad_prefill = self.model.supports_padded_prefill()`, which
+/// the batched path does read fourteen lines up). A guard further away than
+/// that is one a reader cannot see either.
+#[test]
+fn every_tile_aligned_prefill_is_guarded_on_the_model_predicate() {
+    const WINDOW: usize = 12;
+    let mut files = Vec::new();
+    rust_sources(&repo_root().join("src"), &mut files);
+    files.sort();
+
+    let mut unguarded = Vec::new();
+    for file in &files {
+        let Ok(src) = fs::read_to_string(file) else {
+            continue;
+        };
+        let lines: Vec<&str> = src.lines().collect();
+        // Locals bound to the predicate count as the guard, so a site that
+        // hoists it out of a loop is not reported as unguarded.
+        let mut aliases: Vec<String> = Vec::new();
+        for line in &lines {
+            let Some(rest) = line.trim().strip_prefix("let ") else {
+                continue;
+            };
+            if !line.contains("supports_padded_prefill") {
+                continue;
+            }
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                aliases.push(name);
+            }
+        }
+        for (i, line) in lines.iter().enumerate() {
+            let trimmed = line.trim_start();
+            // The definition, its doc examples and its own unit tests are not
+            // prefill sites and have nothing to guard.
+            if !line.contains("align_to_na_tile(")
+                || trimmed.starts_with("//")
+                || trimmed.starts_with("fn ")
+                || trimmed.starts_with("pub fn ")
+                || trimmed.starts_with("assert")
+            {
+                continue;
+            }
+            let start = i.saturating_sub(WINDOW);
+            if lines[start..=i].iter().any(|l| {
+                l.contains("supports_padded_prefill")
+                    || aliases.iter().any(|a| l.contains(a.as_str()))
+            }) {
+                continue;
+            }
+            unguarded.push(format!(
+                "{}:{}: {}",
+                file.strip_prefix(repo_root()).unwrap_or(file).display(),
+                i + 1,
+                line.trim()
+            ));
+        }
+    }
+
+    assert!(
+        unguarded.is_empty(),
+        "a tile-aligned prefill must be gated on the model's own \
+         `supports_padded_prefill()`, not on hardware alone: padding a hybrid \
+         model corrupts its conv / SSM / GatedDeltaNet recurrent state, which \
+         trimming the KV caches afterwards does not undo. Unguarded sites:\n  {}",
+        unguarded.join("\n  ")
+    );
+}
