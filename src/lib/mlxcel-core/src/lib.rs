@@ -3199,8 +3199,12 @@ pub fn causal_attention(
         );
     }
 
-    let hw = hardware::get_hardware();
-    if hw.has_neural_accelerator && hw.macos_supports_na {
+    // Shared predicate rather than a second copy of the hardware test:
+    // this site and `layers::should_use_metal4_attention` had drifted apart
+    // to the extent that `MLXCEL_METAL4_ATTENTION=0` would have disabled
+    // the route in one place and not the other, which is worse than no
+    // switch at all for a diagnostic whose whole job is a clean A/B.
+    if layers::should_use_metal4_attention() {
         return layers::metal4_causal_attention(q, k, v, scale);
     }
 
