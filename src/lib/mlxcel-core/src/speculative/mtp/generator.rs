@@ -48,7 +48,8 @@ use std::time::{Duration, Instant};
 
 use super::adaptive::effective_mtp_block_size;
 use super::target::{MtpTarget, MtpVerifyOutput};
-use super::walk::speculative_walk;
+use super::tree::DraftTree;
+use super::walk::{WalkResult, speculative_walk};
 
 #[derive(Debug, Default)]
 struct MtpRoundDiagnostics {
@@ -481,6 +482,30 @@ pub struct MtpGenerator<T: MtpTarget> {
     /// measured-cost estimator has a classic single-token step time to divide
     /// by. See [`Self::with_profile_probe_rounds`].
     profile_probe_rounds: usize,
+    /// Whether this process may propose a draft tree instead of a chain.
+    ///
+    /// Read once at construction from `MLXCEL_MTP_TREE`, off unless set. Being
+    /// off is not the same as the target refusing: this is the operator switch,
+    /// and [`MtpTarget::tree_round_is_available`] is the per-round capability
+    /// question asked on top of it (issue #1204).
+    tree_drafting: bool,
+}
+
+/// Whether tree drafting is switched on for this process.
+///
+/// Off by default, because the tree path is new and the chain path it subsumes
+/// is what every measurement so far rests on. The default `Drafter::draft_tree`
+/// builds a linear tree, so switching this on without a branching drafter must
+/// produce byte-identical output to leaving it off; that equivalence is the
+/// first thing to check, and a divergence is the wiring rather than the
+/// topology (issue #1204).
+fn tree_drafting_enabled() -> bool {
+    std::env::var("MLXCEL_MTP_TREE")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            value == "1" || value == "true" || value == "on" || value == "yes"
+        })
+        .unwrap_or(false)
 }
 
 impl<T: MtpTarget> MtpGenerator<T> {
@@ -505,6 +530,7 @@ impl<T: MtpTarget> MtpGenerator<T> {
             prefer_requested_block_size,
             last_acceptance: None,
             profile_probe_rounds: 0,
+            tree_drafting: tree_drafting_enabled(),
         }
     }
 
@@ -520,6 +546,18 @@ impl<T: MtpTarget> MtpGenerator<T> {
     #[must_use]
     pub fn with_profile_probe_rounds(mut self, rounds: usize) -> Self {
         self.profile_probe_rounds = rounds;
+        self
+    }
+
+    /// Override the `MLXCEL_MTP_TREE` switch for this generator.
+    ///
+    /// The environment is read once at construction, which is right for a
+    /// process-wide operator switch and useless for a test that has to run
+    /// both arms in one process. Tests use this to pin the arm instead of
+    /// mutating the environment, which is not safe to do from a parallel
+    /// suite (issue #1204).
+    pub fn with_tree_drafting(mut self, enabled: bool) -> Self {
+        self.tree_drafting = enabled;
         self
     }
 
@@ -929,9 +967,15 @@ impl<T: MtpTarget> MtpGenerator<T> {
         // classic decode. Probes are recorded separately from the
         // speculative aggregates below.
         let is_probe = state.probes_remaining > 0;
-        let draft_tokens: Vec<i32> = if is_probe {
+        // A round proposes either a chain or a tree. The capability question
+        // is asked here, before anything is drafted, because the target's
+        // rollback moves with its cache state and the verify forward has
+        // already appended the block by the time a refusal could surface
+        // (issue #1204).
+        let use_tree = !is_probe && self.tree_drafting && self.target.tree_round_is_available();
+        let (draft_tokens, draft_tree): (Vec<i32>, Option<DraftTree>) = if is_probe {
             state.probes_remaining -= 1;
-            Vec::new()
+            (Vec::new(), None)
         } else {
             // Bound the block size by the remaining budget. When the
             // operator requested a block larger than the drafter's
@@ -996,13 +1040,21 @@ impl<T: MtpTarget> MtpGenerator<T> {
             // seed verify on the first round).
             let hidden = state.verify_out.next_hidden.as_ref();
             let draft_start = Instant::now();
-            match self.drafter.draft_block(state.bonus, hidden, bs, sampling) {
-                Ok(t) => {
-                    state.diagnostics.draft_ms += duration_ms(draft_start.elapsed());
-                    t
-                }
+            // Both arms charge `draft_ms` on success and on failure, because a
+            // failing drafter still spent the time.
+            let outcome = if use_tree {
+                self.drafter
+                    .draft_tree(state.bonus, hidden, bs, sampling)
+                    .map(|tree| (Vec::new(), Some(tree)))
+            } else {
+                self.drafter
+                    .draft_block(state.bonus, hidden, bs, sampling)
+                    .map(|tokens| (tokens, None))
+            };
+            state.diagnostics.draft_ms += duration_ms(draft_start.elapsed());
+            match outcome {
+                Ok(proposal) => proposal,
                 Err(e) => {
-                    state.diagnostics.draft_ms += duration_ms(draft_start.elapsed());
                     // Drafter failed; bail out cleanly. We've already
                     // emitted at least the seed bonus, so finish with what
                     // we have rather than panicking. Future hardening
@@ -1018,25 +1070,76 @@ impl<T: MtpTarget> MtpGenerator<T> {
         // If the drafter returned fewer than bs-1 proposals (e.g.
         // it short-circuited on a non-greedy path), `bs` shrinks
         // accordingly so the verify shape stays consistent.
-        let actual_bs = draft_tokens.len() + 1;
-        let mut verify_input = Vec::with_capacity(actual_bs);
-        verify_input.push(state.bonus);
-        verify_input.extend_from_slice(&draft_tokens);
+        let actual_bs = match draft_tree.as_ref() {
+            // A tree's node count already includes the root, which is the
+            // bonus the chain path prepends by hand, so the two agree on what
+            // the verify block length means.
+            Some(tree) => tree.len(),
+            None => draft_tokens.len() + 1,
+        };
+        let verify_input: Vec<i32> = match draft_tree.as_ref() {
+            Some(tree) => tree.tokens().to_vec(),
+            None => {
+                let mut input = Vec::with_capacity(actual_bs);
+                input.push(state.bonus);
+                input.extend_from_slice(&draft_tokens);
+                input
+            }
+        };
 
         // Phase 1: sink-aware forward. The target's KV cache is now
         // `bs` longer than before the call. We have target_tokens
         // for the walk; the captured state holds hidden + shared
         // K/V slabs for the finalize step.
         let verify_forward_start = Instant::now();
-        let forward_out = self
-            .target
-            .verify_forward(&verify_input, sampling, logprobs_config);
+        let forward_out = match draft_tree.as_ref() {
+            Some(tree) => match self
+                .target
+                .verify_forward_tree(tree, sampling, logprobs_config)
+            {
+                Ok(out) => out,
+                Err(refusal) => {
+                    // `tree_round_is_available` said yes above, so this is a
+                    // target bug rather than a configuration. Nothing has been
+                    // appended yet, so finishing is clean.
+                    tracing::warn!(
+                        reason = refusal.reason,
+                        "MTP tree verify refused after the target reported a tree round available"
+                    );
+                    state.finished = true;
+                    return MtpStepOutput::finished_empty();
+                }
+            },
+            None => self
+                .target
+                .verify_forward(&verify_input, sampling, logprobs_config),
+        };
         let verify_elapsed_ms = duration_ms(verify_forward_start.elapsed());
 
         // Walk the draft against the target's argmax tokens.
         let budget = state.max_tokens - state.emitted_count;
         let walk_start = Instant::now();
-        let walk = speculative_walk(&draft_tokens, &forward_out.target_tokens, budget);
+        // The tree walk carries one extra thing the chain walk has no need
+        // for: the accepted node path. For a linear tree that path is
+        // `[0, 1, ..., accepted]` and the rollback it drives reduces to the
+        // tail trim the chain path does, which is the equivalence to check
+        // first when this is switched on.
+        let (walk, accepted_path) = match draft_tree.as_ref() {
+            Some(tree) => {
+                let tree_walk = tree.walk(&forward_out.target_tokens, budget);
+                (
+                    WalkResult {
+                        accepted: tree_walk.accepted,
+                        new_tokens: tree_walk.new_tokens,
+                    },
+                    Some(tree_walk.path),
+                )
+            }
+            None => (
+                speculative_walk(&draft_tokens, &forward_out.target_tokens, budget),
+                None,
+            ),
+        };
         if !is_probe {
             state.diagnostics.speculative_walk_ms += duration_ms(walk_start.elapsed());
         }
@@ -1049,11 +1152,12 @@ impl<T: MtpTarget> MtpGenerator<T> {
             state.diagnostics.record_probe(verify_elapsed_ms);
         } else {
             state.diagnostics.verify_forward_ms += verify_elapsed_ms;
-            state.diagnostics.record_round(
-                draft_tokens.len(),
-                walk.accepted,
-                walk.new_tokens.len(),
-            );
+            // `actual_bs - 1` rather than `draft_tokens.len()`: identical on
+            // the chain path by construction, and the only form that is right
+            // for a tree, whose proposals are not a flat vector.
+            state
+                .diagnostics
+                .record_round(actual_bs - 1, walk.accepted, walk.new_tokens.len());
             state.accept_lens.push(walk.accepted as f64);
         }
 
@@ -1063,9 +1167,32 @@ impl<T: MtpTarget> MtpGenerator<T> {
         // *before* `forward_out` is moved into `verify_finalize`.
         let target_logprobs = forward_out.target_logprobs;
         let verify_finalize_start = Instant::now();
-        state.verify_out =
-            self.target
-                .verify_finalize(walk.accepted, actual_bs, forward_out.captured);
+        state.verify_out = match accepted_path.as_ref() {
+            Some(path) => {
+                match self
+                    .target
+                    .verify_finalize_tree(path, actual_bs, forward_out.captured)
+                {
+                    Ok(out) => out,
+                    Err(refusal) => {
+                        // No fallback exists here. The verify block is on the
+                        // cache and only a tree-aware rollback takes it off, so
+                        // continuing would decode against a tail that no longer
+                        // means what the drafter thinks it means. End the session
+                        // instead.
+                        tracing::error!(
+                            reason = refusal.reason,
+                            "MTP tree rollback refused after its block was appended;                          ending the speculative session"
+                        );
+                        state.finished = true;
+                        return MtpStepOutput::finished_empty();
+                    }
+                }
+            }
+            None => self
+                .target
+                .verify_finalize(walk.accepted, actual_bs, forward_out.captured),
+        };
         if !is_probe {
             state.diagnostics.verify_finalize_ms += duration_ms(verify_finalize_start.elapsed());
         }
@@ -1111,7 +1238,18 @@ impl<T: MtpTarget> MtpGenerator<T> {
         // Early-finish rounds returned above without this call — the drafter
         // is reset before its next session, so nothing is lost. Failures
         // degrade draft quality only and are logged, not fatal.
-        if let Some(hidden_full) = state.verify_out.verify_hidden_full.as_ref() {
+        if accepted_path.is_some() && state.verify_out.verify_hidden_full.is_some() {
+            // A stateful drafter trims its in-round tail against the chain it
+            // proposed, and a tree's accepted set is a path through a
+            // branching proposal rather than a prefix of one chain, so the
+            // hook has no tree form. Unreachable today rather than merely
+            // unimplemented: the one tree-capable target leaves
+            // `verify_hidden_full` as `None`. Warned rather than guessed
+            // (issue #1204).
+            tracing::warn!(
+                "MTP tree round on a stateful drafter: skipping accept_verified_tokens, which                  has no tree form yet"
+            );
+        } else if let Some(hidden_full) = state.verify_out.verify_hidden_full.as_ref() {
             let accept_started = Instant::now();
             let outcome = self.drafter.accept_verified_tokens(
                 hidden_full,
