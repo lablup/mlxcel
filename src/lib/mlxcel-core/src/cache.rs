@@ -2788,6 +2788,16 @@ impl KVCache {
         Ok(())
     }
 
+    /// Whether [`Self::gather_within_tail`] can serve this cache as it stands.
+    ///
+    /// Static here, unlike the rotating counterpart, but exposed with the same
+    /// name so a caller holding either kind asks one question. The point of
+    /// asking at all is the rotating case, where the answer changes with the
+    /// cache's state (issue #1204).
+    pub fn can_gather_within_tail(&self) -> bool {
+        self.paged_backing.is_none() && self.mode != KVCacheMode::Turbo4Delegated
+    }
+
     /// Shared validation for the tail-scoped selection, used by both dense
     /// caches so the two cannot drift into disagreeing about what a legal
     /// selection is.
@@ -5418,6 +5428,17 @@ impl RotatingKVCache {
         self.offset -= dropped;
         self.idx -= dropped;
         Ok(())
+    }
+
+    /// Whether [`Self::gather_within_tail`] can serve this cache **right now**.
+    ///
+    /// State-dependent, and that is the property a caller has to respect: a
+    /// tree rollback available this round can be unavailable the next one, as
+    /// soon as the ring wraps. Ask before appending a verify block, not after.
+    /// A refusal after the block is on the cache leaves a state only a
+    /// tree-aware rollback could undo (issue #1204).
+    pub fn can_gather_within_tail(&self) -> bool {
+        self.is_trimmable() && self.mode != KVCacheMode::Turbo4Delegated
     }
 }
 

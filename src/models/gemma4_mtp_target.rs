@@ -506,6 +506,66 @@ impl<'a> Gemma4MtpTargetAdapter<'a> {
             .collect()
     }
 
+    /// Keep the captured shared K/V history plus the verify block's `kept`
+    /// slots, dropping the rest.
+    ///
+    /// The tree counterpart of [`Self::slice_shared_kv`]. That one crops
+    /// `rejected` entries off the end, which is correct exactly when the
+    /// accept set is a prefix of the block. A tree's accepted path is
+    /// scattered, so the block region has to be selected and closed up while
+    /// the history in front of it is left alone.
+    ///
+    /// `kept` are block offsets, which equal the accepted nodes' indices
+    /// because the block was appended in the tree's topological order. Because
+    /// they are strictly increasing and inside `[0, block_size)`, a full-length
+    /// selection is the identity and returns the slabs untouched, matching
+    /// `slice_shared_kv`'s `rejected == 0` fast path.
+    pub(crate) fn gather_shared_kv(
+        tensors: Vec<UniquePtr<MlxArray>>,
+        block_size: usize,
+        kept: &[i32],
+    ) -> Vec<UniquePtr<MlxArray>> {
+        if kept.len() == block_size {
+            return tensors;
+        }
+        let index = mlxcel_core::from_slice_i32(kept, &[kept.len() as i32]);
+        tensors
+            .into_iter()
+            .map(|ptr| {
+                let array = ptr.as_ref().expect("shared K/V slab must be non-null");
+                let shape = mlxcel_core::array_shape(array);
+                debug_assert!(
+                    shape.len() == 4,
+                    "shared K/V slab must be 4-D, got shape {:?}",
+                    shape
+                );
+                let kv_len = shape[2];
+                let block_start = kv_len - block_size as i32;
+                debug_assert!(
+                    block_start >= 0,
+                    "gather_shared_kv: block_size ({block_size}) exceeds kv_len ({kv_len})",
+                );
+                let block = mlxcel_core::slice(
+                    array,
+                    &[0, 0, block_start, 0],
+                    &[shape[0], shape[1], kv_len, shape[3]],
+                );
+                let picked = mlxcel_core::take(&block, &index, 2);
+                if block_start == 0 {
+                    // No history in front of the block; concatenating an empty
+                    // head would be a no-op with an extra graph node.
+                    return picked;
+                }
+                let head = mlxcel_core::slice(
+                    array,
+                    &[0, 0, 0, 0],
+                    &[shape[0], shape[1], block_start, shape[3]],
+                );
+                mlxcel_core::concatenate(&head, &picked, 2)
+            })
+            .collect()
+    }
+
     /// Compute the argmax along the last axis for each row of a
     /// `[1, block_size, vocab]` logits tensor and return the
     /// per-position token ids.
@@ -757,6 +817,95 @@ impl<'a> MtpTarget for Gemma4MtpTargetAdapter<'a> {
         let flat = tree.additive_mask_with_history(offset, -1.0e9);
         let mask = mlxcel_core::from_slice_f32(&flat, &[nodes as i32, (offset + nodes) as i32]);
         Ok(self.verify_forward_with_mask(tree.tokens(), Some(&mask), sampler, logprobs_config))
+    }
+
+    /// Roll the target cache back to a draft tree's accepted **path**.
+    ///
+    /// [`Self::verify_finalize`] trims `block_size - accepted - 1` entries off
+    /// the tail, which is right exactly when the accept set is a prefix. The
+    /// tree's is a path, so the survivors are scattered through the block and
+    /// the rollback selects them and closes the gap instead (issue #1204).
+    ///
+    /// `path` is the walk's node indices from the root through the last
+    /// accepted node. They double as block offsets, because the verify block
+    /// was appended in the tree's topological order, and `path[0]` is the root
+    /// the target already committed to, so it is always kept.
+    ///
+    /// For a linear tree the path is `[0, 1, ..., accepted]`, the selection is
+    /// a prefix, and every step below reduces to the linear one: the gather
+    /// equals a `trim`, the shared-K/V gather equals the tail slice, and the
+    /// hidden is read at the same position. That is the equivalence to test
+    /// first when the round loop is wired.
+    ///
+    /// The capability check is a guard, not the contract. It is here so a
+    /// wrapped sliding-window ring produces a named refusal rather than a
+    /// silently wrong window, but by this point the block is already on the
+    /// cache and a refusal is not recoverable. The round loop is what has to
+    /// ask `can_gather_speculative_cache` before it drafts a tree.
+    fn verify_finalize_tree(
+        &self,
+        path: &[usize],
+        block_size: usize,
+        captured: VerifyCaptured,
+    ) -> Result<MtpVerifyOutput, mlxcel_core::speculative::mtp::target::TreeVerifyUnsupported> {
+        use mlxcel_core::speculative::mtp::target::TreeVerifyUnsupported;
+
+        if path.is_empty() {
+            return Err(TreeVerifyUnsupported {
+                reason: "an accepted path always contains the root, so an empty one is a bug",
+            });
+        }
+        if !self.wrapper.can_gather_speculative_cache(self.seq_id) {
+            return Err(TreeVerifyUnsupported {
+                reason: "a Gemma 4 sliding-window ring has wrapped, so its verify block is no \
+                         longer a contiguous tail that a path selection can address",
+            });
+        }
+
+        let mut tensors = captured.tensors;
+        if tensors.is_empty() {
+            return Err(TreeVerifyUnsupported {
+                reason: "VerifyCaptured must carry at least the hidden tensor at index 0",
+            });
+        }
+        let hidden_full = tensors.remove(0);
+
+        // The drafter's next hidden comes from the last accepted node. For a
+        // tree that is a node index rather than an accept count; the two
+        // coincide on a linear tree, which is the equivalence.
+        let last_accepted = *path.last().expect("checked non-empty above");
+        let next_hidden =
+            self.draft_hidden_at_position(hidden_full.as_ref().unwrap(), last_accepted);
+
+        let kept: Vec<i32> = path.iter().map(|&node| node as i32).collect();
+        if self
+            .wrapper
+            .gather_speculative_cache(self.seq_id, block_size as i32, &kept)
+            .is_err()
+        {
+            return Err(TreeVerifyUnsupported {
+                reason: "the Gemma 4 target cache refused the accepted path selection",
+            });
+        }
+
+        let next_shared_kv = Self::gather_shared_kv(tensors, block_size, &kept);
+
+        // Same rebind as the linear finalize: the absolute post-rollback cache
+        // offset, read from the wrapper rather than derived from the accept
+        // count, so the drafter's RoPE anchor cannot drift.
+        let kv_offset = self
+            .wrapper
+            .speculative_cache_offset(self.seq_id, "full_attention")
+            .max(0) as usize;
+        let bonus_position = mtp_draft_position(kv_offset);
+
+        Ok(MtpVerifyOutput {
+            next_hidden,
+            next_shared_kv,
+            kv_offset,
+            bonus_position,
+            verify_hidden_full: None,
+        })
     }
 
     fn verify_finalize(

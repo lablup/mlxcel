@@ -1487,6 +1487,43 @@ impl Cache {
         }
     }
 
+    /// Whether this cache can roll back a **scattered** accept set right now.
+    ///
+    /// The tree counterpart of the implicit "trim always works" that
+    /// [`Self::trim_speculative`] rests on. It does not always work here: the
+    /// rotating variant needs its ring unwrapped, so the answer is a function
+    /// of state rather than of type, and a caller must ask each round before
+    /// it appends a verify block (issue #1204).
+    ///
+    /// Used by: Gemma 4 MTP tree rollback.
+    pub(crate) fn can_gather_speculative(&self) -> bool {
+        match self {
+            Self::Standard(cache) => cache.can_gather_within_tail(),
+            Self::Rotating(cache) => cache.can_gather_within_tail(),
+        }
+    }
+
+    /// Keep only the verify block's `kept` slots, compacting them in place.
+    ///
+    /// The tree analogue of [`Self::trim_speculative`]. A linear accept set is
+    /// a prefix of the block, so rolling it back is a tail trim; a tree's is a
+    /// path, so the survivors are scattered and have to be selected and closed
+    /// up. `kept` are offsets within the block, which is exactly the node
+    /// index of each accepted node because the block is appended in the tree's
+    /// topological order.
+    ///
+    /// Used by: Gemma 4 MTP tree rollback.
+    pub(crate) fn gather_speculative(
+        &mut self,
+        block_size: i32,
+        kept: &[i32],
+    ) -> Result<(), String> {
+        match self {
+            Self::Standard(cache) => cache.gather_within_tail(block_size, kept),
+            Self::Rotating(cache) => cache.gather_within_tail(block_size, kept),
+        }
+    }
+
     /// Add upstream-style rollback slack to sliding-window target caches used
     /// by Gemma 4 MTP. The logical attention window is unchanged; only the
     /// rotating cache's temporary storage grows so verify-block append +
@@ -5281,6 +5318,71 @@ impl Gemma4Wrapper {
                     if is_batch && max_a > 0 {
                         cache.zero_partial_accept_tail(&valid_ends, block_size)?;
                     }
+                }
+                Ok(())
+            },
+        )
+    }
+
+    /// Whether every cache of this sequence can roll back a scattered accept
+    /// set right now.
+    ///
+    /// Asked **before** a tree is drafted, not after it is verified. The
+    /// rotating sliding-window caches answer from their state, so the tree
+    /// path is available per round rather than per model, and a round that
+    /// appends a tree block it cannot roll back has no recovery: the linear
+    /// rollback would keep the wrong entries rather than fail (issue #1204).
+    ///
+    /// Used by: [`crate::models::gemma4_mtp_target::Gemma4MtpTargetAdapter`].
+    pub fn can_gather_speculative_cache(&self, seq_id: Option<SequenceId>) -> bool {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.model.make_caches(),
+            |sequence_caches| {
+                sequence_caches
+                    .iter()
+                    .all(|cache| cache.can_gather_speculative())
+            },
+        )
+    }
+
+    /// Keep only the verify block slots named by `kept`, on every cache of
+    /// this sequence.
+    ///
+    /// The tree counterpart of [`Self::rollback_speculative_cache`]. That one
+    /// takes an accept count and trims `block_size - (max(accepted) + 1)` from
+    /// the tail, which is correct exactly when the accept set is a prefix.
+    /// This one takes the accepted path's node indices, which are also the
+    /// block offsets because the verify block is appended in the tree's
+    /// topological order.
+    ///
+    /// A linear tree gives `kept == [0, 1, ..., accepted]`, and the two agree
+    /// there by construction: `KVCache::gather_within_tail` on a prefix is
+    /// asserted equal to `trim`.
+    ///
+    /// There is no per-row tail-zero here because there is no batched tree
+    /// path yet. Adding one has to revisit this: a per-row *path* is not a
+    /// per-row count, so the rows cannot share one global trim the way
+    /// `rollback_speculative_cache` lets them.
+    ///
+    /// Used by: [`crate::models::gemma4_mtp_target::Gemma4MtpTargetAdapter`].
+    pub fn gather_speculative_cache(
+        &self,
+        seq_id: Option<SequenceId>,
+        block_size: i32,
+        kept: &[i32],
+    ) -> Result<(), String> {
+        if block_size <= 0 {
+            return Err(format!(
+                "gather_speculative_cache: block_size must be positive (got {block_size})"
+            ));
+        }
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.model.make_caches(),
+            |sequence_caches| -> Result<(), String> {
+                for cache in sequence_caches.iter_mut() {
+                    cache.gather_speculative(block_size, kept)?;
                 }
                 Ok(())
             },
