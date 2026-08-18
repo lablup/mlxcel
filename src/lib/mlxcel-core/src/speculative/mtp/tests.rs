@@ -1027,6 +1027,22 @@ fn a_target_without_a_tree_path_refuses_a_tree() {
     );
 }
 
+/// A target says nothing about trees unless it says yes.
+///
+/// The round loop asks this before it drafts, because the two tree methods are
+/// one capability: the forward appends a block to the cache and only a
+/// tree-aware rollback can take it off, so a refusal discovered afterwards has
+/// no fallback. A default of `true` would make every target that has not
+/// thought about trees claim it can round-trip one (issue #1204).
+#[test]
+fn a_target_claims_no_tree_round_until_it_says_so() {
+    let target = MockMtpTarget::new(vec![vec![10, 11, 12]], vec![]);
+    assert!(
+        !target.tree_round_is_available(),
+        "the default has to be no, so opting in is an act rather than an omission"
+    );
+}
+
 /// The rollback half of the tree capability refuses by default too.
 ///
 /// Verifying a tree and keeping its accepted path are separate abilities, and

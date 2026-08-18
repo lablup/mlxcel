@@ -819,6 +819,18 @@ impl<'a> MtpTarget for Gemma4MtpTargetAdapter<'a> {
         Ok(self.verify_forward_with_mask(tree.tokens(), Some(&mask), sampler, logprobs_config))
     }
 
+    /// Gemma 4 can round-trip a tree whenever every cache of this sequence can
+    /// still address its verify block as a contiguous tail.
+    ///
+    /// The verify half is always available: the tree mask solves it and every
+    /// layer here is attention. The rollback half is not, because the
+    /// sliding-window layers hold a rotating cache and a wrapped ring has no
+    /// contiguous tail to select from. So this reads cache state rather than
+    /// returning a constant, and the round loop has to ask each round.
+    fn tree_round_is_available(&self) -> bool {
+        self.wrapper.can_gather_speculative_cache(self.seq_id)
+    }
+
     /// Roll the target cache back to a draft tree's accepted **path**.
     ///
     /// [`Self::verify_finalize`] trims `block_size - accepted - 1` entries off

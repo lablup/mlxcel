@@ -307,6 +307,27 @@ pub trait MtpTarget {
         logprobs_config: &LogprobsConfig,
     ) -> VerifyForwardOutput;
 
+    /// Whether a tree round can complete on this target **right now**, asked
+    /// before anything is drafted.
+    ///
+    /// The two tree methods below are one capability and the round loop cannot
+    /// discover that by trying. [`Self::verify_forward_tree`] appends the
+    /// tree's block to the cache; if [`Self::verify_finalize_tree`] then
+    /// refuses, the round is stuck, because the block is on the cache and only
+    /// a tree-aware rollback can take it off. There is no falling back to the
+    /// linear path from there.
+    ///
+    /// The answer is per round rather than per model, which is why it is a
+    /// method and not a constant. Gemma 4 can verify a tree at any time but
+    /// can only roll one back while its sliding-window rings are unwrapped, so
+    /// its answer changes with cache state.
+    ///
+    /// The default is `false`, so a target opts in by answering, the same way
+    /// it opts into the two methods themselves.
+    fn tree_round_is_available(&self) -> bool {
+        false
+    }
+
     /// Verify a draft **tree** in one forward, or say why this target cannot.
     ///
     /// The default refuses, and that default is the safety property rather
