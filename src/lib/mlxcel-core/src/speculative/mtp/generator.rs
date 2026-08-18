@@ -53,6 +53,17 @@ use super::walk::speculative_walk;
 #[derive(Debug, Default)]
 struct MtpRoundDiagnostics {
     rounds: usize,
+    /// Narrowest and widest block the round loop actually drafted at.
+    ///
+    /// Not the same as the requested width, and reported separately because
+    /// they can differ silently: the adaptive controller pins a drafter at
+    /// its configured depth until acceptance justifies expanding, and the
+    /// remaining-token budget clamps the last rounds of a generation. Before
+    /// issue #1206 only the request was logged, so a run at width 4 and a run
+    /// at width 6 were indistinguishable in the record even though the second
+    /// had been overridden into the first.
+    effective_block_min: usize,
+    effective_block_max: usize,
     proposed_tokens: usize,
     accepted_draft_tokens: usize,
     emitted_from_verify_tokens: usize,
@@ -98,6 +109,16 @@ impl MtpRoundDiagnostics {
         self.probe_ms += verify_ms;
     }
 
+    /// Note the width one round actually drafted at.
+    fn record_effective_block(&mut self, block: usize) {
+        if self.effective_block_min == 0 || block < self.effective_block_min {
+            self.effective_block_min = block;
+        }
+        if block > self.effective_block_max {
+            self.effective_block_max = block;
+        }
+    }
+
     fn record_round(&mut self, proposed_tokens: usize, accepted: usize, emitted_tokens: usize) {
         self.rounds += 1;
         self.proposed_tokens += proposed_tokens;
@@ -135,6 +156,8 @@ impl MtpRoundDiagnostics {
     fn summary(&self) -> MtpAcceptanceSummary {
         MtpAcceptanceSummary {
             rounds: self.rounds,
+            effective_block_min: self.effective_block_min,
+            effective_block_max: self.effective_block_max,
             proposed_tokens: self.proposed_tokens,
             accepted_draft_tokens: self.accepted_draft_tokens,
             draft_ms: self.draft_ms,
@@ -155,6 +178,8 @@ impl MtpRoundDiagnostics {
     ) {
         tracing::info!(
             block_size,
+            effective_block_min = self.effective_block_min,
+            effective_block_max = self.effective_block_max,
             prompt_tokens,
             generated_tokens,
             rounds = self.rounds,
@@ -240,6 +265,17 @@ pub struct MtpAcceptanceSummary {
     /// `max_tokens == 1`, in which case the speculative path produced no
     /// timing signal.
     pub rounds: usize,
+    /// Narrowest and widest block the round loop actually drafted at, which
+    /// is not necessarily the width that was requested.
+    ///
+    /// The adaptive controller holds a drafter at its configured depth until
+    /// acceptance justifies expanding, and the remaining-token budget narrows
+    /// the closing rounds of a generation. Reporting only the request made a
+    /// run at width 4 indistinguishable from a run at width 6 that had been
+    /// overridden into it, which is what made `--draft-block-size` look
+    /// tunable when it was not (issue #1206). Zero when no round ran.
+    pub effective_block_min: usize,
+    pub effective_block_max: usize,
     /// Total draft tokens proposed across all rounds.
     pub proposed_tokens: usize,
     /// Total draft tokens accepted by the target's argmax walk across all
@@ -320,6 +356,10 @@ pub struct MtpSessionState {
     /// Per-round accepted counts feeding the adaptive block-size controller
     /// ([`effective_mtp_block_size`]). Probe rounds are excluded.
     accept_lens: Vec<f64>,
+    /// Whether the narrower-than-requested block warning has already fired.
+    /// Once per session: the condition holds every round it holds at all, and
+    /// a per-round warning would bury the run's own diagnostics.
+    warned_block_override: bool,
     /// Classic-step probe rounds still to run (issue #736).
     probes_remaining: usize,
     /// Round diagnostics, accumulated across steps exactly as the
@@ -717,6 +757,7 @@ impl<T: MtpTarget> MtpGenerator<T> {
             drafter_prefill_tokens,
             emitted_count: 1,
             accept_lens: Vec::new(),
+            warned_block_override: false,
             probes_remaining: self.profile_probe_rounds,
             diagnostics,
             prefill_time,
@@ -914,6 +955,25 @@ impl<T: MtpTarget> MtpGenerator<T> {
             if bs <= 1 {
                 state.finished = true;
                 return MtpStepOutput::finished_empty();
+            }
+            state.diagnostics.record_effective_block(bs);
+            // Warn once, at the level an operator sees by default, when the
+            // controller overrides a request that the budget did not force.
+            // A request silently reduced to the configured depth is the case
+            // that makes `--draft-block-size` look tunable when it is not
+            // (issue #1206); a reduction the remaining budget forced is
+            // ordinary end-of-generation behavior and stays quiet.
+            if bs < self.block_size && self.block_size <= remaining && !state.warned_block_override
+            {
+                state.warned_block_override = true;
+                tracing::warn!(
+                    requested = self.block_size,
+                    effective = bs,
+                    configured = self.configured_block_size,
+                    "MTP drafted at a narrower block than requested: the adaptive controller \
+                     holds this drafter at its configured depth until recent acceptance shows \
+                     that prefix is usually fully accepted"
+                );
             }
 
             // Arm the drafter's shared K/V from the stored verify output
