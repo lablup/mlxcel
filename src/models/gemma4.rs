@@ -5118,6 +5118,27 @@ impl Gemma4Wrapper {
     /// verification.
     ///
     /// Used by: [`crate::models::gemma4_mtp_target::Gemma4MtpTargetAdapter`].
+    /// KV length the next forward on `seq_id` will treat as history.
+    ///
+    /// The same value `forward_with_speculative_sinks` derives internally
+    /// when it builds its own causal mask (`first_present_cache_offset`), so
+    /// a caller that supplies a mask instead can size it to match. Anything
+    /// else silently misaligns the mask against the cache.
+    ///
+    /// Exposed for draft-tree verification (issue #1204): a tree mask is
+    /// `[nodes, offset + nodes]` and the caller has to know `offset` to build
+    /// it. Reading the cache is preferable to threading the number down from
+    /// the round loop, which would leave two sources for one fact.
+    ///
+    /// Used by: `Gemma4MtpTargetAdapter::verify_forward_tree`.
+    pub(crate) fn sequence_kv_offset(&self, seq_id: Option<SequenceId>) -> i32 {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.model.make_caches(),
+            |caches| first_present_cache_offset(caches),
+        )
+    }
+
     pub(crate) fn forward_hidden_with_speculative_sinks(
         &self,
         input_ids: &MlxArray,

@@ -190,6 +190,144 @@ pub struct Gemma4MtpTargetAdapter<'a> {
 }
 
 impl<'a> Gemma4MtpTargetAdapter<'a> {
+    /// Shared body of the linear and tree verify paths.
+    ///
+    /// `mask` is `None` for a linear block, where the model builds its own
+    /// causal mask, and `Some(tree_mask)` for a draft tree, whose topology no
+    /// causal mask can express (issue #1204). Everything after the forward is
+    /// identical, so the two paths differ by this argument and nothing else.
+    fn verify_forward_with_mask(
+        &self,
+        verify_input: &[i32],
+        mask: Option<&mlxcel_core::MlxArray>,
+        sampler: &SamplingConfig,
+        logprobs_config: &mlxcel_core::sampling::LogprobsConfig,
+    ) -> VerifyForwardOutput {
+        // Sink-aware forward over `[bonus, draft_0, …, draft_{K-2}]`.
+        let verify_arr = mlxcel_core::from_slice_i32(verify_input, &[1, verify_input.len() as i32]);
+        let mut sinks = Gemma4SpeculativeSinks::with_hidden_and_shared_kv();
+        // Greedy/no-logprobs can use the latest upstream deferred path: run
+        // the transformer once with `skip_final_norm=True`, capture pre-norm
+        // hidden/shared K/V, then project hidden positions to logits only as
+        // needed. Keep the full-logits path for non-greedy or logprob
+        // requests so existing sampler/logprob semantics stay unchanged.
+        // The upstream Python reference uses deferred greedy hidden→logits
+        // projection by default. In Rust/MLX today that path projects one
+        // position at a time across the cxx bridge and is slower than the
+        // batched `[K, vocab]` LM-head projection for Gemma 4 31B on local
+        // Apple Silicon runs. Keep it available for parity experiments, but
+        // leave the faster full-logits verifier as the default until we have
+        // a fused/graph-side deferred walk.
+        let use_deferred_greedy = std::env::var("MLXCEL_ENABLE_MTP_DEFERRED").ok().as_deref()
+            == Some("1")
+            && sampler.temperature == 0.0
+            && !logprobs_config.enabled;
+        let logits = if use_deferred_greedy {
+            let _ = self.wrapper.forward_hidden_with_speculative_sinks(
+                &verify_arr,
+                None,
+                None,
+                mask,
+                self.seq_id,
+                None,
+                Some(&mut sinks),
+                true,
+            );
+            None
+        } else {
+            let raw_logits = self.wrapper.forward_with_speculative_sinks(
+                &verify_arr,
+                None,
+                None,
+                mask,
+                self.seq_id,
+                None,
+                Some(&mut sinks),
+                None,
+            );
+            // issue #350: mask the model's output-illegal placeholder ids on the
+            // verify logits BEFORE the per-position argmax AND the logprob
+            // extraction, so a suppressed id can never win a near-tie verify
+            // position (the leak) and the emitted token plus its logprob stay
+            // consistent. The bias is the model's suppressed-id set, forwarded
+            // from the server `enqueue_request` through `MtpGenerator` into
+            // `sampler`. An empty map (every non-multimodal model) short-circuits
+            // here to the raw logits, so the baseline stays bit-exact.
+            if sampler.token_bias.is_empty() {
+                Some(raw_logits)
+            } else {
+                Some(mlxcel_core::sampling::apply_token_bias(
+                    &raw_logits,
+                    &sampler.token_bias,
+                ))
+            }
+        };
+
+        // Greedy-parity gate: pull the per-position argmax tokens from
+        // the verify logits. At temperature == 0 this is byte-identical
+        // to the drafter-less target's own argmax extension.
+        //
+        // At temperature > 0 a future enhancement plumbs the sampler
+        // through per-position; the round-loop driver's perf-sensitive
+        // path is greedy, so we keep argmax-only for now.
+        let target_tokens = if let Some(logits) = logits.as_ref() {
+            Self::argmax_per_position(logits)
+        } else {
+            // The hidden sink is still owned by `sinks`; pull it below but
+            // compute after extraction so the hidden handle is available for
+            // both token projection and `VerifyCaptured`.
+            Vec::new()
+        };
+
+        // Per-position log-probability data, aligned 1:1 with
+        // `target_tokens`. `None` (zero-overhead) when logprobs are
+        // disabled; the round loop forwards the entries for accepted
+        // positions on to `finalize_burst_success`.
+        let target_logprobs = logits.as_ref().and_then(|logits| {
+            Self::per_position_logprobs(logits, &target_tokens, logprobs_config)
+        });
+
+        // Capture the hidden + pre-slice shared K/V for the finalize step.
+        let hidden_sink = sinks
+            .hidden_sink
+            .expect("with_hidden_and_shared_kv installs the hidden sink");
+        let hidden_full = hidden_sink
+            .into_iter()
+            .next_back()
+            .expect("hidden sink must carry at least one entry");
+        let target_tokens = if target_tokens.is_empty() && use_deferred_greedy {
+            self.argmax_from_hidden_positions(hidden_full.as_ref().unwrap(), &sampler.token_bias)
+        } else {
+            target_tokens
+        };
+
+        let shared_kv_map = sinks
+            .shared_kv_sink
+            .expect("with_hidden_and_shared_kv installs the shared K/V sink");
+        let mut captured_tensors: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(5);
+        captured_tensors.push(hidden_full);
+        if let Some((k_full, v_full)) = shared_kv_map.get("full_attention") {
+            captured_tensors.push(mlxcel_core::copy(k_full.as_ref().unwrap()));
+            captured_tensors.push(mlxcel_core::copy(v_full.as_ref().unwrap()));
+        }
+        if let Some((k_swa, v_swa)) = shared_kv_map.get("sliding_attention") {
+            captured_tensors.push(mlxcel_core::copy(k_swa.as_ref().unwrap()));
+            captured_tensors.push(mlxcel_core::copy(v_swa.as_ref().unwrap()));
+        }
+
+        VerifyForwardOutput {
+            target_tokens,
+            target_logprobs,
+            captured: VerifyCaptured {
+                tensors: captured_tensors,
+                // No per-step scalar metadata used today; the per-row
+                // batched path will populate these with kv_offset_pre /
+                // bonus_position_pre.
+                scalars: Vec::new(),
+            },
+        }
+    }
+
     /// Construct an adapter that routes every trait call through the
     /// per-sequence cache slot at `seq_id`.
     ///
@@ -589,129 +727,36 @@ impl<'a> MtpTarget for Gemma4MtpTargetAdapter<'a> {
         sampler: &SamplingConfig,
         logprobs_config: &mlxcel_core::sampling::LogprobsConfig,
     ) -> VerifyForwardOutput {
-        // Sink-aware forward over `[bonus, draft_0, …, draft_{K-2}]`.
-        let verify_arr = mlxcel_core::from_slice_i32(verify_input, &[1, verify_input.len() as i32]);
-        let mut sinks = Gemma4SpeculativeSinks::with_hidden_and_shared_kv();
-        // Greedy/no-logprobs can use the latest upstream deferred path: run
-        // the transformer once with `skip_final_norm=True`, capture pre-norm
-        // hidden/shared K/V, then project hidden positions to logits only as
-        // needed. Keep the full-logits path for non-greedy or logprob
-        // requests so existing sampler/logprob semantics stay unchanged.
-        // The upstream Python reference uses deferred greedy hidden→logits
-        // projection by default. In Rust/MLX today that path projects one
-        // position at a time across the cxx bridge and is slower than the
-        // batched `[K, vocab]` LM-head projection for Gemma 4 31B on local
-        // Apple Silicon runs. Keep it available for parity experiments, but
-        // leave the faster full-logits verifier as the default until we have
-        // a fused/graph-side deferred walk.
-        let use_deferred_greedy = std::env::var("MLXCEL_ENABLE_MTP_DEFERRED").ok().as_deref()
-            == Some("1")
-            && sampler.temperature == 0.0
-            && !logprobs_config.enabled;
-        let logits = if use_deferred_greedy {
-            let _ = self.wrapper.forward_hidden_with_speculative_sinks(
-                &verify_arr,
-                None,
-                None,
-                None,
-                self.seq_id,
-                None,
-                Some(&mut sinks),
-                true,
-            );
-            None
-        } else {
-            let raw_logits = self.wrapper.forward_with_speculative_sinks(
-                &verify_arr,
-                None,
-                None,
-                None,
-                self.seq_id,
-                None,
-                Some(&mut sinks),
-                None,
-            );
-            // issue #350: mask the model's output-illegal placeholder ids on the
-            // verify logits BEFORE the per-position argmax AND the logprob
-            // extraction, so a suppressed id can never win a near-tie verify
-            // position (the leak) and the emitted token plus its logprob stay
-            // consistent. The bias is the model's suppressed-id set, forwarded
-            // from the server `enqueue_request` through `MtpGenerator` into
-            // `sampler`. An empty map (every non-multimodal model) short-circuits
-            // here to the raw logits, so the baseline stays bit-exact.
-            if sampler.token_bias.is_empty() {
-                Some(raw_logits)
-            } else {
-                Some(mlxcel_core::sampling::apply_token_bias(
-                    &raw_logits,
-                    &sampler.token_bias,
-                ))
-            }
-        };
+        self.verify_forward_with_mask(verify_input, None, sampler, logprobs_config)
+    }
 
-        // Greedy-parity gate: pull the per-position argmax tokens from
-        // the verify logits. At temperature == 0 this is byte-identical
-        // to the drafter-less target's own argmax extension.
-        //
-        // At temperature > 0 a future enhancement plumbs the sampler
-        // through per-position; the round-loop driver's perf-sensitive
-        // path is greedy, so we keep argmax-only for now.
-        let target_tokens = if let Some(logits) = logits.as_ref() {
-            Self::argmax_per_position(logits)
-        } else {
-            // The hidden sink is still owned by `sinks`; pull it below but
-            // compute after extraction so the hidden handle is available for
-            // both token projection and `VerifyCaptured`.
-            Vec::new()
-        };
-
-        // Per-position log-probability data, aligned 1:1 with
-        // `target_tokens`. `None` (zero-overhead) when logprobs are
-        // disabled; the round loop forwards the entries for accepted
-        // positions on to `finalize_burst_success`.
-        let target_logprobs = logits.as_ref().and_then(|logits| {
-            Self::per_position_logprobs(logits, &target_tokens, logprobs_config)
-        });
-
-        // Capture the hidden + pre-slice shared K/V for the finalize step.
-        let hidden_sink = sinks
-            .hidden_sink
-            .expect("with_hidden_and_shared_kv installs the hidden sink");
-        let hidden_full = hidden_sink
-            .into_iter()
-            .next_back()
-            .expect("hidden sink must carry at least one entry");
-        let target_tokens = if target_tokens.is_empty() && use_deferred_greedy {
-            self.argmax_from_hidden_positions(hidden_full.as_ref().unwrap(), &sampler.token_bias)
-        } else {
-            target_tokens
-        };
-
-        let shared_kv_map = sinks
-            .shared_kv_sink
-            .expect("with_hidden_and_shared_kv installs the shared K/V sink");
-        let mut captured_tensors: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(5);
-        captured_tensors.push(hidden_full);
-        if let Some((k_full, v_full)) = shared_kv_map.get("full_attention") {
-            captured_tensors.push(mlxcel_core::copy(k_full.as_ref().unwrap()));
-            captured_tensors.push(mlxcel_core::copy(v_full.as_ref().unwrap()));
-        }
-        if let Some((k_swa, v_swa)) = shared_kv_map.get("sliding_attention") {
-            captured_tensors.push(mlxcel_core::copy(k_swa.as_ref().unwrap()));
-            captured_tensors.push(mlxcel_core::copy(v_swa.as_ref().unwrap()));
-        }
-
-        VerifyForwardOutput {
-            target_tokens,
-            target_logprobs,
-            captured: VerifyCaptured {
-                tensors: captured_tensors,
-                // No per-step scalar metadata used today; the per-row
-                // batched path will populate these with kv_offset_pre /
-                // bonus_position_pre.
-                scalars: Vec::new(),
-            },
-        }
+    /// Verify a draft tree in one forward.
+    ///
+    /// Gemma 4 can do this because it has no recurrent state: the tree mask
+    /// makes siblings invisible to each other and every layer is attention,
+    /// so one flattened forward over the nodes is exact (issue #1204). A
+    /// hybrid target cannot, which is why the trait default refuses and why
+    /// Qwen 3.5 overrides it to say so.
+    ///
+    /// The mask is sized against the cache the next forward will read, taken
+    /// from `sequence_kv_offset` rather than threaded down from the round
+    /// loop, so there is one source for the offset instead of two that can
+    /// drift apart.
+    fn verify_forward_tree(
+        &self,
+        tree: &mlxcel_core::speculative::mtp::tree::DraftTree,
+        sampler: &SamplingConfig,
+        logprobs_config: &mlxcel_core::sampling::LogprobsConfig,
+    ) -> Result<VerifyForwardOutput, mlxcel_core::speculative::mtp::target::TreeVerifyUnsupported>
+    {
+        let offset = self.wrapper.sequence_kv_offset(self.seq_id).max(0) as usize;
+        let nodes = tree.len();
+        // MLX additive masks are f32 with 0 to attend; the blocking value is
+        // a large negative rather than -inf so an all-masked row cannot turn
+        // into NaN through the softmax.
+        let flat = tree.additive_mask_with_history(offset, -1.0e9);
+        let mask = mlxcel_core::from_slice_f32(&flat, &[nodes as i32, (offset + nodes) as i32]);
+        Ok(self.verify_forward_with_mask(tree.tokens(), Some(&mask), sampler, logprobs_config))
     }
 
     fn verify_finalize(
