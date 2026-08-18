@@ -2623,13 +2623,26 @@ impl KVCache {
     /// draft tree's accepted path is scattered across the verified positions,
     /// so the surviving slots have to be selected and closed up (issue #1204).
     ///
-    /// Scoped exactly as [`Self::trim_front_keep`] is, and for the same
-    /// reason: only `Fp16` and `Int8` keep their sequence axis in a dense
-    /// buffer that can be reindexed. Turbo modes carry per-token rotation
-    /// state in packed sidecars that reordering cannot rebuild, and
-    /// pool-backed caches hold no dense buffer at all. Both refuse rather than
-    /// silently reindexing half of their state, and the caller is expected to
-    /// decline tree drafting when this returns an error.
+    /// Supported for every dense mode, because every one of them stores its
+    /// per-token state on the same sequence axis: `Fp16` and `Int8` in
+    /// `keys` / `values` (plus Int8's scale sidecars), and the Turbo modes in
+    /// `v_packed` / `v_norms` / `v_rescale`, with `k_packed` / `k_norms`
+    /// alongside them in symmetric `Turbo4`. `trim` already slices all of
+    /// those on axis 2, so selecting a subset of that axis is the same
+    /// operation with an index list instead of a bound.
+    ///
+    /// Two cases refuse. `Turbo4Delegated` splits its V between packed cold
+    /// storage and a hot ring at `cold_offset`, so a selection spanning the
+    /// boundary has to rebuild it, which this does not attempt. Pool-backed
+    /// caches hold no dense buffer at all. A caller that gets an error is
+    /// expected to decline tree drafting rather than proceed.
+    ///
+    /// Note for anyone extending this: the `Fp16 | Int8` restriction on
+    /// [`Self::trim_front_keep`] does **not** apply here, and inheriting it
+    /// would be wrong. That one exists because a head trim advances
+    /// `live_start` instead of moving data, and the Turbo fetch paths slice
+    /// from `0`. This reindexes the buffers physically and leaves
+    /// `live_start` at `0`, so the hazard is not present.
     ///
     /// `positions` must be strictly increasing and inside the live window. A
     /// tree path is increasing by construction (`parents[i] < i`), so a
@@ -2641,12 +2654,13 @@ impl KVCache {
                     .to_string(),
             );
         }
-        if !matches!(self.mode, KVCacheMode::Fp16 | KVCacheMode::Int8) {
-            return Err(format!(
-                "KVCache::gather_positions: unsupported for {:?}; Turbo modes carry per-token \
-                 rotation state that reordering cannot rebuild",
-                self.mode
-            ));
+        if self.mode == KVCacheMode::Turbo4Delegated {
+            return Err(
+                "KVCache::gather_positions: Turbo4Delegated splits V across packed cold storage \
+                 and a hot ring, and rebuilding cold_offset for a selection spanning both is not \
+                 implemented"
+                    .to_string(),
+            );
         }
         if self.live_start != 0 {
             return Err(format!(
@@ -2683,12 +2697,19 @@ impl KVCache {
 
         let index = ffi::from_slice_i32(positions, &[positions.len() as i32]);
         let pick = |arr: &UniquePtr<MlxArray>| -> UniquePtr<MlxArray> { ffi::take(arr, &index, 2) };
+        // Every buffer that carries a sequence axis is reindexed, whether or
+        // not the current mode populates it. Reindexing a subset would leave
+        // the survivors decoded against another token's scale, norm or sign
+        // vector, which is silent rather than loud.
         self.keys = self.keys.as_ref().map(&pick);
         self.values = self.values.as_ref().map(&pick);
-        if self.mode == KVCacheMode::Int8 {
-            self.key_scales = self.key_scales.as_ref().map(&pick);
-            self.val_scales = self.val_scales.as_ref().map(&pick);
-        }
+        self.key_scales = self.key_scales.as_ref().map(&pick);
+        self.val_scales = self.val_scales.as_ref().map(&pick);
+        self.v_packed = self.v_packed.as_ref().map(&pick);
+        self.v_norms = self.v_norms.as_ref().map(&pick);
+        self.v_rescale = self.v_rescale.as_ref().map(&pick);
+        self.k_packed = self.k_packed.as_ref().map(&pick);
+        self.k_norms = self.k_norms.as_ref().map(&pick);
         self.offset = positions.len() as i32;
         Ok(())
     }

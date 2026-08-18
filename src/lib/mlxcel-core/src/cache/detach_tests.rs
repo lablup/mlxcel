@@ -1179,8 +1179,61 @@ fn gather_positions_rejects_shapes_it_cannot_serve() {
 }
 
 #[test]
-fn gather_positions_refuses_a_turbo_cache() {
-    let mut cache = KVCache::new_with_mode(KVCacheMode::Turbo4);
+fn gather_positions_reindexes_every_turbo_sidecar() {
+    // The Turbo modes keep their per-token state on the same sequence axis
+    // `trim` already slices, so a selection along it is the same operation
+    // with an index list instead of a bound. Every sidecar the mode populates
+    // has to come along: a survivor decoded against another token's norm or
+    // sign vector fails silently rather than loudly.
+    // head_dim 8 rather than the 1 the plain fixture uses: Turbo3Asym packs
+    // 24 bits across the feature axis and rejects anything narrower, so a
+    // head_dim of 1 would test the fixture rather than the gather.
+    let wide = |tokens: usize, base: f32| -> UniquePtr<MlxArray> {
+        let values: Vec<f32> = (0..tokens)
+            .flat_map(|t| (0..8).map(move |d| base + t as f32 + d as f32 * 0.01))
+            .collect();
+        crate::ffi::from_slice_f32(&values, &[1, 1, tokens as i32, 8])
+    };
+
+    for mode in [
+        KVCacheMode::Turbo4,
+        KVCacheMode::Turbo4Asym,
+        KVCacheMode::Turbo3Asym,
+    ] {
+        let mut cache = KVCache::new_with_mode(mode);
+        cache.update(wide(4, 1.0), wide(4, 10.0));
+        let before = cache.seq_len();
+
+        cache
+            .gather_positions(&[0, 2])
+            .unwrap_or_else(|e| panic!("{mode:?} must support gather, got: {e}"));
+
+        assert_eq!(cache.seq_len(), 2, "{mode:?} keeps exactly the survivors");
+        assert!(before > 2, "{mode:?} fixture must start wider than it ends");
+        for (name, sidecar) in [
+            ("v_packed", cache.v_packed.as_ref()),
+            ("v_norms", cache.v_norms.as_ref()),
+            ("v_rescale", cache.v_rescale.as_ref()),
+            ("k_packed", cache.k_packed.as_ref()),
+            ("k_norms", cache.k_norms.as_ref()),
+        ] {
+            let Some(sidecar) = sidecar else { continue };
+            let shape = crate::ffi::array_shape(sidecar);
+            assert_eq!(
+                shape[2], 2,
+                "{mode:?} left {name} at shape {shape:?}, so it no longer describes the tokens"
+            );
+        }
+    }
+}
+
+#[test]
+fn gather_positions_refuses_the_split_delegated_cache() {
+    // Turbo4Delegated is the one dense mode that refuses, and for a reason
+    // that is about its layout rather than about quantization: V lives partly
+    // in packed cold storage and partly in a hot ring, so a selection
+    // spanning `cold_offset` has to rebuild that boundary.
+    let mut cache = KVCache::new_with_mode(KVCacheMode::Turbo4Delegated);
     cache.update(
         fp32_tokens(&[1.0, 2.0, 3.0]),
         fp32_tokens(&[10.0, 20.0, 30.0]),
@@ -1188,9 +1241,9 @@ fn gather_positions_refuses_a_turbo_cache() {
 
     let err = cache
         .gather_positions(&[0, 2])
-        .expect_err("Turbo modes must refuse rather than reindex half their state");
+        .expect_err("the split layout must refuse rather than reindex one half");
     assert!(
-        err.contains("rotation state"),
-        "the refusal should say why, got: {err}"
+        err.contains("cold_offset"),
+        "the refusal should name the boundary it cannot rebuild, got: {err}"
     );
 }
