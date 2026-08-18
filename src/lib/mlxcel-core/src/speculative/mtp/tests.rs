@@ -229,6 +229,10 @@ struct MockMtpDrafter {
     /// Records each `draft_block` call's `last_bonus` so we can assert
     /// the bonus token propagates correctly.
     draft_block_log: RefCell<Vec<i32>>,
+    /// Configured depth, when this mock stands in for a drafter that has one.
+    /// `None` (the default) leaves the adaptive controller with nothing to
+    /// pin against, which is what every other test here wants.
+    configured_block: Option<usize>,
 }
 
 impl MockMtpDrafter {
@@ -237,11 +241,23 @@ impl MockMtpDrafter {
             scripted_draft_tokens: RefCell::new(scripted),
             set_shared_kv_log: RefCell::new(Vec::new()),
             draft_block_log: RefCell::new(Vec::new()),
+            configured_block: None,
         }
+    }
+
+    /// Stand in for a drafter that declares a configured depth, so the
+    /// adaptive controller has something to hold the request down to.
+    fn with_configured_block(mut self, block: usize) -> Self {
+        self.configured_block = Some(block);
+        self
     }
 }
 
 impl Drafter for MockMtpDrafter {
+    fn configured_block_size(&self) -> Option<usize> {
+        self.configured_block
+    }
+
     fn bind(&mut self, _target: &dyn crate::generate::LanguageModel) -> Result<(), DrafterError> {
         Ok(())
     }
@@ -938,5 +954,52 @@ fn round_loop_probe_rounds_emit_one_greedy_token_and_stay_out_of_acceptance() {
         log,
         vec![(0, 1), (0, 1), (3, 4)],
         "probe rounds must finalize as zero-trim single-position verifies",
+    );
+}
+
+/// A request the adaptive controller overrides must not be reported as the
+/// width that ran.
+///
+/// Before issue #1206 the round-loop diagnostics carried only the requested
+/// width, so a run pinned to a drafter's configured depth was indistinguishable
+/// in the record from a run that genuinely used the requested one. On the
+/// Gemma 4 pairing that made `--draft-block-size 6` produce a run byte-identical
+/// to `--draft-block-size 4` while still reporting 6, which is what makes the
+/// flag look tunable when it is not.
+#[test]
+fn an_overridden_block_request_is_not_reported_as_the_width_used() {
+    let target = MockMtpTarget::new(
+        vec![vec![10, 11, 12, 13, 14], vec![20, 21, 22, 23, 24]],
+        vec![],
+    );
+    let drafter = MockMtpDrafter::new(vec![vec![10, 11, 12, 13], vec![20, 21, 22, 23]])
+        .with_configured_block(2);
+    let mut gen_ = MtpGenerator::new(target, Box::new(drafter), 5);
+    let _ = gen_.generate(
+        &[1, 2, 3],
+        10,
+        &SamplingConfig::greedy(),
+        &[],
+        &AtomicBool::new(false),
+        &LogprobsConfig::default(),
+    );
+
+    let summary = gen_
+        .last_acceptance()
+        .expect("a run with rounds must produce a summary");
+    assert!(summary.rounds > 0, "the fixture must actually run rounds");
+    assert!(
+        summary.effective_block_max < 5,
+        "the controller pinned this drafter at depth 2, so 5 must not be \
+         reported as the width used; got {}",
+        summary.effective_block_max
+    );
+    assert!(
+        summary.effective_block_min > 0,
+        "an executed round must record the width it drafted at"
+    );
+    assert!(
+        summary.effective_block_min <= summary.effective_block_max,
+        "the recorded range must be ordered"
     );
 }

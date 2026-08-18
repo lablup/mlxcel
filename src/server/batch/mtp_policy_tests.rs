@@ -50,6 +50,8 @@ fn sample(
 ) -> MtpBurstProfile {
     MtpBurstProfile::from_summary(
         MtpAcceptanceSummary {
+            effective_block_min: 0,
+            effective_block_max: 0,
             rounds,
             proposed_tokens: proposed_per_round * rounds,
             accepted_draft_tokens: accepted_per_round * rounds,
@@ -247,6 +249,8 @@ fn accumulator_records_batch_and_prompt_shape() {
     let mut acc = ProfileAccumulator::default();
     acc.add(&MtpBurstProfile::from_summary(
         MtpAcceptanceSummary {
+            effective_block_min: 0,
+            effective_block_max: 0,
             rounds: 4,
             proposed_tokens: 12,
             accepted_draft_tokens: 8,
@@ -259,6 +263,8 @@ fn accumulator_records_batch_and_prompt_shape() {
     ));
     acc.add(&MtpBurstProfile::from_summary(
         MtpAcceptanceSummary {
+            effective_block_min: 0,
+            effective_block_max: 0,
             rounds: 4,
             proposed_tokens: 12,
             accepted_draft_tokens: 8,
@@ -676,6 +682,8 @@ fn profile_sample_carries_no_token_level_data() {
     // realized byte-identity is validated on real models by the orchestrator
     // and by the greedy-parity gate in mlxcel_core::speculative::mtp::tests.
     let summary = MtpAcceptanceSummary {
+        effective_block_min: 0,
+        effective_block_max: 0,
         rounds: 8,
         proposed_tokens: 24,
         accepted_draft_tokens: 18,
@@ -711,6 +719,8 @@ fn measured_sample(
 ) -> MtpBurstProfile {
     MtpBurstProfile::from_summary(
         MtpAcceptanceSummary {
+            effective_block_min: 0,
+            effective_block_max: 0,
             rounds,
             proposed_tokens: proposed_per_round * rounds,
             accepted_draft_tokens: accepted_total,
