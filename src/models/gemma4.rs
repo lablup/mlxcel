@@ -1487,6 +1487,43 @@ impl Cache {
         }
     }
 
+    /// Whether this cache can roll back a **scattered** accept set right now.
+    ///
+    /// The tree counterpart of the implicit "trim always works" that
+    /// [`Self::trim_speculative`] rests on. It does not always work here: the
+    /// rotating variant needs its ring unwrapped, so the answer is a function
+    /// of state rather than of type, and a caller must ask each round before
+    /// it appends a verify block (issue #1204).
+    ///
+    /// Used by: Gemma 4 MTP tree rollback.
+    pub(crate) fn can_gather_speculative(&self) -> bool {
+        match self {
+            Self::Standard(cache) => cache.can_gather_within_tail(),
+            Self::Rotating(cache) => cache.can_gather_within_tail(),
+        }
+    }
+
+    /// Keep only the verify block's `kept` slots, compacting them in place.
+    ///
+    /// The tree analogue of [`Self::trim_speculative`]. A linear accept set is
+    /// a prefix of the block, so rolling it back is a tail trim; a tree's is a
+    /// path, so the survivors are scattered and have to be selected and closed
+    /// up. `kept` are offsets within the block, which is exactly the node
+    /// index of each accepted node because the block is appended in the tree's
+    /// topological order.
+    ///
+    /// Used by: Gemma 4 MTP tree rollback.
+    pub(crate) fn gather_speculative(
+        &mut self,
+        block_size: i32,
+        kept: &[i32],
+    ) -> Result<(), String> {
+        match self {
+            Self::Standard(cache) => cache.gather_within_tail(block_size, kept),
+            Self::Rotating(cache) => cache.gather_within_tail(block_size, kept),
+        }
+    }
+
     /// Add upstream-style rollback slack to sliding-window target caches used
     /// by Gemma 4 MTP. The logical attention window is unchanged; only the
     /// rotating cache's temporary storage grows so verify-block append +
@@ -2503,6 +2540,54 @@ impl Attention {
     }
 }
 
+/// The mask a sliding-window family must obey when the caller supplied one.
+///
+/// A caller mask states which keys are structurally allowed. It cannot also
+/// state the sliding-window band, because the same mask is handed to the
+/// full-attention family, which must not have one. Below the window the two
+/// constraints agree and this returns the caller mask unchanged. Past it they
+/// stop agreeing, and a sliding layer has to satisfy both, so this returns
+/// their intersection.
+///
+/// The MTP draft-tree mask is what exposed the gap. Its history columns are
+/// all-attend by construction, and [`trim_mask_to_keys`] crops from the right
+/// without adding a band, so past the window the sliding layers were attending
+/// outside their window and a linear-tree verify stopped reproducing the chain
+/// path it is defined to match (issue #1204).
+///
+/// Two properties this rests on. Additive masks intersect by `minimum`, so a
+/// caller mask that already carries the band is unchanged by intersecting it
+/// again, and every existing caller that builds a window-aware mask keeps its
+/// exact behavior. And the intersection always keeps each query's own
+/// position, which both constraints allow, so no row can go all-masked and
+/// soften to NaN.
+///
+/// The crop width is `min(sliding_live_len, window - 1) + l`, which is the
+/// same quantity the caller of this function computes as `sliding_returned`,
+/// so the result's key axis matches what the rotating cache actually returns.
+///
+/// Used by: Gemma 4 caller-mask forward (speculative verify, batched and
+/// adopted-prefix prefill).
+fn sliding_mask_from_caller(
+    mask: &MlxArray,
+    l: i32,
+    sliding_live_len: i32,
+    window: i32,
+) -> UniquePtr<MlxArray> {
+    if window <= 0 || sliding_live_len + l <= window {
+        return mlxcel_core::copy(mask);
+    }
+    let band = create_sliding_window_prefill_mask(l, sliding_live_len, window);
+    let band_len = *mlxcel_core::array_shape(&band).last().unwrap_or(&0);
+    let mask_key_len = *mlxcel_core::array_shape(mask).last().unwrap_or(&0);
+    if band_len > 0 && mask_key_len >= band_len {
+        let cropped = slice_axis(mask, -1, mask_key_len - band_len, mask_key_len);
+        mlxcel_core::minimum(&cropped, &band)
+    } else {
+        band
+    }
+}
+
 fn trim_mask_to_keys(
     mask: Option<&MlxArray>,
     keys: &MlxArray,
@@ -3255,7 +3340,10 @@ impl Gemma4TextModel {
                     )),
                 )
             } else {
-                (Some(mlxcel_core::copy(mask)), Some(mlxcel_core::copy(mask)))
+                (
+                    Some(mlxcel_core::copy(mask)),
+                    Some(sliding_mask_from_caller(mask, l, sliding_live_len, window)),
+                )
             }
         } else if has_padding {
             // Resident prompt padding present (ragged burst). Build per-row
@@ -5118,6 +5206,27 @@ impl Gemma4Wrapper {
     /// verification.
     ///
     /// Used by: [`crate::models::gemma4_mtp_target::Gemma4MtpTargetAdapter`].
+    /// KV length the next forward on `seq_id` will treat as history.
+    ///
+    /// The same value `forward_with_speculative_sinks` derives internally
+    /// when it builds its own causal mask (`first_present_cache_offset`), so
+    /// a caller that supplies a mask instead can size it to match. Anything
+    /// else silently misaligns the mask against the cache.
+    ///
+    /// Exposed for draft-tree verification (issue #1204): a tree mask is
+    /// `[nodes, offset + nodes]` and the caller has to know `offset` to build
+    /// it. Reading the cache is preferable to threading the number down from
+    /// the round loop, which would leave two sources for one fact.
+    ///
+    /// Used by: `Gemma4MtpTargetAdapter::verify_forward_tree`.
+    pub(crate) fn sequence_kv_offset(&self, seq_id: Option<SequenceId>) -> i32 {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.model.make_caches(),
+            |caches| first_present_cache_offset(caches),
+        )
+    }
+
     pub(crate) fn forward_hidden_with_speculative_sinks(
         &self,
         input_ids: &MlxArray,
@@ -5260,6 +5369,71 @@ impl Gemma4Wrapper {
                     if is_batch && max_a > 0 {
                         cache.zero_partial_accept_tail(&valid_ends, block_size)?;
                     }
+                }
+                Ok(())
+            },
+        )
+    }
+
+    /// Whether every cache of this sequence can roll back a scattered accept
+    /// set right now.
+    ///
+    /// Asked **before** a tree is drafted, not after it is verified. The
+    /// rotating sliding-window caches answer from their state, so the tree
+    /// path is available per round rather than per model, and a round that
+    /// appends a tree block it cannot roll back has no recovery: the linear
+    /// rollback would keep the wrong entries rather than fail (issue #1204).
+    ///
+    /// Used by: [`crate::models::gemma4_mtp_target::Gemma4MtpTargetAdapter`].
+    pub fn can_gather_speculative_cache(&self, seq_id: Option<SequenceId>) -> bool {
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.model.make_caches(),
+            |sequence_caches| {
+                sequence_caches
+                    .iter()
+                    .all(|cache| cache.can_gather_speculative())
+            },
+        )
+    }
+
+    /// Keep only the verify block slots named by `kept`, on every cache of
+    /// this sequence.
+    ///
+    /// The tree counterpart of [`Self::rollback_speculative_cache`]. That one
+    /// takes an accept count and trims `block_size - (max(accepted) + 1)` from
+    /// the tail, which is correct exactly when the accept set is a prefix.
+    /// This one takes the accepted path's node indices, which are also the
+    /// block offsets because the verify block is appended in the tree's
+    /// topological order.
+    ///
+    /// A linear tree gives `kept == [0, 1, ..., accepted]`, and the two agree
+    /// there by construction: `KVCache::gather_within_tail` on a prefix is
+    /// asserted equal to `trim`.
+    ///
+    /// There is no per-row tail-zero here because there is no batched tree
+    /// path yet. Adding one has to revisit this: a per-row *path* is not a
+    /// per-row count, so the rows cannot share one global trim the way
+    /// `rollback_speculative_cache` lets them.
+    ///
+    /// Used by: [`crate::models::gemma4_mtp_target::Gemma4MtpTargetAdapter`].
+    pub fn gather_speculative_cache(
+        &self,
+        seq_id: Option<SequenceId>,
+        block_size: i32,
+        kept: &[i32],
+    ) -> Result<(), String> {
+        if block_size <= 0 {
+            return Err(format!(
+                "gather_speculative_cache: block_size must be positive (got {block_size})"
+            ));
+        }
+        self.sequence_state.with_or_create_sequence_state(
+            seq_id,
+            || self.model.make_caches(),
+            |sequence_caches| -> Result<(), String> {
+                for cache in sequence_caches.iter_mut() {
+                    cache.gather_speculative(block_size, kept)?;
                 }
                 Ok(())
             },
@@ -5940,6 +6114,72 @@ mod gemma4_unified_mask_tests {
             "offset-0 caller mask must be shorter than the full-attention returned keys"
         );
         assert!(trim_mask_to_keys(Some(&fixed), &k, m).is_some());
+    }
+
+    /// Below the window the caller mask is returned untouched.
+    ///
+    /// This is what keeps the fix scoped: every context that fits inside the
+    /// sliding window takes exactly the path it took before, so no existing
+    /// caller-mask path changes behavior (issue #1204).
+    #[test]
+    fn sliding_mask_from_caller_is_identity_below_the_window() {
+        let mask = create_causal_mask(4, 8); // [4, 12]
+        let out = sliding_mask_from_caller(&mask, 4, 8, 64);
+        mlxcel_core::eval(&out);
+        assert!(
+            mlxcel_core::item_bool(&mlxcel_core::allclose(&out, &mask, 0.0, 0.0)),
+            "a context inside the window must not be re-masked"
+        );
+    }
+
+    /// Past the window, a caller mask that lets a sliding layer see its whole
+    /// history gets the band added.
+    ///
+    /// This is the draft-tree shape: `DraftTree::additive_mask_with_history`
+    /// fills every history column with 0.0, so without this the sliding layers
+    /// attend outside their window and a linear-tree verify stops matching the
+    /// chain path it is defined to reproduce.
+    #[test]
+    fn sliding_mask_from_caller_adds_the_band_past_the_window() {
+        const L: i32 = 4;
+        const WINDOW: i32 = 8;
+        const LIVE: i32 = 16;
+        // All-attend over history + a causal block, the tree mask's shape.
+        let all_attend = mlxcel_core::zeros(&[L, LIVE + L], mlxcel_core::dtype::FLOAT32);
+        let out = sliding_mask_from_caller(&all_attend, L, LIVE, WINDOW);
+        mlxcel_core::eval(&out);
+
+        let band = create_sliding_window_prefill_mask(L, LIVE, WINDOW);
+        mlxcel_core::eval(&band);
+        assert_eq!(
+            mlxcel_core::array_shape(&out),
+            mlxcel_core::array_shape(&band),
+            "the result must be sized to what the rotating cache returns"
+        );
+        assert!(
+            mlxcel_core::item_bool(&mlxcel_core::allclose(&out, &band, 0.0, 0.0)),
+            "an all-attend caller mask past the window must reduce to the band"
+        );
+    }
+
+    /// Past the window, a caller mask that already carries the band is
+    /// unchanged by intersecting it again.
+    ///
+    /// The property every existing caller relies on: the batched and
+    /// adopted-prefix prefill paths build window-aware masks, so applying the
+    /// band a second time has to be a no-op rather than a tightening.
+    #[test]
+    fn sliding_mask_from_caller_leaves_an_already_banded_mask_alone() {
+        const L: i32 = 4;
+        const WINDOW: i32 = 8;
+        const LIVE: i32 = 16;
+        let banded = create_sliding_window_prefill_mask(L, LIVE, WINDOW);
+        let out = sliding_mask_from_caller(&banded, L, LIVE, WINDOW);
+        mlxcel_core::eval(&out);
+        assert!(
+            mlxcel_core::item_bool(&mlxcel_core::allclose(&out, &banded, 0.0, 0.0)),
+            "intersecting a banded mask with its own band must change nothing"
+        );
     }
 
     /// A mask LONGER than the keys (correctly-offset caller mask on the sliding

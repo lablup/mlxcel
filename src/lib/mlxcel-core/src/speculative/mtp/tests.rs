@@ -62,6 +62,10 @@ struct MockMtpTarget {
     /// before `prefill_and_seed`, then advances by `accepted + 1` per
     /// round.
     cumulative_offset: RefCell<usize>,
+    /// Whether this mock claims it can round-trip a draft tree. Off by
+    /// default so the refusal tests keep testing the default, and turned on
+    /// by the equivalence test that drives both arms.
+    tree_capable: bool,
 }
 
 impl MockMtpTarget {
@@ -73,7 +77,22 @@ impl MockMtpTarget {
             call_count: RefCell::new(0),
             verify_log: RefCell::new(Vec::new()),
             cumulative_offset: RefCell::new(0),
+            tree_capable: false,
         }
+    }
+
+    /// Claim the tree capability, and serve it by delegating to the linear
+    /// path.
+    ///
+    /// The delegation is the point rather than a shortcut. A linear tree's
+    /// node list *is* the chain's verify input, and its accepted path *is*
+    /// `[0, 1, ..., accepted]`, so a mock that forwards both to the linear
+    /// methods is a faithful tree target for the degenerate case, and any
+    /// difference the generator produces between the two arms is the
+    /// generator's own (issue #1204).
+    fn tree_capable(mut self) -> Self {
+        self.tree_capable = true;
+        self
     }
 
     /// Tiny dummy `[1, 1, 4]` FP32 tensor used wherever the target
@@ -195,6 +214,43 @@ impl MtpTarget for MockMtpTarget {
             target_logprobs,
             captured,
         }
+    }
+
+    fn tree_round_is_available(&self) -> bool {
+        self.tree_capable
+    }
+
+    fn verify_forward_tree(
+        &self,
+        tree: &super::tree::DraftTree,
+        sampler: &SamplingConfig,
+        logprobs_config: &LogprobsConfig,
+    ) -> Result<VerifyForwardOutput, super::target::TreeVerifyUnsupported> {
+        if !self.tree_capable {
+            return Err(super::target::TreeVerifyUnsupported {
+                reason: "this mock was not built tree-capable",
+            });
+        }
+        // A linear tree's node list is exactly the chain's verify input.
+        Ok(self.verify_forward(tree.tokens(), sampler, logprobs_config))
+    }
+
+    fn verify_finalize_tree(
+        &self,
+        path: &[usize],
+        block_size: usize,
+        captured: VerifyCaptured,
+    ) -> Result<MtpVerifyOutput, super::target::TreeVerifyUnsupported> {
+        if !self.tree_capable {
+            return Err(super::target::TreeVerifyUnsupported {
+                reason: "this mock was not built tree-capable",
+            });
+        }
+        // A linear tree's accepted path is `[0, 1, ..., accepted]`, so its
+        // length minus the root is the chain's accept count. Logging through
+        // the same `verify_log` is what lets the equivalence test compare the
+        // two arms' rollbacks and not just their tokens.
+        Ok(self.verify_finalize(path.len() - 1, block_size, captured))
     }
 
     fn verify_finalize(
@@ -1001,5 +1057,141 @@ fn an_overridden_block_request_is_not_reported_as_the_width_used() {
     assert!(
         summary.effective_block_min <= summary.effective_block_max,
         "the recorded range must be ordered"
+    );
+}
+
+/// A target that has not implemented a tree-aware verify must refuse one.
+///
+/// The default is the safety property, not a placeholder. Flattening a tree
+/// into the sequence a linear verify expects lets a node's state reach its
+/// sibling, which the tree mask prevents for attention and nothing prevents
+/// for a recurrence, so the failure would be silent (issue #1204). A target
+/// opts in by implementing the method; omission has to mean no.
+#[test]
+fn a_target_without_a_tree_path_refuses_a_tree() {
+    use super::tree::DraftTree;
+
+    let target = MockMtpTarget::new(vec![vec![10, 11, 12]], vec![]);
+    let tree = DraftTree::linear(7, &[10, 11]);
+
+    let refusal = target
+        .verify_forward_tree(&tree, &SamplingConfig::greedy(), &LogprobsConfig::default())
+        .expect_err("a target with no tree path must refuse rather than flatten");
+    assert!(
+        !refusal.reason.is_empty(),
+        "a refusal must carry a reason the round loop can log"
+    );
+}
+
+/// A target says nothing about trees unless it says yes.
+///
+/// The round loop asks this before it drafts, because the two tree methods are
+/// one capability: the forward appends a block to the cache and only a
+/// tree-aware rollback can take it off, so a refusal discovered afterwards has
+/// no fallback. A default of `true` would make every target that has not
+/// thought about trees claim it can round-trip one (issue #1204).
+#[test]
+fn a_target_claims_no_tree_round_until_it_says_so() {
+    let target = MockMtpTarget::new(vec![vec![10, 11, 12]], vec![]);
+    assert!(
+        !target.tree_round_is_available(),
+        "the default has to be no, so opting in is an act rather than an omission"
+    );
+}
+
+/// The rollback half of the tree capability refuses by default too.
+///
+/// Verifying a tree and keeping its accepted path are separate abilities, and
+/// a target can have the first without the second: the mask that makes the
+/// forward correct does nothing for a cache whose rollback is a tail trim.
+/// If this half inherited a permissive default, a target that opted into the
+/// forward would silently get a linear rollback applied to a scattered accept
+/// set, which keeps the wrong entries rather than failing (issue #1204).
+#[test]
+fn a_target_without_a_tree_rollback_refuses_one() {
+    let target = MockMtpTarget::new(vec![vec![10, 11, 12]], vec![]);
+    let captured = VerifyCaptured {
+        tensors: Vec::new(),
+        scalars: Vec::new(),
+    };
+
+    // The path a full linear accept of two drafts produces: root plus both
+    // nodes. Even this, the shape the chain path handles, has to be refused
+    // by a target that has not implemented the selection.
+    let refusal = target
+        .verify_finalize_tree(&[0, 1, 2], 3, captured)
+        .expect_err("a target with no tree rollback must refuse rather than trim a tail");
+    assert!(
+        !refusal.reason.is_empty(),
+        "a refusal must carry a reason the round loop can log"
+    );
+}
+
+/// A linear tree round must land exactly where the chain round lands, token
+/// for token and rollback for rollback.
+///
+/// This is the property the whole tree path rests on. `Drafter::draft_tree`
+/// defaults to wrapping `draft_block` in a linear tree, so switching tree
+/// drafting on without a branching drafter changes the plumbing and nothing
+/// else. A divergence here is the wiring rather than the topology, which is
+/// why this is the first thing to run after the round loop is wired and the
+/// first thing to suspect when a branching drafter later misbehaves
+/// (issue #1204).
+#[test]
+fn a_linear_tree_round_lands_where_the_chain_round_lands() {
+    // One script covering the three shapes a round takes: full accept, a
+    // partial accept that diverges mid-block, and an immediate rejection.
+    let scripted_targets = || {
+        vec![
+            vec![10, 11, 12, 13],
+            vec![20, 99, 22, 23],
+            vec![77, 31, 32, 33],
+        ]
+    };
+    let scripted_drafts = || vec![vec![10, 11, 12], vec![20, 21, 22], vec![30, 31, 32]];
+
+    let run = |tree: bool| {
+        let target = MockMtpTarget::new(scripted_targets(), vec![]);
+        let target = if tree { target.tree_capable() } else { target };
+        let drafter = MockMtpDrafter::new(scripted_drafts());
+        let mut gen_ = MtpGenerator::new(target, Box::new(drafter), 4).with_tree_drafting(tree);
+        let (tokens, _logprobs, stats) = gen_.generate(
+            &[1, 2, 3],
+            13,
+            &SamplingConfig::greedy(),
+            &[],
+            &AtomicBool::new(false),
+            &LogprobsConfig::default(),
+        );
+        let log = gen_.target().verify_log.borrow().clone();
+        (tokens, stats.generated_tokens, log)
+    };
+
+    let (chain_tokens, chain_generated, chain_log) = run(false);
+    let (tree_tokens, tree_generated, tree_log) = run(true);
+
+    assert_eq!(
+        tree_tokens, chain_tokens,
+        "a linear tree must emit exactly what the chain emits"
+    );
+    assert_eq!(
+        tree_generated, chain_generated,
+        "the token counts must agree, not only the token values"
+    );
+    assert_eq!(
+        tree_log, chain_log,
+        "the rollbacks must agree too: same accept count, same block size, same order"
+    );
+
+    // Guard against a vacuous comparison. If every round were a full accept
+    // the two paths would agree for a reason that has nothing to do with the
+    // wiring being right.
+    assert!(
+        chain_log.iter().any(|(accepted, _)| *accepted < 3),
+        "the script must exercise a partial accept, or this proves nothing"
+    );
+    assert!(
+        chain_log.iter().any(|(accepted, _)| *accepted == 0),
+        "the script must exercise an immediate rejection too"
     );
 }

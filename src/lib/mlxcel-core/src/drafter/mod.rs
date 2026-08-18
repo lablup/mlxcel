@@ -963,6 +963,33 @@ pub trait Drafter {
         sampler: &crate::generate::SamplingConfig,
     ) -> Result<Vec<i32>, DrafterError>;
 
+    /// Propose a draft **tree** rather than a chain.
+    ///
+    /// The default wraps [`Self::draft_block`] into a linear tree, so every
+    /// drafter can serve the tree path from day one and a drafter that
+    /// branches overrides this. That degenerate case is not just a
+    /// convenience: it is what makes the tree wiring testable, because a
+    /// linear tree must produce byte-identical output to the chain path it
+    /// subsumes, and any divergence is the wiring rather than the topology
+    /// (issue #1204).
+    ///
+    /// Branching needs a confidence signal the drafter already computes and
+    /// discards: its per-step logits are reduced to an argmax today, and the
+    /// runner-up at an uncertain step is exactly the alternative worth
+    /// spending a verify position on.
+    fn draft_tree(
+        &mut self,
+        last_bonus: i32,
+        hidden: Option<&MlxArray>,
+        block_size: usize,
+        sampler: &crate::generate::SamplingConfig,
+    ) -> Result<crate::speculative::mtp::tree::DraftTree, DrafterError> {
+        let drafts = self.draft_block(last_bonus, hidden, block_size, sampler)?;
+        Ok(crate::speculative::mtp::tree::DraftTree::linear(
+            last_bonus, &drafts,
+        ))
+    }
+
     /// Produce a draft block as a device-side token array.
     ///
     /// DFlash can feed proposal tokens directly into the target verify graph,

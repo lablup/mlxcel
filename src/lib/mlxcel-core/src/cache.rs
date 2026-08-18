@@ -2615,6 +2615,258 @@ impl KVCache {
     /// the INT8 scale sidecars (their last dim is `1`); the head/tail bounds
     /// read every non-sequence dim from the array's own shape. Mirrors mlx-lm
     /// `RotatingKVCache._trim`.
+    /// Keep only the live-window slots named by `positions`, in that order,
+    /// compacted to the front of the buffer.
+    ///
+    /// The generalization of [`Self::trim`] that tree drafting needs. A linear
+    /// speculative accept set is a prefix, so rolling back is a tail trim; a
+    /// draft tree's accepted path is scattered across the verified positions,
+    /// so the surviving slots have to be selected and closed up (issue #1204).
+    ///
+    /// Supported for every dense mode, because every one of them stores its
+    /// per-token state on the same sequence axis: `Fp16` and `Int8` in
+    /// `keys` / `values` (plus Int8's scale sidecars), and the Turbo modes in
+    /// `v_packed` / `v_norms` / `v_rescale`, with `k_packed` / `k_norms`
+    /// alongside them in symmetric `Turbo4`. `trim` already slices all of
+    /// those on axis 2, so selecting a subset of that axis is the same
+    /// operation with an index list instead of a bound.
+    ///
+    /// Two cases refuse. `Turbo4Delegated` splits its V between packed cold
+    /// storage and a hot ring at `cold_offset`, so a selection spanning the
+    /// boundary has to rebuild it, which this does not attempt. Pool-backed
+    /// caches hold no dense buffer at all. A caller that gets an error is
+    /// expected to decline tree drafting rather than proceed.
+    ///
+    /// Note for anyone extending this: the `Fp16 | Int8` restriction on
+    /// [`Self::trim_front_keep`] does **not** apply here, and inheriting it
+    /// would be wrong. That one exists because a head trim advances
+    /// `live_start` instead of moving data, and the Turbo fetch paths slice
+    /// from `0`. This reindexes the buffers physically and leaves
+    /// `live_start` at `0`, so the hazard is not present.
+    ///
+    /// `positions` must be strictly increasing and inside the live window. A
+    /// tree path is increasing by construction (`parents[i] < i`), so a
+    /// violation is a caller bug rather than a shape this should tolerate.
+    pub fn gather_positions(&mut self, positions: &[i32]) -> Result<(), String> {
+        if self.paged_backing.is_some() {
+            return Err(
+                "KVCache::gather_positions: pool-backed caches have no dense buffer to reindex"
+                    .to_string(),
+            );
+        }
+        if self.mode == KVCacheMode::Turbo4Delegated {
+            return Err(
+                "KVCache::gather_positions: Turbo4Delegated splits V across packed cold storage \
+                 and a hot ring, and rebuilding cold_offset for a selection spanning both is not \
+                 implemented"
+                    .to_string(),
+            );
+        }
+        if self.live_start != 0 {
+            return Err(format!(
+                "KVCache::gather_positions: requires an untrimmed head (live_start={})",
+                self.live_start
+            ));
+        }
+        let live_len = self.live_len();
+        if positions.is_empty() {
+            return Err("KVCache::gather_positions: positions must be non-empty".to_string());
+        }
+        for pair in positions.windows(2) {
+            if pair[1] <= pair[0] {
+                return Err(format!(
+                    "KVCache::gather_positions: positions must be strictly increasing, got {pair:?}"
+                ));
+            }
+        }
+        if let Some(&last) = positions.last()
+            && (positions[0] < 0 || last >= live_len)
+        {
+            return Err(format!(
+                "KVCache::gather_positions: positions {:?} outside the live window [0, {live_len})",
+                positions
+            ));
+        }
+        if positions.len() as i32 == live_len
+            && positions.iter().enumerate().all(|(i, &p)| p == i as i32)
+        {
+            // The identity selection. Skipping it keeps a full-accept round
+            // free of a buffer rewrite, mirroring the `trim` fast path.
+            return Ok(());
+        }
+
+        let index = ffi::from_slice_i32(positions, &[positions.len() as i32]);
+        let pick = |arr: &UniquePtr<MlxArray>| -> UniquePtr<MlxArray> { ffi::take(arr, &index, 2) };
+        // Every buffer that carries a sequence axis is reindexed, whether or
+        // not the current mode populates it. Reindexing a subset would leave
+        // the survivors decoded against another token's scale, norm or sign
+        // vector, which is silent rather than loud.
+        self.keys = self.keys.as_ref().map(&pick);
+        self.values = self.values.as_ref().map(&pick);
+        self.key_scales = self.key_scales.as_ref().map(&pick);
+        self.val_scales = self.val_scales.as_ref().map(&pick);
+        self.v_packed = self.v_packed.as_ref().map(&pick);
+        self.v_norms = self.v_norms.as_ref().map(&pick);
+        self.v_rescale = self.v_rescale.as_ref().map(&pick);
+        self.k_packed = self.k_packed.as_ref().map(&pick);
+        self.k_norms = self.k_norms.as_ref().map(&pick);
+        self.offset = positions.len() as i32;
+        Ok(())
+    }
+
+    /// Keep only the tail slots named by `kept`, compacting them to the front
+    /// of the tail region and leaving everything before it alone.
+    ///
+    /// The scoped form of [`Self::gather_positions`], and the one a
+    /// speculative rollback actually wants. `gather_positions` names the
+    /// survivors of the whole live window, so a tree rollback has to re-list
+    /// the entire history every round and pays a full buffer rewrite for a
+    /// change confined to the last `tail_len` slots. This touches only that
+    /// region, through the same `slice_update` the append path uses, so the
+    /// cost scales with the verify block instead of with the context
+    /// (issue #1209).
+    ///
+    /// It also keeps the allocated capacity. `gather_positions` replaces each
+    /// buffer with a `take` result sized exactly to the survivors, so the next
+    /// append has to grow it again; writing back in place does not.
+    ///
+    /// `kept` are offsets **within** the tail, so `0` is the first slot of the
+    /// verified block and `tail_len - 1` the last. They must be strictly
+    /// increasing and inside `[0, tail_len)`. A draft tree's accepted path is
+    /// increasing by construction (`parents[i] < i`), so a violation is a
+    /// caller bug rather than a shape to tolerate.
+    ///
+    /// Unlike [`Self::gather_positions`] this places no requirement on
+    /// `live_start`: the tail is located in buffer coordinates through
+    /// `buffer_idx()`, which already accounts for a trimmed head.
+    ///
+    /// Refuses the two shapes `gather_positions` refuses, for the same
+    /// reasons: `Turbo4Delegated`, whose V is split between packed cold
+    /// storage and a hot ring, and pool-backed caches, which hold no dense
+    /// buffer.
+    pub fn gather_within_tail(&mut self, tail_len: i32, kept: &[i32]) -> Result<(), String> {
+        const WHO: &str = "KVCache::gather_within_tail";
+        if self.paged_backing.is_some() {
+            return Err(format!(
+                "{WHO}: pool-backed caches have no dense buffer to reindex"
+            ));
+        }
+        if self.mode == KVCacheMode::Turbo4Delegated {
+            return Err(format!(
+                "{WHO}: Turbo4Delegated splits V across packed cold storage and a hot ring, and \
+                 rebuilding cold_offset for a selection spanning both is not implemented"
+            ));
+        }
+        Self::validate_tail_selection(WHO, tail_len, kept, self.live_len())?;
+        if Self::is_identity_selection(tail_len, kept) {
+            // Full accept. Mirrors the `trim` and `gather_positions` fast
+            // paths: no buffer touched and no offset moved.
+            return Ok(());
+        }
+
+        let tail_end = self.buffer_idx();
+        let tail_start = tail_end - tail_len;
+        let kept_len = kept.len() as i32;
+        let index = ffi::from_slice_i32(kept, &[kept_len]);
+        let compact = |arr: &UniquePtr<MlxArray>| -> UniquePtr<MlxArray> {
+            Self::compact_tail_in_place(arr, &index, tail_start, tail_end, kept_len)
+        };
+        // Every buffer carrying a sequence axis is rewritten, whether or not
+        // the current mode populates it. Rewriting a subset would leave the
+        // survivors decoded against another token's scale, norm or sign
+        // vector, which is silent rather than loud.
+        self.keys = self.keys.as_ref().map(&compact);
+        self.values = self.values.as_ref().map(&compact);
+        self.key_scales = self.key_scales.as_ref().map(&compact);
+        self.val_scales = self.val_scales.as_ref().map(&compact);
+        self.v_packed = self.v_packed.as_ref().map(&compact);
+        self.v_norms = self.v_norms.as_ref().map(&compact);
+        self.v_rescale = self.v_rescale.as_ref().map(&compact);
+        self.k_packed = self.k_packed.as_ref().map(&compact);
+        self.k_norms = self.k_norms.as_ref().map(&compact);
+        self.offset -= tail_len - kept_len;
+        Ok(())
+    }
+
+    /// Whether [`Self::gather_within_tail`] can serve this cache as it stands.
+    ///
+    /// Static here, unlike the rotating counterpart, but exposed with the same
+    /// name so a caller holding either kind asks one question. The point of
+    /// asking at all is the rotating case, where the answer changes with the
+    /// cache's state (issue #1204).
+    pub fn can_gather_within_tail(&self) -> bool {
+        self.paged_backing.is_none() && self.mode != KVCacheMode::Turbo4Delegated
+    }
+
+    /// Shared validation for the tail-scoped selection, used by both dense
+    /// caches so the two cannot drift into disagreeing about what a legal
+    /// selection is.
+    fn validate_tail_selection(
+        who: &str,
+        tail_len: i32,
+        kept: &[i32],
+        live_len: i32,
+    ) -> Result<(), String> {
+        if tail_len <= 0 {
+            return Err(format!("{who}: tail_len must be positive (got {tail_len})"));
+        }
+        if tail_len > live_len {
+            return Err(format!(
+                "{who}: tail_len {tail_len} exceeds the live window [0, {live_len})"
+            ));
+        }
+        if kept.is_empty() {
+            return Err(format!(
+                "{who}: kept must be non-empty; a round that accepts nothing still keeps its root"
+            ));
+        }
+        for pair in kept.windows(2) {
+            if pair[1] <= pair[0] {
+                return Err(format!(
+                    "{who}: kept must be strictly increasing, got {pair:?}"
+                ));
+            }
+        }
+        if let Some(&last) = kept.last()
+            && (kept[0] < 0 || last >= tail_len)
+        {
+            return Err(format!(
+                "{who}: kept {kept:?} outside the tail [0, {tail_len})"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether the selection keeps the whole tail in order, i.e. the round was
+    /// a full accept and there is nothing to compact.
+    fn is_identity_selection(tail_len: i32, kept: &[i32]) -> bool {
+        kept.len() as i32 == tail_len && kept.iter().enumerate().all(|(i, &p)| p == i as i32)
+    }
+
+    /// Rewrite `[tail_start, tail_start + kept_len)` with the selected slots of
+    /// `[tail_start, tail_end)`, leaving the rest of the buffer as it is.
+    ///
+    /// The slots past the new end keep stale contents, exactly as they do
+    /// after a `trim`: they are outside the live window and the next append
+    /// overwrites them.
+    fn compact_tail_in_place(
+        arr: &UniquePtr<MlxArray>,
+        index: &UniquePtr<MlxArray>,
+        tail_start: i32,
+        tail_end: i32,
+        kept_len: i32,
+    ) -> UniquePtr<MlxArray> {
+        let s = ffi::array_shape(arr);
+        let tail = ffi::slice(arr, &[0, 0, tail_start, 0], &[s[0], s[1], tail_end, s[3]]);
+        let picked = ffi::take(&tail, index, 2);
+        ffi::slice_update(
+            arr,
+            &picked,
+            &[0, 0, tail_start, 0],
+            &[s[0], s[1], tail_start + kept_len, s[3]],
+        )
+    }
+
     fn slice_keep_sink(arr: &MlxArray, keep: i32, n: i32, live_len: i32) -> UniquePtr<MlxArray> {
         let s = ffi::array_shape(arr);
         let head = ffi::slice(arr, &[0, 0, 0, 0], &[s[0], s[1], keep, s[3]]);
@@ -5117,6 +5369,96 @@ impl RotatingKVCache {
         self.offset -= n;
         self.idx -= n;
         n
+    }
+
+    /// Keep only the tail slots named by `kept`, compacting them to the front
+    /// of the tail region.
+    ///
+    /// The rotating counterpart of [`KVCache::gather_within_tail`], and what a
+    /// draft tree needs from Gemma 4: its sliding-window layers hold this
+    /// cache, and [`Self::trim`] cannot serve a scattered accept set because
+    /// it moves no data at all, it only rewinds `offset` and `idx` and lets
+    /// the next append overwrite. A tail that has to be compacted has to be
+    /// written (issue #1204).
+    ///
+    /// Requires the ring to still be linear ([`Self::is_trimmable`]). That is
+    /// the precondition the speculative rollback path already runs under:
+    /// `enable_speculative_buffer` exists so the verify block append plus its
+    /// rollback stay inside the unwrapped region. Once the ring has wrapped,
+    /// physical slot order is not logical order, the tail is not contiguous,
+    /// and a selection expressed as tail offsets does not mean what it says.
+    ///
+    /// `start_position` is untouched, because compacting a tail does not move
+    /// slot `0`.
+    pub fn gather_within_tail(&mut self, tail_len: i32, kept: &[i32]) -> Result<(), String> {
+        const WHO: &str = "RotatingKVCache::gather_within_tail";
+        if !self.tail_is_in_logical_order() {
+            return Err(format!(
+                "{WHO}: the ring has wrapped, so the tail is not contiguous and a selection \
+                 expressed as tail offsets cannot be compacted in place"
+            ));
+        }
+        if self.mode == KVCacheMode::Turbo4Delegated {
+            return Err(format!(
+                "{WHO}: Turbo4Delegated splits V across packed cold storage and a hot ring, and \
+                 rebuilding cold_offset for a selection spanning both is not implemented"
+            ));
+        }
+        KVCache::validate_tail_selection(WHO, tail_len, kept, self.idx)?;
+        if KVCache::is_identity_selection(tail_len, kept) {
+            return Ok(());
+        }
+
+        let tail_end = self.idx;
+        let tail_start = tail_end - tail_len;
+        let kept_len = kept.len() as i32;
+        let index = ffi::from_slice_i32(kept, &[kept_len]);
+        let compact = |arr: &UniquePtr<MlxArray>| -> UniquePtr<MlxArray> {
+            KVCache::compact_tail_in_place(arr, &index, tail_start, tail_end, kept_len)
+        };
+        self.keys = self.keys.as_ref().map(&compact);
+        self.values = self.values.as_ref().map(&compact);
+        self.key_scales = self.key_scales.as_ref().map(&compact);
+        self.val_scales = self.val_scales.as_ref().map(&compact);
+        self.v_packed = self.v_packed.as_ref().map(&compact);
+        self.v_norms = self.v_norms.as_ref().map(&compact);
+        self.v_rescale = self.v_rescale.as_ref().map(&compact);
+
+        let dropped = tail_len - kept_len;
+        self.offset -= dropped;
+        self.idx -= dropped;
+        Ok(())
+    }
+
+    /// Whether the last `n` physical slots are the last `n` logical tokens, in
+    /// order, for any `n` within the live window.
+    ///
+    /// Two regimes qualify, for different reasons. Buffered speculative mode
+    /// (`buffer_size > 0`) compacts from the front rather than wrapping, so
+    /// slot order is logical order by construction and `idx` is the live
+    /// length. Without the buffer the ring wraps in place, and only an
+    /// unwrapped one qualifies.
+    ///
+    /// [`Self::is_trimmable`] is **not** the right question here, despite
+    /// looking like it. It excludes buffered mode outright, deliberately, for
+    /// a snapshot-restore reason that has nothing to do with whether a tail is
+    /// contiguous. Gating on it refuses every MTP round, because
+    /// `enable_speculative_buffer` is what puts the cache in buffered mode in
+    /// the first place, and tree drafting runs in exactly that regime
+    /// (issue #1204).
+    pub fn tail_is_in_logical_order(&self) -> bool {
+        self.buffer_size > 0 || self.is_trimmable()
+    }
+
+    /// Whether [`Self::gather_within_tail`] can serve this cache **right now**.
+    ///
+    /// State-dependent, and that is the property a caller has to respect: a
+    /// tree rollback available this round can be unavailable the next one, as
+    /// soon as an unbuffered ring wraps. Ask before appending a verify block,
+    /// not after. A refusal once the block is on the cache leaves a state only
+    /// a tree-aware rollback could undo (issue #1204).
+    pub fn can_gather_within_tail(&self) -> bool {
+        self.tail_is_in_logical_order() && self.mode != KVCacheMode::Turbo4Delegated
     }
 }
 

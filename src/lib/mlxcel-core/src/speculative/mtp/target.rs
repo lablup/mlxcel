@@ -203,6 +203,15 @@ impl MtpVerifyOutput {
             .collect()
     }
 }
+/// Why a target declined to verify a draft tree.
+///
+/// Carried rather than returned as a bare `None` so the round loop can log
+/// the cause once and fall back to the linear path, instead of leaving an
+/// operator to work out why tree drafting silently did nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TreeVerifyUnsupported {
+    pub reason: &'static str,
+}
 
 /// Trait for MTP-compatible target models.
 ///
@@ -298,6 +307,52 @@ pub trait MtpTarget {
         logprobs_config: &LogprobsConfig,
     ) -> VerifyForwardOutput;
 
+    /// Whether a tree round can complete on this target **right now**, asked
+    /// before anything is drafted.
+    ///
+    /// The two tree methods below are one capability and the round loop cannot
+    /// discover that by trying. [`Self::verify_forward_tree`] appends the
+    /// tree's block to the cache; if [`Self::verify_finalize_tree`] then
+    /// refuses, the round is stuck, because the block is on the cache and only
+    /// a tree-aware rollback can take it off. There is no falling back to the
+    /// linear path from there.
+    ///
+    /// The answer is per round rather than per model, which is why it is a
+    /// method and not a constant. Gemma 4 can verify a tree at any time but
+    /// can only roll one back while its sliding-window rings are unwrapped, so
+    /// its answer changes with cache state.
+    ///
+    /// The default is `false`, so a target opts in by answering, the same way
+    /// it opts into the two methods themselves.
+    fn tree_round_is_available(&self) -> bool {
+        false
+    }
+
+    /// Verify a draft **tree** in one forward, or say why this target cannot.
+    ///
+    /// The default refuses, and that default is the safety property rather
+    /// than a placeholder: a target that has not implemented a tree-aware
+    /// forward must not receive one. Flattening a tree into the sequence a
+    /// linear verify expects would let a node's state reach its sibling,
+    /// which for an attention-only target the tree mask prevents and for a
+    /// recurrent one nothing does (issue #1204).
+    ///
+    /// Qwen 3.5 is the case that makes this matter. Its 64 layers are 48
+    /// GatedDeltaNet and 16 attention, and a recurrence has no mask: a
+    /// flattened tree folds state through siblings and produces a wrong
+    /// answer silently. Its adapter overrides this to say so, rather than
+    /// relying on the default, so the refusal names its cause.
+    fn verify_forward_tree(
+        &self,
+        _tree: &super::tree::DraftTree,
+        _sampler: &SamplingConfig,
+        _logprobs_config: &LogprobsConfig,
+    ) -> Result<VerifyForwardOutput, TreeVerifyUnsupported> {
+        Err(TreeVerifyUnsupported {
+            reason: "this target has no tree-aware verify path",
+        })
+    }
+
     /// Second-phase verify: apply the per-row tail-zero rollback to the
     /// target's KV cache based on the walk's `accepted` count, slice the
     /// captured shared K/V to the post-rollback length, and return the
@@ -323,6 +378,57 @@ pub trait MtpTarget {
         block_size: usize,
         captured: VerifyCaptured,
     ) -> MtpVerifyOutput;
+
+    /// Second-phase verify for a draft **tree**, or say why this target
+    /// cannot.
+    ///
+    /// [`Self::verify_finalize`] rolls the cache back by trimming a tail,
+    /// because a linear accept set is a prefix of the block that was
+    /// verified. A tree's accept set is a path, so the survivors are
+    /// scattered through the block and rolling back means selecting them and
+    /// closing the gap. That is a different operation on the cache rather
+    /// than a different argument to the same one, which is why it is its own
+    /// method instead of a `path` parameter on the linear finalize
+    /// (issue #1204).
+    ///
+    /// `path` is [`super::tree::TreeWalk::path`]: node indices from the root
+    /// through the last accepted node, strictly increasing because
+    /// `parents[i] < i`. `path[0]` is the root, so `path.len() - 1` is the
+    /// accept count the linear finalize would have been given.
+    ///
+    /// A linear tree must land exactly where the chain lands. For a
+    /// [`super::tree::DraftTree::linear`] the path is `[0, 1, ..., accepted]`,
+    /// the selection is a prefix, and the result must be byte-identical to
+    /// `verify_finalize(accepted, block_size, captured)`. That equivalence is
+    /// what lets the tree path be switched on for the configurations the
+    /// chain path already covers, so it is the first thing to test and the
+    /// first thing to suspect: a divergence there is wiring, not topology.
+    ///
+    /// The default refuses, for the reason [`Self::verify_forward_tree`]
+    /// refuses: a target that cannot select a scattered accept set out of its
+    /// cache must not be handed one.
+    ///
+    /// Accepting the forward and refusing the finalize is a real combination
+    /// and not a contradiction. A target can verify a tree under a mask while
+    /// its cache has no way to keep the path afterwards; Gemma 4's rotating
+    /// sliding-window caches are that case today, since `RotatingKVCache`
+    /// rolls back by rewinding `offset` and `idx` without moving data, which
+    /// a scattered selection cannot use. The pair therefore has to be probed
+    /// as one capability **before** a tree is drafted: once a tree forward has
+    /// appended its block, a refusal here leaves the cache in a state only a
+    /// tree-aware rollback can undo, which is also why `captured` is consumed
+    /// rather than handed back for a linear retry.
+    #[allow(unused_variables)]
+    fn verify_finalize_tree(
+        &self,
+        path: &[usize],
+        block_size: usize,
+        captured: VerifyCaptured,
+    ) -> Result<MtpVerifyOutput, TreeVerifyUnsupported> {
+        Err(TreeVerifyUnsupported {
+            reason: "this target has no tree-aware cache rollback path",
+        })
+    }
 
     /// Number of decoder layers in the target. Used by the round-loop
     /// only for diagnostic logging.
