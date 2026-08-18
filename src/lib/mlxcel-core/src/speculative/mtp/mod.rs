@@ -54,6 +54,7 @@ pub(crate) mod adaptive;
 pub mod generator;
 pub mod round_loop_batched;
 pub mod target;
+pub mod tree;
 pub mod walk;
 
 #[cfg(test)]
