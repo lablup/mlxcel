@@ -805,3 +805,39 @@ fn set_shared_kv_with_left_padding_routes_through_normalizer() {
         .set_shared_kv(shared, 0, 0, /* left_padding */ 3)
         .expect("set_shared_kv with left_padding must succeed");
 }
+
+/// The runner-up lookup has to name the second-best token and its margin.
+///
+/// This is the confidence signal branching spends verify positions on, and it
+/// is read off a `[1, vocab]` logits row rather than a sort, so the shape and
+/// the partition orientation both have to be right. Getting either wrong
+/// returns `None` on every step, which is silent: the tree simply never grows
+/// a branch and the round statistics come out identical to the chain's, which
+/// looks like "branching did not help" rather than "branching did not run"
+/// (issue #1204).
+#[test]
+fn runner_up_names_the_second_best_token_and_its_margin() {
+    use crate::drafter::gemma4_assistant::model::Gemma4AssistantDraftModel;
+
+    // Best is index 5 at 9.0, second is index 2 at 7.5, margin 1.5.
+    let row = crate::ffi::from_slice_f32(&[0.0, 1.0, 7.5, 2.0, 3.0, 9.0, 4.0, 5.0], &[1, 8]);
+
+    let (token, margin) = Gemma4AssistantDraftModel::runner_up(&row, 5)
+        .expect("a row with a distinct top two must produce a runner-up");
+    assert_eq!(
+        token, 2,
+        "the runner-up is the second-largest logit's index"
+    );
+    assert!(
+        (margin - 1.5).abs() < 1e-4,
+        "the margin is the top-two logit gap, got {margin}"
+    );
+
+    // A `chosen` that is not in the top two is a tie the sampler broke some
+    // other way; branching on a step whose ordering is not understood is
+    // declined rather than guessed at.
+    assert!(
+        Gemma4AssistantDraftModel::runner_up(&row, 0).is_none(),
+        "a chosen token outside the top two must decline"
+    );
+}
