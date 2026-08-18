@@ -313,6 +313,13 @@ warm, arms alternated with a warm-up discarded, spreads under 1% of the median.
 | M5 Max (128 GB) | source code | "Write a Python function that computes the nth Fibonacci number, with a docstring and type hints." | 300 | 5 | 43.5 | 121.8 | **2.80x** |
 | M5 Max (128 GB) | prose | "Explain how speculative decoding accepts or rejects draft tokens." | 400 | 5 requested, 3 to 4 effective | 43.3 | 84.3 | **1.95x** |
 
+Reproduce or extend the table with `scripts/bench_speculative.sh`. It carries
+the prompts, the block widths and the protocol, detects the host, prints rows
+in the shape above, and refuses to start until nothing else is using the GPU.
+A run whose spread exceeds 4% of the median is reported as untrustworthy rather
+than averaged, because a contaminated median is indistinguishable from a real
+regression once it reaches a document.
+
 **Record the host and the prompt.** Both move the ratio by more than most code
 changes do. The prompt decides acceptance, and the host decides which kernel
 each quantized projection dispatches to and therefore what a verify block
