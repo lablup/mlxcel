@@ -268,6 +268,34 @@ impl<'a> MtpTarget for Qwen35MtpTargetAdapter<'a> {
             .expect("Qwen35Model exposes its embed_tokens table")
     }
 
+    /// Refuse a draft tree, naming the reason rather than inheriting the
+    /// default.
+    ///
+    /// Qwen 3.5 is a hybrid: with `full_attention_interval` 4 over 64 layers,
+    /// 48 are GatedDeltaNet and 16 are attention. The tree mask solves the
+    /// attention layers and does nothing for the other 48, because a
+    /// recurrence is a fold with no mask: flattening a tree through it carries
+    /// state from a node into its sibling and produces a wrong answer with no
+    /// signal. Verifying a tree here needs a tree-aware scan that forks state
+    /// at branch points, which does not exist (issue #1204).
+    ///
+    /// Overridden rather than left to the trait default so the refusal states
+    /// its cause at the place a reader looks for it.
+    fn verify_forward_tree(
+        &self,
+        _tree: &mlxcel_core::speculative::mtp::tree::DraftTree,
+        _sampler: &SamplingConfig,
+        _logprobs_config: &LogprobsConfig,
+    ) -> Result<VerifyForwardOutput, mlxcel_core::speculative::mtp::target::TreeVerifyUnsupported>
+    {
+        Err(
+            mlxcel_core::speculative::mtp::target::TreeVerifyUnsupported {
+                reason: "Qwen 3.5 is a GatedDeltaNet hybrid; a recurrence has no attention mask, \
+                         so a flattened tree would fold state through siblings",
+            },
+        )
+    }
+
     fn verify_forward(
         &self,
         verify_input: &[i32],

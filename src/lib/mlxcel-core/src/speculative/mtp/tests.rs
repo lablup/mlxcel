@@ -1003,3 +1003,26 @@ fn an_overridden_block_request_is_not_reported_as_the_width_used() {
         "the recorded range must be ordered"
     );
 }
+
+/// A target that has not implemented a tree-aware verify must refuse one.
+///
+/// The default is the safety property, not a placeholder. Flattening a tree
+/// into the sequence a linear verify expects lets a node's state reach its
+/// sibling, which the tree mask prevents for attention and nothing prevents
+/// for a recurrence, so the failure would be silent (issue #1204). A target
+/// opts in by implementing the method; omission has to mean no.
+#[test]
+fn a_target_without_a_tree_path_refuses_a_tree() {
+    use super::tree::DraftTree;
+
+    let target = MockMtpTarget::new(vec![vec![10, 11, 12]], vec![]);
+    let tree = DraftTree::linear(7, &[10, 11]);
+
+    let refusal = target
+        .verify_forward_tree(&tree, &SamplingConfig::greedy(), &LogprobsConfig::default())
+        .expect_err("a target with no tree path must refuse rather than flatten");
+    assert!(
+        !refusal.reason.is_empty(),
+        "a refusal must carry a reason the round loop can log"
+    );
+}

@@ -203,6 +203,15 @@ impl MtpVerifyOutput {
             .collect()
     }
 }
+/// Why a target declined to verify a draft tree.
+///
+/// Carried rather than returned as a bare `None` so the round loop can log
+/// the cause once and fall back to the linear path, instead of leaving an
+/// operator to work out why tree drafting silently did nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TreeVerifyUnsupported {
+    pub reason: &'static str,
+}
 
 /// Trait for MTP-compatible target models.
 ///
@@ -297,6 +306,31 @@ pub trait MtpTarget {
         sampler: &SamplingConfig,
         logprobs_config: &LogprobsConfig,
     ) -> VerifyForwardOutput;
+
+    /// Verify a draft **tree** in one forward, or say why this target cannot.
+    ///
+    /// The default refuses, and that default is the safety property rather
+    /// than a placeholder: a target that has not implemented a tree-aware
+    /// forward must not receive one. Flattening a tree into the sequence a
+    /// linear verify expects would let a node's state reach its sibling,
+    /// which for an attention-only target the tree mask prevents and for a
+    /// recurrent one nothing does (issue #1204).
+    ///
+    /// Qwen 3.5 is the case that makes this matter. Its 64 layers are 48
+    /// GatedDeltaNet and 16 attention, and a recurrence has no mask: a
+    /// flattened tree folds state through siblings and produces a wrong
+    /// answer silently. Its adapter overrides this to say so, rather than
+    /// relying on the default, so the refusal names its cause.
+    fn verify_forward_tree(
+        &self,
+        _tree: &super::tree::DraftTree,
+        _sampler: &SamplingConfig,
+        _logprobs_config: &LogprobsConfig,
+    ) -> Result<VerifyForwardOutput, TreeVerifyUnsupported> {
+        Err(TreeVerifyUnsupported {
+            reason: "this target has no tree-aware verify path",
+        })
+    }
 
     /// Second-phase verify: apply the per-row tail-zero rollback to the
     /// target's KV cache based on the walk's `accepted` count, slice the
