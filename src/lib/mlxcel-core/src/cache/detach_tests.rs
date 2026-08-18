@@ -1247,3 +1247,219 @@ fn gather_positions_refuses_the_split_delegated_cache() {
         "the refusal should name the boundary it cannot rebuild, got: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Tail-scoped gather (issue #1204, cost side of issue #1209)
+// ---------------------------------------------------------------------------
+
+/// Visible keys of a rotating cache while its ring is still linear.
+///
+/// Only valid unwrapped, which is the regime the speculative path keeps itself
+/// in; once the ring wraps, slot order stops being logical order.
+fn visible_rotating_keys_as_fp32(cache: &RotatingKVCache) -> Vec<f32> {
+    let keys = cache.keys.as_ref().expect("cache should have keys");
+    let shape = crate::ffi::array_shape(keys);
+    let sliced = crate::ffi::slice(
+        keys,
+        &[0, 0, 0, 0],
+        &[shape[0], shape[1], cache.offset, shape[3]],
+    );
+    flatten_fp32(&sliced)
+}
+
+#[test]
+fn gather_within_tail_keeps_a_scattered_subset_of_the_block() {
+    // Two tokens of history followed by a four-slot verify block. The accepted
+    // path takes the block's slots 0, 2 and 3, which no trim can express.
+    let mut cache = KVCache::new();
+    cache.update(
+        fp32_tokens(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+        fp32_tokens(&[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]),
+    );
+
+    cache
+        .gather_within_tail(4, &[0, 2, 3])
+        .expect("gather must succeed");
+
+    assert_eq!(
+        cache.seq_len(),
+        5,
+        "two history tokens plus three survivors"
+    );
+    assert_eq!(
+        visible_keys_as_fp32(&cache),
+        vec![1.0, 2.0, 3.0, 5.0, 6.0],
+        "the history is untouched and the block's survivors are compacted"
+    );
+}
+
+#[test]
+fn gather_within_tail_agrees_with_the_whole_window_form() {
+    // The scoped form exists to avoid re-listing the history every round, not
+    // to mean something different. Naming the same survivors either way has to
+    // land in the same place, or the cheap path is not the same rollback.
+    let mut scoped = KVCache::new();
+    let mut whole = KVCache::new();
+    for cache in [&mut scoped, &mut whole] {
+        cache.update(
+            fp32_tokens(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            fp32_tokens(&[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]),
+        );
+    }
+
+    scoped
+        .gather_within_tail(4, &[0, 2, 3])
+        .expect("scoped gather must succeed");
+    // The same selection said in absolute terms: keep the history, then the
+    // block slots at 2 + {0, 2, 3}.
+    whole
+        .gather_positions(&[0, 1, 2, 4, 5])
+        .expect("whole-window gather must succeed");
+
+    assert_eq!(scoped.seq_len(), whole.seq_len());
+    assert_eq!(
+        visible_keys_as_fp32(&scoped),
+        visible_keys_as_fp32(&whole),
+        "the scoped and whole-window forms must agree on the surviving tokens"
+    );
+}
+
+#[test]
+fn gather_within_tail_of_a_prefix_matches_trim() {
+    // A linear accept set is a prefix of the block, so the tree rollback has
+    // to agree with the chain rollback there. This is the equivalence that
+    // lets one path serve both once the round loop is wired up.
+    let mut gathered = KVCache::new();
+    let mut trimmed = KVCache::new();
+    for cache in [&mut gathered, &mut trimmed] {
+        cache.update(
+            fp32_tokens(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            fp32_tokens(&[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]),
+        );
+    }
+
+    gathered
+        .gather_within_tail(4, &[0, 1])
+        .expect("gather must succeed");
+    trimmed.trim(2);
+
+    assert_eq!(gathered.seq_len(), trimmed.seq_len());
+    assert_eq!(
+        visible_keys_as_fp32(&gathered),
+        visible_keys_as_fp32(&trimmed)
+    );
+}
+
+#[test]
+fn gather_within_tail_of_the_whole_block_is_a_no_op() {
+    // Full accept. The round pays no buffer rewrite, mirroring the `trim` and
+    // `gather_positions` fast paths.
+    let mut cache = KVCache::new();
+    cache.update(
+        fp32_tokens(&[1.0, 2.0, 3.0, 4.0]),
+        fp32_tokens(&[10.0, 20.0, 30.0, 40.0]),
+    );
+
+    cache
+        .gather_within_tail(3, &[0, 1, 2])
+        .expect("gather must succeed");
+
+    assert_eq!(cache.seq_len(), 4);
+    assert_eq!(visible_keys_as_fp32(&cache), vec![1.0, 2.0, 3.0, 4.0]);
+}
+
+#[test]
+fn gather_within_tail_rejects_selections_it_cannot_serve() {
+    let mut cache = KVCache::new();
+    cache.update(
+        fp32_tokens(&[1.0, 2.0, 3.0, 4.0]),
+        fp32_tokens(&[10.0, 20.0, 30.0, 40.0]),
+    );
+
+    assert!(
+        cache.gather_within_tail(0, &[0]).is_err(),
+        "a zero-length tail names no block"
+    );
+    assert!(
+        cache.gather_within_tail(5, &[0]).is_err(),
+        "a tail longer than the live window is a caller bug"
+    );
+    assert!(
+        cache.gather_within_tail(3, &[]).is_err(),
+        "a round that accepts nothing still keeps its root"
+    );
+    assert!(
+        cache.gather_within_tail(3, &[1, 1]).is_err(),
+        "a tree path is strictly increasing"
+    );
+    assert!(
+        cache.gather_within_tail(3, &[0, 3]).is_err(),
+        "offsets are within the tail, not within the cache"
+    );
+    // None of the refusals may have moved the cache.
+    assert_eq!(cache.seq_len(), 4);
+    assert_eq!(visible_keys_as_fp32(&cache), vec![1.0, 2.0, 3.0, 4.0]);
+}
+
+#[test]
+fn rotating_gather_within_tail_compacts_the_block() {
+    // The case that decides whether Gemma 4 can roll a tree back at all: its
+    // sliding-window layers hold this cache, and `trim` moves no data.
+    let mut cache = RotatingKVCache::new(64);
+    let _ = cache.update_and_fetch(
+        fp32_tokens(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+        fp32_tokens(&[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]),
+    );
+
+    cache
+        .gather_within_tail(4, &[0, 2, 3])
+        .expect("gather must succeed on an unwrapped ring");
+
+    assert_eq!(cache.offset, 5);
+    assert_eq!(
+        visible_rotating_keys_as_fp32(&cache),
+        vec![1.0, 2.0, 3.0, 5.0, 6.0],
+        "the history is untouched and the block's survivors are compacted"
+    );
+}
+
+#[test]
+fn rotating_gather_within_tail_of_a_prefix_matches_trim() {
+    let mut gathered = RotatingKVCache::new(64);
+    let mut trimmed = RotatingKVCache::new(64);
+    for cache in [&mut gathered, &mut trimmed] {
+        let _ = cache.update_and_fetch(
+            fp32_tokens(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            fp32_tokens(&[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]),
+        );
+    }
+
+    gathered
+        .gather_within_tail(4, &[0, 1])
+        .expect("gather must succeed");
+    trimmed.trim(2);
+
+    assert_eq!(gathered.offset, trimmed.offset);
+    assert_eq!(
+        visible_rotating_keys_as_fp32(&gathered),
+        visible_rotating_keys_as_fp32(&trimmed)
+    );
+}
+
+#[test]
+fn rotating_gather_within_tail_refuses_a_wrapped_ring() {
+    // Once the ring has wrapped, physical slot order is not logical order, so
+    // a selection expressed as tail offsets does not mean what it says. The
+    // speculative path avoids this with `enable_speculative_buffer`; a caller
+    // that has not gets a refusal rather than a silently wrong window.
+    let mut cache = RotatingKVCache::new(4);
+    for value in [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0] {
+        let _ = cache.update_and_fetch(fp32_tokens(&[value]), fp32_tokens(&[value * 10.0]));
+    }
+    assert!(!cache.is_trimmable(), "the ring must have wrapped");
+
+    let refusal = cache
+        .gather_within_tail(2, &[0])
+        .expect_err("a wrapped ring must refuse rather than compact the wrong slots");
+    assert!(refusal.contains("wrapped"), "the refusal names its cause");
+}
