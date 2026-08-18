@@ -176,6 +176,36 @@ impl DraftTree {
         mask
     }
 
+    /// Row-major `[n, offset + n]` additive mask, matching the convention
+    /// [`crate::utils::create_causal_mask`] uses: query row `q` sits at
+    /// logical position `q + offset`, `0.0` means attend and `masked` means
+    /// block.
+    ///
+    /// The first `offset` columns are the KV history already in the cache,
+    /// which every node attends in full: the tree branches only within the
+    /// block being verified, and everything before it is shared context. The
+    /// remaining `n` columns follow the topology, so a node sees its
+    /// ancestors and itself and no sibling.
+    ///
+    /// This is the shape a target forward actually takes. [`Self::additive_mask`]
+    /// is the `offset == 0` case and stays because it is what the topology
+    /// tests compare against a plain causal mask.
+    pub fn additive_mask_with_history(&self, offset: usize, masked: f32) -> Vec<f32> {
+        let n = self.tokens.len();
+        let total = offset + n;
+        let mut mask = vec![masked; n * total];
+        for q in 0..n {
+            let row = q * total;
+            for k in 0..offset {
+                mask[row + k] = 0.0;
+            }
+            for k in self.path_to(q) {
+                mask[row + offset + k] = 0.0;
+            }
+        }
+        mask
+    }
+
     /// Descend the branch the target agreed with.
     ///
     /// `target_tokens[i]` is the target's greedy choice conditional on the

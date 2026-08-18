@@ -218,3 +218,65 @@ fn attaching_under_a_nonexistent_parent_is_rejected() {
     let mut tree = DraftTree::root(1);
     tree.push_child(5, 10);
 }
+
+#[test]
+fn a_history_mask_opens_the_cache_and_keeps_the_tree_shape() {
+    // root -> {a, b}; a -> c, with four tokens already in the KV cache.
+    let mut tree = DraftTree::root(1);
+    let a = tree.push_child(0, 10);
+    let b = tree.push_child(0, 20);
+    let c = tree.push_child(a, 30);
+    let offset = 4;
+    let n = tree.len();
+    let total = offset + n;
+    let mask = tree.additive_mask_with_history(offset, MASKED);
+    let visible = |q: usize, k: usize| mask[q * total + k] == 0.0;
+
+    assert_eq!(mask.len(), n * total);
+    for q in 0..n {
+        for k in 0..offset {
+            assert!(visible(q, k), "node {q} must see cached history column {k}");
+        }
+    }
+    assert!(visible(c, offset + a), "c still sees its ancestor");
+    assert!(
+        !visible(c, offset + b),
+        "c still cannot see the other branch"
+    );
+    assert!(
+        !visible(a, offset + b),
+        "siblings stay invisible past the history"
+    );
+}
+
+#[test]
+fn a_history_mask_at_zero_offset_is_the_plain_mask() {
+    let mut tree = DraftTree::root(1);
+    let a = tree.push_child(0, 10);
+    tree.push_child(0, 20);
+    tree.push_child(a, 30);
+    assert_eq!(
+        tree.additive_mask_with_history(0, MASKED),
+        tree.additive_mask(MASKED),
+        "the history form must degenerate to the plain one"
+    );
+}
+
+#[test]
+fn a_linear_history_mask_matches_a_causal_mask_with_the_same_offset() {
+    // The equivalence that lets the tree path replace create_causal_mask on a
+    // linear block without changing what the attention sees.
+    let offset = 3usize;
+    let drafts = vec![11, 12, 13];
+    let tree = DraftTree::linear(7, &drafts);
+    let n = tree.len();
+    let total = offset + n;
+
+    let mut expected = vec![MASKED; n * total];
+    for q in 0..n {
+        for k in 0..=(q + offset) {
+            expected[q * total + k] = 0.0;
+        }
+    }
+    assert_eq!(tree.additive_mask_with_history(offset, MASKED), expected);
+}
