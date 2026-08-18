@@ -5392,7 +5392,7 @@ impl RotatingKVCache {
     /// slot `0`.
     pub fn gather_within_tail(&mut self, tail_len: i32, kept: &[i32]) -> Result<(), String> {
         const WHO: &str = "RotatingKVCache::gather_within_tail";
-        if !self.is_trimmable() {
+        if !self.tail_is_in_logical_order() {
             return Err(format!(
                 "{WHO}: the ring has wrapped, so the tail is not contiguous and a selection \
                  expressed as tail offsets cannot be compacted in place"
@@ -5430,15 +5430,35 @@ impl RotatingKVCache {
         Ok(())
     }
 
+    /// Whether the last `n` physical slots are the last `n` logical tokens, in
+    /// order, for any `n` within the live window.
+    ///
+    /// Two regimes qualify, for different reasons. Buffered speculative mode
+    /// (`buffer_size > 0`) compacts from the front rather than wrapping, so
+    /// slot order is logical order by construction and `idx` is the live
+    /// length. Without the buffer the ring wraps in place, and only an
+    /// unwrapped one qualifies.
+    ///
+    /// [`Self::is_trimmable`] is **not** the right question here, despite
+    /// looking like it. It excludes buffered mode outright, deliberately, for
+    /// a snapshot-restore reason that has nothing to do with whether a tail is
+    /// contiguous. Gating on it refuses every MTP round, because
+    /// `enable_speculative_buffer` is what puts the cache in buffered mode in
+    /// the first place, and tree drafting runs in exactly that regime
+    /// (issue #1204).
+    pub fn tail_is_in_logical_order(&self) -> bool {
+        self.buffer_size > 0 || self.is_trimmable()
+    }
+
     /// Whether [`Self::gather_within_tail`] can serve this cache **right now**.
     ///
     /// State-dependent, and that is the property a caller has to respect: a
     /// tree rollback available this round can be unavailable the next one, as
-    /// soon as the ring wraps. Ask before appending a verify block, not after.
-    /// A refusal after the block is on the cache leaves a state only a
-    /// tree-aware rollback could undo (issue #1204).
+    /// soon as an unbuffered ring wraps. Ask before appending a verify block,
+    /// not after. A refusal once the block is on the cache leaves a state only
+    /// a tree-aware rollback could undo (issue #1204).
     pub fn can_gather_within_tail(&self) -> bool {
-        self.is_trimmable() && self.mode != KVCacheMode::Turbo4Delegated
+        self.tail_is_in_logical_order() && self.mode != KVCacheMode::Turbo4Delegated
     }
 }
 

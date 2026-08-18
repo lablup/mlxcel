@@ -361,6 +361,14 @@ pub struct MtpSessionState {
     /// Once per session: the condition holds every round it holds at all, and
     /// a per-round warning would bury the run's own diagnostics.
     warned_block_override: bool,
+    /// Whether this session has already reported taking the tree path.
+    ///
+    /// Logged once, at a level an operator sees, because "the flag is set" and
+    /// "the tree path ran" are different claims: the per-round capability
+    /// question can answer no every round and leave the session silently on
+    /// the chain path. A linear-tree equivalence check that cannot tell those
+    /// apart proves nothing (issue #1204).
+    announced_tree_round: bool,
     /// Classic-step probe rounds still to run (issue #736).
     probes_remaining: usize,
     /// Round diagnostics, accumulated across steps exactly as the
@@ -796,6 +804,7 @@ impl<T: MtpTarget> MtpGenerator<T> {
             emitted_count: 1,
             accept_lens: Vec::new(),
             warned_block_override: false,
+            announced_tree_round: false,
             probes_remaining: self.profile_probe_rounds,
             diagnostics,
             prefill_time,
@@ -972,7 +981,27 @@ impl<T: MtpTarget> MtpGenerator<T> {
         // rollback moves with its cache state and the verify forward has
         // already appended the block by the time a refusal could surface
         // (issue #1204).
-        let use_tree = !is_probe && self.tree_drafting && self.target.tree_round_is_available();
+        let tree_available =
+            !is_probe && self.tree_drafting && self.target.tree_round_is_available();
+        let use_tree = tree_available;
+        // Report the outcome once per session, at a level an operator sees.
+        // "The flag is set" and "the tree path ran" are different claims: the
+        // per-round capability question can answer no every round and leave
+        // the session silently on the chain path, which would make a
+        // linear-tree equivalence check pass for the wrong reason.
+        if self.tree_drafting && !is_probe && !state.announced_tree_round {
+            state.announced_tree_round = true;
+            if tree_available {
+                tracing::info!(
+                    block_size = self.block_size,
+                    "MTP is drafting trees this session (MLXCEL_MTP_TREE)"
+                );
+            } else {
+                tracing::warn!(
+                    "MLXCEL_MTP_TREE is set but the target declined a tree round;                      staying on the chain path"
+                );
+            }
+        }
         let (draft_tokens, draft_tree): (Vec<i32>, Option<DraftTree>) = if is_probe {
             state.probes_remaining -= 1;
             (Vec::new(), None)

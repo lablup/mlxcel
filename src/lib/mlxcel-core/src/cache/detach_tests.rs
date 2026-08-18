@@ -1463,3 +1463,67 @@ fn rotating_gather_within_tail_refuses_a_wrapped_ring() {
         .expect_err("a wrapped ring must refuse rather than compact the wrong slots");
     assert!(refusal.contains("wrapped"), "the refusal names its cause");
 }
+
+#[test]
+fn rotating_gather_within_tail_serves_the_buffered_speculative_regime() {
+    // The regime that actually matters, and the one an `is_trimmable` gate
+    // silently refused: Gemma 4's MTP path calls `enable_speculative_buffer`
+    // so a verify block can append and roll back without destroying window
+    // entries, and `is_unwrapped` excludes buffered mode outright. Gating the
+    // gather on it made every tree round decline while the flag looked on
+    // (issue #1204).
+    let mut cache = RotatingKVCache::new(64);
+    cache
+        .enable_speculative_buffer(16)
+        .expect("speculative buffer must enable");
+    assert!(
+        !cache.is_trimmable(),
+        "buffered mode is deliberately not `is_trimmable`; that is the trap"
+    );
+    assert!(
+        cache.tail_is_in_logical_order(),
+        "buffered mode compacts from the front, so the tail is still contiguous"
+    );
+
+    for value in [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0] {
+        let _ = cache.update_and_fetch(fp32_tokens(&[value]), fp32_tokens(&[value * 10.0]));
+    }
+
+    cache
+        .gather_within_tail(4, &[0, 2, 3])
+        .expect("a buffered rotating cache must serve a tail selection");
+
+    assert_eq!(cache.offset, 5);
+    assert_eq!(
+        visible_rotating_keys_as_fp32(&cache),
+        vec![1.0, 2.0, 3.0, 5.0, 6.0],
+        "history untouched, block survivors compacted"
+    );
+}
+
+#[test]
+fn rotating_gather_within_tail_matches_trim_in_the_buffered_regime() {
+    // The prefix equivalence again, in the regime the speculative path runs
+    // in rather than only in the plain one.
+    let mut gathered = RotatingKVCache::new(64);
+    let mut trimmed = RotatingKVCache::new(64);
+    for cache in [&mut gathered, &mut trimmed] {
+        cache
+            .enable_speculative_buffer(16)
+            .expect("speculative buffer must enable");
+        for value in [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0] {
+            let _ = cache.update_and_fetch(fp32_tokens(&[value]), fp32_tokens(&[value * 10.0]));
+        }
+    }
+
+    gathered
+        .gather_within_tail(4, &[0, 1])
+        .expect("gather must succeed");
+    trimmed.trim(2);
+
+    assert_eq!(gathered.offset, trimmed.offset);
+    assert_eq!(
+        visible_rotating_keys_as_fp32(&gathered),
+        visible_rotating_keys_as_fp32(&trimmed)
+    );
+}

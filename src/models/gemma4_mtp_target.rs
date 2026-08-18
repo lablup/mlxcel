@@ -1028,6 +1028,36 @@ impl<'a> Gemma4VLMtpTargetAdapter<'a> {
 }
 
 impl<'a> MtpTarget for Gemma4VLMtpTargetAdapter<'a> {
+    /// Delegated to the inner text adapter, which is where the caches a tree
+    /// rollback selects from actually live. Inheriting the refusing defaults
+    /// here made the whole tree path dead for every multimodal Gemma 4
+    /// checkpoint while the text-only one worked, which is not a distinction
+    /// anything about trees justifies: the vision tower is not in the verify
+    /// forward at all (issue #1204).
+    fn tree_round_is_available(&self) -> bool {
+        self.inner.tree_round_is_available()
+    }
+
+    fn verify_forward_tree(
+        &self,
+        tree: &mlxcel_core::speculative::mtp::tree::DraftTree,
+        sampler: &SamplingConfig,
+        logprobs_config: &mlxcel_core::sampling::LogprobsConfig,
+    ) -> Result<VerifyForwardOutput, mlxcel_core::speculative::mtp::target::TreeVerifyUnsupported>
+    {
+        self.inner
+            .verify_forward_tree(tree, sampler, logprobs_config)
+    }
+
+    fn verify_finalize_tree(
+        &self,
+        path: &[usize],
+        block_size: usize,
+        captured: VerifyCaptured,
+    ) -> Result<MtpVerifyOutput, mlxcel_core::speculative::mtp::target::TreeVerifyUnsupported> {
+        self.inner.verify_finalize_tree(path, block_size, captured)
+    }
+
     fn prefill_and_seed(
         &self,
         prompt_tokens: &[i32],
@@ -1122,6 +1152,36 @@ impl<'a> Gemma4UnifiedMtpTargetAdapter<'a> {
 }
 
 impl<'a> MtpTarget for Gemma4UnifiedMtpTargetAdapter<'a> {
+    /// Delegated to the inner text adapter, which is where the caches a tree
+    /// rollback selects from actually live. Inheriting the refusing defaults
+    /// here made the whole tree path dead for every multimodal Gemma 4
+    /// checkpoint while the text-only one worked, which is not a distinction
+    /// anything about trees justifies: the vision tower is not in the verify
+    /// forward at all (issue #1204).
+    fn tree_round_is_available(&self) -> bool {
+        self.inner.tree_round_is_available()
+    }
+
+    fn verify_forward_tree(
+        &self,
+        tree: &mlxcel_core::speculative::mtp::tree::DraftTree,
+        sampler: &SamplingConfig,
+        logprobs_config: &mlxcel_core::sampling::LogprobsConfig,
+    ) -> Result<VerifyForwardOutput, mlxcel_core::speculative::mtp::target::TreeVerifyUnsupported>
+    {
+        self.inner
+            .verify_forward_tree(tree, sampler, logprobs_config)
+    }
+
+    fn verify_finalize_tree(
+        &self,
+        path: &[usize],
+        block_size: usize,
+        captured: VerifyCaptured,
+    ) -> Result<MtpVerifyOutput, mlxcel_core::speculative::mtp::target::TreeVerifyUnsupported> {
+        self.inner.verify_finalize_tree(path, block_size, captured)
+    }
+
     fn prefill_and_seed(
         &self,
         prompt_tokens: &[i32],
