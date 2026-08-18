@@ -2540,6 +2540,54 @@ impl Attention {
     }
 }
 
+/// The mask a sliding-window family must obey when the caller supplied one.
+///
+/// A caller mask states which keys are structurally allowed. It cannot also
+/// state the sliding-window band, because the same mask is handed to the
+/// full-attention family, which must not have one. Below the window the two
+/// constraints agree and this returns the caller mask unchanged. Past it they
+/// stop agreeing, and a sliding layer has to satisfy both, so this returns
+/// their intersection.
+///
+/// The MTP draft-tree mask is what exposed the gap. Its history columns are
+/// all-attend by construction, and [`trim_mask_to_keys`] crops from the right
+/// without adding a band, so past the window the sliding layers were attending
+/// outside their window and a linear-tree verify stopped reproducing the chain
+/// path it is defined to match (issue #1204).
+///
+/// Two properties this rests on. Additive masks intersect by `minimum`, so a
+/// caller mask that already carries the band is unchanged by intersecting it
+/// again, and every existing caller that builds a window-aware mask keeps its
+/// exact behavior. And the intersection always keeps each query's own
+/// position, which both constraints allow, so no row can go all-masked and
+/// soften to NaN.
+///
+/// The crop width is `min(sliding_live_len, window - 1) + l`, which is the
+/// same quantity the caller of this function computes as `sliding_returned`,
+/// so the result's key axis matches what the rotating cache actually returns.
+///
+/// Used by: Gemma 4 caller-mask forward (speculative verify, batched and
+/// adopted-prefix prefill).
+fn sliding_mask_from_caller(
+    mask: &MlxArray,
+    l: i32,
+    sliding_live_len: i32,
+    window: i32,
+) -> UniquePtr<MlxArray> {
+    if window <= 0 || sliding_live_len + l <= window {
+        return mlxcel_core::copy(mask);
+    }
+    let band = create_sliding_window_prefill_mask(l, sliding_live_len, window);
+    let band_len = *mlxcel_core::array_shape(&band).last().unwrap_or(&0);
+    let mask_key_len = *mlxcel_core::array_shape(mask).last().unwrap_or(&0);
+    if band_len > 0 && mask_key_len >= band_len {
+        let cropped = slice_axis(mask, -1, mask_key_len - band_len, mask_key_len);
+        mlxcel_core::minimum(&cropped, &band)
+    } else {
+        band
+    }
+}
+
 fn trim_mask_to_keys(
     mask: Option<&MlxArray>,
     keys: &MlxArray,
@@ -3292,34 +3340,10 @@ impl Gemma4TextModel {
                     )),
                 )
             } else {
-                // A caller mask states which keys are structurally allowed. It
-                // cannot also state the sliding-window band, because the same
-                // mask is handed to the full-attention family, which must not
-                // have one. Below the window the two constraints agree and
-                // this is a no-op; past it they stop agreeing, and a sliding
-                // layer has to satisfy both.
-                //
-                // The MTP draft-tree mask is what exposed this. Its history
-                // columns are all-attend by construction, and `trim_mask_to_keys`
-                // crops from the right without adding a band, so past the
-                // window the sliding layers were attending outside their window
-                // and a linear-tree verify stopped matching the chain path it
-                // is supposed to reproduce exactly (issue #1204). Additive
-                // masks intersect by `minimum`, and the intersection always
-                // keeps each query's own position, so no row can go all-masked.
-                let sliding = if window > 0 && sliding_live_len + l > window {
-                    let band = create_sliding_window_prefill_mask(l, sliding_live_len, window);
-                    let band_len = *mlxcel_core::array_shape(&band).last().unwrap_or(&0);
-                    if band_len > 0 && mask_key_len >= band_len {
-                        let cropped = slice_axis(mask, -1, mask_key_len - band_len, mask_key_len);
-                        mlxcel_core::minimum(&cropped, &band)
-                    } else {
-                        band
-                    }
-                } else {
-                    mlxcel_core::copy(mask)
-                };
-                (Some(mlxcel_core::copy(mask)), Some(sliding))
+                (
+                    Some(mlxcel_core::copy(mask)),
+                    Some(sliding_mask_from_caller(mask, l, sliding_live_len, window)),
+                )
             }
         } else if has_padding {
             // Resident prompt padding present (ragged burst). Build per-row
@@ -6090,6 +6114,72 @@ mod gemma4_unified_mask_tests {
             "offset-0 caller mask must be shorter than the full-attention returned keys"
         );
         assert!(trim_mask_to_keys(Some(&fixed), &k, m).is_some());
+    }
+
+    /// Below the window the caller mask is returned untouched.
+    ///
+    /// This is what keeps the fix scoped: every context that fits inside the
+    /// sliding window takes exactly the path it took before, so no existing
+    /// caller-mask path changes behavior (issue #1204).
+    #[test]
+    fn sliding_mask_from_caller_is_identity_below_the_window() {
+        let mask = create_causal_mask(4, 8); // [4, 12]
+        let out = sliding_mask_from_caller(&mask, 4, 8, 64);
+        mlxcel_core::eval(&out);
+        assert!(
+            mlxcel_core::item_bool(&mlxcel_core::allclose(&out, &mask, 0.0, 0.0)),
+            "a context inside the window must not be re-masked"
+        );
+    }
+
+    /// Past the window, a caller mask that lets a sliding layer see its whole
+    /// history gets the band added.
+    ///
+    /// This is the draft-tree shape: `DraftTree::additive_mask_with_history`
+    /// fills every history column with 0.0, so without this the sliding layers
+    /// attend outside their window and a linear-tree verify stops matching the
+    /// chain path it is defined to reproduce.
+    #[test]
+    fn sliding_mask_from_caller_adds_the_band_past_the_window() {
+        const L: i32 = 4;
+        const WINDOW: i32 = 8;
+        const LIVE: i32 = 16;
+        // All-attend over history + a causal block, the tree mask's shape.
+        let all_attend = mlxcel_core::zeros(&[L, LIVE + L], mlxcel_core::dtype::FLOAT32);
+        let out = sliding_mask_from_caller(&all_attend, L, LIVE, WINDOW);
+        mlxcel_core::eval(&out);
+
+        let band = create_sliding_window_prefill_mask(L, LIVE, WINDOW);
+        mlxcel_core::eval(&band);
+        assert_eq!(
+            mlxcel_core::array_shape(&out),
+            mlxcel_core::array_shape(&band),
+            "the result must be sized to what the rotating cache returns"
+        );
+        assert!(
+            mlxcel_core::item_bool(&mlxcel_core::allclose(&out, &band, 0.0, 0.0)),
+            "an all-attend caller mask past the window must reduce to the band"
+        );
+    }
+
+    /// Past the window, a caller mask that already carries the band is
+    /// unchanged by intersecting it again.
+    ///
+    /// The property every existing caller relies on: the batched and
+    /// adopted-prefix prefill paths build window-aware masks, so applying the
+    /// band a second time has to be a no-op rather than a tightening.
+    #[test]
+    fn sliding_mask_from_caller_leaves_an_already_banded_mask_alone() {
+        const L: i32 = 4;
+        const WINDOW: i32 = 8;
+        const LIVE: i32 = 16;
+        let banded = create_sliding_window_prefill_mask(L, LIVE, WINDOW);
+        let out = sliding_mask_from_caller(&banded, L, LIVE, WINDOW);
+        mlxcel_core::eval(&out);
+        assert!(
+            mlxcel_core::item_bool(&mlxcel_core::allclose(&out, &banded, 0.0, 0.0)),
+            "intersecting a banded mask with its own band must change nothing"
+        );
     }
 
     /// A mask LONGER than the keys (correctly-offset caller mask on the sliding
