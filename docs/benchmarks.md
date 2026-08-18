@@ -251,6 +251,57 @@ The offline `mlxcel generate` command also supports the MTP round-loop path (iss
 
 Parity: at `temperature 0` with no repetition, frequency, presence, or DRY penalties, the offline MTP output matches the non-speculative path within the documented f16 / #203 batched-kernel jitter class (on some hardware, notably M1 Ultra, near-tie token choices can differ). When any sampling penalty is active, only the first bonus token samples from the penalized distribution; subsequent tokens in each verify window are accepted or rejected greedily, so non-greedy or penalized requests are not byte-identical to the non-speculative path. This matches the known limitation of the server burst path.
 
+### Judging a change that moves the numbers
+
+Byte-identity answers one question well and nothing else: is this arithmetic
+path bit-equal to its reference. Once the answer is no, and on Apple GPU
+generation 15 and newer it is no for reasons the caller did not choose, the
+tool is spent. Perplexity answers a different question, whether a model's
+predictive distribution got worse on a corpus, and a kernel reordering can
+leave it unmoved while flipping percents of the greedy tokens a user sees.
+
+`examples/logit_trace` covers the gap. It is teacher-forced, so both arms are
+scored over the same token stream and no comparison is lost to divergence; a
+free-running comparison collapses at the first flipped token, and on a real
+pairing that left 16 comparable positions out of 250. Each configuration
+writes its own trace, which is what lets process-global switches like
+`MLXCEL_QMV_WIDE` be compared at all, and
+`scripts/compare_logit_traces.py` reads two traces.
+
+```bash
+cargo build --release --features metal,accelerate --example logit_trace
+./target/release/examples/logit_trace  MODEL CORPUS.txt 5 60 8 512 > a.tsv
+MLXCEL_QMV_WIDE=0 \
+./target/release/examples/logit_trace  MODEL CORPUS.txt 5 60 8 512 > b.tsv
+python3 scripts/compare_logit_traces.py b.tsv a.tsv
+```
+
+The metric to gate on is **disagreement on decided positions**: the fraction
+of positions where the reference's own top two were more than a stated gap
+apart and the candidate still picked something else. A position the reference
+was indifferent about has no right answer to get wrong, and pooling those with
+decided ones hides the only distinction that matters. Byte-identity is the
+limit case, zero disagreements at every gap.
+
+Two things decide whether the answer means anything.
+
+**Trace at the width the code under test runs at.** A forward over `N`
+positions runs the quantized projections at `M = N`, and MLX picks a different
+kernel per `M`, so the chunk width selects what is measured rather than how
+much. The same `MLXCEL_QMV_WIDE` comparison on gemma-4-12b-it-4bit reads 20.6%
+top-1 disagreement at width 8, 19.5% at 16, and 0.0% at both 32 and 256,
+because `use_qmv_wide` splits at `M >= 2` while the batch limit sends larger
+`M` to a matrix-matrix kernel both arms share. An MTP verify block is the block
+size, a decode step is 1, a prefill is the prompt length.
+
+**Separate context length from forward width.** The sixth argument prefills a
+context whose rows are not traced, so a narrow forward can be measured against
+a realistic history. It matters: the same comparison at width 5 with no context
+and at width 5 behind 512 tokens are different measurements, and only the
+second one is the shape a verify actually runs at. Behind 512 tokens the two
+kernels disagree on 4.0% of positions overall but 0.585% of decided ones, and
+three quarters of the disagreements are the reference's runner-up.
+
 ### Gemma 4 Unified (12B) + 4-bit assistant
 
 Measured on Apple M5 Max (128 GB) with `mlx-community/gemma-4-12b-it-4bit` as the
