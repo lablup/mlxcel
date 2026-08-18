@@ -3292,7 +3292,34 @@ impl Gemma4TextModel {
                     )),
                 )
             } else {
-                (Some(mlxcel_core::copy(mask)), Some(mlxcel_core::copy(mask)))
+                // A caller mask states which keys are structurally allowed. It
+                // cannot also state the sliding-window band, because the same
+                // mask is handed to the full-attention family, which must not
+                // have one. Below the window the two constraints agree and
+                // this is a no-op; past it they stop agreeing, and a sliding
+                // layer has to satisfy both.
+                //
+                // The MTP draft-tree mask is what exposed this. Its history
+                // columns are all-attend by construction, and `trim_mask_to_keys`
+                // crops from the right without adding a band, so past the
+                // window the sliding layers were attending outside their window
+                // and a linear-tree verify stopped matching the chain path it
+                // is supposed to reproduce exactly (issue #1204). Additive
+                // masks intersect by `minimum`, and the intersection always
+                // keeps each query's own position, so no row can go all-masked.
+                let sliding = if window > 0 && sliding_live_len + l > window {
+                    let band = create_sliding_window_prefill_mask(l, sliding_live_len, window);
+                    let band_len = *mlxcel_core::array_shape(&band).last().unwrap_or(&0);
+                    if band_len > 0 && mask_key_len >= band_len {
+                        let cropped = slice_axis(mask, -1, mask_key_len - band_len, mask_key_len);
+                        mlxcel_core::minimum(&cropped, &band)
+                    } else {
+                        band
+                    }
+                } else {
+                    mlxcel_core::copy(mask)
+                };
+                (Some(mlxcel_core::copy(mask)), Some(sliding))
             }
         } else if has_padding {
             // Resident prompt padding present (ragged burst). Build per-row
