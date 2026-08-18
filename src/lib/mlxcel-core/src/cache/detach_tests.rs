@@ -1046,3 +1046,151 @@ fn detached_cache_set_truncate_to_int8_preserves_dequantization() {
         "INT8 truncate_to+adopt+decode values diverge from fresh prefill"
     );
 }
+
+// ---------------------------------------------------------------------------
+// KVCache::gather_positions (issue #1204)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn gather_positions_keeps_a_scattered_subset_and_compacts_it() {
+    // The case a linear trim cannot express: a draft tree's accepted path is
+    // scattered across the verified positions, so the survivors have to be
+    // selected and closed up rather than truncated from the tail.
+    let mut cache = KVCache::new();
+    cache.update(
+        fp32_tokens(&[1.0, 2.0, 3.0, 4.0, 5.0]),
+        fp32_tokens(&[10.0, 20.0, 30.0, 40.0, 50.0]),
+    );
+
+    cache
+        .gather_positions(&[0, 2, 3])
+        .expect("gather must succeed");
+
+    assert_eq!(cache.seq_len(), 3, "the cache holds exactly the survivors");
+    assert_eq!(
+        visible_keys_as_fp32(&cache),
+        vec![1.0, 3.0, 4.0],
+        "survivors keep their order and are compacted to the front"
+    );
+}
+
+#[test]
+fn gather_positions_of_a_prefix_matches_trim_to() {
+    // A linear accepted set is a prefix, so the tree path must agree with the
+    // chain path there. This is the equivalence that lets one rollback serve
+    // both once the tree path is wired up.
+    let mut gathered = KVCache::new();
+    let mut trimmed = KVCache::new();
+    for cache in [&mut gathered, &mut trimmed] {
+        cache.update(
+            fp32_tokens(&[1.0, 2.0, 3.0, 4.0]),
+            fp32_tokens(&[10.0, 20.0, 30.0, 40.0]),
+        );
+    }
+
+    gathered
+        .gather_positions(&[0, 1])
+        .expect("gather must succeed");
+    trimmed.trim_to(2).expect("trim_to must succeed");
+
+    assert_eq!(gathered.seq_len(), trimmed.seq_len());
+    assert_eq!(
+        visible_keys_as_fp32(&gathered),
+        visible_keys_as_fp32(&trimmed)
+    );
+}
+
+#[test]
+fn gather_positions_of_everything_is_a_no_op() {
+    let mut cache = KVCache::new();
+    cache.update(
+        fp32_tokens(&[1.0, 2.0, 3.0]),
+        fp32_tokens(&[10.0, 20.0, 30.0]),
+    );
+
+    cache
+        .gather_positions(&[0, 1, 2])
+        .expect("identity gather must succeed");
+
+    assert_eq!(cache.seq_len(), 3);
+    assert_eq!(visible_keys_as_fp32(&cache), vec![1.0, 2.0, 3.0]);
+}
+
+#[test]
+fn gather_positions_carries_the_int8_scale_sidecars() {
+    // Reindexing K and V while leaving their per-token scales behind would
+    // decode every surviving token against the wrong scale, which is exactly
+    // the class of silent corruption this cache's Turbo refusal exists to
+    // prevent.
+    let mut cache = KVCache::new_with_mode(KVCacheMode::Int8);
+    cache.update(
+        fp32_tokens(&[1.0, 2.0, 3.0, 4.0]),
+        fp32_tokens(&[10.0, 20.0, 30.0, 40.0]),
+    );
+
+    cache
+        .gather_positions(&[1, 3])
+        .expect("gather must succeed");
+
+    assert_eq!(cache.seq_len(), 2);
+    // The raw INT8 codes carry no evidence here: a per-token scale normalizes
+    // every single-valued token to the same code. The scales are where the
+    // surviving identity lives, so that is what has to be reindexed with them.
+    for (name, sidecar) in [
+        ("key_scales", cache.key_scales.as_ref()),
+        ("val_scales", cache.val_scales.as_ref()),
+    ] {
+        let sidecar = sidecar.unwrap_or_else(|| panic!("{name} must survive the gather"));
+        let shape = crate::ffi::array_shape(sidecar);
+        assert_eq!(
+            shape[2], 2,
+            "{name} must be reindexed alongside the tokens, got shape {shape:?}"
+        );
+    }
+}
+
+#[test]
+fn gather_positions_rejects_shapes_it_cannot_serve() {
+    let mut cache = KVCache::new();
+    cache.update(
+        fp32_tokens(&[1.0, 2.0, 3.0]),
+        fp32_tokens(&[10.0, 20.0, 30.0]),
+    );
+
+    assert!(
+        cache.gather_positions(&[]).is_err(),
+        "an empty selection would leave no context to decode from"
+    );
+    assert!(
+        cache.gather_positions(&[1, 1]).is_err(),
+        "a repeated position is a caller bug, not a shape to tolerate"
+    );
+    assert!(
+        cache.gather_positions(&[2, 0]).is_err(),
+        "a tree path is increasing by construction"
+    );
+    assert!(
+        cache.gather_positions(&[0, 5]).is_err(),
+        "a position past the live window must not be reindexed"
+    );
+    // The cache is untouched by every rejection above.
+    assert_eq!(cache.seq_len(), 3);
+    assert_eq!(visible_keys_as_fp32(&cache), vec![1.0, 2.0, 3.0]);
+}
+
+#[test]
+fn gather_positions_refuses_a_turbo_cache() {
+    let mut cache = KVCache::new_with_mode(KVCacheMode::Turbo4);
+    cache.update(
+        fp32_tokens(&[1.0, 2.0, 3.0]),
+        fp32_tokens(&[10.0, 20.0, 30.0]),
+    );
+
+    let err = cache
+        .gather_positions(&[0, 2])
+        .expect_err("Turbo modes must refuse rather than reindex half their state");
+    assert!(
+        err.contains("rotation state"),
+        "the refusal should say why, got: {err}"
+    );
+}

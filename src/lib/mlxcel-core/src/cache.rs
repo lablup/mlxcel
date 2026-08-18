@@ -2615,6 +2615,84 @@ impl KVCache {
     /// the INT8 scale sidecars (their last dim is `1`); the head/tail bounds
     /// read every non-sequence dim from the array's own shape. Mirrors mlx-lm
     /// `RotatingKVCache._trim`.
+    /// Keep only the live-window slots named by `positions`, in that order,
+    /// compacted to the front of the buffer.
+    ///
+    /// The generalization of [`Self::trim`] that tree drafting needs. A linear
+    /// speculative accept set is a prefix, so rolling back is a tail trim; a
+    /// draft tree's accepted path is scattered across the verified positions,
+    /// so the surviving slots have to be selected and closed up (issue #1204).
+    ///
+    /// Scoped exactly as [`Self::trim_front_keep`] is, and for the same
+    /// reason: only `Fp16` and `Int8` keep their sequence axis in a dense
+    /// buffer that can be reindexed. Turbo modes carry per-token rotation
+    /// state in packed sidecars that reordering cannot rebuild, and
+    /// pool-backed caches hold no dense buffer at all. Both refuse rather than
+    /// silently reindexing half of their state, and the caller is expected to
+    /// decline tree drafting when this returns an error.
+    ///
+    /// `positions` must be strictly increasing and inside the live window. A
+    /// tree path is increasing by construction (`parents[i] < i`), so a
+    /// violation is a caller bug rather than a shape this should tolerate.
+    pub fn gather_positions(&mut self, positions: &[i32]) -> Result<(), String> {
+        if self.paged_backing.is_some() {
+            return Err(
+                "KVCache::gather_positions: pool-backed caches have no dense buffer to reindex"
+                    .to_string(),
+            );
+        }
+        if !matches!(self.mode, KVCacheMode::Fp16 | KVCacheMode::Int8) {
+            return Err(format!(
+                "KVCache::gather_positions: unsupported for {:?}; Turbo modes carry per-token \
+                 rotation state that reordering cannot rebuild",
+                self.mode
+            ));
+        }
+        if self.live_start != 0 {
+            return Err(format!(
+                "KVCache::gather_positions: requires an untrimmed head (live_start={})",
+                self.live_start
+            ));
+        }
+        let live_len = self.live_len();
+        if positions.is_empty() {
+            return Err("KVCache::gather_positions: positions must be non-empty".to_string());
+        }
+        for pair in positions.windows(2) {
+            if pair[1] <= pair[0] {
+                return Err(format!(
+                    "KVCache::gather_positions: positions must be strictly increasing, got {pair:?}"
+                ));
+            }
+        }
+        if let Some(&last) = positions.last()
+            && (positions[0] < 0 || last >= live_len)
+        {
+            return Err(format!(
+                "KVCache::gather_positions: positions {:?} outside the live window [0, {live_len})",
+                positions
+            ));
+        }
+        if positions.len() as i32 == live_len
+            && positions.iter().enumerate().all(|(i, &p)| p == i as i32)
+        {
+            // The identity selection. Skipping it keeps a full-accept round
+            // free of a buffer rewrite, mirroring the `trim` fast path.
+            return Ok(());
+        }
+
+        let index = ffi::from_slice_i32(positions, &[positions.len() as i32]);
+        let pick = |arr: &UniquePtr<MlxArray>| -> UniquePtr<MlxArray> { ffi::take(arr, &index, 2) };
+        self.keys = self.keys.as_ref().map(&pick);
+        self.values = self.values.as_ref().map(&pick);
+        if self.mode == KVCacheMode::Int8 {
+            self.key_scales = self.key_scales.as_ref().map(&pick);
+            self.val_scales = self.val_scales.as_ref().map(&pick);
+        }
+        self.offset = positions.len() as i32;
+        Ok(())
+    }
+
     fn slice_keep_sink(arr: &MlxArray, keep: i32, n: i32, live_len: i32) -> UniquePtr<MlxArray> {
         let s = ffi::array_shape(arr);
         let head = ffi::slice(arr, &[0, 0, 0, 0], &[s[0], s[1], keep, s[3]]);
