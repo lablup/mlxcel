@@ -305,13 +305,24 @@ three quarters of the disagreements are the reference's runner-up.
 ### Gemma 4 Unified (12B) + 4-bit assistant
 
 Measured on Apple M5 Max (128 GB) with `mlx-community/gemma-4-12b-it-4bit` as the
-target and `mlx-community/gemma-4-12B-it-assistant-4bit` as the drafter, block
-size 4, `temperature 0`, 200 decode tokens:
+target and `mlx-community/gemma-4-12B-it-assistant-4bit` as the drafter,
+`temperature 0`, warm, arms alternated with a warm-up discarded, spreads under
+1% of the median.
 
-| Path                        | decode tok/s | speedup |
-| --------------------------- | -----------: | ------: |
-| classic decode (no drafter) |         ~39  |  1.00x  |
-| MTP                         |         ~74  | ~1.87x  |
+| Output | Prompt | Tokens | Block | classic | MTP | speedup |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| source code | "Write a Python function that computes the nth Fibonacci number, with a docstring and type hints." | 300 | 5 | 43.5 | 121.8 | **2.80x** |
+| prose | "Explain how speculative decoding accepts or rejects draft tokens." | 400 | 5 requested, 3 to 4 effective | 43.3 | 84.3 | **1.95x** |
+
+**Record the prompt.** The two rows differ in nothing else, and the ratio moves
+by half again between them, because acceptance is a property of how predictable
+the continuation is. A speculative-decoding figure without its prompt cannot be
+reproduced or compared.
+
+The block width is not a tuning knob worth much either. Measured on the code
+row, throughput peaks at width 5 and falls at 6, 8, 10 and 12: tokens emitted
+per round saturate near `1 / (1 - acceptance)` while the verify forward keeps
+getting more expensive, and the adaptive controller already lands on the peak.
 
 The accelerated output is byte-identical to classic decode where the startup
 exactness probe says it is, which the runtime measures rather than assumes: an
@@ -324,6 +335,30 @@ MTP runs by default for every MTP target; the Gemma 4 Unified target cannot batc
 at all, so B=1 is also its only decode path. The batch-capable 31B + bf16
 assistant measures ~1.2 to 1.4x on the same host. Set `MLXCEL_ENABLE_MTP_B1=0` to
 opt out on hardware where the B=1 verify forward does not pay for itself.
+
+Gemma 4 is not probed yet (#1188), so the rows above are the fast kernel rather
+than the byte-identical one. Keeping byte-identity on the code row, by dropping
+`qmv_wide`, measures 93.2 tok/s instead of 121.8, or 2.14x instead of 2.80x.
+
+### Qwen 3.5 / 3.6 / 3.8 with the model's own MTP head
+
+Qwen ships the MTP head as part of the family rather than as a companion
+checkpoint, either split out (`Qwen3.8-27B-MTP-bf16`, `-4bit`) or carried inside
+the target. Measured on the same host and protocol, `qwen3.8-27b-4bit` with
+`qwen3.8-27b-mtp-4bit`, the code prompt above, 300 tokens:
+
+| Path | decode tok/s | speedup |
+| --- | ---: | ---: |
+| classic decode (no drafter) | 32.5 | 1.00x |
+| MTP, block 3 (the drafter's declared width) | 47.0 | **1.45x** |
+
+Two things about that ratio. It is measured **with** the byte-identity
+guarantee: the exactness probe fires on this host and drops `qmv_wide`, which
+costs the verify forward about 17 to 20%. And the block width is genuinely
+optimal at 3 to 4 rather than merely default: 48 of the target's 64 layers are
+GatedDeltaNet, a recurrence that processes tokens in sequence, so the verify
+cost grows nearly linearly with the block instead of amortising the way an
+attention-only target's does. Widths 5, 6 and 8 measure 48.0, 46.8 and 35.7.
 
 ### Gemma 4 31B + bf16 assistant
 

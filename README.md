@@ -239,6 +239,34 @@ hardware. See
 | Molmo2 4B | 60 tok/s | 64 tok/s | 67 tok/s | 96% |
 | Phi 3.5 Vision 4bit | 122 tok/s | 168 tok/s | 160 tok/s | 105% |
 
+### Speculative decoding (MTP)
+
+A small drafter proposes a block of tokens and the target verifies the whole
+block in one forward, so a round emits everything the target would have chosen
+itself plus one more. The gain is therefore a property of the output, not of
+the model: predictable continuations accept long runs of drafts, open prose
+accepts few. Measured on Apple M5 Max (128 GB) at `temperature 0`, warm, with
+the arms alternated and a warm-up discarded.
+
+| Pairing | Output | Classic | MTP | Speedup |
+|---------|--------|--------:|----:|--------:|
+| Gemma 4 12B + 4-bit assistant | source code | 43.5 tok/s | 121.8 tok/s | **2.80x** |
+| Gemma 4 12B + 4-bit assistant | prose | 43.3 tok/s | 84.3 tok/s | **1.95x** |
+| Qwen 3.8 27B + its 4-bit MTP head | source code | 32.5 tok/s | 47.0 tok/s | **1.45x** |
+
+Enable it with `--draft-model <drafter> --draft-kind mtp`. The verify block
+width adapts on its own; forcing it wider does not help, because the tokens a
+round emits saturate near `1 / (1 - acceptance)` while the verify keeps getting
+more expensive.
+
+Qwen's lower ratio is not a worse implementation. Its acceptance is the highest
+of the three, and it pays for a byte-identity guarantee the Gemma arms do not:
+a startup probe compares a verify block against the single-token chain and, on
+Apple GPU generation 15 and newer, drops to the kernel that has byte-identity
+at about 17 to 20% of the verify forward. Gemma 4 is not probed yet
+([#1188](https://github.com/lablup/mlxcel/issues/1188)); keeping the same
+guarantee there measures 93.2 tok/s on the code row, 2.14x.
+
 ### DiffusionGemma (block diffusion)
 
 DiffusionGemma generates a canvas block at a time through iterative denoising
