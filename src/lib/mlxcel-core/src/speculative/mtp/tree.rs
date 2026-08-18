@@ -206,6 +206,28 @@ impl DraftTree {
         mask
     }
 
+    /// Each node's depth, which is its RoPE position relative to the cache
+    /// offset the verify block is appended at.
+    ///
+    /// The flattened block gives every node the position of its index, and
+    /// index equals depth only while the tree is a chain. One sibling puts
+    /// every later node a place too far along, and the target then verifies
+    /// them somewhere they do not belong, so the block has to carry this
+    /// alongside the mask: the mask says what a node can see, this says where
+    /// it sits (issue #1204).
+    ///
+    /// A linear tree returns `0..len`, which is what the uniform rotation
+    /// already does, so the tree path reduces to it exactly.
+    pub fn depths(&self) -> Vec<i32> {
+        let mut depths = vec![0i32; self.tokens.len()];
+        // `parents[i] < i` holds by construction, so one forward pass suffices
+        // and no node is read before it is written.
+        for node in 1..self.tokens.len() {
+            depths[node] = depths[self.parents[node]] + 1;
+        }
+        depths
+    }
+
     /// Descend the branch the target agreed with.
     ///
     /// `target_tokens[i]` is the target's greedy choice conditional on the

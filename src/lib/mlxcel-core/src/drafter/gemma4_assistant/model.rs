@@ -816,46 +816,50 @@ impl Gemma4AssistantDraftModel {
     }
 
     /// How many runner-up candidates a tree round may spend verify positions
-    /// on, from `MLXCEL_MTP_TREE_BRANCHES`.
+    /// on, from `MLXCEL_MTP_TREE_BRANCHES`. **Default 0.**
     ///
-    /// **Defaults to 0, because branching is not correct yet.** A flattened
-    /// tree is fed to the target as a contiguous span of positions, and the
-    /// tree mask fixes what each node can see but not where each node sits.
-    /// A node's RoPE position is its index in that span, which equals its
-    /// depth only while the tree is a chain. The moment a sibling exists,
-    /// every node after it is one position too far along, and the target
-    /// verifies them at the wrong place.
+    /// Zero proposes the linear tree the trait default builds, so the switch
+    /// degrades to exactly the chain behaviour rather than to something new,
+    /// and that is the default for two reasons that are worth stating rather
+    /// than discovering.
     ///
-    /// That is why linear trees are byte-identical to the chain path and a
-    /// branching one is not: measured on gemma-4-12b at block 5, 400 tokens,
-    /// temperature 0, the branching arm's text diverges from the chain's.
-    /// Speculative decoding is supposed to preserve the target's greedy
-    /// output exactly, so that divergence is a defect and not a tradeoff.
+    /// First, a branching round does not reproduce the chain's exact tokens,
+    /// and cannot. When a leaf is accepted its bonus is the target's argmax
+    /// evaluated at a tree position, while the chain evaluates the same
+    /// context at the head of the next block. Both are the target's own
+    /// greedy choice for the same context and they differ only where the top
+    /// two sit within f16 reduction noise, which is the jitter class MTP
+    /// already carries against non-speculative decoding: measured on
+    /// gemma-4-12b, chain, linear tree and branching all first diverge from
+    /// the non-speculative path at the same character. But the linear tree is
+    /// byte-identical to the chain and a branching one is not, so it is a
+    /// weaker guarantee and an opt-in.
     ///
-    /// Closing it needs per-node position ids threaded into the Gemma 4
-    /// forward, which has no parameter for them today: positions are derived
-    /// from the cache offset and the index within the span. Until then a
-    /// non-zero budget is a research setting that produces wrong output, and
-    /// it warns when set (issue #1204).
+    /// Second, the throughput case is not made. Branching lifts acceptance
+    /// (emitted-per-verify 2.4630 to 2.6600, zero-accept rounds 51 to 26 of
+    /// 162) and widens every verify block to do it. Whether that trades
+    /// positive has not been measured on a quiet machine under the protocol
+    /// that measurement needs.
     ///
-    /// What the measurements said before the defect was found, kept because
-    /// they are what makes the position work worth doing: with the budget
-    /// spent on the earliest uncertain steps, emitted-per-verify went 2.4630
-    /// to 2.6600 and zero-accept rounds halved from 51 to 26 out of 162.
+    /// A branching tree is only correct because the verify block now carries
+    /// per-node RoPE positions. A flattened tree hands the target a contiguous
+    /// span, and the tree mask fixes what each node can see but not where each
+    /// node sits; a node's position is its index in the span, which equals its
+    /// depth only while the tree is a chain. Before `DraftTree::depths` was
+    /// threaded through the Gemma 4 forward, one sibling put every later node
+    /// a place too far along and the branching arm's output diverged from the
+    /// chain's, which for temperature-0 speculative decoding is a defect
+    /// rather than a tradeoff (issue #1204).
+    ///
+    /// The extra nodes widen the verify block, so they eat into the rotating
+    /// cache's speculative slack. That slack is `max(32, min(128, K * 8))`
+    /// tokens against blocks of 4 to 8, so a budget in the low single digits
+    /// is comfortably inside it.
     fn branch_budget() -> usize {
-        let budget = std::env::var("MLXCEL_MTP_TREE_BRANCHES")
+        std::env::var("MLXCEL_MTP_TREE_BRANCHES")
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
-            .unwrap_or(0);
-        if budget > 0 {
-            tracing::warn!(
-                budget,
-                "MLXCEL_MTP_TREE_BRANCHES is set: a branching draft tree is verified at the \
-                 wrong RoPE positions and does NOT preserve the target's greedy output \
-                 (issue #1204). Research setting only."
-            );
-        }
-        budget
+            .unwrap_or(0)
     }
 
     /// Top-two logit gap under which a step counts as uncertain, from
@@ -898,7 +902,7 @@ impl Gemma4AssistantDraftModel {
     /// chosen token is not one of the top two, which at temperature 0 means a
     /// tie the sampler broke some other way; branching on a step whose own
     /// ordering is not understood is not worth a position.
-    pub(crate) fn runner_up(last_logits: &MlxArray, chosen: i32) -> Option<(i32, f32)> {
+    pub(crate) fn runner_up_token(last_logits: &MlxArray, chosen: i32) -> Option<i32> {
         let shape = ffi::array_shape(last_logits);
         let vocab = *shape.last()?;
         if vocab < 2 {
@@ -909,13 +913,23 @@ impl Gemma4AssistantDraftModel {
         ffi::eval(&pair);
         let first = ffi::item_i32(&ffi::slice(&pair, &[0, 0], &[1, 1]));
         let second = ffi::item_i32(&ffi::slice(&pair, &[0, 1], &[1, 2]));
-        let other = if first == chosen {
-            second
+        if first == chosen {
+            Some(second)
         } else if second == chosen {
-            first
+            Some(first)
         } else {
-            return None;
-        };
+            None
+        }
+    }
+
+    /// [`Self::runner_up_token`] plus the top-two logit gap.
+    ///
+    /// Only the optional margin gate wants the gap, and it costs a second
+    /// device round trip to read. The default policy selects by step rather
+    /// than by margin, so this is off the hot path and the token-only lookup
+    /// above is what a normal round pays (issue #1204).
+    pub(crate) fn runner_up(last_logits: &MlxArray, chosen: i32) -> Option<(i32, f32)> {
+        let other = Self::runner_up_token(last_logits, chosen)?;
         let ids = ffi::from_slice_i32(&[chosen, other], &[2]);
         let values = ffi::take(last_logits, &ids, -1);
         ffi::eval(&values);
@@ -1349,6 +1363,7 @@ impl Drafter for Gemma4AssistantDraftModel {
         // `(step, runner-up token, margin)` for every step that produced one.
         let mut candidates: Vec<(usize, i32, f32)> = Vec::new();
 
+        let margin_gate = Self::branch_margin();
         let mut h_prev = ffi::copy(hidden);
         let mut last_token = last_bonus;
 
@@ -1371,8 +1386,18 @@ impl Drafter for Gemma4AssistantDraftModel {
             ffi::eval(&token);
             let token_i32 = ffi::item_i32(&token);
 
-            if let Some((other, margin)) = Self::runner_up(&last_logits, token_i32) {
-                candidates.push((step, other, margin));
+            // Only look up what the policy can use. The default selects the
+            // earliest steps, so past the budget there is nothing to gain and
+            // the lookup is skipped entirely; the margin, which costs a second
+            // device round trip, is read only when the gate is actually on.
+            if margin_gate.is_finite() {
+                if let Some((other, gap)) = Self::runner_up(&last_logits, token_i32) {
+                    candidates.push((step, other, gap));
+                }
+            } else if candidates.len() < budget
+                && let Some(other) = Self::runner_up_token(&last_logits, token_i32)
+            {
+                candidates.push((step, other, 0.0));
             }
 
             tokens.push(token_i32);
@@ -1381,11 +1406,7 @@ impl Drafter for Gemma4AssistantDraftModel {
         }
 
         let mut tree = DraftTree::linear(last_bonus, &tokens);
-        // Only steps the drafter was actually unsure about are worth a verify
-        // position; on a confident step the extra node widens the block and
-        // buys nothing.
-        let margin = Self::branch_margin();
-        candidates.retain(|&(_, _, gap)| gap < margin);
+        candidates.retain(|&(_, _, gap)| gap < margin_gate);
         // Earliest step first, not smallest margin. A runner-up at step `i`
         // can only be reached if every step before it was accepted, so its
         // value decays with `i` in a way the logit gap does not describe. The
