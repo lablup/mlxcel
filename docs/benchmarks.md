@@ -304,17 +304,23 @@ three quarters of the disagreements are the reference's runner-up.
 
 ### Gemma 4 Unified (12B) + 4-bit assistant
 
-Measured on Apple M5 Max (128 GB) with `mlx-community/gemma-4-12b-it-4bit` as the
-target and `mlx-community/gemma-4-12B-it-assistant-4bit` as the drafter,
-`temperature 0`, warm, arms alternated with a warm-up discarded, spreads under
-1% of the median.
+`mlx-community/gemma-4-12b-it-4bit` as the target and
+`mlx-community/gemma-4-12B-it-assistant-4bit` as the drafter, `temperature 0`,
+warm, arms alternated with a warm-up discarded, spreads under 1% of the median.
 
-| Output | Prompt | Tokens | Block | classic | MTP | speedup |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| source code | "Write a Python function that computes the nth Fibonacci number, with a docstring and type hints." | 300 | 5 | 43.5 | 121.8 | **2.80x** |
-| prose | "Explain how speculative decoding accepts or rejects draft tokens." | 400 | 5 requested, 3 to 4 effective | 43.3 | 84.3 | **1.95x** |
+| Host | Output | Prompt | Tokens | Block | classic | MTP | speedup |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| M5 Max (128 GB) | source code | "Write a Python function that computes the nth Fibonacci number, with a docstring and type hints." | 300 | 5 | 43.5 | 121.8 | **2.80x** |
+| M5 Max (128 GB) | prose | "Explain how speculative decoding accepts or rejects draft tokens." | 400 | 5 requested, 3 to 4 effective | 43.3 | 84.3 | **1.95x** |
 
-**Record the prompt.** The two rows differ in nothing else, and the ratio moves
+**Record the host and the prompt.** Both move the ratio by more than most code
+changes do. The prompt decides acceptance, and the host decides which kernel
+each quantized projection dispatches to and therefore what a verify block
+costs, which is why the same pairing can pay on one generation and regress on
+another. A row without both cannot be reproduced or compared, and rows from
+different protocols do not belong in the same table.
+
+ The two rows differ in nothing else, and the ratio moves
 by half again between them, because acceptance is a property of how predictable
 the continuation is. A speculative-decoding figure without its prompt cannot be
 reproduced or compared.
@@ -344,13 +350,13 @@ than the byte-identical one. Keeping byte-identity on the code row, by dropping
 
 Qwen ships the MTP head as part of the family rather than as a companion
 checkpoint, either split out (`Qwen3.8-27B-MTP-bf16`, `-4bit`) or carried inside
-the target. Measured on the same host and protocol, `qwen3.8-27b-4bit` with
-`qwen3.8-27b-mtp-4bit`, the code prompt above, 300 tokens:
+the target. Same protocol, `qwen3.8-27b-4bit` with `qwen3.8-27b-mtp-4bit`, the
+code prompt above, 300 tokens:
 
-| Path | decode tok/s | speedup |
-| --- | ---: | ---: |
-| classic decode (no drafter) | 32.5 | 1.00x |
-| MTP, block 3 (the drafter's declared width) | 47.0 | **1.45x** |
+| Host | Path | decode tok/s | speedup |
+| --- | --- | ---: | ---: |
+| M5 Max (128 GB) | classic decode (no drafter) | 32.5 | 1.00x |
+| M5 Max (128 GB) | MTP, block 3 (the drafter's declared width) | 47.0 | **1.45x** |
 
 Two things about that ratio. It is measured **with** the byte-identity
 guarantee: the exactness probe fires on this host and drops `qmv_wide`, which

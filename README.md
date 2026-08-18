@@ -245,14 +245,22 @@ A small drafter proposes a block of tokens and the target verifies the whole
 block in one forward, so a round emits everything the target would have chosen
 itself plus one more. The gain is therefore a property of the output, not of
 the model: predictable continuations accept long runs of drafts, open prose
-accepts few. Measured on Apple M5 Max (128 GB) at `temperature 0`, warm, with
-the arms alternated and a warm-up discarded.
+accepts few. Measured at `temperature 0`, warm, with the arms alternated and a
+warm-up discarded.
 
-| Pairing | Output | Classic | MTP | Speedup |
-|---------|--------|--------:|----:|--------:|
-| Gemma 4 12B + 4-bit assistant | source code | 43.5 tok/s | 121.8 tok/s | **2.80x** |
-| Gemma 4 12B + 4-bit assistant | prose | 43.3 tok/s | 84.3 tok/s | **1.95x** |
-| Qwen 3.8 27B + its 4-bit MTP head | source code | 32.5 tok/s | 47.0 tok/s | **1.45x** |
+| Host | Pairing | Output | Classic | MTP | Speedup |
+|------|---------|--------|--------:|----:|--------:|
+| M5 Max (128 GB) | Gemma 4 12B + 4-bit assistant | source code | 43.5 tok/s | 121.8 tok/s | **2.80x** |
+| M5 Max (128 GB) | Gemma 4 12B + 4-bit assistant | prose | 43.3 tok/s | 84.3 tok/s | **1.95x** |
+| M5 Max (128 GB) | Qwen 3.8 27B + its 4-bit MTP head | source code | 32.5 tok/s | 47.0 tok/s | **1.45x** |
+
+The host matters as much as the prompt. Whether a verify block pays for itself
+depends on how the GPU generation dispatches the quantized projections it runs,
+which is why the runtime profiles each pairing rather than assuming: the
+batch-capable Gemma 4 31B pair measures 1.2 to 1.4x on M5 Max and a consistent
+regression on M1 Ultra, so the policy enables it on one and declines it on the
+other. M1 Ultra rows for the pairings above are measured on this same protocol
+and belong beside them.
 
 Enable it with `--draft-model <drafter> --draft-kind mtp`. The verify block
 width adapts on its own; forcing it wider does not help, because the tokens a
