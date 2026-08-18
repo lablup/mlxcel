@@ -40,7 +40,7 @@ set -uo pipefail
 
 REPS=3                 # ABBA blocks; each gives 2 samples per arm
 SPREAD_LIMIT=4         # percent of the median, above which a run is suspect
-QUIET_LIMIT=15         # percent CPU for the busiest non-shell process
+QUIET_LIMIT=15         # percent CPU for the busiest process that is not ours
 QUIET_HOLD=90          # seconds the host must stay quiet before starting
 WAIT_FOR_QUIET=1
 ONLY=""
@@ -72,19 +72,39 @@ PROMPT_CODE="Write a Python function that computes the nth Fibonacci number, wit
 PROMPT_PROSE="Explain how speculative decoding accepts or rejects draft tokens."
 PROMPT_LIST="Count from 1 to 200, one number per line, with no other text."
 
+# Processes that drive the measurement rather than compete with it. The agent
+# or shell supervising a run spikes well over the limit every time it emits
+# output, so counting it as contention means an interactively supervised sweep
+# never leaves the hold at all.
+QUIET_IGNORE='/claude$|/node$|(^|/)(bash|zsh|sh|ps|awk|sleep|tmux)$|bench_speculative'
+
+# Busiest process that is not one of ours, as an integer percent. Matching on
+# the whole command rather than a field keeps paths with spaces intact.
+busiest() {
+  ps -Ao %cpu,comm -r | awk -v skip="$QUIET_IGNORE" '
+    NR > 1 {
+      name = $0
+      sub(/^[[:space:]]*[0-9.]+[[:space:]]+/, "", name)
+      if (name ~ skip) next
+      print int($1); exit
+    }'
+}
+
 wait_for_quiet() {
   [ "$WAIT_FOR_QUIET" = "1" ] || return 0
   local streak=0 top
-  echo "waiting for a quiet host (busiest process under ${QUIET_LIMIT}% for ${QUIET_HOLD}s)..." >&2
+  echo "waiting for a quiet host (busiest other process under ${QUIET_LIMIT}% for ${QUIET_HOLD}s)..." >&2
   while true; do
-    top=$(ps -Ao %cpu,comm -r | awk 'NR==2 {print int($1)}')
+    top=$(busiest)
     if [ "${top:-100}" -lt "$QUIET_LIMIT" ]; then
       streak=$((streak + 10))
     else
-      if [ $((streak)) -gt 0 ]; then
-        echo "  host became busy again (${top}%), restarting the hold" >&2
-      fi
-      streak=0
+      # A blip costs progress rather than all of it. Sustained load still
+      # drives the streak to zero within a few samples and pins it there,
+      # while one transient spike no longer discards a minute and a half.
+      [ "$streak" -gt 0 ] && echo "  busy (${top}%), holding at ${streak}s" >&2
+      streak=$((streak - 10))
+      [ "$streak" -lt 0 ] && streak=0
     fi
     [ "$streak" -ge "$QUIET_HOLD" ] && break
     sleep 10
