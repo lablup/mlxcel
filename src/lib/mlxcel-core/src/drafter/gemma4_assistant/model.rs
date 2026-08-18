@@ -815,6 +815,129 @@ impl Gemma4AssistantDraftModel {
         Ok((last_hidden, logits))
     }
 
+    /// How many runner-up candidates a tree round may spend verify positions
+    /// on, from `MLXCEL_MTP_TREE_BRANCHES`. **Default 0.**
+    ///
+    /// Zero proposes the linear tree the trait default builds, so the switch
+    /// degrades to exactly the chain behaviour rather than to something new,
+    /// and that is the default for two reasons that are worth stating rather
+    /// than discovering.
+    ///
+    /// First, a branching round does not reproduce the chain's exact tokens,
+    /// and cannot. When a leaf is accepted its bonus is the target's argmax
+    /// evaluated at a tree position, while the chain evaluates the same
+    /// context at the head of the next block. Both are the target's own
+    /// greedy choice for the same context and they differ only where the top
+    /// two sit within f16 reduction noise, which is the jitter class MTP
+    /// already carries against non-speculative decoding: measured on
+    /// gemma-4-12b, chain, linear tree and branching all first diverge from
+    /// the non-speculative path at the same character. But the linear tree is
+    /// byte-identical to the chain and a branching one is not, so it is a
+    /// weaker guarantee and an opt-in.
+    ///
+    /// Second, the throughput case is not made. Branching lifts acceptance
+    /// (emitted-per-verify 2.4630 to 2.6600, zero-accept rounds 51 to 26 of
+    /// 162) and widens every verify block to do it. Whether that trades
+    /// positive has not been measured on a quiet machine under the protocol
+    /// that measurement needs.
+    ///
+    /// A branching tree is only correct because the verify block now carries
+    /// per-node RoPE positions. A flattened tree hands the target a contiguous
+    /// span, and the tree mask fixes what each node can see but not where each
+    /// node sits; a node's position is its index in the span, which equals its
+    /// depth only while the tree is a chain. Before `DraftTree::depths` was
+    /// threaded through the Gemma 4 forward, one sibling put every later node
+    /// a place too far along and the branching arm's output diverged from the
+    /// chain's, which for temperature-0 speculative decoding is a defect
+    /// rather than a tradeoff (issue #1204).
+    ///
+    /// The extra nodes widen the verify block, so they eat into the rotating
+    /// cache's speculative slack. That slack is `max(32, min(128, K * 8))`
+    /// tokens against blocks of 4 to 8, so a budget in the low single digits
+    /// is comfortably inside it.
+    fn branch_budget() -> usize {
+        std::env::var("MLXCEL_MTP_TREE_BRANCHES")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(0)
+    }
+
+    /// Top-two logit gap under which a step counts as uncertain, from
+    /// `MLXCEL_MTP_TREE_MARGIN`.
+    ///
+    /// This is what stops the budget from being spent every round. A verify
+    /// position is not free: it widens the block for that round, and the
+    /// verify forward is where the round's time goes, so paying for a
+    /// candidate on a step the drafter was sure about is a straight loss.
+    /// Measured on gemma-4-12b at block 5, spending the budget
+    /// unconditionally lifted emitted-per-verify from 2.46 to 2.71 and took
+    /// throughput from 84 to 65 tok/s, because a block widening by half
+    /// bought an acceptance gain of a tenth (issue #1204).
+    ///
+    /// Defaults to no gate, because gating on it was measured to do nothing.
+    /// At 0.3, 1.0 and 3.0 the gate admitted 2, 2 and 5 extra nodes across 162
+    /// rounds and left emitted-per-verify at the chain's 2.46296 exactly. The
+    /// drafter is sharply peaked and still only about half right, so the steps
+    /// it is unsure about are not the steps it is wrong about, and its top-two
+    /// gap does not predict whether the target will agree. Kept as an escape
+    /// hatch, and kept documented, so the next person does not re-run the same
+    /// sweep.
+    fn branch_margin() -> f32 {
+        std::env::var("MLXCEL_MTP_TREE_MARGIN")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .unwrap_or(f32::INFINITY)
+    }
+
+    /// The second-best token at this step and how far behind it is.
+    ///
+    /// The drafter projects the whole vocabulary to pick one argmax and then
+    /// discards the rest. The runner-up is the piece of that worth keeping:
+    /// where the top two are close the drafter is guessing, the target is the
+    /// thing that settles it, and a verify position is exactly what buys that
+    /// answer (issue #1204).
+    ///
+    /// One partition over the vocabulary rather than a sort, next to a
+    /// projection that already dominates the step. Returns `None` when the
+    /// chosen token is not one of the top two, which at temperature 0 means a
+    /// tie the sampler broke some other way; branching on a step whose own
+    /// ordering is not understood is not worth a position.
+    pub(crate) fn runner_up_token(last_logits: &MlxArray, chosen: i32) -> Option<i32> {
+        let shape = ffi::array_shape(last_logits);
+        let vocab = *shape.last()?;
+        if vocab < 2 {
+            return None;
+        }
+        let part = ffi::argpartition(last_logits, vocab - 2, -1);
+        let pair = ffi::slice(&part, &[0, vocab - 2], &[1, vocab]);
+        ffi::eval(&pair);
+        let first = ffi::item_i32(&ffi::slice(&pair, &[0, 0], &[1, 1]));
+        let second = ffi::item_i32(&ffi::slice(&pair, &[0, 1], &[1, 2]));
+        if first == chosen {
+            Some(second)
+        } else if second == chosen {
+            Some(first)
+        } else {
+            None
+        }
+    }
+
+    /// [`Self::runner_up_token`] plus the top-two logit gap.
+    ///
+    /// Only the optional margin gate wants the gap, and it costs a second
+    /// device round trip to read. The default policy selects by step rather
+    /// than by margin, so this is off the hot path and the token-only lookup
+    /// above is what a normal round pays (issue #1204).
+    pub(crate) fn runner_up(last_logits: &MlxArray, chosen: i32) -> Option<(i32, f32)> {
+        let other = Self::runner_up_token(last_logits, chosen)?;
+        let ids = ffi::from_slice_i32(&[chosen, other], &[2]);
+        let values = ffi::take(last_logits, &ids, -1);
+        ffi::eval(&values);
+        let chosen_logit = ffi::item_f32(&ffi::slice(&values, &[0, 0], &[1, 1]));
+        let other_logit = ffi::item_f32(&ffi::slice(&values, &[0, 1], &[1, 2]));
+        Some((other, chosen_logit - other_logit))
+    }
+
     /// Single-row argmax sample from a `[1, 1, vocab]` logits tensor.
     ///
     /// The full `SamplingConfig`-aware sampler currently operates on
@@ -1179,6 +1302,123 @@ impl Drafter for Gemma4AssistantDraftModel {
         }
 
         Ok(tokens)
+    }
+
+    /// Propose a tree: the same chain as [`Self::draft_block`], plus a
+    /// runner-up leaf at the steps where the drafter was least sure.
+    ///
+    /// The chain is unchanged, node for node, which is what keeps the linear
+    /// equivalence available as a control: setting `MLXCEL_MTP_TREE_BRANCHES=0`
+    /// yields exactly the tree the trait default builds, and that one is
+    /// asserted byte-identical to the chain path (issue #1204).
+    ///
+    /// A runner-up is attached as a **leaf**, not as the head of a second
+    /// chain. Extending it would need its own drafter forward for every
+    /// remaining step, which is the expensive kind of tree; this one buys a
+    /// candidate for one verify position and no extra drafting. What it can
+    /// win is the round where the target diverges immediately: the walk
+    /// accepts nothing today, and with the runner-up present it accepts one
+    /// token instead, if the target's choice was the drafter's second guess.
+    ///
+    /// Which steps get one is decided by the top-two logit margin, smallest
+    /// first, rather than by an absolute threshold, so it needs no
+    /// calibration and the budget is spent where the drafter was least
+    /// certain.
+    ///
+    /// The extra nodes widen the verify block, so they eat into the rotating
+    /// cache's speculative slack. That slack is
+    /// `max(32, min(128, K * 8))` tokens against blocks of 4 to 8, so a
+    /// budget in the low single digits is comfortably inside it.
+    fn draft_tree(
+        &mut self,
+        last_bonus: i32,
+        hidden: Option<&MlxArray>,
+        block_size: usize,
+        sampler: &SamplingConfig,
+    ) -> Result<crate::speculative::mtp::tree::DraftTree, DrafterError> {
+        use crate::speculative::mtp::tree::DraftTree;
+
+        let budget = Self::branch_budget();
+        // Branching is a greedy-path idea: the walk accepts a child only when
+        // it equals the target's argmax, so a sampled draft has no claim on
+        // the second-best token. Falling back to the linear tree means
+        // switching this on cannot change a sampled run at all.
+        if budget == 0 || sampler.temperature != 0.0 {
+            let drafts = self.draft_block(last_bonus, hidden, block_size, sampler)?;
+            return Ok(DraftTree::linear(last_bonus, &drafts));
+        }
+
+        if self.shared_kv.is_none() {
+            return Err(DrafterError::SetSharedKvNotCalled);
+        }
+        if self.lm_head.is_none() {
+            return Err(DrafterError::BindNotCalled);
+        }
+        if block_size == 0 {
+            return Ok(DraftTree::root(last_bonus));
+        }
+        let hidden = hidden.ok_or(DrafterError::DraftBlockMissingHidden)?;
+
+        let mut tokens: Vec<i32> = Vec::with_capacity(block_size.saturating_sub(1));
+        // `(step, runner-up token, margin)` for every step that produced one.
+        let mut candidates: Vec<(usize, i32, f32)> = Vec::new();
+
+        let margin_gate = Self::branch_margin();
+        let mut h_prev = ffi::copy(hidden);
+        let mut last_token = last_bonus;
+
+        for step in 0..block_size.saturating_sub(1) {
+            let tok_ids = ffi::from_slice_i32(&[last_token], &[1, 1]);
+            let tok_embed = self.draft_input_embed(&tok_ids);
+            let inputs_embeds = crate::concatenate(&tok_embed, &h_prev, -1);
+
+            let (next_hidden, logits) = self.forward(&inputs_embeds)?;
+            // Sliced once and reused: the sampler and the runner-up lookup
+            // both want the same `[1, vocab]` row.
+            let last_logits = ffi::slice_last_logits(&logits);
+            let token = ffi::fused_sample(
+                &last_logits,
+                sampler.temperature,
+                sampler.top_k,
+                sampler.top_p,
+                sampler.min_p,
+            );
+            ffi::eval(&token);
+            let token_i32 = ffi::item_i32(&token);
+
+            // Only look up what the policy can use. The default selects the
+            // earliest steps, so past the budget there is nothing to gain and
+            // the lookup is skipped entirely; the margin, which costs a second
+            // device round trip, is read only when the gate is actually on.
+            if margin_gate.is_finite() {
+                if let Some((other, gap)) = Self::runner_up(&last_logits, token_i32) {
+                    candidates.push((step, other, gap));
+                }
+            } else if candidates.len() < budget
+                && let Some(other) = Self::runner_up_token(&last_logits, token_i32)
+            {
+                candidates.push((step, other, 0.0));
+            }
+
+            tokens.push(token_i32);
+            last_token = token_i32;
+            h_prev = next_hidden;
+        }
+
+        let mut tree = DraftTree::linear(last_bonus, &tokens);
+        candidates.retain(|&(_, _, gap)| gap < margin_gate);
+        // Earliest step first, not smallest margin. A runner-up at step `i`
+        // can only be reached if every step before it was accepted, so its
+        // value decays with `i` in a way the logit gap does not describe. The
+        // round this is trying to rescue is the one that accepts nothing,
+        // and that is decided at step 0.
+        candidates.sort_by_key(|&(step, _, _)| step);
+        for &(step, token, _) in candidates.iter().take(budget) {
+            // Step `i` was drafted from node `i`, so its alternative is a
+            // sibling of node `i + 1` and a second child of node `i`.
+            tree.push_child(step, token);
+        }
+        Ok(tree)
     }
 
     fn sanitize(&mut self, weights: &mut WeightMap) -> Result<(), DrafterError> {

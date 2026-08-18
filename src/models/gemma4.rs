@@ -1954,6 +1954,112 @@ impl Attention {
         out.expect("compiled_q_path_proportional_per_row requires at least one batch row")
     }
 
+    /// Rotate a `[B, H, L, D]` verify block whose positions are not
+    /// consecutive.
+    ///
+    /// A draft tree node sits at its depth, and depth equals index only while
+    /// the tree is a chain, so a flattened tree needs a position per node
+    /// rather than one offset for the whole span. Without this a sibling
+    /// pushes every later node one place too far along and the target
+    /// verifies them somewhere they do not belong (issue #1204).
+    ///
+    /// Consecutive positions are rotated in one call, so a linear tree is a
+    /// single `apply_rope` and stays bit-identical to the uniform path; a tree
+    /// with `n` leaves costs `n + 1` calls, and `n` is in the low single
+    /// digits.
+    ///
+    /// `positions` are **relative** to `offset`, i.e. node depths. Keeping them
+    /// relative means the caller does not have to know which cache offset each
+    /// layer family is at, and a linear tree's `0..L` reduces to exactly the
+    /// uniform `offset` the non-tree path passes.
+    fn apply_rope_per_position(
+        &self,
+        x: &MlxArray,
+        offset: i32,
+        positions: &[i32],
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(x);
+        debug_assert_eq!(shape.len(), 4, "rope input must be [B, H, L, D]");
+        debug_assert_eq!(
+            shape[2] as usize,
+            positions.len(),
+            "apply_rope_per_position needs exactly one position per node"
+        );
+        let mut out: Option<UniquePtr<MlxArray>> = None;
+        let mut start = 0usize;
+        while start < positions.len() {
+            let mut end = start + 1;
+            while end < positions.len() && positions[end] == positions[end - 1] + 1 {
+                end += 1;
+            }
+            let run = mlxcel_core::slice(
+                x,
+                &[0, 0, start as i32, 0],
+                &[shape[0], shape[1], end as i32, shape[3]],
+            );
+            let rotated = self.apply_rope(&run, offset + positions[start]);
+            out = Some(match out {
+                None => rotated,
+                Some(acc) => {
+                    mlxcel_core::concatenate(acc.as_ref().unwrap(), rotated.as_ref().unwrap(), 2)
+                }
+            });
+            start = end;
+        }
+        out.expect("apply_rope_per_position requires at least one position")
+    }
+
+    /// Per-position variant of the compiled proportional Q/K path.
+    ///
+    /// Same run grouping as [`Self::apply_rope_per_position`] and for the same
+    /// reason: a linear tree resolves to one call through the identical kernel
+    /// the uniform path uses, so switching tree drafting on cannot move the
+    /// numerics on the configuration it subsumes.
+    #[allow(clippy::too_many_arguments)]
+    fn compiled_q_path_proportional_per_position(
+        &self,
+        proj_out: &MlxArray,
+        norm_weight: &MlxArray,
+        norm_eps: f32,
+        freqs: &MlxArray,
+        n_heads: i32,
+        rotated_dims: i32,
+        offset: i32,
+        positions: &[i32],
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(proj_out);
+        let b = shape[0];
+        let width = n_heads * self.head_dim;
+        let mut out: Option<UniquePtr<MlxArray>> = None;
+        let mut start = 0usize;
+        while start < positions.len() {
+            let mut end = start + 1;
+            while end < positions.len() && positions[end] == positions[end - 1] + 1 {
+                end += 1;
+            }
+            let run = mlxcel_core::slice(proj_out, &[0, start as i32, 0], &[b, end as i32, width]);
+            let rotated = mlxcel_core::compiled_q_path_proportional(
+                &run,
+                norm_weight,
+                freqs,
+                norm_eps,
+                n_heads,
+                self.head_dim,
+                rotated_dims,
+                offset + positions[start],
+            );
+            out = Some(match out {
+                None => rotated,
+                Some(acc) => {
+                    mlxcel_core::concatenate(acc.as_ref().unwrap(), rotated.as_ref().unwrap(), 2)
+                }
+            });
+            start = end;
+        }
+        out.expect("compiled_q_path_proportional_per_position requires at least one position")
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn forward(
         &self,
         x: &MlxArray,
@@ -1961,6 +2067,7 @@ impl Attention {
         cache: &mut dyn CacheInterface,
         shared_kv: Option<(&MlxArray, &MlxArray)>,
         divergent_rows: Option<&DivergentVerifyRows<'_>>,
+        tree_positions: Option<&[i32]>,
     ) -> (
         UniquePtr<MlxArray>,
         Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)>,
@@ -1992,7 +2099,35 @@ impl Attention {
         // op-at-a-time chain otherwise), just sliced per row, so lockstep
         // rows stay bitwise-identical to the uniform rounds and near-tie
         // argmaxes cannot flip from a kernel-path change.
-        let queries = if let Some(offsets) = rope_offsets {
+        let queries = if let Some(positions) = tree_positions {
+            // Draft-tree verify: each node rotates at its own depth. Runs of
+            // consecutive positions go through the same kernels the uniform
+            // path uses, so a linear tree is one call and is bit-identical
+            // to it (issue #1204).
+            if let Some(ref freqs) = self.proportional_rope_freqs {
+                let rotated_dims = 2 * ((self.proportional_partial_rotary_factor as f64
+                    * self.head_dim as f64
+                    / 2.0)
+                    .floor() as i32)
+                    .max(0);
+                self.compiled_q_path_proportional_per_position(
+                    &q_proj_out,
+                    &self.q_norm.weight,
+                    self.q_norm.eps,
+                    freqs,
+                    self.n_heads,
+                    rotated_dims,
+                    offset,
+                    positions,
+                )
+            } else {
+                let queries =
+                    mlxcel_core::reshape(&q_proj_out, &[b, l, self.n_heads, self.head_dim]);
+                let queries = self.q_norm.forward(&queries);
+                let queries = mlxcel_core::transpose_axes(&queries, &[0, 2, 1, 3]);
+                self.apply_rope_per_position(&queries, offset, positions)
+            }
+        } else if let Some(offsets) = rope_offsets {
             if let Some(ref freqs) = self.proportional_rope_freqs {
                 let rotated_dims = 2 * ((self.proportional_partial_rotary_factor as f64
                     * self.head_dim as f64
@@ -2045,7 +2180,7 @@ impl Attention {
             return (self.project_output(&attn_out, b, l), None);
         }
 
-        let (keys, values) = self.project_kv(x, b, l, offset, cache, rope_offsets);
+        let (keys, values) = self.project_kv(x, b, l, offset, cache, rope_offsets, tree_positions);
         let attn_out = self.attend(&queries, &keys, &values, mask);
         let stored = if self.store_full_length_kv {
             Some((keys, values))
@@ -2111,6 +2246,7 @@ impl Attention {
         offset: i32,
         cache: &mut dyn CacheInterface,
         rope_offsets: Option<&[i32]>,
+        tree_positions: Option<&[i32]>,
     ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
         let (raw_keys, raw_values) = match &self.projection {
             AttentionProjection::Fused(proj) => {
@@ -2147,7 +2283,30 @@ impl Attention {
             .k_norm
             .as_ref()
             .expect("k_norm must be Some for non-KV-shared layers");
-        let keys = if let Some(offsets) = rope_offsets {
+        let keys = if let Some(positions) = tree_positions {
+            if let Some(ref freqs) = self.proportional_rope_freqs {
+                let rotated_dims = 2 * ((self.proportional_partial_rotary_factor as f64
+                    * self.head_dim as f64
+                    / 2.0)
+                    .floor() as i32)
+                    .max(0);
+                self.compiled_q_path_proportional_per_position(
+                    &raw_keys,
+                    &k_norm.weight,
+                    k_norm.eps,
+                    freqs,
+                    self.n_kv_heads,
+                    rotated_dims,
+                    offset,
+                    positions,
+                )
+            } else {
+                let keys = mlxcel_core::reshape(&raw_keys, &[b, l, self.n_kv_heads, self.head_dim]);
+                let keys = k_norm.forward(&keys);
+                let keys = mlxcel_core::transpose_axes(&keys, &[0, 2, 1, 3]);
+                self.apply_rope_per_position(&keys, offset, positions)
+            }
+        } else if let Some(offsets) = rope_offsets {
             // Divergent batched MTP verify (issue #203): rotate each row's
             // new keys at the row's own logical positions, mirroring the
             // per-row query rotation in `forward`, through the same kernels
@@ -2710,6 +2869,7 @@ impl DecoderLayer {
             usize::MAX,
             false,
             None,
+            None,
         )
     }
 
@@ -2724,6 +2884,7 @@ impl DecoderLayer {
         layer_idx: usize,
         profile_subops: bool,
         divergent_rows: Option<&DivergentVerifyRows<'_>>,
+        tree_positions: Option<&[i32]>,
     ) -> (
         UniquePtr<MlxArray>,
         Option<(UniquePtr<MlxArray>, UniquePtr<MlxArray>)>,
@@ -2736,9 +2897,14 @@ impl DecoderLayer {
         // residual is only *read* by the final `add`.
         let h_attn = self.input_layernorm.forward(x);
         timer.tick("input_layernorm", &h_attn);
-        let (h_attn, stored_kv) =
-            self.self_attn
-                .forward(&h_attn, mask, cache, shared_kv, divergent_rows);
+        let (h_attn, stored_kv) = self.self_attn.forward(
+            &h_attn,
+            mask,
+            cache,
+            shared_kv,
+            divergent_rows,
+            tree_positions,
+        );
         timer.tick("self_attn", &h_attn);
         let h_attn = self.post_attention_layernorm.forward(&h_attn);
         timer.tick("post_attention_layernorm", &h_attn);
@@ -2883,7 +3049,9 @@ impl DecoderLayer {
     ) -> UniquePtr<MlxArray> {
         let mut timer = SubopTimer::new(false, usize::MAX);
         let h_attn = self.input_layernorm.forward(x);
-        let (h_attn, _stored_kv) = self.self_attn.forward(&h_attn, mask, cache, None, None);
+        let (h_attn, _stored_kv) = self
+            .self_attn
+            .forward(&h_attn, mask, cache, None, None, None);
         let h_attn = self.post_attention_layernorm.forward(&h_attn);
         let after_attn = mlxcel_core::add(x, &h_attn);
 
@@ -3092,6 +3260,15 @@ pub struct Gemma4TextModel {
 pub struct Gemma4SpeculativeSinks {
     pub hidden_sink: Option<Vec<UniquePtr<MlxArray>>>,
     pub shared_kv_sink: Option<HashMap<String, (UniquePtr<MlxArray>, UniquePtr<MlxArray>)>>,
+    /// Per-node RoPE positions for a draft-tree verify block, relative to the
+    /// cache offset: entry `i` is node `i`'s depth.
+    ///
+    /// An **input**, unlike the two sinks above, and carried here because this
+    /// struct is the one thing already threaded from the MTP adapter into the
+    /// forward that needs it. `None` means the block's positions are the span
+    /// itself, which is what every non-tree caller wants and what a linear
+    /// tree resolves to anyway (issue #1204).
+    pub tree_positions: Option<Vec<i32>>,
 }
 
 impl Gemma4SpeculativeSinks {
@@ -3102,6 +3279,7 @@ impl Gemma4SpeculativeSinks {
         Self {
             hidden_sink: Some(Vec::new()),
             shared_kv_sink: None,
+            tree_positions: None,
         }
     }
 
@@ -3112,6 +3290,7 @@ impl Gemma4SpeculativeSinks {
         Self {
             hidden_sink: None,
             shared_kv_sink: Some(HashMap::new()),
+            tree_positions: None,
         }
     }
 
@@ -3122,6 +3301,7 @@ impl Gemma4SpeculativeSinks {
         Self {
             hidden_sink: Some(Vec::new()),
             shared_kv_sink: Some(HashMap::new()),
+            tree_positions: None,
         }
     }
 }
@@ -3262,6 +3442,15 @@ impl Gemma4TextModel {
             && per_row_valid_end
                 .map(|ve| ve.iter().any(|&v| v != global_offset_pre))
                 .unwrap_or(false);
+        // Per-node RoPE positions for a draft-tree verify block. Cloned out
+        // of the sinks up front because the sinks are borrowed mutably below,
+        // and it is a handful of `i32` per round. `None` for every non-tree
+        // caller, and for a linear tree the positions are the span itself, so
+        // the attention path resolves it back to a single uniform rotation
+        // (issue #1204).
+        let tree_positions: Option<Vec<i32>> =
+            sinks.as_ref().and_then(|s| s.tree_positions.clone());
+
         // Per-row context for the divergent verify path (issue #203): the
         // attention layers rotate queries/keys at per-row logical positions
         // and run attention per row over each row's exact contiguous K/V, so
@@ -3597,6 +3786,7 @@ impl Gemma4TextModel {
                 i,
                 profile_subops,
                 divergent_rows.as_ref(),
+                tree_positions.as_deref(),
             );
             h = next_h;
             if let Some(start) = layer_build_start {

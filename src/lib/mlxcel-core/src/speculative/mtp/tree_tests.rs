@@ -280,3 +280,34 @@ fn a_linear_history_mask_matches_a_causal_mask_with_the_same_offset() {
     }
     assert_eq!(tree.additive_mask_with_history(offset, MASKED), expected);
 }
+
+/// A node's depth is its RoPE position, and index equals depth only in a chain.
+///
+/// The flattened verify block gives every node the position of its index. For a
+/// linear tree that is already right, which is why the tree path could look
+/// correct while carrying this defect; one sibling makes them disagree and the
+/// target then verifies later nodes somewhere they do not belong (issue #1204).
+#[test]
+fn depths_are_the_positions_a_flattened_block_gets_wrong() {
+    let linear = DraftTree::linear(7, &[10, 11, 12]);
+    assert_eq!(
+        linear.depths(),
+        vec![0, 1, 2, 3],
+        "a chain's depths are its indices, so it reduces to the uniform rotation"
+    );
+
+    // Root, a chain of two, then a sibling of the first chain node.
+    let mut tree = DraftTree::linear(7, &[10, 11]);
+    let leaf = tree.push_child(0, 99);
+    assert_eq!(leaf, 3, "the leaf is appended after the chain");
+    assert_eq!(
+        tree.depths(),
+        vec![0, 1, 2, 1],
+        "the leaf sits beside node 1, not after node 2, whatever its index says"
+    );
+
+    // A leaf hung off the deeper node, to check the walk down the parents.
+    let mut deeper = DraftTree::linear(7, &[10, 11, 12]);
+    deeper.push_child(2, 98);
+    assert_eq!(deeper.depths(), vec![0, 1, 2, 3, 3]);
+}

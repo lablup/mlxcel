@@ -203,9 +203,32 @@ impl<'a> Gemma4MtpTargetAdapter<'a> {
         sampler: &SamplingConfig,
         logprobs_config: &mlxcel_core::sampling::LogprobsConfig,
     ) -> VerifyForwardOutput {
+        self.verify_forward_with_mask_and_positions(
+            verify_input,
+            mask,
+            None,
+            sampler,
+            logprobs_config,
+        )
+    }
+
+    /// [`Self::verify_forward_with_mask`] with per-node RoPE positions.
+    ///
+    /// `tree_positions` are node depths relative to the cache offset. `None`
+    /// means the block's positions are the span itself, which is what the
+    /// chain path wants and what a linear tree resolves to (issue #1204).
+    fn verify_forward_with_mask_and_positions(
+        &self,
+        verify_input: &[i32],
+        mask: Option<&mlxcel_core::MlxArray>,
+        tree_positions: Option<Vec<i32>>,
+        sampler: &SamplingConfig,
+        logprobs_config: &mlxcel_core::sampling::LogprobsConfig,
+    ) -> VerifyForwardOutput {
         // Sink-aware forward over `[bonus, draft_0, …, draft_{K-2}]`.
         let verify_arr = mlxcel_core::from_slice_i32(verify_input, &[1, verify_input.len() as i32]);
         let mut sinks = Gemma4SpeculativeSinks::with_hidden_and_shared_kv();
+        sinks.tree_positions = tree_positions;
         // Greedy/no-logprobs can use the latest upstream deferred path: run
         // the transformer once with `skip_final_norm=True`, capture pre-norm
         // hidden/shared K/V, then project hidden positions to logits only as
@@ -816,7 +839,16 @@ impl<'a> MtpTarget for Gemma4MtpTargetAdapter<'a> {
         // into NaN through the softmax.
         let flat = tree.additive_mask_with_history(offset, -1.0e9);
         let mask = mlxcel_core::from_slice_f32(&flat, &[nodes as i32, (offset + nodes) as i32]);
-        Ok(self.verify_forward_with_mask(tree.tokens(), Some(&mask), sampler, logprobs_config))
+        // The mask says what each node can see; the depths say where it sits.
+        // A tree needs both, and the second one is what a flattened block
+        // silently gets wrong as soon as it stops being a chain.
+        Ok(self.verify_forward_with_mask_and_positions(
+            tree.tokens(),
+            Some(&mask),
+            Some(tree.depths()),
+            sampler,
+            logprobs_config,
+        ))
     }
 
     /// Gemma 4 can round-trip a tree whenever every cache of this sequence can
