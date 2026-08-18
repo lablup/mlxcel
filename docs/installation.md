@@ -462,11 +462,53 @@ too.
 Widening the scope does not put the run into the concurrency hazard of #1008,
 where two `mlxcel-core` suites sharing one Metal device aborted 7 of 12 runs.
 Cargo builds every test binary and then runs them one at a time, so the
-`mlxcel-core` suite never overlaps the root suite on the device. Anything that
-changes that, a parallel test runner such as `cargo nextest` for instance, has
-to re-establish it: the `no_other_mlxcel_core_test_binary_is_sharing_the_gpu`
-guard in `src/lib/mlxcel-core/src/gpu_exclusivity_tests.rs` detects a second
+`mlxcel-core` suite never overlaps the root suite on the device. That is
+measured, not assumed: on cargo 1.97.1 a three-crate probe workspace completes
+its entire build before the first test binary starts, and finishes each binary
+before starting the next. Anything that changes it, a parallel test runner such
+as `cargo nextest` for instance, has to re-establish it: the
+`no_other_mlxcel_core_test_binary_is_sharing_the_gpu` guard in
+`src/lib/mlxcel-core/src/gpu_exclusivity_tests.rs` detects a second
 `mlxcel-core` binary, not a root-suite binary competing for the same device.
+
+**`make verify-test` also passes `--test-threads=1` (#1092).** The sequencing
+above bounds concurrency *between* binaries and nothing else, and the failure
+that took `main` red on 2026-08-16 was inside one: the `mlxcel-core` binary
+died with `signal: 11, SIGSEGV`, publishing no panic and no `test result` line,
+so `--no-fail-fast` had nothing to collect and cargo reported a failed target
+with no explanation. libtest defaults to one test thread per logical CPU, and
+the macOS crash report from the local repro on an 18-core M5 Max shows what
+that means here: 18 libtest workers live at the fault, all of them running
+MLX-backed cache tests, two inside `iokit_user_client_trap` and two inside the
+allocator, faulting on an address in no mapped region. It is the CUDA abort of
+#1048 on the other backend. `--jobs 1` does not address it, because `--jobs`
+bounds the build and the build has already finished by the time any test runs.
+
+Serializing is close to free, because the work serializes on the one Metal
+device whether or not the host threads do. Measured on an M5 Max at `5dfcb390`,
+warm cache, whole workspace, 101 binaries and 8128 tests:
+
+| test threads | wall clock |
+|---|---|
+| default (18) | 69.17s |
+| `--test-threads=1` | 76.39s |
+
++7.2s, against a `cargo test` step the nightly budgets 180 minutes for and
+whose time goes to the build rather than to running tests. The two large
+members pull in opposite directions and nearly cancel: `mlxcel-core` costs
++23s serialized (10.2s to 33.2s), while the root suite *gains* 12s (23.5s to
+11.6s), because thread contention across 5695 tests is worse than running them
+in a row. Order matters when reproducing these numbers: a cold first run pays
+roughly 50s of one-time Metal shader compilation, which is enough to invert the
+comparison if the two arms are not both warm.
+
+There is deliberately no macOS counterpart to the
+`the_cuda_test_suite_must_run_single_threaded` guard. The CUDA suite aborts
+every time it runs parallel, so failing by name costs nothing; the Metal suite
+crashes rarely, and a hard guard would break `cargo test -p mlxcel-core --lib`,
+which is three times faster parallel and succeeds nearly always. Narrowed
+hand-runs are meant to stay parallel. It is the whole-suite gate that
+serializes.
 
 ## Troubleshooting
 

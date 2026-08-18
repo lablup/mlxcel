@@ -512,11 +512,18 @@ pre-commit: fmt clippy test ## Pre-commit checks
 #
 #      Cargo builds all the test binaries and then runs them one at a time, so
 #      the mlxcel-core suite never overlaps the root suite on the Metal device.
-#      That is what keeps `--workspace` clear of #1008, where two concurrent
-#      mlxcel-core suites aborted 7 of 12 runs. Anything that starts running
-#      test binaries in parallel here (cargo-nextest, say) has to re-establish
-#      that; the `no_other_mlxcel_core_test_binary_is_sharing_the_gpu` guard
-#      only sees a second mlxcel-core binary, not a root-suite one.
+#      Measured on cargo 1.97.1 against a three-crate probe workspace: the
+#      build completes in full before the first test binary starts, and each
+#      binary finishes before the next one begins. That is what keeps
+#      `--workspace` clear of #1008, where two concurrent mlxcel-core suites
+#      aborted 7 of 12 runs. Anything that starts running test binaries in
+#      parallel here (cargo-nextest, say) has to re-establish that; the
+#      `no_other_mlxcel_core_test_binary_is_sharing_the_gpu` guard only sees a
+#      second mlxcel-core binary, not a root-suite one.
+#
+#      What that argument covers is concurrency *between* binaries, and only
+#      that. Item 6 covers the other axis, which is the one that took `main`
+#      down: concurrency inside a single binary.
 #   5. `--no-fail-fast` on the test target. Without it the first failing test
 #      binary ends the run, which was harmless when the run was one package and
 #      is not now: a single red root-suite test would hide all of mlxcel-core,
@@ -524,6 +531,33 @@ pre-commit: fmt clippy test ## Pre-commit checks
 #      part of an hour should report everything that is red in one pass. It
 #      does not weaken the gate, since cargo still exits non-zero, and it does
 #      not skip compile errors, which stop the run either way.
+#   6. `--test-threads=1`, for the reason `verify-test-cuda` already carries it
+#      (#1092). Cargo's sequencing above bounds concurrency between binaries
+#      and says nothing about concurrency inside one, and libtest defaults to
+#      one test thread per logical CPU. The 2026-08-16 nightly died with
+#      `signal: 11, SIGSEGV` in the mlxcel-core binary, with no panic and no
+#      `test result` line, and the macOS crash report from the local repro on
+#      an 18-core M5 Max names the shape without ambiguity: 18 libtest worker
+#      threads live at the fault, every one of them in an MLX-backed cache
+#      test, two inside `iokit_user_client_trap` and two inside the allocator,
+#      faulting on an address in no mapped region. That is #1048's CUDA abort
+#      on the other backend, and `--test-threads` is the flag that bounds it.
+#      `--jobs 1` is not: it bounds the build, which has already finished.
+#
+#      It costs almost nothing, because the work serializes on the one Metal
+#      device whether or not the host threads do. Measured on M5 Max at
+#      `5dfcb390`, warm, whole workspace, 101 binaries and 8128 tests: 69.17s
+#      parallel against 76.39s serialized. That is +7.2s on a step the nightly
+#      budgets 180 minutes for and whose time goes to the build. The two big
+#      members move in opposite directions and nearly cancel: mlxcel-core
+#      costs +23s serialized (10.2s to 33.2s) while the root suite gains 12s
+#      (23.5s to 11.6s), thread contention across 5695 tests being worse than
+#      running them in a row.
+#
+#      `make test-fast` has passed `--test-threads=1` on macOS since #809, so
+#      this makes the gate agree with the edit-test loop instead of diverging
+#      from it. Narrowed hand-runs stay parallel and that is fine; it is
+#      whole-suite runs that crash.
 #
 # `verify-test-cuda` is the Linux/NVIDIA counterpart of `verify-test`: same
 # scope, same profile, same `--no-fail-fast`, `--features cuda` instead of
@@ -592,9 +626,9 @@ verify-clippy: ## CI-faithful: clippy --workspace --all-targets --features metal
 	$(CARGO) clippy --workspace --all-targets --features metal,accelerate -- -D warnings
 
 .PHONY: verify-test
-verify-test: ## CI-faithful: cargo test --workspace --profile test-fast --features metal,accelerate --no-fail-fast
-	@echo "$(CYAN)[verify] test (workspace, test-fast profile, features=metal,accelerate)...$(RESET)"
-	$(CARGO) test --workspace --profile test-fast --features metal,accelerate --no-fail-fast
+verify-test: ## CI-faithful: cargo test --workspace --profile test-fast --features metal,accelerate --no-fail-fast -- --test-threads=1 (issue #1092)
+	@echo "$(CYAN)[verify] test (workspace, test-fast profile, features=metal,accelerate, single threaded)...$(RESET)"
+	$(CARGO) test --workspace --profile test-fast --features metal,accelerate --no-fail-fast -- --test-threads=1
 
 .PHONY: verify-test-video
 verify-test-video: ## Video gate: run the ffmpeg-backed video tests for real (needs ffmpeg 5.0+ on PATH, issue #1172)
