@@ -294,7 +294,9 @@ impl<'a> Gemma4MtpTargetAdapter<'a> {
         // through per-position; the round-loop driver's perf-sensitive
         // path is greedy, so we keep argmax-only for now.
         let target_tokens = if let Some(logits) = logits.as_ref() {
-            Self::argmax_per_position(logits)
+            let ids = Self::argmax_per_position(logits);
+            Self::log_top_two_gaps(logits, &ids);
+            ids
         } else {
             // The hidden sink is still owned by `sinks`; pull it below but
             // compute after extraction so the hidden handle is available for
@@ -606,6 +608,40 @@ impl<'a> Gemma4MtpTargetAdapter<'a> {
     /// utility and the DFlash module's version is private. Future
     /// refactor: lift this into `mlxcel_core::utils` once a second
     /// adapter (Qwen 3.5 MTP variant) lands and needs the same shape.
+    /// Diagnostic: report the top-two logit gap at every verify position.
+    ///
+    /// The exactness contract only breaks when a kernel difference flips an
+    /// argmax, and a flip needs the top two logits to sit inside that
+    /// difference. So the question "can we keep the fast kernel and stay
+    /// exact" reduces to two distributions: how far apart the top two usually
+    /// are, and how far the kernels move a logit. This prints the first;
+    /// running it under both kernel selections and diffing gives the second
+    /// (issue #1188).
+    ///
+    /// Gated on `MLXCEL_MTP_GAP_LOG` and off otherwise, because it costs a
+    /// `topk` and a host read per verify position.
+    fn log_top_two_gaps(logits: &MlxArray, ids: &[i32]) {
+        if std::env::var("MLXCEL_MTP_GAP_LOG").is_err() {
+            return;
+        }
+        let top2 = mlxcel_core::topk(logits, 2, -1);
+        let as_f32 = mlxcel_core::astype(&top2, mlxcel_core::dtype::FLOAT32);
+        mlxcel_core::eval(&as_f32);
+        let bytes = mlxcel_core::array_to_raw_bytes(&as_f32);
+        let vals: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        for (position, id) in ids.iter().enumerate() {
+            let a = vals.get(position * 2).copied().unwrap_or(0.0);
+            let b = vals.get(position * 2 + 1).copied().unwrap_or(0.0);
+            let (hi, lo) = if a >= b { (a, b) } else { (b, a) };
+            // Machine-readable on purpose: this is analysed offline against a
+            // second run under the other kernel.
+            eprintln!("MTPGAP\t{position}\t{id}\t{hi:.6}\t{lo:.6}\t{:.6}", hi - lo);
+        }
+    }
+
     pub(crate) fn argmax_per_position(logits: &MlxArray) -> Vec<i32> {
         let shape = mlxcel_core::array_shape(logits);
         debug_assert!(shape.len() == 3, "expected [1, block_size, vocab] logits");
