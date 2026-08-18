@@ -1026,3 +1026,31 @@ fn a_target_without_a_tree_path_refuses_a_tree() {
         "a refusal must carry a reason the round loop can log"
     );
 }
+
+/// The rollback half of the tree capability refuses by default too.
+///
+/// Verifying a tree and keeping its accepted path are separate abilities, and
+/// a target can have the first without the second: the mask that makes the
+/// forward correct does nothing for a cache whose rollback is a tail trim.
+/// If this half inherited a permissive default, a target that opted into the
+/// forward would silently get a linear rollback applied to a scattered accept
+/// set, which keeps the wrong entries rather than failing (issue #1204).
+#[test]
+fn a_target_without_a_tree_rollback_refuses_one() {
+    let target = MockMtpTarget::new(vec![vec![10, 11, 12]], vec![]);
+    let captured = VerifyCaptured {
+        tensors: Vec::new(),
+        scalars: Vec::new(),
+    };
+
+    // The path a full linear accept of two drafts produces: root plus both
+    // nodes. Even this, the shape the chain path handles, has to be refused
+    // by a target that has not implemented the selection.
+    let refusal = target
+        .verify_finalize_tree(&[0, 1, 2], 3, captured)
+        .expect_err("a target with no tree rollback must refuse rather than trim a tail");
+    assert!(
+        !refusal.reason.is_empty(),
+        "a refusal must carry a reason the round loop can log"
+    );
+}

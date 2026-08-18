@@ -340,6 +340,34 @@ impl<'a> MtpTarget for Qwen35MtpTargetAdapter<'a> {
         }
     }
 
+    /// Refuse a tree rollback, naming the reason rather than inheriting the
+    /// default.
+    ///
+    /// Unreachable in practice, because [`Self::verify_forward_tree`] refuses
+    /// first and no tree block ever reaches this cache. It is here because the
+    /// two halves are one capability: a reader checking whether Qwen 3.5 can
+    /// keep a tree path should find the answer at the rollback too, and a
+    /// future forward that stops refusing must not silently inherit a rollback
+    /// that cannot serve it.
+    ///
+    /// The cause is the same one. 48 of 64 layers are GatedDeltaNet, and their
+    /// rollback replays the captured block over the accepted prefix. Replaying
+    /// a gathered path instead of a prefix is an indexing change rather than a
+    /// new mechanism, so this is reachable work; it is simply not done
+    /// (issue #1204).
+    fn verify_finalize_tree(
+        &self,
+        _path: &[usize],
+        _block_size: usize,
+        _captured: VerifyCaptured,
+    ) -> Result<MtpVerifyOutput, mlxcel_core::speculative::mtp::target::TreeVerifyUnsupported> {
+        Err(
+            mlxcel_core::speculative::mtp::target::TreeVerifyUnsupported {
+                reason: "Qwen 3.5 rolls GatedDeltaNet state back by replaying the accepted                          prefix, and replaying a scattered path is not implemented",
+            },
+        )
+    }
+
     fn verify_finalize(
         &self,
         accepted: usize,

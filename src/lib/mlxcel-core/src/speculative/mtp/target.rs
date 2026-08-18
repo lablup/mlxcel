@@ -358,6 +358,57 @@ pub trait MtpTarget {
         captured: VerifyCaptured,
     ) -> MtpVerifyOutput;
 
+    /// Second-phase verify for a draft **tree**, or say why this target
+    /// cannot.
+    ///
+    /// [`Self::verify_finalize`] rolls the cache back by trimming a tail,
+    /// because a linear accept set is a prefix of the block that was
+    /// verified. A tree's accept set is a path, so the survivors are
+    /// scattered through the block and rolling back means selecting them and
+    /// closing the gap. That is a different operation on the cache rather
+    /// than a different argument to the same one, which is why it is its own
+    /// method instead of a `path` parameter on the linear finalize
+    /// (issue #1204).
+    ///
+    /// `path` is [`super::tree::TreeWalk::path`]: node indices from the root
+    /// through the last accepted node, strictly increasing because
+    /// `parents[i] < i`. `path[0]` is the root, so `path.len() - 1` is the
+    /// accept count the linear finalize would have been given.
+    ///
+    /// A linear tree must land exactly where the chain lands. For a
+    /// [`super::tree::DraftTree::linear`] the path is `[0, 1, ..., accepted]`,
+    /// the selection is a prefix, and the result must be byte-identical to
+    /// `verify_finalize(accepted, block_size, captured)`. That equivalence is
+    /// what lets the tree path be switched on for the configurations the
+    /// chain path already covers, so it is the first thing to test and the
+    /// first thing to suspect: a divergence there is wiring, not topology.
+    ///
+    /// The default refuses, for the reason [`Self::verify_forward_tree`]
+    /// refuses: a target that cannot select a scattered accept set out of its
+    /// cache must not be handed one.
+    ///
+    /// Accepting the forward and refusing the finalize is a real combination
+    /// and not a contradiction. A target can verify a tree under a mask while
+    /// its cache has no way to keep the path afterwards; Gemma 4's rotating
+    /// sliding-window caches are that case today, since `RotatingKVCache`
+    /// rolls back by rewinding `offset` and `idx` without moving data, which
+    /// a scattered selection cannot use. The pair therefore has to be probed
+    /// as one capability **before** a tree is drafted: once a tree forward has
+    /// appended its block, a refusal here leaves the cache in a state only a
+    /// tree-aware rollback can undo, which is also why `captured` is consumed
+    /// rather than handed back for a linear retry.
+    #[allow(unused_variables)]
+    fn verify_finalize_tree(
+        &self,
+        path: &[usize],
+        block_size: usize,
+        captured: VerifyCaptured,
+    ) -> Result<MtpVerifyOutput, TreeVerifyUnsupported> {
+        Err(TreeVerifyUnsupported {
+            reason: "this target has no tree-aware cache rollback path",
+        })
+    }
+
     /// Number of decoder layers in the target. Used by the round-loop
     /// only for diagnostic logging.
     fn num_layers(&self) -> usize;

@@ -37,7 +37,7 @@ fn causal_mask(n: usize) -> Vec<f32> {
 #[test]
 fn a_linear_tree_masks_exactly_as_a_causal_mask() {
     for k in 0..6 {
-        let drafts: Vec<i32> = (0..k).map(|i| 100 + i as i32).collect();
+        let drafts: Vec<i32> = (0..k).map(|i| 100 + i).collect();
         let tree = DraftTree::linear(7, &drafts);
         assert_eq!(
             tree.additive_mask(MASKED),
