@@ -202,7 +202,8 @@ measure_pairing() {
 import os, re, statistics, sys
 n = int(sys.argv[1])
 vals = [float(v) for v in sys.argv[2:] if v]
-classic, mtp = sorted(vals[:n]), sorted(vals[n:])
+classic_raw, mtp_raw = vals[:n], vals[n:]
+classic, mtp = sorted(classic_raw), sorted(mtp_raw)
 if not classic or not mtp:
     print("  no samples collected", file=sys.stderr); raise SystemExit(1)
 def spread(d): return 100 * (d[-1] - d[0]) / statistics.median(d)
@@ -241,8 +242,10 @@ if bad:
     # Print the samples so a bimodal arm is distinguishable from drift or a
     # one-off outlier. They call for different responses and the median hides
     # which one this is.
-    print(f"   classic {' '.join(f'{v:.1f}' for v in classic)}")
-    print(f"   MTP     {' '.join(f'{v:.1f}' for v in mtp)}")
+    # Run order, not sorted: a rising or falling series is drift or thermal
+    # and a scattered one is intrinsic variance. Sorting erases the difference.
+    print(f"   classic, in run order  {' '.join(f'{v:.1f}' for v in classic_raw)}")
+    print(f"   MTP,     in run order  {' '.join(f'{v:.1f}' for v in mtp_raw)}")
 if bad or contended:
     print(f"   !! do not publish this row. Re-run when nothing else is using the GPU.")
 PY
