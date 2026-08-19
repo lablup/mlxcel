@@ -805,6 +805,9 @@ fn main() -> Result<()> {
             .as_deref()
             .context("--target is required when --sweep is not set")?
             .to_path_buf();
+        let target_name = target
+            .file_name()
+            .context("--target must name a model directory (paths ending in '..' or a trailing slash have no file name)")?;
         let pairing_name = format!("{} ({})", target.display(), args.kind);
         let synthetic = Pairing {
             name: Box::leak(pairing_name.into_boxed_str()),
@@ -826,7 +829,7 @@ fn main() -> Result<()> {
         // The synthetic pairing references the canonical layout via
         // `resolve_model_dir`; pass the explicit `--target` directly so an
         // operator who points at a non-canonical path is honored.
-        let row = if synthetic.target_subdir == target.file_name().unwrap().to_string_lossy() {
+        let row = if synthetic.target_subdir == target_name.to_string_lossy() {
             // Default canonical path; fall back to `bench_one_pairing` which
             // re-resolves via `resolve_model_dir`.
             bench_one_pairing(&synthetic, &args.prompt, args.batch, args.max_tokens)
