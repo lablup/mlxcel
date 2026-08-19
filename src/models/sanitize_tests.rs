@@ -1233,7 +1233,7 @@ operations:
         }
     }
 
-    /// (A4): when the CLI installs an active pipeline via
+    /// When the CLI installs an active pipeline via
     /// `crate::surgery::set_active_pipeline`, the consolidated loader
     /// must pick it up for `load_text_weights(_, None)` callers. This
     /// is the integration glue that lets `mlxcel generate --surgery
@@ -1287,7 +1287,7 @@ operations:
         std::fs::remove_dir_all(&dir_with_slot).unwrap();
     }
 
-    /// (A4): explicit `transform` argument takes precedence
+    /// Explicit `transform` argument takes precedence
     /// over the active-pipeline slot. This is the contract callers
     /// (e.g. future programmatic users and the existing integration tests) rely on to bypass the global slot.
     #[test]

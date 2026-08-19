@@ -427,7 +427,7 @@ pub struct ServerStartupInput {
     /// `--conversation-store-ttl-secs` value (`0` disables TTL).
     pub conversation_store_ttl_secs: u64,
 
-    /// (A4): path to a YAML weight-load surgery configuration.
+    /// Path to a YAML weight-load surgery configuration.
     ///
     /// `None` (the default) keeps the server on the bit-exact baseline
     /// weight-load path — no surgery crate work, no observable

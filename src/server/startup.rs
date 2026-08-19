@@ -301,7 +301,7 @@ pub struct ServerStartupConfig {
     /// (enabled, 2 GiB cap, 1024 entries, 3600 s TTL, 32 token min).
     pub prompt_cache: super::prompt_cache::PromptCacheConfig,
 
-    /// (B11): resolved KV cache mode for per-sequence cache
+    /// Resolved KV cache mode for per-sequence cache
     /// construction.
     ///
     /// Resolved from `--cache-type-k`/`--cache-type-v` (split flags,
@@ -359,7 +359,7 @@ pub struct ServerStartupConfig {
     /// disables TTL.
     pub conversation_store_ttl_secs: u64,
 
-    /// (A4): resolved path to a YAML weight-load surgery
+    /// Resolved path to a YAML weight-load surgery
     /// configuration. `None` keeps the bit-exact baseline load path.
     ///
     /// The path is parsed into a [`mlxcel_surgery::SurgeryPipeline`]
