@@ -76,7 +76,7 @@ PROMPT_LIST="Count from 1 to 200, one number per line, with no other text."
 # or shell supervising a run spikes well over the limit every time it emits
 # output, so counting it as contention means an interactively supervised sweep
 # never leaves the hold at all.
-QUIET_IGNORE='/claude$|/node$|/mlxcel$|/mlxcel-server$|(^|/)(bash|zsh|sh|ps|awk|sleep|tmux)$|bench_speculative'
+QUIET_IGNORE='(^|/)(claude|node|mlxcel|mlxcel-server|bash|zsh|sh|ps|awk|sleep|tmux)$|bench_speculative'
 
 # Busiest process that is not one of ours, as an integer percent. Matching on
 # the whole command rather than a field keeps paths with spaces intact.
