@@ -72,16 +72,16 @@ impl Qwen35MtpAttention {
     /// Attention forward over the drafter's own KV cache.
     ///
     /// - `x`: `[B, L, hidden_size]` input (post `input_layernorm`).
-    /// - `mask`: `Some(causal mask)` for multi-token forwards (drafter
-    ///   prompt prefill and accepted-token extension), `None` for the
-    ///   single-token draft steps.
+    /// - `causal`: `true` for multi-token forwards (drafter prompt prefill
+    ///   and accepted-token extension), `false` for the single-token draft
+    ///   steps, which see no future positions.
     /// - `cache`: this layer's own KV cache; keys/values are appended.
     /// - `rope_offset`: absolute position of `x`'s first token in the
     ///   target sequence (the drafter's `next_position`).
     pub fn forward(
         &self,
         x: &MlxArray,
-        mask: Option<&MlxArray>,
+        causal: bool,
         cache: &mut KVCache,
         rope_offset: i32,
     ) -> UniquePtr<MlxArray> {
@@ -142,8 +142,18 @@ impl Qwen35MtpAttention {
 
         let (cache_k, cache_v) = cache.update_and_fetch(keys, values);
 
-        let attn_out =
-            crate::layers::attention(&queries, &cache_k, &cache_v, self.scale, mask, 0.0, 0);
+        // The causal wrapper derives the query offset from the cache K
+        // length (bottom-right alignment), which equals the explicit
+        // `create_causal_mask(s, cache.offset)` this call site used to
+        // build, in the degraded empty-cache mode included. It selects
+        // MLX's native "causal" mask mode instead of materializing an
+        // `[L, k_len]` additive mask per multi-token call; the kernel
+        // difference only touches drafter numerics (see module docs).
+        let attn_out = if causal {
+            crate::causal_attention(&queries, &cache_k, &cache_v, self.scale, 0.0, 0)
+        } else {
+            crate::layers::attention(&queries, &cache_k, &cache_v, self.scale, None, 0.0, 0)
+        };
 
         let output = ffi::transpose_axes(&attn_out, &[0, 2, 1, 3]);
         let output = ffi::reshape(&output, &[b, l, -1]);
@@ -216,12 +226,12 @@ impl Qwen35MtpDecoderLayer {
     pub fn forward(
         &self,
         x: &MlxArray,
-        mask: Option<&MlxArray>,
+        causal: bool,
         cache: &mut KVCache,
         rope_offset: i32,
     ) -> UniquePtr<MlxArray> {
         let normed = self.input_layernorm.forward(x);
-        let r = self.attention.forward(&normed, mask, cache, rope_offset);
+        let r = self.attention.forward(&normed, causal, cache, rope_offset);
         let h = ffi::add(x, &r);
         let mlp_out = self.mlp.forward(&self.post_attention_layernorm.forward(&h));
         ffi::add(&h, &mlp_out)

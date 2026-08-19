@@ -519,21 +519,17 @@ impl Qwen35MtpDraftModel {
         let fused = crate::ops::concatenate(&a, &b, -1);
         let mut h = self.fc.forward(&fused);
 
-        // Multi-token forwards use a causal mask offset by the drafter
+        // Multi-token forwards need causal masking offset by the drafter
         // cache's key length (mirrors upstream
         // `create_attention_mask(h, layer_cache)`); single-token draft steps
-        // need none. The RoPE offset is the drafter's logical position, which
-        // equals the cache offset while state is intact and runs ahead of it
-        // in the empty-cache degraded mode.
-        let mask = if s > 1 {
-            let cache_offset = self.cache.first().map(|c| c.offset).unwrap_or(0);
-            Some(crate::utils::create_causal_mask(s, cache_offset))
-        } else {
-            None
-        };
+        // need none. The layer derives that offset from its own cache K
+        // length, which stays correct in the empty-cache degraded mode where
+        // the RoPE offset (the drafter's logical position) runs ahead of the
+        // cache.
+        let causal = s > 1;
         let rope_offset = self.next_position;
         for (layer, cache) in self.layers.iter().zip(self.cache.iter_mut()) {
-            h = layer.forward(&h, mask.as_deref(), cache, rope_offset);
+            h = layer.forward(&h, causal, cache, rope_offset);
         }
         let h = self.norm.forward(&h);
         maybe_sync(&h);
@@ -839,28 +835,18 @@ impl Drafter for Qwen35MtpDraftModel {
         }
 
         // Extend with the accepted tokens not yet in the cache, paired with
-        // the target's true verify hidden, plus the newly emitted bonus.
-        let h_dim = hshape[2];
-        let mut tokens: Vec<i32> = Vec::new();
-        let mut hidden_cat: Option<UniquePtr<MlxArray>> = None;
-        let push_slice = |pos: usize, hidden_cat: &mut Option<UniquePtr<MlxArray>>| {
-            let pos = pos as i32;
-            let s = ffi::slice(verify_hidden, &[0, pos, 0], &[hshape[0], pos + 1, h_dim]);
-            *hidden_cat = Some(match hidden_cat.take() {
-                None => s,
-                Some(prev) => crate::ops::concatenate(&prev, &s, 1),
-            });
-        };
-        for (draft_idx, &draft_tok) in draft_tokens.iter().enumerate().take(accepted).skip(keep) {
-            tokens.push(draft_tok);
-            push_slice(draft_idx, &mut hidden_cat);
-        }
+        // the target's true verify hidden, plus the newly emitted bonus. The
+        // hidden positions are the contiguous range starting at `keep`
+        // (drafts `keep..accepted`, then position `accepted` for the bonus),
+        // so one slice covers them all.
+        let mut tokens: Vec<i32> = draft_tokens[keep..accepted].to_vec();
         if let Some(&last) = new_tokens.last() {
             tokens.push(last);
-            push_slice(accepted, &mut hidden_cat);
         }
-
-        if let (false, Some(hiddens)) = (tokens.is_empty(), hidden_cat) {
+        if !tokens.is_empty() {
+            let start = keep as i32;
+            let end = start + tokens.len() as i32;
+            let hiddens = ffi::slice(verify_hidden, &[0, start, 0], &[hshape[0], end, hshape[2]]);
             let h = self.forward_hidden_stack(&tokens, &hiddens)?;
             self.set_seed_from_hidden(&h, sampler)?;
         }
