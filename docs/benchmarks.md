@@ -224,9 +224,10 @@ each quantized projection dispatches to at `M = K` versus `M = 1`, which varies
 by Apple GPU generation, quantization mode and block width. The Qwen 3.5 family
 declines to classic decode when the probe fails (#1186). The Gemma 4 arms are
 not probed at all (#1188), and diffing them settles the question in neither
-direction: on M3 Ultra two of the three prompts below diverge from classic
-decode and the third is byte-identical, so the claim holds per prompt rather
-than per pairing. M4 and M5 are still unmeasured.
+direction: on M3 Ultra and on M5 Max two of the three prompts below diverge
+from classic decode and the third is byte-identical, so the claim holds per
+prompt rather than per pairing, and which prompts fall on which side tracks
+acceptance rather than the hardware. M4 is still unmeasured.
 
 For each pairing, record both the baseline (no drafter) and the MTP run:
 
@@ -567,6 +568,7 @@ Qwen pairing run beside them as the control:
 | M1 Ultra (gen 13) | Qwen 3.8 27B + 4-bit MTP head | passes, no fallback | identical | not run | not run |
 | M3 Ultra (gen 15) | Gemma 4 12B + 4-bit assistant | none (#1188) | **diverges** | identical | **diverges** |
 | M3 Ultra (gen 15) | Qwen 3.8 27B + 4-bit MTP head | passes after dropping `qmv_wide` | identical | not run | not run |
+| M5 Max (gen 17) | Gemma 4 12B + 4-bit assistant | none (#1188) | **diverges** | identical | **diverges** |
 
 M1 Ultra's divergence is on prose, 892 bytes into a 1755-byte generation:
 
@@ -583,30 +585,81 @@ classic: Here are two ways to write this function. The first is
 MTP:     Here are two ways to implement this. The first is the
 ```
 
+M5 Max parts later on the same prompt, at byte 54 of 1025, and its two arms
+agree on the opening that M3 Ultra's disagreed about:
+
+```
+classic: ...ways to implement this. The first is the standard **iterative** ap
+MTP:     ...ways to implement this. The first is the **efficient** approach (u
+```
+
 Each arm is byte-identical to itself across three runs on each host, and on
-M3 Ultra all nine cross-arm pairings differ, so this is the block-versus-chain
-path and not run-to-run noise. The M3 Ultra runs were repeated with
-`--show-reasoning`, since Gemma 4 suppresses that channel by default: these
-prompts emit nothing on it, so the diff covers the whole emission and not just
-the visible answer. The identical row is a result rather than a silent
-fallback, because the MTP arm ran 102 verify rounds at effective block 4 with
-acceptance 0.980 to produce it.
+M3 Ultra and M5 Max all nine cross-arm pairings differ on every divergent row,
+so this is the block-versus-chain path and not run-to-run noise. Both hosts'
+runs used `--show-reasoning`, since Gemma 4 suppresses that channel by
+default: these prompts emit nothing on it, so the diff covers the whole
+emission and not just the visible answer. The identical rows are results
+rather than silent fallbacks, because the MTP arm ran 102 verify rounds at
+effective block 4 with acceptance 0.980 to produce M3 Ultra's and 100 rounds
+at acceptance 0.997 to produce M5 Max's.
 
 Block width is not what separates the rows. Enumeration stays identical at
-block 4 and at block 5, and source code diverges at both, so the prompt
-decides it.
+block 4 and at block 5 on both M3 Ultra and M5 Max, and source code diverges
+at both on each.
 
-Neither host does what the rule of thumb above predicts for it. Generation 13
-should be byte-identical below width 12 and one prompt is not; generation 15
-should diverge from width 2 and one prompt does not. The rule holds at the op
-level and does not carry to the model level in either direction, because
-whether a generation ever reaches a position where the two kernels disagree
-depends on the continuation, and the prompt decides that. This is the argument
-for #1188: the probe measures the property on the pairing at startup instead
-of predicting it from the hardware, and the probed Qwen pairing comes out
-identical on both hosts, on M3 Ultra by failing under `qmv_wide` and disabling
-it for the process. One generation per arm reproduces any of this, and the
-M3 Ultra source-code row parts 22 bytes in.
+What does order them is acceptance, and it orders every cell measured so far:
+
+| acceptance | Host | Prompt | result |
+| ---: | --- | --- | --- |
+| 0.997 | M1 Ultra | enumeration | identical |
+| 0.997 | M5 Max | enumeration | identical |
+| 0.980 | M3 Ultra | enumeration | identical |
+| 0.815 | M1 Ultra | source code | identical |
+| 0.784 | M5 Max | source code | **diverges** |
+| 0.733 | M3 Ultra | source code | **diverges** |
+| 0.544 | M3 Ultra | prose | **diverges** |
+| 0.525 | M1 Ultra | prose | **diverges** |
+| 0.489 | M5 Max | prose | **diverges** |
+
+Nine cells across three GPU generations with no inversion, and a boundary
+between 0.784 and 0.815. The M5 Max source-code row was measured *after* this
+ordering was proposed, specifically because its 0.784 fell in what was then a
+gap between 0.733 and 0.815; it diverged, which is what the ordering predicted
+and what narrowed the gap.
+
+Acceptance also breaks the obvious objection that the prompt is doing the work
+by proxy. Source code is one prompt and it goes both ways: identical on
+M1 Ultra at 0.815, divergent on M5 Max at 0.784 and on M3 Ultra at 0.733. The
+verdict follows the acceptance the pairing happens to reach on that host, not
+the prompt text.
+
+The mechanism is the one measured further up this page. Comparing the two
+kernels position by position, they disagree on 4.0% of positions overall but
+**0.585% of decided ones**: a kernel difference only changes an emitted token
+where the target was near-indifferent between its top two. Low acceptance is
+what a stream of near-indifferent positions looks like from the drafter's
+side, so a low-acceptance generation is one that keeps walking past exactly
+the positions where the two paths can part. Enumeration survives generation 17
+not because the kernels agree there but because it almost never offers them a
+position to disagree at.
+
+Treat it as a nine-point ordering rather than a threshold: the boundary is
+bracketed, not located, and nothing here says a tenth measurement could not
+land inside the bracket on either side.
+
+No host does what the rule of thumb above predicts for it. Generation 13
+should be byte-identical below width 12 and one prompt is not; generations 15
+and 17 should diverge from width 2 and one prompt does not, on both. The rule
+holds at the op level and does not carry to the model level in either
+direction, for the reason the acceptance ordering gives: whether a generation
+ever reaches a position where the two kernels can disagree is a property of
+the continuation, and the hardware only decides what happens once it gets
+there. This is the argument for #1188: the probe measures the property on the
+pairing at startup instead of predicting it from the hardware, and the probed
+Qwen pairing comes out identical on both hosts that were checked, on M3 Ultra
+by failing under `qmv_wide` and disabling it for the process. One generation
+per arm reproduces any of this, and the M3 Ultra source-code row parts 22
+bytes in.
 
 Two things will make that diff lie if they are not handled. The MTP arm prints
 its drafter loader lines *after* `Generating...` and immediately after the
