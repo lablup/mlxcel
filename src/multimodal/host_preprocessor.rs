@@ -1106,7 +1106,7 @@ pub enum HostPreprocessorError {
     Placeholder(#[from] ImageTokenBlockError),
     #[error("incompatible multimodal family: expected LLaVA, got {actual}")]
     FamilyMismatch { actual: String },
-    #[error("invalid LLaVA host-preprocessor config: {0}")]
+    #[error("invalid OpenXLA host-preprocessor config: {0}")]
     InvalidConfig(String),
     #[error("failed to load LLaVA host-preprocessor weights: {0}")]
     WeightLoad(String),
