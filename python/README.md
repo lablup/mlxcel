@@ -8,7 +8,7 @@ This is Phase 1 of Python integration: it builds entirely on the existing HTTP s
 
 ```bash
 pip install ./python          # from a repo checkout
-pip install ./python[dev]     # with pytest, ruff, mypy for development
+pip install "./python[dev]"   # with pytest, ruff, mypy for development
 ```
 
 Requires Python 3.9+. The client itself is pure Python (`openai>=1.40`, `httpx>=0.27`). Managed mode additionally needs the `mlxcel` binary on `PATH`, or pass `binary=` / set `MLXCEL_BIN`.
@@ -66,7 +66,7 @@ HTTP and API errors surface as native `openai` SDK exceptions (for example `open
 ## Tests
 
 ```bash
-pip install -e ./python[dev]
+pip install -e "./python[dev]"
 ruff check python
 ruff format --check python
 mypy python/src
