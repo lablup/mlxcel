@@ -284,10 +284,10 @@ hosts is what a verify round costs in units of that host's own classic decode
 step: 1.28 on M5 Max, 1.51 on M3 Ultra, 2.71 on M1 Ultra at the same block
 width, measured to within 1% by two prompts that have nothing else in common.
 A round has to emit more tokens than that to pay for itself, so the prose
-prompt's 2.574 tokens per verify clears the bar on the first two hosts and
-misses it on the third, where MTP is a 5% loss. Acceptance is not what
-separates them: the enumeration rows accept at 0.997 on both M5 Max and M1
-Ultra, to three digits.
+prompt, which emits 2.463 tokens per verify on M5 Max and between 2.46 and
+2.63 across all three, clears the bar on the first two hosts and misses it on
+the third, where MTP is a 5% loss. Acceptance is not what separates them: the
+enumeration rows accept at 0.997 on both M5 Max and M1 Ultra, to three digits.
 
 Enable it with `--draft-model <drafter> --draft-kind mtp`. Widening the verify
 block stops paying past a point, because the tokens a round emits saturate near

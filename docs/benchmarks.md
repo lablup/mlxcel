@@ -347,13 +347,17 @@ round's wall time divided by `1 / classic tok/s`.
 | Host | Block | round cost, in classic steps | emitted per verify to break even |
 | --- | ---: | ---: | ---: |
 | M5 Max (128 GB) | 4 | 1.27 (enumeration), 1.29 (prose) | ~1.28 |
+| M5 Max (128 GB) | 5 | 1.31 (source code) | ~1.31 |
 | M3 Ultra (512 GB) | 4 | 1.50 (enumeration), 1.51 (prose) | ~1.51 |
 | M1 Ultra (128 GB) | 4 | 2.70 (enumeration), 2.72 (prose) | ~2.71 |
 | M1 Ultra (128 GB) | 5 | 3.15 (source code) | ~3.15 |
 
 On each host two prompts with nothing in common agree on the round cost to
 within 1%, which is the control that this is a property of the host and the
-block width rather than of the prompt. It also orders the three hosts exactly
+block width rather than of the prompt. Those two are the enumeration and prose
+rows, which both run at effective block 4; the code row is listed separately
+because it clears the expansion gate and runs at 5, and it costs more per
+round there, as widening a block should. It also orders the three hosts exactly
 as the speedups do, and it explains the M3 Ultra reading above without
 appealing to which arm gained more: the verify simply costs relatively more
 there than on M5 Max.
@@ -361,8 +365,8 @@ there than on M5 Max.
 The break-even column is what the regression comes from. A round has to emit
 more tokens than it costs in classic steps, so M5 Max needs 1.28 tokens per
 verify and clears it on every prompt here by a wide margin, M3 Ultra needs
-1.51, and M1 Ultra needs 2.71 at block 4. The prose row's 2.574 lands just
-under that last one, which is the whole of its 0.95x.
+1.51, and M1 Ultra needs 2.71 at block 4. M1 Ultra's own prose row emits
+2.574, landing just under that, which is the whole of its 0.95x.
 
 The mechanism is the `use_qmv_wide` split documented in
 `src/models/speculative_exactness.rs`: from Apple GPU generation 15 a
@@ -439,9 +443,6 @@ each quantized projection dispatches to and therefore what a verify block
 costs, which is why the same pairing can pay on one generation and regress on
 another. A row without both cannot be reproduced or compared, and rows from
 different protocols do not belong in the same table.
-
-A speculative-decoding figure without its prompt cannot be reproduced or
-compared.
 
 The block width is not a tuning knob worth much, but where it peaks is a
 per-host fact rather than a constant. Both sweeps below run the code row
@@ -536,7 +537,7 @@ reduction. A declining probe falls back to classic decode unless
 `MLXCEL_MTP_ALLOW_INEXACT=1` is set. B=1 (single-request)
 MTP runs by default for every MTP target; the Gemma 4 Unified target cannot batch
 at all, so B=1 is also its only decode path. The batch-capable 31B + bf16
-assistant measures ~1.2 to 1.4x on the same host. Set `MLXCEL_ENABLE_MTP_B1=0` to
+assistant measures ~1.2 to 1.4x on M5 Max. Set `MLXCEL_ENABLE_MTP_B1=0` to
 opt out on hardware where the B=1 verify forward does not pay for itself.
 
 Gemma 4 is not probed yet (#1188), so the rows above are the fast kernel rather
