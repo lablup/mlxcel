@@ -153,7 +153,7 @@ fn benchmark_result_summary_format() {
 #[test]
 fn format_bytes_ranges() {
     assert!(format_bytes(500).contains("B"));
-    assert!(format_bytes(2048).contains("KB"));
-    assert!(format_bytes(5 * 1024 * 1024).contains("MB"));
-    assert!(format_bytes(2 * 1024 * 1024 * 1024).contains("GB"));
+    assert!(format_bytes(2048).contains("KiB"));
+    assert!(format_bytes(5 * 1024 * 1024).contains("MiB"));
+    assert!(format_bytes(2 * 1024 * 1024 * 1024).contains("GiB"));
 }
