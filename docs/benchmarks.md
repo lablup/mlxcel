@@ -616,7 +616,7 @@ whichever one the question is about, and not the other.
 On M1 Ultra there is no such cost, because generation 13 never takes
 `qmv_wide` in the first place, but the missing probe still lets a divergence
 through. The two arms have now been diffed at `temperature 0` on the three
-prompts above on a generation 13 host and a generation 15 one, with the probed
+prompts above on one host from each of three GPU generations, with the probed
 Qwen pairing run beside them as the control:
 
 | Host | Pairing | Probe | source code | enumeration | prose |
