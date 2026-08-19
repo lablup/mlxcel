@@ -307,17 +307,41 @@ three quarters of the disagreements are the reference's runner-up.
 `mlx-community/gemma-4-12b-it-4bit` as the target and
 `mlx-community/gemma-4-12B-it-assistant-4bit` as the drafter, `temperature 0`,
 warm, arms alternated with a warm-up discarded, eight samples per arm, the
-host's background indexers suspended, spreads at or under 1.9% of the median.
+host's background indexers suspended, spreads at or under 1.9% of the median
+on M5 Max and 2.9% on M3 Ultra.
 
 | Host | Output | Prompt | Tokens | Block | acceptance | classic | MTP | speedup |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | M5 Max (128 GB) | enumeration | "Count from 1 to 200, one number per line, with no other text." | 400 | 4 | 0.997 | 43.1 | 135.4 | **3.14x** |
 | M5 Max (128 GB) | source code | "Write a Python function that computes the nth Fibonacci number, with a docstring and type hints." | 300 | 5 | 0.784 | 43.5 | 121.0 | **2.79x** |
 | M5 Max (128 GB) | prose | "Explain how speculative decoding accepts or rejects draft tokens." | 400 | 5 requested, 4 effective | 0.489 | 43.3 | 82.4 | **1.90x** |
+| M3 Ultra (512 GB) | enumeration | "Count from 1 to 200, one number per line, with no other text." | 400 | 4 | 0.980 | 63.4 | 165.5 | **2.61x** |
+| M3 Ultra (512 GB) | source code | "Write a Python function that computes the nth Fibonacci number, with a docstring and type hints." | 300 | 5 | 0.733 | 64.2 | 138.5 | **2.16x** |
+| M3 Ultra (512 GB) | prose | "Explain how speculative decoding accepts or rejects draft tokens." | 400 | 5 requested, 4 effective | 0.544 | 64.0 | 111.2 | **1.74x** |
 
 Acceptance is the column that explains the rest. The enumeration row accepts
-almost every draft (3.990 tokens emitted per verify against a block of 4) and
-the prose row accepts about half (2.463). Nothing else differs between them.
+almost every draft (3.990 tokens emitted per verify against a block of 4 on
+M5 Max, 3.912 on M3 Ultra) and the prose row accepts about half (2.463 and
+2.625). Nothing else differs between them.
+
+Read the two hosts down the columns rather than across the speedups. All three
+M3 Ultra rows sit below their M5 Max twins while both arms are faster in
+absolute terms: classic decode runs at about 63 to 64 tok/s there against 43,
+so the baseline the ratio divides by gained more than the MTP arm did. The
+speedup is a property of the pair, not a ranking of the hosts, and comparing a
+ratio against one measured on other silicon says nothing. The Qwen pairing
+below moves the other way on the same two hosts, which is the point: the size
+of the host effect is not transferable between pairings either.
+
+Acceptance also moves between hosts on an identical prompt and pairing (0.784
+against 0.733 on the code row). Sampling is not the source: at `temperature 0`
+both arms are greedy. The explanation consistent with everything else on this
+page is that the two hosts resolve the target's own near-tie positions
+differently, which changes the continuation and therefore what there is to
+accept at all — the divergence the exactness probe reports below, seen from
+the acceptance side. That has not been traced per host, so treat it as the
+reading of the numbers rather than a measured cause, and expect acceptance to
+be a per-host figure rather than one carried between rows.
 
 Reproduce or extend the table with `scripts/bench_speculative.sh`. It carries
 the prompts, the block widths and the protocol, detects the host, prints rows
@@ -375,40 +399,60 @@ opt out on hardware where the B=1 verify forward does not pay for itself.
 
 Gemma 4 is not probed yet (#1188), so the rows above are the fast kernel rather
 than the byte-identical one. Keeping byte-identity on the code row, by dropping
-`qmv_wide`, measures 93.2 tok/s instead of 121.0, or 2.14x instead of 2.79x.
+`qmv_wide`, measures 93.2 tok/s instead of 121.0 on M5 Max, or 2.14x instead of
+2.79x, and 117.5 tok/s instead of 138.5 on M3 Ultra, 1.83x instead of 2.16x.
+That is 23% of throughput on one host and 15% on the other, which is not the
+same quantity as the 17 to 20% the probe quotes for the Qwen pairing: the
+probe is costing the verify forward, while these figures are end-to-end decode,
+where the drafter step and the accepted-token emission are unaffected. Quote
+whichever one the question is about, and not the other.
 
 ### Qwen 3.5 / 3.6 / 3.8 with the model's own MTP head
 
 Qwen ships the MTP head as part of the family rather than as a companion
 checkpoint, either split out (`Qwen3.8-27B-MTP-bf16`, `-4bit`) or carried inside
 the target. Same protocol, `qwen3.8-27b-4bit` with `qwen3.8-27b-mtp-4bit`, the
-code prompt above, 300 tokens:
+code prompt above, 300 tokens, eight samples per arm:
 
 | Host | Path | decode tok/s | speedup |
 | --- | --- | ---: | ---: |
 | M5 Max (128 GB) | classic decode (no drafter) | 32.7 | 1.00x |
 | M5 Max (128 GB) | MTP, block 3 (the drafter's declared width) | 53.4 | **1.63x** |
+| M3 Ultra (512 GB) | classic decode (no drafter) | 35.7 | 1.00x |
+| M3 Ultra (512 GB) | MTP, block 3 (the drafter's declared width) | 59.5 | **1.67x** |
 
-The MTP figure is a median over eight samples that ranged from 50.8 to 55.2,
-an 8.2% spread against 0.3% on the classic arm of the same run. Contention
-would have moved both arms, so this belongs to the pairing rather than the
-host: acceptance and effective block come out identical every run at
+On M5 Max the MTP figure is a median over eight samples that ranged from 50.8
+to 55.2, an 8.2% spread against 0.3% on the classic arm of the same run.
+Contention would have moved both arms, so this belongs to the pairing rather
+than the host: acceptance and effective block come out identical every run at
 `temperature 0`, and what varies is where the adaptive B=1 controller (#333)
 lands when it profiles the opening bursts. The median is stable even so,
 reading 1.61x, 1.64x and 1.63x across three independent sweeps. A single run
-of this pairing is worth roughly 1.55x to 1.69x, so a move smaller than that
-is not a result.
+of this pairing on that host is worth roughly 1.55x to 1.69x, so a move
+smaller than that is not a result.
+
+That spread is the one part of this pairing that did not carry over. The same
+sweep on M3 Ultra measured 0.7% on both arms, so the width of the interval
+above is a property of the pairing *on that host*, not of the pairing alone.
+Read the M3 Ultra row at its face value and re-measure the spread before
+quoting an interval for any third host: the controller has a different set of
+opening bursts to profile on each one.
 
 Two things about that ratio. It is measured **with** the byte-identity
-guarantee: the exactness probe fires on this host and drops `qmv_wide`, which
-costs the verify forward about 17 to 20%. And the block width is genuinely
+guarantee: the exactness probe fires on both hosts and drops `qmv_wide`, which
+costs the verify forward about 17 to 20%. Both Qwen rows are therefore already
+paying what the Gemma rows above do not, which is most of why they sit lower:
+on M3 Ultra the byte-identical Gemma code row is 1.83x against Qwen's 1.67x,
+where the fast-kernel Gemma row reads 2.16x. And the block width is genuinely
 optimal at 3 to 4 rather than merely default: 48 of the target's 64 layers are
 GatedDeltaNet, a recurrence that processes tokens in sequence, so the verify
 cost grows nearly linearly with the block instead of amortising the way an
 attention-only target's does. Widths 5, 6 and 8 measured 48.0, 46.8 and 35.7
-in an earlier run. Read that with the variance above in mind: the gap between
-widths 3 and 6 sits inside this pairing's run-to-run range and only width 8 is
-clearly outside it.
+in an earlier run on M5 Max. Read that with the variance above in mind: the
+gap between widths 3 and 6 sits inside that host's run-to-run range and only
+width 8 is clearly outside it. The width sweep has not been repeated on
+M3 Ultra, whose tighter spread would resolve the narrower gaps that M5 Max's
+range swallows.
 
 ### Gemma 4 31B + bf16 assistant
 
