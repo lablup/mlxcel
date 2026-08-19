@@ -443,9 +443,9 @@ impl KVCache {
     /// Semantics:
     /// * `new_len == 0` fully rewinds the cache (equivalent to
     ///   `trim(self.offset)`) and drops all backing buffers.
-    /// * `0 < new_len < self.offset` keeps the pre-allocated buffer but
-    ///   re-slices its visible region to `new_len`. This mirrors
-    ///   [`KVCache::trim`] but takes an absolute target instead of a delta.
+    /// * `0 < new_len < self.offset` delegates to [`KVCache::trim`] with the
+    ///   delta: a logical rewind for `Fp16`/`Int8` (the buffer keeps its
+    ///   capacity, issue #1209), a physical re-slice for the Turbo modes.
     /// * `new_len == self.offset` is a no-op.
     /// * `new_len < 0` or `new_len > self.offset` returns `Err`.
     ///

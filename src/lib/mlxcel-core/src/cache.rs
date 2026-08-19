@@ -925,7 +925,13 @@ impl KVCache {
             let new_v = ffi::zeros(&[b, n_kv_heads, buf_size, v_head_dim], v_dtype);
 
             if self.keys.is_some() {
-                if prev % self.step != 0 {
+                // Normalize the buffer to the live prefix before extending.
+                // The buffer can be longer than `prev`: a logical `trim`
+                // keeps the old capacity (issue #1209), and a partial growth
+                // chunk leaves a non-step-aligned length. Either way the
+                // slots past `prev` are dead and must not survive the
+                // concatenate.
+                if prev != self.buffer_seq_len() {
                     self.keys = Some(ffi::slice(
                         self.keys.as_ref().unwrap(),
                         &[0, 0, 0, 0],
@@ -1011,7 +1017,10 @@ impl KVCache {
             let new_vs_buf = ffi::zeros(&[b, n_kv_heads, buf_size, 1], dtype::FLOAT16);
 
             if self.keys.is_some() {
-                if prev % self.step != 0 {
+                // Normalize to the live prefix before extending — the buffer
+                // can be longer than `prev` after a logical `trim`
+                // (issue #1209) or a partial growth chunk; see `update_fp16`.
+                if prev != self.buffer_seq_len() {
                     self.keys = Some(ffi::slice(
                         self.keys.as_ref().unwrap(),
                         &[0, 0, 0, 0],
@@ -2165,7 +2174,18 @@ impl KVCache {
     /// Trim the last `n` entries from the cache.
     ///
     /// Returns the number of entries actually trimmed.
-    /// In INT8 mode the corresponding scale buffers are also trimmed.
+    ///
+    /// In `Fp16` and `Int8` modes this is a **logical rewind**: only `offset`
+    /// moves, the step-aligned buffers (scale sidecars included) keep their
+    /// allocation, and the next `update_*` overwrites the abandoned slots
+    /// through the same `slice_update` it always uses. Every reader slices to
+    /// `buffer_idx()` rather than trusting the buffer's physical length, which
+    /// is already the normal state between growths. This is the contract
+    /// [`RotatingKVCache::trim`] has always had, and it makes a speculative
+    /// rollback cost O(1) instead of an O(context) buffer rewrite per round
+    /// (issue #1209).
+    ///
+    /// The quantized-sidecar modes keep the physical trim:
     /// In Turbo4Asym mode the V-packed and V-norms buffers are also trimmed.
     /// In Turbo4 (symmetric) mode both the K- and V-side packed sidecars are
     /// trimmed.
@@ -2297,13 +2317,30 @@ impl KVCache {
             }
             // Suppress unused-variable warnings in non-delegated branches.
             let _ = hot_trim;
+        } else if matches!(self.mode, KVCacheMode::Fp16 | KVCacheMode::Int8) {
+            // Dense modes: the `self.offset -= n` above IS the trim. The
+            // buffers (scale sidecars included) keep their step-aligned
+            // capacity; every reader slices to `buffer_idx()`
+            // (`update_and_fetch`, `keys_view`, `trim_front_keep_sink`, the
+            // detached-handle `trim_to`), and the next `slice_update`
+            // overwrites the abandoned slots. Re-slicing here cost an
+            // O(context) copy per speculative round, plus a second one in the
+            // next `update_*` regrow because the capacity was gone
+            // (issue #1209).
         } else {
-            // Non-delegated modes: simple buffer-prefix trim.
-            // The slice upper bound is the post-trim *live* window length
-            // (`live_len_after`), not the monotonic `self.offset`. For
-            // Turbo modes `live_start == 0` so `live_len_after == self.offset`
-            // and behaviour is bit-identical to the earlier implementation.
-            // Trim keys (always present except in Turbo4Asym pre-init).
+            // Turbo modes keep the physical buffer-prefix trim. Their packed
+            // sidecars feed fused kernels and fold/dequant helpers that have
+            // not been audited for a stale tail beyond the live window, and
+            // the speculative rollbacks this rewind serves run on Fp16/Int8
+            // caches; an O(context) slice on an explicit Turbo trim is the
+            // status quo, kept until those consumers are audited
+            // (issue #1209).
+            //
+            // The slice upper bound for K/V is the post-trim *live* window
+            // length (`live_len_after`); `live_start == 0` for Turbo modes so
+            // it equals `self.offset` and the sidecar slices below match.
+            // Trim keys (fp16 K in Turbo4Asym/Turbo3Asym; None in symmetric
+            // Turbo4 pre-init, whose K lives in `k_packed`).
             if let Some(ref k) = self.keys {
                 let k_shape = ffi::array_shape(k);
                 self.keys = Some(ffi::slice(
@@ -2312,7 +2349,6 @@ impl KVCache {
                     &[k_shape[0], k_shape[1], live_len_after, k_shape[3]],
                 ));
             }
-            // Trim values for FP16/INT8 modes (Turbo4Asym keeps values None).
             if let Some(ref v) = self.values {
                 let v_shape = ffi::array_shape(v);
                 self.values = Some(ffi::slice(
@@ -2320,25 +2356,6 @@ impl KVCache {
                     &[0, 0, 0, 0],
                     &[v_shape[0], v_shape[1], live_len_after, v_shape[3]],
                 ));
-            }
-            // Trim INT8 scale sidecars.
-            if self.mode == KVCacheMode::Int8 {
-                if let Some(ref ks) = self.key_scales {
-                    let ks_shape = ffi::array_shape(ks);
-                    self.key_scales = Some(ffi::slice(
-                        ks,
-                        &[0, 0, 0, 0],
-                        &[ks_shape[0], ks_shape[1], live_len_after, 1],
-                    ));
-                }
-                if let Some(ref vs) = self.val_scales {
-                    let vs_shape = ffi::array_shape(vs);
-                    self.val_scales = Some(ffi::slice(
-                        vs,
-                        &[0, 0, 0, 0],
-                        &[vs_shape[0], vs_shape[1], live_len_after, 1],
-                    ));
-                }
             }
             // Trim Turbo4* V sidecars (per-token; speculative-decode rewinds
             // <1 block at a time so we never need to re-quantize a partial
