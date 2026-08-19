@@ -76,7 +76,7 @@ PROMPT_LIST="Count from 1 to 200, one number per line, with no other text."
 # or shell supervising a run spikes well over the limit every time it emits
 # output, so counting it as contention means an interactively supervised sweep
 # never leaves the hold at all.
-QUIET_IGNORE='/claude$|/node$|(^|/)(bash|zsh|sh|ps|awk|sleep|tmux)$|bench_speculative'
+QUIET_IGNORE='/claude$|/node$|/mlxcel$|/mlxcel-server$|(^|/)(bash|zsh|sh|ps|awk|sleep|tmux)$|bench_speculative'
 
 # Busiest process that is not one of ours, as an integer percent. Matching on
 # the whole command rather than a field keeps paths with spaces intact.
@@ -112,6 +112,40 @@ wait_for_quiet() {
   echo "  quiet, starting" >&2
 }
 
+# Peak contention seen while a pairing was actually being measured.
+#
+# The entry gate only guards the start. A load that arrives afterwards is
+# otherwise caught by the spread check alone, and a *steady* load evades that
+# check by construction: it depresses every sample equally, so the median
+# drops while the spread stays small. A video call measured this table 1.2%
+# low with spreads under 4% and nothing flagged.
+CONTENTION_FILE=""
+CONTENTION_PID=""
+
+start_contention_watch() {
+  CONTENTION_FILE=$(mktemp)
+  echo 0 > "$CONTENTION_FILE"
+  (
+    while :; do
+      t=$(busiest)
+      m=$(cat "$CONTENTION_FILE" 2>/dev/null || echo 0)
+      [ "${t:-0}" -gt "${m:-0}" ] && echo "${t:-0}" > "$CONTENTION_FILE"
+      sleep 5
+    done
+  ) &
+  CONTENTION_PID=$!
+}
+
+stop_contention_watch() {
+  [ -n "$CONTENTION_PID" ] && kill "$CONTENTION_PID" 2>/dev/null
+  wait "$CONTENTION_PID" 2>/dev/null
+  cat "$CONTENTION_FILE" 2>/dev/null || echo 0
+  # `command` so an interactive profile that wraps rm cannot print into the
+  # captured output. This is a mktemp scratch file, not anything of value.
+  command rm -f "$CONTENTION_FILE"
+  CONTENTION_PID=""
+}
+
 # $1 label  $2.. full mlxcel argv
 sample() {
   local label="$1"; shift
@@ -127,7 +161,8 @@ measure_pairing() {
   [ -d "$target" ] || { echo "skip $name: no $target" >&2; return; }
   [ -z "$drafter" ] || [ -d "$drafter" ] || { echo "skip $name: no $drafter" >&2; return; }
 
-  local classic=() mtp=() i
+  local classic=() mtp=() i peak
+  start_contention_watch
   # Warm-up, discarded. Throughput climbs over the first runs of a cold host.
   for i in 1 2; do sample warm "$BIN" generate -m "$target" -p "$prompt" -n "$ntok" --temp 0 >/dev/null; sleep 4; done
 
@@ -147,9 +182,11 @@ measure_pairing() {
            --draft-block-size "$block" -p "$prompt" -n "$ntok" --temp 0 2>&1 \
          | sed 's/\x1b\[[0-9;]*m//g' | grep -m1 "round-loop diagnostics")
 
+  peak=$(stop_contention_watch)
+
   MEASURE_NAME="$name" MEASURE_HOST="$HOST ($MEM GB)" MEASURE_LABEL="$plabel" \
   MEASURE_BLOCK="$block" MEASURE_TOK="$ntok" MEASURE_LIMIT="$SPREAD_LIMIT" \
-  MEASURE_DIAG="$diag" \
+  MEASURE_DIAG="$diag" MEASURE_PEAK="$peak" MEASURE_QUIET="$QUIET_LIMIT" \
   python3 - "${#classic[@]}" "${classic[@]}" "${mtp[@]}" <<'PY'
 import os, re, statistics, sys
 n = int(sys.argv[1])
@@ -161,6 +198,9 @@ def spread(d): return 100 * (d[-1] - d[0]) / statistics.median(d)
 mc, mm = statistics.median(classic), statistics.median(mtp)
 limit = float(os.environ["MEASURE_LIMIT"])
 sc, sm = spread(classic), spread(mtp)
+peak = float(os.environ.get("MEASURE_PEAK") or 0)
+quiet = float(os.environ.get("MEASURE_QUIET") or 15)
+contended = peak > quiet
 bad = sc > limit or sm > limit
 d = os.environ.get("MEASURE_DIAG", "")
 g = dict(re.findall(r"(\w+)=([0-9.]+)", d))
@@ -174,8 +214,13 @@ if g:
     print(f"   effective block {g.get('effective_block_max','?')}, "
           f"acceptance {float(g.get('acceptance_rate', 0)):.3f}, "
           f"emitted per verify {float(g.get('emitted_per_verify', 0)):.3f}")
+if contended:
+    print(f"   !! another process reached {peak:.0f}% while this ran (limit {quiet:.0f}%).")
+    print(f"   !! a steady load depresses both arms together and leaves the spread")
+    print(f"   !! small, so a contended row can read clean and still be low.")
 if bad:
     print(f"   !! spread above {limit:.0f}% of the median: the host was not quiet.")
+if bad or contended:
     print(f"   !! do not publish this row. Re-run when nothing else is using the GPU.")
 PY
 }
