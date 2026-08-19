@@ -289,10 +289,14 @@ misses it on the third, where MTP is a 5% loss. Acceptance is not what
 separates them: the enumeration rows accept at 0.997 on both M5 Max and M1
 Ultra, to three digits.
 
-Enable it with `--draft-model <drafter> --draft-kind mtp`. The verify block
-width adapts on its own; forcing it wider does not help, because the tokens a
-round emits saturate near `1 / (1 - acceptance)` while the verify keeps getting
-more expensive.
+Enable it with `--draft-model <drafter> --draft-kind mtp`. Widening the verify
+block stops paying past a point, because the tokens a round emits saturate near
+`1 / (1 - acceptance)` while the verify keeps getting more expensive. Where that
+point sits is a per-host fact, and the shipped default does not track it: with
+no width passed the block settles at 4, which is the peak on M3 Ultra but 5.8%
+short of it on M5 Max, where an explicit `--draft-block-size 5` measures 121.2
+tok/s against the default's 114.6. See
+[`docs/benchmarks.md`](docs/benchmarks.md) before assuming either way.
 
 Qwen's lower ratio is not a worse implementation. On the same code prompt it
 accepts more of its drafts than the Gemma pairing does (0.753 against 0.733 on

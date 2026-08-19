@@ -444,9 +444,39 @@ A speculative-decoding figure without its prompt cannot be reproduced or
 compared.
 
 The block width is not a tuning knob worth much, but where it peaks is a
-per-host fact rather than a constant. On M5 Max, measured on the code row,
-throughput peaks at width 5 and falls at 6, 8, 10 and 12. On M3 Ultra it peaks
-at 4, and what follows is a plateau rather than a fall:
+per-host fact rather than a constant. Both sweeps below run the code row
+through `scripts/bench_block_width.sh`, which visits every width once per
+round with a rotating start so that drift over the run cannot land on
+whichever width happened to be measured last.
+
+On M5 Max the peak is 5:
+
+| width | decode tok/s | spread | acceptance | emitted per verify | vs peak |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 3 | 98.4 | 1.6% | 0.847 | 2.694 | -19.0% |
+| 4 | 114.8 | 1.2% | 0.790 | 3.360 | -5.5% |
+| 5 | 121.5 | 0.2% | 0.784 | 3.646 | **peak** |
+| 6 | 117.6 | 0.3% | 0.752 | 3.785 | -3.2% |
+
+Nothing in that ordering is ambiguous: 5 stands 5.8% above 4 and 3.3% above
+6, against spreads of 0.2 to 1.6%. The first run of this sweep refused widths
+5 and 6 at 7.4% and 5.1% spread; re-measured they returned 121.5 and 117.6
+against that run's 121.4 and 117.5, which is the guard behaving as its own
+note predicts: contention widened the spread without moving the median.
+Widths 8, 10 and 12 have not been run on this host with the script, so the
+older claim that throughput keeps falling across them stands unverified here.
+
+The consequence is that on this host the shipped default is not the peak. The
+Gemma assistant checkpoint is configured for a 4-token verify block and `mtp`
+defaults `--draft-block-size` to 4, so a user who passes no width at all runs
+at effective block 4 and measures 114.6 tok/s, against 121.2 for an explicit
+5: a 5.8% gap, with spreads of 0.1% and 0.3% and no overlap between the two
+sets of samples. That is the opposite of the M3 Ultra result below, where the
+same default lands exactly on that host's peak, so neither host's answer
+generalises and the flag is worth passing only where a sweep has been run.
+
+On M3 Ultra it peaks at 4 instead, and what follows is a plateau rather than
+a fall:
 
 | width | decode tok/s | spread | acceptance | emitted per verify | vs peak |
 | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -463,7 +493,7 @@ not resolved by these samples: 6 reads 0.6% above 5, less than the spread
 either was measured with, and 12 reads 1.2% above 10 against spreads of 2.7
 and 2.8%. Only three things separate cleanly — width 4 above the band, and
 3, 10 and 12 below it — so this host says "peak at 4, then a plateau", not
-the ranking the M5 Max sentence gives. Width 5 reads 138.0 here against the
+the clean ranking M5 Max gives. Width 5 reads 138.0 here against the
 138.5 the table above measured at block 5, a 0.4% agreement inside the
 spread, so the sweep and the published row are the same measurement twice.
 
