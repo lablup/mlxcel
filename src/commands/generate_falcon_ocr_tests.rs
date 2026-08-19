@@ -104,7 +104,7 @@ fn alternative_box_key_spellings_parse() {
 #[test]
 fn malformed_json_is_rejected_with_a_parse_error() {
     let error = parse_layout_detections("{ this is not json").expect_err("must fail");
-    assert!(error.to_string().contains("not valid JSON"), "got: {error}");
+    assert!(error.to_string().contains("Not valid JSON"), "got: {error}");
 }
 
 #[test]
@@ -266,7 +266,7 @@ fn a_coordinate_that_overflows_to_infinity_is_rejected() {
         .expect_err("must fail");
     let message = error.to_string();
     assert!(
-        message.contains("not valid JSON") || message.contains("non-finite"),
+        message.contains("Not valid JSON") || message.contains("non-finite"),
         "got: {message}"
     );
 }

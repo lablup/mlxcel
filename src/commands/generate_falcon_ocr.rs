@@ -123,7 +123,7 @@ pub(crate) fn load_layout_detections(path: &Path) -> Result<Vec<Detection>> {
 /// dump is long enough that "invalid input" alone is not actionable.
 fn parse_layout_detections(text: &str) -> Result<Vec<Detection>> {
     let root: Value =
-        serde_json::from_str(text).map_err(|error| anyhow!("not valid JSON: {error}"))?;
+        serde_json::from_str(text).map_err(|error| anyhow!("Not valid JSON: {error}"))?;
 
     let items: &[Value] = match &root {
         Value::Array(items) => items,
@@ -412,7 +412,7 @@ pub(crate) fn run_falcon_ocr_layout_generation(
             .with_context(|| format!("Failed to decode image {image_path:?}"))?;
     let page = images
         .pop()
-        .ok_or_else(|| anyhow!("image decoding returned no image for {image_path:?}"))?;
+        .ok_or_else(|| anyhow!("Image decoding returned no image for {image_path:?}"))?;
 
     // Planned without cropping, then cropped one region at a time below. A crop
     // copies, so materializing the whole plan up front would hold one full-size

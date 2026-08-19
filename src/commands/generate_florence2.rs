@@ -77,7 +77,7 @@ pub(crate) fn run_florence2_generation(
             .with_context(|| format!("Failed to decode image {image_path:?}"))?;
     let image = images
         .pop()
-        .ok_or_else(|| anyhow!("image decoding returned no image for {image_path:?}"))?;
+        .ok_or_else(|| anyhow!("Image decoding returned no image for {image_path:?}"))?;
 
     print_generation_preamble(user_prompt)?;
     println!();

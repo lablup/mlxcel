@@ -477,7 +477,7 @@ fn generate_pipeline_text(
         )])?
         .into_iter()
         .next()
-        .ok_or_else(|| anyhow!("pipeline worker loop did not return a prefill output"))?
+        .ok_or_else(|| anyhow!("Pipeline worker loop did not return a prefill output"))?
         .logits;
     let prefill_elapsed = prefill_start.elapsed();
 
@@ -515,7 +515,7 @@ fn generate_pipeline_text(
             )])?
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow!("pipeline worker loop did not return a decode output"))?
+            .ok_or_else(|| anyhow!("Pipeline worker loop did not return a decode output"))?
             .logits;
     }
 
@@ -1207,7 +1207,7 @@ fn decode_xla_cli_images(paths: &[std::path::PathBuf]) -> Result<Vec<image::Dyna
     let read_limit = limits
         .max_payload_bytes
         .checked_add(1)
-        .ok_or_else(|| anyhow!("configured image payload limit overflowed"))?;
+        .ok_or_else(|| anyhow!("Configured image payload limit overflowed"))?;
     let mut payloads = Vec::with_capacity(paths.len());
     for path in paths {
         let mut bytes = Vec::new();
