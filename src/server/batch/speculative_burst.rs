@@ -511,8 +511,12 @@ pub(crate) fn mtp_prefill_suffix_start(
 ///
 /// Default policy (issue #165, per-hardware):
 /// - Non-batchable targets (the 12B Unified family, whose only decode path is
-///   B=1): **on** everywhere. Measured profitable on both chip classes
-///   (~1.87x on M5 Max, ~1.1 to 1.4x on M1 Ultra).
+///   B=1): **on** everywhere. Measured across three prompts: 1.90x to 3.14x
+///   on M5 Max, 1.74x to 2.61x on M3 Ultra, and 0.95x to 1.48x on M1 Ultra.
+///   That last low end is a 5% loss on open prose, not the gain this default
+///   assumes on every prompt, and it is what the adaptive policy (#333)
+///   exists to catch. See `docs/benchmarks.md` for the rows and the
+///   round-cost model that predicts them.
 /// - Batch-capable targets (the 31B + bf16 assistant): **on only on M5+**
 ///   (Neural Accelerator generation). M5 Max measured ~1.2 to 1.4x, but
 ///   M1 Ultra measured a consistent regression (~0.75 to 0.96x, four greedy

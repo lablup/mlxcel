@@ -1190,6 +1190,30 @@ impl<T: MtpTarget> MtpGenerator<T> {
             state.accept_lens.push(walk.accepted as f64);
         }
 
+        // Diagnostic: where in the block the drafter first missed, and what
+        // the target chose instead. Paired with the adapter's `MTPGAP` lines
+        // (same flag) it answers the question raising acceptance turns on:
+        // is a miss a position the target itself was nearly indifferent
+        // about, which no drafter can win, or one it was sure about, which is
+        // drafter headroom.
+        if !is_probe && std::env::var("MLXCEL_MTP_GAP_LOG").is_ok() {
+            let drafts = draft_tokens
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let targets = forward_out
+                .target_tokens
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            eprintln!(
+                "MTPWALK\t{actual_bs}\t{}\t{drafts}\t{targets}",
+                walk.accepted
+            );
+        }
+
         // Phase 2: rollback the cache + slice shared K/V based on
         // the walk's accepted count. This consumes the captured
         // state from phase 1. `target_logprobs` is pulled out

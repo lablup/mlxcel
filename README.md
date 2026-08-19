@@ -239,6 +239,83 @@ hardware. See
 | Molmo2 4B | 60 tok/s | 64 tok/s | 67 tok/s | 96% |
 | Phi 3.5 Vision 4bit | 122 tok/s | 168 tok/s | 160 tok/s | 105% |
 
+### Speculative decoding (MTP)
+
+A small drafter proposes a block of tokens and the target verifies the whole
+block in one forward, so a round emits everything the target would have chosen
+itself plus one more. The gain is therefore a property of the output, not of
+the model: predictable continuations accept long runs of drafts, open prose
+accepts few. The three Gemma rows per host differ in nothing but the prompt,
+and the ratio moves by two thirds across them on M5 Max, by half on M3 Ultra,
+and from a gain to a loss on M1 Ultra. Measured at `temperature 0`, warm, with
+the arms alternated, a warm-up discarded and the host's background indexers
+suspended.
+
+| Host | Pairing | Output | Classic | MTP | Speedup |
+|------|---------|--------|--------:|----:|--------:|
+| M5 Max (128 GB) | Gemma 4 12B + 4-bit assistant | enumeration | 43.1 tok/s | 135.4 tok/s | **3.14x** |
+| M5 Max (128 GB) | Gemma 4 12B + 4-bit assistant | source code | 43.5 tok/s | 121.0 tok/s | **2.79x** |
+| M5 Max (128 GB) | Gemma 4 12B + 4-bit assistant | prose | 43.3 tok/s | 82.4 tok/s | **1.90x** |
+| M5 Max (128 GB) | Qwen 3.8 27B + its 4-bit MTP head | source code | 32.7 tok/s | 53.4 tok/s | **1.63x** |
+| M3 Ultra (512 GB) | Gemma 4 12B + 4-bit assistant | enumeration | 63.4 tok/s | 165.5 tok/s | **2.61x** |
+| M3 Ultra (512 GB) | Gemma 4 12B + 4-bit assistant | source code | 64.2 tok/s | 138.5 tok/s | **2.16x** |
+| M3 Ultra (512 GB) | Gemma 4 12B + 4-bit assistant | prose | 64.0 tok/s | 111.2 tok/s | **1.74x** |
+| M3 Ultra (512 GB) | Qwen 3.8 27B + its 4-bit MTP head | source code | 35.7 tok/s | 59.5 tok/s | **1.67x** |
+| M1 Ultra (128 GB) | Gemma 4 12B + 4-bit assistant | enumeration | 34.2 tok/s | 50.4 tok/s | **1.48x** |
+| M1 Ultra (128 GB) | Gemma 4 12B + 4-bit assistant | source code | 34.9 tok/s | 43.5 tok/s | **1.25x** |
+| M1 Ultra (128 GB) | Gemma 4 12B + 4-bit assistant | prose | 34.5 tok/s | 32.7 tok/s | **0.95x** |
+| M1 Ultra (128 GB) | Qwen 3.8 27B + its 4-bit MTP head | source code | 23.8 tok/s | 23.4 tok/s | **0.98x** |
+
+The host matters as much as the prompt. Whether a verify block pays for itself
+depends on how the GPU generation dispatches the quantized projections it runs,
+which is why the runtime profiles each pairing rather than assuming: the
+batch-capable Gemma 4 31B pair measures 1.2 to 1.4x on M5 Max and a consistent
+regression on M1 Ultra, so the policy enables it on one and declines it on the
+other. The M3 Ultra rows show the same point from the other direction: all
+three Gemma ratios fall against their M5 Max twins while *both* arms are
+faster in absolute terms, because the classic baseline a speedup divides by
+rose further than the MTP arm did. A ratio falling is therefore not by itself
+a regression, which is why a row without its host cannot be compared to one.
+The Qwen pairing barely moves across the two hosts (1.63x against 1.67x),
+so how much the host matters is itself a property of the pairing.
+
+The M1 Ultra rows are where it becomes one. The quantity behind all three
+hosts is what a verify round costs in units of that host's own classic decode
+step: 1.28 on M5 Max, 1.51 on M3 Ultra, 2.71 on M1 Ultra at the same block
+width, measured to within 1% by two prompts that have nothing else in common.
+A round has to emit more tokens than that to pay for itself, so the prose
+prompt, which emits 2.463 tokens per verify on M5 Max and between 2.46 and
+2.63 across all three, clears the bar on the first two hosts and misses it on
+the third, where MTP is a 5% loss. Acceptance is not what separates them: the
+enumeration rows accept at 0.997 on both M5 Max and M1 Ultra, to three digits.
+
+Enable it with `--draft-model <drafter> --draft-kind mtp`. Widening the verify
+block stops paying past a point, because the tokens a round emits saturate near
+`1 / (1 - acceptance)` while the verify keeps getting more expensive. Where that
+point sits is a per-host fact, and the shipped default does not track it: with
+no width passed the block settles at 4, which is the peak on M3 Ultra, 5.8%
+short of it on M5 Max, where an explicit `--draft-block-size 5` measures 121.2
+tok/s against the default's 114.6, and on M1 Ultra one of three tied widths
+that the samples cannot separate. Three hosts, three answers. What does carry
+across them is the cost side: a round is affine in the block width, at
+`1.14 + 0.090 K` classic decode steps on M3 Ultra against `1.35 + 0.346 K` on
+M1 Ultra, so the usable band narrows on older silicon and a block of 12 on
+M1 Ultra turns the code prompt into a 0.97x loss. See
+[`docs/benchmarks.md`](docs/benchmarks.md) before assuming either way.
+
+Qwen's lower ratio is not a worse implementation. On the same code prompt it
+accepts more of its drafts than the Gemma pairing does (0.753 against 0.733 on
+M3 Ultra), and it pays for a byte-identity guarantee the Gemma arms do not:
+a startup probe compares a verify block against the single-token chain and, on
+Apple GPU generation 15 and newer, drops to the kernel that has byte-identity
+at about 17 to 20% of the verify forward. Gemma 4 is not probed yet
+([#1188](https://github.com/lablup/mlxcel/issues/1188)); keeping the same
+guarantee there measures 93.2 tok/s on the code row, 2.14x, and 117.5 tok/s on
+M3 Ultra, 1.83x. The gap the missing probe leaves is not theoretical: the
+unprobed Gemma pairing reproducibly diverges from classic decode on the prose
+prompt on M1 Ultra, and on the prose and source-code prompts both on M3 Ultra,
+while the probed Qwen pairing diverges on neither host.
+
 ### DiffusionGemma (block diffusion)
 
 DiffusionGemma generates a canvas block at a time through iterative denoising
