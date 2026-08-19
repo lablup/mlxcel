@@ -112,34 +112,45 @@ wait_for_quiet() {
   echo "  quiet, starting" >&2
 }
 
-# Peak contention seen while a pairing was actually being measured.
+# Contention seen while a pairing was actually being measured.
 #
 # The entry gate only guards the start. A load that arrives afterwards is
 # otherwise caught by the spread check alone, and a *steady* load evades that
 # check by construction: it depresses every sample equally, so the median
 # drops while the spread stays small. A video call measured this table 1.2%
 # low with spreads under 4% and nothing flagged.
+#
+# What matters is therefore how much of the run was contended, not its worst
+# instant. A desktop spikes WindowServer past any threshold whenever it draws,
+# and rejecting a row for one such sample rejects every row ever measured on a
+# machine with a display. Sustained load, the kind that actually moves a
+# median, shows up in most samples instead of one.
 CONTENTION_FILE=""
 CONTENTION_PID=""
 
 start_contention_watch() {
   CONTENTION_FILE=$(mktemp)
-  echo 0 > "$CONTENTION_FILE"
+  echo "0 0 0" > "$CONTENTION_FILE"   # samples, busy samples, peak
   (
     while :; do
       t=$(busiest)
-      m=$(cat "$CONTENTION_FILE" 2>/dev/null || echo 0)
-      [ "${t:-0}" -gt "${m:-0}" ] && echo "${t:-0}" > "$CONTENTION_FILE"
+      read -r n b pk < "$CONTENTION_FILE" 2>/dev/null || { n=0; b=0; pk=0; }
+      n=$((n + 1))
+      [ "${t:-0}" -ge "$QUIET_LIMIT" ] && b=$((b + 1))
+      [ "${t:-0}" -gt "${pk:-0}" ] && pk=${t:-0}
+      echo "$n $b $pk" > "$CONTENTION_FILE"
       sleep 5
     done
   ) &
   CONTENTION_PID=$!
+  # Detached so killing it later cannot print a job notice into the output
+  # this script is being read from.
+  disown "$CONTENTION_PID" 2>/dev/null || true
 }
 
 stop_contention_watch() {
   [ -n "$CONTENTION_PID" ] && kill "$CONTENTION_PID" 2>/dev/null
-  wait "$CONTENTION_PID" 2>/dev/null
-  cat "$CONTENTION_FILE" 2>/dev/null || echo 0
+  cat "$CONTENTION_FILE" 2>/dev/null || echo "0 0 0"
   # `command` so an interactive profile that wraps rm cannot print into the
   # captured output. This is a mktemp scratch file, not anything of value.
   command rm -f "$CONTENTION_FILE"
@@ -186,7 +197,7 @@ measure_pairing() {
 
   MEASURE_NAME="$name" MEASURE_HOST="$HOST ($MEM GB)" MEASURE_LABEL="$plabel" \
   MEASURE_BLOCK="$block" MEASURE_TOK="$ntok" MEASURE_LIMIT="$SPREAD_LIMIT" \
-  MEASURE_DIAG="$diag" MEASURE_PEAK="$peak" MEASURE_QUIET="$QUIET_LIMIT" \
+  MEASURE_DIAG="$diag" MEASURE_WATCH="$peak" MEASURE_QUIET="$QUIET_LIMIT" \
   python3 - "${#classic[@]}" "${classic[@]}" "${mtp[@]}" <<'PY'
 import os, re, statistics, sys
 n = int(sys.argv[1])
@@ -198,9 +209,13 @@ def spread(d): return 100 * (d[-1] - d[0]) / statistics.median(d)
 mc, mm = statistics.median(classic), statistics.median(mtp)
 limit = float(os.environ["MEASURE_LIMIT"])
 sc, sm = spread(classic), spread(mtp)
-peak = float(os.environ.get("MEASURE_PEAK") or 0)
+watch = (os.environ.get("MEASURE_WATCH") or "0 0 0").split()
+n_s, n_busy, peak = (float(x) for x in (watch + ["0", "0", "0"])[:3])
 quiet = float(os.environ.get("MEASURE_QUIET") or 15)
-contended = peak > quiet
+# A fifth of the run under load is enough to move a median; one sample is a
+# desktop drawing itself.
+share = n_busy / n_s if n_s else 0.0
+contended = share > 0.2
 bad = sc > limit or sm > limit
 d = os.environ.get("MEASURE_DIAG", "")
 g = dict(re.findall(r"(\w+)=([0-9.]+)", d))
@@ -215,11 +230,19 @@ if g:
           f"acceptance {float(g.get('acceptance_rate', 0)):.3f}, "
           f"emitted per verify {float(g.get('emitted_per_verify', 0)):.3f}")
 if contended:
-    print(f"   !! another process reached {peak:.0f}% while this ran (limit {quiet:.0f}%).")
+    print(f"   !! another process was over {quiet:.0f}% for {100*share:.0f}% of this run "
+          f"({n_busy:.0f} of {n_s:.0f} samples, peak {peak:.0f}%).")
     print(f"   !! a steady load depresses both arms together and leaves the spread")
     print(f"   !! small, so a contended row can read clean and still be low.")
+elif peak > quiet:
+    print(f"   brief spikes to {peak:.0f}% in {n_busy:.0f} of {n_s:.0f} samples, not enough to flag")
 if bad:
     print(f"   !! spread above {limit:.0f}% of the median: the host was not quiet.")
+    # Print the samples so a bimodal arm is distinguishable from drift or a
+    # one-off outlier. They call for different responses and the median hides
+    # which one this is.
+    print(f"   classic {' '.join(f'{v:.1f}' for v in classic)}")
+    print(f"   MTP     {' '.join(f'{v:.1f}' for v in mtp)}")
 if bad or contended:
     print(f"   !! do not publish this row. Re-run when nothing else is using the GPU.")
 PY
