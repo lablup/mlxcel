@@ -352,8 +352,8 @@ persisted under `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/mtp-policy/` and
 logged at settle time (`adaptive MTP policy: settled verdict ... est_speedup=...
 [measured]`), so a restart skips profiling. Changing K re-profiles. Because
 the decision is measured, the same binary enables a pairing where the
-speculative round pays for itself (Gemma 4 12B + assistant: 1.9x to 2.8x on M5
-Max depending on how predictable the output is,
+speculative round pays for itself (Gemma 4 12B + assistant: 1.90x to 3.14x on
+M5 Max depending on how predictable the output is,
 ~1.5x on GB10 with the multirow qmv verify) and declines it where it does not
 (the same pairing on M1 Ultra, or on CUDA with `MLXCEL_QMV_MULTIROW=0`).
 
