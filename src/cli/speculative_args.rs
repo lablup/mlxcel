@@ -184,7 +184,7 @@ pub fn default_block_size_for_kind(kind: DrafterKind) -> u32 {
         DrafterKind::Mtp => DEFAULT_MTP_BLOCK_SIZE,
         // DFlash and the future InternalMtp variant both share the
         // upstream-published 16-token default. InternalMtp's user-facing
-        // override surface lands in for now its CLI knob
+        // override surface lands later; for now its CLI knob
         // shares the DFlash default.
         DrafterKind::Dflash | DrafterKind::InternalMtp => DEFAULT_DFLASH_BLOCK_SIZE,
         // `DrafterKind` is `#[non_exhaustive]` so future variants force a

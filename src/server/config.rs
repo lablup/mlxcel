@@ -444,7 +444,7 @@ pub struct ServerConfig {
     /// Defaults to the baseline policy (enabled with 2 GiB / 1024 entries /
     /// 1-hour TTL). When `enabled = false` the store is skipped entirely at
     /// startup so no memory is reserved. CLI/env parsing for the individual
-    /// fields is tracked separately in for now operators set
+    /// fields is tracked separately; for now, operators set
     /// the policy via the Rust API or keep the default.
     pub prompt_cache: crate::server::prompt_cache::PromptCacheConfig,
 
