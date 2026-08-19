@@ -222,12 +222,14 @@ by diffing the two completions. The probe is not a formality: whether a `T = K`
 verify block is bit-equal to `K` single-token steps depends on which MLX kernel
 each quantized projection dispatches to at `M = K` versus `M = 1`, which varies
 by Apple GPU generation, quantization mode and block width. The Qwen 3.5 family
-declines to classic decode when the probe fails (#1186). The Gemma 4 arms are
-not probed at all (#1188), and diffing them settles the question in neither
-direction: on M3 Ultra and on M5 Max two of the three prompts below diverge
-from classic decode and the third is byte-identical, so the claim holds per
-prompt rather than per pairing, and which prompts fall on which side tracks
-acceptance rather than the hardware. M4 is still unmeasured.
+declines to classic decode when the probe fails (#1186), and since #1188 the
+Gemma 4 arms run the same probe: on a failing probe the gate first retries with
+`qmv_wide` disabled and keeps it off when that restores exactness (about 23% on
+this family's verify forward), and declines otherwise. Gemma 4 rows measured
+before that gate landed are the fast kernel, not the byte-identical one; the
+row's record says which. One caveat the probe inherits: a passing probe is
+measured evidence, not proof, and the M1 Ultra prose-prompt divergence recorded
+on 2026-08-19 (three-host sweep) is the known case to re-test against it.
 
 For each pairing, record both the baseline (no drafter) and the MTP run:
 
@@ -644,8 +646,11 @@ at all, so B=1 is also its only decode path. The batch-capable 31B + bf16
 assistant measures ~1.2 to 1.4x on M5 Max. Set `MLXCEL_ENABLE_MTP_B1=0` to
 opt out on hardware where the B=1 verify forward does not pay for itself.
 
-Gemma 4 is not probed yet (#1188), so the rows above are the fast kernel rather
-than the byte-identical one. Keeping byte-identity on the code row, by dropping
+The Gemma 4 rows above were measured before the #1188 gate landed, so they are
+the fast kernel rather than the byte-identical one; with the gate in place the
+default on generation 15+ is the byte-identical kernel, and reproducing the
+fast rows needs `MLXCEL_MTP_ALLOW_INEXACT=1`. Keeping byte-identity on the
+code row, by dropping
 `qmv_wide`, measures 93.2 tok/s instead of 121.0 on M5 Max, or 2.14x instead of
 2.79x, and 117.5 tok/s instead of 138.5 on M3 Ultra, 1.83x instead of 2.16x.
 That is 23% of throughput on one host and 15% on the other, which is not the
@@ -655,8 +660,12 @@ where the drafter step and the accepted-token emission are unaffected. Quote
 whichever one the question is about, and not the other.
 
 On M1 Ultra there is no such cost, because generation 13 never takes
-`qmv_wide` in the first place, but the missing probe still lets a divergence
-through. The two arms have now been diffed at `temperature 0` on the three
+`qmv_wide` in the first place, but a divergence still got through while the
+arms were unprobed, and it is the case that tests the probe now that #1188
+routes these arms through it: the mechanism there cannot be `qmv_wide`, so
+what the probe reads on that host (and whether the prose row still diverges
+behind a pass) needs its own run. The two arms have now been diffed at
+`temperature 0` on the three
 prompts above on one host from each of three GPU generations, with the probed
 Qwen pairing run beside them as the control:
 

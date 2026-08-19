@@ -1709,6 +1709,19 @@ where
 ///
 /// A target that is not MTP-capable returns a clear error instead of silently
 /// falling back, matching the issue's contract.
+/// Decline message for a Gemma 4 target whose exactness probe failed even
+/// with the `qmv_wide` retry (issue #1188). Mirrors the Qwen 3.5 message.
+fn gemma4_mtp_declined(block_size: usize) -> anyhow::Error {
+    anyhow!(
+        "Gemma 4 MTP speculative decoding declined: at --draft-block-size \
+         {block_size} this GPU's multi-token verify block is not byte-identical \
+         to the single-token decode chain, so temperature-0 output would \
+         silently differ from `mlxcel generate` without --draft-model. Try a \
+         smaller --draft-block-size, or set MLXCEL_MTP_ALLOW_INEXACT=1 to \
+         engage anyway and forfeit the byte-identity contract."
+    )
+}
+
 fn run_offline_mtp(
     model: &mlxcel::LoadedModel,
     draft_model_path: &Path,
@@ -1761,6 +1774,29 @@ fn run_offline_mtp(
              smaller --draft-block-size, or set MLXCEL_MTP_ALLOW_INEXACT=1 to \
              engage anyway and forfeit the byte-identity contract."
         ));
+    }
+
+    // Gemma 4 exactness gate: same call as the server's `mtp_capable_target`,
+    // for the same reason as the Qwen block above. These arms used to admit
+    // MTP unconditionally, which on Apple GPU generation 15+ advertised a
+    // temperature-0 byte-identity the default kernel selection does not
+    // provide (issue #1188). The gate's own retry drops `qmv_wide` when that
+    // restores exactness, so on those hosts this typically engages MTP at the
+    // exact-kernel cost rather than declining outright.
+    if let LoadedModel::Gemma4(wrapper) = model
+        && !wrapper.mtp_exactness_allows(block_size)
+    {
+        return Err(gemma4_mtp_declined(block_size));
+    }
+    if let LoadedModel::Gemma4VLM(vlm) = model
+        && !vlm.text_model.mtp_exactness_allows(block_size)
+    {
+        return Err(gemma4_mtp_declined(block_size));
+    }
+    if let LoadedModel::Gemma4Unified(unified) = model
+        && !unified.text_model.mtp_exactness_allows(block_size)
+    {
+        return Err(gemma4_mtp_declined(block_size));
     }
 
     // Resolve the concrete target reference the drafter binds to, and reject any
