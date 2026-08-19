@@ -497,10 +497,11 @@ a fall:
 
 Widths 5 to 8 sit within 6% of the peak, and the ordering inside that band is
 not resolved by these samples: 6 reads 0.6% above 5, less than the spread
-either was measured with, and 12 reads 1.2% above 10 against spreads of 2.7
-and 2.8%. Only three things separate cleanly — width 4 above the band, and
-3, 10 and 12 below it — so this host says "peak at 4, then a plateau", not
-the clean ranking M5 Max gives. Width 5 reads 138.0 here against the
+either was measured with. The 10 and 12 rows read 1.2% apart against spreads
+of 2.7 and 2.8%, which the follow-up sweep below settles. Only three things
+separate cleanly here: width 4 above the band, and 3, 10 and 12 below it. So
+this host says "peak at 4, then a plateau", not the clean ranking M5 Max
+gives. Width 5 reads 138.0 here against the
 138.5 the table above measured at block 5, a 0.4% agreement inside the
 spread, so the sweep and the published row are the same measurement twice.
 
@@ -534,12 +535,68 @@ nothing: about 143.5 tok/s and 2.24x against the same classic arm. The table
 keeps 5 so its rows stay comparable across hosts, and the gap is recorded here
 rather than tuned away in one row.
 
+Remeasuring the tail on its own, at 0.4 to 0.6% spread, settles what the sweep
+above left open. It rises monotonically and there is no kink at 12:
+
+| width | decode tok/s | spread | acceptance | emitted per verify |
+| ---: | ---: | ---: | ---: | ---: |
+| 10 | 126.6 | 0.6% | 0.628 | 4.041 |
+| 11 | 127.2 | 0.4% | 0.649 | 4.211 |
+| 12 | 128.0 | 0.4% | 0.658 | 4.333 |
+| 13 | 128.8 | 0.4% | 0.650 | 4.397 |
+
+The 10 and 12 readings agree with the sweep above to within 0.3%, so 12 really
+does sit above 10, by 1.1%, and 11 sits between them. None of it is worth
+tuning for, since all four are 11% or more below the peak at 4.
+
+A kernel boundary does sit at 12 on this host even so, and throughput hides it.
+`get_qmv_batch_limit` reads the architecture generation *and* the size letter,
+and this host reports `applegpu_g15d`. Its generation 15 and generation 17
+branches both require `arch_size != 'd'`, so a `d` part falls through them to
+the generation 13 `case 'd'` table, which reads 32, 18 or 12 by projection
+shape where a non-`d` generation 15 part would read 13, 15 or 13.
+`use_qmv_wide` has no such letter test, so the same host takes the generation
+15 wide path regardless. Two gates, two different answers.
+
+For this target that puts the boundary at exactly 12. The gate, up, down and
+`lm_head` projections (3840x15360, 15360x3840 and 3840x262144) fall in the
+last branch and leave the qmv family at `M = 12`, while q, k, v and o fall in
+the 4096 branch and stay until 18. A verify runs at `M = K`, so requesting
+width 12 is what moves the three largest projections onto qmm. Timing the
+verify forward alone, as `verify_forward_ms / rounds`, with `MLXCEL_QMV_WIDE`
+on and off:
+
+| width | verify forward, qmv_wide on | qmv_wide off | off / on |
+| ---: | ---: | ---: | ---: |
+| 10 | 25.49 ms | 46.98 ms | 1.84x |
+| 11 | 26.47 ms | 50.69 ms | 1.92x |
+| 12 | 27.03 ms | 45.81 ms | **1.70x** |
+| 13 | 27.15 ms | 45.34 ms | **1.67x** |
+
+Three samples per cell, spreads of 0.2 to 0.5%. The off column climbs to width
+11 and then falls 9.6%, which is qmm arriving: past the boundary the flag no
+longer reaches the three big projections and only attention is left for it to
+change. The on column crosses the same boundary smoothly, because qmm and
+qmv_wide cost about the same there, and that is why the width sweep shows
+nothing at 12. Read the two columns as a pair; each was measured with its own
+flag setting, and turning the flag off changes the generated text, so the
+throughput and acceptance figures are not comparable across them.
+
+Two things follow. The tail of a width sweep on this host is measuring a
+different dispatch than it would on a non-`d` generation 15 part, where the
+boundary would sit at 13. And the rule of thumb below is about two independent
+gates rather than one: the generation alone decides `qmv_wide`, while the
+generation and the size letter together decide where qmv gives way to qmm.
+
 The accelerated output is byte-identical to classic decode where the startup
 exactness probe says it is, which the runtime measures rather than assumes: an
 affine 4-bit target on Apple GPU generation 13/14 is byte-identical for block
 widths below 12, while generation 15 and newer (M3, M4, M5) diverge from block
 width 2 because MLX routes `M >= 2` quantized projections to a different
-reduction. A declining probe falls back to classic decode unless
+reduction. The 12 is the `d` entry for this target's largest projections
+rather than a generation constant: the same table reads 6 for those shapes on
+a non-`d` generation 13 part, and 18 for this target's attention projections
+on either. A declining probe falls back to classic decode unless
 `MLXCEL_MTP_ALLOW_INEXACT=1` is set. B=1 (single-request)
 MTP runs by default for every MTP target; the Gemma 4 Unified target cannot batch
 at all, so B=1 is also its only decode path. The batch-capable 31B + bf16
