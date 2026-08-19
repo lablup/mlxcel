@@ -420,6 +420,19 @@ The M1 Ultra rows were measured this way on 2026-08-19. The record is
 two rows the guard rejected and remeasured, and the derivation of the
 round-cost figures above.
 
+The block-width tables further down come from `scripts/bench_block_width.sh`,
+run the same way:
+
+```bash
+./scripts/with_indexers_paused.sh ./scripts/bench_block_width.sh gemma
+./scripts/with_indexers_paused.sh ./scripts/bench_block_width.sh qwen
+```
+
+It visits every width once per round and rotates which width starts the round,
+because measuring one width to completion before the next puts any drift over
+the run onto whichever widths were measured late — indistinguishable from
+those widths being slower, which is the question the sweep is asking.
+
 **Record the host and the prompt.** Both move the ratio by more than most code
 changes do. The prompt decides acceptance, and the host decides which kernel
 each quantized projection dispatches to and therefore what a verify block
@@ -430,10 +443,40 @@ different protocols do not belong in the same table.
 A speculative-decoding figure without its prompt cannot be reproduced or
 compared.
 
-The block width is not a tuning knob worth much either. Measured on the code
-row, throughput peaks at width 5 and falls at 6, 8, 10 and 12: tokens emitted
-per round saturate near `1 / (1 - acceptance)` while the verify forward keeps
-getting more expensive, and the adaptive controller already lands on the peak.
+The block width is not a tuning knob worth much, but where it peaks is a
+per-host fact rather than a constant. On M5 Max, measured on the code row,
+throughput peaks at width 5 and falls at 6, 8, 10 and 12. On M3 Ultra it peaks
+at 4, and what follows is a plateau rather than a fall:
+
+| width | decode tok/s | spread | acceptance | emitted per verify | vs peak |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 3 | 129.1 | 0.7% | 0.843 | 2.670 | -10.1% |
+| 4 | 143.6 | 0.6% | 0.803 | 3.398 | **peak** |
+| 5 | 138.0 | 0.9% | 0.733 | 3.477 | -3.9% |
+| 6 | 138.8 | 0.5% | 0.738 | 3.737 | -3.3% |
+| 8 | 135.1 | 0.6% | 0.683 | 3.934 | -5.9% |
+| 10 | 126.2 | 2.7% | 0.628 | 4.041 | -12.1% |
+| 12 | 127.7 | 2.8% | 0.658 | 4.333 | -11.1% |
+
+Widths 5 to 8 sit within 6% of the peak, and the ordering inside that band is
+not resolved by these samples: 6 reads 0.6% above 5, less than the spread
+either was measured with, and 12 reads 1.2% above 10 against spreads of 2.7
+and 2.8%. Only three things separate cleanly — width 4 above the band, and
+3, 10 and 12 below it — so this host says "peak at 4, then a plateau", not
+the ranking the M5 Max sentence gives. Width 5 reads 138.0 here against the
+138.5 the table above measured at block 5, a 0.4% agreement inside the
+spread, so the sweep and the published row are the same measurement twice.
+
+The mechanism is in the last two columns. Emitted per verify climbs towards
+`1 / (1 - acceptance)` and flattens — 2.670, 3.398, 3.477, 3.737, 3.934,
+4.041, 4.333 across the range — while the verify forward keeps costing more
+per position, so past the peak each widening buys less than it pays for.
+
+One consequence for the row above: on this host the adaptive controller does
+not land on the peak. The code row runs at effective width 5 and leaves 3.9%
+on the table against width 4, which is well outside the 0.6 to 0.9% spreads
+either width was measured with. That is small enough to ignore and too large
+to call noise, so it is recorded rather than tuned away here.
 
 The accelerated output is byte-identical to classic decode where the startup
 exactness probe says it is, which the runtime measures rather than assumes: an
@@ -521,11 +564,26 @@ optimal at 3 to 4 rather than merely default: 48 of the target's 64 layers are
 GatedDeltaNet, a recurrence that processes tokens in sequence, so the verify
 cost grows nearly linearly with the block instead of amortising the way an
 attention-only target's does. Widths 5, 6 and 8 measured 48.0, 46.8 and 35.7
-in an earlier run on M5 Max. Read that with the variance above in mind: the
-gap between widths 3 and 6 sits inside that host's run-to-run range and only
-width 8 is clearly outside it. The width sweep has not been repeated on
-M3 Ultra, whose tighter spread would resolve the narrower gaps that M5 Max's
-range swallows.
+in an earlier run on M5 Max, where the gap between widths 3 and 6 sat inside
+that host's run-to-run range and only width 8 was clearly outside it.
+
+The M3 Ultra sweep separates what that range swallowed:
+
+| width | decode tok/s | spread | acceptance | emitted per verify | vs peak |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 54.6 | 0.5% | 0.875 | 1.869 | -8.2% |
+| 3 | 59.5 | 0.9% | 0.753 | 2.492 | **peak** |
+| 4 | 57.4 | 0.7% | 0.689 | 3.051 | -3.5% |
+| 5 | 52.1 | 0.6% | 0.607 | 3.398 | -12.4% |
+| 6 | 49.4 | 0.4% | 0.546 | 3.691 | -17.0% |
+| 8 | 40.7 | 0.3% | 0.412 | 3.833 | -31.6% |
+
+"Optimal at 3 to 4" is a measurement here rather than a restatement of the
+declared width: 3 is the peak, 4 is 3.5% back, and every gap in the table is
+far outside the 0.9% spread it was measured with, including the 3-to-6 one
+M5 Max could not resolve. The drop is also steeper than the Gemma pairing's
+over the same widths, which is what the GatedDeltaNet recurrence predicts —
+a verify cost growing with the block rather than amortising across it.
 
 M1 Ultra is a wash on this pairing, and for the reason the Gemma table gave.
 Its acceptance is the highest of anything on this page (0.855, 2.694 tokens
