@@ -641,8 +641,10 @@ on either. A declining probe falls back to classic decode unless
 `MLXCEL_MTP_ALLOW_INEXACT=1` is set. B=1 (single-request)
 MTP runs by default for every MTP target; the Gemma 4 Unified target cannot batch
 at all, so B=1 is also its only decode path. The batch-capable 31B + bf16
-assistant measures ~1.2 to 1.4x on M5 Max. Set `MLXCEL_ENABLE_MTP_B1=0` to
-opt out on hardware where the B=1 verify forward does not pay for itself.
+assistant measures ~1.2 to 1.4x on M5 Max and 1.95x to 2.65x on M3 Ultra (see
+below); it runs by default from Apple GPU generation 15 since #1217. Set
+`MLXCEL_ENABLE_MTP_B1=0` to opt out on hardware where the B=1 verify forward
+does not pay for itself.
 
 Gemma 4 is not probed yet (#1188), so the rows above are the fast kernel rather
 than the byte-identical one. Keeping byte-identity on the code row, by dropping
@@ -876,13 +878,46 @@ enabling this pairing on generation 13.
 
 ### Gemma 4 31B + bf16 assistant
 
-The 31B text target is batch-capable, and its MTP speedup comes from batched
-(B>1) verify windows rather than the singleton path. The scheduler declines B=1
-MTP there because the bf16 assistant's single-stream acceptance is too low to
-offset the extra drafter forward per token. This pairing is wired into
-`speculative_bench` (`REACHABLE_PAIRINGS`) and runs once the
-`gemma-4-31b-it-4bit` and `gemma-4-31B-it-assistant-bf16` checkpoints are present
-in the model store.
+The 31B text target is batch-capable, which is the case the B=1 static gate
+(`mtp_b1_default`) governs. Until issue #1217 that gate ran the singleton path
+only where `has_neural_accelerator` held, on the reading that this pairing's
+speedup came from batched (B>1) verify windows and that the bf16 assistant's
+single-stream acceptance was too low to offset its extra drafter forward. Both
+halves of that reading were measured before #1194, #1199, #1203, #1208 and
+#1215, and neither survived re-measurement.
+
+M3 Ultra, 2026-08-20, block 4, greedy, under the protocol above
+(`scripts/bench_speculative.sh gemma31b`):
+
+| Host | Output | Tokens | Block | acceptance | emitted/verify | classic | MTP | speedup |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| M3 Ultra (512 GB) | enumeration | 400 | 4 | 1.000 | 3.990 | 31.5 | 83.6 | **2.65x** |
+| M3 Ultra (512 GB) | source code | 300 | 4 | 0.882 | 3.646 | 31.8 | 76.6 | **2.41x** |
+| M3 Ultra (512 GB) | prose | 400 | 4 | 0.656 | 2.956 | 31.7 | 61.9 | **1.95x** |
+
+Single-stream acceptance is 0.66 to 1.00, not too low, and the singleton path
+gains on every prompt. All three rows measure a verify round at 1.51 to 1.52
+classic decode steps and emit 2.96 to 3.99 tokens, so they clear break-even by
+roughly double. The width sweep fits `0.83 + 0.170 K` classic steps, largest
+residual 0.06, and peaks at width 5 with width 4 tied inside its spread.
+
+Beside the 12B pairing's `1.14 + 0.090 K` on the same host, the bf16 drafter
+costs about 1.9x as much per extra block position and the two lines cross near
+K = 4, which is the only reason the block-4 round costs match. Do not carry a
+round cost between these two pairings at any other width.
+
+The gate now reads Apple GPU generation instead: on from generation 15 (M3, M4,
+M5), classic decode on generation 13 (M1, M2). M4 is grouped by the shared
+`use_qmv_wide` dispatch rather than measured. Generation 13 was not re-measured
+for want of a host, and carrying the slope ratio above onto its
+`1.35 + 0.346 K` puts a block-4 round near 3.6 classic steps, which the emitted
+tokens would only just cover, so its founding 0.75 to 0.96x reads as sound
+rather than stale and it keeps declining. Full record and method:
+`benchmark_results/mtp-b1-gate-m3ultra-2026-08-20.md`.
+
+The pairing is also wired into `speculative_bench` (`REACHABLE_PAIRINGS`), which
+runs once the `gemma-4-31b-it-4bit` and `gemma-4-31B-it-assistant-bf16`
+checkpoints are present in the model store.
 
 ### Adaptive B=1 MTP policy
 

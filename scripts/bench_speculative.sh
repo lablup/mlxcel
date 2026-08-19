@@ -5,6 +5,7 @@
 # Usage:
 #   ./scripts/bench_speculative.sh                 # every pairing it can find
 #   ./scripts/bench_speculative.sh gemma           # one pairing
+#   ./scripts/bench_speculative.sh gemma31b        # the batch-capable pairing
 #   ./scripts/bench_speculative.sh --reps 4        # more samples per arm
 #   ./scripts/bench_speculative.sh --no-wait       # do not wait for a quiet host
 #
@@ -53,7 +54,7 @@ while [ $# -gt 0 ]; do
     --reps) REPS="$2"; shift 2 ;;
     --no-wait) WAIT_FOR_QUIET=0; shift ;;
     --spread-limit) SPREAD_LIMIT="$2"; shift 2 ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
     *) ONLY="$1"; shift ;;
   esac
 done
@@ -182,6 +183,31 @@ if [ -z "$ONLY" ] || [ "$ONLY" = "gemma" ]; then
   measure_pairing "Gemma 4 12B + 4-bit assistant" \
     models/gemma-4-12b-it-4bit models/gemma-4-12b-it-assistant-4bit 4 \
     "enumeration" "$PROMPT_LIST" 400
+fi
+
+# The batch-capable pairing, which is the one the B=1 static gate governs
+# (`mtp_b1_default` in src/server/batch/speculative_burst.rs). It was missing
+# here until issue #1217, so the gate's founding numbers were never reproducible
+# through this protocol; that is most of why they went stale unnoticed.
+#
+# The two env vars are set for the server's benefit, not this script's: the
+# offline `generate` path this harness drives never consults the B=1 gate or
+# the adaptive policy (they live in `Scheduler::mtp_b1_should_run` and
+# `MtpPolicy`, both server-only), so the burst runs here regardless. Setting
+# them makes the arm the same one a server would run with the gate forced on,
+# and keeps the command copy-pasteable into a server session.
+if [ -z "$ONLY" ] || [ "$ONLY" = "gemma31b" ]; then
+  export MLXCEL_ENABLE_MTP_B1=1 MLXCEL_MTP_ADAPTIVE=0
+  measure_pairing "Gemma 4 31B + bf16 assistant" \
+    models/gemma-4-31b-it-4bit models/gemma-4-31b-it-assistant-bf16 4 \
+    "source code" "$PROMPT_CODE" 300
+  measure_pairing "Gemma 4 31B + bf16 assistant" \
+    models/gemma-4-31b-it-4bit models/gemma-4-31b-it-assistant-bf16 4 \
+    "prose" "$PROMPT_PROSE" 400
+  measure_pairing "Gemma 4 31B + bf16 assistant" \
+    models/gemma-4-31b-it-4bit models/gemma-4-31b-it-assistant-bf16 4 \
+    "enumeration" "$PROMPT_LIST" 400
+  unset MLXCEL_ENABLE_MTP_B1 MLXCEL_MTP_ADAPTIVE
 fi
 
 if [ -z "$ONLY" ] || [ "$ONLY" = "qwen" ]; then

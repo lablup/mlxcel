@@ -41,6 +41,35 @@ impl AppleSiliconGen {
         matches!(self, AppleSiliconGen::M5)
     }
 
+    /// Whether this generation runs an affine-quantized projection at `M >= 2`
+    /// as one wide pass rather than as narrow per-position passes.
+    ///
+    /// This is MLX's `use_qmv_wide` predicate (`mode != "affine" || arch_gen
+    /// >= 15` in `mlx/backend/metal/quantized.cpp`) reduced to the part that
+    /// depends only on the chip: Apple GPU generation 15 and newer, which is
+    /// M3, M4 and M5. Generation 13 (M1, M2) has no such path and runs a
+    /// verify block as `K` narrow passes whose cost grows with the block.
+    ///
+    /// That difference is what decides whether a speculative verify round pays
+    /// for itself, so it is the discriminator behind the B=1 MTP gate
+    /// (`mtp_b1_default` in the `mlxcel` crate); see `docs/benchmarks.md` for
+    /// the round-cost measurements that order the generations by it.
+    ///
+    /// `Unknown` reads false, which is deliberate in both directions it
+    /// covers: a non-Apple GPU (CUDA / GB10), where a K-wide verify does not
+    /// amortize at all (issue #638), and an Apple generation newer than the
+    /// enumerated ones, which `parse_silicon_gen` also maps to `Unknown`. Both
+    /// decline rather than assume. Extend the enum when a new Apple generation
+    /// ships; this carries the same staleness contract as
+    /// [`Self::has_neural_accelerator`].
+    #[inline]
+    pub fn wide_quantized_projections(self) -> bool {
+        matches!(
+            self,
+            AppleSiliconGen::M3 | AppleSiliconGen::M4 | AppleSiliconGen::M5
+        )
+    }
+
     /// Returns the expected Metal GPU family version (3 for M1–M4, 4 for M5+).
     #[inline]
     pub fn metal_version(self) -> u32 {
@@ -788,6 +817,43 @@ mod tests {
         assert!(!AppleSiliconGen::M4.has_neural_accelerator());
         assert!(AppleSiliconGen::M5.has_neural_accelerator());
         assert!(!AppleSiliconGen::Unknown.has_neural_accelerator());
+    }
+
+    #[test]
+    fn wide_quantized_projection_flag_splits_at_generation_15() {
+        // Generation 13 runs a verify block as narrow per-position passes.
+        assert!(!AppleSiliconGen::M1.wide_quantized_projections());
+        assert!(!AppleSiliconGen::M2.wide_quantized_projections());
+        // Generation 15+ takes the one wide pass at `M >= 2`.
+        assert!(AppleSiliconGen::M3.wide_quantized_projections());
+        assert!(AppleSiliconGen::M4.wide_quantized_projections());
+        assert!(AppleSiliconGen::M5.wide_quantized_projections());
+        // Non-Apple and not-yet-enumerated Apple parts decline rather than
+        // assume; on CUDA a K-wide verify does not amortize at all (#638).
+        assert!(!AppleSiliconGen::Unknown.wide_quantized_projections());
+    }
+
+    #[test]
+    fn wide_quantized_projections_is_weaker_than_neural_accelerator() {
+        // The B=1 MTP gate moved from `has_neural_accelerator` to this
+        // predicate (issue #1217). That is only safe if it is strictly more
+        // permissive: no generation may lose a capability the old gate
+        // granted, so every NA generation must also read wide here. This is
+        // the property that lets the gate change on M3 Ultra evidence alone
+        // without touching what M1/M2 hosts do.
+        for chip in [
+            AppleSiliconGen::M1,
+            AppleSiliconGen::M2,
+            AppleSiliconGen::M3,
+            AppleSiliconGen::M4,
+            AppleSiliconGen::M5,
+            AppleSiliconGen::Unknown,
+        ] {
+            assert!(
+                !chip.has_neural_accelerator() || chip.wide_quantized_projections(),
+                "{chip} has a Neural Accelerator but does not read as wide-projection",
+            );
+        }
     }
 
     #[test]

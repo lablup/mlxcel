@@ -4,6 +4,7 @@
 # Usage:
 #   ./scripts/bench_block_width.sh qwen        # widths 2 3 4 5 6 8
 #   ./scripts/bench_block_width.sh gemma       # widths 3 4 5 6 8 10 12
+#   ./scripts/bench_block_width.sh gemma31b    # widths 2 3 4 5 6 8
 #   ./scripts/bench_block_width.sh gemma 4 5 6 # explicit widths
 #
 # Run it through scripts/with_indexers_paused.sh, the same way the throughput
@@ -58,8 +59,15 @@ case "${1:-}" in
   gemma)
     TARGET=models/gemma-4-12b-it-4bit; DRAFTER=models/gemma-4-12b-it-assistant-4bit
     DEFAULT_WIDTHS=(3 4 5 6 8 10 12) ;;
+  gemma31b)
+    # The batch-capable pairing the B=1 static gate governs (issue #1217). Its
+    # declared drafter width is 4; the sweep brackets it the way the qwen one
+    # does rather than reaching for the 12B pairing's wide tail, because a bf16
+    # drafter costs far more per position than a 4-bit one.
+    TARGET=models/gemma-4-31b-it-4bit; DRAFTER=models/gemma-4-31b-it-assistant-bf16
+    DEFAULT_WIDTHS=(2 3 4 5 6 8) ;;
   *)
-    sed -n '2,9p' "$0"; exit 1 ;;
+    sed -n '2,10p' "$0"; exit 1 ;;
 esac
 shift
 WIDTHS=("$@"); [ ${#WIDTHS[@]} -eq 0 ] && WIDTHS=("${DEFAULT_WIDTHS[@]}")

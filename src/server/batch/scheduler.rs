@@ -4406,11 +4406,14 @@ impl BatchScheduler {
             // verdict, overriding the static per-hardware gate where the
             // measured profile is clearly favorable or unfavorable. Without a
             // policy (MLXCEL_MTP_ADAPTIVE off) this falls back to the static
-            // per-hardware default (issue #165): non-batchable 12B targets keep
-            // B=1 MTP on everywhere; batch-capable 31B targets default it on
-            // only on M5+, since pre-M5 GPU cores measured a consistent
-            // regression. `MLXCEL_ENABLE_MTP_B1` overrides in both directions;
-            // on decline the request falls back to classic decode.
+            // per-hardware default (issue #165, revised by #1217):
+            // non-batchable 12B targets keep B=1 MTP on everywhere;
+            // batch-capable 31B targets default it on from Apple GPU
+            // generation 15, where a quantized projection at `M >= 2` runs as
+            // one wide pass, and off on generation 13, which runs the verify
+            // block as narrow per-position passes and measured a regression.
+            // `MLXCEL_ENABLE_MTP_B1` overrides in both directions; on decline
+            // the request falls back to classic decode.
             let seq = window.into_iter().next().expect("singleton window");
             tracing::info!(
                 "MTP B=1 speculative burst declined for seq {} (adaptive policy \
