@@ -222,10 +222,11 @@ by diffing the two completions. The probe is not a formality: whether a `T = K`
 verify block is bit-equal to `K` single-token steps depends on which MLX kernel
 each quantized projection dispatches to at `M = K` versus `M = 1`, which varies
 by Apple GPU generation, quantization mode and block width. The Qwen 3.5 family
-declines to classic decode when the probe fails (#1186). The Gemma 4 arms are not
-probed yet and their byte-identity has not been measured on Apple GPU generation
-15 or newer (#1188), so treat the claim there as unverified on M3, M4 and M5
-rather than established.
+declines to classic decode when the probe fails (#1186). The Gemma 4 arms are
+not probed at all (#1188), and diffing them settles the question in neither
+direction: on M3 Ultra two of the three prompts below diverge from classic
+decode and the third is byte-identical, so the claim holds per prompt rather
+than per pairing. M4 and M5 are still unmeasured.
 
 For each pairing, record both the baseline (no drafter) and the MTP run:
 
@@ -556,23 +557,65 @@ whichever one the question is about, and not the other.
 
 On M1 Ultra there is no such cost, because generation 13 never takes
 `qmv_wide` in the first place, but the missing probe still lets a divergence
-through. Diffing the two arms at `temperature 0` on the three prompts above
-gives byte-identical output on source code and on enumeration, and a
-**reproducible divergence on prose**, 892 bytes into a 1755-byte generation:
+through. The two arms have now been diffed at `temperature 0` on the three
+prompts above on a generation 13 host and a generation 15 one, with the probed
+Qwen pairing run beside them as the control:
+
+| Host | Pairing | Probe | source code | enumeration | prose |
+| --- | --- | --- | --- | --- | --- |
+| M1 Ultra (gen 13) | Gemma 4 12B + 4-bit assistant | none (#1188) | identical | identical | **diverges** |
+| M1 Ultra (gen 13) | Qwen 3.8 27B + 4-bit MTP head | passes, no fallback | identical | not run | not run |
+| M3 Ultra (gen 15) | Gemma 4 12B + 4-bit assistant | none (#1188) | **diverges** | identical | **diverges** |
+| M3 Ultra (gen 15) | Qwen 3.8 27B + 4-bit MTP head | passes after dropping `qmv_wide` | identical | not run | not run |
+
+M1 Ultra's divergence is on prose, 892 bytes into a 1755-byte generation:
 
 ```
 classic: ...tokens in parallel (as long as they are provided as inp
 MTP:     ...tokens in parallel (the attention mechanism allows this
 ```
 
-Each arm is byte-identical to itself across three runs and the two arms
-disagree with each other every time, so this is the block-versus-chain path
-and not run-to-run noise. The Qwen pairing below, which *is* probed and whose
-probe passes on that host, comes out byte-identical on the same test. That
-contrast is the argument for #1188: the probe catches what the unconditional
-Gemma 4 gate does not, and one 400-token generation per arm reproduces it. It
-also bounds the rule of thumb above, which holds at the op level and does not
-carry to the model level here: two of three prompts agree and one does not.
+M3 Ultra diverges on prose as well, at byte 581 of 1802, and on source code at
+byte 22 of 1078, which is six words in:
+
+```
+classic: Here are two ways to write this function. The first is
+MTP:     Here are two ways to implement this. The first is the
+```
+
+Each arm is byte-identical to itself across three runs on each host, and on
+M3 Ultra all nine cross-arm pairings differ, so this is the block-versus-chain
+path and not run-to-run noise. The M3 Ultra runs were repeated with
+`--show-reasoning`, since Gemma 4 suppresses that channel by default: these
+prompts emit nothing on it, so the diff covers the whole emission and not just
+the visible answer. The identical row is a result rather than a silent
+fallback, because the MTP arm ran 102 verify rounds at effective block 4 with
+acceptance 0.980 to produce it.
+
+Block width is not what separates the rows. Enumeration stays identical at
+block 4 and at block 5, and source code diverges at both, so the prompt
+decides it.
+
+Neither host does what the rule of thumb above predicts for it. Generation 13
+should be byte-identical below width 12 and one prompt is not; generation 15
+should diverge from width 2 and one prompt does not. The rule holds at the op
+level and does not carry to the model level in either direction, because
+whether a generation ever reaches a position where the two kernels disagree
+depends on the continuation, and the prompt decides that. This is the argument
+for #1188: the probe measures the property on the pairing at startup instead
+of predicting it from the hardware, and the probed Qwen pairing comes out
+identical on both hosts, on M3 Ultra by failing under `qmv_wide` and disabling
+it for the process. One generation per arm reproduces any of this, and the
+M3 Ultra source-code row parts 22 bytes in.
+
+Two things will make that diff lie if they are not handled. The MTP arm prints
+its drafter loader lines *after* `Generating...` and immediately after the
+echoed prompt, so a naive diff reports a divergence at byte 1 that is only the
+banner; strip it before comparing. And Gemma 4 hides its reasoning channel
+unless `--show-reasoning` is passed, so a pairing that spends its budget there
+compares as two empty strings and passes vacuously. The Qwen check needs that
+flag for exactly this reason; these three Gemma prompts do not use the channel
+at all, which is itself something to confirm rather than assume.
 
 ### Qwen 3.5 / 3.6 / 3.8 with the model's own MTP head
 

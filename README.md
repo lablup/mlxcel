@@ -306,9 +306,10 @@ Apple GPU generation 15 and newer, drops to the kernel that has byte-identity
 at about 17 to 20% of the verify forward. Gemma 4 is not probed yet
 ([#1188](https://github.com/lablup/mlxcel/issues/1188)); keeping the same
 guarantee there measures 93.2 tok/s on the code row, 2.14x, and 117.5 tok/s on
-M3 Ultra, 1.83x. The gap the missing probe leaves is not theoretical: on M1
-Ultra the unprobed Gemma pairing reproducibly diverges from classic decode on
-the prose prompt, while the probed Qwen pairing on the same host does not.
+M3 Ultra, 1.83x. The gap the missing probe leaves is not theoretical: the
+unprobed Gemma pairing reproducibly diverges from classic decode on the prose
+prompt on M1 Ultra, and on the prose and source-code prompts both on M3 Ultra,
+while the probed Qwen pairing diverges on neither host.
 
 ### DiffusionGemma (block diffusion)
 
