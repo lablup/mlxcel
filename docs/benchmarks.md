@@ -349,6 +349,7 @@ round's wall time divided by `1 / classic tok/s`.
 | M5 Max (128 GB) | 4 | 1.27 (enumeration), 1.29 (prose) | ~1.28 |
 | M5 Max (128 GB) | 5 | 1.31 (source code) | ~1.31 |
 | M3 Ultra (512 GB) | 4 | 1.50 (enumeration), 1.51 (prose) | ~1.51 |
+| M3 Ultra (512 GB) | 5 | 1.61 (source code) | ~1.61 |
 | M1 Ultra (128 GB) | 4 | 2.70 (enumeration), 2.72 (prose) | ~2.71 |
 | M1 Ultra (128 GB) | 5 | 3.15 (source code) | ~3.15 |
 
@@ -357,7 +358,10 @@ within 1%, which is the control that this is a property of the host and the
 block width rather than of the prompt. Those two are the enumeration and prose
 rows, which both run at effective block 4; the code row is listed separately
 because it clears the expansion gate and runs at 5, and it costs more per
-round there, as widening a block should. It also orders the three hosts exactly
+round there, as widening a block should. The block-5 entries are derived
+rather than separately timed: emitted per verify comes from each host's width
+sweep below and the ratio from the published row, which agree to within 0.4%
+on both hosts. It also orders the three hosts exactly
 as the speedups do, and it explains the M3 Ultra reading above without
 appealing to which arm gained more: the verify simply costs relatively more
 there than on M5 Max.
