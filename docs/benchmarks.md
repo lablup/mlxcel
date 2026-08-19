@@ -330,6 +330,22 @@ contended, is reported as untrustworthy rather than averaged, because a
 contaminated median is indistinguishable from a real regression once it
 reaches a document.
 
+On a Mac that is also somebody's desktop, the thing most likely to fail those
+checks is the machine's own housekeeping. Spotlight indexing, Photos analysis
+and cloud sync are idle-triggered, so they start up exactly when a host is
+left alone to measure something, and they reach several hundred percent CPU
+without `pmset -g therm` reporting anything. Run the sweep through
+`scripts/with_indexers_paused.sh`, which suspends them for the length of one
+command and resumes them however it ends:
+
+```bash
+./scripts/with_indexers_paused.sh ./scripts/bench_speculative.sh --reps 4
+```
+
+It uses SIGSTOP and SIGCONT only, so the suspended work continues from where
+it left off, and three separate paths resume it, including one that survives
+a SIGKILL of the wrapper itself.
+
 **Record the host and the prompt.** Both move the ratio by more than most code
 changes do. The prompt decides acceptance, and the host decides which kernel
 each quantized projection dispatches to and therefore what a verify block
