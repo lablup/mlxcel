@@ -306,19 +306,29 @@ three quarters of the disagreements are the reference's runner-up.
 
 `mlx-community/gemma-4-12b-it-4bit` as the target and
 `mlx-community/gemma-4-12B-it-assistant-4bit` as the drafter, `temperature 0`,
-warm, arms alternated with a warm-up discarded, spreads under 1% of the median.
+warm, arms alternated with a warm-up discarded, eight samples per arm, the
+host's background indexers suspended, spreads at or under 1.9% of the median.
 
-| Host | Output | Prompt | Tokens | Block | classic | MTP | speedup |
-| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| M5 Max (128 GB) | source code | "Write a Python function that computes the nth Fibonacci number, with a docstring and type hints." | 300 | 5 | 43.5 | 121.8 | **2.80x** |
-| M5 Max (128 GB) | prose | "Explain how speculative decoding accepts or rejects draft tokens." | 400 | 5 requested, 3 to 4 effective | 43.3 | 84.3 | **1.95x** |
+| Host | Output | Prompt | Tokens | Block | acceptance | classic | MTP | speedup |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| M5 Max (128 GB) | enumeration | "Count from 1 to 200, one number per line, with no other text." | 400 | 4 | 0.997 | 43.1 | 135.4 | **3.14x** |
+| M5 Max (128 GB) | source code | "Write a Python function that computes the nth Fibonacci number, with a docstring and type hints." | 300 | 5 | 0.784 | 43.5 | 121.0 | **2.79x** |
+| M5 Max (128 GB) | prose | "Explain how speculative decoding accepts or rejects draft tokens." | 400 | 5 requested, 4 effective | 0.489 | 43.3 | 82.4 | **1.90x** |
+
+Acceptance is the column that explains the rest. The enumeration row accepts
+almost every draft (3.990 tokens emitted per verify against a block of 4) and
+the prose row accepts about half (2.463). Nothing else differs between them.
 
 Reproduce or extend the table with `scripts/bench_speculative.sh`. It carries
 the prompts, the block widths and the protocol, detects the host, prints rows
 in the shape above, and refuses to start until nothing else is using the GPU.
-A run whose spread exceeds 4% of the median is reported as untrustworthy rather
-than averaged, because a contaminated median is indistinguishable from a real
-regression once it reaches a document.
+It keeps watching while it measures, because the entry gate guards only the
+start: a load that arrives later is otherwise left to the spread check alone,
+and a steady load evades that check by depressing every sample equally. A run
+whose spread exceeds 4% of the median, or that spent over a fifth of its time
+contended, is reported as untrustworthy rather than averaged, because a
+contaminated median is indistinguishable from a real regression once it
+reaches a document.
 
 **Record the host and the prompt.** Both move the ratio by more than most code
 changes do. The prompt decides acceptance, and the host decides which kernel
@@ -327,10 +337,8 @@ costs, which is why the same pairing can pay on one generation and regress on
 another. A row without both cannot be reproduced or compared, and rows from
 different protocols do not belong in the same table.
 
- The two rows differ in nothing else, and the ratio moves
-by half again between them, because acceptance is a property of how predictable
-the continuation is. A speculative-decoding figure without its prompt cannot be
-reproduced or compared.
+A speculative-decoding figure without its prompt cannot be reproduced or
+compared.
 
 The block width is not a tuning knob worth much either. Measured on the code
 row, throughput peaks at width 5 and falls at 6, 8, 10 and 12: tokens emitted
@@ -351,7 +359,7 @@ opt out on hardware where the B=1 verify forward does not pay for itself.
 
 Gemma 4 is not probed yet (#1188), so the rows above are the fast kernel rather
 than the byte-identical one. Keeping byte-identity on the code row, by dropping
-`qmv_wide`, measures 93.2 tok/s instead of 121.8, or 2.14x instead of 2.80x.
+`qmv_wide`, measures 93.2 tok/s instead of 121.0, or 2.14x instead of 2.79x.
 
 ### Qwen 3.5 / 3.6 / 3.8 with the model's own MTP head
 
@@ -362,8 +370,18 @@ code prompt above, 300 tokens:
 
 | Host | Path | decode tok/s | speedup |
 | --- | --- | ---: | ---: |
-| M5 Max (128 GB) | classic decode (no drafter) | 32.5 | 1.00x |
-| M5 Max (128 GB) | MTP, block 3 (the drafter's declared width) | 47.0 | **1.45x** |
+| M5 Max (128 GB) | classic decode (no drafter) | 32.7 | 1.00x |
+| M5 Max (128 GB) | MTP, block 3 (the drafter's declared width) | 53.4 | **1.63x** |
+
+The MTP figure is a median over eight samples that ranged from 50.8 to 55.2,
+an 8.2% spread against 0.3% on the classic arm of the same run. Contention
+would have moved both arms, so this belongs to the pairing rather than the
+host: acceptance and effective block come out identical every run at
+`temperature 0`, and what varies is where the adaptive B=1 controller (#333)
+lands when it profiles the opening bursts. The median is stable even so,
+reading 1.61x, 1.64x and 1.63x across three independent sweeps. A single run
+of this pairing is worth roughly 1.55x to 1.69x, so a move smaller than that
+is not a result.
 
 Two things about that ratio. It is measured **with** the byte-identity
 guarantee: the exactness probe fires on this host and drops `qmv_wide`, which
@@ -371,7 +389,10 @@ costs the verify forward about 17 to 20%. And the block width is genuinely
 optimal at 3 to 4 rather than merely default: 48 of the target's 64 layers are
 GatedDeltaNet, a recurrence that processes tokens in sequence, so the verify
 cost grows nearly linearly with the block instead of amortising the way an
-attention-only target's does. Widths 5, 6 and 8 measure 48.0, 46.8 and 35.7.
+attention-only target's does. Widths 5, 6 and 8 measured 48.0, 46.8 and 35.7
+in an earlier run. Read that with the variance above in mind: the gap between
+widths 3 and 6 sits inside this pairing's run-to-run range and only width 8 is
+clearly outside it.
 
 ### Gemma 4 31B + bf16 assistant
 

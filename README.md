@@ -245,14 +245,17 @@ A small drafter proposes a block of tokens and the target verifies the whole
 block in one forward, so a round emits everything the target would have chosen
 itself plus one more. The gain is therefore a property of the output, not of
 the model: predictable continuations accept long runs of drafts, open prose
-accepts few. Measured at `temperature 0`, warm, with the arms alternated and a
-warm-up discarded.
+accepts few. The three Gemma rows below differ in nothing but the prompt, and
+the ratio moves by two thirds across them. Measured at `temperature 0`, warm,
+with the arms alternated, a warm-up discarded and the host's background
+indexers suspended.
 
 | Host | Pairing | Output | Classic | MTP | Speedup |
 |------|---------|--------|--------:|----:|--------:|
-| M5 Max (128 GB) | Gemma 4 12B + 4-bit assistant | source code | 43.5 tok/s | 121.8 tok/s | **2.80x** |
-| M5 Max (128 GB) | Gemma 4 12B + 4-bit assistant | prose | 43.3 tok/s | 84.3 tok/s | **1.95x** |
-| M5 Max (128 GB) | Qwen 3.8 27B + its 4-bit MTP head | source code | 32.5 tok/s | 47.0 tok/s | **1.45x** |
+| M5 Max (128 GB) | Gemma 4 12B + 4-bit assistant | enumeration | 43.1 tok/s | 135.4 tok/s | **3.14x** |
+| M5 Max (128 GB) | Gemma 4 12B + 4-bit assistant | source code | 43.5 tok/s | 121.0 tok/s | **2.79x** |
+| M5 Max (128 GB) | Gemma 4 12B + 4-bit assistant | prose | 43.3 tok/s | 82.4 tok/s | **1.90x** |
+| M5 Max (128 GB) | Qwen 3.8 27B + its 4-bit MTP head | source code | 32.7 tok/s | 53.4 tok/s | **1.63x** |
 
 The host matters as much as the prompt. Whether a verify block pays for itself
 depends on how the GPU generation dispatches the quantized projections it runs,
