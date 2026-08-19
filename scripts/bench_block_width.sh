@@ -7,7 +7,14 @@
 #   ./scripts/bench_block_width.sh gemma 4 5 6 # explicit widths
 #
 # Run it through scripts/with_indexers_paused.sh, the same way the throughput
-# sweep is run.
+# sweep is run:
+#
+#   ./scripts/with_indexers_paused.sh ./scripts/bench_block_width.sh gemma
+#
+# The quiet gate is inside this script, not around it, and that ordering is
+# load-bearing rather than stylistic. See scripts/lib/bench_quiet.sh: a gate
+# placed outside the wrapper waits for the daemons the wrapper exists to
+# suspend, and never releases. Do not add an outer runner.
 #
 # ## Why the widths are interleaved
 #
@@ -28,6 +35,9 @@
 # it was the saturation or the cost that did it. Both columns come from the
 # same runs the throughput median does.
 set -uo pipefail
+
+. "$(dirname "$0")/lib/bench_quiet.sh"
+QUIET_IGNORE="$QUIET_IGNORE|bench_block_width"
 
 BIN=${MLXCEL_BIN:-target/release/mlxcel}
 if [ ! -x "$BIN" ]; then
@@ -70,6 +80,9 @@ sample() {
     | sed 's/\x1b\[[0-9;]*m//g' | grep -oE '= [0-9.]+ tok/s' | sed 's/= //;s/ tok.s//'
 }
 
+wait_for_quiet
+start_contention_watch
+
 # Discarded: throughput climbs over the first runs of a cold process.
 for i in 1 2; do sample "${WIDTHS[0]}" >/dev/null; sleep 3; done
 
@@ -83,6 +96,8 @@ for ((r = 0; r < ROUNDS; r++)); do
   echo "  round $((r+1))/$ROUNDS" >&2
 done
 
+WATCH=$(stop_contention_watch)
+
 # Diagnostics run separately: the log costs throughput, so it stays out of the
 # timing samples.
 for w in "${WIDTHS[@]}"; do
@@ -94,7 +109,8 @@ for w in "${WIDTHS[@]}"; do
        "$(echo "$line" | grep -oE 'emitted_per_verify=[0-9.]+' | cut -d= -f2)" >> "$DIAG"
 done
 
-MEASURE_HOST="$HOST ($MEM GB)" python3 - "$OUT" "$DIAG" <<'PY'
+MEASURE_HOST="$HOST ($MEM GB)" MEASURE_WATCH="$WATCH" MEASURE_QUIET="$QUIET_LIMIT" \
+python3 - "$OUT" "$DIAG" <<'PY'
 import os, sys, statistics, collections
 vals = collections.defaultdict(list)
 for ln in open(sys.argv[1]):
@@ -119,4 +135,17 @@ for w in sorted(vals):
     print(f"| {w} | {m:.1f} | {sp:.1f}% | {ar:.3f} | {ev:.3f} | {mark} |{warn}")
     if eb != str(w) and eb != '?':
         print(f"   note: width {w} ran at effective block {eb}", file=sys.stderr)
+watch = (os.environ.get("MEASURE_WATCH") or "0 0 0").split()
+n_s, n_busy, peak = (float(x) for x in (watch + ['0', '0', '0'])[:3])
+quiet = float(os.environ.get("MEASURE_QUIET") or 15)
+share = n_busy / n_s if n_s else 0.0
+# A fifth of the run under load is enough to move a median; one sample is a
+# desktop drawing itself. Same threshold the throughput sweep uses.
+if share > 0.2:
+    print(f"\n!! another process was over {quiet:.0f}% for {100*share:.0f}% of this sweep "
+          f"({n_busy:.0f} of {n_s:.0f} samples, peak {peak:.0f}%).")
+    print("!! a steady load depresses every width together, so the ranking may survive")
+    print("!! while none of the absolute numbers do. Re-run before publishing these.")
+elif peak > quiet:
+    print(f"\nbrief spikes to {peak:.0f}% in {n_busy:.0f} of {n_s:.0f} samples, not enough to flag")
 PY

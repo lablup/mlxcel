@@ -117,6 +117,14 @@ width, widths interleaved and the starting width rotated per round so any
 drift spreads across the table instead of pooling at one end. Same code
 prompt, 300 tokens, same wrapper.
 
+These rows predate the in-script contention watch: at the time that script
+carried no quiet gate and no watch, and both were bolted on from outside for
+this run. The host was checked by hand several times during each sweep and
+showed `mlxcel` alone above 15%, and the spread column is reported per width,
+but there is no automated contention verdict behind these two tables the way
+there is behind the throughput rows above. The gate and the watch now live in
+the script itself, so the next sweep on any host will carry one.
+
 Gemma 4 12B + 4-bit assistant, classic arm 34.86:
 
 | width | decode tok/s | spread | acceptance | emitted/verify | round cost | speedup |

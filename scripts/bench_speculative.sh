@@ -38,11 +38,14 @@
 
 set -uo pipefail
 
+# The quiet gate and the contention watch live in one place, because they are
+# shared with scripts/bench_block_width.sh and because a fix applied to one
+# copy and not the other is exactly how the ignore list went stale once.
+. "$(dirname "$0")/lib/bench_quiet.sh"
+QUIET_IGNORE="$QUIET_IGNORE|bench_speculative"
+
 REPS=3                 # ABBA blocks; each gives 2 samples per arm
 SPREAD_LIMIT=4         # percent of the median, above which a run is suspect
-QUIET_LIMIT=15         # percent CPU for the busiest process that is not ours
-QUIET_HOLD=90          # seconds the host must stay quiet before starting
-WAIT_FOR_QUIET=1
 ONLY=""
 
 while [ $# -gt 0 ]; do
@@ -71,91 +74,6 @@ MEM=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))
 PROMPT_CODE="Write a Python function that computes the nth Fibonacci number, with a docstring and type hints."
 PROMPT_PROSE="Explain how speculative decoding accepts or rejects draft tokens."
 PROMPT_LIST="Count from 1 to 200, one number per line, with no other text."
-
-# Processes that drive the measurement rather than compete with it. The agent
-# or shell supervising a run spikes well over the limit every time it emits
-# output, so counting it as contention means an interactively supervised sweep
-# never leaves the hold at all.
-QUIET_IGNORE='(^|/)(claude|node|mlxcel|mlxcel-server|bash|zsh|sh|ps|awk|sleep|tmux)$|bench_speculative'
-
-# Busiest process that is not one of ours, as an integer percent. Matching on
-# the whole command rather than a field keeps paths with spaces intact.
-busiest() {
-  ps -Ao %cpu,comm -r | awk -v skip="$QUIET_IGNORE" '
-    NR > 1 {
-      name = $0
-      sub(/^[[:space:]]*[0-9.]+[[:space:]]+/, "", name)
-      if (name ~ skip) next
-      print int($1); exit
-    }'
-}
-
-wait_for_quiet() {
-  [ "$WAIT_FOR_QUIET" = "1" ] || return 0
-  local streak=0 top
-  echo "waiting for a quiet host (busiest other process under ${QUIET_LIMIT}% for ${QUIET_HOLD}s)..." >&2
-  while true; do
-    top=$(busiest)
-    if [ "${top:-100}" -lt "$QUIET_LIMIT" ]; then
-      streak=$((streak + 10))
-    else
-      # A blip costs progress rather than all of it. Sustained load still
-      # drives the streak to zero within a few samples and pins it there,
-      # while one transient spike no longer discards a minute and a half.
-      [ "$streak" -gt 0 ] && echo "  busy (${top}%), holding at ${streak}s" >&2
-      streak=$((streak - 10))
-      [ "$streak" -lt 0 ] && streak=0
-    fi
-    [ "$streak" -ge "$QUIET_HOLD" ] && break
-    sleep 10
-  done
-  echo "  quiet, starting" >&2
-}
-
-# Contention seen while a pairing was actually being measured.
-#
-# The entry gate only guards the start. A load that arrives afterwards is
-# otherwise caught by the spread check alone, and a *steady* load evades that
-# check by construction: it depresses every sample equally, so the median
-# drops while the spread stays small. A video call measured this table 1.2%
-# low with spreads under 4% and nothing flagged.
-#
-# What matters is therefore how much of the run was contended, not its worst
-# instant. A desktop spikes WindowServer past any threshold whenever it draws,
-# and rejecting a row for one such sample rejects every row ever measured on a
-# machine with a display. Sustained load, the kind that actually moves a
-# median, shows up in most samples instead of one.
-CONTENTION_FILE=""
-CONTENTION_PID=""
-
-start_contention_watch() {
-  CONTENTION_FILE=$(mktemp)
-  echo "0 0 0" > "$CONTENTION_FILE"   # samples, busy samples, peak
-  (
-    while :; do
-      t=$(busiest)
-      read -r n b pk < "$CONTENTION_FILE" 2>/dev/null || { n=0; b=0; pk=0; }
-      n=$((n + 1))
-      [ "${t:-0}" -ge "$QUIET_LIMIT" ] && b=$((b + 1))
-      [ "${t:-0}" -gt "${pk:-0}" ] && pk=${t:-0}
-      echo "$n $b $pk" > "$CONTENTION_FILE"
-      sleep 5
-    done
-  ) &
-  CONTENTION_PID=$!
-  # Detached so killing it later cannot print a job notice into the output
-  # this script is being read from.
-  disown "$CONTENTION_PID" 2>/dev/null || true
-}
-
-stop_contention_watch() {
-  [ -n "$CONTENTION_PID" ] && kill "$CONTENTION_PID" 2>/dev/null
-  cat "$CONTENTION_FILE" 2>/dev/null || echo "0 0 0"
-  # `command` so an interactive profile that wraps rm cannot print into the
-  # captured output. This is a mktemp scratch file, not anything of value.
-  command rm -f "$CONTENTION_FILE"
-  CONTENTION_PID=""
-}
 
 # $1 label  $2.. full mlxcel argv
 sample() {
