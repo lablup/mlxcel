@@ -46,7 +46,42 @@ if [ $# -eq 0 ]; then
   exit 1
 fi
 
-NAMES="mediaanalysisd photoanalysisd photolibraryd corespotlightd OneDrive"
+# One process name per line, because a desktop app's name can contain a space.
+#
+# `corespotlightd` coordinates and `mdworker` does the indexing, so suspending
+# only the first leaves the load running: an mdworker reached 1612% during the
+# 2026-08-19 M1 Ultra sweep and cost that row. New workers spawn on demand and
+# this cannot catch those, so it reduces the load rather than removing it.
+NAMES="mediaanalysisd
+photoanalysisd
+photolibraryd
+corespotlightd
+mdworker
+mdworker_shared
+OneDrive"
+
+# Deliberately not here: Time Machine's backupd. A first backup is the single
+# largest contender a Mac produces, but suspending it holds a backup session
+# and its destination volume open for the length of the run. `tmutil stopbackup`
+# ends the current pass cleanly instead, and Time Machine resumes incrementally
+# at its next scheduled attempt, so stop it before the sweep rather than
+# freezing it during one.
+
+# Anything else this host needs quiet, one name per line. The indexers above
+# are on every Mac; which chat and mail clients sit on top of them is a
+# property of the machine, not of the benchmark, so the list is passed in:
+#
+#   INDEXER_EXTRA_NAMES=$'Microsoft Outlook\nMSTeams\nTelegram' \
+#     ./scripts/with_indexers_paused.sh ./scripts/bench_speculative.sh
+#
+# Suspending an interactive app freezes its window and queues its network work
+# until the run ends. Nothing is lost, but the host is visibly stopped, so this
+# is opt-in rather than a default.
+if [ -n "${INDEXER_EXTRA_NAMES:-}" ]; then
+  NAMES="$NAMES
+$INDEXER_EXTRA_NAMES"
+fi
+
 PIDFILE=$(mktemp "${TMPDIR:-/tmp}/paused_indexers.XXXXXX")
 
 resume() {
@@ -58,7 +93,8 @@ resume() {
 }
 trap resume EXIT INT TERM HUP
 
-for n in $NAMES; do
+while IFS= read -r n; do
+  [ -n "$n" ] || continue
   for pid in $(pgrep -x "$n" 2>/dev/null); do
     # Already stopped by something else: not ours to resume.
     case "$(ps -o state= -p "$pid" 2>/dev/null)" in
@@ -71,7 +107,9 @@ for n in $NAMES; do
       echo "cannot signal $n ($pid), leaving it alone" >&2
     fi
   done
-done
+done <<EOF
+$NAMES
+EOF
 
 # Backstop. Detached and holding only the file path, so a SIGKILL of this
 # shell still leaves something that will resume the list.
