@@ -535,6 +535,47 @@ nothing: about 143.5 tok/s and 2.24x against the same classic arm. The table
 keeps 5 so its rows stay comparable across hosts, and the gap is recorded here
 rather than tuned away in one row.
 
+M1 Ultra gives a third answer, which is that on this host the width does not
+matter until it starts to hurt:
+
+| width | decode tok/s | spread | acceptance | emitted per verify | vs peak |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 3 | 43.3 | 1.9% | 0.876 | 2.743 | **peak** |
+| 4 | 42.9 | 3.9% | 0.799 | 3.398 | -0.9% |
+| 5 | 43.0 | 3.0% | 0.815 | 3.934 | -0.9% |
+| 6 | 41.4 | 1.0% | 0.760 | 4.153 | -4.3% |
+| 8 | 38.7 | 1.2% | 0.669 | 4.530 | -10.6% |
+| 10 | 35.9 | 1.3% | 0.614 | 5.155 | -17.1% |
+| 12 | 33.8 | 3.2% | 0.519 | 5.155 | -21.9% |
+
+Widths 3, 4 and 5 sit within 0.9% of each other against spreads of 1.9, 3.9
+and 3.0%, so "peak at 3" is not a claim these samples support. The honest
+reading is a band of three tied widths and a fall from 6, where every
+subsequent gap is far outside its spread. The default lands inside that band:
+passing no width measures 42.85 tok/s over four runs and reports
+`block_size=4` with the width-4 row's acceptance and emitted per verify to
+three digits, 1.5% under the protocol's explicit 5 and inside the spread
+either was measured with. Three hosts, three answers, and the flag is worth
+passing only where a sweep has been run.
+
+Width 5 reads 43.0 here against the 43.5 the table above measured at block 5,
+1.1% apart and inside the spread. Width 12 is the one entry on this page that
+turns the code prompt into a **regression**, 0.97x. The 10 and 12 rows share
+an emitted per verify of 5.155 because at 300 tokens both land on 58 rounds,
+so that tail is coarser than the rest.
+
+Putting the round cost from the section above at each width turns the
+qualitative claim into a slope. It is affine in the block width, and fitting
+`cost = a + b K` across each sweep gives `1.14 + 0.090 K` classic steps for
+this pairing on M3 Ultra and `1.35 + 0.346 K` on M1 Ultra, with largest
+residuals of 0.08 and 0.20. The fixed parts are close; the per-position parts
+differ by 3.8x. That factor is the `use_qmv_wide` split priced: generation 15+
+absorbs another block position into one wide pass, generation 13 pays for
+another narrow one. It is also why the usable band keeps moving left as the
+hosts get older, and why only the oldest reaches a width that loses outright.
+M5 Max is not fitted, because its sweep covers widths 3 to 6 only, too short a
+lever arm to separate a slope from an intercept.
+
 Remeasuring the tail on its own, at 0.4 to 0.6% spread, settles what the sweep
 above left open. It rises monotonically and there is no kink at 12:
 
@@ -792,12 +833,41 @@ M5 Max could not resolve. The drop is also steeper than the Gemma pairing's
 over the same widths, which is what the GatedDeltaNet recurrence predicts —
 a verify cost growing with the block rather than amortising across it.
 
-M1 Ultra is a wash on this pairing, and for the reason the Gemma table gave.
-Its acceptance is the highest of anything on this page (0.855, 2.694 tokens
-emitted per verify at block 3) and it still does not clear that host's round
-cost. Neither caveat above applies there: generation 13 never takes
-`qmv_wide`, so the probe passes as it stands and there is no 17 to 20% being
-paid, and both arms measured 0.2% and 1.3% rather than M5 Max's 8.2%. This is
+M1 Ultra is a wash on this pairing at the declared width and a loss at every
+other one. Its acceptance is the highest of anything on this page (0.855,
+2.694 tokens emitted per verify at block 3) and it still does not clear that
+host's round cost:
+
+| width | decode tok/s | spread | acceptance | emitted per verify | vs peak |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 23.6 | 1.2% | 0.935 | 1.929 | **peak** |
+| 3 | 23.1 | 1.3% | 0.855 | 2.694 | -2.3% |
+| 4 | 21.9 | 1.1% | 0.781 | 3.322 | -7.1% |
+| 5 | 20.1 | 1.7% | 0.673 | 3.691 | -14.8% |
+| 6 | 17.7 | 0.7% | 0.567 | 3.785 | -25.3% |
+| 8 | 14.2 | 2.1% | 0.424 | 3.934 | -40.0% |
+
+Against a classic arm of 23.79 that is 0.99x at the peak and 0.60x at width 8.
+"Optimal at 3 to 4" is not a statement about this host: the peak is the
+narrowest width measured, every step up is a clean loss outside its own
+spread, and passing no `--draft-block-size` lands on 3 and measures 23.3 tok/s
+with the width-3 row's acceptance and emitted per verify, so the 0.98x in the
+table above is what an untuned user gets.
+
+The round cost fitted over these six widths is `0.46 + 0.771 K` classic steps,
+largest residual 0.06. Beside the Gemma pairing's `1.35 + 0.346 K` on the same
+host, the per-position cost has slightly more than doubled while the fixed
+part fell, which prices the GatedDeltaNet claim above rather than asserting
+it: a recurrence processing tokens in sequence charges nearly full freight for
+each extra block position where an attention-only target amortises it. The
+host effect and the target effect compose, and this pairing carries both, a
+generation-13 host and a recurrent target, which is why it is the only entry
+on this page that loses at every width.
+
+Neither caveat the generation 15+ hosts carry applies here. Generation 13
+never takes `qmv_wide`, so the probe passes as it stands and there is no 17 to
+20% being paid, and both arms measured 0.2% and 1.3% rather than M5 Max's
+8.2%. This is
 the same pairing that measured 0.59x to 0.70x on that host in
 `benchmark_results/qwen38-mtp-m1ultra-2026-08-16.md` with the bf16 drafter;
 quantizing the drafter to 4-bit (#1185 Phase 3) is what moved it to
