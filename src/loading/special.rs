@@ -97,11 +97,6 @@ fn special_weight_loader_kind(model_type: ModelType) -> Option<SpecialWeightLoad
     }
 }
 
-#[allow(dead_code)]
-pub(crate) fn is_special_weight_model_type(model_type: ModelType) -> bool {
-    model_metadata::is_special_weight_model_type(model_type)
-}
-
 pub(crate) fn try_load_special_model_from_weights(
     model_type: ModelType,
     config_str: &str,
