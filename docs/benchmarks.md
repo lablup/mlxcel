@@ -472,11 +472,30 @@ The mechanism is in the last two columns. Emitted per verify climbs towards
 4.041, 4.333 across the range — while the verify forward keeps costing more
 per position, so past the peak each widening buys less than it pays for.
 
-One consequence for the row above: on this host the adaptive controller does
-not land on the peak. The code row runs at effective width 5 and leaves 3.9%
-on the table against width 4, which is well outside the 0.6 to 0.9% spreads
-either width was measured with. That is small enough to ignore and too large
-to call noise, so it is recorded rather than tuned away here.
+Width 4 is also the shipped default, and that is not a coincidence: the Gemma
+assistant checkpoint is configured for a 4-token verify block, and `mtp`
+defaults `--draft-block-size` to the same 4. So a user who passes no width at
+all lands exactly on this host's peak, measuring 143.5 tok/s against the
+sweep's 143.6.
+
+The 5 in the code and prose rows above is this benchmark's own request, not
+the runtime's choice. `scripts/bench_speculative.sh` passes 5 because 5 is
+where M5 Max peaked, and a width baked into the protocol is what makes rows
+comparable between hosts. `effective_mtp_block_size` treats a request above
+the drafter's configured depth as a *ceiling* rather than a setting: it stays
+at 4 until at least 8 rounds have completed and the configured prefix has been
+fully accepted in at least 65% of the last 32, then expands to the request.
+That is the whole of why the code row reads "5" and the prose row reads
+"5 requested, 4 effective" — the code prompt clears the expansion gate and
+prose does not.
+
+The consequence is worth stating plainly, because it runs the opposite way
+from the usual caveat. On M3 Ultra the protocol's width 5 is 3.9% *slower*
+than the default the shipped configuration would have used, so the 138.5 and
+2.16x in the table above understate what this host gives a user who tunes
+nothing: about 143.5 tok/s and 2.24x against the same classic arm. The table
+keeps 5 so its rows stay comparable across hosts, and the gap is recorded here
+rather than tuned away in one row.
 
 The accelerated output is byte-identical to classic decode where the startup
 exactness probe says it is, which the runtime measures rather than assumes: an
