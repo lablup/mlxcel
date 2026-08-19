@@ -61,6 +61,10 @@ jobs:
 
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.0"
+      # Reverse-DNS base for the code signature identifiers. mlxcel is sealed
+      # as $BUNDLE_ID and mlxcel-server as $BUNDLE_ID-server, the same
+      # convention bssh uses (lablup/bssh#264).
+      BUNDLE_ID: "com.lablup.mlxcel"
 
     steps:
       # Self-healing release: build the *source of the target tag* while
@@ -179,13 +183,17 @@ jobs:
 
       - name: Prepare signing certificate (rcodesign)
         env:
-          APPLE_CERTIFICATE: ${{ secrets.DEV_ID_CERT_P12 }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.DEV_ID_CERT_PASSWORD }}
+          # Same secret names as bssh and continuum-router (lablup/bssh#264):
+          # APPLE_CERTIFICATE is the base64 Developer ID Application .p12 and
+          # APPLE_CERTIFICATE_PASSWORD its password. The former
+          # DEV_ID_CERT_P12 / DEV_ID_CERT_PASSWORD pair is no longer read.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         run: |
           set -euo pipefail
 
           # Use rcodesign instead of Apple's codesign to bypass macOS 26 keychain
-          # session issues on self-hosted runners. rcodesign reads PEM directly —
+          # session issues on self-hosted runners. rcodesign reads PEM directly:
           # no keychain, no SecurityAgent, no GUI session required.
           for var in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD; do
             if [ -z "${!var:-}" ]; then
@@ -201,11 +209,51 @@ jobs:
           # Tolerate trailing whitespace/newlines from copy-paste when decoding.
           printf '%s' "$APPLE_CERTIFICATE" | tr -d '[:space:]' | base64 --decode > "$P12_FILE"
 
-          # Extract to unencrypted PEM (cert + private key) using -legacy flag
-          # for p12 files with legacy RC2-40-CBC encryption. Capture stderr so
+          # Apple's exported p12 uses RC2-40-CBC, which only OpenSSL's legacy
+          # provider reads, so the extraction needs `openssl pkcs12 -legacy`.
+          # Do not let PATH decide which openssl runs: Apple's /usr/bin/openssl
+          # is LibreSSL, which has no -legacy option at all, and Homebrew's
+          # versioned openssl formulae are keg-only, so they are never
+          # symlinked into the prefix bin. Select by capability rather than by
+          # name or version: whichever binary advertises -legacy can do this,
+          # which keeps working on a future openssl@5 and rejects LibreSSL for
+          # the reason that matters. (Ported from lablup/bssh#264.)
+          supports_legacy() {
+            # Probe through a variable rather than `cmd | grep -q`: under
+            # pipefail, grep -q closing the pipe early can fail the probe even
+            # though -legacy was present.
+            local help_output
+            help_output="$("$1" pkcs12 -help 2>&1 || true)"
+            grep -q -- '-legacy' <<<"$help_output"
+          }
+
+          OPENSSL_BIN=""
+          for FORMULA in openssl@4 openssl@3 openssl; do
+            PREFIX="$(brew --prefix "$FORMULA" 2>/dev/null || true)"
+            [ -n "$PREFIX" ] || continue
+            CANDIDATE="$PREFIX/bin/openssl"
+            if [ -x "$CANDIDATE" ] && supports_legacy "$CANDIDATE"; then
+              OPENSSL_BIN="$CANDIDATE"
+              break
+            fi
+          done
+          if [ -z "$OPENSSL_BIN" ]; then
+            CANDIDATE="$(command -v openssl || true)"
+            if [ -n "$CANDIDATE" ] && supports_legacy "$CANDIDATE"; then
+              OPENSSL_BIN="$CANDIDATE"
+            fi
+          fi
+          if [ -z "$OPENSSL_BIN" ]; then
+            echo "::error::No openssl on this runner supports 'pkcs12 -legacy', which is required to read the RC2-40-CBC signing certificate. Install one with: brew install openssl@3"
+            rm -f "$P12_FILE"
+            exit 1
+          fi
+          echo "Using $OPENSSL_BIN ($("$OPENSSL_BIN" version))"
+
+          # Extract to unencrypted PEM (cert + private key). Capture stderr so
           # a wrong password / corrupt file surfaces a useful diagnostic
           # instead of an empty PEM with no explanation.
-          if ! openssl pkcs12 -in "$P12_FILE" \
+          if ! "$OPENSSL_BIN" pkcs12 -in "$P12_FILE" \
               -passin "pass:$APPLE_CERTIFICATE_PASSWORD" \
               -legacy -nodes -out "$PEM_PATH" 2> "$OPENSSL_ERR"; then
             echo "::error::openssl pkcs12 failed to extract the signing certificate:"
@@ -222,7 +270,37 @@ jobs:
           fi
 
           echo "=== Certificate details ==="
-          openssl x509 -in "$PEM_PATH" -noout -subject -dates 2>/dev/null || true
+          "$OPENSSL_BIN" x509 -in "$PEM_PATH" -noout -subject -dates 2>/dev/null || true
+
+          # Gate on the certificate TYPE, not just its presence. mlxcel
+          # v0.0.26 and v0.0.27 shipped signed with "Apple Distribution:
+          # Lablup Inc.", an App Store submission identity that Gatekeeper
+          # rejects for anything downloaded outside the App Store; when that
+          # certificate was revoked on 2026-08-12, macOS started killing those
+          # installed binaries on launch and deleting them as malware. Only a
+          # "Developer ID Application" certificate satisfies the Developer ID
+          # policy, so a wrong p12 must fail the release here, before anything
+          # is signed. Check the whole PEM, not only the first block:
+          # `pkcs12 -nodes` emits the private key and the full chain, and the
+          # bag order that puts the leaf first is a convention rather than a
+          # guarantee. (Ported from lablup/bssh#264.)
+          echo "=== Verifying this is a Developer ID Application certificate ==="
+          CERT_SUBJECTS="$("$OPENSSL_BIN" crl2pkcs7 -nocrl -certfile "$PEM_PATH" 2>/dev/null \
+            | "$OPENSSL_BIN" pkcs7 -print_certs -noout 2>/dev/null || true)"
+          if [ -z "$CERT_SUBJECTS" ]; then
+            CERT_SUBJECTS="$("$OPENSSL_BIN" x509 -in "$PEM_PATH" -noout -subject 2>/dev/null || true)"
+          fi
+          echo "$CERT_SUBJECTS"
+
+          if ! grep -q "Developer ID Application" <<<"$CERT_SUBJECTS"; then
+            echo "::error::the p12 in APPLE_CERTIFICATE contains no 'Developer ID Application' certificate, so anything signed with it is rejected by Gatekeeper on download. Issue a Developer ID Application certificate in the Apple Developer portal (Account Holder role required), export it as a .p12, and replace the secret."
+            if grep -qE "Apple Distribution|Apple Development|iPhone Distribution" <<<"$CERT_SUBJECTS"; then
+              echo "::error::the certificate present is an App Store / development certificate, which is only valid for submissions through App Store Connect"
+            fi
+            rm -f "$PEM_PATH"
+            exit 1
+          fi
+          echo "Developer ID Application certificate confirmed"
 
           echo "PEM_FILE=$PEM_PATH" >> "$GITHUB_ENV"
 
@@ -247,16 +325,50 @@ jobs:
           set -euo pipefail
           BIN_DIR="$CARGO_TARGET_DIR/aarch64-apple-darwin/release"
           for BIN in mlxcel mlxcel-server; do
-            echo "Signing $BIN..."
+            # Pin the code signature identifier to a stable reverse-DNS value
+            # instead of letting rcodesign derive one from the file path,
+            # which produced values like "mlxcel-8cb0b84099852e5f" that change
+            # with the build layout. mlxcel seals as $BUNDLE_ID and
+            # mlxcel-server as $BUNDLE_ID-server.
+            if [ "$BIN" = "mlxcel" ]; then
+              IDENTIFIER="$BUNDLE_ID"
+            else
+              IDENTIFIER="$BUNDLE_ID-${BIN#mlxcel-}"
+            fi
+            echo "Signing $BIN as $IDENTIFIER..."
             rcodesign sign \
               --pem-file "$PEM_FILE" \
               --code-signature-flags runtime \
+              --binary-identifier "$IDENTIFIER" \
               "$BIN_DIR/$BIN"
-          done
 
-          echo "=== Verifying signatures ==="
-          for BIN in mlxcel mlxcel-server; do
             rcodesign verify "$BIN_DIR/$BIN"
+
+            # Assert what was actually sealed, with Apple's own codesign as
+            # the reader. These assertions are the ones that would have caught
+            # the v0.0.26/v0.0.27 defect: those releases went out signed by an
+            # "Apple Distribution" authority and nothing in the workflow ever
+            # looked at the authority. Matched from here-strings, not
+            # `cmd | grep`, because this step runs under pipefail, where
+            # `grep -q` closing the pipe early can surface as a failed
+            # pipeline regardless of whether the pattern matched. (Ported
+            # from lablup/bssh#264.)
+            CODESIGN_OUTPUT="$(codesign -dv --verbose=4 "$BIN_DIR/$BIN" 2>&1 || true)"
+            echo "$CODESIGN_OUTPUT"
+            if ! grep -q "Authority=Developer ID Application" <<<"$CODESIGN_OUTPUT"; then
+              echo "::error::$BIN is not signed by a Developer ID Application authority, so Gatekeeper will refuse it on download"
+              exit 1
+            fi
+            # Match the runtime flag by name, not by a literal flags value:
+            # other code signature flags combine into the same hex field.
+            if ! grep -Eq 'flags=0x[0-9a-f]+\(.*runtime.*\)' <<<"$CODESIGN_OUTPUT"; then
+              echo "::error::$BIN is missing the hardened runtime flag, which notarization requires"
+              exit 1
+            fi
+            if ! grep -qxF "Identifier=$IDENTIFIER" <<<"$CODESIGN_OUTPUT"; then
+              echo "::error::$BIN was signed with a code signature identifier other than the requested $IDENTIFIER"
+              exit 1
+            fi
           done
 
       # macOS notarization via App Store Connect API key.
@@ -301,7 +413,7 @@ jobs:
           done
 
           # The AC_API_PRIVATE_KEY_P8 secret stores the App Store Connect .p8
-          # key base64-encoded (same convention as DEV_ID_CERT_P12). Decode it
+          # key base64-encoded (same convention as APPLE_CERTIFICATE). Decode it
           # back to PEM here. Also tolerate a raw .p8 pasted verbatim, and
           # strip CR so a CRLF-mangled paste still parses — passing the secret
           # verbatim makes the API call fail with the opaque "invalidAsn1".
