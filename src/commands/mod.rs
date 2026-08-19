@@ -18,6 +18,13 @@
 //! argument/schema wiring while command-specific execution logic evolves in
 //! isolated modules.
 
+use std::path::Path;
+
+/// Load an image file, mapping decode failures to a consistent message.
+pub(crate) fn open_image(path: &Path) -> anyhow::Result<image::DynamicImage> {
+    image::open(path).map_err(|e| anyhow::anyhow!("Failed to load image {:?}: {}", path, e))
+}
+
 pub(crate) mod chat;
 pub(crate) mod detect;
 pub(crate) mod download;

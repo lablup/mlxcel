@@ -33,6 +33,7 @@ use mlxcel::server::model_provider::model_worker::StreamingDecodeState;
 use mlxcel::tokenizer::MlxcelTokenizer;
 
 use super::generate::print_generation_preamble;
+use super::open_image;
 use crate::GenerateArgs;
 
 /// Preprocess `--image` paths, expand the prompt, and build the vision
@@ -50,9 +51,7 @@ fn prepare_diffusion_vision(
 ) -> Result<PreparedDiffusionImagePrompt> {
     let images: Vec<image::DynamicImage> = image_paths
         .iter()
-        .map(|path| {
-            image::open(path).map_err(|e| anyhow!("Failed to load image {:?}: {}", path, e))
-        })
+        .map(|path| open_image(path))
         .collect::<Result<Vec<_>>>()?;
     println!("Loaded {} image(s).", images.len());
 
