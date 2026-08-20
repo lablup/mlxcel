@@ -258,8 +258,9 @@ where
             "MTP exactness probe failed under qmv_wide ({}) and passed without it. \
              Disabling qmv_wide for this process to keep the temperature-0 \
              byte-identity contract; the verify forward costs about 17 to 20 \
-             percent more. Set MLXCEL_QMV_WIDE=1 to pin the faster kernel and \
-             decline MTP instead.",
+             percent more on the Qwen 3.5 family and about 23 percent on \
+             Gemma 4 (#1188). Set MLXCEL_QMV_WIDE=1 to pin the faster kernel \
+             and decline MTP instead.",
             first.reason()
         );
         Some(true)

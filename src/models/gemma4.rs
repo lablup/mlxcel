@@ -29,6 +29,9 @@ use crate::distributed::pipeline::StageExecutionOutput;
 use crate::distributed::pipeline::partial_loading::filter_weight_map;
 use crate::models::model_owned::ModelOwnedSequenceState;
 use crate::models::recurrent_snapshot::{push_i32, push_optional, restore_i32, restore_optional};
+use crate::models::speculative_exactness::{
+    BlockChainExactness, ProbeKey, compare_block_against_chain, mtp_exactness_gate,
+};
 use crate::models::switch_layers::{SwitchLinear, gather_sort};
 use mlxcel_core::cache::{
     KVCacheMode, RotatingKVCacheSnapshotState, SequenceId, SequenceStateLayout,
@@ -5114,6 +5117,133 @@ impl Gemma4Wrapper {
     pub fn reset_caches(&self) {
         self.sequence_state
             .replace_internal(self.model.make_caches());
+    }
+
+    /// Whether MTP may engage on this loaded checkpoint at `block_size`,
+    /// measured rather than predicted.
+    ///
+    /// The Gemma 4 arms of `mtp_capable_target` used to return `true`
+    /// unconditionally, which advertised temperature-0 byte-identity the
+    /// hardware does not always provide: on Apple GPU generation 15+ MLX
+    /// dispatches `M >= 2` affine-quantized matmuls to `qmv_wide`, whose
+    /// K-reduction order differs from the single-token `qmv`, and the
+    /// measured result is a systematic token divergence, not f16 jitter
+    /// (issue #1188). This routes through the same
+    /// [`mtp_exactness_gate`] the Qwen 3.5 family uses: probe once per
+    /// process at the configured block width, on failure retry with
+    /// `qmv_wide` disabled and keep it off when that restores exactness
+    /// (measured ~23% on this family's verify forward, #1188), and decline
+    /// to classic decode when neither arm is exact unless
+    /// `MLXCEL_MTP_ALLOW_INEXACT` is set.
+    ///
+    /// Used by: `mtp_capable_target` (server burst dispatch) and the
+    /// offline CLI MTP gate in `commands::generate`.
+    pub fn mtp_exactness_allows(&self, block_size: usize) -> bool {
+        let key = ProbeKey {
+            block_size: block_size as u32,
+            hidden_size: self.model.config.hidden_size as u32,
+            num_hidden_layers: self.model.config.num_hidden_layers as u32,
+        };
+        mtp_exactness_gate(key, || self.probe_block_chain_exactness(block_size))
+    }
+
+    /// Measure whether a `T = block_size` verify block produces
+    /// byte-identical logits to `block_size` single-token decode steps on
+    /// this checkpoint.
+    ///
+    /// Mirrors `Qwen35Model::probe_block_chain_exactness`; the comparison,
+    /// the multi-draw rationale, and the failure policy live in
+    /// [`crate::models::speculative_exactness`]. Runs on throwaway caches
+    /// built directly from the inner model, so neither the wrapper's
+    /// fallback `internal` slot nor any scheduler-owned `seq_id` slot is
+    /// touched — the constraint that kept the Gemma 4 arms on an
+    /// unconditional `true` before this existed.
+    ///
+    /// Both arms project full-width logits through the tied LM head
+    /// (`forward_with_caches_and_embeddings`), so the probe covers the
+    /// `M = K` versus `M = 1` dispatch of the head projection as well as
+    /// the decoder layers, exactly as the Qwen probe does.
+    pub fn probe_block_chain_exactness(&self, block_size: usize) -> BlockChainExactness {
+        // Mirrors `PROBE_PROMPT_LEN` / `PROBE_DRAWS` in `models::qwen3_5`.
+        const PROBE_PROMPT_LEN: usize = 8;
+        const PROBE_DRAWS: usize = 3;
+
+        if block_size < 2 {
+            return BlockChainExactness::NotRun("block width below 2 drafts nothing");
+        }
+        let vocab = self.model.config.vocab_size;
+        if vocab < 2 {
+            return BlockChainExactness::NotRun("degenerate vocabulary");
+        }
+
+        let as_input =
+            |tokens: &[i32]| mlxcel_core::from_slice_i32(tokens, &[1, tokens.len() as i32]);
+        let position_bytes = |logits: &UniquePtr<MlxArray>, index: i32| -> Vec<u8> {
+            let shape = mlxcel_core::array_shape(logits);
+            let row = mlxcel_core::slice(logits, &[0, index, 0], &[shape[0], index + 1, shape[2]]);
+            mlxcel_core::array_to_raw_bytes(&row)
+        };
+
+        for draw in 0..PROBE_DRAWS {
+            // Synthetic ids, varied per draw: dispatch depends only on shape
+            // and `M`, but whether a last-ulp kernel difference lands on a
+            // differing byte depends on the values (see the false-pass note
+            // in `models::speculative_exactness`).
+            let salt = draw * 977 + 1;
+            let wrap = |i: usize, stride: usize, offset: usize| {
+                ((i * stride + offset + salt) % vocab) as i32
+            };
+            let prompt: Vec<i32> = (0..PROBE_PROMPT_LEN).map(|i| wrap(i, 7, 1)).collect();
+            let block: Vec<i32> = (0..block_size).map(|i| wrap(i, 13, 3)).collect();
+
+            // Chain arm: prefill, then one token at a time — the shape
+            // classic decode runs, and the contract's reference.
+            let mut chain_caches = self.model.make_caches();
+            let _ = self.model.forward_with_caches_and_embeddings(
+                &as_input(&prompt),
+                None,
+                &mut chain_caches,
+                None,
+                None,
+            );
+            let mut chain_positions: Vec<Vec<u8>> = Vec::with_capacity(block_size);
+            for token in &block {
+                let out = self.model.forward_with_caches_and_embeddings(
+                    &as_input(&[*token]),
+                    None,
+                    &mut chain_caches,
+                    None,
+                    None,
+                );
+                chain_positions.push(position_bytes(&out, 0));
+            }
+
+            // Block arm: fresh caches, same prefill, the whole block at once.
+            let mut block_caches = self.model.make_caches();
+            let _ = self.model.forward_with_caches_and_embeddings(
+                &as_input(&prompt),
+                None,
+                &mut block_caches,
+                None,
+                None,
+            );
+            let out = self.model.forward_with_caches_and_embeddings(
+                &as_input(&block),
+                None,
+                &mut block_caches,
+                None,
+                None,
+            );
+            let block_positions: Vec<Vec<u8>> = (0..block_size)
+                .map(|i| position_bytes(&out, i as i32))
+                .collect();
+
+            let verdict = compare_block_against_chain(&block_positions, &chain_positions);
+            if !verdict.is_equal() {
+                return verdict;
+            }
+        }
+        BlockChainExactness::Equal
     }
 
     pub(crate) fn input_embeddings(&self, input_ids: &MlxArray) -> UniquePtr<MlxArray> {

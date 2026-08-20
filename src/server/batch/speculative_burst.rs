@@ -682,7 +682,16 @@ fn ragged_target_sliding_window(model: &LoadedModel) -> Option<usize> {
 /// used to check a different subset of it.
 pub(crate) fn mtp_capable_target(model: &LoadedModel, block_size: usize) -> bool {
     match model {
-        LoadedModel::Gemma4(_) | LoadedModel::Gemma4VLM(_) | LoadedModel::Gemma4Unified(_) => true,
+        // The Gemma 4 arms used to return `true` unconditionally, which
+        // advertised a byte-identity the hardware does not always provide:
+        // measured on generation 15+, the default `qmv_wide` dispatch makes
+        // the verify block diverge from the chain systematically (#1188).
+        // Same gate as the Qwen arms below: probe once, buy exactness back
+        // by dropping `qmv_wide` where that suffices (~23% on this family's
+        // verify forward), decline otherwise.
+        LoadedModel::Gemma4(m) => m.mtp_exactness_allows(block_size),
+        LoadedModel::Gemma4VLM(vlm) => vlm.text_model.mtp_exactness_allows(block_size),
+        LoadedModel::Gemma4Unified(unified) => unified.text_model.mtp_exactness_allows(block_size),
         LoadedModel::Qwen35(m) | LoadedModel::Qwen35Moe(m) => m.mtp_exactness_allows(block_size),
         LoadedModel::Qwen35VLM(vlm) | LoadedModel::Qwen35MoeVLM(vlm) => {
             vlm.text_model.mtp_exactness_allows(block_size)
