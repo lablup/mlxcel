@@ -597,15 +597,25 @@ pre-commit: fmt clippy test ## Pre-commit checks
 #     here by widening a parity tolerance before checking whether the run had
 #     TF32 on. Measured on GB10 (sm_121) at `670512c2`: this gate is 8167 passed
 #     and 0 failed, while re-running with `MLX_ENABLE_TF32=1` reds every one of
-#     the four tests #1088 listed. Three of them fail on every run, at a
-#     bit-identical magnitude across 6 runs each. klear straddles its own 1e-3
-#     bound instead: over 10 runs it failed 8 and its max logit delta ranged
-#     5.9e-4 to 2.0e-3 (median 1.2e-3), against 3.6e-7 to 7.2e-7 over 10
-#     pinned-precision runs. That spread is klear's own, not TF32's: it is the
-#     only one of the four that runs a whole quantized MoE model rather than an
-#     isolated module over small dense tensors, and it varies at both precision
-#     settings, so the pin bounds the magnitude rather than the variance. Filed
-#     separately. What it means here is that a single green run under
+#     the four tests #1088 listed. All four now fail on every run, each at a
+#     bit-identical magnitude: klear's is 1.0485351e-3 against its 1e-3 bound,
+#     versus 5.364418e-7 under the pin, both reproducing on 10 of 10 runs.
+#
+#     klear used to be the exception here, and #1265 found out why. It failed
+#     only 8 runs in 10 with its delta wandering over 5.9e-4 to 2.0e-3, which
+#     earlier notes at this spot read as a property of the backend. It was not.
+#     `filled_weights` in `src/models/klear_tests.rs` walked a `WeightMap`, which
+#     is a `HashMap`, and advanced one seed per key; `RandomState` randomizes that
+#     iteration order per process, so every run built a DIFFERENT random model.
+#     Sorting the keys fixed it, and the same fixture bug was in afmoe, phixtral
+#     and bailing_moe_linear. Two claims that stood here before are therefore
+#     withdrawn: the variance was not klear's own numerics, and the fixture is not
+#     a quantized MoE model at all (it ships no `.scales`, so the expert stacks
+#     load dense and neither the fused nor the `gather_qmm` quantized path runs).
+#     Measured on GB10 alongside the fix: both arms are bit-identical to
+#     themselves across repeats in one process, at both precision settings.
+#
+#     What this all means here is that a single green run under
 #     `MLX_ENABLE_TF32=1` is not evidence that a test has stopped depending on
 #     the pin. The pin is load-bearing, not decorative.
 #

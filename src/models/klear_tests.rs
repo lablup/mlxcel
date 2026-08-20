@@ -592,7 +592,12 @@ fn a_dense_layer_is_validated_as_a_plain_mlp() {
 
 fn filled_weights(args: &ModelArgs) -> WeightMap {
     let mut weights = synthetic_weights(args);
-    let keys: Vec<String> = weights.keys().cloned().collect();
+    let mut keys: Vec<String> = weights.keys().cloned().collect();
+    // `WeightMap` is a `HashMap`, whose iteration order is randomized per
+    // process by `RandomState`. The seed below advances once per key, so an
+    // unsorted walk hands every tensor a different noise block on every run
+    // and the test builds a DIFFERENT random model each process (issue #1265).
+    keys.sort();
     let mut seed = 0xC0FF_EE11u32;
     for key in keys {
         let shape = mlxcel_core::array_shape(weights.get(&key).expect("key just listed"));
@@ -643,6 +648,17 @@ fn a_synthetic_model_builds_and_produces_finite_logits() {
 fn the_prefill_is_causal_without_being_handed_a_mask() {
     // Generation calls `forward` with `mask == None` and the model must build
     // its own causal mask. A fully bidirectional prefill is fluent and wrong.
+    //
+    // What the 1e-3 bound is and is not (issue #1265). It is a PRECISION bound,
+    // not a causality bound. Measured on GB10 (CUDA sm_121) once `filled_weights`
+    // stopped seeding through a randomized `HashMap` walk: the two arms differ by
+    // 5.364418e-7 under the `MLX_ENABLE_TF32=0` pin (#1260) and by 1.0485351e-3
+    // at MLX's default precision, each value reproducing on all 10 of 10 runs.
+    // A genuinely bidirectional prefill moves row 0 by about 1.6: roughly 1.5e3x
+    // the default-precision figure and 3e6x the pinned one, so the assertion
+    // keeps its full power over the property it names. Like the other three
+    // tests in #1088 this one depends on the pin and fails deterministically
+    // without it; that is the documented policy, not a defect.
     let args = small_args();
     let weights = filled_weights(&args);
     let model = KlearModel::from_weights(&weights, &args).expect("the model builds");

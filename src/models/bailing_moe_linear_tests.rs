@@ -1091,7 +1091,11 @@ fn a_synthetic_model_builds_and_produces_finite_logits() {
     // Replace the lazy zeros with real values: an all-zero stack produces
     // technically-finite logits from a graph that never exercises the decay,
     // the router or the gate.
-    let keys: Vec<String> = weights.keys().cloned().collect();
+    let mut keys: Vec<String> = weights.keys().cloned().collect();
+    // Sorted because `WeightMap` is a `HashMap`: its iteration order is
+    // randomized per process, and the seed below advances once per key, so an
+    // unsorted walk builds a different random model on every run (issue #1265).
+    keys.sort();
     let mut seed = 0x5EED_1234u32;
     for key in keys {
         let shape = mlxcel_core::array_shape(weights.get(&key).expect("key just listed"));
@@ -1138,7 +1142,11 @@ fn a_synthetic_model_builds_and_produces_finite_logits() {
 fn the_cache_flavour_follows_the_layer_schedule() {
     let args = small_args();
     let mut weights = synthetic_weights(&args);
-    let keys: Vec<String> = weights.keys().cloned().collect();
+    let mut keys: Vec<String> = weights.keys().cloned().collect();
+    // Sorted because `WeightMap` is a `HashMap`: its iteration order is
+    // randomized per process, and the seed below advances once per key, so an
+    // unsorted walk builds a different random model on every run (issue #1265).
+    keys.sort();
     let mut seed = 0x1357_9BDFu32;
     for key in keys {
         let shape = mlxcel_core::array_shape(weights.get(&key).expect("key just listed"));
