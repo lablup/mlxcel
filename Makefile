@@ -596,8 +596,14 @@ pre-commit: fmt clippy test ## Pre-commit checks
 #     runtime exactness probes (#1188, #1189). So do not answer a future red
 #     here by widening a parity tolerance before checking whether the run had
 #     TF32 on. Measured on GB10 (sm_121) at `670512c2`: this gate is 8167 passed
-#     and 0 failed, while re-running with `MLX_ENABLE_TF32=1` still reds three
-#     of the four tests #1088 listed. The pin is load-bearing, not decorative.
+#     and 0 failed, while re-running with `MLX_ENABLE_TF32=1` reds every one of
+#     the four tests #1088 listed. Three of them fail on every run. klear
+#     straddles its own 1e-3 bound instead: over 10 runs it failed 8 and its max
+#     logit delta ranged 5.9e-4 to 2.0e-3 (median 1.2e-3), against 3.6e-7 to
+#     7.2e-7 over 10 pinned-precision runs. So MLX's reduced-precision kernel is
+#     also nondeterministic run to run, and a single green run under
+#     `MLX_ENABLE_TF32=1` is not evidence that a test has stopped depending on
+#     the pin. The pin is load-bearing, not decorative.
 #
 # There is deliberately no `verify-clippy-cuda` here yet: the CUDA lint half is
 # a separate hole from the CUDA test half, and #1048 is about the test gate.
