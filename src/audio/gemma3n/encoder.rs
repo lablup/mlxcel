@@ -69,6 +69,26 @@ struct CumulativeGroupNorm {
     eps: f32,
 }
 
+struct CumulativeGroupNormStages {
+    output: UniquePtr<MlxArray>,
+    #[cfg(feature = "xla-diagnostics")]
+    sum_at_time: UniquePtr<MlxArray>,
+    #[cfg(feature = "xla-diagnostics")]
+    cumulative_sum: UniquePtr<MlxArray>,
+    #[cfg(feature = "xla-diagnostics")]
+    mean: UniquePtr<MlxArray>,
+    #[cfg(feature = "xla-diagnostics")]
+    squared_at_time: UniquePtr<MlxArray>,
+    #[cfg(feature = "xla-diagnostics")]
+    cumulative_squared: UniquePtr<MlxArray>,
+    #[cfg(feature = "xla-diagnostics")]
+    variance: UniquePtr<MlxArray>,
+    #[cfg(feature = "xla-diagnostics")]
+    stabilized_variance: UniquePtr<MlxArray>,
+    #[cfg(feature = "xla-diagnostics")]
+    inverse_stddev: UniquePtr<MlxArray>,
+}
+
 impl CumulativeGroupNorm {
     fn from_weights(
         weights: &WeightMap,
@@ -85,6 +105,10 @@ impl CumulativeGroupNorm {
     /// Input and output are `[B, T, F, C]`. Statistics are float32 and are
     /// cumulative over time after reducing both frequency and channels.
     fn forward(&self, hidden_states: &MlxArray) -> UniquePtr<MlxArray> {
+        self.forward_stages(hidden_states).output
+    }
+
+    fn forward_stages(&self, hidden_states: &MlxArray) -> CumulativeGroupNormStages {
         let input_dtype = mlxcel_core::array_dtype(hidden_states);
         let x = mlxcel_core::astype(hidden_states, mlxcel_core::dtype::FLOAT32);
         let sum_at_time = mlxcel_core::sum_axis(&mlxcel_core::sum_axis(&x, 3, true), 2, true);
@@ -108,10 +132,30 @@ impl CumulativeGroupNorm {
         let cumulative_squared = mlxcel_core::cumsum(&squared_at_time, 1, false, true);
         let variance = mlxcel_core::divide(&cumulative_squared, &safe_count);
         let eps = mlxcel_core::full_f32(&[1], self.eps, mlxcel_core::dtype::FLOAT32);
-        let inverse_stddev = mlxcel_core::rsqrt(&mlxcel_core::add(&variance, &eps));
+        let stabilized_variance = mlxcel_core::add(&variance, &eps);
+        let inverse_stddev = mlxcel_core::rsqrt(&stabilized_variance);
         let normalized = mlxcel_core::multiply(&centered, &inverse_stddev);
         let normalized = mlxcel_core::multiply(&normalized, &self.weight);
-        mlxcel_core::astype(&normalized, input_dtype)
+        let output = mlxcel_core::astype(&normalized, input_dtype);
+        CumulativeGroupNormStages {
+            output,
+            #[cfg(feature = "xla-diagnostics")]
+            sum_at_time,
+            #[cfg(feature = "xla-diagnostics")]
+            cumulative_sum,
+            #[cfg(feature = "xla-diagnostics")]
+            mean: cumulative_mean,
+            #[cfg(feature = "xla-diagnostics")]
+            squared_at_time,
+            #[cfg(feature = "xla-diagnostics")]
+            cumulative_squared,
+            #[cfg(feature = "xla-diagnostics")]
+            variance,
+            #[cfg(feature = "xla-diagnostics")]
+            stabilized_variance,
+            #[cfg(feature = "xla-diagnostics")]
+            inverse_stddev,
+        }
     }
 }
 
@@ -121,6 +165,21 @@ struct SscpConvBlock {
     time_padding_after: i32,
     stride_time: i32,
     stride_frequency: i32,
+}
+
+#[cfg(feature = "xla-diagnostics")]
+struct SscpConvDiagnosticStages {
+    convolution: UniquePtr<MlxArray>,
+    norm_sum_at_time: UniquePtr<MlxArray>,
+    norm_cumulative_sum: UniquePtr<MlxArray>,
+    norm_mean: UniquePtr<MlxArray>,
+    norm_squared_at_time: UniquePtr<MlxArray>,
+    norm_cumulative_squared: UniquePtr<MlxArray>,
+    norm_variance: UniquePtr<MlxArray>,
+    norm_stabilized_variance: UniquePtr<MlxArray>,
+    norm_inverse_stddev: UniquePtr<MlxArray>,
+    norm: UniquePtr<MlxArray>,
+    activated: UniquePtr<MlxArray>,
 }
 
 impl SscpConvBlock {
@@ -157,7 +216,7 @@ impl SscpConvBlock {
         })
     }
 
-    fn forward(&self, x: &MlxArray) -> Result<UniquePtr<MlxArray>, String> {
+    fn convolution(&self, x: &MlxArray) -> Result<UniquePtr<MlxArray>, String> {
         // Match the maintained reference's explicit
         // `audio_encodings_padded.to(self.conv.weight.dtype)` boundary. The
         // processor emits float32 mel features, while released checkpoints use
@@ -167,7 +226,7 @@ impl SscpConvBlock {
         // Reverse-causal time padding `(0, kernel-1)` and SAME-like frequency
         // padding `(1,1)`, in MLX's NHWC layout.
         let x = mlxcel_core::pad(&x, &[0, 0, 0, self.time_padding_after, 1, 1, 0, 0], 0.0);
-        let x = mlxcel_core::try_conv2d(
+        mlxcel_core::try_conv2d(
             &x,
             &self.conv_weight,
             self.stride_time,
@@ -178,8 +237,32 @@ impl SscpConvBlock {
             1,
             1,
         )
-        .map_err(|error| format!("Gemma3n SSCP conv2d failed: {error}"))?;
-        Ok(mlxcel_core::relu(&self.norm.forward(&x)))
+        .map_err(|error| format!("Gemma3n SSCP conv2d failed: {error}"))
+    }
+
+    fn forward(&self, x: &MlxArray) -> Result<UniquePtr<MlxArray>, String> {
+        let convolution = self.convolution(x)?;
+        Ok(mlxcel_core::relu(&self.norm.forward(&convolution)))
+    }
+
+    #[cfg(feature = "xla-diagnostics")]
+    fn forward_with_diagnostics(&self, x: &MlxArray) -> Result<SscpConvDiagnosticStages, String> {
+        let convolution = self.convolution(x)?;
+        let norm = self.norm.forward_stages(&convolution);
+        let activated = mlxcel_core::relu(&norm.output);
+        Ok(SscpConvDiagnosticStages {
+            convolution,
+            norm_sum_at_time: norm.sum_at_time,
+            norm_cumulative_sum: norm.cumulative_sum,
+            norm_mean: norm.mean,
+            norm_squared_at_time: norm.squared_at_time,
+            norm_cumulative_squared: norm.cumulative_squared,
+            norm_variance: norm.variance,
+            norm_stabilized_variance: norm.stabilized_variance,
+            norm_inverse_stddev: norm.inverse_stddev,
+            norm: norm.output,
+            activated,
+        })
     }
 }
 
@@ -187,6 +270,13 @@ struct SubSampleConvProjection {
     conv0: SscpConvBlock,
     conv1: SscpConvBlock,
     input_projection: UnifiedLinear,
+}
+
+#[cfg(feature = "xla-diagnostics")]
+struct SubsampleDiagnosticStages {
+    conv0: SscpConvDiagnosticStages,
+    conv1: SscpConvDiagnosticStages,
+    input_projection: UniquePtr<MlxArray>,
 }
 
 fn final_frequency_size(config: &Gemma3nAudioConfig) -> usize {
@@ -245,6 +335,25 @@ impl SubSampleConvProjection {
         let shape = mlxcel_core::array_shape(&x);
         let x = mlxcel_core::reshape(&x, &[shape[0], shape[1], shape[2] * shape[3]]);
         Ok(self.input_projection.forward(&x))
+    }
+
+    #[cfg(feature = "xla-diagnostics")]
+    fn forward_with_diagnostics(
+        &self,
+        audio_mel: &MlxArray,
+    ) -> Result<SubsampleDiagnosticStages, String> {
+        let x = mlxcel_core::expand_dims(audio_mel, -1);
+        let conv0 = self.conv0.forward_with_diagnostics(&x)?;
+        let conv1 = self.conv1.forward_with_diagnostics(&conv0.activated)?;
+        let shape = mlxcel_core::array_shape(&conv1.activated);
+        let flattened =
+            mlxcel_core::reshape(&conv1.activated, &[shape[0], shape[1], shape[2] * shape[3]]);
+        let input_projection = self.input_projection.forward(&flattened);
+        Ok(SubsampleDiagnosticStages {
+            conv0,
+            conv1,
+            input_projection,
+        })
     }
 }
 
@@ -529,14 +638,13 @@ impl ConformerBlock {
         })
     }
 
-    fn forward(
+    fn forward_after_feed_forward_start(
         &self,
         x: &MlxArray,
         invalid_mask: &MlxArray,
         causal_valid_mask: &MlxArray,
     ) -> Result<UniquePtr<MlxArray>, String> {
-        let x = self.feed_forward_start.forward(x);
-        let x = self.attention.forward(&x, invalid_mask, causal_valid_mask);
+        let x = self.attention.forward(x, invalid_mask, causal_valid_mask);
         let valid = mlxcel_core::astype(
             &mlxcel_core::reshape(
                 &mlxcel_core::logical_not(invalid_mask),
@@ -554,12 +662,58 @@ impl ConformerBlock {
         let x = self.feed_forward_end.forward(&x);
         Ok(self.norm.forward(&clip_gradient(&x, self.clipping)))
     }
+
+    fn forward(
+        &self,
+        x: &MlxArray,
+        invalid_mask: &MlxArray,
+        causal_valid_mask: &MlxArray,
+    ) -> Result<UniquePtr<MlxArray>, String> {
+        let feed_forward_start = self.feed_forward_start.forward(x);
+        self.forward_after_feed_forward_start(&feed_forward_start, invalid_mask, causal_valid_mask)
+    }
+
+    #[cfg(feature = "xla-diagnostics")]
+    fn forward_with_feed_forward_start(
+        &self,
+        x: &MlxArray,
+        invalid_mask: &MlxArray,
+        causal_valid_mask: &MlxArray,
+    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>), String> {
+        let feed_forward_start = self.feed_forward_start.forward(x);
+        let output = self.forward_after_feed_forward_start(
+            &feed_forward_start,
+            invalid_mask,
+            causal_valid_mask,
+        )?;
+        Ok((output, feed_forward_start))
+    }
 }
 
 pub struct Gemma3nAudioEncoder {
     config: Gemma3nAudioConfig,
     subsample: SubSampleConvProjection,
     conformer: Vec<ConformerBlock>,
+}
+
+#[cfg(feature = "xla-diagnostics")]
+pub(super) struct Gemma3nAudioEncoderDiagnosticStages {
+    pub sscp_conv_0_convolution: UniquePtr<MlxArray>,
+    pub sscp_conv_0_norm_sum_at_time: UniquePtr<MlxArray>,
+    pub sscp_conv_0_norm_cumulative_sum: UniquePtr<MlxArray>,
+    pub sscp_conv_0_norm_mean: UniquePtr<MlxArray>,
+    pub sscp_conv_0_norm_squared_at_time: UniquePtr<MlxArray>,
+    pub sscp_conv_0_norm_cumulative_squared: UniquePtr<MlxArray>,
+    pub sscp_conv_0_norm_variance: UniquePtr<MlxArray>,
+    pub sscp_conv_0_norm_stabilized_variance: UniquePtr<MlxArray>,
+    pub sscp_conv_0_norm_inverse_stddev: UniquePtr<MlxArray>,
+    pub sscp_conv_0_norm: UniquePtr<MlxArray>,
+    pub sscp_conv_0: UniquePtr<MlxArray>,
+    pub sscp_conv_1_convolution: UniquePtr<MlxArray>,
+    pub sscp_conv_1_norm: UniquePtr<MlxArray>,
+    pub sscp_conv_1: UniquePtr<MlxArray>,
+    pub input_projection: UniquePtr<MlxArray>,
+    pub conformer_0_feed_forward_start: UniquePtr<MlxArray>,
 }
 
 impl Gemma3nAudioEncoder {
@@ -624,11 +778,11 @@ impl Gemma3nAudioEncoder {
         mlxcel_core::take(mask, &mlxcel_core::from_slice_i32(&indices, &[length]), 1)
     }
 
-    pub fn forward(
+    fn validate_input_shapes(
         &self,
         audio_mel: &MlxArray,
         invalid_mel_mask: &MlxArray,
-    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>), String> {
+    ) -> Result<(), String> {
         let mel_shape = mlxcel_core::array_shape(audio_mel);
         let mask_shape = mlxcel_core::array_shape(invalid_mel_mask);
         if mel_shape.len() != 3
@@ -640,18 +794,26 @@ impl Gemma3nAudioEncoder {
                 self.config.input_feat_size
             ));
         }
+        Ok(())
+    }
 
-        let mut encodings = self.subsample.forward(audio_mel)?;
-        let mut invalid_mask = Self::stride_mask(
+    fn initial_invalid_mask(
+        &self,
+        encodings: &MlxArray,
+        invalid_mel_mask: &MlxArray,
+    ) -> UniquePtr<MlxArray> {
+        Self::stride_mask(
             invalid_mel_mask,
             self.config.time_stride_product(),
-            mlxcel_core::array_shape(&encodings)[1],
-        );
-        let causal_valid_mask = self.causal_valid_mask();
-        for block in &self.conformer {
-            encodings = block.forward(&encodings, &invalid_mask, &causal_valid_mask)?;
-        }
+            mlxcel_core::array_shape(encodings)[1],
+        )
+    }
 
+    fn reduce_and_mask(
+        &self,
+        mut encodings: UniquePtr<MlxArray>,
+        mut invalid_mask: UniquePtr<MlxArray>,
+    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>), String> {
         if self.config.conf_reduction_factor > 1 {
             let reduced_len = (mlxcel_core::array_shape(&encodings)[1]
                 + self.config.conf_reduction_factor as i32
@@ -673,6 +835,82 @@ impl Gemma3nAudioEncoder {
             &encodings,
         );
         Ok((encodings, invalid_mask))
+    }
+
+    fn finish_forward(
+        &self,
+        mut encodings: UniquePtr<MlxArray>,
+        invalid_mel_mask: &MlxArray,
+    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>), String> {
+        let invalid_mask = self.initial_invalid_mask(&encodings, invalid_mel_mask);
+        let causal_valid_mask = self.causal_valid_mask();
+        for block in &self.conformer {
+            encodings = block.forward(&encodings, &invalid_mask, &causal_valid_mask)?;
+        }
+        self.reduce_and_mask(encodings, invalid_mask)
+    }
+
+    pub fn forward(
+        &self,
+        audio_mel: &MlxArray,
+        invalid_mel_mask: &MlxArray,
+    ) -> Result<(UniquePtr<MlxArray>, UniquePtr<MlxArray>), String> {
+        self.validate_input_shapes(audio_mel, invalid_mel_mask)?;
+        let encodings = self.subsample.forward(audio_mel)?;
+        self.finish_forward(encodings, invalid_mel_mask)
+    }
+
+    #[cfg(feature = "xla-diagnostics")]
+    pub(super) fn forward_with_audio_diagnostics(
+        &self,
+        audio_mel: &MlxArray,
+        invalid_mel_mask: &MlxArray,
+    ) -> Result<
+        (
+            UniquePtr<MlxArray>,
+            UniquePtr<MlxArray>,
+            Gemma3nAudioEncoderDiagnosticStages,
+        ),
+        String,
+    > {
+        self.validate_input_shapes(audio_mel, invalid_mel_mask)?;
+        let subsample = self.subsample.forward_with_diagnostics(audio_mel)?;
+        let mut encodings = mlxcel_core::copy(&subsample.input_projection);
+        let invalid_mask = self.initial_invalid_mask(&encodings, invalid_mel_mask);
+        let causal_valid_mask = self.causal_valid_mask();
+        let first = self
+            .conformer
+            .first()
+            .ok_or_else(|| "Gemma3n audio diagnostic requires a Conformer block".to_string())?;
+        let (first_output, conformer_0_feed_forward_start) =
+            first.forward_with_feed_forward_start(&encodings, &invalid_mask, &causal_valid_mask)?;
+        encodings = first_output;
+        for block in &self.conformer[1..] {
+            encodings = block.forward(&encodings, &invalid_mask, &causal_valid_mask)?;
+        }
+        let (encoded, invalid) = self.reduce_and_mask(encodings, invalid_mask)?;
+        Ok((
+            encoded,
+            invalid,
+            Gemma3nAudioEncoderDiagnosticStages {
+                sscp_conv_0_convolution: subsample.conv0.convolution,
+                sscp_conv_0_norm_sum_at_time: subsample.conv0.norm_sum_at_time,
+                sscp_conv_0_norm_cumulative_sum: subsample.conv0.norm_cumulative_sum,
+                sscp_conv_0_norm_mean: subsample.conv0.norm_mean,
+                sscp_conv_0_norm_squared_at_time: subsample.conv0.norm_squared_at_time,
+                sscp_conv_0_norm_cumulative_squared: subsample.conv0.norm_cumulative_squared,
+                sscp_conv_0_norm_variance: subsample.conv0.norm_variance,
+                sscp_conv_0_norm_stabilized_variance: subsample.conv0.norm_stabilized_variance,
+                sscp_conv_0_norm_inverse_stddev: subsample.conv0.norm_inverse_stddev,
+                sscp_conv_0_norm: subsample.conv0.norm,
+                sscp_conv_0: subsample.conv0.activated,
+                sscp_conv_1_convolution: subsample.conv1.convolution,
+                sscp_conv_1_norm: subsample.conv1.norm,
+                sscp_conv_1: subsample.conv1.activated,
+                input_projection: subsample.input_projection,
+                conformer_0_feed_forward_start,
+            },
+        ))
     }
 }
 

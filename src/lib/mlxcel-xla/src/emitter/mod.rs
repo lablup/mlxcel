@@ -48,6 +48,11 @@
 mod builder;
 mod config;
 mod gemma3n;
+mod gemma3n_audio_attention;
+mod gemma3n_audio_emit;
+mod gemma3n_audio_math;
+mod gemma3n_audio_ops;
+mod gemma3n_audio_schema;
 mod gemma3n_decode;
 mod gemma3n_emit;
 mod gemma3n_emit_ops;
@@ -75,6 +80,14 @@ pub(crate) use config::{
 #[allow(unused_imports)]
 pub(crate) use gemma3n::{
     Gemma3nConfig, Gemma3nLayerType, Gemma3nPleDType, Gemma3nPleMetadata, validate_gemma3n_ple,
+};
+#[allow(unused_imports)]
+pub(crate) use gemma3n_audio_emit::{emit_gemma3n_audio_encode, emit_gemma3n_audio_merge_ple};
+#[allow(unused_imports)]
+pub(crate) use gemma3n_audio_schema::{
+    WeightSpec as Gemma3nAudioGraphWeightSpec,
+    encoder_weight_specs as gemma3n_audio_encoder_weights,
+    merge_weight_specs as gemma3n_audio_merge_weights,
 };
 #[allow(unused_imports)]
 pub(crate) use gemma3n_decode::{

@@ -94,9 +94,9 @@ impl AudioFeatureProducer for RecordingProducer {
         token_ids: Vec<i32>,
         _images: Vec<image::DynamicImage>,
         _cancelled: &AtomicBool,
-    ) -> Result<PreparedPrefill, String> {
+    ) -> Result<AudioPreparedRequest, String> {
         self.order.lock().unwrap().push(token_ids[1] as u64);
-        Ok(prepared(token_ids))
+        Ok(prepared(token_ids).into())
     }
 }
 
@@ -121,7 +121,9 @@ fn single_worker_preserves_fifo_and_records_separate_audio_metrics() {
     for expected in 1..=32 {
         let result = stage.recv().unwrap();
         assert_eq!(result.job_id, expected);
-        let AudioPreprocessOutcome::Prepared(prefill) = result.outcome else {
+        let AudioPreprocessOutcome::Prepared(AudioPreparedRequest::Generic(prefill)) =
+            result.outcome
+        else {
             panic!("job must prepare");
         };
         // Logical/public prompt ids remain the producer input. Effective audio
@@ -152,10 +154,10 @@ impl AudioFeatureProducer for BlockingProducer {
         token_ids: Vec<i32>,
         _images: Vec<image::DynamicImage>,
         _cancelled: &AtomicBool,
-    ) -> Result<PreparedPrefill, String> {
+    ) -> Result<AudioPreparedRequest, String> {
         let _ = self.started.send(());
         let _ = self.release.recv();
-        Ok(prepared(token_ids))
+        Ok(prepared(token_ids).into())
     }
 }
 
@@ -230,9 +232,9 @@ impl AudioFeatureProducer for CancelAfterFeature {
         token_ids: Vec<i32>,
         _images: Vec<image::DynamicImage>,
         cancelled: &AtomicBool,
-    ) -> Result<PreparedPrefill, String> {
+    ) -> Result<AudioPreparedRequest, String> {
         cancelled.store(true, Ordering::Release);
-        Ok(prepared(token_ids))
+        Ok(prepared(token_ids).into())
     }
 }
 
@@ -277,12 +279,12 @@ impl AudioFeatureProducer for PanicOnce {
         token_ids: Vec<i32>,
         _images: Vec<image::DynamicImage>,
         _cancelled: &AtomicBool,
-    ) -> Result<PreparedPrefill, String> {
+    ) -> Result<AudioPreparedRequest, String> {
         if !self.0 {
             self.0 = true;
             panic!("synthetic feature panic");
         }
-        Ok(prepared(token_ids))
+        Ok(prepared(token_ids).into())
     }
 }
 
@@ -378,9 +380,9 @@ impl AudioFeatureProducer for StartedProducer {
         token_ids: Vec<i32>,
         _images: Vec<image::DynamicImage>,
         _cancelled: &AtomicBool,
-    ) -> Result<PreparedPrefill, String> {
+    ) -> Result<AudioPreparedRequest, String> {
         self.started.send(token_ids[1] as u64).unwrap();
-        Ok(prepared(token_ids))
+        Ok(prepared(token_ids).into())
     }
 }
 

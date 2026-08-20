@@ -5544,6 +5544,39 @@ impl Gemma3nAudioEmbedder {
         let embedded = self.embedding.forward(&token);
         self.project(&self.hard_embedding_norm.forward(&embedded))
     }
+
+    #[cfg(feature = "xla-diagnostics")]
+    pub fn diagnostic_soft_projection_stages(
+        &self,
+        inputs: &MlxArray,
+    ) -> (
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+    ) {
+        let normalized = self.soft_embedding_norm.forward(inputs);
+        let linear = self.embedding_projection.forward(&normalized);
+        let projected = self.post_projection_norm.forward(&linear);
+        (normalized, linear, projected)
+    }
+
+    #[cfg(feature = "xla-diagnostics")]
+    pub fn diagnostic_hard_projection_stages(
+        &self,
+    ) -> (
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+    ) {
+        let tokens = (0..self.vocab_size as i32).collect::<Vec<_>>();
+        let tokens = mlxcel_core::from_slice_i32(&tokens, &[self.vocab_size as i32]);
+        let embedded = self.embedding.forward(&tokens);
+        let normalized = self.hard_embedding_norm.forward(&embedded);
+        let linear = self.embedding_projection.forward(&normalized);
+        let projected = self.post_projection_norm.forward(&linear);
+        (embedded, normalized, linear, projected)
+    }
 }
 
 #[cfg(test)]

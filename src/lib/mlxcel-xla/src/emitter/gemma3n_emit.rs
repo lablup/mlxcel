@@ -8,8 +8,8 @@ use super::builder::{Builder, Precision, Val, precision_from_env};
 use super::gemma3n::{Gemma3nConfig, Gemma3nLayerType};
 use super::gemma3n_emit_ops::{
     Constants, altup_correct, altup_predict, apply_sliding_window, attention, bf16_scalar,
-    causal_mask, constants, geglu, linear_bf16, linear_seq_bf16, mean_planes_bf16, normalize_to,
-    rms_last_bf16, round_bf16, sparse_gelu,
+    causal_mask, constants, dense_ple_input_head, geglu, linear_bf16, linear_seq_bf16,
+    mean_planes_bf16, normalize_to, rms_last_bf16, round_bf16, sparse_gelu,
 };
 use super::gemma3n_qmv;
 use super::gemma3n_schema::{Args, Decl, Input, Weights, build_schema};
@@ -620,7 +620,6 @@ pub(super) fn token_input_head(
     tokens: &Val,
     lp: usize,
 ) -> (Val, Val) {
-    let ple_width = c.n_layers * c.hidden_per_layer_input;
     let tokens = if tokens.ty.shape.is_empty() {
         b.reshape(tokens, vec![1])
     } else {
@@ -632,47 +631,20 @@ pub(super) fn token_input_head(
     let scale = b.broadcast(&scale, &[], vec![lp, c.hidden]);
     let base = b.multiply(&base, &scale);
     let base = round_bf16(b, &base);
-    let limit = b.const_i32(c.per_layer_vocab as i32);
-    let limit = b.broadcast(&limit, &[], vec![lp]);
-    let zero_i = b.const_i32(0);
-    let zero_ids = b.broadcast(&zero_i, &[], vec![lp]);
-    let nonnegative = b.compare("GE", &tokens, &zero_ids, "SIGNED");
-    let below = b.compare("LT", &tokens, &limit, "SIGNED");
-    let valid = b.select(&nonnegative, &below, &nonnegative);
-    let safe = b.select(&valid, &tokens, &zero_ids);
-    let safe = b.reshape(&safe, vec![lp, 1]);
-    let token_ple = b.gather(&weights.token_ple, &safe);
-    let zeros = b.broadcast(&k.zero, &[], vec![lp, ple_width]);
-    let valid = b.broadcast(&valid, &[0], vec![lp, ple_width]);
-    let token_ple = b.select(&valid, &token_ple, &zeros);
-    let token_scale = bf16_scalar(b, (c.hidden_per_layer_input as f32).sqrt());
-    let token_scale = b.broadcast(&token_scale, &[], vec![lp, ple_width]);
-    let token_ple = b.multiply(&token_ple, &token_scale);
-    let token_ple = round_bf16(b, &token_ple);
-    let projected = linear_seq_bf16(b, &base, &weights.ple_projection);
-    let model_scale = bf16_scalar(b, (c.hidden as f32).sqrt().recip());
-    let model_scale = b.broadcast(&model_scale, &[], vec![lp, ple_width]);
-    let projected = b.multiply(&projected, &model_scale);
-    let projected = round_bf16(b, &projected);
-    let projected = b.reshape(&projected, vec![lp, c.n_layers, c.hidden_per_layer_input]);
-    let projected = rms_last_bf16(
+    let dense_ple = dense_ple_input_head(
         b,
-        &projected,
-        Some(&weights.ple_projection_norm),
+        c,
+        &tokens,
+        &base,
+        &weights.token_ple,
+        &weights.ple_projection,
+        &weights.ple_projection_norm,
+        lp,
         &k.eps,
         &k.zero,
-    );
-    let token_ple = b.reshape(&token_ple, vec![lp, c.n_layers, c.hidden_per_layer_input]);
-    let inv = b.broadcast(
         &k.inv_sqrt2,
-        &[],
-        vec![lp, c.n_layers, c.hidden_per_layer_input],
     );
-    let combined = b.add(&projected, &token_ple);
-    let combined = round_bf16(b, &combined);
-    let combined = b.multiply(&combined, &inv);
-    let combined = round_bf16(b, &combined);
-    (base, combined)
+    (base, dense_ple)
 }
 
 fn magnitude(b: &mut Builder, value: &Val, c: &Gemma3nConfig, k: &Constants) -> Val {

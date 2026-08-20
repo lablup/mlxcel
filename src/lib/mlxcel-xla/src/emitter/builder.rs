@@ -715,6 +715,18 @@ impl Builder {
         }
     }
 
+    pub fn const_i1(&mut self, value: bool) -> Val {
+        let r = self.fresh();
+        self.line(format!(
+            "{} = stablehlo.constant dense<{}> : tensor<i1>",
+            r, value
+        ));
+        Val {
+            name: r,
+            ty: Ty::scalar("i1"),
+        }
+    }
+
     /// Dense f32 constant tensor from raw data (row-major), emitted as hex blob.
     pub fn const_tensor_f32(&mut self, data: &[f32], shape: Vec<usize>) -> Val {
         let ty = Ty::f32(shape);
@@ -987,6 +999,29 @@ impl Builder {
         Val { name: r, ty }
     }
 
+    /// Static slice with an explicit positive stride in each dimension.
+    pub fn slice_strided(&mut self, x: &Val, ranges: &[(usize, usize, usize)]) -> Val {
+        let shape: Vec<usize> = ranges
+            .iter()
+            .map(|(start, limit, stride)| (limit - start).div_ceil(*stride))
+            .collect();
+        let ty = Ty::new(shape, x.ty.elt);
+        let parts: Vec<String> = ranges
+            .iter()
+            .map(|(start, limit, stride)| format!("{start}:{limit}:{stride}"))
+            .collect();
+        let r = self.fresh();
+        self.line(format!(
+            "{} = stablehlo.slice {} [{}] : ({}) -> {}",
+            r,
+            x.name,
+            parts.join(", "),
+            x.ty.render(),
+            ty.render()
+        ));
+        Val { name: r, ty }
+    }
+
     pub fn concatenate(&mut self, a: &Val, b: &Val, dim: usize) -> Val {
         let mut shape = a.ty.shape.clone();
         shape[dim] = a.ty.shape[dim] + b.ty.shape[dim];
@@ -1138,6 +1173,32 @@ impl Builder {
         padding: &[(usize, usize)],
         feature_groups: usize,
     ) -> Val {
+        self.convolution_with_output(input, kernel, strides, padding, feature_groups, false)
+    }
+
+    /// Channels-last convolution whose low-precision inputs accumulate into an
+    /// explicit F32 result before the caller applies its output rounding.
+    pub fn convolution_f32_accumulate(
+        &mut self,
+        input: &Val,
+        kernel: &Val,
+        strides: &[usize],
+        padding: &[(usize, usize)],
+        feature_groups: usize,
+    ) -> Val {
+        self.convolution_with_output(input, kernel, strides, padding, feature_groups, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn convolution_with_output(
+        &mut self,
+        input: &Val,
+        kernel: &Val,
+        strides: &[usize],
+        padding: &[(usize, usize)],
+        feature_groups: usize,
+        f32_output: bool,
+    ) -> Val {
         assert!(feature_groups > 0);
         assert_eq!(
             input.ty.elt, kernel.ty.elt,
@@ -1167,7 +1228,7 @@ impl Builder {
             shape.push((padded - kernel_size) / strides[axis] + 1);
         }
         shape.push(kernel.ty.shape[spatial_rank + 1]);
-        let output_ty = Ty::new(shape, input.ty.elt);
+        let output_ty = Ty::new(shape, if f32_output { "f32" } else { input.ty.elt });
         let input_demoted;
         let kernel_demoted;
         let (input, kernel) = match self.precision.dot_elt() {
@@ -1186,7 +1247,10 @@ impl Builder {
             }
             None => (input, kernel),
         };
-        let convolution_ty = Ty::new(output_ty.shape.clone(), input.ty.elt);
+        let convolution_ty = Ty::new(
+            output_ty.shape.clone(),
+            if f32_output { "f32" } else { input.ty.elt },
+        );
         let array = |values: &[usize]| {
             values
                 .iter()
@@ -1269,6 +1333,12 @@ impl Builder {
     pub fn divide(&mut self, a: &Val, b: &Val) -> Val {
         self.binary("divide", a, b)
     }
+    pub fn minimum(&mut self, a: &Val, b: &Val) -> Val {
+        self.binary("minimum", a, b)
+    }
+    pub fn logical_and(&mut self, a: &Val, b: &Val) -> Val {
+        self.binary("and", a, b)
+    }
 
     fn unary(&mut self, op: &str, a: &Val) -> Val {
         let ty = a.ty.clone();
@@ -1303,6 +1373,12 @@ impl Builder {
     }
     pub fn sine(&mut self, a: &Val) -> Val {
         self.unary("sine", a)
+    }
+    pub fn logarithm(&mut self, a: &Val) -> Val {
+        self.unary("log", a)
+    }
+    pub fn logical_not(&mut self, a: &Val) -> Val {
+        self.unary("not", a)
     }
 
     /// Error function from the CHLO extension accepted by StableHLO import.
@@ -1378,6 +1454,57 @@ impl Builder {
     }
     pub fn reduce_max(&mut self, x: &Val, dim: usize, init: &Val) -> Val {
         self.reduce("maximum", x, dim, init)
+    }
+
+    /// Inclusive prefix sum along one static axis using a left-padded window.
+    ///
+    /// This is the StableHLO cumsum lowering used by Gemma3n cumulative group
+    /// normalization. It avoids a quadratic triangular constant and keeps the
+    /// reduction in f32 on both CPU and CUDA.
+    pub fn reduce_window_prefix_add(&mut self, x: &Val, dim: usize) -> Val {
+        assert_eq!(x.ty.elt, "f32");
+        assert!(dim < x.ty.shape.len());
+        let rank = x.ty.shape.len();
+        let width = x.ty.shape[dim];
+        assert!(width > 0);
+        let zero = self.const_f32(0.0);
+        let window = (0..rank)
+            .map(|axis| if axis == dim { width } else { 1 })
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let strides = std::iter::repeat_n("1", rank)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let padding = (0..rank)
+            .map(|axis| {
+                if axis == dim {
+                    format!("[{}, 0]", width - 1)
+                } else {
+                    "[0, 0]".to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let r = self.fresh();
+        let suffix = r.trim_start_matches('%');
+        self.line(format!(
+            "{r} = \"stablehlo.reduce_window\"({x}, {zero}) ({{\n\
+             ^bb0(%rw_l_{suffix}: tensor<f32>, %rw_r_{suffix}: tensor<f32>):\n  \
+             %rw_sum_{suffix} = stablehlo.add %rw_l_{suffix}, %rw_r_{suffix} : tensor<f32>\n  \
+             stablehlo.return %rw_sum_{suffix} : tensor<f32>\n\
+             }}) {{window_dimensions = array<i64: {window}>, \
+             window_strides = array<i64: {strides}>, \
+             padding = dense<[{padding}]> : tensor<{rank}x2xi64>}} : \
+             ({ty}, tensor<f32>) -> {ty}",
+            x = x.name,
+            zero = zero.name,
+            ty = x.ty.render(),
+        ));
+        Val {
+            name: r,
+            ty: x.ty.clone(),
+        }
     }
 
     /// On-device argmax over a `[V]` vector -> scalar `i32` index (the first
@@ -1556,6 +1683,35 @@ impl Builder {
         Val { name: r, ty }
     }
 
+    /// A contraction that always retains f32 inputs. Audio cumulative
+    /// normalization uses this for prefix sums, which must not inherit the
+    /// model's BF16 projection policy.
+    pub fn dot_general_f32(
+        &mut self,
+        lhs: &Val,
+        rhs: &Val,
+        lhs_contract: &[usize],
+        rhs_contract: &[usize],
+        out_shape: Vec<usize>,
+    ) -> Val {
+        assert_eq!(lhs.ty.elt, "f32");
+        assert_eq!(rhs.ty.elt, "f32");
+        let ty = Ty::f32(out_shape);
+        let r = self.fresh();
+        self.line(format!(
+            "{} = stablehlo.dot_general {}, {}, contracting_dims = {} x {} : ({}, {}) -> {}",
+            r,
+            lhs.name,
+            rhs.name,
+            dims_list(lhs_contract),
+            dims_list(rhs_contract),
+            lhs.ty.render(),
+            rhs.ty.render(),
+            ty.render()
+        ));
+        Val { name: r, ty }
+    }
+
     /// Convenience: y = x @ W^T for x:[K], W:[N,K] (weights stored [out,in]).
     /// Contracts x dim 0 with W dim 1, yielding [N]. No transpose needed.
     pub fn linear(&mut self, x: &Val, w: &Val) -> Val {
@@ -1570,6 +1726,18 @@ impl Builder {
         let l = x.ty.shape[0];
         let n = w.ty.shape[0];
         self.dot_general(x, w, &[], &[], &[1], &[1], vec![l, n])
+    }
+
+    /// Linear projection over the final axis of an arbitrary-rank tensor.
+    pub fn linear_last(&mut self, x: &Val, w: &Val) -> Val {
+        let input = *x.ty.shape.last().expect("linear input rank");
+        assert_eq!(input, w.ty.shape[1]);
+        let rows = x.ty.shape[..x.ty.shape.len() - 1].iter().product();
+        let flat = self.reshape(x, vec![rows, input]);
+        let projected = self.linear_seq(&flat, w);
+        let mut shape = x.ty.shape[..x.ty.shape.len() - 1].to_vec();
+        shape.push(w.ty.shape[0]);
+        self.reshape(&projected, shape)
     }
 }
 

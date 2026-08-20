@@ -31,7 +31,7 @@ use sha2::{Digest, Sha256};
 
 use crate::aux::{
     AuxiliaryInput, AuxiliaryOutput, AuxiliaryTensorDType, AuxiliaryWeight, AuxiliaryWeightDType,
-    IreeAuxiliaryModule,
+    AuxiliaryWeightStorage, IreeAuxiliaryModule,
 };
 use crate::aux_manifest::{AuxiliaryArtifactContract, ensure_qualified_auxiliary_artifact};
 use crate::emitter::{
@@ -306,7 +306,7 @@ fn load_audio_weights(
             validate_finite_values(&format!("Phi4MM audio weight `{}`", spec.name), &values)?;
             loaded[index] = Some(AuxiliaryWeight {
                 name: spec.name.clone(),
-                bytes: f32_bytes(&values),
+                storage: AuxiliaryWeightStorage::Bytes(f32_bytes(&values)),
                 dtype: AuxiliaryWeightDType::Float32,
                 shape: spec.shape.clone(),
             });
@@ -752,7 +752,7 @@ mod tests {
         let vmfb = temporary_audio_path("vmfb");
         let weights = vec![AuxiliaryWeight {
             name: "model.embed_tokens_extend.audio_embed.weight".to_string(),
-            bytes: 1.0f32.to_ne_bytes().to_vec(),
+            storage: AuxiliaryWeightStorage::Bytes(1.0f32.to_ne_bytes().to_vec()),
             dtype: AuxiliaryWeightDType::Float32,
             shape: vec![1],
         }];
@@ -805,7 +805,7 @@ mod tests {
         let vmfb = temporary_audio_path("compiler-digest.vmfb");
         let weights = vec![AuxiliaryWeight {
             name: "weight".to_string(),
-            bytes: 1.0f32.to_ne_bytes().to_vec(),
+            storage: AuxiliaryWeightStorage::Bytes(1.0f32.to_ne_bytes().to_vec()),
             dtype: AuxiliaryWeightDType::Float32,
             shape: vec![1],
         }];

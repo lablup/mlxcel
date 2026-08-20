@@ -52,6 +52,11 @@ use mlxcel_core::session::{InferenceSession, PreparedPrefill, SessionCapabilitie
 mod context;
 #[cfg(any(feature = "diagnostics", test))]
 mod diagnostic_flags;
+mod gemma3n_audio_config;
+mod gemma3n_audio_rows;
+#[cfg(feature = "iree")]
+mod gemma3n_audio_runtime;
+mod gemma3n_audio_weights;
 #[cfg(any(feature = "iree", test))]
 #[allow(dead_code)]
 mod numeric_dtype_contract;
@@ -67,10 +72,13 @@ mod operator_numeric_contract;
 mod prepared;
 mod prepared_deepstack;
 mod prepared_gemma3n;
+mod prepared_gemma3n_audio;
 
-#[cfg(feature = "iree")]
+#[cfg(any(feature = "iree", test))]
+#[cfg_attr(not(feature = "iree"), allow(dead_code))]
 mod aux;
-#[cfg(feature = "iree")]
+#[cfg(any(feature = "iree", test))]
+#[cfg_attr(not(feature = "iree"), allow(dead_code))]
 mod aux_manifest;
 #[cfg(feature = "iree")]
 mod aux_smoke;
@@ -203,14 +211,33 @@ pub fn dequantize_gemma3n_affine_diagnostic(
     bits: usize,
     group_size: usize,
 ) -> Result<Vec<f32>, String> {
-    weights::dequantize_affine_bf16_fused(packed, scales, biases, out, in_packed, bits, group_size)
+    weights::dequantize_affine_bf16_sequential(
+        packed, scales, biases, out, in_packed, bits, group_size,
+    )
 }
 #[cfg(feature = "diagnostics")]
 pub use emitter::{Gemma3nDiagnosticLayout, Gemma3nDiagnosticSegment};
+pub use gemma3n_audio_config::{
+    GEMMA3N_AUDIO_FRAME_BUCKETS, GEMMA3N_AUDIO_GRAPH_ABI, GEMMA3N_AUDIO_MAX_CLIPS,
+    GEMMA3N_AUDIO_MAX_FRAMES, GEMMA3N_AUDIO_MEL_BINS, GEMMA3N_AUDIO_MODALITY_FAMILY,
+    GEMMA3N_AUDIO_SOFT_TOKENS, Gemma3nXlaAudioConfig,
+};
+pub use gemma3n_audio_rows::{Gemma3nAudioRowMapError, validate_gemma3n_audio_row_indices};
+#[cfg(feature = "iree")]
+pub use gemma3n_audio_runtime::{Gemma3nAudioGraphOutput, Gemma3nAudioIreeRuntime};
+pub use gemma3n_audio_weights::{
+    GEMMA3N_AUDIO_CHECKPOINT_TENSOR_COUNT, Gemma3nAudioCheckpointDType,
+    Gemma3nAudioCheckpointError, Gemma3nAudioCheckpointTensorSpec, gemma3n_audio_checkpoint_specs,
+    validate_gemma3n_audio_checkpoint,
+};
 #[cfg(feature = "iree")]
 pub use prepared::PreparedInputError;
 pub use prepared_deepstack::{DeepStackFeatures, DeepStackInputError, DeepStackPreparedPrefill};
 pub use prepared_gemma3n::{Gemma3nDensePle, Gemma3nDensePleError, Gemma3nPreparedPrefill};
+pub use prepared_gemma3n_audio::{
+    Gemma3nAudioInput, Gemma3nAudioInputError, Gemma3nAudioPreparedPrefill,
+    select_gemma3n_audio_frame_bucket,
+};
 #[cfg(feature = "iree")]
 pub use sampler::SampleParams;
 
@@ -264,6 +291,8 @@ pub struct XlaInferenceSession {
     eos_token_ids: Vec<i32>,
     #[cfg(feature = "iree")]
     engine: iree::IreeLlama,
+    #[cfg(feature = "iree")]
+    device: String,
     #[cfg(feature = "iree")]
     cache_len: i32,
 }
@@ -327,6 +356,7 @@ impl XlaInferenceSession {
                 context_capacity,
                 eos_token_ids,
                 engine,
+                device,
                 cache_len: 0,
             })
         }
@@ -364,6 +394,24 @@ impl XlaInferenceSession {
     #[must_use]
     pub fn eos_token_ids(&self) -> &[i32] {
         &self.eos_token_ids
+    }
+
+    /// Conditionally load the Gemma3n audio split artifacts against this exact
+    /// verified #876 language bundle.
+    #[cfg(feature = "iree")]
+    pub fn load_gemma3n_audio(
+        &self,
+        frame_bucket: usize,
+        clips: usize,
+    ) -> Result<Gemma3nAudioIreeRuntime, String> {
+        Gemma3nAudioIreeRuntime::load(
+            &self.model_path,
+            &self.device,
+            self.context_capacity,
+            frame_bucket,
+            clips,
+            self.engine.compatibility_fingerprint(),
+        )
     }
 
     /// Self-contained greedy generation over the object-safe contract.
