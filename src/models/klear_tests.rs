@@ -654,7 +654,7 @@ fn the_prefill_is_causal_without_being_handed_a_mask() {
     // stopped seeding through a randomized `HashMap` walk: the two arms differ by
     // 5.364418e-7 under the `MLX_ENABLE_TF32=0` pin (#1260) and by 1.0485351e-3
     // at MLX's default precision, each value reproducing on all 10 of 10 runs.
-    // A genuinely bidirectional prefill moves row 0 by about 1.6: roughly 3e3x
+    // A genuinely bidirectional prefill moves row 0 by about 1.6: roughly 1.5e3x
     // the default-precision figure and 3e6x the pinned one, so the assertion
     // keeps its full power over the property it names. Like the other three
     // tests in #1088 this one depends on the pin and fails deterministically
