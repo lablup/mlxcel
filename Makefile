@@ -597,11 +597,15 @@ pre-commit: fmt clippy test ## Pre-commit checks
 #     here by widening a parity tolerance before checking whether the run had
 #     TF32 on. Measured on GB10 (sm_121) at `670512c2`: this gate is 8167 passed
 #     and 0 failed, while re-running with `MLX_ENABLE_TF32=1` reds every one of
-#     the four tests #1088 listed. Three of them fail on every run. klear
-#     straddles its own 1e-3 bound instead: over 10 runs it failed 8 and its max
-#     logit delta ranged 5.9e-4 to 2.0e-3 (median 1.2e-3), against 3.6e-7 to
-#     7.2e-7 over 10 pinned-precision runs. So MLX's reduced-precision kernel is
-#     also nondeterministic run to run, and a single green run under
+#     the four tests #1088 listed. Three of them fail on every run, at a
+#     bit-identical magnitude across 6 runs each. klear straddles its own 1e-3
+#     bound instead: over 10 runs it failed 8 and its max logit delta ranged
+#     5.9e-4 to 2.0e-3 (median 1.2e-3), against 3.6e-7 to 7.2e-7 over 10
+#     pinned-precision runs. That spread is klear's own, not TF32's: it is the
+#     only one of the four that runs a whole quantized MoE model rather than an
+#     isolated module over small dense tensors, and it varies at both precision
+#     settings, so the pin bounds the magnitude rather than the variance. Filed
+#     separately. What it means here is that a single green run under
 #     `MLX_ENABLE_TF32=1` is not evidence that a test has stopped depending on
 #     the pin. The pin is load-bearing, not decorative.
 #
