@@ -23,12 +23,13 @@
 //! decode step, sequence completion) and HTTP handlers read them from `/health`
 //! and `/metrics` endpoints without locking.
 
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use mlxcel_core::cache::{PagedBatchDecodeStats, PagedCacheStats};
 use serde::Serialize;
 
+use super::mtp_policy::MtpPolicySnapshot;
 use crate::server::prompt_cache::metrics::{PromptCacheRejectCounters, PromptCacheRejectReason};
 
 /// Returns whether `MLXCEL_APC_TRACE=1` opt-in prompt-cache trace logging is
@@ -295,6 +296,20 @@ pub struct BatchObservability {
     pub audio_preprocess_cancelled: AtomicU64,
     pub audio_preprocess_queued_bytes: AtomicUsize,
     pub audio_preprocess_inflight_host_bytes: AtomicUsize,
+
+    // -- adaptive B=1 MTP policy (issue #1257) --
+    /// Latest state the worker published for the adaptive MTP policy, or
+    /// `None` until it publishes one.
+    ///
+    /// Behind a light [`Mutex`] rather than atomics because the value carries
+    /// the pairing key's three strings. That is affordable here: the worker
+    /// writes it once at startup and then at most once per profiled B=1 burst,
+    /// never per decode step and never at all once the verdict settles. The
+    /// alternative, letting the HTTP handler reach into the scheduler's
+    /// `MtpPolicy` directly, would put a lock on the decode path for a
+    /// diagnostic endpoint's benefit; `MtpPolicy` is single-threaded by design
+    /// and stays that way.
+    mtp_policy: Mutex<Option<MtpPolicySnapshot>>,
 }
 
 impl Default for BatchObservability {
@@ -362,7 +377,28 @@ impl BatchObservability {
             audio_preprocess_cancelled: AtomicU64::new(0),
             audio_preprocess_queued_bytes: AtomicUsize::new(0),
             audio_preprocess_inflight_host_bytes: AtomicUsize::new(0),
+            mtp_policy: Mutex::new(None),
         }
+    }
+
+    /// Publish the adaptive MTP policy's current state (issue #1257).
+    ///
+    /// Called from the worker thread at the points where the policy can have
+    /// changed: once when the scheduler attaches (or declines to attach) a
+    /// policy, and after each profiled B=1 burst until the verdict settles.
+    /// A poisoned lock is ignored rather than propagated: a stale diagnostic
+    /// reading must never take the decode loop down.
+    pub fn set_mtp_policy(&self, snapshot: MtpPolicySnapshot) {
+        if let Ok(mut guard) = self.mtp_policy.lock() {
+            *guard = Some(snapshot);
+        }
+    }
+
+    /// The last published adaptive MTP policy state, or `None` when no worker
+    /// has published one yet.
+    #[must_use]
+    pub fn mtp_policy_snapshot(&self) -> Option<MtpPolicySnapshot> {
+        self.mtp_policy.lock().ok().and_then(|g| g.clone())
     }
 
     // -- Counter increments (called by the scheduler thread) --
@@ -766,6 +802,7 @@ impl BatchObservability {
             prompt_cache_reject_snapshot_diverged: self
                 .prompt_cache_reject_reasons
                 .count(PromptCacheRejectReason::SnapshotDiverged),
+            mtp_policy: self.mtp_policy_snapshot(),
             prompt_cache_last_reject: self.prompt_cache_reject_reasons.last().map(|r| {
                 PromptCacheLastRejectSnapshot {
                     reason: r.reason,
@@ -880,6 +917,12 @@ pub struct ObservabilitySnapshot {
     /// Most recent prompt-cache reject/decline event, if any has happened
     /// yet.
     pub prompt_cache_last_reject: Option<PromptCacheLastRejectSnapshot>,
+    /// Last published state of the adaptive B=1 MTP policy (issue #1257), or
+    /// `None` when no worker has published one. The dedicated
+    /// `GET /v1/internal/mtp-policy` endpoint is the supported read interface;
+    /// this field carries the same value into `/health` for operators who are
+    /// already polling it.
+    pub mtp_policy: Option<MtpPolicySnapshot>,
 }
 
 /// Serializable snapshot of [`crate::server::prompt_cache::PromptCacheLastReject`]
@@ -929,6 +972,53 @@ mod tests {
         assert_eq!(snap.prompt_cache_hit_tokens, 0);
         assert_eq!(snap.prompt_cache_inserts, 0);
         assert_eq!(snap.prompt_cache_insert_rejects, 0);
+        assert_eq!(
+            snap.mtp_policy, None,
+            "no worker has published a policy state on a fresh instance"
+        );
+    }
+
+    /// The publish/read seam issue #1257 relies on: the worker thread writes
+    /// the policy state here and the HTTP handler reads it back, so
+    /// `MtpPolicy` itself never has to be shared or locked.
+    #[test]
+    fn mtp_policy_publishes_and_reads_back() {
+        use super::super::mtp_policy::{
+            MtpPolicySnapshot, MtpPolicyStatus, MtpPolicyUnavailableReason, Verdict,
+        };
+
+        let obs = BatchObservability::new();
+        assert_eq!(obs.mtp_policy_snapshot(), None);
+
+        obs.set_mtp_policy(MtpPolicySnapshot::unavailable(
+            MtpPolicyUnavailableReason::WorkerNotReady,
+            None,
+        ));
+        let published = obs.mtp_policy_snapshot().expect("published");
+        assert_eq!(published.status, MtpPolicyStatus::Unavailable);
+
+        // A later publish replaces the earlier one: the endpoint reports the
+        // current state, never a history.
+        let settled = MtpPolicySnapshot {
+            status: MtpPolicyStatus::Settled,
+            reason: None,
+            target: Some("t".to_string()),
+            drafter: Some("d".to_string()),
+            hardware: Some("M5-16c".to_string()),
+            block_size: Some(4),
+            mtp_enabled: Some(true),
+            verdict: Some(Verdict::Enable),
+            acceptance_rate: Some(0.62),
+            samples: 4,
+            samples_required: 4,
+        };
+        obs.set_mtp_policy(settled.clone());
+        assert_eq!(obs.mtp_policy_snapshot(), Some(settled.clone()));
+        assert_eq!(
+            obs.snapshot().mtp_policy,
+            Some(settled),
+            "the full observability snapshot carries the same value"
+        );
     }
 
     #[test]

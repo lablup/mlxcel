@@ -78,6 +78,9 @@ mod xla_preprocess;
 pub(crate) mod xla_worker;
 
 pub use active::ActiveBatch;
+pub use mtp_policy::{
+    MtpPolicySnapshot, MtpPolicyStatus, MtpPolicyUnavailableReason, Verdict as MtpPolicyVerdict,
+};
 pub use observability::{BatchObservability, ObservabilitySnapshot, PromptCacheLastRejectSnapshot};
 pub use queue::PrefillQueue;
 pub use scheduler::BatchScheduler;

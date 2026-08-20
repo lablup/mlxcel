@@ -909,3 +909,202 @@ fn probe_rounds_requested_only_while_profiling() {
         "forced policies never probe"
     );
 }
+
+// ── published snapshot (issue #1257) ─────────────────────────────────────────
+
+#[test]
+fn snapshot_while_profiling_reports_no_verdict_and_the_running_sample_count() {
+    let mut policy = adaptive_policy(true, false);
+
+    let fresh = policy.snapshot();
+    assert_eq!(fresh.status, MtpPolicyStatus::Profiling);
+    assert_eq!(fresh.reason, None);
+    assert_eq!(fresh.verdict, None);
+    assert_eq!(
+        fresh.mtp_enabled,
+        Some(true),
+        "profiling forces the burst on to collect a sample"
+    );
+    assert_eq!(fresh.samples, 0);
+    assert_eq!(fresh.samples_required, PROFILE_SAMPLE_TARGET);
+    assert_eq!(fresh.samples_remaining(), Some(PROFILE_SAMPLE_TARGET));
+    assert_eq!(
+        fresh.acceptance_rate, None,
+        "nothing measured yet, so no rate is claimed"
+    );
+    // The key fields are what let a consumer confirm the state describes the
+    // pairing it is showing.
+    assert_eq!(fresh.target.as_deref(), Some("target-model"));
+    assert_eq!(fresh.drafter.as_deref(), Some("drafter-model"));
+    assert_eq!(fresh.hardware.as_deref(), Some("M5-16c"));
+    assert_eq!(fresh.block_size, Some(4));
+
+    policy.record_b1_sample(favorable_sample());
+    let partial = policy.snapshot();
+    assert_eq!(partial.status, MtpPolicyStatus::Profiling);
+    assert_eq!(partial.samples, 1);
+    assert_eq!(partial.samples_remaining(), Some(PROFILE_SAMPLE_TARGET - 1));
+    assert!(
+        partial.acceptance_rate.is_some_and(|r| r > 0.0),
+        "a landed sample yields a running acceptance rate"
+    );
+}
+
+#[test]
+fn snapshot_after_settling_reports_the_verdict_and_the_measurement() {
+    // Batch-capable target on generation 13: static default declines, so a
+    // favorable profile settling to ENABLE proves the verdict is the measured
+    // one and not the static fallback.
+    let policy = drive(
+        adaptive_policy(true, false),
+        favorable_sample(),
+        PROFILE_SAMPLE_TARGET,
+    );
+
+    let snap = policy.snapshot();
+    assert_eq!(snap.status, MtpPolicyStatus::Settled);
+    assert_eq!(snap.verdict, Some(Verdict::Enable));
+    assert_eq!(snap.mtp_enabled, Some(true));
+    assert_eq!(snap.samples, PROFILE_SAMPLE_TARGET);
+    assert_eq!(
+        snap.samples_remaining(),
+        None,
+        "a settled window has nothing pending"
+    );
+    assert!(snap.acceptance_rate.is_some_and(|r| r > 0.0));
+}
+
+#[test]
+fn snapshot_after_declining_reports_decline_and_a_closed_gate() {
+    let policy = drive(
+        adaptive_policy(false, false),
+        unfavorable_sample(),
+        PROFILE_SAMPLE_TARGET,
+    );
+
+    let snap = policy.snapshot();
+    assert_eq!(snap.status, MtpPolicyStatus::Settled);
+    assert_eq!(snap.verdict, Some(Verdict::Decline));
+    assert_eq!(snap.mtp_enabled, Some(false));
+}
+
+#[test]
+fn snapshot_of_a_forced_policy_is_not_reported_as_settled() {
+    let policy = MtpPolicy::from_parts(
+        key(),
+        true,
+        false,
+        false,
+        Some(true),
+        PolicyStore::with_dir(None),
+    );
+
+    let snap = policy.snapshot();
+    // An env pin measured nothing. Reporting it as `Settled` would tell a
+    // consumer this machine measured MTP as worthwhile here.
+    assert_eq!(snap.status, MtpPolicyStatus::Forced);
+    assert_eq!(snap.verdict, None);
+    assert_eq!(snap.acceptance_rate, None);
+    assert_eq!(snap.samples, 0);
+    assert_eq!(snap.samples_remaining(), None);
+    // The live gate is still knowable and still reported.
+    assert_eq!(snap.mtp_enabled, Some(true));
+}
+
+#[test]
+fn snapshot_of_a_verdict_restored_from_disk_carries_the_hints_measurement() {
+    let dir = unique_temp_dir("snapshot-reload");
+    let store = PolicyStore::with_dir(Some(dir.clone()));
+    let settled = drive(
+        MtpPolicy::from_parts(key(), true, false, false, None, store.clone()),
+        favorable_sample(),
+        PROFILE_SAMPLE_TARGET,
+    );
+    let settled_snap = settled.snapshot();
+
+    // A restart on the same pairing loads the hint instead of re-profiling.
+    // Its published view must be indistinguishable from the one the profiling
+    // process published, or a consumer would see the verdict change shape
+    // across a restart that changed nothing.
+    let reloaded = MtpPolicy::from_parts(key(), true, false, false, None, store);
+    let reloaded_snap = reloaded.snapshot();
+
+    assert_eq!(reloaded_snap.status, MtpPolicyStatus::Settled);
+    assert_eq!(reloaded_snap, settled_snap);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn snapshot_acceptance_rate_matches_the_persisted_hint_exactly() {
+    let dir = unique_temp_dir("snapshot-rate");
+    let store = PolicyStore::with_dir(Some(dir.clone()));
+    let policy = drive(
+        MtpPolicy::from_parts(key(), true, false, false, None, store),
+        favorable_sample(),
+        PROFILE_SAMPLE_TARGET,
+    );
+
+    // A consumer may compare the endpoint against the hint file during the
+    // migration off the file read, so the two must not differ by a rounding
+    // step.
+    let hint_path = dir.join(format!("{}.json", key().hash()));
+    let raw = std::fs::read_to_string(&hint_path).expect("hint written");
+    let hint: PolicyHint = serde_json::from_str(&raw).expect("hint parses");
+    let snap = policy.snapshot();
+    assert_eq!(snap.acceptance_rate, Some(hint.acceptance_rate));
+    assert_eq!(snap.samples, hint.samples);
+    assert_eq!(snap.verdict, Some(hint.verdict));
+    assert_eq!(snap.block_size, Some(hint.block_size));
+    assert_eq!(snap.target.as_deref(), Some(hint.target.as_str()));
+    assert_eq!(snap.drafter.as_deref(), Some(hint.drafter.as_str()));
+    assert_eq!(snap.hardware.as_deref(), Some(hint.hardware.as_str()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn unavailable_snapshot_reports_its_reason_and_no_pairing() {
+    let snap =
+        MtpPolicySnapshot::unavailable(MtpPolicyUnavailableReason::AdaptiveDisabled, Some(true));
+
+    assert_eq!(snap.status, MtpPolicyStatus::Unavailable);
+    assert_eq!(
+        snap.reason,
+        Some(MtpPolicyUnavailableReason::AdaptiveDisabled)
+    );
+    assert_eq!(snap.target, None);
+    assert_eq!(snap.drafter, None);
+    assert_eq!(snap.hardware, None);
+    assert_eq!(snap.block_size, None);
+    assert_eq!(snap.verdict, None);
+    assert_eq!(snap.samples, 0);
+    assert_eq!(snap.samples_remaining(), None);
+    assert_eq!(
+        snap.samples_required, PROFILE_SAMPLE_TARGET,
+        "the window size is a constant worth reporting even with no policy"
+    );
+    // With the adaptive path off the static gate still decides, so the live
+    // answer is reported rather than left null.
+    assert_eq!(snap.mtp_enabled, Some(true));
+}
+
+#[test]
+fn wire_labels_are_stable() {
+    // These strings are the endpoint contract (issue #1257): a consumer
+    // matches on them, so changing one is a schema-version bump.
+    assert_eq!(MtpPolicyStatus::Unavailable.as_str(), "unavailable");
+    assert_eq!(MtpPolicyStatus::Forced.as_str(), "forced");
+    assert_eq!(MtpPolicyStatus::Profiling.as_str(), "profiling");
+    assert_eq!(MtpPolicyStatus::Settled.as_str(), "settled");
+    assert_eq!(
+        MtpPolicyUnavailableReason::NoMtpDispatch.as_str(),
+        "no_mtp_dispatch"
+    );
+    assert_eq!(
+        MtpPolicyUnavailableReason::AdaptiveDisabled.as_str(),
+        "adaptive_disabled"
+    );
+    assert_eq!(
+        MtpPolicyUnavailableReason::WorkerNotReady.as_str(),
+        "worker_not_ready"
+    );
+}
