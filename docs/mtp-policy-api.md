@@ -20,7 +20,7 @@ Implementation source map:
 
 No `/v1`-less alias is mounted.
 
-The endpoint is always mounted, unlike `/props`, `/slots`, and `/metrics`, which are gated behind CLI flags. It answers with a well-formed body in every state, including when no policy is running at all, so a consumer can poll it unconditionally and never has to tell "nothing to report" apart from "this server does not serve this path". It sits behind the same API-key middleware as every other route, and its payload is as coarse as the persisted hint: a verdict, an acceptance rate, a sample count, and the pairing identity. No prompt data, no token ids, nothing request-identifying.
+On a model-serving node, the endpoint is always mounted, unlike `/props`, `/slots`, and `/metrics`, which are gated behind CLI flags. The one exception is the disaggregated router front-end (`--node-role router`): its router app mounts only `/health`, `/router/stats`, `/v1/chat/completions`, and `/v1/completions`, and 404s everything else, exactly as it already does for `/v1/models`, `/v1/cache/stats`, and `/metrics`. On the nodes where it is mounted, the endpoint answers with a well-formed body in every state, including when no policy is running at all, so a consumer can poll it unconditionally and never has to tell "nothing to report" apart from "this server does not serve this path". It sits behind the same API-key middleware as every other route, and its payload is as coarse as the persisted hint: a verdict, an acceptance rate, a sample count, and the pairing identity. No prompt data, no token ids, nothing request-identifying.
 
 ## Response body
 
@@ -48,24 +48,24 @@ The endpoint is always mounted, unlike `/props`, `/slots`, and `/metrics`, which
 | `state` | string | `"settled"`, `"profiling"`, `"forced"`, or `"unavailable"`. |
 | `reason` | string or null | Why the policy is unavailable. Non-null only when `state` is `"unavailable"`. |
 | `verdict` | string or null | `"enable"` or `"decline"` once settled, `null` otherwise. Same values as the `verdict` field of the persisted hint. |
-| `mtp_enabled` | boolean or null | Whether the B=1 MTP burst runs right now. This is the live gate, not the verdict: it is `true` while profiling, because profiling forces MTP on to collect the sample. |
+| `mtp_enabled` | boolean or null | Whether the *policy* is not blocking the B=1 MTP burst right now. This is the live gate, not the verdict: it is `true` while profiling, because profiling forces MTP on at the policy level. It does not mean a burst is actually running: later runtime gates (target support, exactness, capability checks) can still reject every burst attempt, in which case profiling never accumulates a sample despite `mtp_enabled: true`. |
 | `target` | string or null | Served model directory basename. |
 | `drafter` | string or null | Draft model directory basename. |
 | `hardware` | string or null | Coarse hardware-class label, for example `"M5-16c"`. Apple GPU generation plus GPU core count; non-Apple hosts report `"Unknown-0c"`. |
 | `block_size` | integer or null | Draft block size (K) the pairing is keyed on. |
-| `acceptance_rate` | number or null | Coarse measured acceptance rate (accepted draft tokens over proposed). Running value while profiling, final value once settled, `null` when nothing was measured. Rounded to two decimals once settled, matching the persisted hint exactly. |
+| `acceptance_rate` | number or null | Coarse measured acceptance rate (accepted draft tokens over proposed). Running value while profiling, final value once settled, `null` when nothing was measured. Rounded to two decimals once settled, matching the persisted hint exactly; while profiling it is the raw unrounded running quotient instead. |
 | `samples` | integer | Qualifying samples accumulated so far, or behind the settled verdict. `0` when forced or unavailable. |
 | `samples_required` | integer | Qualifying samples a profiling window needs before it settles. |
 | `samples_remaining` | integer or null | Qualifying samples still needed. Non-null only while `state` is `"profiling"`, because nothing is pending in any other state. |
 
-The four fields `target`, `drafter`, `hardware`, and `block_size` are the pairing key. A consumer showing a verdict should confirm they match the pairing it is showing, in particular `block_size`: a verdict profiled at one K does not carry to another, and changing `--num-draft-tokens` / `MLXCEL_DRAFT_BLOCK_SIZE` starts a fresh profiling window.
+The four fields `target`, `drafter`, `hardware`, and `block_size` are the pairing key. A consumer showing a verdict should confirm they match the pairing it is showing, in particular `block_size`: a verdict profiled at one K does not carry to another, and changing `--draft-block-size` / `MLXCEL_DRAFT_BLOCK_SIZE` starts a fresh profiling window. `--num-draft-tokens` is a separate, offline-only `generate` setting and does not reach the policy key.
 
 ### States
 
 | `state` | Meaning |
 |---------|---------|
 | `settled` | A verdict is in effect, either measured in this process or restored from a persisted hint. `verdict` says which way. |
-| `profiling` | Still accumulating samples. There is no verdict yet; `samples_remaining` says how many qualifying single-request generations are still needed. MTP is forced on meanwhile, so `mtp_enabled` is `true`. |
+| `profiling` | Still accumulating samples. There is no verdict yet; `samples_remaining` says how many qualifying single-request generations are still needed. MTP is forced on at the policy level meanwhile, so `mtp_enabled` is `true`. Limitation: if the runtime gates below the policy (target support, exactness, capability checks) reject every burst attempt, no sample is ever recorded, and the endpoint reports `state: "profiling"`, `samples: 0`, `samples_remaining: 4` for the life of the process, with `mtp_enabled: true` misleadingly suggesting MTP is running. |
 | `forced` | `MLXCEL_ENABLE_MTP_B1` pinned the decision. Nothing was profiled and nothing was measured, so `verdict`, `acceptance_rate`, and `samples` carry no measurement. `mtp_enabled` still reports what the pin resolved to. |
 | `unavailable` | No adaptive policy is running. `reason` says why. |
 
@@ -76,8 +76,8 @@ The four fields `target`, `drafter`, `hardware`, and `block_size` are the pairin
 | `reason` | Meaning |
 |----------|---------|
 | `no_mtp_dispatch` | The server has no MTP speculative dispatch: no drafter was supplied, or the drafter resolved to a different speculative kind. The B=1 MTP burst never runs, so `mtp_enabled` is `false`. |
-| `adaptive_disabled` | `MLXCEL_MTP_ADAPTIVE` is off. The static per-hardware gate decides instead, and nothing is measured or persisted. `mtp_enabled` reports what that gate decided. |
-| `worker_not_ready` | No batch worker has published a policy state yet: the model is still loading, or this server runs a worker variant with no MTP path. `mtp_enabled` is `null`. |
+| `adaptive_disabled` | `MLXCEL_MTP_ADAPTIVE` is off, so nothing is measured or persisted. What decides the B=1 burst instead is `MLXCEL_ENABLE_MTP_B1` when it is also set (an operator pin), or the static per-hardware gate when it is not. `mtp_enabled` reports whichever of the two decided. |
+| `worker_not_ready` | No batch worker has published a policy state yet: the model is still loading. This is transient. Every worker variant publishes at startup, including the legacy single-sequence (`--no-batch`) worker and the OpenXLA worker, which have no MTP path at all and publish `no_mtp_dispatch` immediately rather than leaving `worker_not_ready` as their steady state. `mtp_enabled` is `null`. |
 
 Distinguishing these is the point of the endpoint. Reading the hint files from another process could not: an empty directory meant "still profiling", "no MTP configured", and "the cache root resolved somewhere else" all at once, and the consumer degraded to a blank surface in every case.
 
@@ -101,7 +101,7 @@ A consumer must therefore ignore unknown fields, and must treat an unrecognised 
 
 Settled verdicts are still written to `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/mtp-policy/<key-hash>.json`, and that behavior is unchanged. The files are how a verdict survives a restart; they are not an interface. `HINT_VERSION`, the subdirectory name, and the hint body are private and can change in a patch release without notice.
 
-This endpoint exposes everything the hint file carries, plus the states a file cannot express (profiling, forced, unavailable) and the pairing's `hardware` label. Read it instead of the files.
+This endpoint exposes everything the hint file carries (the hint already includes the pairing's `hardware` label), plus the states a file cannot express: profiling, forced, unavailable. Read it instead of the files.
 
 ## Example: is MTP running, and why
 

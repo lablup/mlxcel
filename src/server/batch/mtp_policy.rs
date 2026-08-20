@@ -533,8 +533,11 @@ impl ProfileAccumulator {
 ///
 /// `block_size` (K) is included because acceptance length and verify latency
 /// both depend on K: a verdict profiled at K=8 must not be reused at K=4 (or
-/// vice versa). Changing `--num-draft-tokens` / `MLXCEL_DRAFT_BLOCK_SIZE` therefore
-/// produces a different key and triggers a fresh profiling window.
+/// vice versa). Changing `--draft-block-size` / `MLXCEL_DRAFT_BLOCK_SIZE`
+/// therefore produces a different key and triggers a fresh profiling window.
+/// `--num-draft-tokens` is a separate, offline-only `generate` setting (the
+/// per-step draft-token budget) and never reaches this key; see
+/// [`crate::cli::speculative_args::resolve_draft_block_size`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PolicyKey {
     target: String,
@@ -766,6 +769,7 @@ pub(crate) fn adaptive_enabled(value: Option<&str>) -> bool {
 /// case an operator is most likely to have forced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum MtpPolicyStatus {
     /// No adaptive policy is running for this server. The companion
     /// [`MtpPolicyUnavailableReason`] says why.
@@ -802,6 +806,7 @@ impl MtpPolicyStatus {
 /// failure issue #1257 exists to remove.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum MtpPolicyUnavailableReason {
     /// The server has no MTP speculative dispatch (no drafter, or a different
     /// speculative kind), so there is no pairing to profile and the B=1 MTP
@@ -811,8 +816,11 @@ pub enum MtpPolicyUnavailableReason {
     /// decides instead, and nothing is measured or persisted.
     AdaptiveDisabled,
     /// No batch worker has published a policy state yet: the model is still
-    /// loading, or this server runs a worker variant with no MTP path (the
-    /// legacy single-sequence worker, the XLA worker).
+    /// loading. This is transient. Every worker variant publishes at
+    /// startup, including the ones with no MTP path at all (the legacy
+    /// single-sequence worker, the XLA worker), which publish
+    /// [`MtpPolicyUnavailableReason::NoMtpDispatch`] immediately rather than
+    /// leaving this reason as their steady state.
     WorkerNotReady,
 }
 

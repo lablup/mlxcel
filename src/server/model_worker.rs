@@ -34,6 +34,7 @@ use crate::SamplingConfig;
 // OpenXLA worker are both driven through `BatchEngine::serve`.
 use crate::server::batch::BatchEngine;
 use crate::server::batch::BatchObservability;
+use crate::server::batch::{MtpPolicySnapshot, MtpPolicyUnavailableReason};
 use crate::server::media::{ImageInputLimits, current_image_input_limits};
 use crate::server::state::BatchMetrics;
 use crate::tokenizer::MlxcelTokenizer;
@@ -911,6 +912,18 @@ pub(crate) fn spawn_legacy_model_worker(
                 "Model worker thread starting (legacy sequential mode, --no-batch), loading model..."
             );
 
+            // The legacy single-sequence worker has no MTP dispatch path at
+            // all: it never builds an adaptive `MtpPolicy` or attaches a
+            // speculative dispatch, so `GET /v1/internal/mtp-policy` would
+            // otherwise stay stuck on `worker_not_ready` for the process
+            // lifetime (issue #1257 accuracy pass). Publish the honest answer
+            // immediately, before model loading, rather than waiting on a
+            // load that will never resolve it.
+            batch_observability.set_mtp_policy(MtpPolicySnapshot::unavailable(
+                MtpPolicyUnavailableReason::NoMtpDispatch,
+                Some(false),
+            ));
+
             let load_start = Instant::now();
             // Route model loading through the compute-backend seam (issue #338);
             // folds to the MLX backend under default features.
@@ -1102,6 +1115,18 @@ pub(crate) fn spawn_xla_model_worker(
                 "Model worker thread starting (OpenXLA continuous batching, B_max={b_max}, \
                  context_capacity={context_capacity}, device={device}), loading model..."
             );
+
+            // The OpenXLA worker has no MTP dispatch path at all: `XlaServeWorker`
+            // has no adaptive `MtpPolicy` and no speculative dispatch, so
+            // `GET /v1/internal/mtp-policy` would otherwise stay stuck on
+            // `worker_not_ready` for the process lifetime (issue #1257 accuracy
+            // pass). Publish the honest answer immediately, before model
+            // loading, rather than waiting on a load that will never resolve
+            // it.
+            batch_observability.set_mtp_policy(MtpPolicySnapshot::unavailable(
+                MtpPolicyUnavailableReason::NoMtpDispatch,
+                Some(false),
+            ));
 
             let load_start = Instant::now();
             let tokenizer = match crate::tokenizer::load_tokenizer(&model_path) {
