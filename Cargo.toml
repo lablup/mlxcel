@@ -305,6 +305,7 @@ large_enum_variant = "allow"
 should_implement_trait = "allow"
 
 [dev-dependencies]
+ctor = "1.0.13"
 tempfile = "3"
 
 [[test]]
