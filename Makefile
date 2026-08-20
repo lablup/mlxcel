@@ -578,6 +578,26 @@ pre-commit: fmt clippy test ## Pre-commit checks
 #     `the_cuda_test_suite_must_run_single_threaded` guard so a hand-run
 #     `cargo test --workspace --features cuda` names the problem instead of
 #     aborting anonymously.
+#   * Neither gate sets `MLX_ENABLE_TF32`, and that is deliberate rather than an
+#     oversight: the pin lives in the test binaries instead. MLX defaults the
+#     variable to 1 in `mlx/utils.h`, which routes f32 GEMMs through a
+#     reduced-precision kernel (TF32 on CUDA, NAX on Apple GPU generation 17)
+#     and breaks the suite's algorithm-equivalence tests, the ones that compute
+#     the same quantity two ways and expect full-f32 agreement. #1088 hit this
+#     on the CUDA gate and #1259 hit the same mechanism on Metal. The fix
+#     (#1260) is a `ctor` in `src/lib.rs` and in `src/lib/mlxcel-core/src/lib.rs`
+#     that sets `MLX_ENABLE_TF32=0` before MLX latches the value into its
+#     process-wide static, so it covers every gate running those two binaries
+#     without the two gates' command lines diverging from each other. An
+#     explicit operator setting still wins over the pin.
+#
+#     The policy this encodes: unit tests verify algorithm equivalence at full
+#     f32, while shipped numerics stay on MLX defaults and are covered by the
+#     runtime exactness probes (#1188, #1189). So do not answer a future red
+#     here by widening a parity tolerance before checking whether the run had
+#     TF32 on. Measured on GB10 (sm_121) at `670512c2`: this gate is 8167 passed
+#     and 0 failed, while re-running with `MLX_ENABLE_TF32=1` still reds three
+#     of the four tests #1088 listed. The pin is load-bearing, not decorative.
 #
 # There is deliberately no `verify-clippy-cuda` here yet: the CUDA lint half is
 # a separate hole from the CUDA test half, and #1048 is about the test gate.
