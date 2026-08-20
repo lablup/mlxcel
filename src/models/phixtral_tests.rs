@@ -577,7 +577,11 @@ fn noise(n: usize, seed: u32) -> Vec<f32> {
 
 fn filled_weights(args: &ModelArgs) -> WeightMap {
     let mut weights = synthetic_weights(args);
-    let keys: Vec<String> = weights.keys().cloned().collect();
+    let mut keys: Vec<String> = weights.keys().cloned().collect();
+    // Sorted because `WeightMap` is a `HashMap`: its iteration order is
+    // randomized per process, and the seed below advances once per key, so an
+    // unsorted walk builds a different random model on every run (issue #1265).
+    keys.sort();
     let mut seed = 0x5EED_9876u32;
     for key in keys {
         let shape = mlxcel_core::array_shape(weights.get(&key).expect("key just listed"));
