@@ -851,8 +851,11 @@ TEMPLATE_OK:{{ tool_call.function.name }}
         "object string arguments must be iterable as a mapping: {:?}",
         prepared.prompt
     );
+    // Python-style `True` is what HF `transformers` renders for a Jinja2
+    // bool, and minijinja follows it since 2.24 (#1259); the value surviving
+    // as a bool rather than a string is what this pins.
     assert!(
-        prepared.prompt.contains("ARG:recursive=true;"),
+        prepared.prompt.contains("ARG:recursive=True;"),
         "boolean argument value must survive mapping normalization: {:?}",
         prepared.prompt
     );

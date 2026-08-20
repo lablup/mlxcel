@@ -29,6 +29,7 @@ libm = "0.2"
 tracing = "0.1"
 
 [dev-dependencies]
+ctor = "1.0.13"
 tempfile = "3"
 
 [build-dependencies]
