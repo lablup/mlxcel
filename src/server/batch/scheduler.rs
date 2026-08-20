@@ -1663,8 +1663,16 @@ impl BatchScheduler {
     /// persisted-hint key; the worker passes the served model's basename.
     /// Building the policy reads the persisted hint from disk once here, at
     /// worker startup, so the per-request gate performs no IO.
+    ///
+    /// Whatever this resolves to, including "no policy at all", is published
+    /// into [`super::observability::BatchObservability`] for the
+    /// `GET /v1/internal/mtp-policy` endpoint (issue #1257). Publishing here is
+    /// what lets the endpoint answer without touching `MtpPolicy`, which the
+    /// worker thread owns unsynchronized.
     pub fn with_mtp_policy(mut self, target_model_id: Option<String>) -> Self {
-        if let crate::server::SpeculativeDispatch::Mtp {
+        use super::mtp_policy::{MtpPolicySnapshot, MtpPolicyUnavailableReason};
+
+        let mtp_dispatch = if let crate::server::SpeculativeDispatch::Mtp {
             draft_model_path,
             block_size,
             ..
@@ -1681,7 +1689,33 @@ impl BatchScheduler {
                 *block_size,
                 self.model.supports_batching(),
             );
-        }
+            true
+        } else {
+            false
+        };
+        // Publish the resolved policy state for the supported read interface
+        // (issue #1257). Doing it here, rather than letting the endpoint reach
+        // into `self.mtp_policy`, is what keeps `MtpPolicy` single-threaded and
+        // lock-free on the decode path.
+        let published = match (&self.mtp_policy, mtp_dispatch) {
+            (Some(policy), _) => policy.snapshot(),
+            // MTP dispatch with the adaptive path switched off
+            // (`MLXCEL_MTP_ADAPTIVE=0`): the pre-#333 static per-hardware gate
+            // decides, so report what it decided rather than leaving a
+            // consumer to guess whether MTP runs.
+            (None, true) => MtpPolicySnapshot::unavailable(
+                MtpPolicyUnavailableReason::AdaptiveDisabled,
+                Some(super::speculative_burst::mtp_b1_burst_enabled(
+                    self.model.supports_batching(),
+                )),
+            ),
+            // No MTP dispatch at all: there is no pairing and no burst.
+            (None, false) => MtpPolicySnapshot::unavailable(
+                MtpPolicyUnavailableReason::NoMtpDispatch,
+                Some(false),
+            ),
+        };
+        self.batch_observability.set_mtp_policy(published);
         self
     }
 
@@ -4651,7 +4685,14 @@ impl BatchScheduler {
         // executed a speculative round; a no-op once the policy has
         // settled, so there is no steady-state per-request cost.
         if let (Some(policy), Some(profile)) = (self.mtp_policy.as_mut(), mtp_profile) {
+            let was_profiling = policy.is_profiling();
             policy.record_b1_sample(profile);
+            // Republish for the supported read interface (issue #1257) only
+            // while the state can still move. Once forced or settled the
+            // published view is fixed, so the steady state pays nothing.
+            if was_profiling {
+                self.batch_observability.set_mtp_policy(policy.snapshot());
+            }
         }
         // Observability (issue #638, re-scoped by issue #734):
         // `burst_wall_ms` is the maximum wall-clock any SINGLE scheduler

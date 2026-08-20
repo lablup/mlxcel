@@ -533,8 +533,11 @@ impl ProfileAccumulator {
 ///
 /// `block_size` (K) is included because acceptance length and verify latency
 /// both depend on K: a verdict profiled at K=8 must not be reused at K=4 (or
-/// vice versa). Changing `--num-draft-tokens` / `MLXCEL_DRAFT_BLOCK_SIZE` therefore
-/// produces a different key and triggers a fresh profiling window.
+/// vice versa). Changing `--draft-block-size` / `MLXCEL_DRAFT_BLOCK_SIZE`
+/// therefore produces a different key and triggers a fresh profiling window.
+/// `--num-draft-tokens` is a separate, offline-only `generate` setting (the
+/// per-step draft-token budget) and never reaches this key; see
+/// [`crate::cli::speculative_args::resolve_draft_block_size`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PolicyKey {
     target: String,
@@ -590,14 +593,14 @@ pub(crate) fn hardware_label() -> String {
 /// The enable/decline verdict as persisted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum Verdict {
+pub enum Verdict {
     Enable,
     Decline,
 }
 
 impl Verdict {
     #[must_use]
-    pub(crate) fn from_run(run: bool) -> Self {
+    pub fn from_run(run: bool) -> Self {
         if run {
             Verdict::Enable
         } else {
@@ -606,7 +609,7 @@ impl Verdict {
     }
 
     #[must_use]
-    pub(crate) fn runs(self) -> bool {
+    pub fn runs(self) -> bool {
         matches!(self, Verdict::Enable)
     }
 }
@@ -753,6 +756,163 @@ pub(crate) fn adaptive_enabled(value: Option<&str>) -> bool {
     value.map(|v| !env_is_off(v)).unwrap_or(true)
 }
 
+// ── Published policy view (issue #1257) ──────────────────────────────────────
+
+/// Which state the adaptive MTP policy is in, as published through the
+/// supported read interface (`GET /v1/internal/mtp-policy`, issue #1257).
+///
+/// [`Forced`](Self::Forced) is deliberately distinct from
+/// [`Settled`](Self::Settled). An operator pin (`MLXCEL_ENABLE_MTP_B1`) is not
+/// a measured verdict, and a consumer that rendered it as "this machine
+/// measured MTP as worth it here" would be reporting something nobody
+/// measured. Collapsing the two would make the interface lie in exactly the
+/// case an operator is most likely to have forced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MtpPolicyStatus {
+    /// No adaptive policy is running for this server. The companion
+    /// [`MtpPolicyUnavailableReason`] says why.
+    Unavailable,
+    /// `MLXCEL_ENABLE_MTP_B1` pinned the decision, so nothing was profiled and
+    /// there is no measured verdict.
+    Forced,
+    /// Still accumulating qualifying samples; no verdict yet.
+    Profiling,
+    /// A verdict is in effect, either settled in this process or loaded from a
+    /// persisted hint.
+    Settled,
+}
+
+impl MtpPolicyStatus {
+    /// Stable lowercase snake_case wire label. Part of the endpoint contract:
+    /// these strings are what a consumer matches on, so they only change with
+    /// a schema-version bump.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::Forced => "forced",
+            Self::Profiling => "profiling",
+            Self::Settled => "settled",
+        }
+    }
+}
+
+/// Why no adaptive policy is running, for [`MtpPolicyStatus::Unavailable`].
+///
+/// The point of naming these separately is that "still profiling" must not be
+/// indistinguishable from "nothing is configured": that ambiguity is the
+/// failure issue #1257 exists to remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MtpPolicyUnavailableReason {
+    /// The server has no MTP speculative dispatch (no drafter, or a different
+    /// speculative kind), so there is no pairing to profile and the B=1 MTP
+    /// burst never runs.
+    NoMtpDispatch,
+    /// `MLXCEL_MTP_ADAPTIVE` is off. The pre-#333 static per-hardware gate
+    /// decides instead, and nothing is measured or persisted.
+    AdaptiveDisabled,
+    /// No batch worker has published a policy state yet: the model is still
+    /// loading. This is transient. Every worker variant publishes at
+    /// startup, including the ones with no MTP path at all (the legacy
+    /// single-sequence worker, the XLA worker), which publish
+    /// [`MtpPolicyUnavailableReason::NoMtpDispatch`] immediately rather than
+    /// leaving this reason as their steady state.
+    WorkerNotReady,
+}
+
+impl MtpPolicyUnavailableReason {
+    /// Stable lowercase snake_case wire label; see
+    /// [`MtpPolicyStatus::as_str`].
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoMtpDispatch => "no_mtp_dispatch",
+            Self::AdaptiveDisabled => "adaptive_disabled",
+            Self::WorkerNotReady => "worker_not_ready",
+        }
+    }
+}
+
+/// Point-in-time view of the adaptive MTP policy, published by the worker
+/// thread into [`super::observability::BatchObservability`] and read back by
+/// the `GET /v1/internal/mtp-policy` handler (issue #1257).
+///
+/// The pairing fields are `Option` because they only exist when a policy
+/// exists; they are all `Some` for every status except
+/// [`MtpPolicyStatus::Unavailable`]. Everything the persisted hint carries is
+/// here too, so a consumer reading this endpoint never needs the on-disk file.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MtpPolicySnapshot {
+    /// Which state the policy is in.
+    pub status: MtpPolicyStatus,
+    /// Set only when `status` is [`MtpPolicyStatus::Unavailable`].
+    pub reason: Option<MtpPolicyUnavailableReason>,
+    /// Target identity (the served model directory's basename).
+    pub target: Option<String>,
+    /// Drafter identity (the draft model directory's basename).
+    pub drafter: Option<String>,
+    /// Coarse hardware-class label, e.g. `"M5-16c"`.
+    pub hardware: Option<String>,
+    /// Draft block size (K) this pairing is keyed on.
+    pub block_size: Option<u32>,
+    /// Whether the B=1 MTP burst runs right now. `true` while profiling
+    /// (profiling forces MTP on to collect the sample), so this is the live
+    /// gate, not the verdict: read `verdict` for the settled answer.
+    pub mtp_enabled: Option<bool>,
+    /// The settled verdict, or `None` when there is not one yet (profiling,
+    /// forced, or unavailable).
+    pub verdict: Option<Verdict>,
+    /// Coarse measured acceptance rate: the running value while profiling,
+    /// the value behind the verdict once settled, `None` when nothing has
+    /// been measured.
+    pub acceptance_rate: Option<f64>,
+    /// Qualifying samples accumulated so far, or behind the settled verdict.
+    /// Zero when forced or unavailable, because neither measured anything.
+    pub samples: usize,
+    /// Qualifying samples a profiling window needs before it settles
+    /// ([`PROFILE_SAMPLE_TARGET`]). Reported in every state so a consumer can
+    /// render "2 of 4" without hard-coding the constant.
+    pub samples_required: usize,
+}
+
+impl MtpPolicySnapshot {
+    /// The "no adaptive policy here" view.
+    ///
+    /// `mtp_enabled` is whatever decides the B=1 burst in this server instead
+    /// of the policy: `Some(false)` when there is no MTP dispatch at all, the
+    /// static per-hardware gate's answer when the adaptive path is switched
+    /// off, and `None` when nothing has resolved it yet.
+    #[must_use]
+    pub fn unavailable(reason: MtpPolicyUnavailableReason, mtp_enabled: Option<bool>) -> Self {
+        Self {
+            status: MtpPolicyStatus::Unavailable,
+            reason: Some(reason),
+            target: None,
+            drafter: None,
+            hardware: None,
+            block_size: None,
+            mtp_enabled,
+            verdict: None,
+            acceptance_rate: None,
+            samples: 0,
+            samples_required: PROFILE_SAMPLE_TARGET,
+        }
+    }
+
+    /// Qualifying samples still needed before the window settles, or `None`
+    /// when the policy is not profiling (nothing is pending in that case, and
+    /// reporting a countdown would invite a consumer to render one).
+    #[must_use]
+    pub fn samples_remaining(&self) -> Option<usize> {
+        matches!(self.status, MtpPolicyStatus::Profiling)
+            .then(|| self.samples_required.saturating_sub(self.samples))
+    }
+}
+
 // ── Stateful policy ───────────────────────────────────────────────────────────
 
 /// Internal policy state machine.
@@ -763,7 +923,16 @@ enum PolicyState {
     /// Profiling: force MTP on and accumulate until the window closes.
     Profiling(ProfileAccumulator),
     /// A verdict is in effect (from profiling or a loaded hint).
-    Settled(bool),
+    ///
+    /// The measurement behind the verdict rides along so the published
+    /// snapshot (issue #1257) can report it without re-reading the hint file:
+    /// `acceptance_rate` and `samples` come from the profiling window that
+    /// settled it, or from the loaded hint when the verdict was restored.
+    Settled {
+        run: bool,
+        acceptance_rate: f64,
+        samples: usize,
+    },
 }
 
 /// Adaptive MTP enable/decline policy for one worker's (target, drafter,
@@ -857,7 +1026,11 @@ impl MtpPolicy {
                 hint.acceptance_rate,
                 key.display(),
             );
-            PolicyState::Settled(hint.verdict.runs())
+            PolicyState::Settled {
+                run: hint.verdict.runs(),
+                acceptance_rate: hint.acceptance_rate,
+                samples: hint.samples,
+            }
         } else {
             PolicyState::Profiling(ProfileAccumulator::default())
         };
@@ -897,7 +1070,7 @@ impl MtpPolicy {
     pub(crate) fn profile_probe_rounds(&self) -> usize {
         match &self.state {
             PolicyState::Profiling(_) => PROFILE_PROBE_ROUNDS_PER_BURST,
-            PolicyState::Forced(_) | PolicyState::Settled(_) => 0,
+            PolicyState::Forced(_) | PolicyState::Settled { .. } => 0,
         }
     }
 
@@ -927,7 +1100,7 @@ impl MtpPolicy {
         match &self.state {
             PolicyState::Forced(run) => *run,
             PolicyState::Profiling(_) => true,
-            PolicyState::Settled(run) => *run,
+            PolicyState::Settled { run, .. } => *run,
         }
     }
 
@@ -937,6 +1110,67 @@ impl MtpPolicy {
     #[must_use]
     pub(crate) fn is_settled(&self) -> bool {
         !matches!(self.state, PolicyState::Profiling(_))
+    }
+
+    /// Whether the policy is still accumulating samples.
+    ///
+    /// The scheduler uses this to republish the snapshot (issue #1257) only
+    /// while the state can still change: once forced or settled the published
+    /// view is fixed, so the steady state pays nothing.
+    #[must_use]
+    pub(crate) fn is_profiling(&self) -> bool {
+        matches!(self.state, PolicyState::Profiling(_))
+    }
+
+    /// Point-in-time view of the policy for the supported read interface
+    /// (issue #1257).
+    ///
+    /// Cheap but not free (it clones the three key strings), so the caller
+    /// publishes it at state transitions rather than per request, and never
+    /// per token. See [`MtpPolicySnapshot`] for what each state reports.
+    #[must_use]
+    pub(crate) fn snapshot(&self) -> MtpPolicySnapshot {
+        let (status, mtp_enabled, verdict, acceptance_rate, samples) = match &self.state {
+            // A pin measured nothing, so it reports no verdict, no acceptance
+            // rate, and no samples. `mtp_enabled` is still the truth about
+            // whether the burst runs.
+            PolicyState::Forced(run) => (MtpPolicyStatus::Forced, *run, None, None, 0),
+            // Profiling forces MTP on to collect the sample, so the live gate
+            // is `true` even though no verdict exists yet. The acceptance rate
+            // is the running partial measurement, absent until a qualifying
+            // sample has landed.
+            PolicyState::Profiling(acc) => (
+                MtpPolicyStatus::Profiling,
+                true,
+                None,
+                (acc.samples() > 0).then(|| acc.acceptance_rate()),
+                acc.samples(),
+            ),
+            PolicyState::Settled {
+                run,
+                acceptance_rate,
+                samples,
+            } => (
+                MtpPolicyStatus::Settled,
+                *run,
+                Some(Verdict::from_run(*run)),
+                Some(*acceptance_rate),
+                *samples,
+            ),
+        };
+        MtpPolicySnapshot {
+            status,
+            reason: None,
+            target: Some(self.key.target.clone()),
+            drafter: Some(self.key.drafter.clone()),
+            hardware: Some(self.key.hardware.clone()),
+            block_size: Some(self.key.block_size),
+            mtp_enabled: Some(mtp_enabled),
+            verdict,
+            acceptance_rate,
+            samples,
+            samples_required: PROFILE_SAMPLE_TARGET,
+        }
     }
 
     /// Record one completed B=1 burst's profile. Folds the sample into the
@@ -1021,7 +1255,14 @@ impl MtpPolicy {
                 self.key.display(),
             );
         }
-        self.state = PolicyState::Settled(run);
+        // Publish the same rounded acceptance rate the hint file carries, so
+        // the endpoint (issue #1257) and the persisted hint never disagree by
+        // a rounding step for a consumer comparing the two.
+        self.state = PolicyState::Settled {
+            run,
+            acceptance_rate: hint.acceptance_rate,
+            samples: hint.samples,
+        };
     }
 }
 

@@ -357,6 +357,13 @@ M5 Max depending on how predictable the output is,
 ~1.5x on GB10 with the multirow qmv verify) and declines it where it does not
 (the same pairing on M1 Ultra, or on CUDA with `MLXCEL_QMV_MULTIROW=0`).
 
+`GET /v1/internal/mtp-policy` reports the current pairing's state through a
+versioned, supported interface: whether the verdict has settled and which way,
+how many qualifying samples a profiling window still needs, and why no policy
+is running when there is none. A host application should read it there rather
+than parsing the hint files, which are a private on-disk format. See
+[Adaptive MTP policy API](mtp-policy-api.md).
+
 Scheduling: for non-batchable targets (the 12B Unified family) an enabled B=1
 burst equals their inherent single-slot serialization. For batch-capable
 targets, the B=1 MTP arm is served tick-cooperatively by default (issue #734):

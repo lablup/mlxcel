@@ -136,6 +136,13 @@ pub fn create_app(state: AppState) -> Router {
         // off so monitoring clients can poll without conditional logic).
         .route("/v1/cache/stats", get(routes::cache_stats))
         .route("/v1/cache/reset", post(routes::cache_reset))
+        // Adaptive B=1 MTP policy state (issue #1257). Always mounted, and
+        // returns a well-formed "unavailable" payload when no policy is
+        // running, for the same reason the cache endpoints do: a consumer must
+        // be able to tell "nothing to report" from "this server does not
+        // answer". It is the supported replacement for reading the private
+        // hint files under the mlxcel cache root.
+        .route("/v1/internal/mtp-policy", get(routes::mtp_policy))
         // Audio routes (speech, transcriptions, translations) come from the
         // sub-router that carries the larger body-limit layer.
         .merge(audio_routes)
