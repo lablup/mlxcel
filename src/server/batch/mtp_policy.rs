@@ -18,8 +18,9 @@
 //!
 //! Before #333 the singleton (B=1) MTP burst was gated by a purely static
 //! per-hardware rule ([`super::speculative_burst::mtp_b1_default`], issue
-//! #165): non-batchable 12B targets default on everywhere, batch-capable 31B
-//! targets default on only on M5+. Those static gates are correct for the
+//! #165, revised by #1217): non-batchable 12B targets default on everywhere,
+//! batch-capable 31B targets default on from Apple GPU generation 15. Those
+//! static gates are correct for the
 //! pairings they were measured on, but they leave performance on the table
 //! when a new (target, drafter, hardware) pairing is favorable yet the static
 //! rule declines it, and they keep running MTP on a pairing that turns out
@@ -773,7 +774,11 @@ enum PolicyState {
 pub(crate) struct MtpPolicy {
     key: PolicyKey,
     target_supports_batching: bool,
-    has_neural_accelerator: bool,
+    /// The host's Apple GPU generation reduced to whether an affine-quantized
+    /// projection at `M >= 2` runs as one wide pass (generation 15+). Feeds
+    /// [`super::speculative_burst::mtp_b1_default`] when a profiling window
+    /// comes out ambiguous; see that function for the measurements behind it.
+    wide_quantized_projections: bool,
     /// True on compute-bound (non-Apple-Silicon, e.g. CUDA / GB10) hardware,
     /// where a K-wide verify forward does not amortize to one classic decode
     /// forward. Drives the backend-specific verify-cost multiple (issue #638).
@@ -806,7 +811,7 @@ impl MtpPolicy {
         }
         let key = PolicyKey::new(target_id, drafter_id, hardware_label(), block_size);
         let hw = mlxcel_core::hardware::get_hardware();
-        let has_neural_accelerator = hw.has_neural_accelerator;
+        let wide_quantized_projections = hw.silicon_gen.wide_quantized_projections();
         // Compute-bound = non-Apple-Silicon (CUDA / GB10): the runtime hardware
         // probe reports `AppleSiliconGen::Unknown` off Apple GPUs. On such hosts
         // the K-wide verify does not amortize (issue #638), so the policy
@@ -814,7 +819,7 @@ impl MtpPolicy {
         // also maps Apple generations newer than the enumerated ones to
         // `Unknown`, so the "Apple byte-identical" guarantee is scoped to the
         // enumerated gens; extend the enum when a new Apple generation ships
-        // (same staleness contract as `has_neural_accelerator`).
+        // (same staleness contract as `wide_quantized_projections`).
         let compute_bound = matches!(
             hw.silicon_gen,
             mlxcel_core::hardware::AppleSiliconGen::Unknown
@@ -824,7 +829,7 @@ impl MtpPolicy {
         Some(Self::from_parts(
             key,
             target_supports_batching,
-            has_neural_accelerator,
+            wide_quantized_projections,
             compute_bound,
             force,
             store,
@@ -838,7 +843,7 @@ impl MtpPolicy {
     pub(crate) fn from_parts(
         key: PolicyKey,
         target_supports_batching: bool,
-        has_neural_accelerator: bool,
+        wide_quantized_projections: bool,
         compute_bound: bool,
         force: Option<bool>,
         store: PolicyStore,
@@ -859,7 +864,7 @@ impl MtpPolicy {
         Self {
             key,
             target_supports_batching,
-            has_neural_accelerator,
+            wide_quantized_projections,
             compute_bound,
             state,
             store,
@@ -903,7 +908,7 @@ impl MtpPolicy {
         super::speculative_burst::mtp_b1_default(
             None,
             self.target_supports_batching,
-            self.has_neural_accelerator,
+            self.wide_quantized_projections,
         )
     }
 

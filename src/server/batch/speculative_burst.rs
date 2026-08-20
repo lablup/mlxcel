@@ -509,7 +509,7 @@ pub(crate) fn mtp_prefill_suffix_start(
 /// Whether the Gemma 4 MTP B=1 (single-request) burst path runs for a target
 /// with the given batching capability.
 ///
-/// Default policy (issue #165, per-hardware):
+/// Default policy (issue #165, revised by #1217, per-hardware):
 /// - Non-batchable targets (the 12B Unified family, whose only decode path is
 ///   B=1): **on** everywhere. Measured across three prompts: 1.90x to 3.14x
 ///   on M5 Max, 1.74x to 2.61x on M3 Ultra, and 0.95x to 1.48x on M1 Ultra.
@@ -517,13 +517,50 @@ pub(crate) fn mtp_prefill_suffix_start(
 ///   assumes on every prompt, and it is what the adaptive policy (#333)
 ///   exists to catch. See `docs/benchmarks.md` for the rows and the
 ///   round-cost model that predicts them.
-/// - Batch-capable targets (the 31B + bf16 assistant): **on only on M5+**
-///   (Neural Accelerator generation). M5 Max measured ~1.2 to 1.4x, but
-///   M1 Ultra measured a consistent regression (~0.75 to 0.96x, four greedy
-///   160-token prompts), so pre-M5 chips default to classic decode. The
-///   discriminator is GPU compute generation rather than memory bandwidth:
-///   M1 Ultra has datacenter-class bandwidth yet the drafter + K-wide verify
-///   forwards do not pay for themselves on its older GPU cores.
+/// - Batch-capable targets (the 31B + bf16 assistant): **on from Apple GPU
+///   generation 15** ([`AppleSiliconGen::wide_quantized_projections`], which
+///   is M3, M4 and M5), classic decode below it.
+///
+/// The batch-capable half was `has_neural_accelerator` (M5 only) until #1217,
+/// on the strength of ~1.2 to 1.4x on M5 Max against a ~0.75 to 0.96x
+/// regression on M1 Ultra. Both of those predate #1194, #1199, #1203, #1208
+/// and #1215, and M3 Ultra had never been measured on this pairing at all. It
+/// has now: 2026-08-20 on current main, three greedy prompts under the #1215
+/// protocol, **1.95x (prose), 2.41x (source code), 2.65x (enumeration)** on an
+/// M3 Ultra that the old predicate declined. The rows are in
+/// `docs/benchmark_results/mtp-b1-gate-m3ultra-2026-08-20.md`.
+///
+/// The discriminator is the `use_qmv_wide` split documented in
+/// `crate::models::speculative_exactness`, not the Neural Accelerator: from
+/// generation 15 an affine-quantized projection at `M >= 2` runs as one wide
+/// pass, while generation 13 runs the verify block as `K` narrow passes. That
+/// shows up directly as the cost of a verify round in classic decode steps,
+/// which is what a round has to out-emit to pay for itself. All three M3 Ultra
+/// rows above measure that round cost at 1.51 to 1.52 and emit 2.96 to 3.99
+/// tokens per verify, so they clear break-even by roughly double; M1 Ultra
+/// measures 2.71 at the same block width on the 12B pairing.
+///
+/// Two limits on this evidence, both deliberate:
+/// - **M4 is inferred, not measured.** It is grouped here because it shares
+///   generation 15's `use_qmv_wide` dispatch with M3, not because anyone ran
+///   the pairing on one.
+/// - **Generation 13 was not re-measured**, for want of the hardware. Its
+///   founding regression is stale in the way M5 Max's founding gain was, but
+///   the width sweep argues it is not therefore wrong. Round cost fits
+///   `0.83 + 0.170 K` classic steps for this pairing on M3 Ultra against
+///   `1.14 + 0.090 K` for the 12B pairing on the same host: the bf16 drafter
+///   costs about 1.9x as much per extra block position as the 4-bit one, and
+///   the two lines happen to cross at K = 4. Carrying that slope ratio onto
+///   generation 13's `1.35 + 0.346 K` puts this pairing near 3.6 classic steps
+///   per round at K = 4 there, which the 2.96 to 3.99 tokens a round emits
+///   would only just cover. So M1 and M2 keep declining, and the estimate is
+///   an extrapolation across both a pairing and a generation rather than a
+///   result. This predicate is strictly more permissive than the one it
+///   replaced, so no host lost a path it previously had.
+///
+/// This is also the value [`super::mtp_policy::MtpPolicy`] falls back to when
+/// a profiling window is ambiguous, so it steers real decisions even with the
+/// adaptive path (#333) on, which is the default.
 ///
 /// `MLXCEL_ENABLE_MTP_B1` overrides the default in both directions: any value
 /// other than `0`/`false`/`no`/`off` forces it on, those values force it off.
@@ -533,15 +570,21 @@ pub(crate) fn mtp_b1_burst_enabled(target_supports_batching: bool) -> bool {
     mtp_b1_default(
         std::env::var("MLXCEL_ENABLE_MTP_B1").ok().as_deref(),
         target_supports_batching,
-        mlxcel_core::hardware::get_hardware().has_neural_accelerator,
+        mlxcel_core::hardware::get_hardware()
+            .silicon_gen
+            .wide_quantized_projections(),
     )
 }
 
 /// Pure decision core of [`mtp_b1_burst_enabled`], separated for unit testing.
+///
+/// `wide_quantized_projections` is the host's Apple GPU generation reduced to
+/// the one property that decides whether a verify block amortizes; see
+/// [`mtp_b1_burst_enabled`] for what it is and what measured it.
 pub(crate) fn mtp_b1_default(
     env_override: Option<&str>,
     target_supports_batching: bool,
-    has_neural_accelerator: bool,
+    wide_quantized_projections: bool,
 ) -> bool {
     if let Some(v) = env_override {
         return !matches!(v, "0" | "false" | "FALSE" | "no" | "off");
@@ -549,7 +592,7 @@ pub(crate) fn mtp_b1_default(
     if !target_supports_batching {
         return true;
     }
-    has_neural_accelerator
+    wide_quantized_projections
 }
 
 /// Whether to force the Gemma 4 MTP B>1 batched burst path. Off by default.
@@ -2876,28 +2919,99 @@ fn model_variant_label(model: &LoadedModel) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    /// Issue #165: per-hardware B=1 MTP default decision table.
+    /// Issue #165, revised by #1217: per-hardware B=1 MTP default decision
+    /// table.
     #[test]
     fn mtp_b1_default_policy_table() {
         use super::mtp_b1_default;
         // Env override wins in both directions, regardless of hardware.
         for &batching in &[true, false] {
-            for &na in &[true, false] {
-                assert!(mtp_b1_default(Some("1"), batching, na));
-                assert!(mtp_b1_default(Some("on"), batching, na));
-                assert!(!mtp_b1_default(Some("0"), batching, na));
-                assert!(!mtp_b1_default(Some("false"), batching, na));
-                assert!(!mtp_b1_default(Some("off"), batching, na));
-                assert!(!mtp_b1_default(Some("no"), batching, na));
+            for &wide in &[true, false] {
+                assert!(mtp_b1_default(Some("1"), batching, wide));
+                assert!(mtp_b1_default(Some("on"), batching, wide));
+                assert!(!mtp_b1_default(Some("0"), batching, wide));
+                assert!(!mtp_b1_default(Some("false"), batching, wide));
+                assert!(!mtp_b1_default(Some("off"), batching, wide));
+                assert!(!mtp_b1_default(Some("no"), batching, wide));
             }
         }
         // No override: non-batchable targets stay on everywhere (B=1 is their
         // only decode path and measured profitable on both chip classes).
         assert!(mtp_b1_default(None, false, true));
         assert!(mtp_b1_default(None, false, false));
-        // Batch-capable targets: on only on M5+ (Neural Accelerator) chips.
+        // Batch-capable targets follow the wide-projection split: on from
+        // Apple GPU generation 15, classic decode below it.
         assert!(mtp_b1_default(None, true, true));
         assert!(!mtp_b1_default(None, true, false));
+    }
+
+    /// Issue #1217: the batch-capable half of the table, stated in terms of
+    /// the chip generations it actually decides for, so a change to
+    /// `wide_quantized_projections` cannot silently re-route this gate.
+    ///
+    /// M3 is the row this issue moved, and it moved on measurement: the
+    /// 31B + bf16 assistant pairing runs 1.95x to 2.65x on an M3 Ultra that
+    /// the previous `has_neural_accelerator` predicate declined
+    /// (`docs/benchmark_results/mtp-b1-gate-m3ultra-2026-08-20.md`).
+    #[test]
+    fn mtp_b1_default_batch_capable_follows_gpu_generation() {
+        use mlxcel_core::hardware::AppleSiliconGen;
+
+        let decides = |chip: AppleSiliconGen| {
+            super::mtp_b1_default(None, true, chip.wide_quantized_projections())
+        };
+
+        // Generation 13: the verify block runs as narrow per-position passes
+        // and its founding regression has not been re-measured, so it keeps
+        // declining.
+        assert!(!decides(AppleSiliconGen::M1));
+        assert!(!decides(AppleSiliconGen::M2));
+        // Generation 15+: measured on M3, inferred for M4 from the shared
+        // dispatch, and M5 keeps the path it already had.
+        assert!(decides(AppleSiliconGen::M3));
+        assert!(decides(AppleSiliconGen::M4));
+        assert!(decides(AppleSiliconGen::M5));
+        // Non-Apple / not-yet-enumerated hosts decline, unchanged by #1217.
+        assert!(!decides(AppleSiliconGen::Unknown));
+
+        // Non-batchable targets are generation-independent, on every host.
+        for chip in [
+            AppleSiliconGen::M1,
+            AppleSiliconGen::M3,
+            AppleSiliconGen::M5,
+            AppleSiliconGen::Unknown,
+        ] {
+            assert!(super::mtp_b1_default(
+                None,
+                false,
+                chip.wide_quantized_projections()
+            ));
+        }
+    }
+
+    /// Issue #1217: no host may lose the B=1 path it had before the gate
+    /// changed. The new predicate must be strictly more permissive than
+    /// `has_neural_accelerator`, which is what makes it safe to flip on
+    /// M3 Ultra evidence without an M1 Ultra re-measurement.
+    #[test]
+    fn mtp_b1_default_never_revokes_a_previously_enabled_host() {
+        use mlxcel_core::hardware::AppleSiliconGen;
+
+        for chip in [
+            AppleSiliconGen::M1,
+            AppleSiliconGen::M2,
+            AppleSiliconGen::M3,
+            AppleSiliconGen::M4,
+            AppleSiliconGen::M5,
+            AppleSiliconGen::Unknown,
+        ] {
+            let before = super::mtp_b1_default(None, true, chip.has_neural_accelerator());
+            let after = super::mtp_b1_default(None, true, chip.wide_quantized_projections());
+            assert!(
+                !before || after,
+                "{chip} ran B=1 MTP before #1217 and would decline after",
+            );
+        }
     }
 
     use super::*;

@@ -298,22 +298,24 @@ fn drive(mut policy: MtpPolicy, s: MtpBurstProfile, n: usize) -> MtpPolicy {
     policy
 }
 
-fn adaptive_policy(static_default_batching: bool, has_na: bool) -> MtpPolicy {
+fn adaptive_policy(static_default_batching: bool, wide_projections: bool) -> MtpPolicy {
     // force = None → adaptive; no-dir store keeps these state-machine tests
     // off the filesystem (persistence is exercised separately). Bandwidth-bound
     // (Apple) hardware unless the test opts into the compute-bound path.
-    adaptive_policy_hw(static_default_batching, has_na, false)
+    // `wide_projections` is the generation-15 split the static default reads
+    // (issue #1217): false models an M1/M2-class host, true an M3/M4/M5 one.
+    adaptive_policy_hw(static_default_batching, wide_projections, false)
 }
 
 fn adaptive_policy_hw(
     static_default_batching: bool,
-    has_na: bool,
+    wide_projections: bool,
     compute_bound: bool,
 ) -> MtpPolicy {
     MtpPolicy::from_parts(
         key(),
         static_default_batching,
-        has_na,
+        wide_projections,
         compute_bound,
         None,
         PolicyStore::with_dir(None),
@@ -322,7 +324,8 @@ fn adaptive_policy_hw(
 
 #[test]
 fn favorable_profile_enables_overriding_static_decline() {
-    // Batch-capable target + no neural accelerator → static default DECLINE.
+    // Batch-capable target on Apple GPU generation 13 (no wide quantized
+    // projection path) → static default DECLINE.
     let policy = adaptive_policy(true, false);
     assert!(
         !policy.static_default(),
