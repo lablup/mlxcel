@@ -62,10 +62,22 @@ projections at `M = B`. The scheduler does run batched decode as one
 `src/server/batch/scheduler.rs`, input shape `[B, 1]`), but what the model
 does with that input decides the dispatch, and neither MTP family stacks it:
 
-- **Gemma 4** (`src/models/gemma4.rs`) does not override `forward_batched`,
-  so it inherits the trait default
-  (`src/lib/mlxcel-core/src/generate.rs:736`), which is a loop: one
-  `forward()` per sequence, `M = 1` each, results concatenated.
+- **Gemma 4** decodes per row on both of its routes. The measured
+  checkpoint carries `embed_vision.*` weights, so detection routes it to
+  `LoadedModel::Gemma4VLM` (`gemma4_has_vision_weights` in
+  `src/models/detection.rs`), and `execute_batched_decode`
+  (`src/server/batch/scheduler.rs:7300`) calls
+  `forward_batched_with_context_and_ids` with the batch's sequence ids.
+  `Gemma4VLModel` overrides that entry point
+  (`src/vision/gemma4_vl.rs:687`) and delegates to
+  `forward_batched_with_seq_ids_dispatch`
+  (`src/multimodal/batched_dispatch.rs:60`), which slices `input_ids` row
+  by row and calls `forward_with_sequence_id` once per sequence. The
+  text-only route (`LoadedModel::Gemma4`, `models::Gemma4Wrapper`)
+  overrides nothing and inherits the trait default
+  (`src/lib/mlxcel-core/src/generate.rs:736`), which is the same per-row
+  loop over `forward()`. Either way `M = 1` per forward, results
+  concatenated.
 - **Qwen 3.5** (`src/models/qwen3_5.rs:3388`) overrides it but branches to
   the same per-row loop whenever the input is single-token, which is every
   decode step. Its joint path only serves multi-token batched prefill.
@@ -94,7 +106,10 @@ branch):
    TTFT, not in decode throughput.
 2. **The speculative verify forward itself** (`M = K`), which is the work
    the pin exists for and was already priced: 17 to 20% on the Qwen verify
-   forward, ~23% on Gemma 4 (`docs/benchmarks.md`).
+   forward, ~23% on the Gemma 4 verify forward (`docs/benchmarks.md`).
+   Neither is the "23% of throughput" the same file quotes for the M5 Max
+   code row, which is end-to-end decode; the two 23s are different
+   quantities.
 
 Fresh full prefill and chunked-prefill chunks run at `M >= 473` in these
 configurations, far above every batch limit, and take the matrix-matrix
@@ -164,7 +179,7 @@ prefill their suffixes serially, so the i-th request's TTFT carries i
 suffix forwards and the level mean carries `(B + 1) / 2` of them. One
 suffix forward costing `d` more narrow predicts mean deltas of `1d, 1.5d,
 2.5d, 4.5d`; the measured `15.5, 23.0, 38.4, 69.5` fit `d = 15.4 ms` to
-within 0.1 ms on every row, the B = 1 row included. So the entire TTFT
+within 0.2 ms on every row, the B = 1 row included. So the entire TTFT
 effect is a single `M = 4` suffix forward costing **+15.4 ms** under the
 narrow pin, repeated once per queued cache-hit request.
 
@@ -317,7 +332,8 @@ MTP stream's window 2 emission (593 vs 612 tokens, 3% fewer narrow) is
 the same effect seen from the other side. So even in the mixed shape, the
 pin's cost to bystander streams on current code is bounded by the MTP
 stream's own slowdown diluted across the batch, single figures of a
-percent, not the kernel-sized 17 to 23%.
+percent, not the kernel-sized 17 to 20% this pairing's verify forward
+pays.
 
 ## Gate recipes: which env reaches which kernel
 
