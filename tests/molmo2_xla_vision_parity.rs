@@ -272,6 +272,15 @@ fn assert_within(
     Ok(())
 }
 
+/// The admission predicate `assert_within` applies, without its progress
+/// reporting. Kept ungated so the tolerance shape is verified in every build of
+/// this target, not only the diagnostics ones that can reach a checkpoint.
+fn within(actual: &[f32], expected: &[f32], max_abs_limit: f32, relative_limit: f32) -> bool {
+    compare_with_limit(actual, expected, max_abs_limit, relative_limit)
+        .map(|comparison| comparison.worst_ratio <= 1.0)
+        .unwrap_or(false)
+}
+
 fn active_groups(pooling: &[i32], groups: usize, group_size: usize) -> Result<Vec<usize>> {
     if group_size == 0 || pooling.len() != groups * group_size {
         return Err(anyhow!(
@@ -380,22 +389,23 @@ fn the_relative_half_only_widens_the_bound_where_values_are_large() {
     // Near zero the absolute floor still rules: a gap just past atol fails, so
     // nothing that was strict before this change became loose.
     assert!(
-        assert_within("small", &[0.06], &[0.0], atol, rtol, 1.0).is_err(),
+        !within(&[0.06], &[0.0], atol, rtol),
         "atol must still bound values around zero"
     );
-    assert!(assert_within("small-ok", &[0.04], &[0.0], atol, rtol, 1.0).is_ok());
+    assert!(within(&[0.04], &[0.0], atol, rtol));
 
     // At the projector output's magnitude the same absolute gap is a fraction
-    // of one f32 ULP's worth of relative error and must pass.
+    // of one f32 ULP's worth of relative error and must pass. These are the
+    // measured `tall` values from the real gate.
     assert!(
-        assert_within("large", &[25507.98], &[25507.887], atol, rtol, 1.0).is_ok(),
+        within(&[25507.98], &[25507.887], atol, rtol),
         "a 0.09 gap on a 2.5e4 value is reduction-order noise, not a defect"
     );
 
     // A genuine defect changes leading digits, which the relative half still
     // catches no matter how large the value is.
     assert!(
-        assert_within("large-wrong", &[25507.98], &[25000.0], atol, rtol, 1.0).is_err(),
+        !within(&[25507.98], &[25000.0], atol, rtol),
         "a 2% error on a large value must still fail"
     );
 }
@@ -409,15 +419,7 @@ fn synthetic_negative_controls_detect_layer_denominator_and_clamped_index_drift(
     // is a defect at any magnitude, so it has to fail under the same atol/rtol
     // the real gate runs with.
     assert!(
-        assert_within(
-            "wrong-layers",
-            &canonical_layers,
-            &wrong_layers,
-            0.05,
-            1e-5,
-            0.01
-        )
-        .is_err(),
+        !within(&canonical_layers, &wrong_layers, 0.05, 1e-5),
         "selected-layer drift must still be rejected"
     );
 
