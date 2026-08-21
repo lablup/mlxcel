@@ -195,7 +195,17 @@ def stream_request(
                 continue
             usage = event.get("usage")
             if isinstance(usage, dict) and usage.get("completion_tokens") is not None:
-                usage_tokens = int(usage["completion_tokens"])
+                try:
+                    usage_tokens = int(usage["completion_tokens"])
+                except (TypeError, ValueError):
+                    # A malformed usage block must not end the sweep. Neither
+                    # TypeError nor ValueError is in the except tuple below, so
+                    # this would propagate out of the executor, through the
+                    # gather in run_level, and abort every remaining
+                    # concurrency level of the pass, discarding a measurement
+                    # that had already run for minutes. delta_tokens is the
+                    # fallback count.
+                    pass
             for choice in event.get("choices", []) or []:
                 delta = choice.get("delta") or {}
                 # Reasoning models stream their thinking channel as

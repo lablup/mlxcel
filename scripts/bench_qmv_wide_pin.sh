@@ -73,19 +73,88 @@ MEASURE_PASSES="${MEASURE_PASSES:-2}"
 SWEEP_ARMS="${SWEEP_ARMS:-1 0 0 1 0 1 1 0}"
 MIXED_ARMS="${MIXED_ARMS:-A B B A}"
 CLASSIC_STREAMS="${CLASSIC_STREAMS:-4}"
+# Seconds a server gets to honour SIGTERM before the harness escalates to SIGKILL.
+SHUTDOWN_GRACE_S="${SHUTDOWN_GRACE_S:-60}"
+
+# Preflight the binary. Without it the first symptom is record_env's stat
+# failing, then every boot failing in turn, and the operator has to read a
+# server log to find out that nothing was ever built.
+if [ ! -x "$BIN" ]; then
+  echo "server binary not found at $BIN; build with:" >&2
+  echo "  cargo build --release --features metal,accelerate" >&2
+  exit 2
+fi
+
+# The arms are defined by the environment, so an inherited value silently
+# redefines them: run_mixed's arm A is "the default env" and run_sweep assumes
+# these two are the only things that differ between boots. Testing a gate
+# recipe by hand is exactly how this measurement's own recipes were checked
+# (see the results record), and an export left behind by that would make both
+# arms the same arm while the run still reports success.
+if [ -n "${MLXCEL_QMV_WIDE+set}" ] || [ -n "${MLXCEL_MTP_ALLOW_INEXACT+set}" ]; then
+  echo "the arms are defined by MLXCEL_QMV_WIDE and MLXCEL_MTP_ALLOW_INEXACT, but this shell already exports:" >&2
+  echo "  MLXCEL_QMV_WIDE=${MLXCEL_QMV_WIDE-<unset>}  MLXCEL_MTP_ALLOW_INEXACT=${MLXCEL_MTP_ALLOW_INEXACT-<unset>}" >&2
+  echo "an inherited value collapses both arms onto one kernel; unset them and rerun" >&2
+  exit 2
+fi
+
+# Refuse to run against a server this script did not boot. If something already
+# holds $PORT (typically a server leaked by an aborted run) every launch below
+# dies on EADDRINUSE while wait_ready happily probes the survivor, so both arms
+# measure the same kernel and the run still reports success. That silently
+# destroys the only thing the ABBA design establishes, so abort instead.
+if curl -sf -m 5 "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1; then
+  echo "something is already serving on port $PORT; stop it or run with PORT=<free port>" >&2
+  exit 2
+fi
 
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="${OUT:-$REPO/bench-results/qmv-wide-pin/$MODE-$STAMP}"
-mkdir -p "$OUT"
+# This script does not use `set -e`, so a failed mkdir would leave every
+# redirect below failing silently while the servers still boot: hours of
+# measurement discarded as it is produced.
+mkdir -p "$OUT" || exit 1
 
 SERVER_PID=""
-cleanup() {
-  if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
-    kill "$SERVER_PID" 2>/dev/null
-    wait "$SERVER_PID" 2>/dev/null
+# Counts python3 harness invocations that exited non-zero, so an unbalanced
+# design cannot be mistaken for a complete one at aggregation time.
+HARNESS_FAILURES=0
+
+# Stop the current server and make sure it is really gone. SIGTERM first so
+# the server can release the model cleanly; escalate to SIGKILL if it is
+# wedged, because an unbounded wait here would hang the harness with tens of
+# GB of unified memory still held. SERVER_PID is cleared before returning so
+# a second call (signal handler, then the EXIT trap) can never signal a PID
+# the OS has recycled.
+kill_server() {
+  local pid="$SERVER_PID"
+  SERVER_PID=""
+  [ -n "$pid" ] || return 0
+  kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null; return 0; }
+  kill -TERM "$pid" 2>/dev/null
+  local waited=0
+  while [ "$waited" -lt "$SHUTDOWN_GRACE_S" ] && kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "server $pid ignored SIGTERM after ${SHUTDOWN_GRACE_S}s; sending SIGKILL" >&2
+    kill -KILL "$pid" 2>/dev/null
   fi
+  wait "$pid" 2>/dev/null
 }
-trap cleanup EXIT INT TERM
+
+cleanup() {
+  kill_server
+}
+# The signal handlers exit rather than fall through. A bash handler that just
+# returns resumes the script where the signal interrupted it, so a Ctrl-C part
+# way through an ABBA run would kill the current server and then boot the next
+# arm instead of aborting. HUP is trapped for the same reason an SSH drop or a
+# closed terminal must not leave a 31B server holding tens of GB of unified
+# memory.
+trap cleanup EXIT
+trap 'cleanup; echo "Interrupted (signal received)" >&2; exit 130' INT TERM HUP
 
 record_env() {
   {
@@ -100,18 +169,26 @@ record_env() {
     echo "parallel: $PARALLEL, port: $PORT, measured passes per boot: $MEASURE_PASSES"
     echo "arms: $([ "$MODE" = "sweep" ] && echo "$SWEEP_ARMS" || echo "$MIXED_ARMS")"
     echo "time machine running: $(tmutil status 2>/dev/null | grep Running | tr -cd '0-9')"
+    # Recorded rather than assumed: any of these inherited from the operator's
+    # shell reaches every boot, so the record has to show what the arms
+    # actually ran under.
+    echo "inherited env: $(env | grep -E '^(MLXCEL_|MLX_|LLAMA_ARG_)' | sort | tr '\n' ' ')"
   } > "$OUT/env.txt"
 }
 
 wait_ready() {
   local deadline=$((SECONDS + 600))
   while [ $SECONDS -lt $deadline ]; do
+    # Liveness before readiness. A curl success proves only that something is
+    # answering on $PORT, not that it is the boot we just launched, so a boot
+    # that died on EADDRINUSE against a stale server must be reported dead
+    # here rather than silently measured as this arm.
+    if [ -n "$SERVER_PID" ] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
+      echo "server died during startup; see the *-server.log files in $OUT" >&2
+      return 1
+    fi
     if curl -sf -m 5 "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1; then
       return 0
-    fi
-    if [ -n "$SERVER_PID" ] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
-      echo "server died during startup; see its log" >&2
-      return 1
     fi
     sleep 2
   done
@@ -120,18 +197,21 @@ wait_ready() {
 }
 
 stop_server() {
-  if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
-    kill "$SERVER_PID" 2>/dev/null
-    wait "$SERVER_PID" 2>/dev/null
-  fi
-  SERVER_PID=""
+  kill_server
   # Let the port close and the GPU settle between boots.
   sleep 5
 }
 
 run_sweep() {
-  local boot=0 arm
+  local boot=0 arm rc
   for arm in $SWEEP_ARMS; do
+    # SWEEP_ARMS is deliberately word-split, which also glob-expands, and each
+    # token then lands in an output path below. Reject anything unexpected so a
+    # typo or a stray `/` cannot write outside $OUT.
+    case "$arm" in
+      0|1) ;;
+      *) echo "invalid SWEEP_ARMS entry '$arm' (expected 0 or 1)" >&2; exit 2 ;;
+    esac
     boot=$((boot + 1))
     local label="boot${boot}-wide${arm}"
     echo "=== $label: MLXCEL_QMV_WIDE=$arm ==="
@@ -145,12 +225,28 @@ run_sweep() {
     for pass in $(seq 0 "$MEASURE_PASSES"); do
       local tag="$label-pass$pass"
       [ "$pass" = 0 ] && tag="$label-warmup"
+      # A harness that errors out leaves a traceback in its output file while
+      # the ABBA loop marches on, which costs one arm a sample and is invisible
+      # at aggregation time. Record the failure both in the file and in the
+      # run-level counter so it cannot be missed.
       python3 "$REPO/scripts/bench_serving_concurrency.py" --port "$PORT" \
         --concurrency 1,2,4,8 --prompt-tokens 512 --max-tokens 256 --metrics \
         > "$OUT/$tag.txt" 2>&1
+      rc=$?
+      if [ "$rc" -ne 0 ]; then
+        echo "  harness failed for $tag (rc=$rc)" >&2
+        echo "HARNESS-FAILED rc=$rc" >> "$OUT/$tag.txt"
+        HARNESS_FAILURES=$((HARNESS_FAILURES + 1))
+      fi
       python3 "$REPO/scripts/bench_serving_concurrency.py" --port "$PORT" \
         --concurrency 4 --prompt-tokens 4096 --max-tokens 256 --metrics \
         > "$OUT/$tag-long.txt" 2>&1
+      rc=$?
+      if [ "$rc" -ne 0 ]; then
+        echo "  harness failed for $tag-long (rc=$rc)" >&2
+        echo "HARNESS-FAILED rc=$rc" >> "$OUT/$tag-long.txt"
+        HARNESS_FAILURES=$((HARNESS_FAILURES + 1))
+      fi
       echo "  pass $pass done"
     done
     stop_server
@@ -158,8 +254,15 @@ run_sweep() {
 }
 
 run_mixed() {
-  local boot=0 arm
+  local boot=0 arm rc
   for arm in $MIXED_ARMS; do
+    # MIXED_ARMS is deliberately word-split, which also glob-expands, and each
+    # token then lands in an output path below. Reject anything unexpected so a
+    # typo or a stray `/` cannot write outside $OUT.
+    case "$arm" in
+      A|B) ;;
+      *) echo "invalid MIXED_ARMS entry '$arm' (expected A or B)" >&2; exit 2 ;;
+    esac
     boot=$((boot + 1))
     local label="boot${boot}-arm${arm}"
     echo "=== $label ==="
@@ -183,6 +286,15 @@ run_mixed() {
     python3 "$REPO/scripts/bench_qmv_pin_mixed.py" --port "$PORT" \
       --windows $((MEASURE_PASSES + 1)) --classic-streams "$CLASSIC_STREAMS" \
       > "$OUT/$label-windows.txt" 2>&1
+    rc=$?
+    # A non-zero exit means the harness gave up (no MTP token in time, or no
+    # valid window), so this boot contributed nothing. Mark it in the file and
+    # in the counter rather than letting the loop hide the lost sample.
+    if [ "$rc" -ne 0 ]; then
+      echo "  harness failed for $label (rc=$rc)" >&2
+      echo "HARNESS-FAILED rc=$rc" >> "$OUT/$label-windows.txt"
+      HARNESS_FAILURES=$((HARNESS_FAILURES + 1))
+    fi
     stop_server
 
     # Arm identity is evidenced by which exactness-gate line the boot logged.
@@ -194,3 +306,8 @@ run_mixed() {
 record_env
 if [ "$MODE" = "sweep" ]; then run_sweep; else run_mixed; fi
 echo "results in $OUT"
+# run_sweep and run_mixed run in the current shell, not a subshell, so the
+# counter they incremented is the one read here.
+if [ "$HARNESS_FAILURES" -ne 0 ]; then
+  echo "WARNING: $HARNESS_FAILURES harness invocation(s) failed; arms are not balanced, see the HARNESS-FAILED markers" >&2
+fi

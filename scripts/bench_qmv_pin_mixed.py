@@ -26,10 +26,13 @@ Phases:
 3. Fire ``--classic-streams`` identical streaming requests concurrently
    (the classic streams) and record each one's TTFT and decode rate.
 4. When the last classic stream finishes, close the MTP stream's connection
-   and report. A window is only valid if the MTP stream was still decoding
-   when the last classic stream finished; the overlap fraction is printed
-   and checked so a window that quietly lost its MTP stream cannot pass as
-   a mixed measurement.
+   and report. A window is only valid on two counts: the MTP stream was
+   still decoding when the last classic stream finished, and that stream
+   then actually drained. The overlap fraction is printed and checked so a
+   window that quietly lost its MTP stream cannot pass as a mixed
+   measurement, and a stream still running after the close is failed too,
+   because it may still hold the slice slot the next window needs, which
+   would make the next window's "MTP stream" a classic one.
 
 The classic streams' decode tok/s is the reported quantity. The MTP
 stream's own throughput is deliberately not compared across kernel arms:
@@ -173,6 +176,7 @@ class StreamRunner(threading.Thread):
         ttft: float | None = None
         delta_tokens = 0
         usage_tokens: int | None = None
+        stopped_by: str | None = None
         try:
             self._conn = http.client.HTTPConnection(
                 self._host, self._port, timeout=self._timeout
@@ -206,7 +210,15 @@ class StreamRunner(threading.Thread):
                     continue
                 usage = event.get("usage")
                 if isinstance(usage, dict) and usage.get("completion_tokens") is not None:
-                    usage_tokens = int(usage["completion_tokens"])
+                    try:
+                        usage_tokens = int(usage["completion_tokens"])
+                    except (TypeError, ValueError):
+                        # A malformed usage block should not discard a window
+                        # that otherwise measured fine, and TypeError is not in
+                        # the except tuple below, so it would kill this thread
+                        # and leave the initial "not started" result standing.
+                        # delta_tokens is the fallback count.
+                        pass
                 for choice in event.get("choices", []) or []:
                     delta = choice.get("delta") or {}
                     # Reasoning models stream their thinking channel as
@@ -225,10 +237,15 @@ class StreamRunner(threading.Thread):
             # closes the connection while the read loop is inside
             # http.client (its file object becomes None mid-read); a
             # stop-induced close is expected for the MTP stream and its
-            # partial stats below are still the measurement.
+            # partial stats below are still the measurement. What ended the
+            # stream is recorded rather than discarded, because the same tuple
+            # also catches a genuine bug in the parsing above (an AttributeError
+            # from a typo, say), which would otherwise be indistinguishable
+            # from a clean stop.
             if not self._stop_event.is_set():
                 self.result = StreamResult(ok=False, error=str(exc))
                 return
+            stopped_by = str(exc)
         finally:
             if self._conn is not None:
                 try:
@@ -251,6 +268,7 @@ class StreamRunner(threading.Thread):
             start_s=start,
             first_token_s=start + (ttft or 0.0),
             end_s=end,
+            error=stopped_by,
         )
 
 
@@ -290,13 +308,28 @@ def run_window(args: argparse.Namespace, model: str, window: int) -> dict:
     mtp_alive_until = mtp.last_token_s
     mtp.stop()
     mtp.join(timeout=15)
+    # The stream must also have ended before the next window starts. A thread
+    # still alive here means the request may still hold the tick-cooperative
+    # slice slot, so the next window's "MTP stream" would arrive to a busy slot
+    # and fall back to classic decode: a different shape, measured under the
+    # same label. That is exactly the silent change the overlap check exists to
+    # catch, so leakage fails the window too.
+    mtp_drained = not mtp.is_alive()
+    if not mtp_drained:
+        print(
+            f"window {window}: MTP stream did not end within 15s of being "
+            "closed; it may still hold the slice slot, so the next window's "
+            "shape is not trustworthy",
+            file=sys.stderr,
+            flush=True,
+        )
 
     window_span = classic_end - classic_start
     overlap = 0.0
     if window_span > 0:
         overlap = max(0.0, min(mtp_alive_until, classic_end) - classic_start)
         overlap /= window_span
-    valid = overlap >= args.min_overlap
+    valid = overlap >= args.min_overlap and mtp_drained
 
     rows = []
     for i, c in enumerate(classics):
@@ -310,7 +343,9 @@ def run_window(args: argparse.Namespace, model: str, window: int) -> dict:
                 if r.decode_tok_s is not None
                 else None,
                 "completion_tokens": r.completion_tokens,
-                "error": r.error if not r.ok else None,
+                # Carried even when ok, because a successful stream now records
+                # whatever exception ended its read loop.
+                "error": r.error,
             }
         )
     ok_rates = [
@@ -322,6 +357,7 @@ def run_window(args: argparse.Namespace, model: str, window: int) -> dict:
         "window": window,
         "valid": valid,
         "overlap": round(overlap, 3),
+        "mtp_drained": mtp_drained,
         "mtp_ttft_s": round(mtp_ttft, 3),
         "mtp_tokens_in_window": mtp.result.completion_tokens,
         "classic_streams": args.classic_streams,
