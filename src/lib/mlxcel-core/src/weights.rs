@@ -182,7 +182,7 @@ fn safetensors_dtype_itemsize(dtype: &str) -> Option<u64> {
 ///
 /// Returns `None` when the file does not exist or cannot be parsed; callers
 /// should fall back to the analytical estimate in that case.
-fn read_safetensors_header_bytes(path: &Path) -> Option<u64> {
+fn read_safetensors_header(path: &Path) -> Option<serde_json::Map<String, serde_json::Value>> {
     use std::io::Read;
 
     let mut f = std::fs::File::open(path).ok()?;
@@ -201,10 +201,13 @@ fn read_safetensors_header_bytes(path: &Path) -> Option<u64> {
     let mut header_bytes = vec![0u8; header_len as usize];
     f.read_exact(&mut header_bytes).ok()?;
     let header_json = serde_json::from_slice::<serde_json::Value>(&header_bytes).ok()?;
+    header_json.as_object().cloned()
+}
 
-    let obj = header_json.as_object()?;
+fn read_safetensors_header_bytes(path: &Path) -> Option<u64> {
+    let obj = read_safetensors_header(path)?;
     let mut total: u64 = 0;
-    for (key, meta) in obj {
+    for (key, meta) in &obj {
         // The special "__metadata__" key is not a tensor entry.
         if key == "__metadata__" {
             continue;
@@ -551,6 +554,25 @@ where
     F: FnMut(&str) -> bool,
 {
     let path = path.as_ref();
+    // A stale index can force the directory loader to inspect every local shard.
+    // Read the lightweight safetensors header first so a filtered sub-stack does
+    // not enter MLX's native loader for a shard that cannot contain any retained
+    // tensor. Besides avoiding unnecessary mmap state, this is important for
+    // repackaged quantized shards whose unrelated tensor dtypes/layouts may not be
+    // loadable by the current MLX build.
+    let retained_names = read_safetensors_header(path).map(|header| {
+        header
+            .into_iter()
+            .map(|(name, _)| name)
+            .filter(|name| name != "__metadata__" && keep(name))
+            .collect::<std::collections::HashSet<_>>()
+    });
+    if retained_names
+        .as_ref()
+        .is_some_and(|names| names.is_empty())
+    {
+        return Ok(HashMap::new());
+    }
     let path_str = path
         .to_str()
         .ok_or_else(|| format!("Non-UTF8 path: {}", path.display()))?;
@@ -560,7 +582,10 @@ where
     let mut weights = HashMap::with_capacity(len);
     for i in 0..len {
         let name = ffi::loaded_weights_name(&loaded, i);
-        if !keep(&name) {
+        let retain = retained_names
+            .as_ref()
+            .map_or_else(|| keep(&name), |names| names.contains(&name));
+        if !retain {
             continue;
         }
         let array = ffi::loaded_weights_take(loaded.pin_mut(), i);
@@ -899,6 +924,21 @@ mod tests {
         f.write_all(&(header_bytes.len() as u64).to_le_bytes())
             .unwrap();
         f.write_all(header_bytes).unwrap();
+    }
+
+    #[test]
+    fn filtered_loader_skips_nonmatching_shard_before_native_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("model-00001-of-00002.safetensors");
+        write_safetensors_stub(&file, "U32", &[4, 4]);
+        let mut inspected = Vec::new();
+        let weights = load_safetensors_filtered(&file, |name| {
+            inspected.push(name.to_string());
+            name.starts_with("vision_tower.")
+        })
+        .expect("a shard with no retained header names is skipped before native loading");
+        assert!(weights.is_empty());
+        assert_eq!(inspected, ["test_tensor"]);
     }
 
     #[test]

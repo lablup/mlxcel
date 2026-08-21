@@ -59,7 +59,7 @@ use safetensors::{Dtype, SafeTensors};
 
 use crate::emitter::{
     Config, DeepStackConfig, Gemma3nConfig, Gemma3nWeightSpec, Precision, QuantConfig,
-    check_packed_supported, emit_decode_ragged_with, emit_decode_with,
+    WeightScheme, check_packed_supported, emit_decode_ragged_with, emit_decode_with,
     emit_gemma3n_decode_ragged_with_qmv, emit_gemma3n_decode_with_qmv,
     emit_gemma3n_prefill_embeddings_ple_with_qmv, emit_gemma3n_prefill_with_qmv,
     emit_prefill_embeddings_deepstack_with, emit_prefill_embeddings_with, emit_prefill_with,
@@ -85,7 +85,8 @@ use crate::{DeepStackFeatures, DeepStackPreparedPrefill, Gemma3nDensePle, Gemma3
 // `dequantize_affine_stacked`). Both are pure-Rust and unit-tested without `iree`.
 use crate::weights::{
     QuantPart, WeightSpec, bf16_to_f32, dequantize_affine, dequantize_affine_bf16_fused,
-    dequantize_affine_stacked, f16_to_f32, f32_le_to_f32, pack_f16, slice_rows, weight_specs,
+    dequantize_affine_f32, dequantize_affine_stacked, f16_to_f32, f32_le_to_f32, pack_f16,
+    slice_rows, weight_specs,
 };
 
 /// Weight-buffer element dtype passed to the C shim (issue #516 per-weight ABI):
@@ -1127,6 +1128,68 @@ fn resolve_dense_weight_sources(
         })
 }
 
+fn resolve_molmo2_weight_sources(
+    model_dir: &Path,
+    names: &[String],
+) -> Result<Vec<PathBuf>, String> {
+    let mut shards = std::fs::read_dir(model_dir)
+        .map_err(|error| format!("read {}: {error}", model_dir.display()))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".safetensors"))
+        })
+        .collect::<Vec<_>>();
+    shards.sort();
+    let mut resolved = vec![None::<PathBuf>; names.len()];
+    for shard in shards {
+        let file =
+            File::open(&shard).map_err(|error| format!("open {}: {error}", shard.display()))?;
+        // Safety: the file is read-only for the lifetime of this header scan.
+        let mmap = unsafe { Mmap::map(&file) }
+            .map_err(|error| format!("mmap {}: {error}", shard.display()))?;
+        let tensors = SafeTensors::deserialize(&mmap)
+            .map_err(|error| format!("parse {}: {error}", shard.display()))?;
+        for (index, name) in names.iter().enumerate() {
+            let wrapped = language_model_tensor_name(name);
+            if tensors.tensor(&wrapped).is_err() {
+                continue;
+            }
+            if let Some(previous) = &resolved[index] {
+                return Err(format!(
+                    "Molmo2 tensor {wrapped} occurs in {} and {}",
+                    previous.display(),
+                    shard.display()
+                ));
+            }
+            resolved[index] = Some(shard.clone());
+        }
+    }
+    let missing = resolved
+        .iter()
+        .zip(names)
+        .filter_map(|(path, name)| path.is_none().then_some(name.as_str()))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "Molmo2 checkpoint is missing {} language graph weight(s): {}",
+            missing.len(),
+            missing
+                .iter()
+                .take(8)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    resolved
+        .into_iter()
+        .map(|path| path.ok_or_else(|| "Molmo2 weight resolution drifted".to_string()))
+        .collect()
+}
+
 /// mlx-community Gemma3n quantized repacks retain the upstream index but rewrite
 /// the language backbone's safetensors prefix. Keep the graph's canonical HF
 /// argument order and only try this one architecture-specific alternate after
@@ -1397,9 +1460,17 @@ fn load_weights(
             let (paths, scheme) = resolve_gemma3n_weight_sources(model_dir, &names)?;
             (paths, None, Some(scheme))
         }
-        RuntimeConfig::Dense(_) => {
-            let (paths, scheme) = resolve_dense_weight_sources(model_dir, &names)?;
-            (paths, scheme, None)
+        RuntimeConfig::Dense(config) => {
+            if config.weight_scheme == WeightScheme::Molmo2 {
+                (
+                    resolve_molmo2_weight_sources(model_dir, &names)?,
+                    Some(DenseCheckpointNames::LanguageModelPrefixed),
+                    None,
+                )
+            } else {
+                let (paths, scheme) = resolve_dense_weight_sources(model_dir, &names)?;
+                (paths, scheme, None)
+            }
         }
     };
 
@@ -1525,12 +1596,21 @@ fn load_weights(
                 // mlx-lm emits the affine scales/biases as either f16 or bf16
                 // (Qwen3 / Gemma3-27B / Qwen3-MoE checkpoints use bf16); accept a
                 // matching 16-bit pair and widen it to f32 in the dequantizer.
-                let sb_bf16 = match (scales.dtype(), biases.dtype()) {
-                    (Dtype::F16, Dtype::F16) => false,
-                    (Dtype::BF16, Dtype::BF16) => true,
+                let sb_dtype = match (scales.dtype(), biases.dtype()) {
+                    (Dtype::F16, Dtype::F16) => Dtype::F16,
+                    (Dtype::BF16, Dtype::BF16) => Dtype::BF16,
+                    (Dtype::F32, Dtype::F32)
+                        if matches!(
+                            cfg,
+                            RuntimeConfig::Dense(config)
+                                if config.weight_scheme == WeightScheme::Molmo2
+                        ) =>
+                    {
+                        Dtype::F32
+                    }
                     (s, b) => {
                         return Err(format!(
-                            "{prefix} scales/biases dtype {s:?}/{b:?}, expected a matching F16 or BF16 pair"
+                            "{prefix} scales/biases dtype {s:?}/{b:?}, expected a matching F16/BF16 pair or Molmo2 F32 pair"
                         ));
                     }
                 };
@@ -1542,12 +1622,22 @@ fn load_weights(
                         let (out, in_packed) = (shape[0], shape[1]);
                         let in_ = in_packed * (32 / qc.bits);
                         let d = if matches!(cfg, RuntimeConfig::Gemma3n(_)) {
-                            if !sb_bf16 {
+                            if sb_dtype != Dtype::BF16 {
                                 return Err(format!(
                                     "{prefix} uses F16 affine scales/biases, but Gemma3n requires BF16 affine metadata"
                                 ));
                             }
                             dequantize_affine_bf16_fused(
+                                t.data(),
+                                scales.data(),
+                                biases.data(),
+                                out,
+                                in_packed,
+                                qc.bits,
+                                qc.group_size,
+                            )
+                        } else if sb_dtype == Dtype::F32 {
+                            dequantize_affine_f32(
                                 t.data(),
                                 scales.data(),
                                 biases.data(),
@@ -1565,7 +1655,7 @@ fn load_weights(
                                 in_packed,
                                 qc.bits,
                                 qc.group_size,
-                                sb_bf16,
+                                sb_dtype == Dtype::BF16,
                             )
                         }
                         .map_err(|e| format!("dequantize {name}: {e}"))?;
@@ -1586,7 +1676,7 @@ fn load_weights(
                             in_packed,
                             qc.bits,
                             qc.group_size,
-                            sb_bf16,
+                            sb_dtype == Dtype::BF16,
                         )
                         .map_err(|e| format!("dequantize stacked {name}: {e}"))?;
                         (d, vec![experts, out, in_])

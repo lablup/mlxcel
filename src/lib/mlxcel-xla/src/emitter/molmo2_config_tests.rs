@@ -1,0 +1,132 @@
+// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use super::*;
+
+fn pinned_config() -> String {
+    serde_json::json!({
+        "model_type": "molmo2",
+        "image_patch_id": 151938,
+        "vit_config": {
+            "hidden_size": 8, "intermediate_size": 16,
+            "num_attention_heads": 2, "head_dim": 4,
+            "num_hidden_layers": 27, "image_default_input_size": [28, 28],
+            "image_patch_size": 14, "image_num_pos": 4, "layer_norm_eps": 1e-6,
+            "hidden_act": "gelu_pytorch_tanh"
+        },
+        "adapter_config": {
+            "hidden_size": 8, "intermediate_size": 12, "text_hidden_size": 10,
+            "num_attention_heads": 2, "head_dim": 4, "vit_layers": [-3, -9],
+            "pooling_attention_mask": true
+        }
+    })
+    .to_string()
+}
+
+fn pinned_processor() -> String {
+    serde_json::json!({
+        "patch_size": 14, "max_crops": 8, "overlap_margins": [0, 0],
+        "pooling_size": [2, 2], "size": {"height": 28, "width": 28}
+    })
+    .to_string()
+}
+
+#[test]
+fn resolves_pinned_layers_and_static_bucket_identity() {
+    let config = Molmo2VisionConfig::from_json_strs(&pinned_config(), &pinned_processor()).unwrap();
+    assert_eq!(config.layers, 27);
+    assert_eq!(config.selected_layers, vec![24, 18]);
+    assert_eq!(config.emitted_layers, 25);
+    let specs = config.weight_specs();
+    assert!(
+        specs
+            .iter()
+            .any(|spec| spec.name.contains("image_vit.transformer.24."))
+    );
+    assert!(
+        !specs
+            .iter()
+            .any(|spec| spec.name.contains("image_vit.transformer.25."))
+    );
+    assert_eq!(config.static_crops, 9);
+    assert_eq!(config.static_pool_groups, 9);
+    assert!(config.fingerprint().contains("position=exact-default"));
+    assert!(
+        config
+            .fingerprint()
+            .contains("activation=gelu-pytorch-tanh")
+    );
+    assert!(config.fingerprint().contains("selected=[24, 18]"));
+    assert!(config.fingerprint().contains("pool-mask=true"));
+    assert!(config.fingerprint().contains("layers=27;emitted=25"));
+}
+
+#[test]
+fn configured_layer_order_and_mixed_index_signs_are_mutation_sensitive() {
+    let mut config: Value = serde_json::from_str(&pinned_config()).unwrap();
+    config["adapter_config"]["vit_layers"] = serde_json::json!([3, -3, 1, -9]);
+    let resolved =
+        Molmo2VisionConfig::from_json_strs(&config.to_string(), &pinned_processor()).unwrap();
+    assert_eq!(resolved.selected_layers, vec![3, 24, 1, 18]);
+    assert_eq!(resolved.emitted_layers, 25);
+
+    config["adapter_config"]["vit_layers"] = serde_json::json!([-9, -3, 3, 1]);
+    let reordered =
+        Molmo2VisionConfig::from_json_strs(&config.to_string(), &pinned_processor()).unwrap();
+    assert_eq!(reordered.selected_layers, vec![18, 24, 3, 1]);
+    assert_ne!(resolved.selected_layers, reordered.selected_layers);
+}
+
+#[test]
+fn validates_runtime_crop_grid_relationship() {
+    let config = Molmo2VisionConfig::from_json_strs(&pinned_config(), &pinned_processor()).unwrap();
+    assert!(config.valid_runtime_geometry(3, [1, 1, 1, 2]));
+    assert!(config.valid_runtime_geometry(3, [1, 1, 2, 1]));
+    assert!(!config.valid_runtime_geometry(4, [1, 1, 1, 2]));
+}
+
+#[test]
+fn rejects_position_grid_and_selected_layer_drift() {
+    let mut config: Value = serde_json::from_str(&pinned_config()).unwrap();
+    config["vit_config"]["image_num_pos"] = Value::from(5);
+    assert!(
+        Molmo2VisionConfig::from_json_strs(&config.to_string(), &pinned_processor())
+            .unwrap_err()
+            .contains("exact position")
+    );
+    config["vit_config"]["image_num_pos"] = Value::from(4);
+    config["adapter_config"]["vit_layers"] = serde_json::json!([-28]);
+    assert!(
+        Molmo2VisionConfig::from_json_strs(&config.to_string(), &pinned_processor())
+            .unwrap_err()
+            .contains("outside")
+    );
+    config["adapter_config"]["vit_layers"] = serde_json::json!([27]);
+    assert!(
+        Molmo2VisionConfig::from_json_strs(&config.to_string(), &pinned_processor())
+            .unwrap_err()
+            .contains("outside")
+    );
+}
+
+#[test]
+fn rejects_noncanonical_vit_activation() {
+    let mut config: Value = serde_json::from_str(&pinned_config()).unwrap();
+    config["vit_config"]["hidden_act"] = Value::from("gelu");
+    assert!(
+        Molmo2VisionConfig::from_json_strs(&config.to_string(), &pinned_processor())
+            .unwrap_err()
+            .contains("gelu_pytorch_tanh")
+    );
+}

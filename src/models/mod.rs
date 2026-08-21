@@ -279,6 +279,11 @@ pub(crate) use sanitize::{
     load_gemma4_unified_weights_with_backing, load_gemma4_vlm_weights_with_backing,
     sanitize_gemma4_nvfp4_weights, strip_gemma4_kv_shared_weights,
 };
+// The only consumer outside `sanitize` is the diagnostics-gated Molmo2 vision
+// reference loader, so an unconditional re-export is dead in a default build
+// and `-D warnings` rejects it.
+#[cfg(any(test, feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+pub(crate) use sanitize::load_weights_from_dir_with_filter;
 pub use sanitize::{
     convert_bf16_weights, convert_bf16_weights_with_keep, gemma3n_language_mlp_bf16_key,
     load_and_sanitize_weights, load_text_weights, sanitize_config_json, sanitize_tied_embeddings,

@@ -80,8 +80,9 @@ pub use multimodal::host_preprocessor::LlavaHostReferenceCapture;
 #[cfg(feature = "xla-iree")]
 pub use multimodal::host_preprocessor::LlavaIreeHostPreprocessor;
 pub use multimodal::host_preprocessor::{
-    FakeHostMultimodalPreprocessor, HostMultimodalPreprocessor, HostPreprocessorError,
-    LlavaHostPreprocessor, XlaVisionBackend, load_xla_image_preprocessor,
+    CONTEXT_CAPACITY_ENV, FakeHostMultimodalPreprocessor, HostMultimodalPreprocessor,
+    HostPreprocessorError, LlavaHostPreprocessor, XlaVisionBackend,
+    ensure_xla_image_context_capacity, load_xla_image_preprocessor, xla_image_context_floor,
 };
 pub use multimodal::{
     falcon_ocr_prompt, internvl_prompt, kimi_vl_prompt, locateanything_prompt, minicpmo_prompt,
@@ -121,6 +122,11 @@ pub fn decode_image_payloads_with_limits(
 // Re-export split modules
 pub use loaded_model::LoadedModel;
 pub use loaded_model_capabilities::VlmRuntimeRef;
+#[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+pub use loading::{
+    Molmo2XlaVisionReference, Molmo2XlaVisionReferenceProjection, Molmo2XlaVisionReferenceStage,
+    load_molmo2_xla_vision_reference,
+};
 pub use loading::{
     context_window_from_config, load_model, load_model_with_adapter,
     load_model_with_tensor_parallel, load_qwen3_omni_speech, read_eos_token_ids,

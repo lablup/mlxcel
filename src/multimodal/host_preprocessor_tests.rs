@@ -18,9 +18,11 @@ use image::DynamicImage;
 use mlxcel_core::dtype;
 
 use super::{
-    FakeHostMultimodalPreprocessor, HostMultimodalPreprocessor, HostPreprocessorError,
-    XlaVisionBackend, XlaVisionBackendPolicy, export_llava_prefill, export_mlx_tensor,
+    CONTEXT_CAPACITY_ENV, FakeHostMultimodalPreprocessor, HostMultimodalPreprocessor,
+    HostPreprocessorError, XlaVisionBackend, XlaVisionBackendPolicy,
+    ensure_xla_image_context_capacity, export_llava_prefill, export_mlx_tensor,
     export_qwen2_vl_prefill, load_xla_image_preprocessor, validate_processor_shape,
+    xla_image_context_floor,
 };
 use crate::multimodal::vlm_prompt::ImageTokenBlockError;
 use crate::vision::merge::merge_llava;
@@ -349,4 +351,107 @@ fn qwen2_vl_export_rejects_video_and_cross_image_run_drift() {
         split_runs,
         HostPreprocessorError::InvalidConfig(_)
     ));
+}
+
+/// The pinned 4B checkpoint's geometry, so the expected numbers below are the
+/// ones a real Molmo2 load would produce rather than invented ones.
+fn molmo2_checkpoint_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{"model_type":"molmo2","image_patch_id":151938}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("preprocessor_config.json"),
+        r#"{"max_crops":8,"patch_size":14,"pooling_size":[2,2],"size":{"height":378,"width":378}}"#,
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn molmo2_image_floor_is_the_tallest_tiling_not_the_square_one() {
+    let dir = molmo2_checkpoint_dir();
+    let floor = xla_image_context_floor(dir.path()).expect("Molmo2 geometry must derive a floor");
+    // 8x1 tiling: low-res 14*(14+1)=210, high-res 108*(14+1)=1620, framing 4.
+    assert_eq!(floor, 1834);
+    // A square image reaches only 424 (210 + 210 + 4), which is what the
+    // 224x224 fixture produces. Sizing on that would reject tall photographs,
+    // so the floor must be strictly larger.
+    assert!(
+        floor > 424,
+        "floor {floor} must exceed the square-image case"
+    );
+}
+
+#[test]
+fn a_checkpoint_without_a_derived_formula_has_no_floor() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{"model_type":"qwen2_vl"}"#,
+    )
+    .unwrap();
+    assert_eq!(xla_image_context_floor(dir.path()), None);
+    // No floor means no guard, not a rejection.
+    assert!(ensure_xla_image_context_capacity(dir.path(), 256, false).is_ok());
+}
+
+#[test]
+fn a_missing_preprocessor_config_reports_no_floor_instead_of_guessing() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("config.json"),
+        r#"{"model_type":"molmo2","image_patch_id":151938}"#,
+    )
+    .unwrap();
+    assert_eq!(xla_image_context_floor(dir.path()), None);
+}
+
+#[test]
+fn the_default_capacity_is_rejected_with_the_derived_requirement() {
+    let dir = molmo2_checkpoint_dir();
+    let error = ensure_xla_image_context_capacity(dir.path(), 256, false)
+        .err()
+        .expect("a graph that cannot admit any image must fail at startup");
+    let HostPreprocessorError::InvalidConfig(message) = &error else {
+        panic!("expected a configuration error, got {error:?}");
+    };
+    assert!(
+        message.contains("1834"),
+        "the message must carry the derived requirement: {message}"
+    );
+    assert!(
+        message.contains(CONTEXT_CAPACITY_ENV),
+        "the message must name the variable to set: {message}"
+    );
+    assert!(
+        message.contains("256"),
+        "the message must show the capacity that was rejected: {message}"
+    );
+}
+
+#[test]
+fn an_operator_pinned_capacity_is_never_second_guessed() {
+    let dir = molmo2_checkpoint_dir();
+    // Text-only serving from a VLM checkpoint is a real workload, and capacity
+    // is what every decode step attends over, so a deliberately small graph
+    // must start.
+    assert!(ensure_xla_image_context_capacity(dir.path(), 256, true).is_ok());
+}
+
+#[test]
+fn a_graph_that_fits_the_worst_case_image_starts_without_pinning() {
+    let dir = molmo2_checkpoint_dir();
+    assert!(ensure_xla_image_context_capacity(dir.path(), 1834, false).is_ok());
+    assert!(ensure_xla_image_context_capacity(dir.path(), 1833, false).is_err());
+}
+
+#[cfg(feature = "xla-backend")]
+#[test]
+fn the_capacity_variable_name_matches_the_xla_crate() {
+    // The name is duplicated so this guard compiles without the xla crate; this
+    // catches a rename on either side.
+    assert_eq!(CONTEXT_CAPACITY_ENV, mlxcel_xla::CONTEXT_CAPACITY_ENV);
 }

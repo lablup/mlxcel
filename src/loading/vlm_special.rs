@@ -1369,6 +1369,47 @@ pub(crate) fn load_phi4mm_xla_text_embeddings(
     ))
 }
 
+/// Load only Molmo2's dual text embedding table for prepared XLA prefills.
+#[cfg(feature = "xla-iree")]
+pub(crate) fn load_molmo2_xla_text_embeddings(
+    model_path: &Path,
+) -> Result<(models::molmo2::Molmo2Embedding, usize, usize)> {
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+    if full_config.get("model_type").and_then(Value::as_str) != Some("molmo2") {
+        return Err(anyhow::anyhow!(
+            "{} is not a Molmo2 checkpoint",
+            model_path.display()
+        ));
+    }
+    let text = full_config
+        .get("text_config")
+        .ok_or_else(|| anyhow::anyhow!("Molmo2 config is missing text_config"))?;
+    let hidden_size = text
+        .get("hidden_size")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("Molmo2 text_config.hidden_size is required"))?
+        as usize;
+    let max_sequence_len = text
+        .get("max_position_embeddings")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("Molmo2 text_config.max_position_embeddings is required"))?
+        as usize;
+    let raw_weights = super::load_vlm_weights_common_filtered_canonical(model_path, |name| {
+        matches!(
+            name,
+            "language_model.model.wte.embedding"
+                | "language_model.model.wte.new_embedding"
+                | "model.transformer.wte.embedding"
+                | "model.transformer.wte.new_embedding"
+        )
+    })?;
+    let weights = remap_molmo2_weights(raw_weights);
+    let embeddings =
+        models::molmo2::Molmo2Embedding::from_weights(&weights, "language_model.model.wte")
+            .map_err(|error| anyhow::anyhow!("invalid Molmo2 text embedding tables: {error}"))?;
+    Ok((embeddings, hidden_size, max_sequence_len))
+}
+
 /// Filtered Phi4MM host components used by the XLA prepared-prefill producer.
 ///
 /// The struct deliberately contains no text decoder, LM head, audio encoder, or
@@ -1731,6 +1772,54 @@ pub(super) fn parse_molmo2_vit_layers(adapter_config: &Value) -> Vec<i32> {
         .unwrap_or_else(|| vec![-3, -9])
 }
 
+/// Resolve adapter layer indices against the checkpoint's declared ViT depth.
+///
+/// Molmo2 declares 27 logical layers but the pinned adapter selects `[-3, -9]`
+/// and therefore persists only the first 25 blocks. Resolving after truncating
+/// to the persisted execution depth would silently select `[22, 16]` instead
+/// of the canonical `[24, 18]`.
+pub(super) fn resolve_molmo2_vit_layers(
+    declared_layers: usize,
+    configured_layers: &[i32],
+) -> Result<Vec<usize>, String> {
+    if declared_layers == 0 {
+        return Err("Molmo2 ViT must declare at least one layer".to_string());
+    }
+    if configured_layers.is_empty() {
+        return Err("Molmo2 adapter must select at least one ViT layer".to_string());
+    }
+    configured_layers
+        .iter()
+        .enumerate()
+        .map(|(index, &layer)| {
+            let resolved = if layer < 0 {
+                i64::try_from(declared_layers)
+                    .map_err(|_| "Molmo2 declared ViT layer count does not fit i64".to_string())?
+                    + i64::from(layer)
+            } else {
+                i64::from(layer)
+            };
+            usize::try_from(resolved)
+                .ok()
+                .filter(|&resolved| resolved < declared_layers)
+                .ok_or_else(|| {
+                    format!(
+                        "Molmo2 vit_layers[{index}]={layer} resolves outside [0,{declared_layers})"
+                    )
+                })
+        })
+        .collect()
+}
+
+pub(super) fn molmo2_vit_execution_depth(selected_layers: &[usize]) -> Result<usize, String> {
+    selected_layers
+        .iter()
+        .copied()
+        .max()
+        .and_then(|layer| layer.checked_add(1))
+        .ok_or_else(|| "Molmo2 adapter must select at least one ViT layer".to_string())
+}
+
 pub(super) fn rewrite_molmo2_weight_key(key: &str) -> String {
     let mut new_key = key.to_string();
     if new_key.starts_with("model.transformer.") {
@@ -1949,31 +2038,54 @@ fn read_clip_triple(config: Option<&Value>, key: &str) -> Option<[f32; 3]> {
         })
 }
 
-pub(crate) fn load_molmo2_vlm(model_path: &Path) -> Result<LoadedModel> {
+fn molmo2_vision_config_sections(full_config: &Value) -> (&Value, &Value) {
+    // Official Molmo2 exports carry an empty `vision_config` compatibility
+    // object alongside the authoritative top-level sections. Prefer those
+    // explicit sections so the empty wrapper cannot trigger fallback depths.
+    let nested = full_config.get("vision_config");
+    let vit_config = full_config
+        .get("vit_config")
+        .or_else(|| nested.and_then(|config| config.get("vit_config")))
+        .or_else(|| nested.filter(|config| config.get("num_hidden_layers").is_some()))
+        .unwrap_or(full_config);
+    let adapter_config = full_config
+        .get("adapter_config")
+        .or_else(|| nested.and_then(|config| config.get("adapter_config")))
+        .or_else(|| nested.filter(|config| config.get("vit_layers").is_some()))
+        .unwrap_or(full_config);
+    (vit_config, adapter_config)
+}
+
+fn build_molmo2_vision_model(
+    weights: &WeightMap,
+    full_config: &Value,
+    text_hidden_size: usize,
+) -> Result<vision::encoders::molmo2::Molmo2VisionModel> {
     use vision::encoders::molmo2::Molmo2VisionModel;
-    use vision::processors::molmo2::Molmo2Processor;
 
-    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+    let (vit_config, adapter_config) = molmo2_vision_config_sections(full_config);
+    let vit_hidden_act = vit_config
+        .get("hidden_act")
+        .and_then(Value::as_str)
+        .unwrap_or("gelu_pytorch_tanh");
+    if vit_hidden_act != "gelu_pytorch_tanh" {
+        return Err(anyhow::anyhow!(
+            "Molmo2 vision hidden_act `{vit_hidden_act}` is unsupported; expected `gelu_pytorch_tanh`"
+        ));
+    }
 
-    let mut text_config_value = full_config
-        .get("text_config")
-        .cloned()
-        .unwrap_or_else(|| full_config.clone());
-    inherit_quantization_if_missing(&mut text_config_value, &full_config)?;
-    let text_config: models::molmo2::Molmo2TextConfig =
-        serde_json::from_value(text_config_value)
-            .map_err(|e| anyhow::anyhow!("Failed to parse text config: {}", e))?;
-
-    let vision_config = full_config.get("vision_config").unwrap_or(&full_config);
-    let vit_config = vision_config.get("vit_config").unwrap_or(vision_config);
-    let adapter_config = vision_config.get("adapter_config").unwrap_or(vision_config);
-
-    let vit_num_layers = cap_molmo2_vit_num_layers(
-        vit_config
-            .get("num_hidden_layers")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(25) as usize,
-    );
+    // Resolve negative adapter indices against the declared depth before
+    // deriving the smaller prefix of blocks that the checkpoint must execute.
+    let vit_declared_num_layers = vit_config
+        .get("num_hidden_layers")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(25) as usize;
+    let vit_layers = resolve_molmo2_vit_layers(
+        vit_declared_num_layers,
+        &parse_molmo2_vit_layers(adapter_config),
+    )
+    .map_err(anyhow::Error::msg)?;
+    let vit_num_layers = molmo2_vit_execution_depth(&vit_layers).map_err(anyhow::Error::msg)?;
     let vit_hidden_size = vit_config
         .get("hidden_size")
         .and_then(|v| v.as_i64())
@@ -2018,7 +2130,7 @@ pub(crate) fn load_molmo2_vlm(model_path: &Path) -> Result<LoadedModel> {
     let adapter_text_hidden_size = adapter_config
         .get("text_hidden_size")
         .and_then(|v| v.as_i64())
-        .unwrap_or(text_config.hidden_size as i64) as i32;
+        .unwrap_or(text_hidden_size as i64) as i32;
     let adapter_num_heads = adapter_config
         .get("num_attention_heads")
         .and_then(|v| v.as_i64())
@@ -2040,24 +2152,8 @@ pub(crate) fn load_molmo2_vlm(model_path: &Path) -> Result<LoadedModel> {
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
 
-    let image_patch_id = full_config
-        .get("image_patch_id")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(151938) as i32;
-    let image_end_token_id = full_config
-        .get("image_end_token_id")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(151937) as i32;
-
-    let mut weights = remap_molmo2_weights(load_vlm_weights_common(model_path, None)?);
-    models::sanitize_tied_embeddings(&mut weights, &full_config);
-
-    let text_model =
-        models::Molmo2Model::from_weights(&weights, &text_config, "language_model.model")
-            .map_err(|e| anyhow::anyhow!("Failed to load text model: {}", e))?;
-
-    let vision_tower = Molmo2VisionModel::from_weights(
-        &weights,
+    Molmo2VisionModel::from_weights(
+        weights,
         "vision_tower",
         vit_num_layers,
         vit_hidden_size,
@@ -2075,19 +2171,242 @@ pub(crate) fn load_molmo2_vlm(model_path: &Path) -> Result<LoadedModel> {
         adapter_num_kv_heads,
         adapter_head_dim,
         adapter_float32_attention,
-        &parse_molmo2_vit_layers(adapter_config),
+        &vit_layers,
         pooling_attention_mask,
     )
-    .map_err(|e| anyhow::anyhow!("Failed to load vision model: {}", e))?;
+    .map_err(|e| anyhow::anyhow!("Failed to load vision model: {}", e))
+}
 
+fn build_molmo2_processor(model_path: &Path) -> vision::processors::molmo2::Molmo2Processor {
     let preprocessor_config = read_optional_model_json(model_path, "preprocessor_config.json");
-    let processor = Molmo2Processor::new(
+    vision::processors::molmo2::Molmo2Processor::new(
         molmo2_max_crops(preprocessor_config.as_ref()),
         None,
         None,
         None,
         None,
-    );
+    )
+}
+
+/// Vision-only MLX reference used by the ignored Molmo2 XLA parity gate.
+///
+/// This diagnostics surface filters the checkpoint before loading and never
+/// constructs the text decoder, LM head, or text embedding tables.
+#[cfg(any(test, feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+#[cfg_attr(test, allow(dead_code))]
+pub struct Molmo2XlaVisionReference {
+    vision_tower: vision::encoders::molmo2::Molmo2VisionModel,
+    processor: vision::processors::molmo2::Molmo2Processor,
+    image_patch_id: i32,
+    text_hidden_size: usize,
+}
+
+/// Eager MLX projection and the exact processor payload that produced it.
+#[cfg(any(test, feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+#[cfg_attr(test, allow(dead_code))]
+pub struct Molmo2XlaVisionReferenceProjection {
+    pub processed: vision::processors::molmo2::Molmo2ProcessorOutput,
+    pub values: Vec<f32>,
+    pub shape: [usize; 2],
+    pub active_groups: Vec<usize>,
+    pub stages: Vec<Molmo2XlaVisionReferenceStage>,
+}
+
+#[cfg(any(test, feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+#[cfg_attr(test, allow(dead_code))]
+pub struct Molmo2XlaVisionReferenceStage {
+    pub name: String,
+    pub values: Vec<f32>,
+    pub shape: Vec<usize>,
+}
+
+#[cfg(any(test, feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+#[cfg_attr(test, allow(dead_code))]
+impl Molmo2XlaVisionReference {
+    pub fn image_patch_id(&self) -> i32 {
+        self.image_patch_id
+    }
+
+    pub fn text_hidden_size(&self) -> usize {
+        self.text_hidden_size
+    }
+
+    pub fn project(
+        &self,
+        image: &image::DynamicImage,
+    ) -> Result<Molmo2XlaVisionReferenceProjection> {
+        let processed = self.processor.preprocess_image(image);
+        let [crops, patches, patch_dim] = processed.pixel_values_shape;
+        let [groups, group_size] = processed.image_token_pooling_shape;
+        let active_groups = processed
+            .image_token_pooling
+            .chunks_exact(group_size as usize)
+            .enumerate()
+            .filter_map(|(group, values)| values.iter().any(|&value| value >= 0).then_some(group))
+            .collect::<Vec<_>>();
+        let images =
+            mlxcel_core::from_slice_f32(&processed.pixel_values, &[1, crops, patches, patch_dim]);
+        let pooling =
+            mlxcel_core::from_slice_i32(&processed.image_token_pooling, &[1, groups, group_size]);
+        #[cfg(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+        let (projected, stages) = {
+            let (projected, diagnostics) = self.vision_tower.forward_diagnostics(&images, &pooling);
+            let stages = diagnostics
+                .stages
+                .into_iter()
+                .map(|stage| {
+                    let tensor = mlxcel_core::astype(&stage.tensor, mlxcel_core::dtype::FLOAT32);
+                    let shape = mlxcel_core::array_shape(&tensor)
+                        .into_iter()
+                        .map(|dimension| {
+                            usize::try_from(dimension).map_err(|_| {
+                                anyhow::anyhow!(
+                                    "Molmo2 MLX stage {} has a negative dimension",
+                                    stage.name
+                                )
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let raw = mlxcel_core::try_array_to_raw_bytes(&tensor).map_err(|error| {
+                        anyhow::anyhow!("Failed to export Molmo2 MLX stage {}: {error}", stage.name)
+                    })?;
+                    if raw.len() != shape.iter().product::<usize>() * std::mem::size_of::<f32>() {
+                        return Err(anyhow::anyhow!(
+                            "Molmo2 MLX stage {} byte count disagrees with shape {shape:?}",
+                            stage.name
+                        ));
+                    }
+                    Ok(Molmo2XlaVisionReferenceStage {
+                        name: stage.name,
+                        values: raw
+                            .chunks_exact(4)
+                            .map(|chunk| {
+                                f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                            })
+                            .collect(),
+                        shape,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            (projected, stages)
+        };
+        #[cfg(not(any(feature = "xla-diagnostics", feature = "xla-diagnostics-cpu")))]
+        let (projected, stages) = (
+            self.vision_tower.forward(&images, &pooling),
+            Vec::<Molmo2XlaVisionReferenceStage>::new(),
+        );
+        let projected = mlxcel_core::astype(&projected, mlxcel_core::dtype::FLOAT32);
+        let raw = mlxcel_core::try_array_to_raw_bytes(&projected)
+            .map_err(|error| anyhow::anyhow!("Failed to export Molmo2 MLX projection: {error}"))?;
+        if !raw.len().is_multiple_of(4) {
+            return Err(anyhow::anyhow!(
+                "Molmo2 MLX projection byte count is not f32-aligned"
+            ));
+        }
+        let dimensions = mlxcel_core::array_shape(&projected);
+        if dimensions.len() != 2 {
+            return Err(anyhow::anyhow!(
+                "Molmo2 MLX projection shape must be rank 2, got {dimensions:?}"
+            ));
+        }
+        let shape = [
+            usize::try_from(dimensions[0])
+                .map_err(|_| anyhow::anyhow!("Molmo2 MLX projection has a negative row count"))?,
+            usize::try_from(dimensions[1]).map_err(|_| {
+                anyhow::anyhow!("Molmo2 MLX projection has a negative hidden dimension")
+            })?,
+        ];
+        let values = raw
+            .chunks_exact(4)
+            .map(|chunk| f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect::<Vec<_>>();
+        if shape != [active_groups.len(), self.text_hidden_size]
+            || values.len() != shape[0] * shape[1]
+        {
+            return Err(anyhow::anyhow!(
+                "Molmo2 MLX projection shape {shape:?} disagrees with {} active groups and hidden size {}",
+                active_groups.len(),
+                self.text_hidden_size
+            ));
+        }
+        Ok(Molmo2XlaVisionReferenceProjection {
+            processed,
+            values,
+            shape,
+            active_groups,
+            stages,
+        })
+    }
+}
+
+/// Load only Molmo2's eager vision encoder/projector for diagnostics.
+#[cfg(any(test, feature = "xla-diagnostics", feature = "xla-diagnostics-cpu"))]
+#[cfg_attr(test, allow(dead_code))]
+pub fn load_molmo2_xla_vision_reference(model_path: &Path) -> Result<Molmo2XlaVisionReference> {
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+    if full_config.get("model_type").and_then(Value::as_str) != Some("molmo2") {
+        return Err(anyhow::anyhow!(
+            "{} is not a Molmo2 checkpoint",
+            model_path.display()
+        ));
+    }
+    let text_hidden_size = full_config
+        .get("text_config")
+        .and_then(|text| text.get("hidden_size"))
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("Molmo2 text_config.hidden_size is required"))?
+        as usize;
+    let mut raw_weights = models::load_weights_from_dir_with_filter(
+        model_path,
+        |name| name.starts_with("vision_tower.") || name.starts_with("model.vision_backbone."),
+        false,
+    )
+    .map_err(anyhow::Error::msg)?;
+    super::finish_vlm_weights_common(model_path, &mut raw_weights, None, false)?;
+    let weights = remap_molmo2_weights(raw_weights);
+    let vision_tower = build_molmo2_vision_model(&weights, &full_config, text_hidden_size)?;
+    let image_patch_id = full_config
+        .get("image_patch_id")
+        .and_then(Value::as_i64)
+        .unwrap_or(151938) as i32;
+    Ok(Molmo2XlaVisionReference {
+        vision_tower,
+        processor: build_molmo2_processor(model_path),
+        image_patch_id,
+        text_hidden_size,
+    })
+}
+
+pub(crate) fn load_molmo2_vlm(model_path: &Path) -> Result<LoadedModel> {
+    let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
+
+    let mut text_config_value = full_config
+        .get("text_config")
+        .cloned()
+        .unwrap_or_else(|| full_config.clone());
+    inherit_quantization_if_missing(&mut text_config_value, &full_config)?;
+    let text_config: models::molmo2::Molmo2TextConfig =
+        serde_json::from_value(text_config_value)
+            .map_err(|e| anyhow::anyhow!("Failed to parse text config: {}", e))?;
+
+    let image_patch_id = full_config
+        .get("image_patch_id")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(151938) as i32;
+    let image_end_token_id = full_config
+        .get("image_end_token_id")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(151937) as i32;
+
+    let mut weights = remap_molmo2_weights(load_vlm_weights_common(model_path, None)?);
+    models::sanitize_tied_embeddings(&mut weights, &full_config);
+
+    let text_model =
+        models::Molmo2Model::from_weights(&weights, &text_config, "language_model.model")
+            .map_err(|e| anyhow::anyhow!("Failed to load text model: {}", e))?;
+
+    let vision_tower = build_molmo2_vision_model(&weights, &full_config, text_config.hidden_size)?;
+    let processor = build_molmo2_processor(model_path);
 
     let vlm = vision::Molmo2VLModel {
         text_model,

@@ -135,6 +135,30 @@ fn phi4_base_projection(cfg: &Config, name: String) -> String {
     }
 }
 
+fn fused_gate_up(cfg: &Config, prefix: &str) -> (String, (usize, usize), (usize, usize)) {
+    if cfg.weight_scheme == crate::emitter::WeightScheme::Molmo2 {
+        (
+            format!("{prefix}mlp.ff_proj.weight"),
+            (cfg.inter, 2 * cfg.inter),
+            (0, cfg.inter),
+        )
+    } else {
+        (
+            format!("{prefix}mlp.gate_up_proj.weight"),
+            (0, cfg.inter),
+            (cfg.inter, 2 * cfg.inter),
+        )
+    }
+}
+
+fn fused_qkv_name(cfg: &Config, prefix: &str) -> String {
+    if cfg.weight_scheme == crate::emitter::WeightScheme::Molmo2 {
+        format!("{prefix}self_attn.att_proj.weight")
+    } else {
+        format!("{prefix}self_attn.qkv_proj.weight")
+    }
+}
+
 fn push_phi4_lora_pair(out: &mut Vec<WeightSpec>, stem: &str, adapter: &str) {
     out.push(WeightSpec::Proj(format!("{stem}.lora_A.{adapter}.weight")));
     out.push(WeightSpec::Proj(format!("{stem}.lora_B.{adapter}.weight")));
@@ -149,7 +173,6 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
     let hd = cfg.head_dim;
     let nq = cfg.n_q * hd;
     let nkv = cfg.n_kv * hd;
-    let inter = cfg.inter;
     let gated = !cfg.dense_mlp;
     let has_post = !cfg.parallel_block;
 
@@ -180,10 +203,11 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
         // gate (gated MLP only; the first half of gate_up_proj for a fused Phi3).
         if gated && !moe_layer {
             if cfg.fused_gate_up {
+                let (name, (start, end), _) = fused_gate_up(cfg, &p);
                 out.push(WeightSpec::Rows {
-                    name: phi4_base_projection(cfg, format!("{p}mlp.gate_up_proj.weight")),
-                    start: 0,
-                    end: inter,
+                    name: phi4_base_projection(cfg, name),
+                    start,
+                    end,
                 });
             } else {
                 push_proj(
@@ -208,10 +232,11 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
         // Skipped on a MoE layer (issue #500), which has no dense up projection.
         if !moe_layer {
             if cfg.fused_gate_up {
+                let (name, _, (start, end)) = fused_gate_up(cfg, &p);
                 out.push(WeightSpec::Rows {
-                    name: phi4_base_projection(cfg, format!("{p}mlp.gate_up_proj.weight")),
-                    start: inter,
-                    end: 2 * inter,
+                    name: phi4_base_projection(cfg, name),
+                    start,
+                    end,
                 });
             } else if cfg.dense_mlp {
                 out.push(WeightSpec::Whole(format!("{p}mlp.c_fc.weight")));
@@ -225,7 +250,7 @@ fn weight_specs_q(cfg: &Config, quant: bool) -> Vec<WeightSpec> {
         }
         // wk, wo, wq, wv (JAX-alphabetical; a fused Phi3 qkv_proj is [Q|K|V] rows).
         if cfg.fused_qkv {
-            let qkv = phi4_base_projection(cfg, format!("{p}self_attn.qkv_proj.weight"));
+            let qkv = phi4_base_projection(cfg, fused_qkv_name(cfg, &p));
             out.push(WeightSpec::Rows {
                 name: qkv.clone(),
                 start: nq,
@@ -520,6 +545,63 @@ pub(crate) fn dequantize_affine(
     group_size: usize,
     scales_bf16: bool,
 ) -> Result<Vec<f32>, String> {
+    dequantize_affine_with_metadata(
+        packed,
+        scales,
+        biases,
+        out,
+        in_packed,
+        bits,
+        group_size,
+        if scales_bf16 {
+            AffineMetadataDType::BFloat16
+        } else {
+            AffineMetadataDType::Float16
+        },
+    )
+}
+
+/// Molmo2's converted 8-bit checkpoint keeps affine scales and biases as F32.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dequantize_affine_f32(
+    packed: &[u8],
+    scales: &[u8],
+    biases: &[u8],
+    out: usize,
+    in_packed: usize,
+    bits: usize,
+    group_size: usize,
+) -> Result<Vec<f32>, String> {
+    dequantize_affine_with_metadata(
+        packed,
+        scales,
+        biases,
+        out,
+        in_packed,
+        bits,
+        group_size,
+        AffineMetadataDType::Float32,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum AffineMetadataDType {
+    Float16,
+    BFloat16,
+    Float32,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dequantize_affine_with_metadata(
+    packed: &[u8],
+    scales: &[u8],
+    biases: &[u8],
+    out: usize,
+    in_packed: usize,
+    bits: usize,
+    group_size: usize,
+    metadata_dtype: AffineMetadataDType,
+) -> Result<Vec<f32>, String> {
     if !(bits == 4 || bits == 8) {
         return Err(format!(
             "unsupported quantization bits {bits} (expected 4 or 8)"
@@ -540,12 +622,10 @@ pub(crate) fn dequantize_affine(
             out * in_packed * 4
         ));
     }
-    // mlx-lm stores the affine scale/bias in either f16 or bf16; widen the
-    // matching 16-bit format to f32 (both are exact in f32).
-    let (scales, biases) = if scales_bf16 {
-        (bf16_to_f32(scales), bf16_to_f32(biases))
-    } else {
-        (f16_to_f32(scales), f16_to_f32(biases))
+    let (scales, biases) = match metadata_dtype {
+        AffineMetadataDType::Float16 => (f16_to_f32(scales), f16_to_f32(biases)),
+        AffineMetadataDType::BFloat16 => (bf16_to_f32(scales), bf16_to_f32(biases)),
+        AffineMetadataDType::Float32 => (f32_le_to_f32(scales), f32_le_to_f32(biases)),
     };
     if scales.len() != out * n_groups || biases.len() != out * n_groups {
         return Err(format!(
@@ -807,6 +887,57 @@ mod tests {
                 })
                 .all(|name| name.contains(".base_layer.") || name.contains(".lora_")),
             "Phi4MM must never resolve a mutable unwrapped projection"
+        );
+    }
+
+    #[test]
+    fn molmo2_uses_olmo_names_and_reversed_fused_swiglu_halves() {
+        let config = Config::from_json_str(
+            r#"{
+                "model_type":"molmo2",
+                "quantization":{"bits":8,"group_size":64},
+                "text_config":{
+                    "model_type":"molmo2_text","hidden_size":8,"intermediate_size":16,
+                    "num_hidden_layers":1,"num_attention_heads":2,"num_key_value_heads":1,
+                    "head_dim":4,"layer_norm_eps":1e-6,"rope_theta":5000000,
+                    "max_position_embeddings":32,"vocab_size":24,"hidden_act":"silu",
+                    "use_qk_norm":true
+                }
+            }"#,
+        )
+        .expect("Molmo2 nested text config");
+        assert_eq!(config.weight_scheme, crate::emitter::WeightScheme::Molmo2);
+        assert!(config.fused_qkv && config.fused_gate_up);
+        assert_eq!(
+            config.qk_norm,
+            Some(crate::emitter::QkNorm {
+                per_head: true,
+                one_plus: false
+            })
+        );
+        let specs = weight_specs_q(&config, false);
+        assert_eq!(specs[0].tensor_name(), "model.wte.embedding");
+        assert_eq!(specs[1].tensor_name(), "model.ln_f.weight");
+        assert_eq!(specs[2].tensor_name(), "lm_head.weight");
+        assert!(matches!(
+            &specs[4],
+            WeightSpec::Rows { name, start: 16, end: 32 }
+                if name == "model.blocks.0.mlp.ff_proj.weight"
+        ));
+        assert!(matches!(
+            &specs[7],
+            WeightSpec::Rows { name, start: 0, end: 16 }
+                if name == "model.blocks.0.mlp.ff_proj.weight"
+        ));
+        assert!(
+            specs
+                .iter()
+                .any(|spec| spec.tensor_name() == "model.blocks.0.self_attn.att_proj.weight")
+        );
+        assert!(
+            specs
+                .iter()
+                .any(|spec| spec.tensor_name() == "model.blocks.0.self_attn.q_norm.weight")
         );
     }
 
@@ -1190,6 +1321,21 @@ mod tests {
         let scales = [0x00u8, 0x40, 0x00, 0x38]; // f16 [2.0, 0.5]
         let biases = [0x00u8, 0x49, 0x00, 0xBC]; // f16 [10.0, -1.0]
         let w = dequantize_affine(&packed, &scales, &biases, 1, 1, 8, 2, false).unwrap();
+        assert_eq!(w, vec![30.0, 50.0, 14.0, 19.0]);
+    }
+
+    #[test]
+    fn dequantize_affine_accepts_molmo2_f32_metadata() {
+        let packed = [0x0Au8, 0x14, 0x1E, 0x28];
+        let scales = [2.0f32, 0.5]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let biases = [10.0f32, -1.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let w = dequantize_affine_f32(&packed, &scales, &biases, 1, 1, 8, 2).unwrap();
         assert_eq!(w, vec![30.0, 50.0, 14.0, 19.0]);
     }
 
