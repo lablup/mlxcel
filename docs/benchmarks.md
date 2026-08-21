@@ -662,10 +662,9 @@ produces output byte-identical to the default env, measured at the
 byte-identical rows' own throughput (verified live on M3 Ultra 2026-08-22,
 117 vs 139 tok/s on the 12B pairing; see
 [qmv-wide-pin-tax-m3ultra-2026-08-22](benchmark_results/qmv-wide-pin-tax-m3ultra-2026-08-22.md)).
-Keeping byte-identity on the
-code row, by dropping
-`qmv_wide`, measures 93.2 tok/s instead of 121.0 on M5 Max, or 2.14x instead of
-2.79x, and 117.5 tok/s instead of 138.5 on M3 Ultra, 1.83x instead of 2.16x.
+Keeping byte-identity on the code row, by dropping `qmv_wide`, measures 93.2
+tok/s instead of 121.0 on M5 Max, or 2.14x instead of 2.79x, and 117.5 tok/s
+instead of 138.5 on M3 Ultra, 1.83x instead of 2.16x.
 That is 23% of throughput on one host and 15% on the other, which is not the
 same quantity as the 17 to 20% the probe quotes for the Qwen pairing: the
 probe is costing the verify forward, while these figures are end-to-end decode,
