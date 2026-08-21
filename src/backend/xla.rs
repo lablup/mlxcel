@@ -109,8 +109,22 @@ impl ComputeBackend for XlaBackend {
         // session owns its own KV and samples greedily on-device.
         let image_preprocessor = crate::load_xla_image_preprocessor(model_path)
             .map_err(|error| anyhow::anyhow!("OpenXLA image preprocessor load failed: {error}"))?;
-        let session =
-            XlaInferenceSession::load(model_path, num_layers).map_err(|e| anyhow::anyhow!(e))?;
+        // Match the server path: reject a graph that could never admit one
+        // image before generation starts, instead of after the vision tower has
+        // already run on the first image request.
+        let context_capacity =
+            mlxcel_xla::context_capacity_from_env().map_err(|e| anyhow::anyhow!(e))?;
+        crate::ensure_xla_image_context_capacity(
+            model_path,
+            context_capacity,
+            std::env::var_os(mlxcel_xla::CONTEXT_CAPACITY_ENV).is_some(),
+        )?;
+        let session = XlaInferenceSession::load_with_context_capacity(
+            model_path,
+            num_layers,
+            context_capacity,
+        )
+        .map_err(|e| anyhow::anyhow!(e))?;
         Ok(Session::xla(session, image_preprocessor))
     }
 

@@ -258,6 +258,135 @@ pub fn load_xla_image_preprocessor(
     }
 }
 
+/// Worst-case logical prompt length one image contributes, from config alone.
+///
+/// The static StableHLO context shape is fixed when the engine is built, which
+/// on the server path happens before any preprocessor exists, so this answers
+/// the question from `config.json` and `preprocessor_config.json` without
+/// loading weights, a processor, or a vision tower.
+///
+/// `None` means "not derived for this checkpoint", not "no images": a family
+/// without a formula here, or a config this cannot read, falls through without
+/// a capacity guard rather than inventing a number.
+///
+/// # Molmo2
+///
+/// The prompt carries one pooled token per pooled patch, plus one column token
+/// per pooled row, for a low-resolution crop and a high-resolution tiling:
+///
+/// ```text
+/// tokens = lo_h * (lo_w + 1) + hi_h * (hi_w + 1) + 4
+/// ```
+///
+/// The low-resolution crop is always one tile. The high-resolution tiling is
+/// whichever `(rows, cols)` with `rows * cols <= max_crops` the processor picks
+/// for the image, so the worst case is the admissible tiling that maximizes the
+/// token count. That is the tallest one, `(max_crops, 1)`, because every extra
+/// row also adds a column token. On the pinned 4B checkpoint (`max_crops = 8`,
+/// 378px crops, 14px patches, 2x2 pooling) a square image expands to 424 tokens
+/// while a tall one reaches 1834, so sizing on the observed square case would
+/// still reject ordinary photographs.
+#[must_use]
+pub fn xla_image_context_floor(model_path: &Path) -> Option<usize> {
+    match crate::models::get_model_type(model_path) {
+        Ok(crate::models::ModelType::Molmo2VLM) => molmo2_image_context_floor(model_path),
+        // Other qualified families expand images too, but their worst case is
+        // not derived here yet. Reporting `None` keeps this guard silent for
+        // them instead of guarding with a Molmo2-shaped guess.
+        _ => None,
+    }
+}
+
+/// Name of the variable that selects the static OpenXLA context shape.
+///
+/// Duplicated from `mlxcel_xla` so this guard, and its tests, still compile in
+/// a build without the `xla-backend` crate. The two are kept in step by
+/// `the_capacity_variable_name_matches_the_xla_crate`.
+pub const CONTEXT_CAPACITY_ENV: &str = "MLXCEL_XLA_CONTEXT_CAPACITY";
+
+/// Reject a graph too small to ever admit one image from this checkpoint.
+///
+/// Returns `Ok(())` when no floor is derived, when the graph already fits, or
+/// when the operator pinned the capacity themselves. Pinning is treated as a
+/// decision, not a mistake: text-only serving from a VLM checkpoint is a real
+/// workload, and the capacity is also what every decode step attends over, so
+/// a larger graph is a throughput cost the operator may be declining on
+/// purpose. What this stops is the silent case, where an unset default admits
+/// no image at all and every image request runs its vision tower and only then
+/// fails at admission.
+///
+/// # Errors
+///
+/// Returns a message naming the derived requirement and the variable to set.
+pub fn ensure_xla_image_context_capacity(
+    model_path: &Path,
+    context_capacity: usize,
+    operator_pinned: bool,
+) -> Result<(), HostPreprocessorError> {
+    if operator_pinned {
+        return Ok(());
+    }
+    let Some(floor) = xla_image_context_floor(model_path) else {
+        return Ok(());
+    };
+    if context_capacity >= floor {
+        return Ok(());
+    }
+    Err(HostPreprocessorError::InvalidConfig(format!(
+        "this checkpoint expands one image into up to {floor} tokens, which the default OpenXLA \
+         context capacity of {context_capacity} cannot admit, so every image request would run \
+         its vision tower and then fail. Set {env}={floor} or higher to serve images (the \
+         capacity is also the length every decode step attends over, so a larger graph costs \
+         throughput), or set {env}={context_capacity} explicitly to keep this graph for \
+         text-only serving.",
+        env = CONTEXT_CAPACITY_ENV,
+    )))
+}
+
+/// Worst-case Molmo2 image expansion, read from `preprocessor_config.json`.
+fn molmo2_image_context_floor(model_path: &Path) -> Option<usize> {
+    let raw = std::fs::read_to_string(model_path.join("preprocessor_config.json")).ok()?;
+    let config: serde_json::Value = serde_json::from_str(&raw).ok()?;
+
+    let max_crops = usize::try_from(config.get("max_crops")?.as_u64()?).ok()?;
+    let patch_size = usize::try_from(config.get("patch_size")?.as_u64()?).ok()?;
+    let size = config.get("size")?;
+    let crop_height = usize::try_from(size.get("height")?.as_u64()?).ok()?;
+    let crop_width = usize::try_from(size.get("width")?.as_u64()?).ok()?;
+    let pooling = config.get("pooling_size")?.as_array()?;
+    let pool_h = usize::try_from(pooling.first()?.as_u64()?).ok()?;
+    let pool_w = usize::try_from(pooling.get(1)?.as_u64()?).ok()?;
+    if max_crops == 0 || patch_size == 0 || pool_h == 0 || pool_w == 0 {
+        return None;
+    }
+
+    let patch_rows = crop_height.checked_div(patch_size)?;
+    let patch_cols = crop_width.checked_div(patch_size)?;
+    let pooled = |patches: usize, pool: usize| patches.div_ceil(pool);
+
+    let lo_h = pooled(patch_rows, pool_h);
+    let lo_w = pooled(patch_cols, pool_w);
+    let low_res = lo_h.checked_mul(lo_w.checked_add(1)?)?;
+
+    // Every admissible tiling, because the maximum is not always the squarest
+    // or the largest-area one: a column token per row makes tall tilings cost
+    // more than wide ones of the same area.
+    let mut high_res = 0usize;
+    for rows in 1..=max_crops {
+        for cols in 1..=max_crops {
+            if rows.checked_mul(cols)? > max_crops {
+                continue;
+            }
+            let hi_h = pooled(patch_rows.checked_mul(rows)?, pool_h);
+            let hi_w = pooled(patch_cols.checked_mul(cols)?, pool_w);
+            high_res = high_res.max(hi_h.checked_mul(hi_w.checked_add(1)?)?);
+        }
+    }
+
+    // The four framing tokens are the low-res start/end and high-res start/end.
+    low_res.checked_add(high_res)?.checked_add(4)
+}
+
 fn load_llava_host_preprocessor_boxed(
     model_path: &Path,
 ) -> Result<Option<Box<dyn HostMultimodalPreprocessor>>, HostPreprocessorError> {
@@ -1142,9 +1271,9 @@ pub enum HostPreprocessorError {
     Placeholder(#[from] ImageTokenBlockError),
     #[error("incompatible multimodal family: expected LLaVA, got {actual}")]
     FamilyMismatch { actual: String },
-    #[error("invalid LLaVA host-preprocessor config: {0}")]
+    #[error("invalid host-preprocessor config: {0}")]
     InvalidConfig(String),
-    #[error("failed to load LLaVA host-preprocessor weights: {0}")]
+    #[error("failed to load host-preprocessor weights: {0}")]
     WeightLoad(String),
     #[error("IREE vision backend failed: {0}")]
     Iree(String),

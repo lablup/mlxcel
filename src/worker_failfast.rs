@@ -61,3 +61,27 @@ where
         }
     }
 }
+
+/// Terminate the process on a worker startup failure that can never resolve.
+///
+/// A core worker thread that logs and returns leaves the process alive with a
+/// model that never loads: `loaded` is never set, nothing observes the dead
+/// thread, and the server parks forever answering no requests. For a startup
+/// failure that is always a misconfiguration (an unusable context capacity, an
+/// unloadable engine or tokenizer), parking is the worst outcome, because an
+/// operator watching for readiness sees a hang rather than the reason.
+///
+/// This exits rather than [`std::process::abort`]: a configuration error is not
+/// a broken invariant, so it should not look like a crash or leave a core dump.
+/// The message is already logged by the caller with its own context; this adds
+/// the thread label and the exit.
+// Only the OpenXLA worker takes this path today, so an unconditional
+// definition is dead in a default build and `-D warnings` rejects it.
+#[cfg(feature = "xla-backend")]
+pub(crate) fn exit_on_worker_startup_failure(label: &str, reason: &str) -> ! {
+    tracing::error!(
+        target: "mlxcel::worker",
+        "core worker thread '{label}' cannot start: {reason}"
+    );
+    std::process::exit(1);
+}

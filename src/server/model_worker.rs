@@ -1106,12 +1106,27 @@ pub(crate) fn spawn_xla_model_worker(
                 .unwrap_or_else(|_| mlxcel_xla::default_device().to_string());
             let context_capacity = match mlxcel_xla::context_capacity_from_env() {
                 Ok(value) => value,
-                Err(err) => {
-                    tracing::error!("Failed to configure the OpenXLA engine: {err}");
-                    return;
-                }
+                Err(err) => crate::worker_failfast::exit_on_worker_startup_failure(
+                    "model-worker-xla",
+                    &format!("failed to configure the OpenXLA engine: {err}"),
+                ),
             };
+            // The capacity is a static graph shape, so this has to be decided
+            // before the engine is built and cannot be revisited per request.
+            let operator_pinned = std::env::var_os(mlxcel_xla::CONTEXT_CAPACITY_ENV).is_some();
+            if let Err(err) = crate::ensure_xla_image_context_capacity(
+                &model_path,
+                context_capacity,
+                operator_pinned,
+            ) {
+                crate::worker_failfast::exit_on_worker_startup_failure(
+                    "model-worker-xla",
+                    &err.to_string(),
+                );
+            }
             tracing::info!(
+                context_capacity,
+                capacity_pinned_by_operator = operator_pinned,
                 "Model worker thread starting (OpenXLA continuous batching, B_max={b_max}, \
                  context_capacity={context_capacity}, device={device}), loading model..."
             );
@@ -1131,10 +1146,10 @@ pub(crate) fn spawn_xla_model_worker(
             let load_start = Instant::now();
             let tokenizer = match crate::tokenizer::load_tokenizer(&model_path) {
                 Ok(t) => t,
-                Err(err) => {
-                    tracing::error!("Failed to load tokenizer for the OpenXLA backend: {err}");
-                    return;
-                }
+                Err(err) => crate::worker_failfast::exit_on_worker_startup_failure(
+                    "model-worker-xla",
+                    &format!("failed to load the tokenizer for the OpenXLA backend: {err}"),
+                ),
             };
             let engine = match mlxcel_xla::XlaBatchEngine::load_with_context_capacity(
                 &model_path,
@@ -1143,10 +1158,10 @@ pub(crate) fn spawn_xla_model_worker(
                 context_capacity,
             ) {
                 Ok(engine) => engine,
-                Err(err) => {
-                    tracing::error!("Failed to load the OpenXLA engine: {err}");
-                    return;
-                }
+                Err(err) => crate::worker_failfast::exit_on_worker_startup_failure(
+                    "model-worker-xla",
+                    &format!("failed to load the OpenXLA engine: {err}"),
+                ),
             };
             let mut worker = match crate::server::batch::XlaServeWorker::new(
                 engine,

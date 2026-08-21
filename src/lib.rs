@@ -80,8 +80,9 @@ pub use multimodal::host_preprocessor::LlavaHostReferenceCapture;
 #[cfg(feature = "xla-iree")]
 pub use multimodal::host_preprocessor::LlavaIreeHostPreprocessor;
 pub use multimodal::host_preprocessor::{
-    FakeHostMultimodalPreprocessor, HostMultimodalPreprocessor, HostPreprocessorError,
-    LlavaHostPreprocessor, XlaVisionBackend, load_xla_image_preprocessor,
+    CONTEXT_CAPACITY_ENV, FakeHostMultimodalPreprocessor, HostMultimodalPreprocessor,
+    HostPreprocessorError, LlavaHostPreprocessor, XlaVisionBackend,
+    ensure_xla_image_context_capacity, load_xla_image_preprocessor, xla_image_context_floor,
 };
 pub use multimodal::{
     falcon_ocr_prompt, internvl_prompt, kimi_vl_prompt, locateanything_prompt, minicpmo_prompt,
