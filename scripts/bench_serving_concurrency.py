@@ -197,7 +197,14 @@ def stream_request(
             if isinstance(usage, dict) and usage.get("completion_tokens") is not None:
                 usage_tokens = int(usage["completion_tokens"])
             for choice in event.get("choices", []) or []:
-                content = (choice.get("delta") or {}).get("content")
+                delta = choice.get("delta") or {}
+                # Reasoning models stream their thinking channel as
+                # `reasoning_content` deltas; counting only `content` would
+                # report no TTFT and no decode rate at all for a request
+                # that spends its whole budget thinking (issue #1261 hit
+                # exactly this on Qwen 3.8). Both channels are decoded
+                # tokens, so both count.
+                content = delta.get("content") or delta.get("reasoning_content")
                 if content:
                     if ttft is None:
                         ttft = time.perf_counter() - start

@@ -44,3 +44,7 @@ webpage/site/node_modules/
 # Host-specific and reactive to local memory conditions, so it never belongs
 # in version control alongside the tracked benchmarks/*.csv result files.
 /benchmarks/.oom-record
+
+# Raw qmv-wide-pin measurement runs written by scripts/bench_qmv_wide_pin.sh
+# (issue #1261). Curated results belong in docs/benchmark_results/.
+/bench-results/
