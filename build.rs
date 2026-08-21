@@ -114,26 +114,63 @@ fn main() {
             ] {
                 println!("cargo:rustc-link-search=native={}", b.join(d).display());
             }
+            // Everything inside the group, in link order. Each entry is here
+            // for a reason worth stating, because a dropped one fails either at
+            // link time with a bare undefined symbol or at runtime with a
+            // device that cannot be created.
+            let mut group = vec![
+                // The CUDA HAL driver's registration wrapper (driver_module.c.o),
+                // pulled by the shim's explicit register call. Whole-archiving
+                // only the unified runtime would leave it out and then no CUDA
+                // device can be created.
+                "-l:libiree_hal_drivers_cuda_registration_registration.a",
+            ];
+            // Older source builds leave the vendored printf implementation in
+            // its own archive; newer unified runtimes carry it directly and do
+            // not produce that archive. Link it only when the build generated it.
+            // Pushed positionally rather than inserted at a fixed index, so
+            // reordering the list above cannot silently move it out of the group.
+            if b.join("build_tools/third_party/printf/libprintf_printf.a")
+                .exists()
+            {
+                group.push("-l:libprintf_printf.a");
+            }
+            group.extend([
+                // flatbuffer parsing for the VM bytecode module loader.
+                "-l:libflatcc_parsing.a",
+                // Compiler intrinsics IREE's C objects reference.
+                "-lgcc",
+                "-lm",
+                "-lpthread",
+                "-ldl",
+                // libc, again and on purpose. rustc already passes `-lc`, but
+                // it does so before these archives, and `rustc-link-arg` can
+                // only append. `libiree_runtime_unified.a(call.c.o)` is built
+                // with the stack protector and references `__stack_chk_guard`,
+                // so that reference appears after the only libc on the line and
+                // has nothing left to resolve against. The symbol is not in
+                // libc itself (it is UND in `libc.so.6`); the definition lives
+                // in `ld-linux-aarch64.so.1`, reachable through libc's
+                // DT_NEEDED, and ld reports the failure as
+                // "DSO missing from command line" naming the dynamic linker.
+                // Repeating `-lc` after the archives puts libc where the
+                // pending reference can reach it.
+                //
+                // Measured, not assumed: this entry alone fixes the link, and
+                // `-Wl,--copy-dt-needed-entries` alone does not, because rustc
+                // appends our args after its `-lc` and that flag only governs
+                // inputs that follow it. See issue #1274.
+                "-lc",
+            ]);
+
             let mut link_args = vec![
                 "-Wl,--whole-archive",
                 "-l:libiree_runtime_unified.a",
                 "-Wl,--no-whole-archive",
                 "-Wl,--start-group",
-                "-l:libiree_hal_drivers_cuda_registration_registration.a",
-                "-l:libflatcc_parsing.a",
-                "-lgcc",
-                "-lm",
-                "-lpthread",
-                "-ldl",
-                "-Wl,--end-group",
             ];
-            // Older source builds leave the vendored printf implementation in
-            // its own archive; newer unified runtimes carry it directly and do
-            // not produce that archive. Link it only when the build generated it.
-            let printf = b.join("build_tools/third_party/printf/libprintf_printf.a");
-            if printf.exists() {
-                link_args.insert(5, "-l:libprintf_printf.a");
-            }
+            link_args.extend(group);
+            link_args.push("-Wl,--end-group");
             for arg in link_args {
                 println!("cargo:rustc-link-arg={arg}");
             }
