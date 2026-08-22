@@ -43,33 +43,85 @@ const HF_PREFIX: &str = "model.";
 /// `decoder.layers.`; raw HF checkpoints surface `model.backbone.` /
 /// `backbone.model.` / `model.decoder.` and the `*.convolution.` /
 /// `*.normalization.` field names. We sniff a few unambiguous markers.
+///
+/// The whole key set is scanned before anything is decided, and the precedence
+/// is applied afterwards, so the verdict is a pure function of the key set.
+/// `WeightMap` is a `HashMap` whose iteration order is randomized per map
+/// instance, so deciding from inside the walk would hand the answer to
+/// whichever key the walk happened to reach first.
 pub fn needs_sanitize(weights: &WeightMap) -> bool {
     let mut has_mlx_marker = false;
     let mut has_hf_marker = false;
     for key in weights.keys() {
-        if key.starts_with("vision.backbone.") || key.starts_with("vision.hybrid_encoder.") {
-            has_mlx_marker = true;
-        }
-        if key.starts_with("model.backbone.")
-            || key.starts_with("backbone.model.")
-            || key.contains(".convolution.")
-            || key.contains(".normalization.")
-            || key.starts_with("model.decoder.")
-            || key.starts_with("model.encoder.")
-        {
-            has_hf_marker = true;
-        }
-        // Early out once both decisions are unambiguous.
-        if has_mlx_marker {
-            return false;
-        }
+        has_mlx_marker |= is_mlx_marker(key);
+        has_hf_marker |= is_hf_marker(key);
+    }
+
+    if has_mlx_marker {
         if has_hf_marker {
-            return true;
+            // Both families at once: a partially converted or hand-merged
+            // checkpoint, or an MLX one shipping auxiliary tensors under HF
+            // field names. Resolve it toward MLX instead of rejecting it,
+            // because only this direction is recoverable. Skipping the
+            // pipeline on something that was really raw HF fails loudly a
+            // moment later, when `RtDetrV2Model::from_weights` looks up MLX
+            // names the map does not have; running the pipeline over
+            // already-MLX weights would double-transpose the conv weights and
+            // leave the model quietly emitting wrong detections. The warning
+            // carries the diagnosis a hard error would have carried.
+            warn_mixed_layout(weights);
         }
+        return false;
+    }
+    if has_hf_marker {
+        return true;
     }
     // No markers at all: treat as already-MLX (no-op) to avoid corrupting an
     // unexpected layout.
-    has_hf_marker
+    false
+}
+
+/// True when `key` carries an MLX-layout marker.
+fn is_mlx_marker(key: &str) -> bool {
+    key.starts_with("vision.backbone.") || key.starts_with("vision.hybrid_encoder.")
+}
+
+/// True when `key` carries a raw-HuggingFace layout marker.
+///
+/// The `.convolution.` / `.normalization.` tests are unanchored substring
+/// matches, so unlike the others they can fire anywhere in a key. That is what
+/// lets a single map trip both families at once.
+fn is_hf_marker(key: &str) -> bool {
+    key.starts_with("model.backbone.")
+        || key.starts_with("backbone.model.")
+        || key.contains(".convolution.")
+        || key.contains(".normalization.")
+        || key.starts_with("model.decoder.")
+        || key.starts_with("model.encoder.")
+}
+
+/// Report a weight map that carries both marker families.
+///
+/// Names the lexicographically first offending key of each family rather than
+/// the first one the walk happens to meet, so the message is reproducible
+/// across runs for the same checkpoint.
+fn warn_mixed_layout(weights: &WeightMap) {
+    let first_matching = |matches: fn(&str) -> bool| {
+        weights
+            .keys()
+            .map(String::as_str)
+            .filter(|key| matches(key))
+            .min()
+            .unwrap_or("<none>")
+    };
+    tracing::warn!(
+        mlx_key = first_matching(is_mlx_marker),
+        hf_key = first_matching(is_hf_marker),
+        "RT-DETRv2 checkpoint carries both MLX-layout and raw-HuggingFace key \
+         markers; treating it as already-MLX and skipping the rename/transpose \
+         pipeline, since re-running that pipeline would double-transpose conv \
+         weights"
+    );
 }
 
 /// True when `key` (already stripped of the `model.` prefix) should be dropped.
@@ -318,6 +370,70 @@ mod tests {
             mlxcel_core::zeros(&[1], mlxcel_core::dtype::FLOAT32),
         );
         assert!(needs_sanitize(&hf_map));
+    }
+
+    /// A mixed-marker map must produce one stable verdict.
+    ///
+    /// `WeightMap` is a `HashMap` and `RandomState` is seeded per map instance,
+    /// not per process, so a fresh map is built on every iteration. Reusing a
+    /// single map would only ever exercise one iteration order and could not
+    /// tell a fixed verdict apart from a lucky one.
+    ///
+    /// The expected verdict is `false`: MLX wins the mixed case because
+    /// skipping the pipeline on a genuine HF checkpoint fails loudly at weight
+    /// lookup, while running it on an MLX checkpoint double-transposes conv
+    /// weights silently.
+    #[test]
+    fn needs_sanitize_mixed_markers_is_order_independent() {
+        const ITERATIONS: usize = 64;
+        // Three MLX-only keys, one key tripping both families at once (an MLX
+        // prefix that kept an HF `.normalization.` field name), and three
+        // HF-only keys, two of which match the unanchored substring markers.
+        const MIXED_KEYS: [&str; 7] = [
+            "vision.backbone.embedder.embedder.0.conv.weight",
+            "vision.backbone.encoder.stages.0.layers.0.conv.weight",
+            "vision.hybrid_encoder.lateral_convs.0.bn.weight",
+            "vision.backbone.embedder.embedder.1.normalization.running_mean",
+            "model.backbone.model.embedder.embedder.0.convolution.weight",
+            "aux.head.0.convolution.weight",
+            "aux.head.0.normalization.bias",
+        ];
+
+        let mut verdicts: Vec<bool> = Vec::with_capacity(ITERATIONS);
+        for _ in 0..ITERATIONS {
+            let mut map: WeightMap = WeightMap::new();
+            for key in MIXED_KEYS {
+                map.insert(
+                    key.to_string(),
+                    mlxcel_core::zeros(&[1], mlxcel_core::dtype::FLOAT32),
+                );
+            }
+            verdicts.push(needs_sanitize(&map));
+        }
+
+        let sanitize_verdicts = verdicts.iter().filter(|v| **v).count();
+        assert_eq!(
+            sanitize_verdicts, 0,
+            "needs_sanitize said `true` for {sanitize_verdicts} of {ITERATIONS} mixed-marker \
+             maps freshly built from the same key set; the verdict must be a stable `false` and \
+             must not depend on HashMap iteration order. Observed: {verdicts:?}"
+        );
+    }
+
+    #[test]
+    fn needs_sanitize_marker_free_maps_are_no_ops() {
+        // Empty map: nothing to sniff, so the pipeline must not run.
+        let empty: WeightMap = WeightMap::new();
+        assert!(!needs_sanitize(&empty));
+
+        // Keys matching neither family: treat as already-MLX rather than
+        // transposing an unrecognized layout.
+        let mut unknown: WeightMap = WeightMap::new();
+        unknown.insert(
+            "some.unrecognized.tensor".to_string(),
+            mlxcel_core::zeros(&[1], mlxcel_core::dtype::FLOAT32),
+        );
+        assert!(!needs_sanitize(&unknown));
     }
 
     #[test]
