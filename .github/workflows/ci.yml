@@ -484,6 +484,15 @@ jobs:
   #     time.
   #   - GPU execution. `--no-run` links only; the XLA test suites still have no
   #     CI coverage, per the `xla-compile` comment above.
+  #   - A run where cargo finds nothing to redo. The target directory persists
+  #     across PRs, so a green run does not by itself prove a link happened:
+  #     this job's own first run on the PR that added it finished in 12 seconds
+  #     with `Finished release profile in 0.14s`. That is correct, because
+  #     cargo relinks exactly when the fingerprint moves, and `build.rs`
+  #     declares `rerun-if-env-changed` for all three IREE variables so a
+  #     version bump does move it. The narrow hole is a `scripts/iree/**` edit
+  #     that changes how the runtime is built without moving `IREE_VERSION`:
+  #     the script is idempotent, so nothing rebuilds and nothing relinks.
   xla-link:
     name: OpenXLA feature link
     needs: changes
