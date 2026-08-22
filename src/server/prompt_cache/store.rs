@@ -309,10 +309,14 @@ impl Inner {
     /// Evict the single oldest entry. Returns the number of bytes freed, or
     /// `0` if the store is empty.
     fn evict_oldest(&mut self) -> usize {
+        // The digest bytes make the key a TOTAL order: `entries` iterates in
+        // `HashMap` order, which `RandomState` randomizes per instance, and
+        // without this tie-break component two entries sharing `last_used`
+        // would resolve to whichever one hash order placed first.
         let oldest = self
             .entries
             .iter()
-            .min_by_key(|(_, slot)| slot.entry.last_used())
+            .min_by_key(|(digest, slot)| (slot.entry.last_used(), *digest.as_bytes()))
             .map(|(d, _)| *d);
         match oldest {
             Some(digest) => {
@@ -330,10 +334,14 @@ impl Inner {
     }
 
     fn evict_oldest_snapshot(&mut self) -> usize {
+        // The digest bytes make the key a TOTAL order: `snapshots` iterates
+        // in `HashMap` order, which `RandomState` randomizes per instance,
+        // and without this tie-break component two entries sharing
+        // `last_used` would resolve to whichever one hash order placed first.
         let oldest = self
             .snapshots
             .iter()
-            .min_by_key(|(_, slot)| slot.entry.last_used())
+            .min_by_key(|(digest, slot)| (slot.entry.last_used(), *digest.as_bytes()))
             .map(|(d, _)| *d);
         match oldest {
             Some(digest) => match self.remove_snapshot(&digest) {
