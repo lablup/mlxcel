@@ -436,6 +436,7 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
         }
     }
 
+    // Both loops below, the image drain and the audio drain, take this allow.
     // clippy::while_let_loop wants `while let Some(stage) =
     // self.image_preprocessor.as_ref()`, but that head holds a shared borrow of
     // `self` for the whole body, which then calls `&mut self` methods and clears

@@ -345,6 +345,15 @@ jobs:
   #     `clippy` job above covers default features only. That half of the
   #     backlog cleared by #1304 can therefore regrow silently; closing it means
   #     running clippy here, which was left out of #1304 deliberately.
+  #   - The path dependencies' own test targets. There is no `default-members`
+  #     (see the note at the top of `Cargo.toml`), so `cargo check` run here
+  #     resolves to `-p mlxcel` and `--all-targets` expands within that package
+  #     only. `mlxcel-core`, `mlxcel-surgery` and `mlxcel-xla` are compiled as
+  #     plain library dependencies, so their `#[cfg(test)]` modules are never
+  #     built. That leaves `mlxcel-xla`'s unit tests ungated by every job,
+  #     because the `clippy` job above builds default features and the crate is
+  #     default-off there. `cargo clippy -p mlxcel-xla --all-targets` covers
+  #     them, but only by hand.
   #   - macOS and `IREE_DIST` builds of the same features. Neither has a runner
   #     with the required distribution.
   xla-compile:
@@ -365,6 +374,15 @@ jobs:
       # dead-code backlog that would have made the job red on arrival; #1304
       # cleared it. See the note above for what `-D warnings` on `cargo check`
       # still does not cover.
+      #
+      # Blast radius, deliberately: `RUSTFLAGS` reaches every unit cargo builds
+      # from a path, so the `mlxcel-core`, `mlxcel-surgery` and `mlxcel-xla`
+      # library units and the build scripts are gated here too, and a warning in
+      # any of them reds a job named for OpenXLA. Registry and git dependencies
+      # cannot, because cargo compiles those with `--cap-lints allow`. The
+      # toolchain is pinned exactly in `rust-toolchain.toml`, so a new rustc
+      # release cannot turn this red on its own; bumping that pin is what has to
+      # re-clear these two feature sets.
       RUSTFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v7

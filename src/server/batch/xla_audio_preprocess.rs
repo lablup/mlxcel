@@ -433,8 +433,9 @@ pub(crate) struct AudioPreprocessStage {
 }
 
 impl AudioPreprocessStage {
-    /// Used by `xla_audio_preprocess_tests.rs`. The serve worker constructs the
-    /// stage through `spawn_with_loader` so MLX handles stay thread-confined.
+    /// Used by `xla_audio_preprocess_tests.rs` and `xla_worker_tests.rs`. The
+    /// serve worker constructs the stage through `spawn_with_loader` so MLX
+    /// handles stay thread-confined.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn spawn<P: AudioFeatureProducer + Send>(
         producer: P,

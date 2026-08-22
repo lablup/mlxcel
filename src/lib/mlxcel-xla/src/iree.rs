@@ -3042,7 +3042,7 @@ impl IreeRaggedLlama {
             || cache_len.len() != self.b_max
         {
             return Err(format!(
-                "decode_ragged_logits expects adapter/token/position/cache arrays of length b_max = {}",
+                "decode_ragged_logits_with_modes expects adapter/token/position/cache arrays of length b_max = {}",
                 self.b_max
             ));
         }
@@ -3100,7 +3100,7 @@ impl IreeRaggedLlama {
             || cache_len.len() != self.b_max
         {
             return Err(format!(
-                "decode_ragged_mrope_logits expects adapter/token/position/cache arrays of length b_max = {}",
+                "decode_ragged_mrope_logits_with_modes expects adapter/token/position/cache arrays of length b_max = {}",
                 self.b_max
             ));
         }
