@@ -2,11 +2,22 @@
 # advisory) and cargo-fmt on every touched-Rust change so formatting drift and
 # license issues are caught at PR time.
 #
-# Neither clippy nor the general unit suite is gated at PR time. Both used to
-# run on the self-hosted Apple Silicon runner, first here and then briefly in
-# release.yml, and in both cases consumed ~30 min per run, blocking either PRs
-# or releases on a shared resource for failures that `make verify` reliably
-# catches on the developer's machine in a fraction of the time (#21, #23).
+# The general unit suite is not gated at PR time, and clippy is gated only in
+# the narrow shape described below. Both used to run on the self-hosted Apple
+# Silicon runner, first here and then briefly in release.yml, and in both cases
+# consumed ~30 min per run, blocking either PRs or releases on a shared
+# resource for failures that `make verify` reliably catches on the developer's
+# machine in a fraction of the time (#21, #23).
+#
+# The `clippy` job below is deliberately not a return to that arrangement. It
+# runs `cargo clippy -p mlxcel --lib --tests -- -D warnings` at default
+# features on the self-hosted GB10 runner with its own persistent target
+# directory, so it neither touches the Apple Silicon runner nor pays a cold
+# build after its first run. It exists because #916 merged an `err_expect`
+# that reddened `make verify` for every contributor on every platform and sat
+# on `main` until the nightly backstop caught it a day later (#1283): the
+# per-crate lint that catches it is cheap, and only its absence at PR time was
+# expensive.
 #
 # They are not absent from every workflow, though, so do not read the above as
 # "nothing anywhere runs them":
@@ -113,6 +124,41 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo-clippy
+    needs: changes
+    # Self-hosted, so fork PRs never queue on it. Mirrors `xla-compile` below.
+    if: github.repository == 'lablup/mlxcel' && needs.changes.outputs.rust == 'true'
+    runs-on: GB10
+    permissions:
+      contents: read
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Use a persistent target directory
+        run: |
+          # Clippy emits different artifacts than a build, so it gets its own
+          # directory rather than sharing (and repeatedly invalidating) the
+          # xla-compile or release caches. Cold on first run, warm after.
+          CARGO_TARGET="$HOME/.cargo-target/mlxcel-clippy-ci"
+          mkdir -p "$CARGO_TARGET"
+          echo "CARGO_TARGET_DIR=$CARGO_TARGET" >> $GITHUB_ENV
+
+      # Default features (`surgery`, no accelerator). The lint that motivated
+      # this job (#1283) reproduces on every feature set, so the cheapest one
+      # that compiles the crate is enough, and it is the same command
+      # pipeline-parallel-ci.yml already runs on its own path filter.
+      - name: Clippy
+        run: |
+          cargo clippy \
+            -p mlxcel \
+            --lib \
+            --tests \
+            -- -D warnings
 
   crate-versions:
     name: crate versions
