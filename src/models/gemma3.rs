@@ -30,6 +30,7 @@ use crate::distributed::pipeline::partial_loading::filter_weight_map;
 use crate::models::model_owned::{
     ModelOwnedSequenceState, dispatch_paged_decode_from_visible_caches,
 };
+use crate::models::rope_utils::{RopeScalingSpec, printable_label};
 use mlxcel_core::cache::{CachePool, RotatingPagedDecodeMetadata, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::DecodeBatchContext;
 use mlxcel_core::layers::{
@@ -110,6 +111,111 @@ impl ModelArgs {
     pub fn bits(&self) -> i32 {
         self.quantization.as_ref().map(|q| q.bits).unwrap_or(4)
     }
+
+    /// The RoPE position scale the global-attention layers rotate at.
+    ///
+    /// Gemma 3 applies `rope_scaling` to the global layers only. mlx-lm reaches
+    /// `initialize_rope` with a `scaling_config` on the non-sliding branch alone
+    /// ([`mlx_lm/models/gemma3_text.py`](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/gemma3_text.py)),
+    /// and mlx-vlm spells the same rule as `scaling_config=None if
+    /// self.is_sliding else config.rope_scaling`
+    /// ([`mlx_vlm/models/gemma3/language.py`](https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/gemma3/language.py)).
+    /// The sliding layers keep `rope_local_base_freq` at an unscaled position,
+    /// which is why this is a *global* scale and [`layer_rope_params`] hands
+    /// `1.0` to the sliding half.
+    ///
+    /// `1.0 / factor` for `linear` mirrors upstream's `scale = 1 /
+    /// scaling_config["factor"]`, because `mx.fast.rope` multiplies the position
+    /// by `scale`. Every published Gemma 3 checkpoint from 4B up declares
+    /// `{"rope_type": "linear", "factor": 8.0}`, so `0.125` is the value the
+    /// family actually decodes with; 1B declares no block and stays at `1.0`.
+    ///
+    /// The block is read through the shared [`RopeScalingSpec`] map lookup
+    /// rather than a derived `#[serde(rename = "type", alias = "rope_type")]`
+    /// field. A derived alias turns a config that carries *both* spellings into
+    /// a hard `duplicate field` parse error, and several checkpoints in the
+    /// local model set spell both (#1355).
+    ///
+    /// # Why an unimplemented scheme is an error here, and a warning on the
+    /// shared Llama path
+    ///
+    /// [`crate::models::rope_utils::RopeScalingKind::resolve`] warns and falls
+    /// back to the unscaled table, because the args type it serves is what
+    /// several VLM loaders parse an arbitrary `text_config` into, and one
+    /// shipped checkpoint (`models/internvl3-1b`) declares a scheme that path
+    /// does not implement. A load error there would take a working checkpoint
+    /// offline.
+    ///
+    /// Nothing comparable reaches `gemma3::ModelArgs`. It is parsed only from a
+    /// Gemma 3 config or a Gemma 3 VLM `text_config`; every published Gemma 3
+    /// checkpoint that declares the block declares `linear`; and Gemma 3n and
+    /// Gemma 4 parse their own args types, so neither passes through here. The
+    /// only failure available is the one a load error prevents, a `yarn` or
+    /// `llama3` block silently decoding at `1.0`, which reads as fluent text.
+    pub fn global_rope_scale(&self) -> Result<f32, String> {
+        let Some(block) = self.rope_scaling.as_ref() else {
+            return Ok(1.0);
+        };
+        let spec = RopeScalingSpec::from_lookup(|key| block.get(key));
+
+        match spec.rope_type() {
+            "default" => Ok(1.0),
+            "linear" => {
+                // Upstream indexes `scaling_config["factor"]` with no default,
+                // so a `linear` block without one is malformed. Defaulting it to
+                // 1.0 would reintroduce this issue's silent no-op one level
+                // down, where nothing would ever report it.
+                let factor = spec.factor.ok_or_else(|| {
+                    "Gemma 3 config declares rope_scaling type \"linear\" but names no numeric \
+                     \"factor\", so the position scale it selects is undefined"
+                        .to_string()
+                })?;
+                if factor > 0.0 && factor.is_finite() {
+                    Ok(1.0 / factor)
+                } else {
+                    Err(format!(
+                        "Gemma 3 config declares rope_scaling type \"linear\" with factor \
+                         {factor}, which is not a positive finite number"
+                    ))
+                }
+            }
+            other => Err(format!(
+                "Gemma 3 config declares rope_scaling type \"{}\", which the Gemma 3 RoPE path \
+                 does not implement; only \"linear\" and \"default\" are supported. Decoding it \
+                 as unscaled would change every global-attention layer's rotation without \
+                 reporting it.",
+                printable_label(other)
+            )),
+        }
+    }
+}
+
+/// The `(is_sliding, rope_base, rope_scale)` triple layer `layer_idx` rotates
+/// with.
+///
+/// Split out of [`Attention::from_weights`] so the per-layer rule is reachable
+/// without a weight map: it is pure config arithmetic, and the sliding/global
+/// split is the half of this that a fix is most likely to get backwards.
+/// Handing the scale to every layer is as wrong as handing it to none, and both
+/// mistakes still load and still read fluently.
+///
+/// The scale is resolved before the branch, not inside it, so an unsupported
+/// scheme is a load error at layer 0 rather than at whichever index first
+/// happens to be global. That also covers a config whose
+/// `sliding_window_pattern` exceeds `num_hidden_layers` and therefore has no
+/// global layer to trip over.
+pub(crate) fn layer_rope_params(
+    args: &ModelArgs,
+    layer_idx: usize,
+) -> Result<(bool, f32, f32), String> {
+    let is_sliding = !(layer_idx + 1).is_multiple_of(args.sliding_window_pattern);
+    let global_rope_scale = args.global_rope_scale()?;
+
+    Ok(if is_sliding {
+        (true, args.rope_local_base_freq, 1.0)
+    } else {
+        (false, args.rope_theta, global_rope_scale)
+    })
 }
 
 // Attention.
@@ -124,6 +230,10 @@ pub struct Attention {
     pub is_sliding: bool,
     pub window_size: i32,
     pub rope_base: f32,
+    /// Position scale handed to every RoPE call in this block: `1.0` on a
+    /// sliding layer, `ModelArgs::global_rope_scale()` on a global one. See
+    /// [`layer_rope_params`].
+    pub rope_scale: f32,
     pub q_norm: GemmaRMSNorm,
     pub k_norm: GemmaRMSNorm,
 }
@@ -146,6 +256,7 @@ impl Attention {
             &self.k_norm,
             self.head_dim,
             self.rope_base,
+            self.rope_scale,
             offset,
         ) {
             (q, k, v)
@@ -167,8 +278,22 @@ impl Attention {
             let k = self.k_norm.forward(&k);
 
             // Apply RoPE
-            let q = mlxcel_core::fast_rope(&q, self.head_dim, false, self.rope_base, 1.0, offset);
-            let k = mlxcel_core::fast_rope(&k, self.head_dim, false, self.rope_base, 1.0, offset);
+            let q = mlxcel_core::fast_rope(
+                &q,
+                self.head_dim,
+                false,
+                self.rope_base,
+                self.rope_scale,
+                offset,
+            );
+            let k = mlxcel_core::fast_rope(
+                &k,
+                self.head_dim,
+                false,
+                self.rope_base,
+                self.rope_scale,
+                offset,
+            );
             (q, k, v)
         };
 
@@ -221,10 +346,22 @@ impl Attention {
         let k = self.k_norm.forward(&k);
 
         let offsets: Vec<i32> = caches.iter().map(|cache| cache.offset()).collect();
-        let q =
-            mlxcel_core::fast_rope_batched(&q, self.head_dim, false, self.rope_base, 1.0, &offsets);
-        let k =
-            mlxcel_core::fast_rope_batched(&k, self.head_dim, false, self.rope_base, 1.0, &offsets);
+        let q = mlxcel_core::fast_rope_batched(
+            &q,
+            self.head_dim,
+            false,
+            self.rope_base,
+            self.rope_scale,
+            &offsets,
+        );
+        let k = mlxcel_core::fast_rope_batched(
+            &k,
+            self.head_dim,
+            false,
+            self.rope_base,
+            self.rope_scale,
+            &offsets,
+        );
 
         if let Some(context) = decode_context {
             let paged_attn = if self.is_sliding && context.is_paged_decode() {
@@ -374,15 +511,10 @@ impl Attention {
         let num_kv_heads = args.num_key_value_heads as i32;
         let scale = 1.0 / args.query_pre_attn_scalar.sqrt();
 
-        // Determine if this is a sliding window layer
-        let is_sliding = !(layer_idx + 1).is_multiple_of(args.sliding_window_pattern);
-
-        // Choose RoPE base based on layer type
-        let rope_base = if is_sliding {
-            args.rope_local_base_freq
-        } else {
-            args.rope_theta
-        };
+        // Layer type, RoPE base and RoPE position scale. Gemma 3 alternates
+        // sliding and global attention, and `rope_scaling` applies to the
+        // global layers only (#1340).
+        let (is_sliding, rope_base, rope_scale) = layer_rope_params(args, layer_idx)?;
 
         // Load Q/K normalization
         let q_norm_weight = get_weight_copy(weights, &format!("{}.q_norm.weight", prefix))?;
@@ -416,6 +548,7 @@ impl Attention {
                 0
             },
             rope_base,
+            rope_scale,
             q_norm,
             k_norm,
         })
@@ -1501,3 +1634,7 @@ mod gemma3_mask_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "gemma3_tests.rs"]
+mod gemma3_tests;

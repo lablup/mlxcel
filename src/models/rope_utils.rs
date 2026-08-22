@@ -421,7 +421,8 @@ fn report_unusable_rope_scaling_once(model_label: &str, rope_type: &str, reason:
     );
 }
 
-/// Make checkpoint-controlled text safe to put on a line of stderr.
+/// Make checkpoint-controlled text safe to put on a line of stderr, or into an
+/// error message.
 ///
 /// Both halves of the warning come out of the checkpoint: `model_type` (or a
 /// directory name) and the `rope_type` string. Neither is bounded or validated
@@ -429,7 +430,10 @@ fn report_unusable_rope_scaling_once(model_label: &str, rope_type: &str, reason:
 /// log line after it, or run to megabytes and bury the message. Control
 /// characters become `U+FFFD` and the label is truncated, which also bounds the
 /// dedup set's keys.
-fn printable_label(label: &str) -> String {
+///
+/// Used by: this module's warning, and `gemma3::ModelArgs::global_rope_scale`,
+/// whose load error names the same checkpoint-controlled `rope_type` string.
+pub(crate) fn printable_label(label: &str) -> String {
     const MAX_CHARS: usize = 64;
 
     let cleaned: String = label

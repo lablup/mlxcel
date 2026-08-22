@@ -1109,8 +1109,13 @@ void fused_qkv_project_split_rope(
 );
 
 // Fused concatenated QKV projection + split + reshape + transpose +
-// GemmaRMSNorm(Q/K) + RoPE.
-// Used by: Gemma3 dense attention preparation path.
+// RMSNorm(Q/K) + RoPE.
+// `rope_scale` multiplies the position, matching mx.fast.rope's `scale`
+// argument: 1.0 for an unscaled layer, 1 / factor for a `linear` rope_scaling
+// block.
+// Used by: Gemma3 dense attention preparation path (1 / rope_scaling.factor on
+// the global-attention layers, 1.0 on the sliding ones), Qwen3 and Qwen3-MoE
+// decode attention preparation paths (1.0).
 void fused_qkv_project_split_norm_rope(
     const MlxArray& x,
     const MlxArray& weight,
@@ -1123,6 +1128,7 @@ void fused_qkv_project_split_norm_rope(
     int32_t head_dim,
     int32_t rope_dims,
     float rope_base,
+    float rope_scale,
     float rms_eps,
     int32_t cache_offset,
     int32_t group_size,

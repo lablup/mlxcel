@@ -1547,7 +1547,15 @@ mod ffi {
         /// RMSNorm(Q/K) + RoPE. Applies the plain
         /// `x * weight * rsqrt(mean(x^2) + eps)` form; the caller passes the raw
         /// weight for a standard RMSNorm or `(1 + weight)` for Gemma.
-        /// Used by: Gemma3, Qwen3, Qwen3-MoE attention preparation paths.
+        ///
+        /// `rope_scale` multiplies the position, the same way `mx.fast.rope`'s
+        /// `scale` argument does: `1.0` for an unscaled layer, `1 / factor` for
+        /// a `linear` `rope_scaling` block.
+        ///
+        /// Used by: Gemma3 attention preparation path (`1 /
+        /// rope_scaling.factor` on the global-attention layers, `1.0` on the
+        /// sliding ones), Qwen3 and Qwen3-MoE decode attention preparation paths
+        /// (`1.0`).
         unsafe fn fused_qkv_project_split_norm_rope(
             x: &MlxArray,
             weight: &MlxArray,
@@ -1560,6 +1568,7 @@ mod ffi {
             head_dim: i32,
             rope_dims: i32,
             rope_base: f32,
+            rope_scale: f32,
             rms_eps: f32,
             cache_offset: i32,
             group_size: i32,
