@@ -192,6 +192,83 @@ fn a_linear_block_with_an_unusable_factor_falls_back_to_the_plain_table() {
     }
 }
 
+/// Assert that a `llama3` block is rejected and leaves the plain table in place.
+///
+/// Both halves matter. The table builder must refuse the block, and `resolve`
+/// must turn that refusal into the unscaled table rather than into a table with
+/// zero, infinite or negative entries in it.
+fn assert_llama3_block_falls_back(block: &str) {
+    let declared = spec(block);
+    let reason = llama3_rope_freqs(&declared, 128, 500_000.0)
+        .err()
+        .unwrap_or_else(|| panic!("{block} must not build a table"));
+    assert!(!reason.is_empty(), "{block} must name what is wrong");
+
+    let kind = RopeScalingKind::resolve(Some(&declared), 128, 500_000.0, "llama-3.1-8b-4bit");
+    assert!(kind.freqs().is_none(), "{block}");
+    assert_eq!(kind.scale(), 1.0, "{block}");
+}
+
+#[test]
+fn a_llama3_block_with_a_zero_factor_falls_back_to_the_plain_table() {
+    // The sharpest case. `freq * factor` is exactly 0.0 for every low-band pair
+    // (35 of 64 at this geometry), `fast::rope` divides the position by the
+    // table entry, and `reciprocal(0.0)` is `inf`, so every logit is NaN for
+    // every token. Nothing on that path throws: the sampler orders logits with
+    // `partial_cmp(..).unwrap_or(Equal)`.
+    assert_llama3_block_falls_back(
+        r#"{"factor": 0.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0,
+            "original_max_position_embeddings": 8192, "rope_type": "llama3"}"#,
+    );
+}
+
+#[test]
+fn a_llama3_block_with_no_numeric_factor_falls_back_instead_of_doing_nothing() {
+    // An absent factor, or one written as a JSON string, used to default to 1.0
+    // and build a table bit-identical to the plain one. That is the silent
+    // no-op #1355 exists to remove, so it is reported rather than defaulted.
+    // Upstream expresses the same judgement as a `KeyError` on
+    // `scaling_config["factor"]`.
+    assert_llama3_block_falls_back(r#"{"rope_type": "llama3"}"#);
+    assert_llama3_block_falls_back(r#"{"rope_type": "llama3", "factor": "8.0"}"#);
+}
+
+#[test]
+fn a_llama3_block_with_an_out_of_range_factor_falls_back_to_the_plain_table() {
+    // A JSON number past f32 range saturates to `inf` through the `as` cast, so
+    // `freq * factor` is `inf` on the whole low band and that band rotates not
+    // at all.
+    assert_llama3_block_falls_back(r#"{"rope_type": "llama3", "factor": 1e39}"#);
+}
+
+#[test]
+fn a_llama3_block_with_a_negative_factor_falls_back_to_the_plain_table() {
+    // A negative factor keeps every entry finite and reverses the rotation
+    // direction on the low band, which is exactly the class of wrongness that
+    // produces correctly shaped activations and fluent text.
+    assert_llama3_block_falls_back(r#"{"rope_type": "llama3", "factor": -8.0}"#);
+}
+
+#[test]
+fn a_llama3_block_with_the_band_factors_equal_still_builds_a_table() {
+    // `Llama-4-Scout-17B-16E` declares `low_freq_factor` and `high_freq_factor`
+    // both 1.0. That is well defined rather than degenerate: the medium band
+    // `wavelen > L / hf && wavelen < L / lf` is empty, so the interpolation
+    // whose denominator would be zero is never evaluated, and upstream reaches
+    // the same table through `mx.where` discarding the unselected branch. The
+    // screening must not reject it.
+    let declared = spec(
+        r#"{"factor": 16.0, "high_freq_factor": 1.0, "low_freq_factor": 1.0,
+            "original_max_position_embeddings": 8192, "rope_type": "llama3"}"#,
+    );
+    let table = to_vec(&llama3_rope_freqs(&declared, 128, 500_000.0).expect("a valid block"));
+    assert_eq!(table.len(), 64);
+    assert!(
+        table.iter().all(|f| f.is_finite() && *f > 0.0),
+        "every entry must stay a positive finite frequency"
+    );
+}
+
 // The llama3 band arithmetic.
 
 #[test]
@@ -213,7 +290,7 @@ fn llama3_freqs_match_reference_bands() {
         r#"{"factor": 8.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0,
             "original_max_position_embeddings": 8192, "rope_type": "llama3"}"#,
     );
-    let table = to_vec(&llama3_rope_freqs(&declared, dims, base));
+    let table = to_vec(&llama3_rope_freqs(&declared, dims, base).expect("a valid block"));
     assert_eq!(table.len(), dims / 2);
 
     let mut low_band = 0usize;
@@ -262,7 +339,7 @@ fn llama3_leaves_the_high_band_alone_and_scales_the_low_band_by_factor() {
         r#"{"factor": 8.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0,
             "original_max_position_embeddings": 8192, "rope_type": "llama3"}"#,
     );
-    let table = to_vec(&llama3_rope_freqs(&declared, dims, base));
+    let table = to_vec(&llama3_rope_freqs(&declared, dims, base).expect("a valid block"));
 
     assert_eq!(table[0], base.powf(0.0));
     assert_eq!(table[63], base.powf(126.0 / 128.0) * 8.0);
@@ -276,22 +353,28 @@ fn a_larger_factor_moves_more_pairs_out_of_the_high_band() {
     // ignored `factor`.
     let dims = 128usize;
     let base = 500_000.0f32;
-    let eight = to_vec(&llama3_rope_freqs(
-        &spec(
-            r#"{"factor": 8.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0,
+    let eight = to_vec(
+        &llama3_rope_freqs(
+            &spec(
+                r#"{"factor": 8.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0,
                 "original_max_position_embeddings": 8192, "rope_type": "llama3"}"#,
-        ),
-        dims,
-        base,
-    ));
-    let thirty_two = to_vec(&llama3_rope_freqs(
-        &spec(
-            r#"{"factor": 32.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0,
+            ),
+            dims,
+            base,
+        )
+        .expect("a valid block"),
+    );
+    let thirty_two = to_vec(
+        &llama3_rope_freqs(
+            &spec(
+                r#"{"factor": 32.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0,
                 "original_max_position_embeddings": 8192, "rope_type": "llama3"}"#,
-        ),
-        dims,
-        base,
-    ));
+            ),
+            dims,
+            base,
+        )
+        .expect("a valid block"),
+    );
 
     assert_eq!(eight[0], thirty_two[0], "the high band ignores factor");
     let ratio = thirty_two[63] / eight[63];
@@ -308,19 +391,25 @@ fn the_defaults_match_upstreams_when_the_block_omits_the_band_factors() {
     // build the same table as one that spells all four out.
     let dims = 64usize;
     let base = 10_000.0f32;
-    let terse = to_vec(&llama3_rope_freqs(
-        &spec(r#"{"rope_type": "llama3", "factor": 8.0}"#),
-        dims,
-        base,
-    ));
-    let explicit = to_vec(&llama3_rope_freqs(
-        &spec(
-            r#"{"rope_type": "llama3", "factor": 8.0, "low_freq_factor": 1.0,
+    let terse = to_vec(
+        &llama3_rope_freqs(
+            &spec(r#"{"rope_type": "llama3", "factor": 8.0}"#),
+            dims,
+            base,
+        )
+        .expect("a valid block"),
+    );
+    let explicit = to_vec(
+        &llama3_rope_freqs(
+            &spec(
+                r#"{"rope_type": "llama3", "factor": 8.0, "low_freq_factor": 1.0,
                 "high_freq_factor": 4.0, "original_max_position_embeddings": 8192}"#,
-        ),
-        dims,
-        base,
-    ));
+            ),
+            dims,
+            base,
+        )
+        .expect("a valid block"),
+    );
     assert_eq!(terse, explicit);
 }
 

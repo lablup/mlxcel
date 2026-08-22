@@ -167,8 +167,9 @@ pub(crate) fn load_idefics2_vlm(model_path: &Path) -> Result<LoadedModel> {
         .unwrap_or(Value::Object(Map::new()));
     normalize_text_config(&mut text_config_value, &full_config)?;
 
-    let text_args: models::llama3::ModelArgs = serde_json::from_value(text_config_value)
+    let mut text_args: models::llama3::ModelArgs = serde_json::from_value(text_config_value)
         .map_err(|e| anyhow::anyhow!("Failed to parse Idefics2 text_config: {}", e))?;
+    text_args.set_checkpoint_label(model_path);
 
     let group_size = text_args.group_size();
     let bits = text_args.bits();

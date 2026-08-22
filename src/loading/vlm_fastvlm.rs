@@ -166,8 +166,9 @@ pub(crate) fn load_fastvlm_vlm(model_path: &Path) -> Result<LoadedModel> {
     // the text fields at the config root (no `text_config` block). Tie-embed
     // sanitize provides `lm_head` from `embed_tokens` when the head is dropped.
     models::sanitize_tied_embeddings(&mut weights, &full_config);
-    let text_args: models::llama3::ModelArgs = serde_json::from_value(full_config.clone())
+    let mut text_args: models::llama3::ModelArgs = serde_json::from_value(full_config.clone())
         .map_err(|e| anyhow::anyhow!("Failed to parse FastVLM text config: {}", e))?;
+    text_args.set_checkpoint_label(model_path);
     let text_model = LoadedModel::Qwen2(
         models::Qwen2Model::from_weights(&weights, &text_args)
             .map_err(|e| anyhow::anyhow!("Failed to load FastVLM text model: {}", e))?,

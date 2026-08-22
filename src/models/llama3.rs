@@ -99,6 +99,21 @@ pub struct ModelArgs {
     /// fused RoPE fast paths.
     #[serde(default, deserialize_with = "deserialize_rope_traditional")]
     pub rope_traditional: bool,
+
+    /// The checkpoint these args were read from, when the loader knows it.
+    ///
+    /// Not a `config.json` key: `#[serde(skip)]`, filled in by a loader that has
+    /// the model directory in hand (see [`Self::set_checkpoint_label`]). It
+    /// exists because `model_type` is the wrong thing to label a diagnostic
+    /// with on two counts. It names the *architecture*, which is often not the
+    /// checkpoint an operator would recognise (`models/internvl3-1b` parses its
+    /// `text_config` into these args, so its `model_type` is `qwen2`), and it
+    /// collides: two different `qwen2` checkpoints are one key to a warning
+    /// deduplicated per model, so the second would degrade in silence.
+    ///
+    /// Nothing about inference reads this. It is diagnostics only.
+    #[serde(skip)]
+    pub checkpoint_label: Option<String>,
 }
 
 /// Parse `rope_traditional`, mapping an explicit JSON `null` to `false`.
@@ -154,6 +169,26 @@ impl ModelArgs {
         self.quantization.as_ref().map(|q| q.bits).unwrap_or(4)
     }
 
+    /// Record the checkpoint directory these args were read from.
+    ///
+    /// Call it wherever a loader parses a `config.json` (or a nested
+    /// `text_config`) with the model directory in hand. It labels the
+    /// `rope_scaling` diagnostics and nothing else; see
+    /// [`Self::checkpoint_label`] for why the architecture name is not enough.
+    pub fn set_checkpoint_label(&mut self, model_dir: &Path) {
+        self.checkpoint_label = model_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty());
+    }
+
+    /// What a diagnostic should call this model.
+    ///
+    /// The checkpoint when a loader recorded one, the architecture otherwise.
+    pub fn model_label(&self) -> &str {
+        self.checkpoint_label.as_deref().unwrap_or(&self.model_type)
+    }
+
     /// Resolve `rope_scaling` into the frequency table this checkpoint asks for.
     ///
     /// Computed once per model, not once per layer: the `llama3` table is a
@@ -171,7 +206,7 @@ impl ModelArgs {
             self.rope_scaling.as_ref(),
             self.head_dim(),
             self.rope_theta,
-            &self.model_type,
+            self.model_label(),
         )
     }
 }
@@ -184,27 +219,65 @@ pub(crate) const FUSED_CAUSAL_PREFILL_ENV: &str = "MLXCEL_ENABLE_FUSED_CAUSAL_PR
 /// [`FusedQKVLinear::forward_split_rope`], not here.
 pub(crate) const FUSED_QKV_SPLIT_ROPE_ENV: &str = "MLXCEL_ENABLE_FUSED_QKV_SPLIT_ROPE";
 
-/// Both environment variables that opt a quantized checkpoint into a fused RoPE
-/// launcher.
+/// Opts the dense decode path into `forward_fused_rope_append`. Read inside
+/// [`FusedQKVLinear::forward_fused_rope_append`], through
+/// `mlxcel_core::layers::fused_rope_append_enabled`.
+pub(crate) const FUSED_ROPE_APPEND_ENV: &str = "MLXCEL_FUSED_ROPE_APPEND";
+
+/// Every environment variable that opts a checkpoint into a fused RoPE
+/// launcher, in the order [`report_fused_rope_bypass_once`] narrows them.
 ///
-/// Both launchers hardcode the split-half rotation inside C++ and take no flag,
-/// so a traditional-RoPE checkpoint is routed around them. Listing them once
-/// keeps the gate in [`Attention::forward`], the notice in
-/// [`Attention::from_weights`] and the tests reading the same set.
-pub(crate) const FUSED_ROPE_ENV_VARS: [&str; 2] =
-    [FUSED_CAUSAL_PREFILL_ENV, FUSED_QKV_SPLIT_ROPE_ENV];
+/// The first two hardcode the split-half rotation and a unit position scale
+/// inside C++ and take no flag, so `rope_traditional`, a position scale and a
+/// frequency table each route around them. The third takes `traditional` and
+/// the scale as real parameters, so only a frequency table routes around it,
+/// which is why it is last rather than interleaved. Listing them once keeps the
+/// gates in [`Attention::forward`], the notice in [`Attention::from_weights`]
+/// and the tests reading the same set.
+pub(crate) const FUSED_ROPE_ENV_VARS: [&str; 3] = [
+    FUSED_CAUSAL_PREFILL_ENV,
+    FUSED_QKV_SPLIT_ROPE_ENV,
+    FUSED_ROPE_APPEND_ENV,
+];
+
+/// How many of [`FUSED_ROPE_ENV_VARS`] a bypass reason takes out.
+///
+/// `rope_traditional` and a position scale take the first two; a frequency
+/// table takes all three.
+const FUSED_ROPE_ENV_VARS_WITHOUT_TABLE_SUPPORT: usize = 2;
+
+/// Whether a fused-RoPE variable is actually asking for its launcher.
+///
+/// The first two are presence-enabled, so `is_ok()` is the whole test.
+/// `MLXCEL_FUSED_ROPE_APPEND` is tri-state (`0` disables, `1` enables, unset
+/// takes the compiled-in default), so presence would report a lost kernel to
+/// someone who set it to `0` precisely to not use one. Asking the same gate the
+/// launcher asks keeps the notice tied to what actually happens.
+fn fused_rope_launcher_requested(name: &str) -> bool {
+    if name == FUSED_ROPE_APPEND_ENV {
+        mlxcel_core::layers::fused_rope_append_enabled()
+    } else {
+        std::env::var(name).is_ok()
+    }
+}
 
 /// Print, at most once per process, that a checkpoint has been routed around a
 /// fused RoPE launcher that an environment variable asked for.
 ///
-/// Two properties trigger the bypass and both are named in `reasons`:
+/// Two properties trigger a bypass and both are named in `reasons`:
 ///
-/// - `rope_traditional`, because the launchers hardcode the split-half rotation
-///   inside C++ and take no flag;
-/// - a `rope_scaling` block that changes the frequency table or the position
-///   scale, because the launchers take `rope_base` (and, for the rope-append
-///   kernel, a position scale) and have no way to receive a precomputed
-///   frequency table at all.
+/// - `rope_traditional` or a `rope_scaling` position scale, because
+///   `fused_causal_prefill_attention` and `fused_qkv_project_split_rope`
+///   hardcode the split-half rotation and a unit scale inside C++ and take no
+///   flag for either;
+/// - a `rope_scaling` frequency table, because all three launchers derive their
+///   frequencies from `rope_base` and none has a parameter that could receive a
+///   precomputed table.
+///
+/// The two are reported against different variable sets, which is what
+/// `bypasses_rope_append` selects: `forward_fused_rope_append` takes
+/// `traditional` and the position scale as real parameters, so naming it in the
+/// first case would report a kernel that was never lost.
 ///
 /// Correctness does not depend on this: [`Attention::forward`] bypasses the
 /// launchers regardless. What it buys is that the fallback is reported rather
@@ -215,17 +288,22 @@ pub(crate) const FUSED_ROPE_ENV_VARS: [&str; 2] =
 /// `eprintln!` rather than `tracing::warn!` on purpose: only the server installs
 /// a `tracing` subscriber, so a `warn!` here is a no-op in the `mlxcel` CLI,
 /// which is where this is most likely to be read.
-fn report_fused_rope_bypass_once(reasons: &[&str]) {
+fn report_fused_rope_bypass_once(reasons: &[&str], bypasses_rope_append: bool) {
     static NOTICE: std::sync::Once = std::sync::Once::new();
 
     if reasons.is_empty() {
         return;
     }
 
-    let requested: Vec<&str> = FUSED_ROPE_ENV_VARS
+    let candidates = if bypasses_rope_append {
+        &FUSED_ROPE_ENV_VARS[..]
+    } else {
+        &FUSED_ROPE_ENV_VARS[..FUSED_ROPE_ENV_VARS_WITHOUT_TABLE_SUPPORT]
+    };
+    let requested: Vec<&str> = candidates
         .iter()
         .copied()
-        .filter(|name| std::env::var(name).is_ok())
+        .filter(|name| fused_rope_launcher_requested(name))
         .collect();
     if requested.is_empty() {
         return;
@@ -234,11 +312,12 @@ fn report_fused_rope_bypass_once(reasons: &[&str]) {
     NOTICE.call_once(|| {
         eprintln!(
             "note: this checkpoint sets {}, so the fused RoPE fast path(s) requested by {} are \
-             bypassed. Those launchers apply the split-half rotation from a plain `rope_theta` \
-             inside C++ and can express neither the interleaved rotation nor a scaled frequency \
-             table, so using them would silently mis-rotate attention. The graph path is used \
-             instead; it applies the correct rotation and costs a handful of extra FFI calls per \
-             layer, not GPU work.",
+             bypassed. Those launchers build their rotary frequencies from a plain `rope_theta` \
+             inside C++ and have no parameter for a precomputed frequency table; the two \
+             quantized-projection launchers additionally hardcode the split-half rotation and a \
+             unit position scale. Using one anyway would silently mis-rotate attention. The graph \
+             path is used instead; it applies the correct rotation and costs a handful of extra \
+             FFI calls per layer, not GPU work.",
             reasons.join(" and "),
             requested.join(" and ")
         );
@@ -404,33 +483,41 @@ impl Attention {
     /// `rope_traditional` set), the Llama-3.2-Vision (`mllama`) text decoder's
     /// self-attention layers, every VLM whose text backbone is `Llama3Model` or
     /// `Qwen2Model` (Pixtral, LLaVA, SmolVLM / Idefics3, Idefics2, InternVL,
-    /// FastVLM, dots.ocr), the `llama` and `mistral` pipeline stage executors,
-    /// and the tensor-parallel Llama runtime.
+    /// FastVLM, LocateAnything, dots.ocr), the `llama` and `mistral` pipeline
+    /// stage executors, and the tensor-parallel Llama runtime.
     ///
     /// # Traditional RoPE and the fused fast paths
     ///
-    /// Three code paths below can rotate Q and K, and all three must agree on
-    /// the rotation convention or the model decodes a different graph depending
-    /// on an environment variable and on whether the checkpoint is quantized:
+    /// Four code paths below can rotate Q and K, and all four must agree on the
+    /// rotation convention and the frequency table, or the model decodes a
+    /// different graph depending on an environment variable and on whether the
+    /// checkpoint is quantized:
     ///
     /// 1. `fused_causal_prefill_attention` (quantized prefill, opt-in through
     ///    `MLXCEL_ENABLE_FUSED_CAUSAL_PREFILL_ATTENTION`),
     /// 2. [`FusedQKVLinear::forward_split_rope`] (quantized projection, opt-in
     ///    through `MLXCEL_ENABLE_FUSED_QKV_SPLIT_ROPE`),
-    /// 3. the graph fallback, which calls `fast_rope` directly.
+    /// 3. [`FusedQKVLinear::forward_fused_rope_append`] (dense decode, opt-in
+    ///    through `MLXCEL_FUSED_ROPE_APPEND`),
+    /// 4. the graph fallback, which goes through [`Self::apply_rope`] and so
+    ///    calls `fast_rope_with_freqs` when a table is present and `fast_rope`
+    ///    otherwise.
     ///
-    /// Only the third can express the convention. The first two apply RoPE
-    /// inside a C++ launcher that hardcodes `traditional = false`
-    /// (`mlx_cxx_bridge.cpp`, `fused_causal_prefill_attention` and
+    /// Only the fourth can express everything. The first two apply RoPE inside a
+    /// C++ launcher that hardcodes `traditional = false` and a unit position
+    /// scale (`mlx_cxx_bridge.cpp`, `fused_causal_prefill_attention` and
     /// `fused_qkv_project_split_rope`), and neither takes a flag, so there is no
     /// way to ask them for the interleaved rotation. Routing a traditional-RoPE
     /// model through either one applies the wrong rotation to correctly shaped
     /// tensors: nothing throws, the KV cache is the right shape, and the model
     /// emits fluent text out of a mis-rotated attention.
     ///
-    /// Both are therefore gated on `!self.rope_traditional`, so a
-    /// traditional-RoPE model always takes the graph fallback, which receives
-    /// the flag.
+    /// The first two are therefore gated on
+    /// [`Self::fused_rope_launchers_usable`], which is three conditions rather
+    /// than one: `!rope_traditional`, no `rope_scaling` frequency table, and a
+    /// position scale of exactly `1.0`. The third launcher takes `traditional`
+    /// and the scale as real parameters, so it is gated more narrowly, on the
+    /// frequency table alone, which is the one thing it has no parameter for.
     ///
     /// ## Why the bypass stays, now that the flag is config-driven (#931)
     ///
@@ -465,11 +552,13 @@ impl Attention {
     ///
     /// What the bypass was missing was observability, and that is fixed rather
     /// than argued away: [`Attention::from_weights`] prints a one-time notice on
-    /// stderr when a traditional-RoPE checkpoint is loaded while one of the two
-    /// environment variables asked for a fused path. The fallback is then a
-    /// reported decision instead of a silent one. Revisit this if either
-    /// launcher is ever promoted to default-on, or if either grows a genuine
-    /// kernel behind it; both are conditions the notice makes visible.
+    /// stderr when a checkpoint that carries any bypass property (a traditional
+    /// rotation, a `rope_scaling` position scale, or a `rope_scaling` frequency
+    /// table) is loaded while an environment variable asked for a launcher that
+    /// property routes around. The fallback is then a reported decision instead
+    /// of a silent one. Revisit this if any launcher is ever promoted to
+    /// default-on, or if any grows a genuine kernel behind it; both are
+    /// conditions the notice makes visible.
     pub fn forward(
         &self,
         x: &MlxArray,
@@ -889,8 +978,8 @@ impl Attention {
     /// `rope_traditional` set), the Llama-3.2-Vision (`mllama`) text decoder's
     /// self-attention layers, every VLM whose text backbone is `Llama3Model` or
     /// `Qwen2Model` (Pixtral, LLaVA, SmolVLM / Idefics3, Idefics2, InternVL,
-    /// FastVLM, dots.ocr), the `llama` and `mistral` pipeline stage executors,
-    /// and the tensor-parallel Llama runtime.
+    /// FastVLM, LocateAnything, dots.ocr), the `llama` and `mistral` pipeline
+    /// stage executors, and the tensor-parallel Llama runtime.
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -903,6 +992,11 @@ impl Attention {
     ///
     /// `rope` is [`RopeScalingKind::duplicate`]d into this block, so one model's
     /// worth of layers shares a single computation of the table.
+    ///
+    /// Returns an error when a supplied table does not match `args.head_dim()`.
+    /// The signature does not tie the two together, and MLX turns the mismatch
+    /// into an uncatchable C++ throw at the first generated token rather than
+    /// into a load failure, so it is checked below.
     pub fn from_weights_with_rope(
         weights: &WeightMap,
         args: &ModelArgs,
@@ -912,12 +1006,37 @@ impl Attention {
         let group_size = args.group_size();
         let bits = args.bits();
 
+        let head_dim = args.head_dim() as i32;
+        let num_heads = args.num_attention_heads as i32;
+        let num_kv_heads = args.num_kv_heads() as i32;
+
         let rope = rope.duplicate();
         let rope_scale = rope.scale();
         let rope_freqs = match rope {
             RopeScalingKind::Llama3 { freqs } => Some(freqs),
             _ => None,
         };
+
+        // MLX requires a supplied frequency table to be a 1D array of exactly
+        // `dims / 2` entries and throws from C++ otherwise
+        // (`mlx/fast.cpp`, `rope`). `fast_rope_with_freqs` is declared in the
+        // cxx bridge returning a bare `UniquePtr<MlxArray>` rather than a
+        // `Result`, so that throw would arrive as an uncatchable
+        // `std::terminate` at the first generated token, not as a load error.
+        // Nothing in this signature ties `rope` to `args` (the table is
+        // resolved separately so one model's worth of layers can share it), so
+        // the invariant is checked here rather than assumed. One FFI shape read
+        // per layer at load.
+        if let Some(freqs) = rope_freqs.as_ref() {
+            let shape = mlxcel_core::array_shape(freqs);
+            let expected = head_dim / 2;
+            if shape.len() != 1 || shape[0] != expected {
+                return Err(format!(
+                    "{prefix}: rope_scaling frequency table has shape {shape:?}, but this block \
+                     rotates {head_dim} dims and needs [{expected}]"
+                ));
+            }
+        }
 
         let mut bypass_reasons: Vec<&str> = Vec::new();
         if args.rope_traditional {
@@ -926,11 +1045,7 @@ impl Attention {
         if rope_freqs.is_some() || rope_scale != 1.0 {
             bypass_reasons.push("a rope_scaling block");
         }
-        report_fused_rope_bypass_once(&bypass_reasons);
-
-        let head_dim = args.head_dim() as i32;
-        let num_heads = args.num_attention_heads as i32;
-        let num_kv_heads = args.num_kv_heads() as i32;
+        report_fused_rope_bypass_once(&bypass_reasons, rope_freqs.is_some());
 
         // Fused QKV: concatenate q/k/v weights into one projection at load time
         let qkv_proj = FusedQKVLinear::from_weights_separate(
@@ -1270,8 +1385,9 @@ impl Llama3Model {
         let config_path = model_dir.join("config.json");
         let config_str = std::fs::read_to_string(&config_path)
             .map_err(|e| format!("Failed to read config.json: {}", e))?;
-        let args: ModelArgs = serde_json::from_str(&config_str)
+        let mut args: ModelArgs = serde_json::from_str(&config_str)
             .map_err(|e| format!("Failed to parse config.json: {}", e))?;
+        args.set_checkpoint_label(model_dir);
 
         // Load weights
         let weights = crate::models::load_text_weights(model_dir, None)?;

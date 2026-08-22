@@ -152,7 +152,7 @@ impl RopeScalingKind {
                 // `linear` block without one is malformed. Falling back to 1.0
                 // keeps that config loading with the graph it already had.
                 let factor = spec.factor.unwrap_or(1.0);
-                if factor > 0.0 && factor.is_finite() {
+                if is_usable_scalar(factor) {
                     Self::Linear {
                         scale: 1.0 / factor,
                     }
@@ -165,8 +165,12 @@ impl RopeScalingKind {
                     Self::Default
                 }
             }
-            "llama3" => Self::Llama3 {
-                freqs: llama3_rope_freqs(spec, dims, base),
+            "llama3" => match llama3_rope_freqs(spec, dims, base) {
+                Ok(freqs) => Self::Llama3 { freqs },
+                Err(reason) => {
+                    report_unusable_rope_scaling_once(model_label, "llama3", &reason);
+                    Self::Default
+                }
             },
             other => {
                 report_unusable_rope_scaling_once(
@@ -202,6 +206,12 @@ impl RopeScalingKind {
     /// duplicate is an MLX `copy` of an already-evaluated `[dims / 2]` float32
     /// array, which is a few hundred bytes; what it buys is that each block owns
     /// its handle and the blocks stay independently constructible.
+    ///
+    /// `mlxcel_core::copy` is `mlx::core::copy`, a lazy `Copy` graph node over
+    /// an evaluated source rather than a refcounted share of one buffer, so each
+    /// block's handle materialises on that block's first forward. That is a
+    /// one-off `[dims / 2]` element copy per layer, not a re-run of the band
+    /// arithmetic, and the source stays evaluated for all of them.
     pub fn duplicate(&self) -> Self {
         match self {
             Self::Default => Self::Default,
@@ -236,12 +246,24 @@ impl RopeScalingKind {
 ///
 /// The arithmetic stays in f32 because upstream's does (`mx.arange` is float32
 /// and the whole expression evaluates in float32), so the table matches the
-/// reference to the same rounding rather than to a more accurate one.
-pub fn llama3_rope_freqs(spec: &RopeScalingSpec, dims: usize, base: f32) -> UniquePtr<MlxArray> {
-    let factor = spec.factor.unwrap_or(1.0);
-    let low_freq_factor = spec.low_freq_factor.unwrap_or(1.0);
-    let high_freq_factor = spec.high_freq_factor.unwrap_or(4.0);
-    let old_context_len = spec.original_max_position_embeddings.unwrap_or(8192.0);
+/// reference to the same rounding rather than to a more accurate one. It is
+/// scalar rather than vectorized, so it can differ from a table built by
+/// mlx-lm's `mx.power` by a couple of ULP; assert closeness against a
+/// Python-generated table, never bit-equality.
+///
+/// `Err` carries the reason the block cannot build a table, for the caller to
+/// report. See [`Llama3Params::from_spec`] for what is screened and why.
+pub fn llama3_rope_freqs(
+    spec: &RopeScalingSpec,
+    dims: usize,
+    base: f32,
+) -> Result<UniquePtr<MlxArray>, String> {
+    let Llama3Params {
+        factor,
+        low_freq_factor,
+        high_freq_factor,
+        old_context_len,
+    } = Llama3Params::from_spec(spec)?;
 
     let low_freq_wavelen = old_context_len / low_freq_factor;
     let high_freq_wavelen = old_context_len / high_freq_factor;
@@ -269,10 +291,89 @@ pub fn llama3_rope_freqs(spec: &RopeScalingSpec, dims: usize, base: f32) -> Uniq
     }
 
     let freqs = mlxcel_core::from_slice_f32(&freq_vals, &[half_dims as i32]);
-    // Evaluated at load so the table is a materialised buffer every layer reads,
-    // not a graph re-run on the first forward of each block.
+    // Evaluated at load so the band arithmetic is a materialised buffer rather
+    // than a graph the first forward has to run. Each layer's
+    // [`RopeScalingKind::duplicate`] is a `copy` node over this evaluated
+    // source, so what a block defers is one element copy, not this loop.
     mlxcel_core::eval(&freqs);
-    freqs
+    Ok(freqs)
+}
+
+/// Whether a `rope_scaling` scalar can be used as a multiplier or a divisor.
+///
+/// One predicate for every scalar the two implemented schemes read, so the
+/// `linear` and `llama3` arms cannot screen to different standards.
+fn is_usable_scalar(value: f32) -> bool {
+    value > 0.0 && value.is_finite()
+}
+
+/// The four `llama3` scalars, screened for values the band arithmetic can use.
+struct Llama3Params {
+    factor: f32,
+    low_freq_factor: f32,
+    high_freq_factor: f32,
+    old_context_len: f32,
+}
+
+impl Llama3Params {
+    /// Read the four scalars, or name the one that is unusable.
+    ///
+    /// # Why this screens at all
+    ///
+    /// Upstream reads these straight out of the block and hands the result to
+    /// `mx.where`, so nothing there rejects a value. Feeding an unusable one
+    /// through the same arithmetic here produces a table that loads, allocates
+    /// and evaluates without a single error, and then decodes wrongly:
+    ///
+    /// - `factor` zero sends `freq * factor` to `0.0` for every pair in the low
+    ///   band (35 of 64 entries at Llama 3.1 geometry). `fast::rope` divides the
+    ///   position by the table entry, `reciprocal(0.0)` is `inf`, and every
+    ///   logit is `NaN` for every token. Nothing panics on the way: the sampler
+    ///   compares with `partial_cmp(..).unwrap_or(Equal)`.
+    /// - `factor` absent, or a JSON string rather than a number, would default
+    ///   to `1.0` and build a table bit-identical to the plain one. That is the
+    ///   silent no-op #1355 exists to remove, so it is reported instead.
+    ///   Upstream indexes `scaling_config["factor"]` with no default, which is
+    ///   the same judgement expressed as a `KeyError`.
+    /// - `factor` beyond f32 range (a JSON `1e39`) saturates to `inf` through
+    ///   the `as` cast and gives 29 `inf` entries, which is an identity rotation
+    ///   on that band.
+    /// - `factor` negative reverses the rotation direction on the low band.
+    ///
+    /// A screened-out block falls back to the plain table, which is the graph
+    /// the checkpoint had before the block was read at all, and says so once on
+    /// stderr.
+    ///
+    /// `low_freq_factor == high_freq_factor` is *not* screened out:
+    /// `Llama-4-Scout-17B-16E` ships exactly that (both `1.0`), and it is
+    /// well defined, because the medium band `wavelen > L / hf && wavelen < L /
+    /// lf` is then empty and the interpolation whose denominator would be zero
+    /// is never evaluated. Upstream reaches the same table through `mx.where`
+    /// discarding the unselected branch.
+    fn from_spec(spec: &RopeScalingSpec) -> Result<Self, String> {
+        let Some(factor) = spec.factor else {
+            return Err("it names no numeric factor".to_string());
+        };
+        let params = Self {
+            factor,
+            low_freq_factor: spec.low_freq_factor.unwrap_or(1.0),
+            high_freq_factor: spec.high_freq_factor.unwrap_or(4.0),
+            old_context_len: spec.original_max_position_embeddings.unwrap_or(8192.0),
+        };
+
+        for (name, value) in [
+            ("factor", params.factor),
+            ("low_freq_factor", params.low_freq_factor),
+            ("high_freq_factor", params.high_freq_factor),
+            ("original_max_position_embeddings", params.old_context_len),
+        ] {
+            if !is_usable_scalar(value) {
+                return Err(format!("{name} {value} is not a positive finite number"));
+            }
+        }
+
+        Ok(params)
+    }
 }
 
 /// Report, at most once per `(model, scheme)` pair, that a `rope_scaling` block
@@ -287,11 +388,21 @@ pub fn llama3_rope_freqs(spec: &RopeScalingSpec, dims: usize, base: f32) -> Uniq
 /// load more than one model (the server's model switching, the pipeline stage
 /// executors, the tensor-parallel ranks), and because a per-layer loader would
 /// otherwise print the same line once per decoder layer.
+///
+/// `model_label` is the checkpoint the loader read when it knows the directory
+/// (see `llama3::ModelArgs::set_checkpoint_label`) and the architecture from
+/// `model_type` otherwise. Keying on the checkpoint is what makes the dedup
+/// argument above hold: two different `qwen2` checkpoints that both declare an
+/// unimplemented scheme each get a warning, where keying on the architecture
+/// would report the first and let the second degrade in silence.
 fn report_unusable_rope_scaling_once(model_label: &str, rope_type: &str, reason: &str) {
     use std::collections::BTreeSet;
     use std::sync::{Mutex, OnceLock};
 
     static REPORTED: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+
+    let model_label = printable_label(model_label);
+    let rope_type = printable_label(rope_type);
 
     let key = format!("{model_label}\u{0}{rope_type}");
     let reported = REPORTED.get_or_init(|| Mutex::new(BTreeSet::new()));
@@ -308,6 +419,30 @@ fn report_unusable_rope_scaling_once(model_label: &str, rope_type: &str, reason:
          before this block was read at all. Short prompts are unaffected; long-context \
          quality past the checkpoint's original_max_position_embeddings may be."
     );
+}
+
+/// Make checkpoint-controlled text safe to put on a line of stderr.
+///
+/// Both halves of the warning come out of the checkpoint: `model_type` (or a
+/// directory name) and the `rope_type` string. Neither is bounded or validated
+/// anywhere upstream of here, so a config can embed a newline and forge a whole
+/// log line after it, or run to megabytes and bury the message. Control
+/// characters become `U+FFFD` and the label is truncated, which also bounds the
+/// dedup set's keys.
+fn printable_label(label: &str) -> String {
+    const MAX_CHARS: usize = 64;
+
+    let cleaned: String = label
+        .chars()
+        .take(MAX_CHARS)
+        .map(|c| if c.is_control() { '\u{fffd}' } else { c })
+        .collect();
+
+    if label.chars().nth(MAX_CHARS).is_some() {
+        format!("{cleaned}...")
+    } else {
+        cleaned
+    }
 }
 
 #[cfg(test)]

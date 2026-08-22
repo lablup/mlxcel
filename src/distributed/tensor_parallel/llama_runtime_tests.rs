@@ -57,6 +57,7 @@ fn make_test_model_args() -> LlamaModelArgs {
         // other direction is covered by
         // `tensor_parallel_llama_propagates_rope_traditional_to_every_rank`.
         rope_traditional: false,
+        checkpoint_label: None,
     }
 }
 
@@ -920,6 +921,7 @@ fn local_llama_args_preserves_computed_head_dim_when_config_omits_it() {
         quantization: None,
         tie_word_embeddings: true,
         rope_traditional: false,
+        checkpoint_label: None,
     };
     let plan = generate_shard_plan("llama", 1, &ShardConfig::with_tp_size(2)).unwrap();
 

@@ -678,6 +678,15 @@ fn read_scalar(weights: &WeightMap, name: &str) -> Option<f32> {
 /// to carry; wiring it here is a separate change and no published Apertus
 /// checkpoint declares it. What is new is that an unimplemented scheme now
 /// prints a warning instead of being dropped in silence.
+///
+/// One precedence change rides along and is deliberate. The inline reader here
+/// looked up `rope_type` first and fell back to `type`; the shared
+/// `RopeScalingSpec::from_lookup` reads `type` first, matching upstream's
+/// `scaling_config.get("type") or scaling_config.get("rope_type", "default")`.
+/// That is invisible on every Apertus checkpoint published so far, because each
+/// writes the same value under both keys, and it is the order to keep: a config
+/// where the two disagree should resolve the way mlx-lm resolves it, not the
+/// way this file happened to.
 fn compute_rope_freqs(args: &ModelArgs) -> Option<UniquePtr<MlxArray>> {
     let scaling = args.rope_scaling.as_ref()?;
     let spec = crate::models::rope_utils::RopeScalingSpec::from_lookup(|key| scaling.get(key));

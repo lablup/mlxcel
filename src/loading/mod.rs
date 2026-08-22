@@ -320,6 +320,7 @@ fn load_mistral3_llama_directory_variant(path_str: &str) -> Result<LoadedModel> 
 
 fn load_llama_family_from_weights(
     model_type: ModelType,
+    model_path: &Path,
     config_str: &str,
     config: &serde_json::Value,
     weights: &mut WeightMap,
@@ -349,7 +350,8 @@ fn load_llama_family_from_weights(
         return Ok(LoadedModel::Mistral4(model));
     }
 
-    let args: models::llama3::ModelArgs = parse_model_config(config_str)?;
+    let mut args: models::llama3::ModelArgs = parse_model_config(config_str)?;
+    args.set_checkpoint_label(model_path);
     let model = models::Llama3Model::from_weights(weights, &args)
         .map_err(|err| anyhow::anyhow!("{}", err))?;
     Ok(LoadedModel::Llama(model))
@@ -730,9 +732,13 @@ fn load_model_from_weights(model_path: &Path, weights: &mut WeightMap) -> Result
         .ok_or_else(|| anyhow::anyhow!("Missing adapter weight route for {:?}", model_type))?;
 
     let model = match weight_route {
-        WeightLoadRoute::LlamaFamily => {
-            load_llama_family_from_weights(model_type, &config_str, &config_value, weights)?
-        }
+        WeightLoadRoute::LlamaFamily => load_llama_family_from_weights(
+            model_type,
+            model_path,
+            &config_str,
+            &config_value,
+            weights,
+        )?,
         WeightLoadRoute::Special => {
             try_load_special_model_from_weights(model_type, &config_str, weights)?.ok_or_else(
                 || anyhow::anyhow!("Missing weight loader for model type: {:?}", model_type),

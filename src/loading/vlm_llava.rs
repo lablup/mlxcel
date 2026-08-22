@@ -166,12 +166,17 @@ fn inherit_text_quantization_if_missing(
 
 fn build_llava_text_model(
     weights: &WeightMap,
+    model_path: &Path,
     text_config_value: &Value,
     backend: LlavaTextBackend,
     family_label: &str,
 ) -> Result<LoadedModel> {
-    let text_args: models::llama3::ModelArgs = serde_json::from_value(text_config_value.clone())
-        .map_err(|e| anyhow::anyhow!("Failed to parse {} text_config: {}", family_label, e))?;
+    let mut text_args: models::llama3::ModelArgs =
+        serde_json::from_value(text_config_value.clone())
+            .map_err(|e| anyhow::anyhow!("Failed to parse {} text_config: {}", family_label, e))?;
+    // `family_label` names the container and `model_type` names the text
+    // backbone; neither identifies the checkpoint a diagnostic should point at.
+    text_args.set_checkpoint_label(model_path);
 
     match backend {
         LlavaTextBackend::Llama => {
@@ -673,7 +678,8 @@ pub(crate) fn load_llava_vlm(model_path: &Path) -> Result<LoadedModel> {
     inherit_text_quantization_if_missing(&mut text_config_value, &full_config)?;
 
     models::sanitize_tied_embeddings(&mut weights, &full_config);
-    let text_model = build_llava_text_model(&weights, &text_config_value, backend, "LLaVA")?;
+    let text_model =
+        build_llava_text_model(&weights, model_path, &text_config_value, backend, "LLaVA")?;
 
     let quant_group_size = full_config
         .get("quantization")
@@ -774,6 +780,7 @@ pub(crate) fn load_llava_bunny_vlm(model_path: &Path) -> Result<LoadedModel> {
 
     let text_model = build_llava_text_model(
         &weights,
+        model_path,
         &text_config_value,
         detect_bunny_text_backend(&full_config),
         "LLaVA-Bunny",

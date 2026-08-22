@@ -38,9 +38,10 @@
 //! scheme still loads.
 
 use super::{
-    Attention, FUSED_CAUSAL_PREFILL_ENV, FUSED_QKV_SPLIT_ROPE_ENV, FUSED_ROPE_ENV_VARS,
-    Llama3Model, ModelArgs,
+    Attention, FUSED_CAUSAL_PREFILL_ENV, FUSED_QKV_SPLIT_ROPE_ENV, FUSED_ROPE_APPEND_ENV,
+    FUSED_ROPE_ENV_VARS, Llama3Model, ModelArgs,
 };
+use crate::models::rope_utils::{RopeScalingKind, RopeScalingSpec};
 use crate::test_support::env_lock::env_lock;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::KVCache;
@@ -361,21 +362,28 @@ fn the_batched_route_honors_the_parsed_flag_too() {
 
 #[test]
 fn the_fused_rope_env_vars_are_the_ones_the_code_actually_reads() {
-    // The bypass, the one-time notice and `docs/environment-variables.md` all
-    // name these two variables. `FUSED_CAUSAL_PREFILL_ENV` is read by the gate
-    // in `Attention::forward`; `FUSED_QKV_SPLIT_ROPE_ENV` is read inside
-    // `FusedQKVLinear::forward_split_rope`, in mlxcel-core, where this test
-    // cannot see it. Pinning the spellings here means a rename on either side
-    // fails a test instead of silently disabling the bypass or the notice.
+    // The bypasses, the one-time notice and `docs/environment-variables.md` all
+    // name these three variables. `FUSED_CAUSAL_PREFILL_ENV` is read by the gate
+    // in `Attention::forward`; the other two are read inside mlxcel-core
+    // (`FusedQKVLinear::forward_split_rope` and
+    // `layers::fused_rope_append_enabled`), where this test cannot see them.
+    // Pinning the spellings here means a rename on either side fails a test
+    // instead of silently disabling a bypass or the notice.
+    //
+    // The order is load-bearing: `report_fused_rope_bypass_once` narrows to the
+    // leading two when the bypass reason is a rotation convention or a position
+    // scale, because only the third launcher takes those as parameters.
     assert_eq!(
         FUSED_ROPE_ENV_VARS,
         [
             "MLXCEL_ENABLE_FUSED_CAUSAL_PREFILL_ATTENTION",
             "MLXCEL_ENABLE_FUSED_QKV_SPLIT_ROPE",
+            "MLXCEL_FUSED_ROPE_APPEND",
         ]
     );
     assert_eq!(FUSED_CAUSAL_PREFILL_ENV, FUSED_ROPE_ENV_VARS[0]);
     assert_eq!(FUSED_QKV_SPLIT_ROPE_ENV, FUSED_ROPE_ENV_VARS[1]);
+    assert_eq!(FUSED_ROPE_APPEND_ENV, FUSED_ROPE_ENV_VARS[2]);
 }
 
 /// A genuinely quantized attention block, which is the only shape that can
@@ -532,6 +540,67 @@ fn a_linear_scaling_block_divides_positions_instead_of_building_a_table() {
     let attention = Attention::from_weights(&weights, &args, "model.layers.0.self_attn").unwrap();
     assert_eq!(attention.rope_scale, 0.25);
     assert!(attention.rope_freqs.is_none());
+}
+
+#[test]
+fn a_frequency_table_that_does_not_match_head_dim_is_a_load_error() {
+    // `from_weights_with_rope` is public and takes the args and the table
+    // separately, so nothing in the signature says the two describe one model.
+    // MLX requires the table to be `dims / 2` long and throws from C++
+    // otherwise, and `fast_rope_with_freqs` is bridged as a bare `UniquePtr`
+    // rather than a `Result`, so that throw would arrive as an uncatchable
+    // `std::terminate` at the first generated token. It has to be a load error.
+    let args = parse_llama_config(LLAMA3_SCALING);
+    let weights = tiny_weights(&args);
+    assert_eq!(args.head_dim(), 16, "this fixture needs an 8-entry table");
+
+    let spec: RopeScalingSpec = serde_json::from_str(
+        r#"{"factor": 8.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0,
+            "original_max_position_embeddings": 8192, "rope_type": "llama3"}"#,
+    )
+    .unwrap();
+    let wrong_width = RopeScalingKind::resolve(Some(&spec), 32, args.rope_theta, "llama");
+
+    let Err(err) = Attention::from_weights_with_rope(
+        &weights,
+        &args,
+        "model.layers.0.self_attn",
+        &wrong_width,
+    ) else {
+        panic!("a mismatched table must not build a block");
+    };
+    assert!(
+        err.contains("frequency table"),
+        "the error must name the table: {err}"
+    );
+
+    // The matching width still loads, so the check is a guard and not a wall.
+    let right_width = RopeScalingKind::resolve(Some(&spec), args.head_dim(), args.rope_theta, "l");
+    Attention::from_weights_with_rope(&weights, &args, "model.layers.0.self_attn", &right_width)
+        .expect("the table this checkpoint asks for must load");
+}
+
+#[test]
+fn diagnostics_name_the_checkpoint_when_the_loader_knows_it() {
+    // `model_type` names the architecture, which is the wrong label twice over:
+    // a VLM parses its `text_config` into these args, so an InternVL3 load used
+    // to warn about `qwen2`, and two checkpoints of one architecture collapse
+    // into a single key for a warning deduplicated per model.
+    let mut args = parse_llama_config(DYNAMIC_SCALING);
+    assert_eq!(
+        args.model_label(),
+        "llama",
+        "the architecture is the default"
+    );
+
+    args.set_checkpoint_label(std::path::Path::new("models/internvl3-1b"));
+    assert_eq!(args.model_label(), "internvl3-1b");
+
+    // A path with no final component leaves the architecture in place rather
+    // than producing an empty label.
+    let mut rootish = parse_llama_config("");
+    rootish.set_checkpoint_label(std::path::Path::new("/"));
+    assert_eq!(rootish.model_label(), "llama");
 }
 
 #[test]
