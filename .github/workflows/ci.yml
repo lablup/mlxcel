@@ -152,6 +152,24 @@ jobs:
       # this job (#1283) reproduces on every feature set, so the cheapest one
       # that compiles the crate is enough, and it is the same command
       # pipeline-parallel-ci.yml already runs on its own path filter.
+      #
+      # On the runner choice, measured rather than assumed, so the question does
+      # not get re-litigated from scratch. This job is here and not on
+      # `ubuntu-latest` because `src/lib/mlxcel-core/build.rs` builds MLX through
+      # cmake unconditionally: the accelerator features pick a backend, they do
+      # not decide whether the C++ builds. A GitHub-hosted runner would pay that
+      # cold on every run, since the one `ubuntu-latest` job this repository
+      # already has (`pipeline-parallel-ci.yml`) caches the cargo registry and
+      # not `target/`, and it takes about 28 minutes. Here the same command is
+      # 2m44s cold and 27 to 40 seconds warm off the persistent target directory.
+      #
+      # The cost of staying on GB10 is that this runner also serves
+      # `xla-compile` and the release build, so a release in flight queues this
+      # job behind it and delays a merge. That happened once on 2026-08-22
+      # (#1301). It is a delay and not a failure: a queued job consumes nothing,
+      # and the release was not slowed by it. Trading a rare queue wait for
+      # roughly 20 minutes on every PR would re-create the cost objection that
+      # removed clippy from PR-time CI in the first place (#21, #23).
       - name: Clippy
         run: |
           cargo clippy \
