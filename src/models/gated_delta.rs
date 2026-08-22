@@ -742,8 +742,7 @@ pub fn gated_delta_update_chain_parity(
     gated_delta_ops_with_parity(q, k, v, &g, &beta, state, mask, chain_parity_enabled())
 }
 
-/// Diagnostic escape hatch for the chain-parity kernel, mirroring the
-/// `MLXCEL_ENABLE_MTP_DEFERRED` parity-experiment precedent:
+/// Diagnostic escape hatch for the chain-parity kernel:
 /// `MLXCEL_GDN_CHAIN_PARITY=0` restores the pre-#1165 block numerics
 /// (float32 in-block state carry) on the speculative verify / rollback
 /// paths for A/B attribution of the parity kernel's cost and acceptance

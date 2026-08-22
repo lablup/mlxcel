@@ -919,8 +919,8 @@ impl DFlashGenerator {
 /// path (not DFlash). If a model with a non-empty suppressed-id set ever
 /// adopts the DFlash verify path, this call must be preceded by
 /// `mlxcel_core::sampling::apply_token_bias(logits, token_bias)` — exactly as
-/// `Gemma4MtpTargetAdapter::argmax_from_hidden_positions` does — so that
-/// suppressed placeholder token ids cannot win a verify position and
+/// the Gemma 4 MTP verify forward does before its per-position argmax — so
+/// that suppressed placeholder token ids cannot win a verify position and
 /// reintroduce the #350 leak.
 fn argmax_logits_to_array(logits: &MlxArray, seq_len: i32) -> UniquePtr<MlxArray> {
     let shape = ffi::array_shape(logits);
