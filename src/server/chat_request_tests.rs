@@ -871,6 +871,11 @@ async fn prepare_chat_request_tojson_templates_render_normalized_arguments() {
     // Templates that serialize assistant tool-call arguments with `tojson`
     // remain valid after normalization: they now emit the JSON object the
     // assistant originally produced, rather than an escaped JSON string.
+    //
+    // The spacing is CPython `json.dumps`', not serde_json's compact form,
+    // because `tojson` is mlxcel's own filter rather than minijinja's builtin
+    // (see `chat_template_json`). That is what `transformers` renders, so it is
+    // what the checkpoint's own tokenization was measured against.
     let request = req_with_tool_call_arguments(r#"{"path":"/foo","recursive":true}"#);
     let processor = ChatTemplateProcessor::with_template(
         r#"{% for message in messages %}{% for tool_call in message.tool_calls %}{{ tool_call.function.arguments | tojson }}{% endfor %}{% endfor %}"#
@@ -880,7 +885,7 @@ async fn prepare_chat_request_tojson_templates_render_normalized_arguments() {
     let prepared = prepare_chat_request(&processor, &request, None)
         .await
         .unwrap();
-    assert_eq!(prepared.prompt, r#"{"path":"/foo","recursive":true}"#);
+    assert_eq!(prepared.prompt, r#"{"path": "/foo", "recursive": true}"#);
 }
 
 #[test]
