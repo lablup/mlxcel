@@ -646,7 +646,7 @@ impl RequestRouter {
         let mut failed = 0usize;
 
         // Collect request IDs affected by this node failure.
-        let affected: Vec<String> = requests
+        let mut affected: Vec<String> = requests
             .iter()
             .filter(|(_, r)| {
                 !r.phase.is_terminal()
@@ -661,6 +661,11 @@ impl RequestRouter {
             })
             .map(|(k, _)| k.clone())
             .collect();
+        // `requests` is a HashMap, so this comes out in an instance-specific
+        // order. The loop below hands candidates out round-robin in exactly
+        // this sequence, so sorting is what makes the request-to-node pairing
+        // reproducible; sorting the candidate list alone is not enough.
+        affected.sort();
 
         // Get available alternative nodes for re-routing.
         let prefill_candidates: Vec<String> = self
