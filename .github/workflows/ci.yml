@@ -68,6 +68,8 @@ jobs:
               - '**/Cargo.toml'
               - 'Cargo.lock'
               - 'deny.toml'
+              - 'build.rs'
+              - 'scripts/iree/**'
               - '.github/workflows/ci.yml'
             mlx_pin:
               - 'src/lib/mlx-cpp/CMakeLists.txt'
@@ -224,3 +226,81 @@ jobs:
           BASE_REF: origin/${{ github.base_ref }}
         run: python3 scripts/ci/check_cross_repo_refs.py
 
+  # ============================================================================
+  # OpenXLA feature compile (self-hosted GB10)
+  # ============================================================================
+  # Nothing else in CI compiles any XLA feature. `deny`, `fmt` and the other
+  # jobs here never build the crate, `pipeline-parallel-ci.yml` runs clippy on
+  # default features, and `nightly-verify.yml` uses `metal,accelerate`. Two
+  # defects reached `main` through that gap: a non-exhaustive `match` in the
+  # OpenXLA serve worker after a new `ModelRequest` variant landed, and a dead
+  # re-export that `-D warnings` would have rejected. Both were found by hand
+  # while rebasing an unrelated branch.
+  #
+  # Why this runs on the self-hosted GB10 runner rather than a hosted one:
+  # `xla-iree` links a C shim against a prebuilt IREE runtime, which
+  # `scripts/iree/setup-cuda.sh` provisions by building the runtime from source
+  # against a pinned revision. That is far too slow to do per PR from scratch,
+  # but the GB10 runner already holds the build under
+  # `~/.cache/mlxcel/iree-cuda-<version>` and the script is idempotent, so a
+  # warm runner reuses it and only a fresh one pays the one-time cost.
+  # `xla-diagnostics` additionally implies `cuda`, which points at the same
+  # runner.
+  #
+  # Deliberately NOT covered, so the gap is recorded rather than assumed shut:
+  #   - `cargo test`. This is a compile gate; running the XLA suites needs a
+  #     GPU that is not contended with development work on the same host.
+  #   - Full `-D warnings`. The XLA feature combination carries a pre-existing
+  #     dead-code backlog in `mlxcel-xla` and `mlxcel`, and clippy fails on it
+  #     today, so denying every lint would make this job red on arrival and
+  #     therefore ignored. It denies `unused_imports` instead, which is the
+  #     exact lint class of the dead re-export above, and compile errors cover
+  #     the other. Broadening to `-D warnings` needs that backlog cleared
+  #     first.
+  #   - macOS and `IREE_DIST` builds of the same features. Neither has a runner
+  #     with the required distribution.
+  xla-compile:
+    name: OpenXLA feature compile
+    needs: changes
+    if: github.repository == 'lablup/mlxcel' && needs.changes.outputs.rust == 'true'
+    runs-on: GB10
+    permissions:
+      contents: read
+    timeout-minutes: 120
+    env:
+      # The value shipped for this runner's architecture. Auto-detection yields
+      # `121a`, which is numerically identical here but is not what releases
+      # build, so the gate compiles what ships.
+      MLX_CUDA_ARCHITECTURES: "121"
+      # See the note above: this denies the lint that let a defect through, not
+      # every lint.
+      RUSTFLAGS: "-D unused_imports"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Use a persistent target directory
+        run: |
+          # Separate from the release job's directory so a CI check cannot
+          # invalidate a release build's cache, or be slowed by it.
+          CARGO_TARGET="$HOME/.cargo-target/mlxcel-xla-ci"
+          mkdir -p "$CARGO_TARGET"
+          echo "CARGO_TARGET_DIR=$CARGO_TARGET" >> $GITHUB_ENV
+
+      - name: Provision the IREE runtime
+        run: |
+          # Idempotent: reuses `~/.cache/mlxcel/iree-cuda-<version>` when the
+          # runtime is already built, and builds it once when it is not.
+          bash scripts/iree/setup-cuda.sh
+          # The script emits shell `export VAR=value` lines; GITHUB_ENV wants
+          # bare `VAR=value`, and without stripping the prefix the variables
+          # would be named "export IREE_CUDA_HOME" and build.rs would abort
+          # claiming no IREE distribution is configured.
+          bash scripts/iree/setup-cuda.sh --env | sed 's/^export //' >> "$GITHUB_ENV"
+
+      - name: Compile the production XLA feature set
+        run: cargo check --features cuda,xla-iree --all-targets
+
+      - name: Compile the diagnostics XLA feature set
+        run: cargo check --no-default-features --features xla-diagnostics --all-targets
