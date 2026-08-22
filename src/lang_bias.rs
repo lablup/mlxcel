@@ -52,7 +52,12 @@ pub enum CliError {
         entry: String,
         reason: String,
     },
-    #[error("duplicate language code '{code}' in --lang-bias (ambiguous priority)")]
+    /// Raised by both language-bias entry points: the `--lang-bias` string
+    /// parser and the YAML `bias:` block, which reject a repeated language code
+    /// identically because the repeat makes the priority order ambiguous.
+    #[error(
+        "duplicate language code '{code}' in language bias entries (ambiguous priority); check --lang-bias and the YAML bias: block"
+    )]
     DuplicateLanguageCode { code: String },
     #[error("failed to read lang-bias config file '{path}': {source}")]
     ConfigReadError {
@@ -171,15 +176,103 @@ pub fn parse_lang_bias_entries(s: &str) -> Result<LangBiasSet, CliError> {
 /// ```
 ///
 /// Unknown top-level keys produce a parse error via `#[serde(deny_unknown_fields)]`.
+///
+/// The order of the `bias:` entries is significant and is preserved exactly as
+/// written: index 0 is the highest priority. `to_token_bias` resolves a token
+/// claimed by several languages with first-language-wins, so in the example
+/// above the Han tokens shared by `ja`, `zh` and `ko` all receive `ja`'s
+/// `-inf`. Writing the same three languages in a different order is a
+/// different configuration, not a cosmetic difference.
+///
+/// A language code repeated inside one `bias:` block is rejected with
+/// [`CliError::DuplicateLanguageCode`], the same error the equivalent
+/// `--lang-bias` string produces.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LangBiasYamlConfig {
     #[serde(default)]
     pub policy: Option<PolicyStr>,
     #[serde(default)]
-    pub bias: Option<HashMap<String, BiasValueStr>>,
+    pub bias: Option<BiasEntries>,
     #[serde(default)]
     pub exceptions: Option<ExceptionYaml>,
+}
+
+/// The `bias:` block of a YAML config, in document order.
+///
+/// Deserializing that block into a `HashMap` (what this field used to be) threw
+/// away the two properties the resolve loop depends on. `HashMap` iteration
+/// order is randomized by `RandomState` per map instance, so the priority order
+/// handed to `to_token_bias` was a fresh random permutation on every load, and
+/// the resulting bias assigned to a shared Han token changed from run to run for
+/// one unchanged config file. `HashMap` also collapses repeated keys during
+/// deserialization (serde_yaml resolves them last-wins with no diagnostic),
+/// which made the resolve loop's duplicate check unreachable and let the YAML
+/// path silently accept input the `--lang-bias` parser rejects. See issue #1267.
+///
+/// Collecting the entries through `MapAccess` into a `Vec` keeps both: the
+/// author's order survives, and a repeated key arrives as a second entry that
+/// the resolve loop can reject. The accepted YAML syntax is unchanged, `bias:`
+/// is still a plain mapping.
+#[derive(Debug, Default)]
+pub struct BiasEntries(Vec<(String, BiasValueStr)>);
+
+impl BiasEntries {
+    /// The `(language code, bias)` pairs in the order they appear in the document.
+    pub fn as_slice(&self) -> &[(String, BiasValueStr)] {
+        &self.0
+    }
+
+    /// Number of entries, counting a repeated language code once per occurrence.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Returns `true` when the `bias:` block is present but empty.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl IntoIterator for BiasEntries {
+    type Item = (String, BiasValueStr);
+    type IntoIter = std::vec::IntoIter<(String, BiasValueStr)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'de> Deserialize<'de> for BiasEntries {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct BiasEntriesVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for BiasEntriesVisitor {
+            type Value = BiasEntries;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a mapping of language code to bias value")
+            }
+
+            fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+            where
+                M: serde::de::MapAccess<'de>,
+            {
+                let mut entries = Vec::with_capacity(access.size_hint().unwrap_or(0));
+                // Deliberately a Vec push per entry rather than a map insert:
+                // repeated keys must reach the caller so it can reject them.
+                while let Some(entry) = access.next_entry::<String, BiasValueStr>()? {
+                    entries.push(entry);
+                }
+                Ok(BiasEntries(entries))
+            }
+        }
+
+        deserializer.deserialize_map(BiasEntriesVisitor)
+    }
 }
 
 /// Wraps a YAML `policy:` string value with custom deserialization.
@@ -402,6 +495,10 @@ impl LangBiasCliArgs {
             }
 
             if let Some(yaml_bias) = yaml.bias {
+                // `BiasEntries` yields the `bias:` block in document order and
+                // keeps repeated keys, so `ordered` ends up in the priority
+                // order the author wrote and the duplicate check below actually
+                // fires. This mirrors `parse_lang_bias_entries` entry for entry.
                 let mut ordered = Vec::new();
                 let mut seen: HashMap<String, ()> = HashMap::new();
                 for (code_str, BiasValueStr(bias)) in yaml_bias {
@@ -598,10 +695,12 @@ exceptions:
         let config: LangBiasYamlConfig = serde_yaml::from_str(yaml_str).unwrap();
         assert!(matches!(config.policy, Some(PolicyStr::Conservative)));
         let bias = config.bias.unwrap();
-        assert!(bias.contains_key("ja"));
-        assert_eq!(bias["ja"].0, f32::NEG_INFINITY);
-        assert_eq!(bias["zh"].0, -10.0_f32);
-        assert_eq!(bias["ko"].0, 5.0_f32);
+        // Assert the order, not just membership. Asserting membership alone is
+        // what let the randomized `HashMap` ordering of issue #1267 stay hidden.
+        let codes: Vec<&str> = bias.as_slice().iter().map(|(c, _)| c.as_str()).collect();
+        assert_eq!(codes, ["ja", "zh", "ko"]);
+        let values: Vec<f32> = bias.as_slice().iter().map(|(_, v)| v.0).collect();
+        assert_eq!(values, [f32::NEG_INFINITY, -10.0_f32, 5.0_f32]);
         let ex = config.exceptions.unwrap();
         assert!(!ex.include_special);
         assert!(!ex.include_numeric);
@@ -629,6 +728,227 @@ unknown_field: value
         assert!(
             result.is_err(),
             "unknown top-level key should produce a parse error"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // YAML `bias:` ordering (issue #1267)
+    //
+    // The `bias:` block used to deserialize into a `HashMap`, whose iteration
+    // order `RandomState` randomizes per map instance. Because
+    // `TokenLanguageIndex::to_token_bias` resolves a token claimed by several
+    // languages with first-language-wins, the bias landing on a shared Han
+    // token changed from run to run for one unchanged config file. These tests
+    // resolve repeatedly inside one process, which is what makes them
+    // load-bearing: a single resolve can pass by luck, and the randomization is
+    // per map instance rather than per process, so a fresh resolve inside the
+    // same process draws a fresh order.
+    // -------------------------------------------------------------------------
+
+    /// Number of repeated resolves the ordering tests perform.
+    ///
+    /// With three languages there are six possible orders, so a single resolve
+    /// against the broken code had a good chance of coming out right and
+    /// proving nothing. Repeating the resolve makes an accidental pass
+    /// vanishingly unlikely. Measured against the pre-fix code, all three
+    /// ordering tests here failed at iteration 0 or 2.
+    const ORDER_RESOLVE_ITERATIONS: usize = 32;
+
+    /// Write `contents` to a temp file and return the handle plus its path.
+    ///
+    /// The handle must stay alive for as long as the path is used: dropping a
+    /// `NamedTempFile` deletes the file.
+    fn write_temp_yaml(contents: &str) -> (tempfile::NamedTempFile, PathBuf) {
+        use std::io::Write;
+
+        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
+        tmpfile.write_all(contents.as_bytes()).unwrap();
+        tmpfile.flush().unwrap();
+        let path = tmpfile.path().to_path_buf();
+        (tmpfile, path)
+    }
+
+    /// The three-CJK config from the `LangBiasYamlConfig` schema doc comment.
+    ///
+    /// Han is shared by all three languages (`scripts_for`: Japanese includes
+    /// `Han` under both policies, Chinese is `{Han}`, Korean Conservative
+    /// includes `Han`), so this is exactly the case where the priority order
+    /// decides the outcome.
+    const THREE_CJK_YAML: &str =
+        "policy: conservative\nbias:\n  ja: -inf\n  zh: -10.0\n  ko: +5.0\n";
+
+    #[test]
+    fn yaml_multi_cjk_bias_keeps_document_order_across_repeated_resolves() {
+        let (_tmpfile, path) = write_temp_yaml(THREE_CJK_YAML);
+
+        let expected = [
+            (LanguageCode::Ja, f32::NEG_INFINITY),
+            (LanguageCode::Zh, -10.0_f32),
+            (LanguageCode::Ko, 5.0_f32),
+        ];
+
+        for iteration in 0..ORDER_RESOLVE_ITERATIONS {
+            let args = LangBiasCliArgs {
+                lang_bias_config: Some(path.clone()),
+                ..Default::default()
+            };
+            // A full `resolve()` per iteration, so each one re-reads and
+            // re-deserializes the file and gets a fresh map instance.
+            let config = args.resolve().unwrap().unwrap();
+            let ordered = &config.bias_set.ordered;
+
+            assert_eq!(
+                ordered.len(),
+                expected.len(),
+                "iteration {iteration}: expected {} entries, got {ordered:?}",
+                expected.len()
+            );
+            for (index, (expected_code, expected_bias)) in expected.iter().enumerate() {
+                let (code, bias) = ordered[index];
+                assert_eq!(
+                    code, *expected_code,
+                    "iteration {iteration}: entry {index} should be {expected_code:?} but the \
+                     resolved order was {ordered:?}; YAML bias: order must be the priority order"
+                );
+                assert_eq!(
+                    bias, *expected_bias,
+                    "iteration {iteration}: entry {index} carried the wrong bias value"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn yaml_and_cli_paths_agree_on_multi_cjk_order() {
+        let (_tmpfile, path) = write_temp_yaml(THREE_CJK_YAML);
+
+        let cli_args = LangBiasCliArgs {
+            lang_bias: Some("ja=-inf,zh=-10.0,ko=+5.0".to_owned()),
+            ..Default::default()
+        };
+        let cli_ordered = cli_args.resolve().unwrap().unwrap().bias_set.ordered;
+
+        for iteration in 0..ORDER_RESOLVE_ITERATIONS {
+            let yaml_args = LangBiasCliArgs {
+                lang_bias_config: Some(path.clone()),
+                ..Default::default()
+            };
+            let yaml_ordered = yaml_args.resolve().unwrap().unwrap().bias_set.ordered;
+            assert_eq!(
+                yaml_ordered, cli_ordered,
+                "iteration {iteration}: the YAML path and the --lang-bias path must resolve \
+                 equivalent input to the same LangBiasSet"
+            );
+        }
+    }
+
+    #[test]
+    fn yaml_multi_cjk_first_language_wins_on_shared_han_tokens() {
+        use mlxcel_core::lang_analyzer::{
+            CURRENT_VERSION, Script, TokenLanguageIndex, TokenScriptInfo,
+        };
+
+        // A three-token synthetic vocabulary: one pure-Han token claimed by ja,
+        // zh and ko alike, one Hiragana token only ja claims, and one Hangul
+        // token only ko claims. Building the index by hand keeps the assertion
+        // on `to_token_bias` without needing a real tokenizer.
+        let token = |token_id: i32, scripts: Vec<Script>| TokenScriptInfo {
+            token_id,
+            scripts: scripts.into(),
+            is_special: false,
+            is_numeric: false,
+            is_punctuation: false,
+            is_whitespace: false,
+            is_byte_fragment: false,
+        };
+        let index = TokenLanguageIndex {
+            vocab_hash: "test".to_owned(),
+            version: CURRENT_VERSION,
+            tokens: vec![
+                token(0, vec![Script::Han]),
+                token(1, vec![Script::Hiragana]),
+                token(2, vec![Script::Hangul]),
+            ],
+            by_script: HashMap::new(),
+        };
+
+        let (_tmpfile, path) = write_temp_yaml(THREE_CJK_YAML);
+
+        for iteration in 0..ORDER_RESOLVE_ITERATIONS {
+            let args = LangBiasCliArgs {
+                lang_bias_config: Some(path.clone()),
+                ..Default::default()
+            };
+            let config = args.resolve().unwrap().unwrap();
+            let bias_map = index.to_token_bias(&config.bias_set, config.policy, &config.exceptions);
+
+            assert_eq!(
+                bias_map.get(&0).copied(),
+                Some(f32::NEG_INFINITY),
+                "iteration {iteration}: the shared Han token must take the first-listed \
+                 language's bias (ja = -inf), resolved order was {:?}",
+                config.bias_set.ordered
+            );
+            assert_eq!(
+                bias_map.get(&1).copied(),
+                Some(f32::NEG_INFINITY),
+                "iteration {iteration}: the Hiragana token belongs to ja only"
+            );
+            assert_eq!(
+                bias_map.get(&2).copied(),
+                Some(5.0_f32),
+                "iteration {iteration}: the Hangul token belongs to ko only"
+            );
+        }
+    }
+
+    #[test]
+    fn yaml_duplicate_language_code_is_rejected() {
+        // serde_yaml deserializes a repeated key into a typed `HashMap` without
+        // any diagnostic (last occurrence wins), which is why the duplicate
+        // check in `resolve` used to be unreachable. The ordered representation
+        // delivers both occurrences, so the YAML path now rejects what the
+        // `--lang-bias` path already rejected.
+        let (_tmpfile, path) = write_temp_yaml("bias:\n  ja: -1.0\n  zh: -2.0\n  ja: -3.0\n");
+
+        let args = LangBiasCliArgs {
+            lang_bias_config: Some(path),
+            ..Default::default()
+        };
+        let err = args
+            .resolve()
+            .expect_err("a repeated language code in a YAML bias: block must be rejected");
+        assert!(
+            matches!(err, CliError::DuplicateLanguageCode { ref code } if code == "ja"),
+            "expected DuplicateLanguageCode, got: {err}"
+        );
+    }
+
+    #[test]
+    fn yaml_empty_bias_block_resolves_to_an_empty_set() {
+        let (_tmpfile, path) = write_temp_yaml("policy: strict\nbias: {}\n");
+
+        let args = LangBiasCliArgs {
+            lang_bias_config: Some(path),
+            ..Default::default()
+        };
+        let config = args.resolve().unwrap().unwrap();
+        assert!(
+            config.bias_set.ordered.is_empty(),
+            "an empty bias: block must resolve to an empty set, not an error"
+        );
+        assert_eq!(config.policy, InclusionPolicy::Strict);
+    }
+
+    #[test]
+    fn yaml_bias_block_rejects_a_sequence() {
+        // The accepted syntax is unchanged: `bias:` is a mapping, and a list
+        // form is still a parse error rather than a silently different config.
+        let result: Result<LangBiasYamlConfig, _> =
+            serde_yaml::from_str("bias:\n  - ja: -inf\n  - zh: -10.0\n");
+        assert!(
+            result.is_err(),
+            "a sequence-shaped bias: block should still be a parse error"
         );
     }
 

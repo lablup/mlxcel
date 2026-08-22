@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **A `--lang-bias-config` YAML file with two or more languages now steers deterministically** (#1267). The `bias:` block deserialized into a `HashMap`, whose iteration order `RandomState` randomizes per map instance, and that iteration order was pushed straight into `LangBiasSet.ordered`, which is the priority order `TokenLanguageIndex::to_token_bias` resolves conflicts with under first-language-wins. Han is shared by `ja`, `zh` and `ko`, so a config naming two or more CJK languages assigned a different bias to every shared Han token on every run, with no error and no warning, and the one place the order surfaced was the `languages` field of a DEBUG-level tracing event that is off by default. The shipped schema example is itself a three-CJK config, so copying it was enough to hit this. The `bias:` block is now collected through `MapAccess` into an ordered `Vec`, so index 0 is the first language written in the file, matching what `--lang-bias ja=-inf,zh=-10.0,ko=+5.0` and the `LLAMA_ARG_LANG_BIAS` env fallback have always done. **The accepted YAML syntax is unchanged**: `bias:` is still a plain mapping and existing config files keep working, though a file relying on the previous random behavior will now steer consistently toward its first-listed language.
+- **A language code repeated inside one YAML `bias:` block is rejected** (#1267). `serde_yaml` resolves a repeated key into a typed `HashMap` last-wins with no diagnostic, which made the duplicate check in the resolve path unreachable and let the YAML path silently accept input the `--lang-bias` parser has always rejected. The ordered representation delivers both occurrences, so both entry points now fail with `duplicate language code '<code>' in language bias entries (ambiguous priority)`. This is a behavior change for any config file that repeats a language code: it previously took the last occurrence and now errors out.
+
 ## [v0.5.2] - 2026-08-18
 
 ### Changed
