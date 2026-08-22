@@ -4494,58 +4494,11 @@ impl Gemma4Model {
         logits
     }
 
-    /// Run the transformer with speculative sinks but skip the tied LM head.
-    ///
-    /// Used by: Gemma 4 MTP deferred greedy verification, which needs the
-    /// pre-norm hidden states and shared K/V slabs but can project only the
-    /// positions required by the speculative walk.
-    #[allow(clippy::too_many_arguments)]
-    fn forward_hidden_with_caches_and_speculative_sinks(
-        &self,
-        input_ids: &MlxArray,
-        input_embeddings: Option<&MlxArray>,
-        caches: &mut [Cache],
-        mask: Option<&MlxArray>,
-        per_layer_inputs: Option<&MlxArray>,
-        capture_layer_ids: Option<&[usize]>,
-        sinks: Option<&mut Gemma4SpeculativeSinks>,
-        skip_final_norm: bool,
-        left_padding: Option<&[i32]>,
-    ) -> UniquePtr<MlxArray> {
-        self.text_model.forward_with_speculative_sinks(
-            input_ids,
-            input_embeddings,
-            caches,
-            mask,
-            per_layer_inputs,
-            capture_layer_ids,
-            sinks,
-            skip_final_norm,
-            None,
-            left_padding,
-            None,
-        )
-    }
-
     /// Apply the Gemma 4 final norm to a pre-norm decoder hidden state.
     ///
-    /// Used by: Gemma 4 MTP drafter hidden preparation and deferred
-    /// hidden-to-logits verification.
+    /// Used by: Gemma 4 MTP drafter hidden preparation.
     fn speculative_draft_hidden(&self, hidden: &MlxArray) -> UniquePtr<MlxArray> {
         self.text_model.norm.forward(hidden)
-    }
-
-    /// Project a pre-norm decoder hidden state to logits using the tied LM
-    /// head and optional final-logit softcap.
-    ///
-    /// Used by: Gemma 4 MTP deferred greedy verification.
-    fn speculative_logits_from_hidden(&self, hidden: &MlxArray) -> UniquePtr<MlxArray> {
-        let hidden = self.speculative_draft_hidden(hidden);
-        let mut logits = self.text_model.embed_tokens.as_linear(&hidden);
-        if let Some(cap) = self.config.final_logit_softcapping {
-            logits = mlxcel_core::compiled_softcap(&logits, cap);
-        }
-        logits
     }
 
     pub(crate) fn make_caches(&self) -> Vec<Cache> {
@@ -5547,50 +5500,12 @@ impl Gemma4Wrapper {
         )
     }
 
-    pub(crate) fn forward_hidden_with_speculative_sinks(
-        &self,
-        input_ids: &MlxArray,
-        input_embeddings: Option<&MlxArray>,
-        per_layer_inputs: Option<&MlxArray>,
-        mask: Option<&MlxArray>,
-        seq_id: Option<SequenceId>,
-        capture_layer_ids: Option<&[usize]>,
-        sinks: Option<&mut Gemma4SpeculativeSinks>,
-        skip_final_norm: bool,
-    ) -> UniquePtr<MlxArray> {
-        self.sequence_state.with_or_create_sequence_state(
-            seq_id,
-            || self.model.make_caches(),
-            |sequence_caches| {
-                self.model.forward_hidden_with_caches_and_speculative_sinks(
-                    input_ids,
-                    input_embeddings,
-                    sequence_caches,
-                    mask,
-                    per_layer_inputs,
-                    capture_layer_ids,
-                    sinks,
-                    skip_final_norm,
-                    None,
-                )
-            },
-        )
-    }
-
     /// Normalize a pre-norm hidden state before handing it to the MTP
     /// assistant drafter.
     ///
     /// Used by: [`crate::models::gemma4_mtp_target::Gemma4MtpTargetAdapter`].
     pub(crate) fn speculative_draft_hidden(&self, hidden: &MlxArray) -> UniquePtr<MlxArray> {
         self.model.speculative_draft_hidden(hidden)
-    }
-
-    /// Project a pre-norm hidden state to logits without rerunning the
-    /// transformer.
-    ///
-    /// Used by: Gemma 4 MTP deferred greedy verification.
-    pub(crate) fn speculative_logits_from_hidden(&self, hidden: &MlxArray) -> UniquePtr<MlxArray> {
-        self.model.speculative_logits_from_hidden(hidden)
     }
 
     /// Allocate a fresh per-layer cache vector for a batched MTP burst
