@@ -505,18 +505,34 @@ pub struct MtpGenerator<T: MtpTarget> {
     /// `prefer_requested_block_size` is false and the proxy controller is
     /// not pinned via `MLXCEL_MTP_BLOCK_CONTROLLER=proxy`.
     block_controller: BlockThroughputController,
-    /// `MLXCEL_MTP_BLOCK_CONTROLLER=proxy`: keep the upstream
-    /// fully-accepted-prefix gate instead of the throughput comparator.
-    proxy_block_controller: bool,
+    /// Which block-width controller `MLXCEL_MTP_BLOCK_CONTROLLER` selected.
+    block_controller_mode: BlockControllerMode,
 }
 
-/// Whether `MLXCEL_MTP_BLOCK_CONTROLLER` pins the upstream acceptance-proxy
-/// block controller. Any other value (or unset) selects the measured
-/// throughput comparator, the default since issue #1207.
-fn proxy_block_controller_pinned() -> bool {
-    std::env::var("MLXCEL_MTP_BLOCK_CONTROLLER")
-        .map(|value| value.trim().eq_ignore_ascii_case("proxy"))
-        .unwrap_or(false)
+/// `MLXCEL_MTP_BLOCK_CONTROLLER` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockControllerMode {
+    /// Default: the measured-throughput comparator (issue #1207).
+    Throughput,
+    /// The upstream fully-accepted-prefix gate.
+    Proxy,
+    /// Honour the requested width immediately, controller-free. The
+    /// measurement mode: #1207's own width sweep needed a temporary code
+    /// patch to hold the widths it compared, and this value is that patch
+    /// as a switch. Not a deployment setting.
+    Requested,
+}
+
+/// Parse `MLXCEL_MTP_BLOCK_CONTROLLER`. Unknown values fall back to the
+/// default rather than erroring, matching the other MLXCEL_* switches.
+fn block_controller_mode() -> BlockControllerMode {
+    match std::env::var("MLXCEL_MTP_BLOCK_CONTROLLER") {
+        Ok(value) if value.trim().eq_ignore_ascii_case("proxy") => BlockControllerMode::Proxy,
+        Ok(value) if value.trim().eq_ignore_ascii_case("requested") => {
+            BlockControllerMode::Requested
+        }
+        _ => BlockControllerMode::Throughput,
+    }
 }
 
 /// Whether tree drafting is switched on for this process.
@@ -560,7 +576,7 @@ impl<T: MtpTarget> MtpGenerator<T> {
             profile_probe_rounds: 0,
             tree_drafting: tree_drafting_enabled(),
             block_controller: BlockThroughputController::new(block_size, configured_block_size),
-            proxy_block_controller: proxy_block_controller_pinned(),
+            block_controller_mode: block_controller_mode(),
         }
     }
 
@@ -1048,15 +1064,17 @@ impl<T: MtpTarget> MtpGenerator<T> {
             let remaining = state.max_tokens - state.emitted_count + 1;
             let bs = if self.prefer_requested_block_size {
                 self.block_size.min(remaining)
-            } else if self.proxy_block_controller {
-                effective_mtp_block_size(
-                    self.block_size,
-                    self.configured_block_size,
-                    &state.accept_lens,
-                    remaining,
-                )
             } else {
-                self.block_controller.decide(remaining)
+                match self.block_controller_mode {
+                    BlockControllerMode::Requested => self.block_size.min(remaining),
+                    BlockControllerMode::Proxy => effective_mtp_block_size(
+                        self.block_size,
+                        self.configured_block_size,
+                        &state.accept_lens,
+                        remaining,
+                    ),
+                    BlockControllerMode::Throughput => self.block_controller.decide(remaining),
+                }
             };
             if bs <= 1 {
                 state.finished = true;
@@ -1075,7 +1093,7 @@ impl<T: MtpTarget> MtpGenerator<T> {
             if bs < self.block_size && self.block_size <= remaining && !state.warned_block_override
             {
                 state.warned_block_override = true;
-                if self.proxy_block_controller {
+                if self.block_controller_mode == BlockControllerMode::Proxy {
                     tracing::warn!(
                         requested = self.block_size,
                         effective = bs,
@@ -1097,7 +1115,9 @@ impl<T: MtpTarget> MtpGenerator<T> {
                 }
             }
 
-            if !self.prefer_requested_block_size && !self.proxy_block_controller {
+            if !self.prefer_requested_block_size
+                && self.block_controller_mode == BlockControllerMode::Throughput
+            {
                 throughput_round = Some((bs, Instant::now()));
             }
 

@@ -283,6 +283,18 @@ impl BlockThroughputController {
                 Some(h) => rate > h * (1.0 + ADOPT_MARGIN),
                 None => true,
             };
+            // One line per verdict so a sweep can see which width a run
+            // settled on and why, without instrumented builds. Verdicts are
+            // rare (once per challenge window at the least), so this stays
+            // out of the per-round path.
+            tracing::info!(
+                challenger_width = self.arm_width(arm),
+                held_width = self.arm_width(self.held),
+                challenger_rate = format!("{rate:.5}"),
+                held_rate = held_rate.map(|h| format!("{h:.5}")).unwrap_or_default(),
+                adopted,
+                "MTP block-width challenge closed (tokens per ms, issue #1207)"
+            );
             if adopted {
                 self.held = arm;
                 self.challenge_backoff = RECHALLENGE_BASE_WINDOWS;
