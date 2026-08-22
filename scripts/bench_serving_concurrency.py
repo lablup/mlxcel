@@ -195,9 +195,26 @@ def stream_request(
                 continue
             usage = event.get("usage")
             if isinstance(usage, dict) and usage.get("completion_tokens") is not None:
-                usage_tokens = int(usage["completion_tokens"])
+                try:
+                    usage_tokens = int(usage["completion_tokens"])
+                except (TypeError, ValueError):
+                    # A malformed usage block must not end the sweep. Neither
+                    # TypeError nor ValueError is in the except tuple below, so
+                    # this would propagate out of the executor, through the
+                    # gather in run_level, and abort every remaining
+                    # concurrency level of the pass, discarding a measurement
+                    # that had already run for minutes. delta_tokens is the
+                    # fallback count.
+                    pass
             for choice in event.get("choices", []) or []:
-                content = (choice.get("delta") or {}).get("content")
+                delta = choice.get("delta") or {}
+                # Reasoning models stream their thinking channel as
+                # `reasoning_content` deltas; counting only `content` would
+                # report no TTFT and no decode rate at all for a request
+                # that spends its whole budget thinking (issue #1261 hit
+                # exactly this on Qwen 3.8). Both channels are decoded
+                # tokens, so both count.
+                content = delta.get("content") or delta.get("reasoning_content")
                 if content:
                     if ttft is None:
                         ttft = time.perf_counter() - start

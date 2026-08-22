@@ -639,7 +639,10 @@ width 2 because MLX routes `M >= 2` quantized projections to a different
 reduction. The 12 is the `d` entry for this target's largest projections
 rather than a generation constant: the same table reads 6 for those shapes on
 a non-`d` generation 13 part, and 18 for this target's attention projections
-on either. A declining probe falls back to classic decode unless
+on either. A probe that diverges under `qmv_wide` retries with it disabled
+and keeps the narrow kernel when that restores exactness (#1199), which is
+what happens on every generation 15+ host measured so far; only a probe
+that diverges both ways falls back to classic decode, unless
 `MLXCEL_MTP_ALLOW_INEXACT=1` is set. B=1 (single-request)
 MTP runs by default for every MTP target; the Gemma 4 Unified target cannot batch
 at all, so B=1 is also its only decode path. The batch-capable 31B + bf16
@@ -651,10 +654,17 @@ does not pay for itself.
 The Gemma 4 rows above were measured before the #1188 gate landed, so they are
 the fast kernel rather than the byte-identical one; with the gate in place the
 default on generation 15+ is the byte-identical kernel, and reproducing the
-fast rows needs `MLXCEL_MTP_ALLOW_INEXACT=1`. Keeping byte-identity on the
-code row, by dropping
-`qmv_wide`, measures 93.2 tok/s instead of 121.0 on M5 Max, or 2.14x instead of
-2.79x, and 117.5 tok/s instead of 138.5 on M3 Ultra, 1.83x instead of 2.16x.
+fast rows needs `MLXCEL_QMV_WIDE=1` together with `MLXCEL_MTP_ALLOW_INEXACT=1`
+(the pin keeps the gate's retry from dropping `qmv_wide`, and the override
+engages MTP anyway). `MLXCEL_MTP_ALLOW_INEXACT=1` alone does not reach them:
+the retry runs before the override is consulted, pins the process narrow, and
+produces output byte-identical to the default env, measured at the
+byte-identical rows' own throughput (verified live on M3 Ultra 2026-08-22,
+117 vs 139 tok/s on the 12B pairing; see
+[qmv-wide-pin-tax-m3ultra-2026-08-22](benchmark_results/qmv-wide-pin-tax-m3ultra-2026-08-22.md)).
+Keeping byte-identity on the code row, by dropping `qmv_wide`, measures 93.2
+tok/s instead of 121.0 on M5 Max, or 2.14x instead of 2.79x, and 117.5 tok/s
+instead of 138.5 on M3 Ultra, 1.83x instead of 2.16x.
 That is 23% of throughput on one host and 15% on the other, which is not the
 same quantity as the 17 to 20% the probe quotes for the Qwen pairing: the
 probe is costing the verify forward, while these figures are end-to-end decode,
@@ -769,6 +779,13 @@ Qwen pairing comes out identical on both hosts that were checked, on M3 Ultra
 by failing under `qmv_wide` and disabling it for the process. One generation
 per arm reproduces any of this, and the M3 Ultra source-code row parts 22
 bytes in.
+
+What the rest of a process pinned narrow pays is measured in
+[qmv-wide-pin-tax-m3ultra-2026-08-22](benchmark_results/qmv-wide-pin-tax-m3ultra-2026-08-22.md)
+(issue #1261): batched decode loses at most 1% at B = 2 to 8, because both
+MTP families decode batches as per-row `M = 1` forwards that never reach
+`qmv_wide`; the one real collateral cost is about 15 ms per prompt-cache-hit
+request, whose short adopted-suffix prefill lands in the qmv window.
 
 Two things will make that diff lie if they are not handled. The MTP arm prints
 its drafter loader lines *after* `Generating...` and immediately after the

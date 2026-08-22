@@ -171,3 +171,13 @@ done
 `MLXCEL_MTP_ALLOW_INEXACT=1` is required on generation 15 and later. Without it
 the gate refuses to engage MTP and the run falls back to classic decode, which
 produces no round-loop diagnostics at all.
+
+Update 2026-08-22: the paragraph above describes the pre-#1199 gate this
+profile was measured under, and the recipe no longer reproduces these
+kernels. Since #1199 the gate retries a failing probe with `qmv_wide`
+disabled before the override is consulted, so on generation 15+ the same
+command now engages MTP on the narrow kernel with byte-identity kept, and
+the override is inert. Reproducing this profile's fast-kernel arm needs
+`MLXCEL_QMV_WIDE=1` alongside `MLXCEL_MTP_ALLOW_INEXACT=1`; see
+`qmv-wide-pin-tax-m3ultra-2026-08-22.md` for the live verification of all
+four recipes.
