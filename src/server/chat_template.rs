@@ -16,6 +16,30 @@
 //!
 //! Applies Jinja2 chat templates from tokenizer_config.json to format
 //! conversation messages into model-specific prompts.
+//!
+//! # Template environment
+//!
+//! Every render goes through [`configure_environment`], the single funnel where
+//! the minijinja environment gets its limits and its template-facing callables.
+//! Templates published on HuggingFace are written against `transformers`, which
+//! is Jinja2 on CPython, so the environment provides what those templates assume
+//! exists:
+//!
+//! * `raise_exception(msg)`: the template refusing a caller-supplied value.
+//!   Errors it raises carry a [`TemplateRejection`] source so the caller can tell
+//!   them apart from an engine-side render failure.
+//! * `strftime_now(format)`: the current date, for templates that stamp one into
+//!   a system prompt.
+//! * `tojson(value, ensure_ascii=..., indent=..., separators=..., sort_keys=...)`: an
+//!   mlxcel-owned filter that shadows minijinja's builtin and reproduces CPython
+//!   `json.dumps` byte for byte, defaulting to `ensure_ascii=False` the way
+//!   `transformers` does. The builtin rejects every kwarg but `indent` and emits
+//!   compact JSON, which both breaks tool-calling templates outright and, where
+//!   it does render, tokenizes differently from the provider's own prompt. The
+//!   implementation and its exact CPython semantics live in
+//!   [`super::chat_template_json`].
+//! * Python string, dict and list methods (`.split()`, `.strip()`, `.items()`,
+//!   `.get()`, …) through minijinja's unknown-method callback.
 
 use std::path::Path;
 
@@ -1085,6 +1109,18 @@ fn configure_environment(env: &mut Environment<'_>) {
         chrono::Utc::now().format("%d %b %Y").to_string()
     });
 
+    // Shadow minijinja's builtin `tojson` with a CPython `json.dumps` compatible
+    // one. Published chat templates are written against `transformers`, where
+    // `tojson` IS `json.dumps`, so they call it with `json.dumps` keyword
+    // arguments (`ensure_ascii`, `sort_keys`, `separators`) that the builtin
+    // rejects outright, and they expect `json.dumps` spacing (`{"a": 1}`) where
+    // the builtin emits serde_json's compact form (`{"a":1}`). The first failure
+    // mode aborts the render and degrades the request to the generic
+    // `User:/Assistant:` prompt; the second is silent and only shows up as
+    // different token ids than the provider's own tokenization. See
+    // [`super::chat_template_json`] for the exact semantics implemented.
+    env.add_filter("tojson", super::chat_template_json::python_tojson);
+
     // Handle Python methods not natively supported by minijinja.
     //
     // Many HuggingFace chat templates use Python-style string and dict
@@ -1963,6 +1999,204 @@ mod tests {
         assert!(
             pattern_idx < include_idx,
             "tool parameter keys must render in wire order (pattern before include), got: {result}"
+        );
+    }
+
+    /// Render a template that only exercises filters, with one throwaway message.
+    fn render_filter_only(template: &str) -> String {
+        ChatTemplateProcessor::with_template(template.to_string())
+            .apply(
+                &[ChatMessage {
+                    role: "user".to_string(),
+                    content: "x".to_string(),
+                }],
+                None,
+            )
+            .expect("template must render")
+    }
+
+    /// One tool, used by the Laguna- and Inkling-shaped template tests below.
+    fn sample_tool() -> Tool {
+        Tool {
+            tool_type: "function".to_string(),
+            function: crate::server::types::request::FunctionDefinition {
+                name: "set_config".to_string(),
+                description: Some("Set config".to_string()),
+                parameters: None,
+            },
+        }
+    }
+
+    #[test]
+    fn tojson_default_matches_python_json_dumps() {
+        // CPython `json.dumps` puts a space after every `,` and `:`; minijinja's
+        // builtin emits serde_json's compact form. A bare `x | tojson` is the
+        // most common shape in published templates (Laguna's
+        // `<available_tools>` block among them), so this is the difference that
+        // silently changes token ids on an otherwise successful render.
+        let out = render_filter_only(r#"{{ {"b": [1, 2.5], "a": "e"} | tojson }}"#);
+        assert_eq!(out, r#"{"b": [1, 2.5], "a": "e"}"#);
+    }
+
+    #[test]
+    fn tojson_sort_keys_and_compact_separators() {
+        // thinkingmachines/Inkling-Small calls
+        // `tojson(sort_keys=true, separators=(",", ":"))`. Under the builtin
+        // filter both kwargs are rejected outright and the whole render fails.
+        let out = render_filter_only(
+            r#"{{ {"b": [1, 2.5], "a": "e"} | tojson(sort_keys=true, separators=(",", ":")) }}"#,
+        );
+        assert_eq!(out, r#"{"a":"e","b":[1,2.5]}"#);
+    }
+
+    #[test]
+    fn tojson_ensure_ascii_escapes_non_ascii() {
+        // `json.dumps(..., ensure_ascii=True)`: lowercase `\uXXXX`, and a
+        // surrogate pair for anything above the BMP.
+        let out = render_filter_only(
+            "{{ {\"e\": \"\u{e9}\", \"emoji\": \"\u{1f600}\"} | tojson(ensure_ascii=True) }}",
+        );
+        assert_eq!(out, r#"{"e": "\u00e9", "emoji": "\ud83d\ude00"}"#);
+    }
+
+    #[test]
+    fn tojson_ensure_ascii_defaults_to_false_like_transformers() {
+        // CPython's own default is `True`, but `transformers` renders chat
+        // templates with `ensure_ascii=False`, so that is the default here.
+        let out = render_filter_only("{{ {\"e\": \"\u{e9}\"} | tojson }}");
+        assert_eq!(out, "{\"e\": \"\u{e9}\"}");
+    }
+
+    #[test]
+    fn tojson_indent_uses_python_item_separators() {
+        // With `indent` set, CPython drops the trailing space after `,` (each
+        // item is already on its own line) but keeps `": "` between key and
+        // value.
+        let out = render_filter_only(r#"{{ {"a": 1, "b": [1, 2]} | tojson(indent=2) }}"#);
+        assert_eq!(out, "{\n  \"a\": 1,\n  \"b\": [\n    1,\n    2\n  ]\n}");
+    }
+
+    #[test]
+    fn laguna_template_renders_tool_call_history() {
+        // Shape of poolside/Laguna-XS-2.1's chat_template.jinja: a bare
+        // `tool | tojson` for the declarations, and
+        // `tojson(ensure_ascii=False) if v is not string else v` for each
+        // tool-call argument. The kwarg makes minijinja's builtin abort the
+        // render, which drops the request to the generic `User:/Assistant:`
+        // fallback prompt and loses the tool-call history entirely.
+        let template = concat!(
+            r#"{% if tools %}<available_tools>"#,
+            r#"{% for tool in tools %}{{ tool | tojson }}{% endfor %}"#,
+            r#"</available_tools>{% endif %}"#,
+            r#"{% for message in messages %}{% if message.tool_calls %}"#,
+            r#"{% for call in message.tool_calls %}"#,
+            r#"<tool_call><function_name>{{ call.function.name }}</function_name>"#,
+            r#"{% for k, v in call.function.arguments.items() %}"#,
+            r#"<arg_key>{{ k }}</arg_key>"#,
+            r#"<arg_value>{{ v | tojson(ensure_ascii=False) if v is not string else v }}</arg_value>"#,
+            r#"{% endfor %}</tool_call>{% endfor %}"#,
+            r#"{% else %}{{ message.content }}{% endif %}{% endfor %}"#,
+        );
+
+        let messages = serde_json::json!([
+            {"role": "user", "content": "configure it"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {
+                        "name": "set_config",
+                        "arguments": {"payload": {"x": 1}, "note": "plain"}
+                    }
+                }]
+            }
+        ]);
+
+        let tools = vec![sample_tool()];
+        let out = ChatTemplateProcessor::with_template(template.to_string())
+            .apply_raw(&messages, Some(&tools))
+            .expect("Laguna-shaped template must render");
+
+        // A structured argument is serialized with Python spacing.
+        assert!(
+            out.contains(r#"<arg_value>{"x": 1}</arg_value>"#),
+            "structured tool-call argument must serialize with json.dumps spacing: {out}"
+        );
+        // A string argument bypasses `tojson` entirely and stays unquoted.
+        assert!(
+            out.contains("<arg_value>plain</arg_value>"),
+            "string tool-call argument must render raw: {out}"
+        );
+        // The declarations block uses the bare filter, so Python spacing again.
+        assert!(
+            out.contains(
+                r#"<available_tools>{"type": "function", "function": {"name": "set_config", "description": "Set config"}}</available_tools>"#
+            ),
+            "tool declarations must serialize with json.dumps spacing: {out}"
+        );
+        // The fallback prompt would have swallowed the markup above.
+        assert!(!out.contains("Assistant:"), "must not fall back: {out}");
+    }
+
+    #[test]
+    fn inkling_template_renders_tool_declarations() {
+        // Shape of thinkingmachines/Inkling-Small's chat_template.jinja.
+        let template = concat!(
+            r#"{% if tools %}<|content_xml|>"#,
+            r#"{{ tools | tojson(sort_keys=true, separators=(",", ":")) }}"#,
+            r#"{% endif %}"#,
+        );
+
+        let tools = vec![sample_tool()];
+        let out = ChatTemplateProcessor::with_template(template.to_string())
+            .apply(
+                &[ChatMessage {
+                    role: "user".to_string(),
+                    content: "hi".to_string(),
+                }],
+                Some(&tools),
+            )
+            .expect("Inkling-shaped template must render");
+
+        // `sort_keys` reaches every nesting level: `function` before `type` at
+        // the top, `description` before `name` inside.
+        assert_eq!(
+            out,
+            r#"<|content_xml|>[{"function":{"description":"Set config","name":"set_config"},"type":"function"}]"#
+        );
+    }
+
+    #[test]
+    fn tojson_does_not_html_escape_tool_schemas() {
+        // minijinja's builtin rewrites `<`, `>`, `&` and `'` as `\uXXXX` so its
+        // output can be inlined into HTML. A chat prompt is not HTML, and
+        // `transformers` does not do it, so a JSON Schema `pattern` containing
+        // a comparison operator must survive verbatim.
+        let out = render_filter_only(r#"{{ {"pattern": "a < b && c > d, isn't it"} | tojson }}"#);
+        assert_eq!(out, r#"{"pattern": "a < b && c > d, isn't it"}"#);
+    }
+
+    #[test]
+    fn tojson_rejects_unknown_keyword_arguments() {
+        // `assert_all_used` is still called: a template asking for something
+        // unimplemented must fail loudly rather than silently render output the
+        // author did not ask for.
+        let err = ChatTemplateProcessor::with_template(
+            r#"{{ {"a": 1} | tojson(cls="Encoder") }}"#.to_string(),
+        )
+        .apply(
+            &[ChatMessage {
+                role: "user".to_string(),
+                content: "x".to_string(),
+            }],
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("cls"),
+            "unknown kwarg must be reported: {err:#}"
         );
     }
 

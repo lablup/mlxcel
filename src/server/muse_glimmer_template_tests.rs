@@ -74,6 +74,16 @@ fn base_kwargs() -> ChatTemplateKwargs {
     kwargs(&[("current_date", json!("2026-08-11"))])
 }
 
+/// Pin a rendered prompt by length and digest.
+///
+/// Two of these pins moved when `tojson` stopped being minijinja's builtin and
+/// became mlxcel's CPython-compatible filter (`chat_template_json`): the
+/// template serializes each tool's JSON Schema with `fn.parameters | tojson`,
+/// and CPython `json.dumps` writes `", "` / `": "` where serde_json writes
+/// `","` / `":"`. Substituting the compact schema back into either new render
+/// reproduces the previous digest exactly, so the separators are the whole of
+/// the difference. The new form is what `transformers` renders from this same
+/// checkpoint template, which is what the checkpoint was tokenized against.
 fn assert_render_hash(name: &str, rendered: &str, expected_len: usize, expected_sha: &str) {
     assert_eq!(rendered.len(), expected_len, "{name} rendered length");
     assert_eq!(
@@ -228,8 +238,8 @@ fn muse_glimmer_template_renders_tools_calls_and_results() {
     assert_render_hash(
         "tools_and_results",
         &rendered,
-        2327,
-        "3431d38cb62f8505f0ffb94ef056260c4531029d66e194a08aa53ae61d4aad75",
+        2340,
+        "3d860a2454537255404bc2a68b757605f5d2f6d6e513b7fbe2dad6527cea42f5",
     );
 }
 
@@ -332,7 +342,7 @@ fn muse_glimmer_kwargs_precedence_and_reserved_keys_are_enforced() {
     assert_render_hash(
         "kwargs_precedence_reserved",
         &rendered,
-        1814,
-        "bc46f4ee133c0d4ca81f385241a6872b220912c0fd72a92e8265296e70b1be65",
+        1827,
+        "97ad54c9ddea6a4be5d8fa79f09d365108389f209871f038d0c1141f27ed1bd6",
     );
 }

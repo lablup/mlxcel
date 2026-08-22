@@ -21,6 +21,7 @@ pub(crate) mod audio_worker;
 pub mod batch;
 mod chat_request;
 pub mod chat_template;
+pub mod chat_template_json;
 pub mod chat_template_kwargs;
 mod cli_input;
 mod config;
