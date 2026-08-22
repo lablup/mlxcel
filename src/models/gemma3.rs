@@ -136,8 +136,7 @@ impl ModelArgs {
     /// a hard `duplicate field` parse error, and several checkpoints in the
     /// local model set spell both (#1355).
     ///
-    /// # Why an unimplemented scheme is an error here, and a warning on the
-    /// shared Llama path
+    /// # Why an unimplemented scheme is an error here, and a warning on the shared Llama path
     ///
     /// [`crate::models::rope_utils::RopeScalingKind::resolve`] warns and falls
     /// back to the unscaled table, because the args type it serves is what
@@ -170,7 +169,7 @@ impl ModelArgs {
                      \"factor\", so the position scale it selects is undefined"
                         .to_string()
                 })?;
-                if factor > 0.0 && factor.is_finite() {
+                if crate::models::rope_utils::is_usable_scalar(factor) {
                     Ok(1.0 / factor)
                 } else {
                     Err(format!(
@@ -204,10 +203,7 @@ impl ModelArgs {
 /// happens to be global. That also covers a config whose
 /// `sliding_window_pattern` exceeds `num_hidden_layers` and therefore has no
 /// global layer to trip over.
-pub(crate) fn layer_rope_params(
-    args: &ModelArgs,
-    layer_idx: usize,
-) -> Result<(bool, f32, f32), String> {
+fn layer_rope_params(args: &ModelArgs, layer_idx: usize) -> Result<(bool, f32, f32), String> {
     let is_sliding = !(layer_idx + 1).is_multiple_of(args.sliding_window_pattern);
     let global_rope_scale = args.global_rope_scale()?;
 

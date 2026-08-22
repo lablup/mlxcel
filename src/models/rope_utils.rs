@@ -301,9 +301,13 @@ pub fn llama3_rope_freqs(
 
 /// Whether a `rope_scaling` scalar can be used as a multiplier or a divisor.
 ///
-/// One predicate for every scalar the two implemented schemes read, so the
-/// `linear` and `llama3` arms cannot screen to different standards.
-fn is_usable_scalar(value: f32) -> bool {
+/// One predicate for every scalar any implemented scheme reads, so the arms
+/// cannot screen to different standards. Gemma 3 resolves its own `linear`
+/// factor rather than going through [`RopeScalingKind::resolve`], because an
+/// unimplemented scheme is a load error there and a warning here, so it calls
+/// this directly to stay on the same standard.
+// Used by: rope_utils (linear, llama3), Gemma3 (global_rope_scale)
+pub(crate) fn is_usable_scalar(value: f32) -> bool {
     value > 0.0 && value.is_finite()
 }
 
