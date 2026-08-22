@@ -338,7 +338,14 @@ impl RequestTracker {
             .map(|(k, l)| (k.clone(), l.created_at))
             .collect();
 
-        completed.sort_by_key(|(_, t)| *t);
+        // The key component is what makes the sort key a TOTAL order, and it
+        // must stay. `sort_by_key` is stable, `completed` comes out of a
+        // `HashMap` whose iteration order `RandomState` randomizes per
+        // instance, and the `take(to_remove)` below consumes only a prefix.
+        // Without the tie-break, requests sharing a `created_at` tick keep hash
+        // order and which of them is dropped changes from run to run. The
+        // comparator form avoids cloning the key that `sort_by_key` would need.
+        completed.sort_by(|(key_a, t_a), (key_b, t_b)| t_a.cmp(t_b).then_with(|| key_a.cmp(key_b)));
 
         // Remove oldest completed until we are under the limit.
         let to_remove = inner.requests.len().saturating_sub(self.config.max_tracked) + 1;

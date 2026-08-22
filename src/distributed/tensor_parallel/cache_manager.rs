@@ -710,12 +710,19 @@ impl TPCacheManager {
     fn select_eviction_candidates(&self) -> Vec<SequenceId> {
         let mut entries: Vec<_> = self.allocations.values().collect();
 
+        // The `sequence_id` component is what makes each sort key a TOTAL
+        // order, and it must stay. `sort_by_key` is stable, `entries` comes out
+        // of a `HashMap` whose iteration order `RandomState` randomizes per
+        // instance, and `check_pressure` consumes only a prefix of this list.
+        // Without the tie-break, allocations that tie on the policy key keep
+        // hash order and which of them actually loses its cache changes from
+        // run to run.
         match self.eviction_policy {
             EvictionPolicy::LRU => {
-                entries.sort_by_key(|a| a.last_accessed);
+                entries.sort_by_key(|a| (a.last_accessed, a.sequence_id));
             }
             EvictionPolicy::LeastTokens => {
-                entries.sort_by_key(|a| a.current_offset);
+                entries.sort_by_key(|a| (a.current_offset, a.sequence_id));
             }
         }
 
