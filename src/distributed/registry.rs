@@ -131,27 +131,37 @@ impl NodeRegistry {
             .cloned()
     }
 
-    /// Return a snapshot of all registered nodes.
+    /// Return a snapshot of all registered nodes, sorted by node ID.
+    ///
+    /// The sort is part of the contract, not a convenience. Callers select a
+    /// node by position (round-robin) or by first / last extreme
+    /// (`min_by_key` / `max_by_key`, which tie-break on input order), and an
+    /// idle cluster ties on every load metric. Since `nodes` is a `HashMap`
+    /// whose iteration order is seeded per instance, an unsorted snapshot
+    /// makes those selections differ between processes for identical cluster
+    /// state.
     pub fn all_nodes(&self) -> Vec<RegisteredNode> {
-        self.inner
-            .read()
-            .expect("registry lock poisoned")
-            .nodes
-            .values()
-            .cloned()
-            .collect()
+        let inner = self.inner.read().expect("registry lock poisoned");
+        let mut nodes: Vec<RegisteredNode> = inner.nodes.values().cloned().collect();
+        nodes.sort_by(|a, b| a.config.id.cmp(&b.config.id));
+        nodes
     }
 
-    /// Return nodes filtered by role.
+    /// Return nodes filtered by role, sorted by node ID.
+    ///
+    /// Sorted for the same reason as [`Self::all_nodes`]: the failover path
+    /// walks this list round-robin by position when re-routing the requests
+    /// that a failed node was holding.
     pub fn nodes_with_role(&self, role: NodeRole) -> Vec<RegisteredNode> {
-        self.inner
-            .read()
-            .expect("registry lock poisoned")
+        let inner = self.inner.read().expect("registry lock poisoned");
+        let mut nodes: Vec<RegisteredNode> = inner
             .nodes
             .values()
             .filter(|n| n.config.role == role)
             .cloned()
-            .collect()
+            .collect();
+        nodes.sort_by(|a, b| a.config.id.cmp(&b.config.id));
+        nodes
     }
 
     /// Return the registered node that owns the 2D `(pp_stage, tp_rank)`
@@ -256,15 +266,17 @@ impl NodeRegistry {
         inner.nodes.remove(id)
     }
 
-    /// Return the address of each peer (all nodes except the local one).
+    /// Return the address of each peer (all nodes except the local one),
+    /// ordered by the owning node's ID.
     pub fn peer_addresses(&self) -> Vec<SocketAddr> {
         let inner = self.inner.read().expect("registry lock poisoned");
-        inner
+        let mut peers: Vec<&RegisteredNode> = inner
             .nodes
             .values()
             .filter(|n| n.config.id != inner.local_node_id)
-            .map(|n| n.config.address)
-            .collect()
+            .collect();
+        peers.sort_by(|a, b| a.config.id.cmp(&b.config.id));
+        peers.into_iter().map(|n| n.config.address).collect()
     }
 
     /// Return a human-readable cluster topology string.
@@ -280,7 +292,10 @@ impl NodeRegistry {
         );
         let _ = writeln!(out, "  Local node: {}", inner.local_node_id);
         let _ = writeln!(out, "  Nodes ({}):", inner.nodes.len());
-        for node in inner.nodes.values() {
+        // Listed in ID order so two snapshots of the same cluster diff cleanly.
+        let mut nodes: Vec<&RegisteredNode> = inner.nodes.values().collect();
+        nodes.sort_by(|a, b| a.config.id.cmp(&b.config.id));
+        for node in nodes {
             let local_tag = if node.config.id == inner.local_node_id {
                 " (local)"
             } else {

@@ -852,3 +852,163 @@ fn auto_purge_removes_old_terminal_on_overflow() {
     let m = router.metrics();
     assert_eq!(m.active_prefills, 1);
 }
+
+// ── Selection determinism ────────────────────────────────────────────
+
+/// How many independently constructed routers each determinism test builds.
+///
+/// The registry keeps its nodes in a `HashMap` and the router keeps its
+/// in-flight requests in another, and `RandomState` seeds each map instance
+/// separately. Repeating a call against one router therefore proves nothing;
+/// only rebuilding the whole cluster from the same config exercises the
+/// randomization that used to leak into node selection.
+const SELECTION_ITERATIONS: usize = 32;
+
+/// Helper: build a 4-node prefill cluster, so that failing one node still
+/// leaves several re-routing candidates to distribute across.
+fn failover_cluster() -> (NodeRegistry, ClusterMetrics, BackpressureMonitor) {
+    let ids = ["prefill-0", "prefill-1", "prefill-2", "prefill-3"];
+    let config = ClusterConfig {
+        cluster: ClusterMeta::default(),
+        nodes: ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| NodeConfig {
+                id: (*id).to_string(),
+                address: format!("127.0.0.1:{}", 9100 + i)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+                role: NodeRole::Prefill,
+                stage: None,
+                rank: None,
+                resources: NodeResources {
+                    memory_bytes: 16_000_000_000,
+                    compute_units: 8,
+                },
+            })
+            .collect(),
+    };
+
+    let registry = NodeRegistry::from_config(&config, "prefill-0");
+    for id in ids {
+        registry.set_node_status(id, NodeStatus::Online);
+    }
+
+    (
+        registry,
+        ClusterMetrics::new(),
+        BackpressureMonitor::new(BackpressureConfig::default()),
+    )
+}
+
+#[test]
+fn prefill_tie_break_is_stable_across_routers() {
+    for i in 0..SELECTION_ITERATIONS {
+        let router = test_router();
+        let node = router.route_to_prefill(RequestId::new(), 100).unwrap();
+        // The default prefill strategy is LeastLoaded and no metrics are
+        // registered, so every candidate ties at zero active requests.
+        // `min_by_key` keeps the first minimum, which is the lowest node id
+        // now that the registry hands back nodes in id order.
+        assert_eq!(
+            node, "prefill-0",
+            "prefill selection differs on router #{i}"
+        );
+    }
+}
+
+#[test]
+fn decode_tie_break_is_stable_across_routers() {
+    for i in 0..SELECTION_ITERATIONS {
+        let router = test_router();
+        let req_id = RequestId::new();
+        router.route_to_prefill(req_id.clone(), 100).unwrap();
+        let node = router.route_to_decode(&req_id).unwrap();
+        // The default decode strategy is MemoryAware and every candidate
+        // reports the same (absent) memory. `max_by_key` keeps the last
+        // maximum, which is the highest node id under id ordering.
+        assert_eq!(node, "decode-1", "decode selection differs on router #{i}");
+    }
+}
+
+#[test]
+fn round_robin_selection_sequence_is_stable_across_routers() {
+    let mut baseline: Option<Vec<String>> = None;
+    for i in 0..SELECTION_ITERATIONS {
+        let (registry, metrics, bp) = test_cluster();
+        let config = RouterConfig {
+            prefill_strategy: DisaggRoutingStrategy::RoundRobin,
+            ..Default::default()
+        };
+        let router = RequestRouter::new(config, registry, metrics, bp);
+
+        let sequence: Vec<String> = (0..4)
+            .map(|_| router.route_to_prefill(RequestId::new(), 100).unwrap())
+            .collect();
+
+        match &baseline {
+            None => baseline = Some(sequence),
+            Some(expected) => assert_eq!(
+                &sequence, expected,
+                "round-robin sequence differs on router #{i}"
+            ),
+        }
+    }
+
+    assert_eq!(
+        baseline.unwrap(),
+        ["prefill-0", "prefill-1", "prefill-0", "prefill-1"],
+    );
+}
+
+#[test]
+fn failover_reroute_assignment_is_stable_across_routers() {
+    let request_ids = ["req-a", "req-b", "req-c"];
+    let mut baseline: Option<Vec<(String, String)>> = None;
+
+    for i in 0..SELECTION_ITERATIONS {
+        let (registry, metrics, bp) = failover_cluster();
+        let router = RequestRouter::new(RouterConfig::default(), registry, metrics, bp);
+
+        // With no metrics registered every node ties, so LeastLoaded puts all
+        // three requests on the lowest-id prefill node.
+        for id in request_ids {
+            let req_id = RequestId::from_string((*id).to_string()).unwrap();
+            let node = router.route_to_prefill(req_id, 100).unwrap();
+            assert_eq!(node, "prefill-0");
+        }
+
+        let (rerouted, failed) = router.handle_node_failure("prefill-0");
+        assert_eq!((rerouted, failed), (3, 0));
+
+        let assignment: Vec<(String, String)> = request_ids
+            .iter()
+            .map(|id| {
+                let req_id = RequestId::from_string((*id).to_string()).unwrap();
+                match router.get_phase(&req_id).unwrap() {
+                    RequestPhase::Prefilling { node_id } => ((*id).to_string(), node_id),
+                    other => panic!("expected Prefilling for {id}, got {other}"),
+                }
+            })
+            .collect();
+
+        match &baseline {
+            None => baseline = Some(assignment),
+            Some(expected) => assert_eq!(
+                &assignment, expected,
+                "failover assignment differs on router #{i}"
+            ),
+        }
+    }
+
+    // Candidates are visited in id order and the affected requests are taken
+    // in id order, so the round-robin pairing is fully determined.
+    assert_eq!(
+        baseline.unwrap(),
+        [
+            ("req-a".to_string(), "prefill-1".to_string()),
+            ("req-b".to_string(), "prefill-2".to_string()),
+            ("req-c".to_string(), "prefill-3".to_string()),
+        ],
+    );
+}

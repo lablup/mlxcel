@@ -243,3 +243,205 @@ fn local_pp_tp_coords_none_for_legacy_topology() {
     let registry = NodeRegistry::from_config(&config, "local");
     assert!(registry.local_pp_tp_coords().is_none());
 }
+
+// -- Deterministic accessor ordering -----------------------------------------
+
+/// How many independently constructed registries each ordering test builds.
+///
+/// `RandomState` seeds every `HashMap` instance separately rather than once per
+/// process, so repeated calls against a single registry cannot tell a defined
+/// order apart from an arbitrary one that happens to stay put. Only freshly
+/// constructed registries exercise that per-instance randomization, and a
+/// handful of them is not enough: with five ids, a single build has a
+/// noticeable chance of landing on the sorted order by luck.
+const ORDER_ITERATIONS: usize = 64;
+
+/// A cluster whose node ids are deliberately out of insertion order, so a
+/// passing ordering assertion cannot be explained by the registry happening to
+/// preserve config order.
+fn unordered_ids_config() -> ClusterConfig {
+    let toml_str = r#"
+[cluster]
+name = "ordering"
+
+[[nodes]]
+id = "zulu-hybrid"
+address = "10.1.0.1:8080"
+role = "hybrid"
+
+[[nodes]]
+id = "alpha-decode"
+address = "10.1.0.2:8080"
+role = "decode"
+
+[[nodes]]
+id = "mike-prefill"
+address = "10.1.0.3:8080"
+role = "prefill"
+
+[[nodes]]
+id = "bravo-decode"
+address = "10.1.0.4:8080"
+role = "decode"
+
+[[nodes]]
+id = "yankee-prefill"
+address = "10.1.0.5:8080"
+role = "prefill"
+"#;
+    ClusterConfig::from_toml(toml_str).unwrap()
+}
+
+#[test]
+fn all_nodes_ordered_by_id_across_registries() {
+    let config = unordered_ids_config();
+    let expected = [
+        "alpha-decode",
+        "bravo-decode",
+        "mike-prefill",
+        "yankee-prefill",
+        "zulu-hybrid",
+    ];
+
+    for i in 0..ORDER_ITERATIONS {
+        let registry = NodeRegistry::from_config(&config, "zulu-hybrid");
+        let ids: Vec<String> = registry
+            .all_nodes()
+            .into_iter()
+            .map(|n| n.config.id)
+            .collect();
+        assert_eq!(ids, expected, "all_nodes order differs on registry #{i}");
+    }
+}
+
+#[test]
+fn nodes_with_role_ordered_by_id_across_registries() {
+    let config = unordered_ids_config();
+
+    for i in 0..ORDER_ITERATIONS {
+        let registry = NodeRegistry::from_config(&config, "zulu-hybrid");
+
+        let prefill: Vec<String> = registry
+            .nodes_with_role(NodeRole::Prefill)
+            .into_iter()
+            .map(|n| n.config.id)
+            .collect();
+        assert_eq!(
+            prefill,
+            ["mike-prefill", "yankee-prefill"],
+            "prefill order differs on registry #{i}"
+        );
+
+        let decode: Vec<String> = registry
+            .nodes_with_role(NodeRole::Decode)
+            .into_iter()
+            .map(|n| n.config.id)
+            .collect();
+        assert_eq!(
+            decode,
+            ["alpha-decode", "bravo-decode"],
+            "decode order differs on registry #{i}"
+        );
+
+        let hybrid: Vec<String> = registry
+            .nodes_with_role(NodeRole::Hybrid)
+            .into_iter()
+            .map(|n| n.config.id)
+            .collect();
+        assert_eq!(
+            hybrid,
+            ["zulu-hybrid"],
+            "hybrid order differs on registry #{i}"
+        );
+
+        // A role with no members still yields an empty Vec, not a panic.
+        assert!(
+            registry
+                .nodes_with_role(NodeRole::PipelineTensorParallel)
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn ordering_survives_upsert_and_remove() {
+    let config = unordered_ids_config();
+    let registry = NodeRegistry::from_config(&config, "zulu-hybrid");
+
+    // A node added after construction sorts into place rather than landing
+    // wherever the HashMap put it.
+    registry.upsert_node(
+        NodeConfig {
+            id: "charlie-prefill".to_string(),
+            address: "10.1.0.6:8080".parse().unwrap(),
+            role: NodeRole::Prefill,
+            stage: None,
+            rank: None,
+            resources: NodeResources::default(),
+        },
+        NodeStatus::Online,
+    );
+    let prefill: Vec<String> = registry
+        .nodes_with_role(NodeRole::Prefill)
+        .into_iter()
+        .map(|n| n.config.id)
+        .collect();
+    assert_eq!(
+        prefill,
+        ["charlie-prefill", "mike-prefill", "yankee-prefill"]
+    );
+
+    registry.remove_node("mike-prefill");
+    let prefill: Vec<String> = registry
+        .nodes_with_role(NodeRole::Prefill)
+        .into_iter()
+        .map(|n| n.config.id)
+        .collect();
+    assert_eq!(prefill, ["charlie-prefill", "yankee-prefill"]);
+}
+
+#[test]
+fn peer_addresses_ordered_by_id_across_registries() {
+    let config = unordered_ids_config();
+    let expected: Vec<SocketAddr> = [
+        "10.1.0.2:8080",
+        "10.1.0.4:8080",
+        "10.1.0.3:8080",
+        "10.1.0.5:8080",
+    ]
+    .iter()
+    .map(|a| a.parse().unwrap())
+    .collect();
+
+    for i in 0..ORDER_ITERATIONS {
+        let registry = NodeRegistry::from_config(&config, "zulu-hybrid");
+        assert_eq!(
+            registry.peer_addresses(),
+            expected,
+            "peer_addresses order differs on registry #{i}"
+        );
+    }
+}
+
+#[test]
+fn topology_summary_lists_nodes_in_id_order() {
+    let config = unordered_ids_config();
+    let expected = [
+        "alpha-decode",
+        "bravo-decode",
+        "mike-prefill",
+        "yankee-prefill",
+        "zulu-hybrid",
+    ];
+
+    for i in 0..ORDER_ITERATIONS {
+        let registry = NodeRegistry::from_config(&config, "zulu-hybrid");
+        let summary = registry.topology_summary();
+        let listed: Vec<&str> = summary
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("- "))
+            .filter_map(|l| l.split(" @ ").next())
+            .collect();
+        assert_eq!(listed, expected, "summary order differs on registry #{i}");
+    }
+}
