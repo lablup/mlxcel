@@ -430,6 +430,14 @@ fn the_default_capacity_is_rejected_with_the_derived_requirement() {
         message.contains("256"),
         "the message must show the capacity that was rejected: {message}"
     );
+    assert!(
+        message.contains("accepts every image that fits it"),
+        "the message must say a smaller capacity still serves images: {message}"
+    );
+    assert!(
+        !message.contains('#'),
+        "operator-facing text must not carry issue numbers: {message}"
+    );
 }
 
 #[test]
@@ -454,4 +462,202 @@ fn the_capacity_variable_name_matches_the_xla_crate() {
     // The name is duplicated so this guard compiles without the xla crate; this
     // catches a rename on either side.
     assert_eq!(CONTEXT_CAPACITY_ENV, mlxcel_xla::CONTEXT_CAPACITY_ENV);
+}
+
+/// A LLaVA checkpoint's geometry. 336px images over 14px patches is the
+/// llava-1.5 vision tower, and 384px is the llava-interleave one.
+fn llava_checkpoint_dir(
+    image_size: u32,
+    patch_size: u32,
+    explicit: Option<u32>,
+) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let explicit = explicit
+        .map(|count| format!(r#","mm_tokens_per_image":{count}"#))
+        .unwrap_or_default();
+    std::fs::write(
+        dir.path().join("config.json"),
+        format!(
+            r#"{{"model_type":"llava","image_token_index":32000,"text_config":{{"model_type":"llama"}},"vision_config":{{"image_size":{image_size},"patch_size":{patch_size}}}{explicit}}}"#
+        ),
+    )
+    .unwrap();
+    dir
+}
+
+fn qwen2_vl_checkpoint_dir(patch_size: u32, merge_size: u32) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("config.json"),
+        format!(
+            r#"{{"model_type":"qwen2_vl","vision_config":{{"patch_size":{patch_size},"spatial_merge_size":{merge_size}}}}}"#
+        ),
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn llava_image_floor_matches_the_loader_expression() {
+    // `load_llava_host_preprocessor` computes `(image_size / patch_size)^2`
+    // unless the checkpoint states `mm_tokens_per_image`. These are the two
+    // real geometries: llava-1.5 at 336/14 and llava-interleave at 384/14.
+    let one_five = llava_checkpoint_dir(336, 14, None);
+    assert_eq!(xla_image_context_floor(one_five.path()), Some(576));
+    let interleave = llava_checkpoint_dir(384, 14, None);
+    assert_eq!(xla_image_context_floor(interleave.path()), Some(729));
+
+    // 384 / 14 truncates to 27, so the floor is 729 rather than the 753 an
+    // exact division would suggest. The loader truncates the same way.
+    assert_eq!(27usize * 27, 729);
+
+    // An explicit count wins, because the loader prefers it too.
+    let explicit = llava_checkpoint_dir(336, 14, Some(1024));
+    assert_eq!(xla_image_context_floor(explicit.path()), Some(1024));
+}
+
+#[test]
+fn qwen2_vl_image_floor_bounds_every_admissible_image() {
+    let dir = qwen2_vl_checkpoint_dir(14, 2);
+    let floor = xla_image_context_floor(dir.path()).expect("qwen2_vl must derive a floor");
+    assert_eq!(floor, 16384);
+
+    // Validation against the processor rather than against the same formula:
+    // run the real `smart_resize` and token count over extreme shapes and
+    // confirm none exceeds the floor. A floor that is too low reinstates the
+    // late-admission failure the guard exists to prevent, so this is the
+    // property that matters.
+    let processor = crate::vision::processors::qwen2_vl::Qwen2VLProcessor::new(14, 2, 2);
+    let mut worst = 0usize;
+    for (h, w) in [
+        (224u32, 224u32),
+        (768, 1024),
+        (1512, 378),
+        (378, 1512),
+        (4000, 4000),
+        (8000, 8000),
+        (20000, 300),
+        (300, 20000),
+        (10000, 12000),
+    ] {
+        let image = DynamicImage::new_rgb8(w, h);
+        let grids = processor.compute_grid_thw(std::slice::from_ref(&image));
+        let (t, gh, gw) = grids[0];
+        let tokens = (t as usize) * (gh as usize / 2) * (gw as usize / 2);
+        assert!(
+            tokens <= floor,
+            "{h}x{w} expands to {tokens} tokens, above the derived floor {floor}"
+        );
+        worst = worst.max(tokens);
+    }
+    // The bound is tight, not merely safe: a square image at the pixel cap
+    // reaches it exactly, so the floor is not an arbitrary overestimate.
+    assert_eq!(worst, floor);
+}
+
+#[test]
+fn the_new_families_report_no_floor_for_an_unreadable_config() {
+    let empty = tempfile::tempdir().unwrap();
+    assert_eq!(xla_image_context_floor(empty.path()), None);
+
+    // A LLaVA config without the geometry keys must not fall back to a guess.
+    let partial = tempfile::tempdir().unwrap();
+    std::fs::write(
+        partial.path().join("config.json"),
+        r#"{"model_type":"llava","image_token_index":32000,"text_config":{"model_type":"llama"},"vision_config":{}}"#,
+    )
+    .unwrap();
+    assert_eq!(xla_image_context_floor(partial.path()), None);
+
+    // A zero patch size must report no floor rather than divide.
+    let degenerate = qwen2_vl_checkpoint_dir(0, 2);
+    assert_eq!(xla_image_context_floor(degenerate.path()), None);
+}
+
+#[test]
+fn the_capacity_guard_covers_the_new_families_at_the_boundary() {
+    let llava = llava_checkpoint_dir(336, 14, None);
+    assert!(ensure_xla_image_context_capacity(llava.path(), 576, false).is_ok());
+    assert!(ensure_xla_image_context_capacity(llava.path(), 575, false).is_err());
+    assert!(ensure_xla_image_context_capacity(llava.path(), 575, true).is_ok());
+
+    let qwen = qwen2_vl_checkpoint_dir(14, 2);
+    assert!(ensure_xla_image_context_capacity(qwen.path(), 16384, false).is_ok());
+    assert!(ensure_xla_image_context_capacity(qwen.path(), 16383, false).is_err());
+    assert!(ensure_xla_image_context_capacity(qwen.path(), 16383, true).is_ok());
+}
+
+/// Close the loop on a real checkpoint instead of a synthetic config.
+///
+/// The other tests build the config themselves, so they can only prove the
+/// derivation is self-consistent. This one reads a checkpoint from
+/// `MLXCEL_FLOOR_MODEL`, derives the floor from its actual `config.json`, and
+/// for Qwen2-VL runs the real processor over extreme shapes to confirm nothing
+/// exceeds it. No weights are loaded, so it stays fast, but the geometry is the
+/// checkpoint's own.
+#[test]
+#[ignore = "requires a real LLaVA or Qwen2-VL checkpoint in MLXCEL_FLOOR_MODEL"]
+fn a_real_checkpoint_never_exceeds_its_derived_floor() {
+    let Ok(path) = std::env::var("MLXCEL_FLOOR_MODEL") else {
+        panic!("MLXCEL_FLOOR_MODEL is required");
+    };
+    let model = std::path::PathBuf::from(path);
+    let floor = xla_image_context_floor(&model).expect("this checkpoint must derive a floor");
+    let model_type = crate::models::get_model_type(&model).expect("model type");
+    println!("{}: floor={floor} ({model_type:?})", model.display());
+
+    match model_type {
+        crate::models::ModelType::Qwen2VL => {
+            let config: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(model.join("config.json")).unwrap())
+                    .unwrap();
+            let vision = &config["vision_config"];
+            let patch = vision["patch_size"].as_u64().unwrap() as usize;
+            let merge = vision["spatial_merge_size"].as_u64().unwrap() as usize;
+            let temporal = vision["temporal_patch_size"].as_u64().unwrap_or(2) as usize;
+            let processor =
+                crate::vision::processors::qwen2_vl::Qwen2VLProcessor::new(patch, temporal, merge);
+            let mut worst = 0usize;
+            for (h, w) in [
+                (224u32, 224u32),
+                (768, 1024),
+                (4000, 4000),
+                (8000, 8000),
+                (20000, 300),
+                (300, 20000),
+            ] {
+                let image = DynamicImage::new_rgb8(w, h);
+                let grids = processor.compute_grid_thw(std::slice::from_ref(&image));
+                let (t, gh, gw) = grids[0];
+                let tokens = (t as usize) * (gh as usize / merge) * (gw as usize / merge);
+                println!("  {h}x{w} -> {tokens} tokens");
+                assert!(
+                    tokens <= floor,
+                    "{h}x{w} produced {tokens} above floor {floor}"
+                );
+                worst = worst.max(tokens);
+            }
+            println!("  worst={worst} floor={floor}");
+        }
+        crate::models::ModelType::LlavaVLM => {
+            // LLaVA's block is a fixed count with no shape dependence, so the
+            // check is that the floor equals what the loader would compute from
+            // this checkpoint's own vision config.
+            let config: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(model.join("config.json")).unwrap())
+                    .unwrap();
+            let expected = config
+                .get("mm_tokens_per_image")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize)
+                .unwrap_or_else(|| {
+                    let vision = &config["vision_config"];
+                    let side = vision["image_size"].as_u64().unwrap() as usize
+                        / vision["patch_size"].as_u64().unwrap() as usize;
+                    side * side
+                });
+            assert_eq!(floor, expected);
+        }
+        other => panic!("unexpected family for this test: {other:?}"),
+    }
 }

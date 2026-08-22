@@ -290,11 +290,77 @@ pub fn load_xla_image_preprocessor(
 pub fn xla_image_context_floor(model_path: &Path) -> Option<usize> {
     match crate::models::get_model_type(model_path) {
         Ok(crate::models::ModelType::Molmo2VLM) => molmo2_image_context_floor(model_path),
-        // Other qualified families expand images too, but their worst case is
-        // not derived here yet. Reporting `None` keeps this guard silent for
-        // them instead of guarding with a Molmo2-shaped guess.
+        Ok(crate::models::ModelType::LlavaVLM) => llava_image_context_floor(model_path),
+        Ok(crate::models::ModelType::Qwen2VL) => qwen2_vl_image_context_floor(model_path),
+        // A family without a formula here reports `None` rather than being
+        // guarded with another family's shape.
         _ => None,
     }
+}
+
+/// Read `config.json` without loading anything else.
+fn read_config_json(model_path: &Path) -> Option<serde_json::Value> {
+    serde_json::from_str(&std::fs::read_to_string(model_path.join("config.json")).ok()?).ok()
+}
+
+/// Worst-case LLaVA image expansion.
+///
+/// LLaVA's block carries no begin- or end-of-image markers, no separator and no
+/// per-row token (`llava_token_block_info` sets `use_boi_eoi: false` with empty
+/// prefix and suffix lists), so one image contributes exactly the projector's
+/// token count and there is no shape to maximize over.
+///
+/// That count is what `load_llava_host_preprocessor` computes: an explicit
+/// `mm_tokens_per_image` when the checkpoint states one, otherwise
+/// `(image_size / patch_size)^2` from the vision config. This mirrors that
+/// expression rather than the upstream HF behavior, because the guard has to
+/// predict what this codebase's preprocessor will actually emit. In particular
+/// no anyres or multi-patch grid is applied here, since this loader applies
+/// none either.
+fn llava_image_context_floor(model_path: &Path) -> Option<usize> {
+    let config = read_config_json(model_path)?;
+    if let Some(explicit) = config.get("mm_tokens_per_image").and_then(|v| v.as_u64()) {
+        return usize::try_from(explicit).ok().filter(|count| *count > 0);
+    }
+    let vision = config.get("vision_config")?;
+    let image_size = usize::try_from(vision.get("image_size")?.as_u64()?).ok()?;
+    let patch_size = usize::try_from(vision.get("patch_size")?.as_u64()?).ok()?;
+    if patch_size == 0 {
+        return None;
+    }
+    let per_side = image_size / patch_size;
+    per_side.checked_mul(per_side).filter(|count| *count > 0)
+}
+
+/// Worst-case Qwen2-VL image expansion.
+///
+/// Unlike Molmo2 and LLaVA the bound does not come from a fixed grid. The
+/// processor's `smart_resize` rounds both edges to `patch_size *
+/// spatial_merge_size` and then caps the area, and
+/// `insert_qwen_vl_image_tokens` emits `(h / merge) * (w / merge)` tokens for a
+/// single-frame image, so the count is `pixels / (patch_size * merge)^2` and
+/// its maximum is that quotient at the pixel cap.
+///
+/// The cap is deliberately read from
+/// [`crate::vision::processors::qwen2_vl::DEFAULT_MAX_PIXELS`] rather than from
+/// `preprocessor_config.json`. `qwen_vl_processor` builds the processor with
+/// `Qwen2VLProcessor::new`, which never consults that file, so a `max_pixels`
+/// key in the checkpoint does not affect what this path admits and reading one
+/// would produce a floor the runtime does not honor.
+fn qwen2_vl_image_context_floor(model_path: &Path) -> Option<usize> {
+    let config = read_config_json(model_path)?;
+    let vision = config.get("vision_config")?;
+    let patch_size = usize::try_from(vision.get("patch_size")?.as_u64()?).ok()?;
+    let merge_size = usize::try_from(vision.get("spatial_merge_size")?.as_u64()?).ok()?;
+    if patch_size == 0 || merge_size == 0 {
+        return None;
+    }
+    crate::vision::processors::qwen2_vl::max_image_tokens(
+        patch_size,
+        merge_size,
+        crate::vision::processors::qwen2_vl::DEFAULT_MAX_PIXELS,
+    )
+    .filter(|count| *count > 0)
 }
 
 /// Name of the variable that selects the static OpenXLA context shape.
@@ -333,12 +399,14 @@ pub fn ensure_xla_image_context_capacity(
         return Ok(());
     }
     Err(HostPreprocessorError::InvalidConfig(format!(
-        "this checkpoint expands one image into up to {floor} tokens, which the default OpenXLA \
-         context capacity of {context_capacity} cannot admit, so every image request would run \
-         its vision tower and then fail. Set {env}={floor} or higher to serve images (the \
-         capacity is also the length every decode step attends over, so a larger graph costs \
-         throughput), or set {env}={context_capacity} explicitly to keep this graph for \
-         text-only serving.",
+        "this checkpoint can expand a single image into up to {floor} tokens, and the default \
+         OpenXLA context capacity of {context_capacity} admits none of them. Set {env} to the \
+         largest image expansion you intend to serve: {floor} accepts any image, and a smaller \
+         value accepts every image that fits it while rejecting the rest at admission, after \
+         their vision tower has already run. The capacity is also the sequence length every \
+         decode step attends over, so a larger graph costs throughput on every request, \
+         including text-only ones. To keep this graph exactly as it is, set \
+         {env}={context_capacity} explicitly.",
         env = CONTEXT_CAPACITY_ENV,
     )))
 }

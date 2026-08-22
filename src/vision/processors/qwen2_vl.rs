@@ -36,6 +36,40 @@ pub struct Qwen2VLProcessor {
     pub std: [f32; 3],
 }
 
+/// Default lower pixel bound the Qwen2-VL processors are constructed with.
+pub const DEFAULT_MIN_PIXELS: usize = 4 * 28 * 28;
+
+/// Default upper pixel bound the Qwen2-VL processors are constructed with.
+///
+/// `smart_resize` caps the resized area at this value, so it is also what
+/// bounds the visual token count for any input image. Shared with
+/// [`max_image_tokens`] so a capacity floor derived from it cannot drift away
+/// from what the processor actually admits.
+pub const DEFAULT_MAX_PIXELS: usize = 16384 * 28 * 28;
+
+/// Largest visual token count one image can expand into under these bounds.
+///
+/// `smart_resize` rounds both edges to `patch_size * spatial_merge_size` and
+/// caps the area at `max_pixels`; `insert_qwen_vl_image_tokens` then emits
+/// `(h / merge) * (w / merge)` tokens for a single-frame image. Both reduce to
+/// `pixels / (patch_size * spatial_merge_size)^2`, so the maximum is that
+/// quotient evaluated at the pixel cap.
+///
+/// Returns `None` for a degenerate geometry rather than dividing by zero.
+#[must_use]
+pub fn max_image_tokens(
+    patch_size: usize,
+    spatial_merge_size: usize,
+    max_pixels: usize,
+) -> Option<usize> {
+    let factor = patch_size.checked_mul(spatial_merge_size)?;
+    let divisor = factor.checked_mul(factor)?;
+    if divisor == 0 {
+        return None;
+    }
+    Some(max_pixels / divisor)
+}
+
 impl Qwen2VLProcessor {
     /// Used by: Qwen2-VL, Qwen2.5-VL (CLIP normalization)
     pub fn new(patch_size: usize, temporal_patch_size: usize, spatial_merge_size: usize) -> Self {
@@ -43,8 +77,8 @@ impl Qwen2VLProcessor {
             patch_size,
             temporal_patch_size,
             spatial_merge_size,
-            min_pixels: 4 * 28 * 28,     // 3136
-            max_pixels: 16384 * 28 * 28, // large limit
+            min_pixels: DEFAULT_MIN_PIXELS,
+            max_pixels: DEFAULT_MAX_PIXELS,
             mean: [0.48145466, 0.4578275, 0.40821073],
             std: [0.26862954, 0.261_302_6, 0.275_777_1],
         }
@@ -62,8 +96,8 @@ impl Qwen2VLProcessor {
             patch_size,
             temporal_patch_size,
             spatial_merge_size,
-            min_pixels: 4 * 28 * 28,
-            max_pixels: 16384 * 28 * 28,
+            min_pixels: DEFAULT_MIN_PIXELS,
+            max_pixels: DEFAULT_MAX_PIXELS,
             mean,
             std,
         }
