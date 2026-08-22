@@ -413,8 +413,7 @@ fn a_missing_preprocessor_config_reports_no_floor_instead_of_guessing() {
 fn the_default_capacity_is_rejected_with_the_derived_requirement() {
     let dir = molmo2_checkpoint_dir();
     let error = ensure_xla_image_context_capacity(dir.path(), 256, false)
-        .err()
-        .expect("a graph that cannot admit any image must fail at startup");
+        .expect_err("a graph that cannot admit any image must fail at startup");
     let HostPreprocessorError::InvalidConfig(message) = &error else {
         panic!("expected a configuration error, got {error:?}");
     };
