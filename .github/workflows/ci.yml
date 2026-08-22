@@ -424,13 +424,33 @@ jobs:
   # rejected because the release link is minutes of shared-runner time and the
   # overwhelming majority of Rust PRs cannot affect the link line.
   #
-  # Measured cost: a cold release link of the `xla_prepared_prefill` test
-  # binary under `cuda,xla-iree` on this runner takes COLD_COST_PLACEHOLDER.
+  # Measured cost of this job's link command on the GB10 runner: 15m40s from a
+  # purged `CARGO_TARGET_DIR`, most of which is MLX's CUDA sources compiling
+  # from scratch rather than the link itself, and 6m to 7m30s warm. Warm is the
+  # figure that matters, because the trigger below fires on `build.rs`, which
+  # invalidates the `mlxcel` crate but not `mlxcel-core`'s MLX build. For
+  # comparison, `xla-compile`'s `cargo check` over the same feature set is
+  # about a minute warm, which is why the two are separate jobs on separate
+  # triggers.
   #
   # `RUSTFLAGS` is deliberately unset here, unlike `xla-compile`. This job
   # gates the link, not lints; `xla-compile` owns the lint policy. Leaving it
   # unset means a red run here is unambiguously a link failure, not a lint
   # failure wearing a link job's name.
+  #
+  # What the gate was demonstrated on, since #1274's own defect no longer
+  # reproduces here: the IREE runtime currently pinned by
+  # `scripts/iree/setup-cuda.sh` is built without the stack protector, so
+  # `libiree_runtime_unified.a` holds no `__stack_chk_guard` reference at all
+  # (`nm` reports zero) and removing the `-lc` entry from `build.rs` links
+  # cleanly today. The `-lc` entry is therefore inert against this particular
+  # distribution, though still correct to keep for one built with the stack
+  # protector. The gate was instead demonstrated by dropping
+  # `-l:libflatcc_parsing.a` from the same recipe: on that tree `cargo check
+  # --features cuda,xla-iree --all-targets` still passed in 59 seconds while
+  # this job's link command failed with undefined references to
+  # `flatcc_verify_*`, which is the same shape as #1274 and the exact gap this
+  # job exists to close.
   #
   # Deliberately NOT covered, so the gap is recorded rather than assumed shut:
   #   - The `IREE_DIST` recipe (`build.rs:180-220`) and the macOS
