@@ -209,3 +209,29 @@ fn reason_strings_name_the_position_and_the_byte_counts() {
     assert!(reason.contains("17"), "{reason}");
     assert!(reason.contains("496640"), "{reason}");
 }
+
+/// A decline records its reason beside the memoized decision, so the
+/// server's policy endpoint can say why MTP is not running without
+/// re-probing (issue #1298). A pass records nothing.
+#[test]
+fn a_decline_records_its_reason_and_a_pass_does_not() {
+    let declined = key(9105);
+    let decision = mtp_exactness_gate(declined, || BlockChainExactness::Diverges {
+        position: 0,
+        differing_bytes: 7,
+        total_bytes: 100,
+    });
+    assert!(!decision);
+    let reason = super::decline_reason(9105).expect("a decline records its reason");
+    assert!(
+        reason.contains("differs from the single-token chain"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("Disabling qmv_wide did not make it exact either"),
+        "the retry outcome is part of the story: {reason}"
+    );
+
+    assert!(mtp_exactness_gate(key(9106), || BlockChainExactness::Equal));
+    assert_eq!(super::decline_reason(9106), None);
+}

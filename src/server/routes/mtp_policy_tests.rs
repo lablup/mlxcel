@@ -27,6 +27,7 @@ fn settled(run: bool, acceptance_rate: f64, samples: usize) -> MtpPolicySnapshot
     MtpPolicySnapshot {
         status: MtpPolicyStatus::Settled,
         reason: None,
+        decline_detail: None,
         target: Some("Gemma4-12B".to_string()),
         drafter: Some("Gemma4-12B-MTP".to_string()),
         hardware: Some("M5-16c".to_string()),
@@ -75,6 +76,7 @@ fn profiling_reports_no_verdict_and_the_remaining_sample_count() {
     let snapshot = MtpPolicySnapshot {
         status: MtpPolicyStatus::Profiling,
         reason: None,
+        decline_detail: None,
         target: Some("Gemma4-12B".to_string()),
         drafter: Some("Gemma4-12B-MTP".to_string()),
         hardware: Some("M5-16c".to_string()),
@@ -103,6 +105,7 @@ fn forced_is_reported_separately_from_settled() {
     let snapshot = MtpPolicySnapshot {
         status: MtpPolicyStatus::Forced,
         reason: None,
+        decline_detail: None,
         target: Some("Gemma4-12B".to_string()),
         drafter: Some("Gemma4-12B-MTP".to_string()),
         hardware: Some("M5-16c".to_string()),
@@ -173,6 +176,7 @@ fn profiling_is_distinguishable_from_unavailable() {
     let profiling = build_mtp_policy_response(Some(MtpPolicySnapshot {
         status: MtpPolicyStatus::Profiling,
         reason: None,
+        decline_detail: None,
         target: Some("t".to_string()),
         drafter: Some("d".to_string()),
         hardware: Some("hw".to_string()),
@@ -217,4 +221,38 @@ fn response_round_trips_through_json_with_the_documented_field_names() {
 
     let parsed: MtpPolicyResponse = serde_json::from_value(json).expect("round-trips");
     assert_eq!(parsed, body);
+}
+
+/// The exactness veto is a first-class state (issue #1298): not `profiling`
+/// (no verdict is pending, none can arrive) and not `unavailable` (the
+/// dispatch exists; the measured gate refused it). The probe's reason rides
+/// along so the endpoint and the boot-time WARN tell one story.
+#[test]
+fn exactness_declined_reports_the_veto_and_its_reason() {
+    let detail = "verify block position 0 differs from the single-token chain \
+                  in 245722 of 524288 logit bytes. Disabling qmv_wide did not \
+                  make it exact either.";
+    let snapshot = MtpPolicySnapshot::exactness_declined(
+        "Gemma4-31B".to_string(),
+        "Gemma4-31B-assistant".to_string(),
+        4,
+        Some(detail.to_string()),
+    );
+    let body = build_mtp_policy_response(Some(snapshot));
+
+    assert_eq!(body.state, "exactness_declined");
+    assert_eq!(body.mtp_enabled, Some(false));
+    assert_eq!(body.verdict, None, "nothing was measured by the policy");
+    assert_eq!(body.reason, None, "reason is the unavailable-state field");
+    assert_eq!(body.decline_detail.as_deref(), Some(detail));
+    assert_eq!(body.samples, 0);
+    assert_eq!(
+        body.samples_remaining, None,
+        "a vetoed pairing must not render a countdown"
+    );
+
+    let json = serde_json::to_value(&body).expect("serializes");
+    assert_eq!(json["state"], "exactness_declined");
+    assert_eq!(json["decline_detail"], detail);
+    assert_eq!(json["block_size"], 4);
 }

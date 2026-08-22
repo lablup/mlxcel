@@ -68,16 +68,23 @@ pub const MTP_POLICY_SCHEMA_VERSION: u32 = 1;
 pub struct MtpPolicyResponse {
     /// See [`MTP_POLICY_SCHEMA_VERSION`].
     pub schema_version: u32,
-    /// `"settled"`, `"profiling"`, `"forced"`, or `"unavailable"`.
+    /// `"settled"`, `"profiling"`, `"forced"`, `"unavailable"`, or
+    /// `"exactness_declined"`.
     ///
     /// `"forced"` is not `"settled"`: it means `MLXCEL_ENABLE_MTP_B1` pinned
     /// the decision, so nothing was measured on this machine and rendering it
-    /// as a measured verdict would be a lie.
+    /// as a measured verdict would be a lie. `"exactness_declined"` means the
+    /// runtime exactness probe vetoed the pairing, the B=1 burst never
+    /// dispatches, and requests serve classic decode; nothing is profiling
+    /// and no verdict will arrive (issue #1298).
     pub state: String,
     /// Why the policy is unavailable: `"no_mtp_dispatch"`,
     /// `"adaptive_disabled"`, or `"worker_not_ready"`. `null` in every other
     /// state.
     pub reason: Option<String>,
+    /// The exactness probe's one-line reason, present only when `state` is
+    /// `"exactness_declined"`. The same sentence the boot-time WARN logs.
+    pub decline_detail: Option<String>,
     /// `"enable"` or `"decline"` once settled, `null` otherwise. Matches the
     /// `verdict` values in the persisted hint file.
     pub verdict: Option<String>,
@@ -136,6 +143,7 @@ pub(crate) fn build_mtp_policy_response(snapshot: Option<MtpPolicySnapshot>) -> 
         schema_version: MTP_POLICY_SCHEMA_VERSION,
         state: snapshot.status.as_str().to_string(),
         reason: snapshot.reason.map(|r| r.as_str().to_string()),
+        decline_detail: snapshot.decline_detail,
         verdict: snapshot
             .verdict
             .map(|v| if v.runs() { "enable" } else { "decline" }.to_string()),

@@ -782,6 +782,15 @@ pub enum MtpPolicyStatus {
     /// A verdict is in effect, either settled in this process or loaded from a
     /// persisted hint.
     Settled,
+    /// The runtime exactness probe declined the pairing
+    /// (`models::speculative_exactness`), so the B=1 burst never dispatches
+    /// and requests serve classic decode. Distinct from
+    /// [`Profiling`](Self::Profiling) precisely so a vetoed pairing does not
+    /// report a verdict as pending forever, which is the ambiguity #1257
+    /// exists to remove, and distinct from [`Settled`](Self::Settled)
+    /// because this policy measured nothing: the veto happened upstream of
+    /// it (issue #1298).
+    ExactnessDeclined,
 }
 
 impl MtpPolicyStatus {
@@ -795,6 +804,7 @@ impl MtpPolicyStatus {
             Self::Forced => "forced",
             Self::Profiling => "profiling",
             Self::Settled => "settled",
+            Self::ExactnessDeclined => "exactness_declined",
         }
     }
 }
@@ -851,6 +861,12 @@ pub struct MtpPolicySnapshot {
     pub status: MtpPolicyStatus,
     /// Set only when `status` is [`MtpPolicyStatus::Unavailable`].
     pub reason: Option<MtpPolicyUnavailableReason>,
+    /// The exactness probe's one-line reason, set only when `status` is
+    /// [`MtpPolicyStatus::ExactnessDeclined`]. The same sentence the
+    /// boot-time WARN logs, so the endpoint and the log tell one story
+    /// (issue #1298).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decline_detail: Option<String>,
     /// Target identity (the served model directory's basename).
     pub target: Option<String>,
     /// Drafter identity (the draft model directory's basename).
@@ -891,11 +907,43 @@ impl MtpPolicySnapshot {
         Self {
             status: MtpPolicyStatus::Unavailable,
             reason: Some(reason),
+            decline_detail: None,
             target: None,
             drafter: None,
             hardware: None,
             block_size: None,
             mtp_enabled,
+            verdict: None,
+            acceptance_rate: None,
+            samples: 0,
+            samples_required: PROFILE_SAMPLE_TARGET,
+        }
+    }
+
+    /// The "exactness probe vetoed this pairing" view (issue #1298).
+    ///
+    /// Published instead of the attached policy's own snapshot when
+    /// `mtp_capable_target` is false for the resolved MTP dispatch: the
+    /// policy would otherwise report `profiling` forever, because the burst
+    /// it waits to sample never dispatches. `mtp_enabled` is `false`, no
+    /// verdict exists, and nothing was measured; `decline_detail` carries
+    /// the probe's reason when the gate recorded one.
+    #[must_use]
+    pub fn exactness_declined(
+        target: String,
+        drafter: String,
+        block_size: u32,
+        decline_detail: Option<String>,
+    ) -> Self {
+        Self {
+            status: MtpPolicyStatus::ExactnessDeclined,
+            reason: None,
+            decline_detail,
+            target: Some(target),
+            drafter: Some(drafter),
+            hardware: Some(hardware_label()),
+            block_size: Some(block_size),
+            mtp_enabled: Some(false),
             verdict: None,
             acceptance_rate: None,
             samples: 0,
@@ -1161,6 +1209,7 @@ impl MtpPolicy {
         MtpPolicySnapshot {
             status,
             reason: None,
+            decline_detail: None,
             target: Some(self.key.target.clone()),
             drafter: Some(self.key.drafter.clone()),
             hardware: Some(self.key.hardware.clone()),

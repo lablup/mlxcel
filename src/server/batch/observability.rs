@@ -1002,6 +1002,7 @@ mod tests {
         let settled = MtpPolicySnapshot {
             status: MtpPolicyStatus::Settled,
             reason: None,
+            decline_detail: None,
             target: Some("t".to_string()),
             drafter: Some("d".to_string()),
             hardware: Some("M5-16c".to_string()),

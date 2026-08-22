@@ -29,6 +29,7 @@ On a model-serving node, the endpoint is always mounted, unlike `/props`, `/slot
   "schema_version": 1,
   "state": "settled",
   "reason": null,
+  "decline_detail": null,
   "verdict": "enable",
   "mtp_enabled": true,
   "target": "Gemma4-12B",
@@ -45,8 +46,9 @@ On a model-serving node, the endpoint is always mounted, unlike `/props`, `/slot
 | Field | Type | Meaning |
 |-------|------|---------|
 | `schema_version` | integer | Wire schema version of this body. See [Versioning and compatibility](#versioning-and-compatibility). |
-| `state` | string | `"settled"`, `"profiling"`, `"forced"`, or `"unavailable"`. |
+| `state` | string | `"settled"`, `"profiling"`, `"forced"`, `"unavailable"`, or `"exactness_declined"`. |
 | `reason` | string or null | Why the policy is unavailable. Non-null only when `state` is `"unavailable"`. |
+| `decline_detail` | string or null | The exactness probe's one-line reason. Non-null only when `state` is `"exactness_declined"`; the same sentence the boot-time WARN logs. |
 | `verdict` | string or null | `"enable"` or `"decline"` once settled, `null` otherwise. Same values as the `verdict` field of the persisted hint. |
 | `mtp_enabled` | boolean or null | Whether the *policy* is not blocking the B=1 MTP burst right now. This is the live gate, not the verdict: it is `true` while profiling, because profiling forces MTP on at the policy level. It does not mean a burst is actually running: later runtime gates (target support, exactness, capability checks) can still reject every burst attempt, in which case profiling never accumulates a sample despite `mtp_enabled: true`. |
 | `target` | string or null | Served model directory basename. |
@@ -65,7 +67,8 @@ The four fields `target`, `drafter`, `hardware`, and `block_size` are the pairin
 | `state` | Meaning |
 |---------|---------|
 | `settled` | A verdict is in effect, either measured in this process or restored from a persisted hint. `verdict` says which way. |
-| `profiling` | Still accumulating samples. There is no verdict yet; `samples_remaining` says how many qualifying single-request generations are still needed. MTP is forced on at the policy level meanwhile, so `mtp_enabled` is `true`. Limitation: if the runtime gates below the policy (target support, exactness, capability checks) reject every burst attempt, no sample is ever recorded, and the endpoint reports `state: "profiling"`, `samples: 0`, `samples_remaining: 4` for the life of the process, with `mtp_enabled: true` misleadingly suggesting MTP is running. |
+| `profiling` | Still accumulating samples. There is no verdict yet; `samples_remaining` says how many qualifying single-request generations are still needed. MTP is forced on at the policy level meanwhile, so `mtp_enabled` is `true`. Limitation: if per-request runtime gates below the policy (target support, per-sequence capability checks) reject every burst attempt, no sample is ever recorded and this state persists with `samples: 0`. The one structural case of that starvation, the exactness-probe veto, reports as `exactness_declined` instead since issue #1298. |
+| `exactness_declined` | The runtime exactness probe declined the pairing: the multi-token verify block is not byte-identical to the single-token chain on this hardware under any available kernel selection, so the B=1 burst never dispatches and requests serve classic decode. `decline_detail` carries the probe's reason, `mtp_enabled` is `false`, and no verdict will ever arrive, which is exactly why this is not `profiling`. `MLXCEL_MTP_ALLOW_INEXACT=1` opts into running anyway, forfeiting the temperature-0 byte-identity contract. |
 | `forced` | `MLXCEL_ENABLE_MTP_B1` pinned the decision. Nothing was profiled and nothing was measured, so `verdict`, `acceptance_rate`, and `samples` carry no measurement. `mtp_enabled` still reports what the pin resolved to. |
 | `unavailable` | No adaptive policy is running. `reason` says why. |
 
@@ -116,6 +119,7 @@ While profiling:
   "schema_version": 1,
   "state": "profiling",
   "reason": null,
+  "decline_detail": null,
   "verdict": null,
   "mtp_enabled": true,
   "target": "Gemma4-12B",
@@ -138,6 +142,7 @@ On a server with no drafter:
   "schema_version": 1,
   "state": "unavailable",
   "reason": "no_mtp_dispatch",
+  "decline_detail": null,
   "verdict": null,
   "mtp_enabled": false,
   "target": null,
@@ -150,5 +155,28 @@ On a server with no drafter:
   "samples_remaining": null
 }
 ```
+
+On a generation 15+ host whose pairing fails the exactness probe under both kernel selections (measured on the Gemma 4 31B + bf16 assistant pairing on M3 Ultra and M5 Max, issue #1279):
+
+```json
+{
+  "schema_version": 1,
+  "state": "exactness_declined",
+  "reason": null,
+  "decline_detail": "verify block position 0 differs from the single-token chain in 245722 of 524288 logit bytes. Disabling qmv_wide did not make it exact either.",
+  "verdict": null,
+  "mtp_enabled": false,
+  "target": "gemma-4-31b-it-4bit",
+  "drafter": "gemma-4-31b-it-assistant-bf16",
+  "hardware": "M5-40c",
+  "block_size": 4,
+  "acceptance_rate": null,
+  "samples": 0,
+  "samples_required": 4,
+  "samples_remaining": null
+}
+```
+
+which renders as "MTP configured but vetoed; running classic decode", with the reason available verbatim.
 
 The same state is also included in the `/health` observability snapshot under `observability.mtp_policy`, in a similar but unversioned shape (it spells the state field `status` and omits `schema_version` and `samples_remaining`), for operators already polling that endpoint. `/health` is an operator surface with no stability promise; `/v1/internal/mtp-policy` is the one with the contract above.
