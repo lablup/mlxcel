@@ -175,6 +175,74 @@ fn eviction_removes_oldest_completed() {
     assert!(tracker.tracked_count() <= 4);
 }
 
+/// Number of freshly built trackers the determinism test iterates over.
+///
+/// `RandomState` seeds every `HashMap` instance separately, not merely once
+/// per process, so probing a single tracker twice proves nothing. Rebuilding
+/// the tracker on every iteration is what exercises a different hash
+/// iteration order each time.
+const DETERMINISM_ITERATIONS: usize = 32;
+
+/// Issue #1286: requests that share a `created_at` tick must be evicted in a
+/// defined order rather than in `HashMap` iteration order.
+#[test]
+fn eviction_tie_break_is_deterministic() {
+    let keys: Vec<String> = ["req-4", "req-1", "req-5", "req-0", "req-3", "req-2"]
+        .iter()
+        .map(|k| (*k).to_string())
+        .collect();
+    // Six tracked against max_tracked = 5 means to_remove = 2, and every
+    // entry ties on created_at, so the two lexicographically smallest keys go.
+    let expected_remaining: Vec<String> = ["req-2", "req-3", "req-4", "req-5"]
+        .iter()
+        .map(|k| (*k).to_string())
+        .collect();
+
+    for _ in 0..DETERMINISM_ITERATIONS {
+        let tracker = RequestTracker::new(RequestTrackerConfig { max_tracked: 5 });
+
+        // Submit all six before completing any, so the eviction that runs
+        // inside submit_with_id finds no terminal entries to drop.
+        for key in &keys {
+            tracker.submit_with_id(RequestId::from_string(key.clone()).unwrap());
+        }
+        for key in &keys {
+            let id = RequestId::from_string(key.clone()).unwrap();
+            assert!(tracker.transition(&id, RequestState::Routing));
+            assert!(tracker.transition(
+                &id,
+                RequestState::Processing {
+                    node_id: "node-0".to_string(),
+                },
+            ));
+            assert!(tracker.transition(&id, RequestState::Completed));
+        }
+
+        {
+            let mut inner = tracker.inner.write().expect("tracker lock poisoned");
+            // `Instant::now()` has nanosecond resolution on Linux and will
+            // never tie naturally, so write one shared timestamp into every
+            // lifecycle.
+            let tied = Instant::now();
+            for lifecycle in inner.requests.values_mut() {
+                lifecycle.created_at = tied;
+            }
+            tracker.evict_if_needed(&mut inner);
+        }
+
+        let mut remaining: Vec<String> = tracker
+            .inner
+            .read()
+            .expect("tracker lock poisoned")
+            .requests
+            .keys()
+            .cloned()
+            .collect();
+        remaining.sort();
+        assert_eq!(remaining, expected_remaining);
+    }
+}
+
 #[test]
 fn remove_request() {
     let tracker = RequestTracker::new(RequestTrackerConfig::default());

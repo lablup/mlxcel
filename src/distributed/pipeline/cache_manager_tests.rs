@@ -300,6 +300,87 @@ fn eviction_candidates_longest() {
     assert_eq!(candidates[2], 2);
 }
 
+// --- Eviction tie-break determinism (issue #1286) ---
+
+/// Number of freshly built managers each determinism test iterates over.
+///
+/// `RandomState` seeds every `HashMap` instance separately, not merely once
+/// per process, so probing a single map twice proves nothing. Rebuilding the
+/// manager on every iteration is what exercises a different hash iteration
+/// order each time.
+const DETERMINISM_ITERATIONS: usize = 32;
+
+/// Helper: build a manager holding eight equally sized allocations under the
+/// given preemption policy, with sequence IDs inserted out of order.
+fn tied_manager(policy: PreemptionPolicy) -> PipelineCacheManager {
+    let mut cfg = test_config(0, 0..1);
+    cfg.memory_budget_bytes = 1_000_000;
+    cfg.max_sequences = 10;
+    let mut mgr = PipelineCacheManager::new(cfg)
+        .unwrap()
+        .with_preemption_policy(policy);
+
+    for id in [7, 3, 8, 1, 6, 2, 5, 4] {
+        // Equal prompt lengths, so `current_offset` ties across all eight.
+        let req = CacheAdmissionRequest::new(id, 10);
+        assert_eq!(mgr.request_admission(&req), AdmissionDecision::Admitted);
+    }
+    mgr
+}
+
+#[test]
+fn eviction_candidates_lru_tie_break_is_deterministic() {
+    let expected: Vec<SequenceId> = vec![1, 2, 3, 4, 5, 6, 7, 8];
+
+    for _ in 0..DETERMINISM_ITERATIONS {
+        let mut mgr = tied_manager(PreemptionPolicy::LRU);
+        // `Instant::now()` has nanosecond resolution on Linux and will never
+        // tie naturally, so write one shared timestamp into every allocation.
+        let tied = Instant::now();
+        for alloc in mgr.allocations.values_mut() {
+            alloc.last_accessed = tied;
+        }
+
+        assert_eq!(mgr.select_eviction_candidates(), expected);
+    }
+}
+
+#[test]
+fn eviction_candidates_shortest_tie_break_is_deterministic() {
+    let expected: Vec<SequenceId> = vec![1, 2, 3, 4, 5, 6, 7, 8];
+
+    for _ in 0..DETERMINISM_ITERATIONS {
+        let mgr = tied_manager(PreemptionPolicy::Shortest);
+        assert_eq!(mgr.select_eviction_candidates(), expected);
+    }
+}
+
+#[test]
+fn eviction_candidates_longest_tie_break_is_deterministic() {
+    let expected: Vec<SequenceId> = vec![1, 2, 3, 4, 5, 6, 7, 8];
+
+    for _ in 0..DETERMINISM_ITERATIONS {
+        let mgr = tied_manager(PreemptionPolicy::Longest);
+        assert_eq!(mgr.select_eviction_candidates(), expected);
+    }
+}
+
+#[test]
+fn preemption_signal_order_is_deterministic_under_ties() {
+    let expected: Vec<SequenceId> = vec![1, 2, 3, 4, 5, 6, 7, 8];
+
+    for _ in 0..DETERMINISM_ITERATIONS {
+        let mut mgr = tied_manager(PreemptionPolicy::Shortest);
+        // Eight 10-token allocations use 81_920 B; drop the budget so the
+        // manager is over its 0.8 threshold and publishes a signal.
+        mgr.config.memory_budget_bytes = 100_000;
+        let signal = mgr
+            .check_memory_pressure()
+            .expect("81_920 B of 100_000 B must exceed the 0.8 threshold");
+        assert_eq!(signal.sequence_ids, expected);
+    }
+}
+
 // --- Metadata sync tests ---
 
 #[test]

@@ -395,6 +395,105 @@ fn eviction_candidates_least_tokens() {
     assert_eq!(candidates[2], 1);
 }
 
+// --- Eviction tie-break determinism (issue #1286) ---
+
+/// Number of freshly built managers each determinism test iterates over.
+///
+/// `RandomState` seeds every `HashMap` instance separately, not merely once
+/// per process, so probing a single map twice proves nothing. Rebuilding the
+/// manager on every iteration is what exercises a different hash iteration
+/// order each time.
+const DETERMINISM_ITERATIONS: usize = 32;
+
+/// Helper: a tight-budget config where six equally sized allocations put the
+/// manager over the pressure threshold and a three-sequence prefix brings it
+/// back under the target.
+fn tied_pressure_config() -> TPCacheConfig {
+    let mut cfg = mha_config(0, 4);
+    cfg.memory_budget_bytes = 10_000_000;
+    cfg.pressure_threshold = 0.5;
+    cfg
+}
+
+#[test]
+fn eviction_candidates_lru_tie_break_is_deterministic() {
+    let ids: [SequenceId; 8] = [7, 3, 8, 1, 6, 2, 5, 4];
+    let expected: Vec<SequenceId> = vec![1, 2, 3, 4, 5, 6, 7, 8];
+
+    for _ in 0..DETERMINISM_ITERATIONS {
+        let mut mgr = TPCacheManager::new(mha_config(0, 4)).unwrap();
+        for &id in &ids {
+            mgr.allocate_cache(id, 1).unwrap();
+        }
+        // `Instant::now()` has nanosecond resolution on Linux and will never
+        // tie naturally, so write one shared timestamp into every allocation.
+        let tied = Instant::now();
+        for alloc in mgr.allocations.values_mut() {
+            alloc.last_accessed = tied;
+        }
+
+        assert_eq!(mgr.select_eviction_candidates(), expected);
+    }
+}
+
+#[test]
+fn eviction_candidates_least_tokens_tie_break_is_deterministic() {
+    let ids: [SequenceId; 8] = [7, 3, 8, 1, 6, 2, 5, 4];
+    let expected: Vec<SequenceId> = vec![1, 2, 3, 4, 5, 6, 7, 8];
+
+    for _ in 0..DETERMINISM_ITERATIONS {
+        let mut mgr = TPCacheManager::new(mha_config(0, 4))
+            .unwrap()
+            .with_eviction_policy(EvictionPolicy::LeastTokens);
+        // Equal token counts, so `current_offset` ties across all eight.
+        for &id in &ids {
+            mgr.allocate_cache(id, 10).unwrap();
+        }
+
+        assert_eq!(mgr.select_eviction_candidates(), expected);
+    }
+}
+
+#[test]
+fn check_pressure_prefix_is_deterministic_under_ties() {
+    let ids: [SequenceId; 6] = [14, 11, 16, 12, 15, 13];
+    // Six 10-token allocations use 7_864_320 B against a 10 MB budget with a
+    // 0.5 threshold, so `check_pressure` consumes a three-candidate prefix to
+    // get projected usage under the 5_000_000 B target. Every candidate ties,
+    // so the prefix is exactly the three lowest sequence IDs.
+    let expected: Vec<SequenceId> = vec![11, 12, 13];
+
+    for _ in 0..DETERMINISM_ITERATIONS {
+        // LeastTokens: identical token counts tie `current_offset`.
+        let mut mgr = TPCacheManager::new(tied_pressure_config())
+            .unwrap()
+            .with_eviction_policy(EvictionPolicy::LeastTokens);
+        for &id in &ids {
+            mgr.allocate_cache(id, 10).unwrap();
+        }
+        let signal = mgr
+            .check_pressure()
+            .expect("six 10-token allocations must exceed the 0.5 threshold");
+        assert_eq!(signal.sequence_ids, expected);
+
+        // LRU: the same allocations with one shared `last_accessed`.
+        let mut mgr = TPCacheManager::new(tied_pressure_config())
+            .unwrap()
+            .with_eviction_policy(EvictionPolicy::LRU);
+        for &id in &ids {
+            mgr.allocate_cache(id, 10).unwrap();
+        }
+        let tied = Instant::now();
+        for alloc in mgr.allocations.values_mut() {
+            alloc.last_accessed = tied;
+        }
+        let signal = mgr
+            .check_pressure()
+            .expect("six 10-token allocations must exceed the 0.5 threshold");
+        assert_eq!(signal.sequence_ids, expected);
+    }
+}
+
 // --- Coordinated eviction ---
 
 #[test]

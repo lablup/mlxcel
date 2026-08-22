@@ -351,7 +351,7 @@ impl fmt::Display for EvictionEvent {
 /// Signal emitted when memory pressure requires preemption.
 #[derive(Debug, Clone)]
 pub struct PreemptionSignal {
-    /// Sequences recommended for eviction, in priority order (evict first last).
+    /// Sequences recommended for eviction, in priority order (first = evict first).
     pub sequence_ids: Vec<SequenceId>,
     /// Stage that detected the pressure.
     pub source_stage: u32,
@@ -696,15 +696,20 @@ impl PipelineCacheManager {
     fn select_eviction_candidates(&self) -> Vec<SequenceId> {
         let mut entries: Vec<_> = self.allocations.values().collect();
 
+        // The `sequence_id` component is what makes each sort key a TOTAL
+        // order, and it must stay. `sort_by_key` is stable and `entries` comes
+        // out of a `HashMap` whose iteration order `RandomState` randomizes per
+        // instance, so without the tie-break the priority order published in
+        // `PreemptionSignal.sequence_ids` is not reproducible across runs.
         match self.preemption_policy {
             PreemptionPolicy::LRU => {
-                entries.sort_by_key(|a| a.last_accessed);
+                entries.sort_by_key(|a| (a.last_accessed, a.sequence_id));
             }
             PreemptionPolicy::Shortest => {
-                entries.sort_by_key(|a| a.current_offset);
+                entries.sort_by_key(|a| (a.current_offset, a.sequence_id));
             }
             PreemptionPolicy::Longest => {
-                entries.sort_by_key(|a| std::cmp::Reverse(a.current_offset));
+                entries.sort_by_key(|a| (std::cmp::Reverse(a.current_offset), a.sequence_id));
             }
         }
 
