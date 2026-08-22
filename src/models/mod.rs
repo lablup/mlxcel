@@ -35,6 +35,11 @@ mod sanitize;
 pub mod config;
 pub(crate) mod conv_decode;
 pub mod gated_delta;
+// `rope_utils` is the shared reader for the `rope_scaling` block plus the
+// frequency tables it selects (#1355). It exists because two families needed
+// the same decision and only one made it: Apertus computed the `llama3` table
+// inline while the shared Llama attention parsed the block and dropped it.
+pub mod rope_utils;
 pub mod switch_layers;
 
 // Model implementations (mlxcel-core based)

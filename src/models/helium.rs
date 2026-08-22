@@ -413,7 +413,11 @@ impl ModelArgs {
             attention_bias: self.attention_bias,
             mlp_bias: self.mlp_bias,
             rope_theta: self.rope_theta,
-            // Helium has no RoPE scaling of any kind upstream.
+            // Helium has no RoPE scaling of any kind upstream, and its own
+            // `config.json` declares no `rope_scaling` key, so there is nothing
+            // to forward. Since #1355 the shared path reads this field, which
+            // makes `None` a decision rather than a placeholder: it selects the
+            // plain `base^(2i/d)` table Helium has always rotated with.
             rope_scaling: None,
             quantization: self
                 .quantization

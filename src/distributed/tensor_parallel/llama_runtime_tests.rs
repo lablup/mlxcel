@@ -930,6 +930,57 @@ fn local_llama_args_preserves_computed_head_dim_when_config_omits_it() {
 }
 
 #[test]
+fn tensor_parallel_llama_propagates_rope_scaling_to_every_rank() {
+    // Same argument as the rotation convention below, for the frequency table
+    // (#1355). `from_model_dir` parses `config.json` straight into the shared
+    // args and `local_llama_args` clones them per rank, so the table travels by
+    // construction; asserting it is what stops that from ceasing to be true in
+    // silence. A rank that rotated at the unscaled base while its peers used
+    // the banded table would still produce correctly shaped activations and a
+    // fluent result.
+    let config_str = crate::models::sanitize_config_json(
+        r#"{
+            "model_type": "llama",
+            "hidden_size": 4,
+            "num_hidden_layers": 1,
+            "intermediate_size": 8,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+            "head_dim": 2,
+            "rms_norm_eps": 1e-5,
+            "rope_theta": 500000.0,
+            "vocab_size": 8,
+            "rope_scaling": {
+                "factor": 8.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0,
+                "original_max_position_embeddings": 8192, "rope_type": "llama3"
+            }
+        }"#,
+    );
+    let args: LlamaModelArgs = serde_json::from_str(&config_str).unwrap();
+    assert!(
+        args.rope_scaling_kind().freqs().is_some(),
+        "the runtime parses config.json with no conversion step, so the block must survive \
+         the parse and resolve to a table"
+    );
+
+    let plan = generate_shard_plan(
+        "llama",
+        args.num_hidden_layers,
+        &ShardConfig::with_tp_size(2),
+    )
+    .unwrap();
+    assert!(
+        local_llama_args(&args, &plan)
+            .unwrap()
+            .rope_scaling_kind()
+            .freqs()
+            .is_some(),
+        "the rank-local config must keep the frequency table while it edits the sharded \
+         dimensions"
+    );
+}
+
+#[test]
 fn tensor_parallel_llama_propagates_rope_traditional_to_every_rank() {
     // #931 made `rope_traditional` deserializable, which puts the flag on the
     // tensor-parallel path for the first time: `from_model_dir` parses

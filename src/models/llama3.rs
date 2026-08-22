@@ -28,6 +28,8 @@ use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
 use std::path::Path;
 
+use crate::models::rope_utils::RopeScalingKind;
+
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelArgs {
@@ -110,19 +112,16 @@ where
     Ok(Option::<bool>::deserialize(deserializer)?.unwrap_or(false))
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct RopeScaling {
-    #[serde(rename = "type", default)]
-    pub rope_type: Option<String>,
-    #[serde(default)]
-    pub factor: Option<f32>,
-    #[serde(default)]
-    pub low_freq_factor: Option<f32>,
-    #[serde(default)]
-    pub high_freq_factor: Option<f32>,
-    #[serde(default)]
-    pub original_max_position_embeddings: Option<usize>,
-}
+/// The parsed `rope_scaling` block.
+///
+/// This used to be a local struct whose scheme field was `#[serde(rename =
+/// "type")]`, which is not the spelling any Llama 3.x config uses: they all
+/// write `rope_type`, so the field was `None` on every checkpoint the block was
+/// meant to describe, and nothing read the rest of it either. It is now the
+/// shared reader in [`crate::models::rope_utils`], which accepts both spellings
+/// and tolerates a config carrying both. The alias keeps the name that
+/// [`crate::models::qwen2`] re-exports.
+pub use crate::models::rope_utils::RopeScalingSpec as RopeScaling;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Quantization {
@@ -154,6 +153,27 @@ impl ModelArgs {
     pub fn bits(&self) -> i32 {
         self.quantization.as_ref().map(|q| q.bits).unwrap_or(4)
     }
+
+    /// Resolve `rope_scaling` into the frequency table this checkpoint asks for.
+    ///
+    /// Computed once per model, not once per layer: the `llama3` table is a
+    /// `powf` loop over `head_dim / 2` entries, and every decoder layer of a
+    /// given model rotates with the same one. [`Llama3Model::from_weights`]
+    /// calls this and hands each block a
+    /// [`crate::models::rope_utils::RopeScalingKind::duplicate`].
+    ///
+    /// An unimplemented scheme warns and keeps the unscaled table rather than
+    /// failing the load; see
+    /// [`crate::models::rope_utils::RopeScalingKind::resolve`] for why a load
+    /// error could not ship.
+    pub fn rope_scaling_kind(&self) -> RopeScalingKind {
+        RopeScalingKind::resolve(
+            self.rope_scaling.as_ref(),
+            self.head_dim(),
+            self.rope_theta,
+            &self.model_type,
+        )
+    }
 }
 
 /// Opts a quantized prefill into `fused_causal_prefill_attention`. Read by the
@@ -174,20 +194,33 @@ pub(crate) const FUSED_QKV_SPLIT_ROPE_ENV: &str = "MLXCEL_ENABLE_FUSED_QKV_SPLIT
 pub(crate) const FUSED_ROPE_ENV_VARS: [&str; 2] =
     [FUSED_CAUSAL_PREFILL_ENV, FUSED_QKV_SPLIT_ROPE_ENV];
 
-/// Print, at most once per process, that a traditional-RoPE checkpoint has been
-/// routed around a fused RoPE launcher that an environment variable asked for.
+/// Print, at most once per process, that a checkpoint has been routed around a
+/// fused RoPE launcher that an environment variable asked for.
+///
+/// Two properties trigger the bypass and both are named in `reasons`:
+///
+/// - `rope_traditional`, because the launchers hardcode the split-half rotation
+///   inside C++ and take no flag;
+/// - a `rope_scaling` block that changes the frequency table or the position
+///   scale, because the launchers take `rope_base` (and, for the rope-append
+///   kernel, a position scale) and have no way to receive a precomputed
+///   frequency table at all.
 ///
 /// Correctness does not depend on this: [`Attention::forward`] bypasses the
 /// launchers regardless. What it buys is that the fallback is reported rather
 /// than silent, which is the one real cost the bypass carries. The notice fires
-/// only when both conditions hold, so a user who never sets the variables never
-/// sees it.
+/// only when a bypass reason holds *and* a variable asked for a fused path, so a
+/// user who never sets the variables never sees it.
 ///
 /// `eprintln!` rather than `tracing::warn!` on purpose: only the server installs
 /// a `tracing` subscriber, so a `warn!` here is a no-op in the `mlxcel` CLI,
 /// which is where this is most likely to be read.
-fn report_fused_rope_bypass_once() {
+fn report_fused_rope_bypass_once(reasons: &[&str]) {
     static NOTICE: std::sync::Once = std::sync::Once::new();
+
+    if reasons.is_empty() {
+        return;
+    }
 
     let requested: Vec<&str> = FUSED_ROPE_ENV_VARS
         .iter()
@@ -200,11 +233,13 @@ fn report_fused_rope_bypass_once() {
 
     NOTICE.call_once(|| {
         eprintln!(
-            "note: this checkpoint sets rope_traditional, so the fused RoPE fast path(s) \
-             requested by {} are bypassed. Those launchers apply the split-half rotation inside \
-             C++ and cannot express the interleaved one, so using them would silently mis-rotate \
-             attention. The graph path is used instead; it applies the correct rotation and costs \
-             a handful of extra FFI calls per layer, not GPU work.",
+            "note: this checkpoint sets {}, so the fused RoPE fast path(s) requested by {} are \
+             bypassed. Those launchers apply the split-half rotation from a plain `rope_theta` \
+             inside C++ and can express neither the interleaved rotation nor a scaled frequency \
+             table, so using them would silently mis-rotate attention. The graph path is used \
+             instead; it applies the correct rotation and costs a handful of extra FFI calls per \
+             layer, not GPU work.",
+            reasons.join(" and "),
             requested.join(" and ")
         );
     });
@@ -226,9 +261,142 @@ pub struct Attention {
     /// `config.json` declares the key or a loader sets it programmatically, so
     /// every family that used this attention before Helium keeps its graph.
     pub rope_traditional: bool,
+    /// Position scale handed to `fast_rope`. `1.0` for every checkpoint except
+    /// a `rope_scaling` block of type `linear`, where it is `1 / factor`.
+    pub rope_scale: f32,
+    /// The precomputed frequency table for a `rope_scaling` block that needs
+    /// one, currently only type `llama3` (#1355).
+    ///
+    /// `None` restores the plain `base^(2i/d)` frequencies MLX derives from
+    /// [`Self::rope_base`], which is what every checkpoint on this path used
+    /// before the block was read. When it is `Some`, `rope_base` is unused: MLX
+    /// takes either a base or a table, never both.
+    pub rope_freqs: Option<UniquePtr<MlxArray>>,
 }
 
 impl Attention {
+    /// Whether the two fused RoPE launchers that build their own frequencies
+    /// from `rope_base` can serve this checkpoint.
+    ///
+    /// `fused_causal_prefill_attention` and
+    /// [`FusedQKVLinear::forward_split_rope`] both apply RoPE inside a C++
+    /// launcher that takes `rope_base` and hardcodes `traditional = false`.
+    /// Neither takes a rotation flag, a position scale or a frequency table, so
+    /// all three properties that can move this model off the plain table route
+    /// it to the graph path instead. See [`Self::forward`] for why the bypass is
+    /// the right call rather than extending the bridge.
+    ///
+    /// The third launcher, `forward_fused_rope_append`, is gated separately: it
+    /// takes `traditional` and `rope_scale` as real parameters, so only a
+    /// frequency table routes around it.
+    fn fused_rope_launchers_usable(&self) -> bool {
+        !self.rope_traditional && self.rope_freqs.is_none() && self.rope_scale == 1.0
+    }
+
+    /// Rotate Q and K on the graph path.
+    ///
+    /// One place decides between `fast_rope` and `fast_rope_with_freqs` so the
+    /// two calls cannot drift apart. MLX takes a base or a frequency table,
+    /// never both, which is why the table branch drops `rope_base`.
+    fn apply_rope(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offset: i32,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        match self.rope_freqs.as_ref() {
+            Some(freqs) => (
+                mlxcel_core::fast_rope_with_freqs(
+                    q,
+                    self.rope_dims,
+                    self.rope_traditional,
+                    self.rope_scale,
+                    offset,
+                    freqs,
+                ),
+                mlxcel_core::fast_rope_with_freqs(
+                    k,
+                    self.rope_dims,
+                    self.rope_traditional,
+                    self.rope_scale,
+                    offset,
+                    freqs,
+                ),
+            ),
+            None => (
+                mlxcel_core::fast_rope(
+                    q,
+                    self.rope_dims,
+                    self.rope_traditional,
+                    self.rope_base,
+                    self.rope_scale,
+                    offset,
+                ),
+                mlxcel_core::fast_rope(
+                    k,
+                    self.rope_dims,
+                    self.rope_traditional,
+                    self.rope_base,
+                    self.rope_scale,
+                    offset,
+                ),
+            ),
+        }
+    }
+
+    /// Rotate Q and K on the batched decode / batched prefill path.
+    ///
+    /// The batched and single-sequence routes must select the same table from
+    /// the same fields, or a sequence would decode differently depending on
+    /// whether it was scheduled alone or in a batch. That is the same argument
+    /// the rotation convention already carries here, now extended to the
+    /// frequency table and the position scale.
+    fn apply_rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        match self.rope_freqs.as_ref() {
+            Some(freqs) => (
+                mlxcel_core::fast_rope_batched_with_freqs(
+                    q,
+                    self.rope_dims,
+                    self.rope_traditional,
+                    self.rope_scale,
+                    offsets,
+                    freqs,
+                ),
+                mlxcel_core::fast_rope_batched_with_freqs(
+                    k,
+                    self.rope_dims,
+                    self.rope_traditional,
+                    self.rope_scale,
+                    offsets,
+                    freqs,
+                ),
+            ),
+            None => (
+                mlxcel_core::fast_rope_batched(
+                    q,
+                    self.rope_dims,
+                    self.rope_traditional,
+                    self.rope_base,
+                    self.rope_scale,
+                    offsets,
+                ),
+                mlxcel_core::fast_rope_batched(
+                    k,
+                    self.rope_dims,
+                    self.rope_traditional,
+                    self.rope_base,
+                    self.rope_scale,
+                    offsets,
+                ),
+            ),
+        }
+    }
+
     /// Dense attention with RoPE.
     ///
     /// Used by: Llama (`llama` / `mistral` checkpoints), Qwen2 / Qwen2.5 (which
@@ -316,7 +484,7 @@ impl Attention {
         if l > 1
             && mask.is_none()
             && cache.is_empty()
-            && !self.rope_traditional
+            && self.fused_rope_launchers_usable()
             && std::env::var(FUSED_CAUSAL_PREFILL_ENV).is_ok()
             && let (Some(qkv_weight), Some(o_weight)) = (
                 self.qkv_proj.fused_quantized_weight(),
@@ -353,13 +521,14 @@ impl Attention {
             return output;
         }
 
-        let fused_split_rope = if self.rope_traditional {
-            // The fused launcher hardcodes `traditional = false`; see the method
-            // doc comment. Skipping it is what keeps the rotation correct.
-            None
-        } else {
+        let fused_split_rope = if self.fused_rope_launchers_usable() {
             self.qkv_proj
                 .forward_split_rope(x, self.rope_dims, self.rope_base, offset)
+        } else {
+            // The fused launcher hardcodes `traditional = false` and derives its
+            // frequencies from `rope_base`; see the method doc comment. Skipping
+            // it is what keeps the rotation correct.
+            None
         };
 
         // Fused q/k RoPE + KV-append-layout kernel (#905). Unlike
@@ -370,14 +539,16 @@ impl Attention {
         // also supports belongs to the batched paged decode path (#899) and is
         // deliberately not wired here. `MLXCEL_FUSED_ROPE_APPEND=0` falls back
         // to the reshape / transpose / `fast_rope` graph below.
-        let fused_rope_append = if fused_split_rope.is_some() {
+        let fused_rope_append = if fused_split_rope.is_some() || self.rope_freqs.is_some() {
+            // A `rope_scaling` table has no route into this kernel either: it
+            // takes `rope_base` and builds its own frequencies in Metal.
             None
         } else {
             self.qkv_proj.forward_fused_rope_append(
                 x,
                 self.rope_dims,
                 self.rope_base,
-                1.0,
+                self.rope_scale,
                 self.rope_traditional,
                 offset,
                 mlxcel_core::layers::FusedRopeDestLayout::DenseSlab,
@@ -402,22 +573,7 @@ impl Attention {
             let k = mlxcel_core::transpose_axes(&k, &[0, 2, 1, 3]);
             let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
 
-            let q = mlxcel_core::fast_rope(
-                &q,
-                self.rope_dims,
-                self.rope_traditional,
-                self.rope_base,
-                1.0,
-                offset,
-            );
-            let k = mlxcel_core::fast_rope(
-                &k,
-                self.rope_dims,
-                self.rope_traditional,
-                self.rope_base,
-                1.0,
-                offset,
-            );
+            let (q, k) = self.apply_rope(&q, &k, offset);
             (q, k, v)
         };
 
@@ -552,22 +708,8 @@ impl Attention {
         // the single-sequence path above; dropping the flag on one route while
         // honoring it on the other would make a sequence decode differently
         // depending on whether it was scheduled alone or in a batch.
-        let q_batched = mlxcel_core::fast_rope_batched(
-            &q_batched,
-            self.rope_dims,
-            self.rope_traditional,
-            self.rope_base,
-            1.0,
-            &metadata.rope_offsets,
-        );
-        let k_batched = mlxcel_core::fast_rope_batched(
-            &k_batched,
-            self.rope_dims,
-            self.rope_traditional,
-            self.rope_base,
-            1.0,
-            &metadata.rope_offsets,
-        );
+        let (q_batched, k_batched) =
+            self.apply_rope_batched(&q_batched, &k_batched, &metadata.rope_offsets);
 
         // Pool-backed paged decode (#899): the whole batch in one fused launch.
         // This is the production path for `--decode-storage paged`; it appends
@@ -729,6 +871,12 @@ impl Attention {
 
     /// Build the dense attention block from a checkpoint.
     ///
+    /// Resolves `rope_scaling` on its own, so every caller gets the checkpoint's
+    /// frequency table whether or not it knows the block exists. Use
+    /// [`Self::from_weights_with_rope`] when building many blocks of one model,
+    /// which is what [`Llama3Model::from_weights`] does so the table is computed
+    /// once rather than once per layer.
+    ///
     /// `rope_traditional` is carried over from [`ModelArgs`], where it is
     /// deserialized from `config.json` with a default of `false` and may also be
     /// set programmatically by a loader whose family fixes the convention in
@@ -748,12 +896,37 @@ impl Attention {
         args: &ModelArgs,
         prefix: &str,
     ) -> Result<Self, String> {
+        Self::from_weights_with_rope(weights, args, prefix, &args.rope_scaling_kind())
+    }
+
+    /// [`Self::from_weights`] with an already-resolved frequency table.
+    ///
+    /// `rope` is [`RopeScalingKind::duplicate`]d into this block, so one model's
+    /// worth of layers shares a single computation of the table.
+    pub fn from_weights_with_rope(
+        weights: &WeightMap,
+        args: &ModelArgs,
+        prefix: &str,
+        rope: &RopeScalingKind,
+    ) -> Result<Self, String> {
         let group_size = args.group_size();
         let bits = args.bits();
 
+        let rope = rope.duplicate();
+        let rope_scale = rope.scale();
+        let rope_freqs = match rope {
+            RopeScalingKind::Llama3 { freqs } => Some(freqs),
+            _ => None,
+        };
+
+        let mut bypass_reasons: Vec<&str> = Vec::new();
         if args.rope_traditional {
-            report_fused_rope_bypass_once();
+            bypass_reasons.push("rope_traditional");
         }
+        if rope_freqs.is_some() || rope_scale != 1.0 {
+            bypass_reasons.push("a rope_scaling block");
+        }
+        report_fused_rope_bypass_once(&bypass_reasons);
 
         let head_dim = args.head_dim() as i32;
         let num_heads = args.num_attention_heads as i32;
@@ -782,6 +955,8 @@ impl Attention {
             rope_dims: head_dim,
             rope_base: args.rope_theta,
             rope_traditional: args.rope_traditional,
+            rope_scale,
+            rope_freqs,
         })
     }
 }
@@ -917,14 +1092,37 @@ impl TransformerBlock {
         mlxcel_core::add(&h, &ff_out)
     }
 
+    /// Build one decoder layer.
+    ///
+    /// Resolves `rope_scaling` per call. That is one `powf` loop over
+    /// `head_dim / 2` entries, which is why the callers that build a single
+    /// layer at a time (the `llama` and `mistral` pipeline stage executors, the
+    /// `mllama` text decoder) can keep this entry point and still get the
+    /// checkpoint's frequency table. [`Llama3Model::from_weights`] uses
+    /// [`Self::from_weights_with_rope`] instead.
     pub fn from_weights(
         weights: &WeightMap,
         args: &ModelArgs,
         layer_idx: usize,
     ) -> Result<Self, String> {
+        Self::from_weights_with_rope(weights, args, layer_idx, &args.rope_scaling_kind())
+    }
+
+    /// [`Self::from_weights`] with an already-resolved frequency table.
+    pub fn from_weights_with_rope(
+        weights: &WeightMap,
+        args: &ModelArgs,
+        layer_idx: usize,
+        rope: &RopeScalingKind,
+    ) -> Result<Self, String> {
         let prefix = format!("model.layers.{}", layer_idx);
 
-        let self_attn = Attention::from_weights(weights, args, &format!("{}.self_attn", prefix))?;
+        let self_attn = Attention::from_weights_with_rope(
+            weights,
+            args,
+            &format!("{}.self_attn", prefix),
+            rope,
+        )?;
         let mlp = MLP::from_weights(weights, args, &format!("{}.mlp", prefix))?;
 
         let input_norm_weight =
@@ -1093,10 +1291,15 @@ impl Llama3Model {
         let embed_tokens =
             UnifiedEmbedding::from_weights(weights, "model.embed_tokens", group_size, bits)?;
 
+        // The `rope_scaling` frequency table is identical for every layer of a
+        // model, so it is resolved once here and duplicated into each block
+        // rather than recomputed `num_hidden_layers` times.
+        let rope = args.rope_scaling_kind();
+
         // Load layers
         let mut layers = Vec::with_capacity(args.num_hidden_layers);
         for i in 0..args.num_hidden_layers {
-            let layer = TransformerBlock::from_weights(weights, args, i)?;
+            let layer = TransformerBlock::from_weights_with_rope(weights, args, i, &rope)?;
             layers.push(layer);
         }
 

@@ -144,6 +144,79 @@ fn test_fast_rope_batched_uniform_offsets_match_per_row_path() {
     );
 }
 
+/// `fast_rope_batched_with_freqs` must equal `fast_rope_with_freqs` applied to
+/// each row on its own, at the row's own offset.
+///
+/// This is the batched-decode half of #1355. A model whose `rope_scaling` block
+/// selects a frequency table has to rotate identically whether a sequence is
+/// scheduled alone (single-sequence `forward`) or in a batch
+/// (`forward_split_attention`), and the two call different entry points. The
+/// offsets are deliberately spread across `[0, 17, 4096]`: at offset 0 the
+/// rotation is the identity for every table, so a row set that starts there and
+/// stays small could pass with the wrong frequencies entirely.
+#[test]
+fn test_fast_rope_batched_with_freqs_matches_per_row() {
+    let x = from_slice_f32(
+        &[
+            0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, //
+            8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, //
+            16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0,
+        ],
+        &[3, 1, 2, 4],
+    );
+    // A `[dims / 2]` table whose entries are nothing like `10000^(2i/4)`, so a
+    // path that fell back to a base-derived table could not match by accident.
+    let freqs = from_slice_f32(&[1.0, 37.5], &[2]);
+    let offsets = [0, 17, 4096];
+
+    let actual = fast_rope_batched_with_freqs(&x, 4, false, 1.0, &offsets, &freqs);
+
+    let mut expected: Option<UniquePtr<MlxArray>> = None;
+    for (row, &offset) in offsets.iter().enumerate() {
+        let row = row as i32;
+        let chunk = slice(
+            &x,
+            &[row, 0, 0, 0],
+            &[row + 1, i32::MAX, i32::MAX, i32::MAX],
+        );
+        let chunk = fast_rope_with_freqs(&chunk, 4, false, 1.0, offset, &freqs);
+        expected = Some(match expected {
+            None => chunk,
+            Some(acc) => concatenate(&acc, &chunk, 0),
+        });
+    }
+    let expected = expected.unwrap();
+
+    eval(&actual);
+    eval(&expected);
+    let close = allclose(&actual, &expected, 1e-5, 1e-5);
+    eval(&close);
+    assert!(
+        item_bool(&close),
+        "batched RoPE with a frequency table must match the per-row reference"
+    );
+}
+
+/// The `batch == 1` early return of `fast_rope_batched_with_freqs` must agree
+/// with the scalar entry point, the same contract
+/// `test_fast_rope_batched_single_row_matches_scalar_fast_rope` pins for the
+/// base-derived path. The server takes this branch on every single-request
+/// decode step.
+#[test]
+fn test_fast_rope_batched_with_freqs_single_row_matches_scalar() {
+    let x = from_slice_f32(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], &[1, 1, 2, 4]);
+    let freqs = from_slice_f32(&[1.0, 37.5], &[2]);
+
+    let actual = fast_rope_batched_with_freqs(&x, 4, false, 1.0, &[7], &freqs);
+    let expected = fast_rope_with_freqs(&x, 4, false, 1.0, 7, &freqs);
+
+    eval(&actual);
+    eval(&expected);
+    let close = allclose(&actual, &expected, 1e-5, 1e-5);
+    eval(&close);
+    assert!(item_bool(&close));
+}
+
 /// The single-row case (`batch == 1`) is its own branch in
 /// `fast_rope_batched` and must not be regressed by the uniform-batch
 /// fast-path addition. Keep an explicit test so any future refactor of

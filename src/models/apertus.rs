@@ -664,68 +664,33 @@ fn read_scalar(weights: &WeightMap, name: &str) -> Option<f32> {
 }
 
 /// Compute llama3 RoPE frequencies from `rope_scaling`. Returns `None` for
-/// default RoPE (absent scaling or an unsupported `rope_type`), mirroring
-/// mlx-lm's `Llama3RoPE`
-/// (https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/rope_utils.py).
+/// default RoPE (absent scaling or a `rope_type` this path does not implement).
+///
+/// The table itself now lives in [`crate::models::rope_utils`], which is the
+/// shared port of mlx-lm's
+/// [`rope_utils.py`](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/rope_utils.py).
+/// It used to be inline here, which is how the shared Llama path ended up
+/// parsing the same block and dropping it (#1355).
+///
+/// Apertus behavior is unchanged: `llama3` produces the same banded table, and
+/// every other scheme still returns `None` and decodes on the plain one. That
+/// includes `linear`, whose position scale this family's attention has no field
+/// to carry; wiring it here is a separate change and no published Apertus
+/// checkpoint declares it. What is new is that an unimplemented scheme now
+/// prints a warning instead of being dropped in silence.
 fn compute_rope_freqs(args: &ModelArgs) -> Option<UniquePtr<MlxArray>> {
     let scaling = args.rope_scaling.as_ref()?;
-    let rope_type = scaling
-        .get("rope_type")
-        .or_else(|| scaling.get("type"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("default");
+    let spec = crate::models::rope_utils::RopeScalingSpec::from_lookup(|key| scaling.get(key));
 
-    if rope_type != "llama3" {
-        return None;
+    match crate::models::rope_utils::RopeScalingKind::resolve(
+        Some(&spec),
+        args.head_dim(),
+        args.rope_theta,
+        &args.model_type,
+    ) {
+        crate::models::rope_utils::RopeScalingKind::Llama3 { freqs } => Some(freqs),
+        _ => None,
     }
-
-    let factor = scaling
-        .get("factor")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(1.0) as f32;
-    let low_freq_factor = scaling
-        .get("low_freq_factor")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(1.0) as f32;
-    let high_freq_factor = scaling
-        .get("high_freq_factor")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(4.0) as f32;
-    let old_context_len = scaling
-        .get("original_max_position_embeddings")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(8192.0) as f32;
-
-    let dims = args.head_dim();
-    let base = args.rope_theta;
-
-    let low_freq_wavelen = old_context_len / low_freq_factor;
-    let high_freq_wavelen = old_context_len / high_freq_factor;
-
-    // freqs = base^(arange(0, dims, 2) / dims), adjusted per the llama3 bands.
-    let half_dims = dims / 2;
-    let mut freq_vals = Vec::with_capacity(half_dims);
-    for i in 0..half_dims {
-        let exp = (2 * i) as f32 / dims as f32;
-        let freq = base.powf(exp);
-        let wavelen = 2.0 * std::f32::consts::PI * freq;
-
-        let adjusted = if wavelen > low_freq_wavelen {
-            // Low frequency (long wavelength): scale by factor.
-            freq * factor
-        } else if wavelen > high_freq_wavelen {
-            // Medium frequency: smooth interpolation.
-            let smooth = (old_context_len / wavelen - low_freq_factor)
-                / (high_freq_factor - low_freq_factor);
-            freq / ((1.0 - smooth) / factor + smooth)
-        } else {
-            // High frequency (short wavelength): unchanged.
-            freq
-        };
-        freq_vals.push(adjusted);
-    }
-
-    Some(mlxcel_core::from_slice_f32(&freq_vals, &[half_dims as i32]))
 }
 
 // LanguageModel trait implementation.
