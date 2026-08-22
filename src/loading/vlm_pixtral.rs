@@ -233,9 +233,10 @@ fn build_pixtral_family_context(model_path: &Path) -> Result<PixtralFamilyContex
             .map(LoadedModel::Mistral4)
             .map_err(|e| anyhow::anyhow!("Failed to load Mistral4 text model: {}", e))?
     } else {
-        let text_args: models::llama3::ModelArgs =
+        let mut text_args: models::llama3::ModelArgs =
             serde_json::from_value(text_config_value.clone())
                 .map_err(|e| anyhow::anyhow!("Failed to parse text_config as Mistral: {}", e))?;
+        text_args.set_checkpoint_label(model_path);
         models::Llama3Model::from_weights(&weights, &text_args)
             .map(LoadedModel::Llama)
             .map_err(|e| anyhow::anyhow!("Failed to load text model: {}", e))?

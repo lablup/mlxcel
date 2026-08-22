@@ -66,8 +66,9 @@ impl MistralStageExecutor {
         let config_str = std::fs::read_to_string(&config_path)
             .map_err(|err| anyhow!("failed to read {}: {}", config_path.display(), err))?;
         let config_str = sanitize_config_json(&config_str);
-        let args: models::llama3::ModelArgs = serde_json::from_str(&config_str)
+        let mut args: models::llama3::ModelArgs = serde_json::from_str(&config_str)
             .map_err(|err| anyhow!("failed to parse {}: {}", config_path.display(), err))?;
+        args.set_checkpoint_label(model_dir);
 
         let mut weights = models::load_text_weights(model_dir, None).map_err(anyhow::Error::msg)?;
         let mut effective_filter = filter.clone();
@@ -90,10 +91,15 @@ impl MistralStageExecutor {
             None
         };
 
+        // Resolved once for the whole stage; see the same hoist in the `llama`
+        // stage executor.
+        let rope = args.rope_scaling_kind();
         let mut layers = Vec::with_capacity(filter.num_layers());
         for layer_idx in filter.layer_range.clone() {
-            let layer = models::llama3::TransformerBlock::from_weights(&weights, &args, layer_idx)
-                .map_err(anyhow::Error::msg)?;
+            let layer = models::llama3::TransformerBlock::from_weights_with_rope(
+                &weights, &args, layer_idx, &rope,
+            )
+            .map_err(anyhow::Error::msg)?;
             layers.push(MistralStageLayer(layer));
         }
 

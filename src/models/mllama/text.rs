@@ -316,6 +316,12 @@ impl MllamaTextModel {
         let embed_tokens =
             UnifiedEmbedding::from_weights(weights, "model.embed_tokens", group_size, bits)?;
 
+        // Resolved once for the decoder. `TransformerBlock::from_weights`
+        // resolves per call, which on a 40-layer Llama 3.2 Vision decoder is 40
+        // `powf` loops and 40 separate blocking MLX evals at load; the table is
+        // the same one for every self-attention layer. The cross-attention
+        // layers apply no RoPE at all, so they take no table.
+        let rope = args.rope_scaling_kind();
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for idx in 0..config.num_hidden_layers {
             if config.is_cross_attention_layer(idx) {
@@ -324,7 +330,7 @@ impl MllamaTextModel {
                 )));
             } else {
                 layers.push(TextLayer::SelfAttn(Box::new(
-                    TransformerBlock::from_weights(weights, &args, idx)?,
+                    TransformerBlock::from_weights_with_rope(weights, &args, idx, &rope)?,
                 )));
             }
         }

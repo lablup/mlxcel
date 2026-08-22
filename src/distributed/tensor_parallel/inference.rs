@@ -318,8 +318,9 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // `runtime_kind_for` match has no `ModelType::TeleChat3` arm. The
         // obstacle is the same one that stops it reusing the llama3 decoder:
         // the TP runtime parses `config.json` straight into `llama3::ModelArgs`,
-        // which never reads `rope_scaling`, so a sharded TeleChat3 would rotate
-        // at the unscaled base while the single-process path applies YaRN.
+        // which implements `default`, `linear` and `llama3` but not YaRN
+        // (#1355), so a sharded TeleChat3 would rotate at the unscaled base
+        // while the single-process path applies YaRN.
         ModelType::TeleChat3 => "telechat3",
         ModelType::StarCoder2 => "starcoder2",
         ModelType::Mellum => "mellum",

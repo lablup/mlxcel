@@ -48,6 +48,15 @@ pub struct MllamaTextConfig {
     pub rope_theta: f32,
     #[serde(default)]
     pub rope_traditional: bool,
+    /// The `rope_scaling` block, kept as raw JSON so the shared reader in
+    /// [`crate::models::rope_utils`] sees exactly what the checkpoint wrote.
+    ///
+    /// Every Llama 3.2 Vision checkpoint declares `{"rope_type": "llama3",
+    /// "factor": 8.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0,
+    /// "original_max_position_embeddings": 8192}` here, the same block as the
+    /// 3.1 text model its decoder is built from.
+    #[serde(default)]
+    pub rope_scaling: Option<serde_json::Value>,
     #[serde(default = "default_tie_word_embeddings")]
     pub tie_word_embeddings: bool,
     #[serde(default = "default_cross_attention_layers")]
@@ -83,6 +92,11 @@ impl MllamaTextConfig {
     /// key rotated split-half in the self-attention layers while its own config
     /// said otherwise. The cross-attention layers are unaffected either way,
     /// since they attend to vision features and apply no RoPE at all.
+    ///
+    /// `rope_scaling` is the same story and was found the same way (#1355).
+    /// Every Llama 3.2 Vision checkpoint declares the `llama3` block, and this
+    /// key list did not carry it, so the decoder could not have applied the
+    /// banded frequency table even once the shared path learned to read it.
     pub fn to_llama3_args(&self) -> crate::models::llama3::ModelArgs {
         let mut text_config = serde_json::json!({
             "model_type": self.model_type,
@@ -96,6 +110,7 @@ impl MllamaTextConfig {
             "head_dim": self.head_dim,
             "rope_theta": self.rope_theta,
             "rope_traditional": self.rope_traditional,
+            "rope_scaling": self.rope_scaling,
             "tie_word_embeddings": self.tie_word_embeddings,
         });
         if let Some(q) = &self.quantization {
@@ -339,6 +354,53 @@ mod tests {
         let default: MllamaTextConfig = serde_json::from_str("{}").expect("defaults");
         assert!(!default.rope_traditional);
         assert!(!default.to_llama3_args().rope_traditional);
+    }
+
+    #[test]
+    fn to_llama3_args_forwards_rope_scaling() {
+        // The same failure mode as the rotation convention, found the same way
+        // (#1355). Every Llama 3.2 Vision checkpoint declares the `llama3`
+        // block in `text_config`, and this fixed key list did not name it, so
+        // the self-attention layers could not have received the banded
+        // frequency table even once the shared decoder learned to read it.
+        //
+        // The block is checked through `rope_scaling_kind` rather than by
+        // comparing JSON, because what has to survive the round trip is the
+        // table it selects, not the spelling.
+        let declared: MllamaTextConfig = serde_json::from_str(
+            r#"{
+                "hidden_size": 4096,
+                "num_attention_heads": 32,
+                "rope_theta": 500000.0,
+                "rope_scaling": {
+                    "factor": 8.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0,
+                    "original_max_position_embeddings": 8192, "rope_type": "llama3"
+                }
+            }"#,
+        )
+        .expect("valid text config");
+
+        let args = declared.to_llama3_args();
+        assert!(
+            args.rope_scaling.is_some(),
+            "the block must survive the rebuild"
+        );
+        assert!(
+            args.rope_scaling_kind().freqs().is_some(),
+            "the forwarded block must resolve to the llama3 frequency table"
+        );
+
+        // A checkpoint that declares none keeps the plain table, which is what
+        // the text-only Llama 3.2 Vision path relied on before this change.
+        let default: MllamaTextConfig = serde_json::from_str("{}").expect("defaults");
+        assert!(default.rope_scaling.is_none());
+        assert!(
+            default
+                .to_llama3_args()
+                .rope_scaling_kind()
+                .freqs()
+                .is_none()
+        );
     }
 
     #[test]

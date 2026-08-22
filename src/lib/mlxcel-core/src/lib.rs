@@ -3026,7 +3026,9 @@ fn use_bool_causal_mask_path() -> bool {
 /// See `ffi_tests::test_fast_rope_batched_non_contiguous_t1_symmetric` and
 /// the paged batched B=2 parity regression.
 ///
-/// Used by: Llama3 batched decode, Qwen3 batched decode, Gemma3 batched decode, Llama4 batched decode
+/// Used by: Llama3 batched decode (unscaled `rope_scaling` only; a scaled table
+/// goes through [`fast_rope_batched_with_freqs`]), Qwen3 batched decode, Gemma3
+/// batched decode, Llama4 batched decode
 pub fn fast_rope_batched(
     x: &MlxArray,
     dims: i32,
@@ -3093,6 +3095,67 @@ pub fn fast_rope_batched(
         end[0] = batch_idx as i32 + 1;
         let chunk = ffi::slice(x, &begin, &end);
         let chunk = ffi::fast_rope(&chunk, dims, traditional, base, scale, offset);
+        result = crate::concatenate(&result, &chunk, 0);
+    }
+
+    result
+}
+
+/// [`fast_rope_batched`] against a precomputed frequency table.
+///
+/// Same per-row slicing structure and the same reason for it: MLX's
+/// `fast::rope` kernel confuses the batch stride for the sequence stride on the
+/// `[B, n_heads, 1, D]` tensors the decode path hands it, so every row is
+/// rotated on its own with `B == 1`. Read [`fast_rope_batched`]'s comment for
+/// the full argument; it applies verbatim here, because the two differ only in
+/// where the frequencies come from.
+///
+/// MLX takes a base or a table, never both, so there is no `base` parameter:
+/// `freqs` fully determines the frequencies. `freqs` must be a float32
+/// `[dims / 2]` array, which is what
+/// `crate::models::rope_utils::llama3_rope_freqs` produces on the caller side.
+///
+/// Used by: Llama3 batched decode with a `rope_scaling` table (#1355), and
+/// through it Qwen2 / Qwen2.5 and every VLM whose text backbone is the shared
+/// Llama decoder.
+pub fn fast_rope_batched_with_freqs(
+    x: &MlxArray,
+    dims: i32,
+    traditional: bool,
+    scale: f32,
+    offsets: &[i32],
+    freqs: &MlxArray,
+) -> UniquePtr<MlxArray> {
+    let shape = ffi::array_shape(x);
+    let batch = shape.first().copied().unwrap_or(0).max(0) as usize;
+    assert_eq!(
+        batch,
+        offsets.len(),
+        "fast_rope_batched_with_freqs expected {} offsets, got {}",
+        batch,
+        offsets.len()
+    );
+
+    if batch == 0 {
+        return ffi::copy(x);
+    }
+    if batch == 1 {
+        return ffi::fast_rope_with_freqs(x, dims, traditional, scale, offsets[0], freqs);
+    }
+
+    let rank = shape.len();
+    let mut begin = vec![0; rank];
+    let mut end = vec![i32::MAX; rank];
+    end[0] = 1;
+
+    let first = ffi::slice(x, &begin, &end);
+    let mut result = ffi::fast_rope_with_freqs(&first, dims, traditional, scale, offsets[0], freqs);
+
+    for (batch_idx, &offset) in offsets.iter().enumerate().skip(1) {
+        begin[0] = batch_idx as i32;
+        end[0] = batch_idx as i32 + 1;
+        let chunk = ffi::slice(x, &begin, &end);
+        let chunk = ffi::fast_rope_with_freqs(&chunk, dims, traditional, scale, offset, freqs);
         result = crate::concatenate(&result, &chunk, 0);
     }
 

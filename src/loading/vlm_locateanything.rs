@@ -285,8 +285,9 @@ pub(crate) fn load_locateanything_vlm(model_path: &Path) -> Result<LoadedModel> 
         super::require_object_mut(&mut text_config_value, "LocateAnything text_config")?
             .insert("quantization".to_string(), q.clone());
     }
-    let text_args: models::llama3::ModelArgs = serde_json::from_value(text_config_value)
+    let mut text_args: models::llama3::ModelArgs = serde_json::from_value(text_config_value)
         .map_err(|e| anyhow::anyhow!("Failed to parse LocateAnything text_config: {e}"))?;
+    text_args.set_checkpoint_label(model_path);
 
     let group_size = text_args.group_size();
     let bits = text_args.bits();

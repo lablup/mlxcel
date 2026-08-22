@@ -122,8 +122,12 @@ pub(crate) fn load_internvl_vlm(model_path: &Path) -> Result<LoadedModel> {
             .insert("quantization".to_string(), q.clone());
     }
 
-    let text_args: models::llama3::ModelArgs = serde_json::from_value(text_config_value)
+    let mut text_args: models::llama3::ModelArgs = serde_json::from_value(text_config_value)
         .map_err(|e| anyhow::anyhow!("Failed to parse InternVL text_config: {}", e))?;
+    // The shared Llama args label their diagnostics with `model_type`, which for
+    // a `text_config` is the text backbone (`qwen2` here) rather than anything
+    // an operator would recognise as this checkpoint.
+    text_args.set_checkpoint_label(model_path);
 
     // Load weights. `load_vlm_weights_common` skips bf16 -> f16 because the
     // model is quantized, so we convert the plain bf16 tensors ourselves
