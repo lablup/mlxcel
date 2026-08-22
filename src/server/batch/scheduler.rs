@@ -750,6 +750,84 @@ fn lookahead_teardown_positions(next_prime_issued: bool) -> usize {
     if next_prime_issued { 2 } else { 1 }
 }
 
+/// Pick the preemption victim for `policy` out of a candidate iterator.
+///
+/// This is the single implementation of the eviction policy.
+/// [`BatchScheduler::select_eviction_victim`] is a thin wrapper over it, and
+/// unit tests call it directly. The indirection exists because `BatchScheduler`
+/// needs a real model to construct, so a test cannot reach the method: the two
+/// pre-existing eviction tests worked around that by copying the selection
+/// expression inline, and both copies then drifted from production by losing
+/// the `structured.is_none()` guard. Extend the policy here, never at a call
+/// site.
+///
+/// Sequences carrying a structured-output constraint are filtered out inside
+/// this function rather than by the caller, so the exclusion cannot be lost by
+/// a caller that forgets it. See [`BatchScheduler::select_eviction_victim`] for
+/// why those sequences cannot be preempted.
+///
+/// # Tie-break: smallest `seq_id`
+///
+/// Both arms append `seq_id` so the order is total. `seq_id` is unique across
+/// the batch (it is the `ActiveBatch` map key), so no two candidates can
+/// compare equal and the victim can no longer be decided by `HashMap`
+/// iteration order, which `RandomState` re-seeds per map instance. This is the
+/// reachable case rather than a theoretical one: the primary key of the
+/// `LongestFirst` arm is `generated_tokens.len()`, a small integer that
+/// sequences admitted together and decoding in lockstep share routinely.
+///
+/// The direction is smallest-id-wins, and it is chosen for anti-starvation
+/// rather than only for totality. `SequenceId` is handed out monotonically by
+/// `CachePool`, and preemption reallocates its victim under a *fresh*, higher
+/// id (see `BatchScheduler::try_evict_for_preemption`), so a large id marks a
+/// sequence that was preempted recently. Preferring the smallest id therefore
+/// rotates preemption onto sequences that have not been hit yet; preferring the
+/// largest would keep re-picking the request that was just replayed.
+/// `SequenceInfo::created_at` survives preemption and would give true arrival
+/// order, but for that reason it points the other way: it would repeatedly
+/// select the same oldest request. It is also an `Instant`, so it would still
+/// need `seq_id` behind it to be total.
+///
+/// Because the two arms use opposite-facing selectors, they need
+/// opposite-facing tie components to break the same direction:
+/// `Iterator::max_by_key` returns the LAST maximum while `Iterator::min_by`
+/// returns the FIRST minimum (`docs/code-guidelines.md`, "HashMap Iteration
+/// Order").
+pub(crate) fn select_eviction_victim_from<'a>(
+    sequences: impl Iterator<Item = &'a SequenceInfo>,
+    policy: PreemptionPolicy,
+) -> Option<SequenceId> {
+    let candidates = sequences.filter(|seq| seq.structured.is_none());
+    match policy {
+        // Evict the sequence with the most generated tokens. `seq_id` is the
+        // component that makes this key a TOTAL order; without it, tied
+        // sequences resolve through `HashMap` iteration order. Do not
+        // simplify it away. It is wrapped in `Reverse` because `max_by_key`
+        // takes the LAST maximum, and reversing the id is what makes the
+        // SMALLEST id win, matching the `LowestPriority` arm below.
+        PreemptionPolicy::LongestFirst => candidates
+            .max_by_key(|seq| {
+                (
+                    seq.generated_tokens.len(),
+                    std::cmp::Reverse(seq.seq_id.as_u64()),
+                )
+            })
+            .map(|seq| seq.seq_id),
+        // Evict the lowest-priority sequence; break ties by longest, then by
+        // smallest `seq_id`. As above, `seq_id` is the component that makes
+        // the comparator a TOTAL order and must not be simplified away. It is
+        // compared ascending here because `min_by` takes the FIRST minimum.
+        PreemptionPolicy::LowestPriority => candidates
+            .min_by(|a, b| {
+                a.priority
+                    .cmp(&b.priority)
+                    .then_with(|| b.generated_tokens.len().cmp(&a.generated_tokens.len()))
+                    .then_with(|| a.seq_id.as_u64().cmp(&b.seq_id.as_u64()))
+            })
+            .map(|seq| seq.seq_id),
+    }
+}
+
 impl BatchScheduler {
     fn release_sequence_caches(&mut self, seq_id: SequenceId) {
         self.model.release_sequence_state_by_id(seq_id);
@@ -6813,6 +6891,10 @@ impl BatchScheduler {
 
     /// Select the eviction victim based on the configured policy.
     ///
+    /// The policy itself lives in [`select_eviction_victim_from`], which is its
+    /// only implementation and the entry point the unit tests use; this method
+    /// just supplies the batch and the configured policy.
+    ///
     /// follow-up: sequences with an attached structured-output
     /// constraint are excluded from the candidate set. Preemption resets
     /// `generated_tokens`, the streaming decoder, and the KV cache, but the
@@ -6824,28 +6906,7 @@ impl BatchScheduler {
     /// available, `try_evict_for_preemption` falls through to its existing
     /// "no candidate" path and the new request stays queued.
     fn select_eviction_victim(&self) -> Option<SequenceId> {
-        match self.preemption_policy {
-            PreemptionPolicy::LongestFirst => {
-                // Evict the sequence with the most generated tokens
-                self.active_batch
-                    .iter_sequences()
-                    .filter(|seq| seq.structured.is_none())
-                    .max_by_key(|seq| seq.generated_tokens.len())
-                    .map(|seq| seq.seq_id)
-            }
-            PreemptionPolicy::LowestPriority => {
-                // Evict the lowest-priority sequence; break ties by longest
-                self.active_batch
-                    .iter_sequences()
-                    .filter(|seq| seq.structured.is_none())
-                    .min_by(|a, b| {
-                        a.priority
-                            .cmp(&b.priority)
-                            .then_with(|| b.generated_tokens.len().cmp(&a.generated_tokens.len()))
-                    })
-                    .map(|seq| seq.seq_id)
-            }
-        }
+        select_eviction_victim_from(self.active_batch.iter_sequences(), self.preemption_policy)
     }
 
     // ------------------------------------------------------------------

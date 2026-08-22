@@ -27,14 +27,15 @@ use mlxcel_core::generate::SamplingConfig;
 
 use super::{
     MAX_CONSECUTIVE_EVAL_FAILURES, advance_eval_failure_count, effective_decode_storage_backend,
-    eval_failures_reached_limit, resolve_max_batch_prefill_tokens, vlm_prefix_sharing_allowed,
+    eval_failures_reached_limit, resolve_max_batch_prefill_tokens, select_eviction_victim_from,
+    vlm_prefix_sharing_allowed,
 };
 use crate::server::batch::active::ActiveBatch;
 use crate::server::batch::queue::PrefillQueue;
 use crate::server::batch::sequence::{
     BatchSchedulerAction, RequestPriority, SequenceInfo, SequenceState,
 };
-use crate::server::config::DecodeStorageBackend;
+use crate::server::config::{DecodeStorageBackend, PreemptionPolicy};
 use crate::server::model_provider::GenerateEvent;
 use crate::server::model_provider::model_worker::StreamingDecodeState;
 
@@ -691,8 +692,6 @@ fn active_batch_iter_min_priority_empty_returns_none() {
 
 #[test]
 fn eviction_selects_longest_first_by_default() {
-    use crate::server::config::PreemptionPolicy;
-
     let mut batch = ActiveBatch::new(4);
 
     let (mut s1, _r1) = make_test_sequence_with_priority(1, RequestPriority::Normal);
@@ -706,22 +705,18 @@ fn eviction_selects_longest_first_by_default() {
     batch.add(s1).unwrap();
     batch.add(s2).unwrap();
 
-    // LongestFirst should pick s1 (3 tokens > 1 token)
-    let victim = match PreemptionPolicy::LongestFirst {
-        PreemptionPolicy::LongestFirst => batch
-            .iter_sequences()
-            .max_by_key(|seq| seq.generated_tokens.len())
-            .map(|seq| seq.seq_id),
-        _ => None,
-    };
+    // LongestFirst should pick s1 (3 tokens > 1 token). Call the production
+    // selector rather than restating its expression: this test and the one
+    // below used to carry their own copies, and both copies drifted by losing
+    // the `structured.is_none()` guard that production has.
+    let victim =
+        select_eviction_victim_from(batch.iter_sequences(), PreemptionPolicy::LongestFirst);
 
     assert_eq!(victim.unwrap().as_u64(), 1);
 }
 
 #[test]
 fn eviction_selects_lowest_priority_then_longest() {
-    use crate::server::config::PreemptionPolicy;
-
     let mut batch = ActiveBatch::new(4);
 
     let (mut s1, _r1) = make_test_sequence_with_priority(1, RequestPriority::High);
@@ -740,20 +735,150 @@ fn eviction_selects_lowest_priority_then_longest() {
     batch.add(s2).unwrap();
     batch.add(s3).unwrap();
 
-    // LowestPriority should pick s3 (Low + 4 tokens, longest of Low group)
-    let victim = match PreemptionPolicy::LowestPriority {
-        PreemptionPolicy::LowestPriority => batch
-            .iter_sequences()
-            .min_by(|a, b| {
-                a.priority
-                    .cmp(&b.priority)
-                    .then_with(|| b.generated_tokens.len().cmp(&a.generated_tokens.len()))
-            })
-            .map(|seq| seq.seq_id),
-        _ => None,
-    };
+    // LowestPriority should pick s3 (Low + 4 tokens, longest of Low group).
+    // No two candidates tie here, so the seq_id component cannot reach the
+    // result and the expected victim is the same as before the tie-break was
+    // added; the tie itself is covered by the two tests below.
+    let victim =
+        select_eviction_victim_from(batch.iter_sequences(), PreemptionPolicy::LowestPriority);
 
     assert_eq!(victim.unwrap().as_u64(), 3);
+}
+
+/// Rebuild count for the eviction tie-break determinism tests.
+///
+/// `RandomState` seeds each `HashMap` instance rather than the process, so the
+/// `ActiveBatch` is rebuilt inside the loop; probing one batch repeatedly
+/// measures nothing. The pre-fix failure rate is well under 100 percent, so a
+/// single-shot version would pass most of the time and pin nothing. Matches the
+/// in-tree precedent (`ORDER_ITERATIONS = 64` in `src/distributed/registry_tests.rs`).
+/// See `docs/code-guidelines.md`, "HashMap Iteration Order" / "Testing the fix".
+const EVICTION_TIE_ITERATIONS: usize = 64;
+
+/// The seq_id both tie-break tests expect to win: the smallest among the tied
+/// candidates. See `select_eviction_victim_from` for why the smallest id is the
+/// chosen direction.
+const EXPECTED_TIE_VICTIM: u64 = 2;
+
+/// Build a fresh `ActiveBatch` holding one sequence per
+/// `(seq_id, priority, generated_token_count)` triple.
+///
+/// The returned receivers are the sequences' response channels; the caller
+/// holds them so the batch's senders stay connected for its lifetime.
+fn eviction_tie_batch(
+    specs: &[(u64, RequestPriority, usize)],
+) -> (ActiveBatch, Vec<mpsc::Receiver<GenerateEvent>>) {
+    let mut batch = ActiveBatch::new(specs.len());
+    let mut receivers = Vec::with_capacity(specs.len());
+
+    for &(id, priority, generated) in specs {
+        let (mut seq, rx) = make_test_sequence_with_priority(id, priority);
+        seq.state = SequenceState::Decoding;
+        seq.generated_tokens = vec![7; generated];
+        batch.add(seq).unwrap();
+        receivers.push(rx);
+    }
+
+    (batch, receivers)
+}
+
+#[test]
+fn eviction_longest_first_tie_resolves_to_smallest_seq_id() {
+    // Every candidate carries the same generated-token count, which is the
+    // reachable case: sequences admitted together decode in lockstep, one token
+    // each per step. Only the seq_id component of the key can separate them,
+    // and it has to separate them the same way on every batch. Without it the
+    // arm falls through to `max_by_key`'s last-maximum rule applied to
+    // `HashMap` order, which `RandomState` re-seeds for every new batch.
+    //
+    // The ids are inserted out of order on purpose, so a selector that returns
+    // the first- or last-inserted sequence cannot pass by coincidence.
+    let specs = [
+        (9u64, RequestPriority::Normal, 4usize),
+        (2, RequestPriority::Normal, 4),
+        (14, RequestPriority::Normal, 4),
+        (5, RequestPriority::Normal, 4),
+    ];
+
+    // Every iteration is recorded rather than asserted, so a failure reports how
+    // many of the freshly built batches disagreed instead of stopping at the
+    // first one. The pre-fix rate is well under 100 percent, so the count is
+    // the useful number.
+    let mut mismatches: Vec<(usize, Option<u64>)> = Vec::new();
+
+    for iteration in 0..EVICTION_TIE_ITERATIONS {
+        let (batch, _receivers) = eviction_tie_batch(&specs);
+
+        let victim =
+            select_eviction_victim_from(batch.iter_sequences(), PreemptionPolicy::LongestFirst)
+                .map(|id| id.as_u64());
+
+        if victim != Some(EXPECTED_TIE_VICTIM) {
+            mismatches.push((iteration, victim));
+        }
+    }
+
+    assert!(
+        mismatches.is_empty(),
+        "LongestFirst resolved a fully tied batch to something other than seq_id \
+         {EXPECTED_TIE_VICTIM} on {} of {EVICTION_TIE_ITERATIONS} freshly built batches \
+         (first {:?}); the tie is falling through to HashMap order",
+        mismatches.len(),
+        mismatches.first(),
+    );
+}
+
+#[test]
+fn eviction_lowest_priority_tie_resolves_to_smallest_seq_id() {
+    // The `LowestPriority` arm needs a tie on BOTH axes to reach hash order, so
+    // the three `Low` candidates share a generated-token count as well. The
+    // `High` and `Normal` entries are longer than all of them and must still
+    // lose on priority, which pins that the appended seq_id component did not
+    // perturb the primary keys.
+    let specs = [
+        (9u64, RequestPriority::Low, 4usize),
+        (2, RequestPriority::Low, 4),
+        (14, RequestPriority::Low, 4),
+        (5, RequestPriority::High, 9),
+        (11, RequestPriority::Normal, 12),
+    ];
+
+    let mut mismatches: Vec<(usize, Option<u64>)> = Vec::new();
+
+    for iteration in 0..EVICTION_TIE_ITERATIONS {
+        let (batch, _receivers) = eviction_tie_batch(&specs);
+
+        let victim =
+            select_eviction_victim_from(batch.iter_sequences(), PreemptionPolicy::LowestPriority)
+                .map(|id| id.as_u64());
+
+        if victim != Some(EXPECTED_TIE_VICTIM) {
+            mismatches.push((iteration, victim));
+        }
+    }
+
+    assert!(
+        mismatches.is_empty(),
+        "LowestPriority resolved a batch tied on priority and length to something other than \
+         seq_id {EXPECTED_TIE_VICTIM} on {} of {EVICTION_TIE_ITERATIONS} freshly built batches \
+         (first {:?}); the tie is falling through to HashMap order",
+        mismatches.len(),
+        mismatches.first(),
+    );
+}
+
+#[test]
+fn eviction_returns_none_for_an_empty_batch() {
+    let batch = ActiveBatch::new(4);
+
+    assert_eq!(
+        select_eviction_victim_from(batch.iter_sequences(), PreemptionPolicy::LongestFirst),
+        None
+    );
+    assert_eq!(
+        select_eviction_victim_from(batch.iter_sequences(), PreemptionPolicy::LowestPriority),
+        None
+    );
 }
 
 #[test]
