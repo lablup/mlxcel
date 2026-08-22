@@ -118,8 +118,15 @@ struct Comparison {
     /// Worst `difference / (atol + rtol * |expected|)` seen. At most 1.0 the
     /// tensor is inside the contract; above 1.0 it is not.
     worst_ratio: f32,
+    // Read only by `detail`, which only the diagnostics-gated assertion path
+    // calls. A build without those features still constructs them, so they are
+    // allowed rather than cfg-gated: the values are cheap and keeping one
+    // definition avoids two shapes of the same struct.
+    #[allow(dead_code)]
     ratio_index: usize,
+    #[allow(dead_code)]
     ratio_actual: f32,
+    #[allow(dead_code)]
     ratio_expected: f32,
 }
 
@@ -134,6 +141,8 @@ impl Comparison {
         }
     }
 
+    /// Only the diagnostics-gated `assert_within` reports this.
+    #[allow(dead_code)]
     fn detail(&self) -> String {
         format!(
             "max_abs={} at {} (actual={}, expected={}, relative={:.4}%), rms={}, \
