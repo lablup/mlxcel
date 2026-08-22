@@ -146,9 +146,19 @@ impl ConversationStore {
 
     fn evict_to_capacity(map: &mut HashMap<String, Entry>, target_size: usize) {
         while map.len() > target_size {
+            // The key component makes the comparator a TOTAL order: `map`
+            // iterates in `HashMap` order, which `RandomState` randomizes
+            // per instance, and without this tie-break two entries sharing
+            // `last_accessed` would resolve to whichever one hash order
+            // placed first. Comparator form avoids cloning the key that
+            // `min_by_key` would need to fold it into a tuple.
             let Some(victim) = map
                 .iter()
-                .min_by_key(|(_, e)| e.last_accessed)
+                .min_by(|(key_a, a), (key_b, b)| {
+                    a.last_accessed
+                        .cmp(&b.last_accessed)
+                        .then_with(|| key_a.cmp(key_b))
+                })
                 .map(|(k, _)| k.clone())
             else {
                 break;
