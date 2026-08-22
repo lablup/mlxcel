@@ -145,6 +145,8 @@ mod validation;
 #[cfg(feature = "iree")]
 pub use aux_smoke::{AuxiliaryAbiSmokeReport, run_auxiliary_abi_smoke};
 #[cfg(feature = "iree")]
+pub use batch::XlaBucketSet;
+#[cfg(feature = "iree")]
 pub use batch::{EngineEvent, FinishReason, XlaAdmissionError, XlaBatchEngine, XlaReferenceEngine};
 #[cfg(feature = "diagnostics")]
 pub use batch::{
@@ -153,8 +155,9 @@ pub use batch::{
     run_gemma3n_canonical_diagnostics, run_gemma3n_prefix_decode_diagnostic,
 };
 pub use context::{
-    CONTEXT_CAPACITY_ENV, ContextCapacityError, DEFAULT_CONTEXT_CAPACITY,
-    context_capacity_from_env, validate_request_capacity,
+    CONTEXT_BUCKETS_ENV, CONTEXT_CAPACITY_ENV, ContextCapacityError, DEFAULT_CONTEXT_CAPACITY,
+    context_capacity_buckets_from_env, context_capacity_from_env, derive_context_buckets,
+    validate_request_capacity,
 };
 #[cfg(feature = "diagnostics")]
 pub use diagnostic_flags::{

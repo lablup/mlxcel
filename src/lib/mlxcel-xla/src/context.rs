@@ -78,6 +78,92 @@ fn parse_context_capacity(raw: &str) -> Result<usize, String> {
     validate_context_capacity_value(value)
 }
 
+/// Environment variable selecting an explicit list of static context shapes.
+pub const CONTEXT_BUCKETS_ENV: &str = "MLXCEL_XLA_CONTEXT_BUCKETS";
+
+/// Resolve the set of static context shapes to compile.
+///
+/// Three sources, in precedence order, matching the three ways an operator can
+/// reasonably want this decided:
+///
+/// 1. [`CONTEXT_CAPACITY_ENV`], which yields exactly one bucket. Pinning a
+///    single capacity is an existing operator-facing decision and must keep
+///    producing exactly the engine it produced before buckets existed, so it
+///    wins over everything else rather than becoming a floor or a hint.
+/// 2. [`CONTEXT_BUCKETS_ENV`], a comma-separated list, for an operator who
+///    knows their traffic better than any derivation can.
+/// 3. Derived from the checkpoint: the text default, plus the worst-case image
+///    expansion when the caller knows one. This is the case that makes an
+///    image-capable checkpoint usable without the operator having to discover
+///    the number themselves.
+///
+/// `image_floor` is `None` for a text-only checkpoint or a family whose worst
+/// case is not derived, and a floor at or below the text default adds no
+/// bucket, since the default already admits it.
+///
+/// # Errors
+///
+/// Returns an error for a malformed or out-of-range value in either variable.
+pub fn context_capacity_buckets_from_env(image_floor: Option<usize>) -> Result<Vec<usize>, String> {
+    if let Some(pinned) = read_env_capacity(CONTEXT_CAPACITY_ENV)? {
+        return Ok(vec![pinned]);
+    }
+    if let Some(raw) = read_env_raw(CONTEXT_BUCKETS_ENV)? {
+        return parse_context_buckets(&raw);
+    }
+    Ok(derive_context_buckets(
+        DEFAULT_CONTEXT_CAPACITY,
+        image_floor,
+    ))
+}
+
+/// The derived bucket set, split out so the rule is testable without env.
+#[must_use]
+pub fn derive_context_buckets(text_default: usize, image_floor: Option<usize>) -> Vec<usize> {
+    let mut buckets = vec![text_default];
+    if let Some(floor) = image_floor
+        && floor > text_default
+    {
+        buckets.push(floor);
+    }
+    buckets
+}
+
+fn read_env_raw(name: &str) -> Result<Option<String>, String> {
+    match std::env::var(name) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(err) => Err(format!("read {name}: {err}")),
+    }
+}
+
+fn read_env_capacity(name: &str) -> Result<Option<usize>, String> {
+    match read_env_raw(name)? {
+        Some(raw) => parse_context_capacity(&raw).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Parse a comma-separated bucket list, sorted ascending and deduplicated.
+fn parse_context_buckets(raw: &str) -> Result<Vec<usize>, String> {
+    let mut buckets = Vec::new();
+    for field in raw.split(',') {
+        let field = field.trim();
+        if field.is_empty() {
+            continue;
+        }
+        buckets.push(parse_context_capacity(field)?);
+    }
+    if buckets.is_empty() {
+        return Err(format!(
+            "{CONTEXT_BUCKETS_ENV} must list at least one capacity, got {raw:?}"
+        ));
+    }
+    buckets.sort_unstable();
+    buckets.dedup();
+    Ok(buckets)
+}
+
 /// Enforce the common text/multimodal admission invariant.
 ///
 /// `effective_prompt_len` is the token count after any placeholder expansion.
@@ -138,5 +224,39 @@ mod tests {
     #[test]
     fn zero_capacity_is_never_admitted() {
         assert!(validate_request_capacity(0, 0, 0).is_err());
+    }
+
+    #[test]
+    fn a_derived_set_adds_an_image_bucket_only_when_it_is_larger() {
+        assert_eq!(derive_context_buckets(256, None), vec![256]);
+        assert_eq!(derive_context_buckets(256, Some(1834)), vec![256, 1834]);
+        // A floor the text default already admits adds nothing to compile.
+        assert_eq!(derive_context_buckets(256, Some(200)), vec![256]);
+        assert_eq!(derive_context_buckets(256, Some(256)), vec![256]);
+    }
+
+    #[test]
+    fn a_bucket_list_is_sorted_deduplicated_and_validated() {
+        assert_eq!(
+            parse_context_buckets("2048, 256,1024"),
+            Ok(vec![256, 1024, 2048])
+        );
+        assert_eq!(parse_context_buckets("512,512"), Ok(vec![512]));
+        assert_eq!(parse_context_buckets(" 256 , "), Ok(vec![256]));
+        assert!(parse_context_buckets("").is_err());
+        assert!(parse_context_buckets("0").is_err());
+        assert!(parse_context_buckets("256,many").is_err());
+    }
+
+    #[test]
+    fn routing_by_whole_budget_is_what_makes_migration_unnecessary() {
+        // A prompt that fits the small bucket but whose generation budget does
+        // not must not be admitted there, or it would outgrow its graph shape
+        // mid-generation and need its KV moved to a larger one.
+        let small = 256;
+        let large = 2048;
+        assert!(validate_request_capacity(200, 8, small).is_ok());
+        assert!(validate_request_capacity(200, 512, small).is_err());
+        assert!(validate_request_capacity(200, 512, large).is_ok());
     }
 }

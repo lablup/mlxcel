@@ -273,10 +273,27 @@ struct Scheduler {
     slots: Vec<Option<Slot>>,
     queue: VecDeque<Pending>,
     next_id: u64,
+    /// Step between successive request ids. See `new_with_id_stride`.
+    id_stride: u64,
 }
 
 impl Scheduler {
     fn new(b_max: usize, eos: Vec<i32>) -> Self {
+        Self::new_with_id_stride(b_max, eos, 0, 1)
+    }
+
+    /// Build a scheduler whose request ids are `first_id`, `first_id + stride`,
+    /// and so on.
+    ///
+    /// A capacity bucket set runs one scheduler per bucket, and each would
+    /// otherwise hand out ids from zero, so two buckets would issue the same id
+    /// to different requests. The server matches cancellations and completion
+    /// events by id, so the collision would cancel or complete the wrong
+    /// request rather than fail visibly. Striding by the bucket count makes ids
+    /// unique across buckets and lets `id % stride` name the owning bucket
+    /// without a side table that could drift out of step.
+    fn new_with_id_stride(b_max: usize, eos: Vec<i32>, first_id: u64, stride: u64) -> Self {
+        debug_assert!(stride >= 1, "id stride must be at least 1");
         let mut slots = Vec::with_capacity(b_max);
         slots.resize_with(b_max, || None);
         Self {
@@ -284,14 +301,15 @@ impl Scheduler {
             eos,
             slots,
             queue: VecDeque::new(),
-            next_id: 0,
+            next_id: first_id,
+            id_stride: stride.max(1),
         }
     }
 
     /// Queue a request and return its id (monotonically increasing).
     fn submit_input(&mut self, input: PendingInput, cap: usize, params: SampleParams) -> u64 {
         let req_id = self.next_id;
-        self.next_id += 1;
+        self.next_id += self.id_stride;
         self.queue.push_back(Pending {
             req_id,
             input,
@@ -474,6 +492,267 @@ where
 pub struct XlaBatchEngine {
     engine: IreeRaggedLlama,
     sched: Scheduler,
+}
+
+/// Index of the smallest capacity in `capacities` (ascending) that admits
+/// `effective_prompt_len` plus `max_new_tokens`, or `None` when none does.
+///
+/// Split out from [`XlaBucketSet`] because this crate's own tests cannot link
+/// the IREE runtime, so the selection rule is unit-tested here while the engine
+/// wiring is exercised on a device. Routing on the whole generation budget, not
+/// just the prompt, is what guarantees an admitted request can never outgrow
+/// its bucket and therefore never needs its KV moved between graph shapes.
+pub(crate) fn route_capacity(
+    capacities: &[usize],
+    effective_prompt_len: usize,
+    max_new_tokens: usize,
+) -> Option<usize> {
+    capacities.iter().position(|capacity| {
+        crate::validate_request_capacity(effective_prompt_len, max_new_tokens, *capacity).is_ok()
+    })
+}
+
+/// A set of engines differing only in their static context capacity (#1271).
+///
+/// The capacity is a compiled graph shape and is also the sequence length every
+/// decode step attends over, so it trades image capability against text
+/// throughput and no single value wins. Measured on the pinned Molmo2 4B
+/// checkpoint: 3.18 tok/s at capacity 256, 2.17 at 1024, 1.41 at 2048, while a
+/// single image on that checkpoint expands to between 424 and 1834 tokens.
+///
+/// Holding several shapes lets each request use the smallest that admits it.
+/// Only the KV cache is duplicated per bucket, which is what makes this
+/// affordable: at B_max 4 that checkpoint's cache is about 0.30 GB at 256
+/// against 2.42 GB at 2048, and the roughly 16 GB of weights are shared.
+///
+/// # Routing and why no sequence ever outgrows its bucket
+///
+/// A request is admitted to the smallest bucket whose capacity covers its
+/// prompt **plus its whole generation budget**, which is the same invariant
+/// [`validate_request_capacity`] already enforced for a single shape. A request
+/// that fits at admission therefore cannot exceed its bucket later, so growing
+/// out of a bucket mid-generation cannot arise and no KV migration between
+/// shapes is needed. The alternative, admitting on prompt length alone and
+/// migrating when a sequence grows, would require copying KV across two
+/// differently-shaped caches; it was rejected because the conservative
+/// admission costs nothing that the single-shape path did not already cost.
+///
+/// # Batching
+///
+/// Buckets do not share a decode call: each has its own compiled graph and its
+/// own KV cache, so rows in different buckets cannot be advanced together.
+/// [`pump`](Self::pump) drives every non-empty bucket in turn. The cost is that
+/// slots are per bucket rather than pooled across them, which is the honest
+/// price of not promoting every text request to the image shape.
+#[cfg(feature = "iree")]
+pub struct XlaBucketSet {
+    /// Ascending by capacity, so the first admitting bucket is the smallest.
+    buckets: Vec<XlaBatchEngine>,
+}
+
+#[cfg(feature = "iree")]
+impl XlaBucketSet {
+    /// Load one engine per capacity in `capacities`.
+    ///
+    /// The first capacity is loaded normally and uploads the weights; the rest
+    /// share them. A bucket after the first that fails to load is dropped with
+    /// its reason returned rather than failing the set, because a smaller set
+    /// still serves every request that fits it. The first bucket failing is
+    /// fatal, since nothing has been loaded to fall back to.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the first bucket's load failure, an empty capacity list, or a
+    /// capacity outside the valid range.
+    pub fn load(
+        model_path: &Path,
+        b_max: usize,
+        device: &str,
+        capacities: &[usize],
+    ) -> Result<(Self, Vec<String>), String> {
+        let mut wanted: Vec<usize> = capacities.to_vec();
+        wanted.sort_unstable();
+        wanted.dedup();
+        if wanted.is_empty() {
+            return Err("a capacity bucket set needs at least one capacity".to_string());
+        }
+        for capacity in &wanted {
+            crate::context::validate_context_capacity_value(*capacity)?;
+        }
+
+        let stride = wanted.len() as u64;
+        let eos = crate::read_eos(model_path);
+        let mut engines: Vec<XlaBatchEngine> = Vec::with_capacity(wanted.len());
+        let mut dropped = Vec::new();
+
+        let base = IreeRaggedLlama::load(model_path, device, b_max, wanted[0])?;
+        for (index, capacity) in wanted.iter().enumerate().skip(1) {
+            match base.load_bucket(model_path, device, *capacity) {
+                Ok(engine) => engines.push(XlaBatchEngine {
+                    engine,
+                    sched: Scheduler::new_with_id_stride(b_max, eos.clone(), index as u64, stride),
+                }),
+                Err(error) => {
+                    dropped.push(format!("capacity {capacity} bucket was dropped: {error}"))
+                }
+            }
+        }
+        engines.insert(
+            0,
+            XlaBatchEngine {
+                engine: base,
+                sched: Scheduler::new_with_id_stride(b_max, eos, 0, stride),
+            },
+        );
+        engines.sort_by_key(XlaBatchEngine::context_capacity);
+        Ok((Self { buckets: engines }, dropped))
+    }
+
+    /// Total slots across buckets.
+    ///
+    /// Slots are per bucket rather than pooled, because a slot is a row in one
+    /// bucket's KV cache and the caches have different shapes. The sum is what
+    /// the set can run at once.
+    #[must_use]
+    pub fn b_max_total(&self) -> usize {
+        self.buckets.iter().map(XlaBatchEngine::b_max).sum()
+    }
+
+    /// The capacities held, ascending.
+    #[must_use]
+    pub fn capacities(&self) -> Vec<usize> {
+        self.buckets
+            .iter()
+            .map(XlaBatchEngine::context_capacity)
+            .collect()
+    }
+
+    /// The largest capacity held, which bounds every admissible request.
+    #[must_use]
+    pub fn largest_capacity(&self) -> usize {
+        self.buckets
+            .last()
+            .map_or(0, XlaBatchEngine::context_capacity)
+    }
+
+    /// Index of the smallest bucket admitting `effective_prompt_len` plus
+    /// `max_new_tokens`, or `None` when even the largest cannot.
+    #[must_use]
+    pub fn route(&self, effective_prompt_len: usize, max_new_tokens: usize) -> Option<usize> {
+        route_capacity(&self.capacities(), effective_prompt_len, max_new_tokens)
+    }
+
+    /// Queue a token prompt into the smallest bucket that admits it.
+    ///
+    /// # Errors
+    ///
+    /// Reports the same admission errors a single engine does. A request larger
+    /// than the largest bucket is rejected here rather than after its vision
+    /// tower has run.
+    pub fn submit(
+        &mut self,
+        prompt: &[i32],
+        max_new_tokens: usize,
+        params: SampleParams,
+    ) -> Result<u64, XlaAdmissionError> {
+        match self.route(prompt.len(), max_new_tokens) {
+            Some(index) => self.buckets[index].submit(prompt, max_new_tokens, params),
+            None => Err(crate::ContextCapacityError {
+                effective_prompt_len: prompt.len(),
+                max_new_tokens,
+                context_capacity: self.largest_capacity(),
+            }
+            .into()),
+        }
+    }
+
+    /// Queue an owned prepared-embeddings request into the smallest bucket that
+    /// admits its expanded length plus its whole generation budget.
+    ///
+    /// This is the multimodal path, and the one the routing exists for: an
+    /// expanded image can be several thousand tokens while a text turn is a few
+    /// dozen, and without buckets both would run on whichever single shape was
+    /// large enough for the image.
+    ///
+    /// # Errors
+    ///
+    /// Reports the same admission errors a single engine does, including a
+    /// request too large for the largest bucket.
+    pub fn submit_prepared(
+        &mut self,
+        prepared: PreparedPrefill,
+        max_new_tokens: usize,
+        params: SampleParams,
+    ) -> Result<u64, XlaAdmissionError> {
+        match self.route(prepared.sequence_len, max_new_tokens) {
+            Some(index) => self.buckets[index].submit_prepared(prepared, max_new_tokens, params),
+            None => Err(crate::ContextCapacityError {
+                effective_prompt_len: prepared.sequence_len,
+                max_new_tokens,
+                context_capacity: self.largest_capacity(),
+            }
+            .into()),
+        }
+    }
+
+    /// Cancel `req_id` in whichever bucket owns it.
+    pub fn cancel(&mut self, req_id: u64) -> bool {
+        let stride = self.buckets.len() as u64;
+        let owner = (req_id % stride) as usize;
+        // The id encodes its bucket, but a caller can pass anything, so fall
+        // back to a scan rather than trusting arithmetic on unvalidated input.
+        if self.buckets[owner].cancel(req_id) {
+            return true;
+        }
+        self.buckets
+            .iter_mut()
+            .enumerate()
+            .any(|(index, bucket)| index != owner && bucket.cancel(req_id))
+    }
+
+    /// Whether every bucket is idle.
+    #[must_use]
+    pub fn is_idle(&self) -> bool {
+        self.buckets.iter().all(XlaBatchEngine::is_idle)
+    }
+
+    /// Total queued requests across buckets.
+    #[must_use]
+    pub fn pending_len(&self) -> usize {
+        self.buckets.iter().map(XlaBatchEngine::pending_len).sum()
+    }
+
+    /// Total active rows across buckets.
+    #[must_use]
+    pub fn active_len(&self) -> usize {
+        self.buckets.iter().map(XlaBatchEngine::active_len).sum()
+    }
+
+    /// EOS ids, which every bucket shares.
+    #[must_use]
+    pub fn eos_token_ids(&self) -> &[i32] {
+        self.buckets
+            .first()
+            .map_or(&[], XlaBatchEngine::eos_token_ids)
+    }
+
+    /// Advance every non-empty bucket by one step and collect their events.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first bucket failure, after the buckets before it have
+    /// already stepped; their events are lost with the error, which matches how
+    /// a single engine reports a failed step.
+    pub fn pump(&mut self) -> Result<Vec<EngineEvent>, String> {
+        let mut events = Vec::new();
+        for bucket in &mut self.buckets {
+            if bucket.is_idle() {
+                continue;
+            }
+            events.extend(bucket.pump()?);
+        }
+        Ok(events)
+    }
 }
 
 #[cfg(feature = "iree")]
@@ -1310,6 +1589,72 @@ impl XlaReferenceEngine {
 // mlxcel-xla`).
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn routing_picks_the_smallest_bucket_that_admits_the_whole_budget() {
+        let caps = [256usize, 2048];
+        // A short text turn stays on the cheap shape.
+        assert_eq!(route_capacity(&caps, 20, 64), Some(0));
+        // Exactly filling the small bucket still uses it.
+        assert_eq!(route_capacity(&caps, 192, 64), Some(0));
+        // One token past it moves up rather than being rejected.
+        assert_eq!(route_capacity(&caps, 193, 64), Some(1));
+        // An expanded image only fits the large shape.
+        assert_eq!(route_capacity(&caps, 1834, 64), Some(1));
+    }
+
+    #[test]
+    fn routing_counts_the_generation_budget_not_just_the_prompt() {
+        let caps = [256usize, 2048];
+        // Same prompt, different budgets. Admitting this on prompt length alone
+        // would put it in the 256 bucket and let it run past that shape, which
+        // is exactly the case that would force KV migration between buckets.
+        assert_eq!(route_capacity(&caps, 200, 8), Some(0));
+        assert_eq!(route_capacity(&caps, 200, 512), Some(1));
+    }
+
+    #[test]
+    fn a_request_larger_than_every_bucket_is_refused() {
+        let caps = [256usize, 2048];
+        assert_eq!(route_capacity(&caps, 2048, 1), None);
+        assert_eq!(route_capacity(&caps, 4096, 1), None);
+        // Refusing is the point: the alternative is admitting it into a shape
+        // that cannot hold it.
+        assert_eq!(route_capacity(&caps, 2047, 1), Some(1));
+    }
+
+    #[test]
+    fn a_single_bucket_routes_exactly_like_one_engine() {
+        let caps = [256usize];
+        assert_eq!(route_capacity(&caps, 100, 100), Some(0));
+        assert_eq!(route_capacity(&caps, 200, 100), None);
+        // Which is the same verdict the single-shape admission gives.
+        assert!(crate::validate_request_capacity(100, 100, 256).is_ok());
+        assert!(crate::validate_request_capacity(200, 100, 256).is_err());
+    }
+
+    #[test]
+    fn scheduler_ids_do_not_collide_across_buckets() {
+        // Two buckets in a set of two: ids interleave rather than both starting
+        // at zero, so the server cannot cancel or complete the wrong request.
+        let mut a = Scheduler::new_with_id_stride(2, vec![], 0, 2);
+        let mut b = Scheduler::new_with_id_stride(2, vec![], 1, 2);
+        let ids_a: Vec<u64> = (0..3)
+            .map(|_| a.submit(vec![1], 1, SampleParams::greedy()))
+            .collect();
+        let ids_b: Vec<u64> = (0..3)
+            .map(|_| b.submit(vec![1], 1, SampleParams::greedy()))
+            .collect();
+        assert_eq!(ids_a, vec![0, 2, 4]);
+        assert_eq!(ids_b, vec![1, 3, 5]);
+        // And the id names its own bucket, which is what `cancel` relies on.
+        for id in &ids_a {
+            assert_eq!(id % 2, 0);
+        }
+        for id in &ids_b {
+            assert_eq!(id % 2, 1);
+        }
+    }
     use super::*;
     use mlxcel_core::session::{
         OwnedTensor, PreparedAdapterMode, PreparedAttentionBias, PreparedModality,

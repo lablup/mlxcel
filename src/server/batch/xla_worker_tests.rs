@@ -42,6 +42,12 @@ struct FakeServingEngine {
 }
 
 impl XlaServingEngine for FakeServingEngine {
+    fn context_capacity(&self) -> usize {
+        // The fake never routes by capacity; a large value keeps admission from
+        // rejecting the fixtures on a dimension this test is not about.
+        usize::MAX
+    }
+
     fn b_max(&self) -> usize {
         4
     }
