@@ -1672,6 +1672,13 @@ impl BatchScheduler {
     pub fn with_mtp_policy(mut self, target_model_id: Option<String>) -> Self {
         use super::mtp_policy::{MtpPolicySnapshot, MtpPolicyUnavailableReason};
 
+        // Snapshot to publish when the exactness gate has vetoed the
+        // pairing (issue #1298). Checked here, at attach time, because the
+        // gate is memoized per block width and cannot change later in the
+        // process: publishing the attached policy instead would report
+        // `profiling` forever, since the burst the policy waits to sample
+        // never dispatches past `mtp_capable_target`.
+        let mut exactness_veto: Option<MtpPolicySnapshot> = None;
         let mtp_dispatch = if let crate::server::SpeculativeDispatch::Mtp {
             draft_model_path,
             block_size,
@@ -1683,6 +1690,15 @@ impl BatchScheduler {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "unknown-drafter".to_string());
             let target_id = target_model_id.unwrap_or_else(|| "unknown-target".to_string());
+            let block = *block_size as usize;
+            if block >= 2 && !super::speculative_burst::mtp_capable_target(&self.model, block) {
+                exactness_veto = Some(MtpPolicySnapshot::exactness_declined(
+                    target_id.clone(),
+                    drafter_id.clone(),
+                    *block_size,
+                    crate::models::speculative_exactness::decline_reason(*block_size),
+                ));
+            }
             self.mtp_policy = super::mtp_policy::MtpPolicy::initialize(
                 target_id,
                 drafter_id,
@@ -1697,23 +1713,30 @@ impl BatchScheduler {
         // (issue #1257). Doing it here, rather than letting the endpoint reach
         // into `self.mtp_policy`, is what keeps `MtpPolicy` single-threaded and
         // lock-free on the decode path.
-        let published = match (&self.mtp_policy, mtp_dispatch) {
-            (Some(policy), _) => policy.snapshot(),
-            // MTP dispatch with the adaptive path switched off
-            // (`MLXCEL_MTP_ADAPTIVE=0`): the pre-#333 static per-hardware gate
-            // decides, so report what it decided rather than leaving a
-            // consumer to guess whether MTP runs.
-            (None, true) => MtpPolicySnapshot::unavailable(
-                MtpPolicyUnavailableReason::AdaptiveDisabled,
-                Some(super::speculative_burst::mtp_b1_burst_enabled(
-                    self.model.supports_batching(),
-                )),
-            ),
-            // No MTP dispatch at all: there is no pairing and no burst.
-            (None, false) => MtpPolicySnapshot::unavailable(
-                MtpPolicyUnavailableReason::NoMtpDispatch,
-                Some(false),
-            ),
+        // The exactness veto outranks the attached policy's own view: a
+        // vetoed pairing's policy is structurally starved and its
+        // `profiling` state would be a lie (issue #1298).
+        let published = if let Some(veto) = exactness_veto {
+            veto
+        } else {
+            match (&self.mtp_policy, mtp_dispatch) {
+                (Some(policy), _) => policy.snapshot(),
+                // MTP dispatch with the adaptive path switched off
+                // (`MLXCEL_MTP_ADAPTIVE=0`): the pre-#333 static per-hardware gate
+                // decides, so report what it decided rather than leaving a
+                // consumer to guess whether MTP runs.
+                (None, true) => MtpPolicySnapshot::unavailable(
+                    MtpPolicyUnavailableReason::AdaptiveDisabled,
+                    Some(super::speculative_burst::mtp_b1_burst_enabled(
+                        self.model.supports_batching(),
+                    )),
+                ),
+                // No MTP dispatch at all: there is no pairing and no burst.
+                (None, false) => MtpPolicySnapshot::unavailable(
+                    MtpPolicyUnavailableReason::NoMtpDispatch,
+                    Some(false),
+                ),
+            }
         };
         self.batch_observability.set_mtp_policy(published);
         self

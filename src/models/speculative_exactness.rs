@@ -163,9 +163,34 @@ pub fn allow_inexact() -> bool {
     })
 }
 
-fn verdict_cache() -> &'static Mutex<HashMap<ProbeKey, bool>> {
-    static CACHE: OnceLock<Mutex<HashMap<ProbeKey, bool>>> = OnceLock::new();
+/// Memoized outcome of one gate run: the decision, plus the decline reason
+/// when there was one, so observability surfaces can say why MTP is not
+/// running without re-probing (issue #1298).
+#[derive(Debug, Clone)]
+struct CachedDecision {
+    decision: bool,
+    decline_reason: Option<String>,
+}
+
+fn verdict_cache() -> &'static Mutex<HashMap<ProbeKey, CachedDecision>> {
+    static CACHE: OnceLock<Mutex<HashMap<ProbeKey, CachedDecision>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The one-line reason the gate declined MTP at `block_size`, when it did.
+///
+/// Keyed by block width alone: a process serves one target model (see
+/// [`ProbeKey`]), so the width is the only discriminator a server-side
+/// consumer has, or needs. `None` when no gate run at that width has
+/// declined, including when the probe has not run at all.
+///
+/// Used by: the scheduler's `/v1/internal/mtp-policy` publish (issue #1298).
+pub fn decline_reason(block_size: u32) -> Option<String> {
+    let cache = verdict_cache().lock().ok()?;
+    cache
+        .iter()
+        .find(|(key, cached)| key.block_size == block_size && cached.decline_reason.is_some())
+        .and_then(|(_, cached)| cached.decline_reason.clone())
 }
 
 /// Whether MTP may engage for `key`, running `probe` at most once per key.
@@ -275,9 +300,9 @@ where
     F: FnMut() -> BlockChainExactness,
 {
     if let Ok(cache) = verdict_cache().lock()
-        && let Some(decision) = cache.get(&key)
+        && let Some(cached) = cache.get(&key)
     {
-        return *decision;
+        return cached.decision;
     }
 
     let verdict = probe();
@@ -288,6 +313,21 @@ where
     };
     let exact = verdict.is_equal() || retried == Some(true);
     let decision = exact || allow_inexact();
+    let also_tried = match retried {
+        Some(false) => " Disabling qmv_wide did not make it exact either.",
+        None if qmv_wide_pinned_by_operator() => {
+            " The qmv_wide retry was skipped because MLXCEL_QMV_WIDE is pinned."
+        }
+        _ => "",
+    };
+    // The sentence observability surfaces show for a declined pairing
+    // (issue #1298): the same content the WARN below logs, minus the
+    // env-var instructions, which are operator-console text.
+    let decline_reason = (!decision).then(|| {
+        format!("{}.{}", verdict.reason(), also_tried)
+            .trim()
+            .to_string()
+    });
 
     if verdict.is_equal() {
         tracing::info!(
@@ -306,13 +346,6 @@ where
             verdict.reason()
         );
     } else {
-        let also_tried = match retried {
-            Some(false) => " Disabling qmv_wide did not make it exact either.",
-            None if qmv_wide_pinned_by_operator() => {
-                " The qmv_wide retry was skipped because MLXCEL_QMV_WIDE is pinned."
-            }
-            _ => "",
-        };
         tracing::warn!(
             block_size = key.block_size,
             "MTP declined: {}.{} Falling back to classic decode. Set \
@@ -324,7 +357,13 @@ where
     }
 
     if let Ok(mut cache) = verdict_cache().lock() {
-        cache.insert(key, decision);
+        cache.insert(
+            key,
+            CachedDecision {
+                decision,
+                decline_reason,
+            },
+        );
     }
     decision
 }
