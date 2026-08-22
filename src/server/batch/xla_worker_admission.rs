@@ -502,11 +502,6 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
                 response_tx,
                 cancelled,
             ),
-            ModelRequest::PromptCacheWarmup { .. } => {
-                // Only the BatchScheduler owns a prompt cache; the XLA worker
-                // has no snapshot state to warm, so the job is dropped without
-                // touching admission state.
-            }
             ModelRequest::Shutdown => {
                 self.shutdown = true;
                 for state in self.pending_images.values() {
