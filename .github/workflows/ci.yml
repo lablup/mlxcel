@@ -95,6 +95,8 @@ jobs:
             # every Rust PR. See the `xla-link` job comment for the rationale.
             xla_link:
               - 'build.rs'
+              - 'src/lib/mlxcel-xla/build.rs'
+              - 'src/lib/mlxcel-xla/csrc/**'
               - 'scripts/iree/**'
               - 'rust-toolchain.toml'
               - '.github/workflows/ci.yml'
@@ -406,12 +408,16 @@ jobs:
   # What it links, and why: `cargo test --release --features cuda,xla-iree
   # --test xla_prepared_prefill --no-run`. `build.rs` emits the IREE recipe
   # through `cargo:rustc-link-arg`, which applies to every linked artifact of
-  # the crate, so the smallest linked target exercises the same recipe as
-  # `mlxcel-server` does. `--no-run` links without executing, so this job never
-  # touches the GPU and never contends with development work on the shared
-  # GB10 host. `cargo build --release --features cuda,xla-iree --bin
-  # mlxcel-server` was considered and rejected: it costs 17m06s cold on this
-  # runner and adds no additional recipe coverage over the test binary.
+  # the crate, so any linked target exercises the same recipe `mlxcel-server`
+  # does, and an integration test is the direct reproducer because #1274 was an
+  # integration-test link failure. Cargo also builds the package's `[[bin]]`
+  # targets whenever an integration test is selected, so `mlxcel-server` and
+  # the other three binaries are linked here as well; the costs measured below
+  # already include them, which makes `cargo build --release --features
+  # cuda,xla-iree --bin mlxcel-server` a strict subset of this command rather
+  # than a cheaper alternative to it. `--no-run` links without executing, so
+  # this job never touches the GPU and never contends with development work on
+  # the shared GB10 host.
   #
   # Profile: `--release` is mandatory, not a choice. On this host the debug
   # profile cannot link these targets at all: it fails with hundreds of
@@ -420,12 +426,14 @@ jobs:
   # exceeds the AArch64 direct-branch range.
   #
   # Trigger: path-filtered via the `changes` job's `xla_link` output, not every
-  # Rust PR and not scheduled. `build.rs` holds the recipe and
-  # `scripts/iree/**` pins the IREE distribution whose archive set the recipe
-  # names, so those two are the causal surface. `rust-toolchain.toml` is on the
-  # same causal path because the #1274 failure was entirely about where rustc
-  # places its own `-lc` relative to appended `rustc-link-arg` entries, which a
-  # toolchain bump can move. `.github/workflows/ci.yml` is included so edits to
+  # Rust PR and not scheduled. `build.rs` holds the recipe, `scripts/iree/**`
+  # pins the IREE distribution whose archive set the recipe names, and
+  # `src/lib/mlxcel-xla/build.rs` with its `csrc/**` sources builds the shim
+  # object whose undefined symbols those archives resolve, so those are the
+  # causal surface. `rust-toolchain.toml` is on the same causal path because
+  # the #1274 failure was entirely about where rustc places its own `-lc`
+  # relative to appended `rustc-link-arg` entries, which a toolchain bump can
+  # move. `.github/workflows/ci.yml` is included so edits to
   # this job itself are testable. A schedule was rejected because it decouples
   # the failure from the PR that caused it, which is the exact failure mode of
   # #1274 (found by hand later, not by CI). Running on every Rust PR was
@@ -446,19 +454,22 @@ jobs:
   # unset means a red run here is unambiguously a link failure, not a lint
   # failure wearing a link job's name.
   #
-  # What the gate was demonstrated on, since #1274's own defect no longer
-  # reproduces here: the IREE runtime currently pinned by
-  # `scripts/iree/setup-cuda.sh` is built without the stack protector, so
-  # `libiree_runtime_unified.a` holds no `__stack_chk_guard` reference at all
-  # (`nm` reports zero) and removing the `-lc` entry from `build.rs` links
-  # cleanly today. The `-lc` entry is therefore inert against this particular
-  # distribution, though still correct to keep for one built with the stack
-  # protector. The gate was instead demonstrated by dropping
-  # `-l:libflatcc_parsing.a` from the same recipe: on that tree `cargo check
+  # What the gate was demonstrated on: dropping `-l:libflatcc_parsing.a` from
+  # the `IREE_CUDA_HOME` recipe in `build.rs`. On that tree `cargo check
   # --features cuda,xla-iree --all-targets` still passed in 59 seconds while
   # this job's link command failed with undefined references to
   # `flatcc_verify_*`, which is the same shape as #1274 and the exact gap this
   # job exists to close.
+  #
+  # #1274's own defect, removing the second `-lc`, was tried as the control
+  # first and did not fail the link on the tree this job was validated against.
+  # Why it did not is unresolved, so do not read that run as evidence the entry
+  # is dead: against the pinned runtime, `nm` still reports `__stack_chk_guard`
+  # undefined in 176 objects of `libiree_runtime_unified.a`, including the
+  # `call.c.o` named in #1274; the symbol is still undefined in `libc.so.6`;
+  # and it is still defined only in `ld-linux-aarch64.so.1`. Every precondition
+  # the `build.rs` comment records holds today, so leave that entry alone until
+  # a control that actually reproduces says otherwise.
   #
   # Deliberately NOT covered, so the gap is recorded rather than assumed shut:
   #   - The `IREE_DIST` recipe (`build.rs:180-220`) and the macOS
