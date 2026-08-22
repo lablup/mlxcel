@@ -436,6 +436,13 @@ impl<E: XlaServingEngine> XlaServeWorker<E> {
         }
     }
 
+    // Both loops below, the image drain and the audio drain, take this allow.
+    // clippy::while_let_loop wants `while let Some(stage) =
+    // self.image_preprocessor.as_ref()`, but that head holds a shared borrow of
+    // `self` for the whole body, which then calls `&mut self` methods and clears
+    // the field. Taking the receiver result inside the loop ends the borrow at
+    // the `let`, so the `match` shape is load-bearing rather than stylistic.
+    #[allow(clippy::while_let_loop)]
     pub(super) fn drain_preprocessed(&mut self) {
         loop {
             let received = match self.image_preprocessor.as_ref() {

@@ -196,7 +196,12 @@ impl MediaRequestMetadata {
     /// failed resolver cannot erase an unsupported modality. Images require a
     /// one-to-one declaration → raw payload handoff; decoded cardinality is
     /// checked later by the bounded preprocessing worker.
-    #[cfg_attr(not(feature = "xla-iree"), allow(dead_code))]
+    ///
+    /// Called by `media_tests.rs` only. The XLA admission path calls
+    /// [`Self::validate_xla_raw_counts_with_audio`] directly because it knows
+    /// whether the loaded family supports audio, so this no-audio wrapper is
+    /// the test-facing spelling of the same check.
+    #[cfg_attr(any(not(feature = "xla-iree"), not(test)), allow(dead_code))]
     pub(crate) fn validate_xla_raw_counts(
         self,
         images: usize,

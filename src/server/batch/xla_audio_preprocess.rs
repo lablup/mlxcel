@@ -48,7 +48,13 @@ pub(crate) struct AudioPreprocessJob {
 
 pub(crate) enum AudioPreprocessOutcome {
     Prepared(PreparedPrefill),
-    Cancelled(AudioPreprocessCheckpoint),
+    // The checkpoint payload records where cancellation was observed. Serving
+    // matches it as `Cancelled(_)` (`xla_worker_admission.rs`), so only the
+    // unit tests in `xla_audio_preprocess_tests.rs` read the value. Keeping the
+    // payload is deliberate: `Cancelled` is constructed at several checkpoints
+    // in this file, and dropping the field would erase that distinction from
+    // the type rather than from one caller.
+    Cancelled(#[cfg_attr(not(test), allow(dead_code))] AudioPreprocessCheckpoint),
     Failed(AudioStageError),
 }
 
@@ -220,6 +226,9 @@ impl AudioPreprocessMetrics {
         }
     }
 
+    /// Read by the unit tests in `xla_audio_preprocess_tests.rs`; serving reads
+    /// these counters through `BatchObservability` instead of this struct.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn snapshot(&self) -> AudioPreprocessMetricsSnapshot {
         AudioPreprocessMetricsSnapshot {
             accepted: self.accepted.load(Ordering::Relaxed),
@@ -338,6 +347,9 @@ enum AudioRejectionReason {
     ContextLimit,
 }
 
+/// Constructed only by `AudioPreprocessMetrics::snapshot`, which the unit tests
+/// in `xla_audio_preprocess_tests.rs` are the only callers of.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AudioPreprocessMetricsSnapshot {
     pub accepted: u64,
@@ -409,6 +421,11 @@ pub(crate) struct AudioPreprocessStage {
     sender: Option<mpsc::SyncSender<QueuedJob>>,
     result_rx: Option<mpsc::Receiver<AudioPreprocessResult>>,
     metrics: Arc<AudioPreprocessMetrics>,
+    // Written by the worker thread and read back through `is_healthy`, which
+    // only `xla_audio_preprocess_tests.rs` calls. The worker still needs the
+    // flag to publish its liveness, so it stays a field rather than becoming a
+    // test-only construct.
+    #[cfg_attr(not(test), allow(dead_code))]
     healthy: Arc<AtomicBool>,
     max_queued_encoded_bytes: usize,
     max_in_flight_host_bytes: usize,
@@ -416,6 +433,10 @@ pub(crate) struct AudioPreprocessStage {
 }
 
 impl AudioPreprocessStage {
+    /// Used by `xla_audio_preprocess_tests.rs` and `xla_worker_tests.rs`. The
+    /// serve worker constructs the stage through `spawn_with_loader` so MLX
+    /// handles stay thread-confined.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn spawn<P: AudioFeatureProducer + Send>(
         producer: P,
         limits: AudioPreprocessLimits,
@@ -634,14 +655,24 @@ impl AudioPreprocessStage {
             .try_recv()
     }
 
+    /// Blocking counterpart to `try_recv`, used by
+    /// `xla_audio_preprocess_tests.rs`. The scheduling loop must not block, so
+    /// serving drains the stage with `try_recv` only.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn recv(&self) -> Result<AudioPreprocessResult, mpsc::RecvError> {
         self.result_rx.as_ref().ok_or(mpsc::RecvError)?.recv()
     }
 
+    /// Read by `xla_audio_preprocess_tests.rs`; serving observes the same
+    /// counters through the `BatchObservability` the metrics forward to.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn metrics(&self) -> &Arc<AudioPreprocessMetrics> {
         &self.metrics
     }
 
+    /// Read by `xla_audio_preprocess_tests.rs` to assert that a per-request
+    /// panic does not take the worker thread down with it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::Acquire)
     }

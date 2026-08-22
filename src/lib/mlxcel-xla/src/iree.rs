@@ -1819,10 +1819,6 @@ fn deepstack_descriptors(
     ))
 }
 
-/// Load the weights and create the C execution context for a (prefill, decode)
-/// vmfb pair on `device`. Shared by the single-sequence ([`IreeLlama`]) and ragged
-/// ([`IreeRaggedLlama`]) engines, which differ only in which decode vmfb they pass.
-
 /// Create a context that shares `base`'s uploaded weights, differing only in the
 /// compiled bundle and the capacity baked into it.
 ///
@@ -1876,6 +1872,9 @@ fn create_bucket_ctx(
     Ok(ctx)
 }
 
+/// Load the weights and create the C execution context for a (prefill, decode)
+/// vmfb pair on `device`. Shared by the single-sequence ([`IreeLlama`]) and ragged
+/// ([`IreeRaggedLlama`]) engines, which differ only in which decode vmfb they pass.
 fn create_ctx(
     model_dir: &Path,
     cfg: &RuntimeConfig,
@@ -3008,6 +3007,14 @@ impl IreeRaggedLlama {
     /// LOGITS (#449 M3 Stage 2d). `tokens` / `pos` / `cache_len` are per-row (length
     /// `b_max`); an inactive slot carries zeros (a masked no-op whose logits the
     /// caller discards). The caller samples a token per row from `logits[s*vocab..]`.
+    ///
+    /// Every caller is diagnostics-only (`LlavaReferenceDiagnosticEngine::capture`
+    /// and the Gemma3n diagnostic runners in `batch.rs`); serving goes through
+    /// [`decode_ragged_logits_with_modes`] directly. Gated to match those callers
+    /// so the production feature set neither compiles nor warns about it.
+    ///
+    /// [`decode_ragged_logits_with_modes`]: Self::decode_ragged_logits_with_modes
+    #[cfg(feature = "diagnostics")]
     pub fn decode_ragged_logits(
         &mut self,
         tokens: &[i32],
@@ -3035,7 +3042,7 @@ impl IreeRaggedLlama {
             || cache_len.len() != self.b_max
         {
             return Err(format!(
-                "decode_ragged_logits expects adapter/token/position/cache arrays of length b_max = {}",
+                "decode_ragged_logits_with_modes expects adapter/token/position/cache arrays of length b_max = {}",
                 self.b_max
             ));
         }
@@ -3076,22 +3083,6 @@ impl IreeRaggedLlama {
         Ok(logits)
     }
 
-    /// Advance an M-RoPE batch with explicit temporal/height/width coordinates
-    /// per row while retaining physical KV writes at `cache_len`.
-    pub fn decode_ragged_mrope_logits(
-        &mut self,
-        tokens: &[i32],
-        positions: &[[i32; 3]],
-        cache_len: &[i32],
-    ) -> Result<Vec<f32>, String> {
-        self.decode_ragged_mrope_logits_with_modes(
-            &vec![0; self.b_max],
-            tokens,
-            positions,
-            cache_len,
-        )
-    }
-
     /// Mode-aware M-RoPE ragged decode.
     pub fn decode_ragged_mrope_logits_with_modes(
         &mut self,
@@ -3109,7 +3100,7 @@ impl IreeRaggedLlama {
             || cache_len.len() != self.b_max
         {
             return Err(format!(
-                "decode_ragged_mrope_logits expects adapter/token/position/cache arrays of length b_max = {}",
+                "decode_ragged_mrope_logits_with_modes expects adapter/token/position/cache arrays of length b_max = {}",
                 self.b_max
             ));
         }
