@@ -46,7 +46,7 @@ use crate::sampling::{LogprobsConfig, TokenLogprobData};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use super::adaptive::effective_mtp_block_size;
+use super::adaptive::{BlockThroughputController, effective_mtp_block_size};
 use super::target::{MtpTarget, MtpVerifyOutput};
 use super::tree::DraftTree;
 use super::walk::{WalkResult, speculative_walk};
@@ -354,8 +354,10 @@ pub struct MtpSessionState {
     /// not keep the token stream itself: each step hands its new tokens to
     /// the caller, who owns accumulation/streaming.
     emitted_count: usize,
-    /// Per-round accepted counts feeding the adaptive block-size controller
-    /// ([`effective_mtp_block_size`]). Probe rounds are excluded.
+    /// Per-round accepted counts feeding the acceptance-proxy block
+    /// controller ([`effective_mtp_block_size`]), which only decides when
+    /// `MLXCEL_MTP_BLOCK_CONTROLLER=proxy` pins it (issue #1207). Probe
+    /// rounds are excluded.
     accept_lens: Vec<f64>,
     /// Whether the narrower-than-requested block warning has already fired.
     /// Once per session: the condition holds every round it holds at all, and
@@ -497,6 +499,40 @@ pub struct MtpGenerator<T: MtpTarget> {
     /// and [`MtpTarget::tree_round_is_available`] is the per-round capability
     /// question asked on top of it (issue #1204).
     tree_drafting: bool,
+    /// Measured-throughput block-width comparator (issue #1207). Owned by
+    /// the generator rather than the session so a server process keeps its
+    /// evidence across requests. Consulted only when
+    /// `prefer_requested_block_size` is false and the proxy controller is
+    /// not pinned via `MLXCEL_MTP_BLOCK_CONTROLLER=proxy`.
+    block_controller: BlockThroughputController,
+    /// Which block-width controller `MLXCEL_MTP_BLOCK_CONTROLLER` selected.
+    block_controller_mode: BlockControllerMode,
+}
+
+/// `MLXCEL_MTP_BLOCK_CONTROLLER` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockControllerMode {
+    /// Default: the measured-throughput comparator (issue #1207).
+    Throughput,
+    /// The upstream fully-accepted-prefix gate.
+    Proxy,
+    /// Honour the requested width immediately, controller-free. The
+    /// measurement mode: #1207's own width sweep needed a temporary code
+    /// patch to hold the widths it compared, and this value is that patch
+    /// as a switch. Not a deployment setting.
+    Requested,
+}
+
+/// Parse `MLXCEL_MTP_BLOCK_CONTROLLER`. Unknown values fall back to the
+/// default rather than erroring, matching the other MLXCEL_* switches.
+fn block_controller_mode() -> BlockControllerMode {
+    match std::env::var("MLXCEL_MTP_BLOCK_CONTROLLER") {
+        Ok(value) if value.trim().eq_ignore_ascii_case("proxy") => BlockControllerMode::Proxy,
+        Ok(value) if value.trim().eq_ignore_ascii_case("requested") => {
+            BlockControllerMode::Requested
+        }
+        _ => BlockControllerMode::Throughput,
+    }
 }
 
 /// Whether tree drafting is switched on for this process.
@@ -539,6 +575,8 @@ impl<T: MtpTarget> MtpGenerator<T> {
             last_acceptance: None,
             profile_probe_rounds: 0,
             tree_drafting: tree_drafting_enabled(),
+            block_controller: BlockThroughputController::new(block_size, configured_block_size),
+            block_controller_mode: block_controller_mode(),
         }
     }
 
@@ -1002,28 +1040,41 @@ impl<T: MtpTarget> MtpGenerator<T> {
                 );
             }
         }
+        // (width, start) of a round the throughput comparator will be fed at
+        // the end of this step. `None` for probe rounds, for the proxy /
+        // prefer-requested paths, and for rounds that bail out early (a
+        // drafter failure or rollback refusal spends time this round, but
+        // charging a terminal round to either arm would bias the window it
+        // lands in).
+        let mut throughput_round: Option<(usize, Instant)> = None;
         let (draft_tokens, draft_tree): (Vec<i32>, Option<DraftTree>) = if is_probe {
             state.probes_remaining -= 1;
             (Vec::new(), None)
         } else {
             // Bound the block size by the remaining budget. When the
             // operator requested a block larger than the drafter's
-            // configured depth, mirror upstream's adaptive controller:
-            // stay at configured depth until recent acceptance proves the
-            // configured prefix is usually fully accepted, then expand to
-            // the requested ceiling. The `+1` is because the verify input
-            // is `[bonus, draft_0, …, draft_{K-2}]`: one prefix bonus
-            // position that the round-loop already counts as emitted.
+            // configured depth, the throughput comparator alternates
+            // measurement windows between the two widths and holds
+            // whichever measures more emitted tokens per millisecond
+            // (issue #1207); `MLXCEL_MTP_BLOCK_CONTROLLER=proxy` restores
+            // upstream's fully-accepted-prefix gate. The `+1` is because
+            // the verify input is `[bonus, draft_0, …, draft_{K-2}]`: one
+            // prefix bonus position that the round-loop already counts as
+            // emitted.
             let remaining = state.max_tokens - state.emitted_count + 1;
             let bs = if self.prefer_requested_block_size {
                 self.block_size.min(remaining)
             } else {
-                effective_mtp_block_size(
-                    self.block_size,
-                    self.configured_block_size,
-                    &state.accept_lens,
-                    remaining,
-                )
+                match self.block_controller_mode {
+                    BlockControllerMode::Requested => self.block_size.min(remaining),
+                    BlockControllerMode::Proxy => effective_mtp_block_size(
+                        self.block_size,
+                        self.configured_block_size,
+                        &state.accept_lens,
+                        remaining,
+                    ),
+                    BlockControllerMode::Throughput => self.block_controller.decide(remaining),
+                }
             };
             if bs <= 1 {
                 state.finished = true;
@@ -1035,18 +1086,39 @@ impl<T: MtpTarget> MtpGenerator<T> {
             // A request silently reduced to the configured depth is the case
             // that makes `--draft-block-size` look tunable when it is not
             // (issue #1206); a reduction the remaining budget forced is
-            // ordinary end-of-generation behavior and stays quiet.
+            // ordinary end-of-generation behavior and stays quiet. Under the
+            // throughput comparator the narrower rounds are measurement, not
+            // a verdict, so the message names the mechanism that would
+            // expand it.
             if bs < self.block_size && self.block_size <= remaining && !state.warned_block_override
             {
                 state.warned_block_override = true;
-                tracing::warn!(
-                    requested = self.block_size,
-                    effective = bs,
-                    configured = self.configured_block_size,
-                    "MTP drafted at a narrower block than requested: the adaptive controller \
-                     holds this drafter at its configured depth until recent acceptance shows \
-                     that prefix is usually fully accepted"
-                );
+                if self.block_controller_mode == BlockControllerMode::Proxy {
+                    tracing::warn!(
+                        requested = self.block_size,
+                        effective = bs,
+                        configured = self.configured_block_size,
+                        "MTP drafted at a narrower block than requested: the proxy controller \
+                         holds this drafter at its configured depth until recent acceptance shows \
+                         that prefix is usually fully accepted (MLXCEL_MTP_BLOCK_CONTROLLER=proxy)"
+                    );
+                } else {
+                    tracing::warn!(
+                        requested = self.block_size,
+                        effective = bs,
+                        configured = self.configured_block_size,
+                        "MTP drafted at a narrower block than requested: the throughput \
+                         comparator holds the configured depth until the requested width \
+                         measures more emitted tokens per millisecond over a recent window \
+                         (issue #1207)"
+                    );
+                }
+            }
+
+            if !self.prefer_requested_block_size
+                && self.block_controller_mode == BlockControllerMode::Throughput
+            {
+                throughput_round = Some((bs, Instant::now()));
             }
 
             // Arm the drafter's shared K/V from the stored verify output
@@ -1320,6 +1392,20 @@ impl<T: MtpTarget> MtpGenerator<T> {
                     "MTP drafter accept_verified_tokens failed: {e}; drafter history reset"
                 );
             }
+        }
+
+        // Feed the throughput comparator with what this round actually
+        // delivered: everything from the shared-K/V arm through the accept
+        // hook, against everything it emitted. Per-round attribution of
+        // lazily-evaluated GPU work is approximate (a round can execute a
+        // predecessor's deferred tail), which is why the comparator only
+        // ever reads window sums.
+        if let Some((bs, started)) = throughput_round {
+            self.block_controller.record_round(
+                bs,
+                new_tokens.len(),
+                duration_ms(started.elapsed()),
+            );
         }
 
         // Next round's bonus is the last emitted token. `walk.new_tokens`

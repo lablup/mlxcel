@@ -311,6 +311,12 @@ impl<T: MtpTarget> MtpBatchedGenerator<T> {
             let bs = if self.prefer_requested_block_size {
                 self.block_size.min(remaining_min)
             } else {
+                // The batched loop stays on the acceptance-proxy controller
+                // while the B = 1 loop moved to the measured-throughput
+                // comparator (issue #1207): the row-averaged accept length is
+                // the only per-round signal this loop measures today, its
+                // per-round wall time mixes rows at divergent depths, and the
+                // #1207 measurement that justified the switch is B = 1.
                 effective_mtp_block_size(
                     self.block_size,
                     self.configured_block_size,
