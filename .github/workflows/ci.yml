@@ -66,6 +66,7 @@ jobs:
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       mlx_pin: ${{ steps.filter.outputs.mlx_pin }}
+      xla_link: ${{ steps.filter.outputs.xla_link }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -88,6 +89,16 @@ jobs:
               - 'src/lib/mlxcel-mlx-pin/**'
               - 'scripts/ci/mlx_pinned_commit.sh'
               - 'scripts/ci/mlx_pinned_commit_test.sh'
+              - '.github/workflows/ci.yml'
+            # Narrower than `rust` above: only the paths that can move the IREE
+            # link recipe itself, so the release link job below does not run on
+            # every Rust PR. See the `xla-link` job comment for the rationale.
+            xla_link:
+              - 'build.rs'
+              - 'src/lib/mlxcel-xla/build.rs'
+              - 'src/lib/mlxcel-xla/csrc/**'
+              - 'scripts/iree/**'
+              - 'rust-toolchain.toml'
               - '.github/workflows/ci.yml'
 
   deny:
@@ -128,7 +139,15 @@ jobs:
   clippy:
     name: cargo-clippy
     needs: changes
-    # Self-hosted, so fork PRs never queue on it. Mirrors `xla-compile` below.
+    # On the repository guard, because it is easy to read more into it than it
+    # does. It keeps this job from queueing forever in a *fork of* this
+    # repository, which has no GB10 runner of its own. It does not stop a pull
+    # request opened *from* a fork against lablup/mlxcel: on that event
+    # `github.repository` is the base repository, so the guard is true and the
+    # job runs here, executing the PR's `build.rs` and `scripts/iree/**` as the
+    # runner's own user. What actually gates that case is the repository's
+    # Actions fork-PR approval policy, currently `first_time_contributors`.
+    # The same reading applies to `xla-compile` and `xla-link` below.
     if: github.repository == 'lablup/mlxcel' && needs.changes.outputs.rust == 'true'
     runs-on: GB10
     permissions:
@@ -312,6 +331,10 @@ jobs:
   # runner.
   #
   # Deliberately NOT covered, so the gap is recorded rather than assumed shut:
+  #   - Linking. `cargo check` never invokes the linker, so a regression in the
+  #     IREE link recipe in `build.rs` (see #1274/#1275) is invisible here. The
+  #     `xla-link` job immediately below closes that gap for the CUDA/IREE
+  #     recipe; see its comment for what it covers and what it still does not.
   #   - `cargo test`. This is a compile gate; running the XLA suites needs a
   #     GPU that is not contended with development work on the same host.
   #   - Full `-D warnings`. The XLA feature combination carries a pre-existing
@@ -368,3 +391,154 @@ jobs:
 
       - name: Compile the diagnostics XLA feature set
         run: cargo check --no-default-features --features xla-diagnostics --all-targets
+
+  # ============================================================================
+  # OpenXLA feature link (self-hosted GB10)
+  # ============================================================================
+  # `xla-compile` above never invokes the linker, so it cannot catch a
+  # regression in the IREE link recipe in `build.rs`. That is not hypothetical:
+  # #1274 was exactly a link failure, and `cargo check --features
+  # cuda,xla-iree --all-targets` passed cleanly on the same tree that could not
+  # link a single integration test. It reached `main` and was found by hand
+  # while validating an unrelated PR. The fix, #1275, appends a second `-lc`
+  # after the IREE archives in `build.rs`, because rustc emits its own `-lc`
+  # before anything `cargo:rustc-link-arg` can append. This job is a direct
+  # reproducer of that failure class.
+  #
+  # What it links, and why: `cargo test --release --features cuda,xla-iree
+  # --test xla_prepared_prefill --no-run`. `build.rs` emits the IREE recipe
+  # through `cargo:rustc-link-arg`, which applies to every linked artifact of
+  # the crate, so any linked target exercises the same recipe `mlxcel-server`
+  # does, and an integration test is the direct reproducer because #1274 was an
+  # integration-test link failure. Cargo also builds the package's `[[bin]]`
+  # targets whenever an integration test is selected, so `mlxcel-server` and
+  # the other three binaries are linked here as well; the costs measured below
+  # already include them, which makes `cargo build --release --features
+  # cuda,xla-iree --bin mlxcel-server` a strict subset of this command rather
+  # than a cheaper alternative to it. `--no-run` links without executing, so
+  # this job never touches the GPU and never contends with development work on
+  # the shared GB10 host.
+  #
+  # Profile: `--release` is mandatory, not a choice. On this host the debug
+  # profile cannot link these targets at all: it fails with hundreds of
+  # `relocation truncated to fit: R_AARCH64_CALL26` errors against ordinary
+  # `libstd`/`compiler_builtins` symbols, because the unoptimized binary
+  # exceeds the AArch64 direct-branch range.
+  #
+  # Trigger: path-filtered via the `changes` job's `xla_link` output, not every
+  # Rust PR and not scheduled. `build.rs` holds the recipe, `scripts/iree/**`
+  # pins the IREE distribution whose archive set the recipe names, and
+  # `src/lib/mlxcel-xla/build.rs` with its `csrc/**` sources builds the shim
+  # object whose undefined symbols those archives resolve, so those are the
+  # causal surface. `rust-toolchain.toml` is on the same causal path because
+  # the #1274 failure was entirely about where rustc places its own `-lc`
+  # relative to appended `rustc-link-arg` entries, which a toolchain bump can
+  # move. `.github/workflows/ci.yml` is included so edits to
+  # this job itself are testable. A schedule was rejected because it decouples
+  # the failure from the PR that caused it, which is the exact failure mode of
+  # #1274 (found by hand later, not by CI). Running on every Rust PR was
+  # rejected because the release link is minutes of shared-runner time and the
+  # overwhelming majority of Rust PRs cannot affect the link line.
+  #
+  # Measured cost of this job's link command on the GB10 runner: 15m40s from a
+  # purged `CARGO_TARGET_DIR`, most of which is MLX's CUDA sources compiling
+  # from scratch rather than the link itself, and 6m to 7m30s warm. Warm is the
+  # figure that matters, because the trigger below fires on `build.rs`, which
+  # invalidates the `mlxcel` crate but not `mlxcel-core`'s MLX build. For
+  # comparison, `xla-compile`'s `cargo check` over the same feature set is
+  # about a minute warm, which is why the two are separate jobs on separate
+  # triggers.
+  #
+  # `RUSTFLAGS` is deliberately unset here, unlike `xla-compile`. This job
+  # gates the link, not lints; `xla-compile` owns the lint policy. Leaving it
+  # unset means a red run here is unambiguously a link failure, not a lint
+  # failure wearing a link job's name.
+  #
+  # What the gate was demonstrated on: dropping `-l:libflatcc_parsing.a` from
+  # the `IREE_CUDA_HOME` recipe in `build.rs`. On that tree `cargo check
+  # --features cuda,xla-iree --all-targets` still passed in 59 seconds while
+  # this job's link command failed with undefined references to
+  # `flatcc_verify_*`, which is the same shape as #1274 and the exact gap this
+  # job exists to close.
+  #
+  # #1274's own defect, removing the second `-lc`, was tried as the control
+  # first and did not fail the link on the tree this job was validated against.
+  # Why it did not is unresolved, so do not read that run as evidence the entry
+  # is dead: against the pinned runtime, `nm` still reports `__stack_chk_guard`
+  # undefined in 176 objects of `libiree_runtime_unified.a`, including the
+  # `call.c.o` named in #1274; the symbol is still undefined in `libc.so.6`;
+  # and it is still defined only in `ld-linux-aarch64.so.1`. Every precondition
+  # the `build.rs` comment records holds today, so leave that entry alone until
+  # a control that actually reproduces says otherwise.
+  #
+  # Deliberately NOT covered, so the gap is recorded rather than assumed shut:
+  #   - The `IREE_DIST` recipe (`build.rs:180-220`) and the macOS
+  #     `IREE_MACOS_HOME` recipe (`build.rs:38-90`). Both remain unverified by
+  #     any link, on any machine, because no runner in this repository holds
+  #     either distribution. Only the `IREE_CUDA_HOME` recipe this job exercises
+  #     is covered.
+  #   - Anything outside the path filter above. Because the trigger is
+  #     path-filtered rather than universal, a link regression arriving through
+  #     a path the filter does not name (a new dependency pulling in a
+  #     conflicting native library, for instance) is still not caught at PR
+  #     time.
+  #   - GPU execution. `--no-run` links only; the XLA test suites still have no
+  #     CI coverage, per the `xla-compile` comment above.
+  #   - A run where cargo finds nothing to redo. The target directory persists
+  #     across PRs, so a green run does not by itself prove a link happened:
+  #     this job's own first run on the PR that added it finished in 12 seconds
+  #     with `Finished release profile in 0.14s`. That is correct, because
+  #     cargo relinks exactly when the fingerprint moves, and `build.rs`
+  #     declares `rerun-if-env-changed` for all three IREE variables so a
+  #     version bump does move it. The narrow hole is a `scripts/iree/**` edit
+  #     that changes how the runtime is built without moving `IREE_VERSION`:
+  #     the script is idempotent, so nothing rebuilds and nothing relinks.
+  xla-link:
+    name: OpenXLA feature link
+    needs: changes
+    if: github.repository == 'lablup/mlxcel' && needs.changes.outputs.xla_link == 'true'
+    runs-on: GB10
+    permissions:
+      contents: read
+    # The other jobs on this runner are seconds warm; this one is minutes, so
+    # it is the first here that can hold GB10 long enough to matter. Without a
+    # group, three pushes to a `build.rs` PR queue three link jobs of up to
+    # 120 minutes each on the one runner that also serves clippy for every Rust
+    # PR and the release build. Keyed per PR, so PRs never cancel each other.
+    concurrency:
+      group: xla-link-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    timeout-minutes: 120
+    env:
+      # The value shipped for this runner's architecture. Auto-detection yields
+      # `121a`, which is numerically identical here but is not what releases
+      # build, so the gate links what ships.
+      MLX_CUDA_ARCHITECTURES: "121"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Use a persistent target directory
+        run: |
+          # Its own directory, not shared with `xla-compile` or the release
+          # job: a link job emits release artifacts and build-script output
+          # that a check-only cache does not, and sharing would have the two
+          # jobs repeatedly invalidate each other.
+          CARGO_TARGET="$HOME/.cargo-target/mlxcel-xla-link-ci"
+          mkdir -p "$CARGO_TARGET"
+          echo "CARGO_TARGET_DIR=$CARGO_TARGET" >> $GITHUB_ENV
+
+      - name: Provision the IREE runtime
+        run: |
+          # Idempotent: reuses `~/.cache/mlxcel/iree-cuda-<version>` when the
+          # runtime is already built, and builds it once when it is not.
+          bash scripts/iree/setup-cuda.sh
+          # The script emits shell `export VAR=value` lines; GITHUB_ENV wants
+          # bare `VAR=value`, and without stripping the prefix the variables
+          # would be named "export IREE_CUDA_HOME" and build.rs would abort
+          # claiming no IREE distribution is configured.
+          bash scripts/iree/setup-cuda.sh --env | sed 's/^export //' >> "$GITHUB_ENV"
+
+      - name: Link the OpenXLA integration test
+        run: cargo test --release --features cuda,xla-iree --test xla_prepared_prefill --no-run
