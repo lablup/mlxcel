@@ -415,34 +415,10 @@ pub(crate) fn should_burst_for_sequence(
         );
         return false;
     }
-    // An adopted prompt-cache prefix (`prefill_start_offset > 0`) is NO LONGER a
-    // blanket decline-to-classic gate (issue #518). The B = 1 MTP burst reuses
-    // the adopted KV by prefilling only the suffix `[offset..]` (the same
-    // `ModelOwnedSequenceState[seq_id]` slot the snapshot restore populated is
-    // what the speculative forward resolves, so there is no double-prefill). The
-    // per-driver decision lives in `run_mtp_burst` (honors the offset) and
-    // `run_dflash_burst` (declines to classic — its fresh independent caches do
-    // not hold the adopted KV yet; a B = 1 DFlash follow-up). The B > 1 batched
-    // burst still declines an adopted prefix via `can_join_batched_burst_window`
-    // below, so an offset request always lands on the B = 1 arm.
-    //
-    // History-dependent sampling penalties (repetition / frequency /
-    // presence / DRY) are NO LONGER a decline-to-classic gate. The burst now threads `initial_token_history(&prompt, ..)`
-    // into the first-bonus sample via `MtpTarget::prefill_and_seed` /
-    // `sample_token_optimized`, so a penalty-bearing request's first
-    // bonus is byte-identical to the classic decode path. The
-    // subsequent round-loop tokens come from the target's greedy
-    // argmax, which carries no history dependence.
-    //
-    // `logprobs_config.enabled` is likewise NO LONGER a gate. The burst threads `logprobs_config` through
-    // `MtpGenerator::generate` / `DFlashGenerator::run` and emits
-    // `TokenWithLogprobs` events from `finalize_burst_success` — the
-    // same payload the classic decode path produces.
-    //
-    // Thinking-budget enforcement is likewise NO LONGER a gate. `finalize_burst_success` runs the same per-token
-    // `decide_override` + `observe` cycle the classic path's
-    // `apply_thinking_budget` uses, injecting a forced `</think>` at the
-    // budget boundary.
+    // Everything else that used to decline here (an adopted prompt-cache
+    // prefix, history-dependent penalties, logprobs, thinking budgets) is
+    // supported by the burst now; the function doc says what carries each
+    // one.
     true
 }
 
@@ -521,13 +497,9 @@ pub(crate) fn mtp_prefill_suffix_start(
 ///   generation 15** ([`AppleSiliconGen::wide_quantized_projections`], which
 ///   is M3, M4 and M5), classic decode below it.
 ///
-/// The batch-capable half was `has_neural_accelerator` (M5 only) until #1217,
-/// on the strength of ~1.2 to 1.4x on M5 Max against a ~0.75 to 0.96x
-/// regression on M1 Ultra. Both of those predate #1194, #1199, #1203, #1208
-/// and #1215, and M3 Ultra had never been measured on this pairing at all. It
-/// has now: 2026-08-20 on current main, three greedy prompts under the #1215
-/// protocol, **1.95x (prose), 2.41x (source code), 2.65x (enumeration)** on an
-/// M3 Ultra that the old predicate declined. The rows are in
+/// The batch-capable half keyed on `has_neural_accelerator` (M5 only) until
+/// #1217 measured M3 Ultra on this pairing for the first time and found 1.95x
+/// to 2.65x on a host the old predicate declined. The rows are in
 /// `docs/benchmark_results/mtp-b1-gate-m3ultra-2026-08-20.md`.
 ///
 /// The discriminator is the `use_qmv_wide` split documented in
@@ -1182,13 +1154,9 @@ fn run_mtp_burst(
         .take()
         .ok_or_else(|| BurstOutcome::Error("drafter slot empty after ensure_loaded".to_string()))?;
 
-    // CRITICAL: bind the drafter to the target BEFORE constructing the
-    // generator. [`MtpGenerator::generate`] does NOT call bind
-    // internally (unlike `DFlashGenerator::run` which does). Without
-    // this call, the first `draft_block` returns
-    // `DrafterError::BindNotCalled`, the generator silently breaks out
-    // of the round loop, and the client receives exactly one
-    // seed-bonus token. See the function-level docstring above.
+    // Bind BEFORE constructing the generator: `MtpGenerator::generate` does
+    // not bind internally, and the failure is quiet (one seed-bonus token).
+    // The function doc has the full reasoning.
     //
     // On bind failure we drop the drafter and surface the error to
     // the client — the slot stays empty so the next request lazily
@@ -2169,35 +2137,21 @@ fn emit_error_and_finalize(_ctx: BurstContext<'_>, seq: SequenceInfo, msg: &str)
 // Batched burst (B > 1)
 // ===========================================================================
 //
-// The B = 1 burst above runs the full prefill + decode lifecycle of ONE
-// speculative request as a single scheduler tick. The batched burst
-// generalises that to a *window* of B speculative requests that the
-// scheduler collected together: every row runs its prefill + decode
-// through the batched round-loop driver
-// (`MtpBatchedGenerator::run_batched` / `DFlashBatchedGenerator::run_batched`)
-// in one logical tick.
+// The B = 1 burst above runs one speculative request's whole prefill +
+// decode lifecycle in a single scheduler tick; the batched burst does the
+// same for a window of B requests through
+// `MtpBatchedGenerator::run_batched` / `DFlashBatchedGenerator::run_batched`.
 //
-// ## Window admission (equal-length prompts)
+// Window admission defaults to equal-length prompts, where the 2-D causal
+// masks broadcast across the batch and the result is byte-identical to B
+// separate B = 1 prefills. `MLXCEL_ENABLE_MTP_BATCH_RAGGED` admits a
+// variable-length window on top of that; see `mtp_batched_ragged_window_enabled`
+// for what it costs and `try_run_burst_batched` for how a window is formed.
 //
-// The batched MTP target adapter forwards the `[B, max_prompt_len]`
-// prompt batch in one pass. With equal-length prompts the 2-D causal
-// masks broadcast cleanly across the batch and the result is
-// byte-identical to running B separate B = 1 prefills (acceptance item 1). The scheduler's window collector
-// (`BatchScheduler::execute_speculative_burst`) therefore only groups
-// speculative-eligible requests of the *same prompt length* into one
-// batched window. A request whose prompt length differs from the window
-// head stays queued and is served on the next tick (possibly as its own
-// window head).
-//
-// ## Per-row early-EOS
-//
-// The batched round-loop drivers already implement per-row early-EOS
-// (a row that hits EOS or saturates `max_new_tokens` freezes in place;
-// its `bs` no longer participates in the per-round block-size minimum so
-// it does not stall its siblings). The burst's per-row finalize
-// (`finalize_batched_burst_success`) classifies each row independently:
-// `FinishReason::Stop` at the first EOS, `FinishReason::Length` at the
-// budget, `FinishReason::Stop` otherwise.
+// Per-row early-EOS is the batched round-loop drivers' contract, stated in
+// the `round_loop_batched` module doc. The burst side of it is
+// `finalize_batched_burst_success`, which classifies each row's finish
+// reason independently.
 
 /// One finalized row of a batched burst — the per-row analogue of
 /// [`BurstFinalized`].

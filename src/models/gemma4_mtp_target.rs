@@ -518,23 +518,6 @@ impl<'a> Gemma4MtpTargetAdapter<'a> {
             .collect()
     }
 
-    /// Compute the argmax along the last axis for each row of a
-    /// `[1, block_size, vocab]` logits tensor and return the
-    /// per-position token ids.
-    ///
-    /// At temperature > 0 the caller is expected to override this with
-    /// a real sampler; this helper handles only the greedy-parity path
-    /// (`temperature == 0`). The MTP greedy-parity invariant
-    /// (referenced in https://github.com/Blaizzy/mlx-vlm) requires the
-    /// target tokens to match the target's own argmax extension, so for
-    /// `temperature == 0` this is the load-bearing choice.
-    ///
-    /// Mirrors `argmax_logits_to_vec` in
-    /// [`mlxcel_core::drafter::dflash::round_loop`] — duplicating the
-    /// helper rather than re-exporting because it is a single-call
-    /// utility and the DFlash module's version is private. Future
-    /// refactor: lift this into `mlxcel_core::utils` once a second
-    /// adapter (Qwen 3.5 MTP variant) lands and needs the same shape.
     /// Diagnostic: report the top-two logit gap at every verify position.
     ///
     /// The exactness contract only breaks when a kernel difference flips an

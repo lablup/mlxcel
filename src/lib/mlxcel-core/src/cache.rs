@@ -2788,10 +2788,9 @@ impl KVCache {
         let compact = |arr: &UniquePtr<MlxArray>| -> UniquePtr<MlxArray> {
             Self::compact_tail_in_place(arr, &index, tail_start, tail_end, kept_len)
         };
-        // Every buffer carrying a sequence axis is rewritten, whether or not
-        // the current mode populates it. Rewriting a subset would leave the
-        // survivors decoded against another token's scale, norm or sign
-        // vector, which is silent rather than loud.
+        // Every buffer carrying a sequence axis is rewritten, for the reason
+        // `gather_positions` gives: a subset leaves survivors decoded against
+        // another token's scale, norm or sign vector.
         self.keys = self.keys.as_ref().map(&compact);
         self.values = self.values.as_ref().map(&compact);
         self.key_scales = self.key_scales.as_ref().map(&compact);

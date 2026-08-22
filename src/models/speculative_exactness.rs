@@ -56,13 +56,10 @@
 //! A diverging probe is conclusive: the arms provably differ, and no
 //! amount of further sampling can make them agree.
 //!
-//! A passing probe is weaker than it first looks, and the earlier version
-//! of this note overstated it. It said that byte-equal logits mean both
-//! arms took the same kernels, since MLX dispatch depends on shape,
-//! dtype, quantization mode and `M` and not on token values. The
-//! dispatch half is true; the inference from it is not. Two *different*
-//! kernels can still produce byte-identical output on a particular input
-//! when their disagreement is small enough. Measured at op level on
+//! A passing probe is weaker than it first looks. Byte-equal logits do
+//! not prove both arms took the same kernel: two *different* kernels can
+//! still produce byte-identical output on a particular input when their
+//! disagreement is small enough. Measured at op level on
 //! 2026-08-17: mxfp4 group 32 at 5120 -> 5120 moves 1 to 11 bytes of
 //! 10240 depending only on the operand draw, while the affine row at the
 //! same shape moves about 39%. In that low-amplitude regime a single
