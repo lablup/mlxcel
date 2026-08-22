@@ -137,7 +137,15 @@ jobs:
   clippy:
     name: cargo-clippy
     needs: changes
-    # Self-hosted, so fork PRs never queue on it. Mirrors `xla-compile` below.
+    # On the repository guard, because it is easy to read more into it than it
+    # does. It keeps this job from queueing forever in a *fork of* this
+    # repository, which has no GB10 runner of its own. It does not stop a pull
+    # request opened *from* a fork against lablup/mlxcel: on that event
+    # `github.repository` is the base repository, so the guard is true and the
+    # job runs here, executing the PR's `build.rs` and `scripts/iree/**` as the
+    # runner's own user. What actually gates that case is the repository's
+    # Actions fork-PR approval policy, currently `first_time_contributors`.
+    # The same reading applies to `xla-compile` and `xla-link` below.
     if: github.repository == 'lablup/mlxcel' && needs.changes.outputs.rust == 'true'
     runs-on: GB10
     permissions:
@@ -472,6 +480,14 @@ jobs:
     runs-on: GB10
     permissions:
       contents: read
+    # The other jobs on this runner are seconds warm; this one is minutes, so
+    # it is the first here that can hold GB10 long enough to matter. Without a
+    # group, three pushes to a `build.rs` PR queue three link jobs of up to
+    # 120 minutes each on the one runner that also serves clippy for every Rust
+    # PR and the release build. Keyed per PR, so PRs never cancel each other.
+    concurrency:
+      group: xla-link-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
     timeout-minutes: 120
     env:
       # The value shipped for this runner's architecture. Auto-detection yields
