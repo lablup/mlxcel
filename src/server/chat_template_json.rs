@@ -66,9 +66,43 @@ use minijinja::{Error, ErrorKind};
 /// A chat template is operator-controlled but the values it serializes are not:
 /// `tools` comes straight from the client request body. Recursion here is
 /// unbounded otherwise, and minijinja's fuel budget does not help because fuel
-/// counts VM instructions, not native stack frames inside one filter call. The
-/// limit matches `serde_json`'s own default recursion limit.
-const MAX_DEPTH: usize = 128;
+/// counts VM instructions, not native stack frames inside one filter call.
+///
+/// The value deliberately leaves headroom over `serde_json`'s own default
+/// 128-level parse limit rather than matching it. `chat_request` re-parses
+/// `function.arguments` out of its wire string and splices the result back into
+/// the message tree at roughly depth 4, and that inner parse gets a fresh
+/// 128-level budget of its own, so an assembled `messages` value can legitimately
+/// reach about 132. At exactly 128 a template that serializes a whole message
+/// instead of just the arguments object would error, abort the render, and fall
+/// back to the generic prompt that drops tool declarations, which is the failure
+/// this filter exists to prevent.
+const MAX_DEPTH: usize = 192;
+
+/// The headroom above is load-bearing, so lowering `MAX_DEPTH` back to
+/// `serde_json`'s own 128 fails the build rather than silently reintroducing the
+/// fallback-to-generic-prompt failure described above.
+const _: () = assert!(MAX_DEPTH > 128);
+
+/// Largest `indent=` width this filter honors.
+///
+/// `indent` comes from the template, and `width * level` is emitted as literal
+/// spaces on every container break. Without a clamp the multiplication can
+/// overflow `usize` and a merely large width emits gigabytes of padding. No
+/// legitimate template indents by more than a handful of columns.
+const MAX_INDENT: usize = 64;
+
+/// Byte ceiling on a single filter call's output.
+///
+/// Nothing else bounds the rendered size: minijinja's fuel counts VM
+/// instructions, not bytes emitted inside one filter call. Pretty-printing
+/// amplifies its input substantially (`tojson(indent=4)` is what Llama 3.1,
+/// Llama 4 Scout and the Granite templates call), and `ensure_ascii` expands
+/// non-ASCII about sixfold, so a request body that clears the server's own
+/// limit can still render into something far larger. The ceiling sits far above
+/// any legitimate render, which is measured in kilobytes, because exceeding it
+/// degrades the request to the generic fallback prompt.
+const MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 
 /// `json.dumps` options resolved from the filter's arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,7 +135,10 @@ impl DumpOptions {
             Some(value) => match bool::try_from(value.clone()) {
                 Ok(true) => Some(2),
                 Ok(false) => None,
-                Err(_) => Some(usize::try_from(value)?),
+                // Clamp rather than reject: a template asking for a huge indent
+                // wants pretty output, not a failed render that costs it the
+                // tools block. See `MAX_INDENT`.
+                Err(_) => Some(usize::try_from(value)?.min(MAX_INDENT)),
             },
         };
 
@@ -132,7 +169,11 @@ fn read_separators(value: &Value) -> Result<(String, String), Error> {
     if value.kind() != ValueKind::Seq {
         return Err(invalid());
     }
-    let parts: Vec<Value> = value.try_iter()?.collect();
+    // Take one more than the arity we accept, so a three-or-longer sequence is
+    // still rejected, but stop there: `separators` is template-supplied and
+    // collecting it whole would let `separators=range(4000000000)` allocate
+    // four billion values before the arity check could fire.
+    let parts: Vec<Value> = value.try_iter()?.take(3).collect();
     let [item, key] = parts.as_slice() else {
         return Err(invalid());
     };
@@ -171,6 +212,14 @@ fn write_value(
         return Err(Error::new(
             ErrorKind::InvalidOperation,
             format!("tojson: value nests deeper than {MAX_DEPTH} levels"),
+        ));
+    }
+    // Checked on entry to every node, so the walk stops shortly after the
+    // ceiling is crossed rather than after the whole value has been rendered.
+    if out.len() > MAX_OUTPUT_BYTES {
+        return Err(Error::new(
+            ErrorKind::InvalidOperation,
+            format!("tojson: output exceeds {MAX_OUTPUT_BYTES} bytes"),
         ));
     }
 
@@ -222,9 +271,12 @@ fn write_value(
 fn write_container_break(out: &mut String, options: &DumpOptions, level: usize) {
     if let Some(width) = options.indent {
         out.push('\n');
-        for _ in 0..width * level {
-            out.push(' ');
-        }
+        // `width` is clamped to `MAX_INDENT` and `level` to `MAX_DEPTH`, so the
+        // product cannot overflow. Reserve once instead of pushing a space at a
+        // time.
+        let fill = width * level;
+        out.reserve(fill);
+        out.extend(std::iter::repeat_n(' ', fill));
     }
 }
 
@@ -269,6 +321,12 @@ fn write_object(
         // Rust compares `str` by UTF-8 bytes, which is code-point order for
         // valid UTF-8 and therefore the same order Python's `sorted` produces.
         // The sort is stable, so duplicate keys keep their relative order.
+        //
+        // Known divergence: CPython sorts the original key objects, so numeric
+        // keys sort numerically (`{10: .., 9: ..}` gives `9` before `10`) while
+        // sorting their string forms puts `10` first. Only a template-authored
+        // dict literal can produce a non-string key; keys arriving as JSON from
+        // a client are always strings, where the two orders agree.
         entries.sort_by(|left, right| left.0.cmp(&right.0));
     }
 
@@ -700,6 +758,79 @@ mod tests {
         assert_eq!(
             dump(Value::from_serialize(value), &[]),
             r#"{"pattern": 1, "include": 2, "a": 3}"#
+        );
+    }
+
+    /// Render `value` and return the error message, expecting failure.
+    fn dump_err(value: Value, kwargs: &[(&str, Value)]) -> String {
+        let kwargs: Kwargs = kwargs.iter().map(|(k, v)| (*k, v.clone())).collect();
+        python_tojson(value, None, kwargs)
+            .expect_err("filter must reject this input")
+            .to_string()
+    }
+
+    #[test]
+    fn indent_width_is_clamped_instead_of_emitting_unbounded_padding() {
+        // `indent` is template-supplied. Without the clamp, `width * level` both
+        // overflows `usize` for a large enough width and emits gigabytes of
+        // spaces below that threshold. Clamping keeps the render alive, which
+        // matters because a failed render costs the template its tools block.
+        let value: serde_json::Value = serde_json::from_str(r#"[1]"#).unwrap();
+        let huge = dump(
+            Value::from_serialize(&value),
+            &[("indent", Value::from(u64::MAX))],
+        );
+        let clamped = dump(
+            Value::from_serialize(&value),
+            &[("indent", Value::from(MAX_INDENT as u64))],
+        );
+        assert_eq!(huge, clamped);
+        assert_eq!(huge, format!("[\n{}1\n]", " ".repeat(MAX_INDENT)));
+    }
+
+    #[test]
+    fn separators_arity_is_checked_before_the_sequence_is_materialized() {
+        // A three-element sequence is still rejected, but the check must not
+        // require collecting the whole thing first: `separators` is template
+        // supplied and could be an enormous lazy range.
+        let value: serde_json::Value = serde_json::from_str(r#"[1]"#).unwrap();
+        let message = dump_err(
+            Value::from_serialize(&value),
+            &[(
+                "separators",
+                Value::from(vec![
+                    Value::from(","),
+                    Value::from(":"),
+                    Value::from("extra"),
+                ]),
+            )],
+        );
+        assert!(
+            message.contains("two element tuple"),
+            "expected an arity rejection, got: {message}"
+        );
+    }
+
+    #[test]
+    fn depth_limit_leaves_headroom_over_the_request_parsers_own_ceiling() {
+        // `chat_request` splices a separately-parsed `function.arguments` into
+        // the message tree, so an assembled value can exceed serde_json's own
+        // 128-level limit. The cap has to sit above that or the filter errors on
+        // a legitimate request and the render falls back to the generic prompt.
+        // The headroom itself is pinned by a `const` assertion at the definition
+        // site, so this test covers the runtime behavior at the cap.
+        //
+        // Past the cap the filter still errors rather than recursing without
+        // bound. Build the nesting iteratively so the test itself cannot blow
+        // the stack constructing its input.
+        let mut nested = serde_json::Value::from(1u64);
+        for _ in 0..(MAX_DEPTH + 2) {
+            nested = serde_json::Value::Array(vec![nested]);
+        }
+        let message = dump_err(Value::from_serialize(&nested), &[]);
+        assert!(
+            message.contains("nests deeper than"),
+            "expected a depth rejection, got: {message}"
         );
     }
 }
