@@ -395,6 +395,20 @@ unsafe extern "C" {
         vocab: c_int,
         out_logits: *mut f32,
     ) -> c_int;
+
+    /// Create an additional context sharing `base`'s uploaded weights and
+    /// device, differing only in the compiled bundle and its context capacity.
+    /// Returns null on failure. The returned context is freed with
+    /// `xla_llama_free` like any other; it retains what it shares.
+    fn xla_llama_create_bucket(
+        base: *const XlaCtx,
+        prefill: *const c_char,
+        prefill_embeddings: *const c_char,
+        prefill_embeddings_deepstack: *const c_char,
+        decode: *const c_char,
+        prefill_diagnostics: *const c_char,
+        context_capacity: c_int,
+    ) -> *mut XlaCtx;
     fn xla_llama_free(c: *mut XlaCtx);
 }
 
@@ -1808,6 +1822,60 @@ fn deepstack_descriptors(
 /// Load the weights and create the C execution context for a (prefill, decode)
 /// vmfb pair on `device`. Shared by the single-sequence ([`IreeLlama`]) and ragged
 /// ([`IreeRaggedLlama`]) engines, which differ only in which decode vmfb they pass.
+
+/// Create a context that shares `base`'s uploaded weights, differing only in the
+/// compiled bundle and the capacity baked into it.
+///
+/// Weights dominate device memory (a 4B model widened to f32 is roughly 16 GB,
+/// against about 0.3 GB for a bucket's own KV cache at capacity 256), so a
+/// bucket that re-uploaded them would cost more than every bucket's KV
+/// combined. The C side shares them by retaining each buffer view, so the
+/// returned context is freed exactly like any other and imposes no ordering
+/// against the base.
+///
+/// # Safety
+///
+/// `base` must be a live context produced by `create_ctx`, valid for the
+/// duration of this call.
+fn create_bucket_ctx(
+    base: *const XlaCtx,
+    bundle: &CompiledBundle,
+    context_capacity: usize,
+) -> Result<*mut XlaCtx, String> {
+    let c_pre = path_cstring(&bundle.prefill_vmfb)?;
+    let c_pre_embeddings = path_cstring(&bundle.prefill_embeddings_vmfb)?;
+    let c_pre_embeddings_deepstack = bundle
+        .prefill_embeddings_deepstack_vmfb
+        .as_deref()
+        .map(path_cstring)
+        .transpose()?;
+    let c_dec = path_cstring(&bundle.decode_vmfb)?;
+    let capacity = checked_ffi_int(context_capacity, "context_capacity")?;
+    // Safety: every pointer is a live CString owned above for the duration of
+    // the call, `base` is a live context by this function's contract, and the
+    // shim treats a null deepstack or diagnostics path as "this bundle has
+    // none" rather than dereferencing it.
+    let ctx = unsafe {
+        xla_llama_create_bucket(
+            base,
+            c_pre.as_ptr(),
+            c_pre_embeddings.as_ptr(),
+            c_pre_embeddings_deepstack
+                .as_ref()
+                .map_or(std::ptr::null(), |p| p.as_ptr()),
+            c_dec.as_ptr(),
+            std::ptr::null(),
+            capacity,
+        )
+    };
+    if ctx.is_null() {
+        return Err(format!(
+            "failed to create an OpenXLA capacity bucket at {context_capacity} tokens"
+        ));
+    }
+    Ok(ctx)
+}
+
 fn create_ctx(
     model_dir: &Path,
     cfg: &RuntimeConfig,
@@ -2277,7 +2345,15 @@ impl IreeRaggedLlama {
         b_max: usize,
         context_capacity: usize,
     ) -> Result<Self, String> {
-        Self::load_inner(model_dir, device, b_max, context_capacity, false, false)
+        Self::load_inner(
+            model_dir,
+            device,
+            b_max,
+            context_capacity,
+            false,
+            false,
+            None,
+        )
     }
 
     #[cfg(feature = "diagnostics")]
@@ -2287,7 +2363,15 @@ impl IreeRaggedLlama {
         b_max: usize,
         context_capacity: usize,
     ) -> Result<Self, String> {
-        Self::load_inner(model_dir, device, b_max, context_capacity, true, false)
+        Self::load_inner(
+            model_dir,
+            device,
+            b_max,
+            context_capacity,
+            true,
+            false,
+            None,
+        )
     }
 
     #[cfg(feature = "diagnostics")]
@@ -2297,9 +2381,27 @@ impl IreeRaggedLlama {
         b_max: usize,
         context_capacity: usize,
     ) -> Result<Self, String> {
-        Self::load_inner(model_dir, device, b_max, context_capacity, false, true)
+        Self::load_inner(
+            model_dir,
+            device,
+            b_max,
+            context_capacity,
+            false,
+            true,
+            None,
+        )
     }
 
+    /// Load an engine, optionally as a capacity bucket of an existing one.
+    ///
+    /// With `base` set, everything up to context creation is identical: the same
+    /// config, the same emitted graphs and the same compile path, only at a
+    /// different context capacity. Only the final step differs, creating a
+    /// context that shares the base's already-uploaded weights instead of
+    /// reading and uploading them again. Keeping the two paths in one function
+    /// is deliberate, because a bucket that emitted or compiled differently from
+    /// its base would read shared weights under a different contract.
+    #[allow(clippy::too_many_arguments)]
     fn load_inner(
         model_dir: &Path,
         device: &str,
@@ -2307,6 +2409,7 @@ impl IreeRaggedLlama {
         context_capacity: usize,
         diagnostics: bool,
         all_layer_diagnostics: bool,
+        base: Option<*const XlaCtx>,
     ) -> Result<Self, String> {
         debug_assert!(!(diagnostics && all_layer_diagnostics));
         let cfg = RuntimeConfig::from_json(model_dir, context_capacity)?;
@@ -2375,16 +2478,25 @@ impl IreeRaggedLlama {
         };
         #[cfg(not(feature = "diagnostics"))]
         debug_assert!(!diagnostics && !all_layer_diagnostics);
-        #[cfg(feature = "diagnostics")]
-        let ctx = create_ctx_with_diagnostics(
-            model_dir,
-            &cfg,
-            device,
-            &bundle,
-            diagnostic_vmfb.as_deref(),
-        )?;
-        #[cfg(not(feature = "diagnostics"))]
-        let ctx = create_ctx(model_dir, &cfg, device, &bundle)?;
+        let ctx = match base {
+            Some(base) => create_bucket_ctx(base, &bundle, cfg.context_capacity())?,
+            None => {
+                #[cfg(feature = "diagnostics")]
+                {
+                    create_ctx_with_diagnostics(
+                        model_dir,
+                        &cfg,
+                        device,
+                        &bundle,
+                        diagnostic_vmfb.as_deref(),
+                    )?
+                }
+                #[cfg(not(feature = "diagnostics"))]
+                {
+                    create_ctx(model_dir, &cfg, device, &bundle)?
+                }
+            }
+        };
         // Safety: ctx is a fresh valid context from create_ctx; free it on error.
         let b_max_ffi = checked_ffi_int(b_max, "b_max")?;
         let rc = unsafe { xla_llama_ragged_reset(ctx, b_max_ffi) };
@@ -2407,6 +2519,49 @@ impl IreeRaggedLlama {
             #[cfg(feature = "diagnostics")]
             diagnostic_layout,
         })
+    }
+
+    /// Load an additional engine at `context_capacity` that shares this one's
+    /// uploaded weights and device (#1271 capacity buckets).
+    ///
+    /// The capacity is a static graph shape and is also the sequence length
+    /// every decode step attends over, so one shape cannot be both large enough
+    /// for an expanded image and cheap enough for text. Measured on the pinned
+    /// Molmo2 4B checkpoint, decode runs at 3.18 tok/s at capacity 256 and
+    /// 1.41 tok/s at 2048. A second engine makes the small shape available to
+    /// requests that fit it while the large one stays available for images.
+    ///
+    /// Only the KV cache is duplicated, which is what makes this affordable:
+    /// at B_max 4 that checkpoint's cache is about 0.30 GB at capacity 256
+    /// against 2.42 GB at 2048, while its weights are roughly 16 GB and are
+    /// shared rather than uploaded again.
+    ///
+    /// # Errors
+    ///
+    /// Propagates emit, compile and context-creation failures. A caller that
+    /// treats a failure as fatal loses a bucket it could have run without, so
+    /// prefer dropping the bucket when the remaining set still covers the
+    /// checkpoint.
+    pub fn load_bucket(
+        &self,
+        model_dir: &Path,
+        device: &str,
+        context_capacity: usize,
+    ) -> Result<Self, String> {
+        if context_capacity == self.context_capacity {
+            return Err(format!(
+                "bucket capacity {context_capacity} duplicates the base engine's"
+            ));
+        }
+        Self::load_inner(
+            model_dir,
+            device,
+            self.b_max,
+            context_capacity,
+            false,
+            true,
+            Some(self.ctx),
+        )
     }
 
     /// The fixed slot count this engine was compiled for.

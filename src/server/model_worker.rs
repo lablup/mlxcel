@@ -1104,19 +1104,27 @@ pub(crate) fn spawn_xla_model_worker(
         run_core_thread_or_abort("model-worker-xla", move || {
             let device = std::env::var("MLXCEL_XLA_DEVICE")
                 .unwrap_or_else(|_| mlxcel_xla::default_device().to_string());
-            let context_capacity = match mlxcel_xla::context_capacity_from_env() {
+            // Capacities are static graph shapes, so the set has to be decided
+            // before any engine is built and cannot be revisited per request.
+            // The worst-case image expansion is what makes a second, larger
+            // shape worth compiling, and it is derived from config alone.
+            let image_floor = crate::xla_image_context_floor(&model_path);
+            let capacities = match mlxcel_xla::context_capacity_buckets_from_env(image_floor) {
                 Ok(value) => value,
                 Err(err) => crate::worker_failfast::exit_on_worker_startup_failure(
                     "model-worker-xla",
                     &format!("failed to configure the OpenXLA engine: {err}"),
                 ),
             };
-            // The capacity is a static graph shape, so this has to be decided
-            // before the engine is built and cannot be revisited per request.
             let operator_pinned = std::env::var_os(mlxcel_xla::CONTEXT_CAPACITY_ENV).is_some();
+            // The guard asks whether ANY shape can admit an image, so it takes
+            // the largest. With a derived set that is the image floor itself, so
+            // the guard passes by construction; it still fires for an operator
+            // who pinned a single shape too small, which stays their decision.
+            let largest_capacity = capacities.iter().copied().max().unwrap_or(0);
             if let Err(err) = crate::ensure_xla_image_context_capacity(
                 &model_path,
-                context_capacity,
+                largest_capacity,
                 operator_pinned,
             ) {
                 crate::worker_failfast::exit_on_worker_startup_failure(
@@ -1125,10 +1133,11 @@ pub(crate) fn spawn_xla_model_worker(
                 );
             }
             tracing::info!(
-                context_capacity,
+                capacities = ?capacities,
                 capacity_pinned_by_operator = operator_pinned,
+                image_floor = ?image_floor,
                 "Model worker thread starting (OpenXLA continuous batching, B_max={b_max}, \
-                 context_capacity={context_capacity}, device={device}), loading model..."
+                 capacities={capacities:?}, device={device}), loading model..."
             );
 
             // The OpenXLA worker has no MTP dispatch path at all: `XlaServeWorker`
@@ -1151,18 +1160,27 @@ pub(crate) fn spawn_xla_model_worker(
                     &format!("failed to load the tokenizer for the OpenXLA backend: {err}"),
                 ),
             };
-            let engine = match mlxcel_xla::XlaBatchEngine::load_with_context_capacity(
-                &model_path,
-                b_max,
-                &device,
-                context_capacity,
-            ) {
-                Ok(engine) => engine,
-                Err(err) => crate::worker_failfast::exit_on_worker_startup_failure(
-                    "model-worker-xla",
-                    &format!("failed to load the OpenXLA engine: {err}"),
-                ),
-            };
+            let engine =
+                match mlxcel_xla::XlaBucketSet::load(&model_path, b_max, &device, &capacities) {
+                    Ok((engine, dropped)) => {
+                        // A bucket after the first can fail to compile or to
+                        // allocate its cache without costing the process: the
+                        // remaining shapes still serve every request that fits
+                        // them. Say so rather than starting quietly degraded.
+                        for reason in &dropped {
+                            tracing::warn!("{reason}");
+                        }
+                        tracing::info!(
+                            capacities = ?engine.capacities(),
+                            "OpenXLA capacity buckets compiled"
+                        );
+                        engine
+                    }
+                    Err(err) => crate::worker_failfast::exit_on_worker_startup_failure(
+                        "model-worker-xla",
+                        &format!("failed to load the OpenXLA engine: {err}"),
+                    ),
+                };
             let mut worker = match crate::server::batch::XlaServeWorker::new(
                 engine,
                 tokenizer,
@@ -1184,7 +1202,7 @@ pub(crate) fn spawn_xla_model_worker(
             tracing::info!(
                 worker_model_id = %worker_model_id,
                 load_seconds = load_elapsed.as_secs_f64(),
-                "OpenXLA model {worker_model_id} loaded in {:.3}s (B_max={b_max}, context_capacity={context_capacity}, device={device})",
+                "OpenXLA model {worker_model_id} loaded in {:.3}s (B_max={b_max}, capacities={capacities:?}, device={device})",
                 load_elapsed.as_secs_f64(),
             );
             loaded.store(true, Ordering::Release);

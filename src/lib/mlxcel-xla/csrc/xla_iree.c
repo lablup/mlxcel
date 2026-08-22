@@ -24,6 +24,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>  // memcpy, used by the bucket path
 
 // The iree-dist build leaves the system allocator to the application (its
 // iree_allocator_system() is gated on IREE_ALLOCATOR_SYSTEM_CTL). Point it at a
@@ -433,6 +434,59 @@ static int xla_validate_kv_pair(xla_ctx* c, iree_hal_buffer_view_t* kc,
   return 0;
 }
 
+// Append a bundle's modules to `c->session` and probe every entry point the
+// configured shape requires. Shared by the owning create path and the bucket
+// create path so a bucket cannot end up with a differently-validated session.
+static iree_status_t xla_append_bundle(xla_ctx* c, const char* prefill_vmfb,
+                                       const char* prefill_embeddings_vmfb,
+                                       const char* prefill_embeddings_deepstack_vmfb,
+                                       const char* decode_vmfb,
+                                       const char* prefill_diagnostics_vmfb) {
+  // All bundle members enter one session atomically. Their distinct names make
+  // the calls "prefill.main", "prefill_embeddings.main", and
+  // "decode_step.main".
+  IREE_RETURN_IF_ERROR(iree_runtime_session_append_bytecode_module_from_file(
+      c->session, prefill_vmfb));
+  IREE_RETURN_IF_ERROR(iree_runtime_session_append_bytecode_module_from_file(
+      c->session, prefill_embeddings_vmfb));
+  if (c->has_deepstack) {
+    IREE_RETURN_IF_ERROR(iree_runtime_session_append_bytecode_module_from_file(
+        c->session, prefill_embeddings_deepstack_vmfb));
+  }
+  IREE_RETURN_IF_ERROR(iree_runtime_session_append_bytecode_module_from_file(
+      c->session, decode_vmfb));
+  if (c->has_prefill_diagnostics) {
+    IREE_RETURN_IF_ERROR(iree_runtime_session_append_bytecode_module_from_file(
+        c->session, prefill_diagnostics_vmfb));
+  }
+
+  const char* embeddings_entry = c->prefill_embeddings_kind == 1
+                                     ? "prefill_embeddings_ple.main"
+                                     : "prefill_embeddings.main";
+  const char* required_entries[] = {"prefill.main", embeddings_entry,
+                                    "decode_step.main"};
+  for (size_t i = 0; i < 3; ++i) {
+    iree_runtime_call_t probe;
+    IREE_RETURN_IF_ERROR(iree_runtime_call_initialize_by_name(
+        c->session, iree_make_cstring_view(required_entries[i]), &probe));
+    iree_runtime_call_deinitialize(&probe);
+  }
+  if (c->has_deepstack) {
+    iree_runtime_call_t probe;
+    IREE_RETURN_IF_ERROR(iree_runtime_call_initialize_by_name(
+        c->session,
+        iree_make_cstring_view("prefill_embeddings_deepstack.main"), &probe));
+    iree_runtime_call_deinitialize(&probe);
+  }
+  if (c->has_prefill_diagnostics) {
+    iree_runtime_call_t probe;
+    IREE_RETURN_IF_ERROR(iree_runtime_call_initialize_by_name(
+        c->session, iree_make_cstring_view("prefill_diagnostics.main"), &probe));
+    iree_runtime_call_deinitialize(&probe);
+  }
+  return iree_ok_status();
+}
+
 static iree_status_t xla_llama_create_impl(
     xla_ctx* c, const char* device_uri, const char* prefill_vmfb,
     const char* prefill_embeddings_vmfb,
@@ -529,48 +583,9 @@ static iree_status_t xla_llama_create_impl(
       c->instance, &sess_opts, c->device,
       iree_runtime_instance_host_allocator(c->instance), &c->session));
 
-  // All bundle members enter one session atomically. Their distinct names make
-  // the calls "prefill.main", "prefill_embeddings.main", and
-  // "decode_step.main".
-  IREE_RETURN_IF_ERROR(iree_runtime_session_append_bytecode_module_from_file(
-      c->session, prefill_vmfb));
-  IREE_RETURN_IF_ERROR(iree_runtime_session_append_bytecode_module_from_file(
-      c->session, prefill_embeddings_vmfb));
-  if (c->has_deepstack) {
-    IREE_RETURN_IF_ERROR(iree_runtime_session_append_bytecode_module_from_file(
-        c->session, prefill_embeddings_deepstack_vmfb));
-  }
-  IREE_RETURN_IF_ERROR(iree_runtime_session_append_bytecode_module_from_file(
-      c->session, decode_vmfb));
-  if (c->has_prefill_diagnostics) {
-    IREE_RETURN_IF_ERROR(iree_runtime_session_append_bytecode_module_from_file(
-        c->session, prefill_diagnostics_vmfb));
-  }
-
-  const char* embeddings_entry = prefill_embeddings_kind == 1
-                                      ? "prefill_embeddings_ple.main"
-                                      : "prefill_embeddings.main";
-  const char* required_entries[] = {"prefill.main", embeddings_entry,
-                                    "decode_step.main"};
-  for (size_t i = 0; i < 3; ++i) {
-    iree_runtime_call_t probe;
-    IREE_RETURN_IF_ERROR(iree_runtime_call_initialize_by_name(
-        c->session, iree_make_cstring_view(required_entries[i]), &probe));
-    iree_runtime_call_deinitialize(&probe);
-  }
-  if (c->has_deepstack) {
-    iree_runtime_call_t probe;
-    IREE_RETURN_IF_ERROR(iree_runtime_call_initialize_by_name(
-        c->session,
-        iree_make_cstring_view("prefill_embeddings_deepstack.main"), &probe));
-    iree_runtime_call_deinitialize(&probe);
-  }
-  if (c->has_prefill_diagnostics) {
-    iree_runtime_call_t probe;
-    IREE_RETURN_IF_ERROR(iree_runtime_call_initialize_by_name(
-        c->session, iree_make_cstring_view("prefill_diagnostics.main"), &probe));
-    iree_runtime_call_deinitialize(&probe);
-  }
+  IREE_RETURN_IF_ERROR(xla_append_bundle(
+      c, prefill_vmfb, prefill_embeddings_vmfb,
+      prefill_embeddings_deepstack_vmfb, decode_vmfb, prefill_diagnostics_vmfb));
 
   c->allocator = iree_runtime_session_device_allocator(c->session);
 
@@ -622,6 +637,130 @@ static iree_status_t xla_llama_create_impl(
 // laid out row-major; the shim copies them into resident device buffers, so the
 // caller may free them after this returns. Returns NULL on failure (after printing
 // a diagnostic).
+
+// Create an additional execution context that shares `base`'s uploaded weights
+// and device, differing only in the compiled bundle and therefore in the
+// context capacity baked into it (#1271 capacity buckets).
+//
+// Weights dominate device memory: a 4B model widened to f32 is roughly 16 GB,
+// while a bucket's own KV cache at capacity 256 is about 0.3 GB. Uploading a
+// second copy per bucket would cost more than every bucket's KV combined and
+// defeat the point, so the weight buffer views are shared.
+//
+// Sharing is by refcount, not by borrowing. The bucket retains the instance,
+// the device and every weight view, so `xla_llama_free` releases exactly what
+// this function retained and needs no special case. That also means the base
+// and its buckets have no ordering requirement between them: whichever is
+// freed last drops the final reference.
+static iree_status_t xla_llama_create_bucket_impl(
+    xla_ctx* c, const xla_ctx* base, const char* prefill_vmfb,
+    const char* prefill_embeddings_vmfb,
+    const char* prefill_embeddings_deepstack_vmfb, const char* decode_vmfb,
+    const char* prefill_diagnostics_vmfb, int32_t context_capacity) {
+  if (context_capacity <= 0) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "bucket context_capacity must be positive, got %d",
+                            context_capacity);
+  }
+  if (!base || !base->instance || !base->device || !base->weights) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "bucket base context is not fully initialized");
+  }
+
+  // Everything that describes the model rather than the graph shape is copied
+  // verbatim: a bucket that disagreed with its base about layer counts or the
+  // position ABI would read the shared weights with the wrong contract.
+  c->compatibility_fingerprint = base->compatibility_fingerprint;
+  c->hidden_size = base->hidden_size;
+  c->position_mode = base->position_mode;
+  c->prefill_embeddings_kind = base->prefill_embeddings_kind;
+  c->dense_ple_layers = base->dense_ple_layers;
+  c->dense_ple_hidden = base->dense_ple_hidden;
+  c->model_layers = base->model_layers;
+  c->deepstack_layers = base->deepstack_layers;
+  c->deepstack_visual_positions = base->deepstack_visual_positions;
+  c->has_adapter_modes = base->has_adapter_modes;
+  // Derived from the arguments, NOT copied from the base. These two flags decide
+  // which modules `xla_append_bundle` appends and which entry points it probes,
+  // so copying them would make a bucket try to append a module the caller did
+  // not pass whenever the base happened to have one.
+  c->has_deepstack = prefill_embeddings_deepstack_vmfb &&
+                     prefill_embeddings_deepstack_vmfb[0] != '\0';
+  c->has_prefill_diagnostics =
+      prefill_diagnostics_vmfb && prefill_diagnostics_vmfb[0] != '\0';
+  if (c->has_deepstack != base->has_deepstack) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "bucket deepstack bundle (%d) disagrees with its base (%d); the shared "
+        "weights are read under the base's contract",
+        c->has_deepstack, base->has_deepstack);
+  }
+  c->context_capacity = context_capacity;
+
+  if (base->deepstack_target_layers && base->deepstack_layers > 0) {
+    // Owned per context, because `xla_llama_free` frees it unconditionally.
+    size_t bytes = (size_t)base->deepstack_layers * sizeof(int32_t);
+    c->deepstack_target_layers = (int32_t*)malloc(bytes);
+    if (!c->deepstack_target_layers) {
+      return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
+                              "failed to copy deepstack target layers");
+    }
+    memcpy(c->deepstack_target_layers, base->deepstack_target_layers, bytes);
+  }
+
+  c->instance = base->instance;
+  iree_runtime_instance_retain(c->instance);
+  c->device = base->device;
+  iree_hal_device_retain(c->device);
+
+  iree_runtime_session_options_t sess_opts;
+  iree_runtime_session_options_initialize(&sess_opts);
+  IREE_RETURN_IF_ERROR(iree_runtime_session_create_with_device(
+      c->instance, &sess_opts, c->device,
+      iree_runtime_instance_host_allocator(c->instance), &c->session));
+
+  IREE_RETURN_IF_ERROR(xla_append_bundle(
+      c, prefill_vmfb, prefill_embeddings_vmfb,
+      prefill_embeddings_deepstack_vmfb, decode_vmfb, prefill_diagnostics_vmfb));
+
+  c->allocator = iree_runtime_session_device_allocator(c->session);
+
+  c->n_weights = base->n_weights;
+  c->weights = (iree_hal_buffer_view_t**)calloc(
+      (size_t)c->n_weights, sizeof(iree_hal_buffer_view_t*));
+  if (!c->weights) return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED);
+  for (int32_t i = 0; i < c->n_weights; i++) {
+    c->weights[i] = base->weights[i];
+    iree_hal_buffer_view_retain(c->weights[i]);
+  }
+  return iree_ok_status();
+}
+
+xla_ctx* xla_llama_create_bucket(const xla_ctx* base, const char* prefill_vmfb,
+                                 const char* prefill_embeddings_vmfb,
+                                 const char* prefill_embeddings_deepstack_vmfb,
+                                 const char* decode_vmfb,
+                                 const char* prefill_diagnostics_vmfb,
+                                 int32_t context_capacity) {
+  xla_ctx* c = (xla_ctx*)calloc(1, sizeof(xla_ctx));
+  if (!c) return NULL;
+  iree_status_t s = xla_llama_create_bucket_impl(
+      c, base, prefill_vmfb, prefill_embeddings_vmfb,
+      prefill_embeddings_deepstack_vmfb, decode_vmfb, prefill_diagnostics_vmfb,
+      context_capacity);
+  if (!iree_status_is_ok(s)) {
+    char buf[512];
+    iree_host_size_t got = 0;
+    iree_status_format(s, sizeof(buf), buf, &got);
+    fprintf(stderr, "xla_llama_create_bucket failed: %.*s (code %d)\n", (int)got,
+            buf, (int)iree_status_code(s));
+    iree_status_ignore(s);
+    xla_llama_free(c);
+    return NULL;
+  }
+  return c;
+}
+
 xla_ctx* xla_llama_create(const char* device_uri, const char* prefill_vmfb,
                           const char* prefill_embeddings_vmfb,
                           const char* prefill_embeddings_deepstack_vmfb,

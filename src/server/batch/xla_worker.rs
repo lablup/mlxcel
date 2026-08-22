@@ -72,6 +72,10 @@ mod tests;
 
 pub(crate) trait XlaServingEngine {
     fn b_max(&self) -> usize;
+    /// The largest static shape this engine can admit into. With capacity
+    /// buckets that is the largest bucket, because it bounds every request the
+    /// engine will accept.
+    fn context_capacity(&self) -> usize;
     fn is_idle(&self) -> bool;
     fn pending_len(&self) -> usize;
     fn active_len(&self) -> usize;
@@ -91,9 +95,72 @@ pub(crate) trait XlaServingEngine {
     fn pump(&mut self) -> Result<Vec<EngineEvent>, String>;
 }
 
+/// A bucket set serves exactly like a single engine from the worker's side.
+///
+/// The worker keys its request state by the id `submit` returned and never
+/// inspects which shape ran a request, so routing stays entirely inside the
+/// set. Ids are unique across buckets by construction, which is what makes that
+/// safe: without it two buckets would hand out the same id and the worker would
+/// complete or cancel the wrong request.
+impl XlaServingEngine for mlxcel_xla::XlaBucketSet {
+    fn b_max(&self) -> usize {
+        // Slots are per bucket, so the worker's admission ceiling is the total
+        // it could run at once rather than any one bucket's.
+        self.b_max_total()
+    }
+
+    fn context_capacity(&self) -> usize {
+        self.largest_capacity()
+    }
+
+    fn is_idle(&self) -> bool {
+        mlxcel_xla::XlaBucketSet::is_idle(self)
+    }
+
+    fn pending_len(&self) -> usize {
+        mlxcel_xla::XlaBucketSet::pending_len(self)
+    }
+
+    fn active_len(&self) -> usize {
+        mlxcel_xla::XlaBucketSet::active_len(self)
+    }
+
+    fn submit(
+        &mut self,
+        prompt: &[i32],
+        max_new_tokens: usize,
+        params: SampleParams,
+    ) -> Result<u64, String> {
+        mlxcel_xla::XlaBucketSet::submit(self, prompt, max_new_tokens, params)
+            .map_err(|error| error.to_string())
+    }
+
+    fn submit_prepared(
+        &mut self,
+        prepared: PreparedPrefill,
+        max_new_tokens: usize,
+        params: SampleParams,
+    ) -> Result<u64, String> {
+        mlxcel_xla::XlaBucketSet::submit_prepared(self, prepared, max_new_tokens, params)
+            .map_err(|error| error.to_string())
+    }
+
+    fn cancel(&mut self, req_id: u64) -> bool {
+        mlxcel_xla::XlaBucketSet::cancel(self, req_id)
+    }
+
+    fn pump(&mut self) -> Result<Vec<EngineEvent>, String> {
+        mlxcel_xla::XlaBucketSet::pump(self)
+    }
+}
+
 impl XlaServingEngine for XlaBatchEngine {
     fn b_max(&self) -> usize {
         XlaBatchEngine::b_max(self)
+    }
+
+    fn context_capacity(&self) -> usize {
+        XlaBatchEngine::context_capacity(self)
     }
 
     fn is_idle(&self) -> bool {
@@ -234,9 +301,9 @@ pub(crate) struct XlaServeWorker<E = XlaBatchEngine> {
     shutdown: bool,
 }
 
-impl XlaServeWorker<XlaBatchEngine> {
+impl<E: XlaServingEngine> XlaServeWorker<E> {
     pub(crate) fn new(
-        engine: XlaBatchEngine,
+        engine: E,
         tokenizer: MlxcelTokenizer,
         model_path: std::path::PathBuf,
         device: String,
