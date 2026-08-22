@@ -326,6 +326,11 @@ fn finish_vlm_weights_common(
         .flatten();
     #[cfg(not(feature = "surgery"))]
     let _ = allow_active_pipeline;
+    // Without `surgery` the `None` arm collapses to `None` and clippy calls the
+    // match needless. Taking that suggestion would delete the active-pipeline
+    // resolution from the default build, where `surgery` is on, so the lint is
+    // silenced for the builds that see the collapsed shape instead.
+    #[cfg_attr(not(feature = "surgery"), allow(clippy::needless_match))]
     let resolved_transform: Option<&dyn mlxcel_core::weights::WeightTransform> = match transform {
         Some(t) => Some(t),
         None => {

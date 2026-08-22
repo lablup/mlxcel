@@ -322,6 +322,12 @@ fn load_audio_weights(
         .collect()
 }
 
+// Eight arguments against clippy's threshold of seven. Both call sites are in
+// this file and pass a different `graph` / `artifact_name` / `entry_name` triple
+// for the encoder and the projector, so a parameter struct would only move the
+// same eight values into a type that exists for one private helper and ripple
+// through both callers.
+#[allow(clippy::too_many_arguments)]
 fn load_audio_module(
     model_dir: &Path,
     device: &str,

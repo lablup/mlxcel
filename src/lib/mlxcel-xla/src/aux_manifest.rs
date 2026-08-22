@@ -589,13 +589,13 @@ fn acquire_auxiliary_cache_lock_with_policy(
 fn cache_lock_is_stale(path: &Path, stale_after: Duration) -> bool {
     #[cfg(target_os = "linux")]
     {
-        if let Ok(token) = std::fs::read_to_string(path) {
-            if let Some(pid) = cache_lock_owner_pid(&token) {
-                match Path::new("/proc").join(pid.to_string()).try_exists() {
-                    Ok(false) => return true,
-                    Ok(true) => {}
-                    Err(_) => {}
-                }
+        if let Ok(token) = std::fs::read_to_string(path)
+            && let Some(pid) = cache_lock_owner_pid(&token)
+        {
+            match Path::new("/proc").join(pid.to_string()).try_exists() {
+                Ok(false) => return true,
+                Ok(true) => {}
+                Err(_) => {}
             }
         }
     }

@@ -1661,6 +1661,11 @@ pub fn load_text_weights<P: AsRef<std::path::Path>>(
         .is_none()
         .then(crate::surgery::snapshot_active_pipeline)
         .flatten();
+    // Without `surgery` the `None` arm collapses to `None` and clippy calls the
+    // match needless. Taking that suggestion would delete the active-pipeline
+    // resolution from the default build, where `surgery` is on, so the lint is
+    // silenced for the builds that see the collapsed shape instead.
+    #[cfg_attr(not(feature = "surgery"), allow(clippy::needless_match))]
     let resolved_transform: Option<&dyn mlxcel_core::weights::WeightTransform> = match transform {
         Some(t) => Some(t),
         None => {
