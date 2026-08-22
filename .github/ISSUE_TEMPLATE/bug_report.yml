@@ -56,7 +56,7 @@ body:
     attributes:
       label: mlxcel version
       description: Output of `mlxcel --version` or the commit SHA you built from.
-      placeholder: e.g. "v0.5.2" or "main @ abc1234"
+      placeholder: e.g. "v0.6.0" or "main @ abc1234"
     validations:
       required: true
 

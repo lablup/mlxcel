@@ -14,7 +14,7 @@
 #     on-device argmax. The root `xla-iree` feature enables it.
 [package]
 name = "mlxcel-xla"
-version = "0.4.0"
+version = "0.6.0"
 edition = "2024"
 description = "OpenXLA / StableHLO compiler-family inference backend for mlxcel (default-off)"
 repository = "https://github.com/lablup/mlxcel"

@@ -12,6 +12,16 @@ High-performance LLM/VLM inference runtime and server for Apple Silicon / NVIDIA
 
 The project started as work on structural model fine-tuning and has grown into a general-purpose serving runtime for local and small-cluster inference.
 
+## New in v0.6.0
+
+- **Gemma 4 MTP now measures its exactness instead of assuming it.** The gate used to return an unconditional yes for Gemma 4, advertising temperature-0 byte-identity that generation 15+ hardware does not provide under the default kernel. It now probes, and where the probe fails it buys the contract back by selecting the exact kernel: 2.13x classic decode on M5 Max with byte-identity, where the fast kernel would read 2.76x without it.
+- **The MTP verify width is chosen by measured throughput.** The old controller waited for the configured prefix to be fully accepted, a bar the Gemma 4 12B pairing never clears, so it never widened. Measuring instead finds the pairing's own optimum: 94.9 tok/s at width 5 against 89.2 at 4, and it still refuses width 8, which is slower.
+- **`GET /v1/internal/mtp-policy` says whether MTP is running and why.** Including the case that used to be invisible: a pairing the exactness probe vetoes now reports `exactness_declined` with the probe's reason, instead of claiming a measurement is still in progress for the life of the process.
+- **Speculative rollback stops rewriting the whole KV cache every round.** A dense tail trim moves an offset instead of copying the live window, which is +5.3% at 24k context and grows with the conversation.
+- **Draft trees, behind `MLXCEL_MTP_TREE` and off by default.** The measurement says a linear tree costs 1.9% to 4.1% and branching 8.1% to 10.1%, so the flag ships off and the numbers ship with it.
+- **The OpenXLA backend is alpha.** Still off by default behind `xla-backend` / `xla-iree`, but 23 pull requests of multimodal execution, session plumbing and operator numeric contracts that never reached a release note are collected in the changelog, and the crate now ships on the workspace version line.
+- **Five silent nondeterminism fixes** where a `HashMap` iteration order reached a decision: language-bias priority, RT-DETRv2 sanitization, distributed registry ordering, and two eviction paths.
+
 ## New in v0.5.2
 
 - **Two silent correctness fixes on M5-class hardware.** A VLM wrapper and three server prefill paths padded prompts to a 32-token tile on models whose recurrent state cannot survive it, so Qwen 3.5, Mamba, Jamba, RWKV, Nemotron-H, Falcon-H1 and the other hybrid families produced changed greedy output whenever a prompt was not already tile-aligned. Nothing failed; the text just differed.

@@ -22,6 +22,8 @@ must either match the root version or appear in ``INDEPENDENT`` below with a
 reason. Adding a sixth member fails this check until someone decides which of
 the two it is, which is the decision that kept getting skipped.
 
+As of v0.6.0 ``INDEPENDENT`` is empty: every member tracks the root.
+
 Usage
 -----
     python3 scripts/ci/check_crate_versions.py          # check
@@ -48,13 +50,16 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # Members deliberately versioned independently of the root. A member listed here
 # is skipped by the check; anything not listed must match the root version.
 # Keep the reason: it is the whole justification for the exemption.
-INDEPENDENT: dict[str, str] = {
-    "mlxcel-xla": (
-        "Default-off backend (the `xla-backend` / `xla-iree` features). It is not "
-        "compiled into a release build and is not published, so its version is not "
-        "part of the release contract and moves on its own cadence."
-    ),
-}
+#
+# Empty since v0.6.0. `mlxcel-xla` was the one entry, exempted because a
+# default-off backend that nothing shipped could not be part of the release
+# contract. That stopped being true: the crate now carries model support users
+# select (Molmo2 indexed attention pooling, LLaVA and Qwen2-VL image context
+# floors), its worker is on the server's prompt-cache path, and CI compiles its
+# feature combinations. A version that stands still while the code moves tells a
+# reader the backend is dormant, so it tracks the root and ships in the release
+# notes like every other crate.
+INDEPENDENT: dict[str, str] = {}
 
 VERSION_RE = re.compile(r'^version = "(?P<version>[^"]+)"$', re.MULTILINE)
 
