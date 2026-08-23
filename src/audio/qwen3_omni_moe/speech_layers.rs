@@ -47,10 +47,43 @@ pub(super) fn load_rms_norm(
 }
 
 /// Sample one token from `[1, vocab]` logits with temperature + nucleus
-/// filtering (the reference `top_p_sampling`). `top_p >= 1.0` degrades to
-/// pure temperature sampling; `temperature == 0.0` is greedy.
+/// filtering, in the reference `top_p_sampling` order: the temperature is
+/// applied FIRST and the nucleus is resolved on the tempered distribution.
+/// `top_p >= 1.0` degrades to pure temperature sampling; `temperature == 0.0`
+/// is greedy.
+///
+/// mlxcel's text sampler evaluates every truncation filter on the UNTEMPERED
+/// row and divides by the temperature last (issue #1379), because that is the
+/// chain llama-server runs and mlxcel's request schema is compatible with it.
+/// That contract covers the request-driven sampler and stops there. The
+/// talker's temperature and top-p are not request parameters: they come from
+/// the checkpoint's own generation config (`talker_temperature`,
+/// `talker_top_p`) and from the fixed `CODE_PREDICTOR_TOP_P`, so no
+/// llama-server compatibility argument reaches this path, while mlx-vlm
+/// remains the only correctness oracle it has. Scaling here and calling the
+/// shared sampler at `T = 1.0` therefore reproduces the reference exactly
+/// (including its promotion to float32 before the softmax) instead of
+/// silently changing which codec tokens the nucleus admits.
+///
+/// Reference: mlx-vlm
+/// <https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/sample_utils.py>
+/// (`top_p_sampling`).
 pub(super) fn sample_logits(logits: &MlxArray, temperature: f32, top_p: f32) -> i32 {
-    let token = mlxcel_core::fused_sample(logits, temperature, 0, top_p, 0.0);
+    // `temperature == 0.0` is greedy and must not be divided by; `1.0` is a
+    // no-op division worth not building a graph node for. Both go straight to
+    // the shared sampler, where the filter order is unobservable.
+    let scaled = if temperature > 0.0 && temperature != 1.0 {
+        Some(mlxcel_core::divide_scalar(
+            &mlxcel_core::astype(logits, mlxcel_core::dtype::FLOAT32),
+            temperature,
+        ))
+    } else {
+        None
+    };
+    let token = match scaled.as_ref() {
+        Some(x) => mlxcel_core::fused_sample(x, 1.0, 0, top_p, 0.0),
+        None => mlxcel_core::fused_sample(logits, temperature, 0, top_p, 0.0),
+    };
     // Announce a newly-seen sampling dispatch outcome at INFO (#901).
     mlxcel_core::report_sampling_dispatch();
     mlxcel_core::eval(&token);

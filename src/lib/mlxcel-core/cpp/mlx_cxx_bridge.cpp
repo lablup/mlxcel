@@ -5377,6 +5377,18 @@ static uint32_t count_and_report_overflow(
 // enough to make distinct vocabulary entries collide at the top-k boundary.
 // The cast reads the row once more; against the `argsort` this replaces, that
 // is noise.
+//
+// The two helpers cast independently, and hoisting that cast into one shared
+// `astype` node handed to both was tried and MEASURED SLOWER: 108.15 tok/s
+// median before the hoist against 107.46 after, over nine interleaved pairs on
+// qwen3-4b-4bit at `--temp 0.8 --top-k 0 --top-p 0.9 --min-p 0.1`, 512 tokens,
+// M1 Ultra. The hoisted arm lost every pair and the two ranges did not
+// overlap, so this is not noise. The likely mechanism is that sharing the cast
+// forces the f32 row to materialize once and be read twice, while two
+// separately constructed casts each fuse into their own consumer and never
+// materialize a 600 KB intermediate at this vocabulary. Common-subexpression
+// elimination is not free when it costs fusion. Do not re-hoist without
+// re-measuring.
 static mlx::core::array rejection_filter_probabilities(
     const mlx::core::array& logits
 ) {

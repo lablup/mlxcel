@@ -134,7 +134,8 @@
 // `r` of row `b` is `philox(key, {r, 0, b, 0})[0]`, so rounds and rows never
 // share a draw.
 //
-// Used by: `cpp/mlx_cxx_bridge.cpp` (`fused_sample`, `fused_sample_rejection`).
+// Used by: `cpp/mlx_cxx_bridge.cpp` (`fused_sample`, `fused_sample_rejection`,
+// `fused_sample_rejection_deferred`, `sampling_rejection_probe`).
 
 #include <mlx/array.h>
 

@@ -312,9 +312,9 @@ inline GumbelKernelHolder& get_gumbel_kernel() {
     // backend state owned by other statics, and `exit` destroys statics in an
     // order C++ does not define across translation units. A compiled min-p
     // filter previously in `mlx_cxx_bridge.cpp` (removed with #1379) faulted
-    // in exactly that window; this has
-    // the same shape, is process-lifetime by construction, and costs one
-    // never-freed allocation to take out of the teardown path entirely.
+    // in exactly that window; this has the same shape, is process-lifetime by
+    // construction, and costs one never-freed allocation to take out of the
+    // teardown path entirely.
     static GumbelKernelHolder* holder = new GumbelKernelHolder();
     return *holder;
 }
@@ -342,9 +342,9 @@ inline GumbelKernelHolderCuda& get_gumbel_kernel_cuda() {
     // backend state owned by other statics, and `exit` destroys statics in an
     // order C++ does not define across translation units. A compiled min-p
     // filter previously in `mlx_cxx_bridge.cpp` (removed with #1379) faulted
-    // in exactly that window; this has
-    // the same shape, is process-lifetime by construction, and costs one
-    // never-freed allocation to take out of the teardown path entirely.
+    // in exactly that window; this has the same shape, is process-lifetime by
+    // construction, and costs one never-freed allocation to take out of the
+    // teardown path entirely.
     static GumbelKernelHolderCuda* holder = new GumbelKernelHolderCuda();
     return *holder;
 }

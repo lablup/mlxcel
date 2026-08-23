@@ -31,9 +31,12 @@
 //!
 //! Attention, RoPE handling, resize MLPs, and the sampling helper live in
 //! the sibling [`super::speech_layers`] module. Sampling mirrors the
-//! reference: temperature + nucleus (top-p) only; the first codebook uses the
-//! configured talker temperature/top-p, the code predictor uses the same
-//! temperature with top-p 0.8 fixed.
+//! reference: temperature + nucleus (top-p) only, applied in the reference's
+//! order (temperature first, nucleus on the tempered row), which
+//! [`super::speech_layers::sample_logits`] holds deliberately against the
+//! untempered-filter chain the request-driven text sampler took in #1379. The
+//! first codebook uses the configured talker temperature/top-p, the code
+//! predictor uses the same temperature with top-p 0.8 fixed.
 //!
 //! Reference: mlx-vlm
 //! <https://github.com/Blaizzy/mlx-vlm/blob/main/mlx_vlm/models/qwen3_omni_moe/talker.py>.

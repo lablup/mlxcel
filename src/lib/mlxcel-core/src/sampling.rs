@@ -1281,6 +1281,13 @@ pub fn compute_logprobs(
 }
 
 /// Apply min-p filtering to logits.
+///
+/// Production runs min-p inside the C++ chain (`fused_sample_filter_logits`)
+/// or inside the rejection kernel; this is the reference copy the tests hold
+/// those against.
+///
+/// Used by: unit tests (`fused_sample_probs_equals_softmax_of_filtered_over_t`
+/// in `sampling::tests`)
 #[allow(dead_code)]
 pub(crate) fn min_p_filter(logits: &MlxArray, min_p: f32) -> UniquePtr<MlxArray> {
     let probs = ffi::softmax(logits, -1);
@@ -1293,6 +1300,12 @@ pub(crate) fn min_p_filter(logits: &MlxArray, min_p: f32) -> UniquePtr<MlxArray>
 }
 
 /// Apply top-k filtering to logits.
+///
+/// Production runs top-k inside the C++ chain or inside the rejection kernel;
+/// this is the reference copy the tests hold those against.
+///
+/// Used by: unit tests (`fused_sample_probs_equals_softmax_of_filtered_over_t`
+/// in `sampling::tests`)
 #[allow(dead_code)]
 pub(crate) fn top_k_filter(logits: &MlxArray, k: i32) -> UniquePtr<MlxArray> {
     let neg_logits = ffi::negative(logits);
@@ -1336,7 +1349,9 @@ pub(crate) fn top_k_filter(logits: &MlxArray, k: i32) -> UniquePtr<MlxArray> {
 /// implementation is a reference/test-parity copy used to validate the
 /// algorithm and in unit tests for batched correctness.
 ///
-/// Used by: unit tests (`top_p_filter_*` in `sampling::tests`)
+/// Used by: unit tests (`top_p_filter_*`,
+/// `fused_sample_probs_equals_softmax_of_filtered_over_t` in
+/// `sampling::tests`)
 #[allow(dead_code)]
 pub(crate) fn top_p_filter(logits: &MlxArray, p: f32) -> UniquePtr<MlxArray> {
     // Step 1: per-row softmax probabilities.
@@ -1401,7 +1416,8 @@ pub(crate) fn top_p_filter(logits: &MlxArray, p: f32) -> UniquePtr<MlxArray> {
 /// 5. `where(remove, -inf, logits)`.
 ///
 /// Used by: [`apply_xtc_step`], unit tests (`apply_xtc_filter_*`,
-/// `xtc_runs_on_renormalised_filtered_row` in `sampling::tests`)
+/// `xtc_runs_on_renormalised_filtered_row`,
+/// `cpp_xtc_matches_the_rust_reference_filter` in `sampling::tests`)
 #[allow(dead_code)]
 pub(crate) fn apply_xtc_filter(
     logits: &MlxArray,
@@ -2817,18 +2833,22 @@ mod tests {
     /// bits pin a defect, not a contract. `min_p_filters_the_stock_chain` in
     /// sampling_rejection_tests.rs pins the fixed behavior instead.
     ///
-    /// Guarded on the rejection backend because the routed configurations
-    /// (top-p active) report the kernel's intersection semantics only where
-    /// the kernel is available; the snapshot was captured under that routing.
+    /// The two top-p cases are guarded on the rejection backend: they route to
+    /// the kernel, whose intersection semantics the snapshot was captured
+    /// under, so they only mean anything where the kernel exists. The third
+    /// case `(top_k = 40, top_p = 1.0)` is NOT guarded. Routing requires an
+    /// active top-p (`rejection_sample_applies`), so that case takes the stock
+    /// argpartition chain on every backend and is a valid regression check
+    /// everywhere. Guarding the whole test on the kernel, as it was first
+    /// written, left the single committed bit-identity check for the reorder
+    /// running nowhere at all on a CPU-only build.
     #[test]
     fn temperature_one_support_unchanged() {
-        if !ffi::sampling_rejection_available() {
-            return;
-        }
         let row = lcg_logits(0x1379_5EED, 64);
         let logits = ffi::from_slice_f32(&row, &[1, row.len() as i32]);
 
-        let cases: [(i32, f32, Vec<u32>); 3] = [
+        // `routed`: true when the configuration reaches the rejection kernel.
+        let cases: [(i32, f32, bool, Vec<u32>); 3] = [
             // The joint (40, 0.9) row equals the (0, 0.9) row bit for bit in
             // the capture: on this 64-token row the 0.9 nucleus holds 15
             // tokens, a strict subset of the top-40 set, so the kernel's
@@ -2836,6 +2856,7 @@ mod tests {
             (
                 40,
                 0.9,
+                true,
                 vec![
                     0x00000000, 0x3e507f8c, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
                     0x00000000, 0x00000000, 0x00000000, 0x3ce40600, 0x00000000, 0x00000000,
@@ -2853,6 +2874,7 @@ mod tests {
             (
                 0,
                 0.9,
+                true,
                 vec![
                     0x00000000, 0x3e507f8c, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
                     0x00000000, 0x00000000, 0x00000000, 0x3ce40600, 0x00000000, 0x00000000,
@@ -2870,6 +2892,7 @@ mod tests {
             (
                 40,
                 1.0,
+                false,
                 vec![
                     0x3bbec528, 0x3e3c000c, 0x00000000, 0x00000000, 0x00000000, 0x38d87b5b,
                     0x00000000, 0x3c045883, 0x3c83b0c8, 0x3ccd9b17, 0x00000000, 0x38ccbd8e,
@@ -2885,7 +2908,10 @@ mod tests {
                 ],
             ),
         ];
-        for (top_k, top_p, expected) in cases {
+        for (top_k, top_p, routed, expected) in cases {
+            if routed && !ffi::sampling_rejection_available() {
+                continue;
+            }
             let probs = ffi::fused_sample_probs(&logits, 1.0, top_k, top_p, 0.0);
             let got: Vec<u32> = ffi::array_to_raw_bytes(&probs)
                 .chunks_exact(4)
@@ -2951,5 +2977,146 @@ mod tests {
             "XTC did not evaluate the renormalised filtered row: {probs_b:?}"
         );
         assert!((probs_b[2] - 1.0).abs() < 1e-6, "{probs_b:?}");
+    }
+
+    /// The C++ in-chain XTC (`apply_xtc_to_filtered_logits` in
+    /// `cpp/mlx_cxx_bridge.cpp`) against the Rust reference
+    /// [`apply_xtc_filter`], element for element, on the four rows the
+    /// `apply_xtc_filter_*` tests pin.
+    ///
+    /// Every truncation filter is off (`top_k = 0`, `top_p = 1.0`,
+    /// `min_p = 0.0`) and `T == 1.0`, so the C++ XTC sees the raw row and the
+    /// reported distribution is exactly `softmax(apply_xtc_filter(row))`,
+    /// which is the Rust reference's own domain. `xtc_probability = 1.0`
+    /// against a gate of 0.5 fires the removal unconditionally, so this test
+    /// isolates the filter from the gate; `cpp_xtc_gate_decides_the_removal`
+    /// covers the gate.
+    ///
+    /// The allowlist row is the case that earns this test. Production always
+    /// populates `xtc_special_tokens` (newline plus the merged EOS set, built
+    /// in `src/server/model_worker.rs`), and a defect in that branch would let
+    /// XTC remove EOS and run generation away, which no other test would
+    /// catch.
+    #[test]
+    fn cpp_xtc_matches_the_rust_reference_filter() {
+        let gate = ffi::from_slice_f32(&[0.5], &[1]);
+        let cases: [(f32, &[i32]); 4] = [
+            // Tokens 0, 1, 2 above threshold: 0 and 1 are removed, 2 (the
+            // least probable of them) survives.
+            (0.01, &[]),
+            // Same row, but token 0 is held by the allowlist.
+            (0.01, &[0]),
+            // One candidate above threshold: no-op.
+            (0.5, &[]),
+            // Zero candidates above threshold: no-op.
+            (0.9, &[]),
+        ];
+        for (threshold, allowlist) in cases {
+            let logits = xtc_test_logits();
+            let reference = apply_xtc_filter(&logits, threshold, allowlist);
+            let expected = probs_row(&ffi::softmax(&reference, -1));
+            let got = probs_row(&ffi::fused_sample_probs_xtc(
+                &logits, 1.0, 0, 1.0, 0.0, threshold, 1.0, allowlist, &gate,
+            ));
+            assert_eq!(got.len(), expected.len());
+            for (i, (&g, &e)) in got.iter().zip(&expected).enumerate() {
+                assert!(
+                    (g - e).abs() < 1e-6,
+                    "C++ XTC diverged from apply_xtc_filter at token {i} \
+                     (threshold {threshold}, allowlist {allowlist:?}): \
+                     {got:?} vs {expected:?}"
+                );
+            }
+        }
+    }
+
+    /// The gate compare (`gate < xtc_probability`) in its deciding regime.
+    ///
+    /// The production setting is `0 < xtc_probability < 1`, where that compare
+    /// picks between a filtered and an unfiltered row on every step. The other
+    /// two C++ XTC tests pass `xtc_probability = 1.0`, where it always fires,
+    /// so neither reaches it. Here `probability = 0.5` is held against a gate
+    /// on either side of it, so a compare that was inverted, dropped, or wired
+    /// to the wrong operand fails.
+    #[test]
+    fn cpp_xtc_gate_decides_the_removal() {
+        let logits = xtc_test_logits();
+        let unfiltered = probs_row(&ffi::softmax(&logits, -1));
+
+        // 0.9 is not below 0.5: no removal, the row is the plain softmax.
+        let gate_off = ffi::from_slice_f32(&[0.9], &[1]);
+        let off = probs_row(&ffi::fused_sample_probs_xtc(
+            &logits,
+            1.0,
+            0,
+            1.0,
+            0.0,
+            0.01,
+            0.5,
+            &[],
+            &gate_off,
+        ));
+        for (i, (&g, &e)) in off.iter().zip(&unfiltered).enumerate() {
+            assert!(
+                (g - e).abs() < 1e-6,
+                "XTC fired with gate 0.9 above probability 0.5 at token {i}: \
+                 {off:?} vs {unfiltered:?}"
+            );
+        }
+
+        // 0.1 is below 0.5: the removal fires and tokens 0 and 1 leave the
+        // support.
+        let gate_on = ffi::from_slice_f32(&[0.1], &[1]);
+        let on = probs_row(&ffi::fused_sample_probs_xtc(
+            &logits,
+            1.0,
+            0,
+            1.0,
+            0.0,
+            0.01,
+            0.5,
+            &[],
+            &gate_on,
+        ));
+        assert_eq!(
+            support_of(&on),
+            vec![2, 3],
+            "XTC did not fire with gate 0.1 below probability 0.5: {on:?}"
+        );
+    }
+
+    /// [`ffi::fused_sample_xtc`], the token-drawing entry point, at
+    /// `temperature == 0.0`: the draw is the argmax of the XTC-filtered row,
+    /// not of the raw row. This is the one deliberate edge change #1379 makes
+    /// to a greedy configuration, and it is the only test that calls
+    /// `fused_sample_xtc` at all.
+    ///
+    /// The second case runs the same draw with the allowlist populated, so the
+    /// allowlist branch is exercised through the drawing path as well as
+    /// through the reported distribution.
+    #[test]
+    fn cpp_xtc_greedy_draw_is_the_argmax_of_the_filtered_row() {
+        let gate = ffi::from_slice_f32(&[0.5], &[1]);
+
+        // Raw argmax is token 0 (logit 10.0). XTC at threshold 0.01 removes
+        // tokens 0 and 1, leaving token 2 (logit 8.0) as the argmax.
+        let logits = xtc_test_logits();
+        let tok = ffi::fused_sample_xtc(&logits, 0.0, 0, 1.0, 0.0, 0.01, 1.0, &[], &gate);
+        let b = ffi::array_to_raw_bytes(&tok);
+        assert_eq!(
+            i32::from_ne_bytes([b[0], b[1], b[2], b[3]]),
+            2,
+            "greedy XTC draw is not the argmax of the filtered row"
+        );
+
+        // With token 0 allowlisted it survives the removal and wins the
+        // argmax again.
+        let tok_allow = ffi::fused_sample_xtc(&logits, 0.0, 0, 1.0, 0.0, 0.01, 1.0, &[0], &gate);
+        let ba = ffi::array_to_raw_bytes(&tok_allow);
+        assert_eq!(
+            i32::from_ne_bytes([ba[0], ba[1], ba[2], ba[3]]),
+            0,
+            "allowlisted token was removed by the C++ XTC draw path"
+        );
     }
 }
