@@ -1156,3 +1156,51 @@ fn kv_cache_stays_consistent_across_mixed_accept_reject_rounds() {
         }
     }
 }
+
+/// #1379: the target distribution the accept test consumes gives positive
+/// mass to every token of the UNTEMPERED nucleus.
+///
+/// The #902 accept rule rejects a drafted token `t` whenever the reported
+/// target mass `p(t)` is zero. Before #1379 `effective_token_distribution`
+/// evaluated top-p on the tempered row, so at `T = 0.5` and `top_p = 0.9`
+/// tokens inside the untempered nucleus but outside the sharper tempered one
+/// reported zero mass and were rejected even though the reference chain's
+/// target sampler could produce them. On `p = [0.50, 0.30, 0.15, 0.05]` the
+/// untempered nucleus is {0, 1, 2}; each of those must report positive mass
+/// (in fact the tempered truncated value), and index 3 must report zero.
+#[test]
+fn stochastic_accept_uses_untempered_support() {
+    let row: Vec<f32> = [0.5f32, 0.3, 0.15, 0.05].iter().map(|p| p.ln()).collect();
+    let logits = crate::ffi::from_slice_f32(&row, &[1, 4]);
+    let config = SamplingConfig {
+        temperature: 0.5,
+        top_p: 0.9,
+        ..SamplingConfig::default()
+    };
+    let probs = effective_token_distribution(&logits, &config, &[]);
+    let vals: Vec<f32> = crate::ffi::array_to_raw_bytes(&probs)
+        .chunks_exact(4)
+        .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+
+    // Tempered (T = 0.5 squares the probabilities) and truncated to {0, 1, 2}.
+    let sq = [0.25f64, 0.09, 0.0225];
+    let z: f64 = sq.iter().sum();
+    for (i, &want) in sq.iter().enumerate() {
+        assert!(
+            vals[i] > 0.0,
+            "token {i} is inside the untempered nucleus but reports zero mass; \
+             the accept test would reject it unconditionally ({vals:?})"
+        );
+        assert!(
+            (f64::from(vals[i]) - want / z).abs() < 1e-4,
+            "token {i}: reported {} against tempered truncated reference {:.6}",
+            vals[i],
+            want / z
+        );
+    }
+    assert_eq!(
+        vals[3], 0.0,
+        "token 3 lies outside the untempered nucleus and must report zero mass ({vals:?})"
+    );
+}

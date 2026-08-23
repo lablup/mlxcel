@@ -39,6 +39,9 @@ src/
 - `src/lib/mlxcel-core/src/ops.rs`, `src/lib/mlxcel-core/src/dtype.rs`, `src/lib/mlxcel-core/src/streams.rs` — wrappers around common MLX
   operations and runtime concepts.
 - `src/lib/mlxcel-core/src/sampling.rs` — penalties and token sampling shared by CLI/server paths.
+  Sampler chain order: token bias and penalties, then top-k / top-p / min-p evaluated on the
+  untempered distribution, then XTC on the renormalised filtered row, then one temperature
+  scaling applied only to the final draw (matching the llama-server chain).
 - `src/lib/mlxcel-core/src/generate.rs` — `LanguageModel` trait and generation loops.
 - `src/lib/mlxcel-core/src/drafter/` and `src/lib/mlxcel-core/src/speculative/` — speculative decoding support.
   `speculative/stochastic_accept.rs` holds the acceptance rules and the distribution-preservation

@@ -519,9 +519,11 @@ fn top_k_holds_under_temperature_scaling() {
     if !gpu_backend() {
         return;
     }
-    // Temperature is applied before the softmax the kernel consumes, so a
-    // scaling bug shows up as a support that no longer matches the reference at
-    // that temperature.
+    // Since #1379 the kernel resolves the support on the UNTEMPERED row and
+    // draws from the tempered one. Top-k's support is invariant under the
+    // monotone temperature map, so the support still matches the reference
+    // computed at each temperature, and the frequencies must follow the
+    // tempered truncated distribution.
     let logits = bimodal_logits(128);
     for &temperature in &[0.5f32, 1.5] {
         let probs = softmax_reference(&logits, temperature);
@@ -1504,4 +1506,147 @@ fn the_two_filter_orderings_really_do_differ_for_top_k_plus_top_p() {
          teeth; pick a distribution that straddles the top_p boundary",
         stock.len()
     );
+}
+
+/// #1379: the support comes from the UNTEMPERED distribution while the draw
+/// follows the tempered one.
+///
+/// At `T = 0.5` and `top_p = 0.9` the untempered nucleus of this row keeps
+/// seven tokens (exclusive cumulative mass 0.88 <= 0.9 at the seventh) while
+/// the tempered nucleus the pre-#1379 kernel resolved kept four, so a kernel
+/// that still filtered the tempered row fails the support half, and a kernel
+/// that drew from the untempered row fails the frequency half. 100k draws,
+/// each in-support frequency within 3 sigma of the tempered truncated
+/// reference, and not one draw outside the untempered nucleus.
+///
+/// The stock-chain arm is exercised through `fused_sample_categorical`, the
+/// committed in-process equivalent of `MLXCEL_SAMPLING_REJECTION=0` (the env
+/// switch is read once per process, so the kill switch itself cannot be
+/// toggled inside a test); its support must equal the kernel's.
+#[test]
+fn rejection_kernel_filter_on_untempered_draw_on_tempered() {
+    let _dispatch = crate::sampling_dispatch::dispatch_test_guard();
+    if !gpu_backend() {
+        return;
+    }
+    let base: [f64; 16] = [
+        0.30, 0.20, 0.14, 0.10, 0.08, 0.06, 0.05, 0.03, 0.02, 0.01, 0.004, 0.003, 0.002, 0.0005,
+        0.0003, 0.0002,
+    ];
+    let logits: Vec<f32> = base.iter().map(|&p| p.ln() as f32).collect();
+    let temperature = 0.5f32;
+    let top_p = 0.9f32;
+    let n = 100_000usize;
+
+    // Untempered nucleus: descending prefix whose exclusive cumulative mass
+    // stays within top_p, on the raw probabilities.
+    let raw = softmax_reference(&logits, 1.0);
+    let support = stock_top_p_support(&raw, f64::from(top_p));
+    assert_eq!(
+        support,
+        (0..7usize).collect::<BTreeSet<_>>(),
+        "the row no longer produces the intended untempered nucleus"
+    );
+
+    // Tempered draw distribution, truncated to that support.
+    let tempered = softmax_reference(&logits, temperature);
+    let mass: f64 = support.iter().map(|&i| tempered[i]).sum();
+
+    random_seed(0x1379_F117);
+    let counts = histogram(&logits, temperature, 0, top_p, 0.0, n);
+
+    for (i, &count) in counts.iter().enumerate() {
+        if !support.contains(&i) {
+            assert_eq!(
+                count, 0,
+                "token {i} lies outside the untempered nucleus and was drawn {count} times"
+            );
+            continue;
+        }
+        let q = tempered[i] / mass;
+        let expect = q * n as f64;
+        let sigma = (n as f64 * q * (1.0 - q)).sqrt();
+        let dev = (count as f64 - expect).abs();
+        assert!(
+            dev <= 3.0 * sigma,
+            "token {i}: {count} draws against expectation {expect:.1} (tempered truncated), \
+             deviation {dev:.1} > 3 sigma ({sigma:.1})"
+        );
+    }
+
+    // Stock chain (reference arm): same support.
+    let rows = 512usize;
+    let batched = tiled(&logits, rows);
+    random_seed(0x1379_F118);
+    let mut stock_support = BTreeSet::new();
+    for _ in 0..40 {
+        for id in u32_values(&fused_sample_categorical(
+            &batched,
+            temperature,
+            0,
+            top_p,
+            0.0,
+        )) {
+            stock_support.insert(id as usize);
+        }
+    }
+    assert_eq!(
+        stock_support, support,
+        "the stock chain and the rejection kernel resolve different supports"
+    );
+}
+
+/// Regression guard for the pre-#1379 stock-chain min-p no-op.
+///
+/// Through #1378 the chain routed min-p through a `mlx::core::compile`d
+/// callable that returned its input UNFILTERED on the Metal backend: the
+/// reported distribution did not move across min_p values from 0.05 to 0.9,
+/// and the sampler drew tokens below `min_p * p_max` on both the production
+/// stock chain and this reference arm. The rejection kernel applied min-p
+/// correctly, which kept the defect invisible on routed configurations, and
+/// `the_reported_distribution_matches_what_the_sampler_draws` compared the
+/// broken chain against its own broken report, so it passed. This pins the
+/// straight-line replacement, on both the production entry point (min-p alone
+/// is never routed, so `fused_sample` takes the stock chain here) and the
+/// reference arm.
+#[test]
+fn min_p_filters_the_stock_chain() {
+    let _dispatch = crate::sampling_dispatch::dispatch_test_guard();
+    // p = [0.5, 0.3, 0.15, 0.05]; min_p = 0.5 puts the threshold at 0.25, so
+    // only {0, 1} survive and renormalise to [0.625, 0.375].
+    let row: Vec<f32> = [0.5f32, 0.3, 0.15, 0.05].iter().map(|p| p.ln()).collect();
+    let single = from_slice_f32(&row, &[1, 4]);
+    let probs: Vec<f32> = array_to_raw_bytes(&fused_sample_probs(&single, 1.0, 0, 1.0, 0.5))
+        .chunks_exact(4)
+        .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    let expected = [0.625f32, 0.375, 0.0, 0.0];
+    for (i, (&got, &want)) in probs.iter().zip(&expected).enumerate() {
+        assert!(
+            (got - want).abs() < 1e-6,
+            "reported min-p distribution wrong at token {i}: got {got}, want {want} \
+             (full row {probs:?})"
+        );
+    }
+
+    let rows = 64usize;
+    let batched = tiled(&row, rows);
+    for (label, arm) in [("fused_sample", true), ("fused_sample_categorical", false)] {
+        random_seed(0x1379_313B);
+        let mut drawn = 0usize;
+        while drawn < 2000 {
+            let ids = if arm {
+                u32_values(&fused_sample(&batched, 1.0, 0, 1.0, 0.5))
+            } else {
+                u32_values(&fused_sample_categorical(&batched, 1.0, 0, 1.0, 0.5))
+            };
+            for id in ids {
+                assert!(
+                    id < 2,
+                    "{label} drew token {id}, which min-p 0.5 must exclude"
+                );
+                drawn += 1;
+            }
+        }
+    }
 }

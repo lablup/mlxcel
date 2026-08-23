@@ -63,12 +63,14 @@ constexpr int REJECTION_TG_SIZE = 256;
 //   MaxRounds - rejection rounds before the row is declared unconverged.
 //
 // Buffers (order matches the launcher's input vector):
-//   probs   [B, V]   f32  softmax probabilities, one row per batch entry
-//   params  [B, 3]   f32  {top_k, top_p, min_p} per row
-//   rng_key [2]      u32  Philox key drawn from MLX's key sequence
-//   ids     [B]      u32  sampled token id
-//   ok      [B]      u32  1 when the loop accepted inside the round cap
-//   rounds  [B]      u32  rounds the row consumed
+//   probs      [B, V]  f32  UNTEMPERED softmax row; every filter test reads it
+//   probs_draw [B, V]  f32  tempered softmax row; the draw is weighted by it
+//                           (the caller passes the probs array itself at T==1)
+//   params     [B, 3]  f32  {top_k, top_p, min_p} per row
+//   rng_key    [2]     u32  Philox key drawn from MLX's key sequence
+//   ids        [B]     u32  sampled token id
+//   ok         [B]     u32  1 when the loop accepted inside the round cap
+//   rounds     [B]     u32  rounds the row consumed
 constexpr const char* REJECTION_SAMPLE_SOURCE = R"(
     uint t = thread_position_in_threadgroup.x;   // 0 .. TgSize-1
     uint row = threadgroup_position_in_grid.z;   // 0 .. B-1
@@ -97,13 +99,22 @@ constexpr const char* REJECTION_SAMPLE_SOURCE = R"(
     threadgroup float sh_m1[TgSize];
     threadgroup uint  bcu[2];
 
-    // ---- sweep 1: row maximum (index carrying) and row mass.
+    // ---- sweep 1: row maximum (index carrying), filter-row mass, and the
+    // draw-row mass of the initial proposal {p > 0}. Gating the draw sum on
+    // filter membership keeps it consistent with the pick loop below: a token
+    // whose filter probability underflowed to 0 can never be picked, so its
+    // draw mass must not inflate the proposal mass either. Adding a gated 0.0
+    // is exact, so at T == 1 this sum is bit-identical to the filter sum.
     float local_max = -1.0f;
     uint  local_arg = 0u;
     float local_sum = 0.0f;
+    float local_draw = 0.0f;
     for (uint i = t; i < vocab; i += tg) {
         float p = probs[row_off + i];
         local_sum += p;
+        if (p > 0.0f) {
+            local_draw += probs_draw[row_off + i];
+        }
         if (p > local_max) {
             local_max = p;
             local_arg = i;
@@ -142,14 +153,16 @@ constexpr const char* REJECTION_SAMPLE_SOURCE = R"(
     float total = sh_scan[0];
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // ---- min-p is a plain threshold, so it is folded into the initial
-    // interval instead of being tested per round: the proposal starts as
-    // { p : p >= min_p * p_max } and never has to shrink for min-p again.
-    // `low` is an EXCLUSIVE bound, so the inclusive threshold is spelled as the
-    // largest float strictly below it. That is one integer decrement of the bit
-    // pattern, which a fast-math backend cannot perturb.
+    // ---- min-p is a plain threshold on the filter row, so it is folded into
+    // the initial interval instead of being tested per round: the proposal
+    // starts as { p : p >= min_p * p_max } and never has to shrink for min-p
+    // again. `low` is an EXCLUSIVE bound, so the inclusive threshold is
+    // spelled as the largest float strictly below it. That is one integer
+    // decrement of the bit pattern, which a fast-math backend cannot perturb.
+    // `part` carries the DRAW-row mass of the proposal; membership stays in
+    // filter space.
     float low = 0.0f;
-    float part = local_sum;
+    float part = local_draw;
     if (use_mp) {
         float tau_min = min_p * p_max;
         uint tau_bits = as_type<uint>(tau_min);
@@ -159,7 +172,7 @@ constexpr const char* REJECTION_SAMPLE_SOURCE = R"(
             for (uint i = t; i < vocab; i += tg) {
                 float p = probs[row_off + i];
                 if (p > low) {
-                    part += p;
+                    part += probs_draw[row_off + i];
                 }
             }
         }
@@ -240,7 +253,7 @@ constexpr const char* REJECTION_SAMPLE_SOURCE = R"(
             for (uint i = t; i < vocab; i += tg) {
                 float p = probs[row_off + i];
                 if (p > low) {
-                    run += p;
+                    run += probs_draw[row_off + i];
                     if (run > target) {
                         pick = i;
                         break;
@@ -293,27 +306,34 @@ constexpr const char* REJECTION_SAMPLE_SOURCE = R"(
         uint bm = (b0 >> 1u) + (bh >> 1u) + (b0 & bh & 1u);
         float pivot1 = as_type<float>(bm);
 
-        // ---- (count, mass) above both pivots. Skipped outright when neither
-        // top-k nor top-p is active (min-p alone needs no pivot at all), which
-        // is threadgroup-uniform, so the barriers inside stay well formed.
+        // ---- (count, mass) above both pivots in filter space, plus the
+        // per-thread DRAW-row mass above each pivot for the next round's
+        // proposal. Skipped outright when neither top-k nor top-p is active
+        // (min-p alone needs no pivot at all), which is threadgroup-uniform,
+        // so the barriers inside stay well formed.
         float cnt0 = 0.0f;
         float mass0 = 0.0f;
         float cnt1 = 0.0f;
         float mass1 = 0.0f;
-        float m0acc = 0.0f;
-        float m1acc = 0.0f;
+        float d0acc = 0.0f;
+        float d1acc = 0.0f;
         if (use_k || use_p) {
             float c0acc = 0.0f;
             float c1acc = 0.0f;
+            float m0acc = 0.0f;
+            float m1acc = 0.0f;
             for (uint i = t; i < vocab; i += tg) {
                 float p = probs[row_off + i];
+                float pd = probs_draw[row_off + i];
                 if (p > pivot0) {
                     c0acc += 1.0f;
                     m0acc += p;
+                    d0acc += pd;
                 }
                 if (p > pivot1) {
                     c1acc += 1.0f;
                     m1acc += p;
+                    d1acc += pd;
                 }
             }
             sh_c0[t] = c0acc;
@@ -353,14 +373,15 @@ constexpr const char* REJECTION_SAMPLE_SOURCE = R"(
         }
 
         // Shrink. `pivot1 >= pivot0 > low`, so both updates raise `low`
-        // strictly and the bit-space bracket at least halves every round.
+        // strictly and the bit-space bracket at least halves every round. The
+        // new proposal mass is the DRAW-row mass above the surviving pivot.
         if (fail1) {
             low = pivot1;
-            part = m1acc;
+            part = d1acc;
         } else {
             low = pivot0;
             high = pivot1;
-            part = m0acc;
+            part = d0acc;
         }
     }
 
@@ -390,7 +411,10 @@ constexpr const char* REJECTION_SAMPLE_SOURCE = R"(
 //
 // UNVALIDATED: written from the Metal source for parity, but no CUDA hardware
 // and no `nvcc` were available when this landed, so it has never been compiled
-// or run. Same status as the CUDA strings in `sampling.cpp`,
+// or run. The #1379 filter/draw split (the `probs_draw` buffer, the gated
+// draw-mass sums, and the `d0acc`/`d1acc` proposal-mass updates) was mirrored
+// from the Metal source under the same conditions and inherits the same
+// unvalidated status. Same status as the CUDA strings in `sampling.cpp`,
 // `fused_norm.cpp`, and `fused_rope_append.cpp`.
 constexpr const char* REJECTION_SAMPLE_CUDA_SOURCE = R"(
     uint32_t t = threadIdx.x;   // 0 .. TgSize-1
@@ -418,12 +442,18 @@ constexpr const char* REJECTION_SAMPLE_CUDA_SOURCE = R"(
     __shared__ float sh_m1[TgSize];
     __shared__ uint32_t bcu[2];
 
+    // See the Metal source: the draw-row sum is gated on filter membership so
+    // the proposal mass never counts a token the pick loop cannot reach.
     float local_max = -1.0f;
     uint32_t local_arg = 0u;
     float local_sum = 0.0f;
+    float local_draw = 0.0f;
     for (uint32_t i = t; i < vocab; i += tg) {
         float p = probs[row_off + i];
         local_sum += p;
+        if (p > 0.0f) {
+            local_draw += probs_draw[row_off + i];
+        }
         if (p > local_max) {
             local_max = p;
             local_arg = i;
@@ -460,7 +490,7 @@ constexpr const char* REJECTION_SAMPLE_CUDA_SOURCE = R"(
     __syncthreads();
 
     float low = 0.0f;
-    float part = local_sum;
+    float part = local_draw;
     if (use_mp) {
         float tau_min = min_p * p_max;
         uint32_t tau_bits = __float_as_uint(tau_min);
@@ -470,7 +500,7 @@ constexpr const char* REJECTION_SAMPLE_CUDA_SOURCE = R"(
             for (uint32_t i = t; i < vocab; i += tg) {
                 float p = probs[row_off + i];
                 if (p > low) {
-                    part += p;
+                    part += probs_draw[row_off + i];
                 }
             }
         }
@@ -534,7 +564,7 @@ constexpr const char* REJECTION_SAMPLE_CUDA_SOURCE = R"(
             for (uint32_t i = t; i < vocab; i += tg) {
                 float p = probs[row_off + i];
                 if (p > low) {
-                    run += p;
+                    run += probs_draw[row_off + i];
                     if (run > target) {
                         pick = i;
                         break;
@@ -579,20 +609,25 @@ constexpr const char* REJECTION_SAMPLE_CUDA_SOURCE = R"(
         float mass0 = 0.0f;
         float cnt1 = 0.0f;
         float mass1 = 0.0f;
-        float m0acc = 0.0f;
-        float m1acc = 0.0f;
+        float d0acc = 0.0f;
+        float d1acc = 0.0f;
         if (use_k || use_p) {
             float c0acc = 0.0f;
             float c1acc = 0.0f;
+            float m0acc = 0.0f;
+            float m1acc = 0.0f;
             for (uint32_t i = t; i < vocab; i += tg) {
                 float p = probs[row_off + i];
+                float pd = probs_draw[row_off + i];
                 if (p > pivot0) {
                     c0acc += 1.0f;
                     m0acc += p;
+                    d0acc += pd;
                 }
                 if (p > pivot1) {
                     c1acc += 1.0f;
                     m1acc += p;
+                    d1acc += pd;
                 }
             }
             sh_c0[t] = c0acc;
@@ -630,11 +665,11 @@ constexpr const char* REJECTION_SAMPLE_CUDA_SOURCE = R"(
 
         if (fail1) {
             low = pivot1;
-            part = m1acc;
+            part = d1acc;
         } else {
             low = pivot0;
             high = pivot1;
-            part = m0acc;
+            part = d0acc;
         }
     }
 
@@ -657,7 +692,7 @@ struct RejectionKernelHolder {
         std::call_once(init_flag, [this] {
             kernel = mlx::core::fast::metal_kernel(
                 "mlxcel_rejection_sample",
-                {"probs", "params", "rng_key"},
+                {"probs", "probs_draw", "params", "rng_key"},
                 {"ids", "ok", "rounds"},
                 std::string(REJECTION_SAMPLE_SOURCE));
         });
@@ -668,8 +703,9 @@ struct RejectionKernelHolder {
 inline RejectionKernelHolder& get_rejection_kernel() {
     // Leaked on purpose: the holder owns a JIT-compiled kernel that references
     // backend state owned by other statics, and `exit` destroys statics in an
-    // order C++ does not define across translation units. The compiled min-p
-    // filter in `mlx_cxx_bridge.cpp` faulted in exactly that window; this has
+    // order C++ does not define across translation units. A compiled min-p
+    // filter previously in `mlx_cxx_bridge.cpp` (removed with #1379) faulted
+    // in exactly that window; this has
     // the same shape, is process-lifetime by construction, and costs one
     // never-freed allocation to take out of the teardown path entirely.
     static RejectionKernelHolder* holder = new RejectionKernelHolder();
@@ -684,7 +720,7 @@ struct RejectionKernelHolderCuda {
         std::call_once(init_flag, [this] {
             kernel = mlx::core::fast::cuda_kernel(
                 "mlxcel_rejection_sample",
-                {"probs", "params", "rng_key"},
+                {"probs", "probs_draw", "params", "rng_key"},
                 {"ids", "ok", "rounds"},
                 std::string(REJECTION_SAMPLE_CUDA_SOURCE));
         });
@@ -695,8 +731,9 @@ struct RejectionKernelHolderCuda {
 inline RejectionKernelHolderCuda& get_rejection_kernel_cuda() {
     // Leaked on purpose: the holder owns a JIT-compiled kernel that references
     // backend state owned by other statics, and `exit` destroys statics in an
-    // order C++ does not define across translation units. The compiled min-p
-    // filter in `mlx_cxx_bridge.cpp` faulted in exactly that window; this has
+    // order C++ does not define across translation units. A compiled min-p
+    // filter previously in `mlx_cxx_bridge.cpp` (removed with #1379) faulted
+    // in exactly that window; this has
     // the same shape, is process-lifetime by construction, and costs one
     // never-freed allocation to take out of the teardown path entirely.
     static RejectionKernelHolderCuda* holder = new RejectionKernelHolderCuda();
@@ -724,14 +761,15 @@ int rejection_threadgroup_size() {
 }
 
 RejectionSampleResult rejection_sample(
-    const mlx::core::array& probs,
+    const mlx::core::array& probs_filter,
+    const mlx::core::array& probs_draw,
     const mlx::core::array& params,
     int max_rounds) {
     using mlx::core::Dtype;
     using mlx::core::Shape;
     using mlx::core::fast::TemplateArg;
 
-    const int batch = probs.shape(0);
+    const int batch = probs_filter.shape(0);
     const int rounds = max_rounds > 0 ? max_rounds : 1;
 
     // Metal kernel on Apple, CUDA port elsewhere. `mx.fast.metal_kernel` throws
@@ -749,19 +787,22 @@ RejectionSampleResult rejection_sample(
     // Philox key; the counter carries the (round, row) pair.
     auto rng_key = mlx::core::random::bits(Shape{2}, 4);
 
-    // `ProbsType`/`ParamsType` key the JIT cache on the input dtypes and are
-    // deliberately unreferenced by the kernel body (issue #1054). This is the
-    // widest exposure of the three sites fixed there: `rejection_sample_accepts`
-    // places no dtype restriction at all, so any float dtype reaches the kernel
-    // while `TgSize` is a constant and `MaxRounds` is a caller cap.
+    // `ProbsType`/`DrawType`/`ParamsType` key the JIT cache on the input
+    // dtypes and are deliberately unreferenced by the kernel body (issue
+    // #1054). This is the widest exposure of the three sites fixed there:
+    // `rejection_sample_accepts` places no dtype restriction at all, so any
+    // float dtype reaches the kernel while `TgSize` is a constant and
+    // `MaxRounds` is a caller cap. `probs_draw` is a separate input whose
+    // dtype can vary independently, so it carries its own key entry.
     std::vector<std::pair<std::string, TemplateArg>> template_args = {
         {"TgSize", REJECTION_TG_SIZE},
         {"MaxRounds", rounds},
-        {"ProbsType", probs.dtype()},
+        {"ProbsType", probs_filter.dtype()},
+        {"DrawType", probs_draw.dtype()},
         {"ParamsType", params.dtype()},
     };
 
-    std::vector<mlx::core::array> inputs = {probs, params, rng_key};
+    std::vector<mlx::core::array> inputs = {probs_filter, probs_draw, params, rng_key};
     std::vector<Shape> output_shapes = {
         Shape{batch},
         Shape{batch},

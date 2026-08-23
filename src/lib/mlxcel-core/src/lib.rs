@@ -2073,8 +2073,10 @@ mod ffi {
         /// the fused native kernel on CUDA. See issue #634.
         fn cuda_is_available() -> bool;
 
-        /// Fused sampling: temperature + top-k + top-p + min-p + categorical
-        /// in a single C++ call to minimize FFI round-trips.
+        /// Fused sampling: top-k + top-p + min-p on the untempered
+        /// distribution, then one temperature scaling, then the categorical
+        /// draw, in a single C++ call to minimize FFI round-trips (chain
+        /// order per issue #1379, matching the llama-server sampler chain).
         /// Input: 2D logits [batch, vocab] (already sliced, penalties applied)
         /// Returns sampled token
         fn fused_sample(
@@ -2083,6 +2085,26 @@ mod ffi {
             top_k: i32,
             top_p: f32,
             min_p: f32,
+        ) -> UniquePtr<MlxArray>;
+
+        /// [`fused_sample`] with the in-chain XTC filter active (#1379): XTC
+        /// runs after min-p, on the softmax of the filtered row, gated on
+        /// `xtc_gate < xtc_probability` where `xtc_gate` is a lazy `[1]` f32
+        /// uniform draw the caller made (one per sampling step, shared with
+        /// [`fused_sample_probs_xtc`] so the token and the reported
+        /// distribution see the same gate outcome). `xtc_special_tokens` are
+        /// token ids XTC never removes. XTC-active configurations always take
+        /// the stock chain, never the Gumbel-max or rejection kernels.
+        fn fused_sample_xtc(
+            logits: &MlxArray,
+            temperature: f32,
+            top_k: i32,
+            top_p: f32,
+            min_p: f32,
+            xtc_threshold: f32,
+            xtc_probability: f32,
+            xtc_special_tokens: &[i32],
+            xtc_gate: &MlxArray,
         ) -> UniquePtr<MlxArray>;
 
         /// Pre-#900 reference sampler: identical to [`fused_sample`] except
@@ -2117,6 +2139,21 @@ mod ffi {
             top_k: i32,
             top_p: f32,
             min_p: f32,
+        ) -> UniquePtr<MlxArray>;
+
+        /// [`fused_sample_probs`] for an XTC-active configuration: the
+        /// distribution [`fused_sample_xtc`] draws from when handed the same
+        /// `xtc_gate` array.
+        fn fused_sample_probs_xtc(
+            logits: &MlxArray,
+            temperature: f32,
+            top_k: i32,
+            top_p: f32,
+            min_p: f32,
+            xtc_threshold: f32,
+            xtc_probability: f32,
+            xtc_special_tokens: &[i32],
+            xtc_gate: &MlxArray,
         ) -> UniquePtr<MlxArray>;
 
         /// Softmax-free Gumbel-max categorical sampling (#900), called

@@ -1288,8 +1288,9 @@ void set_default_stream(const MlxStream& stream);
 // Check if GPU is available
 bool is_gpu_available();
 
-// Fused sampling: temperature scaling + top-k + top-p + min-p + categorical
-// in a single function call to minimize FFI round-trips.
+// Fused sampling: top-k + top-p + min-p on the untempered distribution, then
+// one temperature scaling, then the categorical draw, in a single function
+// call to minimize FFI round-trips (chain order per issue #1379).
 // Input: 2D logits [batch, vocab] (already sliced, penalties already applied)
 // Returns sampled token
 std::unique_ptr<MlxArray> fused_sample(
@@ -1298,6 +1299,24 @@ std::unique_ptr<MlxArray> fused_sample(
     int32_t top_k,
     float top_p,
     float min_p
+);
+
+// `fused_sample` with the in-chain XTC filter active (issue #1379): XTC runs
+// after min-p, on the softmax of the filtered row, gated on
+// `xtc_gate < xtc_probability` where `xtc_gate` is a lazy `[1]` f32 uniform
+// draw the Rust caller made (one per sampling step, so `fused_sample_xtc` and
+// `fused_sample_probs_xtc` can share it). `xtc_special_tokens` are token ids
+// XTC never removes. XTC-active configurations always take the stock chain.
+std::unique_ptr<MlxArray> fused_sample_xtc(
+    const MlxArray& logits,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p,
+    float xtc_threshold,
+    float xtc_probability,
+    rust::Slice<const int32_t> xtc_special_tokens,
+    const MlxArray& xtc_gate
 );
 
 // Pre-#900 reference sampler: identical to `fused_sample` except that the
@@ -1313,15 +1332,30 @@ std::unique_ptr<MlxArray> fused_sample_categorical(
 
 // The exact categorical distribution `fused_sample` draws from (#902), as a
 // float32 [batch, vocab] row-normalized probability tensor. Shares the filter
-// chain with `fused_sample` so support and masses cannot drift. A greedy
-// configuration (temperature == 0 or top_k == 1) returns the one-hot argmax
-// indicator.
+// chain with `fused_sample` so support and masses cannot drift: the filters
+// are evaluated on the untempered row and the returned distribution is
+// `softmax(x_filtered / T)` (issue #1379). A greedy configuration
+// (temperature == 0 or top_k == 1) returns the one-hot argmax indicator.
 std::unique_ptr<MlxArray> fused_sample_probs(
     const MlxArray& logits,
     float temperature,
     int32_t top_k,
     float top_p,
     float min_p
+);
+
+// `fused_sample_probs` for an XTC-active configuration: the distribution
+// `fused_sample_xtc` draws from when handed the same `xtc_gate` array.
+std::unique_ptr<MlxArray> fused_sample_probs_xtc(
+    const MlxArray& logits,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p,
+    float xtc_threshold,
+    float xtc_probability,
+    rust::Slice<const int32_t> xtc_special_tokens,
+    const MlxArray& xtc_gate
 );
 
 // Softmax-free Gumbel-max categorical sampling (#900), called directly.

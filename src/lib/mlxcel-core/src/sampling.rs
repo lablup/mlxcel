@@ -233,8 +233,11 @@ pub fn apply_token_bias(logits: &MlxArray, bias: &TokenBiasMap) -> UniquePtr<Mlx
 /// Returns `(token_array, logits_array)` without forcing evaluation so the
 /// caller can preserve async lookahead pipelining.
 ///
-/// Uses fused C++ sampling (temperature + top-k + top-p + min-p + categorical
-/// in a single FFI call) to minimize round-trip overhead.
+/// Uses fused C++ sampling in a single FFI call to minimize round-trip
+/// overhead. Chain order (#1379, matching llama-server): top-k, top-p, and
+/// min-p evaluate on the untempered distribution, XTC on the renormalised
+/// filtered row, and the single temperature scaling comes last, applied only
+/// to the draw.
 ///
 /// **B9 observability**: when `config.token_bias` is non-empty this function
 /// increments `LANG_BIAS_APPLIED_TOTAL` and, when the pre-bias top-1 token
@@ -302,22 +305,108 @@ fn sample_token_optimized_core(
 ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
     let last_logits = preprocess_logits_for_sampling(logits, config, token_history, state);
 
-    let token = ffi::fused_sample(
-        &last_logits,
-        config.temperature,
-        config.top_k,
-        config.top_p,
-        config.min_p,
-    );
+    let gate = xtc_gate_draw(config);
+    let token = fused_sample_dispatch(&last_logits, config, gate.as_deref());
     // Announce a newly-seen dispatch outcome at INFO. Costs one `u32` load per
     // step in steady state; see `sampling_dispatch` for why this is not `debug`.
     crate::sampling_dispatch::report_sampling_dispatch();
     (token, last_logits)
 }
 
+/// One lazy `[1]` f32 uniform draw for the XTC gate, or `None` when XTC is
+/// disabled (`xtc_probability <= 0.0`), in which case the per-request RNG
+/// stream is not advanced and every existing request's token stream stays
+/// byte-identical to before XTC existed.
+///
+/// The draw itself is the same one `apply_xtc_step` made before #1379 moved
+/// XTC into the C++ chain: it comes from the thread-local default MLX key
+/// sequence, split at graph-construction time BEFORE the categorical draw
+/// inside the fused sampler, so a fixed seed reproduces the same gate outcome
+/// followed by the same categorical sample. The comparison against
+/// `xtc_probability` happens lazily inside the C++ chain, so nothing here
+/// synchronizes.
+///
+/// Used by: [`sample_token_optimized_core`], [`effective_token_distribution`],
+/// [`sample_token_with_distribution`]
+fn xtc_gate_draw(config: &SamplingConfig) -> Option<UniquePtr<MlxArray>> {
+    if config.xtc_probability > 0.0 {
+        // SAFETY: `key` is documented to accept a null pointer, meaning "draw
+        // from the current thread-local default RNG state" (mirrors the
+        // existing `std::ptr::null()` "no explicit key" usage in `layers.rs`).
+        Some(unsafe { ffi::random_uniform(0.0, 1.0, &[1], dtype::FLOAT32, std::ptr::null()) })
+    } else {
+        None
+    }
+}
+
+/// Dispatch one sampling draw to [`ffi::fused_sample`], or to
+/// [`ffi::fused_sample_xtc`] when an XTC gate draw is present. The XTC-less
+/// call is byte-identical to the pre-#1379 call, so XTC-disabled configs pay
+/// nothing.
+fn fused_sample_dispatch(
+    logits: &MlxArray,
+    config: &SamplingConfig,
+    gate: Option<&MlxArray>,
+) -> UniquePtr<MlxArray> {
+    match gate {
+        Some(gate) => ffi::fused_sample_xtc(
+            logits,
+            config.temperature,
+            config.top_k,
+            config.top_p,
+            config.min_p,
+            config.xtc_threshold,
+            config.xtc_probability,
+            &config.xtc_special_token_ids,
+            gate,
+        ),
+        None => ffi::fused_sample(
+            logits,
+            config.temperature,
+            config.top_k,
+            config.top_p,
+            config.min_p,
+        ),
+    }
+}
+
+/// [`fused_sample_dispatch`]'s counterpart for the reported distribution
+/// (#902): the same routing, into [`ffi::fused_sample_probs`] or
+/// [`ffi::fused_sample_probs_xtc`]. Handing it the same `gate` array a
+/// [`fused_sample_dispatch`] call used makes the reported distribution the
+/// one that draw actually came from.
+fn fused_sample_probs_dispatch(
+    logits: &MlxArray,
+    config: &SamplingConfig,
+    gate: Option<&MlxArray>,
+) -> UniquePtr<MlxArray> {
+    match gate {
+        Some(gate) => ffi::fused_sample_probs_xtc(
+            logits,
+            config.temperature,
+            config.top_k,
+            config.top_p,
+            config.min_p,
+            config.xtc_threshold,
+            config.xtc_probability,
+            &config.xtc_special_token_ids,
+            gate,
+        ),
+        None => ffi::fused_sample_probs(
+            logits,
+            config.temperature,
+            config.top_k,
+            config.top_p,
+            config.min_p,
+        ),
+    }
+}
+
 /// Everything [`sample_token_optimized`] does to the logits *before* the fused
-/// temperature / top-k / top-p / min-p sampler: last-position slice, token
-/// bias, repetition penalty, DRY, frequency/presence penalty, XTC.
+/// top-k / top-p / min-p / XTC / temperature sampler: last-position slice,
+/// token bias, repetition penalty, DRY, frequency/presence penalty. XTC is no
+/// longer applied here: since #1379 it lives inside the C++ chain, after
+/// min-p, on the renormalised filtered row (see [`fused_sample_dispatch`]).
 ///
 /// Split out so the speculative acceptance path (issue #902) can obtain the
 /// exact same pre-sampler logits and hand them to [`ffi::fused_sample_probs`],
@@ -392,7 +481,7 @@ fn preprocess_logits_for_sampling(
         last_logits
     };
 
-    let last_logits = if (config.frequency_penalty != 0.0 || config.presence_penalty != 0.0)
+    if (config.frequency_penalty != 0.0 || config.presence_penalty != 0.0)
         && !token_history.is_empty()
     {
         match &mut state {
@@ -408,18 +497,6 @@ fn preprocess_logits_for_sampling(
                 config.presence_penalty,
             ),
         }
-    } else {
-        last_logits
-    };
-
-    // XTC (Exclude Top Choices): a logits pre-processing step, applied here
-    // (before the fused temperature/top-k/top-p/min-p/categorical sampler)
-    // the same way the penalties above are. `xtc_probability <= 0.0` is the
-    // default disabled state and skips this entirely — no array ops, and no
-    // draw from the per-request RNG stream, which keeps every existing
-    // request's token stream byte-identical to before this feature existed.
-    if config.xtc_probability > 0.0 {
-        apply_xtc_step(&last_logits, config)
     } else {
         last_logits
     }
@@ -438,8 +515,10 @@ fn preprocess_logits_for_sampling(
 /// indicator at the argmax, which is the correct degenerate proposal
 /// distribution for a greedily-proposing drafter.
 ///
-/// Consumes no randomness: safe to call without perturbing the token stream of
-/// any other sampler on the same RNG key sequence.
+/// Consumes no randomness while XTC is disabled: safe to call without
+/// perturbing the token stream of any other sampler on the same RNG key
+/// sequence. An XTC-active config consumes exactly one uniform for the XTC
+/// gate, the same one draw the pre-#1379 Rust XTC pre-step consumed.
 ///
 /// Used by: `speculative::stochastic_accept`
 pub fn effective_token_distribution(
@@ -448,13 +527,8 @@ pub fn effective_token_distribution(
     token_history: &[i32],
 ) -> UniquePtr<MlxArray> {
     let processed = preprocess_logits_for_sampling(logits, config, token_history, None);
-    ffi::fused_sample_probs(
-        &processed,
-        config.temperature,
-        config.top_k,
-        config.top_p,
-        config.min_p,
-    )
+    let gate = xtc_gate_draw(config);
+    fused_sample_probs_dispatch(&processed, config, gate.as_deref())
 }
 
 /// Sample one token *and* return the distribution it was drawn from.
@@ -475,23 +549,15 @@ pub fn sample_token_with_distribution(
     token_history: &[i32],
 ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
     let processed = preprocess_logits_for_sampling(logits, config, token_history, None);
-    let token = ffi::fused_sample(
-        &processed,
-        config.temperature,
-        config.top_k,
-        config.top_p,
-        config.min_p,
-    );
+    // One gate draw for BOTH calls: the token and the reported distribution
+    // must see the same XTC gate outcome, and only one uniform may leave the
+    // per-request RNG stream per sampling step.
+    let gate = xtc_gate_draw(config);
+    let token = fused_sample_dispatch(&processed, config, gate.as_deref());
     // Announce a newly-seen dispatch outcome at INFO. Costs one `u32` load per
     // step in steady state; see `sampling_dispatch` for why this is not `debug`.
     crate::sampling_dispatch::report_sampling_dispatch();
-    let probs = ffi::fused_sample_probs(
-        &processed,
-        config.temperature,
-        config.top_k,
-        config.top_p,
-        config.min_p,
-    );
+    let probs = fused_sample_probs_dispatch(&processed, config, gate.as_deref());
     (token, probs)
 }
 
@@ -1318,10 +1384,11 @@ pub(crate) fn top_p_filter(logits: &MlxArray, p: f32) -> UniquePtr<MlxArray> {
 /// merged end-of-sequence set (see `BatchScheduler::enqueue_request`) so XTC
 /// can never suppress a token needed to end a line or the sequence.
 ///
-/// This is a logits pre-processing step, applied the same way
-/// [`apply_dry_penalty`] and the repetition/frequency/presence penalties
-/// are: before the fused C++ temperature/top-k/top-p/min-p/categorical
-/// sampler ([`ffi::fused_sample`]), not inside it.
+/// Since #1379 the production XTC filter lives inside the C++ chain
+/// (`apply_xtc_to_filtered_logits` in `mlx_cxx_bridge.cpp`), after min-p, on
+/// the renormalised filtered row. This function is the Rust REFERENCE
+/// implementation the C++ port is held against, element for element, by the
+/// unit tests below; it is no longer on any production path.
 ///
 /// Algorithm (all lazy MLX array ops, no host round-trip):
 /// 1. `probs = softmax(logits)`; `above = probs > threshold`.
@@ -1333,7 +1400,9 @@ pub(crate) fn top_p_filter(logits: &MlxArray, p: f32) -> UniquePtr<MlxArray> {
 ///    `allowlist`, gated by the no-op guard from step 2.
 /// 5. `where(remove, -inf, logits)`.
 ///
-/// Used by: [`apply_xtc_step`]
+/// Used by: [`apply_xtc_step`], unit tests (`apply_xtc_filter_*`,
+/// `xtc_runs_on_renormalised_filtered_row` in `sampling::tests`)
+#[allow(dead_code)]
 pub(crate) fn apply_xtc_filter(
     logits: &MlxArray,
     threshold: f32,
@@ -1412,10 +1481,11 @@ pub(crate) fn apply_xtc_filter(
 /// fixed seed: the same seed always produces the same gate outcome followed
 /// by the same categorical sample.
 ///
-/// Only called when `config.xtc_probability > 0.0` (see
-/// [`sample_token_optimized_core`]); a request that leaves XTC disabled
-/// never advances the RNG stream here, preserving the pre-XTC token stream
-/// byte-for-byte.
+/// Since #1379 production draws the gate in [`xtc_gate_draw`] and applies the
+/// filter inside the C++ chain; this function remains as the Rust reference
+/// for the gate semantics (one uniform, compared lazily, whole-row
+/// where-select), exercised by the `apply_xtc_step_*` unit tests.
+#[allow(dead_code)]
 fn apply_xtc_step(logits: &MlxArray, config: &SamplingConfig) -> UniquePtr<MlxArray> {
     // SAFETY: `key` is documented to accept a null pointer, meaning "draw
     // from the current thread-local default RNG state" (mirrors the
@@ -2586,5 +2656,300 @@ mod tests {
 
         assert_eq!(a0, b0);
         assert_eq!(a1, b1);
+    }
+
+    // -- #1379: filters on the untempered distribution, temperature last --
+
+    /// f32 values of a `[1, n]` probability tensor.
+    fn probs_row(arr: &MlxArray) -> Vec<f32> {
+        ffi::array_to_raw_bytes(arr)
+            .chunks_exact(4)
+            .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
+    /// Indices with non-zero mass.
+    fn support_of(probs: &[f32]) -> Vec<usize> {
+        (0..probs.len()).filter(|&i| probs[i] > 0.0).collect()
+    }
+
+    /// `[1, 4]` logits whose softmax is `[0.50, 0.30, 0.15, 0.05]`.
+    fn nucleus_test_logits() -> UniquePtr<MlxArray> {
+        let row: Vec<f32> = [0.5f32, 0.3, 0.15, 0.05].iter().map(|p| p.ln()).collect();
+        ffi::from_slice_f32(&row, &[1, 4])
+    }
+
+    #[test]
+    fn top_p_support_is_temperature_invariant() {
+        // The untempered nucleus at top_p = 0.9 keeps {0, 1, 2} (exclusive
+        // cumulative mass 0.95 > 0.9 excludes index 3). Before #1379 the
+        // filter saw the TEMPERED distribution, so T = 0.5 sharpened the row
+        // and dropped index 2 while T = 2.0 flattened it and admitted index 3.
+        let logits = nucleus_test_logits();
+        for t in [0.5f32, 1.0, 2.0] {
+            let probs = probs_row(&ffi::fused_sample_probs(&logits, t, 0, 0.9, 0.0));
+            assert_eq!(
+                support_of(&probs),
+                vec![0, 1, 2],
+                "top-p support moved with the temperature at T={t}: {probs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn min_p_support_is_temperature_invariant() {
+        // min-p 0.2 on the untempered row: threshold 0.2 * 0.5 = 0.1, so
+        // {0, 1, 2} survive (0.15 >= 0.1) and index 3 does not. The test is
+        // renormalisation-invariant but temperature-variant, which is why it
+        // must read the untempered row like the others.
+        let logits = nucleus_test_logits();
+        for t in [0.5f32, 1.0, 2.0] {
+            let probs = probs_row(&ffi::fused_sample_probs(&logits, t, 0, 1.0, 0.2));
+            assert_eq!(
+                support_of(&probs),
+                vec![0, 1, 2],
+                "min-p support moved with the temperature at T={t}: {probs:?}"
+            );
+        }
+    }
+
+    /// Deterministic pseudo-random `[1, n]` logits row over ~12 nats.
+    fn lcg_logits(seed: u64, n: usize) -> Vec<f32> {
+        let mut state = seed;
+        let mut row = Vec::with_capacity(n);
+        for _ in 0..n {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let unit = ((state >> 33) as f64) / f64::from(u32::MAX >> 1);
+            row.push((unit * 12.0 - 6.0) as f32);
+        }
+        row
+    }
+
+    #[test]
+    fn fused_sample_probs_equals_softmax_of_filtered_over_t() {
+        // The reported distribution must be softmax(where(support, x, -inf)/T)
+        // where `support` comes from the Rust reference filters applied to the
+        // UNTEMPERED row in chain order. Configurations avoid the joint
+        // top-k + top-p combination so the stock and rejection-kernel
+        // semantics coincide and the reference is backend-independent.
+        let t = 0.7f32;
+        for (seed, top_k, top_p, min_p) in [
+            (0xA11CEu64, 0i32, 0.9f32, 0.0f32),
+            (0xB0B5Eu64, 0, 0.7, 0.2),
+            (0xC4A7u64, 40, 1.0, 0.05),
+        ] {
+            let row = lcg_logits(seed, 64);
+            let logits = ffi::from_slice_f32(&row, &[1, row.len() as i32]);
+
+            // Reference support: chain order on the raw row.
+            let mut filtered = ffi::astype(&logits, dtype::FLOAT32);
+            if top_k > 0 {
+                filtered = top_k_filter(&filtered, top_k);
+            }
+            if top_p > 0.0 && top_p < 1.0 {
+                filtered = top_p_filter(&filtered, top_p);
+            }
+            if min_p > 0.0 && min_p < 1.0 {
+                filtered = min_p_filter(&filtered, min_p);
+            }
+            let kept: Vec<bool> = probs_row(&filtered).iter().map(|v| v.is_finite()).collect();
+
+            // Expected distribution in f64: softmax(x_kept / T).
+            let scaled: Vec<f64> = row.iter().map(|&x| f64::from(x) / f64::from(t)).collect();
+            let max = scaled
+                .iter()
+                .zip(&kept)
+                .filter(|(_, k)| **k)
+                .map(|(&s, _)| s)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let exp: Vec<f64> = scaled
+                .iter()
+                .zip(&kept)
+                .map(|(&s, &k)| if k { (s - max).exp() } else { 0.0 })
+                .collect();
+            let z: f64 = exp.iter().sum();
+            let expected: Vec<f64> = exp.iter().map(|&e| e / z).collect();
+
+            let probs = probs_row(&ffi::fused_sample_probs(&logits, t, top_k, top_p, min_p));
+            for (i, (&got, &want)) in probs.iter().zip(&expected).enumerate() {
+                assert!(
+                    (f64::from(got) - want).abs() < 1e-5,
+                    "top_k={top_k} top_p={top_p} min_p={min_p}: token {i} reported {got}, \
+                     reference {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn greedy_path_unchanged() {
+        // T == 0 and top_k == 1 both return the argmax of the penalized
+        // logits, untouched by #1379, for any filter combination.
+        for seed in [0x9EED1u64, 0x9EED2, 0x9EED3] {
+            let row = lcg_logits(seed, 128);
+            let logits = ffi::from_slice_f32(&row, &[1, row.len() as i32]);
+            let host_argmax = (0..row.len())
+                .max_by(|&a, &b| row[a].partial_cmp(&row[b]).expect("finite"))
+                .expect("non-empty") as i32;
+
+            for (t, top_k) in [(0.0f32, 40i32), (0.0, 0), (0.7, 1)] {
+                let tok = ffi::fused_sample(&logits, t, top_k, 0.9, 0.1);
+                let b = ffi::array_to_raw_bytes(&tok);
+                let id = i32::from_ne_bytes([b[0], b[1], b[2], b[3]]);
+                assert_eq!(
+                    id, host_argmax,
+                    "greedy config (T={t}, top_k={top_k}) diverged from argmax"
+                );
+            }
+        }
+    }
+
+    /// Pre-#1379 `fused_sample_probs` bit patterns at `T == 1.0`, captured
+    /// from commit e989e45da on the Metal backend for min-p-free
+    /// configurations. `T == 1.0` applies no temperature division on either
+    /// side of #1379, so these must stay bit-identical across the reorder.
+    ///
+    /// min-p-active configurations are deliberately absent: through #1378 the
+    /// stock chain's compiled min-p filter was a silent no-op on Metal (see
+    /// the min-p block in `fused_sample_filter_logits`), so their pre-change
+    /// bits pin a defect, not a contract. `min_p_filters_the_stock_chain` in
+    /// sampling_rejection_tests.rs pins the fixed behavior instead.
+    ///
+    /// Guarded on the rejection backend because the routed configurations
+    /// (top-p active) report the kernel's intersection semantics only where
+    /// the kernel is available; the snapshot was captured under that routing.
+    #[test]
+    fn temperature_one_support_unchanged() {
+        if !ffi::sampling_rejection_available() {
+            return;
+        }
+        let row = lcg_logits(0x1379_5EED, 64);
+        let logits = ffi::from_slice_f32(&row, &[1, row.len() as i32]);
+
+        let cases: [(i32, f32, Vec<u32>); 3] = [
+            // The joint (40, 0.9) row equals the (0, 0.9) row bit for bit in
+            // the capture: on this 64-token row the 0.9 nucleus holds 15
+            // tokens, a strict subset of the top-40 set, so the kernel's
+            // intersection semantics reduce to the plain nucleus.
+            (
+                40,
+                0.9,
+                vec![
+                    0x00000000, 0x3e507f8c, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+                    0x00000000, 0x00000000, 0x00000000, 0x3ce40600, 0x00000000, 0x00000000,
+                    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x3d08d9cb, 0x00000000,
+                    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+                    0x00000000, 0x00000000, 0x3d3f3109, 0x3db9baff, 0x00000000, 0x3cc3616a,
+                    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+                    0x00000000, 0x00000000, 0x3dabc508, 0x00000000, 0x00000000, 0x00000000,
+                    0x00000000, 0x00000000, 0x00000000, 0x3e2d97e5, 0x00000000, 0x3cc2352f,
+                    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x3e334131, 0x00000000,
+                    0x3d44a814, 0x00000000, 0x3d06223f, 0x00000000, 0x00000000, 0x00000000,
+                    0x3d27f9f0, 0x00000000, 0x00000000, 0x00000000,
+                ],
+            ),
+            (
+                0,
+                0.9,
+                vec![
+                    0x00000000, 0x3e507f8c, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+                    0x00000000, 0x00000000, 0x00000000, 0x3ce40600, 0x00000000, 0x00000000,
+                    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x3d08d9cb, 0x00000000,
+                    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+                    0x00000000, 0x00000000, 0x3d3f3109, 0x3db9baff, 0x00000000, 0x3cc3616a,
+                    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+                    0x00000000, 0x00000000, 0x3dabc508, 0x00000000, 0x00000000, 0x00000000,
+                    0x00000000, 0x00000000, 0x00000000, 0x3e2d97e5, 0x00000000, 0x3cc2352f,
+                    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x3e334131, 0x00000000,
+                    0x3d44a814, 0x00000000, 0x3d06223f, 0x00000000, 0x00000000, 0x00000000,
+                    0x3d27f9f0, 0x00000000, 0x00000000, 0x00000000,
+                ],
+            ),
+            (
+                40,
+                1.0,
+                vec![
+                    0x3bbec528, 0x3e3c000c, 0x00000000, 0x00000000, 0x00000000, 0x38d87b5b,
+                    0x00000000, 0x3c045883, 0x3c83b0c8, 0x3ccd9b17, 0x00000000, 0x38ccbd8e,
+                    0x3ad63cff, 0x00000000, 0x00000000, 0x3ba91865, 0x3cf6cb0b, 0x3aa825ec,
+                    0x3a28f9fa, 0x00000000, 0x3a5b3f4b, 0x3b9e73a3, 0x00000000, 0x3a3249b7,
+                    0x00000000, 0x00000000, 0x3d2c651d, 0x3da77885, 0x00000000, 0x3cb02c10,
+                    0x00000000, 0x3a01edd8, 0x00000000, 0x00000000, 0x3b492638, 0x00000000,
+                    0x00000000, 0x00000000, 0x3d9ae1eb, 0x3a08a211, 0x3b203923, 0x00000000,
+                    0x3ca0964f, 0x3b985ac4, 0x00000000, 0x3e1c86e2, 0x3b1c3010, 0x3caf1d59,
+                    0x00000000, 0x3b9c3542, 0x3aee9c92, 0x3b5b3bc3, 0x3e21a1b2, 0x3b774dee,
+                    0x3d31529c, 0x38ff1229, 0x3cf1e4b6, 0x395dc1b0, 0x00000000, 0x3bbc077d,
+                    0x3d17764c, 0x38f7d749, 0x00000000, 0x00000000,
+                ],
+            ),
+        ];
+        for (top_k, top_p, expected) in cases {
+            let probs = ffi::fused_sample_probs(&logits, 1.0, top_k, top_p, 0.0);
+            let got: Vec<u32> = ffi::array_to_raw_bytes(&probs)
+                .chunks_exact(4)
+                .map(|c| u32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            assert_eq!(
+                got, expected,
+                "T=1.0 fused_sample_probs bits moved for top_k={top_k} top_p={top_p}"
+            );
+        }
+    }
+
+    #[test]
+    fn xtc_runs_on_renormalised_filtered_row() {
+        // Two ways the post-filter placement is observable.
+        //
+        // (a) A token that top-p removes must not count towards XTC's "at
+        //     least two above threshold" test. Raw row [0.70, 0.15, 0.14,
+        //     0.01] at top_p = 0.65 keeps only index 0; on the raw row three
+        //     tokens exceed the 0.10 threshold and the pre-#1379 placement
+        //     removed index 0, while the renormalised filtered row holds one
+        //     token at probability 1.0, so in-chain XTC is a no-op.
+        let gate = ffi::from_slice_f32(&[0.5], &[1]);
+        let row_a: Vec<f32> = [0.70f32, 0.15, 0.14, 0.01].iter().map(|p| p.ln()).collect();
+        let logits_a = ffi::from_slice_f32(&row_a, &[1, 4]);
+        let probs_a = probs_row(&ffi::fused_sample_probs_xtc(
+            &logits_a,
+            1.0,
+            0,
+            0.65,
+            0.0,
+            0.10,
+            1.0,
+            &[],
+            &gate,
+        ));
+        assert!(
+            probs_a[0] > 0.99,
+            "XTC counted a token top-p had removed: {probs_a:?}"
+        );
+
+        // (b) Renormalisation must raise a surviving token above the
+        //     threshold. Raw row [0.50, 0.30, 0.15, 0.05] at top_p = 0.9
+        //     keeps {0, 1, 2}; renormalised, index 2 sits at 0.158 > 0.155
+        //     while its raw probability 0.15 is below, so all three survivors
+        //     are above the threshold and XTC keeps exactly the least
+        //     probable of them, index 2.
+        let logits_b = nucleus_test_logits();
+        let probs_b = probs_row(&ffi::fused_sample_probs_xtc(
+            &logits_b,
+            1.0,
+            0,
+            0.9,
+            0.0,
+            0.155,
+            1.0,
+            &[],
+            &gate,
+        ));
+        assert_eq!(
+            support_of(&probs_b),
+            vec![2],
+            "XTC did not evaluate the renormalised filtered row: {probs_b:?}"
+        );
+        assert!((probs_b[2] - 1.0).abs() < 1e-6, "{probs_b:?}");
     }
 }
