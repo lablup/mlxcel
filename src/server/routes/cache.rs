@@ -79,6 +79,7 @@ pub(crate) struct RejectReasonStats {
     pub layout_constraints: u64,
     pub block_boundary_floor: u64,
     pub snapshot_diverged: u64,
+    pub model_owned_state: u64,
     pub last_reason: Option<String>,
     pub last_seq_id: Option<u64>,
     pub last_context_len: Option<u64>,
@@ -100,6 +101,7 @@ impl RejectReasonStats {
             layout_constraints: snap.prompt_cache_reject_layout_constraints,
             block_boundary_floor: snap.prompt_cache_reject_block_boundary_floor,
             snapshot_diverged: snap.prompt_cache_reject_snapshot_diverged,
+            model_owned_state: snap.prompt_cache_reject_model_owned_state,
             last_reason: last.map(|r| r.reason.to_string()),
             last_seq_id: last.and_then(|r| r.seq_id),
             last_context_len: last.map(|r| r.context_len),
@@ -247,6 +249,30 @@ pub struct CacheStatsResponse {
     /// a zero count means there was nothing to reuse. `last_reject_context_len`
     /// and `last_reject_entry_len` carry the geometry of the most recent one.
     pub reject_snapshot_diverged: u64,
+    /// Donate-path declines for a model-owned family (issue #1346, donate path
+    /// only): the model keeps its per-sequence K/V inside its own
+    /// `ModelOwnedSequenceState`, so the paged sequence the scheduler
+    /// allocated for it is shadow block-table accounting with no K/V behind
+    /// it and cannot be donated as a reusable KV entry. Gemma 3 and Llama 4
+    /// under `--decode-storage-backend paged` sit here permanently: expect
+    /// this counter to advance once per completed request while `inserts` and
+    /// `hits` stay at zero. Families that opt into recurrent-state snapshots
+    /// (`supports_snapshot_reuse()`) are checked first and keep donating, so
+    /// they never appear here.
+    ///
+    /// Two consequences for anyone reading this endpoint alongside `/metrics`.
+    /// `lookups` deliberately stays at zero for these families, because the
+    /// adopt gate returns before the store lookup rather than performing one
+    /// that could only miss, while the Prometheus
+    /// `mlxcel_prompt_cache_misses_total` counter is recorded by the caller and
+    /// still advances per request; the two surfaces therefore disagree by
+    /// design here, where before this gate existed they agreed. And because the
+    /// decline fires on every healthy completion for these families, the
+    /// `last_reject_*` fields stay pinned to `model_owned_state` and will mask
+    /// an earlier, more interesting decline such as `oversized`; the per-reason
+    /// counters above stay separable, so use those rather than `last_reject_*`
+    /// when diagnosing a model-owned family.
+    pub reject_model_owned_state: u64,
     /// Reason label of the most recent reject/decline event, if any has
     /// happened yet.
     pub last_reject_reason: Option<String>,
@@ -396,6 +422,7 @@ pub(crate) fn build_stats_response(
                 reject_layout_constraints: reject.layout_constraints,
                 reject_block_boundary_floor: reject.block_boundary_floor,
                 reject_snapshot_diverged: reject.snapshot_diverged,
+                reject_model_owned_state: reject.model_owned_state,
                 last_reject_reason: reject.last_reason,
                 last_reject_seq_id: reject.last_seq_id,
                 last_reject_context_len: reject.last_context_len,
@@ -456,6 +483,7 @@ pub(crate) fn build_stats_response(
             reject_layout_constraints: reject.layout_constraints,
             reject_block_boundary_floor: reject.block_boundary_floor,
             reject_snapshot_diverged: reject.snapshot_diverged,
+            reject_model_owned_state: reject.model_owned_state,
             last_reject_reason: reject.last_reason,
             last_reject_seq_id: reject.last_seq_id,
             last_reject_context_len: reject.last_context_len,

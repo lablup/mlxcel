@@ -2127,6 +2127,20 @@ impl BatchScheduler {
                 }
             }
         }
+        // Issue #1346, the adopt half of the same gate, keyed on the same
+        // natural backend for the same reason. `donate_finished_sequence_cache`
+        // never produces a KV entry for a model-owned family, so the lookup
+        // below is a guaranteed miss whose only effect is to advance the KV
+        // `lookups` counter and depress `hit_rate` for a family that structurally
+        // cannot use that path. Bail first: this is a never-applies, not a miss,
+        // and it mirrors `SnapshotLookupOutcome::NoCandidate`, which likewise
+        // records nothing. It is also the guard that refuses any pre-existing
+        // shadow entry a store carried in from before this fix. The snapshot
+        // block above has already run, so `supports_snapshot_reuse()` families
+        // keep their snapshot hits and their `snapshot_lookups`.
+        if self.model.sequence_state_layout().backend == SequenceStateBackend::ModelOwned {
+            return None;
+        }
         let (entry, matched_len) = store.lookup_longest_prefix(&key, tokens)?;
         // #124 step c: multimodal sharing requires the matched prefix to cover
         // the ENTIRE stored entry. A partial (e.g. APC block-clamped) match
@@ -2981,6 +2995,34 @@ impl BatchScheduler {
         // `ModelOwnedSequenceState` and cannot be detached as KV blocks.
         if self.model.supports_snapshot_reuse() {
             self.insert_model_state_snapshot(seq_id, &ctx, tokens, SnapshotOrigin::Completion);
+            return;
+        }
+
+        // Issue #1346. Gate on the model's NATURAL sequence-state backend, not
+        // the one this sequence was allocated on. Under
+        // `--decode-storage-backend paged` (the `auto` default on a batching
+        // server) `sequence_state_layout_override` allocates EVERY family on
+        // `PagedKvCache`, model-owned ones included, purely so
+        // `sync_paged_state_with_lengths` can keep a shadow block table for
+        // accounting. Their real K/V never leaves `ModelOwnedSequenceState`,
+        // so the shadow table indexes pool pages nothing ever wrote. The
+        // allocated-backend check below reads `PagedKvCache` for exactly those
+        // sequences and lets them through; donating one and adopting it next
+        // turn skips prefill for tokens whose K/V does not exist, and the model
+        // answers turn 2 from the appended suffix alone.
+        //
+        // `self.model.sequence_state_layout()` is the model's own answer and is
+        // never rewritten by the override (the override is built from server
+        // config alone, and `CachePool::allocate_with_layout` consults the
+        // model's layout separately as `natural_backend` for the same reason).
+        // `handoff_supported` already gates the disaggregated KV handoff on the
+        // same predicate for the same underlying fact (#708).
+        if self.model.sequence_state_layout().backend == SequenceStateBackend::ModelOwned {
+            self.batch_observability.record_prompt_cache_reject(
+                PromptCacheRejectReason::ModelOwnedState,
+                Some(seq_id.as_u64()),
+                tokens.len(),
+            );
             return;
         }
 
@@ -8256,3 +8298,7 @@ mod scheduler_muse_glimmer_support;
 #[cfg(test)]
 #[path = "scheduler_muse_glimmer_parallel_tests.rs"]
 mod scheduler_muse_glimmer_parallel_tests;
+
+#[cfg(test)]
+#[path = "scheduler_model_owned_cache_tests.rs"]
+mod scheduler_model_owned_cache_tests;

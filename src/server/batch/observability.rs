@@ -802,6 +802,9 @@ impl BatchObservability {
             prompt_cache_reject_snapshot_diverged: self
                 .prompt_cache_reject_reasons
                 .count(PromptCacheRejectReason::SnapshotDiverged),
+            prompt_cache_reject_model_owned_state: self
+                .prompt_cache_reject_reasons
+                .count(PromptCacheRejectReason::ModelOwnedState),
             mtp_policy: self.mtp_policy_snapshot(),
             prompt_cache_last_reject: self.prompt_cache_reject_reasons.last().map(|r| {
                 PromptCacheLastRejectSnapshot {
@@ -914,6 +917,14 @@ pub struct ObservabilitySnapshot {
     /// the multi-turn miss class epic #1148 covers, and separates it from a
     /// genuinely cold store.
     pub prompt_cache_reject_snapshot_diverged: u64,
+    /// Donate-path declines for a model-owned family (issue #1346): the model
+    /// keeps its K/V in its own `ModelOwnedSequenceState`, so the paged
+    /// sequence it was allocated is shadow accounting with no K/V behind it.
+    /// A non-zero value here with `prompt_cache_inserts` at zero is the
+    /// expected steady state for Gemma 3 and Llama 4 under
+    /// `--decode-storage-backend paged`, and it is what makes that decline
+    /// visible instead of silent.
+    pub prompt_cache_reject_model_owned_state: u64,
     /// Most recent prompt-cache reject/decline event, if any has happened
     /// yet.
     pub prompt_cache_last_reject: Option<PromptCacheLastRejectSnapshot>,
