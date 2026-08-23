@@ -23,13 +23,22 @@
 //
 // The stock filtered sampler runs `argpartition` over the whole vocabulary for
 // top-k, an `argsort` + `cumsum` + two `take_along_axis` chain for top-p, a
-// compiled softmax/max/mask for min-p, and finally `random::categorical`. Every
-// stage materialises a full `[B, V]` intermediate, and `argsort` alone is
-// `O(V log V)` over 32K-152K entries per token.
+// softmax/max/mask sequence for min-p, and finally `random::categorical`.
+// Every stage materialises a full `[B, V]` intermediate, and `argsort` alone
+// is `O(V log V)` over 32K-152K entries per token.
 //
 // ## The algorithm
 //
-// All three filters are threshold filters on the probability value:
+// The kernel reads two probability rows per batch entry (issue #1379). The
+// FILTER row `probs` is the softmax of the raw, untempered logits: every
+// threshold test below reads it, so the kept support matches the llama-server
+// chain, where truncation filters run before temperature. The DRAW row
+// `probs_draw` is the softmax of `logits / T`: the candidate draw is weighted
+// by it, so the accepted token is distributed as the tempered distribution
+// truncated to the untempered support. At `T == 1` the caller passes the same
+// array for both and nothing changes.
+//
+// All three filters are threshold filters on the filter-row probability:
 //
 //   - top-k keeps `p_i >= tau_k`, where `tau_k` is the k-th largest
 //     probability. `count(p > v) < k` holds exactly when `v >= tau_k`, which is
@@ -37,22 +46,35 @@
 //   - top-p keeps the descending prefix whose exclusive cumulative mass is at
 //     most `top_p`, i.e. `mass(p > v) <= top_p * total`.
 //   - min-p keeps `p_i >= min_p * p_max`. That test is invariant to
-//     renormalisation, so it does not care where in the chain it is applied.
+//     renormalisation but not to temperature, so it reads the filter row like
+//     the others.
 //
-// So the filtered support is `{ i : p_i > low }` for one scalar `low` per row,
-// and the whole job is to find `low` without sorting. The kernel does that by
-// rejection sampling on a shrinking interval, one threadgroup per row:
+// So the filtered support is `{ i : p_i > low }` for one scalar `low` per row
+// in filter space, and the whole job is to find `low` without sorting. The
+// kernel does that by rejection sampling on a shrinking interval, one
+// threadgroup per row:
 //
 //   1. Draw a candidate from the current proposal set `{p > low}`, weighted by
-//      probability, with a fixed-order block scan (no sort).
-//   2. Set `pivot_0 = p[candidate]` and `pivot_1 = midpoint(pivot_0, high)`.
-//   3. One vocabulary sweep reduces `(count, mass)` above each pivot.
+//      the DRAW row's probability, with a fixed-order block scan (no sort).
+//   2. Set `pivot_0 = p[candidate]` and `pivot_1 = midpoint(pivot_0, high)`,
+//      both in filter space.
+//   3. One vocabulary sweep reduces `(count, mass)` above each pivot in filter
+//      space, plus the draw-space mass above each pivot for the next round's
+//      proposal.
 //   4. Accept the candidate when it passes every active filter test; the
-//      accepted draw is then distributed exactly as the truncated,
-//      renormalised distribution (standard rejection sampling: the proposal
-//      always contains the target support).
+//      accepted draw is then distributed exactly as the DRAW row truncated to
+//      the filtered support and renormalised (standard rejection sampling:
+//      the proposal always contains the target support, and membership is
+//      tested in filter space).
 //   5. Otherwise raise `low` to whichever pivot still leaves the boundary
 //      above it, lower `high` when the bisection pivot cleared, and repeat.
+//
+// The bracket, the pivots, and every filter test live entirely in filter
+// space, so the convergence argument below is untouched by the second row.
+// `probs_draw_i = probs_filter_i^(1/T) / Z` is strictly monotone in
+// `probs_filter_i`, so a threshold set in filter space is the same index set
+// as a threshold set in draw space; the draw row only reweights WHICH member
+// of the proposal is drawn, never which members exist.
 //
 // `pivot_1` is the *bit-pattern* midpoint of `pivot_0` and `high`, not the
 // arithmetic one. Two reasons. It is pure integer arithmetic, so a backend that
@@ -108,10 +130,12 @@
 // One threadgroup per row, a compile-time thread count, a fixed-order block
 // scan, and a halving-tree reduction: nothing about the launch geometry varies
 // with batch size, so the reduction order is fixed and the sampled id is a pure
-// function of `(key, probs, params)`. The uniform for round `r` of row `b` is
-// `philox(key, {r, 0, b, 0})[0]`, so rounds and rows never share a draw.
+// function of `(key, probs_filter, probs_draw, params)`. The uniform for round
+// `r` of row `b` is `philox(key, {r, 0, b, 0})[0]`, so rounds and rows never
+// share a draw.
 //
-// Used by: `cpp/mlx_cxx_bridge.cpp` (`fused_sample`, `fused_sample_rejection`).
+// Used by: `cpp/mlx_cxx_bridge.cpp` (`fused_sample`, `fused_sample_rejection`,
+// `fused_sample_rejection_deferred`, `sampling_rejection_probe`).
 
 #include <mlx/array.h>
 
@@ -153,12 +177,19 @@ struct RejectionSampleResult {
     mlx::core::array rounds;
 };
 
-// Draw one token id per row from the top-k / top-p / min-p truncated,
-// renormalised distribution.
+// Draw one token id per row: the support is resolved by the top-k / top-p /
+// min-p tests on `probs_filter`, and the accepted token is distributed as
+// `probs_draw` truncated to that support and renormalised (issue #1379).
 //
-// - `probs`: `[B, V]` float32 probabilities, one softmax row per batch entry.
+// - `probs_filter`: `[B, V]` float32 probabilities of the raw, untempered
+//   logits, one softmax row per batch entry. Every filter test reads this row.
 //   Rows need not sum to exactly 1; the kernel renormalises by the mass it
-//   measures, so a row that sums to 0.9999 samples the same distribution.
+//   measures, so a row that sums to 0.9999 resolves the same support.
+// - `probs_draw`: `[B, V]` float32 probabilities of the temperature-scaled
+//   logits. The candidate draw is weighted by this row. Pass the same array as
+//   `probs_filter` when `T == 1`. Draw mass is only ever read at positions
+//   where the filter row is positive, so an entry whose filter probability
+//   underflowed to 0 is outside the support regardless of its draw value.
 // - `params`: `[B, 3]` float32, `{top_k, top_p, min_p}` per row. `top_k < 1` or
 //   `top_k >= V` disables top-k, `top_p` outside `(0, 1)` disables top-p,
 //   `min_p` outside `(0, 1)` disables min-p. Rows in one launch may carry
@@ -167,15 +198,16 @@ struct RejectionSampleResult {
 //   Production passes `REJECTION_MAX_ROUNDS`; a test lowers it to force the
 //   cap-overflow path.
 //
-// The launch requests a row-contiguous `probs`, so a strided input costs one
-// `[B, V]` copy first. Decode never pays it: the caller's softmax output is
-// contiguous.
+// The launch requests row-contiguous probability inputs, so a strided input
+// costs one `[B, V]` copy first. Decode never pays it: the caller's softmax
+// outputs are contiguous.
 //
 // One RNG key is drawn from MLX's default key sequence per call, so a call
 // advances the shared random state exactly once, the same way one
 // `random::categorical` call does.
 RejectionSampleResult rejection_sample(
-    const mlx::core::array& probs,
+    const mlx::core::array& probs_filter,
+    const mlx::core::array& probs_draw,
     const mlx::core::array& params,
     int max_rounds);
 

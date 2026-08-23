@@ -4565,33 +4565,10 @@ namespace {
     }
 }
 
-// Compiled min-p filtering fused into a single kernel.
-namespace {
-    using CompiledFilterFn =
-        std::function<std::vector<array>(const std::vector<array>&)>;
-
-    static CompiledFilterFn get_compiled_min_p_filter() {
-        // Backend is process-constant, so capture the gate once at build time.
-        // Non-Metal fills the sentinel in x's dtype so no per-step AsType is
-        // inserted on the scalar under the CUDA bf16 promotion patch (issue
-        // #636); Metal keeps the bare f32 sentinel exactly as before.
-        const bool single_dtype_scalars = !mlx::core::metal::is_available();
-        auto fn = [single_dtype_scalars](
-                      const std::vector<array>& inputs) -> std::vector<array> {
-            const auto& x = inputs[0];
-            const auto& min_p_arr = inputs[1];
-            auto probs = mlx::core::softmax(x, -1);
-            auto max_prob = mlx::core::max(probs, -1, true);
-            auto threshold = mlx::core::multiply(max_prob, min_p_arr);
-            auto mask = mlx::core::greater_equal(probs, threshold);
-            auto fill_scalar = single_dtype_scalars
-                ? mlx::core::array(std::numeric_limits<float>::lowest(), x.dtype())
-                : mlx::core::array(std::numeric_limits<float>::lowest());
-            return {mlx::core::where(mask, x, fill_scalar)};
-        };
-        return mlx::core::compile(fn, true);
-    }
-}
+// The compiled min-p filter that used to live here was removed with #1379:
+// on the Metal backend the `mlx::core::compile`d callable returned its input
+// unfiltered (see the min-p block in `fused_sample_filter_logits`), so min-p
+// now runs as straight-line ops inside the chain.
 
 // Env kill switch for the Gumbel-max sampling kernel (#900). Falsy disables
 // and restores the `random::categorical` path exactly. Read once per process
@@ -4666,7 +4643,8 @@ namespace {
         SAMPLING_DISPATCH_REFERENCE_ARM = 7,
         SAMPLING_DISPATCH_REJECTION_VERIFIED = 8,
         SAMPLING_DISPATCH_NOT_ROUTED = 9,
-        SAMPLING_DISPATCH_KIND_COUNT = 10,
+        SAMPLING_DISPATCH_XTC_CHAIN = 10,
+        SAMPLING_DISPATCH_KIND_COUNT = 11,
     };
 
     struct SamplingDispatchState {
@@ -4876,9 +4854,11 @@ int32_t sampling_rejection_max_rounds() {
 // Whether this exact sampler configuration can take the Gumbel-max kernel.
 // The kernel draws from `softmax(logits / temperature)` over the whole row, so
 // it is valid only when no top-k / top-p / min-p filter narrows the support
-// first. XTC and token bias are upstream logit pre-steps that leave `-inf`
-// masks in `logits`; the kernel reproduces them exactly (a `-inf` entry stays
-// `-inf` after the divide and the finite Gumbel add), so they need no gate.
+// first. Token bias is an upstream logit pre-step that leaves `-inf` masks in
+// `logits`; the kernel reproduces it exactly (a `-inf` entry stays `-inf`
+// after the divide and the finite Gumbel add), so it needs no gate. XTC lives
+// inside the stock chain since #1379 and `fused_sample_impl` routes every
+// XTC-active configuration there before this predicate is consulted.
 static bool gumbel_sample_applies(
     const mlx::core::array& x,
     float temperature,
@@ -4923,7 +4903,7 @@ static bool gumbel_sample_applies(
 // loop runs on ONE threadgroup per row because the shrinking interval is carried
 // across sweeps and MLX custom kernels have no grid-wide barrier. So the kernel
 // pays single-core bandwidth per round, while the stock chain's `argpartition`
-// and compiled min-p filter run across the whole GPU. Where the chain also runs
+// and min-p mask run across the whole GPU. Where the chain also runs
 // `argsort`, the kernel is far ahead; where it does not, it cannot win.
 //
 // Hence: route only when the chain would sort, which is exactly when top-p is
@@ -5006,15 +4986,110 @@ static bool rejection_sample_applies(
     return sampling_rejection_routes(x.shape(1), top_k, top_p, min_p);
 }
 
-// Fused sampling: temperature scaling + top-k + top-p + min-p + categorical
-// in a single function call to minimize FFI round-trips.
+// XTC (Exclude Top Choices) parameters for the in-chain filter (issue #1379).
+// XTC runs INSIDE the stock chain, after min-p, on the softmax of the
+// filtered row, so its threshold test sees the renormalised post-filter
+// distribution exactly as llama-server's chain does. The gate draw is made by
+// the Rust caller (one `random::uniform` per sampling step, before the
+// categorical consumes the stream) and passed in as a lazy `[1]` f32 array,
+// so `fused_sample` and `fused_sample_probs` can share one draw and report
+// the same filtered distribution the sampler drew from.
+struct XtcFilterArgs {
+    // Probability threshold of the renormalised post-filter distribution;
+    // tokens strictly above it are removal candidates.
+    float threshold;
+    // Per-step chance that the removal fires. Compared against `*gate`.
+    float probability;
+    // Lazy `[1]` f32 uniform draw in [0, 1). Never null when the struct is
+    // passed; a disabled XTC passes a null struct pointer instead.
+    const mlx::core::array* gate;
+    // Token ids that are never removed (newline + merged EOS set).
+    rust::Slice<const int32_t> special_tokens;
+};
+
+// The in-chain XTC filter, element-for-element the C++ image of the Rust
+// reference `apply_xtc_filter` + `apply_xtc_step` (sampling.rs), which the
+// unit tests hold it against. Among the tokens whose renormalised probability
+// exceeds the threshold, if two or more exist, every one except the single
+// least probable (and except the allowlist) is masked to -inf; the whole
+// removal is gated on `gate < probability` as one lazy array op, so nothing
+// here synchronizes.
+static mlx::core::array apply_xtc_to_filtered_logits(
+    mlx::core::array x,
+    const XtcFilterArgs& xtc
+) {
+    namespace mx = mlx::core;
+    auto probs = mx::softmax(x, -1);
+
+    // Tokens whose probability exceeds the threshold.
+    auto above = mx::greater(probs, mx::array(xtc.threshold));
+
+    // No-op guard: fewer than two above-threshold tokens in this row.
+    auto above_f32 = mx::astype(above, mx::float32);
+    auto count = mx::sum(above_f32, -1, /*keepdims=*/true);
+    auto has_two_or_more = mx::greater_equal(count, mx::array(2.0f));
+
+    // The single least-probable above-threshold token: mask every other
+    // position to float max so it can never win the row-wise argmin (the Rust
+    // reference uses +inf; any value above 1.0 is equivalent for a
+    // probability row, and this file is compiled with fast-math options under
+    // which a raw infinity constant is a -Wnan-infinity-disabled warning),
+    // then one-hot mark it via scatter so it can be excluded from the removal
+    // set.
+    auto argmin_mask_fill = mx::array(std::numeric_limits<float>::max());
+    auto masked_probs = mx::where(above, probs, argmin_mask_fill);
+    auto least_idx = mx::argmin(masked_probs, -1, /*keepdims=*/true);
+    auto zeros_full = mx::zeros(x.shape(), mx::float32);
+    auto ones_col = mx::ones(least_idx.shape(), mx::float32);
+    auto is_least_f32 = mx::put_along_axis(zeros_full, least_idx, ones_col, -1);
+    auto is_least = mx::greater(is_least_f32, mx::array(0.0f));
+
+    // Removal candidates: above-threshold, excluding the least-probable one
+    // and excluding the allowlist.
+    auto remove_candidate = mx::logical_and(above, mx::logical_not(is_least));
+    if (!xtc.special_tokens.empty()) {
+        const int vocab = x.shape(-1);
+        std::vector<float> allow(static_cast<size_t>(vocab), 0.0f);
+        for (int32_t id : xtc.special_tokens) {
+            if (id >= 0 && id < vocab) {
+                allow[static_cast<size_t>(id)] = 1.0f;
+            }
+        }
+        auto allow_arr =
+            mx::array(allow.data(), Shape{1, vocab}, mx::float32);
+        auto allow_broadcast = mx::broadcast_to(allow_arr, x.shape());
+        auto not_allowed =
+            mx::logical_not(mx::greater(allow_broadcast, mx::array(0.0f)));
+        remove_candidate = mx::logical_and(remove_candidate, not_allowed);
+    }
+
+    // Gate the whole filter on having >= 2 candidates AND on the per-step
+    // uniform draw clearing the probability.
+    auto remove_mask = mx::logical_and(remove_candidate, has_two_or_more);
+    auto gate = mx::less(*xtc.gate, mx::array(xtc.probability));
+    auto gated_remove = mx::logical_and(remove_mask, gate);
+
+    // Removal fill: `lowest()` like every other filter in this chain (the
+    // Rust reference uses -inf; both leave the removed entry with a
+    // probability of exactly 0 after the trailing temperature division and
+    // softmax, and lowest() avoids constructing an infinity under fast-math).
+    auto removal_fill = mx::array(std::numeric_limits<float>::lowest());
+    return mx::where(gated_remove, removal_fill, x);
+}
+
+// Fused sampling: top-k + top-p + min-p + XTC on the UNTEMPERED distribution,
+// then one temperature scaling, then the categorical draw, in a single
+// function call to minimize FFI round-trips (chain order per issue #1379,
+// matching the llama-server sampler chain).
 // Input: 2D logits [batch, vocab] (already sliced, penalties already applied)
 // Returns sampled token
 //
-// Uses compiled (fused) kernels where supported:
-// - Categorical sampling: temp scaling + random::categorical in one kernel
-// - Min-p filtering: softmax + max + mask in one kernel
-// - Top-p filtering: uncompiled (cumsum lacks output_shapes in MLX v0.31.x)
+// Top-p filtering stays uncompiled (cumsum lacks output_shapes in MLX
+// v0.31.x), and min-p runs as straight-line ops: the compiled min-p callable
+// this chain used through #1378 returned its input unfiltered on the Metal
+// backend (a silent no-op for every stock-chain min-p configuration; the
+// rejection kernel path was unaffected), so the chain no longer routes any
+// filter through `mlx::core::compile`.
 //
 // The filter chain itself lives in `fused_sample_filter_logits` so that
 // `fused_sample_probs` (issue #902) can reproduce the sampler's support and
@@ -5046,7 +5121,8 @@ static mlx::core::array fused_sample_filter_logits(
     int32_t top_k,
     float top_p,
     float min_p,
-    bool rejection_semantics
+    bool rejection_semantics,
+    const XtcFilterArgs* xtc
 ) {
     // Build sampler scalars in the logit dtype on non-Metal backends only
     // (issue #636). On CUDA the bf16 promotion patch keeps bf16 op boundaries
@@ -5067,10 +5143,9 @@ static mlx::core::array fused_sample_filter_logits(
                                      : mlx::core::array(value);
     };
 
-    // Temperature scaling
-    if (temperature > 0.0f && temperature != 1.0f) {
-        x = x / sampler_scalar(temperature);
-    }
+    // No temperature scaling here: every filter below evaluates the raw,
+    // untempered row, and the single division by the temperature is the last
+    // statement of this function (issue #1379).
 
     // Top-k filtering: keep only the k highest-probability tokens
     // (Not compiled: argpartition has dynamic shape that breaks compile)
@@ -5110,47 +5185,72 @@ static mlx::core::array fused_sample_filter_logits(
         }
     }
 
-    // Min-p filtering — compiled kernel
+    // Min-p filtering, as straight-line ops. This chain ran a
+    // `mlx::core::compile`d min-p callable through #1378, and on the Metal
+    // backend that callable returned its input UNFILTERED: the output did not
+    // move across min_p values from 0.05 to 0.9 on a fixed row, and the
+    // sampler drew tokens below `min_p * p_max` on both the production stock
+    // chain and the `fused_sample_categorical` reference arm, while these
+    // same ops uncompiled (the Rust reference `min_p_filter`) filtered
+    // correctly. The rejection kernel path applied min-p correctly, which is
+    // why the defect stayed invisible on routed configurations. Uncompiled is
+    // the fix; `min_p_filters_the_stock_chain` in sampling_rejection_tests.rs
+    // pins it.
     if (min_p > 0.0f && min_p < 1.0f) {
-        // Leaked on purpose, and it is not an oversight. The compiled callable
-        // holds handles into MLX's process-global compile cache, and a plain
-        // function-local static would be destroyed during `exit` in an order
-        // C++ leaves unspecified relative to that cache. Destroying it after
-        // the cache is gone is a null dereference inside
-        // `__cxa_finalize_ranges`: `examples/rejection_sampling_microbench`
-        // exited 139 after printing a complete, correct table, and the fault
-        // reproduced with nothing in the process but one
-        // `fused_sample_categorical` call carrying a min-p. The object is
-        // process-lifetime by construction, so never destroying it is the fix
-        // rather than a workaround.
-        static auto* compiled_fn = new CompiledFilterFn(get_compiled_min_p_filter());
-        auto result = (*compiled_fn)({x, sampler_scalar(min_p)});
-        x = std::move(result[0]);
+        auto probs = mlx::core::softmax(x, -1);
+        auto max_prob = mlx::core::max(probs, -1, /*keepdims=*/true);
+        auto threshold = mlx::core::multiply(max_prob, sampler_scalar(min_p));
+        auto mask = mlx::core::greater_equal(probs, threshold);
+        x = mlx::core::where(
+            mask, x, sampler_scalar(std::numeric_limits<float>::lowest()));
+    }
+
+    // XTC, on the softmax of the FILTERED row, so its threshold test sees the
+    // renormalised post-top-k/top-p/min-p distribution (issue #1379).
+    if (xtc != nullptr && xtc->probability > 0.0f && xtc->gate != nullptr) {
+        x = apply_xtc_to_filtered_logits(std::move(x), *xtc);
+    }
+
+    // Temperature scaling, applied exactly once and last, only to the draw.
+    // A `-inf` or `lowest()`-masked entry stays outside the support: dividing
+    // `lowest()` by `T < 1` overflows to `-inf`, and any masked value still
+    // underflows to a probability of exactly 0 in the softmax either way.
+    if (temperature > 0.0f && temperature != 1.0f) {
+        x = x / sampler_scalar(temperature);
     }
 
     return x;
 }
 
-// The stock filter chain plus the categorical draw that ends it: temperature
-// scale, `argpartition` top-k, `argsort` + `cumsum` top-p, compiled min-p, then
-// `random::categorical`. The reference arm, the kill-switch target, and the
-// cap-overflow fallback all take it.
+// The stock filter chain plus the draw that ends it: `argpartition` top-k,
+// `argsort` + `cumsum` top-p, min-p, optional in-chain XTC, one temperature
+// scale, then `random::categorical`. The reference arm, the kill-switch
+// target, the cap-overflow fallback, and every XTC-active configuration take
+// it.
 //
 // It deliberately shares `fused_sample_filter_logits` with `fused_sample_probs`
 // (#902) rather than repeating the chain, so a fallback draw and the
 // distribution that function reports cannot drift apart.
+//
+// `temperature == 0` reaches this chain only when XTC is active (without XTC
+// the greedy configurations short-circuit to `argmax` in `fused_sample_impl`
+// before any chain runs); the draw is then the argmax of the filtered row,
+// which is the llama-server chain's greedy-after-filters behavior.
 static mlx::core::array fused_sample_argpartition_chain(
     mlx::core::array x,
     float temperature,
     int32_t top_k,
     float top_p,
     float min_p,
-    bool rejection_semantics
+    bool rejection_semantics,
+    const XtcFilterArgs* xtc
 ) {
-    return mlx::core::random::categorical(
-        fused_sample_filter_logits(
-            std::move(x), temperature, top_k, top_p, min_p, rejection_semantics),
-        -1);
+    auto filtered = fused_sample_filter_logits(
+        std::move(x), temperature, top_k, top_p, min_p, rejection_semantics, xtc);
+    if (temperature == 0.0f) {
+        return mlx::core::argmax(filtered, -1, false);
+    }
+    return mlx::core::random::categorical(filtered, -1);
 }
 
 // True when `fused_sample` will send this configuration to the rejection
@@ -5263,22 +5363,50 @@ static uint32_t count_and_report_overflow(
     return unconverged;
 }
 
-// Probabilities the rejection kernel consumes: one softmax over the
-// temperature-scaled logits, in f32.
+// Probabilities the rejection kernel consumes, split into the two rows of
+// issue #1379: the FILTER row is the softmax of the raw logits (every top-k /
+// top-p / min-p test reads it, so the support matches the untempered chain),
+// and the DRAW row is the softmax of `logits / T` (the accepted token is
+// distributed as it, truncated to the filtered support). At `T == 1` the
+// caller passes the filter row itself as the draw row, so there is no second
+// softmax.
 //
-// f32 rather than the logit dtype on purpose. The kernel's shrinking interval
-// is a value bisection over probabilities, and an f16 probability grid has ~1e-3
-// relative resolution near 1e-5, which is coarse enough to make distinct
-// vocabulary entries collide at the top-k boundary. The cast reads the row once
-// more; against the `argsort` this replaces, that is noise.
-static mlx::core::array rejection_probabilities(
-    const mlx::core::array& logits,
-    float temperature
+// Both rows are f32 rather than the logit dtype on purpose. The kernel's
+// shrinking interval is a value bisection over probabilities, and an f16
+// probability grid has ~1e-3 relative resolution near 1e-5, which is coarse
+// enough to make distinct vocabulary entries collide at the top-k boundary.
+// The cast reads the row once more; against the `argsort` this replaces, that
+// is noise.
+//
+// The two helpers cast independently, and hoisting that cast into one shared
+// `astype` node handed to both was tried and MEASURED SLOWER: 108.15 tok/s
+// median before the hoist against 107.46 after, over nine interleaved pairs on
+// qwen3-4b-4bit at `--temp 0.8 --top-k 0 --top-p 0.9 --min-p 0.1`, 512 tokens,
+// M1 Ultra. The hoisted arm lost every pair and the two ranges did not
+// overlap, so this is not noise. The likely mechanism is that sharing the cast
+// forces the f32 row to materialize once and be read twice, while two
+// separately constructed casts each fuse into their own consumer and never
+// materialize a 600 KB intermediate at this vocabulary. Common-subexpression
+// elimination is not free when it costs fusion. Do not re-hoist without
+// re-measuring.
+static mlx::core::array rejection_filter_probabilities(
+    const mlx::core::array& logits
 ) {
-    auto x = mlx::core::astype(logits, mlx::core::float32);
-    if (temperature > 0.0f && temperature != 1.0f) {
-        x = mlx::core::divide(x, mlx::core::array(temperature));
+    return mlx::core::softmax(mlx::core::astype(logits, mlx::core::float32), -1);
+}
+
+// The tempered draw row, or `probs_filter` itself when the temperature leaves
+// the distribution untouched (see `rejection_filter_probabilities`).
+static mlx::core::array rejection_draw_probabilities(
+    const mlx::core::array& logits,
+    float temperature,
+    const mlx::core::array& probs_filter
+) {
+    if (!(temperature > 0.0f) || temperature == 1.0f) {
+        return probs_filter;
     }
+    auto x = mlx::core::astype(logits, mlx::core::float32);
+    x = mlx::core::divide(x, mlx::core::array(temperature));
     return mlx::core::softmax(x, -1);
 }
 
@@ -5326,9 +5454,12 @@ static std::unique_ptr<MlxArray> fused_sample_rejection_path(
     const int batch = logits.shape(0);
     const int vocab = logits.shape(1);
 
-    auto probs = rejection_probabilities(logits, temperature);
+    auto probs_filter = rejection_filter_probabilities(logits);
+    auto probs_draw =
+        rejection_draw_probabilities(logits, temperature, probs_filter);
     auto params = rejection_params(batch, top_k, top_p, min_p);
-    auto result = mlxcel::turbo::rejection_sample(probs, params, max_rounds);
+    auto result =
+        mlxcel::turbo::rejection_sample(probs_filter, probs_draw, params, max_rounds);
 
     if (!verify) {
         // Production path. It must not evaluate anything.
@@ -5433,22 +5564,27 @@ static std::unique_ptr<MlxArray> fused_sample_rejection_path(
     // drew from the stock chain's narrower support would silently disagree with
     // the distribution the speculative accept test (#902) is using.
     return std::make_unique<MlxArray>(fused_sample_argpartition_chain(
-        logits, temperature, top_k, top_p, min_p, true));
+        logits, temperature, top_k, top_p, min_p, true, nullptr));
 }
 
-// Fused sampling: temperature scaling + top-k + top-p + min-p + categorical
-// in a single function call to minimize FFI round-trips.
+// Fused sampling: top-k + top-p + min-p + XTC on the untempered row, then one
+// temperature scaling, then the draw, in a single function call to minimize
+// FFI round-trips (issue #1379).
 // Input: 2D logits [batch, vocab] (already sliced, penalties already applied)
 // Returns sampled token
 //
 // Dispatch, in order:
+// - XTC active: the stock chain, always. XTC lives inside the chain (after
+//   min-p, on the renormalised filtered row), so the greedy shortcut, the
+//   Gumbel-max kernel, and the rejection kernel are all bypassed: each of
+//   them resolves its draw without running the chain XTC lives in.
 // - Greedy (`temperature == 0` or `top_k == 1`): `argmax`, untouched.
 // - No-filter stochastic: the Gumbel-max kernel (#900), which drops the
 //   `categorical` normalization pass entirely.
 // - Filtered stochastic: the dual-pivot rejection kernel (#901), which drops
 //   the `argpartition` / `argsort` / `cumsum` chain entirely.
-// - Everything else: the stock chain (compiled min-p, uncompiled top-p because
-//   cumsum lacks output_shapes in MLX v0.31.x).
+// - Everything else: the stock chain (uncompiled top-p because cumsum lacks
+//   output_shapes in MLX v0.31.x, straight-line min-p).
 //
 // `allow_kernels == false` reproduces the pre-#900/#901 behavior for A/B
 // benchmarking and parity tests.
@@ -5462,9 +5598,26 @@ static std::unique_ptr<MlxArray> fused_sample_impl(
     float top_p,
     float min_p,
     bool allow_kernels,
-    bool verify
+    bool verify,
+    const XtcFilterArgs* xtc
 ) {
     auto x = logits.inner;
+
+    // XTC-active configurations take the stock chain unconditionally; the
+    // chain resolves greedy (`temperature == 0`) as the argmax of the
+    // filtered row, which is the reference chain's greedy-after-filters
+    // behavior.
+    if (xtc != nullptr && xtc->probability > 0.0f && xtc->gate != nullptr) {
+        if (sampling_dispatch_is_new(SAMPLING_DISPATCH_XTC_CHAIN)) {
+            sampling_dispatch_record(
+                SAMPLING_DISPATCH_XTC_CHAIN,
+                "argpartition chain: XTC is active, so the draw takes the "
+                "stock chain (filters on the untempered row, XTC on the "
+                "renormalised filtered row, then the temperature)");
+        }
+        return std::make_unique<MlxArray>(fused_sample_argpartition_chain(
+            x, temperature, top_k, top_p, min_p, false, xtc));
+    }
 
     // Greedy path: argmax
     if (temperature == 0.0f || top_k == 1) {
@@ -5485,7 +5638,7 @@ static std::unique_ptr<MlxArray> fused_sample_impl(
                 "pre-#900/#901 reference arm");
         }
         return std::make_unique<MlxArray>(fused_sample_argpartition_chain(
-            x, temperature, top_k, top_p, min_p, false));
+            x, temperature, top_k, top_p, min_p, false, nullptr));
     }
 
     // Softmax-free stochastic sampling (#900). Batch-wide: one launch covers
@@ -5553,7 +5706,7 @@ static std::unique_ptr<MlxArray> fused_sample_impl(
     // Not routed, so the stock support is what this configuration samples and
     // what `fused_sample_probs` reports.
     return std::make_unique<MlxArray>(fused_sample_argpartition_chain(
-        x, temperature, top_k, top_p, min_p, false));
+        x, temperature, top_k, top_p, min_p, false, nullptr));
 }
 
 std::unique_ptr<MlxArray> fused_sample(
@@ -5564,7 +5717,24 @@ std::unique_ptr<MlxArray> fused_sample(
     float min_p
 ) {
     return fused_sample_impl(
-        logits, temperature, top_k, top_p, min_p, true, false);
+        logits, temperature, top_k, top_p, min_p, true, false, nullptr);
+}
+
+std::unique_ptr<MlxArray> fused_sample_xtc(
+    const MlxArray& logits,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p,
+    float xtc_threshold,
+    float xtc_probability,
+    rust::Slice<const int32_t> xtc_special_tokens,
+    const MlxArray& xtc_gate
+) {
+    XtcFilterArgs xtc{
+        xtc_threshold, xtc_probability, &xtc_gate.inner, xtc_special_tokens};
+    return fused_sample_impl(
+        logits, temperature, top_k, top_p, min_p, true, false, &xtc);
 }
 
 std::unique_ptr<MlxArray> fused_sample_rejection(
@@ -5588,9 +5758,12 @@ std::unique_ptr<MlxArray> fused_sample_rejection_deferred(
     int32_t max_rounds
 ) {
     const int batch = logits.inner.shape(0);
-    auto probs = rejection_probabilities(logits.inner, temperature);
+    auto probs_filter = rejection_filter_probabilities(logits.inner);
+    auto probs_draw =
+        rejection_draw_probabilities(logits.inner, temperature, probs_filter);
     auto params = rejection_params(batch, top_k, top_p, min_p);
-    auto result = mlxcel::turbo::rejection_sample(probs, params, max_rounds);
+    auto result =
+        mlxcel::turbo::rejection_sample(probs_filter, probs_draw, params, max_rounds);
 
     // Land the launch and inspect ITS OWN flags, rather than parking them in the
     // deferred ring and hoping to find them again. The ring is best-effort by
@@ -5614,9 +5787,12 @@ std::unique_ptr<MlxArray> sampling_rejection_probe(
     int32_t max_rounds
 ) {
     const int batch = logits.inner.shape(0);
-    auto probs = rejection_probabilities(logits.inner, temperature);
+    auto probs_filter = rejection_filter_probabilities(logits.inner);
+    auto probs_draw =
+        rejection_draw_probabilities(logits.inner, temperature, probs_filter);
     auto params = rejection_params(batch, top_k, top_p, min_p);
-    auto result = mlxcel::turbo::rejection_sample(probs, params, max_rounds);
+    auto result =
+        mlxcel::turbo::rejection_sample(probs_filter, probs_draw, params, max_rounds);
     return std::make_unique<MlxArray>(mlx::core::stack(
         {result.ids, result.ok, result.rounds}, 0));
 }
@@ -5629,7 +5805,7 @@ std::unique_ptr<MlxArray> fused_sample_categorical(
     float min_p
 ) {
     return fused_sample_impl(
-        logits, temperature, top_k, top_p, min_p, false, true);
+        logits, temperature, top_k, top_p, min_p, false, true, nullptr);
 }
 
 // The exact categorical distribution `fused_sample` draws from, as a float32
@@ -5637,7 +5813,10 @@ std::unique_ptr<MlxArray> fused_sample_categorical(
 //
 // Correctness contract: the filter chain is *the same code* `fused_sample`
 // runs (`fused_sample_filter_logits`), so the support and the relative masses
-// cannot drift from the sampler. Both stochastic sampler arms agree with it:
+// cannot drift from the sampler. The filters are evaluated on `softmax(x)`
+// with the temperature not applied, and the returned distribution is
+// `softmax(x_filtered / T)`, temperature applied once at the end (issue
+// #1379). Both stochastic sampler arms agree with it:
 // `random::categorical(x, -1)` draws from `softmax(x, -1)` by definition, and
 // the Gumbel-max kernel draws from `softmax(logits / temperature)`, which is
 // what the filter chain leaves when no top-k / top-p / min-p narrows the row.
@@ -5645,28 +5824,39 @@ std::unique_ptr<MlxArray> fused_sample_categorical(
 // A greedy sampler configuration (`temperature == 0` or `top_k == 1`) draws a
 // point mass, so this returns the one-hot indicator at the argmax. That is the
 // degenerate `p_draft` a greedily-proposing drafter needs for the modified
-// rejection-sampling accept test.
+// rejection-sampling accept test. When XTC is active, `temperature == 0` is
+// instead the point mass at the argmax of the filtered row (the chain's
+// greedy-after-filters draw), and `top_k == 1` flows through the chain, which
+// leaves a single survivor that XTC's two-candidate guard can never remove.
 //
 // The softmax runs in float32 regardless of the logit dtype: the caller reads
 // individual entries back to the host and compares them against a uniform
 // draw, where an f16 probability (which underflows below ~6e-8) would turn a
 // legitimately small acceptance ratio into an unconditional accept.
-std::unique_ptr<MlxArray> fused_sample_probs(
+static std::unique_ptr<MlxArray> fused_sample_probs_impl(
     const MlxArray& logits,
     float temperature,
     int32_t top_k,
     float top_p,
-    float min_p
+    float min_p,
+    const XtcFilterArgs* xtc
 ) {
     auto x = logits.inner;
+    const bool xtc_active =
+        xtc != nullptr && xtc->probability > 0.0f && xtc->gate != nullptr;
 
-    if (temperature == 0.0f || top_k == 1) {
-        auto idx = mlx::core::argmax(x, -1, /*keepdims=*/true);
-        const auto vocab = static_cast<double>(x.shape(-1));
+    const auto one_hot_at = [&](const mlx::core::array& row) {
+        auto idx = mlx::core::argmax(row, -1, /*keepdims=*/true);
+        const auto vocab = static_cast<double>(row.shape(-1));
         auto ids = mlx::core::arange(0.0, vocab, mlx::core::int32);
-        auto one_hot = mlx::core::equal(ids, mlx::core::astype(idx, mlx::core::int32));
+        auto one_hot =
+            mlx::core::equal(ids, mlx::core::astype(idx, mlx::core::int32));
         return std::make_unique<MlxArray>(
             mlx::core::astype(one_hot, mlx::core::float32));
+    };
+
+    if (!xtc_active && (temperature == 0.0f || top_k == 1)) {
+        return one_hot_at(x);
     }
 
     // Follow the sampler's routing (#901). When `fused_sample` sends this
@@ -5674,13 +5864,50 @@ std::unique_ptr<MlxArray> fused_sample_probs(
     // draws from, and for top-k with top-p that is a superset of the stock
     // chain's. Reporting the stock support there would understate the target's
     // support and make the modified-rejection accept test reject tokens the
-    // target could actually have produced.
-    const bool rejection_semantics =
+    // target could actually have produced. An XTC-active configuration never
+    // routes (see `fused_sample_impl`), so it always reports the stock
+    // support.
+    const bool rejection_semantics = !xtc_active &&
         rejection_path_selected(x, temperature, top_k, top_p, min_p);
     x = fused_sample_filter_logits(
-        std::move(x), temperature, top_k, top_p, min_p, rejection_semantics);
+        std::move(x), temperature, top_k, top_p, min_p, rejection_semantics,
+        xtc_active ? xtc : nullptr);
+    if (xtc_active && temperature == 0.0f) {
+        // The chain applied no temperature division at T == 0; the draw is
+        // the argmax of the filtered row, so the distribution is its
+        // indicator.
+        return one_hot_at(x);
+    }
     return std::make_unique<MlxArray>(
         mlx::core::softmax(mlx::core::astype(x, mlx::core::float32), -1, /*precise=*/true));
+}
+
+std::unique_ptr<MlxArray> fused_sample_probs(
+    const MlxArray& logits,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p
+) {
+    return fused_sample_probs_impl(
+        logits, temperature, top_k, top_p, min_p, nullptr);
+}
+
+std::unique_ptr<MlxArray> fused_sample_probs_xtc(
+    const MlxArray& logits,
+    float temperature,
+    int32_t top_k,
+    float top_p,
+    float min_p,
+    float xtc_threshold,
+    float xtc_probability,
+    rust::Slice<const int32_t> xtc_special_tokens,
+    const MlxArray& xtc_gate
+) {
+    XtcFilterArgs xtc{
+        xtc_threshold, xtc_probability, &xtc_gate.inner, xtc_special_tokens};
+    return fused_sample_probs_impl(
+        logits, temperature, top_k, top_p, min_p, &xtc);
 }
 
 std::unique_ptr<MlxArray> gumbel_max_sample(

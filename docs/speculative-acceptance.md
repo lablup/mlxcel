@@ -10,9 +10,10 @@ one guarantees, and how to tell from a log which one a given run used.
 ## The rules
 
 Write `p` for the target model's effective next-token distribution at a verify
-position (after temperature, token bias, penalties, XTC, and top-k / top-p /
-min-p filtering) and `q` for the distribution the drafter actually drew its
-proposal from.
+position (after token bias, penalties, top-k / top-p / min-p filtering on the
+untempered distribution, XTC on the renormalised filtered row, and the final
+temperature scaling) and `q` for the distribution the drafter actually drew
+its proposal from.
 
 ### Sampler-match (the default at `temperature > 0`)
 
