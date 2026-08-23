@@ -218,10 +218,13 @@ and recurrent or hybrid SSM models keep dense or model-owned caches and stay out
 of the pool.
 
 Model-owned families need one clarification, because the paged backend does
-apply to them and it is easy to read that as pool participation. Gemma 3,
-Llama 4 and AFMoE report `supports_batching()`, so under
+apply to them and it is easy to read that as pool participation. Gemma 3 and
+Llama 4 report `supports_batching()`, so under
 `--decode-storage-backend auto` (the default) the scheduler allocates them on
-the paged backend. That allocation is **accounting only**: their real K/V lives
+the paged backend. AFMoE declares model-owned state too, but it reports
+`supports_batching() == false`, so it stays on the dense backend where the
+allocated backend already reads `ModelOwned` and donation was already skipped;
+it is unaffected either way. That allocation is **accounting only**: their real K/V lives
 in the model's `ModelOwnedSequenceState`, `make_caches()` hands the pool nothing,
 and the paged block table exists so `sync_paged_state_with_lengths` can mirror
 their lengths. Such a sequence is never donated to the prompt cache and never

@@ -366,8 +366,8 @@ impl CachePool {
     /// any of them while the detached set is alive — the set is responsible
     /// for releasing those pins on adopt or explicit release.
     ///
-    /// Used by: prompt prefix cache store, scheduler request-boundary
-    /// handoff for `DecodeStorageBackend::Paged`.
+    /// Used by: the scheduler's prompt-cache donate path, which is the only
+    /// caller outside tests.
     pub fn detach_paged(&mut self, seq_id: SequenceId) -> Option<DetachedPagedCacheSet> {
         {
             let sequence = self.active.get(&seq_id)?;

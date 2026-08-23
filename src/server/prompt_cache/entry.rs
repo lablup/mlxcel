@@ -77,7 +77,7 @@ impl DetachedKvSet {
     ///   against a sequence aborted before any prefill completed).
     /// * Paged: the per-layer dense handles carry no tensor data for a
     ///   pool-backed set (the K/V lives in the block pool), so we gate on the
-    ///   paged block table instead — a set is empty when it exposes no visible
+    ///   paged block table instead. A set is empty when it exposes no visible
     ///   tokens or pins no physical blocks. It is also empty when it carries
     ///   no per-layer handles AT ALL (#1346): that is a model-owned family's
     ///   shadow accounting sequence, whose block table describes pool pages
@@ -108,9 +108,9 @@ impl DetachedKvSet {
 /// `boundary_capture_applies` and `next_chunked_prefill_range` in the
 /// scheduler.
 ///
-/// * `seq_len` — visible tokens the block table exposes.
-/// * `retained_blocks` — physical pool blocks the set pins.
-/// * `dense_handles` — per-layer handle count. Zero means the sequence was a
+/// * `seq_len`: visible tokens the block table exposes.
+/// * `retained_blocks`: physical pool blocks the set pins.
+/// * `dense_handles`: per-layer handle count. Zero means the sequence was a
 ///   model-owned family's shadow accounting entry, whose block table describes
 ///   pool pages nothing ever wrote.
 #[inline]

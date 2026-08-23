@@ -340,4 +340,18 @@ fn model_owned_paged_family_never_donates_or_adopts() {
         after.prompt_cache_hits, 0,
         "adoption must not happen either"
     );
+
+    // The adopt gate specifically, which the assertions above do not reach.
+    // They stay green with it deleted, because the donate gate already left the
+    // store empty and the lookup would have missed anyway. `lookups` only
+    // advances inside `finalize_miss`, so a zero here is the difference between
+    // "returned before the store lookup" and "looked, missed, and moved on".
+    // That distinction is the whole point of the second gate: it is what
+    // refuses a shadow entry that reached the store by some other route, such
+    // as a store populated before this fix landed.
+    assert_eq!(
+        store.stats().lookups,
+        0,
+        "the adopt gate must return before the KV store lookup, not after a guaranteed miss"
+    );
 }

@@ -259,6 +259,19 @@ pub struct CacheStatsResponse {
     /// `hits` stay at zero. Families that opt into recurrent-state snapshots
     /// (`supports_snapshot_reuse()`) are checked first and keep donating, so
     /// they never appear here.
+    ///
+    /// Two consequences for anyone reading this endpoint alongside `/metrics`.
+    /// `lookups` deliberately stays at zero for these families, because the
+    /// adopt gate returns before the store lookup rather than performing one
+    /// that could only miss, while the Prometheus
+    /// `mlxcel_prompt_cache_misses_total` counter is recorded by the caller and
+    /// still advances per request; the two surfaces therefore disagree by
+    /// design here, where before this gate existed they agreed. And because the
+    /// decline fires on every healthy completion for these families, the
+    /// `last_reject_*` fields stay pinned to `model_owned_state` and will mask
+    /// an earlier, more interesting decline such as `oversized`; the per-reason
+    /// counters above stay separable, so use those rather than `last_reject_*`
+    /// when diagnosing a model-owned family.
     pub reject_model_owned_state: u64,
     /// Reason label of the most recent reject/decline event, if any has
     /// happened yet.
