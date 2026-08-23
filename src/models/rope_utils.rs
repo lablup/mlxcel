@@ -26,7 +26,8 @@
 //! Used by: Llama 3.x text (`llama3`, and through it Qwen2 / Qwen2.5, Helium,
 //! the `mllama` text decoder, every VLM whose text backbone is `Llama3Model` or
 //! `Qwen2Model`, the `llama` / `mistral` pipeline stage executors and the
-//! tensor-parallel Llama runtime), Apertus.
+//! tensor-parallel Llama runtime), Apertus, Gemma 3, and InternLM3 / InternLM2
+//! through `dynamic_ntk_rope`.
 
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::{Deserialize, Deserializer};
@@ -306,7 +307,8 @@ pub fn llama3_rope_freqs(
 /// factor rather than going through [`RopeScalingKind::resolve`], because an
 /// unimplemented scheme is a load error there and a warning here, so it calls
 /// this directly to stay on the same standard.
-// Used by: rope_utils (linear, llama3), Gemma3 (global_rope_scale)
+// Used by: rope_utils (linear, llama3), Gemma3 (global_rope_scale),
+// dynamic_ntk_rope (linear, dynamic) and through it InternLM3 / InternLM2
 pub(crate) fn is_usable_scalar(value: f32) -> bool {
     value > 0.0 && value.is_finite()
 }
@@ -435,8 +437,9 @@ fn report_unusable_rope_scaling_once(model_label: &str, rope_type: &str, reason:
 /// characters become `U+FFFD` and the label is truncated, which also bounds the
 /// dedup set's keys.
 ///
-/// Used by: this module's warning, and `gemma3::ModelArgs::global_rope_scale`,
-/// whose load error names the same checkpoint-controlled `rope_type` string.
+/// Used by: this module's warning, `gemma3::ModelArgs::global_rope_scale`, and
+/// `dynamic_ntk_rope` (InternLM3 / InternLM2), all of whose load errors name the
+/// same checkpoint-controlled `rope_type` string.
 pub(crate) fn printable_label(label: &str) -> String {
     const MAX_CHARS: usize = 64;
 

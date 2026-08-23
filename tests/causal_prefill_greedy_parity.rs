@@ -132,6 +132,23 @@ const INTERNLM3_INPUT_IDS: &[i32] = &[
 /// The two schedules diverge at step 2 of 24 here, where the corrected oracle's
 /// top-2 logit margin is 0.31, so the step that separates them is decided by
 /// the model rather than by rounding.
+///
+/// # Regenerating these ids
+///
+/// The oracle is committed as `scripts/tools/internlm_rope_oracle.py` so this
+/// pin is regenerable rather than merely described. Run it with
+/// `--mode fixed` for the values below, or `--mode stock` to reproduce the
+/// defective ones this constant used to hold:
+///
+/// ```text
+/// python3 scripts/tools/internlm_rope_oracle.py \
+///     --model models/internlm3-8b-4bit --mode fixed --tokens 24
+/// ```
+///
+/// Note one detail that is easy to miss when reconstructing the oracle by
+/// hand: stock mlx-lm reads the sequence length as `x.shape[1]`, which is the
+/// head axis of a `[B, n_heads, L, head_dim]` tensor, not the length. The
+/// corrected oracle uses `x.shape[-2]`. mlxcel always read it correctly.
 const INTERNLM3_REF_OUT: &[i32] = &[
     272, 14753, 331, 269, 510, 530, 331, 26264, 10011, 2969, 3491, 16354, 272, 1971, 331, 8161,
     353, 24324, 8032, 27964, 303, 6850, 2645, 27964,
