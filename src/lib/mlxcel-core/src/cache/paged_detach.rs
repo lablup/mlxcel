@@ -168,8 +168,16 @@ impl DetachedPagedCacheSet {
     /// metadata-only dense handles. Ineligible sets (e.g. dense-compat Int8
     /// whose K/V lives in the handles) must go through the consuming take
     /// path instead, which can still adopt them.
+    ///
+    /// The `!self.caches.is_empty()` term is load-bearing, not a tidy-up
+    /// (#1346). The handle predicate below is `all(..)`, which is vacuously
+    /// TRUE for zero handles, so a model-owned family's handle-less shadow set
+    /// used to report itself clone-eligible and get adopted as a real prefix.
+    /// Every genuine paged sequence carries one handle per layer, pool-backed
+    /// or dense-compat, so requiring at least one costs nothing.
     pub fn clone_eligible(&self) -> bool {
         self.backend == SequenceStateBackend::PagedKvCache
+            && !self.caches.is_empty()
             && !self.paged_layout.is_turbo_mode()
             && self.retained_blocks.is_some()
             && self
@@ -340,8 +348,20 @@ impl CachePool {
     /// Remove a paged-backed sequence from the active set and return it as an
     /// inert [`DetachedPagedCacheSet`].
     ///
-    /// Returns `None` if `seq_id` is not active or is not using the paged
-    /// backend. Every physical block referenced by the sequence has its
+    /// Returns `None` if `seq_id` is not active, is not using the paged
+    /// backend, or carries no per-layer cache handles. That last case is a
+    /// model-owned family's shadow accounting sequence (#1346): under
+    /// `--decode-storage-backend paged` the scheduler allocates Gemma 3 /
+    /// Llama 4 on the paged backend so `sync_paged_state_with_lengths` can
+    /// mirror their lengths into a block table, but `make_caches()` returns an
+    /// empty vector for them and their real K/V stays in
+    /// `ModelOwnedSequenceState`. The block table alone is not reusable KV:
+    /// handing it out lets a later adopt skip prefill for tokens whose K/V does
+    /// not exist. Both real paged shapes always carry `num_layers` handles
+    /// (pool-backed `KVCache::new_paged` ones, or dense-compat placeholders
+    /// from `make_caches()`), so this refuses only the shadow case.
+    ///
+    /// Every physical block referenced by an accepted sequence has its
     /// refcount incremented so the shared [`PagedBlockPool`] will not recycle
     /// any of them while the detached set is alive — the set is responsible
     /// for releasing those pins on adopt or explicit release.
@@ -355,6 +375,12 @@ impl CachePool {
                 return None;
             }
             if sequence.paged.is_none() || sequence.paged_layout().is_none() {
+                return None;
+            }
+            // Shadow accounting sequence with no per-layer K/V behind the block
+            // table (#1346). Decline before any block is pinned, so the pool
+            // budget is untouched and the caller sees a plain "not detachable".
+            if sequence.caches.is_empty() {
                 return None;
             }
         }

@@ -217,6 +217,27 @@ Paged adopt and donate are supported for the pool-backed Fp16 families
 and recurrent or hybrid SSM models keep dense or model-owned caches and stay out
 of the pool.
 
+Model-owned families need one clarification, because the paged backend does
+apply to them and it is easy to read that as pool participation. Gemma 3,
+Llama 4 and AFMoE report `supports_batching()`, so under
+`--decode-storage-backend auto` (the default) the scheduler allocates them on
+the paged backend. That allocation is **accounting only**: their real K/V lives
+in the model's `ModelOwnedSequenceState`, `make_caches()` hands the pool nothing,
+and the paged block table exists so `sync_paged_state_with_lengths` can mirror
+their lengths. Such a sequence is never donated to the prompt cache and never
+adopted from it. `CachePool::detach_paged` refuses a paged sequence with no
+per-layer handles, `DetachedPagedCacheSet::clone_eligible` requires at least one,
+and the scheduler declines the donation up front against the model's own
+`sequence_state_layout().backend` rather than the backend it was allocated on
+(the allocated one reads `PagedKvCache` for exactly these families, which is what
+issue #1346 turned into a wrong turn-2 answer). The decline is visible, not
+silent: `GET /v1/cache/stats` reports `reject_model_owned_state` and `/metrics`
+carries `mlxcel_prompt_cache_reject_total{reason="model_owned_state"}`, so a
+family whose store legitimately stays empty is distinguishable from a cache that
+is broken. Real cross-request reuse for these families comes through the
+model-state snapshot path (#1335), described next; a family that opts into
+`supports_snapshot_reuse()` is handled by that branch first and keeps donating.
+
 ### Exact-prefix snapshots for recurrent state
 
 Hybrid-SSM and linear-attention families remain excluded from block sharing:

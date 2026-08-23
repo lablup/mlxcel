@@ -1138,3 +1138,26 @@ fn boundary_snapshots_still_chain_against_each_other() {
     assert_eq!(store.stats().snapshot_entries, 1);
     assert_eq!(store.stats().snapshot_supersedes, 1);
 }
+
+// ---------------------------------------------------------------------------
+// #1346: a paged set with no per-layer handles carries no reusable KV.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn paged_set_without_handles_is_empty() {
+    use super::super::entry::paged_set_is_empty;
+
+    // A real paged donation: visible tokens, pinned blocks, one handle per
+    // layer. Reusable.
+    assert!(!paged_set_is_empty(64, 4, 2));
+
+    // The #1346 shape. The block table looks healthy because
+    // `sync_paged_state_with_lengths` mirrored the model-owned lengths into
+    // it, but zero per-layer handles means nothing ever wrote K/V behind those
+    // pages. Adopting it would skip prefill for 64 tokens that do not exist.
+    assert!(paged_set_is_empty(64, 4, 0));
+
+    // The two pre-existing terms are unchanged.
+    assert!(paged_set_is_empty(0, 4, 2));
+    assert!(paged_set_is_empty(64, 0, 2));
+}

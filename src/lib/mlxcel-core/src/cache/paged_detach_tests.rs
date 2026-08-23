@@ -2009,3 +2009,159 @@ fn clone_detached_paged_prefix_rejects_bad_targets() {
 
     pool.release_detached_paged(source);
 }
+
+// ---------------------------------------------------------------------------
+// 8. Model-owned shadow sequences (#1346).
+//
+// Under `--decode-storage-backend paged` the scheduler allocates EVERY
+// batching family on the paged backend, model-owned ones included, so
+// `sync_paged_state_with_lengths` can mirror their lengths into a block table.
+// For Gemma 3 / Llama 4 that table is pure accounting: `make_caches()` returns
+// nothing and the real K/V never leaves `ModelOwnedSequenceState`. Handing
+// such a set to the prompt cache lets a later adopt skip prefill for tokens
+// whose K/V does not exist, which is #1346. These two cases lock the refusal
+// into the types that own the shape.
+// ---------------------------------------------------------------------------
+
+/// A model-owned family as the paged decode override actually allocates it:
+/// natural backend `ModelOwned`, no per-layer caches, but `num_layers` layers
+/// of shadow block-table accounting. Mirrors `Gemma3Wrapper` / `Llama4Wrapper`
+/// (`make_caches() -> Vec::new()`, `sequence_state_layout() -> model_owned`).
+struct ModelOwnedShadowStub {
+    num_layers: usize,
+}
+
+impl LanguageModel for ModelOwnedShadowStub {
+    fn forward(
+        &self,
+        _input_ids: &MlxArray,
+        _caches: &mut [KVCache],
+        _mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        crate::ffi::zeros(&[1], 0)
+    }
+
+    fn make_caches(&self) -> Vec<KVCache> {
+        Vec::new()
+    }
+
+    fn num_layers(&self) -> usize {
+        self.num_layers
+    }
+
+    fn eos_token_ids(&self) -> Vec<i32> {
+        vec![0]
+    }
+
+    fn sequence_state_layout(&self) -> SequenceStateLayout {
+        SequenceStateLayout::model_owned(self.num_layers)
+    }
+}
+
+#[test]
+fn detach_paged_refuses_shadow_sequence_without_handles() {
+    let layout = default_layout();
+    let model = ModelOwnedShadowStub {
+        num_layers: layout.num_layers,
+    };
+    let mut pool = CachePool::new(4);
+
+    // Exactly what `BatchScheduler::allocate_sequence_state` does when
+    // `sequence_state_layout_override` returns a paged layout: the allocated
+    // backend says `PagedKvCache` while the model's own layout says
+    // `ModelOwned`.
+    let seq = pool
+        .allocate_with_layout(
+            &model,
+            Some(SequenceStateLayout::paged_kv_cache(layout.clone())),
+        )
+        .unwrap();
+    {
+        let set = pool.get(seq).unwrap();
+        assert_eq!(set.backend, SequenceStateBackend::PagedKvCache);
+        assert!(
+            set.caches.is_empty(),
+            "a model-owned family contributes no per-layer handles"
+        );
+    }
+
+    // Shadow accounting still reserves real pool blocks.
+    pool.append_paged_tokens(seq, 0, 6).unwrap();
+    pool.append_paged_tokens(seq, 1, 8).unwrap();
+    let blocks: Vec<PagedBlockId> = (0..layout.num_layers)
+        .flat_map(|layer| {
+            pool.get_paged_state(seq)
+                .unwrap()
+                .layer(layer)
+                .unwrap()
+                .block_ids
+                .clone()
+        })
+        .collect();
+    assert!(
+        !blocks.is_empty(),
+        "the shadow block table must be populated"
+    );
+    let before: Vec<u32> = blocks
+        .iter()
+        .map(|id| pool.paged_pool_ref().unwrap().refcount(*id))
+        .collect();
+
+    assert!(
+        pool.detach_paged(seq).is_none(),
+        "a paged sequence with no per-layer handles is shadow accounting, not donatable KV"
+    );
+
+    // Declining must be inert: the sequence stays active and no block was
+    // pinned, so the pool budget is exactly as it was.
+    assert_eq!(
+        pool.active_count(),
+        1,
+        "a declined detach must leave the sequence installed"
+    );
+    let after: Vec<u32> = blocks
+        .iter()
+        .map(|id| pool.paged_pool_ref().unwrap().refcount(*id))
+        .collect();
+    assert_eq!(before, after, "a declined detach must not pin any block");
+
+    // And the ordinary release path still returns every block.
+    pool.release(seq);
+    for id in &blocks {
+        assert_eq!(
+            pool.paged_pool_ref().unwrap().refcount(*id),
+            0,
+            "block {id} must return to the free list after release"
+        );
+    }
+}
+
+#[test]
+fn clone_eligible_requires_dense_handles() {
+    // A real paged set is clone-eligible; the same set with its per-layer
+    // handles removed must not be. The handle predicate in `clone_eligible` is
+    // an `all(..)`, which is vacuously TRUE over zero handles: without the
+    // explicit non-empty term a handle-less shadow set advertised itself as a
+    // shareable prefix and `clone_detached_paged_prefix` installed it.
+    let layout = default_layout();
+    let model = PagedStubModel::new(layout.clone());
+    let mut pool = CachePool::new(4);
+
+    let seq = pool.allocate(&model).unwrap();
+    pool.append_paged_tokens(seq, 0, 4).unwrap();
+    pool.append_paged_tokens(seq, 1, 4).unwrap();
+    let mut detached = pool.detach_paged(seq).expect("paged detach must succeed");
+    assert_eq!(detached.dense_caches().len(), layout.num_layers);
+    assert!(
+        detached.clone_eligible(),
+        "a pool-backed Fp16 set with metadata-only handles is clone-eligible"
+    );
+
+    detached.caches.clear();
+    assert!(
+        !detached.clone_eligible(),
+        "zero per-layer handles must fail clone eligibility, not pass it vacuously"
+    );
+
+    pool.release_detached_paged(detached);
+}

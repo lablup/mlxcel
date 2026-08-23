@@ -73,12 +73,28 @@ pub enum PromptCacheRejectReason {
     /// prefix with the request, and the reject's `entry_len` is the stored
     /// entry's token count.
     SnapshotDiverged,
+    /// The model keeps its per-sequence K/V inside its own
+    /// `ModelOwnedSequenceState` rather than in the caches the scheduler
+    /// hands to `forward` (issue #1346). Under `--decode-storage-backend
+    /// paged` such a family is still allocated on the paged backend, but only
+    /// for shadow block-table accounting: the block table it carries indexes
+    /// pool pages nothing ever wrote. Donating that as a KV entry and adopting
+    /// it on the next turn skips prefill for tokens whose K/V does not exist,
+    /// so the donate path declines it here.
+    ///
+    /// The decline is keyed on the model's NATURAL sequence-state backend
+    /// (`LanguageModel::sequence_state_layout().backend`), not the allocated
+    /// one, because the allocated backend is exactly what lies. Families that
+    /// return `true` from `supports_snapshot_reuse()` are checked first and
+    /// keep donating a real model-owned snapshot, so they never reach this
+    /// reason.
+    ModelOwnedState,
 }
 
 impl PromptCacheRejectReason {
     /// All variants, in the stable order used by Prometheus/`/v1/cache/stats`
     /// exposition helpers.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Oversized,
         Self::Disabled,
         Self::PrefixTooShort,
@@ -87,6 +103,7 @@ impl PromptCacheRejectReason {
         Self::LayoutConstraints,
         Self::BlockBoundaryFloor,
         Self::SnapshotDiverged,
+        Self::ModelOwnedState,
     ];
 
     /// Stable lowercase snake_case label used as the Prometheus `reason`
@@ -101,6 +118,7 @@ impl PromptCacheRejectReason {
             Self::LayoutConstraints => "layout_constraints",
             Self::BlockBoundaryFloor => "block_boundary_floor",
             Self::SnapshotDiverged => "snapshot_diverged",
+            Self::ModelOwnedState => "model_owned_state",
         }
     }
 }
@@ -158,6 +176,7 @@ pub struct PromptCacheRejectCounters {
     layout_constraints: AtomicU64,
     block_boundary_floor: AtomicU64,
     snapshot_diverged: AtomicU64,
+    model_owned_state: AtomicU64,
     last: Mutex<Option<PromptCacheLastReject>>,
 }
 
@@ -176,6 +195,7 @@ impl PromptCacheRejectCounters {
             PromptCacheRejectReason::LayoutConstraints => &self.layout_constraints,
             PromptCacheRejectReason::BlockBoundaryFloor => &self.block_boundary_floor,
             PromptCacheRejectReason::SnapshotDiverged => &self.snapshot_diverged,
+            PromptCacheRejectReason::ModelOwnedState => &self.model_owned_state,
         }
     }
 

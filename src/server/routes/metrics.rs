@@ -130,6 +130,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     let pc_reject_layout_constraints = obs.prompt_cache_reject_layout_constraints;
     let pc_reject_block_boundary_floor = obs.prompt_cache_reject_block_boundary_floor;
     let pc_reject_snapshot_diverged = obs.prompt_cache_reject_snapshot_diverged;
+    let pc_reject_model_owned_state = obs.prompt_cache_reject_model_owned_state;
 
     let pp_snapshot = state.pp_observability.snapshot();
     let body = format!(
@@ -276,7 +277,8 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
          mlxcel_prompt_cache_reject_total{{reason=\"empty_set\"}} {pc_reject_empty_set}\n\
          mlxcel_prompt_cache_reject_total{{reason=\"layout_constraints\"}} {pc_reject_layout_constraints}\n\
          mlxcel_prompt_cache_reject_total{{reason=\"block_boundary_floor\"}} {pc_reject_block_boundary_floor}\n\
-         mlxcel_prompt_cache_reject_total{{reason=\"snapshot_diverged\"}} {pc_reject_snapshot_diverged}\n",
+         mlxcel_prompt_cache_reject_total{{reason=\"snapshot_diverged\"}} {pc_reject_snapshot_diverged}\n\
+         mlxcel_prompt_cache_reject_total{{reason=\"model_owned_state\"}} {pc_reject_model_owned_state}\n",
         gen_time_sec = gen_time_ms as f64 / 1000.0,
         seq_started = obs.sequences_started,
         seq_completed = obs.sequences_completed,
@@ -324,6 +326,7 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
         pc_reject_layout_constraints = pc_reject_layout_constraints,
         pc_reject_block_boundary_floor = pc_reject_block_boundary_floor,
         pc_reject_snapshot_diverged = pc_reject_snapshot_diverged,
+        pc_reject_model_owned_state = pc_reject_model_owned_state,
     );
 
     let mut body = body;

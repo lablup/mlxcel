@@ -75,15 +75,51 @@ impl DetachedKvSet {
     ///
     /// * Dense: the per-layer caches are absent or all empty (e.g. stored
     ///   against a sequence aborted before any prefill completed).
-    /// * Paged: the per-layer dense handles are EMPTY by design, so we gate
-    ///   on the paged block table instead — a set is empty when it exposes no
-    ///   visible tokens or pins no physical blocks.
+    /// * Paged: the per-layer dense handles carry no tensor data for a
+    ///   pool-backed set (the K/V lives in the block pool), so we gate on the
+    ///   paged block table instead — a set is empty when it exposes no visible
+    ///   tokens or pins no physical blocks. It is also empty when it carries
+    ///   no per-layer handles AT ALL (#1346): that is a model-owned family's
+    ///   shadow accounting sequence, whose block table describes pool pages
+    ///   nothing ever wrote. `CachePool::detach_paged` already refuses to
+    ///   produce such a set, and the scheduler declines to donate one; this is
+    ///   the third, type-local guard, so an entry that reached the store by any
+    ///   other route still fails the emptiness check on both the donate and the
+    ///   adopt side. Real paged sets always carry `num_layers` handles.
     pub fn is_empty(&self) -> bool {
         match self {
             DetachedKvSet::Dense(d) => d.caches.is_empty() || d.caches.iter().all(|c| c.is_empty()),
-            DetachedKvSet::Paged(p) => p.seq_len() == 0 || p.retained_block_count() == 0,
+            DetachedKvSet::Paged(p) => paged_set_is_empty(
+                p.seq_len(),
+                p.retained_block_count(),
+                p.dense_caches().len(),
+            ),
         }
     }
+}
+
+/// The paged arm of [`DetachedKvSet::is_empty`], as a pure function over the
+/// three facts it reads.
+///
+/// Extracted so the rule is testable without minting a
+/// [`DetachedPagedCacheSet`]: `CachePool::detach_paged` is the only producer of
+/// that type and it now refuses the handle-less shape outright (#1346), which
+/// is exactly the case the third term guards. Same house style as
+/// `boundary_capture_applies` and `next_chunked_prefill_range` in the
+/// scheduler.
+///
+/// * `seq_len` — visible tokens the block table exposes.
+/// * `retained_blocks` — physical pool blocks the set pins.
+/// * `dense_handles` — per-layer handle count. Zero means the sequence was a
+///   model-owned family's shadow accounting entry, whose block table describes
+///   pool pages nothing ever wrote.
+#[inline]
+pub(crate) const fn paged_set_is_empty(
+    seq_len: usize,
+    retained_blocks: usize,
+    dense_handles: usize,
+) -> bool {
+    seq_len == 0 || retained_blocks == 0 || dense_handles == 0
 }
 
 /// Send/Sync holder for a [`DetachedKvSet`].
