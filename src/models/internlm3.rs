@@ -15,10 +15,34 @@
 //! InternLM 3 model implementation using mlxcel-core
 //!
 //! Key features:
-//! - DynamicNTK RoPE scaling: dynamically adjusts base when seq_len > max_position_embeddings
+//! - Dynamic NTK RoPE scaling through the shared
+//!   [`crate::models::dynamic_ntk_rope`] schedule: positions are never scaled,
+//!   and the rotary base is recomputed per forward from the live sequence
+//!   length, departing from `rope_theta` only once the sequence passes
+//!   `max_position_embeddings`.
 //! - Optional qkv_bias
 //! - Standard Llama-style architecture
+//!
+//! # The position scale (issue #1324)
+//!
+//! `ModelArgs::rope_scale` used to end in `.unwrap_or(2.0)` and matched only
+//! `"linear"`, so an absent block and a `"dynamic"` block both produced a
+//! position scale of `2.0`: every query and key was rotated at twice its true
+//! position, at every context length, on the very checkpoint this family is
+//! validated against
+//! (`mlx-community/internlm3-8b-instruct-4bit`, which ships
+//! `{"factor": 6.0, "rope_type": "dynamic"}`). That is not a long-context
+//! defect: doubling the position doubles the relative angle between any two
+//! tokens, so attention differed from training everywhere. It was inherited
+//! from
+//! [`mlx_lm/models/internlm3.py`](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/internlm3.py),
+//! which still computes `rope_scale = ... else 2.0` and then reuses that same
+//! `2.0` as the NTK factor; the checkpoint's own remote code
+//! (`modeling_internlm3.py`, via transformers'
+//! `_compute_dynamic_ntk_parameters`) is the reference this file now follows.
 
+use crate::models::dynamic_ntk_rope::DynamicNtkRope;
+use crate::models::rope_utils::RopeScalingSpec;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{FusedQKVLinear, KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
@@ -55,20 +79,18 @@ pub struct ModelArgs {
     #[serde(default)]
     pub rope_traditional: bool,
 
+    /// Read through the shared [`RopeScalingSpec`] rather than a derived
+    /// struct, so both the `rope_type` spelling this family's configs use and
+    /// the older `type` spelling resolve, and a config carrying both parses
+    /// instead of hitting serde's `duplicate field`.
     #[serde(default)]
-    pub rope_scaling: Option<RopeScaling>,
+    pub rope_scaling: Option<RopeScalingSpec>,
 
     #[serde(default)]
     pub tie_word_embeddings: bool,
 
     #[serde(default)]
     pub quantization: Option<Quantization>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct RopeScaling {
-    pub factor: f32,
-    pub rope_type: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -105,51 +127,20 @@ impl ModelArgs {
         self.quantization.as_ref().map(|q| q.bits).unwrap_or(4)
     }
 
-    pub fn rope_scale(&self) -> f32 {
-        self.rope_scaling
-            .as_ref()
-            .and_then(|s| {
-                if s.rope_type == "linear" {
-                    Some(1.0 / s.factor)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(2.0)
-    }
-
-    pub fn dynamic_ntk_factor(&self) -> f32 {
-        self.rope_scaling
-            .as_ref()
-            .and_then(|s| {
-                if s.rope_type == "dynamic" {
-                    Some(s.factor)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(1.0)
-    }
-}
-
-// DynamicNTK RoPE.
-/// Compute RoPE base with DynamicNTK scaling
-///
-/// If seq_len > max_position_embeddings, dynamically adjusts base:
-/// base = original_base * ((factor * seq_len / max_pos) - (factor - 1)) ^ (dims / (dims - 2))
-fn compute_dynamic_ntk_base(
-    seq_len: i32,
-    max_position_embeddings: usize,
-    original_base: f32,
-    factor: f32,
-    dims: i32,
-) -> f32 {
-    if seq_len > max_position_embeddings as i32 {
-        let ratio = (factor * (seq_len as f32) / (max_position_embeddings as f32)) - (factor - 1.0);
-        let power = (dims as f32) / ((dims - 2) as f32);
-        original_base * ratio.powf(power)
-    } else {
-        original_base
+    /// The rotary schedule this config selects.
+    ///
+    /// Returns `Err` for a scheme the family does not implement, or for a
+    /// `"linear"` / `"dynamic"` block without a usable `factor`; see
+    /// [`DynamicNtkRope::from_scaling`] for why that is a load error here.
+    pub fn rope(&self) -> Result<DynamicNtkRope, String> {
+        DynamicNtkRope::from_scaling(
+            self.head_dim() as i32,
+            self.rope_theta,
+            self.rope_traditional,
+            self.max_position_embeddings,
+            self.rope_scaling.as_ref(),
+            &self.model_type,
+        )
     }
 }
 
@@ -162,11 +153,8 @@ pub struct Attention {
     pub num_kv_heads: i32,
     pub head_dim: i32,
     pub scale: f32,
-    pub rope_base: f32,
-    pub rope_scale: f32,
-    pub rope_traditional: bool,
-    pub max_position_embeddings: usize,
-    pub dynamic_ntk_factor: f32,
+    /// The dynamic NTK schedule, resolved once at load.
+    pub rope: DynamicNtkRope,
 }
 
 impl Attention {
@@ -196,32 +184,11 @@ impl Attention {
         let offset = cache.offset;
         let seq_len = l + offset;
 
-        // Compute DynamicNTK base
-        let rope_base = compute_dynamic_ntk_base(
-            seq_len,
-            self.max_position_embeddings,
-            self.rope_base,
-            self.dynamic_ntk_factor,
-            self.head_dim,
-        );
-
-        // Apply RoPE
-        let q = mlxcel_core::fast_rope(
-            &q,
-            self.head_dim,
-            self.rope_traditional,
-            rope_base,
-            self.rope_scale,
-            offset,
-        );
-        let k = mlxcel_core::fast_rope(
-            &k,
-            self.head_dim,
-            self.rope_traditional,
-            rope_base,
-            self.rope_scale,
-            offset,
-        );
+        // Apply RoPE. The base is recomputed from the live sequence length on
+        // every forward, so it tracks the cache as it grows; the position is
+        // handed over unscaled, which is what the dynamic schedule requires.
+        let q = self.rope.apply(&q, offset, seq_len);
+        let k = self.rope.apply(&k, offset, seq_len);
 
         // Update KV cache and get sliced views
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
@@ -293,11 +260,7 @@ impl Attention {
             num_kv_heads,
             head_dim,
             scale,
-            rope_base: args.rope_theta,
-            rope_scale: args.rope_scale(),
-            rope_traditional: args.rope_traditional,
-            max_position_embeddings: args.max_position_embeddings,
-            dynamic_ntk_factor: args.dynamic_ntk_factor(),
+            rope: args.rope()?,
         })
     }
 }
@@ -540,3 +503,7 @@ impl LanguageModel for InternLM3Model {
         vec![2] // InternLM EOS token
     }
 }
+
+#[cfg(test)]
+#[path = "internlm3_tests.rs"]
+mod tests;

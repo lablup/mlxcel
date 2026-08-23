@@ -26,7 +26,11 @@
 //!
 //! * A greedy-parity gate pins the generated ids against `mlx_lm` 0.31.3 greedy
 //!   decode (`temp = 0`) on the same prompt ids. Reference and mlxcel are fed
-//!   the same raw id sequence, so tokenizer differences cannot enter.
+//!   the same raw id sequence, so tokenizer differences cannot enter. The
+//!   `internlm3` reference is the one exception to "stock mlx-lm": see
+//!   [`INTERNLM3_REF_OUT`], whose values were re-captured for issue #1324 from
+//!   an mlx-lm whose InternLM3 rotary schedule was corrected first, because the
+//!   stock one shares the defect that issue fixed.
 //! * A causality gate pins the property the bug violated without depending on
 //!   any reference ids: the first prompt position's logits must not move when
 //!   later prompt tokens are added. It is portable across families and
@@ -98,12 +102,39 @@ const INTERNLM3_INPUT_IDS: &[i32] = &[
     14757, 331, 17415, 2878, 3401, 27974, 5563, 5568, 20748, 1235,
 ];
 
-// mlx-lm 0.31.3 greedy (temp 0) continuation:
-// "the rise of the factory system, which replaced the traditional cottage
-//  industries, where goods were produced in the home"
+/// Greedy (temp 0) continuation from mlx-lm 0.31.3 **with its InternLM3 rotary
+/// schedule corrected**, which is the oracle issue #1324 re-pinned this
+/// constant from:
+///
+/// "the growth of a new class of industrial capitalists who owned the means of
+///  production and employed workers to produce goods"
+///
+/// # Why the reference ids changed
+///
+/// The previous values were captured from stock mlx-lm 0.31.3, and stock
+/// mlx-lm carries the defect #1324 fixed. Its
+/// [`internlm3.py`](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/internlm3.py)
+/// computes `rope_scale = 1 / factor if rope_type == "linear" else 2.0`, so the
+/// `{"factor": 6.0, "rope_type": "dynamic"}` block this checkpoint ships gets a
+/// position scale of `2.0`: every token is rotated as if it sat at twice its
+/// position. mlxcel had ported that expression verbatim, so the two agreed
+/// exactly, and this gate went green on 24 of 24 ids while pinning the bug.
+///
+/// The oracle the values now come from is the same mlx-lm, same weights, same
+/// prompt ids, with only the per-layer rope module replaced by the schedule the
+/// checkpoint's own remote code implements (`modeling_internlm3.py` ->
+/// transformers `_compute_dynamic_ntk_parameters`): positions unscaled,
+/// `seq_len` clamped up to `max_position_embeddings`, and only the base moving
+/// past that. The ids were **not** taken from mlxcel's own output; doing that
+/// would re-set the same trap, since a self-captured pin agrees with whatever
+/// the code does.
+///
+/// The two schedules diverge at step 2 of 24 here, where the corrected oracle's
+/// top-2 logit margin is 0.31, so the step that separates them is decided by
+/// the model rather than by rounding.
 const INTERNLM3_REF_OUT: &[i32] = &[
-    272, 18101, 331, 272, 6558, 1810, 27980, 870, 7910, 272, 15469, 22541, 29756, 35267, 345,
-    27980, 1368, 2645, 27964, 3149, 12419, 293, 272, 3412,
+    272, 14753, 331, 269, 510, 530, 331, 26264, 10011, 2969, 3491, 16354, 272, 1971, 331, 8161,
+    353, 24324, 8032, 27964, 303, 6850, 2645, 27964,
 ];
 
 /// 36 ids: the Hunyuan chat template applied to a one-turn user question. The

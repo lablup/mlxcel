@@ -34,6 +34,12 @@ mod sanitize;
 // reaches for the helper cannot inherit the hole.
 pub mod config;
 pub(crate) mod conv_decode;
+// `dynamic_ntk_rope` is the shared dynamic-NTK / linear rotary schedule for
+// the InternLM families (#1324). It exists because both of them got the
+// schedule wrong in different halves: `internlm3` scaled positions by 2.0 on
+// every dynamic and every absent block, and `internlm2` dropped its
+// `rope_scaling` block at deserialization so the base never moved.
+pub mod dynamic_ntk_rope;
 pub mod gated_delta;
 // `rope_utils` is the shared reader for the `rope_scaling` block plus the
 // frequency tables it selects (#1355). It exists because two families needed

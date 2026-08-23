@@ -16,7 +16,27 @@
 //!
 //! Key difference from Llama:
 //! - Fused wqkv projection (single linear layer for Q, K, V)
+//! - Dynamic NTK RoPE scaling through the shared
+//!   [`crate::models::dynamic_ntk_rope`] schedule
+//!
+//! # The `rope_scaling` block (issue #1324)
+//!
+//! `ModelArgs` did not declare `rope_scaling` at all, so the
+//! `{"type": "dynamic", "factor": 2.0}` that InternLM2 checkpoints ship
+//! (`models/internlm2-7b-4bit`, and the long-context 1M variants) was dropped
+//! at deserialization and the rotary base stayed at `rope_theta` for every
+//! sequence length. Inside `max_position_embeddings` that is the correct
+//! schedule, which is why nothing shorter than a 32768-token prompt could
+//! observe it; past that boundary the base has to grow and did not.
+//!
+//! The position scale was already right here (a hardcoded `1.0`), which is
+//! where this family differs from `internlm3` and from
+//! [`mlx_lm/models/internlm2.py`](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/models/internlm2.py):
+//! upstream computes `rope_scale = ... else 2.0` and so doubles every position
+//! on exactly these checkpoints.
 
+use crate::models::dynamic_ntk_rope::DynamicNtkRope;
+use crate::models::rope_utils::RopeScalingSpec;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
@@ -49,6 +69,13 @@ pub struct ModelArgs {
 
     #[serde(default)]
     pub rope_traditional: bool,
+
+    /// Read through the shared [`RopeScalingSpec`], which looks up `type` then
+    /// `rope_type`. InternLM2 configs spell it `type`; reading both means one
+    /// helper serves this family and `internlm3`, whose configs spell it
+    /// `rope_type`.
+    #[serde(default)]
+    pub rope_scaling: Option<RopeScalingSpec>,
 
     #[serde(default)]
     pub tie_word_embeddings: bool,
@@ -90,6 +117,23 @@ impl ModelArgs {
     pub fn bits(&self) -> i32 {
         self.quantization.as_ref().map(|q| q.bits).unwrap_or(4)
     }
+
+    /// The rotary schedule this config selects.
+    ///
+    /// Returns `Err` for a scheme the family does not implement, or for a
+    /// `"linear"` / `"dynamic"` block without a usable `factor`. That mirrors
+    /// upstream's `__post_init__`, which raises on anything outside
+    /// `{"linear", "dynamic"}`.
+    pub fn rope(&self) -> Result<DynamicNtkRope, String> {
+        DynamicNtkRope::from_scaling(
+            self.head_dim() as i32,
+            self.rope_theta,
+            self.rope_traditional,
+            self.max_position_embeddings,
+            self.rope_scaling.as_ref(),
+            &self.model_type,
+        )
+    }
 }
 
 // Attention with Fused QKV.
@@ -100,8 +144,8 @@ pub struct Attention {
     pub num_kv_heads: i32,
     pub head_dim: i32,
     pub scale: f32,
-    pub rope_dims: i32,
-    pub rope_base: f32,
+    /// The dynamic NTK schedule, resolved once at load.
+    pub rope: DynamicNtkRope,
 }
 
 impl Attention {
@@ -152,10 +196,12 @@ impl Attention {
         let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
 
         let offset = cache.offset;
+        let seq_len = l + offset;
 
-        // Apply RoPE
-        q = mlxcel_core::fast_rope(&q, self.rope_dims, false, self.rope_base, 1.0, offset);
-        k = mlxcel_core::fast_rope(&k, self.rope_dims, false, self.rope_base, 1.0, offset);
+        // Apply RoPE. Positions are handed over unscaled; only the base moves,
+        // and only once the sequence passes `max_position_embeddings`.
+        q = self.rope.apply(&q, offset, seq_len);
+        k = self.rope.apply(&k, offset, seq_len);
 
         // Update KV cache and get sliced views
         let (cache_k, cache_v) = cache.update_and_fetch(k, v);
@@ -201,8 +247,7 @@ impl Attention {
             num_kv_heads: args.num_kv_heads() as i32,
             head_dim,
             scale: 1.0 / (head_dim as f32).sqrt(),
-            rope_dims: head_dim,
-            rope_base: args.rope_theta,
+            rope: args.rope()?,
         })
     }
 }
@@ -417,3 +462,7 @@ impl LanguageModel for InternLM2Model {
         vec![2] // Default EOS token
     }
 }
+
+#[cfg(test)]
+#[path = "internlm2_tests.rs"]
+mod tests;
