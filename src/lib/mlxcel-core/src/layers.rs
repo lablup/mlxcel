@@ -3022,8 +3022,19 @@ impl FusedQKVLinear {
     /// (head_dim), which the `[B, T, H, D]` -> `[B, H, T, D]` permutation leaves
     /// untouched, so both orders are numerically equivalent per element.
     ///
+    /// `rope_scale` multiplies the position, exactly as the `scale` argument of
+    /// [`crate::fast_rope`] does, so the fused path and the graph fallback stay
+    /// interchangeable on a scaled layer. Gemma 3's global-attention layers pass
+    /// `1 / rope_scaling.factor` (`0.125` on every published checkpoint from 4B
+    /// up); its sliding layers, Qwen3 and Qwen3-MoE pass `1.0`. Before #1340 the
+    /// C++ launcher hardcoded `1.0f`, which is why this parameter exists rather
+    /// than the caller gating the fused path off on a scaled layer: gating would
+    /// have cost Gemma 3 4B/12B/27B their fused prefill kernel on every global
+    /// layer.
+    ///
     /// Used by: Gemma3 dense attention path, Qwen3 / Qwen3-MoE decode attention
     /// path.
+    #[allow(clippy::too_many_arguments)]
     pub fn forward_split_norm_rope_quantized<N: FusedQkNorm>(
         &self,
         x: &MlxArray,
@@ -3031,6 +3042,7 @@ impl FusedQKVLinear {
         k_norm: &N,
         rope_dims: i32,
         rope_base: f32,
+        rope_scale: f32,
         cache_offset: i32,
     ) -> Option<(
         UniquePtr<MlxArray>,
@@ -3065,6 +3077,7 @@ impl FusedQKVLinear {
                 self.head_dim,
                 rope_dims,
                 rope_base,
+                rope_scale,
                 q_norm.rms_eps(),
                 cache_offset,
                 weight.group_size,
@@ -7666,10 +7679,11 @@ mod tests {
         arr: &MlxArray,
         rope_dims: i32,
         rope_base: f32,
+        rope_scale: f32,
         offset: i32,
     ) -> UniquePtr<MlxArray> {
         let t = ffi::transpose_axes(arr, &[0, 2, 1, 3]);
-        ffi::fast_rope(&t, rope_dims, false, rope_base, 1.0, offset)
+        ffi::fast_rope(&t, rope_dims, false, rope_base, rope_scale, offset)
     }
 
     /// The generalized fused primitive with a standard `RMSNorm` Q/K norm must
@@ -7696,8 +7710,8 @@ mod tests {
         let (rq, rk, rv) = project_reshape_heads(&qkv, &x);
         let rq = q_norm.forward(&rq);
         let rk = k_norm.forward(&rk);
-        let ref_q = transpose_then_rope(&rq, rope_dims, rope_base, offset);
-        let ref_k = transpose_then_rope(&rk, rope_dims, rope_base, offset);
+        let ref_q = transpose_then_rope(&rq, rope_dims, rope_base, 1.0, offset);
+        let ref_k = transpose_then_rope(&rk, rope_dims, rope_base, 1.0, offset);
         let ref_v = ffi::transpose_axes(&rv, &[0, 2, 1, 3]);
 
         // Guard: a trivially-zero projection would make the RMS comparison vacuous.
@@ -7708,7 +7722,9 @@ mod tests {
         );
 
         let (fq, fk, fv) = qkv
-            .forward_split_norm_rope_quantized(&x, &q_norm, &k_norm, rope_dims, rope_base, offset)
+            .forward_split_norm_rope_quantized(
+                &x, &q_norm, &k_norm, rope_dims, rope_base, 1.0, offset,
+            )
             .expect("quantized fused QKV must take the fused path");
 
         let (dq, dk, dv) = (
@@ -7741,8 +7757,8 @@ mod tests {
         let (rq, rk, rv) = project_reshape_heads(&qkv, &x);
         let rq = q_norm.forward(&rq);
         let rk = k_norm.forward(&rk);
-        let ref_q = transpose_then_rope(&rq, rope_dims, rope_base, offset);
-        let ref_k = transpose_then_rope(&rk, rope_dims, rope_base, offset);
+        let ref_q = transpose_then_rope(&rq, rope_dims, rope_base, 1.0, offset);
+        let ref_k = transpose_then_rope(&rk, rope_dims, rope_base, 1.0, offset);
         let ref_v = ffi::transpose_axes(&rv, &[0, 2, 1, 3]);
 
         assert!(
@@ -7752,7 +7768,9 @@ mod tests {
         );
 
         let (fq, fk, fv) = qkv
-            .forward_split_norm_rope_quantized(&x, &q_norm, &k_norm, rope_dims, rope_base, offset)
+            .forward_split_norm_rope_quantized(
+                &x, &q_norm, &k_norm, rope_dims, rope_base, 1.0, offset,
+            )
             .expect("quantized fused QKV must take the fused path");
 
         let (dq, dk, dv) = (
@@ -7763,6 +7781,74 @@ mod tests {
         assert!(dq < 5e-3, "Gemma fused Q vs graph Q RMS too large: {dq}");
         assert!(dk < 5e-3, "Gemma fused K vs graph K RMS too large: {dk}");
         assert!(dv < 5e-3, "Gemma fused V vs graph V RMS too large: {dv}");
+    }
+
+    /// A non-unit RoPE position scale must reach the fused primitive and produce
+    /// the same Q/K the graph path produces at that scale (#1340).
+    ///
+    /// The launcher used to hardcode `1.0f`, so the fused and graph paths
+    /// disagreed on every Gemma 3 global-attention layer, all of which carry a
+    /// `linear` `rope_scaling` factor. Neither path failed and neither produced
+    /// a NaN: they simply rotated the same token to two different angles, and
+    /// the one that reached the KV cache depended on whether the weights were
+    /// quantized.
+    #[test]
+    fn fused_qkv_split_norm_rope_applies_position_scale() {
+        let (n_heads, n_kv_heads, head_dim) = (2, 1, 8);
+        let (rope_dims, rope_base, eps) = (head_dim, 1_000_000.0_f32, 1e-6_f32);
+        // A large offset, because the two scales agree to f16 rounding near
+        // position 0. This is the same reason a short prompt cannot separate the
+        // scaled and unscaled models at the output.
+        let offset = 4096;
+        // 1 / 8, the factor every published Gemma 3 checkpoint from 4B up
+        // declares.
+        let scale = 0.125_f32;
+
+        let qkv = synthetic_quantized_fused_qkv(n_heads, n_kv_heads, head_dim);
+        let norm_w: Vec<f32> = (0..head_dim).map(|i| 0.5 + 0.1 * i as f32).collect();
+        let q_norm = GemmaRMSNorm::new(f16_from(&norm_w, &[head_dim]), eps);
+        let k_norm = GemmaRMSNorm::new(f16_from(&norm_w, &[head_dim]), eps);
+
+        let x_vals: Vec<f32> = (0..64).map(|c| 0.2 + 0.01 * c as f32).collect();
+        let x = f16_from(&x_vals, &[1, 1, 64]);
+
+        let (rq, rk, _rv) = project_reshape_heads(&qkv, &x);
+        let rq = q_norm.forward(&rq);
+        let rk = k_norm.forward(&rk);
+        let ref_q = transpose_then_rope(&rq, rope_dims, rope_base, scale, offset);
+        let ref_k = transpose_then_rope(&rk, rope_dims, rope_base, scale, offset);
+
+        assert!(
+            max_abs(&ref_q) > 0.1,
+            "reference Q must be non-degenerate (max-abs {})",
+            max_abs(&ref_q)
+        );
+
+        let (fq, fk, _fv) = qkv
+            .forward_split_norm_rope_quantized(
+                &x, &q_norm, &k_norm, rope_dims, rope_base, scale, offset,
+            )
+            .expect("quantized fused QKV must take the fused path");
+
+        let (dq, dk) = (rms_diff(&fq, &ref_q), rms_diff(&fk, &ref_k));
+        assert!(dq < 5e-3, "scaled fused Q vs graph Q RMS too large: {dq}");
+        assert!(dk < 5e-3, "scaled fused K vs graph K RMS too large: {dk}");
+
+        // Guard: the comparison above would also pass if the parameter were
+        // ignored on BOTH sides. What the kernel did before this change is the
+        // unscaled rotation at the same offset, and it has to be materially
+        // different, else the parameter is inert.
+        let (uq, uk, _uv) = qkv
+            .forward_split_norm_rope_quantized(
+                &x, &q_norm, &k_norm, rope_dims, rope_base, 1.0, offset,
+            )
+            .expect("quantized fused QKV must take the fused path");
+        let separation = rms_diff(&fq, &uq).min(rms_diff(&fk, &uk));
+        assert!(
+            separation > 1e-2,
+            "a 1/8 position scale must change the fused output; min Q/K RMS \
+             separation from the unscaled call was {separation}"
+        );
     }
 
     /// The `(1 + weight)` Gemma offset must actually change the fused output:
@@ -7786,10 +7872,14 @@ mod tests {
         let x = f16_from(&x_vals, &[1, 1, 64]);
 
         let (sq, sk, _sv) = qkv
-            .forward_split_norm_rope_quantized(&x, &std_q, &std_k, rope_dims, rope_base, offset)
+            .forward_split_norm_rope_quantized(
+                &x, &std_q, &std_k, rope_dims, rope_base, 1.0, offset,
+            )
             .expect("standard fused path");
         let (gq, gk, _gv) = qkv
-            .forward_split_norm_rope_quantized(&x, &gemma_q, &gemma_k, rope_dims, rope_base, offset)
+            .forward_split_norm_rope_quantized(
+                &x, &gemma_q, &gemma_k, rope_dims, rope_base, 1.0, offset,
+            )
             .expect("gemma fused path");
 
         // Guard: both outputs must be non-degenerate, else the difference below

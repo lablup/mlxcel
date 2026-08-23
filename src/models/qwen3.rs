@@ -126,6 +126,8 @@ impl Attention {
                 &self.k_norm,
                 self.rope_dims,
                 self.rope_base,
+                // No rope_scaling on this path: the position is unscaled.
+                1.0,
                 offset,
             )
         } else {

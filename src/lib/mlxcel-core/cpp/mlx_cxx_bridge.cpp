@@ -3963,6 +3963,7 @@ void fused_qkv_project_split_norm_rope(
     int32_t head_dim,
     int32_t rope_dims,
     float rope_base,
+    float rope_scale,
     float rms_eps,
     int32_t cache_offset,
     int32_t group_size,
@@ -4007,8 +4008,11 @@ void fused_qkv_project_split_norm_rope(
     q = mlx::core::fast::rms_norm(q, q_norm_weight.inner, rms_eps);
     k = mlx::core::fast::rms_norm(k, k_norm_weight.inner, rms_eps);
 
-    q = mlx::core::fast::rope(q, rope_dims, false, rope_base, 1.0f, cache_offset);
-    k = mlx::core::fast::rope(k, rope_dims, false, rope_base, 1.0f, cache_offset);
+    // `rope_scale` multiplies the position. Hardcoding 1.0f here is what made
+    // this kernel disagree with the graph path on every Gemma 3 global-attention
+    // layer, which all carry a `linear` rope_scaling factor (#1340).
+    q = mlx::core::fast::rope(q, rope_dims, false, rope_base, rope_scale, cache_offset);
+    k = mlx::core::fast::rope(k, rope_dims, false, rope_base, rope_scale, cache_offset);
 
     q_out = std::make_unique<MlxArray>(std::move(q));
     k_out = std::make_unique<MlxArray>(std::move(k));

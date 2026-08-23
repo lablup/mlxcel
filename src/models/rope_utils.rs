@@ -301,9 +301,13 @@ pub fn llama3_rope_freqs(
 
 /// Whether a `rope_scaling` scalar can be used as a multiplier or a divisor.
 ///
-/// One predicate for every scalar the two implemented schemes read, so the
-/// `linear` and `llama3` arms cannot screen to different standards.
-fn is_usable_scalar(value: f32) -> bool {
+/// One predicate for every scalar any implemented scheme reads, so the arms
+/// cannot screen to different standards. Gemma 3 resolves its own `linear`
+/// factor rather than going through [`RopeScalingKind::resolve`], because an
+/// unimplemented scheme is a load error there and a warning here, so it calls
+/// this directly to stay on the same standard.
+// Used by: rope_utils (linear, llama3), Gemma3 (global_rope_scale)
+pub(crate) fn is_usable_scalar(value: f32) -> bool {
     value > 0.0 && value.is_finite()
 }
 
@@ -421,7 +425,8 @@ fn report_unusable_rope_scaling_once(model_label: &str, rope_type: &str, reason:
     );
 }
 
-/// Make checkpoint-controlled text safe to put on a line of stderr.
+/// Make checkpoint-controlled text safe to put on a line of stderr, or into an
+/// error message.
 ///
 /// Both halves of the warning come out of the checkpoint: `model_type` (or a
 /// directory name) and the `rope_type` string. Neither is bounded or validated
@@ -429,7 +434,10 @@ fn report_unusable_rope_scaling_once(model_label: &str, rope_type: &str, reason:
 /// log line after it, or run to megabytes and bury the message. Control
 /// characters become `U+FFFD` and the label is truncated, which also bounds the
 /// dedup set's keys.
-fn printable_label(label: &str) -> String {
+///
+/// Used by: this module's warning, and `gemma3::ModelArgs::global_rope_scale`,
+/// whose load error names the same checkpoint-controlled `rope_type` string.
+pub(crate) fn printable_label(label: &str) -> String {
     const MAX_CHARS: usize = 64;
 
     let cleaned: String = label
