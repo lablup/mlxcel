@@ -1347,9 +1347,11 @@ fn configure_environment(env: &mut Environment<'_>) {
         if value.kind() == ValueKind::Map {
             match method {
                 // Python-style `dict.get(key[, default])`: returns the
-                // value at `key` or `default` (or Undefined) when absent.
-                // Jinja2 treats Undefined as falsy, matching Python's
-                // `None` semantics in `m.get('a') or m.get('b')` chains.
+                // value at `key` or `default`, or Python `None` when the
+                // key is absent and no explicit default was supplied.
+                // `None` remains falsy, so `m.get('a') or m.get('b')`
+                // chains keep working while `is none` / `is defined`
+                // now match CPython Jinja semantics for missing keys.
                 "get" => {
                     let Some(key) = args.first() else {
                         return Err(minijinja::Error::new(
@@ -1357,7 +1359,7 @@ fn configure_environment(env: &mut Environment<'_>) {
                             "dict.get() requires at least one argument",
                         ));
                     };
-                    let default = args.get(1).cloned().unwrap_or(Value::UNDEFINED);
+                    let default = args.get(1).cloned().unwrap_or_else(|| Value::from(()));
                     return match value.get_item(key) {
                         Ok(v) if v.is_undefined() => Ok(default),
                         Ok(v) => Ok(v),
@@ -2253,6 +2255,39 @@ mod tests {
         }];
         let result = processor.apply(&messages, None).unwrap();
         assert_eq!(result.trim(), "NONE");
+    }
+
+    #[test]
+    fn test_dict_get_method_missing_key_is_none_and_defined() {
+        let template = r#"none={{ messages[0].get('missing_field') is none }} defined={{ messages[0].get('missing_field') is defined }}"#;
+        let processor = ChatTemplateProcessor::with_template(template.to_string());
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }];
+        let result = processor.apply(&messages, None).unwrap();
+        assert_eq!(result.trim(), "none=True defined=True");
+    }
+
+    #[test]
+    fn test_dict_get_method_preserves_present_null_and_falsy_values() {
+        let template = r#"null_none={{ messages[0].get('null_value') is none }} false_value={{ messages[0].get('flag') == false }} zero_value={{ messages[0].get('count') == 0 }} empty_value={{ messages[0].get('label') == '' }}"#;
+        let processor = ChatTemplateProcessor::with_template(template.to_string());
+        let messages = serde_json::json!([{
+            "role": "user",
+            "content": "hi",
+            "null_value": null,
+            "flag": false,
+            "count": 0,
+            "label": ""
+        }]);
+        let result = processor
+            .apply_raw_with_kwargs(&messages, None, &ChatTemplateKwargs::new())
+            .unwrap();
+        assert_eq!(
+            result.trim(),
+            "null_none=True false_value=True zero_value=True empty_value=True"
+        );
     }
 
     #[test]
