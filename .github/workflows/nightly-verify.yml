@@ -157,62 +157,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Temporary branch-only qualification for issue #1392. Removed again after
-  # the final 20-site audit; no model weights are downloaded.
-  shapeless-compile-audit:
-    name: shapeless compile audit (macOS Apple Silicon)
-    if: >-
-      ${{ github.repository == 'lablup/mlxcel'
-          && github.event_name == 'workflow_dispatch' }}
-    runs-on: self-hosted-macos-26-arm64
-    timeout-minutes: 60
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - name: Setup Metal build environment
-        run: |
-          set -euo pipefail
-          export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-          command -v cmake
-          if ! xcrun -f metal >/dev/null 2>&1; then
-            for candidate in /Applications/Xcode*.app/Contents/Developer; do
-              [ -d "$candidate" ] || continue
-              if DEVELOPER_DIR="$candidate" xcrun -f metal >/dev/null 2>&1; then
-                echo "DEVELOPER_DIR=$candidate" >> "$GITHUB_ENV"
-                break
-              fi
-            done
-          fi
-          xcrun -f metal
-          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
-          echo "/usr/local/bin" >> "$GITHUB_PATH"
-          CARGO_TARGET="$HOME/.cargo-target/mlxcel"
-          mkdir -p "$CARGO_TARGET"
-          echo "CARGO_TARGET_DIR=$CARGO_TARGET" >> "$GITHUB_ENV"
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - name: Audit every shapeless compile site
-        run: scripts/audit_shapeless_compile.sh
-      - name: Verify quiet-site regressions
-        run: >-
-          cargo test -p mlxcel-core --profile test-fast
-          --features metal,accelerate --lib eager_regression --
-          --nocapture --test-threads=1
-
   verify:
     name: fmt + clippy + test + video (macOS Apple Silicon)
     # Scheduled workflows run from the default branch of whatever repository
     # holds them. A fork that enables Actions would otherwise queue forever
     # against runner labels it does not own.
-    if: >-
-      ${{ github.repository == 'lablup/mlxcel'
-          && github.event_name == 'schedule' }}
+    if: github.repository == 'lablup/mlxcel'
     runs-on: self-hosted-macos-26-arm64 # Self-hosted Apple Silicon runner with macOS 26 SDK + Metal 4
     # Generous because a cold run is a full MLX C++ build plus a link of every
     # integration-test binary. Note that the FIRST run after the switch to
