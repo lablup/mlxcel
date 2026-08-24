@@ -1,0 +1,219 @@
+name: Issue 1388 real-model validation
+
+on:
+  push:
+    branches:
+      - fix/issue-1388-qwen3-rope-scaling
+
+permissions: {}
+
+concurrency:
+  group: issue-1388-real-model-validation
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Qwen3 scaled and unscaled checkpoints (Apple Silicon)
+    if: github.repository == 'lablup/mlxcel'
+    runs-on: self-hosted-macos-26-arm64
+    timeout-minutes: 120
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Configure build environment
+        run: |
+          set -euo pipefail
+          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+          echo "/usr/local/bin" >> "$GITHUB_PATH"
+          echo "CARGO_TARGET_DIR=$HOME/.cargo-target/mlxcel" >> "$GITHUB_ENV"
+
+          if ! xcrun -f metal >/dev/null 2>&1; then
+            for candidate in /Applications/Xcode*.app/Contents/Developer; do
+              [ -d "$candidate" ] || continue
+              if DEVELOPER_DIR="$candidate" xcrun -f metal >/dev/null 2>&1; then
+                echo "DEVELOPER_DIR=$candidate" >> "$GITHUB_ENV"
+                exit 0
+              fi
+            done
+            echo "::error::No Xcode installation exposes the Metal compiler." >&2
+            exit 1
+          fi
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build current and main binaries
+        run: |
+          set -euo pipefail
+          VALIDATION_ROOT="$(mktemp -d /tmp/mlxcel-1388.XXXXXX)"
+          case "$VALIDATION_ROOT" in
+            /tmp/mlxcel-1388.*) ;;
+            *) echo "::error::Unexpected validation root: $VALIDATION_ROOT" >&2; exit 1 ;;
+          esac
+          echo "VALIDATION_ROOT=$VALIDATION_ROOT" >> "$GITHUB_ENV"
+
+          cargo build --profile test-fast --features metal,accelerate --bin mlxcel
+          cp "$CARGO_TARGET_DIR/test-fast/mlxcel" "$VALIDATION_ROOT/mlxcel-current"
+
+          git worktree add --detach "$VALIDATION_ROOT/main-checkout" origin/main
+          (
+            cd "$VALIDATION_ROOT/main-checkout"
+            cargo build --profile test-fast --features metal,accelerate --bin mlxcel
+          )
+          cp "$CARGO_TARGET_DIR/test-fast/mlxcel" "$VALIDATION_ROOT/mlxcel-main"
+
+      - name: Install the pinned mlx-lm oracle
+        run: |
+          set -euo pipefail
+          python3 -m venv "$VALIDATION_ROOT/venv"
+          "$VALIDATION_ROOT/venv/bin/pip" install 'mlx-lm==0.31.3'
+
+      - name: Download issue checkpoints
+        run: |
+          set -euo pipefail
+          "$VALIDATION_ROOT/mlxcel-current" download mlx-community/Qwen3-4B-4bit --local-dir "$VALIDATION_ROOT/qwen3-4b"
+          "$VALIDATION_ROOT/mlxcel-current" download mlx-community/Qwen3-30B-A3B-4bit --local-dir "$VALIDATION_ROOT/qwen3-30b-a3b"
+
+      - name: Compare main, scaled mlxcel, and mlx-lm
+        run: |
+          set -euo pipefail
+          "$VALIDATION_ROOT/venv/bin/python" - <<'PY'
+          import gc
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+
+          root = Path(os.environ["VALIDATION_ROOT"])
+          current = root / "mlxcel-current"
+          main = root / "mlxcel-main"
+          dense = root / "qwen3-4b"
+          moe = root / "qwen3-30b-a3b"
+          regression_prompt = "Explain the difference between a B-tree and a B+ tree."
+          long_prompt = "Hello " * 2200
+
+          def run_rust(binary: Path, model: Path, prompt: str, max_tokens: int) -> str:
+              env = os.environ.copy()
+              env["MLXCEL_DEVICE"] = "gpu"
+              completed = subprocess.run(
+                  [
+                      str(binary),
+                      "generate",
+                      "-m",
+                      str(model),
+                      "-p",
+                      prompt,
+                      "-n",
+                      str(max_tokens),
+                      "--temp",
+                      "0",
+                      "--seed",
+                      "0",
+                      "--no-chat-template",
+                  ],
+                  env=env,
+                  capture_output=True,
+                  text=True,
+                  timeout=1800,
+              )
+              if completed.returncode != 0:
+                  raise RuntimeError(
+                      f"{binary.name} failed for {model.name}:\n{completed.stderr[-4000:]}"
+                  )
+              if not completed.stdout.startswith(prompt):
+                  raise RuntimeError(
+                      f"unexpected stdout prefix from {binary.name} for {model.name}"
+                  )
+              generated = completed.stdout[len(prompt):]
+              marker = "\n\n[Generated "
+              if marker not in generated:
+                  raise RuntimeError(
+                      f"generation summary missing from {binary.name} for {model.name}"
+                  )
+              return generated.split(marker, 1)[0]
+
+          def inject_linear_scaling(model: Path) -> None:
+              config_path = model / "config.json"
+              config = json.loads(config_path.read_text())
+              config["rope_scaling"] = {"rope_type": "linear", "factor": 8.0}
+              config_path.write_text(json.dumps(config, indent=2) + "\n")
+
+          results = {}
+          for name, model in [("dense", dense), ("moe", moe)]:
+              current_text = run_rust(current, model, regression_prompt, 128)
+              main_text = run_rust(main, model, regression_prompt, 128)
+              if current_text != main_text:
+                  raise AssertionError(f"unscaled {name} output differs from origin/main")
+              results[f"{name}_unscaled_sha256"] = hashlib.sha256(
+                  current_text.encode()
+              ).hexdigest()
+
+          dense_unscaled_long = run_rust(current, dense, long_prompt, 8)
+          inject_linear_scaling(dense)
+          dense_scaled = run_rust(current, dense, long_prompt, 8)
+          dense_old_path = run_rust(main, dense, long_prompt, 8)
+          if dense_scaled == dense_old_path:
+              raise AssertionError("scaled dense output did not diverge from the old unscaled path")
+          if dense_unscaled_long != dense_old_path:
+              raise AssertionError("origin/main did not reproduce the current unscaled dense output")
+
+          from mlx_lm import generate, load
+
+          oracle_model, oracle_tokenizer = load(str(dense))
+          if len(oracle_tokenizer.encode(long_prompt)) < 2048:
+              raise AssertionError("oracle prompt did not reach 2048 tokens")
+          oracle_text = generate(
+              oracle_model,
+              oracle_tokenizer,
+              prompt=long_prompt,
+              max_tokens=8,
+              verbose=False,
+          )
+          if dense_scaled != oracle_text:
+              raise AssertionError(
+                  "scaled dense output differs from mlx-lm: "
+                  f"mlxcel={dense_scaled!r}, mlx-lm={oracle_text!r}"
+              )
+          import mlx.core as mx
+
+          del oracle_model
+          gc.collect()
+          mx.clear_cache()
+
+          moe_unscaled = run_rust(current, moe, long_prompt, 8)
+          inject_linear_scaling(moe)
+          moe_scaled = run_rust(current, moe, long_prompt, 8)
+          if moe_scaled == moe_unscaled:
+              raise AssertionError("scaled MoE output did not diverge from its unscaled output")
+
+          results["dense_scaled_text"] = dense_scaled
+          results["dense_oracle_text"] = oracle_text
+          results["moe_unscaled_text"] = moe_unscaled
+          results["moe_scaled_text"] = moe_scaled
+          print(json.dumps(results, ensure_ascii=False, indent=2))
+          PY
+
+      - name: Clean validation artifacts
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -n "${VALIDATION_ROOT:-}" ]; then
+            case "$VALIDATION_ROOT" in
+              /tmp/mlxcel-1388.*)
+                git worktree remove --force "$VALIDATION_ROOT/main-checkout" 2>/dev/null || true
+                rm -rf -- "$VALIDATION_ROOT"
+                ;;
+              *)
+                echo "::error::Refusing to clean unexpected path: $VALIDATION_ROOT" >&2
+                exit 1
+                ;;
+            esac
+          fi
