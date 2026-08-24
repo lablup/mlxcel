@@ -33,6 +33,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use mlxcel_core::cache::{BatchKvQuantConfig, KVCacheMode, KvQuantScheme};
+
 use crate::server::prompt_cache::{
     ApcConfig, ApcHashAlgo, CacheEntry, MultimodalDigest, PromptCacheConfig, PromptCacheKey,
     PromptCacheStore,
@@ -520,6 +522,34 @@ fn build_stats_response_disabled_when_store_is_none() {
     assert_eq!(resp.lookups, 0);
     assert_eq!(resp.hit_rate, 0.0);
     assert_eq!(resp.block_size, cfg.apc.block_size);
+}
+
+#[test]
+fn cache_stats_effective_kv_mode_prefers_batch_kv_quant_when_enabled() {
+    let mut config = crate::server::ServerConfig {
+        kv_cache_mode: KVCacheMode::Fp16,
+        batch_kv_quant: BatchKvQuantConfig::new(KvQuantScheme::Uniform, 8, 64, true)
+            .expect("valid int8 batch KV config"),
+        ..crate::server::ServerConfig::default()
+    };
+    assert_eq!(
+        super::super::cache::cache_stats_effective_kv_mode(&config),
+        "int8"
+    );
+
+    config.batch_kv_quant = BatchKvQuantConfig::new(KvQuantScheme::TurboQuant, 4, 64, true)
+        .expect("valid turbo batch KV config");
+    assert_eq!(
+        super::super::cache::cache_stats_effective_kv_mode(&config),
+        "fp16+turbo4"
+    );
+
+    config.batch_kv_quant = BatchKvQuantConfig::default();
+    config.kv_cache_mode = KVCacheMode::Turbo4Delegated;
+    assert_eq!(
+        super::super::cache::cache_stats_effective_kv_mode(&config),
+        "turbo4-delegated"
+    );
 }
 
 #[test]

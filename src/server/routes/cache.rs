@@ -322,8 +322,16 @@ pub async fn cache_stats(State(state): State<AppState>) -> Json<CacheStatsRespon
         paged,
         reject,
         warmups,
-        state.config.kv_cache_mode.to_string(),
+        cache_stats_effective_kv_mode(&state.config),
     ))
+}
+
+pub(crate) fn cache_stats_effective_kv_mode(config: &crate::server::ServerConfig) -> String {
+    if config.batch_kv_quant.is_enabled() {
+        config.batch_kv_quant.base_mode().to_string()
+    } else {
+        config.kv_cache_mode.to_string()
+    }
 }
 
 /// `POST /v1/cache/reset` — drop every live cache entry.
