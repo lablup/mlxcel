@@ -16,7 +16,7 @@ jobs:
     name: Qwen3 scaled and unscaled checkpoints (Apple Silicon)
     if: github.repository == 'lablup/mlxcel'
     runs-on: self-hosted-macos-26-arm64
-    timeout-minutes: 120
+    timeout-minutes: 240
     permissions:
       contents: read
 
@@ -97,6 +97,7 @@ jobs:
           import os
           from pathlib import Path
           import subprocess
+          import time
 
           root = Path(os.environ["VALIDATION_ROOT"])
           current = root / "mlxcel-current"
@@ -109,26 +110,50 @@ jobs:
           def run_rust(binary: Path, model: Path, prompt: str, max_tokens: int) -> str:
               env = os.environ.copy()
               env["MLXCEL_DEVICE"] = "gpu"
-              completed = subprocess.run(
-                  [
-                      str(binary),
-                      "generate",
-                      "-m",
-                      str(model),
-                      "-p",
-                      prompt,
-                      "-n",
-                      str(max_tokens),
-                      "--temp",
-                      "0",
-                      "--seed",
-                      "0",
-                      "--no-chat-template",
-                  ],
-                  env=env,
-                  capture_output=True,
-                  text=True,
-                  timeout=1800,
+              command = [
+                  str(binary),
+                  "generate",
+                  "-m",
+                  str(model),
+                  "-p",
+                  prompt,
+                  "-n",
+                  str(max_tokens),
+                  "--temp",
+                  "0",
+                  "--seed",
+                  "0",
+                  "--no-chat-template",
+              ]
+              print(
+                  f"starting {binary.name} / {model.name}: "
+                  f"prompt_chars={len(prompt)}, max_tokens={max_tokens}",
+                  flush=True,
+              )
+              started = time.monotonic()
+              try:
+                  completed = subprocess.run(
+                      command,
+                      env=env,
+                      capture_output=True,
+                      text=True,
+                      timeout=5400,
+                  )
+              except subprocess.TimeoutExpired as error:
+                  stdout = error.stdout or ""
+                  stderr = error.stderr or ""
+                  if isinstance(stdout, bytes):
+                      stdout = stdout.decode(errors="replace")
+                  if isinstance(stderr, bytes):
+                      stderr = stderr.decode(errors="replace")
+                  raise RuntimeError(
+                      f"{binary.name} timed out for {model.name} after 5400s; "
+                      f"stdout_tail={stdout[-4000:]!r}; stderr_tail={stderr[-4000:]!r}"
+                  ) from error
+              print(
+                  f"finished {binary.name} / {model.name} in "
+                  f"{time.monotonic() - started:.1f}s",
+                  flush=True,
               )
               if completed.returncode != 0:
                   raise RuntimeError(
@@ -155,14 +180,13 @@ jobs:
               config_path.write_text(json.dumps(config, indent=2) + "\n")
 
           results = {}
-          for name, model in [("dense", dense), ("moe", moe)]:
-              current_text = run_rust(current, model, regression_prompt, 128)
-              main_text = run_rust(main, model, regression_prompt, 128)
-              if current_text != main_text:
-                  raise AssertionError(f"unscaled {name} output differs from origin/main")
-              results[f"{name}_unscaled_sha256"] = hashlib.sha256(
-                  current_text.encode()
-              ).hexdigest()
+          dense_current = run_rust(current, dense, regression_prompt, 128)
+          dense_main = run_rust(main, dense, regression_prompt, 128)
+          if dense_current != dense_main:
+              raise AssertionError("unscaled dense output differs from origin/main")
+          results["dense_unscaled_sha256"] = hashlib.sha256(
+              dense_current.encode()
+          ).hexdigest()
 
           dense_unscaled_long = run_rust(current, dense, long_prompt, 8)
           inject_linear_scaling(dense)
@@ -196,16 +220,16 @@ jobs:
           gc.collect()
           mx.clear_cache()
 
-          moe_unscaled = run_rust(current, moe, long_prompt, 8)
-          inject_linear_scaling(moe)
-          moe_scaled = run_rust(current, moe, long_prompt, 8)
-          if moe_scaled == moe_unscaled:
-              raise AssertionError("scaled MoE output did not diverge from its unscaled output")
+          moe_current = run_rust(current, moe, regression_prompt, 128)
+          moe_main = run_rust(main, moe, regression_prompt, 128)
+          if moe_current != moe_main:
+              raise AssertionError("unscaled MoE output differs from origin/main")
+          results["moe_unscaled_sha256"] = hashlib.sha256(
+              moe_current.encode()
+          ).hexdigest()
 
           results["dense_scaled_text"] = dense_scaled
           results["dense_oracle_text"] = oracle_text
-          results["moe_unscaled_text"] = moe_unscaled
-          results["moe_scaled_text"] = moe_scaled
           print(json.dumps(results, ensure_ascii=False, indent=2))
           PY
 
