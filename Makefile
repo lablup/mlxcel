@@ -39,6 +39,11 @@ PROMPT ?= "Hello, world!"
 # below, e.g. `make test-fast-cuda FILTER=server::chat_request` (issue #809).
 FILTER ?=
 
+# Dev-profile server template renders can overflow libtest's default 2 MiB
+# thread stack; keep the larger stack limited to the plain dev-profile test
+# entry points and leave test-fast / release gates unchanged (#1384).
+DEV_TEST_RUST_MIN_STACK ?= 16777216
+
 # Server settings
 HOST ?= 127.0.0.1
 PORT ?= 8080
@@ -203,17 +208,17 @@ endif
 .PHONY: test
 test: ## Run all tests
 	@echo "$(CYAN)Running tests...$(RESET)"
-	$(CARGO) test -- --test-threads=1
+	RUST_MIN_STACK=$(DEV_TEST_RUST_MIN_STACK) $(CARGO) test -- --test-threads=1
 	@echo "$(GREEN)All tests passed!$(RESET)"
 
 .PHONY: test-verbose
 test-verbose: ## Run tests with verbose output
 	@echo "$(CYAN)Running tests (verbose)...$(RESET)"
-	$(CARGO) test -- --nocapture --test-threads=1
+	RUST_MIN_STACK=$(DEV_TEST_RUST_MIN_STACK) $(CARGO) test -- --nocapture --test-threads=1
 
 .PHONY: test-lib
 test-lib: ## Run library tests only
-	$(CARGO) test --lib -- --test-threads=1
+	RUST_MIN_STACK=$(DEV_TEST_RUST_MIN_STACK) $(CARGO) test --lib -- --test-threads=1
 
 .PHONY: test-doc
 test-doc: ## Run documentation tests
