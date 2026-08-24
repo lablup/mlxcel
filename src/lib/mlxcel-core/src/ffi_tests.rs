@@ -2535,10 +2535,10 @@ fn shapeless_compile_audit_harness() {
     set_default_device(true);
     random_seed(1392);
 
-    let x = from_slice_f32(&[-3.0, -0.5, 0.25, 4.0], &[1, 4]);
-    let gate = from_slice_f32(&[1.5, -2.0, 0.75, 3.0], &[1, 4]);
-    let gpt_linear = from_slice_f32(&[-8.0, -1.0, 2.0, 8.0], &[1, 4]);
-    let gpt_glu = from_slice_f32(&[-2.0, 0.5, 2.0, 8.0], &[1, 4]);
+    let x_f32 = from_slice_f32(&[-3.0, -0.5, 0.25, 4.0], &[1, 4]);
+    let gate_f32 = from_slice_f32(&[1.5, -2.0, 0.75, 3.0], &[1, 4]);
+    let gpt_linear_f32 = from_slice_f32(&[-8.0, -1.0, 2.0, 8.0], &[1, 4]);
+    let gpt_glu_f32 = from_slice_f32(&[-2.0, 0.5, 2.0, 8.0], &[1, 4]);
     let clip_x = astype(
         &from_slice_f32(&[65504.0, -65504.0, 10.0, -10.0], &[1, 4]),
         dtype::FLOAT16,
@@ -2547,37 +2547,52 @@ fn shapeless_compile_audit_harness() {
         &from_slice_f32(&[4096.0, -4096.0, 2.0, -2.0], &[1, 4]),
         dtype::FLOAT16,
     );
-    let attn_q = from_slice_f32(&[8.0, -4.0, 2.0, 6.0], &[1, 1, 2, 2]);
-    let attn_k = from_slice_f32(&[4.0, -2.0, -6.0, 3.0, 2.0, 5.0], &[1, 1, 3, 2]);
-    let attn_v = from_slice_f32(&[1.0, 10.0, 2.0, 20.0, 4.0, 40.0], &[1, 1, 3, 2]);
-    let attn_mask = from_slice_f32(&[0.0, -1000.0, 0.0, 0.0, 0.0, -1000.0], &[1, 1, 2, 3]);
+    let attn_q_f32 = from_slice_f32(&[8.0, -4.0, 2.0, 6.0], &[1, 1, 2, 2]);
+    let attn_k_f32 = from_slice_f32(&[4.0, -2.0, -6.0, 3.0, 2.0, 5.0], &[1, 1, 3, 2]);
+    let attn_v_f32 = from_slice_f32(&[1.0, 10.0, 2.0, 20.0, 4.0, 40.0], &[1, 1, 3, 2]);
+    let attn_mask_f32 = from_slice_f32(&[0.0, -1000.0, 0.0, 0.0, 0.0, -1000.0], &[1, 1, 2, 3]);
+
+    for audit_dtype in [dtype::FLOAT32, dtype::BFLOAT16, dtype::FLOAT16] {
+        let x = astype(&x_f32, audit_dtype);
+        let gate = astype(&gate_f32, audit_dtype);
+        let gpt_linear = astype(&gpt_linear_f32, audit_dtype);
+        let gpt_glu = astype(&gpt_glu_f32, audit_dtype);
+        let attn_q = astype(&attn_q_f32, audit_dtype);
+        let attn_k = astype(&attn_k_f32, audit_dtype);
+        let attn_v = astype(&attn_v_f32, audit_dtype);
+        let attn_mask = astype(&attn_mask_f32, audit_dtype);
+
+        for _ in 0..2 {
+            eval(&compiled_swiglu_activation(&gate, &x));
+            eval(&compiled_relu_squared(&x));
+            eval(&compiled_silu(&x));
+            eval(&compiled_gpt_oss_swiglu_activation(&gpt_linear, &gpt_glu));
+            eval(&compiled_gelu(&x));
+            eval(&compiled_gelu_approx(&x));
+            eval(&compiled_geglu_activation(&gate, &x));
+            eval(&compiled_geglu_approx_activation(&gate, &x));
+            eval(&compiled_gelu_topk(&x, 0.75));
+            eval(&compiled_softcap(&x, 1.0));
+            let sdpa = unsafe {
+                compiled_softcap_sdpa(&attn_q, &attn_k, &attn_v, 4.0, 3.0, std::ptr::null())
+            };
+            eval(&sdpa);
+            let masked_sdpa = unsafe {
+                compiled_softcap_sdpa(
+                    &attn_q,
+                    &attn_k,
+                    &attn_v,
+                    4.0,
+                    3.0,
+                    attn_mask.as_ref().unwrap() as *const MlxArray,
+                )
+            };
+            eval(&masked_sdpa);
+        }
+    }
 
     for _ in 0..2 {
-        eval(&compiled_swiglu_activation(&gate, &x));
-        eval(&compiled_relu_squared(&x));
-        eval(&compiled_silu(&x));
-        eval(&compiled_gpt_oss_swiglu_activation(&gpt_linear, &gpt_glu));
-        eval(&compiled_gelu(&x));
-        eval(&compiled_gelu_approx(&x));
-        eval(&compiled_geglu_activation(&gate, &x));
-        eval(&compiled_geglu_approx_activation(&gate, &x));
-        eval(&compiled_gelu_topk(&x, 0.75));
-        eval(&compiled_softcap(&x, 1.0));
         eval(&compiled_clip_residual(&clip_x, &clip_y));
-        let sdpa =
-            unsafe { compiled_softcap_sdpa(&attn_q, &attn_k, &attn_v, 4.0, 3.0, std::ptr::null()) };
-        eval(&sdpa);
-        let masked_sdpa = unsafe {
-            compiled_softcap_sdpa(
-                &attn_q,
-                &attn_k,
-                &attn_v,
-                4.0,
-                3.0,
-                attn_mask.as_ref().unwrap() as *const MlxArray,
-            )
-        };
-        eval(&masked_sdpa);
     }
 
     let group_size = 64;
@@ -2587,63 +2602,66 @@ fn shapeless_compile_audit_harness() {
     let (gate_w, gate_s, gate_b) = random_quantized_weight(intermediate, hidden, group_size, bits);
     let (up_w, up_s, up_b) = random_quantized_weight(intermediate, hidden, group_size, bits);
     let (down_w, down_s, down_b) = random_quantized_weight(hidden, intermediate, group_size, bits);
-    let mlp_x = unsafe { random_normal(&[1, 1, hidden], dtype::FLOAT32, std::ptr::null()) };
+    let mlp_x_f32 = unsafe { random_normal(&[1, 1, hidden], dtype::FLOAT32, std::ptr::null()) };
 
-    for _ in 0..2 {
-        let precise = unsafe {
-            compiled_gelu_mlp_forward(
-                &mlp_x,
-                &gate_w,
-                &gate_s,
-                gate_b.as_ref().unwrap() as *const MlxArray,
-                &up_w,
-                &up_s,
-                up_b.as_ref().unwrap() as *const MlxArray,
-                &down_w,
-                &down_s,
-                down_b.as_ref().unwrap() as *const MlxArray,
-                group_size,
-                bits,
-                "affine",
-            )
-        };
-        eval(&precise);
-        let approximate = unsafe {
-            compiled_gelu_approx_mlp_forward(
-                &mlp_x,
-                &gate_w,
-                &gate_s,
-                gate_b.as_ref().unwrap() as *const MlxArray,
-                &up_w,
-                &up_s,
-                up_b.as_ref().unwrap() as *const MlxArray,
-                &down_w,
-                &down_s,
-                down_b.as_ref().unwrap() as *const MlxArray,
-                group_size,
-                bits,
-                "affine",
-            )
-        };
-        eval(&approximate);
-        let moe = unsafe {
-            compiled_moe_expert_forward(
-                &mlp_x,
-                &gate_w,
-                &gate_s,
-                gate_b.as_ref().unwrap() as *const MlxArray,
-                &up_w,
-                &up_s,
-                up_b.as_ref().unwrap() as *const MlxArray,
-                &down_w,
-                &down_s,
-                down_b.as_ref().unwrap() as *const MlxArray,
-                group_size,
-                bits,
-                "affine",
-            )
-        };
-        eval(&moe);
+    for audit_dtype in [dtype::FLOAT32, dtype::BFLOAT16, dtype::FLOAT16] {
+        let mlp_x = astype(&mlp_x_f32, audit_dtype);
+        for _ in 0..2 {
+            let precise = unsafe {
+                compiled_gelu_mlp_forward(
+                    &mlp_x,
+                    &gate_w,
+                    &gate_s,
+                    gate_b.as_ref().unwrap() as *const MlxArray,
+                    &up_w,
+                    &up_s,
+                    up_b.as_ref().unwrap() as *const MlxArray,
+                    &down_w,
+                    &down_s,
+                    down_b.as_ref().unwrap() as *const MlxArray,
+                    group_size,
+                    bits,
+                    "affine",
+                )
+            };
+            eval(&precise);
+            let approximate = unsafe {
+                compiled_gelu_approx_mlp_forward(
+                    &mlp_x,
+                    &gate_w,
+                    &gate_s,
+                    gate_b.as_ref().unwrap() as *const MlxArray,
+                    &up_w,
+                    &up_s,
+                    up_b.as_ref().unwrap() as *const MlxArray,
+                    &down_w,
+                    &down_s,
+                    down_b.as_ref().unwrap() as *const MlxArray,
+                    group_size,
+                    bits,
+                    "affine",
+                )
+            };
+            eval(&approximate);
+            let moe = unsafe {
+                compiled_moe_expert_forward(
+                    &mlp_x,
+                    &gate_w,
+                    &gate_s,
+                    gate_b.as_ref().unwrap() as *const MlxArray,
+                    &up_w,
+                    &up_s,
+                    up_b.as_ref().unwrap() as *const MlxArray,
+                    &down_w,
+                    &down_s,
+                    down_b.as_ref().unwrap() as *const MlxArray,
+                    group_size,
+                    bits,
+                    "affine",
+                )
+            };
+            eval(&moe);
+        }
     }
 
     let (scaled_gate_w, scaled_gate_s) =
@@ -2653,83 +2671,100 @@ fn shapeless_compile_audit_harness() {
     let (scaled_down_w, scaled_down_s) =
         random_block_float_weight(hidden, intermediate, 32, 4, "mxfp4");
     let global_scale = scale_scalar(1.25);
-    for _ in 0..2 {
-        let scaled = unsafe {
-            compiled_gelu_approx_mlp_forward_global_scale(
-                &mlp_x,
-                &scaled_gate_w,
-                &scaled_gate_s,
-                &scaled_up_w,
-                &scaled_up_s,
-                &scaled_down_w,
-                &scaled_down_s,
-                global_scale.as_ref().unwrap() as *const MlxArray,
-                global_scale.as_ref().unwrap() as *const MlxArray,
-                global_scale.as_ref().unwrap() as *const MlxArray,
-                32,
-                4,
-                "mxfp4",
-            )
-        };
-        eval(&scaled);
+    for audit_dtype in [dtype::FLOAT32, dtype::BFLOAT16, dtype::FLOAT16] {
+        let mlp_x = astype(&mlp_x_f32, audit_dtype);
+        for _ in 0..2 {
+            let scaled = unsafe {
+                compiled_gelu_approx_mlp_forward_global_scale(
+                    &mlp_x,
+                    &scaled_gate_w,
+                    &scaled_gate_s,
+                    &scaled_up_w,
+                    &scaled_up_s,
+                    &scaled_down_w,
+                    &scaled_down_s,
+                    global_scale.as_ref().unwrap() as *const MlxArray,
+                    global_scale.as_ref().unwrap() as *const MlxArray,
+                    global_scale.as_ref().unwrap() as *const MlxArray,
+                    32,
+                    4,
+                    "mxfp4",
+                )
+            };
+            eval(&scaled);
+        }
     }
 
     let (input_gate_w, input_gate_s, input_gate_b) =
         random_quantized_weight(hidden, hidden, group_size, bits);
     let (input_proj_w, input_proj_s, input_proj_b) =
         random_quantized_weight(hidden, hidden, group_size, bits);
-    let per_layer_input =
+    let per_layer_input_f32 =
         unsafe { random_normal(&[1, 1, hidden], dtype::FLOAT32, std::ptr::null()) };
-    let post_norm_w = ones(&[hidden], dtype::FLOAT32);
-    for _ in 0..2 {
-        let gated = unsafe {
-            compiled_per_layer_input_gate(
-                &mlp_x,
-                &per_layer_input,
-                &input_gate_w,
-                &input_gate_s,
-                input_gate_b.as_ref().unwrap() as *const MlxArray,
-                &input_proj_w,
-                &input_proj_s,
-                input_proj_b.as_ref().unwrap() as *const MlxArray,
-                &post_norm_w,
-                std::ptr::null(),
-                std::ptr::null(),
-                1e-6,
-                group_size,
-                bits,
-                "affine",
-            )
-        };
-        eval(&gated);
+    let post_norm_w_f32 = ones(&[hidden], dtype::FLOAT32);
+    for audit_dtype in [dtype::FLOAT32, dtype::BFLOAT16, dtype::FLOAT16] {
+        let mlp_x = astype(&mlp_x_f32, audit_dtype);
+        let per_layer_input = astype(&per_layer_input_f32, audit_dtype);
+        let post_norm_w = astype(&post_norm_w_f32, audit_dtype);
+        for _ in 0..2 {
+            let gated = unsafe {
+                compiled_per_layer_input_gate(
+                    &mlp_x,
+                    &per_layer_input,
+                    &input_gate_w,
+                    &input_gate_s,
+                    input_gate_b.as_ref().unwrap() as *const MlxArray,
+                    &input_proj_w,
+                    &input_proj_s,
+                    input_proj_b.as_ref().unwrap() as *const MlxArray,
+                    &post_norm_w,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    1e-6,
+                    group_size,
+                    bits,
+                    "affine",
+                )
+            };
+            eval(&gated);
+        }
     }
 
-    let q = from_slice_f32(&[0.1, 0.2, -0.3, 0.4, 0.5, -0.6, 0.7, 0.8], &[1, 2, 4]);
-    let k = from_slice_f32(&[-0.2, 0.3, 0.4, -0.5, 0.6, 0.7, -0.8, 0.9], &[1, 2, 4]);
-    let v = from_slice_f32(&[0.5, -0.4, 0.3, -0.2, 0.1, 0.8], &[1, 2, 3]);
-    let beta = from_slice_f32(&[0.25, 0.75], &[1, 2]);
-    let state = unsafe { random_normal(&[1, 2, 3, 4], dtype::FLOAT32, std::ptr::null()) };
-    let scalar_gate = from_slice_f32(&[0.8, 0.9], &[1, 2]);
-    let dim_gate = from_slice_f32(&[0.8, 0.9, 0.7, 0.6, 0.5, 0.75, 0.85, 0.95], &[1, 2, 4]);
-    for gate in [&scalar_gate, &dim_gate] {
-        for _ in 0..2 {
-            let mut output = UniquePtr::null();
-            let mut new_state = UniquePtr::null();
-            unsafe {
-                fused_gated_delta_decode_step(
-                    &q,
-                    &k,
-                    &v,
-                    gate,
-                    &beta,
-                    &state,
-                    dtype::FLOAT32,
-                    &mut output,
-                    &mut new_state,
-                );
+    let q_f32 = from_slice_f32(&[0.1, 0.2, -0.3, 0.4, 0.5, -0.6, 0.7, 0.8], &[1, 2, 4]);
+    let k_f32 = from_slice_f32(&[-0.2, 0.3, 0.4, -0.5, 0.6, 0.7, -0.8, 0.9], &[1, 2, 4]);
+    let v_f32 = from_slice_f32(&[0.5, -0.4, 0.3, -0.2, 0.1, 0.8], &[1, 2, 3]);
+    let beta_f32 = from_slice_f32(&[0.25, 0.75], &[1, 2]);
+    let state_f32 = unsafe { random_normal(&[1, 2, 3, 4], dtype::FLOAT32, std::ptr::null()) };
+    let scalar_gate_f32 = from_slice_f32(&[0.8, 0.9], &[1, 2]);
+    let dim_gate_f32 = from_slice_f32(&[0.8, 0.9, 0.7, 0.6, 0.5, 0.75, 0.85, 0.95], &[1, 2, 4]);
+    for audit_dtype in [dtype::FLOAT32, dtype::BFLOAT16, dtype::FLOAT16] {
+        let q = astype(&q_f32, audit_dtype);
+        let k = astype(&k_f32, audit_dtype);
+        let v = astype(&v_f32, audit_dtype);
+        let beta = astype(&beta_f32, audit_dtype);
+        let state = astype(&state_f32, audit_dtype);
+        let scalar_gate = astype(&scalar_gate_f32, audit_dtype);
+        let dim_gate = astype(&dim_gate_f32, audit_dtype);
+        for gate in [&scalar_gate, &dim_gate] {
+            for _ in 0..2 {
+                let mut output = UniquePtr::null();
+                let mut new_state = UniquePtr::null();
+                unsafe {
+                    fused_gated_delta_decode_step(
+                        &q,
+                        &k,
+                        &v,
+                        gate,
+                        &beta,
+                        &state,
+                        audit_dtype,
+                        &mut output,
+                        &mut new_state,
+                    );
+                }
+                eval(&output);
+                eval(&new_state);
             }
-            eval(&output);
-            eval(&new_state);
         }
     }
 
@@ -2772,8 +2807,19 @@ fn shapeless_compile_audit_harness() {
         let fields: Vec<_> = line.split('\t').collect();
         let calls: usize = fields[1].parse().unwrap();
         let warmed: usize = fields[3].parse().unwrap();
-        assert!(calls >= 2, "{site} must cover first-use and warm calls");
-        assert!(warmed >= 1, "{site} must warm at least one input signature");
+        let expected_signatures = if site == "compiled_clip_residual" {
+            1
+        } else {
+            3
+        };
+        assert!(
+            calls >= expected_signatures * 2,
+            "{site} must cover first-use and warm calls for every dtype"
+        );
+        assert!(
+            warmed >= expected_signatures,
+            "{site} must warm every audited dtype signature"
+        );
         assert_eq!(fields[4], "PASS", "{site} failed: {line}");
     }
 }
