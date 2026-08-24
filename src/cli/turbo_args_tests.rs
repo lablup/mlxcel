@@ -22,7 +22,7 @@
 
 use mlxcel_core::cache::KVCacheMode;
 
-use super::{TurboKvCacheArgs, resolve_kv_cache_mode};
+use super::{TurboKvCacheArgs, resolve_effective_kv_cache_mode, resolve_kv_cache_mode};
 // `std::env::set_var` / `remove_var` are not thread-safe. Tests that touch
 // the process environment must serialize through the crate-wide
 // `ENV_LOCK` — a per-module lock would race with the env
@@ -155,4 +155,100 @@ fn resolve_split_flags_symmetric_turbo3_is_rejected_with_helpful_error() {
         err.contains("fp16   / turbo3"),
         "error must list the supported `fp16 / turbo3` row, got: {err}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Model-aware second stage (issue #1350)
+// ---------------------------------------------------------------------------
+
+/// Write a minimal model directory carrying just the `model_type` the
+/// resolver reads.
+fn model_dir_with_type(model_type: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("config.json"),
+        format!("{{\"model_type\": \"{model_type}\"}}"),
+    )
+    .expect("write config.json");
+    dir
+}
+
+/// The reproduction from issue #1350: `--kv-cache-mode turbo4` on
+/// `glm4-flash-4bit` produced 40 tokens of `!`. The mode never reaches the
+/// cache now.
+#[test]
+fn turbo4_on_an_mla_latent_family_resolves_to_fp16_with_a_warning() {
+    let dir = model_dir_with_type("glm4_moe_lite");
+    let (mode, warning) = resolve_effective_kv_cache_mode(KVCacheMode::Turbo4, dir.path());
+    assert_eq!(mode, KVCacheMode::Fp16);
+    let warning = warning.expect("a substitution must be explained");
+    assert!(warning.contains("glm4_moe_lite"), "{warning}");
+    assert!(warning.contains("turbo4"), "{warning}");
+}
+
+/// The quieter half of the same defect: the asymmetric modes quantize `k_pe`,
+/// a key stream, on these families. They are refused too.
+#[test]
+fn asymmetric_modes_on_an_mla_latent_family_resolve_to_fp16() {
+    let dir = model_dir_with_type("kimi_linear");
+    for requested in [
+        KVCacheMode::Turbo4Asym,
+        KVCacheMode::Turbo3Asym,
+        KVCacheMode::Turbo4Delegated,
+        KVCacheMode::Int8,
+    ] {
+        let (mode, warning) = resolve_effective_kv_cache_mode(requested, dir.path());
+        assert_eq!(mode, KVCacheMode::Fp16, "{requested}");
+        assert!(warning.is_some(), "{requested}");
+    }
+}
+
+/// The fallback the CLI banner has always described.
+#[test]
+fn turbo4_on_a_non_allowlisted_family_resolves_to_turbo4_asym() {
+    let dir = model_dir_with_type("llama");
+    let (mode, warning) = resolve_effective_kv_cache_mode(KVCacheMode::Turbo4, dir.path());
+    assert_eq!(mode, KVCacheMode::Turbo4Asym);
+    assert!(warning.expect("must warn").contains("llama"));
+}
+
+#[test]
+fn turbo4_on_an_allowlisted_family_is_left_alone() {
+    let dir = model_dir_with_type("qwen3_5");
+    let (mode, warning) = resolve_effective_kv_cache_mode(KVCacheMode::Turbo4, dir.path());
+    assert_eq!(mode, KVCacheMode::Turbo4);
+    assert!(warning.is_none());
+}
+
+/// An ordinary family keeps every mode it could run before, so this stage
+/// cannot change what an existing deployment serves.
+#[test]
+fn an_ordinary_family_keeps_every_other_mode() {
+    let dir = model_dir_with_type("llama");
+    for requested in [
+        KVCacheMode::Fp16,
+        KVCacheMode::Int8,
+        KVCacheMode::Turbo4Asym,
+        KVCacheMode::Turbo3Asym,
+        KVCacheMode::Turbo4Delegated,
+    ] {
+        let (mode, warning) = resolve_effective_kv_cache_mode(requested, dir.path());
+        assert_eq!(mode, requested);
+        assert!(warning.is_none());
+    }
+}
+
+/// A directory with no readable `config.json` must pass the request through
+/// rather than invent a downgrade for a model it could not identify.
+#[test]
+fn an_unreadable_config_passes_the_requested_mode_through() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (mode, warning) = resolve_effective_kv_cache_mode(KVCacheMode::Turbo4Asym, dir.path());
+    assert_eq!(mode, KVCacheMode::Turbo4Asym);
+    assert!(warning.is_none());
+
+    std::fs::write(dir.path().join("config.json"), "not json").expect("write");
+    let (mode, warning) = resolve_effective_kv_cache_mode(KVCacheMode::Turbo4Asym, dir.path());
+    assert_eq!(mode, KVCacheMode::Turbo4Asym);
+    assert!(warning.is_none());
 }

@@ -14,6 +14,7 @@
 
 use super::default_generation_settings;
 use crate::server::config::ServerConfig;
+use crate::server::types::PropsResponse;
 
 #[test]
 fn props_reports_the_resolved_dry_sequence_breakers() {
@@ -110,4 +111,47 @@ fn props_reports_all_five_dry_fields() {
     assert_eq!(settings["dry_allowed_length"], serde_json::json!(3));
     assert_eq!(settings["dry_penalty_last_n"], serde_json::json!(64));
     assert_eq!(settings["dry_sequence_breakers"], serde_json::json!([198]));
+}
+
+/// `/props` reports the KV cache mode and `--kv-bits` the server actually
+/// resolved (issue #1350).
+///
+/// `docs/turbo-kv-cache.md` tells operators that the mode announced by the CLI
+/// banner, the startup log and `/props` is the effective mode rather than the
+/// requested one. `ServerStartupInput::into_startup_config` performs the
+/// substitution before `ServerConfig` is built, so the payload only has to
+/// carry the resolved value; this test is what keeps the field from being
+/// dropped and the doc sentence from going stale.
+#[test]
+fn props_reports_the_effective_kv_cache_mode_and_kv_bits() {
+    let response = PropsResponse {
+        default_generation_settings: default_generation_settings(&ServerConfig::default()),
+        total_slots: 1,
+        kv_cache_mode: mlxcel_core::cache::KVCacheMode::Turbo4Asym.to_string(),
+        kv_bits: 4,
+    };
+
+    let payload = serde_json::to_value(&response).expect("PropsResponse serializes");
+    // The `--kv-cache-mode` spelling, not the Rust variant name: an operator
+    // has to be able to paste it straight back onto the flag.
+    assert_eq!(payload["kv_cache_mode"], serde_json::json!("fp16+turbo4"));
+    assert_eq!(payload["kv_bits"], serde_json::json!(4));
+}
+
+/// The default server reports `fp16` and `0`, not an absent key. Present-but-
+/// default and absent are different answers to "is a quantized KV cache in
+/// force", which is the same gap #1103 closed for `dry_sequence_breakers`.
+#[test]
+fn props_reports_the_kv_keys_even_on_a_default_server() {
+    let config = ServerConfig::default();
+    let response = PropsResponse {
+        default_generation_settings: default_generation_settings(&config),
+        total_slots: config.n_parallel,
+        kv_cache_mode: config.kv_cache_mode.to_string(),
+        kv_bits: config.batch_kv_quant.bits,
+    };
+
+    let payload = serde_json::to_value(&response).expect("PropsResponse serializes");
+    assert_eq!(payload["kv_cache_mode"], serde_json::json!("fp16"));
+    assert_eq!(payload["kv_bits"], serde_json::json!(0));
 }

@@ -48,12 +48,12 @@
 //!
 //! Only `KVCacheMode::Fp16` and non-paged backing. The INT8 and Turbo3/Turbo4
 //! modes quantize along the head dimension with a per-token scale, which is
-//! calibrated for a per-head K/V row, not for a 512-wide shared latent whose
-//! reconstruction error is amplified by every one of the `num_heads` query
-//! heads that read it. The paged pool allocates `[num_blocks, page_size, Hkv,
-//! head_dim]` tensors with one head dim for both sides, which the asymmetric
-//! `(512, 64)` split cannot fill. Both are declined at wrap time with a
-//! message rather than silently mis-served.
+//! calibrated for a per-head K/V row, not for a shared latent hundreds of
+//! elements wide whose reconstruction error is amplified by every one of the
+//! `num_heads` query heads that read it. The paged pool allocates
+//! `[num_blocks, page_size, Hkv, head_dim]` tensors with one head dim for both
+//! sides, which the asymmetric `(512, 64)` split cannot fill. Both are declined
+//! at wrap time with a message rather than silently mis-served.
 
 use cxx::UniquePtr;
 
@@ -83,6 +83,97 @@ pub const fn decompressed_bytes_per_token(
     geometry.num_heads * (geometry.q_head_dim() + geometry.v_head_dim) * bytes_per_element
 }
 
+/// `model_type` values whose attention stores an MLA `(kv_latent, k_pe)` pair
+/// in one shared [`KVCache`] on **every** step, with no decompressed fallback.
+///
+/// Each of these families calls `cache.update_and_fetch(kv_latent, k_pe)`
+/// unconditionally, so the cache's "K" slot is at least `kv_lora_rank` wide and
+/// its "V" slot is `qk_rope_head_dim` wide (64). Neither slot is a per-head K/V
+/// row. That is the packing [`MlaLatentCache`] names, and the reason
+/// [`latent_layout_supports_mode`] is the rule for all of them.
+///
+/// The "K" slot is not one fixed width across the list. `kv_lora_rank` is 512
+/// in the shipping checkpoints of every family here, and it is the serde
+/// default wherever one is declared. On top of that, `deepseek_v32`,
+/// `deepseek_v3.2` and `glm_moe_dsa` concatenate the `index_head_dim`-wide DSA
+/// indexer key onto the same slot before caching it
+/// (`src/models/deepseek_v32.rs`), which makes it 640 wide at the default
+/// `index_head_dim` of 128. A codebook and a sign vector calibrated from the
+/// 64-wide "V" slot are wrong for any of those widths.
+///
+/// `deepseek_v2` is deliberately **absent**. It asks
+/// [`MlaLatentCache::supports`] first and falls back to the decompressed
+/// per-head K/V layout when the cache is not FP16 (`src/models/deepseek_v2.rs`),
+/// so a quantized mode there is applied to ordinary per-head rows and needs no
+/// family-level override. Adding it here would take away a working
+/// configuration rather than fixing a broken one.
+///
+/// Used by: [`caches_mla_latent_pair`].
+pub static MLA_LATENT_CACHE_FAMILIES: &[&str] = &[
+    "glm4_moe_lite",
+    "deepseek_v3",
+    // `deepseek_v32` and the `deepseek_v3.2` spelling of the same
+    // `config.json` value both resolve to `DeepSeekV32Model`
+    // (`src/models/detection.rs`), and `glm_moe_dsa` wraps that model
+    // wholesale (`src/models/glm_moe_dsa.rs`). All three share the single
+    // unconditional `cache.update_and_fetch(cache_keys, k_pe)` in
+    // `src/models/deepseek_v32.rs` and consult neither
+    // [`MlaLatentCache::supports`] nor the cache's mode, so they have no
+    // decompressed fallback to land on.
+    "deepseek_v32",
+    "deepseek_v3.2",
+    "glm_moe_dsa",
+    "kimi_linear",
+    "longcat_flash_ngram",
+];
+
+/// Whether `model_type` names a family that always caches an MLA latent pair.
+///
+/// `model_type` is the lowercase `config.json` string, matching the canonical
+/// key used by the model detection path. The comparison is exact rather than a
+/// prefix walk: the latent packing is a property of one concrete attention
+/// implementation, so a neighbouring `model_type` that merely shares a prefix
+/// must not inherit the answer.
+///
+/// Used by: `cache::turbo::allowlist::resolve_kv_cache_mode_for_model`.
+#[must_use]
+pub fn caches_mla_latent_pair(model_type: &str) -> bool {
+    let needle = model_type.trim().to_ascii_lowercase();
+    MLA_LATENT_CACHE_FAMILIES
+        .iter()
+        .any(|&family| needle == family)
+}
+
+/// The rule: an MLA latent cache holds FP16 and nothing else.
+///
+/// Every quantized [`KVCacheMode`] calibrates a per-token codebook from one
+/// head dimension and applies it to both stored streams. A latent cache has two
+/// different widths in those two slots (`kv_lora_rank` and
+/// `qk_rope_head_dim`), and neither slot is a per-head K/V row:
+///
+/// * Symmetric `Turbo4` derives its sign vectors and codebook from the "V"
+///   width and then applies them to the "K" slot as well, which is
+///   `kv_lora_rank` wide. The sign vectors are read past their end.
+/// * The asymmetric modes quantize only the "V" slot, but here that slot holds
+///   `k_pe`, the RoPE **key** stream. They therefore compress a key and leave
+///   the latent (which is both K and V after absorption) exact, which is the
+///   opposite of the "FP16 K, quantized V" contract those modes document.
+///
+/// Stated once here so [`MlaLatentCache::supports`] and the model-level mode
+/// resolver cannot drift apart. Returns the operator-facing reason on refusal.
+///
+/// Used by: [`MlaLatentCache::supports`],
+/// `cache::turbo::allowlist::resolve_kv_cache_mode_for_model`.
+pub fn latent_layout_supports_mode(mode: KVCacheMode) -> Result<(), String> {
+    if mode == KVCacheMode::Fp16 {
+        return Ok(());
+    }
+    Err(format!(
+        "mla: absorbed decode needs an FP16 KV cache; this cache is {mode} and its per-token \
+         quantization is calibrated for per-head K/V rows, not a shared latent"
+    ))
+}
+
 /// A [`KVCache`] used as a compressed-latent MLA cache.
 ///
 /// Borrowed rather than owned so a family keeps handing `&mut [KVCache]`
@@ -107,13 +198,7 @@ impl<'a> MlaLatentCache<'a> {
     /// and decompressed rows.
     pub fn supports(cache: &KVCache, geometry: MlaGeometry) -> Result<(), String> {
         geometry.check()?;
-        if cache.mode != KVCacheMode::Fp16 {
-            return Err(format!(
-                "mla: absorbed decode needs an FP16 KV cache; this cache is {} and its per-token \
-                 quantization is calibrated for per-head K/V rows, not a shared latent",
-                cache.mode
-            ));
-        }
+        latent_layout_supports_mode(cache.mode)?;
         if cache.is_paged_backed() {
             return Err(
                 "mla: absorbed decode cannot use a paged-backed cache; the pool's \
@@ -279,6 +364,72 @@ mod tests {
         assert_eq!(cache.trim(2), 2);
         let view = MlaLatentCache::wrap(&mut cache, G).unwrap();
         assert_eq!(view.seq_len(), 4);
+    }
+
+    /// The four families that always cache a latent pair, and the one that
+    /// does not. `deepseek_v2` has a decompressed fallback, so a quantized
+    /// mode there lands on ordinary per-head K/V rows and must keep working.
+    #[test]
+    fn only_the_fallback_less_families_are_latent_families() {
+        for family in [
+            "glm4_moe_lite",
+            "deepseek_v3",
+            "deepseek_v32",
+            "deepseek_v3.2",
+            "glm_moe_dsa",
+            "kimi_linear",
+            "longcat_flash_ngram",
+        ] {
+            assert!(caches_mla_latent_pair(family), "{family}");
+        }
+        assert!(!caches_mla_latent_pair("deepseek_v2"));
+        assert!(!caches_mla_latent_pair("llama"));
+        assert!(!caches_mla_latent_pair(""));
+    }
+
+    /// The DSA trio needs its own entries, not coverage inherited from
+    /// `deepseek_v3`. `caches_mla_latent_pair` matches exactly, so a family
+    /// whose `model_type` merely extends an entry is not covered by it, and
+    /// `glm_moe_dsa` shares nothing textual with the model it wraps.
+    #[test]
+    fn the_dsa_families_are_listed_in_their_own_right() {
+        for family in ["deepseek_v32", "deepseek_v3.2", "glm_moe_dsa"] {
+            assert!(
+                MLA_LATENT_CACHE_FAMILIES.contains(&family),
+                "{family} must be listed explicitly; `deepseek_v3` does not cover it"
+            );
+        }
+    }
+
+    /// Exact match, not a prefix walk: the latent packing belongs to one
+    /// concrete attention implementation, and a neighbouring `model_type` that
+    /// happens to share a prefix must not inherit the answer.
+    #[test]
+    fn latent_family_lookup_is_exact_and_case_insensitive() {
+        assert!(caches_mla_latent_pair("  GLM4_MoE_Lite  "));
+        assert!(caches_mla_latent_pair("  DeepSeek_V3.2  "));
+        assert!(!caches_mla_latent_pair("glm4_moe_lite_vl"));
+        assert!(!caches_mla_latent_pair("glm4_moe"));
+        assert!(!caches_mla_latent_pair("glm_moe"));
+        assert!(!caches_mla_latent_pair("deepseek_v32_vl"));
+    }
+
+    /// The rule `MlaLatentCache::supports` has always applied, now callable on
+    /// its own so the model-level resolver states it once rather than twice.
+    #[test]
+    fn latent_layout_accepts_fp16_and_nothing_else() {
+        assert!(latent_layout_supports_mode(KVCacheMode::Fp16).is_ok());
+        for mode in [
+            KVCacheMode::Int8,
+            KVCacheMode::Turbo4Asym,
+            KVCacheMode::Turbo3Asym,
+            KVCacheMode::Turbo4,
+            KVCacheMode::Turbo4Delegated,
+        ] {
+            let err = latent_layout_supports_mode(mode).unwrap_err();
+            assert!(err.contains("FP16"), "{err}");
+            assert!(err.contains(&mode.to_string()), "{err}");
+        }
     }
 
     #[test]

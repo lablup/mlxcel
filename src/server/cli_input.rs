@@ -521,13 +521,67 @@ impl ServerStartupInput {
         // `--kv-skip-last-layer` flags. When `kv_bits == 0` this falls
         // through to the disabled default which is bit-exact equivalent
         // to the legacy `kv_cache_mode`-only path.
-        let batch_kv_quant = resolve_batch_kv_quant_config(
+        let mut batch_kv_quant = resolve_batch_kv_quant_config(
             self.kv_bits,
             self.kv_group_size,
             self.kv_quant_scheme.as_deref(),
             self.kv_skip_last_layer,
         )
         .map_err(|e| anyhow::anyhow!("batch KV cache quant error: {e}"))?;
+
+        // issue #1350: substitute the KV cache mode this model family can
+        // really run. Done here, at the single fallible startup boundary, so
+        // `ServerStartupConfig::kv_cache_mode` is already the effective mode by
+        // the time the scheduler, the paged layout and `/props` read it, and
+        // the server cannot log one mode while allocating another.
+        //
+        // `--kv-bits` is a second, independent route to a quantized cache
+        // (`BatchKvQuantConfig::base_mode` maps `--kv-quant-scheme turboquant`
+        // to Turbo4Asym and `--kv-bits 8` to Int8, and the scheduler prefers
+        // that table over `kv_cache_mode`), so a family that cannot hold a
+        // quantized cache has to be taken off both.
+        //
+        // The notices are collected rather than logged: this runs before
+        // `initialize_server_logging` installs a tracing subscriber, so a
+        // `tracing::warn!` here would be written to nothing. `start_server`
+        // emits them once logging exists.
+        let mut kv_cache_mode_notices = Vec::new();
+        let (kv_cache_mode, kv_mode_warning) =
+            crate::cli::turbo_args::resolve_effective_kv_cache_mode(
+                kv_cache_mode,
+                &self.model_path,
+            );
+        kv_cache_mode_notices.extend(kv_mode_warning);
+        if batch_kv_quant.is_enabled() {
+            let requested_batch_mode = batch_kv_quant.base_mode();
+            // The resolver's own warning is deliberately discarded here. It is
+            // phrased for `--kv-cache-mode`, so an operator who passed
+            // `--kv-bits 4 --kv-quant-scheme turboquant` would be told that
+            // `--kv-cache-mode fp16+turbo4` was refused: a flag they never
+            // passed, on a line nearly identical to the one below. The line
+            // below names the flag that was actually set.
+            let (batch_effective, _) = crate::cli::turbo_args::resolve_effective_kv_cache_mode(
+                requested_batch_mode,
+                &self.model_path,
+            );
+            // `!=` rather than `== Fp16`. Fp16 is the only landing place a
+            // `--kv-bits` request can have today (rule 2 of
+            // `resolve_kv_cache_mode_for_model` fires only on a `Turbo4`
+            // request and `base_mode` never returns one), but the condition
+            // that matters is "the batch table asked for a mode this family
+            // cannot hold", not which mode it was moved to. Written this way,
+            // a future rule that substitutes something other than Fp16 still
+            // disables the batch table instead of silently keeping it.
+            if batch_effective != requested_batch_mode {
+                kv_cache_mode_notices.push(format!(
+                    "warning: disabling batched KV quantization (--kv-bits {}) for this model \
+                     family; it selects a {requested_batch_mode} KV cache, which this family \
+                     cannot hold. Serving its KV caches at fp16",
+                    self.kv_bits
+                ));
+                batch_kv_quant.bits = 0;
+            }
+        }
 
         // H1: validate `--max-kv-size` bounds before we lower
         // the raw `usize` into the semantic `Option<usize>` downstream.
@@ -655,6 +709,7 @@ impl ServerStartupInput {
             chat_template_kwargs,
             prompt_cache,
             kv_cache_mode,
+            kv_cache_mode_notices,
             batch_kv_quant,
             // lower the raw `usize` (0 = disabled) into a
             // semantic `Option<usize>` after `resolve_max_kv_size` has

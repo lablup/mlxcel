@@ -56,6 +56,7 @@ use std::path::Path;
 
 use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::cache::turbo::is_symmetric_turbo_allowed;
+use mlxcel_core::mla::caches_mla_latent_pair;
 
 use crate::execution::config_fields;
 use crate::execution::kv_arch::{KvArchKind, estimate_kv_arch_from_config};
@@ -179,6 +180,11 @@ impl KvCacheModeAdvice {
 /// - MLA and pure-SSM families never receive a Turbo (Walsh-Hadamard) mode,
 ///   because their cache dimension is not a power of two (MLA) or absent
 ///   (SSM).
+/// - An MLA family that always caches the latent pair
+///   ([`caches_mla_latent_pair`]) never receives any quantized mode, not even
+///   [`KVCacheMode::Int8`]. Those families have their request substituted back
+///   to fp16 at startup (issue #1350), so advice to the contrary would name a
+///   mode the binary refuses.
 #[must_use]
 pub fn recommend_kv_cache_mode(
     arch_kind: KvArchKind,
@@ -206,6 +212,16 @@ pub fn recommend_kv_cache_mode(
                     Fp16,
                     None,
                     "MLA already caches a compact low-rank latent, so at short context the KV footprint is small. Keep fp16.",
+                ),
+                // A family that always caches the `(kv_latent, k_pe)` pair has
+                // no decompressed fallback, so every quantized mode (int8
+                // included) is refused and resolved back to fp16 at startup
+                // (issue #1350). Advising int8 there would name a mode the
+                // binary rejects, which is worse than advising nothing.
+                Medium | Long if caches_mla_latent_pair(model_type) => (
+                    Fp16,
+                    None,
+                    "This family caches the MLA (kv_latent, k_pe) pair in one KV cache with no decompressed fallback, so every quantized mode is mis-calibrated for it and is substituted back to fp16 at startup. See the MLA latent section of docs/turbo-kv-cache.md. Keep fp16.",
                 ),
                 Medium | Long => (
                     Int8,
