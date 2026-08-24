@@ -307,7 +307,7 @@ jobs:
         # name can never reach shell parsing; the script reads BASE_REF as input.
         env:
           BASE_REF: origin/${{ github.base_ref }}
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.token || '' }}
         run: |
           bash scripts/ci/check_cross_repo_refs_test.sh
           python3 scripts/ci/check_cross_repo_refs.py

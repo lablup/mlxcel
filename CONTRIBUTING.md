@@ -112,10 +112,12 @@ are still flagged regardless of the number. Offline, unauthenticated, or
 failed-API runs stay advisory, print the fallback reason, and leave non-upstream
 bare refs in the manual-review bucket.
 
-CI runs the same check on every pull request (advisory) and passes
-`github.token` when available so the live boundary is exercised there too. The
-same CI step also runs `scripts/ci/check_cross_repo_refs_test.sh`, the
-companion shell test for the classifier.
+CI runs the same check on every pull request (advisory). Same-repository pull
+requests pass `github.token` so the live boundary is exercised there too; fork
+pull requests intentionally use the offline fallback rather than exposing the
+base repository's token to PR-controlled code. The same CI step also runs
+`scripts/ci/check_cross_repo_refs_test.sh`, the companion shell test for the
+classifier.
 
 ### Adding a new model family
 
