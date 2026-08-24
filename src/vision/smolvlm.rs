@@ -52,6 +52,9 @@
 //!
 //! Used by: `loading::load_smolvlm_vlm`, `multimodal::vlm_runtime`.
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::{DecodeBatchContext, LanguageModel};
 use mlxcel_core::layers::{KVCache, UnifiedLinear};
@@ -170,6 +173,8 @@ pub struct SmolVLMModel {
     /// Token id of `<global-img>` (opens the global-image block). `0` when the
     /// tokenizer does not expose it.
     pub global_image_token_id: i32,
+    /// Tokenized SmolVLM prompt marker cache keyed by the exact marker string.
+    pub prompt_marker_cache: Mutex<HashMap<String, Vec<i32>>>,
     /// Number of image feature tokens emitted per tile after pixel-shuffle
     /// compression (`(image_size / patch_size / scale_factor)^2`).
     pub num_image_token: usize,
@@ -178,6 +183,26 @@ pub struct SmolVLMModel {
 }
 
 impl SmolVLMModel {
+    /// Tokenize a SmolVLM marker string with `add_special_tokens = false`,
+    /// caching the result so repeated row/global markers do not round-trip
+    /// through the tokenizer for every request.
+    pub fn encode_prompt_marker<E>(&self, marker: &str, encode: &mut E) -> Vec<i32>
+    where
+        E: FnMut(&str, bool) -> Vec<i32>,
+    {
+        if let Ok(cache) = self.prompt_marker_cache.lock()
+            && let Some(tokens) = cache.get(marker)
+        {
+            return tokens.clone();
+        }
+
+        let tokens = encode(marker, false);
+        if let Ok(mut cache) = self.prompt_marker_cache.lock() {
+            cache.insert(marker.to_string(), tokens.clone());
+        }
+        tokens
+    }
+
     /// Compute merged input embeddings for a request that carries pixel values.
     /// Mirrors `Model.get_input_embeddings` in upstream `idefics3.py`.
     ///

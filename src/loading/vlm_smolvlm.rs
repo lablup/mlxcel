@@ -52,6 +52,98 @@ const DEFAULT_IMAGE_TOKEN_ID: i32 = 49153;
 /// Default pixel-shuffle compression factor.
 const DEFAULT_SCALE_FACTOR: i32 = 2;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SmolVlmProcessorSettings {
+    do_image_splitting: bool,
+    longest_edge: usize,
+    tile_size: usize,
+    mean: [f32; 3],
+    std: [f32; 3],
+}
+
+fn read_json_file(path: &Path) -> Option<Value> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+}
+
+fn nested_longest_edge(config: Option<&Value>, key: &str) -> Option<usize> {
+    config
+        .and_then(|c| c.get(key))
+        .and_then(|s| s.get("longest_edge"))
+        .and_then(|v| v.as_u64())
+        .map(|v| v.max(1) as usize)
+}
+
+fn rgb_triplet(config: Option<&Value>, key: &str) -> Option<[f32; 3]> {
+    let values = config.and_then(|c| c.get(key)).and_then(|v| v.as_array())?;
+    if values.len() != 3 {
+        return None;
+    }
+    Some([
+        values[0].as_f64()? as f32,
+        values[1].as_f64()? as f32,
+        values[2].as_f64()? as f32,
+    ])
+}
+
+fn bool_key(config: Option<&Value>, key: &str) -> Option<bool> {
+    config.and_then(|c| c.get(key)).and_then(|v| v.as_bool())
+}
+
+fn declares_smolvlm_processor(preprocessor: Option<&Value>, processor: Option<&Value>) -> bool {
+    let names = [
+        preprocessor
+            .and_then(|c| c.get("image_processor_type"))
+            .and_then(|v| v.as_str()),
+        processor
+            .and_then(|c| c.get("image_processor_type"))
+            .and_then(|v| v.as_str()),
+        processor
+            .and_then(|c| c.get("processor_class"))
+            .and_then(|v| v.as_str()),
+    ];
+    names.into_iter().flatten().any(|name| {
+        matches!(
+            name,
+            "Idefics3ImageProcessor"
+                | "SmolVLMImageProcessor"
+                | "Idefics3Processor"
+                | "SmolVLMProcessor"
+        )
+    })
+}
+
+fn smolvlm_processor_settings(
+    preprocessor: Option<&Value>,
+    processor: Option<&Value>,
+    vision_image_size: usize,
+) -> SmolVlmProcessorSettings {
+    let tile_size = nested_longest_edge(preprocessor, "max_image_size")
+        .or_else(|| nested_longest_edge(processor, "max_image_size"))
+        .unwrap_or(vision_image_size.max(1));
+    let longest_edge = nested_longest_edge(preprocessor, "size")
+        .or_else(|| nested_longest_edge(processor, "size"))
+        .unwrap_or(tile_size.max(1) * 4);
+    let do_image_splitting = bool_key(preprocessor, "do_image_splitting")
+        .or_else(|| bool_key(processor, "do_image_splitting"))
+        .unwrap_or_else(|| declares_smolvlm_processor(preprocessor, processor));
+    let mean = rgb_triplet(preprocessor, "image_mean")
+        .or_else(|| rgb_triplet(processor, "image_mean"))
+        .unwrap_or(vision::processors::smolvlm::DEFAULT_SIGLIP_MEAN);
+    let std = rgb_triplet(preprocessor, "image_std")
+        .or_else(|| rgb_triplet(processor, "image_std"))
+        .unwrap_or(vision::processors::smolvlm::DEFAULT_SIGLIP_STD);
+
+    SmolVlmProcessorSettings {
+        do_image_splitting,
+        longest_edge,
+        tile_size,
+        mean,
+        std,
+    }
+}
+
 /// Resolve a special token id from the tokenizer's `added_tokens.json`,
 /// returning `0` (unknown) when the file or key is absent.
 fn resolve_added_token_id(added_tokens: Option<&Value>, name: &str) -> i32 {
@@ -235,11 +327,11 @@ pub(crate) fn load_smolvlm_vlm(model_path: &Path) -> Result<LoadedModel> {
         SmolVLMConnector::from_weights(&weights, connector_prefix, scale_factor, group_size, bits)
             .map_err(|e| anyhow::anyhow!("Failed to load SmolVLM connector: {}", e))?;
 
-    // Image processor. The splitting policy comes from processor_config.json
-    // when present.
-    let processor_config = std::fs::read_to_string(model_path.join("processor_config.json"))
-        .ok()
-        .and_then(|content| serde_json::from_str::<Value>(&content).ok());
+    // Image processor. The splitting policy and resize sizes live in
+    // preprocessor_config.json for Idefics3 / SmolVLM checkpoints. Fall back to
+    // legacy processor_config.json keys for older local conversions.
+    let preprocessor_config = read_json_file(&model_path.join("preprocessor_config.json"));
+    let processor_config = read_json_file(&model_path.join("processor_config.json"));
 
     // Derive num_image_token from the vision config so it always equals the
     // runtime pixel_shuffle output per tile, `(side / scale_factor)^2`, where
@@ -250,22 +342,18 @@ pub(crate) fn load_smolvlm_vlm(model_path: &Path) -> Result<LoadedModel> {
     let side = (image_size / vision_config.patch_size.max(1)) / (scale_factor.max(1) as usize);
     let num_image_token = (side * side).max(1);
 
-    let do_image_splitting = processor_config
-        .as_ref()
-        .and_then(|c| c.get("do_image_splitting"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    // Cap the tile grid using the outer longest-edge budget when available.
-    let max_splits_per_side = processor_config
-        .as_ref()
-        .and_then(|c| c.get("size"))
-        .and_then(|s| s.get("longest_edge"))
-        .and_then(|v| v.as_u64())
-        .map(|edge| (edge as usize).div_ceil(image_size.max(1)).max(1))
-        .unwrap_or(4);
-
-    let processor = SmolVLMProcessor::new(image_size, do_image_splitting, max_splits_per_side);
+    let processor_settings = smolvlm_processor_settings(
+        preprocessor_config.as_ref(),
+        processor_config.as_ref(),
+        image_size,
+    );
+    let processor = SmolVLMProcessor::new(
+        processor_settings.tile_size,
+        processor_settings.do_image_splitting,
+        processor_settings.longest_edge,
+        processor_settings.mean,
+        processor_settings.std,
+    );
 
     // Resolve token ids from config + the tokenizer's added tokens.
     let image_token_id = full_config
@@ -294,6 +382,7 @@ pub(crate) fn load_smolvlm_vlm(model_path: &Path) -> Result<LoadedModel> {
         image_token_id,
         fake_image_token_id,
         global_image_token_id,
+        prompt_marker_cache: Default::default(),
         num_image_token,
         eos_token_ids,
     };
@@ -303,8 +392,70 @@ pub(crate) fn load_smolvlm_vlm(model_path: &Path) -> Result<LoadedModel> {
 
 #[cfg(test)]
 mod tests {
-    use super::remap_smolvlm_text_key;
+    use super::{read_json_file, remap_smolvlm_text_key, smolvlm_processor_settings};
     use serde_json::json;
+
+    #[test]
+    fn policy_read_from_preprocessor_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("preprocessor_config.json"),
+            serde_json::to_string(&json!({
+                "image_processor_type": "Idefics3ImageProcessor",
+                "do_image_splitting": true,
+                "size": { "longest_edge": 1456 },
+                "max_image_size": { "longest_edge": 364 },
+                "image_mean": [0.5, 0.4, 0.3],
+                "image_std": [0.2, 0.3, 0.4]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("processor_config.json"),
+            serde_json::to_string(&json!({
+                "processor_class": "Idefics3Processor",
+                "image_seq_len": 169
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let preprocessor = read_json_file(&dir.path().join("preprocessor_config.json"));
+        let processor = read_json_file(&dir.path().join("processor_config.json"));
+        let settings = smolvlm_processor_settings(preprocessor.as_ref(), processor.as_ref(), 384);
+
+        assert!(settings.do_image_splitting);
+        assert_eq!(settings.longest_edge, 1456);
+        assert_eq!(settings.tile_size, 364);
+        assert_eq!(settings.mean, [0.5, 0.4, 0.3]);
+        assert_eq!(settings.std, [0.2, 0.3, 0.4]);
+    }
+
+    #[test]
+    fn declared_preprocessor_defaults_splitting_to_true() {
+        let preprocessor = json!({
+            "image_processor_type": "SmolVLMImageProcessor",
+            "size": { "longest_edge": 1536 },
+            "max_image_size": { "longest_edge": 384 }
+        });
+        let settings = smolvlm_processor_settings(Some(&preprocessor), None, 384);
+
+        assert!(settings.do_image_splitting);
+        assert_eq!(settings.longest_edge, 1536);
+        assert_eq!(settings.tile_size, 384);
+    }
+
+    #[test]
+    fn unknown_processor_defaults_splitting_to_false() {
+        let preprocessor = json!({
+            "image_processor_type": "SomeOtherImageProcessor"
+        });
+        let settings = smolvlm_processor_settings(Some(&preprocessor), None, 384);
+
+        assert!(!settings.do_image_splitting);
+        assert_eq!(settings.tile_size, 384);
+    }
 
     #[test]
     fn idefics3_text_config_parses_into_llama_args() {
