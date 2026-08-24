@@ -36,8 +36,9 @@ impl Qwen3StageExecutor {
         let config_str = std::fs::read_to_string(&config_path)
             .map_err(|err| anyhow!("failed to read {}: {}", config_path.display(), err))?;
         let config_str = sanitize_config_json(&config_str);
-        let args: models::qwen3::ModelArgs = serde_json::from_str(&config_str)
+        let mut args: models::qwen3::ModelArgs = serde_json::from_str(&config_str)
             .map_err(|err| anyhow!("failed to parse {}: {}", config_path.display(), err))?;
+        args.set_checkpoint_label(model_dir);
 
         let mut weights = models::load_text_weights(model_dir, None).map_err(anyhow::Error::msg)?;
         let mut effective_filter = filter.clone();

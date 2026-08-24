@@ -268,6 +268,14 @@ fn qwen3_moe_rope_scaling_kind_reads_linear_and_type_precedence() {
 }
 
 #[test]
+fn qwen3_moe_rope_warnings_use_the_checkpoint_name_when_available() {
+    let mut args = moe_args_with_rope(Some(serde_json::json!({"rope_type": "dynamic"})));
+    assert_eq!(args.model_label(), "qwen3_moe");
+    args.set_checkpoint_label(std::path::Path::new("models/vendor-qwen3-moe-scaled"));
+    assert_eq!(args.model_label(), "vendor-qwen3-moe-scaled");
+}
+
+#[test]
 fn qwen3_moe_rope_scaling_kind_warns_to_plain_table_for_unusable_blocks() {
     for block in [
         None,

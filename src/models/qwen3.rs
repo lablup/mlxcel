@@ -54,6 +54,10 @@ pub struct ModelArgs {
     #[serde(default)]
     pub rope_scaling: Option<HashMap<String, serde_json::Value>>,
 
+    /// Checkpoint name used only to key and label RoPE fallback diagnostics.
+    #[serde(skip)]
+    pub checkpoint_label: Option<String>,
+
     #[serde(default = "default_tie_word_embeddings")]
     pub tie_word_embeddings: bool,
 
@@ -87,6 +91,17 @@ impl ModelArgs {
         self.quantization.as_ref().map(|q| q.bits).unwrap_or(4)
     }
 
+    pub fn set_checkpoint_label(&mut self, model_dir: &Path) {
+        self.checkpoint_label = model_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty());
+    }
+
+    pub fn model_label(&self) -> &str {
+        self.checkpoint_label.as_deref().unwrap_or(&self.model_type)
+    }
+
     /// Resolve `rope_scaling` for Qwen3 attention.
     ///
     /// Unsupported or malformed schemes warn and keep the unscaled table rather
@@ -101,7 +116,7 @@ impl ModelArgs {
             spec.as_ref(),
             self.head_dim,
             self.rope_theta,
-            &self.model_type,
+            self.model_label(),
         )
     }
 }
@@ -935,8 +950,9 @@ impl Qwen3Model {
         let config_path = model_dir.join("config.json");
         let config_str = std::fs::read_to_string(&config_path)
             .map_err(|e| format!("Failed to read config.json: {}", e))?;
-        let args: ModelArgs = serde_json::from_str(&config_str)
+        let mut args: ModelArgs = serde_json::from_str(&config_str)
             .map_err(|e| format!("Failed to parse config.json: {}", e))?;
+        args.set_checkpoint_label(model_dir);
 
         // Load weights
         let weights = crate::models::load_text_weights(model_dir, None)?;

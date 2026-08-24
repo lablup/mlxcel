@@ -203,6 +203,14 @@ fn qwen3_rope_scaling_kind_reads_linear_spellings_and_type_precedence() {
 }
 
 #[test]
+fn qwen3_rope_warnings_use_the_checkpoint_name_when_available() {
+    let mut args = args_with(Some(serde_json::json!({"rope_type": "yarn"})));
+    assert_eq!(args.model_label(), "qwen3");
+    args.set_checkpoint_label(std::path::Path::new("models/vendor-qwen3-scaled"));
+    assert_eq!(args.model_label(), "vendor-qwen3-scaled");
+}
+
+#[test]
 fn qwen3_rope_scaling_kind_warns_to_plain_table_for_unusable_blocks() {
     for block in [
         None,

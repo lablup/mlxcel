@@ -76,6 +76,7 @@ fn make_test_qwen3_args() -> Qwen3ModelArgs {
         max_position_embeddings: None,
         rope_theta: 10_000.0,
         rope_scaling: None,
+        checkpoint_label: None,
         tie_word_embeddings: false,
         quantization: None,
     }
@@ -1077,7 +1078,8 @@ fn tensor_parallel_qwen3_propagates_rope_scaling_to_every_rank() {
             "rope_scaling": {"rope_type": "linear", "factor": 8.0}
         }"#,
     );
-    let args: Qwen3ModelArgs = serde_json::from_str(&config_str).unwrap();
+    let mut args: Qwen3ModelArgs = serde_json::from_str(&config_str).unwrap();
+    args.set_checkpoint_label(std::path::Path::new("models/qwen3-tp-scaled-test"));
     assert_eq!(args.rope_scaling_kind().scale(), 0.125);
 
     let plan = generate_shard_plan(
@@ -1086,14 +1088,13 @@ fn tensor_parallel_qwen3_propagates_rope_scaling_to_every_rank() {
         &ShardConfig::with_tp_size(2),
     )
     .unwrap();
+    let local_args = local_qwen3_args(&args, &plan).unwrap();
     assert_eq!(
-        local_qwen3_args(&args, &plan)
-            .unwrap()
-            .rope_scaling_kind()
-            .scale(),
+        local_args.rope_scaling_kind().scale(),
         0.125,
         "the rank-local config must keep linear rope_scaling while it edits sharded dimensions"
     );
+    assert_eq!(local_args.model_label(), "qwen3-tp-scaled-test");
 
     let weights = make_test_qwen3_weight_map();
     let tp = TensorParallelQwen3Model::from_full_weights(&args, &weights, &plan).unwrap();

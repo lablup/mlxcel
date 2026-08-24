@@ -357,8 +357,9 @@ pub(crate) fn load_minicpmo_vlm(model_path: &Path) -> Result<LoadedModel> {
 
     let (_config_str, full_config) = read_sanitized_vlm_config(model_path)?;
     // MiniCPM-o uses standard Qwen3 (NOT Qwen3-VL) as text backbone
-    let text_config: models::qwen3::ModelArgs = serde_json::from_value(full_config.clone())
+    let mut text_config: models::qwen3::ModelArgs = serde_json::from_value(full_config.clone())
         .map_err(|e| anyhow::anyhow!("Failed to parse MiniCPM-o text config: {}", e))?;
+    text_config.set_checkpoint_label(model_path);
     let vision_config: MiniCPMOVisionConfig =
         parse_required_vlm_subconfig(&full_config, "vision_config", "MiniCPM-o vision config")?;
     let processor_config = minicpmo_processor_config_value(model_path, &full_config)
