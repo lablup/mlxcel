@@ -28,10 +28,12 @@ use crate::distributed::pipeline::LayerFilter;
 use crate::distributed::pipeline::StageExecutionOutput;
 use crate::distributed::pipeline::partial_loading::filter_weight_map;
 use crate::models::model_owned::{
-    ModelOwnedSequenceState, dispatch_paged_decode_from_visible_caches,
+    KvCacheLayerModes, ModelOwnedSequenceState, dispatch_paged_decode_from_visible_caches,
 };
 use crate::models::rope_utils::{RopeScalingSpec, printable_label};
-use mlxcel_core::cache::{CachePool, RotatingPagedDecodeMetadata, SequenceId, SequenceStateLayout};
+use mlxcel_core::cache::{
+    CachePool, KVCacheMode, RotatingPagedDecodeMetadata, SequenceId, SequenceStateLayout,
+};
 use mlxcel_core::generate::DecodeBatchContext;
 use mlxcel_core::layers::{
     FusedQKVLinear, GemmaRMSNorm, KVCache, RotatingKVCache, UnifiedEmbedding, UnifiedLinear,
@@ -966,14 +968,24 @@ impl Gemma3Model {
 
     /// Create KV caches for all layers
     pub(crate) fn make_caches(&self) -> Vec<Cache> {
+        self.make_caches_with_modes(None)
+    }
+
+    pub(crate) fn make_caches_with_modes(&self, modes: Option<&KvCacheLayerModes>) -> Vec<Cache> {
         (0..self.layers.len())
             .map(|i| {
                 let is_global =
                     (i % self.sliding_window_pattern) == (self.sliding_window_pattern - 1);
+                let mode = modes
+                    .map(|modes| modes.mode_for_layer(i))
+                    .unwrap_or(KVCacheMode::Fp16);
                 if is_global {
-                    Cache::Standard(KVCache::new())
+                    Cache::Standard(KVCache::new_with_mode(mode))
                 } else {
-                    Cache::Rotating(RotatingKVCache::new(self.sliding_window as i32))
+                    Cache::Rotating(RotatingKVCache::new_with_mode(
+                        self.sliding_window as i32,
+                        mode,
+                    ))
                 }
             })
             .collect()
@@ -1288,6 +1300,7 @@ fn get_weight_copy(weights: &WeightMap, name: &str) -> Result<UniquePtr<MlxArray
 pub struct Gemma3Wrapper {
     model: Gemma3Model,
     sequence_state: ModelOwnedSequenceState<Cache>,
+    kv_cache_layer_modes: KvCacheLayerModes,
 }
 
 impl Gemma3Wrapper {
@@ -1296,12 +1309,18 @@ impl Gemma3Wrapper {
         Self {
             model,
             sequence_state: ModelOwnedSequenceState::new(caches),
+            kv_cache_layer_modes: KvCacheLayerModes::new(),
         }
+    }
+
+    fn make_configured_caches(&self) -> Vec<Cache> {
+        self.model
+            .make_caches_with_modes(Some(&self.kv_cache_layer_modes))
     }
 
     pub fn reset_caches(&self) {
         self.sequence_state
-            .replace_internal(self.model.make_caches());
+            .replace_internal(self.make_configured_caches());
     }
 }
 
@@ -1344,6 +1363,15 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
         Vec::new()
     }
 
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        self.kv_cache_layer_modes.set(modes);
+        self.reset_caches();
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.kv_cache_layer_modes.clone_modes()
+    }
+
     fn num_layers(&self) -> usize {
         self.model.layers.len()
     }
@@ -1362,7 +1390,7 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
 
     fn prepare_sequence_state(&self, seq_id: SequenceId) {
         self.sequence_state
-            .prepare_sequence_state(seq_id, self.model.make_caches());
+            .prepare_sequence_state(seq_id, self.make_configured_caches());
     }
 
     fn reset_runtime_state(&self) {
@@ -1388,7 +1416,7 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
     ) -> UniquePtr<MlxArray> {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
-            || self.model.make_caches(),
+            || self.make_configured_caches(),
             |sequence_caches| self.model.forward_with_caches(input_ids, sequence_caches),
         )
     }
@@ -1403,7 +1431,7 @@ impl mlxcel_core::generate::LanguageModel for Gemma3Wrapper {
     ) -> UniquePtr<MlxArray> {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
-            || self.model.make_caches(),
+            || self.make_configured_caches(),
             |sequence_caches| {
                 self.model.forward_with_caches_and_embeddings(
                     input_ids,

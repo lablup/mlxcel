@@ -32,7 +32,7 @@ use super::gemma4_per_layer_inputs_state::Gemma4PerLayerInputsState;
 use super::processors::gemma4_unified::{Gemma4UnifiedImageInput, Gemma4UnifiedProcessor};
 use super::{encoders, merge};
 use crate::LanguageModel;
-use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
+use mlxcel_core::cache::{KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -609,6 +609,14 @@ impl LanguageModel for Gemma4UnifiedModel {
 
     fn make_caches(&self) -> Vec<KVCache> {
         self.text_model.make_caches()
+    }
+
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        self.text_model.set_kv_cache_layer_modes(modes)
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.text_model.kv_cache_layer_modes()
     }
 
     fn sequence_state_layout(&self) -> SequenceStateLayout {

@@ -184,6 +184,14 @@ the CLI banner, the server startup log and the `/props` payload
 effective mode, not the requested one. If you are adding a new entry, include a
 quality gate in the same change.
 
+## Model-owned cache families
+
+Some families do not use the homogeneous `&mut [KVCache]` slice handed to `forward`; they keep heterogeneous attention, sliding-window, recurrent, or convolutional state inside the model wrapper. The CLI generator and server scheduler resolve the effective per-layer KV-mode table once (including Boundary-V and `--kv-bits` / batch-KV policy) and inject that table into model-owned attention-cache constructors too. The CLI banner and server startup log report the effective mode and `applied to N of M layers`, and `GET /v1/cache/stats` includes `kv_cache_mode_effective`.
+
+Attention KV caches owned by Gemma 3, AFMoE, Gemma 4 text/VLM/Unified, Qwen 3.5 text/MoE/VLM, Qwen3-Next, Bailing MoE Linear, LFM2/LFM2-VL, and the regular-attention arms of Llama 4 use the injected mode for their layer index and fall back to FP16 only when no table is available. Recurrent, convolutional, and gated-delta state is not a KV tensor and remains unchanged.
+
+Llama 4 `ChunkedKVCache` layers remain FP16. They do not yet have quantized sidecar storage, and the wrapper warns once when a non-FP16 table would otherwise apply to those chunked layers. Muse Glimmer still rejects non-FP16 modes at startup rather than silently running a partial mode.
+
 ## WHT head-dimension constraint
 
 TurboQuant uses a Walsh-Hadamard transform. The implementation expects a
@@ -275,9 +283,14 @@ issue #1346 turned into a wrong turn-2 answer). The decline is visible, not
 silent: `GET /v1/cache/stats` reports `reject_model_owned_state` and `/metrics`
 carries `mlxcel_prompt_cache_reject_total{reason="model_owned_state"}`, so a
 family whose store legitimately stays empty is distinguishable from a cache that
-is broken. Real cross-request reuse for these families comes through the
-model-state snapshot path (#1335), described next; a family that opts into
-`supports_snapshot_reuse()` is handled by that branch first and keeps donating.
+is broken. Dense prompt-cache adoption also compares every detached layer's KV
+mode against the currently resolved per-layer table; mismatches decline with
+`reject_kv_mode_mismatch` and
+`mlxcel_prompt_cache_reject_total{reason="kv_mode_mismatch"}` instead of
+installing a stale-mode cache. Real cross-request reuse for these families
+comes through the model-state snapshot path (#1335), described next; a family
+that opts into `supports_snapshot_reuse()` is handled by that branch first and
+keeps donating.
 
 ### Exact-prefix snapshots for recurrent state
 
@@ -291,6 +304,15 @@ tokens begin with that exact stored prefix under the same session key. As of
 v0.2.1, the supported snapshot families are Mamba, Mamba2, Jamba, Nemotron-H,
 Qwen 3.5 / 3.6 text, MoE, and VLM wrappers, and Gemma 4 text, VLM, and Unified
 wrappers.
+
+Snapshot reuse is deliberately conservative with quantized attention caches.
+Gemma 4, Qwen3-Next/Qwen 3.5, Bailing MoE Linear, and LFM2 serialize FP16
+model-owned attention KV state only; if a live layer is configured for Int8 or
+Turbo mode, donation/restoration is refused with an explicit error rather than
+copying only `keys`/`values` and restoring them as FP16. Restores also compare
+the serialized snapshot mode with the live per-layer table, so a snapshot
+captured under a different KV mode falls back to cold prefill instead of
+corrupting the cache.
 
 The snapshot bucket has its own byte cap, entry cap, TTL, LRU counters, and
 hit/miss metrics. `GET /v1/cache/stats` reports `snapshot_*` fields, while

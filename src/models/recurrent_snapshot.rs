@@ -18,6 +18,7 @@
 //! through the `LanguageModel` trait. These helpers keep the model files from
 //! repeating the same optional-tensor copy/restore boilerplate.
 
+use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::generate::ModelStateSnapshot;
 use mlxcel_core::{MlxArray, UniquePtr};
 
@@ -48,4 +49,45 @@ pub(crate) fn restore_optional(
 
 pub(crate) fn restore_i32(snapshot: &ModelStateSnapshot, name: impl AsRef<str>) -> Option<i32> {
     snapshot.tensor(name.as_ref()).map(mlxcel_core::item_i32)
+}
+
+pub(crate) fn push_kv_cache_mode(
+    snapshot: &mut ModelStateSnapshot,
+    name: impl Into<String>,
+    mode: KVCacheMode,
+) {
+    push_i32(snapshot, name, kv_cache_mode_to_i32(mode));
+}
+
+pub(crate) fn restore_kv_cache_mode(
+    snapshot: &ModelStateSnapshot,
+    name: impl AsRef<str>,
+) -> Result<Option<KVCacheMode>, String> {
+    let Some(tag) = restore_i32(snapshot, name.as_ref()) else {
+        return Ok(None);
+    };
+    kv_cache_mode_from_i32(tag).map(Some)
+}
+
+fn kv_cache_mode_to_i32(mode: KVCacheMode) -> i32 {
+    match mode {
+        KVCacheMode::Fp16 => 0,
+        KVCacheMode::Int8 => 1,
+        KVCacheMode::Turbo4Asym => 2,
+        KVCacheMode::Turbo3Asym => 3,
+        KVCacheMode::Turbo4 => 4,
+        KVCacheMode::Turbo4Delegated => 5,
+    }
+}
+
+fn kv_cache_mode_from_i32(tag: i32) -> Result<KVCacheMode, String> {
+    match tag {
+        0 => Ok(KVCacheMode::Fp16),
+        1 => Ok(KVCacheMode::Int8),
+        2 => Ok(KVCacheMode::Turbo4Asym),
+        3 => Ok(KVCacheMode::Turbo3Asym),
+        4 => Ok(KVCacheMode::Turbo4),
+        5 => Ok(KVCacheMode::Turbo4Delegated),
+        other => Err(format!("unknown serialized KV cache mode tag {other}")),
+    }
 }

@@ -21,16 +21,17 @@ use crate::models::llama4_helpers::{
     create_chunked_attention_mask, get_weight_copy, load_quantized_linear,
 };
 use crate::models::model_owned::{
-    ModelOwnedSequenceState, dispatch_paged_decode_from_backing_caches,
+    KvCacheLayerModes, ModelOwnedSequenceState, dispatch_paged_decode_from_backing_caches,
 };
 use crate::models::switch_layers::validate_expert_quantization_params;
-use mlxcel_core::cache::{CachePool, SequenceId, SequenceStateLayout};
+use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::{DecodeBatchContext, LanguageModel};
 use mlxcel_core::layers::{ChunkedKVCache, KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // Llama4 Cache Types.
 /// Cache enum for Llama4's iGQA (Interleaved GQA) pattern
@@ -1396,20 +1397,44 @@ impl Llama4CxxModel {
     /// Create Llama4 caches for iGQA pattern
     /// MoE layers (non-4th) use ChunkedKVCache, dense layers (4th) use regular KVCache
     pub fn make_llama4_caches(&self) -> Vec<Llama4Cache> {
+        self.make_llama4_caches_with_modes(None)
+    }
+
+    pub(crate) fn make_llama4_caches_with_modes(
+        &self,
+        modes: Option<&KvCacheLayerModes>,
+    ) -> Vec<Llama4Cache> {
         let chunk_size = self.attention_chunk_size as i32;
         self.layers
             .iter()
             .enumerate()
             .map(|(idx, _)| {
+                let mode = modes
+                    .map(|modes| modes.mode_for_layer(idx))
+                    .unwrap_or(KVCacheMode::Fp16);
                 if (idx + 1) % 4 != 0 {
                     // MoE layer: use chunked cache
+                    warn_llama4_chunked_kv_mode_ignored(mode);
                     Llama4Cache::Chunked(ChunkedKVCache::new(chunk_size))
                 } else {
                     // Dense layer: use regular cache
-                    Llama4Cache::Regular(KVCache::new())
+                    Llama4Cache::Regular(KVCache::new_with_mode(mode))
                 }
             })
             .collect()
+    }
+}
+
+fn warn_llama4_chunked_kv_mode_ignored(mode: KVCacheMode) {
+    if mode == KVCacheMode::Fp16 {
+        return;
+    }
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            requested_mode = %mode,
+            "Llama 4 ChunkedKVCache layers do not support quantized KV modes yet; keeping those layers at fp16"
+        );
     }
 }
 
@@ -1658,6 +1683,7 @@ impl LanguageModel for Llama4CxxModel {
 pub struct Llama4Wrapper {
     model: Llama4CxxModel,
     sequence_state: ModelOwnedSequenceState<Llama4Cache>,
+    kv_cache_layer_modes: KvCacheLayerModes,
 }
 
 impl Llama4Wrapper {
@@ -1666,12 +1692,18 @@ impl Llama4Wrapper {
         Self {
             model,
             sequence_state: ModelOwnedSequenceState::new(caches),
+            kv_cache_layer_modes: KvCacheLayerModes::new(),
         }
+    }
+
+    fn make_configured_caches(&self) -> Vec<Llama4Cache> {
+        self.model
+            .make_llama4_caches_with_modes(Some(&self.kv_cache_layer_modes))
     }
 
     pub fn reset_caches(&self) {
         self.sequence_state
-            .replace_internal(self.model.make_llama4_caches());
+            .replace_internal(self.make_configured_caches());
     }
 }
 
@@ -1714,6 +1746,15 @@ impl LanguageModel for Llama4Wrapper {
         Vec::new()
     }
 
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        self.kv_cache_layer_modes.set(modes);
+        self.reset_caches();
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.kv_cache_layer_modes.clone_modes()
+    }
+
     fn num_layers(&self) -> usize {
         self.model.layers.len()
     }
@@ -1732,7 +1773,7 @@ impl LanguageModel for Llama4Wrapper {
 
     fn prepare_sequence_state(&self, seq_id: SequenceId) {
         self.sequence_state
-            .prepare_sequence_state(seq_id, self.model.make_llama4_caches());
+            .prepare_sequence_state(seq_id, self.make_configured_caches());
     }
 
     fn reset_runtime_state(&self) {
@@ -1756,7 +1797,7 @@ impl LanguageModel for Llama4Wrapper {
     ) -> UniquePtr<MlxArray> {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
-            || self.model.make_llama4_caches(),
+            || self.make_configured_caches(),
             |sequence_caches| self.model.forward_igqa(input_ids, sequence_caches, None),
         )
     }
@@ -1771,7 +1812,7 @@ impl LanguageModel for Llama4Wrapper {
     ) -> UniquePtr<MlxArray> {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
-            || self.model.make_llama4_caches(),
+            || self.make_configured_caches(),
             |sequence_caches| {
                 self.model.forward_igqa_with_embeddings(
                     input_ids,

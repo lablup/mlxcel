@@ -141,6 +141,7 @@ use crate::LanguageModel;
 use connectors::MultiModalConnector;
 use encoders::VisionEncoder;
 use merge::InputEmbeddings;
+use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
 use processors::ImageProcessor;
@@ -320,6 +321,14 @@ impl LanguageModel for VisionLanguageModel {
 
     fn make_caches(&self) -> Vec<KVCache> {
         self.text_model.make_caches()
+    }
+
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        self.text_model.set_kv_cache_layer_modes(modes)
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.text_model.kv_cache_layer_modes()
     }
 
     fn num_layers(&self) -> usize {

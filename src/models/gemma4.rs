@@ -27,7 +27,7 @@
 use crate::distributed::pipeline::LayerFilter;
 use crate::distributed::pipeline::StageExecutionOutput;
 use crate::distributed::pipeline::partial_loading::filter_weight_map;
-use crate::models::model_owned::ModelOwnedSequenceState;
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::recurrent_snapshot::{push_i32, push_optional, restore_i32, restore_optional};
 use crate::models::speculative_exactness::{
     BlockChainExactness, ProbeKey, compare_block_against_chain, mtp_exactness_gate,
@@ -1303,11 +1303,16 @@ impl Cache {
                         mode
                     ));
                 }
+                if cache.mode != mode {
+                    return Err(format!(
+                        "Gemma 4 restore {prefix}: standard snapshot mode {:?} does not match configured cache mode {:?}",
+                        mode, cache.mode
+                    ));
+                }
                 cache.keys = keys;
                 cache.values = values;
                 cache.offset = restore_i32(snapshot, format!("{prefix}.standard.offset"))
                     .unwrap_or(snapshot.token_len() as i32);
-                cache.mode = KVCacheMode::Fp16;
             }
             Self::Rotating(cache) => {
                 let keys = restore_optional(snapshot, format!("{prefix}.rotating.keys"));
@@ -1325,6 +1330,12 @@ impl Cache {
                     .map(kv_cache_mode_from_i32)
                     .transpose()?
                     .unwrap_or(KVCacheMode::Fp16);
+                if mode != current.mode {
+                    return Err(format!(
+                        "Gemma 4 restore {prefix}: rotating snapshot mode {:?} does not match configured cache mode {:?}",
+                        mode, current.mode
+                    ));
+                }
                 let state = RotatingKVCacheSnapshotState {
                     max_size: restore_i32(snapshot, format!("{prefix}.rotating.max_size"))
                         .unwrap_or(current.max_size),
@@ -4003,14 +4014,25 @@ impl Gemma4TextModel {
     }
 
     pub(crate) fn make_caches(&self) -> Vec<Cache> {
+        self.make_caches_with_modes(None)
+    }
+
+    pub(crate) fn make_caches_with_modes(&self, modes: Option<&KvCacheLayerModes>) -> Vec<Cache> {
         self.config
             .layer_types
             .iter()
-            .map(|layer_type| {
+            .enumerate()
+            .map(|(idx, layer_type)| {
+                let mode = modes
+                    .map(|modes| modes.mode_for_layer(idx))
+                    .unwrap_or(KVCacheMode::Fp16);
                 if layer_type == "full_attention" {
-                    Cache::Standard(KVCache::new())
+                    Cache::Standard(KVCache::new_with_mode(mode))
                 } else {
-                    Cache::Rotating(RotatingKVCache::new(self.config.sliding_window as i32))
+                    Cache::Rotating(RotatingKVCache::new_with_mode(
+                        self.config.sliding_window as i32,
+                        mode,
+                    ))
                 }
             })
             .collect()
@@ -4503,6 +4525,10 @@ impl Gemma4Model {
 
     pub(crate) fn make_caches(&self) -> Vec<Cache> {
         self.text_model.make_caches()
+    }
+
+    pub(crate) fn make_caches_with_modes(&self, modes: &KvCacheLayerModes) -> Vec<Cache> {
+        self.text_model.make_caches_with_modes(Some(modes))
     }
 }
 
@@ -5048,6 +5074,7 @@ impl Gemma4StageModel {
 pub struct Gemma4Wrapper {
     model: Gemma4Model,
     sequence_state: ModelOwnedSequenceState<Cache>,
+    kv_cache_layer_modes: KvCacheLayerModes,
 }
 
 impl Gemma4Wrapper {
@@ -5056,7 +5083,13 @@ impl Gemma4Wrapper {
         Self {
             model,
             sequence_state: ModelOwnedSequenceState::new(caches),
+            kv_cache_layer_modes: KvCacheLayerModes::new(),
         }
+    }
+
+    fn make_configured_caches(&self) -> Vec<Cache> {
+        self.model
+            .make_caches_with_modes(&self.kv_cache_layer_modes)
     }
 
     /// Reset the wrapper's fallback cache slot (the `internal` slot used
@@ -5069,7 +5102,7 @@ impl Gemma4Wrapper {
     /// a fresh request that does not flow through the server scheduler.
     pub fn reset_caches(&self) {
         self.sequence_state
-            .replace_internal(self.model.make_caches());
+            .replace_internal(self.make_configured_caches());
     }
 
     /// Whether MTP may engage on this loaded checkpoint at `block_size`,
@@ -5151,7 +5184,7 @@ impl Gemma4Wrapper {
 
             // Chain arm: prefill, then one token at a time — the shape
             // classic decode runs, and the contract's reference.
-            let mut chain_caches = self.model.make_caches();
+            let mut chain_caches = self.make_configured_caches();
             let _ = self.model.forward_with_caches_and_embeddings(
                 &as_input(&prompt),
                 None,
@@ -5172,7 +5205,7 @@ impl Gemma4Wrapper {
             }
 
             // Block arm: fresh caches, same prefill, the whole block at once.
-            let mut block_caches = self.model.make_caches();
+            let mut block_caches = self.make_configured_caches();
             let _ = self.model.forward_with_caches_and_embeddings(
                 &as_input(&prompt),
                 None,
@@ -5246,7 +5279,7 @@ impl Gemma4Wrapper {
     ) -> UniquePtr<MlxArray> {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
-            || self.model.make_caches(),
+            || self.make_configured_caches(),
             |sequence_caches| {
                 self.model.forward_with_caches_and_embeddings(
                     input_ids,
@@ -5279,7 +5312,7 @@ impl Gemma4Wrapper {
     ) -> UniquePtr<MlxArray> {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
-            || self.model.make_caches(),
+            || self.make_configured_caches(),
             |sequence_caches| {
                 self.model.forward_unified_with_caches_and_embeddings(
                     input_ids,
@@ -5331,7 +5364,7 @@ impl Gemma4Wrapper {
     ) -> i32 {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
-            || self.model.make_caches(),
+            || self.make_configured_caches(),
             |sequence_caches| first_cache_offset(sequence_caches, layer_type),
         )
     }
@@ -5351,7 +5384,7 @@ impl Gemma4Wrapper {
     ) {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
-            || self.model.make_caches(),
+            || self.make_configured_caches(),
             |sequence_caches| {
                 for cache in sequence_caches.iter_mut() {
                     if let Err(error) = cache.enable_mtp_rotating_buffer(buffer_size) {
@@ -5413,7 +5446,7 @@ impl Gemma4Wrapper {
     ) -> UniquePtr<MlxArray> {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
-            || self.model.make_caches(),
+            || self.make_configured_caches(),
             |sequence_caches| {
                 self.model.forward_with_caches_and_speculative_sinks(
                     input_ids,
@@ -5495,7 +5528,7 @@ impl Gemma4Wrapper {
     pub(crate) fn sequence_kv_offset(&self, seq_id: Option<SequenceId>) -> i32 {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
-            || self.model.make_caches(),
+            || self.make_configured_caches(),
             |caches| first_present_cache_offset(caches),
         )
     }
@@ -5522,7 +5555,7 @@ impl Gemma4Wrapper {
     ///
     /// Used by: [`crate::models::gemma4_mtp_target::Gemma4MtpBatchedTargetAdapter`].
     pub fn make_speculative_caches(&self) -> Vec<Cache> {
-        self.model.make_caches()
+        self.make_configured_caches()
     }
 
     /// Rewind the per-sequence target KV caches after a Gemma 4 MTP
@@ -5595,7 +5628,7 @@ impl Gemma4Wrapper {
 
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
-            || self.model.make_caches(),
+            || self.make_configured_caches(),
             |sequence_caches| -> Result<(), String> {
                 for cache in sequence_caches.iter_mut() {
                     if trim > 0 {
@@ -5623,7 +5656,7 @@ impl Gemma4Wrapper {
     pub fn can_gather_speculative_cache(&self, seq_id: Option<SequenceId>) -> bool {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
-            || self.model.make_caches(),
+            || self.make_configured_caches(),
             |sequence_caches| {
                 sequence_caches
                     .iter()
@@ -5665,7 +5698,7 @@ impl Gemma4Wrapper {
         }
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
-            || self.model.make_caches(),
+            || self.make_configured_caches(),
             |sequence_caches| -> Result<(), String> {
                 for cache in sequence_caches.iter_mut() {
                     cache.gather_speculative(block_size, kept)?;
@@ -5840,7 +5873,7 @@ impl LanguageModel for Gemma4Wrapper {
     ) -> UniquePtr<MlxArray> {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
-            || self.model.make_caches(),
+            || self.make_configured_caches(),
             |sequence_caches| {
                 self.model.forward_with_caches_and_embeddings(
                     input_ids,
@@ -5883,7 +5916,7 @@ impl LanguageModel for Gemma4Wrapper {
         }
         self.sequence_state.with_or_create_sequence_state(
             None,
-            || self.model.make_caches(),
+            || self.make_configured_caches(),
             |sequence_caches| {
                 self.model.forward_last_with_caches_and_embeddings(
                     input_ids,
@@ -5907,7 +5940,7 @@ impl LanguageModel for Gemma4Wrapper {
     ) -> UniquePtr<MlxArray> {
         self.sequence_state.with_or_create_sequence_state(
             seq_id,
-            || self.model.make_caches(),
+            || self.make_configured_caches(),
             |sequence_caches| {
                 self.model.forward_with_caches_and_embeddings(
                     input_ids,
@@ -5944,13 +5977,22 @@ impl LanguageModel for Gemma4Wrapper {
         Vec::new()
     }
 
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        self.kv_cache_layer_modes.set(modes);
+        self.reset_caches();
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.kv_cache_layer_modes.clone_modes()
+    }
+
     fn sequence_state_layout(&self) -> SequenceStateLayout {
         SequenceStateLayout::model_owned(self.model.text_model.layers.len())
     }
 
     fn prepare_sequence_state(&self, seq_id: SequenceId) {
         self.sequence_state
-            .prepare_sequence_state(seq_id, self.model.make_caches());
+            .prepare_sequence_state(seq_id, self.make_configured_caches());
     }
 
     fn reset_runtime_state(&self) {
@@ -6007,7 +6049,7 @@ impl LanguageModel for Gemma4Wrapper {
                 snapshot.family()
             ));
         }
-        let mut state = self.model.make_caches();
+        let mut state = self.make_configured_caches();
         for (idx, cache) in state.iter_mut().enumerate() {
             cache.restore_from(snapshot, &format!("layer{idx}"))?;
         }
@@ -6060,7 +6102,7 @@ impl LanguageModel for Gemma4Wrapper {
                 "Gemma 4 truncated restore: snapshot cannot be truncated to {target_len} tokens"
             ));
         }
-        let mut state = self.model.make_caches();
+        let mut state = self.make_configured_caches();
         for (idx, cache) in state.iter_mut().enumerate() {
             let prefix = format!("layer{idx}");
             cache.restore_from(snapshot, &prefix)?;

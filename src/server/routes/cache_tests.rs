@@ -33,6 +33,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use mlxcel_core::cache::{BatchKvQuantConfig, KVCacheMode, KvQuantScheme};
+
 use crate::server::prompt_cache::{
     ApcConfig, ApcHashAlgo, CacheEntry, MultimodalDigest, PromptCacheConfig, PromptCacheKey,
     PromptCacheStore,
@@ -86,6 +88,7 @@ fn cache_stats_response_serializes_with_expected_keys() {
         apc_enabled: true,
         block_size: 16,
         hash: "sha256".to_string(),
+        kv_cache_mode_effective: "int8".to_string(),
         entries: 3,
         bytes: 12345,
         capacity_bytes: 2 * 1024 * 1024 * 1024,
@@ -125,6 +128,7 @@ fn cache_stats_response_serializes_with_expected_keys() {
         reject_disabled: 0,
         reject_prefix_too_short: 2,
         reject_mode_mismatch: 3,
+        reject_kv_mode_mismatch: 12,
         reject_empty_set: 4,
         reject_layout_constraints: 5,
         reject_block_boundary_floor: 6,
@@ -142,6 +146,7 @@ fn cache_stats_response_serializes_with_expected_keys() {
         "\"apc_enabled\":true",
         "\"block_size\":16",
         "\"hash\":\"sha256\"",
+        "\"kv_cache_mode_effective\":\"int8\"",
         "\"entries\":3",
         "\"bytes\":12345",
         "\"capacity_bytes\":",
@@ -168,6 +173,7 @@ fn cache_stats_response_serializes_with_expected_keys() {
         "\"reject_disabled\":0",
         "\"reject_prefix_too_short\":2",
         "\"reject_mode_mismatch\":3",
+        "\"reject_kv_mode_mismatch\":12",
         "\"reject_empty_set\":4",
         "\"reject_layout_constraints\":5",
         "\"reject_block_boundary_floor\":6",
@@ -249,6 +255,7 @@ fn cache_stats_response_disabled_payload_uses_zero_counters() {
         apc_enabled: false,
         block_size: cfg.apc.block_size,
         hash: cfg.apc.hash.to_string(),
+        kv_cache_mode_effective: "fp16".to_string(),
         entries: 0,
         bytes: 0,
         capacity_bytes: cfg.capacity_bytes,
@@ -288,6 +295,7 @@ fn cache_stats_response_disabled_payload_uses_zero_counters() {
         reject_disabled: 0,
         reject_prefix_too_short: 0,
         reject_mode_mismatch: 0,
+        reject_kv_mode_mismatch: 0,
         reject_empty_set: 0,
         reject_layout_constraints: 0,
         reject_block_boundary_floor: 0,
@@ -334,6 +342,7 @@ fn build_stats_response_surfaces_paged_pool_independent_of_store() {
         paged,
         RejectReasonStats::default(),
         super::super::cache::WarmupStats::default(),
+        "fp16".to_string(),
     );
     assert!(!disabled.enabled);
     assert_eq!(disabled.paged_block_size, 32);
@@ -353,6 +362,7 @@ fn build_stats_response_surfaces_paged_pool_independent_of_store() {
         paged,
         RejectReasonStats::default(),
         super::super::cache::WarmupStats::default(),
+        "fp16".to_string(),
     );
     assert_eq!(enabled.paged_blocks_allocated, 200);
     assert_eq!(enabled.paged_bytes_in_use, 98304);
@@ -423,6 +433,7 @@ fn snapshot_divergence_reject_reaches_the_stats_body_with_its_geometry() {
         PagedBlockStats::default(),
         reject,
         super::super::cache::WarmupStats::default(),
+        "fp16".to_string(),
     );
     assert_eq!(resp.reject_snapshot_diverged, 1);
     let json = serde_json::to_string(&resp).expect("serialize");
@@ -462,6 +473,7 @@ fn other_reject_reasons_leave_the_stats_divergence_counter_at_zero() {
         PagedBlockStats::default(),
         reject,
         super::super::cache::WarmupStats::default(),
+        "fp16".to_string(),
     );
     assert_eq!(resp.reject_snapshot_diverged, 0);
     assert_eq!(resp.last_reject_entry_len, None);
@@ -501,6 +513,7 @@ fn build_stats_response_disabled_when_store_is_none() {
         PagedBlockStats::default(),
         RejectReasonStats::default(),
         super::super::cache::WarmupStats::default(),
+        "fp16".to_string(),
     );
     assert!(!resp.enabled);
     assert!(!resp.apc_enabled);
@@ -509,6 +522,34 @@ fn build_stats_response_disabled_when_store_is_none() {
     assert_eq!(resp.lookups, 0);
     assert_eq!(resp.hit_rate, 0.0);
     assert_eq!(resp.block_size, cfg.apc.block_size);
+}
+
+#[test]
+fn cache_stats_effective_kv_mode_prefers_batch_kv_quant_when_enabled() {
+    let mut config = crate::server::ServerConfig {
+        kv_cache_mode: KVCacheMode::Fp16,
+        batch_kv_quant: BatchKvQuantConfig::new(KvQuantScheme::Uniform, 8, 64, true)
+            .expect("valid int8 batch KV config"),
+        ..crate::server::ServerConfig::default()
+    };
+    assert_eq!(
+        super::super::cache::cache_stats_effective_kv_mode(&config),
+        "int8"
+    );
+
+    config.batch_kv_quant = BatchKvQuantConfig::new(KvQuantScheme::TurboQuant, 4, 64, true)
+        .expect("valid turbo batch KV config");
+    assert_eq!(
+        super::super::cache::cache_stats_effective_kv_mode(&config),
+        "fp16+turbo4"
+    );
+
+    config.batch_kv_quant = BatchKvQuantConfig::default();
+    config.kv_cache_mode = KVCacheMode::Turbo4Delegated;
+    assert_eq!(
+        super::super::cache::cache_stats_effective_kv_mode(&config),
+        "turbo4-delegated"
+    );
 }
 
 #[test]
@@ -527,6 +568,7 @@ fn build_stats_response_reflects_live_store() {
         PagedBlockStats::default(),
         RejectReasonStats::default(),
         super::super::cache::WarmupStats::default(),
+        "fp16".to_string(),
     );
     assert!(resp.enabled);
     assert!(
@@ -573,6 +615,7 @@ fn build_stats_response_reflects_apc_blocks_when_enabled() {
         PagedBlockStats::default(),
         RejectReasonStats::default(),
         super::super::cache::WarmupStats::default(),
+        "fp16".to_string(),
     );
     assert!(resp.enabled);
     assert!(resp.apc_enabled, "APC must be enabled in this fixture");
@@ -610,6 +653,7 @@ fn build_stats_response_apc_zero_when_disabled_with_inserts() {
         PagedBlockStats::default(),
         RejectReasonStats::default(),
         super::super::cache::WarmupStats::default(),
+        "fp16".to_string(),
     );
     assert!(!resp.apc_enabled);
     assert_eq!(resp.entries, 3);
@@ -658,6 +702,7 @@ fn apc_unique_block_hashes_reflects_dedup_potential() {
         PagedBlockStats::default(),
         RejectReasonStats::default(),
         super::super::cache::WarmupStats::default(),
+        "fp16".to_string(),
     );
     assert_eq!(resp.entries, 2);
     assert_eq!(resp.apc_active_entries, 2);
@@ -736,6 +781,7 @@ async fn router_returns_stats_and_reset_with_correct_methods() {
             PagedBlockStats::default(),
             RejectReasonStats::default(),
             super::super::cache::WarmupStats::default(),
+            "fp16".to_string(),
         ))
     }
     async fn reset_handler(

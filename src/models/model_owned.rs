@@ -15,13 +15,53 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use mlxcel_core::cache::{PagedDecodeMetadata, SequenceId};
+use mlxcel_core::cache::{KVCacheMode, PagedDecodeMetadata, SequenceId};
 use mlxcel_core::generate::DecodeBatchContext;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 pub(crate) struct ModelOwnedSequenceState<T> {
     internal: RefCell<Vec<T>>,
     sequences: RefCell<HashMap<SequenceId, Vec<T>>>,
+}
+
+/// Shared per-layer KV cache mode table for families whose attention caches
+/// live inside the model wrapper instead of the external generator cache slice.
+///
+/// The table is injected by the CLI generator or server scheduler after they
+/// resolve requested/effective KV mode and Boundary-V policy. Constructors use
+/// `mode_for_layer` so absent or short tables conservatively fall back to FP16.
+pub(crate) struct KvCacheLayerModes {
+    modes: RefCell<Option<Vec<KVCacheMode>>>,
+}
+
+impl KvCacheLayerModes {
+    pub(crate) fn new() -> Self {
+        Self {
+            modes: RefCell::new(None),
+        }
+    }
+
+    pub(crate) fn set(&self, modes: Vec<KVCacheMode>) {
+        *self.modes.borrow_mut() = Some(modes);
+    }
+
+    pub(crate) fn clone_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.modes.borrow().clone()
+    }
+
+    pub(crate) fn mode_for_layer(&self, layer_idx: usize) -> KVCacheMode {
+        self.modes
+            .borrow()
+            .as_ref()
+            .and_then(|modes| modes.get(layer_idx).copied())
+            .unwrap_or(KVCacheMode::Fp16)
+    }
+}
+
+impl Default for KvCacheLayerModes {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<T> ModelOwnedSequenceState<T> {

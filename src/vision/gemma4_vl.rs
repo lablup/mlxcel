@@ -23,7 +23,7 @@ use super::{encoders, merge, processors};
 use crate::LanguageModel;
 use crate::audio;
 use crate::multimodal::batched_dispatch::forward_batched_with_seq_ids_dispatch;
-use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
+use mlxcel_core::cache::{KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::DecodeBatchContext;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -572,6 +572,14 @@ impl LanguageModel for Gemma4VLModel {
     /// [`Self::sequence_state_layout`].
     fn make_caches(&self) -> Vec<KVCache> {
         self.text_model.make_caches()
+    }
+
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        self.text_model.set_kv_cache_layer_modes(modes)
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.text_model.kv_cache_layer_modes()
     }
 
     fn sequence_state_layout(&self) -> SequenceStateLayout {

@@ -38,9 +38,9 @@ use crate::distributed::pipeline::partial_loading::filter_weight_map;
 use crate::models::gated_delta::{
     GatedDeltaCache, RMSNormGated, gated_delta_update, scaled_fast_rms_norm_no_weight,
 };
-use crate::models::model_owned::ModelOwnedSequenceState;
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::switch_layers::validate_expert_quantization_params;
-use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
+use mlxcel_core::cache::{KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::dtype;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
@@ -175,9 +175,20 @@ impl Qwen3NextCache {
         &self,
         snapshot: &mut mlxcel_core::generate::ModelStateSnapshot,
         prefix: &str,
-    ) {
+    ) -> Result<(), String> {
         match self {
             Qwen3NextCache::Attention(kv) => {
+                if kv.mode != KVCacheMode::Fp16 {
+                    return Err(format!(
+                        "{prefix}.attention: model-state snapshots do not yet serialize {:?} KV sidecars",
+                        kv.mode
+                    ));
+                }
+                super::recurrent_snapshot::push_kv_cache_mode(
+                    snapshot,
+                    format!("{prefix}.attention.mode"),
+                    kv.mode,
+                );
                 super::recurrent_snapshot::push_optional(
                     snapshot,
                     format!("{prefix}.attention.keys"),
@@ -188,8 +199,12 @@ impl Qwen3NextCache {
                     format!("{prefix}.attention.values"),
                     &kv.values,
                 );
+                Ok(())
             }
-            Qwen3NextCache::Linear(gd) => gd.snapshot_into(snapshot, &format!("{prefix}.linear")),
+            Qwen3NextCache::Linear(gd) => {
+                gd.snapshot_into(snapshot, &format!("{prefix}.linear"));
+                Ok(())
+            }
         }
     }
 
@@ -197,9 +212,26 @@ impl Qwen3NextCache {
         &mut self,
         snapshot: &mlxcel_core::generate::ModelStateSnapshot,
         prefix: &str,
-    ) {
+    ) -> Result<(), String> {
         match self {
             Qwen3NextCache::Attention(kv) => {
+                let snapshot_mode = super::recurrent_snapshot::restore_kv_cache_mode(
+                    snapshot,
+                    format!("{prefix}.attention.mode"),
+                )?
+                .unwrap_or(KVCacheMode::Fp16);
+                if snapshot_mode != kv.mode {
+                    return Err(format!(
+                        "{prefix}.attention: snapshot KV mode {:?} does not match configured mode {:?}",
+                        snapshot_mode, kv.mode
+                    ));
+                }
+                if kv.mode != KVCacheMode::Fp16 {
+                    return Err(format!(
+                        "{prefix}.attention: model-state restores do not yet deserialize {:?} KV sidecars",
+                        kv.mode
+                    ));
+                }
                 kv.keys = super::recurrent_snapshot::restore_optional(
                     snapshot,
                     format!("{prefix}.attention.keys"),
@@ -209,9 +241,11 @@ impl Qwen3NextCache {
                     format!("{prefix}.attention.values"),
                 );
                 kv.offset = snapshot.token_len() as i32;
+                Ok(())
             }
             Qwen3NextCache::Linear(gd) => {
                 gd.restore_from(snapshot, &format!("{prefix}.linear"));
+                Ok(())
             }
         }
     }
@@ -1416,6 +1450,7 @@ pub struct Qwen3NextModel {
     // model owns its heterogeneous cache here and persists it across forward
     // calls; recreating it per call would make decode stateless.
     sequence_state: ModelOwnedSequenceState<Qwen3NextCache>,
+    kv_cache_layer_modes: KvCacheLayerModes,
 }
 
 impl Qwen3NextModel {
@@ -1441,13 +1476,20 @@ impl Qwen3NextModel {
     }
 
     pub fn make_caches(&self) -> Vec<Qwen3NextCache> {
+        self.make_internal_caches()
+    }
+
+    fn make_internal_caches_with_modes(&self, modes: &KvCacheLayerModes) -> Vec<Qwen3NextCache> {
         self.layers
             .iter()
-            .map(|l| {
+            .enumerate()
+            .map(|(layer_idx, l)| {
                 if l.is_linear {
                     Qwen3NextCache::Linear(GatedDeltaCache::new())
                 } else {
-                    Qwen3NextCache::Attention(KVCache::new())
+                    Qwen3NextCache::Attention(KVCache::new_with_mode(
+                        modes.mode_for_layer(layer_idx),
+                    ))
                 }
             })
             .collect()
@@ -1597,20 +1639,12 @@ impl Qwen3NextModel {
             tie_word_embeddings: config.tie_word_embeddings,
             full_attention_interval: config.full_attention_interval,
             sequence_state: ModelOwnedSequenceState::new(internal_caches),
+            kv_cache_layer_modes: KvCacheLayerModes::new(),
         })
     }
 
     fn make_internal_caches(&self) -> Vec<Qwen3NextCache> {
-        self.layers
-            .iter()
-            .map(|l| {
-                if l.is_linear {
-                    Qwen3NextCache::Linear(GatedDeltaCache::new())
-                } else {
-                    Qwen3NextCache::Attention(KVCache::new())
-                }
-            })
-            .collect()
+        self.make_internal_caches_with_modes(&self.kv_cache_layer_modes)
     }
 
     /// Shared forward that routes through the model-owned heterogeneous cache.
@@ -1707,6 +1741,16 @@ impl LanguageModel for Qwen3NextModel {
             .prepare_sequence_state(seq_id, self.make_internal_caches());
     }
 
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        self.kv_cache_layer_modes.set(modes);
+        self.sequence_state
+            .replace_internal(self.make_internal_caches());
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.kv_cache_layer_modes.clone_modes()
+    }
+
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         self.sequence_state.release_sequence_state(seq_id);
     }
@@ -1725,10 +1769,14 @@ impl LanguageModel for Qwen3NextModel {
                 let mut snapshot =
                     mlxcel_core::generate::ModelStateSnapshot::new("qwen3_next", token_len);
                 for (idx, cache) in state.iter().enumerate() {
-                    cache.snapshot_into(&mut snapshot, &format!("layer{idx}"));
+                    if let Err(err) = cache.snapshot_into(&mut snapshot, &format!("layer{idx}")) {
+                        tracing::warn!("Qwen3-Next prompt-cache snapshot skipped: {err}");
+                        return None;
+                    }
                 }
-                snapshot
+                Some(snapshot)
             })
+            .flatten()
     }
 
     fn restore_sequence_state(
@@ -1744,7 +1792,7 @@ impl LanguageModel for Qwen3NextModel {
         }
         let mut state = self.make_internal_caches();
         for (idx, cache) in state.iter_mut().enumerate() {
-            cache.restore_from(snapshot, &format!("layer{idx}"));
+            cache.restore_from(snapshot, &format!("layer{idx}"))?;
         }
         self.sequence_state.replace_sequence_state(seq_id, state);
         Ok(())
@@ -2095,10 +2143,14 @@ mod cache_tests {
         let cache = Qwen3NextCache::Attention(kv);
 
         let mut snapshot = ModelStateSnapshot::new("qwen3_5", 23);
-        cache.snapshot_into(&mut snapshot, "layer0");
+        cache
+            .snapshot_into(&mut snapshot, "layer0")
+            .expect("fp16 attention snapshot should be supported");
 
         let mut restored = Qwen3NextCache::Attention(KVCache::new());
-        restored.restore_from(&snapshot, "layer0");
+        restored
+            .restore_from(&snapshot, "layer0")
+            .expect("fp16 attention snapshot should restore");
 
         match restored {
             Qwen3NextCache::Attention(kv) => {
@@ -2128,10 +2180,14 @@ mod cache_tests {
         let cache = Qwen3NextCache::Linear(gd);
 
         let mut snapshot = ModelStateSnapshot::new("qwen3_5", 29);
-        cache.snapshot_into(&mut snapshot, "layer1");
+        cache
+            .snapshot_into(&mut snapshot, "layer1")
+            .expect("linear snapshot should be supported");
 
         let mut restored = Qwen3NextCache::Linear(GatedDeltaCache::new());
-        restored.restore_from(&snapshot, "layer1");
+        restored
+            .restore_from(&snapshot, "layer1")
+            .expect("linear snapshot should restore");
 
         match restored {
             Qwen3NextCache::Linear(gd) => {
@@ -2151,6 +2207,35 @@ mod cache_tests {
             }
             Qwen3NextCache::Attention(_) => panic!("restored wrong cache variant"),
         }
+    }
+
+    #[test]
+    fn qwen3_next_attention_snapshot_refuses_non_fp16_modes() {
+        let cache = Qwen3NextCache::Attention(KVCache::new_with_mode(
+            mlxcel_core::cache::KVCacheMode::Int8,
+        ));
+        let mut snapshot = ModelStateSnapshot::new("qwen3_next", 1);
+        let err = cache
+            .snapshot_into(&mut snapshot, "layer0")
+            .expect_err("non-fp16 attention snapshot must be refused");
+        assert!(err.contains("Int8"));
+    }
+
+    #[test]
+    fn qwen3_next_attention_restore_refuses_mode_mismatch() {
+        let cache = Qwen3NextCache::Attention(KVCache::new());
+        let mut snapshot = ModelStateSnapshot::new("qwen3_next", 1);
+        cache
+            .snapshot_into(&mut snapshot, "layer0")
+            .expect("fp16 snapshot should be supported");
+
+        let mut restored = Qwen3NextCache::Attention(KVCache::new_with_mode(
+            mlxcel_core::cache::KVCacheMode::Int8,
+        ));
+        let err = restored
+            .restore_from(&snapshot, "layer0")
+            .expect_err("restoring fp16 snapshot into int8 cache must be refused");
+        assert!(err.contains("does not match configured mode"));
     }
 }
 
