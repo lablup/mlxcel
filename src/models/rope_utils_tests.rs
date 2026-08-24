@@ -27,7 +27,9 @@
 //! at low positions, so no short-prompt output separates them; the band
 //! arithmetic is therefore checked against the closed form directly.
 
-use super::{RopeScalingKind, RopeScalingSpec, llama3_rope_freqs};
+use super::{
+    RopeScalingKind, RopeScalingSpec, llama3_rope_freqs, report_unusable_rope_scaling_once,
+};
 
 /// Parse a `rope_scaling` block the way a `config.json` delivers it.
 fn spec(json: &str) -> RopeScalingSpec {
@@ -176,12 +178,39 @@ fn an_unimplemented_scheme_keeps_the_model_loading_on_the_plain_table() {
 }
 
 #[test]
-fn a_linear_block_with_an_unusable_factor_falls_back_to_the_plain_table() {
-    // A zero or negative factor would make `1 / factor` infinite or flip the
-    // sign of every position. Upstream would index `scaling_config["factor"]`
-    // and hand the result straight to `nn.RoPE`; falling back keeps the config
-    // loading with the graph it already had.
+fn an_unimplemented_scheme_warns_once_per_model_and_scheme() {
+    let model = "qwen3-warning-dedup-test";
+    assert!(report_unusable_rope_scaling_once(
+        model,
+        "yarn",
+        "test-only unsupported scheme"
+    ));
+    assert!(!report_unusable_rope_scaling_once(
+        model,
+        "yarn",
+        "test-only unsupported scheme"
+    ));
+    assert!(report_unusable_rope_scaling_once(
+        model,
+        "dynamic",
+        "test-only distinct scheme"
+    ));
+    assert!(report_unusable_rope_scaling_once(
+        "qwen3-moe-warning-dedup-test",
+        "yarn",
+        "test-only distinct model"
+    ));
+}
+
+#[test]
+fn a_linear_block_with_a_missing_or_unusable_factor_falls_back_to_the_plain_table() {
+    // A missing factor would silently no-op, and a zero or negative factor
+    // would make `1 / factor` infinite or flip the sign of every position.
+    // Upstream would index `scaling_config["factor"]` and hand the result
+    // straight to `nn.RoPE`; falling back keeps the config loading with the
+    // graph it already had while emitting the once-per-model warning.
     for block in [
+        r#"{"type": "linear"}"#,
         r#"{"factor": 0.0, "type": "linear"}"#,
         r#"{"factor": -2.0, "type": "linear"}"#,
     ] {

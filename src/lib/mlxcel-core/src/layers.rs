@@ -3024,13 +3024,13 @@ impl FusedQKVLinear {
     ///
     /// `rope_scale` multiplies the position, exactly as the `scale` argument of
     /// [`crate::fast_rope`] does, so the fused path and the graph fallback stay
-    /// interchangeable on a scaled layer. Gemma 3's global-attention layers pass
-    /// `1 / rope_scaling.factor` (`0.125` on every published checkpoint from 4B
-    /// up); its sliding layers, Qwen3 and Qwen3-MoE pass `1.0`. Before #1340 the
-    /// C++ launcher hardcoded `1.0f`, which is why this parameter exists rather
-    /// than the caller gating the fused path off on a scaled layer: gating would
-    /// have cost Gemma 3 4B/12B/27B their fused prefill kernel on every global
-    /// layer.
+    /// interchangeable on a scaled layer. Gemma 3's global-attention layers and
+    /// Qwen3 / Qwen3-MoE `linear` rope_scaling blocks pass
+    /// `1 / rope_scaling.factor` (`0.125` when factor is 8); unscaled and
+    /// frequency-table layers pass `1.0`, with table schemes routed to the graph
+    /// path by the caller. Before #1340 the C++ launcher hardcoded `1.0f`, which
+    /// is why this parameter exists rather than the caller gating the fused path
+    /// off on every scaled layer.
     ///
     /// Used by: Gemma3 dense attention path, Qwen3 / Qwen3-MoE decode attention
     /// path.
@@ -7735,6 +7735,66 @@ mod tests {
         assert!(dq < 5e-3, "fused Q vs graph Q RMS too large: {dq}");
         assert!(dk < 5e-3, "fused K vs graph K RMS too large: {dk}");
         assert!(dv < 5e-3, "fused V vs graph V RMS too large: {dv}");
+    }
+
+    /// A non-unit RoPE position scale must also reach the standard-RMSNorm
+    /// fused primitive that Qwen3 and Qwen3-MoE use. The scaled Gemma test below
+    /// pins the same parameter through `GemmaRMSNorm`, but it does not exercise
+    /// the raw-weight norm variant selected by Qwen3.
+    #[test]
+    fn fused_qkv_split_norm_rope_standard_rmsnorm_applies_position_scale() {
+        let (n_heads, n_kv_heads, head_dim) = (2, 1, 8);
+        let (rope_dims, rope_base, eps) = (head_dim, 1_000_000.0_f32, 1e-6_f32);
+        let offset = 4096;
+        let scale = 0.125_f32;
+
+        let qkv = synthetic_quantized_fused_qkv(n_heads, n_kv_heads, head_dim);
+        let q_norm_w: Vec<f32> = (0..head_dim).map(|i| 0.5 + 0.1 * i as f32).collect();
+        let k_norm_w: Vec<f32> = (0..head_dim).map(|i| 0.7 + 0.05 * i as f32).collect();
+        let q_norm = RMSNorm::new(f16_from(&q_norm_w, &[head_dim]), eps);
+        let k_norm = RMSNorm::new(f16_from(&k_norm_w, &[head_dim]), eps);
+
+        let x_vals: Vec<f32> = (0..64).map(|c| 0.2 + 0.01 * c as f32).collect();
+        let x = f16_from(&x_vals, &[1, 1, 64]);
+
+        let (rq, rk, _rv) = project_reshape_heads(&qkv, &x);
+        let rq = q_norm.forward(&rq);
+        let rk = k_norm.forward(&rk);
+        let ref_q = transpose_then_rope(&rq, rope_dims, rope_base, scale, offset);
+        let ref_k = transpose_then_rope(&rk, rope_dims, rope_base, scale, offset);
+
+        assert!(
+            max_abs(&ref_q) > 0.1,
+            "reference Q must be non-degenerate (max-abs {})",
+            max_abs(&ref_q)
+        );
+
+        let (fq, fk, _fv) = qkv
+            .forward_split_norm_rope_quantized(
+                &x, &q_norm, &k_norm, rope_dims, rope_base, scale, offset,
+            )
+            .expect("quantized fused QKV must take the fused path");
+
+        let (dq, dk) = (rms_diff(&fq, &ref_q), rms_diff(&fk, &ref_k));
+        assert!(
+            dq < 5e-3,
+            "scaled standard Q vs graph Q RMS too large: {dq}"
+        );
+        assert!(
+            dk < 5e-3,
+            "scaled standard K vs graph K RMS too large: {dk}"
+        );
+
+        let (uq, uk, _uv) = qkv
+            .forward_split_norm_rope_quantized(
+                &x, &q_norm, &k_norm, rope_dims, rope_base, 1.0, offset,
+            )
+            .expect("quantized fused QKV must take the fused path");
+        let separation = rms_diff(&fq, &uq).min(rms_diff(&fk, &uk));
+        assert!(
+            separation > 1e-2,
+            "a 1/8 position scale must change the standard fused output; min Q/K RMS separation from the unscaled call was {separation}"
+        );
     }
 
     /// The existing `GemmaRMSNorm` path must still match its graph reference
