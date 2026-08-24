@@ -102,7 +102,7 @@ CUDA host는 NVIDIA GB10, driver 580.173.02, CUDA 13 runtime 가시성, compute 
 | 항목 | 값 |
 |---|---:|
 | 변경 파일 | 5 |
-| 추가 라인 | 832 |
+| 추가 라인 | 843 |
 | 삭제 라인 | 114 |
 | 영구 회귀 테스트 | 4 |
 | 감사한 shapeless callable | 20 |

@@ -102,7 +102,7 @@ Implementation diff before adding this report:
 | Item | Value |
 |---|---:|
 | Files changed | 5 |
-| Lines added | 832 |
+| Lines added | 843 |
 | Lines deleted | 114 |
 | Permanent regression tests | 4 |
 | Audited shapeless callables | 20 |
