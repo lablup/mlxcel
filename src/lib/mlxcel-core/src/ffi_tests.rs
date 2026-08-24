@@ -2539,6 +2539,18 @@ fn shapeless_compile_audit_harness() {
     let gate = from_slice_f32(&[1.5, -2.0, 0.75, 3.0], &[1, 4]);
     let gpt_linear = from_slice_f32(&[-8.0, -1.0, 2.0, 8.0], &[1, 4]);
     let gpt_glu = from_slice_f32(&[-2.0, 0.5, 2.0, 8.0], &[1, 4]);
+    let clip_x = astype(
+        &from_slice_f32(&[65504.0, -65504.0, 10.0, -10.0], &[1, 4]),
+        dtype::FLOAT16,
+    );
+    let clip_y = astype(
+        &from_slice_f32(&[4096.0, -4096.0, 2.0, -2.0], &[1, 4]),
+        dtype::FLOAT16,
+    );
+    let attn_q = from_slice_f32(&[8.0, -4.0, 2.0, 6.0], &[1, 1, 2, 2]);
+    let attn_k = from_slice_f32(&[4.0, -2.0, -6.0, 3.0, 2.0, 5.0], &[1, 1, 3, 2]);
+    let attn_v = from_slice_f32(&[1.0, 10.0, 2.0, 20.0, 4.0, 40.0], &[1, 1, 3, 2]);
+    let attn_mask = from_slice_f32(&[0.0, -1000.0, 0.0, 0.0, 0.0, -1000.0], &[1, 1, 2, 3]);
 
     for _ in 0..2 {
         eval(&compiled_swiglu_activation(&gate, &x));
@@ -2550,6 +2562,22 @@ fn shapeless_compile_audit_harness() {
         eval(&compiled_geglu_activation(&gate, &x));
         eval(&compiled_geglu_approx_activation(&gate, &x));
         eval(&compiled_gelu_topk(&x, 0.75));
+        eval(&compiled_softcap(&x, 1.0));
+        eval(&compiled_clip_residual(&clip_x, &clip_y));
+        let sdpa =
+            unsafe { compiled_softcap_sdpa(&attn_q, &attn_k, &attn_v, 4.0, 3.0, std::ptr::null()) };
+        eval(&sdpa);
+        let masked_sdpa = unsafe {
+            compiled_softcap_sdpa(
+                &attn_q,
+                &attn_k,
+                &attn_v,
+                4.0,
+                3.0,
+                attn_mask.as_ref().unwrap() as *const MlxArray,
+            )
+        };
+        eval(&masked_sdpa);
     }
 
     let group_size = 64;
@@ -2715,6 +2743,10 @@ fn shapeless_compile_audit_harness() {
         "compiled_geglu_activation",
         "compiled_geglu_approx_activation",
         "compiled_gelu_topk",
+        "compiled_softcap",
+        "compiled_clip_residual",
+        "compiled_softcap_sdpa_nomask",
+        "compiled_softcap_sdpa_masked",
         "compiled_gelu_mlp_forward",
         "compiled_gelu_approx_mlp_forward",
         "compiled_gelu_approx_mlp_forward_global_scale",

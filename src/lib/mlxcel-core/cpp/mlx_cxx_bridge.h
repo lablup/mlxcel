@@ -527,16 +527,14 @@ std::unique_ptr<MlxArray> compiled_geglu_approx_activation(
     const MlxArray& x
 );
 
-// Softcap attention scores: tanh(scores * inv_cap) * cap.
-// The compatibility name is retained; the implementation is eager so a
-// shapeless compile cannot silently return an input unchanged.
+// Compiled softcap attention scores: tanh(scores * inv_cap) * cap.
 // Used by: Gemma2 attention with logit softcapping
 std::unique_ptr<MlxArray> compiled_softcap(
     const MlxArray& scores,
     float cap
 );
 
-// Eager clip_residual for float16 overflow prevention
+// Compiled clip_residual for float16 overflow prevention
 // When float16: cast to f32, add, clip to f16 range, cast back
 // When other dtype: simple addition
 // Used by: Gemma3 residual connections
@@ -545,7 +543,7 @@ std::unique_ptr<MlxArray> compiled_clip_residual(
     const MlxArray& y
 );
 
-// Eager softcap SDPA: Q@K^T * scale -> softcap -> mask -> softmax -> @V
+// Compiled softcap SDPA: Q@K^T * scale -> softcap -> mask -> softmax -> @V
 // Used by: Gemma2 attention with logit softcapping
 std::unique_ptr<MlxArray> compiled_softcap_sdpa(
     const MlxArray& q,
@@ -556,7 +554,7 @@ std::unique_ptr<MlxArray> compiled_softcap_sdpa(
     const MlxArray* mask
 );
 
-// Eager softcap SDPA with GQA: handles repeat_kv + attention
+// Compiled softcap SDPA with GQA: handles repeat_kv + attention
 // Used by: Gemma2 attention (GQA + softcap)
 std::unique_ptr<MlxArray> compiled_softcap_sdpa_gqa(
     const MlxArray& q,

@@ -1599,8 +1599,21 @@ std::unique_ptr<MlxArray> compiled_gelu_topk(
     return std::make_unique<MlxArray>(std::move(result[0]));
 }
 
-// Softcap: tanh(scores / cap) * cap
+// Compiled softcap: tanh(scores / cap) * cap
 // Used by: Gemma2 attention with logit softcapping
+namespace {
+    static CompiledArrayFn get_compiled_softcap() {
+        auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
+            const auto& scores = inputs[0];
+            const auto& cap = inputs[1];
+            auto result = mlx::core::multiply(
+                mlx::core::tanh(mlx::core::divide(scores, cap)), cap);
+            return {mlx::core::astype(result, scores.dtype())};
+        };
+        return compile_shapeless_audited("compiled_softcap", fn);
+    }
+}
+
 std::unique_ptr<MlxArray> compiled_softcap(
     const MlxArray& scores,
     float cap
@@ -1608,18 +1621,28 @@ std::unique_ptr<MlxArray> compiled_softcap(
     if (cap <= 0.0f) {
         return std::make_unique<MlxArray>(scores.inner);
     }
-    auto cap_arr = array(cap);
-    auto result = mlx::core::multiply(
-        mlx::core::tanh(mlx::core::divide(scores.inner, cap_arr)),
-        cap_arr);
-    return std::make_unique<MlxArray>(
-        mlx::core::astype(result, scores.inner.dtype()));
+    static auto compiled_fn = get_compiled_softcap();
+    auto result = compiled_fn({scores.inner, array(cap)});
+    return std::make_unique<MlxArray>(std::move(result[0]));
 }
 
-// Eager clip_residual for float16 overflow prevention. This deliberately stays
-// outside mlx::core::compile: the former shapeless callable could silently
-// return an input unchanged on Metal (#1391/#1392).
+// Compiled clip_residual for float16 overflow prevention.
 // Used by: Gemma3 residual connections
+namespace {
+    static CompiledArrayFn get_compiled_clip_residual_f16() {
+        auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
+            auto sum = mlx::core::add(
+                mlx::core::astype(inputs[0], mlx::core::float32),
+                mlx::core::astype(inputs[1], mlx::core::float32));
+            auto bound = array(65504.0f);
+            auto clipped = mlx::core::clip(
+                sum, mlx::core::negative(bound), bound);
+            return {mlx::core::astype(clipped, mlx::core::float16)};
+        };
+        return compile_shapeless_audited("compiled_clip_residual", fn);
+    }
+}
+
 std::unique_ptr<MlxArray> compiled_clip_residual(
     const MlxArray& x,
     const MlxArray& y
@@ -1628,40 +1651,53 @@ std::unique_ptr<MlxArray> compiled_clip_residual(
     if (x.inner.dtype() != mlx::core::float16) {
         return std::make_unique<MlxArray>(mlx::core::add(x.inner, y.inner));
     }
-    auto sum = mlx::core::add(
-        mlx::core::astype(x.inner, mlx::core::float32),
-        mlx::core::astype(y.inner, mlx::core::float32));
-    auto bound = array(65504.0f);
-    auto clipped = mlx::core::clip(sum, mlx::core::negative(bound), bound);
-    return std::make_unique<MlxArray>(
-        mlx::core::astype(clipped, mlx::core::float16));
+    static auto compiled_fn = get_compiled_clip_residual_f16();
+    auto result = compiled_fn({x.inner, y.inner});
+    return std::make_unique<MlxArray>(std::move(result[0]));
 }
 
-// Eager softcap SDPA: Q@K^T * scale -> softcap -> mask -> softmax -> @V.
-// The public name is retained for compatibility, but the implementation avoids
-// shapeless compile because a no-op here can be numerically plausible (#1392).
+// Compiled softcap SDPA: Q@K^T * scale -> softcap -> mask -> softmax -> @V.
 // Used by: Gemma2 attention with logit softcapping
 namespace {
-    static array softcap_sdpa_eager(
+    static array softcap_sdpa_graph(
         const array& q,
         const array& k,
         const array& v,
-        float scale,
-        float cap,
+        const array& scale,
+        const array& cap,
         const array* mask
     ) {
         auto scores = mlx::core::matmul(
             q, mlx::core::transpose(k, {0, 1, 3, 2}));
-        scores = mlx::core::multiply(scores, array(scale));
-        auto cap_arr = array(cap);
+        scores = mlx::core::multiply(scores, scale);
         scores = mlx::core::multiply(
-            mlx::core::tanh(mlx::core::divide(scores, cap_arr)), cap_arr);
+            mlx::core::tanh(mlx::core::divide(scores, cap)), cap);
         if (mask) {
             scores = mlx::core::add(scores, *mask);
         }
         auto result = mlx::core::matmul(
             mlx::core::softmax(scores, -1), v);
         return mlx::core::astype(result, v.dtype());
+    }
+
+    static CompiledArrayFn get_compiled_softcap_sdpa_nomask() {
+        auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
+            return {softcap_sdpa_graph(
+                inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+                nullptr)};
+        };
+        return compile_shapeless_audited(
+            "compiled_softcap_sdpa_nomask", fn);
+    }
+
+    static CompiledArrayFn get_compiled_softcap_sdpa_masked() {
+        auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
+            return {softcap_sdpa_graph(
+                inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+                &inputs[5])};
+        };
+        return compile_shapeless_audited(
+            "compiled_softcap_sdpa_masked", fn);
     }
 
     bool enable_softcap_gqa_decode_grouped_opt() {
@@ -1689,16 +1725,20 @@ std::unique_ptr<MlxArray> compiled_softcap_sdpa(
     float softcap,
     const MlxArray* mask
 ) {
-    std::optional<array> cast_mask;
     if (mask) {
-        cast_mask = mask->inner.dtype() == q.inner.dtype()
+        auto cast_mask = mask->inner.dtype() == q.inner.dtype()
             ? mask->inner
             : mlx::core::astype(mask->inner, q.inner.dtype());
+        static auto compiled_fn = get_compiled_softcap_sdpa_masked();
+        auto result = compiled_fn({
+            q.inner, k.inner, v.inner, array(scale), array(softcap),
+            std::move(cast_mask)});
+        return std::make_unique<MlxArray>(std::move(result[0]));
     }
-    auto result = softcap_sdpa_eager(
-        q.inner, k.inner, v.inner, scale, softcap,
-        cast_mask ? &*cast_mask : nullptr);
-    return std::make_unique<MlxArray>(std::move(result));
+    static auto compiled_fn = get_compiled_softcap_sdpa_nomask();
+    auto result = compiled_fn({
+        q.inner, k.inner, v.inner, array(scale), array(softcap)});
+    return std::make_unique<MlxArray>(std::move(result[0]));
 }
 
 // Softcap SDPA with GQA: do repeat_kv outside compiled graph, then call compiled SDPA
@@ -1760,16 +1800,20 @@ std::unique_ptr<MlxArray> compiled_softcap_sdpa_gqa(
     auto rk = do_repeat_kv(k.inner);
     auto rv = do_repeat_kv(v.inner);
 
-    std::optional<array> cast_mask;
     if (mask) {
-        cast_mask = mask->inner.dtype() == q.inner.dtype()
+        auto cast_mask = mask->inner.dtype() == q.inner.dtype()
             ? mask->inner
             : mlx::core::astype(mask->inner, q.inner.dtype());
+        static auto compiled_fn = get_compiled_softcap_sdpa_masked();
+        auto result = compiled_fn({
+            q.inner, rk, rv, array(scale), array(softcap),
+            std::move(cast_mask)});
+        return std::make_unique<MlxArray>(std::move(result[0]));
     }
-    auto result = softcap_sdpa_eager(
-        q.inner, rk, rv, scale, softcap,
-        cast_mask ? &*cast_mask : nullptr);
-    return std::make_unique<MlxArray>(std::move(result));
+    static auto compiled_fn = get_compiled_softcap_sdpa_nomask();
+    auto result = compiled_fn({
+        q.inner, rk, rv, array(scale), array(softcap)});
+    return std::make_unique<MlxArray>(std::move(result[0]));
 }
 
 // Compiled GELU MLP forward: down_proj(gelu(gate_proj(x)) * up_proj(x))

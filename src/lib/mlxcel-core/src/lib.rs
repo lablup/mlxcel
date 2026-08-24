@@ -657,16 +657,15 @@ mod ffi {
         /// Used by: Gemma3n MLP layers with activation_sparsity > 0
         fn compiled_gelu_topk(x: &MlxArray, std_multiplier: f32) -> UniquePtr<MlxArray>;
 
-        /// Eager softcap: tanh(scores / cap) * cap.
-        /// The compatibility name is retained to avoid an API break.
+        /// Compiled softcap: tanh(scores / cap) * cap.
         /// Used by: Gemma2 attention with logit softcapping
         fn compiled_softcap(scores: &MlxArray, cap: f32) -> UniquePtr<MlxArray>;
 
-        /// Eager clip_residual for float16 overflow prevention
+        /// Compiled clip_residual for float16 overflow prevention
         /// Used by: Gemma3 residual connections
         fn compiled_clip_residual(x: &MlxArray, y: &MlxArray) -> UniquePtr<MlxArray>;
 
-        /// Eager softcap SDPA: Q@K^T * scale -> softcap -> mask -> softmax -> @V
+        /// Compiled softcap SDPA: Q@K^T * scale -> softcap -> mask -> softmax -> @V
         /// Used by: Gemma2 attention with logit softcapping
         unsafe fn compiled_softcap_sdpa(
             q: &MlxArray,
@@ -677,7 +676,7 @@ mod ffi {
             mask: *const MlxArray,
         ) -> UniquePtr<MlxArray>;
 
-        /// Eager softcap SDPA with GQA: repeat_kv + attention
+        /// Compiled softcap SDPA with GQA: repeat_kv + attention
         /// Used by: Gemma2 attention (GQA + softcap)
         unsafe fn compiled_softcap_sdpa_gqa(
             q: &MlxArray,
