@@ -307,7 +307,10 @@ jobs:
         # name can never reach shell parsing; the script reads BASE_REF as input.
         env:
           BASE_REF: origin/${{ github.base_ref }}
-        run: python3 scripts/ci/check_cross_repo_refs.py
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          bash scripts/ci/check_cross_repo_refs_test.sh
+          python3 scripts/ci/check_cross_repo_refs.py
 
   # ============================================================================
   # OpenXLA feature compile (self-hosted GB10)

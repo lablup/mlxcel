@@ -18,6 +18,14 @@ author/reviewer can confirm each is a genuine ``lablup/mlxcel`` reference,
 qualify an upstream reference as ``org/repo#NNN``, or drop an internal one.
 ``org/repo#NNN`` (already qualified) and corpus fixtures are ignored.
 
+When ``GH_TOKEN`` or ``GITHUB_TOKEN`` is available, the script asks GitHub for
+the newest issue/PR number in ``lablup/mlxcel`` and treats any larger bare ref
+as likely cross-repository. The issues endpoint includes pull requests and both
+share the same numbering sequence, so one bounded query is enough. When the
+token, ``gh`` CLI, or API response is unavailable, the script falls back to the
+honest manual-review bucket for refs on lines without an explicit upstream
+signal and prints which fallback path was used.
+
 Usage
 -----
     scripts/ci/check_cross_repo_refs.py [BASE_REF]
@@ -27,6 +35,7 @@ exit non-zero when any reference needs review (default is advisory: exit 0).
 """
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -42,7 +51,15 @@ UPSTREAM = re.compile(
     r"\bupstream\b|sglang|llama\.cpp|pytorch",
     re.IGNORECASE,
 )
-IGNORE_PREFIXES = ("tests/fixtures/", ".github/PULL_REQUEST_TEMPLATE.md")
+IGNORE_PREFIXES = (
+    "tests/fixtures/",
+    ".github/PULL_REQUEST_TEMPLATE.md",
+    "scripts/ci/check_cross_repo_refs_test.sh",
+)
+REPO = "lablup/mlxcel"
+FALLBACK_PREFIX = (
+    "cross-repo-refs: fallback to manual review for non-upstream bare refs"
+)
 
 
 def diff_base() -> str:
@@ -53,8 +70,63 @@ def diff_base() -> str:
     return mb.stdout.strip() or base
 
 
+def resolve_repo_boundary():
+    token_name = next(
+        (name for name in ("GH_TOKEN", "GITHUB_TOKEN") if os.environ.get(name)),
+        None,
+    )
+    if token_name is None:
+        return None, f"{FALLBACK_PREFIX} (no GH_TOKEN/GITHUB_TOKEN)."
+    if shutil.which("gh") is None:
+        return None, f"{FALLBACK_PREFIX} (gh CLI not found)."
+
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "api",
+                f"repos/{REPO}/issues",
+                "--method",
+                "GET",
+                "-f",
+                "state=all",
+                "-f",
+                "sort=created",
+                "-f",
+                "direction=desc",
+                "-F",
+                "per_page=1",
+                "--jq",
+                ".[0].number",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"{FALLBACK_PREFIX} (gh api timed out)."
+
+    if result.returncode != 0:
+        stderr = result.stderr.strip().splitlines()
+        detail = stderr[-1] if stderr else f"gh api exited {result.returncode}"
+        return None, f"{FALLBACK_PREFIX} ({detail})."
+
+    try:
+        boundary = int(result.stdout.strip())
+    except ValueError:
+        bad = result.stdout.strip() or "<empty>"
+        return None, f"{FALLBACK_PREFIX} (invalid gh api output: {bad})."
+
+    if boundary <= 0:
+        return None, f"{FALLBACK_PREFIX} (invalid repo boundary: {boundary})."
+
+    return boundary, None
+
+
 def main() -> int:
     base = diff_base()
+    repo_boundary, fallback_message = resolve_repo_boundary()
     diff = subprocess.run(
         ["git", "diff", "--unified=0", f"{base}...HEAD"],
         capture_output=True, text=True,
@@ -72,18 +144,22 @@ def main() -> int:
             for m in BARE.finditer(content):
                 num = int(m.group(1))
                 hit = (cur, m.group(1), content.strip()[:110])
-                # >=1000 cannot be a lablup/mlxcel number (this repo is far below
-                # that), so it is always an upstream ref to qualify; below that,
-                # an upstream-naming line is upstream and the rest is same-repo.
-                if num >= 1000 or UPSTREAM.search(content):
+                if UPSTREAM.search(content) or (
+                    repo_boundary is not None and num > repo_boundary
+                ):
                     upstream_hits.append(hit)
                 else:
                     samerepo_hits.append(hit)
 
     if not upstream_hits and not samerepo_hits:
+        if fallback_message:
+            print(fallback_message)
         print("cross-repo-refs: OK — no bare 3+-digit '#NNN' added.")
         return 0
 
+    if fallback_message:
+        print(fallback_message)
+        print()
     print("cross-repo-refs: bare 3+-digit '#NNN' references were added.\n")
     print(
         "Policy: same-repo (lablup/mlxcel) refs use bare '#N'. Any reference to another\n"
