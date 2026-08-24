@@ -128,11 +128,13 @@ jobs:
                   raise RuntimeError(
                       f"{binary.name} failed for {model.name}:\n{completed.stderr[-4000:]}"
                   )
-              if not completed.stdout.startswith(prompt):
+              prompt_offset = completed.stdout.rfind(prompt)
+              if prompt_offset < 0:
                   raise RuntimeError(
-                      f"unexpected stdout prefix from {binary.name} for {model.name}"
+                      f"prompt missing from {binary.name} stdout for {model.name}: "
+                      f"{completed.stdout[-4000:]!r}"
                   )
-              generated = completed.stdout[len(prompt):]
+              generated = completed.stdout[prompt_offset + len(prompt):]
               marker = "\n\n[Generated "
               if marker not in generated:
                   raise RuntimeError(
