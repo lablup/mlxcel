@@ -19,23 +19,34 @@ repo_root="$(git rev-parse --show-toplevel)"
 bridge="$repo_root/src/lib/mlxcel-core/cpp/mlx_cxx_bridge.cpp"
 
 # Every production shapeless=true construction must pass through the opt-in
-# eager-oracle wrapper. Comments do not match this literal call pattern.
+# eager-oracle wrapper. Inventory the compile token itself so a future direct
+# call cannot evade this check merely by putting its arguments on another line.
 if command -v rg >/dev/null 2>&1; then
-    direct_shapeless="$(
-        rg -n 'mlx::core::compile\([^\n]*(true|shapeless=\*/true)' "$bridge"
-    )"
+    direct_compile="$(rg -nF 'mlx::core::compile(' "$bridge")"
 else
     # The self-hosted Apple runner intentionally carries only the build tools;
     # keep the on-demand audit usable there without installing ripgrep.
-    direct_shapeless="$(
-        grep -En 'mlx::core::compile\([^)]*(true|shapeless=\*/true)' "$bridge"
-    )"
+    direct_compile="$(grep -nF 'mlx::core::compile(' "$bridge")"
 fi
-direct_count="$(printf '%s\n' "$direct_shapeless" | sed '/^$/d' | wc -l | tr -d ' ')"
-if [[ $direct_count -ne 1 ]] \
-    || [[ $direct_shapeless != *'mlx::core::compile(eager_fn, /*shapeless=*/true)'* ]]; then
-    printf 'unexpected direct shapeless compile site(s):\n' >&2
-    printf '%s\n' "$direct_shapeless" >&2
+
+wrapper_count=0
+unexpected_compile=''
+while IFS= read -r line; do
+    case "$line" in
+        *'mlx::core::compile(eager_fn, /*shapeless=*/true)'*)
+            ((wrapper_count += 1))
+            ;;
+        *'mlx::core::compile('*false*)
+            [[ $line != *true* ]] || unexpected_compile+="$line"$'\n'
+            ;;
+        *)
+            unexpected_compile+="$line"$'\n'
+            ;;
+    esac
+done <<< "$direct_compile"
+if [[ $wrapper_count -ne 1 || -n $unexpected_compile ]]; then
+    printf 'unexpected direct compile site(s):\n' >&2
+    printf '%s' "$unexpected_compile" >&2
     exit 1
 fi
 
