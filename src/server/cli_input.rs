@@ -553,16 +553,30 @@ impl ServerStartupInput {
             );
         kv_cache_mode_notices.extend(kv_mode_warning);
         if batch_kv_quant.is_enabled() {
-            let (batch_effective, batch_warning) =
-                crate::cli::turbo_args::resolve_effective_kv_cache_mode(
-                    batch_kv_quant.base_mode(),
-                    &self.model_path,
-                );
-            if batch_effective == mlxcel_core::cache::KVCacheMode::Fp16 {
-                kv_cache_mode_notices.extend(batch_warning);
+            let requested_batch_mode = batch_kv_quant.base_mode();
+            // The resolver's own warning is deliberately discarded here. It is
+            // phrased for `--kv-cache-mode`, so an operator who passed
+            // `--kv-bits 4 --kv-quant-scheme turboquant` would be told that
+            // `--kv-cache-mode fp16+turbo4` was refused: a flag they never
+            // passed, on a line nearly identical to the one below. The line
+            // below names the flag that was actually set.
+            let (batch_effective, _) = crate::cli::turbo_args::resolve_effective_kv_cache_mode(
+                requested_batch_mode,
+                &self.model_path,
+            );
+            // `!=` rather than `== Fp16`. Fp16 is the only landing place a
+            // `--kv-bits` request can have today (rule 2 of
+            // `resolve_kv_cache_mode_for_model` fires only on a `Turbo4`
+            // request and `base_mode` never returns one), but the condition
+            // that matters is "the batch table asked for a mode this family
+            // cannot hold", not which mode it was moved to. Written this way,
+            // a future rule that substitutes something other than Fp16 still
+            // disables the batch table instead of silently keeping it.
+            if batch_effective != requested_batch_mode {
                 kv_cache_mode_notices.push(format!(
                     "warning: disabling batched KV quantization (--kv-bits {}) for this model \
-                     family; serving its KV caches at fp16",
+                     family; it selects a {requested_batch_mode} KV cache, which this family \
+                     cannot hold. Serving its KV caches at fp16",
                     self.kv_bits
                 ));
                 batch_kv_quant.bits = 0;

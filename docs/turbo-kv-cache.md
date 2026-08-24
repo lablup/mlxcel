@@ -179,9 +179,10 @@ resolves the requested mode through
 `cache::turbo::resolve_kv_cache_mode_for_model` before any cache is built, so
 `--kv-cache-mode turbo4` on a family outside this list serves as
 `fp16+turbo4` and says so on stderr and in the server log. The mode reported in
-the CLI banner, the server startup log and `/props` is the effective mode, not
-the requested one. If you are adding a new entry, include a quality gate in the
-same change.
+the CLI banner, the server startup log and the `/props` payload
+(`kv_cache_mode`, `kv_bits`, when the endpoint is enabled with `--props`) is the
+effective mode, not the requested one. If you are adding a new entry, include a
+quality gate in the same change.
 
 ## WHT head-dimension constraint
 
@@ -192,15 +193,20 @@ family-specific fallback; do not silently pad without a quality test.
 
 ## MLA latent caches are FP16 only
 
-`glm4_moe_lite`, `deepseek_v3`, `kimi_linear` and `longcat_flash_ngram` store an
-MLA `(kv_latent, k_pe)` pair in one `KVCache`: the "K" slot holds the
-`kv_lora_rank`-wide latent (512 in every shipping checkpoint) and the "V" slot
-holds the `qk_rope_head_dim`-wide RoPE key stream (64). Neither slot is a
-per-head K/V row, so no quantized mode is calibrated for what they contain:
+`glm4_moe_lite`, `deepseek_v3`, `deepseek_v32` (also spelled `deepseek_v3.2`),
+`glm_moe_dsa`, `kimi_linear` and `longcat_flash_ngram` store an MLA
+`(kv_latent, k_pe)` pair in one `KVCache`: the "K" slot holds the
+`kv_lora_rank`-wide latent (512 in the shipping checkpoints) and the "V" slot
+holds the `qk_rope_head_dim`-wide RoPE key stream (64). `deepseek_v32`,
+`deepseek_v3.2` and `glm_moe_dsa` concatenate the `index_head_dim`-wide DSA
+indexer key onto the same "K" slot, so theirs is 640 wide at the default
+`index_head_dim` of 128. Neither slot is a per-head K/V row at any of those
+widths, so no quantized mode is calibrated for what they contain:
 
 - Symmetric `turbo4` builds its sign vectors and codebook from the "V" width and
   applies them to the "K" slot as well, reading 448 floats past the end of a
-  64-entry sign vector. On `glm4-flash` every generated token came out `!`.
+  64-entry sign vector (576 on the indexer-carrying families). On `glm4-flash`
+  every generated token came out `!`.
 - The asymmetric modes (`fp16+turbo4`, `fp16+turbo3`, `turbo4-delegated`)
   quantize only the "V" slot, which here is `k_pe`. They therefore compress a
   **key** and leave the latent exact, which is the reverse of the "FP16 K,

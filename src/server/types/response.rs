@@ -595,6 +595,21 @@ pub struct AudioTranscriptionResponse {
 pub struct PropsResponse {
     pub default_generation_settings: serde_json::Value,
     pub total_slots: usize,
+    /// The KV cache mode the caches were really built with, as the
+    /// `--kv-cache-mode` spelling (`fp16`, `int8`, `fp16+turbo4`, `turbo4`,
+    /// `turbo4-delegated`, `fp16+turbo3`).
+    ///
+    /// The *effective* mode, not the requested one (issue #1350). A model
+    /// family that cannot hold a quantized cache has its request substituted
+    /// during startup, and until this field existed the only record of that was
+    /// one `tracing::warn!` line, invisible to a client and gone after log
+    /// rotation. An operator reads this to answer "what am I actually running".
+    pub kv_cache_mode: String,
+    /// Effective batched KV quantization width (`--kv-bits`), `0` when batched
+    /// KV quantization is off. Reported alongside [`Self::kv_cache_mode`]
+    /// because it is an independent second route to a quantized cache and is
+    /// subject to the same startup substitution.
+    pub kv_bits: i32,
 }
 
 /// Slot information (GET /slots)

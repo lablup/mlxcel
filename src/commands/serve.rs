@@ -76,12 +76,23 @@ fn run_serve_memory_preflight(args: &crate::ServeArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let kv_cache_mode = resolve_kv_cache_mode(
+    let requested = resolve_kv_cache_mode(
         args.turbo.cache_type_k.as_deref(),
         args.turbo.cache_type_v.as_deref(),
         args.turbo.kv_cache_mode.as_deref(),
     )
     .map_err(|e| anyhow::anyhow!("{}", e))?;
+    // Estimate against the mode the caches will really be built with (issue
+    // #1350), not the one requested. `--estimate-memory --kv-cache-mode int8`
+    // on an MLA latent family resolves back to fp16 at startup, so sizing an
+    // int8 cache here under-counts the KV budget, and this preflight can abort
+    // the server outright when the total exceeds the available memory.
+    // `run_serve` resolved `-m` to a concrete directory before calling us, so
+    // the `model_type` lookup is a plain file read. Resolving quietly:
+    // `into_startup_config` performs the same substitution and reports it once
+    // logging exists.
+    let (kv_cache_mode, _) =
+        mlxcel::cli::turbo_args::resolve_effective_kv_cache_mode(requested, &args.model);
     let kv_int8 = matches!(kv_cache_mode, KVCacheMode::Int8);
 
     let ctx_len = serve_preflight_ctx_len(args);
