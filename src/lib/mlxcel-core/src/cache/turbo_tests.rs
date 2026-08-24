@@ -3515,3 +3515,55 @@ fn turbo4_asym_continuous_batching_grow_shrink_matches_sequential() {
         );
     }
 }
+
+// ===========================================================================
+// Symmetric Turbo4 head-dimension precondition (issue #1350)
+// ===========================================================================
+
+/// The exact geometry the MLA-latent families hand the shared `KVCache`:
+/// K is the `kv_lora_rank = 512` latent and V is the `qk_rope_head_dim = 64`
+/// rope stream.
+///
+/// Before #1350 the only guard was a `debug_assert_eq!`, which neither
+/// `[profile.release]` nor `[profile.test-fast]` compiles in, so this call
+/// built a 64-entry sign vector and handed it to
+/// `ffi::from_slice_f32(signs1, &[1, 1, 1, 512])`, reading 448 floats past the
+/// end of the slice and producing 4-bit indices from whatever was there. On
+/// `glm4-flash-4bit` that surfaced as every generated token being `!`.
+///
+/// This test must fail in every profile the project builds, which is why the
+/// check is `assert_eq!`. It is the backstop; the mode never reaches a latent
+/// family in the first place once
+/// `turbo::resolve_kv_cache_mode_for_model` has run.
+#[test]
+#[should_panic(expected = "symmetric Turbo4 requires K and V head_dim to match")]
+fn symmetric_turbo4_rejects_mismatched_k_and_v_head_dims() {
+    let mut cache = KVCache::new_with_mode(KVCacheMode::Turbo4);
+    let kv_latent = synth_kv_tensor(1, 1, 4, 512, 1350);
+    let k_pe = synth_kv_tensor(1, 1, 4, 64, 1351);
+    let _ = cache.update_and_fetch(kv_latent, k_pe);
+}
+
+/// `quantize_into_packed` is reached through `quantize_k_turbo4`, so drive the
+/// same precondition from the quantizer side: params calibrated for one head
+/// dimension must refuse a wider tensor rather than over-read the sign vector.
+#[test]
+#[should_panic(expected = "input last dim (512) must match TurboQuantParams head_dim (64)")]
+fn quantize_k_turbo4_rejects_a_tensor_wider_than_its_params() {
+    let params = turbo::TurboQuantParams::new(64, 0);
+    let wide = synth_kv_tensor(1, 1, 4, 512, 1352);
+    let _ = turbo::quant::quantize_k_turbo4(&wide, &params);
+}
+
+/// Matching head dims still work, so the new assertion did not narrow the
+/// supported geometry. 64 is what an allowlisted family actually uses.
+#[test]
+fn symmetric_turbo4_accepts_matching_head_dims() {
+    let mut cache = KVCache::new_with_mode(KVCacheMode::Turbo4);
+    let k = synth_kv_tensor(1, 1, 4, 64, 1353);
+    let v = synth_kv_tensor(1, 1, 4, 64, 1354);
+    let (out_k, out_v) = cache.update_and_fetch(k, v);
+    assert_eq!(ffi::array_shape(&out_k)[3], 64);
+    assert_eq!(ffi::array_shape(&out_v)[3], 64);
+    assert_eq!(cache.seq_len(), 4);
+}

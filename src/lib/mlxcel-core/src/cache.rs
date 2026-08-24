@@ -1370,9 +1370,14 @@ impl KVCache {
     /// tensors are reconstructed lazily on `update_and_fetch` via
     /// [`turbo::quant::dequantize_k_turbo4`] / [`turbo::quant::dequantize_v_turbo4`].
     ///
-    /// **Safety**: callers must consult [`turbo::is_symmetric_turbo_allowed`]
-    /// before constructing a cache in this mode for an arbitrary model — see
-    /// [`turbo::allowlist`] for the rationale.
+    /// **Safety**: callers must consult
+    /// [`turbo::resolve_kv_cache_mode_for_model`] before constructing a cache
+    /// in this mode for an arbitrary model. That function performs the
+    /// symmetric-Turbo4 allowlist fallback and refuses the MLA latent families
+    /// outright; see [`turbo::allowlist`] for the rationale. The head-dim
+    /// `assert_eq!` below is the backstop for a caller that skips it, and is
+    /// unconditional because a mismatch makes the K quantizer read past its
+    /// sign vectors rather than merely return a poor answer.
     ///
     /// Used by: `KVCache::update` dispatch when `mode == KVCacheMode::Turbo4`
     fn update_turbo4_sym(
@@ -1392,12 +1397,15 @@ impl KVCache {
         // this assumption.
         let v_shape = ffi::array_shape(&new_values_f16);
         let k_shape_in = ffi::array_shape(&new_keys_f16);
-        debug_assert_eq!(
+        assert_eq!(
             k_shape_in[3], v_shape[3],
             "symmetric Turbo4 requires K and V head_dim to match; \
-             got K head_dim={} V head_dim={} — this model likely uses \
-             differently-sized K/V projections and is incompatible with \
-             this mode.",
+             got K head_dim={} V head_dim={}. This cache holds two \
+             differently-shaped streams (an MLA (kv_latent, k_pe) pair, or a \
+             family whose K and V projections differ) and is incompatible \
+             with this mode. Entry points resolve this to a supported mode \
+             before the cache is built; see \
+             `cache::turbo::resolve_kv_cache_mode_for_model`.",
             k_shape_in[3], v_shape[3],
         );
         if self.turbo_params.is_none() {

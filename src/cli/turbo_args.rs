@@ -31,8 +31,11 @@
 //!
 //! See `docs/turbo-kv-cache.md` for the operator-facing reference.
 
+use std::path::Path;
+
 use clap::Args;
 use mlxcel_core::cache::KVCacheMode;
+use mlxcel_core::cache::turbo::resolve_kv_cache_mode_for_model;
 
 /// Shared TurboQuant KV-cache flag group.
 ///
@@ -319,6 +322,87 @@ fn apply_optional_string_env_fallback(value: &mut Option<String>, key: &str, fla
             *value = Some(trimmed);
         }
     }
+}
+
+/// Second stage of KV-cache mode resolution: turn the mode the operator asked
+/// for into the mode this particular model can actually run.
+///
+/// [`resolve_kv_cache_mode`] turns flags into a [`KVCacheMode`] without knowing
+/// which model is being loaded. Two rules need the model, and both were
+/// documented long before anything performed them (issue #1350):
+///
+/// * The MLA-latent families (`glm4_moe_lite`, `deepseek_v3`, `kimi_linear`,
+///   `longcat_flash_ngram`) pack a `(kv_latent, k_pe)` pair into one cache, so
+///   no quantized mode is calibrated for what they store. Symmetric `turbo4`
+///   made the K quantizer read past its sign vectors and every generated token
+///   came out `!`; the asymmetric modes quietly compressed the RoPE key stream
+///   instead of a value. They resolve to `fp16`.
+/// * `turbo4` on a family outside `ALLOWED_SYMMETRIC_TURBO_FAMILIES` resolves
+///   to `fp16+turbo4`, which is the fallback the CLI banner has always
+///   described.
+///
+/// Every generation entry point (CLI `generate`, the chat REPL, the memory
+/// preflight, `mlxcel-server`, and `bench_decode`) calls this so the mode that
+/// is announced is the mode the caches are built with. Returns the effective
+/// mode plus, when it differs from the request, one line for the operator.
+///
+/// `model_path` is a resolved local model directory. A missing or unparsable
+/// `config.json` yields `(requested, None)`: this stage must not invent a
+/// downgrade from a model it could not identify, and the unconditional head-dim
+/// assertions in `cache::turbo::quant` remain the backstop for that case.
+///
+/// Used by: `commands::generate`, `commands::chat`, `server::cli_input`,
+/// `bin/bench_decode`.
+#[must_use]
+pub fn resolve_effective_kv_cache_mode(
+    requested: KVCacheMode,
+    model_path: &Path,
+) -> (KVCacheMode, Option<String>) {
+    let Some(model_type) = read_config_model_type(model_path) else {
+        return (requested, None);
+    };
+    resolve_kv_cache_mode_for_model(requested, &model_type)
+}
+
+/// Apply [`resolve_effective_kv_cache_mode`] and report the substitution once
+/// on stderr.
+///
+/// stderr rather than stdout so a downgrade notice never lands in piped
+/// generation output, and `tracing::warn!` as well so it is captured in the
+/// server's structured log.
+///
+/// Used by: the CLI generation entry points; the server logs through
+/// `tracing` alone and calls [`resolve_effective_kv_cache_mode`] directly.
+#[must_use]
+pub fn resolve_and_announce_kv_cache_mode(
+    requested: KVCacheMode,
+    model_path: &Path,
+) -> KVCacheMode {
+    let (effective, warning) = resolve_effective_kv_cache_mode(requested, model_path);
+    if let Some(warning) = warning {
+        eprintln!("{warning}");
+        tracing::warn!(
+            requested = %requested,
+            effective = %effective,
+            "KV cache mode substituted for this model family"
+        );
+    }
+    effective
+}
+
+/// Read the raw `model_type` string from a model directory's `config.json`.
+///
+/// Deliberately the raw string rather than `models::detection::get_model_type`:
+/// the allowlist and the latent-family list are both keyed on the `config.json`
+/// value, and detection maps several distinct `model_type` values onto one
+/// enum variant.
+fn read_config_model_type(model_path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(model_path.join("config.json")).ok()?;
+    let config = serde_json::from_str::<serde_json::Value>(&content).ok()?;
+    config
+        .get("model_type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
 }
 
 #[cfg(test)]

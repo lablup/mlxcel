@@ -521,13 +521,51 @@ impl ServerStartupInput {
         // `--kv-skip-last-layer` flags. When `kv_bits == 0` this falls
         // through to the disabled default which is bit-exact equivalent
         // to the legacy `kv_cache_mode`-only path.
-        let batch_kv_quant = resolve_batch_kv_quant_config(
+        let mut batch_kv_quant = resolve_batch_kv_quant_config(
             self.kv_bits,
             self.kv_group_size,
             self.kv_quant_scheme.as_deref(),
             self.kv_skip_last_layer,
         )
         .map_err(|e| anyhow::anyhow!("batch KV cache quant error: {e}"))?;
+
+        // issue #1350: substitute the KV cache mode this model family can
+        // really run. Done here, at the single fallible startup boundary, so
+        // `ServerStartupConfig::kv_cache_mode` is already the effective mode by
+        // the time the scheduler, the paged layout and `/props` read it, and
+        // the server cannot log one mode while allocating another.
+        //
+        // `--kv-bits` is a second, independent route to a quantized cache
+        // (`BatchKvQuantConfig::base_mode` maps `--kv-quant-scheme turboquant`
+        // to Turbo4Asym and `--kv-bits 8` to Int8, and the scheduler prefers
+        // that table over `kv_cache_mode`), so a family that cannot hold a
+        // quantized cache has to be taken off both.
+        let (kv_cache_mode, kv_mode_warning) =
+            crate::cli::turbo_args::resolve_effective_kv_cache_mode(
+                kv_cache_mode,
+                &self.model_path,
+            );
+        if let Some(warning) = kv_mode_warning {
+            tracing::warn!("{warning}");
+        }
+        if batch_kv_quant.is_enabled() {
+            let (batch_effective, batch_warning) =
+                crate::cli::turbo_args::resolve_effective_kv_cache_mode(
+                    batch_kv_quant.base_mode(),
+                    &self.model_path,
+                );
+            if batch_effective == mlxcel_core::cache::KVCacheMode::Fp16 {
+                if let Some(warning) = batch_warning {
+                    tracing::warn!("{warning}");
+                }
+                tracing::warn!(
+                    kv_bits = self.kv_bits,
+                    "disabling batched KV quantization for this model family; \
+                     serving its KV caches at fp16"
+                );
+                batch_kv_quant.bits = 0;
+            }
+        }
 
         // H1: validate `--max-kv-size` bounds before we lower
         // the raw `usize` into the semantic `Option<usize>` downstream.

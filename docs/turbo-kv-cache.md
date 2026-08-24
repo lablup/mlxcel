@@ -174,9 +174,14 @@ prefixes are:
 Do not assume `turbo4` is safe for other dense 4-bit checkpoints. The safer
 starting point is `fp16+turbo4`, which keeps K in FP16.
 
-Note: the allowlist helper exists in `mlxcel-core`, but callers still need to
-consult it before constructing a symmetric Turbo4 cache. If you are adding a new
-entry or a new caller, include a quality gate in the same change.
+The fallback is performed, not merely advertised. Every generation entry point
+resolves the requested mode through
+`cache::turbo::resolve_kv_cache_mode_for_model` before any cache is built, so
+`--kv-cache-mode turbo4` on a family outside this list serves as
+`fp16+turbo4` and says so on stderr and in the server log. The mode reported in
+the CLI banner, the server startup log and `/props` is the effective mode, not
+the requested one. If you are adding a new entry, include a quality gate in the
+same change.
 
 ## WHT head-dimension constraint
 
@@ -184,6 +189,33 @@ TurboQuant uses a Walsh-Hadamard transform. The implementation expects a
 power-of-two head dimension for the production path. Models with unsupported
 head dimensions must either reject TurboQuant for that cache path or use a
 family-specific fallback; do not silently pad without a quality test.
+
+## MLA latent caches are FP16 only
+
+`glm4_moe_lite`, `deepseek_v3`, `kimi_linear` and `longcat_flash_ngram` store an
+MLA `(kv_latent, k_pe)` pair in one `KVCache`: the "K" slot holds the
+`kv_lora_rank`-wide latent (512 in every shipping checkpoint) and the "V" slot
+holds the `qk_rope_head_dim`-wide RoPE key stream (64). Neither slot is a
+per-head K/V row, so no quantized mode is calibrated for what they contain:
+
+- Symmetric `turbo4` builds its sign vectors and codebook from the "V" width and
+  applies them to the "K" slot as well, reading 448 floats past the end of a
+  64-entry sign vector. On `glm4-flash` every generated token came out `!`.
+- The asymmetric modes (`fp16+turbo4`, `fp16+turbo3`, `turbo4-delegated`)
+  quantize only the "V" slot, which here is `k_pe`. They therefore compress a
+  **key** and leave the latent exact, which is the reverse of the "FP16 K,
+  4-bit V" contract in the mode table above. Output stayed finite, which is why
+  this went unnoticed.
+
+Any non-`fp16` mode requested for one of these families resolves to `fp16` with
+one warning naming the family and the requested mode. `deepseek_v2` is not in
+this set: it asks `MlaLatentCache::supports` per cache and falls back to the
+decompressed per-head K/V layout when the mode is quantized, so a quantized mode
+there lands on ordinary per-head rows and keeps working.
+
+Making a Turbo mode work on the latent layout is a new calibration and a new
+kernel (a 512-wide codebook for the latent with `k_pe` left at FP16), not a
+configuration change.
 
 ## Paged cache and server batching
 
@@ -430,3 +462,5 @@ require local model checkouts.
   have different bottlenecks from the developer benchmark machines.
 - Experimental environment-variable paths are useful for A/B testing but should
   not appear in user-facing recommendations without fresh benchmark data.
+- No TurboQuant or INT8 mode is available on the MLA latent families listed
+  above; they serve at FP16 whatever is requested.

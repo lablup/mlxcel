@@ -30,7 +30,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use mlxcel::cli::turbo_args::{TurboKvCacheArgs, resolve_kv_cache_mode};
+use mlxcel::cli::turbo_args::{
+    TurboKvCacheArgs, resolve_and_announce_kv_cache_mode, resolve_kv_cache_mode,
+};
 use mlxcel::sampling::{ResolvedSamplingParams, build_sampling_config};
 use mlxcel::server::chat_template::{ChatMessage, ChatTemplateProcessor};
 use mlxcel::tokenizer::{MlxcelTokenizer, load_tokenizer};
@@ -379,6 +381,10 @@ fn main() -> Result<()> {
         args.turbo.kv_cache_mode.as_deref(),
     )
     .map_err(|err| anyhow::anyhow!("{err}"))?;
+    // issue #1350: benchmark the mode the shipped binaries would actually
+    // build for this model, so a number reported as `turbo4` is never really
+    // an fp16 or fp16+turbo4 run.
+    let kv_cache_mode = resolve_and_announce_kv_cache_mode(kv_cache_mode, &args.model);
 
     // Keep `--turbo-boundary-v` semantics identical to `mlxcel generate`.
     // This must happen before any generator/cache construction.
