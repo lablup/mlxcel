@@ -20,9 +20,17 @@ bridge="$repo_root/src/lib/mlxcel-core/cpp/mlx_cxx_bridge.cpp"
 
 # Every production shapeless=true construction must pass through the opt-in
 # eager-oracle wrapper. Comments do not match this literal call pattern.
-direct_shapeless="$(
-    rg -n 'mlx::core::compile\([^\n]*(true|shapeless=\*/true)' "$bridge"
-)"
+if command -v rg >/dev/null 2>&1; then
+    direct_shapeless="$(
+        rg -n 'mlx::core::compile\([^\n]*(true|shapeless=\*/true)' "$bridge"
+    )"
+else
+    # The self-hosted Apple runner intentionally carries only the build tools;
+    # keep the on-demand audit usable there without installing ripgrep.
+    direct_shapeless="$(
+        grep -En 'mlx::core::compile\([^)]*(true|shapeless=\*/true)' "$bridge"
+    )"
+fi
 direct_count="$(printf '%s\n' "$direct_shapeless" | sed '/^$/d' | wc -l | tr -d ' ')"
 if [[ $direct_count -ne 1 ]] \
     || [[ $direct_shapeless != *'mlx::core::compile(eager_fn, /*shapeless=*/true)'* ]]; then
