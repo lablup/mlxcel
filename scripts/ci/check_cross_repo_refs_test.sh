@@ -43,7 +43,7 @@ run_case() {
   set +e
   (
     cd "$repo"
-    env PATH="$fake_bin:$PATH" "$@" python3 "$under_test" "$status_ref"
+    env "$@" PATH="$fake_bin:$PATH" python3 "$under_test" "$status_ref"
   ) >"$stdout" 2>&1
   local status=$?
   set -e
@@ -124,7 +124,8 @@ printf 'offline fallback leaves #1355 in manual review\n' >> "$repo_offline/note
 git -C "$repo_offline" add notes.md
 git -C "$repo_offline" commit -q -m "offline fallback"
 base_offline="$(git -C "$repo_offline" rev-parse HEAD~1)"
-run_case no_token "$repo_offline" "$base_offline" 0 'printf "1387\n"'
+run_case no_token "$repo_offline" "$base_offline" 0 'printf "1387\n"' \
+  -u GH_TOKEN -u GITHUB_TOKEN
 assert_contains no_token "fallback to manual review for non-upstream bare refs (no GH_TOKEN/GITHUB_TOKEN)."
 assert_contains no_token "Verify each is a real lablup/mlxcel #N"
 assert_not_contains no_token "Likely UPSTREAM"
