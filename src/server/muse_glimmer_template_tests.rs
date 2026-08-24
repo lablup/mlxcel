@@ -194,12 +194,13 @@ fn muse_glimmer_template_renders_default_system_text_image_and_turns() {
         None,
         &base,
     );
-    assert!(multi_turn.contains("Hello!"));
+    assert!(multi_turn.contains("<|message|>Hello!<|eot|>"));
+    assert!(!multi_turn.contains("<|message|>Hello!<|eom|>"));
     assert_render_hash(
         "multi_turn",
         &multi_turn,
         325,
-        "0b659b810b68a4162de9ae35c764b04ee67727eed81ac21ba93e01930a0bb119",
+        "433d37ff14caf2f2b177d904726b34ff09cb2aad4426a237a7b27772eab47007",
     );
 }
 
@@ -235,11 +236,13 @@ fn muse_glimmer_template_renders_tools_calls_and_results() {
     assert!(rendered.contains("// Function schemas"));
     assert!(rendered.contains("<atem:invoke name=\"weather.get_current\">"));
     assert!(rendered.contains("<tool_output name=\"weather.get_current\">"));
+    assert!(rendered.contains("<|message|>It is 29 C.<|eot|>"));
+    assert!(!rendered.contains("<|message|>It is 29 C.<|eom|>"));
     assert_render_hash(
         "tools_and_results",
         &rendered,
         2340,
-        "3d860a2454537255404bc2a68b757605f5d2f6d6e513b7fbe2dad6527cea42f5",
+        "dc451d3030d24f37ecc20fc0236c0b5fa7f70032d8c5331f8f6690689620d6ae",
     );
 }
 
