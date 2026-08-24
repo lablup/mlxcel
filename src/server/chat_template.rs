@@ -2270,6 +2270,27 @@ mod tests {
     }
 
     #[test]
+    fn test_dict_get_method_preserves_present_null_and_falsy_values() {
+        let template = r#"null_none={{ messages[0].get('null_value') is none }} false_value={{ messages[0].get('flag') == false }} zero_value={{ messages[0].get('count') == 0 }} empty_value={{ messages[0].get('label') == '' }}"#;
+        let processor = ChatTemplateProcessor::with_template(template.to_string());
+        let messages = serde_json::json!([{
+            "role": "user",
+            "content": "hi",
+            "null_value": null,
+            "flag": false,
+            "count": 0,
+            "label": ""
+        }]);
+        let result = processor
+            .apply_raw_with_kwargs(&messages, None, &ChatTemplateKwargs::new())
+            .unwrap();
+        assert_eq!(
+            result.trim(),
+            "null_none=True false_value=True zero_value=True empty_value=True"
+        );
+    }
+
+    #[test]
     fn test_dict_get_method_or_chain() {
         // `m.get('a') or m.get('b')` — the Gemma 4 idiom.
         let template = r#"{{ messages[0].get('reasoning') or messages[0].get('content') }}"#;
