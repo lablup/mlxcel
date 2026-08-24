@@ -54,7 +54,7 @@ use mlxcel_core::lang_analyzer::LangBiasConfig;
 use mlxcel_core::sampling::{TokenBiasMap, sample_token_optimized};
 
 use mlxcel::cli::speculative_args::resolve_draft_block_size;
-use mlxcel::cli::turbo_args::resolve_kv_cache_mode;
+use mlxcel::cli::turbo_args::{resolve_and_announce_kv_cache_mode, resolve_kv_cache_mode};
 use mlxcel_core::drafter::{DrafterKind, load_drafter, resolve_drafter_kind};
 
 use super::generate_vlm;
@@ -303,12 +303,18 @@ fn run_memory_preflight(
         return Ok(None);
     }
 
-    let kv_cache_mode = resolve_kv_cache_mode(
+    let requested = resolve_kv_cache_mode(
         args.generation.turbo.cache_type_k.as_deref(),
         args.generation.turbo.cache_type_v.as_deref(),
         args.generation.turbo.kv_cache_mode.as_deref(),
     )
     .map_err(|e| anyhow::anyhow!("{}", e))?;
+    // Estimate against the mode that will really be built (issue #1350), not
+    // the one requested, or the preflight would size an int8 cache for a model
+    // whose caches resolve back to fp16. The substitution has already been
+    // announced by `run_generate`, so resolve quietly here.
+    let (kv_cache_mode, _) =
+        mlxcel::cli::turbo_args::resolve_effective_kv_cache_mode(requested, &args.model.model);
     let kv_int8 = matches!(kv_cache_mode, KVCacheMode::Int8);
 
     // Size the KV cache for the tokens that can actually enter the cache:
@@ -2104,12 +2110,19 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
 
     validate_tensor_parallel_args(&args)?;
     validate_pipeline_parallel_args(&args)?;
-    let kv_cache_mode = resolve_kv_cache_mode(
+    let requested_kv_cache_mode = resolve_kv_cache_mode(
         args.generation.turbo.cache_type_k.as_deref(),
         args.generation.turbo.cache_type_v.as_deref(),
         args.generation.turbo.kv_cache_mode.as_deref(),
     )
     .map_err(|e| anyhow::anyhow!("{}", e))?;
+    // issue #1350: substitute the mode this model can actually run before
+    // anything reads it. `-m` was resolved to a local directory just above, so
+    // the model_type lookup is a plain file read. Everything downstream (the
+    // banner, the generator, the memory preflight) sees the effective mode, so
+    // what is printed and what is built cannot disagree.
+    let kv_cache_mode =
+        resolve_and_announce_kv_cache_mode(requested_kv_cache_mode, &args.model.model);
     validate_muse_glimmer_cli_unsupported_options(&args, kv_cache_mode)?;
 
     // Parse and validate language bias arguments early (before model load).
@@ -2312,9 +2325,13 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
             println!("KV cache mode: fp16+turbo4 (asymmetric Fp16-K + Turbo4-V, ~26% KV savings)");
         }
         KVCacheMode::Turbo4 => {
+            // Reached only when the family is on
+            // `ALLOWED_SYMMETRIC_TURBO_FAMILIES`: a non-allowlisted request was
+            // already resolved to Turbo4Asym above, which is why this line no
+            // longer describes a fallback that had never been performed.
             println!(
                 "KV cache mode: turbo4 (symmetric Turbo4-K + Turbo4-V, ~73% KV savings; \
-                 allowlisted families only; non-allowlisted models fall back to Turbo4Asym)"
+                 this family is on the symmetric-Turbo4 allowlist)"
             );
         }
         KVCacheMode::Turbo4Delegated => {
@@ -2329,7 +2346,19 @@ fn run_generate_once(mut args: GenerateArgs) -> Result<()> {
                  ~5.1x total KV savings)"
             );
         }
-        KVCacheMode::Fp16 => {}
+        KVCacheMode::Fp16 => {
+            // Fp16 is the default and normally announces nothing. When it is
+            // the *result* of a substitution the operator asked for something
+            // else, so name the mode actually in force (issue #1350). The
+            // reason was printed to stderr by
+            // `resolve_and_announce_kv_cache_mode`.
+            if kv_cache_mode != requested_kv_cache_mode {
+                println!(
+                    "KV cache mode: fp16 (requested {requested_kv_cache_mode}; \
+                     not supported on this model family)"
+                );
+            }
+        }
     }
 
     // OpenXLA backend (issue #449): the engine drives generation from its own

@@ -160,15 +160,38 @@ pub fn quantize_v_turbo3(
 ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
     let v_f32 = ffi::astype(v, dtype::FLOAT32);
     let shape = ffi::array_shape(&v_f32);
-    debug_assert_eq!(shape.len(), 4, "input must be 4-D [B, H, T, D]");
+    // Unconditional, for the reason spelled out in `quant::quantize_into_packed`:
+    // `params.signs1` / `params.signs2` are host slices handed to
+    // `ffi::from_slice_f32(signs, &[1, 1, 1, d])` below, which reads `d` floats
+    // through the raw pointer with no length check of its own. A `d` larger
+    // than `signs.len()` is an out-of-bounds read rather than a wrong answer,
+    // and neither `[profile.release]` nor `[profile.test-fast]` turns debug
+    // assertions on, so a `debug_assert!` here would guard nothing that ships
+    // or that the test gate runs. `TurboQuantParams3` has all-`pub` fields and
+    // no `#[non_exhaustive]`, so a struct literal with a short sign vector is
+    // constructible. The checks are O(1) against a per-call cost dominated by a
+    // WHT and a host readback.
+    assert_eq!(shape.len(), 4, "input must be 4-D [B, H, T, D]");
     let _b = shape[0];
     let _h = shape[1];
     let t = shape[2];
     let d = shape[3];
-    debug_assert_eq!(
+    assert_eq!(
         d as u32, params.head_dim,
         "input last dim ({d}) must match TurboQuantParams3 head_dim ({})",
         params.head_dim
+    );
+    assert_eq!(
+        params.signs1.len(),
+        d as usize,
+        "signs1 length ({}) must match head_dim ({d})",
+        params.signs1.len()
+    );
+    assert_eq!(
+        params.signs2.len(),
+        d as usize,
+        "signs2 length ({}) must match head_dim ({d})",
+        params.signs2.len()
     );
 
     // 1. Per-token L2 norm with a `where`-guarded zero fallback (matches the
@@ -275,16 +298,34 @@ pub fn dequantize_v_turbo3(
     let t = packed_shape[2];
     let bytes_per_token = packed_shape[3];
     let d = bytes_per_token * 8 / 3; // inverse of head_dim * 3 / 8
-    debug_assert_eq!(
+    // Unconditional for the same reason as in `quantize_v_turbo3`: the inverse
+    // rotation below hands `params.signs1` / `params.signs2` to
+    // `ffi::from_slice_f32(signs, &[1, 1, 1, d])`, which reads `d` floats out
+    // of a `signs.len()`-element host slice. Here `d` is derived from the
+    // packed byte count, so nothing but this check ties it to the params the
+    // caller passed.
+    assert_eq!(
         d as u32, params.head_dim,
         "head_dim mismatch on dequantize: derived {d} from {bytes_per_token} packed bytes, \
          expected {}",
         params.head_dim
     );
-    debug_assert_eq!(
+    assert_eq!(
         d % 8,
         0,
         "head_dim must be a multiple of 8 for 3-bit dequant; got {d}"
+    );
+    assert_eq!(
+        params.signs1.len(),
+        d as usize,
+        "signs1 length ({}) must match head_dim ({d})",
+        params.signs1.len()
+    );
+    assert_eq!(
+        params.signs2.len(),
+        d as usize,
+        "signs2 length ({}) must match head_dim ({d})",
+        params.signs2.len()
     );
 
     // 1. Pull the packed bytes back to host memory and unpack to one-byte-

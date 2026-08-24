@@ -58,6 +58,14 @@ pub async fn props(State(state): State<AppState>) -> Json<PropsResponse> {
     Json(PropsResponse {
         default_generation_settings: default_generation_settings(&state.config),
         total_slots: state.config.n_parallel,
+        // The effective mode, not the requested one: `ServerStartupInput::
+        // into_startup_config` has already substituted anything this model
+        // family cannot hold (issue #1350), and `ServerConfig` carries the
+        // result. Reporting it here is what makes "the mode announced is the
+        // mode in force" checkable by a client rather than only greppable in
+        // the startup log.
+        kv_cache_mode: state.config.kv_cache_mode.to_string(),
+        kv_bits: state.config.batch_kv_quant.bits,
     })
 }
 

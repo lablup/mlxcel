@@ -515,6 +515,44 @@ pub fn compute_alive_mask(
     ffi::astype(&alive_bool, dtype::FLOAT32)
 }
 
+/// Assert that `params`' sign vectors really cover a `head_dim`-wide slice.
+///
+/// The fused launchers below rebuild the inverse Turbo4 rotation with
+/// `ffi::from_slice_f32(&params.signs1, &[1, 1, 1, head_dim])`, which reads
+/// `head_dim` floats through the slice's raw pointer and performs no length
+/// check of its own. `head_dim` there is `q_shape[3]`, the query head dim of a
+/// caller-supplied tensor, and nothing else ties it to `params.head_dim`, so a
+/// mismatch is an out-of-bounds read rather than a wrong answer.
+///
+/// Unconditional rather than `debug_assert!`: neither `[profile.release]` nor
+/// `[profile.test-fast]` enables debug assertions, so a debug-only check here
+/// would guard neither the shipped binary nor the test gate. `TurboQuantParams`
+/// has all-`pub` fields and no `#[non_exhaustive]`, so a struct literal
+/// carrying a short sign vector is constructible. The cost is O(1) against a
+/// launcher dominated by an SDPA and a Metal dispatch.
+///
+/// Used by: [`attention_sparse_v_turbo4_fused`],
+/// [`attention_turbo4_delegated_fused`], [`attention_turbo4_delegated_steel`].
+fn assert_sign_vectors_cover_head_dim(head_dim: i32, params: &TurboQuantParams) {
+    assert_eq!(
+        head_dim as u32, params.head_dim,
+        "q head_dim ({head_dim}) must match TurboQuantParams head_dim ({})",
+        params.head_dim
+    );
+    assert_eq!(
+        params.signs1.len(),
+        head_dim as usize,
+        "signs1 length ({}) must match head_dim ({head_dim})",
+        params.signs1.len()
+    );
+    assert_eq!(
+        params.signs2.len(),
+        head_dim as usize,
+        "signs2 length ({}) must match head_dim ({head_dim})",
+        params.signs2.len()
+    );
+}
+
 /// Split-SDPA reference path with attention-gated V-side masking.
 ///
 /// **Correctness scaffolding only.** Computes attention scores explicitly,
@@ -739,6 +777,9 @@ pub fn attention_sparse_v_turbo4_fused(
     if !(head_dim as u32).is_power_of_two() {
         return None;
     }
+    // Past this point the inverse rotation below reads `head_dim` floats out
+    // of each of `params.signs1` / `params.signs2`.
+    assert_sign_vectors_cover_head_dim(head_dim, params);
 
     // 1. Compute attention scores via the standard graph path. We keep this
     //    in MLX so the score matrix benefits from steel-attention SDPA and
@@ -920,6 +961,9 @@ pub fn attention_turbo4_delegated_fused(
     if !(head_dim as u32).is_power_of_two() {
         return None;
     }
+    // Past this point the cold-branch inverse rotation reads `head_dim` floats
+    // out of each of `params.signs1` / `params.signs2`.
+    assert_sign_vectors_cover_head_dim(head_dim, params);
 
     // 1. Compute attention scores via the standard graph path. The unified K
     //    buffer is FP16; we cast to FP32 for a stable softmax. Repeat KV
@@ -1300,6 +1344,9 @@ pub fn attention_turbo4_delegated_steel(
     if !(head_dim as u32).is_power_of_two() {
         return None;
     }
+    // Past this point the cold-branch inverse rotation reads `head_dim` floats
+    // out of each of `params.signs1` / `params.signs2`.
+    assert_sign_vectors_cover_head_dim(head_dim, params);
 
     // Both ranges empty would imply a decode step with no context, which is
     // structurally impossible after `KVCache::update`. Guard defensively.

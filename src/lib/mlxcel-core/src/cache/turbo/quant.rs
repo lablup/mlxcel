@@ -281,23 +281,32 @@ fn quantize_into_packed(
     // well-conditioned even for very small / very large magnitudes.
     let v_f32 = ffi::astype(x, dtype::FLOAT32);
     let shape = ffi::array_shape(&v_f32);
-    debug_assert_eq!(shape.len(), 4, "input must be 4-D [B, H, T, D]");
+    // These four are `assert!`, not `debug_assert!`, on purpose. `signs1` and
+    // `signs2` are host slices handed to `ffi::from_slice_f32(signs, &[1, 1,
+    // 1, d])` below, which builds an MLX array by reading `d` floats from the
+    // raw pointer with no length check of its own. A `d` larger than
+    // `signs.len()` is therefore an out-of-bounds read, not a wrong answer,
+    // and neither `[profile.release]` nor `[profile.test-fast]` enables
+    // debug assertions, so a `debug_assert!` here guards nothing that ships or
+    // that the test gate runs. The checks are O(1) against a per-quantize-call
+    // cost dominated by a WHT and a host readback.
+    assert_eq!(shape.len(), 4, "input must be 4-D [B, H, T, D]");
     let _b = shape[0];
     let _h = shape[1];
     let t = shape[2];
     let d = shape[3];
-    debug_assert_eq!(
+    assert_eq!(
         d as u32, params.head_dim,
         "input last dim ({d}) must match TurboQuantParams head_dim ({})",
         params.head_dim
     );
-    debug_assert_eq!(
+    assert_eq!(
         signs1.len(),
         d as usize,
         "signs1 length ({}) must match head_dim ({d})",
         signs1.len()
     );
-    debug_assert_eq!(
+    assert_eq!(
         signs2.len(),
         d as usize,
         "signs2 length ({}) must match head_dim ({d})",
@@ -360,7 +369,7 @@ fn quantize_into_packed(
 
     // 4. Pack two consecutive 4-bit indices into one byte.
     //    Layout: byte[i] low nibble = indices[2*i], high nibble = indices[2*i+1].
-    debug_assert!(d % 2 == 0, "head_dim must be even for nibble-packing");
+    assert!(d % 2 == 0, "head_dim must be even for nibble-packing");
     let coords_per_token = d as usize;
     let bytes_per_token = coords_per_token / 2;
     let total_tokens = (shape[0] * shape[1] * t) as usize;
@@ -503,14 +512,18 @@ fn dequantize_from_packed(
     signs2: &[f32],
 ) -> UniquePtr<MlxArray> {
     let (indices_u8, _b, _h, _t, d) = unpack_turbo4_indices(packed);
-    debug_assert_eq!(d as u32, params.head_dim, "head_dim mismatch on dequantize");
-    debug_assert_eq!(
+    // Unconditional for the same reason as in `quantize_into_packed`: the
+    // inverse rotation below hands `signs1` / `signs2` to
+    // `ffi::from_slice_f32(signs, &[1, 1, 1, d])`, which reads `d` floats out
+    // of a `signs.len()`-element host slice.
+    assert_eq!(d as u32, params.head_dim, "head_dim mismatch on dequantize");
+    assert_eq!(
         signs1.len(),
         d as usize,
         "signs1 length ({}) must match head_dim ({d})",
         signs1.len()
     );
-    debug_assert_eq!(
+    assert_eq!(
         signs2.len(),
         d as usize,
         "signs2 length ({}) must match head_dim ({d})",

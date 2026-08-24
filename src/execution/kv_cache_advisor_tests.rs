@@ -124,14 +124,18 @@ fn pure_ssm_is_always_fp16() {
 
 #[test]
 fn mla_uses_int8_never_turbo() {
+    // `deepseek_v2` is the MLA family that keeps a decompressed fallback, so
+    // int8 there lands on ordinary per-head K/V rows and is a real
+    // recommendation. A latent-pair family is covered by
+    // `latent_mla_families_are_advised_fp16_because_the_binary_refuses_the_rest`.
     for kind in [KvArchKind::MlaCompressed, KvArchKind::MlaDecompressed] {
         // Short stays fp16.
         assert_eq!(
-            recommend_kv_cache_mode(kind, "deepseek_v3", KvContextRange::Short).suggested,
+            recommend_kv_cache_mode(kind, "deepseek_v2", KvContextRange::Short).suggested,
             KVCacheMode::Fp16
         );
         for range in [KvContextRange::Medium, KvContextRange::Long] {
-            let advice = recommend_kv_cache_mode(kind, "deepseek_v3", range);
+            let advice = recommend_kv_cache_mode(kind, "deepseek_v2", range);
             assert_eq!(advice.suggested, KVCacheMode::Int8);
             // MLA must never get a Walsh-Hadamard Turbo mode.
             for mode in [
@@ -146,6 +150,30 @@ fn mla_uses_int8_never_turbo() {
     }
 }
 
+/// `mlxcel recommend` must not advise a mode the binary refuses.
+///
+/// Every family in `MLA_LATENT_CACHE_FAMILIES` has any non-fp16 request
+/// substituted back to fp16 before a cache is built (issue #1350), and
+/// `kv_arch` classifies anything carrying `kv_lora_rank` as MLA, so without
+/// this branch the advisor recommended int8 at medium and long context for
+/// exactly the families that reject it.
+#[test]
+fn latent_mla_families_are_advised_fp16_because_the_binary_refuses_the_rest() {
+    for &family in mlxcel_core::mla::MLA_LATENT_CACHE_FAMILIES {
+        for kind in [KvArchKind::MlaCompressed, KvArchKind::MlaDecompressed] {
+            for range in KvContextRange::all() {
+                let advice = recommend_kv_cache_mode(kind, family, range);
+                assert_eq!(
+                    advice.suggested,
+                    KVCacheMode::Fp16,
+                    "{family}/{kind:?}/{range:?} advised a mode the binary refuses"
+                );
+                assert_eq!(advice.also_consider, None, "{family}/{kind:?}/{range:?}");
+            }
+        }
+    }
+}
+
 /// Every recommendation is one of the allowed KV-cache modes, and never
 /// `Turbo3Asym` (a documented memory-extremis last resort, not an advisory
 /// pick). Because the output is always a `KVCacheMode` (a KV-cache-only storage
@@ -153,7 +181,16 @@ fn mla_uses_int8_never_turbo() {
 /// (the #289 landmine).
 #[test]
 fn recommendation_is_always_an_allowed_kv_cache_mode() {
-    let model_types = ["llama", "qwen3_5", "deepseek_v3", "mamba", "gemma3", ""];
+    let model_types = [
+        "llama",
+        "qwen3_5",
+        "deepseek_v2",
+        "deepseek_v3",
+        "glm_moe_dsa",
+        "mamba",
+        "gemma3",
+        "",
+    ];
     for kind in ALL_ARCH_KINDS {
         for range in KvContextRange::all() {
             for mt in model_types {

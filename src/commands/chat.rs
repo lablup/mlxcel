@@ -170,7 +170,7 @@ enum SlashOutcome {
 /// Returns an error if the model cannot be resolved / loaded, the tokenizer
 /// cannot be read, or the terminal line editor cannot be initialized. Per-turn
 /// generation never aborts the loop; a `/clear` or a fresh turn always recovers.
-pub fn run_chat(opts: ChatOptions) -> Result<()> {
+pub fn run_chat(mut opts: ChatOptions) -> Result<()> {
     let runtime = initialize_runtime();
     println!("Runtime device: {}", runtime.device);
 
@@ -182,6 +182,15 @@ pub fn run_chat(opts: ChatOptions) -> Result<()> {
         opts.models_dir.as_deref(),
         opts.revision.as_deref(),
     )?;
+
+    // issue #1350: substitute the KV cache mode this model family can really
+    // run before the session (and therefore its caches) is built, so the REPL
+    // and one-shot `generate` agree on what a given `--kv-cache-mode` means.
+    // Announced once here, before the load banner, rather than per turn.
+    opts.kv_cache_mode = mlxcel::cli::turbo_args::resolve_and_announce_kv_cache_mode(
+        opts.kv_cache_mode,
+        &model_path,
+    );
 
     println!("Loading model from {model_path:?}...");
     let load_start = Instant::now();
