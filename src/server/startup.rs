@@ -314,6 +314,17 @@ pub struct ServerStartupConfig {
     /// Unsupported K/V combinations are rejected at startup.
     pub kv_cache_mode: mlxcel_core::cache::KVCacheMode,
 
+    /// Operator-facing notices explaining why [`Self::kv_cache_mode`] or
+    /// [`Self::batch_kv_quant`] differ from what was requested (issue #1350).
+    ///
+    /// `ServerStartupInput::into_startup_config` resolves the requested mode
+    /// against the model family, but it runs before
+    /// [`initialize_server_logging`] installs a tracing subscriber, so a
+    /// `tracing::warn!` there is written to nothing. The notices are carried
+    /// here and emitted by [`start_server`] once logging exists. Empty when the
+    /// requested mode was used as-is.
+    pub kv_cache_mode_notices: Vec<String>,
+
     /// resolved batch KV cache quantization configuration
     /// (uniform `mx.quantize` or TurboQuant variant) for the
     /// continuous-batching path.
@@ -492,6 +503,7 @@ impl Default for ServerStartupConfig {
             chat_template_kwargs: None,
             prompt_cache: super::prompt_cache::PromptCacheConfig::default(),
             kv_cache_mode: mlxcel_core::cache::KVCacheMode::Fp16,
+            kv_cache_mode_notices: Vec::new(),
             batch_kv_quant: mlxcel_core::cache::BatchKvQuantConfig::default(),
             max_kv_size: None,
             // Serving-throughput default guard (#628): `auto` paged KV budget
@@ -1685,6 +1697,19 @@ fn install_surgery_pipeline_for_server(startup: &ServerStartupConfig) -> Result<
 /// Shared entry point used by both `mlxcel serve` and `mlxcel-server`.
 pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     initialize_server_logging(&startup)?;
+
+    // issue #1350: the KV cache mode was resolved against the model family in
+    // `into_startup_config`, which runs before the subscriber above exists.
+    // Report the substitution now, so the log states the mode the caches are
+    // really built with rather than the one that was asked for.
+    for notice in &startup.kv_cache_mode_notices {
+        tracing::warn!("{notice}");
+    }
+    tracing::info!(
+        kv_cache_mode = %startup.kv_cache_mode,
+        kv_bits = startup.batch_kv_quant.bits,
+        "effective KV cache mode"
+    );
 
     // Florence-2 (issue #1073): the encoder-decoder (seq2seq) family is
     // served on its dedicated worker loop (`server/florence2_worker.rs`),

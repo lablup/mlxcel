@@ -540,14 +540,18 @@ impl ServerStartupInput {
         // to Turbo4Asym and `--kv-bits 8` to Int8, and the scheduler prefers
         // that table over `kv_cache_mode`), so a family that cannot hold a
         // quantized cache has to be taken off both.
+        //
+        // The notices are collected rather than logged: this runs before
+        // `initialize_server_logging` installs a tracing subscriber, so a
+        // `tracing::warn!` here would be written to nothing. `start_server`
+        // emits them once logging exists.
+        let mut kv_cache_mode_notices = Vec::new();
         let (kv_cache_mode, kv_mode_warning) =
             crate::cli::turbo_args::resolve_effective_kv_cache_mode(
                 kv_cache_mode,
                 &self.model_path,
             );
-        if let Some(warning) = kv_mode_warning {
-            tracing::warn!("{warning}");
-        }
+        kv_cache_mode_notices.extend(kv_mode_warning);
         if batch_kv_quant.is_enabled() {
             let (batch_effective, batch_warning) =
                 crate::cli::turbo_args::resolve_effective_kv_cache_mode(
@@ -555,14 +559,12 @@ impl ServerStartupInput {
                     &self.model_path,
                 );
             if batch_effective == mlxcel_core::cache::KVCacheMode::Fp16 {
-                if let Some(warning) = batch_warning {
-                    tracing::warn!("{warning}");
-                }
-                tracing::warn!(
-                    kv_bits = self.kv_bits,
-                    "disabling batched KV quantization for this model family; \
-                     serving its KV caches at fp16"
-                );
+                kv_cache_mode_notices.extend(batch_warning);
+                kv_cache_mode_notices.push(format!(
+                    "warning: disabling batched KV quantization (--kv-bits {}) for this model \
+                     family; serving its KV caches at fp16",
+                    self.kv_bits
+                ));
                 batch_kv_quant.bits = 0;
             }
         }
@@ -693,6 +695,7 @@ impl ServerStartupInput {
             chat_template_kwargs,
             prompt_cache,
             kv_cache_mode,
+            kv_cache_mode_notices,
             batch_kv_quant,
             // lower the raw `usize` (0 = disabled) into a
             // semantic `Option<usize>` after `resolve_max_kv_size` has
