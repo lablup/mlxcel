@@ -48,17 +48,17 @@ fn build_single_smolvlm_block<E>(
     image_token_id: i32,
     num_image_token: usize,
     encode_marker: &mut E,
-) -> Vec<i32>
+) -> Option<Vec<i32>>
 where
     E: FnMut(&str) -> Vec<i32>,
 {
-    let mut block = Vec::with_capacity(num_image_token + 4);
+    let mut block = Vec::with_capacity(num_image_token.checked_add(4)?);
     block.extend(encode_marker(&format!(
         "{FAKE_IMAGE_MARKER}{GLOBAL_IMAGE_MARKER}"
     )));
     append_repeated_image_tokens(&mut block, image_token_id, num_image_token);
     block.extend(encode_marker(FAKE_IMAGE_MARKER));
-    block
+    Some(block)
 }
 
 fn build_split_smolvlm_block<E>(
@@ -66,13 +66,17 @@ fn build_split_smolvlm_block<E>(
     num_image_token: usize,
     layout: TileLayout,
     encode_marker: &mut E,
-) -> Vec<i32>
+) -> Option<Vec<i32>>
 where
     E: FnMut(&str) -> Vec<i32>,
 {
-    let mut block = Vec::with_capacity(
-        layout.total_tiles() * num_image_token + layout.rows * layout.cols * 3 + layout.rows + 4,
-    );
+    let split_tiles = layout.rows.checked_mul(layout.cols)?;
+    let total_image_tokens = layout.checked_total_tiles()?.checked_mul(num_image_token)?;
+    let marker_capacity = split_tiles
+        .checked_mul(3)?
+        .checked_add(layout.rows)?
+        .checked_add(4)?;
+    let mut block = Vec::with_capacity(total_image_tokens.checked_add(marker_capacity)?);
     for row in 1..=layout.rows {
         for col in 1..=layout.cols {
             block.extend(encode_marker(&format!(
@@ -87,7 +91,7 @@ where
     )));
     append_repeated_image_tokens(&mut block, image_token_id, num_image_token);
     block.extend(encode_marker(FAKE_IMAGE_MARKER));
-    block
+    Some(block)
 }
 
 fn build_smolvlm_block<E>(
@@ -95,7 +99,7 @@ fn build_smolvlm_block<E>(
     num_image_token: usize,
     layout: TileLayout,
     encode_marker: &mut E,
-) -> Vec<i32>
+) -> Option<Vec<i32>>
 where
     E: FnMut(&str) -> Vec<i32>,
 {
@@ -106,8 +110,8 @@ where
     }
 }
 
-fn image_tokens_for_layout(layout: TileLayout, num_image_token: usize) -> usize {
-    layout.total_tiles() * num_image_token
+fn image_tokens_for_layout(layout: TileLayout, num_image_token: usize) -> Option<usize> {
+    layout.checked_total_tiles()?.checked_mul(num_image_token)
 }
 
 /// Insert (or expand) SmolVLM image-token runs into `prompt_tokens`.
@@ -136,8 +140,10 @@ where
         .iter()
         .copied()
         .map(|layout| image_tokens_for_layout(layout, num_image_token))
-        .collect();
-    let total_image_tokens: usize = per_image_counts.iter().sum();
+        .collect::<Option<Vec<_>>>()?;
+    let total_image_tokens: usize = per_image_counts
+        .iter()
+        .try_fold(0usize, |acc, &count| acc.checked_add(count))?;
     let image_blocks = layouts.len();
 
     // Case 1: the prompt already carries bare <image> placeholders (one per
@@ -146,17 +152,17 @@ where
         .iter()
         .filter(|&&t| t == image_token_id)
         .count();
-    if placeholder_count > 0 {
-        let mut expanded = Vec::with_capacity(prompt_tokens.len() + total_image_tokens);
+    if placeholder_count == layouts.len() {
+        let mut expanded = Vec::with_capacity(prompt_tokens.len().checked_add(total_image_tokens)?);
         let mut image_idx = 0usize;
         for &token in prompt_tokens.iter() {
-            if token == image_token_id && image_idx < layouts.len() {
+            if token == image_token_id {
                 expanded.extend(build_smolvlm_block(
                     image_token_id,
                     num_image_token,
                     layouts[image_idx],
                     &mut encode_marker,
-                ));
+                )?);
                 image_idx += 1;
             } else {
                 expanded.push(token);
@@ -168,17 +174,21 @@ where
             total_image_tokens,
         });
     }
+    if placeholder_count != 0 {
+        return None;
+    }
 
     // Case 2: no placeholder, so splice one block per image after the first
     // token (which typically opens the user turn).
-    let mut blocks: Vec<i32> = Vec::with_capacity(total_image_tokens + 4 * image_blocks);
+    let mut blocks: Vec<i32> =
+        Vec::with_capacity(total_image_tokens.checked_add(4usize.checked_mul(image_blocks)?)?);
     for &layout in layouts {
         blocks.extend(build_smolvlm_block(
             image_token_id,
             num_image_token,
             layout,
             &mut encode_marker,
-        ));
+        )?);
     }
 
     let head = prompt_tokens[0];
@@ -219,20 +229,22 @@ pub fn insert_idefics2_image_tokens(
 
     let per_image_counts: Vec<usize> = tiles_per_image
         .iter()
-        .map(|&tiles| num_image_token * tiles)
-        .collect();
-    let total_image_tokens: usize = per_image_counts.iter().sum();
+        .map(|&tiles| num_image_token.checked_mul(tiles))
+        .collect::<Option<Vec<_>>>()?;
+    let total_image_tokens: usize = per_image_counts
+        .iter()
+        .try_fold(0usize, |acc, &count| acc.checked_add(count))?;
     let image_blocks = tiles_per_image.len();
 
     let placeholder_count = prompt_tokens
         .iter()
         .filter(|&&t| t == image_token_id)
         .count();
-    if placeholder_count > 0 {
-        let mut expanded = Vec::with_capacity(prompt_tokens.len() + total_image_tokens);
+    if placeholder_count == tiles_per_image.len() {
+        let mut expanded = Vec::with_capacity(prompt_tokens.len().checked_add(total_image_tokens)?);
         let mut image_idx = 0usize;
         for &token in prompt_tokens.iter() {
-            if token == image_token_id && image_idx < per_image_counts.len() {
+            if token == image_token_id {
                 expanded.extend(build_idefics2_block(
                     image_token_id,
                     fake_image_token_id,
@@ -249,8 +261,12 @@ pub fn insert_idefics2_image_tokens(
             total_image_tokens,
         });
     }
+    if placeholder_count != 0 {
+        return None;
+    }
 
-    let mut blocks: Vec<i32> = Vec::with_capacity(total_image_tokens + 2 * image_blocks);
+    let mut blocks: Vec<i32> =
+        Vec::with_capacity(total_image_tokens.checked_add(2usize.checked_mul(image_blocks)?)?);
     for &count in &per_image_counts {
         blocks.extend(build_idefics2_block(
             image_token_id,
@@ -365,11 +381,36 @@ mod tests {
     }
 
     #[test]
+    fn smolvlm_mismatched_placeholder_count_returns_none() {
+        let mut prompt = vec![1, IMAGE, 2];
+        let original = prompt.clone();
+        assert!(
+            insert_smolvlm_image_tokens(
+                &mut prompt,
+                &[TileLayout::single(), TileLayout::single()],
+                4,
+                IMAGE,
+                fake_encode,
+            )
+            .is_none()
+        );
+        assert_eq!(prompt, original);
+    }
+
+    #[test]
     fn idefics2_keeps_fake_only_single_tile_framing() {
         let mut prompt = vec![1, IMAGE, 2];
         let stats = insert_idefics2_image_tokens(&mut prompt, &[1], 3, IMAGE, FAKE).unwrap();
         assert_eq!(stats.total_image_tokens, 3);
         assert_eq!(prompt, vec![1, FAKE, IMAGE, IMAGE, IMAGE, FAKE, 2]);
+    }
+
+    #[test]
+    fn idefics2_mismatched_placeholder_count_returns_none() {
+        let mut prompt = vec![1, IMAGE, 2, IMAGE, 3];
+        let original = prompt.clone();
+        assert!(insert_idefics2_image_tokens(&mut prompt, &[1], 3, IMAGE, FAKE).is_none());
+        assert_eq!(prompt, original);
     }
 
     #[test]

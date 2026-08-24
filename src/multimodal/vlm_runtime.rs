@@ -386,6 +386,36 @@ where
     )
 }
 
+fn ensure_image_token_feature_cardinality<I>(
+    family: &str,
+    prompt_tokens: &[i32],
+    image_token_id: i32,
+    tiles_per_image: I,
+    num_image_token: usize,
+) -> Result<()>
+where
+    I: IntoIterator<Item = usize>,
+{
+    let expected = tiles_per_image
+        .into_iter()
+        .try_fold(0usize, |acc, tiles| {
+            tiles
+                .checked_mul(num_image_token)
+                .and_then(|count| acc.checked_add(count))
+        })
+        .ok_or_else(|| anyhow::anyhow!("{family} image-token cardinality overflowed"))?;
+    let actual = prompt_tokens
+        .iter()
+        .filter(|&&token| token == image_token_id)
+        .count();
+    if actual != expected {
+        anyhow::bail!(
+            "{family} prompt contains {actual} image token(s), but preprocessing produced {expected} image feature row(s)"
+        );
+    }
+    Ok(())
+}
+
 /// Cache-aware wrapper for [`prepare_and_compute_vlm_embeddings`].
 ///
 /// When `caches` is `Some`, the VLM runtime is invoked through its
@@ -1209,6 +1239,16 @@ where
                 image_blocks: stats.image_blocks,
                 total_image_tokens: stats.total_image_tokens,
             });
+            ensure_image_token_feature_cardinality(
+                "SmolVLM",
+                prompt_tokens,
+                smolvlm.image_token_id,
+                tiles_per_image
+                    .iter()
+                    .copied()
+                    .map(|layout| layout.total_tiles()),
+                smolvlm.num_image_token,
+            )?;
 
             // SmolVLM processes all tiles for the request in one tower call;
             // skip the opportunistic vision cache for the first integration
@@ -1243,6 +1283,13 @@ where
                 image_blocks: stats.image_blocks,
                 total_image_tokens: stats.total_image_tokens,
             });
+            ensure_image_token_feature_cardinality(
+                "Idefics2",
+                prompt_tokens,
+                idefics2.image_token_id,
+                tiles_per_image.iter().copied(),
+                idefics2.num_image_token,
+            )?;
 
             // Idefics2 runs every tile in one tower call; skip the opportunistic
             // vision cache for this first integration (mirrors the SmolVLM decision).

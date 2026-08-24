@@ -69,6 +69,17 @@ impl TileLayout {
             1
         }
     }
+
+    pub const fn checked_total_tiles(self) -> Option<usize> {
+        if self.is_split() {
+            match self.rows.checked_mul(self.cols) {
+                Some(grid) => grid.checked_add(1),
+                None => None,
+            }
+        } else {
+            Some(1)
+        }
+    }
 }
 
 pub struct SmolVLMProcessor {
@@ -204,7 +215,9 @@ impl SmolVLMProcessor {
         let rgb = image.to_rgb8();
         let (orig_w, orig_h) = (rgb.width(), rgb.height());
         if orig_w == 0 || orig_h == 0 {
-            return (Vec::new(), TileLayout::single());
+            let tile = self.tile_size as u32;
+            let blank = image::RgbImage::from_pixel(tile, tile, image::Rgb([0, 0, 0]));
+            return (vec![blank], TileLayout::single());
         }
 
         let layout = self.tile_layout(orig_w, orig_h);
@@ -264,7 +277,7 @@ impl SmolVLMProcessor {
         for image in images {
             let (tiles, layout) = self.tiles_for_image(image);
             layouts.push(layout);
-            total_tiles += tiles.len();
+            total_tiles = total_tiles.saturating_add(tiles.len());
             for tile in &tiles {
                 self.append_normalized_chw(tile, &mut all_pixels);
             }
@@ -392,5 +405,15 @@ mod tests {
         let img = solid(50, 40, 10);
         let (_pixels, layouts) = proc.preprocess_with_tiles(std::slice::from_ref(&img));
         assert_eq!(layouts, vec![TileLayout::single()]);
+    }
+
+    #[test]
+    fn zero_dimension_image_preserves_single_tile_invariant() {
+        let proc = SmolVLMProcessor::with_defaults(8, true);
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(0, 8));
+        let (pixels, layouts) = proc.preprocess_with_tiles(std::slice::from_ref(&img));
+
+        assert_eq!(layouts, vec![TileLayout::single()]);
+        assert_eq!(mlxcel_core::array_shape(&pixels), vec![1, 3, 8, 8]);
     }
 }
