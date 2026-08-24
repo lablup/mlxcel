@@ -49,10 +49,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Python
-        uses: actions/setup-python@v6
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
-          python-version: "3.13"
+          enable-cache: false
 
       - name: Build current and main binaries
         run: |
@@ -77,8 +77,9 @@ jobs:
       - name: Install the pinned mlx-lm oracle
         run: |
           set -euo pipefail
-          python3 -m venv "$VALIDATION_ROOT/venv"
-          "$VALIDATION_ROOT/venv/bin/pip" install 'mlx-lm==0.31.3'
+          uv python install 3.13
+          uv venv --python 3.13 "$VALIDATION_ROOT/venv"
+          uv pip install --python "$VALIDATION_ROOT/venv/bin/python" 'mlx-lm==0.31.3'
 
       - name: Download issue checkpoints
         run: |
