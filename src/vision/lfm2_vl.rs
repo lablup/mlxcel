@@ -40,6 +40,7 @@ use mlxcel_core::{MlxArray, UniquePtr};
 use crate::models::lfm2::Lfm2Model;
 use crate::vision::connectors::lfm2_vl::Lfm2VlConnector;
 use crate::vision::encoders::lfm2_vl::Lfm2VlVisionTower;
+use crate::vision::feature_cache::{CacheKey, SingleArrayFeatures, VisionFeatureCache};
 use crate::vision::merge::{self, InputEmbeddings};
 use crate::vision::processors::lfm2_vl::Lfm2VlProcessor;
 
@@ -73,30 +74,81 @@ impl Lfm2VlModel {
         pixel_values: &MlxArray,
         grids: &[(i32, i32)],
     ) -> InputEmbeddings {
+        self.get_input_embeddings_with_cache(input_ids, pixel_values, grids, None, None)
+    }
+
+    /// Get input embeddings with optional vision feature caching.
+    ///
+    /// LFM2-VL runs every image through the tower + connector independently
+    /// (variable patch count per image), and the resulting per-image feature
+    /// rows are concatenated before the LLaVA-style merge. The cache stores
+    /// the concatenated post-connector tensor keyed by the request-supplied
+    /// image bytes (SHA-256 + soft-token budget), so multi-turn conversations
+    /// that revisit the same image skip the vision tower + connector on
+    /// subsequent turns.
+    ///
+    /// Note: the connector output shape depends on the image's native patch
+    /// count, which is folded into the key by the soft-token budget; two
+    /// different resolutions of the same image cannot collide.
+    pub fn get_input_embeddings_with_cache(
+        &self,
+        input_ids: &MlxArray,
+        pixel_values: &MlxArray,
+        grids: &[(i32, i32)],
+        cache_key: Option<&CacheKey>,
+        vision_cache: Option<&std::sync::Mutex<VisionFeatureCache<SingleArrayFeatures>>>,
+    ) -> InputEmbeddings {
         let inputs_embeds = self.text_model.input_embeddings(input_ids);
         let embed_dtype = mlxcel_core::array_dtype(&inputs_embeds);
-        let pv = mlxcel_core::astype(pixel_values, embed_dtype);
 
-        let mut features: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(grids.len());
-        let mut offset = 0i32;
-        for &(h, w) in grids {
-            let n = h * w;
-            // patches_i: [1, n, patch_dim]
-            let patches =
-                mlxcel_core::slice(&pv, &[0, offset, 0], &[1, offset + n, self.patch_dim]);
-            offset += n;
-            let vision_out = self.vision_tower.forward(&patches, (h, w));
-            features.push(self.connector.forward(&vision_out, (h, w)));
-        }
+        // Cache lookup: reuse the concatenated post-connector features when
+        // the same image bytes have already been encoded.
+        let cached_features = match (cache_key, vision_cache) {
+            (Some(key), Some(cache)) => cache
+                .lock()
+                .ok()
+                .and_then(|mut guard| guard.get(key))
+                .map(|c| c.features),
+            _ => None,
+        };
 
-        let image_features = match features.len() {
-            0 => mlxcel_core::astype(&inputs_embeds, embed_dtype), // unused; no images
-            1 => features.into_iter().next().unwrap(),
-            _ => {
-                let mut iter = features.into_iter();
-                let first = iter.next().unwrap();
-                iter.fold(first, |acc, next| mlxcel_core::concatenate(&acc, &next, 0))
+        let image_features: UniquePtr<MlxArray> = if let Some(cached) = cached_features {
+            cached
+        } else {
+            let pv = mlxcel_core::astype(pixel_values, embed_dtype);
+            let mut features: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(grids.len());
+            let mut offset = 0i32;
+            for &(h, w) in grids {
+                let n = h * w;
+                let patches =
+                    mlxcel_core::slice(&pv, &[0, offset, 0], &[1, offset + n, self.patch_dim]);
+                offset += n;
+                let vision_out = self.vision_tower.forward(&patches, (h, w));
+                features.push(self.connector.forward(&vision_out, (h, w)));
             }
+
+            let combined = match features.len() {
+                0 => mlxcel_core::astype(&inputs_embeds, embed_dtype),
+                1 => features.into_iter().next().unwrap(),
+                _ => {
+                    let mut iter = features.into_iter();
+                    let first = iter.next().unwrap();
+                    iter.fold(first, |acc, next| mlxcel_core::concatenate(&acc, &next, 0))
+                }
+            };
+
+            // Populate the cache on miss so subsequent turns can skip the
+            // vision tower + connector. Materialize before copying so we
+            // cache a concrete array rather than a deferred graph node.
+            if let (Some(key), Some(cache)) = (cache_key, vision_cache) {
+                mlxcel_core::eval(&combined);
+                let snapshot = SingleArrayFeatures::new(mlxcel_core::copy(combined.as_ref().unwrap()));
+                if let Ok(mut guard) = cache.lock() {
+                    guard.put(key.clone(), &snapshot);
+                }
+            }
+
+            combined
         };
 
         merge::merge_llava(

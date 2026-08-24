@@ -1279,13 +1279,25 @@ where
                 total_image_tokens: stats.total_image_tokens,
             });
 
-            // LFM2-VL runs every image in one preparation pass; skip the
-            // opportunistic vision cache for this first integration.
-            let _ = active_caches;
-            let _ = image_cache_keys;
+            // LFM2-VL runs every image in one preparation pass. The cache key
+            // covers the concatenated pixel bytes for all images in the
+            // request; multi-turn conversations that revisit the same image
+            // set skip the vision tower + connector on subsequent turns.
+            let lfm2_cache_key = if active_caches.is_some() {
+                first_explicit_key(image_cache_keys)
+                    .or_else(|| Some(CacheKey::from_hash(image_hash_from_pixels(&pixel_values))))
+            } else {
+                None
+            };
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
-            let embeddings = lfm2vl.get_input_embeddings(&input_ids_arr, &pixel_values, &grids);
+            let embeddings = lfm2vl.get_input_embeddings_with_cache(
+                &input_ids_arr,
+                &pixel_values,
+                &grids,
+                lfm2_cache_key.as_ref(),
+                active_caches.map(|c| &c.single),
+            );
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,
