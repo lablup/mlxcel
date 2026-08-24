@@ -21,7 +21,7 @@ use super::{encoders, merge, processors};
 use crate::LanguageModel;
 use crate::models::qwen3_5::{GdnRollbackSnapshot, VerifyOutput};
 use crate::models::qwen3_next::Qwen3NextCache;
-use mlxcel_core::cache::SequenceId;
+use mlxcel_core::cache::{KVCacheMode, SequenceId};
 use mlxcel_core::generate::DecodeBatchContext;
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -503,6 +503,14 @@ impl LanguageModel for Qwen35VLModel {
 
     fn make_caches(&self) -> Vec<KVCache> {
         self.text_model.make_caches()
+    }
+
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        self.text_model.set_kv_cache_layer_modes(modes)
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.text_model.kv_cache_layer_modes()
     }
 
     fn num_layers(&self) -> usize {

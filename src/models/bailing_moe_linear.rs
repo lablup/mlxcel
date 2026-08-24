@@ -113,7 +113,7 @@
 //! `std::terminate` at the first forward pass, not a Rust error, so a check that
 //! happens at the first forward pass is not a check.
 
-use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
+use mlxcel_core::cache::{KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, slice_axis};
@@ -127,7 +127,7 @@ use crate::models::bailing_moe::{
     BailingMoeGate, BailingMoeMLP, BailingMoeSparseBlock, ScoreFunction, router_prefix,
 };
 use crate::models::gpt2::{dim_eq, validate_embedding_table};
-use crate::models::model_owned::ModelOwnedSequenceState;
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::switch_layers::SwitchGLU;
 
 /// Chunk length for [`gla_chunked`].
@@ -1511,9 +1511,20 @@ impl BailingLinearCache {
         &self,
         snapshot: &mut mlxcel_core::generate::ModelStateSnapshot,
         prefix: &str,
-    ) {
+    ) -> Result<(), String> {
         match self {
             Self::Attention(kv) => {
+                if kv.mode != KVCacheMode::Fp16 {
+                    return Err(format!(
+                        "{prefix}.attention: model-state snapshots do not yet serialize {:?} KV sidecars",
+                        kv.mode
+                    ));
+                }
+                super::recurrent_snapshot::push_kv_cache_mode(
+                    snapshot,
+                    format!("{prefix}.attention.mode"),
+                    kv.mode,
+                );
                 super::recurrent_snapshot::push_optional(
                     snapshot,
                     format!("{prefix}.attention.keys"),
@@ -1524,18 +1535,43 @@ impl BailingLinearCache {
                     format!("{prefix}.attention.values"),
                     &kv.values,
                 );
+                Ok(())
             }
-            Self::Linear(linear) => super::recurrent_snapshot::push_optional(
-                snapshot,
-                format!("{prefix}.linear.state"),
-                &linear.state,
-            ),
+            Self::Linear(linear) => {
+                super::recurrent_snapshot::push_optional(
+                    snapshot,
+                    format!("{prefix}.linear.state"),
+                    &linear.state,
+                );
+                Ok(())
+            }
         }
     }
 
-    fn restore_from(&mut self, snapshot: &mlxcel_core::generate::ModelStateSnapshot, prefix: &str) {
+    fn restore_from(
+        &mut self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+        prefix: &str,
+    ) -> Result<(), String> {
         match self {
             Self::Attention(kv) => {
+                let snapshot_mode = super::recurrent_snapshot::restore_kv_cache_mode(
+                    snapshot,
+                    format!("{prefix}.attention.mode"),
+                )?
+                .unwrap_or(KVCacheMode::Fp16);
+                if snapshot_mode != kv.mode {
+                    return Err(format!(
+                        "{prefix}.attention: snapshot KV mode {:?} does not match configured mode {:?}",
+                        snapshot_mode, kv.mode
+                    ));
+                }
+                if kv.mode != KVCacheMode::Fp16 {
+                    return Err(format!(
+                        "{prefix}.attention: model-state restores do not yet deserialize {:?} KV sidecars",
+                        kv.mode
+                    ));
+                }
                 kv.keys = super::recurrent_snapshot::restore_optional(
                     snapshot,
                     format!("{prefix}.attention.keys"),
@@ -1545,6 +1581,7 @@ impl BailingLinearCache {
                     format!("{prefix}.attention.values"),
                 );
                 kv.offset = snapshot.token_len() as i32;
+                Ok(())
             }
             Self::Linear(linear) => {
                 linear.state = super::recurrent_snapshot::restore_optional(
@@ -1552,6 +1589,7 @@ impl BailingLinearCache {
                     format!("{prefix}.linear.state"),
                 );
                 linear.offset = snapshot.token_len() as i32;
+                Ok(())
             }
         }
     }
@@ -2408,6 +2446,7 @@ pub struct BailingMoeLinearModel {
     /// owns the heterogeneous cache here and persists it across forward calls;
     /// recreating it per call would make decode stateless.
     sequence_state: ModelOwnedSequenceState<BailingLinearCache>,
+    kv_cache_layer_modes: KvCacheLayerModes,
 }
 
 impl BailingMoeLinearModel {
@@ -2442,9 +2481,12 @@ impl BailingMoeLinearModel {
     fn make_internal_caches(&self) -> Vec<BailingLinearCache> {
         self.layers
             .iter()
-            .map(|layer| {
+            .enumerate()
+            .map(|(layer_idx, layer)| {
                 if layer.is_global() {
-                    BailingLinearCache::Attention(KVCache::new())
+                    BailingLinearCache::Attention(KVCache::new_with_mode(
+                        self.kv_cache_layer_modes.mode_for_layer(layer_idx),
+                    ))
                 } else {
                     BailingLinearCache::Linear(LinearAttentionCache::new())
                 }
@@ -2558,6 +2600,7 @@ impl BailingMoeLinearModel {
             global_layer_index: args.global_layer_index(),
             eos_token_ids: args.eos_token_ids(),
             sequence_state: ModelOwnedSequenceState::new(internal_caches),
+            kv_cache_layer_modes: KvCacheLayerModes::new(),
         })
     }
 }
@@ -2610,6 +2653,16 @@ impl LanguageModel for BailingMoeLinearModel {
             .prepare_sequence_state(seq_id, self.make_internal_caches());
     }
 
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        self.kv_cache_layer_modes.set(modes);
+        self.sequence_state
+            .replace_internal(self.make_internal_caches());
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.kv_cache_layer_modes.clone_modes()
+    }
+
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {
         self.sequence_state.release_sequence_state(seq_id);
     }
@@ -2628,10 +2681,14 @@ impl LanguageModel for BailingMoeLinearModel {
                 let mut snapshot =
                     mlxcel_core::generate::ModelStateSnapshot::new("bailing_moe_linear", token_len);
                 for (idx, cache) in state.iter().enumerate() {
-                    cache.snapshot_into(&mut snapshot, &format!("layer{idx}"));
+                    if let Err(err) = cache.snapshot_into(&mut snapshot, &format!("layer{idx}")) {
+                        tracing::warn!("Bailing MoE Linear prompt-cache snapshot skipped: {err}");
+                        return None;
+                    }
                 }
-                snapshot
+                Some(snapshot)
             })
+            .flatten()
     }
 
     fn restore_sequence_state(
@@ -2647,7 +2704,7 @@ impl LanguageModel for BailingMoeLinearModel {
         }
         let mut state = self.make_internal_caches();
         for (idx, cache) in state.iter_mut().enumerate() {
-            cache.restore_from(snapshot, &format!("layer{idx}"));
+            cache.restore_from(snapshot, &format!("layer{idx}"))?;
         }
         self.sequence_state.replace_sequence_state(seq_id, state);
         Ok(())

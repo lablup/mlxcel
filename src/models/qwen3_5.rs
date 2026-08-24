@@ -32,7 +32,7 @@ use crate::models::gated_delta::{
     GatedDeltaCache, RMSNormGated, gated_delta_update, gated_delta_update_chain_parity,
     scaled_fast_rms_norm_no_weight,
 };
-use crate::models::model_owned::ModelOwnedSequenceState;
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::qwen_mrope_state::MRopeState;
 use crate::models::qwen3_next::{
     MLP, Quantization, Qwen3NextAttention, Qwen3NextCache, Qwen3NextConfig, SparseMoeBlock,
@@ -40,7 +40,7 @@ use crate::models::qwen3_next::{
 use crate::models::speculative_exactness::{
     BlockChainExactness, ProbeKey, compare_block_against_chain, mtp_exactness_gate,
 };
-use mlxcel_core::cache::{CachePool, SequenceId, SequenceStateLayout};
+use mlxcel_core::cache::{CachePool, KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::dtype;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
@@ -1365,6 +1365,7 @@ pub struct Qwen35Model {
     pub(crate) config: Qwen35Config,
     /// Internal and per-sequence mixed cache state.
     sequence_state: ModelOwnedSequenceState<Qwen3NextCache>,
+    kv_cache_layer_modes: KvCacheLayerModes,
     /// Per-sequence MRoPE state (mlx-vlm PR #1095). Each row
     /// in a server batch needs its own delta — the legacy fallback slot
     /// preserves CLI/single-row behavior when no `SequenceId` is plumbed.
@@ -1429,11 +1430,14 @@ impl Qwen35Model {
     fn make_internal_caches(&self) -> Vec<Qwen3NextCache> {
         self.layers
             .iter()
-            .map(|l| {
+            .enumerate()
+            .map(|(layer_idx, l)| {
                 if l.is_linear {
                     Qwen3NextCache::Linear(GatedDeltaCache::new())
                 } else {
-                    Qwen3NextCache::Attention(KVCache::new())
+                    Qwen3NextCache::Attention(KVCache::new_with_mode(
+                        self.kv_cache_layer_modes.mode_for_layer(layer_idx),
+                    ))
                 }
             })
             .collect()
@@ -1635,7 +1639,7 @@ impl Qwen35Model {
     fn split_batched_cache(cache: &Qwen3NextCache, batch_idx: usize) -> Qwen3NextCache {
         match cache {
             Qwen3NextCache::Attention(kv) => {
-                let mut split = KVCache::new();
+                let mut split = KVCache::new_with_mode(kv.mode);
                 split.offset = kv.offset;
                 split.keys = kv.keys.as_ref().map(|keys| {
                     mlxcel_core::slice(
@@ -1692,6 +1696,7 @@ impl Qwen35Model {
         input_ids: &MlxArray,
         seq_ids: &[SequenceId],
     ) -> UniquePtr<MlxArray> {
+        debug_assert!(self.configured_attention_kv_modes_all_fp16());
         let mut batched_caches = self.make_internal_caches();
         let logits = self.forward_internal(input_ids, None, &mut batched_caches, None);
         for (batch_idx, seq_id) in seq_ids.iter().copied().enumerate() {
@@ -1703,6 +1708,43 @@ impl Qwen35Model {
                 .replace_sequence_state(seq_id, split_caches);
         }
         logits
+    }
+
+    fn configured_attention_kv_modes_all_fp16(&self) -> bool {
+        let Some(modes) = self.kv_cache_layer_modes.clone_modes() else {
+            return true;
+        };
+        self.layers.iter().enumerate().all(|(layer_idx, layer)| {
+            layer.is_linear
+                || modes.get(layer_idx).copied().unwrap_or(KVCacheMode::Fp16) == KVCacheMode::Fp16
+        })
+    }
+
+    fn forward_batched_rows_sequential(
+        &self,
+        input_ids: &MlxArray,
+        seq_ids: Option<&[SequenceId]>,
+        batch_caches: &mut [&mut [KVCache]],
+    ) -> UniquePtr<MlxArray> {
+        let shape = mlxcel_core::array_shape(input_ids);
+        let input_0 = mlxcel_core::slice(input_ids, &[0, 0], &[1, shape[1]]);
+        let mut result = self.forward_with_sequence_id(
+            &input_0,
+            seq_ids.and_then(|ids| ids.first().copied()),
+            batch_caches[0],
+            None,
+        );
+        for (i, caches) in batch_caches.iter_mut().enumerate().skip(1) {
+            let input_i = mlxcel_core::slice(input_ids, &[i as i32, 0], &[i as i32 + 1, shape[1]]);
+            let logits_i = self.forward_with_sequence_id(
+                &input_i,
+                seq_ids.and_then(|ids| ids.get(i).copied()),
+                caches,
+                None,
+            );
+            result = mlxcel_core::concatenate(&result, &logits_i, 0);
+        }
+        result
     }
 
     fn forward_with_sequence_caches(
@@ -1879,6 +1921,7 @@ impl Qwen35Model {
             config: config_clone,
             sequence_state: ModelOwnedSequenceState::new(internal_caches),
             mrope_state: MRopeState::new(),
+            kv_cache_layer_modes: KvCacheLayerModes::new(),
         })
     }
 
@@ -3280,6 +3323,16 @@ impl LanguageModel for Qwen35Model {
             .prepare_sequence_state(seq_id, self.make_internal_caches());
     }
 
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        self.kv_cache_layer_modes.set(modes);
+        self.sequence_state
+            .replace_internal(self.make_internal_caches());
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.kv_cache_layer_modes.clone_modes()
+    }
+
     fn reset_runtime_state(&self) {
         // Used by: CxxGenerator single-row generation paths. Qwen 3.5 Next
         // owns mixed attention / GatedDelta cache state in
@@ -3308,10 +3361,14 @@ impl LanguageModel for Qwen35Model {
                 let mut snapshot =
                     mlxcel_core::generate::ModelStateSnapshot::new("qwen3_5", token_len);
                 for (idx, cache) in state.iter().enumerate() {
-                    cache.snapshot_into(&mut snapshot, &format!("layer{idx}"));
+                    if let Err(err) = cache.snapshot_into(&mut snapshot, &format!("layer{idx}")) {
+                        tracing::warn!("Qwen 3.5 prompt-cache snapshot skipped: {err}");
+                        return None;
+                    }
                 }
-                snapshot
+                Some(snapshot)
             })
+            .flatten()
     }
 
     fn restore_sequence_state(
@@ -3327,7 +3384,7 @@ impl LanguageModel for Qwen35Model {
         }
         let mut state = self.make_internal_caches();
         for (idx, cache) in state.iter_mut().enumerate() {
-            cache.restore_from(snapshot, &format!("layer{idx}"));
+            cache.restore_from(snapshot, &format!("layer{idx}"))?;
         }
         self.sequence_state.replace_sequence_state(seq_id, state);
         Ok(())
@@ -3386,8 +3443,8 @@ impl LanguageModel for Qwen35Model {
     ) -> UniquePtr<MlxArray> {
         let shape = mlxcel_core::array_shape(input_ids);
         if batch_caches.len() <= 1 || shape[1] <= 1 {
-            let token_0 = mlxcel_core::slice(input_ids, &[0, 0], &[1, shape[1]]);
             if batch_caches.len() == 1 {
+                let token_0 = mlxcel_core::slice(input_ids, &[0, 0], &[1, shape[1]]);
                 return self.forward_with_sequence_id(
                     &token_0,
                     seq_ids.and_then(|ids| ids.first().copied()),
@@ -3395,60 +3452,28 @@ impl LanguageModel for Qwen35Model {
                     None,
                 );
             }
-            let mut result = self.forward_with_sequence_id(
-                &token_0,
-                seq_ids.and_then(|ids| ids.first().copied()),
-                batch_caches[0],
-                None,
-            );
-            for (i, caches) in batch_caches.iter_mut().enumerate().skip(1) {
-                let input_i =
-                    mlxcel_core::slice(input_ids, &[i as i32, 0], &[i as i32 + 1, shape[1]]);
-                let logits_i = self.forward_with_sequence_id(
-                    &input_i,
-                    seq_ids.and_then(|ids| ids.get(i).copied()),
-                    caches,
-                    None,
-                );
-                result = mlxcel_core::concatenate(&result, &logits_i, 0);
-            }
-            return result;
+            return self.forward_batched_rows_sequential(input_ids, seq_ids, batch_caches);
         }
 
         if mask.is_some() {
-            let input_0 = mlxcel_core::slice(input_ids, &[0, 0], &[1, shape[1]]);
-            let mut result = self.forward_with_sequence_id(
-                &input_0,
-                seq_ids.and_then(|ids| ids.first().copied()),
-                batch_caches[0],
-                None,
-            );
-            for (i, caches) in batch_caches.iter_mut().enumerate().skip(1) {
-                let input_i =
-                    mlxcel_core::slice(input_ids, &[i as i32, 0], &[i as i32 + 1, shape[1]]);
-                let logits_i = self.forward_with_sequence_id(
-                    &input_i,
-                    seq_ids.and_then(|ids| ids.get(i).copied()),
-                    caches,
-                    None,
-                );
-                result = mlxcel_core::concatenate(&result, &logits_i, 0);
-            }
-            return result;
+            return self.forward_batched_rows_sequential(input_ids, seq_ids, batch_caches);
         }
 
         if let Some(seq_ids) = seq_ids {
+            if !self.configured_attention_kv_modes_all_fp16() {
+                tracing::debug!(
+                    "Qwen 3.5 batched prefill is disabled for non-FP16 model-owned KV modes until row-split sidecars are supported"
+                );
+                return self.forward_batched_rows_sequential(
+                    input_ids,
+                    Some(seq_ids),
+                    batch_caches,
+                );
+            }
             return self.forward_batched_prefill(input_ids, seq_ids);
         }
 
-        let input_0 = mlxcel_core::slice(input_ids, &[0, 0], &[1, shape[1]]);
-        let mut result = self.forward_with_sequence_id(&input_0, None, batch_caches[0], None);
-        for (i, caches) in batch_caches.iter_mut().enumerate().skip(1) {
-            let input_i = mlxcel_core::slice(input_ids, &[i as i32, 0], &[i as i32 + 1, shape[1]]);
-            let logits_i = self.forward_with_sequence_id(&input_i, None, caches, None);
-            result = mlxcel_core::concatenate(&result, &logits_i, 0);
-        }
-        result
+        self.forward_batched_rows_sequential(input_ids, None, batch_caches)
     }
 
     fn eos_token_ids(&self) -> Vec<i32> {

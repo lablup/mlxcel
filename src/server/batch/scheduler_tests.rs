@@ -1594,6 +1594,53 @@ fn batch_kv_quant_per_layer_table_disabled_skip_keeps_uniform_modes() {
     }
 }
 
+fn detached_set_with_modes(
+    modes: &[mlxcel_core::cache::KVCacheMode],
+) -> mlxcel_core::cache::DetachedCacheSet {
+    let now = Instant::now();
+    let caches = modes
+        .iter()
+        .copied()
+        .map(|mode| {
+            let mut cache = mlxcel_core::cache::KVCache::new_with_mode(mode);
+            cache.clone_handle()
+        })
+        .collect();
+    mlxcel_core::cache::DetachedCacheSet {
+        caches,
+        backend: mlxcel_core::cache::SequenceStateBackend::DenseKvCache,
+        prompt_len: 0,
+        current_offset: 0,
+        created_at: now,
+        detached_at: now,
+        origin_seq_id: SequenceId::from_raw(123),
+    }
+}
+
+#[test]
+fn dense_detached_kv_mode_validation_accepts_the_resolved_table() {
+    use mlxcel_core::cache::KVCacheMode::{Fp16, Int8, Turbo4Asym};
+
+    let dense = detached_set_with_modes(&[Int8, Fp16, Turbo4Asym]);
+
+    super::validate_dense_detached_kv_modes_against_table(&dense, &[Int8, Fp16, Turbo4Asym])
+        .expect("matching detached KV modes must adopt");
+}
+
+#[test]
+fn dense_detached_kv_mode_validation_declines_named_mismatch() {
+    use mlxcel_core::cache::KVCacheMode::{Fp16, Int8};
+
+    let dense = detached_set_with_modes(&[Int8, Fp16]);
+    let err = super::validate_dense_detached_kv_modes_against_table(&dense, &[Fp16, Fp16])
+        .expect_err("a detached cache with a stale KV mode must not be adopted");
+
+    assert!(
+        err.contains("layer 0") && err.contains("int8") && err.contains("fp16"),
+        "mismatch error should name the layer and both modes: {err}"
+    );
+}
+
 // -------------------------------------------------------------------
 // Lookahead async_eval pipeline invalidation logic (issue #632)
 // -------------------------------------------------------------------

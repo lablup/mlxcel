@@ -101,7 +101,7 @@
 //! crossing the cxx bridge is an uncatchable `std::terminate` at the first
 //! forward pass, not a Rust error.
 
-use mlxcel_core::cache::{SequenceId, SequenceStateLayout};
+use mlxcel_core::cache::{KVCacheMode, SequenceId, SequenceStateLayout};
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, RotatingKVCache, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, create_sliding_window_prefill_mask, slice_axis};
@@ -113,7 +113,7 @@ use std::path::Path;
 
 use crate::models::gemma3::{Cache, CacheInterface};
 use crate::models::gpt2::{dim_eq, validate_embedding_table};
-use crate::models::model_owned::ModelOwnedSequenceState;
+use crate::models::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
 use crate::models::switch_layers::{SwitchGLU, fused_moe_enabled, group_mask_scores};
 
 // Configuration.
@@ -1147,6 +1147,7 @@ pub struct AfmoeModel {
     /// which does not fit the trait's homogeneous `&mut [KVCache]`, so the model
     /// owns its heterogeneous cache here and persists it across forward calls.
     sequence_state: ModelOwnedSequenceState<Cache>,
+    kv_cache_layer_modes: KvCacheLayerModes,
 }
 
 impl AfmoeModel {
@@ -1204,11 +1205,13 @@ impl AfmoeModel {
     fn make_internal_caches(&self) -> Vec<Cache> {
         self.layers
             .iter()
-            .map(|layer| {
+            .enumerate()
+            .map(|(layer_idx, layer)| {
+                let mode = self.kv_cache_layer_modes.mode_for_layer(layer_idx);
                 if layer.uses_sliding {
-                    Cache::Rotating(RotatingKVCache::new(self.sliding_window))
+                    Cache::Rotating(RotatingKVCache::new_with_mode(self.sliding_window, mode))
                 } else {
-                    Cache::Standard(KVCache::new())
+                    Cache::Standard(KVCache::new_with_mode(mode))
                 }
             })
             .collect()
@@ -1302,6 +1305,7 @@ impl AfmoeModel {
             sliding_index: args.sliding_index(),
             eos_token_ids: args.eos_token_ids(),
             sequence_state: ModelOwnedSequenceState::new(internal_caches),
+            kv_cache_layer_modes: KvCacheLayerModes::new(),
         })
     }
 }
@@ -1662,6 +1666,16 @@ impl LanguageModel for AfmoeModel {
     fn prepare_sequence_state(&self, seq_id: SequenceId) {
         self.sequence_state
             .prepare_sequence_state(seq_id, self.make_internal_caches());
+    }
+
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        self.kv_cache_layer_modes.set(modes);
+        self.sequence_state
+            .replace_internal(self.make_internal_caches());
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.kv_cache_layer_modes.clone_modes()
     }
 
     fn release_sequence_state_by_id(&self, seq_id: SequenceId) {

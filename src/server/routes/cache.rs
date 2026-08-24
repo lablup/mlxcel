@@ -75,6 +75,7 @@ pub(crate) struct RejectReasonStats {
     pub disabled: u64,
     pub prefix_too_short: u64,
     pub mode_mismatch: u64,
+    pub kv_mode_mismatch: u64,
     pub empty_set: u64,
     pub layout_constraints: u64,
     pub block_boundary_floor: u64,
@@ -97,6 +98,7 @@ impl RejectReasonStats {
             disabled: snap.prompt_cache_reject_disabled,
             prefix_too_short: snap.prompt_cache_reject_prefix_too_short,
             mode_mismatch: snap.prompt_cache_reject_mode_mismatch,
+            kv_mode_mismatch: snap.prompt_cache_reject_kv_mode_mismatch,
             empty_set: snap.prompt_cache_reject_empty_set,
             layout_constraints: snap.prompt_cache_reject_layout_constraints,
             block_boundary_floor: snap.prompt_cache_reject_block_boundary_floor,
@@ -123,6 +125,8 @@ pub struct CacheStatsResponse {
     pub block_size: usize,
     /// APC hash algorithm string (`"sha256"` or `"blake3"`).
     pub hash: String,
+    /// Effective server KV cache mode after model allowlist/fallback resolution.
+    pub kv_cache_mode_effective: String,
     /// Live entries in the store.
     pub entries: usize,
     /// Total bytes consumed by live entries.
@@ -231,6 +235,8 @@ pub struct CacheStatsResponse {
     pub reject_prefix_too_short: u64,
     /// Cross-backend or whole-entry-policy declines (adopt path only).
     pub reject_mode_mismatch: u64,
+    /// Per-layer KV cache mode mismatch declines (dense adopt path only).
+    pub reject_kv_mode_mismatch: u64,
     /// Nothing-to-cache declines, from either path.
     pub reject_empty_set: u64,
     /// Pool-level operation failures (paged clone/trim, dense truncate,
@@ -316,6 +322,7 @@ pub async fn cache_stats(State(state): State<AppState>) -> Json<CacheStatsRespon
         paged,
         reject,
         warmups,
+        state.config.kv_cache_mode.to_string(),
     ))
 }
 
@@ -356,6 +363,7 @@ pub(crate) fn build_stats_response(
     paged: PagedBlockStats,
     reject: RejectReasonStats,
     warmups: WarmupStats,
+    kv_cache_mode_effective: String,
 ) -> CacheStatsResponse {
     let apc = &cfg.apc;
     match store {
@@ -377,6 +385,7 @@ pub(crate) fn build_stats_response(
                 apc_enabled: cfg.apc_enabled(),
                 block_size: apc.block_size,
                 hash: apc.hash.to_string(),
+                kv_cache_mode_effective: kv_cache_mode_effective.clone(),
                 entries: stats.entries,
                 bytes: stats.bytes,
                 capacity_bytes: cfg.capacity_bytes,
@@ -418,6 +427,7 @@ pub(crate) fn build_stats_response(
                 reject_disabled: reject.disabled,
                 reject_prefix_too_short: reject.prefix_too_short,
                 reject_mode_mismatch: reject.mode_mismatch,
+                reject_kv_mode_mismatch: reject.kv_mode_mismatch,
                 reject_empty_set: reject.empty_set,
                 reject_layout_constraints: reject.layout_constraints,
                 reject_block_boundary_floor: reject.block_boundary_floor,
@@ -435,6 +445,7 @@ pub(crate) fn build_stats_response(
             apc_enabled: false,
             block_size: apc.block_size,
             hash: apc.hash.to_string(),
+            kv_cache_mode_effective,
             entries: 0,
             bytes: 0,
             capacity_bytes: cfg.capacity_bytes,
@@ -479,6 +490,7 @@ pub(crate) fn build_stats_response(
             reject_disabled: reject.disabled,
             reject_prefix_too_short: reject.prefix_too_short,
             reject_mode_mismatch: reject.mode_mismatch,
+            reject_kv_mode_mismatch: reject.kv_mode_mismatch,
             reject_empty_set: reject.empty_set,
             reject_layout_constraints: reject.layout_constraints,
             reject_block_boundary_floor: reject.block_boundary_floor,

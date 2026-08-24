@@ -32,7 +32,7 @@
 //!
 //! Used by: `loading::load_lfm2_vl`, `multimodal::vlm_runtime`.
 
-use mlxcel_core::cache::SequenceId;
+use mlxcel_core::cache::{KVCacheMode, SequenceId};
 use mlxcel_core::generate::{DecodeBatchContext, LanguageModel, ModelStateSnapshot};
 use mlxcel_core::layers::KVCache;
 use mlxcel_core::{MlxArray, UniquePtr};
@@ -176,6 +176,14 @@ impl LanguageModel for Lfm2VlModel {
 
     fn make_caches(&self) -> Vec<KVCache> {
         LanguageModel::make_caches(&self.text_model)
+    }
+
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        self.text_model.set_kv_cache_layer_modes(modes)
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.text_model.kv_cache_layer_modes()
     }
 
     fn num_layers(&self) -> usize {

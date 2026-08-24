@@ -39,6 +39,7 @@
 //! [`ModelOwnedSequenceState`] (like Jamba / NemotronH) and reports
 //! `supports_batching() == false`.
 
+use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
 use mlxcel_core::utils::{create_causal_mask, slice_axis, stack_arrays};
@@ -47,8 +48,10 @@ use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
 use std::path::Path;
 
-use super::model_owned::ModelOwnedSequenceState;
-use super::recurrent_snapshot::{push_optional, restore_optional};
+use super::model_owned::{KvCacheLayerModes, ModelOwnedSequenceState};
+use super::recurrent_snapshot::{
+    push_kv_cache_mode, push_optional, restore_kv_cache_mode, restore_optional,
+};
 use super::switch_layers::{SwitchGLU, moe_weighted_sum};
 
 // The single-step short-conv decode fast path (issue #748) now lives in the
@@ -612,11 +615,15 @@ impl Lfm2DecoderLayer {
         matches!(self.mixer, Mixer::Attention(_))
     }
 
-    fn make_cache(&self) -> Lfm2LayerCache {
+    fn make_cache_with_mode(&self, mode: KVCacheMode) -> Lfm2LayerCache {
         match self.mixer {
-            Mixer::Attention(_) => Lfm2LayerCache::Attention(KVCache::new()),
+            Mixer::Attention(_) => Lfm2LayerCache::Attention(KVCache::new_with_mode(mode)),
             Mixer::Conv(_) => Lfm2LayerCache::Conv(None),
         }
+    }
+
+    fn make_cache(&self) -> Lfm2LayerCache {
+        self.make_cache_with_mode(KVCacheMode::Fp16)
     }
 
     fn forward(
@@ -715,27 +722,57 @@ impl Lfm2LayerCache {
         &self,
         snapshot: &mut mlxcel_core::generate::ModelStateSnapshot,
         prefix: &str,
-    ) {
+    ) -> Result<(), String> {
         match self {
             Lfm2LayerCache::Attention(kv) => {
+                if kv.mode != KVCacheMode::Fp16 {
+                    return Err(format!(
+                        "{prefix}.attention: model-state snapshots do not yet serialize {:?} KV sidecars",
+                        kv.mode
+                    ));
+                }
+                push_kv_cache_mode(snapshot, format!("{prefix}.attention.mode"), kv.mode);
                 push_optional(snapshot, format!("{prefix}.attention.keys"), &kv.keys);
                 push_optional(snapshot, format!("{prefix}.attention.values"), &kv.values);
+                Ok(())
             }
             Lfm2LayerCache::Conv(state) => {
                 push_optional(snapshot, format!("{prefix}.conv.state"), state);
+                Ok(())
             }
         }
     }
 
-    fn restore_from(&mut self, snapshot: &mlxcel_core::generate::ModelStateSnapshot, prefix: &str) {
+    fn restore_from(
+        &mut self,
+        snapshot: &mlxcel_core::generate::ModelStateSnapshot,
+        prefix: &str,
+    ) -> Result<(), String> {
         match self {
             Lfm2LayerCache::Attention(kv) => {
+                let snapshot_mode =
+                    restore_kv_cache_mode(snapshot, format!("{prefix}.attention.mode"))?
+                        .unwrap_or(KVCacheMode::Fp16);
+                if snapshot_mode != kv.mode {
+                    return Err(format!(
+                        "{prefix}.attention: snapshot KV mode {:?} does not match configured mode {:?}",
+                        snapshot_mode, kv.mode
+                    ));
+                }
+                if kv.mode != KVCacheMode::Fp16 {
+                    return Err(format!(
+                        "{prefix}.attention: model-state restores do not yet deserialize {:?} KV sidecars",
+                        kv.mode
+                    ));
+                }
                 kv.keys = restore_optional(snapshot, format!("{prefix}.attention.keys"));
                 kv.values = restore_optional(snapshot, format!("{prefix}.attention.values"));
                 kv.offset = snapshot.token_len() as i32;
+                Ok(())
             }
             Lfm2LayerCache::Conv(state) => {
                 *state = restore_optional(snapshot, format!("{prefix}.conv.state"));
+                Ok(())
             }
         }
     }
@@ -752,6 +789,7 @@ pub struct Lfm2Model {
     /// Model-owned mixed caches keyed by scheduler sequence id, plus a fallback
     /// slot for CLI / benchmark paths.
     sequence_state: ModelOwnedSequenceState<Lfm2LayerCache>,
+    kv_cache_layer_modes: KvCacheLayerModes,
 }
 
 impl Lfm2Model {
@@ -760,7 +798,11 @@ impl Lfm2Model {
     }
 
     pub fn make_caches(&self) -> Vec<Lfm2LayerCache> {
-        self.layers.iter().map(|l| l.make_cache()).collect()
+        self.layers
+            .iter()
+            .enumerate()
+            .map(|(idx, l)| l.make_cache_with_mode(self.kv_cache_layer_modes.mode_for_layer(idx)))
+            .collect()
     }
 
     fn forward_with_caches(
@@ -864,6 +906,7 @@ impl Lfm2Model {
             embedding_norm,
             eos_token_ids,
             sequence_state: ModelOwnedSequenceState::new(internal_caches),
+            kv_cache_layer_modes: KvCacheLayerModes::new(),
         })
     }
 }
@@ -1014,6 +1057,16 @@ impl LanguageModel for Lfm2Model {
             .prepare_sequence_state(seq_id, Lfm2Model::make_caches(self));
     }
 
+    fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+        self.kv_cache_layer_modes.set(modes);
+        self.sequence_state
+            .replace_internal(Lfm2Model::make_caches(self));
+    }
+
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        self.kv_cache_layer_modes.clone_modes()
+    }
+
     fn release_sequence_state_by_id(&self, seq_id: mlxcel_core::cache::SequenceId) {
         self.sequence_state.release_sequence_state(seq_id);
     }
@@ -1078,10 +1131,14 @@ impl LanguageModel for Lfm2Model {
                 let mut snapshot =
                     mlxcel_core::generate::ModelStateSnapshot::new("lfm2", token_len);
                 for (idx, cache) in state.iter().enumerate() {
-                    cache.snapshot_into(&mut snapshot, &format!("layer{idx}"));
+                    if let Err(err) = cache.snapshot_into(&mut snapshot, &format!("layer{idx}")) {
+                        tracing::warn!("LFM2 prompt-cache snapshot skipped: {err}");
+                        return None;
+                    }
                 }
-                snapshot
+                Some(snapshot)
             })
+            .flatten()
     }
 
     fn restore_sequence_state(
@@ -1097,7 +1154,7 @@ impl LanguageModel for Lfm2Model {
         }
         let mut state = Lfm2Model::make_caches(self);
         for (idx, cache) in state.iter_mut().enumerate() {
-            cache.restore_from(snapshot, &format!("layer{idx}"));
+            cache.restore_from(snapshot, &format!("layer{idx}"))?;
         }
         self.sequence_state.replace_sequence_state(seq_id, state);
         Ok(())

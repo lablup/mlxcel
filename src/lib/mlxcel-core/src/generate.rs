@@ -340,6 +340,19 @@ pub trait LanguageModel {
     /// Create KV caches for all layers
     fn make_caches(&self) -> Vec<KVCache>;
 
+    /// Inject a resolved per-layer KV cache mode table for model-owned caches.
+    ///
+    /// Most dense models keep caches in the generator-provided slice and use
+    /// the default no-op. Hybrid / sliding / VLM families that own attention
+    /// caches internally override this and build those caches from the same
+    /// resolved table used for dense external caches.
+    fn set_kv_cache_layer_modes(&self, _modes: Vec<KVCacheMode>) {}
+
+    /// Return the currently injected model-owned KV cache mode table, if any.
+    fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+        None
+    }
+
     /// Get the number of layers
     fn num_layers(&self) -> usize;
 
@@ -1148,9 +1161,10 @@ impl CxxGenerator {
     pub fn reset_with_model<M: LanguageModel + ?Sized>(&mut self, model: &M) {
         model.reset_runtime_state();
         self.caches = model.make_caches();
-        // Apply the configured KV cache mode (with Boundary-V upgrade) to
-        // all freshly created caches.
-        self.apply_kv_cache_mode_with_boundary_policy();
+        // Apply the configured KV cache mode (with Boundary-V upgrade) to all
+        // freshly created external caches, and inject the same resolved table
+        // into model-owned cache families.
+        self.apply_kv_cache_mode_with_boundary_policy_for_model(model);
         self.generated_tokens.clear();
     }
 
@@ -1168,19 +1182,27 @@ impl CxxGenerator {
     /// Boundary-V policy survives the entire generation lifecycle
     /// including `reset_with_model` boundary cases.
     ///
-    /// No-op when `self.kv_cache_mode == Fp16` — every layer is already FP16
-    /// so there is nothing to apply.
-    fn apply_kv_cache_mode_with_boundary_policy(&mut self) {
+    fn resolved_layer_modes_for(&self, n_layers: usize) -> Vec<KVCacheMode> {
         let nominal = self.kv_cache_mode;
-        if nominal == KVCacheMode::Fp16 {
-            return;
-        }
-        let n_layers = self.caches.len();
         let requested = crate::cache::turbo::boundary_v_layers_from_env();
-        let layer_modes = crate::cache::turbo::resolve_layer_modes(nominal, n_layers, requested);
-        for (cache, mode) in self.caches.iter_mut().zip(layer_modes) {
+        crate::cache::turbo::resolve_layer_modes(nominal, n_layers, requested)
+    }
+
+    fn apply_kv_cache_mode_with_boundary_policy(&mut self) -> Vec<KVCacheMode> {
+        let layer_modes = self.resolved_layer_modes_for(self.caches.len());
+        for (cache, mode) in self.caches.iter_mut().zip(layer_modes.iter().copied()) {
             cache.mode = mode;
         }
+        layer_modes
+    }
+
+    fn apply_kv_cache_mode_with_boundary_policy_for_model<M: LanguageModel + ?Sized>(
+        &mut self,
+        model: &M,
+    ) {
+        self.apply_kv_cache_mode_with_boundary_policy();
+        let model_modes = self.resolved_layer_modes_for(model.num_layers());
+        model.set_kv_cache_layer_modes(model_modes);
     }
 
     /// Generate tokens from the model (original implementation)
@@ -1232,7 +1254,7 @@ impl CxxGenerator {
         // Honor the Boundary-V policy when applying the
         // nominal mode to per-layer caches: the first/last N layers stay
         // at FP16 to recover the V-quantization quality gap.
-        self.apply_kv_cache_mode_with_boundary_policy();
+        self.apply_kv_cache_mode_with_boundary_policy_for_model(model);
 
         // Set generation stream as default for better pipelining
         install_thread_local_default_stream(self.generation_stream.as_ref());
@@ -1571,7 +1593,7 @@ impl CxxGenerator {
         // Honor the Boundary-V policy when applying the
         // nominal mode to per-layer caches: the first/last N layers stay
         // at FP16 to recover the V-quantization quality gap.
-        self.apply_kv_cache_mode_with_boundary_policy();
+        self.apply_kv_cache_mode_with_boundary_policy_for_model(model);
 
         install_thread_local_default_stream(self.generation_stream.as_ref());
 
@@ -1748,7 +1770,7 @@ impl CxxGenerator {
         // Honor the Boundary-V policy when applying the
         // nominal mode to per-layer caches: the first/last N layers stay
         // at FP16 to recover the V-quantization quality gap.
-        self.apply_kv_cache_mode_with_boundary_policy();
+        self.apply_kv_cache_mode_with_boundary_policy_for_model(model);
         install_thread_local_default_stream(self.generation_stream.as_ref());
 
         let eos_tokens = merged_eos_token_ids(model.eos_token_ids(), &sampling.stop_token_ids);
@@ -1930,7 +1952,7 @@ impl CxxGenerator {
         // Honor the Boundary-V policy when applying the
         // nominal mode to per-layer caches: the first/last N layers stay
         // at FP16 to recover the V-quantization quality gap.
-        self.apply_kv_cache_mode_with_boundary_policy();
+        self.apply_kv_cache_mode_with_boundary_policy_for_model(model);
 
         // Set generation stream as default for better pipelining
         install_thread_local_default_stream(self.generation_stream.as_ref());
@@ -2909,6 +2931,67 @@ mod tests {
             model.reset_call_count.get(),
             1,
             "reset_with_model must reset model-owned fallback state"
+        );
+    }
+
+    struct TrackingKvModeModel {
+        modes: std::cell::RefCell<Option<Vec<KVCacheMode>>>,
+    }
+
+    impl TrackingKvModeModel {
+        fn new() -> Self {
+            Self {
+                modes: std::cell::RefCell::new(None),
+            }
+        }
+    }
+
+    impl LanguageModel for TrackingKvModeModel {
+        fn forward(
+            &self,
+            input_ids: &MlxArray,
+            _caches: &mut [KVCache],
+            _mask: Option<&MlxArray>,
+        ) -> UniquePtr<MlxArray> {
+            ffi::eval(input_ids);
+            ffi::zeros(&[1, 1, 4], crate::dtype::FLOAT32)
+        }
+
+        fn make_caches(&self) -> Vec<KVCache> {
+            Vec::new()
+        }
+
+        fn set_kv_cache_layer_modes(&self, modes: Vec<KVCacheMode>) {
+            *self.modes.borrow_mut() = Some(modes);
+        }
+
+        fn kv_cache_layer_modes(&self) -> Option<Vec<KVCacheMode>> {
+            self.modes.borrow().clone()
+        }
+
+        fn num_layers(&self) -> usize {
+            3
+        }
+
+        fn eos_token_ids(&self) -> Vec<i32> {
+            vec![99]
+        }
+    }
+
+    #[test]
+    fn reset_with_model_forwards_resolved_modes_to_model_owned_caches() {
+        let model = TrackingKvModeModel::new();
+        let mut generator = CxxGenerator::new_with_kv_mode(0, KVCacheMode::Int8);
+
+        generator.reset_with_model(&model);
+
+        assert_eq!(
+            model.kv_cache_layer_modes(),
+            Some(vec![
+                KVCacheMode::Int8,
+                KVCacheMode::Int8,
+                KVCacheMode::Int8
+            ])
         );
     }
 

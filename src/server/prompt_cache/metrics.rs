@@ -50,6 +50,10 @@ pub enum PromptCacheRejectReason {
     /// backend (or vice versa), or a partial match declined under
     /// `require_whole_entry` (multimodal whole-entry policy).
     ModeMismatch,
+    /// Dense prompt-cache adoption declined because at least one detached
+    /// layer's KV cache mode differs from the scheduler's resolved per-layer
+    /// KV mode table.
+    KvModeMismatch,
     /// The detached, cloned, or snapshot KV set carried nothing to store or
     /// adopt (aborted before any prefill completed, or the model produced no
     /// capturable state).
@@ -94,11 +98,12 @@ pub enum PromptCacheRejectReason {
 impl PromptCacheRejectReason {
     /// All variants, in the stable order used by Prometheus/`/v1/cache/stats`
     /// exposition helpers.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Oversized,
         Self::Disabled,
         Self::PrefixTooShort,
         Self::ModeMismatch,
+        Self::KvModeMismatch,
         Self::EmptySet,
         Self::LayoutConstraints,
         Self::BlockBoundaryFloor,
@@ -114,6 +119,7 @@ impl PromptCacheRejectReason {
             Self::Disabled => "disabled",
             Self::PrefixTooShort => "prefix_too_short",
             Self::ModeMismatch => "mode_mismatch",
+            Self::KvModeMismatch => "kv_mode_mismatch",
             Self::EmptySet => "empty_set",
             Self::LayoutConstraints => "layout_constraints",
             Self::BlockBoundaryFloor => "block_boundary_floor",
@@ -172,6 +178,7 @@ pub struct PromptCacheRejectCounters {
     disabled: AtomicU64,
     prefix_too_short: AtomicU64,
     mode_mismatch: AtomicU64,
+    kv_mode_mismatch: AtomicU64,
     empty_set: AtomicU64,
     layout_constraints: AtomicU64,
     block_boundary_floor: AtomicU64,
@@ -191,6 +198,7 @@ impl PromptCacheRejectCounters {
             PromptCacheRejectReason::Disabled => &self.disabled,
             PromptCacheRejectReason::PrefixTooShort => &self.prefix_too_short,
             PromptCacheRejectReason::ModeMismatch => &self.mode_mismatch,
+            PromptCacheRejectReason::KvModeMismatch => &self.kv_mode_mismatch,
             PromptCacheRejectReason::EmptySet => &self.empty_set,
             PromptCacheRejectReason::LayoutConstraints => &self.layout_constraints,
             PromptCacheRejectReason::BlockBoundaryFloor => &self.block_boundary_floor,

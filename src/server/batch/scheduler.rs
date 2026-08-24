@@ -828,6 +828,33 @@ pub(crate) fn select_eviction_victim_from<'a>(
     }
 }
 
+fn validate_dense_detached_kv_modes_against_table(
+    dense: &mlxcel_core::cache::DetachedCacheSet,
+    expected: &[KVCacheMode],
+) -> Result<(), String> {
+    if expected.len() != dense.num_layers() {
+        return Err(format!(
+            "resolved {} KV cache layer modes for {} detached layers",
+            expected.len(),
+            dense.num_layers()
+        ));
+    }
+    for (idx, (detached, expected_mode)) in dense
+        .caches
+        .iter()
+        .zip(expected.iter().copied())
+        .enumerate()
+    {
+        let actual = detached.mode();
+        if actual != expected_mode {
+            return Err(format!(
+                "layer {idx} detached mode {actual} does not match resolved mode {expected_mode}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl BatchScheduler {
     fn release_sequence_caches(&mut self, seq_id: SequenceId) {
         self.model.release_sequence_state_by_id(seq_id);
@@ -1517,6 +1544,7 @@ impl BatchScheduler {
     /// reserved, preserving the cross-tenant isolation contract.
     pub fn with_kv_cache_mode(mut self, mode: KVCacheMode) -> Self {
         self.kv_cache_mode = mode;
+        self.inject_model_owned_kv_cache_modes();
         self
     }
 
@@ -1536,6 +1564,8 @@ impl BatchScheduler {
     /// bit-exactly.
     pub fn with_batch_kv_quant(mut self, config: BatchKvQuantConfig) -> Self {
         self.batch_kv_quant = config;
+        self.inject_model_owned_kv_cache_modes();
+        self.log_effective_kv_cache_application();
         self
     }
 
@@ -2305,6 +2335,17 @@ impl BatchScheduler {
                         to = target,
                         "prompt-cache adopt: APC partial adoption truncated detached cache to block boundary"
                     );
+                }
+                if let Err(reason) = self.validate_dense_detached_kv_modes(&dense) {
+                    tracing::debug!(
+                        "prompt-cache adopt: dense KV mode mismatch ({reason}); falling back to cold prefill"
+                    );
+                    self.batch_observability.record_prompt_cache_reject(
+                        PromptCacheRejectReason::KvModeMismatch,
+                        None,
+                        matched_len,
+                    );
+                    return None;
                 }
                 self.cache_pool
                     .adopt(&self.model as &dyn LanguageModel, dense)
@@ -3449,6 +3490,9 @@ impl BatchScheduler {
     ///
     /// Used by: [`Self::allocate_sequence_state`].
     fn apply_kv_cache_mode_to(&mut self, seq_id: SequenceId) {
+        let batch_kv_quant = self.batch_kv_quant;
+        let kv_cache_mode = self.kv_cache_mode;
+        let requested_boundary_layers = mlxcel_core::cache::turbo::boundary_v_layers_from_env();
         let Some(caches) = self.cache_pool.get_caches_mut(seq_id) else {
             return;
         };
@@ -3458,32 +3502,59 @@ impl BatchScheduler {
             // is responsible for honoring the configured mode.
             return;
         }
-        let n_layers = caches.len();
-
-        // when the batched KV quant config is active, it
-        // takes precedence over the legacy `kv_cache_mode` path. The
-        // resolved table already encodes the per-layer mode (with the
-        // last-layer skip applied), so apply it directly.
-        if self.batch_kv_quant.is_enabled() {
-            let layer_modes = self.batch_kv_quant.resolve_layer_modes(n_layers);
-            for (cache, mode) in caches.iter_mut().zip(layer_modes) {
-                cache.mode = mode;
-            }
-            return;
-        }
-
-        // Legacy path: nominal mode + Boundary-V
-        // protection only.
-        let nominal = self.kv_cache_mode;
-        if nominal == KVCacheMode::Fp16 {
-            return;
-        }
-        let requested = mlxcel_core::cache::turbo::boundary_v_layers_from_env();
-        let layer_modes =
-            mlxcel_core::cache::turbo::resolve_layer_modes(nominal, n_layers, requested);
+        let layer_modes = if batch_kv_quant.is_enabled() {
+            batch_kv_quant.resolve_layer_modes(caches.len())
+        } else {
+            mlxcel_core::cache::turbo::resolve_layer_modes(
+                kv_cache_mode,
+                caches.len(),
+                requested_boundary_layers,
+            )
+        };
         for (cache, mode) in caches.iter_mut().zip(layer_modes) {
             cache.mode = mode;
         }
+    }
+
+    fn resolved_kv_cache_layer_modes(&self, n_layers: usize) -> Vec<KVCacheMode> {
+        if self.batch_kv_quant.is_enabled() {
+            return self.batch_kv_quant.resolve_layer_modes(n_layers);
+        }
+        let requested = mlxcel_core::cache::turbo::boundary_v_layers_from_env();
+        mlxcel_core::cache::turbo::resolve_layer_modes(self.kv_cache_mode, n_layers, requested)
+    }
+
+    fn configured_model_kv_cache_layer_modes(&self) -> Vec<KVCacheMode> {
+        self.resolved_kv_cache_layer_modes(self.model.num_layers())
+    }
+
+    fn inject_model_owned_kv_cache_modes(&self) {
+        self.model
+            .set_kv_cache_layer_modes(self.configured_model_kv_cache_layer_modes());
+    }
+
+    fn log_effective_kv_cache_application(&self) {
+        let modes = self.configured_model_kv_cache_layer_modes();
+        let effective_mode = if self.batch_kv_quant.is_enabled() {
+            self.batch_kv_quant.base_mode()
+        } else {
+            self.kv_cache_mode
+        };
+        let applied = modes.iter().filter(|mode| **mode == effective_mode).count();
+        tracing::info!(
+            kv_cache_mode_effective = %effective_mode,
+            kv_cache_mode_applied_layers = applied,
+            kv_cache_mode_total_layers = modes.len(),
+            "resolved KV cache mode applied to model caches"
+        );
+    }
+
+    fn validate_dense_detached_kv_modes(
+        &self,
+        dense: &mlxcel_core::cache::DetachedCacheSet,
+    ) -> Result<(), String> {
+        let expected = self.resolved_kv_cache_layer_modes(dense.num_layers());
+        validate_dense_detached_kv_modes_against_table(dense, &expected)
     }
 
     /// Prepare Turbo4Delegated cache state before a sequence enters decode.

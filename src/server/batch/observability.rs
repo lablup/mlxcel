@@ -790,6 +790,9 @@ impl BatchObservability {
             prompt_cache_reject_mode_mismatch: self
                 .prompt_cache_reject_reasons
                 .count(PromptCacheRejectReason::ModeMismatch),
+            prompt_cache_reject_kv_mode_mismatch: self
+                .prompt_cache_reject_reasons
+                .count(PromptCacheRejectReason::KvModeMismatch),
             prompt_cache_reject_empty_set: self
                 .prompt_cache_reject_reasons
                 .count(PromptCacheRejectReason::EmptySet),
@@ -908,6 +911,7 @@ pub struct ObservabilitySnapshot {
     pub prompt_cache_reject_disabled: u64,
     pub prompt_cache_reject_prefix_too_short: u64,
     pub prompt_cache_reject_mode_mismatch: u64,
+    pub prompt_cache_reject_kv_mode_mismatch: u64,
     pub prompt_cache_reject_empty_set: u64,
     pub prompt_cache_reject_layout_constraints: u64,
     pub prompt_cache_reject_block_boundary_floor: u64,
@@ -1172,6 +1176,7 @@ mod tests {
         assert_eq!(snap.prompt_cache_reject_disabled, 0);
         assert_eq!(snap.prompt_cache_reject_prefix_too_short, 0);
         assert_eq!(snap.prompt_cache_reject_mode_mismatch, 0);
+        assert_eq!(snap.prompt_cache_reject_kv_mode_mismatch, 0);
         assert_eq!(snap.prompt_cache_reject_empty_set, 0);
         assert_eq!(snap.prompt_cache_reject_layout_constraints, 0);
         assert_eq!(snap.prompt_cache_reject_block_boundary_floor, 0);
@@ -1193,6 +1198,7 @@ mod tests {
         assert_eq!(snap.prompt_cache_reject_oversized, 0);
         assert_eq!(snap.prompt_cache_reject_disabled, 0);
         assert_eq!(snap.prompt_cache_reject_prefix_too_short, 0);
+        assert_eq!(snap.prompt_cache_reject_kv_mode_mismatch, 0);
         assert_eq!(snap.prompt_cache_reject_empty_set, 0);
         assert_eq!(snap.prompt_cache_reject_layout_constraints, 0);
         assert_eq!(snap.prompt_cache_reject_snapshot_diverged, 0);
