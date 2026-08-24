@@ -105,7 +105,19 @@ git diff origin/main...HEAD | grep -nE '#[0-9]{3,}'
 python3 scripts/ci/check_cross_repo_refs.py
 ```
 
-CI runs the same check on every pull request (advisory).
+When `GH_TOKEN` or `GITHUB_TOKEN` is available, the helper asks GitHub for the
+current highest issue/PR number in `lablup/mlxcel` and treats any larger bare
+ref as likely cross-repository. Lines that explicitly name an upstream project
+are still flagged regardless of the number. Offline, unauthenticated, or
+failed-API runs stay advisory, print the fallback reason, and leave non-upstream
+bare refs in the manual-review bucket.
+
+CI runs the same check on every pull request (advisory). Same-repository pull
+requests pass `github.token` so the live boundary is exercised there too; fork
+pull requests intentionally use the offline fallback rather than exposing the
+base repository's token to PR-controlled code. The same CI step also runs
+`scripts/ci/check_cross_repo_refs_test.sh`, the companion shell test for the
+classifier.
 
 ### Adding a new model family
 
