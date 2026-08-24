@@ -468,6 +468,10 @@ std::unique_ptr<MlxArray> swiglu_mlp_forward(
     const MlxArray& down_proj
 );
 
+// One-shot report for MLXCEL_SHAPELESS_COMPILE_AUDIT=1. Each audited compile
+// site is compared against its eager graph on first-use and warmed calls.
+rust::String shapeless_compile_audit_report();
+
 // Compiled relu_squared: square(maximum(x, 0)) — single fused kernel
 std::unique_ptr<MlxArray> compiled_relu_squared(const MlxArray& x);
 
@@ -523,8 +527,7 @@ std::unique_ptr<MlxArray> compiled_geglu_approx_activation(
     const MlxArray& x
 );
 
-// Compiled softcap attention scores: tanh(scores * inv_cap) * cap
-// Fuses divide + tanh + multiply into single compiled kernel
+// Compiled softcap attention scores: tanh(scores * inv_cap) * cap.
 // Used by: Gemma2 attention with logit softcapping
 std::unique_ptr<MlxArray> compiled_softcap(
     const MlxArray& scores,
@@ -540,8 +543,7 @@ std::unique_ptr<MlxArray> compiled_clip_residual(
     const MlxArray& y
 );
 
-// Softcap SDPA: Q@K^T * scale -> softcap -> mask -> softmax -> @V
-// Combines the entire manual attention path into one compiled call
+// Compiled softcap SDPA: Q@K^T * scale -> softcap -> mask -> softmax -> @V
 // Used by: Gemma2 attention with logit softcapping
 std::unique_ptr<MlxArray> compiled_softcap_sdpa(
     const MlxArray& q,
@@ -552,8 +554,7 @@ std::unique_ptr<MlxArray> compiled_softcap_sdpa(
     const MlxArray* mask
 );
 
-// Softcap SDPA with GQA: handles repeat_kv + attention in compiled graph
-// Avoids separate repeat_kv FFI calls by incorporating GQA internally
+// Compiled softcap SDPA with GQA: handles repeat_kv + attention
 // Used by: Gemma2 attention (GQA + softcap)
 std::unique_ptr<MlxArray> compiled_softcap_sdpa_gqa(
     const MlxArray& q,

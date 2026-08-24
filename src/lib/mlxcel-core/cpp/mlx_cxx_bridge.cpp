@@ -10,12 +10,16 @@
 
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
+#include <functional>
 #include <map>
+#include <mutex>
 #include <sstream>
 #include <tuple>
-#include <vector>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 #ifdef MLXCEL_BRIDGE_METAL_BACKEND
 // Defined by the mlx/backend/metal/quantized.cpp overlay (issue #1187).
@@ -33,6 +37,149 @@ bool mlxcel_qmv_wide(void);
 namespace mlx_cxx {
 
 using namespace mlx::core;
+
+namespace {
+
+using CompiledArrayFn =
+    std::function<std::vector<array>(const std::vector<array>&)>;
+
+struct ShapelessAuditStats {
+    size_t calls = 0;
+    size_t failures = 0;
+    std::map<std::string, size_t> signatures;
+    std::string last_failure;
+};
+
+std::mutex& shapeless_audit_mutex() {
+    static auto* mutex = new std::mutex();
+    return *mutex;
+}
+
+std::map<std::string, ShapelessAuditStats>& shapeless_audit_stats() {
+    // Intentionally leaked: compiled functions may be destroyed after other
+    // function-local statics during process shutdown.
+    static auto* stats = new std::map<std::string, ShapelessAuditStats>();
+    return *stats;
+}
+
+bool shapeless_audit_enabled() {
+    const char* value = std::getenv("MLXCEL_SHAPELESS_COMPILE_AUDIT");
+    return value && std::string_view(value) != "0";
+}
+
+std::string shapeless_signature(const std::vector<array>& inputs) {
+    std::ostringstream out;
+    for (size_t input_index = 0; input_index < inputs.size(); ++input_index) {
+        if (input_index != 0) {
+            out << ';';
+        }
+        const auto& input = inputs[input_index];
+        out << from_dtype(input.dtype()) << ':';
+        const auto& shape = input.shape();
+        for (size_t dim_index = 0; dim_index < shape.size(); ++dim_index) {
+            if (dim_index != 0) {
+                out << 'x';
+            }
+            out << shape[dim_index];
+        }
+    }
+    return out.str();
+}
+
+bool shapeless_outputs_match(
+    const std::vector<array>& compiled,
+    const std::vector<array>& eager,
+    std::string& failure
+) {
+    if (compiled.size() != eager.size()) {
+        failure = "output-count mismatch";
+        return false;
+    }
+
+    for (size_t index = 0; index < compiled.size(); ++index) {
+        if (compiled[index].shape() != eager[index].shape()) {
+            failure = "output shape mismatch at index " + std::to_string(index);
+            return false;
+        }
+        if (compiled[index].dtype() != eager[index].dtype()) {
+            failure = "output dtype mismatch at index " + std::to_string(index);
+            return false;
+        }
+
+        const auto dtype = compiled[index].dtype();
+        const double tolerance =
+            (dtype == mlx::core::float16 || dtype == mlx::core::bfloat16)
+                ? 5e-3
+                : 1e-4;
+        auto close = mlx::core::allclose(
+            compiled[index], eager[index], tolerance, tolerance);
+        close.eval();
+        if (!close.item<bool>()) {
+            failure = "numeric mismatch at index " + std::to_string(index);
+            return false;
+        }
+    }
+    return true;
+}
+
+// Wrap every shapeless compile site with an opt-in eager oracle. Production
+// calls still receive the original compiled function with no comparison or
+// registry overhead. The one-shot hardware audit sets the environment variable
+// before any compiled function is initialized, invokes each site twice, and
+// reads the report below to prove both first-use and warmed-cache behavior.
+CompiledArrayFn compile_shapeless_audited(
+    const char* site,
+    CompiledArrayFn eager_fn
+) {
+    auto compiled_fn = mlx::core::compile(eager_fn, /*shapeless=*/true);
+    if (!shapeless_audit_enabled()) {
+        return compiled_fn;
+    }
+
+    return [site = std::string(site), eager_fn = std::move(eager_fn),
+            compiled_fn = std::move(compiled_fn)]
+        (const std::vector<array>& inputs) mutable -> std::vector<array> {
+        auto compiled = compiled_fn(inputs);
+        auto eager = eager_fn(inputs);
+        std::string failure;
+        const bool matches = shapeless_outputs_match(compiled, eager, failure);
+        const auto signature = shapeless_signature(inputs);
+
+        std::lock_guard<std::mutex> lock(shapeless_audit_mutex());
+        auto& stats = shapeless_audit_stats()[site];
+        ++stats.calls;
+        ++stats.signatures[signature];
+        if (!matches) {
+            ++stats.failures;
+            stats.last_failure = std::move(failure);
+        }
+        return compiled;
+    };
+}
+
+} // namespace
+
+rust::String shapeless_compile_audit_report() {
+    std::ostringstream out;
+    out << "site\tcalls\tsignatures\twarmed\tstatus\n";
+    std::lock_guard<std::mutex> lock(shapeless_audit_mutex());
+    for (const auto& [site, stats] : shapeless_audit_stats()) {
+        size_t warmed = 0;
+        for (const auto& [_, count] : stats.signatures) {
+            if (count >= 2) {
+                ++warmed;
+            }
+        }
+        out << site << '\t' << stats.calls << '\t' << stats.signatures.size()
+            << '\t' << warmed << '\t'
+            << (stats.failures == 0 ? "PASS" : "FAIL");
+        if (!stats.last_failure.empty()) {
+            out << " (" << stats.last_failure << ')';
+        }
+        out << '\n';
+    }
+    return rust::String(out.str());
+}
 
 // to_shape / to_dtype / from_dtype / gelu_tanh_approx live in
 // mlx_cxx_internal.h so the split-out TUs (kernels/nemotron/ext) share them.
@@ -1211,7 +1358,8 @@ namespace {
             return {mlx::core::multiply(silu_gate, x)};
         };
         // Compile with shapeless=true for kernel fusion
-        return mlx::core::compile(swiglu_fn, true);
+        return compile_shapeless_audited(
+            "compiled_swiglu_activation", swiglu_fn);
     }
 }
 
@@ -1223,7 +1371,7 @@ namespace {
             const auto& x = inputs[0];
             return {mlx::core::square(mlx::core::maximum(x, mlx::core::array(0)))};
         };
-        return mlx::core::compile(fn, true);
+        return compile_shapeless_audited("compiled_relu_squared", fn);
     }
 }
 
@@ -1241,7 +1389,7 @@ namespace {
             const auto& x = inputs[0];
             return {mlx::core::multiply(x, mlx::core::sigmoid(x))};
         };
-        return mlx::core::compile(fn, true);
+        return compile_shapeless_audited("compiled_silu", fn);
     }
 }
 
@@ -1286,7 +1434,8 @@ namespace {
             auto result = mlx::core::multiply(out_glu, mlx::core::add(x_linear, mlx::core::array(1.0f)));
             return {mlx::core::astype(result, x_linear_in.dtype())};
         };
-        return mlx::core::compile(fn, true);
+        return compile_shapeless_audited(
+            "compiled_gpt_oss_swiglu_activation", fn);
     }
 }
 
@@ -1313,7 +1462,7 @@ namespace {
             auto result = mlx::core::multiply(x, scale);
             return {mlx::core::astype(result, x.dtype())};
         };
-        return mlx::core::compile(fn, true);
+        return compile_shapeless_audited("compiled_gelu", fn);
     }
 }
 
@@ -1340,7 +1489,7 @@ namespace {
             auto result = mlx::core::multiply(x, scale);
             return {mlx::core::astype(result, x.dtype())};
         };
-        return mlx::core::compile(fn, true);
+        return compile_shapeless_audited("compiled_gelu_approx", fn);
     }
 }
 
@@ -1367,7 +1516,8 @@ namespace {
             auto result = mlx::core::multiply(gelu_gate, x);
             return {mlx::core::astype(result, x.dtype())};
         };
-        return mlx::core::compile(fn, true);
+        return compile_shapeless_audited(
+            "compiled_geglu_activation", fn);
     }
 }
 
@@ -1390,7 +1540,8 @@ namespace {
             auto result = mlx::core::multiply(gelu_tanh_approx(gate), x);
             return {mlx::core::astype(result, x.dtype())};
         };
-        return mlx::core::compile(fn, true);
+        return compile_shapeless_audited(
+            "compiled_geglu_approx_activation", fn);
     }
 }
 
@@ -1434,7 +1585,7 @@ namespace {
             auto result = mlx::core::multiply(zeroed, scale);
             return {mlx::core::astype(result, x.dtype())};
         };
-        return mlx::core::compile(fn, true);
+        return compile_shapeless_audited("compiled_gelu_topk", fn);
     }
 }
 
@@ -1451,16 +1602,15 @@ std::unique_ptr<MlxArray> compiled_gelu_topk(
 // Compiled softcap: tanh(scores / cap) * cap
 // Used by: Gemma2 attention with logit softcapping
 namespace {
-    static std::function<std::vector<array>(const std::vector<array>&)> get_compiled_softcap() {
+    static CompiledArrayFn get_compiled_softcap() {
         auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
             const auto& scores = inputs[0];
             const auto& cap = inputs[1];
-            auto scaled = mlx::core::divide(scores, cap);
-            auto tanhed = mlx::core::tanh(scaled);
-            auto result = mlx::core::multiply(tanhed, cap);
+            auto result = mlx::core::multiply(
+                mlx::core::tanh(mlx::core::divide(scores, cap)), cap);
             return {mlx::core::astype(result, scores.dtype())};
         };
-        return mlx::core::compile(fn, true);
+        return compile_shapeless_audited("compiled_softcap", fn);
     }
 }
 
@@ -1472,27 +1622,24 @@ std::unique_ptr<MlxArray> compiled_softcap(
         return std::make_unique<MlxArray>(scores.inner);
     }
     static auto compiled_fn = get_compiled_softcap();
-    auto cap_arr = array(cap);
-    auto result = compiled_fn({scores.inner, cap_arr});
+    auto result = compiled_fn({scores.inner, array(cap)});
     return std::make_unique<MlxArray>(std::move(result[0]));
 }
 
-// Compiled clip_residual for float16 overflow prevention
+// Compiled clip_residual for float16 overflow prevention.
 // Used by: Gemma3 residual connections
 namespace {
-    static std::function<std::vector<array>(const std::vector<array>&)> get_compiled_clip_residual_f16() {
+    static CompiledArrayFn get_compiled_clip_residual_f16() {
         auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
-            const auto& x = inputs[0];
-            const auto& y = inputs[1];
-            auto x_f32 = mlx::core::astype(x, mlx::core::float32);
-            auto y_f32 = mlx::core::astype(y, mlx::core::float32);
-            auto sum = mlx::core::add(x_f32, y_f32);
+            auto sum = mlx::core::add(
+                mlx::core::astype(inputs[0], mlx::core::float32),
+                mlx::core::astype(inputs[1], mlx::core::float32));
             auto bound = array(65504.0f);
-            auto neg_bound = mlx::core::negative(bound);
-            auto clipped = mlx::core::clip(sum, neg_bound, bound);
+            auto clipped = mlx::core::clip(
+                sum, mlx::core::negative(bound), bound);
             return {mlx::core::astype(clipped, mlx::core::float16)};
         };
-        return mlx::core::compile(fn, true);
+        return compile_shapeless_audited("compiled_clip_residual", fn);
     }
 }
 
@@ -1509,61 +1656,48 @@ std::unique_ptr<MlxArray> compiled_clip_residual(
     return std::make_unique<MlxArray>(std::move(result[0]));
 }
 
-// Compiled softcap SDPA: Q@K^T * scale -> softcap -> mask -> softmax -> @V
-// Fuses the entire attention score computation into a compiled graph
+// Compiled softcap SDPA: Q@K^T * scale -> softcap -> mask -> softmax -> @V.
 // Used by: Gemma2 attention with logit softcapping
 namespace {
-    // Compiled version without mask (single-token decode path)
-    static std::function<std::vector<array>(const std::vector<array>&)>
-    get_compiled_softcap_sdpa_nomask() {
-        auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
-            const auto& q = inputs[0];       // [B, H, 1, D]
-            const auto& k = inputs[1];       // [B, H, S, D]
-            const auto& v = inputs[2];       // [B, H, S, D]
-            const auto& scale_arr = inputs[3];
-            const auto& cap_arr = inputs[4];
-
-            // scores = Q @ K^T
-            auto k_t = mlx::core::transpose(k, {0, 1, 3, 2});
-            auto scores = mlx::core::matmul(q, k_t);
-
-            // scores = scores * scale
-            scores = mlx::core::multiply(scores, scale_arr);
-
-            // softcap: tanh(scores / cap) * cap
-            scores = mlx::core::multiply(mlx::core::tanh(mlx::core::divide(scores, cap_arr)), cap_arr);
-
-            // softmax
-            auto probs = mlx::core::softmax(scores, -1);
-
-            // probs @ V
-            auto result = mlx::core::matmul(probs, v);
-            return {mlx::core::astype(result, v.dtype())};
-        };
-        return mlx::core::compile(fn, true);  // shapeless=true
+    static array softcap_sdpa_graph(
+        const array& q,
+        const array& k,
+        const array& v,
+        const array& scale,
+        const array& cap,
+        const array* mask
+    ) {
+        auto scores = mlx::core::matmul(
+            q, mlx::core::transpose(k, {0, 1, 3, 2}));
+        scores = mlx::core::multiply(scores, scale);
+        scores = mlx::core::multiply(
+            mlx::core::tanh(mlx::core::divide(scores, cap)), cap);
+        if (mask) {
+            scores = mlx::core::add(scores, *mask);
+        }
+        auto result = mlx::core::matmul(
+            mlx::core::softmax(scores, -1), v);
+        return mlx::core::astype(result, v.dtype());
     }
 
-    // Compiled version with mask (prefill path)
-    static std::function<std::vector<array>(const std::vector<array>&)>
-    get_compiled_softcap_sdpa_masked() {
+    static CompiledArrayFn get_compiled_softcap_sdpa_nomask() {
         auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
-            const auto& q = inputs[0];
-            const auto& k = inputs[1];
-            const auto& v = inputs[2];
-            const auto& scale_arr = inputs[3];
-            const auto& cap_arr = inputs[4];
-            const auto& mask = inputs[5];
-
-            auto k_t = mlx::core::transpose(k, {0, 1, 3, 2});
-            auto scores = mlx::core::matmul(q, k_t);
-            scores = mlx::core::multiply(scores, scale_arr);
-            scores = mlx::core::multiply(mlx::core::tanh(mlx::core::divide(scores, cap_arr)), cap_arr);
-            scores = mlx::core::add(scores, mask);
-            auto probs = mlx::core::softmax(scores, -1);
-            auto result = mlx::core::matmul(probs, v);
-            return {mlx::core::astype(result, v.dtype())};
+            return {softcap_sdpa_graph(
+                inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+                nullptr)};
         };
-        return mlx::core::compile(fn, true);
+        return compile_shapeless_audited(
+            "compiled_softcap_sdpa_nomask", fn);
+    }
+
+    static CompiledArrayFn get_compiled_softcap_sdpa_masked() {
+        auto fn = [](const std::vector<array>& inputs) -> std::vector<array> {
+            return {softcap_sdpa_graph(
+                inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+                &inputs[5])};
+        };
+        return compile_shapeless_audited(
+            "compiled_softcap_sdpa_masked", fn);
     }
 
     bool enable_softcap_gqa_decode_grouped_opt() {
@@ -1591,23 +1725,20 @@ std::unique_ptr<MlxArray> compiled_softcap_sdpa(
     float softcap,
     const MlxArray* mask
 ) {
-    auto scale_arr = array(scale);
-    auto cap_arr = array(softcap);
-
     if (mask) {
+        auto cast_mask = mask->inner.dtype() == q.inner.dtype()
+            ? mask->inner
+            : mlx::core::astype(mask->inner, q.inner.dtype());
         static auto compiled_fn = get_compiled_softcap_sdpa_masked();
-        // Cast mask to Q's dtype if needed
-        auto m = mask->inner;
-        if (m.dtype() != q.inner.dtype()) {
-            m = mlx::core::astype(m, q.inner.dtype());
-        }
-        auto result = compiled_fn({q.inner, k.inner, v.inner, scale_arr, cap_arr, m});
-        return std::make_unique<MlxArray>(std::move(result[0]));
-    } else {
-        static auto compiled_fn = get_compiled_softcap_sdpa_nomask();
-        auto result = compiled_fn({q.inner, k.inner, v.inner, scale_arr, cap_arr});
+        auto result = compiled_fn({
+            q.inner, k.inner, v.inner, array(scale), array(softcap),
+            std::move(cast_mask)});
         return std::make_unique<MlxArray>(std::move(result[0]));
     }
+    static auto compiled_fn = get_compiled_softcap_sdpa_nomask();
+    auto result = compiled_fn({
+        q.inner, k.inner, v.inner, array(scale), array(softcap)});
+    return std::make_unique<MlxArray>(std::move(result[0]));
 }
 
 // Softcap SDPA with GQA: do repeat_kv outside compiled graph, then call compiled SDPA
@@ -1669,20 +1800,20 @@ std::unique_ptr<MlxArray> compiled_softcap_sdpa_gqa(
     auto rk = do_repeat_kv(k.inner);
     auto rv = do_repeat_kv(v.inner);
 
-    auto scale_arr = array(scale);
-    auto cap_arr = array(softcap);
-
     if (mask) {
+        auto cast_mask = mask->inner.dtype() == q.inner.dtype()
+            ? mask->inner
+            : mlx::core::astype(mask->inner, q.inner.dtype());
         static auto compiled_fn = get_compiled_softcap_sdpa_masked();
-        auto m = mask->inner;
-        if (m.dtype() != q.inner.dtype()) m = mlx::core::astype(m, q.inner.dtype());
-        auto result = compiled_fn({q.inner, rk, rv, scale_arr, cap_arr, m});
-        return std::make_unique<MlxArray>(std::move(result[0]));
-    } else {
-        static auto compiled_fn = get_compiled_softcap_sdpa_nomask();
-        auto result = compiled_fn({q.inner, rk, rv, scale_arr, cap_arr});
+        auto result = compiled_fn({
+            q.inner, rk, rv, array(scale), array(softcap),
+            std::move(cast_mask)});
         return std::make_unique<MlxArray>(std::move(result[0]));
     }
+    static auto compiled_fn = get_compiled_softcap_sdpa_nomask();
+    auto result = compiled_fn({
+        q.inner, rk, rv, array(scale), array(softcap)});
+    return std::make_unique<MlxArray>(std::move(result[0]));
 }
 
 // Compiled GELU MLP forward: down_proj(gelu(gate_proj(x)) * up_proj(x))
@@ -1728,7 +1859,8 @@ namespace {
 
             return {down};
         };
-        return mlx::core::compile(fn, true);  // shapeless=true
+        return compile_shapeless_audited(
+            "compiled_gelu_mlp_forward", fn);
     }
 }
 
@@ -1877,7 +2009,10 @@ namespace {
             return {down};
         };
 
-        auto [iter, _] = cache.emplace(key, mlx::core::compile(fn, /*shapeless=*/true));
+        auto [iter, _] = cache.emplace(
+            key,
+            compile_shapeless_audited(
+                "compiled_gelu_approx_mlp_forward", fn));
         return iter->second;
     }
 }
@@ -2097,7 +2232,11 @@ namespace {
             return {down};
         };
 
-        auto [iter, _] = cache.emplace(key, mlx::core::compile(fn, /*shapeless=*/shapeless));
+        auto compiled = shapeless
+            ? compile_shapeless_audited(
+                "compiled_gelu_approx_mlp_forward_global_scale", fn)
+            : mlx::core::compile(fn, /*shapeless=*/false);
+        auto [iter, _] = cache.emplace(key, std::move(compiled));
         return iter->second;
     }
 
@@ -3337,7 +3476,9 @@ namespace {
             return {combined};
         };
         auto [iter, _] = cache.emplace(
-            key, mlx::core::compile(fn, /*shapeless=*/true));
+            key,
+            compile_shapeless_audited(
+                "compiled_per_layer_input_gate", fn));
         return iter->second;
     }
 }
@@ -4205,7 +4346,8 @@ namespace {
 
             return {down};
         };
-        return mlx::core::compile(moe_expert_fn, true);  // shapeless=true
+        return compile_shapeless_audited(
+            "compiled_moe_expert_forward", moe_expert_fn);
     }
 }
 
@@ -5990,7 +6132,8 @@ namespace {
 
             return {y, ns};
         };
-        return mlx::core::compile(fn, true);
+        return compile_shapeless_audited(
+            "fused_gated_delta_decode_step_scalar_gate", fn);
     }
 
     // Compiled version for per-dim gate (g_ndim == 3): [B, H, Dk]
@@ -6021,7 +6164,8 @@ namespace {
 
             return {y, ns};
         };
-        return mlx::core::compile(fn, true);
+        return compile_shapeless_audited(
+            "fused_gated_delta_decode_step_dim_gate", fn);
     }
 }
 
