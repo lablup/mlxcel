@@ -14,6 +14,7 @@
 
 import pathlib
 import re
+import subprocess
 import unittest
 
 
@@ -38,6 +39,20 @@ class MakefileDevTestStackTests(unittest.TestCase):
                 block = self._target_block(target)
                 self.assertIn(command, block)
 
+    def test_dev_test_stack_default_is_16_mib(self) -> None:
+        self.assertRegex(self.text, r"(?m)^DEV_TEST_RUST_MIN_STACK \?= 16777216$")
+
+    def test_dev_test_dry_runs_expand_stack_override(self) -> None:
+        expected_commands = {
+            "test": "RUST_MIN_STACK=16777216 cargo test -- --test-threads=1",
+            "test-verbose": "RUST_MIN_STACK=16777216 cargo test -- --nocapture --test-threads=1",
+            "test-lib": "RUST_MIN_STACK=16777216 cargo test --lib -- --test-threads=1",
+        }
+
+        for target, command in expected_commands.items():
+            with self.subTest(target=target):
+                self.assertIn(command, self._make_dry_run(target))
+
     def test_verify_test_command_stays_ci_faithful(self) -> None:
         block = self._target_block("verify-test")
         self.assertIn(
@@ -45,6 +60,10 @@ class MakefileDevTestStackTests(unittest.TestCase):
             block,
         )
         self.assertNotIn("RUST_MIN_STACK", block)
+        self.assertIn(
+            "cargo test --workspace --profile test-fast --features metal,accelerate --no-fail-fast -- --test-threads=1",
+            self._make_dry_run("verify-test"),
+        )
 
     def _target_block(self, target: str) -> str:
         pattern = re.compile(
@@ -53,6 +72,16 @@ class MakefileDevTestStackTests(unittest.TestCase):
         match = pattern.search(self.text)
         self.assertIsNotNone(match, f"missing target block for {target}")
         return match.group(0)
+
+    def _make_dry_run(self, target: str) -> str:
+        result = subprocess.run(
+            ["make", "-n", target],
+            cwd=ROOT,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        return result.stdout
 
 
 if __name__ == "__main__":
