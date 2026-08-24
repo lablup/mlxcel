@@ -30,6 +30,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::models::rope_utils::{RopeScalingKind, RopeScalingSpec};
+
 // Configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelArgs {
@@ -51,6 +53,10 @@ pub struct ModelArgs {
 
     #[serde(default)]
     pub rope_scaling: Option<HashMap<String, serde_json::Value>>,
+
+    /// Checkpoint name used only to key and label RoPE fallback diagnostics.
+    #[serde(skip)]
+    pub checkpoint_label: Option<String>,
 
     #[serde(default = "default_tie_word_embeddings")]
     pub tie_word_embeddings: bool,
@@ -84,6 +90,35 @@ impl ModelArgs {
     pub fn bits(&self) -> i32 {
         self.quantization.as_ref().map(|q| q.bits).unwrap_or(4)
     }
+
+    pub fn set_checkpoint_label(&mut self, model_dir: &Path) {
+        self.checkpoint_label = model_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty());
+    }
+
+    pub fn model_label(&self) -> &str {
+        self.checkpoint_label.as_deref().unwrap_or(&self.model_type)
+    }
+
+    /// Resolve `rope_scaling` for Qwen3 attention.
+    ///
+    /// Unsupported or malformed schemes warn and keep the unscaled table rather
+    /// than failing the load because MiniCPM-o parses arbitrary full configs
+    /// into this args type through `loading/vlm_special.rs`.
+    pub fn rope_scaling_kind(&self) -> RopeScalingKind {
+        let spec = self
+            .rope_scaling
+            .as_ref()
+            .map(|block| RopeScalingSpec::from_lookup(|key| block.get(key)));
+        RopeScalingKind::resolve(
+            spec.as_ref(),
+            self.head_dim,
+            self.rope_theta,
+            self.model_label(),
+        )
+    }
 }
 
 // Attention with Q/K Normalization.
@@ -99,9 +134,109 @@ pub struct Attention {
     pub scale: f32,
     pub rope_dims: i32,
     pub rope_base: f32,
+    pub rope_scale: f32,
+    pub rope_freqs: Option<UniquePtr<MlxArray>>,
 }
 
 impl Attention {
+    /// The Qwen3 fused Q/K-norm launcher accepts a linear position scale, but
+    /// it cannot accept a precomputed frequency table.
+    fn fused_qk_norm_launcher_usable(&self) -> bool {
+        self.rope_freqs.is_none()
+    }
+
+    fn apply_rope(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offset: i32,
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        match self.rope_freqs.as_ref() {
+            Some(freqs) => (
+                mlxcel_core::fast_rope_with_freqs(
+                    q,
+                    self.rope_dims,
+                    false,
+                    self.rope_scale,
+                    offset,
+                    freqs,
+                ),
+                mlxcel_core::fast_rope_with_freqs(
+                    k,
+                    self.rope_dims,
+                    false,
+                    self.rope_scale,
+                    offset,
+                    freqs,
+                ),
+            ),
+            None => (
+                mlxcel_core::fast_rope(
+                    q,
+                    self.rope_dims,
+                    false,
+                    self.rope_base,
+                    self.rope_scale,
+                    offset,
+                ),
+                mlxcel_core::fast_rope(
+                    k,
+                    self.rope_dims,
+                    false,
+                    self.rope_base,
+                    self.rope_scale,
+                    offset,
+                ),
+            ),
+        }
+    }
+
+    fn apply_rope_batched(
+        &self,
+        q: &MlxArray,
+        k: &MlxArray,
+        offsets: &[i32],
+    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+        match self.rope_freqs.as_ref() {
+            Some(freqs) => (
+                mlxcel_core::fast_rope_batched_with_freqs(
+                    q,
+                    self.rope_dims,
+                    false,
+                    self.rope_scale,
+                    offsets,
+                    freqs,
+                ),
+                mlxcel_core::fast_rope_batched_with_freqs(
+                    k,
+                    self.rope_dims,
+                    false,
+                    self.rope_scale,
+                    offsets,
+                    freqs,
+                ),
+            ),
+            None => (
+                mlxcel_core::fast_rope_batched(
+                    q,
+                    self.rope_dims,
+                    false,
+                    self.rope_base,
+                    self.rope_scale,
+                    offsets,
+                ),
+                mlxcel_core::fast_rope_batched(
+                    k,
+                    self.rope_dims,
+                    false,
+                    self.rope_base,
+                    self.rope_scale,
+                    offsets,
+                ),
+            ),
+        }
+    }
+
     pub fn forward(
         &self,
         x: &MlxArray,
@@ -118,16 +253,20 @@ impl Attention {
         // norm reduces over head_dim, which the head transpose leaves untouched,
         // so the fused result matches the graph path below. Prefill (l > 1),
         // non-quantized weights (the kernel returns None), and
-        // MLXCEL_FUSED_QK_NORM=0 all take the graph path.
-        let fused = if l == 1 && mlxcel_core::layers::fused_qk_norm_enabled() {
+        // MLXCEL_FUSED_QK_NORM=0 all take the graph path. Frequency-table
+        // rope_scaling schemes also take the graph path because this launcher
+        // can consume a linear scale but not a table.
+        let fused = if l == 1
+            && mlxcel_core::layers::fused_qk_norm_enabled()
+            && self.fused_qk_norm_launcher_usable()
+        {
             self.qkv_proj.forward_split_norm_rope_quantized(
                 x,
                 &self.q_norm,
                 &self.k_norm,
                 self.rope_dims,
                 self.rope_base,
-                // No rope_scaling on this path: the position is unscaled.
-                1.0,
+                self.rope_scale,
                 offset,
             )
         } else {
@@ -155,8 +294,7 @@ impl Attention {
             let v = mlxcel_core::transpose_axes(&v, &[0, 2, 1, 3]);
 
             // Apply RoPE AFTER normalization
-            let q = mlxcel_core::fast_rope(&q, self.rope_dims, false, self.rope_base, 1.0, offset);
-            let k = mlxcel_core::fast_rope(&k, self.rope_dims, false, self.rope_base, 1.0, offset);
+            let (q, k) = self.apply_rope(&q, &k, offset);
             (q, k, v)
         };
 
@@ -290,22 +428,8 @@ impl Attention {
         let k_batched = mlxcel_core::transpose_axes(&k_batched, &[0, 2, 1, 3]);
         let v_batched = mlxcel_core::transpose_axes(&v_batched, &[0, 2, 1, 3]);
 
-        let q_batched = mlxcel_core::fast_rope_batched(
-            &q_batched,
-            self.rope_dims,
-            false,
-            self.rope_base,
-            1.0,
-            &metadata.rope_offsets,
-        );
-        let k_batched = mlxcel_core::fast_rope_batched(
-            &k_batched,
-            self.rope_dims,
-            false,
-            self.rope_base,
-            1.0,
-            &metadata.rope_offsets,
-        );
+        let (q_batched, k_batched) =
+            self.apply_rope_batched(&q_batched, &k_batched, &metadata.rope_offsets);
 
         // Pool-backed paged decode (#899): the whole batch in one fused launch.
         // This is the production path for `--decode-storage paged`; it appends
@@ -467,6 +591,15 @@ impl Attention {
         args: &ModelArgs,
         prefix: &str,
     ) -> Result<Self, String> {
+        Self::from_weights_with_rope(weights, args, prefix, &args.rope_scaling_kind())
+    }
+
+    pub fn from_weights_with_rope(
+        weights: &WeightMap,
+        args: &ModelArgs,
+        prefix: &str,
+        rope: &RopeScalingKind,
+    ) -> Result<Self, String> {
         let group_size = args.group_size();
         let bits = args.bits();
 
@@ -480,6 +613,23 @@ impl Attention {
         let head_dim = args.head_dim as i32;
         let num_heads = args.num_attention_heads as i32;
         let num_kv_heads = args.num_key_value_heads as i32;
+
+        let rope = rope.duplicate();
+        let rope_scale = rope.scale();
+        let rope_freqs = match rope {
+            RopeScalingKind::Llama3 { freqs } => Some(freqs),
+            _ => None,
+        };
+
+        if let Some(freqs) = rope_freqs.as_ref() {
+            let shape = mlxcel_core::array_shape(freqs);
+            let expected = head_dim / 2;
+            if shape.len() != 1 || shape[0] != expected {
+                return Err(format!(
+                    "{prefix}: rope_scaling frequency table has shape {shape:?}, but this block rotates {head_dim} dims and needs [{expected}]"
+                ));
+            }
+        }
 
         // Fused QKV: concatenate q/k/v weights into one projection at load time
         let qkv_proj = FusedQKVLinear::from_weights_separate(
@@ -503,6 +653,8 @@ impl Attention {
             scale: 1.0 / (head_dim as f32).sqrt(),
             rope_dims: head_dim,
             rope_base: args.rope_theta,
+            rope_scale,
+            rope_freqs,
         })
     }
 }
@@ -641,9 +793,23 @@ impl TransformerBlock {
         args: &ModelArgs,
         layer_idx: usize,
     ) -> Result<Self, String> {
+        Self::from_weights_with_rope(weights, args, layer_idx, &args.rope_scaling_kind())
+    }
+
+    pub fn from_weights_with_rope(
+        weights: &WeightMap,
+        args: &ModelArgs,
+        layer_idx: usize,
+        rope: &RopeScalingKind,
+    ) -> Result<Self, String> {
         let prefix = format!("model.layers.{}", layer_idx);
 
-        let self_attn = Attention::from_weights(weights, args, &format!("{}.self_attn", prefix))?;
+        let self_attn = Attention::from_weights_with_rope(
+            weights,
+            args,
+            &format!("{}.self_attn", prefix),
+            rope,
+        )?;
         let mlp = MLP::from_weights(weights, args, &format!("{}.mlp", prefix))?;
 
         let input_norm_weight =
@@ -784,8 +950,9 @@ impl Qwen3Model {
         let config_path = model_dir.join("config.json");
         let config_str = std::fs::read_to_string(&config_path)
             .map_err(|e| format!("Failed to read config.json: {}", e))?;
-        let args: ModelArgs = serde_json::from_str(&config_str)
+        let mut args: ModelArgs = serde_json::from_str(&config_str)
             .map_err(|e| format!("Failed to parse config.json: {}", e))?;
+        args.set_checkpoint_label(model_dir);
 
         // Load weights
         let weights = crate::models::load_text_weights(model_dir, None)?;
@@ -799,6 +966,7 @@ impl Qwen3Model {
     pub fn from_weights(weights: &WeightMap, args: &ModelArgs) -> Result<Self, String> {
         let group_size = args.group_size();
         let bits = args.bits();
+        let rope = args.rope_scaling_kind();
 
         // Load quantized embedding
         let embed_tokens =
@@ -807,7 +975,7 @@ impl Qwen3Model {
         // Load layers
         let mut layers = Vec::with_capacity(args.num_hidden_layers);
         for i in 0..args.num_hidden_layers {
-            let layer = TransformerBlock::from_weights(weights, args, i)?;
+            let layer = TransformerBlock::from_weights_with_rope(weights, args, i, &rope)?;
             layers.push(layer);
         }
 
@@ -910,3 +1078,7 @@ impl LanguageModel for Qwen3Model {
         true
     }
 }
+
+#[cfg(test)]
+#[path = "qwen3_tests.rs"]
+mod tests;

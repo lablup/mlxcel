@@ -21,7 +21,8 @@ use mlxcel_core::weights::WeightMap;
 use super::{
     TensorParallelErnie45Model, TensorParallelGemma3Model, TensorParallelGemma4Model,
     TensorParallelHunyuanV1DenseModel, TensorParallelLlamaModel, TensorParallelQwen3Model,
-    TensorParallelQwen35Model, local_llama_args, logical_weight_name, validate_supported_runtime,
+    TensorParallelQwen35Model, local_llama_args, local_qwen3_args, logical_weight_name,
+    validate_supported_runtime,
 };
 use crate::distributed::tensor_parallel::{ShardConfig, generate_shard_plan};
 use crate::models::ernie4_5::{Ernie45Model, ModelArgs as Ernie45ModelArgs};
@@ -75,6 +76,7 @@ fn make_test_qwen3_args() -> Qwen3ModelArgs {
         max_position_embeddings: None,
         rope_theta: 10_000.0,
         rope_scaling: None,
+        checkpoint_label: None,
         tie_word_embeddings: false,
         quantization: None,
     }
@@ -1052,6 +1054,60 @@ fn tensor_parallel_llama_propagates_rope_traditional_to_every_rank() {
             .flat_map(|model| model.layers.iter())
             .all(|block| !block.self_attn.rope_traditional)
     );
+}
+
+#[test]
+fn tensor_parallel_qwen3_propagates_rope_scaling_to_every_rank() {
+    // Qwen3's tensor-parallel runtime parses `config.json` straight into the
+    // model args and then clones those args per rank before editing head counts.
+    // A rank that reset `rope_scaling` to the plain table would still produce
+    // correctly shaped activations, so the scale is asserted on the local args
+    // and on the built rank models.
+    let config_str = crate::models::sanitize_config_json(
+        r#"{
+            "model_type": "qwen3",
+            "hidden_size": 4,
+            "num_hidden_layers": 1,
+            "intermediate_size": 8,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+            "head_dim": 2,
+            "rms_norm_eps": 1e-5,
+            "vocab_size": 8,
+            "tie_word_embeddings": false,
+            "rope_scaling": {"rope_type": "linear", "factor": 8.0}
+        }"#,
+    );
+    let mut args: Qwen3ModelArgs = serde_json::from_str(&config_str).unwrap();
+    args.set_checkpoint_label(std::path::Path::new("models/qwen3-tp-scaled-test"));
+    assert_eq!(args.rope_scaling_kind().scale(), 0.125);
+
+    let plan = generate_shard_plan(
+        "qwen3",
+        args.num_hidden_layers,
+        &ShardConfig::with_tp_size(2),
+    )
+    .unwrap();
+    let local_args = local_qwen3_args(&args, &plan).unwrap();
+    assert_eq!(
+        local_args.rope_scaling_kind().scale(),
+        0.125,
+        "the rank-local config must keep linear rope_scaling while it edits sharded dimensions"
+    );
+    assert_eq!(local_args.model_label(), "qwen3-tp-scaled-test");
+
+    let weights = make_test_qwen3_weight_map();
+    let tp = TensorParallelQwen3Model::from_full_weights(&args, &weights, &plan).unwrap();
+    assert_eq!(tp.ranks.len(), plan.tp_size);
+    for (rank, model) in tp.ranks.iter().enumerate() {
+        for (layer, block) in model.layers.iter().enumerate() {
+            assert_eq!(
+                block.self_attn.rope_scale, 0.125,
+                "rank {rank} layer {layer} would rotate at an unscaled Qwen3 position"
+            );
+            assert!(block.self_attn.rope_freqs.is_none());
+        }
+    }
 }
 
 #[test]

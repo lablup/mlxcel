@@ -245,8 +245,9 @@ impl TensorParallelQwen3Model {
         let config_str = std::fs::read_to_string(&config_path)
             .with_context(|| format!("failed to read {}", config_path.display()))?;
         let config_str = crate::models::sanitize_config_json(&config_str);
-        let args: crate::models::qwen3::ModelArgs =
+        let mut args: crate::models::qwen3::ModelArgs =
             serde_json::from_str(&config_str).context("failed to parse qwen3 config")?;
+        args.set_checkpoint_label(model_dir);
         let weights = models::load_text_weights(model_dir, None).map_err(anyhow::Error::msg)?;
         Self::from_full_weights(&args, &weights, &support.summary.plan)
     }

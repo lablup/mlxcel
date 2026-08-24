@@ -26,8 +26,8 @@
 //! Used by: Llama 3.x text (`llama3`, and through it Qwen2 / Qwen2.5, Helium,
 //! the `mllama` text decoder, every VLM whose text backbone is `Llama3Model` or
 //! `Qwen2Model`, the `llama` / `mistral` pipeline stage executors and the
-//! tensor-parallel Llama runtime), Apertus, Gemma 3, and InternLM3 / InternLM2
-//! through `dynamic_ntk_rope`.
+//! tensor-parallel Llama runtime), Qwen3 / Qwen3-MoE, Apertus, Gemma 3, and
+//! InternLM3 / InternLM2 through `dynamic_ntk_rope`.
 
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::{Deserialize, Deserializer};
@@ -104,7 +104,8 @@ impl<'de> Deserialize<'de> for RopeScalingSpec {
 /// The frequency table a `rope_scaling` block selects.
 ///
 /// Mirrors the three branches of upstream's `initialize_rope`, minus the ones
-/// this path does not implement (see [`RopeScalingKind::resolve`]).
+/// this shared model RoPE path does not implement (see
+/// [`RopeScalingKind::resolve`]).
 pub enum RopeScalingKind {
     /// Plain `base^(2i/d)` frequencies at position scale `1.0`. Selected by an
     /// absent block, `"default"`, and any scheme this path cannot serve.
@@ -127,9 +128,11 @@ impl RopeScalingKind {
     /// implement. That cannot ship as written: the shared Llama args are also
     /// what several VLM loaders parse a `text_config` into, and
     /// `models/internvl3-1b` declares `"rope_type": "dynamic"` in exactly that
-    /// position. It loads today (the block is parsed and ignored), so a load
-    /// error would take a working checkpoint offline to fix a scheme that is not
-    /// implemented on either side of the change.
+    /// position. Qwen3 has the same shape through MiniCPM-o, whose loader parses
+    /// an arbitrary full config into `qwen3::ModelArgs`. Those models load today
+    /// (the block is parsed and ignored), so a load error would take a working
+    /// checkpoint offline to fix a scheme that is not implemented on either side
+    /// of the change.
     ///
     /// The failure a load error was meant to prevent is silence, and a warning
     /// removes the silence without removing the model. The scheme stays on the
@@ -148,16 +151,11 @@ impl RopeScalingKind {
 
         match spec.rope_type() {
             "default" => Self::Default,
-            "linear" => {
-                // Upstream indexes `scaling_config["factor"]` here, so a
-                // `linear` block without one is malformed. Falling back to 1.0
-                // keeps that config loading with the graph it already had.
-                let factor = spec.factor.unwrap_or(1.0);
-                if is_usable_scalar(factor) {
-                    Self::Linear {
-                        scale: 1.0 / factor,
-                    }
-                } else {
+            "linear" => match spec.factor {
+                Some(factor) if is_usable_scalar(factor) => Self::Linear {
+                    scale: 1.0 / factor,
+                },
+                Some(factor) => {
                     report_unusable_rope_scaling_once(
                         model_label,
                         "linear",
@@ -165,7 +163,15 @@ impl RopeScalingKind {
                     );
                     Self::Default
                 }
-            }
+                None => {
+                    report_unusable_rope_scaling_once(
+                        model_label,
+                        "linear",
+                        "it names no numeric factor",
+                    );
+                    Self::Default
+                }
+            },
             "llama3" => match llama3_rope_freqs(spec, dims, base) {
                 Ok(freqs) => Self::Llama3 { freqs },
                 Err(reason) => {
@@ -177,7 +183,7 @@ impl RopeScalingKind {
                 report_unusable_rope_scaling_once(
                     model_label,
                     other,
-                    "this scheme is not implemented on the shared Llama RoPE path",
+                    "this scheme is not implemented on the shared model RoPE path",
                 );
                 Self::Default
             }
@@ -401,7 +407,7 @@ impl Llama3Params {
 /// argument above hold: two different `qwen2` checkpoints that both declare an
 /// unimplemented scheme each get a warning, where keying on the architecture
 /// would report the first and let the second degrade in silence.
-fn report_unusable_rope_scaling_once(model_label: &str, rope_type: &str, reason: &str) {
+fn report_unusable_rope_scaling_once(model_label: &str, rope_type: &str, reason: &str) -> bool {
     use std::collections::BTreeSet;
     use std::sync::{Mutex, OnceLock};
 
@@ -416,7 +422,7 @@ fn report_unusable_rope_scaling_once(model_label: &str, rope_type: &str, reason:
     // is still a valid set, and losing the warning is worse than reusing it.
     let mut reported = reported.lock().unwrap_or_else(|err| err.into_inner());
     if !reported.insert(key) {
-        return;
+        return false;
     }
 
     eprintln!(
@@ -425,6 +431,7 @@ fn report_unusable_rope_scaling_once(model_label: &str, rope_type: &str, reason:
          before this block was read at all. Short prompts are unaffected; long-context \
          quality past the checkpoint's original_max_position_embeddings may be."
     );
+    true
 }
 
 /// Make checkpoint-controlled text safe to put on a line of stderr, or into an
