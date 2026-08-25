@@ -120,6 +120,8 @@ pub mod ministral3;
 pub mod mistral4;
 pub mod mixtral;
 pub mod mllama;
+pub mod modernbert;
+pub mod modernbert_heads;
 pub mod molmo;
 pub mod molmo2;
 pub mod molmo_point;
@@ -1463,3 +1465,11 @@ mod granitemoehybrid_tests;
 #[cfg(test)]
 #[path = "minimax_tests.rs"]
 mod minimax_tests;
+
+#[cfg(test)]
+#[path = "modernbert_tests.rs"]
+mod modernbert_tests;
+
+#[cfg(test)]
+#[path = "modernbert_real_checkpoint_tests.rs"]
+mod modernbert_real_checkpoint_tests;
