@@ -120,6 +120,139 @@ pub(crate) fn detect_hunyuan_model_type(config: &serde_json::Value) -> ModelType
     }
 }
 
+/// `model_type` values that are encoder-only and never generate text. A
+/// `BertForMaskedLM` / `ModernBertForMaskedLM` checkpoint loads as an
+/// embedder with its MLM head dropped.
+const ENCODER_ONLY_MODEL_TYPES: &[&str] = &["bert", "xlm-roberta", "modernbert", "siglip"];
+
+/// `architectures[0]` values that mark an embedding export outright.
+const EMBEDDING_ARCHITECTURES: &[&str] = &[
+    "BertModel",
+    "XLMRobertaModel",
+    "ModernBertModel",
+    "SiglipModel",
+    "SiglipTextModel",
+    "LlamaBidirectionalModel",
+    "LlamaNemotronVLModel",
+    "Lfm2BidirectionalModel",
+    "ColIdefics3",
+    "ColQwen2_5",
+    "ColQwen2ForRetrieval",
+];
+
+fn first_architecture(config: &Value) -> Option<&str> {
+    config
+        .get("architectures")
+        .and_then(Value::as_array)
+        .and_then(|arr| arr.first())
+        .and_then(Value::as_str)
+}
+
+/// `config.architectures[0]` names an embedding export (including the two
+/// flag-gated decoders: `Gemma3TextModel` with `use_bidirectional_attention`
+/// and `Ministral3Model` with `is_causal: false`).
+fn has_embedding_architecture(config: &Value) -> bool {
+    let Some(arch) = first_architecture(config) else {
+        return false;
+    };
+    if EMBEDDING_ARCHITECTURES.contains(&arch) {
+        return true;
+    }
+    let flag = |key: &str| config.get(key).and_then(Value::as_bool);
+    match arch {
+        "Gemma3TextModel" => flag("use_bidirectional_attention") == Some(true),
+        "Ministral3Model" => flag("is_causal") == Some(false),
+        _ => false,
+    }
+}
+
+/// `<model_dir>/modules.json` lists a sentence-transformers module whose
+/// `type` ends with `.Pooling`. A file whose only extra module is
+/// `1_LogitScore` (Qwen3-VL-Reranker) does not qualify.
+fn modules_json_has_pooling(model_path: &Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(model_path.join("modules.json")) else {
+        return false;
+    };
+    let Ok(modules) = serde_json::from_str::<Value>(&raw) else {
+        return false;
+    };
+    modules
+        .as_array()
+        .map(|entries| {
+            entries.iter().any(|entry| {
+                entry
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|ty| ty.ends_with(".Pooling"))
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Map the `model_type` of a detected embedding layout to its family.
+fn embedding_variant_for_model_type(model_type: &str) -> Option<ModelType> {
+    Some(match model_type {
+        "bert" => ModelType::Bert,
+        "xlm-roberta" | "xlm_roberta" => ModelType::XlmRoberta,
+        "modernbert" => ModelType::ModernBert,
+        "siglip" | "siglip_text_model" => ModelType::SiglipText,
+        "gemma3_text" | "gemma3" => ModelType::Gemma3Embedding,
+        "qwen3" => ModelType::Qwen3Embedding,
+        "qwen3_vl" => ModelType::Qwen3VLEmbedding,
+        "lfm2" => ModelType::Lfm2Embedding,
+        "ministral3" => ModelType::Ministral3Embedding,
+        "llama" | "llama_bidirec" => ModelType::LlamaBidirec,
+        "llama_nemotron_vl" => ModelType::LlamaNemotronVLEmbedding,
+        "idefics3" => ModelType::ColIdefics3,
+        "qwen2_5_vl" | "colqwen2" => ModelType::ColQwen25,
+        _ => return None,
+    })
+}
+
+/// Recognize an embedding checkpoint before the `model_type` dispatch.
+///
+/// Returns `Ok(Some(variant))` when the checkpoint is an embedding export:
+/// its `model_type` is an encoder-only family, `config.architectures[0]` is
+/// an embedding architecture, `modules.json` carries a `.Pooling` module, or
+/// `1_Pooling/config.json` exists. A checkpoint whose `architectures[0]`
+/// ends with `ForSequenceClassification` is a reranker, never an embedder.
+/// `Ok(None)` means "not an embedding checkpoint, continue with the
+/// generation dispatch"; `Err` means the layout says embedding but the
+/// `model_type` has no embedding family, which is reported rather than
+/// misrouted to a causal generator.
+pub(crate) fn is_embedding_checkpoint(
+    model_path: &Path,
+    config: &Value,
+) -> Result<Option<ModelType>> {
+    let Some(model_type_raw) = config.get("model_type").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let model_type = model_type_raw.to_ascii_lowercase();
+
+    if first_architecture(config).is_some_and(|arch| arch.ends_with("ForSequenceClassification")) {
+        return Ok(None);
+    }
+
+    let encoder_only = ENCODER_ONLY_MODEL_TYPES.contains(&model_type.as_str());
+    let layout_says_embedding = encoder_only
+        || has_embedding_architecture(config)
+        || modules_json_has_pooling(model_path)
+        || model_path.join("1_Pooling").join("config.json").exists();
+    if !layout_says_embedding {
+        return Ok(None);
+    }
+
+    match embedding_variant_for_model_type(&model_type) {
+        Some(variant) => Ok(Some(variant)),
+        None => Err(anyhow::anyhow!(
+            "{} is an embedding checkpoint (sentence-transformers pooling layout or embedding \
+             architecture), but model_type `{model_type_raw}` has no embedding family in \
+             mlxcel; see docs/embeddings.md for the supported families",
+            model_path.display()
+        )),
+    }
+}
+
 /// Detect model type from config.json
 pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
     let config_path = model_path.join("config.json");
@@ -144,6 +277,13 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
     // filename) before the `model_type`-based dispatch below would error.
     if super::kokoro::is_kokoro_checkpoint(model_path, &v) {
         return Ok(ModelType::Kokoro);
+    }
+
+    // Embedding exports reuse generator `model_type`s (`qwen3` for
+    // Qwen3-Embedding, `gemma3_text` for EmbeddingGemma), so the layout and
+    // architecture rules must run before the `model_type` match below.
+    if let Some(embedding) = is_embedding_checkpoint(model_path, &v)? {
+        return Ok(embedding);
     }
 
     let model_type_raw = v["model_type"]

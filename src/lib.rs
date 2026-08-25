@@ -22,6 +22,7 @@ pub mod backend;
 pub mod cli;
 pub mod distributed;
 pub mod downloader;
+pub mod embeddings;
 pub mod execution;
 pub mod lang_bias;
 pub mod lora;

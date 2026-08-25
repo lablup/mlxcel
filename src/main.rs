@@ -143,6 +143,21 @@ enum Commands {
     #[command(verbatim_doc_comment)]
     Detect(DetectArgs),
 
+    /// Embed texts (or images) with an embedding checkpoint and print the vectors.
+    ///
+    /// Loads a checkpoint the way `/v1/embeddings` does (pooling from
+    /// `1_Pooling/config.json`, L2 normalization, right-padded batching) and
+    /// prints one vector per input, plus the cosine-similarity matrix when
+    /// two or more inputs are given. This is the offline validation tool for
+    /// every embedding family.
+    ///
+    /// Examples:
+    ///
+    ///     mlxcel embed -m sentence-transformers/all-MiniLM-L6-v2 -p "The weather is lovely" -p "It is sunny"
+    ///     mlxcel embed -m models/Qwen3-Embedding-0.6B -p "query" --instruction "Retrieve passages" --dimensions 256 --json
+    #[command(verbatim_doc_comment)]
+    Embed(commands::EmbedArgs),
+
     /// Remove a downloaded model from the global store.
     ///
     /// Deletes `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/<owner>/<name>`
@@ -1021,6 +1036,47 @@ pub(crate) struct ServeArgs {
     /// and returns a structured 504 after this, instead of hanging the worker.
     #[arg(long, env = "MLXCEL_AUDIO_REQUEST_TIMEOUT_SECS", default_value_t = 120)]
     audio_request_timeout_secs: u64,
+
+    /// Embedding checkpoint to serve on /v1/embeddings next to the chat model
+    ///
+    /// A local directory or a HuggingFace `owner/name` repo-id (resolved like
+    /// `-m`). Loads on its own worker thread; `-m` keeps serving chat. When
+    /// `-m` itself is an embedding checkpoint this flag must be omitted (that
+    /// checkpoint is then served on /v1/embeddings and chat stays unloaded).
+    /// Also reads `MLXCEL_EMBEDDING_MODEL`.
+    #[arg(
+        long,
+        env = "LLAMA_ARG_EMBEDDING_MODEL",
+        value_name = "PATH_OR_REPO_ID"
+    )]
+    embedding_model: Option<String>,
+
+    /// Texts per embedding forward pass (default: 16)
+    ///
+    /// `/v1/embeddings` sorts text inputs by token length and cuts them into
+    /// micro-batches of this size, each right-padded to its longest member.
+    #[arg(long, env = "MLXCEL_EMBEDDING_BATCH_SIZE", default_value_t = 16)]
+    embedding_batch_size: usize,
+
+    /// Token cap per embedding input (default: derived from the checkpoint)
+    ///
+    /// Lowers the limit derived from `sentence_bert_config.json`,
+    /// `tokenizer_config.json` and `config.json` (hard cap 8192). Longer
+    /// inputs are truncated from the right, keeping a trailing special token.
+    #[arg(long, env = "MLXCEL_EMBEDDING_MAX_LENGTH", value_name = "N")]
+    embedding_max_length: Option<usize>,
+
+    /// Bound on the embedding worker command queue; a full queue returns 503 (default: 8)
+    #[arg(long, env = "MLXCEL_EMBEDDING_QUEUE_DEPTH", default_value_t = 8)]
+    embedding_queue_depth: usize,
+
+    /// Per-request embedding reply timeout in seconds; 0 falls back to the default (default: 120)
+    #[arg(
+        long,
+        env = "MLXCEL_EMBEDDING_REQUEST_TIMEOUT_SECS",
+        default_value_t = 120
+    )]
+    embedding_request_timeout_secs: u64,
 
     /// Prefill chunk size in tokens (0 = disabled, default: 512)
     ///
@@ -2002,6 +2058,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Inspect(args) => commands::run_inspect(args),
         Commands::Download(args) => commands::run_download(args),
         Commands::Detect(args) => commands::run_detect(args),
+        Commands::Embed(args) => commands::run_embed(args),
         Commands::Rm(args) => commands::run_remove(
             &args.repo_id,
             args.yes,
@@ -2050,6 +2107,7 @@ const FAMILY_ORDER: &[&str] = &[
     "BitNet",
     "Speech-to-text",
     "Text-to-speech",
+    "Embedding",
     "Diffusion",
     "Specialized",
     "Llama VLM",

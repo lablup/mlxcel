@@ -112,6 +112,22 @@ pub struct ServerStartupConfig {
     /// Per-request reply timeout for the audio worker, in seconds. Forwarded to
     /// [`super::config::ServerConfig::audio_request_timeout_secs`].
     pub audio_request_timeout_secs: u64,
+    /// `--embedding-model`: embedding checkpoint served on `/v1/embeddings`
+    /// next to the chat model. Forwarded to
+    /// [`super::config::ServerConfig::embedding_model_path`].
+    pub embedding_model_path: Option<PathBuf>,
+    /// `--embedding-batch-size`. Forwarded to
+    /// [`super::config::ServerConfig::embedding_batch_size`].
+    pub embedding_batch_size: usize,
+    /// `--embedding-max-length`. Forwarded to
+    /// [`super::config::ServerConfig::embedding_max_length`].
+    pub embedding_max_length: Option<usize>,
+    /// `--embedding-queue-depth`. Forwarded to
+    /// [`super::config::ServerConfig::embedding_queue_depth`].
+    pub embedding_queue_depth: usize,
+    /// `--embedding-request-timeout-secs`. Forwarded to
+    /// [`super::config::ServerConfig::embedding_request_timeout_secs`].
+    pub embedding_request_timeout_secs: u64,
     /// Prefill chunk size in tokens (0 = disabled).
     pub prefill_chunk_size: usize,
     /// Set when `--batch-size` and `--prefill-chunk-size` conflict; triggers a startup warning.
@@ -423,6 +439,12 @@ impl Default for ServerStartupConfig {
             max_queue_depth: 32,
             audio_queue_depth: crate::server::config::DEFAULT_AUDIO_QUEUE_DEPTH,
             audio_request_timeout_secs: crate::server::config::DEFAULT_AUDIO_REQUEST_TIMEOUT_SECS,
+            embedding_model_path: None,
+            embedding_batch_size: crate::server::config::DEFAULT_EMBEDDING_BATCH_SIZE,
+            embedding_max_length: None,
+            embedding_queue_depth: crate::server::config::DEFAULT_EMBEDDING_QUEUE_DEPTH,
+            embedding_request_timeout_secs:
+                crate::server::config::DEFAULT_EMBEDDING_REQUEST_TIMEOUT_SECS,
             prefill_chunk_size: 512,
             batch_size_conflict: false,
             ubatch_size_provided: false,
@@ -977,6 +999,11 @@ pub(super) fn build_server_config(
         max_queue_depth: startup.max_queue_depth,
         audio_queue_depth: startup.audio_queue_depth,
         audio_request_timeout_secs: startup.audio_request_timeout_secs,
+        embedding_model_path: startup.embedding_model_path.clone(),
+        embedding_batch_size: startup.embedding_batch_size,
+        embedding_max_length: startup.embedding_max_length,
+        embedding_queue_depth: startup.embedding_queue_depth,
+        embedding_request_timeout_secs: startup.embedding_request_timeout_secs,
         prefill_chunk_size: startup.prefill_chunk_size,
         // #1011: pass the explicit --prefill-grant-interval through untouched
         // (the scheduler resolves env / shipped default when this is None).
@@ -2209,6 +2236,20 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
             _ => None,
         };
 
+    // Embedding wiring (#1353): `--embedding-model` loads a second checkpoint
+    // on its own worker thread; without it, an `-m` that detects as an
+    // embedding kind is served on `/v1/embeddings` instead of chat (the chat
+    // worker's `load_model` bails and logs, exactly like the Whisper path).
+    // Naming both is a configuration error, reported before the listener
+    // binds. A failing `--embedding-model` load is fatal for the same reason;
+    // a failing `-m` embedding load logs and leaves the slot empty so the
+    // server still answers with structured 501s.
+    let served_chat_id = config
+        .model_alias
+        .clone()
+        .unwrap_or_else(|| model_provider.model_id().to_string());
+    let embedding_model = resolve_embedding_provider(&startup, &config, &served_chat_id)?;
+
     let state = AppState::with_observability(
         model_provider,
         config,
@@ -2223,13 +2264,123 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     .with_prompt_cache(prompt_cache_store)
     .with_responses_store(responses_store)
     .with_conversation_store(conversation_store)
-    .with_audio_model(audio_model);
+    .with_audio_model(audio_model)
+    .with_embedding_model(embedding_model);
     let app = create_app(state);
 
     if startup.port == 0 {
         serve_unix_socket(&startup, app).await
     } else {
         serve_tcp(&startup, app).await
+    }
+}
+
+/// Where the embedding checkpoint comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EmbeddingSource {
+    /// `--embedding-model <path>`: a second checkpoint next to the chat model.
+    Explicit(PathBuf),
+    /// `-m` itself detected as an embedding kind.
+    Primary(PathBuf),
+    /// No embedding model to serve.
+    None,
+}
+
+/// Pick the embedding checkpoint from `--embedding-model` and the `-m`
+/// detection, rejecting the combination of both.
+pub(crate) fn resolve_embedding_source(
+    model_path: &Path,
+    embedding_model_path: Option<&Path>,
+) -> Result<EmbeddingSource> {
+    let primary_is_embedding = crate::models::get_model_type(model_path)
+        .is_ok_and(crate::model_metadata::is_embedding_model_type);
+    match (embedding_model_path, primary_is_embedding) {
+        (Some(explicit), true) => anyhow::bail!(
+            "two embedding models: -m {} is an embedding checkpoint and --embedding-model {} \
+             was also given. Pass a chat model to -m and the embedding checkpoint to \
+             --embedding-model, or pass the embedding checkpoint to -m alone.",
+            model_path.display(),
+            explicit.display()
+        ),
+        (Some(explicit), false) => Ok(EmbeddingSource::Explicit(explicit.to_path_buf())),
+        (None, true) => Ok(EmbeddingSource::Primary(model_path.to_path_buf())),
+        (None, false) => Ok(EmbeddingSource::None),
+    }
+}
+
+/// Served id of an explicit embedding checkpoint: its directory name.
+fn embedding_model_id_for_path(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Spawn the embedding worker for the resolved source, if any.
+fn resolve_embedding_provider(
+    startup: &ServerStartupConfig,
+    config: &ServerConfig,
+    served_chat_id: &str,
+) -> Result<Option<Arc<dyn crate::server::embedding_model::EmbeddingModelProvider>>> {
+    let source =
+        resolve_embedding_source(&startup.model_path, config.embedding_model_path.as_deref())?;
+    let (path, model_id, fatal) = match source {
+        EmbeddingSource::None => return Ok(None),
+        EmbeddingSource::Explicit(path) => {
+            let id = embedding_model_id_for_path(&path);
+            (path, id, true)
+        }
+        EmbeddingSource::Primary(path) => (path, served_chat_id.to_string(), false),
+    };
+
+    let request_timeout =
+        std::time::Duration::from_secs(if config.embedding_request_timeout_secs == 0 {
+            crate::server::config::DEFAULT_EMBEDDING_REQUEST_TIMEOUT_SECS
+        } else {
+            config.embedding_request_timeout_secs
+        });
+    let load_options = crate::embeddings::EmbeddingLoadOptions {
+        max_length: config.embedding_max_length,
+    };
+    tracing::info!(
+        path = %path.display(),
+        model_id = %model_id,
+        batch_size = config.embedding_batch_size,
+        "Loading embedding model for /v1/embeddings"
+    );
+    match crate::server::embedding_worker::EmbeddingWorkerProvider::load(
+        &path,
+        model_id,
+        config.embedding_batch_size,
+        config.embedding_queue_depth,
+        request_timeout,
+        load_options,
+    ) {
+        Ok(provider) => {
+            let info = provider.info();
+            tracing::info!(
+                model_type = ?info.model_type,
+                dim = info.dim,
+                max_length = info.max_length,
+                multi_vector = info.multi_vector,
+                supports_images = info.supports_images,
+                batch_size = info.batch_size,
+                "Embedding model ready on /v1/embeddings"
+            );
+            Ok(Some(Arc::new(provider)))
+        }
+        Err(err) if fatal => Err(err.context(format!(
+            "failed to load --embedding-model {}",
+            path.display()
+        ))),
+        Err(err) => {
+            tracing::error!(
+                "Failed to load embedding model {}: {err:#}; /v1/embeddings will return 501",
+                path.display()
+            );
+            Ok(None)
+        }
     }
 }
 

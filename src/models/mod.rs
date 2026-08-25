@@ -286,9 +286,9 @@ pub use qwen3_vl_moe::Qwen3VLMoeModel;
 pub use recurrent_gemma::GriffinModel;
 pub use rwkv7::Rwkv7;
 pub(crate) use sanitize::{
-    Gemma4WeightBacking, load_gemma4_text_weights_with_backing,
+    Gemma4WeightBacking, config_has_quantization_metadata, load_gemma4_text_weights_with_backing,
     load_gemma4_unified_weights_with_backing, load_gemma4_vlm_weights_with_backing,
-    sanitize_gemma4_nvfp4_weights, strip_gemma4_kv_shared_weights,
+    sanitize_gemma4_nvfp4_weights, should_convert_bf16_to_f16, strip_gemma4_kv_shared_weights,
 };
 // The only consumer outside `sanitize` is the diagnostics-gated Molmo2 vision
 // reference loader, so an unconditional re-export is dead in a default build
@@ -541,6 +541,23 @@ pub enum ModelType {
 
     // Text-to-speech (StyleTTS2 acoustic model + built-in iSTFTNet vocoder)
     Kokoro,
+
+    // Embedding models served through /v1/embeddings (epic #1348). Detected by
+    // encoder-only `model_type`, embedding `architectures[0]`, a
+    // `modules.json` Pooling entry or a `1_Pooling/config.json`.
+    Bert,                     // BERT / MiniLM encoders (bert)
+    XlmRoberta,               // XLM-RoBERTa encoders (xlm-roberta)
+    ModernBert,               // ModernBERT encoders (modernbert)
+    SiglipText,               // SigLIP text tower (siglip)
+    Gemma3Embedding,          // EmbeddingGemma (gemma3_text, bidirectional)
+    Qwen3Embedding,           // Qwen3-Embedding (qwen3 + 1_Pooling lasttoken)
+    Qwen3VLEmbedding,         // Qwen3-VL-Embedding (qwen3_vl)
+    Lfm2Embedding,            // LFM2 bidirectional embedder (lfm2)
+    Ministral3Embedding,      // Ministral3 bidirectional embedder (ministral3)
+    LlamaBidirec,             // Llama bidirectional embedder (llama / llama_bidirec)
+    LlamaNemotronVLEmbedding, // Llama-Nemotron-VL embedder (llama_nemotron_vl)
+    ColIdefics3,              // ColIdefics3 late-interaction retriever (idefics3)
+    ColQwen25,                // ColQwen2.5 late-interaction retriever (qwen2_5_vl)
 }
 
 /// All `ModelType` variants, in declaration order. Used as the iteration
@@ -729,6 +746,20 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Whisper,
     // Text-to-speech
     ModelType::Kokoro,
+    // Embedding models
+    ModelType::Bert,
+    ModelType::XlmRoberta,
+    ModelType::ModernBert,
+    ModelType::SiglipText,
+    ModelType::Gemma3Embedding,
+    ModelType::Qwen3Embedding,
+    ModelType::Qwen3VLEmbedding,
+    ModelType::Lfm2Embedding,
+    ModelType::Ministral3Embedding,
+    ModelType::LlamaBidirec,
+    ModelType::LlamaNemotronVLEmbedding,
+    ModelType::ColIdefics3,
+    ModelType::ColQwen25,
 ];
 
 impl ModelType {
@@ -953,6 +984,23 @@ impl ModelType {
 
             // ----- Text-to-speech (TTS) -----
             ModelType::Kokoro => ("Kokoro (StyleTTS2 + iSTFTNet)", "Text-to-speech"),
+
+            // ----- Embedding models (/v1/embeddings) -----
+            ModelType::Bert => ("BERT / MiniLM encoder", "Embedding"),
+            ModelType::XlmRoberta => ("XLM-RoBERTa encoder", "Embedding"),
+            ModelType::ModernBert => ("ModernBERT encoder", "Embedding"),
+            ModelType::SiglipText => ("SigLIP text tower", "Embedding"),
+            ModelType::Gemma3Embedding => ("EmbeddingGemma (bidirectional Gemma 3)", "Embedding"),
+            ModelType::Qwen3Embedding => ("Qwen3-Embedding (last-token)", "Embedding"),
+            ModelType::Qwen3VLEmbedding => ("Qwen3-VL-Embedding (multimodal)", "Embedding"),
+            ModelType::Lfm2Embedding => ("LFM2 bidirectional embedder", "Embedding"),
+            ModelType::Ministral3Embedding => ("Ministral 3 bidirectional embedder", "Embedding"),
+            ModelType::LlamaBidirec => ("Llama bidirectional embedder", "Embedding"),
+            ModelType::LlamaNemotronVLEmbedding => {
+                ("Llama-Nemotron-VL embedder (multimodal)", "Embedding")
+            }
+            ModelType::ColIdefics3 => ("ColIdefics3 (late interaction, multimodal)", "Embedding"),
+            ModelType::ColQwen25 => ("ColQwen2.5 (late interaction, multimodal)", "Embedding"),
 
             // ----- Specialized / other small/text -----
             ModelType::Gpt2 => (
@@ -1246,6 +1294,19 @@ mod metadata_tests {
             RecurrentGemma,
             Whisper,
             Kokoro,
+            Bert,
+            XlmRoberta,
+            ModernBert,
+            SiglipText,
+            Gemma3Embedding,
+            Qwen3Embedding,
+            Qwen3VLEmbedding,
+            Lfm2Embedding,
+            Ministral3Embedding,
+            LlamaBidirec,
+            LlamaNemotronVLEmbedding,
+            ColIdefics3,
+            ColQwen25,
         );
         for mt in variants {
             assert!(

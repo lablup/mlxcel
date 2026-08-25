@@ -27,6 +27,9 @@ use crate::models::ModelType;
 pub(crate) enum ModelKind {
     Text,
     Vlm,
+    /// Encoder or bidirectional / last-token embedder served through
+    /// `/v1/embeddings`; never a text generator and never adapter-loadable.
+    Embedding,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -247,6 +250,22 @@ macro_rules! for_each_model_registration {
             RecurrentGemma => { kind: Text, directory: Nonstandard, weight: Some(WeightLoadRoute::Special), adapter: None };
             Whisper => { kind: Text, directory: Nonstandard, weight: None, adapter: Some("Whisper ASR checkpoints are served through the /v1/audio/* endpoints, not text generation or adapter loading") };
             Kokoro => { kind: Text, directory: Nonstandard, weight: None, adapter: Some("Kokoro TTS checkpoints are served through the /v1/audio/speech endpoint, not text generation or adapter loading") };
+            // Embedding families (epic #1348). Each family sub-issue supplies its
+            // constructor in `crate::embeddings::loader`; the registration here
+            // keeps every loader and adapter path pointing at /v1/embeddings.
+            Bert => { kind: Embedding, directory: Nonstandard, weight: None, adapter: Some("BERT is an embedding model served through /v1/embeddings; adapters are not supported") };
+            XlmRoberta => { kind: Embedding, directory: Nonstandard, weight: None, adapter: Some("XLM-RoBERTa is an embedding model served through /v1/embeddings; adapters are not supported") };
+            ModernBert => { kind: Embedding, directory: Nonstandard, weight: None, adapter: Some("ModernBERT is an embedding model served through /v1/embeddings; adapters are not supported") };
+            SiglipText => { kind: Embedding, directory: Nonstandard, weight: None, adapter: Some("SigLIP text is an embedding model served through /v1/embeddings; adapters are not supported") };
+            Gemma3Embedding => { kind: Embedding, directory: Nonstandard, weight: None, adapter: Some("EmbeddingGemma is an embedding model served through /v1/embeddings; adapters are not supported") };
+            Qwen3Embedding => { kind: Embedding, directory: Nonstandard, weight: None, adapter: Some("Qwen3-Embedding is an embedding model served through /v1/embeddings; adapters are not supported") };
+            Qwen3VLEmbedding => { kind: Embedding, directory: Nonstandard, weight: None, adapter: Some("Qwen3-VL-Embedding is an embedding model served through /v1/embeddings; adapters are not supported") };
+            Lfm2Embedding => { kind: Embedding, directory: Nonstandard, weight: None, adapter: Some("LFM2 bidirectional embedding is an embedding model served through /v1/embeddings; adapters are not supported") };
+            Ministral3Embedding => { kind: Embedding, directory: Nonstandard, weight: None, adapter: Some("Ministral3 bidirectional embedding is an embedding model served through /v1/embeddings; adapters are not supported") };
+            LlamaBidirec => { kind: Embedding, directory: Nonstandard, weight: None, adapter: Some("Llama bidirectional embedding is an embedding model served through /v1/embeddings; adapters are not supported") };
+            LlamaNemotronVLEmbedding => { kind: Embedding, directory: Nonstandard, weight: None, adapter: Some("Llama-Nemotron-VL embedding is an embedding model served through /v1/embeddings; adapters are not supported") };
+            ColIdefics3 => { kind: Embedding, directory: Nonstandard, weight: None, adapter: Some("ColIdefics3 is an embedding model served through /v1/embeddings; adapters are not supported") };
+            ColQwen25 => { kind: Embedding, directory: Nonstandard, weight: None, adapter: Some("ColQwen2.5 is an embedding model served through /v1/embeddings; adapters are not supported") };
         }
     };
 }
@@ -298,6 +317,12 @@ pub(crate) fn is_mistral4_config(config: &serde_json::Value) -> bool {
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn is_vlm_model_type(model_type: ModelType) -> bool {
     static_model_descriptor(model_type).kind == ModelKind::Vlm
+}
+
+/// `true` for every family served through `/v1/embeddings` rather than the
+/// text-generation loader.
+pub(crate) fn is_embedding_model_type(model_type: ModelType) -> bool {
+    static_model_descriptor(model_type).kind == ModelKind::Embedding
 }
 
 #[cfg_attr(not(test), allow(dead_code))]

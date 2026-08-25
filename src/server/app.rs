@@ -118,6 +118,9 @@ pub fn create_app(state: AppState) -> Router {
         .route("/v1/chat/completions", post(routes::chat_completions))
         .route("/v1/completions", post(routes::completions))
         .route("/v1/models", get(routes::list_models))
+        // Embeddings (OpenAI /v1/embeddings surface), served by the embedding
+        // worker when one is loaded; a structured 501 otherwise.
+        .route("/v1/embeddings", post(routes::create_embeddings))
         // Responses API (OpenAI /v1/responses surface).
         .route("/v1/responses", post(routes::create_response))
         .route(
@@ -150,6 +153,7 @@ pub fn create_app(state: AppState) -> Router {
         .route("/chat/completions", post(routes::chat_completions))
         .route("/completions", post(routes::completions))
         .route("/models", get(routes::list_models))
+        .route("/embeddings", post(routes::create_embeddings))
         .route("/responses", post(routes::create_response))
         .route(
             "/responses/:id",

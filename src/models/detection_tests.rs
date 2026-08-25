@@ -860,3 +860,240 @@ fn ordinary_qwen3_full_model_still_detects_as_qwen3() {
 
     fs::remove_dir_all(model_dir).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Embedding detection (#1353): encoder-only `model_type`, embedding
+// `architectures[0]`, `modules.json` Pooling entry, `1_Pooling/config.json`,
+// and the negative cases that must keep routing to the generators.
+// ---------------------------------------------------------------------------
+
+/// Write `config.json` plus any extra files (relative path, contents) into a
+/// fresh temp checkpoint directory and run detection on it.
+fn detect_layout(
+    name: &str,
+    config: &serde_json::Value,
+    extra_files: &[(&str, &str)],
+) -> anyhow::Result<ModelType> {
+    let model_dir = temp_path(name);
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(model_dir.join("config.json"), config.to_string()).unwrap();
+    for (relative, contents) in extra_files {
+        let path = model_dir.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, contents).unwrap();
+    }
+    let result = super::detection::get_model_type(&model_dir);
+    fs::remove_dir_all(model_dir).unwrap();
+    result
+}
+
+const POOLING_MODULES: &str = r#"[
+    {"idx": 0, "name": "0", "path": "", "type": "sentence_transformers.models.Transformer"},
+    {"idx": 1, "name": "1", "path": "1_Pooling", "type": "sentence_transformers.models.Pooling"},
+    {"idx": 2, "name": "2", "path": "2_Normalize", "type": "sentence_transformers.models.Normalize"}
+]"#;
+
+const LOGIT_SCORE_MODULES: &str = r#"[
+    {"idx": 0, "name": "0", "path": "", "type": "sentence_transformers.models.Transformer"},
+    {"idx": 1, "name": "1", "path": "1_LogitScore", "type": "custom.LogitScore"}
+]"#;
+
+#[test]
+fn encoder_only_model_types_detect_as_embedding_without_pooling_files() {
+    let cases = [
+        ("bert", "BertForMaskedLM", ModelType::Bert),
+        (
+            "xlm-roberta",
+            "XLMRobertaForMaskedLM",
+            ModelType::XlmRoberta,
+        ),
+        ("modernbert", "ModernBertForMaskedLM", ModelType::ModernBert),
+        ("siglip", "SiglipModel", ModelType::SiglipText),
+    ];
+    for (model_type, arch, expected) in cases {
+        let detected = detect_layout(
+            &format!("encoder_{model_type}"),
+            &json!({"model_type": model_type, "architectures": [arch], "hidden_size": 8}),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(detected, expected, "{model_type}");
+    }
+}
+
+#[test]
+fn embedding_architectures_route_generator_model_types_to_embedding_variants() {
+    let cases = [
+        ("llama", "LlamaBidirectionalModel", ModelType::LlamaBidirec),
+        (
+            "llama_nemotron_vl",
+            "LlamaNemotronVLModel",
+            ModelType::LlamaNemotronVLEmbedding,
+        ),
+        ("lfm2", "Lfm2BidirectionalModel", ModelType::Lfm2Embedding),
+        ("idefics3", "ColIdefics3", ModelType::ColIdefics3),
+        ("qwen2_5_vl", "ColQwen2_5", ModelType::ColQwen25),
+        ("qwen2_5_vl", "ColQwen2ForRetrieval", ModelType::ColQwen25),
+        ("siglip", "SiglipTextModel", ModelType::SiglipText),
+        ("bert", "BertModel", ModelType::Bert),
+        ("xlm-roberta", "XLMRobertaModel", ModelType::XlmRoberta),
+        ("modernbert", "ModernBertModel", ModelType::ModernBert),
+    ];
+    for (model_type, arch, expected) in cases {
+        let detected = detect_layout(
+            &format!("arch_{arch}"),
+            &json!({"model_type": model_type, "architectures": [arch], "hidden_size": 8}),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(detected, expected, "{arch}");
+    }
+}
+
+#[test]
+fn gemma3_text_model_is_embedding_only_with_bidirectional_attention() {
+    let bidirectional = detect_layout(
+        "embeddinggemma",
+        &json!({
+            "model_type": "gemma3_text",
+            "architectures": ["Gemma3TextModel"],
+            "use_bidirectional_attention": true,
+            "hidden_size": 8
+        }),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(bidirectional, ModelType::Gemma3Embedding);
+
+    let causal = detect_layout(
+        "gemma3_text_causal",
+        &json!({
+            "model_type": "gemma3_text",
+            "architectures": ["Gemma3TextModel"],
+            "hidden_size": 8
+        }),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(causal, ModelType::Gemma3);
+}
+
+#[test]
+fn ministral3_model_is_embedding_only_when_not_causal() {
+    let bidirectional = detect_layout(
+        "ministral3_embed",
+        &json!({
+            "model_type": "ministral3",
+            "architectures": ["Ministral3Model"],
+            "is_causal": false,
+            "hidden_size": 8
+        }),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(bidirectional, ModelType::Ministral3Embedding);
+
+    let causal = detect_layout(
+        "ministral3_causal",
+        &json!({
+            "model_type": "ministral3",
+            "architectures": ["Ministral3ForCausalLM"],
+            "hidden_size": 8
+        }),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(causal, ModelType::Ministral3);
+}
+
+#[test]
+fn modules_json_pooling_entry_routes_qwen3_to_qwen3_embedding() {
+    let detected = detect_layout(
+        "qwen3_modules_pooling",
+        &json!({"model_type": "qwen3", "architectures": ["Qwen3ForCausalLM"], "hidden_size": 8}),
+        &[("modules.json", POOLING_MODULES)],
+    )
+    .unwrap();
+    assert_eq!(detected, ModelType::Qwen3Embedding);
+}
+
+#[test]
+fn one_pooling_config_routes_qwen3_and_qwen3_vl_to_embedding_variants() {
+    let detected = detect_layout(
+        "qwen3_one_pooling",
+        &json!({"model_type": "qwen3", "architectures": ["Qwen3ForCausalLM"], "hidden_size": 8}),
+        &[(
+            "1_Pooling/config.json",
+            r#"{"pooling_mode_lasttoken": true}"#,
+        )],
+    )
+    .unwrap();
+    assert_eq!(detected, ModelType::Qwen3Embedding);
+
+    let detected = detect_layout(
+        "qwen3_vl_one_pooling",
+        &json!({"model_type": "qwen3_vl", "architectures": ["Qwen3VLForConditionalGeneration"]}),
+        &[(
+            "1_Pooling/config.json",
+            r#"{"pooling_mode_lasttoken": true}"#,
+        )],
+    )
+    .unwrap();
+    assert_eq!(detected, ModelType::Qwen3VLEmbedding);
+}
+
+#[test]
+fn qwen3_for_causal_lm_without_pooling_layout_stays_qwen3() {
+    let detected = detect_layout(
+        "qwen3_plain",
+        &json!({"model_type": "qwen3", "architectures": ["Qwen3ForCausalLM"], "hidden_size": 8}),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(detected, ModelType::Qwen3);
+}
+
+#[test]
+fn sequence_classification_checkpoints_are_never_embedding() {
+    // A reranker keeps its generator routing even with a pooling layout.
+    let detected = detect_layout(
+        "qwen3_reranker",
+        &json!({
+            "model_type": "qwen3",
+            "architectures": ["Qwen3ForSequenceClassification"],
+            "hidden_size": 8
+        }),
+        &[("modules.json", POOLING_MODULES)],
+    )
+    .unwrap();
+    assert_eq!(detected, ModelType::Qwen3);
+}
+
+#[test]
+fn modules_json_with_only_logit_score_does_not_trigger_embedding() {
+    let detected = detect_layout(
+        "qwen3_vl_reranker",
+        &json!({"model_type": "qwen3_vl", "architectures": ["Qwen3VLForConditionalGeneration"]}),
+        &[("modules.json", LOGIT_SCORE_MODULES)],
+    )
+    .unwrap();
+    assert_eq!(detected, ModelType::Qwen3VL);
+}
+
+#[test]
+fn embedding_layout_with_unknown_family_is_reported_not_misrouted() {
+    let err = detect_layout(
+        "mpnet_pooling",
+        &json!({"model_type": "mpnet", "architectures": ["MPNetModel"], "hidden_size": 8}),
+        &[(
+            "1_Pooling/config.json",
+            r#"{"pooling_mode_mean_tokens": true}"#,
+        )],
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("embedding checkpoint"), "{err}");
+    assert!(err.contains("mpnet"), "{err}");
+}
