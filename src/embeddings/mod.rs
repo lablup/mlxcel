@@ -47,7 +47,7 @@ mod pooling_tests;
 
 #[cfg(test)]
 #[path = "tokenize_tests.rs"]
-mod tokenize_tests;
+pub(crate) mod tokenize_tests;
 
 #[cfg(test)]
 #[path = "engine_tests.rs"]

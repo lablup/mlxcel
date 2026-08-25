@@ -158,6 +158,21 @@ enum Commands {
     #[command(verbatim_doc_comment)]
     Embed(commands::EmbedArgs),
 
+    /// Score query/document relevance with a reranker checkpoint.
+    ///
+    /// Loads a checkpoint the way `/v1/rerank` does (pair tokenization for a
+    /// cross-encoder, the yes/no prompt for a generative reranker) and prints
+    /// one relevance score per document plus the ranking. This is the offline
+    /// validation tool for every reranker family.
+    ///
+    /// Examples:
+    ///
+    ///     mlxcel rerank -m BAAI/bge-reranker-v2-m3 -q "what is panda?" -d "hi" -d "The giant panda is a bear species endemic to China."
+    ///     mlxcel rerank -m mlx-community/Qwen3-Reranker-0.6B-4bit -q "What is the capital of China?" -d "The capital of China is Beijing." -d "Berlin is in Germany."
+    ///     mlxcel rerank -m Qwen/Qwen3-VL-Reranker-2B -q "a chart of quarterly revenue" --image chart.png --image cat.jpg
+    #[command(verbatim_doc_comment)]
+    Rerank(commands::RerankArgs),
+
     /// Remove a downloaded model from the global store.
     ///
     /// Deletes `${MLXCEL_CACHE_DIR:-$HOME/.cache/mlxcel}/models/<owner>/<name>`
@@ -1077,6 +1092,32 @@ pub(crate) struct ServeArgs {
         default_value_t = 120
     )]
     embedding_request_timeout_secs: u64,
+
+    /// Reranker checkpoint to serve on /v1/rerank next to the chat model
+    ///
+    /// A local directory or a HuggingFace `owner/name` repo-id (resolved like
+    /// `-m`). Loads on its own worker thread; `-m` keeps serving chat. A
+    /// one-label `ForSequenceClassification` cross-encoder is also detected
+    /// from `-m` alone; the Qwen3 and Qwen3-VL generative rerankers are
+    /// indistinguishable from chat checkpoints and are only reachable through
+    /// this flag. Naming the same directory in `-m` and here serves that one
+    /// checkpoint as a reranker and leaves chat unloaded. Also reads
+    /// `MLXCEL_RERANKER_MODEL`.
+    #[arg(long, env = "LLAMA_ARG_RERANKER_MODEL", value_name = "PATH_OR_REPO_ID")]
+    reranker_model: Option<String>,
+
+    /// Query/document pairs per rerank forward pass (0 = the reranker kind's default)
+    ///
+    /// `/v1/rerank` scores documents in micro-batches of this size. The
+    /// default is 8 for a text reranker and 2 for the multimodal one, whose
+    /// rows each carry a full image's worth of visual tokens.
+    #[arg(
+        long,
+        env = "MLXCEL_RERANK_BATCH_SIZE",
+        default_value_t = 0,
+        value_name = "N"
+    )]
+    rerank_batch_size: usize,
 
     /// Prefill chunk size in tokens (0 = disabled, default: 512)
     ///
@@ -2059,6 +2100,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Download(args) => commands::run_download(args),
         Commands::Detect(args) => commands::run_detect(args),
         Commands::Embed(args) => commands::run_embed(args),
+        Commands::Rerank(args) => commands::run_rerank(args),
         Commands::Rm(args) => commands::run_remove(
             &args.repo_id,
             args.yes,
@@ -2108,6 +2150,7 @@ const FAMILY_ORDER: &[&str] = &[
     "Speech-to-text",
     "Text-to-speech",
     "Embedding",
+    "Reranker",
     "Diffusion",
     "Specialized",
     "Llama VLM",

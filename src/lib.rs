@@ -29,6 +29,7 @@ pub mod lora;
 pub mod models;
 pub mod multimodal;
 pub mod reasoning_stream;
+pub mod rerank;
 pub mod server;
 #[cfg(feature = "surgery")]
 pub mod surgery;

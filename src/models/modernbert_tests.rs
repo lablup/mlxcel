@@ -673,13 +673,17 @@ fn modernbert_config_detects_as_the_embedding_family() {
         );
     }
 
-    // A reranker is never an embedder: detection falls through to the
-    // generation dispatch, which has no `modernbert` arm.
+    // A reranker is never an embedder. Since #1356 it detects as the reranker
+    // family instead, which is what lets `-m <cross-encoder>` serve
+    // `/v1/rerank` without `--reranker-model`.
     let mut config = tiny_config();
     config["architectures"] = json!(["ModernBertForSequenceClassification"]);
     std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
-    let err = get_model_type(&dir).expect_err("a classifier must not detect as an embedder");
-    assert!(err.to_string().contains("Unsupported model type"), "{err}");
+    assert_eq!(
+        get_model_type(&dir).expect("a classifier detects as the reranker family"),
+        ModelType::SequenceClassifier,
+        "a classifier must not detect as an embedder"
+    );
 
     std::fs::remove_dir_all(&dir).unwrap();
 }

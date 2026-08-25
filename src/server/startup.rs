@@ -128,6 +128,13 @@ pub struct ServerStartupConfig {
     /// `--embedding-request-timeout-secs`. Forwarded to
     /// [`super::config::ServerConfig::embedding_request_timeout_secs`].
     pub embedding_request_timeout_secs: u64,
+    /// `--reranker-model`: reranker checkpoint served on `/v1/rerank` next to
+    /// the chat model. Forwarded to
+    /// [`super::config::ServerConfig::reranker_model_path`].
+    pub reranker_model_path: Option<PathBuf>,
+    /// `--rerank-batch-size`. Forwarded to
+    /// [`super::config::ServerConfig::rerank_batch_size`].
+    pub rerank_batch_size: usize,
     /// Prefill chunk size in tokens (0 = disabled).
     pub prefill_chunk_size: usize,
     /// Set when `--batch-size` and `--prefill-chunk-size` conflict; triggers a startup warning.
@@ -445,6 +452,8 @@ impl Default for ServerStartupConfig {
             embedding_queue_depth: crate::server::config::DEFAULT_EMBEDDING_QUEUE_DEPTH,
             embedding_request_timeout_secs:
                 crate::server::config::DEFAULT_EMBEDDING_REQUEST_TIMEOUT_SECS,
+            reranker_model_path: None,
+            rerank_batch_size: crate::server::config::DEFAULT_RERANK_BATCH_SIZE,
             prefill_chunk_size: 512,
             batch_size_conflict: false,
             ubatch_size_provided: false,
@@ -1004,6 +1013,8 @@ pub(super) fn build_server_config(
         embedding_max_length: startup.embedding_max_length,
         embedding_queue_depth: startup.embedding_queue_depth,
         embedding_request_timeout_secs: startup.embedding_request_timeout_secs,
+        reranker_model_path: startup.reranker_model_path.clone(),
+        rerank_batch_size: startup.rerank_batch_size,
         prefill_chunk_size: startup.prefill_chunk_size,
         // #1011: pass the explicit --prefill-grant-interval through untouched
         // (the scheduler resolves env / shipped default when this is None).
@@ -2249,6 +2260,12 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         .clone()
         .unwrap_or_else(|| model_provider.model_id().to_string());
     let embedding_model = resolve_embedding_provider(&startup, &config, &served_chat_id)?;
+    // Rerank wiring (#1356) follows the same rule, with one addition: a
+    // generative reranker's checkpoint is indistinguishable from a chat
+    // model's, so `--reranker-model` is the only way to reach it and naming
+    // the same path in `-m` and `--reranker-model` loads it once on the rerank
+    // worker instead of being an error.
+    let rerank_model = resolve_rerank_provider(&startup, &config, &served_chat_id)?;
 
     let state = AppState::with_observability(
         model_provider,
@@ -2265,7 +2282,8 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     .with_responses_store(responses_store)
     .with_conversation_store(conversation_store)
     .with_audio_model(audio_model)
-    .with_embedding_model(embedding_model);
+    .with_embedding_model(embedding_model)
+    .with_rerank_model(rerank_model);
     let app = create_app(state);
 
     if startup.port == 0 {
@@ -2308,8 +2326,11 @@ pub(crate) fn resolve_embedding_source(
     }
 }
 
-/// Served id of an explicit embedding checkpoint: its directory name.
-fn embedding_model_id_for_path(path: &Path) -> String {
+/// Served id of an explicitly named side checkpoint: its directory name.
+///
+/// Used by both `--embedding-model` and `--reranker-model`, which each get
+/// their own id next to the chat model's.
+fn side_model_id_for_path(path: &Path) -> String {
     path.file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
@@ -2328,7 +2349,7 @@ fn resolve_embedding_provider(
     let (path, model_id, fatal) = match source {
         EmbeddingSource::None => return Ok(None),
         EmbeddingSource::Explicit(path) => {
-            let id = embedding_model_id_for_path(&path);
+            let id = side_model_id_for_path(&path);
             (path, id, true)
         }
         EmbeddingSource::Primary(path) => (path, served_chat_id.to_string(), false),
@@ -2377,6 +2398,118 @@ fn resolve_embedding_provider(
         Err(err) => {
             tracing::error!(
                 "Failed to load embedding model {}: {err:#}; /v1/embeddings will return 501",
+                path.display()
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// Where the reranker checkpoint comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RerankSource {
+    /// `--reranker-model <path>`: a checkpoint next to the chat model.
+    Explicit(PathBuf),
+    /// `-m` itself detected as a sequence-classifier reranker.
+    Primary(PathBuf),
+    /// No reranker to serve.
+    None,
+}
+
+/// Pick the reranker checkpoint from `--reranker-model` and the `-m`
+/// detection.
+///
+/// Passing the same path to both is allowed and resolves to
+/// [`RerankSource::Primary`]: the checkpoint is then loaded once, on the
+/// rerank worker, which is what "when `--reranker-model` names the same path
+/// as `-m`, the checkpoint is loaded once and chat stays unloaded" means. Two
+/// different reranker checkpoints are a configuration error.
+pub(crate) fn resolve_rerank_source(
+    model_path: &Path,
+    reranker_model_path: Option<&Path>,
+) -> Result<RerankSource> {
+    let primary_is_reranker = crate::models::get_model_type(model_path)
+        .is_ok_and(crate::model_metadata::is_reranker_model_type);
+    match (reranker_model_path, primary_is_reranker) {
+        // The same directory in both flags is the rerank-only shape: `-m` is
+        // required, and a generative reranker is only reachable through
+        // `--reranker-model`, so this is how an operator asks for a server
+        // that only reranks. `ModelProvider` recognizes it too and leaves the
+        // chat worker without a model.
+        (Some(explicit), _) if explicit == model_path => {
+            Ok(RerankSource::Primary(model_path.to_path_buf()))
+        }
+        (Some(explicit), true) => anyhow::bail!(
+            "two rerankers: -m {} is a reranker checkpoint and --reranker-model {} was also \
+             given. Pass a chat model to -m and the reranker to --reranker-model, or pass the \
+             reranker to -m alone.",
+            model_path.display(),
+            explicit.display()
+        ),
+        (Some(explicit), false) => Ok(RerankSource::Explicit(explicit.to_path_buf())),
+        (None, true) => Ok(RerankSource::Primary(model_path.to_path_buf())),
+        (None, false) => Ok(RerankSource::None),
+    }
+}
+
+/// Spawn the rerank worker for the resolved source, if any.
+fn resolve_rerank_provider(
+    startup: &ServerStartupConfig,
+    config: &ServerConfig,
+    served_chat_id: &str,
+) -> Result<Option<Arc<dyn crate::server::rerank_model::RerankModelProvider>>> {
+    let source = resolve_rerank_source(&startup.model_path, config.reranker_model_path.as_deref())?;
+    let (path, model_id, fatal) = match source {
+        RerankSource::None => return Ok(None),
+        RerankSource::Explicit(path) => {
+            let id = side_model_id_for_path(&path);
+            (path, id, true)
+        }
+        RerankSource::Primary(path) => (path, served_chat_id.to_string(), false),
+    };
+
+    let request_timeout =
+        std::time::Duration::from_secs(if config.embedding_request_timeout_secs == 0 {
+            crate::server::config::DEFAULT_EMBEDDING_REQUEST_TIMEOUT_SECS
+        } else {
+            config.embedding_request_timeout_secs
+        });
+    let load_options = crate::rerank::RerankLoadOptions {
+        batch_size: (config.rerank_batch_size > 0).then_some(config.rerank_batch_size),
+        max_length: None,
+    };
+    tracing::info!(
+        path = %path.display(),
+        model_id = %model_id,
+        batch_size = config.rerank_batch_size,
+        "Loading reranker for /v1/rerank"
+    );
+    match crate::server::rerank_worker::RerankWorkerProvider::load(
+        &path,
+        model_id,
+        config.embedding_queue_depth,
+        request_timeout,
+        load_options,
+    ) {
+        Ok(provider) => {
+            let info = provider.info();
+            tracing::info!(
+                kind = info.kind.as_str(),
+                model_type = %info.model_type,
+                max_length = info.max_length,
+                batch_size = info.batch_size,
+                supports_images = info.supports_images,
+                "Reranker ready on /v1/rerank"
+            );
+            Ok(Some(Arc::new(provider)))
+        }
+        Err(err) if fatal => Err(err.context(format!(
+            "failed to load --reranker-model {}",
+            path.display()
+        ))),
+        Err(err) => {
+            tracing::error!(
+                "Failed to load reranker {}: {err:#}; /v1/rerank will return 501",
                 path.display()
             );
             Ok(None)

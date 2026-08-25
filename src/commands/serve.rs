@@ -33,8 +33,8 @@ use mlxcel::server::{
     env_fallback_prompt_cache_enabled, env_fallback_prompt_cache_max_entries,
     env_fallback_prompt_cache_min_prefix, env_fallback_prompt_cache_snapshot_capacity_bytes,
     env_fallback_prompt_cache_snapshot_max_entries, env_fallback_prompt_cache_snapshot_ttl,
-    env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, long_cli_flag_was_set,
-    resolve_parallel_context_size, start_server,
+    env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, env_fallback_reranker_model,
+    long_cli_flag_was_set, resolve_parallel_context_size, start_server,
 };
 use mlxcel_core::cache::KVCacheMode;
 
@@ -244,6 +244,20 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         })
         .transpose()?;
 
+    // `--reranker-model` accepts the same path-or-repo-id shapes as `-m`.
+    env_fallback_reranker_model(&mut args.reranker_model);
+    let reranker_model_path = args
+        .reranker_model
+        .as_deref()
+        .map(|value| {
+            resolve_model_source_with_override(
+                std::path::Path::new(value),
+                args.models_dir.as_deref(),
+                args.revision.as_deref(),
+            )
+        })
+        .transpose()?;
+
     Ok(ServerStartupInput {
         model_path: args.model,
         adapter_path: args.adapter,
@@ -273,6 +287,8 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         embedding_max_length: args.embedding_max_length,
         embedding_queue_depth: args.embedding_queue_depth,
         embedding_request_timeout_secs: args.embedding_request_timeout_secs,
+        reranker_model_path,
+        rerank_batch_size: args.rerank_batch_size,
         prefill_chunk_size: args.prefill_chunk_size,
         prefill_grant_interval: args.prefill_grant_interval,
         batch_size: args.batch_size,

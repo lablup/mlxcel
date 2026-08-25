@@ -295,6 +295,13 @@ pub const DEFAULT_EMBEDDING_QUEUE_DEPTH: usize = DEFAULT_AUDIO_QUEUE_DEPTH;
 /// tracks the audio value.
 pub const DEFAULT_EMBEDDING_REQUEST_TIMEOUT_SECS: u64 = DEFAULT_AUDIO_REQUEST_TIMEOUT_SECS;
 
+/// Default `--rerank-batch-size`: query/document pairs per forward pass.
+///
+/// This is the text default; a multimodal reranker lowers it to its own
+/// [`crate::rerank::DEFAULT_RERANK_VL_BATCH_SIZE`] unless the flag is given,
+/// because each of its rows carries a full image's worth of visual tokens.
+pub const DEFAULT_RERANK_BATCH_SIZE: usize = crate::rerank::DEFAULT_RERANK_BATCH_SIZE;
+
 /// Server configuration derived from CLI-compatible startup arguments.
 ///
 /// Default values intentionally track `llama-server` behavior where practical
@@ -392,6 +399,16 @@ pub struct ServerConfig {
     /// Per-request reply timeout for the embedding worker, in seconds. A `0`
     /// falls back to the default. See [`DEFAULT_EMBEDDING_REQUEST_TIMEOUT_SECS`].
     pub embedding_request_timeout_secs: u64,
+    /// `--reranker-model`: a checkpoint served on `/v1/rerank` next to the
+    /// chat model. `None` means "use `-m` when it is itself a
+    /// sequence-classifier reranker, otherwise serve no reranking". The
+    /// generative rerankers are only reachable through this flag: their
+    /// checkpoints are indistinguishable from chat models.
+    pub reranker_model_path: Option<std::path::PathBuf>,
+    /// `--rerank-batch-size`: query/document pairs per forward pass. A `0`
+    /// takes the loaded reranker kind's own default. See
+    /// [`DEFAULT_RERANK_BATCH_SIZE`].
+    pub rerank_batch_size: usize,
     /// Number of tokens per prefill chunk. When 0, chunking is disabled and
     /// the full prompt is prefilled in a single pass.
     pub prefill_chunk_size: usize,
@@ -653,6 +670,8 @@ impl Default for ServerConfig {
             embedding_max_length: None,
             embedding_queue_depth: DEFAULT_EMBEDDING_QUEUE_DEPTH,
             embedding_request_timeout_secs: DEFAULT_EMBEDDING_REQUEST_TIMEOUT_SECS,
+            reranker_model_path: None,
+            rerank_batch_size: DEFAULT_RERANK_BATCH_SIZE,
             prefill_chunk_size: 512,
             // #1011: unset -> scheduler resolves the env override / default.
             prefill_grant_interval: None,

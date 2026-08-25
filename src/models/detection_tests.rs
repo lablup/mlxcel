@@ -1072,6 +1072,52 @@ fn sequence_classification_checkpoints_are_never_embedding() {
 }
 
 #[test]
+fn cross_encoder_checkpoints_detect_as_the_reranker_family() {
+    // #1356: a one-label `ForSequenceClassification` export on one of the
+    // three encoder families is a reranker, so `-m <checkpoint>` can serve
+    // `/v1/rerank` without `--reranker-model`. A pooling layout does not turn
+    // it back into an embedder.
+    for (model_type, architecture) in [
+        ("bert", "BertForSequenceClassification"),
+        ("xlm-roberta", "XLMRobertaForSequenceClassification"),
+        ("xlm_roberta", "XLMRobertaForSequenceClassification"),
+        ("modernbert", "ModernBertForSequenceClassification"),
+    ] {
+        let detected = detect_layout(
+            &format!("cross_encoder_{model_type}"),
+            &json!({
+                "model_type": model_type,
+                "architectures": [architecture],
+                "hidden_size": 8,
+            }),
+            &[("modules.json", POOLING_MODULES)],
+        )
+        .unwrap_or_else(|err| panic!("{model_type}: {err}"));
+        assert_eq!(detected, ModelType::SequenceClassifier, "{model_type}");
+    }
+}
+
+#[test]
+fn a_classifier_on_an_unported_family_keeps_its_generator_routing() {
+    // Only the three encoder families have a cross-encoder head port. A
+    // classifier on anything else must not be claimed by the reranker family;
+    // it stays on the existing dispatch, which is what reports it.
+    let err = detect_layout(
+        "deberta_classifier",
+        &json!({
+            "model_type": "deberta-v2",
+            "architectures": ["DebertaV2ForSequenceClassification"],
+            "hidden_size": 8,
+        }),
+        &[],
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("Unsupported model type"), "{err}");
+    assert!(err.contains("deberta-v2"), "{err}");
+}
+
+#[test]
 fn modules_json_with_only_logit_score_does_not_trigger_embedding() {
     let detected = detect_layout(
         "qwen3_vl_reranker",

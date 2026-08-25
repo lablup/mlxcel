@@ -2,6 +2,8 @@
 
 mlxcel serves embedding checkpoints through the OpenAI-compatible `POST /v1/embeddings` endpoint and the offline `mlxcel embed` command. This page covers the shared foundation every embedding family builds on: detection, pooling, normalization, length limits, the request and response schema, the server flags, and the CLI. Per-family details (prompt prefixes, instruction formats, image support) are filled in by each family as it lands; the family table lives in [supported-models.md](supported-models.md#embedding-models).
 
+Relevance scoring lives on the same page, under [Reranking](#reranking-v1rerank-and-mlxcel-rerank): `POST /v1/rerank` and `mlxcel rerank` share this subsystem's tokenizer, length-limit and worker plumbing, and two of the three reranker kinds sit on encoders the embedding families already own.
+
 **Current status.** The route, the worker thread, batching, pooling and the CLI are in place. Detection recognizes every family listed below and the loader dispatches on it, but the forward passes land one family at a time (epic #1348): loading a checkpoint whose family has not landed reports `<family> is detected as an embedding checkpoint, but this embedding family is not yet supported by /v1/embeddings`. The [Embedding models table](supported-models.md#embedding-models) records which families are served today.
 
 ## Implemented endpoints
@@ -10,7 +12,9 @@ mlxcel serves embedding checkpoints through the OpenAI-compatible `POST /v1/embe
 |--------|------|-------------|
 | POST | `/v1/embeddings` | Embed a string, a list of strings, a token-id array, a list of token-id arrays, or a list of typed parts. |
 | POST | `/embeddings` | Alias without the `/v1` prefix. |
-| GET | `/v1/models` | Lists the embedding model next to the chat model when `--embedding-model` loads a second checkpoint. |
+| POST | `/v1/rerank` | Score a query against a document list. Cohere and Jina compatible; see [Reranking](#reranking-v1rerank-and-mlxcel-rerank). |
+| POST | `/rerank` | Alias without the `/v1` prefix. |
+| GET | `/v1/models` | Lists the embedding model, and the reranker, next to the chat model when `--embedding-model` / `--reranker-model` load a second checkpoint. |
 
 ## Implementation source map
 
@@ -43,6 +47,16 @@ mlxcel serves embedding checkpoints through the OpenAI-compatible `POST /v1/embe
 | `src/models/llama_bidirec.rs` | Bidirectional Llama (LLM2Vec): Llama 3 layers under a padding-only mask, mean pooling. |
 | `src/models/ministral3_embedding.rs` | Nemotron-3-Embed: bidirectional Ministral 3, Llama 4 attention scaling at offset 0, mean pooling. |
 | `src/models/lfm2_embedding.rs` | LFM2.5-Embedding: bidirectional LFM2 (non-causal short conv), CLS pooling. |
+| `src/rerank/mod.rs` | `Reranker` trait, `RerankerKind`, `RerankItem`, `detect_reranker_kind`. |
+| `src/rerank/loader.rs` | `load_reranker`: kind dispatch, batch-size and length overrides. |
+| `src/rerank/sequence_classifier.rs` | Cross-encoder path: pair tokenization, longest-first truncation, `sigmoid(logit)`. |
+| `src/rerank/qwen3_generative.rs` | Qwen3 yes/no path: the prompt recipe, left padding, `sigmoid(logit(yes) - logit(no))`. |
+| `src/rerank/qwen3_vl_generative.rs` | Qwen3-VL yes/no path: `reranker.jinja`, image merge, `1_LogitScore` token ids. |
+| `src/server/rerank_model.rs` | `RerankModelProvider` trait and `RerankError`. |
+| `src/server/rerank_worker.rs` | `RerankWorker`: the dedicated MLX-owning thread, bounded queue, timeout, panic boundary. |
+| `src/server/routes/rerank.rs` | HTTP handler, validation order, sorting, `top_n`, `return_documents`. |
+| `src/server/types/rerank.rs` | Request and response types, the sort-and-truncate rule. |
+| `src/commands/rerank.rs` | `mlxcel rerank`. |
 
 ## Detection
 
@@ -53,7 +67,7 @@ A checkpoint is served as an embedding model, before the ordinary `model_type` d
 - `modules.json` exists and lists a module whose `type` ends with `.Pooling` (the sentence-transformers layout). A `modules.json` whose only extra module is `1_LogitScore` (Qwen3-VL-Reranker) does not qualify.
 - `1_Pooling/config.json` exists.
 
-A checkpoint whose `architectures[0]` ends with `ForSequenceClassification` is a reranker, never an embedder, whatever else its layout says.
+A checkpoint whose `architectures[0]` ends with `ForSequenceClassification` is a reranker, never an embedder, whatever else its layout says. On `bert`, `xlm-roberta` and `modernbert` it detects as `ModelType::SequenceClassifier` and is served on `/v1/rerank`; on any other family it falls through to the ordinary `model_type` dispatch, which reports it.
 
 The resolved family is keyed on `model_type`:
 
@@ -75,7 +89,7 @@ The resolved family is keyed on `model_type`:
 
 A pooling layout on any other `model_type` is reported as an error naming the `model_type`, rather than misrouted to a causal generator. `Qwen3ForCausalLM` without a pooling layout still detects as the `Qwen3` generator.
 
-`mlxcel arch` lists the embedding variants under the `Embedding` family. The generation loader (`load_model`, used by `mlxcel generate`, `mlxcel run` and the chat worker) rejects every embedding variant with a message pointing at `/v1/embeddings` and `mlxcel embed`, so `mlxcel-server -m <embedding checkpoint>` serves embeddings and leaves chat unloaded (the same way a Whisper checkpoint leaves chat unloaded), and `/v1/chat/completions` returns the existing "model is not loaded" error.
+`mlxcel arch` lists the embedding variants under the `Embedding` family and `SequenceClassifier` under `Reranker`. The generation loader (`load_model`, used by `mlxcel generate`, `mlxcel run` and the chat worker) rejects every embedding variant with a message pointing at `/v1/embeddings` and `mlxcel embed`, so `mlxcel-server -m <embedding checkpoint>` serves embeddings and leaves chat unloaded (the same way a Whisper checkpoint leaves chat unloaded), and `/v1/chat/completions` returns the existing "model is not loaded" error.
 
 ## Pooling
 
@@ -126,7 +140,7 @@ Length is capped by the absolute position table. BERT indexes it from 0, so `max
 
 Non-quantized f32 checkpoints run in f32. `all-MiniLM-L6-v2` ships f32 with `layer_norm_eps: 1e-12`, which underflows in f16, so the shared text bf16-to-f16 rule applies only to bf16 exports. Quantized checkpoints (`config.quantization`) load every projection and the word-embedding table through `UnifiedLinear` / `UnifiedEmbedding`.
 
-`BertForSequenceClassification` and `XLMRobertaForSequenceClassification` checkpoints (`BAAI/bge-reranker-v2-m3`) are rerankers: detection refuses to call them embedders, and `BertSequenceClassifier::load(dir)` in `src/models/bert_heads.rs` loads one by path. It reuses the same trunk, keeps the `pooler.` tensors that the embedder path drops, and returns `[B, num_labels]` logits from `tanh(dense(h[:, 0, :]))` followed by the label projection (`pooler.dense` plus `classifier` for BERT, `classifier.dense` plus `classifier.out_proj` for XLM-RoBERTa). The `/v1/rerank` wiring is a separate port.
+`BertForSequenceClassification` and `XLMRobertaForSequenceClassification` checkpoints (`BAAI/bge-reranker-v2-m3`, `cross-encoder/ms-marco-MiniLM-L6-v2`) are rerankers: detection routes them to `ModelType::SequenceClassifier` rather than to an embedding variant, and `BertSequenceClassifier::load(dir)` in `src/models/bert_heads.rs` loads one by path. It reuses the same trunk, keeps the `pooler.` tensors that the embedder path drops, and returns `[B, num_labels]` logits from `tanh(dense(h[:, 0, :]))` followed by the label projection (`pooler.dense` plus `classifier` for BERT, `classifier.dense` plus `classifier.out_proj` for XLM-RoBERTa). `num_labels` is the row count of that projection tensor, not the config's claim. [Reranking](#reranking-v1rerank-and-mlxcel-rerank) serves them.
 
 ### ModernBERT (`modernbert`)
 
@@ -145,7 +159,7 @@ curl -s localhost:8080/v1/embeddings -H 'Content-Type: application/json' \
   -d '{"input": ["search_query: What is TSNE?", "search_document: t-SNE is a dimensionality reduction technique used for visualizing high-dimensional data."]}'
 ```
 
-`Alibaba-NLP/gte-reranker-modernbert-base` declares `ModernBertForSequenceClassification`, which detection deliberately refuses to route to any embedding variant (a reranker is not an embedder), so `-m` on that directory is a "not an embedding checkpoint" error today. Its head is implemented as `crate::models::modernbert_heads::ModernBertSequenceClassifier`, which loads by directory and returns `[B, num_labels]` logits from `classifier(norm(gelu(dense(pooled))))` with `classifier_pooling` (`cls` or `mean`) deciding the pooling; `/v1/rerank` wiring is #1356.
+`Alibaba-NLP/gte-reranker-modernbert-base` declares `ModernBertForSequenceClassification`, which detection deliberately refuses to route to any embedding variant (a reranker is not an embedder); it detects as `ModelType::SequenceClassifier` instead, so `-m` on that directory serves `/v1/rerank`. Its head is `crate::models::modernbert_heads::ModernBertSequenceClassifier`, which loads by directory and returns `[B, num_labels]` logits from `classifier(norm(gelu(dense(pooled))))` with `classifier_pooling` (`cls` or `mean`) deciding the pooling.
 
 ### SigLIP text (`siglip`, `SiglipModel` / `SiglipTextModel`)
 
@@ -424,6 +438,132 @@ mlxcel embed -m <path or repo-id> -p "text" [-p "text2" ...] [--image <file> ...
 ```
 
 Prints one vector per input (`[v1, v2, ...]`, one line each; a list of rows for multi-vector models) and, with two or more inputs, the similarity matrix: cosine for single-vector models, MaxSim for multi-vector ones (the header names which one). `--json` prints one object with `embeddings`, `shapes`, `prompt_tokens` and `similarity` instead. This is the offline validation tool for every family: the same loader, pooling, normalization and batching as the server, without a listener.
+
+## Reranking (`/v1/rerank`) and `mlxcel rerank`
+
+A reranker scores how relevant a document is to a query and returns a probability in `[0, 1]`; it is a cross-encoder over the pair rather than two independent vectors, so it cannot be indexed but it discriminates far better than a cosine over embeddings. The usual shape is retrieve with `/v1/embeddings`, then reorder the top candidates with `/v1/rerank`.
+
+Three checkpoint shapes are served, and all three end at a probability:
+
+| Kind | Selected when | Score | Checkpoints |
+|------|---------------|-------|-------------|
+| `sequence_classifier` | `architectures[0]` ends with `ForSequenceClassification` and `model_type` is `bert`, `xlm-roberta` or `modernbert` | `sigmoid(logit)` from the one-label head | `BAAI/bge-reranker-v2-m3`, `cross-encoder/ms-marco-MiniLM-L6-v2`, `Alibaba-NLP/gte-reranker-modernbert-base` |
+| `generative_text` | `--reranker-model` points at a `model_type: qwen3` causal checkpoint | `sigmoid(logit("yes") - logit("no"))` at the last prompt position | `Qwen/Qwen3-Reranker-0.6B` and its MLX quantizations, e.g. `mlx-community/Qwen3-Reranker-0.6B-4bit` |
+| `generative_vl` | `--reranker-model` points at a `model_type: qwen3_vl` checkpoint | the same yes/no read, over a prompt whose query and documents may carry images | `Qwen/Qwen3-VL-Reranker-2B` |
+
+A classifier that does not expose exactly one output label is rejected at load with `reranker sequence classifiers must expose exactly one output label`; the count comes from the row count of the projection tensor, not from `config.json`. Any other `model_type` is rejected with `Unsupported reranker model type`.
+
+Only the cross-encoder kind is detectable from a checkpoint alone, so only it can be served through `-m`. A generative reranker's `config.json` is an ordinary chat export (`Qwen3ForCausalLM`, `Qwen3VLForConditionalGeneration`) and is reachable only through `--reranker-model`. `Qwen/Qwen3-VL-Reranker-2B` does ship a `modules.json`, but its only extra module is `1_LogitScore` rather than a `Pooling` one, which is exactly why detection does not mistake it for an embedding export.
+
+### Cross-encoder scoring
+
+The pair is tokenized as one sequence through the checkpoint's own pair template (`[CLS] query [SEP] document [SEP]` for BERT, `<s> query </s></s> document </s>` for XLM-RoBERTa), with `token_type_ids` on the BERT dialect only. Truncation is the tokenizer's own `longest_first` at `max_length`: it drops from whichever side is currently longer and reserves the template's special tokens before dropping anything, so a long document never costs the query its opening token. `max_length` is the smallest of `sentence_bert_config.json` `max_seq_length`, `tokenizer_config.json` `model_max_length`, `config.json` `max_position_embeddings` for the absolute-position BERT trunk, and the shared 8192 ceiling.
+
+### Qwen3 generative scoring
+
+The prompt is byte-identical to the recipe the model card publishes:
+
+```text
+PREFIX  = "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n"
+CONTENT = "<Instruct>: {instruction}\n<Query>: {query}\n<Document>: {document}"
+SUFFIX  = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+```
+
+Default `instruction`: `Given a web search query, retrieve relevant passages that answer the query`. The three pieces are tokenized separately and concatenated, so only `CONTENT` is truncated; the prefix and the assistant header the score is read from always survive. `yes` and `no` are resolved at load by encoding them without special tokens (9693 and 2152 on the Qwen3 tokenizer) and the load fails if either is not a single token.
+
+Rows are **left**-padded with the checkpoint's pad token, which is what puts every row's last real token at column `L - 1`, and the mask is `create_causal_padding_mask`, so the pad prefix is blocked as a key everywhere. Absolute positions still run `0..L` over the padded row, exactly as the reference `Qwen3ForCausalLM.forward(input_ids, attention_mask)` does when it derives `position_ids` from the cache position. One consequence worth knowing: a document's score depends slightly on the batch it was scored in, because a left-padded row's real tokens sit at shifted positions. That is a property of the reference recipe, not of this port.
+
+### Qwen3-VL generative scoring
+
+The prompt comes from the checkpoint's own `additional_chat_templates/reranker.jinja`, rendered with `add_generation_prompt: true`. That template reads `role: query` and `role: document` messages (not `user`), supplies its own default instruction (`Given a search query, retrieve relevant candidates that answer the query.`) when no `system` message is present, and renders each image content item as `<|vision_start|><|image_pad|><|vision_end|>`. Rendering is delegated to it verbatim, so a re-exported checkpoint with a different prompt stays correct. The two answer token ids come from `1_LogitScore/config.json` (`true_token_id` 9693, `false_token_id` 2152).
+
+Image placeholders are expanded to the visual-token count the Qwen2-VL processor computes for each image before padding, and the features are merged through `Qwen3VLModel::get_input_embeddings`. A row that carries an image is scored on its own: Qwen3-VL's M-RoPE index and its DeepStack injection are computed per sequence, the same constraint the Qwen3-VL-Embedding family documents. Text-only rows in the same request are still batched and left-padded, so a mixed request pays the per-row cost only for its image documents. Query and document text are truncated longest-first before the template renders them, with the scaffold and the visual tokens reserved first.
+
+Video documents are out of scope.
+
+### Request and response
+
+```json
+POST /v1/rerank
+{
+  "model": "optional; must match the served reranker id",
+  "query": "string, or {\"text\": ..., \"image\": url}",
+  "documents": ["string, or {\"text\": ..., \"image\": url}", "..."],
+  "top_n": 3,
+  "return_documents": false,
+  "instruction": "optional; generative rerankers only"
+}
+```
+
+An item is either a bare string or an object with `text`, `image` and/or `image_url`. `image` and `image_url` accept the same URL forms as `/v1/embeddings` (a `data:` URI, `file://`, `http(s)://`, or a local path) and either the bare-string or the `{"url": ...}` spelling; `image` wins when a client sends both. An object with only an image is a valid image document.
+
+```json
+{
+  "model": "bge-reranker-v2-m3",
+  "results": [
+    {"index": 0, "relevance_score": 0.9948, "document": "..."},
+    {"index": 1, "relevance_score": 0.0003}
+  ],
+  "usage": {"prompt_tokens": 312, "total_tokens": 312}
+}
+```
+
+`results` is sorted by `relevance_score` descending with ties broken by ascending `index`, then truncated to `top_n`. `document` is present only when `return_documents` is true, and echoes the request item verbatim. `prompt_tokens` counts the real tokens of every scored pair.
+
+| Status | Type | When |
+|--------|------|------|
+| 400 | `invalid_request_error` | Malformed body, empty `documents`, an item with neither text nor an image, `top_n` below 1, an image item for a reranker with `supports_images() == false`, `instruction` on a sequence-classifier reranker, or `model` not matching the served id. |
+| 501 | `not_implemented` | No reranker loaded: `No reranker loaded; start with -m <sequence-classifier checkpoint> or --reranker-model <path>`. |
+| 503 | `server_busy` | The bounded worker queue is full (`--embedding-queue-depth`, shared with the embedding worker). |
+| 504 | `server_timeout` | The worker did not reply within `--embedding-request-timeout-secs`. |
+| 500 | `server_error` | The forward pass failed. |
+
+### Reranker flags
+
+| Flag | Env | Default | Meaning |
+|------|-----|---------|---------|
+| `-m <cross-encoder checkpoint>` | `LLAMA_ARG_MODEL` | | Serves a one-label `ForSequenceClassification` checkpoint on `/v1/rerank`; chat stays unloaded. |
+| `--reranker-model <path or repo-id>` | `LLAMA_ARG_RERANKER_MODEL`, `MLXCEL_RERANKER_MODEL` | unset | A checkpoint served on `/v1/rerank` next to the chat model in `-m`. Resolved and auto-downloaded like `-m`. This is the only way to reach the generative rerankers. |
+| `--rerank-batch-size N` | `MLXCEL_RERANK_BATCH_SIZE` | `0` (the kind's own default: 8 for text, 2 for multimodal) | Query/document pairs per forward pass. |
+
+Queue depth and the reply timeout are shared with the embedding worker (`--embedding-queue-depth`, `--embedding-request-timeout-secs`), because both single-thread workers shed load the same way. A load failure of an explicit `--reranker-model` is a startup error; a load failure of an `-m` reranker checkpoint is logged and the route answers `501`.
+
+Naming a reranker checkpoint in `-m` and a *different* one in `--reranker-model` is a startup error ("two rerankers"). Naming the **same** directory in both is the rerank-only shape: `-m` is required by the server and a generative reranker is unreachable without `--reranker-model`, so that combination serves the one checkpoint on `/v1/rerank` and the chat worker deliberately does not load a second copy of the same weights. Chat then behaves as it does for any `-m` that is not a text generator: `/v1/chat/completions` errors and `/health` reports `loading model`.
+
+```sh
+# A cross-encoder alone: -m is enough.
+mlxcel-server -m BAAI/bge-reranker-v2-m3 --port 8080
+
+# Chat plus reranking in one process.
+mlxcel-server -m mlx-community/Qwen3-4B-4bit --reranker-model mlx-community/Qwen3-Reranker-0.6B-4bit --port 8080
+
+# A generative reranker alone.
+mlxcel-server -m mlx-community/Qwen3-Reranker-0.6B-4bit --reranker-model mlx-community/Qwen3-Reranker-0.6B-4bit --port 8080
+
+curl -s localhost:8080/v1/rerank -H 'Content-Type: application/json' -d '{
+  "query": "What is the capital of China?",
+  "documents": ["The capital of China is Beijing.", "Gravity is a force that attracts two bodies towards each other.", "Berlin is in Germany."],
+  "top_n": 2, "return_documents": true}'
+```
+
+### `mlxcel rerank`
+
+```text
+mlxcel rerank -m <path or repo-id> -q "query" -d "doc" [-d "doc2" ...] [--image <file> ...]
+              [--query-image <file>] [--instruction "..."] [--top-n N]
+              [--max-length N] [--batch-size N] [--json]
+```
+
+Prints one relevance score per document in request order, then the ranking. Image documents follow the text ones in the result order. `--json` prints one object with `scores`, `ranking`, `kind` and `prompt_tokens` instead. This is the offline validation tool for every reranker kind: the same loader, prompt assembly and batching as the server, without a listener.
+
+```sh
+mlxcel rerank -m BAAI/bge-reranker-v2-m3 -q "what is panda?" \
+  -d "hi" \
+  -d "The giant panda (Ailuropoda melanoleuca), sometimes called a panda bear or simply panda, is a bear species endemic to China."
+
+mlxcel rerank -m Qwen/Qwen3-VL-Reranker-2B -q "a chart of quarterly revenue" \
+  --image revenue-chart.png --image cat.jpg
+```
 
 ## Adding a family
 

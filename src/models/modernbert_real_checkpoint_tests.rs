@@ -257,10 +257,13 @@ fn gte_reranker_modernbert_produces_finite_logits() {
         return;
     };
     let _mlx = mlx_guard();
-    // Detection must keep refusing to serve a reranker as an embedder; the
-    // head is reached by directory instead (#1356 wires /v1/rerank).
-    let err = get_model_type(&dir).expect_err("a reranker is not an embedding checkpoint");
-    assert!(err.to_string().contains("Unsupported model type"), "{err}");
+    // Detection must keep refusing to serve a reranker as an embedder. Since
+    // #1356 it routes the checkpoint to the reranker family instead of
+    // erroring, and `/v1/rerank` consumes the head from there.
+    assert_eq!(
+        get_model_type(&dir).expect("a reranker detects as the reranker family"),
+        crate::models::ModelType::SequenceClassifier
+    );
 
     let classifier = ModernBertSequenceClassifier::load(&dir).expect("the classifier head loads");
     assert_eq!(classifier.num_labels(), 1, "id2label declares one label");

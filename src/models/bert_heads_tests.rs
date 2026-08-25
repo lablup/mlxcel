@@ -213,3 +213,38 @@ fn classifier_head_scores_multi_label_configs() {
     mlxcel_core::try_eval(&logits).unwrap();
     assert_eq!(mlxcel_core::array_shape(&logits), vec![1, 4]);
 }
+
+#[test]
+fn num_labels_comes_from_the_projection_tensor_not_the_config() {
+    let _guard = mlx_test_guard();
+    // The `/v1/rerank` single-label check keys off the width the head really
+    // produces, so a config that disagrees with the tensor must not decide it
+    // (#1356). Build the weights for one label and lie about it in the config.
+    for variant in [BertVariant::Bert, BertVariant::XlmRoberta] {
+        let weights = tiny_weights(&tiny_args(variant), true);
+        let mut args = tiny_args(variant);
+        args.num_labels = 7;
+        let model =
+            BertSequenceClassifier::from_weights(&weights, args, DENSE_QUANTIZATION).unwrap();
+        assert_eq!(
+            model.args().num_labels,
+            7,
+            "{variant:?}: the config's claim"
+        );
+        assert_eq!(
+            model.num_labels(),
+            1,
+            "{variant:?}: the tensor decides the real head width"
+        );
+
+        let input_ids = i32_array(&[5, 6, 7], &[1, 3]);
+        let attention_mask = i32_array(&[1, 1, 1], &[1, 3]);
+        let logits = model.logits(&input_ids, &attention_mask, None).unwrap();
+        mlxcel_core::try_eval(&logits).unwrap();
+        assert_eq!(
+            mlxcel_core::array_shape(&logits),
+            vec![1, 1],
+            "{variant:?}: the logits match the tensor, not the config"
+        );
+    }
+}

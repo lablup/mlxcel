@@ -30,6 +30,7 @@ use super::batch::BatchObservability;
 use super::conversation_store::ConversationStore;
 use super::embedding_model::EmbeddingModelProvider;
 use super::prompt_cache::{PromptCacheStore, metrics::PromptCacheMetrics};
+use super::rerank_model::RerankModelProvider;
 use super::responses_store::ResponsesStore;
 use super::{ChatTemplateProcessor, ModelProvider, ServerConfig};
 
@@ -413,6 +414,11 @@ pub struct AppState {
     /// `--embedding-model`); while it is `None` the route returns a
     /// structured `501 Not Implemented`.
     pub embedding_model: Option<Arc<dyn EmbeddingModelProvider>>,
+    /// Reranker provider serving `POST /v1/rerank`. `None` until a reranker
+    /// checkpoint is loaded (`-m <sequence-classifier checkpoint>` or
+    /// `--reranker-model`); while it is `None` the route returns a structured
+    /// `501 Not Implemented`.
+    pub rerank_model: Option<Arc<dyn RerankModelProvider>>,
 }
 
 impl AppState {
@@ -442,6 +448,7 @@ impl AppState {
             conversation_store: None,
             audio_model: None,
             embedding_model: None,
+            rerank_model: None,
         }
     }
 
@@ -475,6 +482,7 @@ impl AppState {
             conversation_store: None,
             audio_model: None,
             embedding_model: None,
+            rerank_model: None,
         }
     }
 
@@ -546,6 +554,14 @@ impl AppState {
         provider: Option<Arc<dyn EmbeddingModelProvider>>,
     ) -> Self {
         self.embedding_model = provider;
+        self
+    }
+
+    /// Attach a reranker provider serving `POST /v1/rerank`.
+    /// Pass `None` to leave the route returning a structured `501`.
+    #[must_use]
+    pub fn with_rerank_model(mut self, provider: Option<Arc<dyn RerankModelProvider>>) -> Self {
+        self.rerank_model = provider;
         self
     }
 

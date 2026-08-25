@@ -140,12 +140,44 @@ impl EmbeddingModel for BertEmbeddingModel {
     }
 }
 
+/// Row count of the head's projection weight, which is the real output width
+/// of [`BertSequenceClassifier::logits`].
+///
+/// Quantization packs the input axis and never the output axis, so the row
+/// count is `num_labels` on both paths. `config.json` is only consulted for the
+/// warning: a config that disagrees with the tensor would otherwise make
+/// `num_labels()` lie about the shape the head actually produces.
+fn projection_rows(weights: &WeightMap, prefix: &str, declared: usize) -> Result<usize> {
+    let key = format!("{prefix}.weight");
+    let weight = weights
+        .get(&key)
+        .ok_or_else(|| anyhow::anyhow!("bert classification head: weight not found: {key}"))?;
+    let shape = mlxcel_core::array_shape(weight);
+    let Some(&rows) = shape.first() else {
+        bail!("bert classification head: {key} has shape {shape:?}, expected a 2-D matrix");
+    };
+    let rows = usize::try_from(rows).unwrap_or(0);
+    if rows == 0 {
+        bail!("bert classification head: {key} has no rows, so the head has no labels");
+    }
+    if declared != rows {
+        tracing::warn!(
+            target: "mlxcel::rerank",
+            declared,
+            rows,
+            "config.json and {key} disagree on the label count; using the tensor"
+        );
+    }
+    Ok(rows)
+}
+
 /// `tanh(dense(h[:, 0, :]))` followed by the label projection. BERT keeps the
 /// first linear in `pooler.dense` and the projection in `classifier`;
 /// XLM-RoBERTa keeps both under `classifier.`.
 struct ClassifierHead {
     dense: UnifiedLinear,
     projection: UnifiedLinear,
+    num_labels: usize,
 }
 
 impl ClassifierHead {
@@ -153,6 +185,7 @@ impl ClassifierHead {
         weights: &WeightMap,
         variant: BertVariant,
         quant: QuantizationParams,
+        declared_labels: usize,
     ) -> Result<Self> {
         let (dense_prefix, projection_prefix) = match variant {
             BertVariant::Bert => ("pooler.dense", "classifier"),
@@ -165,6 +198,7 @@ impl ClassifierHead {
         Ok(Self {
             dense: linear(dense_prefix)?,
             projection: linear(projection_prefix)?,
+            num_labels: projection_rows(weights, projection_prefix, declared_labels)?,
         })
     }
 
@@ -204,9 +238,10 @@ impl BertSequenceClassifier {
             );
         };
         let (encoder, weights, quant) = load_encoder(model_dir, &config, variant, true)?;
+        let declared = encoder.args().num_labels;
         Ok(Self {
+            head: ClassifierHead::from_weights(&weights, variant, quant, declared)?,
             encoder,
-            head: ClassifierHead::from_weights(&weights, variant, quant)?,
         })
     }
 
@@ -217,15 +252,27 @@ impl BertSequenceClassifier {
         quant: QuantizationParams,
     ) -> Result<Self> {
         let variant = args.variant;
+        let declared = args.num_labels;
         Ok(Self {
             encoder: BertEncoder::from_weights(weights, args, quant.group_size, quant.bits)?,
-            head: ClassifierHead::from_weights(weights, variant, quant)?,
+            head: ClassifierHead::from_weights(weights, variant, quant, declared)?,
         })
     }
 
-    /// Resolved encoder geometry, including `num_labels`.
+    /// Resolved encoder geometry, including the config's `num_labels`.
     pub fn args(&self) -> &BertArgs {
         self.encoder.args()
+    }
+
+    /// Head width, i.e. the second axis of [`Self::logits`], read off the
+    /// projection tensor rather than `config.json`.
+    pub fn num_labels(&self) -> usize {
+        self.head.num_labels
+    }
+
+    /// Real tokens the absolute position table can address.
+    pub fn max_sequence_length(&self) -> usize {
+        self.encoder.args().max_sequence_length()
     }
 
     /// Whether a batch for this checkpoint must carry segment ids. BERT
