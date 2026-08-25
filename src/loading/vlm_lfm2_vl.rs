@@ -113,6 +113,12 @@ fn validate_tiling_policy(
             policy.max_tiles
         );
     }
+    if !policy.max_pixels_tolerance.is_finite() || policy.max_pixels_tolerance <= 0.0 {
+        bail!(
+            "LFM2-VL processor_config.json max_pixels_tolerance must be finite and positive, got {}",
+            policy.max_pixels_tolerance
+        );
+    }
     if policy.max_tiles > 10 {
         bail!(
             "LFM2-VL processor_config.json max_tiles={} exceeds the shipped <|img_row_r_col_c|> marker table size 10",
