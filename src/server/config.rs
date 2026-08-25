@@ -284,6 +284,17 @@ pub const DEFAULT_AUDIO_QUEUE_DEPTH: usize = 8;
 /// thread after this instead of hanging.
 pub const DEFAULT_AUDIO_REQUEST_TIMEOUT_SECS: u64 = 120;
 
+/// Default `--embedding-batch-size`: texts per embedding forward pass.
+pub const DEFAULT_EMBEDDING_BATCH_SIZE: usize = crate::embeddings::DEFAULT_EMBEDDING_BATCH_SIZE;
+
+/// Default bound for the embedding worker command queue; tracks the audio
+/// value so both single-thread workers shed load the same way.
+pub const DEFAULT_EMBEDDING_QUEUE_DEPTH: usize = DEFAULT_AUDIO_QUEUE_DEPTH;
+
+/// Default per-request reply timeout (seconds) for the embedding worker;
+/// tracks the audio value.
+pub const DEFAULT_EMBEDDING_REQUEST_TIMEOUT_SECS: u64 = DEFAULT_AUDIO_REQUEST_TIMEOUT_SECS;
+
 /// Server configuration derived from CLI-compatible startup arguments.
 ///
 /// Default values intentionally track `llama-server` behavior where practical
@@ -365,6 +376,22 @@ pub struct ServerConfig {
     /// a structured `504` after this. A `0` falls back to the default rather
     /// than timing out instantly. See [`DEFAULT_AUDIO_REQUEST_TIMEOUT_SECS`].
     pub audio_request_timeout_secs: u64,
+    /// `--embedding-model`: a second checkpoint served on `/v1/embeddings`
+    /// next to the chat model. `None` means "use `-m` when it is itself an
+    /// embedding checkpoint, otherwise serve no embeddings".
+    pub embedding_model_path: Option<std::path::PathBuf>,
+    /// `--embedding-batch-size`: texts per embedding forward pass. See
+    /// [`DEFAULT_EMBEDDING_BATCH_SIZE`].
+    pub embedding_batch_size: usize,
+    /// `--embedding-max-length`: lowers the token cap derived from the
+    /// checkpoint. `None` keeps the derived value.
+    pub embedding_max_length: Option<usize>,
+    /// Bound on the embedding worker command queue (admission control). See
+    /// [`DEFAULT_EMBEDDING_QUEUE_DEPTH`].
+    pub embedding_queue_depth: usize,
+    /// Per-request reply timeout for the embedding worker, in seconds. A `0`
+    /// falls back to the default. See [`DEFAULT_EMBEDDING_REQUEST_TIMEOUT_SECS`].
+    pub embedding_request_timeout_secs: u64,
     /// Number of tokens per prefill chunk. When 0, chunking is disabled and
     /// the full prompt is prefilled in a single pass.
     pub prefill_chunk_size: usize,
@@ -621,6 +648,11 @@ impl Default for ServerConfig {
             max_queue_depth: 1024,
             audio_queue_depth: DEFAULT_AUDIO_QUEUE_DEPTH,
             audio_request_timeout_secs: DEFAULT_AUDIO_REQUEST_TIMEOUT_SECS,
+            embedding_model_path: None,
+            embedding_batch_size: DEFAULT_EMBEDDING_BATCH_SIZE,
+            embedding_max_length: None,
+            embedding_queue_depth: DEFAULT_EMBEDDING_QUEUE_DEPTH,
+            embedding_request_timeout_secs: DEFAULT_EMBEDDING_REQUEST_TIMEOUT_SECS,
             prefill_chunk_size: 512,
             // #1011: unset -> scheduler resolves the env override / default.
             prefill_grant_interval: None,

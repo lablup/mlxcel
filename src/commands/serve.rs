@@ -26,12 +26,12 @@ use mlxcel::memory_estimate::{QuantHint, estimate_total_memory, format_bytes, fo
 use mlxcel::server::{
     ServerStartupInput, env_fallback_apc_block_size, env_fallback_apc_enabled,
     env_fallback_apc_hash, env_fallback_apc_num_blocks, env_fallback_cache_type_k,
-    env_fallback_cache_type_v, env_fallback_chat_template_kwargs, env_fallback_kv_bits,
-    env_fallback_kv_group_size, env_fallback_kv_quant_scheme, env_fallback_kv_skip_last_layer,
-    env_fallback_lang_bias, env_fallback_lang_bias_include_byte_fragments,
-    env_fallback_prompt_cache_capacity_bytes, env_fallback_prompt_cache_enabled,
-    env_fallback_prompt_cache_max_entries, env_fallback_prompt_cache_min_prefix,
-    env_fallback_prompt_cache_snapshot_capacity_bytes,
+    env_fallback_cache_type_v, env_fallback_chat_template_kwargs, env_fallback_embedding_model,
+    env_fallback_kv_bits, env_fallback_kv_group_size, env_fallback_kv_quant_scheme,
+    env_fallback_kv_skip_last_layer, env_fallback_lang_bias,
+    env_fallback_lang_bias_include_byte_fragments, env_fallback_prompt_cache_capacity_bytes,
+    env_fallback_prompt_cache_enabled, env_fallback_prompt_cache_max_entries,
+    env_fallback_prompt_cache_min_prefix, env_fallback_prompt_cache_snapshot_capacity_bytes,
     env_fallback_prompt_cache_snapshot_max_entries, env_fallback_prompt_cache_snapshot_ttl,
     env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, long_cli_flag_was_set,
     resolve_parallel_context_size, start_server,
@@ -229,6 +229,21 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         .resolve()
         .map_err(|e| anyhow::anyhow!("--lang-bias: {e}"))?;
 
+    // `--embedding-model` accepts the same path-or-repo-id shapes as `-m`
+    // and resolves through the same store lookup / auto-download.
+    env_fallback_embedding_model(&mut args.embedding_model);
+    let embedding_model_path = args
+        .embedding_model
+        .as_deref()
+        .map(|value| {
+            resolve_model_source_with_override(
+                std::path::Path::new(value),
+                args.models_dir.as_deref(),
+                args.revision.as_deref(),
+            )
+        })
+        .transpose()?;
+
     Ok(ServerStartupInput {
         model_path: args.model,
         adapter_path: args.adapter,
@@ -253,6 +268,11 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         max_queue_depth: args.max_queue_depth,
         audio_queue_depth: args.audio_queue_depth,
         audio_request_timeout_secs: args.audio_request_timeout_secs,
+        embedding_model_path,
+        embedding_batch_size: args.embedding_batch_size,
+        embedding_max_length: args.embedding_max_length,
+        embedding_queue_depth: args.embedding_queue_depth,
+        embedding_request_timeout_secs: args.embedding_request_timeout_secs,
         prefill_chunk_size: args.prefill_chunk_size,
         prefill_grant_interval: args.prefill_grant_interval,
         batch_size: args.batch_size,

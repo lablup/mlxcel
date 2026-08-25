@@ -9,7 +9,8 @@ source of truth is the code, not this prose page:
 - VLM loading routes: `src/loading/vlm*.rs`
 
 `ModelType` spans text and non-VLM language models, VLM variants, a
-speech-to-text encoder-decoder (Whisper), and a text-to-speech model (Kokoro).
+speech-to-text encoder-decoder (Whisper), a text-to-speech model (Kokoro), and
+the embedding families served through `/v1/embeddings`.
 These are architecture/runtime variants, not a guarantee that every checkpoint
 under a marketing family name is supported.
 
@@ -518,6 +519,13 @@ mlxcel loads the Kokoro-82M model (a StyleTTS2 phoneme-to-mel acoustic model wit
 Detection works without a top-level `model_type`: the loader recognizes a Kokoro checkpoint by the `istftnet` config block or the `kokoro-v1_0.safetensors` weight filename, so `-m <kokoro-dir>` resolves to the TTS provider. The `voice` request field selects a pack from `voices/<name>.safetensors` (54 voices; default `af_heart`), validated against the available packs with a safe fallback. `speed` scales the predicted durations (larger is faster and shorter). `response_format` accepts `wav` today (returned via the shared WAV writer); other containers are a follow-up.
 
 The grapheme-to-phoneme front-end is a self-contained American-English phonemizer: text is normalized (lower-cased, integers spoken, common punctuation kept), each word is looked up in a bundled lexicon, and out-of-vocabulary words fall back to deterministic letter-to-sound rules. It emits the IPA symbols in Kokoro's vocab and needs no external binary or download. Non-English voices in the checkpoint still load and synthesize, but their phonemes come from the English front-end, so pronunciation quality is limited; per-language g2p (the analogue of upstream Kokoro's `misaki[xx]` packages) is future work. Like Whisper, the model loads and runs every synthesis on one dedicated MLX worker thread, so loading a Kokoro checkpoint serves text-to-speech only.
+
+## Embedding models
+
+Embedding checkpoints are served through `POST /v1/embeddings` and the offline `mlxcel embed` command rather than text generation; see [Embeddings API](embeddings.md) for detection rules, pooling, the request schema, the server flags and the checklist for adding a family. Detection recognizes a checkpoint by an encoder-only `model_type` (`bert`, `xlm-roberta`, `modernbert`, `siglip`), an embedding `architectures[0]`, a `modules.json` Pooling entry or a `1_Pooling/config.json`, and `mlxcel arch` lists the variants under the `Embedding` family. Each family below is registered for detection and the loader; its forward pass lands with its own port, and the table fills in as they merge.
+
+| Family | `model_type` | `ModelType` | Pooling | Validation checkpoint | Status |
+|--------|--------------|-------------|---------|-----------------------|--------|
 
 ## Quantization formats
 

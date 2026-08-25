@@ -70,6 +70,17 @@ pub struct ServerStartupInput {
     /// Per-request reply timeout (seconds) for the audio worker, forwarded to the
     /// audio providers via [`super::config::ServerConfig`].
     pub audio_request_timeout_secs: u64,
+    /// `--embedding-model`: resolved embedding checkpoint directory served on
+    /// `/v1/embeddings` next to the chat model.
+    pub embedding_model_path: Option<PathBuf>,
+    /// `--embedding-batch-size`: texts per embedding forward pass.
+    pub embedding_batch_size: usize,
+    /// `--embedding-max-length`: token cap override for embedding inputs.
+    pub embedding_max_length: Option<usize>,
+    /// `--embedding-queue-depth`: bound on the embedding worker queue.
+    pub embedding_queue_depth: usize,
+    /// `--embedding-request-timeout-secs`: embedding worker reply timeout.
+    pub embedding_request_timeout_secs: u64,
     pub prefill_chunk_size: usize,
     /// #1011: `--prefill-grant-interval`, the decode ticks a parked chunked
     /// prefill yields before the scheduler grants it one. `None` = env override
@@ -634,6 +645,11 @@ impl ServerStartupInput {
             max_queue_depth: self.max_queue_depth,
             audio_queue_depth: self.audio_queue_depth,
             audio_request_timeout_secs: self.audio_request_timeout_secs,
+            embedding_model_path: self.embedding_model_path,
+            embedding_batch_size: self.embedding_batch_size,
+            embedding_max_length: self.embedding_max_length,
+            embedding_queue_depth: self.embedding_queue_depth,
+            embedding_request_timeout_secs: self.embedding_request_timeout_secs,
             prefill_chunk_size: resolution.prefill_chunk_size,
             prefill_grant_interval: self.prefill_grant_interval,
             batch_size_conflict: resolution.batch_size_conflict,
@@ -1036,6 +1052,29 @@ fn apply_optional_string_env_fallback(value: &mut Option<String>, key: &str, fla
 /// validation point.
 pub fn env_fallback_reasoning_budget(cli_value: &mut i32) {
     *cli_value = resolve_server_default_reasoning_budget(*cli_value);
+}
+
+/// Apply the `MLXCEL_EMBEDDING_MODEL` env var fallback to `--embedding-model`.
+///
+/// `clap` already reads `LLAMA_ARG_EMBEDDING_MODEL` through the flag's `env`
+/// attribute; this layers the mlxcel-native alias on top with the same
+/// precedence rule as the other pairs: the CLI flag (or the `LLAMA_ARG_*`
+/// value clap resolved) wins, and a conflicting alias is logged and ignored.
+pub fn env_fallback_embedding_model(cli_value: &mut Option<String>) {
+    const ALIAS: &str = "MLXCEL_EMBEDDING_MODEL";
+    match std::env::var(ALIAS) {
+        Ok(value) if !value.trim().is_empty() => {
+            if cli_value.is_none() {
+                *cli_value = Some(value);
+            } else {
+                tracing::info!(
+                    "{ALIAS} env var is set but --embedding-model (or LLAMA_ARG_EMBEDDING_MODEL) \
+                     takes precedence; ignoring {ALIAS}"
+                );
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Apply `LLAMA_ARG_LANG_BIAS` env var fallback to the `lang_bias` field (plan §6.4).

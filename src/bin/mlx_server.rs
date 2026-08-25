@@ -27,12 +27,12 @@ use mlxcel::lang_bias::LangBiasCliArgs;
 use mlxcel::server::{
     ServerStartupInput, env_fallback_apc_block_size, env_fallback_apc_enabled,
     env_fallback_apc_hash, env_fallback_apc_num_blocks, env_fallback_cache_type_k,
-    env_fallback_cache_type_v, env_fallback_chat_template_kwargs, env_fallback_kv_bits,
-    env_fallback_kv_group_size, env_fallback_kv_quant_scheme, env_fallback_kv_skip_last_layer,
-    env_fallback_lang_bias, env_fallback_lang_bias_include_byte_fragments,
-    env_fallback_prompt_cache_capacity_bytes, env_fallback_prompt_cache_enabled,
-    env_fallback_prompt_cache_max_entries, env_fallback_prompt_cache_min_prefix,
-    env_fallback_prompt_cache_snapshot_capacity_bytes,
+    env_fallback_cache_type_v, env_fallback_chat_template_kwargs, env_fallback_embedding_model,
+    env_fallback_kv_bits, env_fallback_kv_group_size, env_fallback_kv_quant_scheme,
+    env_fallback_kv_skip_last_layer, env_fallback_lang_bias,
+    env_fallback_lang_bias_include_byte_fragments, env_fallback_prompt_cache_capacity_bytes,
+    env_fallback_prompt_cache_enabled, env_fallback_prompt_cache_max_entries,
+    env_fallback_prompt_cache_min_prefix, env_fallback_prompt_cache_snapshot_capacity_bytes,
     env_fallback_prompt_cache_snapshot_max_entries, env_fallback_prompt_cache_snapshot_ttl,
     env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, long_cli_flag_was_set,
     start_server,
@@ -344,6 +344,59 @@ struct ServerArgs {
         default_value_t = 120
     )]
     audio_request_timeout_secs: u64,
+
+    /// Embedding checkpoint to serve on /v1/embeddings next to the chat model
+    ///
+    /// A local directory or a HuggingFace `owner/name` repo-id (resolved like
+    /// `-m`). Loads on its own worker thread; `-m` keeps serving chat. When
+    /// `-m` itself is an embedding checkpoint this flag must be omitted (that
+    /// checkpoint is then served on /v1/embeddings and chat stays unloaded).
+    /// Also reads `MLXCEL_EMBEDDING_MODEL`.
+    #[arg(
+        long = "embedding-model",
+        env = "LLAMA_ARG_EMBEDDING_MODEL",
+        value_name = "PATH_OR_REPO_ID"
+    )]
+    embedding_model: Option<String>,
+
+    /// Texts per embedding forward pass (default: 16)
+    ///
+    /// `/v1/embeddings` sorts text inputs by token length and cuts them into
+    /// micro-batches of this size, each right-padded to its longest member.
+    #[arg(
+        long = "embedding-batch-size",
+        env = "MLXCEL_EMBEDDING_BATCH_SIZE",
+        default_value_t = 16
+    )]
+    embedding_batch_size: usize,
+
+    /// Token cap per embedding input (default: derived from the checkpoint)
+    ///
+    /// Lowers the limit derived from `sentence_bert_config.json`,
+    /// `tokenizer_config.json` and `config.json` (hard cap 8192). Longer
+    /// inputs are truncated from the right, keeping a trailing special token.
+    #[arg(
+        long = "embedding-max-length",
+        env = "MLXCEL_EMBEDDING_MAX_LENGTH",
+        value_name = "N"
+    )]
+    embedding_max_length: Option<usize>,
+
+    /// Bound on the embedding worker command queue; a full queue returns 503 (default: 8)
+    #[arg(
+        long = "embedding-queue-depth",
+        env = "MLXCEL_EMBEDDING_QUEUE_DEPTH",
+        default_value_t = 8
+    )]
+    embedding_queue_depth: usize,
+
+    /// Per-request embedding reply timeout in seconds; 0 falls back to the default (default: 120)
+    #[arg(
+        long = "embedding-request-timeout-secs",
+        env = "MLXCEL_EMBEDDING_REQUEST_TIMEOUT_SECS",
+        default_value_t = 120
+    )]
+    embedding_request_timeout_secs: u64,
 
     /// Prefill chunk size in tokens (0 = disabled, default: 512)
     #[arg(long = "prefill-chunk-size", default_value_t = 512)]
@@ -1404,6 +1457,21 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         args.revision.as_deref(),
     )?;
 
+    // `--embedding-model` accepts the same path-or-repo-id shapes as `-m`
+    // and resolves through the same store lookup / auto-download.
+    env_fallback_embedding_model(&mut args.embedding_model);
+    let embedding_model_path = args
+        .embedding_model
+        .as_deref()
+        .map(|value| {
+            resolve_model_source_with_override(
+                std::path::Path::new(value),
+                args.models_dir.as_deref(),
+                args.revision.as_deref(),
+            )
+        })
+        .transpose()?;
+
     Ok(ServerStartupInput {
         model_path,
         adapter_path: args.lora,
@@ -1428,6 +1496,11 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         max_queue_depth: args.max_queue_depth,
         audio_queue_depth: args.audio_queue_depth,
         audio_request_timeout_secs: args.audio_request_timeout_secs,
+        embedding_model_path,
+        embedding_batch_size: args.embedding_batch_size,
+        embedding_max_length: args.embedding_max_length,
+        embedding_queue_depth: args.embedding_queue_depth,
+        embedding_request_timeout_secs: args.embedding_request_timeout_secs,
         prefill_chunk_size: args.prefill_chunk_size,
         prefill_grant_interval: args.prefill_grant_interval,
         batch_size: args.batch_size,

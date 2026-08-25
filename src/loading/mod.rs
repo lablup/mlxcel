@@ -557,6 +557,18 @@ pub fn load_model(model_path: &Path) -> Result<(LoadedModel, MlxcelTokenizer)> {
         );
     }
 
+    // Embedding checkpoints have no `lm_head` and no causal decode path; they
+    // are served by the embedding worker (`/v1/embeddings`, `mlxcel embed`),
+    // so fail here with the route instead of a missing-tensor symptom.
+    if crate::model_metadata::is_embedding_model_type(model_type) {
+        anyhow::bail!(
+            "{} is an embedding model served through /v1/embeddings (and `mlxcel embed`), \
+             not a text-generation model. Start mlxcel-server with -m <this checkpoint> or \
+             --embedding-model <path> to serve it; chat generation is not available from it.",
+            model_type.display_name()
+        );
+    }
+
     let path_str = model_path_str(model_path)?;
 
     let policy = if model_type == ModelType::Mistral3 {

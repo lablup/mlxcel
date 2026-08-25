@@ -21,6 +21,7 @@
 pub(crate) mod chat;
 pub(crate) mod detect;
 pub(crate) mod download;
+pub(crate) mod embed;
 pub(crate) mod generate;
 mod generate_diffusion;
 mod generate_falcon_ocr;
@@ -36,6 +37,7 @@ pub(crate) mod tune;
 pub(crate) use chat::{ChatOptions, run_chat};
 pub(crate) use detect::run_detect;
 pub(crate) use download::run_download;
+pub(crate) use embed::{EmbedArgs, run_embed};
 pub(crate) use generate::run_generate;
 pub(crate) use inspect::run_inspect;
 pub(crate) use models::{run_list_local, run_remove};

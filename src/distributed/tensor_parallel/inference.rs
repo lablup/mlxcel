@@ -424,6 +424,22 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         // Kokoro is a TTS model served through /v1/audio/speech, never routed
         // to tensor-parallel text inference; placeholder keeps the table total.
         ModelType::Kokoro => "kokoro",
+        // Embedding families are served through /v1/embeddings on their own
+        // worker and never reach tensor-parallel text inference; the loader
+        // rejects them earlier. Placeholder keeps the table total.
+        ModelType::Bert
+        | ModelType::XlmRoberta
+        | ModelType::ModernBert
+        | ModelType::SiglipText
+        | ModelType::Gemma3Embedding
+        | ModelType::Qwen3Embedding
+        | ModelType::Qwen3VLEmbedding
+        | ModelType::Lfm2Embedding
+        | ModelType::Ministral3Embedding
+        | ModelType::LlamaBidirec
+        | ModelType::LlamaNemotronVLEmbedding
+        | ModelType::ColIdefics3
+        | ModelType::ColQwen25 => "embedding",
     }
 }
 

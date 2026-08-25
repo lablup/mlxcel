@@ -373,6 +373,86 @@ where
     Ok(weights)
 }
 
+/// Safetensors file names that are never part of a served checkpoint even
+/// when they sit next to real shards: a raw consolidated export kept beside
+/// its sharded twin, and a LoRA adapter delta.
+const SUBFOLDER_SKIPPED_FILES: &[&str] = &["consolidated.safetensors", "adapter_model.safetensors"];
+
+/// Load a checkpoint that may spread its tensors over sentence-transformers
+/// style module subfolders (`2_Dense/model.safetensors`, ...).
+///
+/// The top-level shards load exactly as [`load_weights_from_dir`] loads them
+/// (index-driven or globbed), minus `consolidated.safetensors` and
+/// `adapter_model.safetensors`. Then every immediate subdirectory is walked
+/// in sorted order and each `*.safetensors` inside it is loaded with its
+/// tensor names prefixed by `<folder>.`, so `2_Dense/model.safetensors`
+/// `linear.weight` becomes `2_Dense.linear.weight`. The same two file names
+/// are skipped inside subfolders. Hidden directories and nested levels are
+/// not visited; a subfolder without safetensors contributes nothing.
+///
+/// Used by: `mlxcel::embeddings::load_embedding_model` (every embedding
+/// family), so the `2_Dense` projection of a sentence-transformers export is
+/// not silently dropped.
+pub fn load_weights_from_dir_with_subfolders<P: AsRef<Path>>(dir: P) -> Result<WeightMap, String> {
+    let dir = dir.as_ref();
+    let mut weights = HashMap::new();
+
+    let skipped = |path: &Path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| SUBFOLDER_SKIPPED_FILES.contains(&name))
+    };
+
+    let shard_paths: Vec<std::path::PathBuf> = collect_shard_paths(dir)?
+        .into_iter()
+        .filter(|path| !skipped(path))
+        .collect();
+    if shard_paths.is_empty() {
+        return Err(format!(
+            "No safetensors files found in directory: {}",
+            dir.display()
+        ));
+    }
+    for path in &shard_paths {
+        weights.extend(load_safetensors_filtered(path, |_| true)?);
+    }
+
+    let mut subdirs: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .map_err(|e| format!("Failed to read directory {}: {e}", dir.display()))?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            (path.is_dir() && !name.starts_with('.')).then_some(path)
+        })
+        .collect();
+    subdirs.sort();
+
+    for subdir in subdirs {
+        let Some(folder) = subdir.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let mut files = glob_safetensors(&subdir)?;
+        files.retain(|path| !skipped(path));
+        for path in files {
+            let (is_symlink, target_exists) = check_symlink(&path);
+            if is_symlink && !target_exists {
+                eprintln!(
+                    "Warning: skipping broken symlink {} in subfolder {folder}",
+                    path.display()
+                );
+                continue;
+            }
+            let loaded = load_safetensors_filtered(&path, |_| true)?;
+            for (name, array) in loaded {
+                weights.insert(format!("{folder}.{name}"), array);
+            }
+        }
+    }
+
+    Ok(weights)
+}
+
 /// Collect and validate the list of shard paths to load from a model directory.
 ///
 /// Uses the index JSON when present; otherwise globs all `*.safetensors` files.

@@ -28,6 +28,7 @@ use crate::tokenizer::MlxcelTokenizer;
 use super::audio_model::AudioModelProvider;
 use super::batch::BatchObservability;
 use super::conversation_store::ConversationStore;
+use super::embedding_model::EmbeddingModelProvider;
 use super::prompt_cache::{PromptCacheStore, metrics::PromptCacheMetrics};
 use super::responses_store::ResponsesStore;
 use super::{ChatTemplateProcessor, ModelProvider, ServerConfig};
@@ -407,6 +408,11 @@ pub struct AppState {
     /// speech-to-text or text-to-speech model is wired in; while it is `None`
     /// the audio routes return a structured `501 Not Implemented`.
     pub audio_model: Option<Arc<dyn AudioModelProvider>>,
+    /// Embedding-model provider serving `POST /v1/embeddings`. `None` until
+    /// an embedding checkpoint is loaded (`-m <embedding checkpoint>` or
+    /// `--embedding-model`); while it is `None` the route returns a
+    /// structured `501 Not Implemented`.
+    pub embedding_model: Option<Arc<dyn EmbeddingModelProvider>>,
 }
 
 impl AppState {
@@ -435,6 +441,7 @@ impl AppState {
             responses_store: None,
             conversation_store: None,
             audio_model: None,
+            embedding_model: None,
         }
     }
 
@@ -467,6 +474,7 @@ impl AppState {
             responses_store: None,
             conversation_store: None,
             audio_model: None,
+            embedding_model: None,
         }
     }
 
@@ -527,6 +535,17 @@ impl AppState {
     #[must_use]
     pub fn with_audio_model(mut self, provider: Option<Arc<dyn AudioModelProvider>>) -> Self {
         self.audio_model = provider;
+        self
+    }
+
+    /// Attach an embedding-model provider serving `POST /v1/embeddings`.
+    /// Pass `None` to leave the route returning a structured `501`.
+    #[must_use]
+    pub fn with_embedding_model(
+        mut self,
+        provider: Option<Arc<dyn EmbeddingModelProvider>>,
+    ) -> Self {
+        self.embedding_model = provider;
         self
     }
 

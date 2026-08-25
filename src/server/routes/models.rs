@@ -24,12 +24,26 @@ use crate::server::types::{ModelInfo, ModelsResponse};
 
 /// GET /v1/models
 pub async fn list_models(State(state): State<AppState>) -> Json<ModelsResponse> {
-    let models = vec![ModelInfo {
+    let mut models = vec![ModelInfo {
         id: state.display_model_id().to_string(),
         object: "model".to_string(),
         created: state.model_provider.created_at(),
         owned_by: "user".to_string(),
     }];
+
+    // A separately loaded embedding model (`--embedding-model`) is listed
+    // next to the chat model; when `-m` itself is the embedding checkpoint
+    // the two ids coincide and the entry above already covers it.
+    if let Some(embedding) = state.embedding_model.as_ref()
+        && embedding.model_id() != state.display_model_id()
+    {
+        models.push(ModelInfo {
+            id: embedding.model_id().to_string(),
+            object: "model".to_string(),
+            created: embedding.created_at(),
+            owned_by: "user".to_string(),
+        });
+    }
 
     Json(ModelsResponse {
         object: "list".to_string(),

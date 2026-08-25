@@ -159,6 +159,160 @@ fn additive_causal_window_mask(size: i32, offset: i32, window: Option<i32>) -> U
     ffi::where_cond(&allowed, &zero, &neg_inf)
 }
 
+/// Convert a boolean "attend" array into an additive f32 `0 / -inf` mask.
+///
+/// Shared tail of the padding-aware mask builders below. The output is f32
+/// on purpose: `fast_scaled_dot_product_attention` casts a floating mask to
+/// the query dtype and `-inf` survives that cast, so a f32 `0 / -inf` mask is
+/// safe for f16 and bf16 activations. Never build a mask as `(1 - m) * C`
+/// with a finite `C` in the activation dtype: in f16 `-1e9` overflows to
+/// `-inf` and `0 * -inf` is NaN, which corrupts every attended position.
+fn additive_from_allowed(allowed: &MlxArray) -> UniquePtr<MlxArray> {
+    let zero = crate::from_slice_f32(&[0.0], &[1, 1, 1, 1]);
+    let neg_inf = crate::from_slice_f32(&[f32::NEG_INFINITY], &[1, 1, 1, 1]);
+    ffi::where_cond(allowed, &zero, &neg_inf)
+}
+
+/// Read the `[B, T]` shape of a padding mask, panicking with a clear message
+/// on any other rank (a shape bug in the caller, not a runtime condition).
+fn padding_mask_shape(mask: &MlxArray, builder: &str) -> (i32, i32) {
+    let shape = ffi::array_shape(mask);
+    assert!(
+        shape.len() == 2,
+        "{builder}: padding mask must be [B, L], got shape {shape:?}"
+    );
+    (shape[0], shape[1])
+}
+
+/// Bidirectional (encoder) mask that blocks only padding keys.
+///
+/// `mask` is `[B, L]` int32 with `1` for a real token and `0` for padding.
+/// Returns `[B, 1, 1, L]` f32 with `0.0` = attend and `-inf` = blocked: key
+/// column `k` of row `b` is blocked iff `mask[b, k] == 0`. Query rows of
+/// padding tokens still see every real key, so no row is fully blocked and no
+/// softmax is NaN. Broadcasts against `[B, H, L, L]` scores.
+///
+/// Used by: the encoder-only embedding families (BERT, XLM-RoBERTa,
+/// ModernBERT, SigLIP text) and the bidirectional decoder embedders
+/// (EmbeddingGemma, Qwen3-Embedding, LFM2 / Ministral3 / Llama bidirectional,
+/// ColQwen2.5, ColIdefics3) served through `/v1/embeddings`.
+pub fn create_bidirectional_padding_mask(mask: &MlxArray) -> UniquePtr<MlxArray> {
+    let (b, l) = padding_mask_shape(mask, "create_bidirectional_padding_mask");
+    let zero_i32 = ffi::from_slice_i32(&[0], &[1, 1]);
+    let key_ok = ffi::reshape(&ffi::not_equal(mask, &zero_i32), &[b, 1, 1, l]);
+    additive_from_allowed(&key_ok)
+}
+
+/// Causal mask that also blocks padding keys, for right- or left-padded
+/// batches of a decoder-style embedder (or a batched causal prefill).
+///
+/// `mask` is `[B, T]` int32 over the full key axis, `T = L + offset`, with `1`
+/// for a real token and `0` for padding; `L = T - offset` is the number of
+/// query rows in this step. Returns `[B, 1, L, T]` f32 with `0.0` = attend
+/// and `-inf` = blocked: `allowed[b, q, k] = (k <= q + offset) && mask[b, k]
+/// == 1`.
+///
+/// A query row whose causal-AND-padding key set is empty (a leading-padding
+/// row in a left-padded batch) keeps its diagonal column `k == q + offset`
+/// unblocked, the same rescue [`create_causal_mask_with_left_padding`]
+/// applies, so every row attends at least one key and softmax over any row is
+/// finite. Padding-row outputs are garbage-but-finite and are never consumed,
+/// because those key positions stay blocked for every real query.
+///
+/// Used by: the last-token embedding families (Qwen3-Embedding without
+/// bidirectional attention, Qwen3-VL-Embedding) and any batched causal
+/// prefill over a padded `[B, L]` input.
+pub fn create_causal_padding_mask(mask: &MlxArray, offset: i32) -> UniquePtr<MlxArray> {
+    let (b, total) = padding_mask_shape(mask, "create_causal_padding_mask");
+    assert!(
+        offset >= 0 && offset < total,
+        "create_causal_padding_mask: offset {offset} must be in [0, {total})"
+    );
+    let size = total - offset;
+
+    let q_idx = ffi::reshape(&ffi::arange_i32(offset, total, 1), &[1, 1, size, 1]);
+    let k_idx = ffi::reshape(&ffi::arange_i32(0, total, 1), &[1, 1, 1, total]);
+    let causal = ffi::less_equal(&k_idx, &q_idx);
+
+    let zero_i32 = ffi::from_slice_i32(&[0], &[1, 1]);
+    let key_ok = ffi::reshape(&ffi::not_equal(mask, &zero_i32), &[b, 1, 1, total]);
+    let allowed = ffi::logical_and(&causal, &key_ok);
+
+    // Rescue exactly the rows with no attended key: count the allowed
+    // columns per row and re-enable the diagonal where that count is zero.
+    let allowed_count = ffi::sum_axis(&ffi::astype(&allowed, dtype::INT32), -1, true);
+    let zero_count = ffi::from_slice_i32(&[0], &[1, 1, 1, 1]);
+    let fully_blocked = ffi::equal(&allowed_count, &zero_count);
+    let diagonal = ffi::equal(&k_idx, &q_idx);
+    let rescue = ffi::logical_and(&fully_blocked, &diagonal);
+
+    additive_from_allowed(&ffi::logical_or(&allowed, &rescue))
+}
+
+/// Bidirectional sliding-window mask that blocks padding keys and keys more
+/// than `window - 1` positions away in either direction.
+///
+/// `mask` is `[B, L]` int32 (`1` real, `0` padding). Returns `[B, 1, L, L]`
+/// f32 with `0.0` = attend and `-inf` = blocked: `blocked[b, q, k] =
+/// mask[b, k] == 0 || |q - k| >= window`. The diagonal is always inside the
+/// window (`window >= 1`), so a real query row always attends itself; a
+/// padding query row attends every real key inside its window, and one that
+/// has none keeps its own column so no softmax row is NaN.
+///
+/// Used by: ModernBERT local-attention layers and the EmbeddingGemma
+/// sliding-window layers served through `/v1/embeddings`.
+pub fn create_bidirectional_window_mask(mask: &MlxArray, window: i32) -> UniquePtr<MlxArray> {
+    let (b, l) = padding_mask_shape(mask, "create_bidirectional_window_mask");
+    assert!(
+        window >= 1,
+        "create_bidirectional_window_mask: window must be >= 1, got {window}"
+    );
+
+    let q_idx = ffi::reshape(&ffi::arange_i32(0, l, 1), &[1, 1, l, 1]);
+    let k_idx = ffi::reshape(&ffi::arange_i32(0, l, 1), &[1, 1, 1, l]);
+    let distance = ffi::abs(&ffi::subtract(&q_idx, &k_idx));
+    let window_bound = ffi::from_slice_i32(&[window], &[1, 1, 1, 1]);
+    let in_window = ffi::less(&distance, &window_bound);
+
+    let zero_i32 = ffi::from_slice_i32(&[0], &[1, 1]);
+    let key_ok = ffi::reshape(&ffi::not_equal(mask, &zero_i32), &[b, 1, 1, l]);
+    let allowed = ffi::logical_and(&in_window, &key_ok);
+
+    // Same rescue as the causal builder: a row with no attended key keeps
+    // its diagonal so the softmax stays finite.
+    let allowed_count = ffi::sum_axis(&ffi::astype(&allowed, dtype::INT32), -1, true);
+    let zero_count = ffi::from_slice_i32(&[0], &[1, 1, 1, 1]);
+    let fully_blocked = ffi::equal(&allowed_count, &zero_count);
+    let diagonal = ffi::equal(&k_idx, &q_idx);
+    let rescue = ffi::logical_and(&fully_blocked, &diagonal);
+
+    additive_from_allowed(&ffi::logical_or(&allowed, &rescue))
+}
+
+/// Materialize an array as a flat row-major `Vec<f32>`, casting from any
+/// floating or integer dtype first.
+///
+/// Evaluates the array (it may be lazy) and copies the bytes out, so this is
+/// a readback for results, not a hot-path accessor. Every element is one
+/// `f32` in native byte order because the cast lands the data in `FLOAT32`
+/// before the raw copy.
+///
+/// Used by: the `/v1/embeddings` engine (pooled vectors back to the HTTP
+/// layer), `mlxcel embed`, and the embedding mask / pooling tests.
+pub fn array_to_vec_f32(arr: &MlxArray) -> Vec<f32> {
+    let as_f32 = if ffi::array_dtype(arr) == dtype::FLOAT32 {
+        None
+    } else {
+        Some(ffi::astype(arr, dtype::FLOAT32))
+    };
+    let source: &MlxArray = as_f32.as_deref().unwrap_or(arr);
+    ffi::eval(source);
+    ffi::array_to_raw_bytes(source)
+        .chunks_exact(4)
+        .map(|chunk| f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect()
+}
+
 /// Create a causal attention mask with per-sequence left-padding support.
 ///
 /// Mirrors the Python `mlx_lm.models.base.create_causal_mask` with the
@@ -1161,6 +1315,10 @@ pub fn pipeline_hint(hidden: &MlxArray, layer_idx: usize, total_layers: usize) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "utils_embedding_mask_tests.rs"]
+mod embedding_mask_tests;
 
 #[cfg(test)]
 mod tests {
