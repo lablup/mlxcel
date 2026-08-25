@@ -1320,10 +1320,12 @@ where
                 lfm2vl.img_thumbnail_id,
                 lfm2vl.use_image_special_tokens,
             )
-            .map(|stats| VlmPreparationSummary::Lfm2Vl {
-                image_blocks: stats.image_blocks,
-                total_image_tokens: stats.total_image_tokens,
-            });
+            .map(|stats| {
+                stats.map(|stats| VlmPreparationSummary::Lfm2Vl {
+                    image_blocks: stats.image_blocks,
+                    total_image_tokens: stats.total_image_tokens,
+                })
+            })?;
 
             // LFM2-VL runs every image in one preparation pass; skip the
             // opportunistic vision cache for this first integration.

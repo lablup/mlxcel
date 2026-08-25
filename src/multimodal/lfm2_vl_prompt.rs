@@ -24,6 +24,8 @@
 //! the invariant that matters is that the count of 396-tokens equals the number
 //! of image-feature rows.
 
+use anyhow::{Result, bail};
+
 use crate::vision::processors::lfm2_vl::Lfm2VlImageLayout;
 
 /// Statistics describing the LFM2-VL image-token expansion.
@@ -33,9 +35,59 @@ pub struct InsertedLfm2VlTokens {
     pub total_image_tokens: usize,
 }
 
-fn view_token_count((h, w): (i32, i32), downsample_factor: i32) -> usize {
-    let f = downsample_factor.max(1);
-    (((h + f - 1) / f) * ((w + f - 1) / f)).max(0) as usize
+fn view_token_count((h, w): (i32, i32), downsample_factor: i32) -> Result<usize> {
+    if h <= 0 || w <= 0 {
+        bail!("LFM2-VL image layout contains non-positive patch grid {h}x{w}");
+    }
+    let f = i64::from(downsample_factor.max(1));
+    let rows = (i64::from(h) + f - 1) / f;
+    let cols = (i64::from(w) + f - 1) / f;
+    let tokens = rows
+        .checked_mul(cols)
+        .ok_or_else(|| anyhow::anyhow!("LFM2-VL image token count overflows for grid {h}x{w}"))?;
+    usize::try_from(tokens)
+        .map_err(|_| anyhow::anyhow!("LFM2-VL image token count exceeds usize for grid {h}x{w}"))
+}
+
+fn validate_layout(layout: &Lfm2VlImageLayout) -> Result<usize> {
+    if layout.views.is_empty() {
+        bail!("LFM2-VL image layout contains no views");
+    }
+    if layout.rows == 0 || layout.cols == 0 {
+        bail!(
+            "LFM2-VL image layout has invalid tile grid {}x{}",
+            layout.rows,
+            layout.cols
+        );
+    }
+    if layout.rows > 10 || layout.cols > 10 {
+        bail!(
+            "LFM2-VL image layout {}x{} exceeds the 10x10 row/col marker table",
+            layout.rows,
+            layout.cols
+        );
+    }
+    let tile_count = layout
+        .rows
+        .checked_mul(layout.cols)
+        .ok_or_else(|| anyhow::anyhow!("LFM2-VL image layout tile grid overflows"))?;
+    if layout.is_tiled() {
+        if layout.views.len() != tile_count && layout.views.len() != tile_count + 1 {
+            bail!(
+                "LFM2-VL tiled layout has {} views but grid {}x{} requires {} tiles plus at most one thumbnail",
+                layout.views.len(),
+                layout.rows,
+                layout.cols,
+                tile_count
+            );
+        }
+    } else if layout.views.len() != 1 {
+        bail!(
+            "LFM2-VL single-image layout has {} views; expected exactly one",
+            layout.views.len()
+        );
+    }
+    Ok(tile_count)
 }
 
 fn append_image_run(block: &mut Vec<i32>, image_token_id: i32, count: usize) {
@@ -51,12 +103,11 @@ fn build_block(
     use_special: bool,
     layout: &Lfm2VlImageLayout,
     downsample_factor: i32,
-) -> Vec<i32> {
-    let total_count: usize = layout
-        .views
-        .iter()
-        .map(|&grid| view_token_count(grid, downsample_factor))
-        .sum();
+) -> Result<Vec<i32>> {
+    let total_count = layout.views.iter().try_fold(0usize, |acc, &grid| {
+        acc.checked_add(view_token_count(grid, downsample_factor)?)
+            .ok_or_else(|| anyhow::anyhow!("LFM2-VL image token count overflows"))
+    })?;
     let mut block = Vec::with_capacity(total_count + 2 + layout.views.len());
     if use_special && image_start_id != 0 {
         block.push(image_start_id);
@@ -80,7 +131,7 @@ fn build_block(
             append_image_run(
                 &mut block,
                 image_token_id,
-                view_token_count(layout.views[tile_idx], downsample_factor),
+                view_token_count(layout.views[tile_idx], downsample_factor)?,
             );
         }
         if layout.has_thumbnail() {
@@ -90,21 +141,21 @@ fn build_block(
             append_image_run(
                 &mut block,
                 image_token_id,
-                view_token_count(layout.views[tile_count], downsample_factor),
+                view_token_count(layout.views[tile_count], downsample_factor)?,
             );
         }
     } else if let Some(&grid) = layout.views.first() {
         append_image_run(
             &mut block,
             image_token_id,
-            view_token_count(grid, downsample_factor),
+            view_token_count(grid, downsample_factor)?,
         );
     }
 
     if use_special && image_end_id != 0 {
         block.push(image_end_id);
     }
-    block
+    Ok(block)
 }
 
 /// Expand (or splice) LFM2-VL image-token runs into `prompt_tokens`. Per-image
@@ -120,15 +171,19 @@ pub fn insert_lfm2_vl_image_tokens(
     img_row_col_ids: &[[i32; 10]; 10],
     thumbnail_id: i32,
     use_special: bool,
-) -> Option<InsertedLfm2VlTokens> {
+) -> Result<Option<InsertedLfm2VlTokens>> {
     if prompt_tokens.is_empty() || layouts.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let total_image_tokens: usize = layouts
-        .iter()
-        .flat_map(|layout| layout.views.iter())
-        .map(|&grid| view_token_count(grid, downsample_factor))
-        .sum();
+    for layout in layouts {
+        validate_layout(layout)?;
+    }
+    let total_image_tokens = layouts.iter().try_fold(0usize, |acc, layout| {
+        layout.views.iter().try_fold(acc, |acc, &grid| {
+            acc.checked_add(view_token_count(grid, downsample_factor)?)
+                .ok_or_else(|| anyhow::anyhow!("LFM2-VL total image token count overflows"))
+        })
+    })?;
     let image_blocks = layouts.len();
 
     // Case 1: expand each bare <image> placeholder in place (one per logical image).
@@ -137,6 +192,12 @@ pub fn insert_lfm2_vl_image_tokens(
         .filter(|&&t| t == image_token_id)
         .count();
     if placeholder_count > 0 {
+        if placeholder_count != layouts.len() {
+            bail!(
+                "LFM2-VL prompt contains {placeholder_count} <image> placeholders but {} logical images were supplied",
+                layouts.len()
+            );
+        }
         let mut expanded = Vec::with_capacity(prompt_tokens.len() + total_image_tokens);
         let mut image_idx = 0usize;
         for &token in prompt_tokens.iter() {
@@ -150,17 +211,17 @@ pub fn insert_lfm2_vl_image_tokens(
                     use_special,
                     &layouts[image_idx],
                     downsample_factor,
-                ));
+                )?);
                 image_idx += 1;
             } else {
                 expanded.push(token);
             }
         }
         *prompt_tokens = expanded;
-        return Some(InsertedLfm2VlTokens {
+        return Ok(Some(InsertedLfm2VlTokens {
             image_blocks,
             total_image_tokens,
-        });
+        }));
     }
 
     // Case 2: no placeholder; splice one block per image after the first token.
@@ -175,7 +236,7 @@ pub fn insert_lfm2_vl_image_tokens(
             use_special,
             layout,
             downsample_factor,
-        ));
+        )?);
     }
     let head = prompt_tokens[0];
     let rest: Vec<i32> = prompt_tokens[1..].to_vec();
@@ -183,10 +244,10 @@ pub fn insert_lfm2_vl_image_tokens(
     prompt_tokens.extend(blocks);
     prompt_tokens.extend(rest);
 
-    Some(InsertedLfm2VlTokens {
+    Ok(Some(InsertedLfm2VlTokens {
         image_blocks,
         total_image_tokens,
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -226,6 +287,7 @@ mod tests {
             THUMB,
             true,
         )
+        .unwrap()
         .unwrap();
         assert_eq!(stats.image_blocks, 1);
         assert_eq!(stats.total_image_tokens, 6);
@@ -251,6 +313,7 @@ mod tests {
             THUMB,
             false,
         )
+        .unwrap()
         .unwrap();
         // grid (2,2), f=2 -> T=1. No start/end.
         assert_eq!(prompt, vec![1, IMAGE, 2]);
@@ -271,6 +334,7 @@ mod tests {
             THUMB,
             true,
         )
+        .unwrap()
         .unwrap();
         assert_eq!(stats.total_image_tokens, 7);
         assert_eq!(prompt.iter().filter(|&&t| t == IMAGE).count(), 7);
@@ -291,6 +355,7 @@ mod tests {
             THUMB,
             true,
         )
+        .unwrap()
         .unwrap();
         assert_eq!(stats.image_blocks, 1);
         assert_eq!(stats.total_image_tokens, 6 * 256);
@@ -323,9 +388,46 @@ mod tests {
             THUMB,
             true,
         )
+        .unwrap()
         .unwrap();
         assert!(prompt.windows(1).any(|w| w[0] == THUMB));
         let thumb_pos = prompt.iter().position(|&id| id == THUMB).unwrap();
         assert_eq!(prompt[thumb_pos + 1..thumb_pos + 17], [IMAGE; 16]);
+    }
+
+    #[test]
+    fn rejects_placeholder_image_count_mismatch() {
+        let mut prompt = vec![1, IMAGE, 2];
+        let err = insert_lfm2_vl_image_tokens(
+            &mut prompt,
+            &[layout(vec![(2, 2)], 1, 1), layout(vec![(2, 2)], 1, 1)],
+            2,
+            IMAGE,
+            START,
+            END,
+            &marker_ids(),
+            THUMB,
+            true,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("1 <image> placeholders"));
+    }
+
+    #[test]
+    fn rejects_malformed_layout_before_merge() {
+        let mut prompt = vec![1, IMAGE, 2];
+        let err = insert_lfm2_vl_image_tokens(
+            &mut prompt,
+            &[layout(vec![(32, 32), (32, 32)], 2, 2)],
+            2,
+            IMAGE,
+            START,
+            END,
+            &marker_ids(),
+            THUMB,
+            true,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("requires 4 tiles"));
     }
 }

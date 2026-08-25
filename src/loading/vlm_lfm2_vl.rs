@@ -23,7 +23,7 @@
 //! `UnifiedLinear` loads plain tensors as a regular `Linear` when no `.scales`
 //! companion is present.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use std::path::Path;
 
@@ -40,6 +40,8 @@ const DEFAULT_IMAGE_START_ID: i32 = 498;
 const DEFAULT_IMAGE_END_ID: i32 = 499;
 const DEFAULT_IMG_ROW_COL_BASE_ID: i32 = 397;
 const DEFAULT_IMG_THUMBNAIL_ID: i32 = 497;
+const MAX_LFM2_VL_VIEW_PATCHES: usize = 16 * 1024;
+const MAX_LFM2_VL_CANVAS_PIXELS: usize = 32 * 1024 * 1024;
 
 fn get_usize(v: &Value, key: &str, default: usize) -> usize {
     v.get(key)
@@ -59,10 +61,43 @@ fn get_f32(v: &Value, key: &str, default: f32) -> f32 {
         .unwrap_or(default)
 }
 
-fn read_json_file(path: &Path) -> Option<Value> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+fn read_optional_json_file(path: &Path, label: &str) -> Result<Option<Value>> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => serde_json::from_str::<Value>(&content)
+            .with_context(|| format!("Failed to parse LFM2-VL {label} at {}", path.display()))
+            .map(Some),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err)
+            .with_context(|| format!("Failed to read LFM2-VL {label} at {}", path.display())),
+    }
+}
+
+fn token_i64_to_i32(id: i64) -> Option<i32> {
+    i32::try_from(id).ok().filter(|id| *id >= 0)
+}
+
+fn token_field(v: &Value, key: &str) -> Result<Option<i32>> {
+    v.get(key)
+        .and_then(|value| value.as_i64())
+        .map(|id| {
+            token_i64_to_i32(id)
+                .ok_or_else(|| anyhow::anyhow!("LFM2-VL {key} token id {id} is outside i32 range"))
+        })
+        .transpose()
+}
+
+fn positive_i32_field(v: &Value, key: &str) -> Result<Option<i32>> {
+    v.get(key)
+        .and_then(|value| value.as_i64())
+        .map(|value| {
+            i32::try_from(value)
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("LFM2-VL {key} value {value} must be a positive i32")
+                })
+        })
+        .transpose()
 }
 
 fn sidecar_or_config_usize(
@@ -117,8 +152,43 @@ fn validate_tiling_policy(
     policy: Lfm2VlTilingPolicy,
     patch_size: usize,
     downsample_factor: usize,
+    min_image_tokens: usize,
+    max_image_tokens: usize,
     max_num_patches: usize,
 ) -> Result<()> {
+    if patch_size == 0 {
+        bail!("LFM2-VL processor encoder_patch_size must be positive");
+    }
+    if downsample_factor == 0 {
+        bail!("LFM2-VL processor downsample_factor must be positive");
+    }
+    if min_image_tokens == 0 || min_image_tokens > max_image_tokens {
+        bail!(
+            "LFM2-VL processor requires 1 <= min_image_tokens <= max_image_tokens, got {}..={}",
+            min_image_tokens,
+            max_image_tokens
+        );
+    }
+    let max_single_view_patches = max_image_tokens
+        .checked_mul(downsample_factor)
+        .and_then(|tokens| tokens.checked_mul(downsample_factor))
+        .ok_or_else(|| anyhow::anyhow!("LFM2-VL max image patch budget overflows"))?;
+    if max_single_view_patches > MAX_LFM2_VL_VIEW_PATCHES {
+        bail!(
+            "LFM2-VL max_image_tokens={} with downsample_factor={} can allocate {} patches, exceeding the safety limit {}",
+            max_image_tokens,
+            downsample_factor,
+            max_single_view_patches,
+            MAX_LFM2_VL_VIEW_PATCHES
+        );
+    }
+    if max_num_patches > MAX_LFM2_VL_VIEW_PATCHES {
+        bail!(
+            "LFM2-VL max_num_patches={} exceeds the safety limit {}",
+            max_num_patches,
+            MAX_LFM2_VL_VIEW_PATCHES
+        );
+    }
     if policy.tile_size == 0 {
         bail!("LFM2-VL processor_config.json tile_size must be positive");
     }
@@ -141,7 +211,9 @@ fn validate_tiling_policy(
             policy.max_tiles
         );
     }
-    let total = patch_size.max(1) * downsample_factor.max(1);
+    let total = patch_size
+        .checked_mul(downsample_factor)
+        .ok_or_else(|| anyhow::anyhow!("LFM2-VL patch_size * downsample_factor overflows"))?;
     if !policy.tile_size.is_multiple_of(total) {
         bail!(
             "LFM2-VL processor_config.json tile_size={} must be divisible by encoder_patch_size * downsample_factor ({})",
@@ -159,6 +231,20 @@ fn validate_tiling_policy(
             max_num_patches
         );
     }
+    let max_canvas_pixels = policy
+        .tile_size
+        .checked_mul(policy.tile_size)
+        .and_then(|pixels_per_tile| pixels_per_tile.checked_mul(policy.max_tiles))
+        .ok_or_else(|| anyhow::anyhow!("LFM2-VL tiling canvas pixel count overflows"))?;
+    if max_canvas_pixels > MAX_LFM2_VL_CANVAS_PIXELS {
+        bail!(
+            "LFM2-VL processor_config.json tile_size={} and max_tiles={} can allocate {} canvas pixels, exceeding the safety limit {}",
+            policy.tile_size,
+            policy.max_tiles,
+            max_canvas_pixels,
+            MAX_LFM2_VL_CANVAS_PIXELS
+        );
+    }
     Ok(())
 }
 
@@ -166,7 +252,7 @@ fn resolve_token_id_from_json(value: &Value, name: &str) -> Option<i32> {
     value
         .get(name)
         .and_then(|id| id.as_i64())
-        .map(|id| id as i32)
+        .and_then(token_i64_to_i32)
         .or_else(|| {
             value
                 .get("added_tokens")
@@ -178,7 +264,7 @@ fn resolve_token_id_from_json(value: &Value, name: &str) -> Option<i32> {
                                 token
                                     .get("id")
                                     .and_then(|id| id.as_i64())
-                                    .map(|id| id as i32)
+                                    .and_then(token_i64_to_i32)
                             })
                             .flatten()
                     })
@@ -190,7 +276,7 @@ fn resolve_token_id_from_json(value: &Value, name: &str) -> Option<i32> {
                 .and_then(|model| model.get("vocab"))
                 .and_then(|vocab| vocab.get(name))
                 .and_then(|id| id.as_i64())
-                .map(|id| id as i32)
+                .and_then(token_i64_to_i32)
         })
         .or_else(|| {
             value
@@ -199,7 +285,7 @@ fn resolve_token_id_from_json(value: &Value, name: &str) -> Option<i32> {
                 .and_then(|decoder| {
                     decoder.iter().find_map(|(id, token)| {
                         (token.get("content").and_then(|content| content.as_str()) == Some(name))
-                            .then(|| id.parse::<i32>().ok())
+                            .then(|| id.parse::<i32>().ok().filter(|id| *id >= 0))
                             .flatten()
                     })
                 })
@@ -348,10 +434,7 @@ pub(crate) fn load_lfm2_vl(model_path: &Path) -> Result<LoadedModel> {
         Lfm2VlVisionTower::from_weights(&weights, "vision_tower", &vision_config, gs, bits)
             .map_err(|e| anyhow::anyhow!("Failed to load LFM2-VL vision tower: {}", e))?;
 
-    let downsample_factor = full_config
-        .get("downsample_factor")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(2) as i32;
+    let downsample_factor = positive_i32_field(&full_config, "downsample_factor")?.unwrap_or(2);
     let use_layernorm = full_config
         .get("projector_use_layernorm")
         .and_then(|v| v.as_bool())
@@ -369,7 +452,10 @@ pub(crate) fn load_lfm2_vl(model_path: &Path) -> Result<LoadedModel> {
     // Processor. LFM2-VL stores image-splitting policy in processor_config.json;
     // keep config.json as the compatibility fallback for the keys mlxcel already
     // read before splitting support.
-    let processor_config_json = read_json_file(&model_path.join("processor_config.json"));
+    let processor_config_json = read_optional_json_file(
+        &model_path.join("processor_config.json"),
+        "processor_config.json",
+    )?;
     let processor_config = processor_config_json.as_ref().map(lfm2_processor_sidecar);
     let patch_size = sidecar_or_config_usize(
         processor_config,
@@ -394,7 +480,14 @@ pub(crate) fn load_lfm2_vl(model_path: &Path) -> Result<LoadedModel> {
         "max_num_patches",
         default_max_num_patches,
     );
-    validate_tiling_policy(tiling, patch_size, downsample_factor_usize, max_num_patches)?;
+    validate_tiling_policy(
+        tiling,
+        patch_size,
+        downsample_factor_usize,
+        min_tokens,
+        max_tokens,
+        max_num_patches,
+    )?;
     let processor = Lfm2VlProcessor::new(
         patch_size,
         downsample_factor_usize,
@@ -403,19 +496,18 @@ pub(crate) fn load_lfm2_vl(model_path: &Path) -> Result<LoadedModel> {
         tiling,
     );
 
-    let added_tokens = read_json_file(&model_path.join("added_tokens.json"));
-    let tokenizer_json = read_json_file(&model_path.join("tokenizer.json"));
+    let added_tokens =
+        read_optional_json_file(&model_path.join("added_tokens.json"), "added_tokens.json")?;
+    let tokenizer_json =
+        read_optional_json_file(&model_path.join("tokenizer.json"), "tokenizer.json")?;
     let (img_row_col_ids, img_thumbnail_id) =
         resolve_lfm2_vl_marker_ids(added_tokens.as_ref(), tokenizer_json.as_ref(), tiling)?;
 
-    let image_token_id = full_config
-        .get("image_token_index")
-        .and_then(|v| v.as_i64())
+    let image_token_id = token_field(&full_config, "image_token_index")?
         .or_else(|| {
             resolve_added_token_id(added_tokens.as_ref(), tokenizer_json.as_ref(), "<image>")
-                .map(i64::from)
         })
-        .unwrap_or(DEFAULT_IMAGE_TOKEN_ID as i64) as i32;
+        .unwrap_or(DEFAULT_IMAGE_TOKEN_ID);
     let image_start_id = resolve_added_token_id(
         added_tokens.as_ref(),
         tokenizer_json.as_ref(),
@@ -436,6 +528,14 @@ pub(crate) fn load_lfm2_vl(model_path: &Path) -> Result<LoadedModel> {
     );
     let eos_token_ids = text_args.eos_token_ids();
 
+    let patch_dim = patch_size
+        .checked_mul(patch_size)
+        .and_then(|dim| dim.checked_mul(3))
+        .and_then(|dim| i32::try_from(dim).ok())
+        .ok_or_else(|| {
+            anyhow::anyhow!("LFM2-VL patch_dim overflows for patch_size={patch_size}")
+        })?;
+
     let vlm = Lfm2VlModel {
         text_model,
         vision_tower,
@@ -448,7 +548,7 @@ pub(crate) fn load_lfm2_vl(model_path: &Path) -> Result<LoadedModel> {
         img_thumbnail_id,
         use_image_special_tokens,
         downsample_factor,
-        patch_dim: (patch_size * patch_size * 3) as i32,
+        patch_dim,
         eos_token_ids,
     };
 
@@ -463,8 +563,8 @@ mod tests {
     #[test]
     fn tiling_validation_uses_processor_max_num_patches_not_vision_table_len() {
         let policy = Lfm2VlTilingPolicy::default();
-        assert!(validate_tiling_policy(policy, 16, 2, 1024).is_ok());
-        assert!(validate_tiling_policy(policy, 16, 2, 256).is_err());
+        assert!(validate_tiling_policy(policy, 16, 2, 64, 256, 1024).is_ok());
+        assert!(validate_tiling_policy(policy, 16, 2, 64, 256, 256).is_err());
     }
 
     #[test]
@@ -496,5 +596,55 @@ mod tests {
             "use_image_special_tokens",
             true
         ));
+    }
+
+    #[test]
+    fn processor_metadata_rejects_malformed_json() {
+        let dir = tempfile::tempdir().expect("temporary model dir");
+        let path = dir.path().join("processor_config.json");
+        std::fs::write(&path, "{not-json").expect("write processor config");
+
+        let err = read_optional_json_file(&path, "processor_config.json").unwrap_err();
+        assert!(err.to_string().contains("processor_config.json"));
+    }
+
+    #[test]
+    fn tiling_validation_bounds_canvas_allocation() {
+        let policy = Lfm2VlTilingPolicy {
+            tile_size: 2048,
+            max_tiles: 10,
+            ..Lfm2VlTilingPolicy::default()
+        };
+        let err =
+            validate_tiling_policy(policy, 16, 2, 64, 256, MAX_LFM2_VL_VIEW_PATCHES).unwrap_err();
+        assert!(err.to_string().contains("safety limit"));
+    }
+
+    #[test]
+    fn tiling_validation_bounds_single_view_patch_budget() {
+        let err = validate_tiling_policy(
+            Lfm2VlTilingPolicy::default(),
+            16,
+            2,
+            64,
+            MAX_LFM2_VL_VIEW_PATCHES,
+            1024,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("max_image_tokens"));
+    }
+
+    #[test]
+    fn token_field_rejects_out_of_range_ids() {
+        let config = json!({"image_token_index": i64::MAX});
+        let err = token_field(&config, "image_token_index").unwrap_err();
+        assert!(err.to_string().contains("outside i32 range"));
+    }
+
+    #[test]
+    fn positive_i32_field_rejects_invalid_downsample_factor() {
+        let config = json!({"downsample_factor": -2});
+        let err = positive_i32_field(&config, "downsample_factor").unwrap_err();
+        assert!(err.to_string().contains("positive i32"));
     }
 }
