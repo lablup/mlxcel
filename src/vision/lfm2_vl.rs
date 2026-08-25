@@ -41,7 +41,7 @@ use crate::models::lfm2::Lfm2Model;
 use crate::vision::connectors::lfm2_vl::Lfm2VlConnector;
 use crate::vision::encoders::lfm2_vl::Lfm2VlVisionTower;
 use crate::vision::merge::{self, InputEmbeddings};
-use crate::vision::processors::lfm2_vl::Lfm2VlProcessor;
+use crate::vision::processors::lfm2_vl::{Lfm2VlImageLayout, Lfm2VlProcessor};
 
 /// Top-level LFM2-VL runtime.
 pub struct Lfm2VlModel {
@@ -54,6 +54,8 @@ pub struct Lfm2VlModel {
     /// `<|image_start|>` (498) / `<|image_end|>` (499); `0` when absent.
     pub image_start_id: i32,
     pub image_end_id: i32,
+    pub img_row_col_ids: [[i32; 10]; 10],
+    pub img_thumbnail_id: i32,
     pub use_image_special_tokens: bool,
     pub downsample_factor: i32,
     pub patch_dim: i32,
@@ -63,23 +65,24 @@ pub struct Lfm2VlModel {
 impl Lfm2VlModel {
     /// Merge image features into the text embedding stream.
     ///
-    /// `pixel_values`: `[1, sum_i(h_i*w_i), patch_dim]` (all images' packed
-    /// patches concatenated); `grids`: per-image `(h_i, w_i)`. Each image runs the
-    /// tower + connector at its own grid, and the `sum_i T_i` feature rows replace
-    /// the `<image>` positions.
+    /// `pixel_values`: `[1, sum_i(h_i*w_i), patch_dim]` (all packed views
+    /// concatenated); `layouts`: per-image view layouts. Each view runs the
+    /// tower and connector at its own grid, and the `sum_i T_i` feature rows
+    /// replace the `<image>` positions.
     pub fn get_input_embeddings(
         &self,
         input_ids: &MlxArray,
         pixel_values: &MlxArray,
-        grids: &[(i32, i32)],
+        layouts: &[Lfm2VlImageLayout],
     ) -> InputEmbeddings {
         let inputs_embeds = self.text_model.input_embeddings(input_ids);
         let embed_dtype = mlxcel_core::array_dtype(&inputs_embeds);
         let pv = mlxcel_core::astype(pixel_values, embed_dtype);
 
-        let mut features: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(grids.len());
+        let view_count = layouts.iter().map(|layout| layout.views.len()).sum();
+        let mut features: Vec<UniquePtr<MlxArray>> = Vec::with_capacity(view_count);
         let mut offset = 0i32;
-        for &(h, w) in grids {
+        for &(h, w) in layouts.iter().flat_map(|layout| layout.views.iter()) {
             let n = h * w;
             // patches_i: [1, n, patch_dim]
             let patches =

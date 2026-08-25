@@ -23,7 +23,7 @@
 //! `UnifiedLinear` loads plain tensors as a regular `Linear` when no `.scales`
 //! companion is present.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use serde_json::Value;
 use std::path::Path;
 
@@ -31,18 +31,209 @@ use crate::LoadedModel;
 use crate::models;
 use crate::vision;
 use crate::vision::encoders::lfm2_vl::Lfm2VlVisionConfig;
+use crate::vision::processors::lfm2_vl::Lfm2VlTilingPolicy;
 
 use super::{load_vlm_weights_common, read_sanitized_vlm_config};
 
 const DEFAULT_IMAGE_TOKEN_ID: i32 = 396;
 const DEFAULT_IMAGE_START_ID: i32 = 498;
 const DEFAULT_IMAGE_END_ID: i32 = 499;
+const DEFAULT_IMG_ROW_COL_BASE_ID: i32 = 397;
+const DEFAULT_IMG_THUMBNAIL_ID: i32 = 497;
 
 fn get_usize(v: &Value, key: &str, default: usize) -> usize {
     v.get(key)
         .and_then(|x| x.as_u64())
         .map(|x| x as usize)
         .unwrap_or(default)
+}
+
+fn get_bool(v: &Value, key: &str, default: bool) -> bool {
+    v.get(key).and_then(|x| x.as_bool()).unwrap_or(default)
+}
+
+fn get_f32(v: &Value, key: &str, default: f32) -> f32 {
+    v.get(key)
+        .and_then(|x| x.as_f64())
+        .map(|x| x as f32)
+        .unwrap_or(default)
+}
+
+fn read_json_file(path: &Path) -> Option<Value> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+}
+
+fn sidecar_or_config_usize(
+    sidecar: Option<&Value>,
+    full_config: &Value,
+    key: &str,
+    default: usize,
+) -> usize {
+    sidecar
+        .and_then(|v| v.get(key))
+        .and_then(|x| x.as_u64())
+        .map(|x| x as usize)
+        .unwrap_or_else(|| get_usize(full_config, key, default))
+}
+
+fn parse_tiling_policy(processor_config: Option<&Value>) -> Lfm2VlTilingPolicy {
+    let defaults = Lfm2VlTilingPolicy::default();
+    let Some(config) = processor_config else {
+        return defaults;
+    };
+    Lfm2VlTilingPolicy {
+        do_image_splitting: get_bool(config, "do_image_splitting", defaults.do_image_splitting),
+        tile_size: get_usize(config, "tile_size", defaults.tile_size),
+        min_tiles: get_usize(config, "min_tiles", defaults.min_tiles),
+        max_tiles: get_usize(config, "max_tiles", defaults.max_tiles),
+        max_pixels_tolerance: get_f32(
+            config,
+            "max_pixels_tolerance",
+            defaults.max_pixels_tolerance,
+        ),
+        use_thumbnail: get_bool(config, "use_thumbnail", defaults.use_thumbnail),
+    }
+}
+
+fn validate_tiling_policy(
+    policy: Lfm2VlTilingPolicy,
+    patch_size: usize,
+    downsample_factor: usize,
+    max_num_patches: usize,
+) -> Result<()> {
+    if policy.tile_size == 0 {
+        bail!("LFM2-VL processor_config.json tile_size must be positive");
+    }
+    if policy.min_tiles == 0 || policy.min_tiles > policy.max_tiles {
+        bail!(
+            "LFM2-VL processor_config.json requires 1 <= min_tiles <= max_tiles, got {}..={}",
+            policy.min_tiles,
+            policy.max_tiles
+        );
+    }
+    if policy.max_tiles > 10 {
+        bail!(
+            "LFM2-VL processor_config.json max_tiles={} exceeds the shipped <|img_row_r_col_c|> marker table size 10",
+            policy.max_tiles
+        );
+    }
+    let total = patch_size.max(1) * downsample_factor.max(1);
+    if !policy.tile_size.is_multiple_of(total) {
+        bail!(
+            "LFM2-VL processor_config.json tile_size={} must be divisible by encoder_patch_size * downsample_factor ({})",
+            policy.tile_size,
+            total
+        );
+    }
+    let tile_patch_side = policy.tile_size / patch_size.max(1);
+    if tile_patch_side.saturating_mul(tile_patch_side) > max_num_patches.max(1) {
+        bail!(
+            "LFM2-VL processor_config.json tile_size={} creates {}x{} patches, exceeding max_num_patches={}",
+            policy.tile_size,
+            tile_patch_side,
+            tile_patch_side,
+            max_num_patches
+        );
+    }
+    Ok(())
+}
+
+fn resolve_token_id_from_json(value: &Value, name: &str) -> Option<i32> {
+    value
+        .get(name)
+        .and_then(|id| id.as_i64())
+        .map(|id| id as i32)
+        .or_else(|| {
+            value
+                .get("added_tokens")
+                .and_then(|tokens| tokens.as_array())
+                .and_then(|tokens| {
+                    tokens.iter().find_map(|token| {
+                        (token.get("content").and_then(|content| content.as_str()) == Some(name))
+                            .then(|| {
+                                token
+                                    .get("id")
+                                    .and_then(|id| id.as_i64())
+                                    .map(|id| id as i32)
+                            })
+                            .flatten()
+                    })
+                })
+        })
+        .or_else(|| {
+            value
+                .get("model")
+                .and_then(|model| model.get("vocab"))
+                .and_then(|vocab| vocab.get(name))
+                .and_then(|id| id.as_i64())
+                .map(|id| id as i32)
+        })
+        .or_else(|| {
+            value
+                .get("added_tokens_decoder")
+                .and_then(|decoder| decoder.as_object())
+                .and_then(|decoder| {
+                    decoder.iter().find_map(|(id, token)| {
+                        (token.get("content").and_then(|content| content.as_str()) == Some(name))
+                            .then(|| id.parse::<i32>().ok())
+                            .flatten()
+                    })
+                })
+        })
+}
+
+fn resolve_added_token_id(
+    added_tokens: Option<&Value>,
+    tokenizer_json: Option<&Value>,
+    name: &str,
+) -> Option<i32> {
+    added_tokens
+        .and_then(|value| resolve_token_id_from_json(value, name))
+        .or_else(|| tokenizer_json.and_then(|value| resolve_token_id_from_json(value, name)))
+}
+
+fn lfm2_row_col_default(row: usize, col: usize) -> i32 {
+    DEFAULT_IMG_ROW_COL_BASE_ID + ((row - 1) * 10 + (col - 1)) as i32
+}
+
+fn resolve_lfm2_vl_marker_ids(
+    added_tokens: Option<&Value>,
+    tokenizer_json: Option<&Value>,
+    policy: Lfm2VlTilingPolicy,
+) -> Result<([[i32; 10]; 10], i32)> {
+    let mut row_col_ids = [[0i32; 10]; 10];
+    for row in 1..=10 {
+        for col in 1..=10 {
+            row_col_ids[row - 1][col - 1] = resolve_added_token_id(
+                added_tokens,
+                tokenizer_json,
+                &format!("<|img_row_{row}_col_{col}|>"),
+            )
+            .unwrap_or_else(|| lfm2_row_col_default(row, col));
+        }
+    }
+    let thumbnail_id = resolve_added_token_id(added_tokens, tokenizer_json, "<|img_thumbnail|>")
+        .unwrap_or(DEFAULT_IMG_THUMBNAIL_ID);
+
+    if policy.do_image_splitting {
+        for row in 1..=policy.max_tiles {
+            for col in 1..=policy.max_tiles {
+                let name = format!("<|img_row_{row}_col_{col}|>");
+                if resolve_added_token_id(added_tokens, tokenizer_json, &name).is_none() {
+                    bail!("LFM2-VL tokenizer is missing required added token {name}");
+                }
+            }
+        }
+        if policy.use_thumbnail
+            && resolve_added_token_id(added_tokens, tokenizer_json, "<|img_thumbnail|>").is_none()
+        {
+            bail!("LFM2-VL tokenizer is missing required added token <|img_thumbnail|>");
+        }
+    }
+
+    Ok((row_col_ids, thumbnail_id))
 }
 
 fn parse_vision_config(full_config: &Value) -> Lfm2VlVisionConfig {
@@ -153,24 +344,69 @@ pub(crate) fn load_lfm2_vl(model_path: &Path) -> Result<LoadedModel> {
     )
     .map_err(|e| anyhow::anyhow!("Failed to load LFM2-VL projector: {}", e))?;
 
-    // Processor.
-    let patch_size = full_config
-        .get("encoder_patch_size")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(vision_config.patch_size as u64) as usize;
-    let min_tokens = get_usize(&full_config, "min_image_tokens", 64);
-    let max_tokens = get_usize(&full_config, "max_image_tokens", 256);
+    // Processor. LFM2-VL stores image-splitting policy in processor_config.json;
+    // keep config.json as the compatibility fallback for the keys mlxcel already
+    // read before splitting support.
+    let processor_config = read_json_file(&model_path.join("processor_config.json"));
+    let patch_size = sidecar_or_config_usize(
+        processor_config.as_ref(),
+        &full_config,
+        "encoder_patch_size",
+        vision_config.patch_size,
+    );
+    let min_tokens = sidecar_or_config_usize(
+        processor_config.as_ref(),
+        &full_config,
+        "min_image_tokens",
+        64,
+    );
+    let max_tokens = sidecar_or_config_usize(
+        processor_config.as_ref(),
+        &full_config,
+        "max_image_tokens",
+        256,
+    );
+    let tiling = parse_tiling_policy(processor_config.as_ref());
+    let downsample_factor_usize = downsample_factor.max(1) as usize;
+    validate_tiling_policy(
+        tiling,
+        patch_size,
+        downsample_factor_usize,
+        vision_config.num_patches,
+    )?;
     let processor = Lfm2VlProcessor::new(
         patch_size,
-        downsample_factor as usize,
+        downsample_factor_usize,
         min_tokens,
         max_tokens,
+        tiling,
     );
+
+    let added_tokens = read_json_file(&model_path.join("added_tokens.json"));
+    let tokenizer_json = read_json_file(&model_path.join("tokenizer.json"));
+    let (img_row_col_ids, img_thumbnail_id) =
+        resolve_lfm2_vl_marker_ids(added_tokens.as_ref(), tokenizer_json.as_ref(), tiling)?;
 
     let image_token_id = full_config
         .get("image_token_index")
         .and_then(|v| v.as_i64())
+        .or_else(|| {
+            resolve_added_token_id(added_tokens.as_ref(), tokenizer_json.as_ref(), "<image>")
+                .map(i64::from)
+        })
         .unwrap_or(DEFAULT_IMAGE_TOKEN_ID as i64) as i32;
+    let image_start_id = resolve_added_token_id(
+        added_tokens.as_ref(),
+        tokenizer_json.as_ref(),
+        "<|image_start|>",
+    )
+    .unwrap_or(DEFAULT_IMAGE_START_ID);
+    let image_end_id = resolve_added_token_id(
+        added_tokens.as_ref(),
+        tokenizer_json.as_ref(),
+        "<|image_end|>",
+    )
+    .unwrap_or(DEFAULT_IMAGE_END_ID);
     let use_image_special_tokens = full_config
         .get("use_image_special_tokens")
         .and_then(|v| v.as_bool())
@@ -183,8 +419,10 @@ pub(crate) fn load_lfm2_vl(model_path: &Path) -> Result<LoadedModel> {
         connector,
         processor,
         image_token_id,
-        image_start_id: DEFAULT_IMAGE_START_ID,
-        image_end_id: DEFAULT_IMAGE_END_ID,
+        image_start_id,
+        image_end_id,
+        img_row_col_ids,
+        img_thumbnail_id,
         use_image_special_tokens,
         downsample_factor,
         patch_dim: (patch_size * patch_size * 3) as i32,

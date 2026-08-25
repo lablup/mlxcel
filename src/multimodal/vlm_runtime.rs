@@ -1307,15 +1307,17 @@ where
         VlmRuntimeRef::Lfm2Vl(lfm2vl) => {
             // Each image is packed at its native patch count; the tower + connector
             // run per image and produce `ceil(h/f)*ceil(w/f)` compressed tokens.
-            let (pixel_values, grids) = lfm2vl.processor.preprocess_with_grid(images);
+            let (pixel_values, layouts) = lfm2vl.processor.preprocess_with_grid(images);
 
             let preparation = crate::multimodal::lfm2_vl_prompt::insert_lfm2_vl_image_tokens(
                 prompt_tokens,
-                &grids,
+                &layouts,
                 lfm2vl.downsample_factor,
                 lfm2vl.image_token_id,
                 lfm2vl.image_start_id,
                 lfm2vl.image_end_id,
+                &lfm2vl.img_row_col_ids,
+                lfm2vl.img_thumbnail_id,
                 lfm2vl.use_image_special_tokens,
             )
             .map(|stats| VlmPreparationSummary::Lfm2Vl {
@@ -1329,7 +1331,7 @@ where
             let _ = image_cache_keys;
 
             let input_ids_arr = prompt_ids_array(prompt_tokens);
-            let embeddings = lfm2vl.get_input_embeddings(&input_ids_arr, &pixel_values, &grids);
+            let embeddings = lfm2vl.get_input_embeddings(&input_ids_arr, &pixel_values, &layouts);
 
             Ok(Some(PreparedVlmEmbeddings {
                 embeddings,
