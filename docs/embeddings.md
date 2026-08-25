@@ -40,6 +40,9 @@ mlxcel serves embedding checkpoints through the OpenAI-compatible `POST /v1/embe
 | `src/models/col_late_interaction.rs` | Shared by the two late-interaction families: `embedding_dim`, the `1_Dense` projection override, the LoRA-only rejection, per-token projection and normalization, the query format. |
 | `src/models/colidefics3.rs` | ColIdefics3: SmolVLM / Idefics3 without a head plus a 128-dim projection. |
 | `src/models/colqwen2_5.rs` | ColQwen2.5: Qwen2.5-VL without a head plus a 128-dim projection. |
+| `src/models/llama_bidirec.rs` | Bidirectional Llama (LLM2Vec): Llama 3 layers under a padding-only mask, mean pooling. |
+| `src/models/ministral3_embedding.rs` | Nemotron-3-Embed: bidirectional Ministral 3, Llama 4 attention scaling at offset 0, mean pooling. |
+| `src/models/lfm2_embedding.rs` | LFM2.5-Embedding: bidirectional LFM2 (non-causal short conv), CLS pooling. |
 
 ## Detection
 
@@ -239,6 +242,61 @@ maxsim(q, d) = sum over query rows i of ( max over document rows j of dot(q_i, d
 `crate::embeddings::maxsim` implements it over read-back rows and `maxsim_mlx` over device arrays. Because every row is L2-normalized, each inner product is a cosine and the score is bounded by the query's row count; it is reported raw rather than averaged, since comparing two documents for one query is what the number is read for. The score is asymmetric: the outer sum always runs over the first argument.
 
 `mlxcel embed` prints this matrix, labelled `MaxSim similarity`, in place of the cosine matrix whenever the loaded model is multi-vector.
+
+### Bidirectional Llama, LLM2Vec (`LlamaBidirec`)
+
+The LLM2Vec recipe: an ordinary Llama 3.2 1B decoder converted to an encoder by dropping the causal mask. `nvidia/llama-nemotron-embed-1b-v2` exports it as `model_type: llama_bidirec`, `architectures: ["LlamaBidirectionalModel"]`, `use_bidirectional_attention: true` and a `1_Pooling` module declaring mean pooling. Nothing about the layers changes: the same `rope_scaling` `llama3` schedule at factor 32, the same norms, the same GQA 32/8 with `head_dim` 64. Only the mask and the missing head differ, so the port builds `llama3::TransformerBlock` layers straight from the weight map rather than through `Llama3Model`, whose `lm_head` field is not optional and would otherwise materialize a tied `128256 x 2048` projection this path never applies.
+
+The published export saves the inner `LlamaBidirectionalModel`, so the roots arrive bare (`embed_tokens.weight`, `layers.0.…`, `norm.weight`) and are prefixed with `model.` at load. A `language_model.` wrapper prefix is stripped first, and the derived `rotary_emb.inv_freq` and `position_ids` buffers are dropped, since this tree rebuilds the frequency table from `rope_theta` and `rope_scaling`.
+
+LLM2Vec checkpoints that ship as PEFT adapters are not loadable. A directory carrying `adapter_model.safetensors` and no full shard is rejected with a message saying to merge the adapter into its base model and export a complete `LlamaBidirectionalModel` checkpoint first; mlxcel does not merge adapters.
+
+`max_length` is 8192 (`sentence_bert_config.json`, which happens to equal the hard cap). Prompt prefixes from `config_sentence_transformers.json`, applied by the caller: `query: ` before a query, `passage: ` before a document.
+
+```sh
+mlxcel embed -m nvidia/llama-nemotron-embed-1b-v2 \
+  -p "query: how do solar panels generate electricity" \
+  -p "passage: Photovoltaic cells convert sunlight into electricity through the photovoltaic effect."
+```
+
+### Nemotron-3-Embed (`Ministral3Embedding`)
+
+The Ministral 3 backbone run bidirectionally. `nvidia/Nemotron-3-Embed-1B-BF16` and the `mlx-community` 8-bit conversion declare `model_type: ministral3`, `architectures: ["Ministral3Model"]` and `is_causal: false`, which is the flag detection keys on; the pooling module says mean.
+
+Two details carry the port. The per-position Llama 4 attention scale (`1 + beta * ln(1 + floor(pos / original_max_position_embeddings))`, `beta` 0.1, window 16384) is computed at offset 0, because the embedder runs one prefill and never decodes, which is the same value the generator's fresh cache reports for the same length. And `tie_word_embeddings` is true on both checkpoints, so `lm_head` is absent and the forward pass stops at the final norm. Both published checkpoints carry `sliding_window: null` and no `layer_types`, so every layer is full attention; a checkpoint that did declare `sliding_attention` layers would get `create_bidirectional_window_mask` for those.
+
+`max_length` is the hard cap of 8192, below the checkpoint's declared 32768. Prompt prefixes, applied by the caller: `query: ` and `passage: `.
+
+```sh
+mlxcel embed -m nvidia/Nemotron-3-Embed-1B-BF16 \
+  -p "query: how do solar panels generate electricity" \
+  -p "passage: Photovoltaic cells convert sunlight into electricity through the photovoltaic effect."
+```
+
+### LFM2.5-Embedding (`Lfm2Embedding`)
+
+The hybrid LFM2 backbone with both of its mixers made bidirectional. `LiquidAI/LFM2.5-Embedding-350M` is 16 layers alternating 10 gated short convolutions with 6 full-attention layers (`conv_L_cache` 3, GQA 16/8 with per-head Q/K RMSNorm, `embedding_norm` as the final norm), exported as `Lfm2BidirectionalModel` with a `1_Pooling` module declaring CLS.
+
+The attention layers take the usual padding-only mask. The short conv needs two changes, and they are the only ones that reach into the generator's file:
+
+- `ModelArgs` grows a `conv_causal` flag, default `true`, that the embedding loader sets to `false`. The mixer then splits its `L_cache - 1` zero padding across both sides instead of prepending all of it, so position `t` mixes `t - 1`, `t` and `t + 1` and the output length stays `L`. It also stops writing a conv state, which a one-shot bidirectional pass has no use for. Generation keeps the default and is byte-identical.
+- The conv input is zeroed at padding positions through a `[B, L, 1]` multiplier, the same thing the reference's `apply_mask_to_padding_states` does. A convolution has no key axis for an attention mask to act on, so without this the pad-token embeddings mix into the real positions next to the boundary and the attention layers above spread that across the whole row. Measured on the published checkpoint before the fix, changing only the masked tail of a padded row moved the pooled vector by cosine 0.94.
+
+Pooling is CLS: the tokenizer's post-processor prepends `<|startoftext|>` and the sentence vector is the hidden state there. Right padding puts it at index 0 in every row, though the pooling finds it by first-real-token argmax rather than assuming that.
+
+The LFM2 and LFM2.5 ColBERT late-interaction checkpoints share this `model_type` and this architecture but project every token through a `1_Dense` module and emit one vector per token. They are rejected at load rather than served as a single pooled vector.
+
+`max_length` is 512 (`sentence_bert_config.json`), well under the hard cap. Prompt prefixes, applied by the caller: `query: ` and `document: `.
+
+```sh
+mlxcel embed -m LiquidAI/LFM2.5-Embedding-350M \
+  -p "query: how do solar panels generate electricity" \
+  -p "document: Photovoltaic cells convert sunlight into electricity through the photovoltaic effect."
+```
+
+### Batch geometry and bf16
+
+One property is worth knowing before comparing vectors across runs. On a bf16 checkpoint the attention kernels pick their accumulation shape from the batch geometry, so the same text embedded alone and embedded as a row of a larger batch agrees to roughly cosine 0.9999 rather than exactly. This is arithmetic, not padding: embedding one text as several unpadded copies of a single batch shows the same spread, and it is visible on every bf16 decoder-backbone family here. Padding itself changes nothing, which each family gates exactly, at zero tolerance, by holding the batch shape fixed and changing only the token ids underneath the mask.
 
 ## Attention masks
 

@@ -155,11 +155,16 @@ fn build_family_model(
         ModelType::ColQwen25 => Ok(Box::new(crate::models::colqwen2_5::ColQwen25Model::load(
             model_dir, config,
         )?)),
-        ModelType::Qwen3VLEmbedding
-        | ModelType::Lfm2Embedding
-        | ModelType::Ministral3Embedding
-        | ModelType::LlamaBidirec
-        | ModelType::LlamaNemotronVLEmbedding => {
+        ModelType::LlamaBidirec => Ok(Box::new(
+            crate::models::llama_bidirec::LlamaBidirecModel::load(model_dir, config)?,
+        )),
+        ModelType::Ministral3Embedding => Ok(Box::new(
+            crate::models::ministral3_embedding::Ministral3EmbeddingModel::load(model_dir, config)?,
+        )),
+        ModelType::Lfm2Embedding => Ok(Box::new(
+            crate::models::lfm2_embedding::Lfm2EmbeddingModel::load(model_dir, config)?,
+        )),
+        ModelType::Qwen3VLEmbedding | ModelType::LlamaNemotronVLEmbedding => {
             Err(embedding_family_not_yet_supported(model_type))
         }
         other => bail!(

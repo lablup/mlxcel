@@ -42,7 +42,9 @@
 use mlxcel_core::cache::KVCacheMode;
 use mlxcel_core::generate::LanguageModel;
 use mlxcel_core::layers::{KVCache, RMSNorm, UnifiedEmbedding, UnifiedLinear};
-use mlxcel_core::utils::{create_causal_mask, slice_axis, stack_arrays};
+use mlxcel_core::utils::{
+    create_bidirectional_padding_mask, create_causal_mask, slice_axis, stack_arrays,
+};
 use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::Deserialize;
@@ -78,6 +80,16 @@ pub struct ModelArgs {
 
     #[serde(default = "default_rope_theta")]
     pub rope_theta: f32,
+
+    /// Whether the short-convolution mixer stays causal.
+    ///
+    /// Not a `config.json` key on any published checkpoint; it defaults to
+    /// `true`, which is the generator behaviour, and is set to `false` by
+    /// [`crate::models::lfm2_embedding`] for the bidirectional
+    /// `Lfm2BidirectionalModel` export. See [`ShortConv::forward`] for what the
+    /// two modes pad.
+    #[serde(default = "default_conv_causal")]
+    pub conv_causal: bool,
 
     /// Present in the dense `lfm2` config; the MoE config derives the indices
     /// from `layer_types` instead.
@@ -125,6 +137,28 @@ fn default_rope_theta() -> f32 {
 
 fn default_routed_scaling_factor() -> f32 {
     1.0
+}
+
+fn default_conv_causal() -> bool {
+    true
+}
+
+/// `[B, L, 1]` multiplier holding `1` at a real token and `0` at padding, in
+/// `dtype`, from a `[B, L]` int32 attention mask.
+///
+/// Used by: [`Lfm2Model::forward_hidden_bidirectional`] to zero the short-conv
+/// input at padding positions.
+fn padding_multiplier(attention_mask: &MlxArray, dtype: i32) -> UniquePtr<MlxArray> {
+    let shape = mlxcel_core::array_shape(attention_mask);
+    debug_assert_eq!(
+        shape.len(),
+        2,
+        "padding_multiplier: attention mask must be [B, L]"
+    );
+    let zero = mlxcel_core::from_slice_i32(&[0], &[1, 1]);
+    let real = mlxcel_core::not_equal(attention_mask, &zero);
+    let real = mlxcel_core::astype(&real, dtype);
+    mlxcel_core::reshape(&real, &[shape[0], shape[1], 1])
 }
 
 impl ModelArgs {
@@ -306,9 +340,14 @@ impl Attention {
     }
 }
 
-// ShortConv (gated depthwise causal convolution mixer).
+// ShortConv (gated depthwise convolution mixer; causal for generation,
+// bidirectional for the LFM2.5-Embedding export).
+//
+// `pub(crate)` so `lfm2_tests` can drive the mixer directly: the causal and the
+// bidirectional padding differ only in where the zeros go, which a whole-model
+// forward pass would hide behind sixteen layers of mixing.
 
-struct ShortConv {
+pub(crate) struct ShortConv {
     in_proj: UnifiedLinear,
     out_proj: UnifiedLinear,
     conv_weight: UniquePtr<MlxArray>,
@@ -321,10 +360,18 @@ struct ShortConv {
     /// MLX's `conv1d` already dispatches a fast small-conv kernel and the proven
     /// path is kept as-is.
     decode_weight: Option<UniquePtr<MlxArray>>,
+    /// `ModelArgs::conv_causal`. `true` keeps the generator's left padding;
+    /// `false` splits the same total padding across both sides so the mixer
+    /// becomes bidirectional (`crate::models::lfm2_embedding`).
+    causal: bool,
 }
 
 impl ShortConv {
-    fn from_weights(weights: &WeightMap, args: &ModelArgs, prefix: &str) -> Result<Self, String> {
+    pub(crate) fn from_weights(
+        weights: &WeightMap,
+        args: &ModelArgs,
+        prefix: &str,
+    ) -> Result<Self, String> {
         let gs = args.group_size();
         let bits = args.bits();
 
@@ -353,19 +400,62 @@ impl ShortConv {
             hidden_size: args.hidden_size as i32,
             l_cache: args.conv_l_cache as i32,
             decode_weight,
+            causal: args.conv_causal,
         })
     }
 
+    /// Zero padding the depthwise conv needs, as `(left, right)`.
+    ///
+    /// Both modes pad `L_cache - 1` positions in total, so the output length
+    /// always equals the input length. Causal puts all of it on the left, which
+    /// is what makes position `t` see only `t - L_cache + 1 ..= t`. Non-causal
+    /// splits it, so for the published odd `L_cache = 3` position `t` sees
+    /// exactly `t - 1`, `t` and `t + 1`.
+    pub(crate) fn conv_padding(&self) -> (i32, i32) {
+        let total = self.l_cache - 1;
+        if self.causal {
+            (total, 0)
+        } else {
+            let left = self.l_cache / 2;
+            (left, total - left)
+        }
+    }
+
     /// `BCx = in_proj(x)` → split into `B, C, x` → `Bx = B * x` → depthwise
-    /// causal Conv1d (kernel `L_cache`, left-padded by `L_cache - 1` on prefill
-    /// or prepended with the cached `L_cache - 1` time steps on decode) →
+    /// Conv1d (kernel `L_cache`, left-padded by `L_cache - 1` on prefill or
+    /// prepended with the cached `L_cache - 1` time steps on decode) →
     /// `y = C * conv_out` → `out_proj(y)`.
-    fn forward(
+    ///
+    /// With `conv_causal = false` the left pad is split across both sides
+    /// instead (see [`Self::conv_padding`]) and the conv state is left
+    /// untouched: the bidirectional embedder runs one prefill per call and
+    /// never decodes, and a "state" carrying the tail of a bidirectional window
+    /// would be meaningless to resume from.
+    ///
+    /// `pad_multiplier` is an optional `[B, L, 1]` array holding `1` at a real
+    /// token and `0` at padding, in `x`'s dtype. Unlike attention, a
+    /// convolution has no key axis to mask, so a padded batch has to be zeroed
+    /// on the way in or the pad embeddings mix into every real position within
+    /// `L_cache / 2` of the boundary and then spread further through the
+    /// attention layers above. The reference does the same thing
+    /// (`apply_mask_to_padding_states` at the top of the mixer). Generation
+    /// passes `None`: it runs one unpadded sequence and never has padding to
+    /// mask.
+    pub(crate) fn forward(
         &self,
         x: &MlxArray,
         conv_state: &mut Option<UniquePtr<MlxArray>>,
+        pad_multiplier: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let h = self.hidden_size;
+        let masked;
+        let x = match pad_multiplier {
+            Some(multiplier) => {
+                masked = mlxcel_core::multiply(x, multiplier);
+                &*masked
+            }
+            None => x,
+        };
         let bcx = self.in_proj.forward(x);
 
         // Split along the last axis into B, C, x (each [batch, seq, hidden]).
@@ -379,23 +469,47 @@ impl ShortConv {
         // so the kernel-size-`L_cache` depthwise conv stays causal.
         let n_keep = self.l_cache - 1;
         let bx_shape = mlxcel_core::array_shape(&bx);
-        let padded = match conv_state.as_ref().and_then(|s| s.as_ref()) {
-            Some(state) => mlxcel_core::concatenate(state, &bx, 1),
-            None => {
-                let pad = mlxcel_core::zeros(
-                    &[bx_shape[0], n_keep, bx_shape[2]],
-                    mlxcel_core::array_dtype(&bx),
-                );
-                mlxcel_core::concatenate(&pad, &bx, 1)
+        let (pad_left, pad_right) = self.conv_padding();
+        let pad_before = |value: &MlxArray, steps: i32| {
+            if steps <= 0 {
+                return mlxcel_core::copy(value);
             }
+            let zeros = mlxcel_core::zeros(
+                &[bx_shape[0], steps, bx_shape[2]],
+                mlxcel_core::array_dtype(&bx),
+            );
+            mlxcel_core::concatenate(&zeros, value, 1)
+        };
+        let pad_after = |value: &MlxArray, steps: i32| {
+            if steps <= 0 {
+                return mlxcel_core::copy(value);
+            }
+            let zeros = mlxcel_core::zeros(
+                &[bx_shape[0], steps, bx_shape[2]],
+                mlxcel_core::array_dtype(&bx),
+            );
+            mlxcel_core::concatenate(value, &zeros, 1)
+        };
+        let padded = if self.causal {
+            match conv_state.as_ref().and_then(|s| s.as_ref()) {
+                Some(state) => mlxcel_core::concatenate(state, &bx, 1),
+                None => pad_before(&bx, pad_left),
+            }
+        } else {
+            // The bidirectional mixer ignores any conv state, in both
+            // directions: it neither reads one nor writes one.
+            pad_after(&pad_before(&bx, pad_left), pad_right)
         };
 
         // Persist the last `L_cache - 1` time steps as the next conv state.
         // `contiguous` forces a fresh buffer so the cached slice does not retain
         // the full padded allocation (mirrors the Mamba conv-state handling).
-        let plen = mlxcel_core::array_shape(&padded)[1];
-        let tail = slice_axis(&padded, 1, plen - n_keep, plen);
-        *conv_state = Some(mlxcel_core::contiguous(&tail, false));
+        // The non-causal mixer never decodes, so it keeps the state untouched.
+        if self.causal {
+            let plen = mlxcel_core::array_shape(&padded)[1];
+            let tail = slice_axis(&padded, 1, plen - n_keep, plen);
+            *conv_state = Some(mlxcel_core::contiguous(&tail, false));
+        }
 
         // Depthwise Conv1d (groups == hidden). Match the conv weight dtype to
         // the (possibly bf16) activations; quantized checkpoints leave the
@@ -626,11 +740,15 @@ impl Lfm2DecoderLayer {
         self.make_cache_with_mode(KVCacheMode::Fp16)
     }
 
+    /// `pad_multiplier` is the `[B, L, 1]` padding multiplier the short-conv
+    /// mixer needs (see [`ShortConv::forward`]); attention masks padding
+    /// through `mask` instead and ignores it. `None` on the generation path.
     fn forward(
         &self,
         x: &MlxArray,
         cache: &mut Lfm2LayerCache,
         mask: Option<&MlxArray>,
+        pad_multiplier: Option<&MlxArray>,
     ) -> UniquePtr<MlxArray> {
         let normed = self.operator_norm.forward(x);
         // `make_caches` builds the per-layer cache in lockstep with the mixer
@@ -639,7 +757,9 @@ impl Lfm2DecoderLayer {
             (Mixer::Attention(attn), Lfm2LayerCache::Attention(kv)) => {
                 attn.forward(&normed, kv, mask)
             }
-            (Mixer::Conv(conv), Lfm2LayerCache::Conv(state)) => conv.forward(&normed, state),
+            (Mixer::Conv(conv), Lfm2LayerCache::Conv(state)) => {
+                conv.forward(&normed, state, pad_multiplier)
+            }
             _ => unreachable!("LFM2 layer cache kind does not match its mixer"),
         };
         let h = mlxcel_core::add(x, &r);
@@ -822,6 +942,48 @@ impl Lfm2Model {
         self.embed_tokens.forward(inputs)
     }
 
+    /// One bidirectional prefill: `[B, L]` token ids and a `[B, L]` int32
+    /// padding mask in, `[B, L, hidden_size]` hidden states after
+    /// `embedding_norm` out.
+    ///
+    /// The two mixer kinds block padding differently. An attention layer gets
+    /// `create_bidirectional_padding_mask`, which removes padding from its key
+    /// axis, so every real position attends every real token in both
+    /// directions. A convolution has no key axis to mask, so its input is
+    /// zeroed at padding positions instead, through a `[B, L, 1]` multiplier
+    /// (the reference's `apply_mask_to_padding_states`). Without that zeroing
+    /// the pad-token embeddings mix into every real position within
+    /// `L_cache / 2` of the boundary, and the attention layers above then
+    /// spread the contamination across the whole row: on
+    /// `LiquidAI/LFM2.5-Embedding-350M` changing only the masked tail moved the
+    /// pooled vector by cosine 0.94.
+    ///
+    /// Caches are built fresh per call and never touch
+    /// `Lfm2Model::sequence_state`, so this shares no state with generation and
+    /// every call starts at offset 0.
+    ///
+    /// Used by: `crate::models::lfm2_embedding::Lfm2EmbeddingModel`.
+    pub(crate) fn forward_hidden_bidirectional(
+        &self,
+        input_ids: &MlxArray,
+        attention_mask: &MlxArray,
+    ) -> UniquePtr<MlxArray> {
+        let mut h = self.embed_tokens.forward(input_ids);
+        let mask = create_bidirectional_padding_mask(attention_mask);
+        let pad_multiplier = padding_multiplier(attention_mask, mlxcel_core::array_dtype(&h));
+        let mut caches = self.make_caches();
+
+        for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
+            let layer_mask = if layer.is_attention() {
+                Some(&*mask)
+            } else {
+                None
+            };
+            h = layer.forward(&h, cache, layer_mask, Some(&pad_multiplier));
+        }
+        self.embedding_norm.forward(&h)
+    }
+
     /// Layer stack over pre-computed input embeddings (the VLM injection point).
     fn forward_embeds_with_caches(
         &self,
@@ -853,7 +1015,7 @@ impl Lfm2Model {
             } else {
                 None
             };
-            h = layer.forward(&h, cache, mask);
+            h = layer.forward(&h, cache, mask, None);
         }
 
         let h = self.embedding_norm.forward(&h);
