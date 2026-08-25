@@ -73,6 +73,11 @@ pub(crate) use self::vlm::{
     load_phi4mm_xla_text_embeddings,
 };
 pub(crate) use self::vlm::{ensure_supported_muse_weight_map, normalize_muse_glimmer_weights};
+// Qwen3-VL-Embedding reuses the generative Qwen3-VL stack verbatim (vision
+// tower, DeepStack mergers, M-RoPE text decoder) and only replaces the head
+// with pooling, so its loader goes through the same entry point rather than
+// duplicating the weight remap and the token-id resolution.
+pub(crate) use self::vlm::load_qwen3_vl;
 
 /// Resolve model path: if a file is given, use its parent directory.
 ///

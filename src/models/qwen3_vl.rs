@@ -846,6 +846,35 @@ impl Qwen3VLModel {
         mask: Option<&MlxArray>,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        let h = self.forward_hidden_for_sequence(input_ids, input_embeddings, caches, mask, seq_id);
+        self.lm_head.forward(&h)
+    }
+
+    /// Run the decoder and the final norm, returning the `[B, L, hidden_size]`
+    /// hidden states without applying `lm_head`.
+    ///
+    /// Used by: Qwen3VL generation (through [`Self::forward_for_sequence`]),
+    /// Qwen3VLEmbedding, #1356 (Qwen3-VL reranker).
+    pub(crate) fn forward_hidden(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        self.forward_hidden_for_sequence(input_ids, input_embeddings, caches, mask, None)
+    }
+
+    /// Head-free body of [`Self::forward_for_sequence`]: MRoPE position
+    /// handling, DeepStack injection and the final norm, with no `lm_head`.
+    fn forward_hidden_for_sequence(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+    ) -> UniquePtr<MlxArray> {
         let cache_offset = caches[0].offset;
         if input_embeddings.is_none() && cache_offset == 0 {
             self.clear_mrope_state();
@@ -853,7 +882,7 @@ impl Qwen3VLModel {
         }
 
         if input_embeddings.is_none() && self.can_use_text_only_fast_path(seq_id) {
-            return self.forward_text_only(input_ids, caches, mask);
+            return self.forward_text_only_hidden(input_ids, caches, mask);
         }
 
         let mut h = if let Some(embeds) = input_embeddings {
@@ -944,11 +973,13 @@ impl Qwen3VLModel {
             }
         }
 
-        h = self.norm.forward(&h);
-        self.lm_head.forward(&h)
+        self.norm.forward(&h)
     }
 
-    fn forward_text_only(
+    /// Head-free text-only fast path: no MRoPE state, no DeepStack, plain 1-D
+    /// RoPE. For a sequence with no vision tokens the three MRoPE sections all
+    /// carry the same position, so this is numerically the multimodal path.
+    fn forward_text_only_hidden(
         &self,
         input_ids: &MlxArray,
         caches: &mut [KVCache],
@@ -960,8 +991,7 @@ impl Qwen3VLModel {
             h = layer.forward_text_only(&h, &mut caches[layer_idx], mask);
         }
 
-        h = self.norm.forward(&h);
-        self.lm_head.forward(&h)
+        self.norm.forward(&h)
     }
 
     /// Compute `[3, batch, seq_len]` position ids by adding `delta` to a
@@ -1062,6 +1092,10 @@ impl mlxcel_core::generate::LanguageModel for Qwen3VLModel {
         vec![151645, 151643] // Qwen EOS tokens
     }
 }
+
+#[cfg(test)]
+#[path = "qwen3_vl_tests.rs"]
+mod qwen3_vl_tests;
 
 #[cfg(test)]
 mod deepstack_injection_tests {

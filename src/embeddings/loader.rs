@@ -112,6 +112,12 @@ pub fn load_embedding_weights(model_dir: &Path, config: &Value) -> Result<Weight
 }
 
 /// Error for a detected embedding family whose port has not landed yet.
+///
+/// Every variant epic #1348 enumerated now has a forward pass, so no arm of
+/// [`build_family_model`] returns this today. It is kept as the message a new
+/// `ModelType` embedding variant should use between the commit that adds it to
+/// detection and the commit that adds its constructor, which is how every
+/// family in the epic reached the dispatcher.
 pub fn embedding_family_not_yet_supported(model_type: ModelType) -> anyhow::Error {
     anyhow::anyhow!(
         "{} ({model_type:?}) is detected as an embedding checkpoint, but this embedding \
@@ -122,8 +128,9 @@ pub fn embedding_family_not_yet_supported(model_type: ModelType) -> anyhow::Erro
 
 /// Construct the family model for a detected embedding variant.
 ///
-/// Each family sub-issue replaces its `not yet supported` arm with the real
-/// constructor. Families resolve their pooling mode through
+/// Each family sub-issue replaced its `not yet supported` arm with the real
+/// constructor, and every variant epic #1348 enumerated now has one. A new
+/// family adds its arm here; families resolve their pooling mode through
 /// [`super::pooling::resolve_pooling_mode`] and read weights through
 /// [`load_embedding_weights`].
 fn build_family_model(
@@ -164,9 +171,14 @@ fn build_family_model(
         ModelType::Lfm2Embedding => Ok(Box::new(
             crate::models::lfm2_embedding::Lfm2EmbeddingModel::load(model_dir, config)?,
         )),
-        ModelType::Qwen3VLEmbedding | ModelType::LlamaNemotronVLEmbedding => {
-            Err(embedding_family_not_yet_supported(model_type))
-        }
+        ModelType::Qwen3VLEmbedding => Ok(Box::new(
+            crate::models::qwen3_vl_embedding::Qwen3VLEmbeddingModel::load(model_dir, config)?,
+        )),
+        ModelType::LlamaNemotronVLEmbedding => Ok(Box::new(
+            crate::models::llama_nemotron_vl_embedding::LlamaNemotronVLEmbeddingModel::load(
+                model_dir, config,
+            )?,
+        )),
         other => bail!(
             "{} ({other:?}) is not an embedding checkpoint; load it with the generation \
              loader instead",
