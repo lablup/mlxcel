@@ -24,53 +24,28 @@
 //! companion is present.
 
 use anyhow::Result;
-use serde_json::Value;
 use std::path::Path;
 
+use super::{load_vlm_weights_common, read_sanitized_vlm_config};
 use crate::LoadedModel;
 use crate::models;
 use crate::vision;
-use crate::vision::encoders::lfm2_vl::Lfm2VlVisionConfig;
 
-use super::{load_vlm_weights_common, read_sanitized_vlm_config};
+#[path = "vlm_lfm2_vl_metadata.rs"]
+mod metadata;
+#[cfg(test)]
+#[path = "vlm_lfm2_vl_tests.rs"]
+mod tests;
+
+use self::metadata::{
+    lfm2_processor_sidecar, parse_tiling_policy, parse_vision_config, positive_i32_field,
+    read_optional_json_file, resolve_added_token_id, resolve_lfm2_vl_marker_ids,
+    sidecar_or_config_bool, sidecar_or_config_usize, token_field, validate_tiling_policy,
+};
 
 const DEFAULT_IMAGE_TOKEN_ID: i32 = 396;
 const DEFAULT_IMAGE_START_ID: i32 = 498;
 const DEFAULT_IMAGE_END_ID: i32 = 499;
-
-fn get_usize(v: &Value, key: &str, default: usize) -> usize {
-    v.get(key)
-        .and_then(|x| x.as_u64())
-        .map(|x| x as usize)
-        .unwrap_or(default)
-}
-
-fn parse_vision_config(full_config: &Value) -> Lfm2VlVisionConfig {
-    let vc = full_config
-        .get("vision_config")
-        .cloned()
-        .unwrap_or(Value::Null);
-    let d = Lfm2VlVisionConfig::default();
-    Lfm2VlVisionConfig {
-        hidden_size: get_usize(&vc, "hidden_size", d.hidden_size),
-        intermediate_size: get_usize(&vc, "intermediate_size", d.intermediate_size),
-        num_hidden_layers: get_usize(&vc, "num_hidden_layers", d.num_hidden_layers),
-        num_attention_heads: get_usize(&vc, "num_attention_heads", d.num_attention_heads),
-        patch_size: get_usize(&vc, "patch_size", d.patch_size),
-        num_patches: get_usize(&vc, "num_patches", d.num_patches),
-        layer_norm_eps: vc
-            .get("layer_norm_eps")
-            .and_then(|x| x.as_f64())
-            .map(|x| x as f32)
-            .unwrap_or(d.layer_norm_eps),
-        // vision_feature_layer is a top-level key, not in vision_config.
-        vision_feature_layer: full_config
-            .get("vision_feature_layer")
-            .and_then(|x| x.as_i64())
-            .map(|x| x as i32)
-            .unwrap_or(d.vision_feature_layer),
-    }
-}
 
 /// Strip the `language_model.` prefix so the LFM2 backbone sees its canonical
 /// `model.*` layout (it applies its own sanitize internally).
@@ -135,10 +110,7 @@ pub(crate) fn load_lfm2_vl(model_path: &Path) -> Result<LoadedModel> {
         Lfm2VlVisionTower::from_weights(&weights, "vision_tower", &vision_config, gs, bits)
             .map_err(|e| anyhow::anyhow!("Failed to load LFM2-VL vision tower: {}", e))?;
 
-    let downsample_factor = full_config
-        .get("downsample_factor")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(2) as i32;
+    let downsample_factor = positive_i32_field(&full_config, "downsample_factor")?.unwrap_or(2);
     let use_layernorm = full_config
         .get("projector_use_layernorm")
         .and_then(|v| v.as_bool())
@@ -153,29 +125,92 @@ pub(crate) fn load_lfm2_vl(model_path: &Path) -> Result<LoadedModel> {
     )
     .map_err(|e| anyhow::anyhow!("Failed to load LFM2-VL projector: {}", e))?;
 
-    // Processor.
-    let patch_size = full_config
-        .get("encoder_patch_size")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(vision_config.patch_size as u64) as usize;
-    let min_tokens = get_usize(&full_config, "min_image_tokens", 64);
-    let max_tokens = get_usize(&full_config, "max_image_tokens", 256);
-    let processor = Lfm2VlProcessor::new(
+    // Processor. LFM2-VL stores image-splitting policy in processor_config.json;
+    // keep config.json as the compatibility fallback for the keys mlxcel already
+    // read before splitting support.
+    let processor_config_json = read_optional_json_file(
+        &model_path.join("processor_config.json"),
+        "processor_config.json",
+    )?;
+    let processor_config = processor_config_json.as_ref().map(lfm2_processor_sidecar);
+    let patch_size = sidecar_or_config_usize(
+        processor_config,
+        &full_config,
+        "encoder_patch_size",
+        vision_config.patch_size,
+    );
+    let min_tokens =
+        sidecar_or_config_usize(processor_config, &full_config, "min_image_tokens", 64);
+    let max_tokens =
+        sidecar_or_config_usize(processor_config, &full_config, "max_image_tokens", 256);
+    let tiling = parse_tiling_policy(processor_config);
+    let downsample_factor_usize = downsample_factor.max(1) as usize;
+    let tile_patch_side = tiling.tile_size / patch_size.max(1);
+    let default_max_num_patches = (max_tokens
+        .saturating_mul(downsample_factor_usize)
+        .saturating_mul(downsample_factor_usize))
+    .max(tile_patch_side.saturating_mul(tile_patch_side));
+    let max_num_patches = sidecar_or_config_usize(
+        processor_config,
+        &full_config,
+        "max_num_patches",
+        default_max_num_patches,
+    );
+    validate_tiling_policy(
+        tiling,
         patch_size,
-        downsample_factor as usize,
+        downsample_factor_usize,
         min_tokens,
         max_tokens,
+        max_num_patches,
+    )?;
+    let processor = Lfm2VlProcessor::new(
+        patch_size,
+        downsample_factor_usize,
+        min_tokens,
+        max_tokens,
+        tiling,
     );
 
-    let image_token_id = full_config
-        .get("image_token_index")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(DEFAULT_IMAGE_TOKEN_ID as i64) as i32;
-    let use_image_special_tokens = full_config
-        .get("use_image_special_tokens")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+    let added_tokens =
+        read_optional_json_file(&model_path.join("added_tokens.json"), "added_tokens.json")?;
+    let tokenizer_json =
+        read_optional_json_file(&model_path.join("tokenizer.json"), "tokenizer.json")?;
+    let (img_row_col_ids, img_thumbnail_id) =
+        resolve_lfm2_vl_marker_ids(added_tokens.as_ref(), tokenizer_json.as_ref(), tiling)?;
+
+    let image_token_id = token_field(&full_config, "image_token_index")?
+        .or_else(|| {
+            resolve_added_token_id(added_tokens.as_ref(), tokenizer_json.as_ref(), "<image>")
+        })
+        .unwrap_or(DEFAULT_IMAGE_TOKEN_ID);
+    let image_start_id = resolve_added_token_id(
+        added_tokens.as_ref(),
+        tokenizer_json.as_ref(),
+        "<|image_start|>",
+    )
+    .unwrap_or(DEFAULT_IMAGE_START_ID);
+    let image_end_id = resolve_added_token_id(
+        added_tokens.as_ref(),
+        tokenizer_json.as_ref(),
+        "<|image_end|>",
+    )
+    .unwrap_or(DEFAULT_IMAGE_END_ID);
+    let use_image_special_tokens = sidecar_or_config_bool(
+        processor_config,
+        &full_config,
+        "use_image_special_tokens",
+        true,
+    );
     let eos_token_ids = text_args.eos_token_ids();
+
+    let patch_dim = patch_size
+        .checked_mul(patch_size)
+        .and_then(|dim| dim.checked_mul(3))
+        .and_then(|dim| i32::try_from(dim).ok())
+        .ok_or_else(|| {
+            anyhow::anyhow!("LFM2-VL patch_dim overflows for patch_size={patch_size}")
+        })?;
 
     let vlm = Lfm2VlModel {
         text_model,
@@ -183,11 +218,13 @@ pub(crate) fn load_lfm2_vl(model_path: &Path) -> Result<LoadedModel> {
         connector,
         processor,
         image_token_id,
-        image_start_id: DEFAULT_IMAGE_START_ID,
-        image_end_id: DEFAULT_IMAGE_END_ID,
+        image_start_id,
+        image_end_id,
+        img_row_col_ids,
+        img_thumbnail_id,
         use_image_special_tokens,
         downsample_factor,
-        patch_dim: (patch_size * patch_size * 3) as i32,
+        patch_dim,
         eos_token_ids,
     };
 
