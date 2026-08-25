@@ -58,6 +58,9 @@ pub mod baichuan;
 pub mod bailing_moe;
 pub mod bailing_moe_linear;
 pub mod bert;
+// Facade: the two config types are re-exported from `bert`, so callers keep
+// one public path (`models::bert::BertArgs`).
+mod bert_config;
 pub mod bert_heads;
 pub mod bitnet;
 pub mod cohere;
