@@ -633,6 +633,28 @@ impl Qwen2VLModel {
         mask: Option<&MlxArray>,
         seq_id: Option<SequenceId>,
     ) -> UniquePtr<MlxArray> {
+        let h = self.forward_hidden(input_ids, input_embeddings, caches, mask, seq_id);
+        self.lm_head.forward(&h)
+    }
+
+    /// Everything [`Self::forward_for_sequence`] does except the head:
+    /// returns the `[B, L, hidden_size]` states after the final norm.
+    ///
+    /// Split out so an embedder can reach the hidden states without ever
+    /// materializing a `[B, L, vocab_size]` logit tensor. The generation
+    /// path is this function followed by `lm_head`, so the two stay
+    /// token-exact by construction.
+    ///
+    /// Used by: Qwen2-VL / Qwen2.5-VL generation (through
+    /// [`Self::forward_for_sequence`]) and ColQwen2.5 embedding.
+    pub(crate) fn forward_hidden(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+        seq_id: Option<SequenceId>,
+    ) -> UniquePtr<MlxArray> {
         let mut h = if let Some(embeds) = input_embeddings {
             mlxcel_core::copy(embeds)
         } else {
@@ -715,8 +737,7 @@ impl Qwen2VLModel {
             h = layer.forward(&h, &mut caches[i], mask, &position_ids);
         }
 
-        h = self.norm.forward(&h);
-        self.lm_head.forward(&h)
+        self.norm.forward(&h)
     }
 
     /// Compute `[3, batch, seq_len]` position ids by adding `delta` to a

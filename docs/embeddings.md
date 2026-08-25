@@ -22,6 +22,7 @@ mlxcel serves embedding checkpoints through the OpenAI-compatible `POST /v1/embe
 | `src/embeddings/tokenize.rs` | Right-padded batch tokenization, trailing-special truncation, pair encoding. |
 | `src/embeddings/loader.rs` | `load_embedding_model`: family dispatch, subfolder weights, bf16 rule. |
 | `src/embeddings/engine.rs` | Length-sorted micro-batching, normalization, `dimensions`, readback. |
+| `src/embeddings/maxsim.rs` | `maxsim` / `maxsim_mlx`: the late-interaction score multi-vector families are ranked with. |
 | `src/lib/mlxcel-core/src/utils.rs` | `create_bidirectional_padding_mask`, `create_causal_padding_mask`, `create_bidirectional_window_mask`. |
 | `src/lib/mlxcel-core/src/weights.rs` | `load_weights_from_dir_with_subfolders` (`2_Dense/...` tensors prefixed `2_Dense.`). |
 | `src/models/detection.rs` | `is_embedding_checkpoint`: the detection rules below. |
@@ -36,6 +37,9 @@ mlxcel serves embedding checkpoints through the OpenAI-compatible `POST /v1/embe
 | `src/models/embedding_sanitize.rs` | Weight-key normalization shared by the decoder-backbone families: `{N}_Dense.linear.*` folding, head dropping, `model.` prefixing. |
 | `src/models/gemma3_embedding.rs` | EmbeddingGemma: bidirectional Gemma 3, mean pooling, two `Dense` projections. |
 | `src/models/qwen3_embedding.rs` | Qwen3-Embedding: causal Qwen3, last-token pooling. |
+| `src/models/col_late_interaction.rs` | Shared by the two late-interaction families: `embedding_dim`, the `1_Dense` projection override, the LoRA-only rejection, per-token projection and normalization, the query format. |
+| `src/models/colidefics3.rs` | ColIdefics3: SmolVLM / Idefics3 without a head plus a 128-dim projection. |
+| `src/models/colqwen2_5.rs` | ColQwen2.5: Qwen2.5-VL without a head plus a 128-dim projection. |
 
 ## Detection
 
@@ -194,6 +198,48 @@ mlxcel embed -m Qwen/Qwen3-Embedding-0.6B \
   -p "What is the capital of China?"
 ```
 
+### ColIdefics3 (`idefics3`, `ColIdefics3`)
+
+A late-interaction visual document retriever on the SmolVLM / Idefics3 stack: the SigLIP tower, the `pixel_shuffle(scale_factor)` connector and the SmolLM2 decoder are the ones `mlxcel generate` already runs. Retrieval changes only the ends. The decoder stops at its final norm (the checkpoint ships no `lm_head` at all), one `Linear` (`linear.{weight,bias}`, `[128, 576]`) projects every token's hidden state to 128 dimensions, each token vector is L2-normalized and padding rows are zeroed.
+
+Prompts are built by the family, not by the caller, because the two item kinds use different formats. An image document renders as `<|im_start|>User:<image>Describe the image.<end_of_utterance>\nAssistant:`, and the engine then replaces the single `<image>` with the processor's framed tile runs (`<fake_token_around_image><row_r_col_c>` plus 64 image tokens per tile, one row per line, then the global thumbnail block). A query renders as `Query: {text}` followed by ten `<end_of_utterance>` augmentation tokens, which is what gives a short query enough vectors for MaxSim to discriminate. The `instruction` field is not used by this family.
+
+`vidore/colSmol-256M` is a LoRA adapter on `vidore/ColSmolVLM-Instruct-256M-base` and carries the trained projection in `1_Dense/`; mlxcel does not merge adapters, so a directory holding `adapter_model.safetensors` with no base shard is rejected with a message asking for the merged checkpoint. Merge it with the checkpoint's own tooling and keep `1_Dense/model.safetensors` next to `config.json`: when that folder is present its `linear.{weight,bias}` replace the ones in the main shard, which is what sentence-transformers does. The base repository loads on its own and produces finite, correctly shaped output, which validates the weight layout, but its projection is untrained and its ranking is not meaningful. `mask_non_image_embeddings: true` is rejected at load rather than silently ignored.
+
+```sh
+mlxcel embed -m models/colSmol-256M-merged \
+  -p "What was the total revenue in 2023?" \
+  --image revenue-table.png --image unrelated-page.png
+```
+
+### ColQwen2.5 (`qwen2_5_vl` / `colqwen2`, `ColQwen25`)
+
+The same recipe on the Qwen2.5-VL stack: the windowed vision tower and the patch merger feed the Qwen2 decoder with M-RoPE, `Qwen2VLModel::forward_hidden` stops at the final norm, and `custom_text_proj` (`[128, 2048]` plus bias) projects every token. Position ids follow the input: a text-only micro-batch uses the sequential `[3, B, L]` positions the backbone builds for a text prefill, an image input keeps the real M-RoPE grid, and the per-request M-RoPE slot is cleared before a text batch so a previous image request cannot leak its spatial positions into it.
+
+An image document renders as `<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>Describe the image.<|im_end|><|endoftext|>` with the `<|image_pad|>` run expanded to one token per merged patch, and a query as `Query: {text}` plus ten `<|endoftext|>` tokens. The document turn is closed with `<|endoftext|>` rather than an assistant header, which is what the reference processor and the checkpoint's own `additional_chat_templates/sentence_transformers.jinja` both emit; nothing is ever generated after the page. `preprocessor_config.json` caps the image at `768 * 28 * 28` pixels, which bounds one page at 768 visual tokens.
+
+Three key layouts load. `vidore/colqwen2.5-base` and its merged descendants store `model.*`, `visual.*` and `custom_text_proj.*`; the native `transformers` retrieval export nests everything under `vlm.` and names the projection `embedding_proj_layer.*`; an mlx conversion already stores `model.*` and `vision_tower.*`. The sanitizer strips the `vlm.` wrapper first, then maps `embedding_proj_layer.` to `custom_text_proj.`, `model.language_model.` and `language_model.` to `model.`, and `visual.` / `model.visual.` to `vision_tower.`. The tied `lm_head` is dropped at load. A raw HuggingFace export also stores the vision patch filter in `Conv3d`'s native `[out, in, kT, kH, kW]` layout while the encoder expects the channels-last mlx conversion, so that tensor is permuted at load; without it the tower reads scrambled filters and every page embeds to nearly the same vectors. As for ColIdefics3, `vidore/colqwen2.5-v0.2` is a LoRA adapter and has to be merged into the base first, and the base repository loads on its own with an untrained projection, which validates the layout but not the ranking.
+
+```sh
+mlxcel embed -m models/colqwen2.5-v0.2-merged \
+  -p "What was the total revenue in 2023?" \
+  --image revenue-table.png --image unrelated-page.png
+```
+
+## Multi-vector (late-interaction) output
+
+A family whose `EmbeddingModel::multi_vector()` is `true` returns one vector per token instead of one per input. `EmbeddingModel::embed` produces `[B, L, D]` with the rows of padding tokens zeroed; the engine normalizes, applies `dimensions`, and trims each item to its own real token count, so the response carries `[num_real_tokens, D]`. For an image item the real token count is the count after the image placeholder has been expanded, which is what `EmbeddingModel::expand_image_tokens` computes before the batch is padded, so `usage.prompt_tokens` and the number of returned rows always describe the same sequence.
+
+Candidates are ranked with MaxSim, not cosine:
+
+```
+maxsim(q, d) = sum over query rows i of ( max over document rows j of dot(q_i, d_j) )
+```
+
+`crate::embeddings::maxsim` implements it over read-back rows and `maxsim_mlx` over device arrays. Because every row is L2-normalized, each inner product is a cosine and the score is bounded by the query's row count; it is reported raw rather than averaged, since comparing two documents for one query is what the number is read for. The score is asymmetric: the outer sum always runs over the first argument.
+
+`mlxcel embed` prints this matrix, labelled `MaxSim similarity`, in place of the cosine matrix whenever the loaded model is multi-vector.
+
 ## Attention masks
 
 Families build additive f32 masks (`0.0` = attend, `-inf` = blocked) from the `[B, L]` attention mask with three builders in `mlxcel_core::utils`, next to `create_causal_mask`:
@@ -272,11 +318,11 @@ mlxcel embed -m <path or repo-id> -p "text" [-p "text2" ...] [--image <file> ...
              [--instruction "..."] [--dimensions N] [--max-length N] [--batch-size N] [--json]
 ```
 
-Prints one vector per input (`[v1, v2, ...]`, one line each; a list of rows for multi-vector models) and, with two or more inputs, the cosine-similarity matrix (for multi-vector models the MaxSim score averaged over the query rows). `--json` prints one object with `embeddings`, `shapes`, `prompt_tokens` and `similarity` instead. This is the offline validation tool for every family: the same loader, pooling, normalization and batching as the server, without a listener.
+Prints one vector per input (`[v1, v2, ...]`, one line each; a list of rows for multi-vector models) and, with two or more inputs, the similarity matrix: cosine for single-vector models, MaxSim for multi-vector ones (the header names which one). `--json` prints one object with `embeddings`, `shapes`, `prompt_tokens` and `similarity` instead. This is the offline validation tool for every family: the same loader, pooling, normalization and batching as the server, without a listener.
 
 ## Adding a family
 
-1. Add the family module under `src/models/` with an `EmbeddingModel` implementation. Read weights with `crate::embeddings::loader::load_embedding_weights` (module subfolders included, text bf16 rule applied) and resolve the pooling mode with `crate::embeddings::resolve_pooling_mode(model_dir, family_default)`. Build attention masks from `EmbeddingBatch::attention_mask` with the builders above. Return pooled `[B, D]` vectors (`[B, L, D]` with padding rows zeroed for multi-vector families); the engine normalizes and truncates.
+1. Add the family module under `src/models/` with an `EmbeddingModel` implementation. Read weights with `crate::embeddings::loader::load_embedding_weights` (module subfolders included, text bf16 rule applied) and resolve the pooling mode with `crate::embeddings::resolve_pooling_mode(model_dir, family_default)`. Build attention masks from `EmbeddingBatch::attention_mask` with the builders above. Return pooled `[B, D]` vectors (`[B, L, D]` with padding rows zeroed for multi-vector families); the engine normalizes and truncates. A vision-language family whose prompt carries an image placeholder also implements `EmbeddingModel::expand_image_tokens`, which the engine calls before padding so the reported token count matches the sequence the forward pass sees.
 2. Replace the family's `not yet supported` arm in `build_family_model` (`src/embeddings/loader.rs`) with the constructor.
 3. Quantized checkpoints (`config.quantization = {group_size, bits}`) go through `UnifiedLinear::from_weights` / `UnifiedEmbedding::from_weights`, which accept a tensor with or without `.scales`; `quantization_params(config)` reads the block.
 4. Validate with `mlxcel embed` against a real checkpoint and add the family row to [supported-models.md](supported-models.md#embedding-models).

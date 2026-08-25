@@ -149,13 +149,19 @@ fn build_family_model(
         ModelType::Qwen3Embedding => Ok(Box::new(
             crate::models::qwen3_embedding::Qwen3EmbeddingModel::load(model_dir, config)?,
         )),
+        ModelType::ColIdefics3 => Ok(Box::new(
+            crate::models::colidefics3::ColIdefics3Model::load(model_dir, config)?,
+        )),
+        ModelType::ColQwen25 => Ok(Box::new(crate::models::colqwen2_5::ColQwen25Model::load(
+            model_dir, config,
+        )?)),
         ModelType::Qwen3VLEmbedding
         | ModelType::Lfm2Embedding
         | ModelType::Ministral3Embedding
         | ModelType::LlamaBidirec
-        | ModelType::LlamaNemotronVLEmbedding
-        | ModelType::ColIdefics3
-        | ModelType::ColQwen25 => Err(embedding_family_not_yet_supported(model_type)),
+        | ModelType::LlamaNemotronVLEmbedding => {
+            Err(embedding_family_not_yet_supported(model_type))
+        }
         other => bail!(
             "{} ({other:?}) is not an embedding checkpoint; load it with the generation \
              loader instead",

@@ -128,4 +128,23 @@ pub trait EmbeddingModel {
     fn max_sequence_length(&self) -> Option<usize> {
         None
     }
+
+    /// Rewrite one encoded row so its image placeholder becomes the run of
+    /// image tokens the forward pass will actually consume.
+    ///
+    /// A vision-language embedder's prompt carries a single placeholder
+    /// (`<image>`, `<|image_pad|>`) that the reference processor expands to
+    /// one token per projected image feature, and how many that is depends
+    /// on the image's geometry. The engine therefore calls this on the row
+    /// [`EmbeddingModel::format_text`] produced, before padding, so that the
+    /// real token count the `usage` field reports and the row count of a
+    /// multi-vector `[B, L, D]` output both match what
+    /// [`EmbeddingModel::embed`] sees.
+    ///
+    /// The default is the identity, which is correct for every text-only
+    /// family and for a VLM whose `format_text` already emits the expanded
+    /// run.
+    fn expand_image_tokens(&self, ids: &[u32], _images: &[ImageInput]) -> Result<Vec<u32>> {
+        Ok(ids.to_vec())
+    }
 }
