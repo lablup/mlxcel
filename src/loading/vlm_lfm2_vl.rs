@@ -599,6 +599,23 @@ mod tests {
     }
 
     #[test]
+    fn tiling_policy_reads_reference_processor_defaults() {
+        let sidecar = json!({
+            "do_image_splitting": true,
+            "tile_size": 512,
+            "min_tiles": 2,
+            "max_tiles": 10,
+            "max_pixels_tolerance": 2.0,
+            "use_thumbnail": false
+        });
+        assert_eq!(
+            parse_tiling_policy(Some(&sidecar)),
+            Lfm2VlTilingPolicy::default()
+        );
+        assert_eq!(parse_tiling_policy(None), Lfm2VlTilingPolicy::default());
+    }
+
+    #[test]
     fn processor_metadata_rejects_malformed_json() {
         let dir = tempfile::tempdir().expect("temporary model dir");
         let path = dir.path().join("processor_config.json");
@@ -646,5 +663,43 @@ mod tests {
         let config = json!({"downsample_factor": -2});
         let err = positive_i32_field(&config, "downsample_factor").unwrap_err();
         assert!(err.to_string().contains("positive i32"));
+    }
+
+    #[test]
+    fn marker_resolution_uses_tokenizer_ids_and_requires_tiling_table() {
+        let tokenizer = json!({
+            "model": {
+                "vocab": {
+                    "<|img_row_1_col_1|>": 900,
+                    "<|img_row_1_col_2|>": 901,
+                    "<|img_row_2_col_1|>": 910,
+                    "<|img_row_2_col_2|>": 911,
+                    "<|img_thumbnail|>": 999
+                }
+            }
+        });
+        let policy = Lfm2VlTilingPolicy {
+            min_tiles: 2,
+            max_tiles: 2,
+            use_thumbnail: true,
+            ..Lfm2VlTilingPolicy::default()
+        };
+        let (row_col_ids, thumbnail_id) =
+            resolve_lfm2_vl_marker_ids(None, Some(&tokenizer), policy).unwrap();
+        assert_eq!(row_col_ids[0][0], 900);
+        assert_eq!(row_col_ids[0][1], 901);
+        assert_eq!(row_col_ids[1][0], 910);
+        assert_eq!(row_col_ids[1][1], 911);
+        assert_eq!(thumbnail_id, 999);
+
+        let missing = json!({
+            "model": {
+                "vocab": {
+                    "<|img_row_1_col_1|>": 900
+                }
+            }
+        });
+        let err = resolve_lfm2_vl_marker_ids(None, Some(&missing), policy).unwrap_err();
+        assert!(err.to_string().contains("<|img_row_1_col_2|>"));
     }
 }

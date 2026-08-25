@@ -396,6 +396,41 @@ mod tests {
     }
 
     #[test]
+    fn multi_image_placeholder_expansion_preserves_per_image_layouts() {
+        let mut prompt = vec![11, IMAGE, 12, IMAGE, 13];
+        let layouts = [
+            layout(vec![(32, 32), (32, 32), (8, 8)], 1, 2),
+            layout(vec![(4, 6)], 1, 1),
+        ];
+        let stats = insert_lfm2_vl_image_tokens(
+            &mut prompt,
+            &layouts,
+            2,
+            IMAGE,
+            START,
+            END,
+            &marker_ids(),
+            THUMB,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(stats.image_blocks, 2);
+        assert_eq!(stats.total_image_tokens, 256 + 256 + 16 + 6);
+        assert_eq!(prompt[0], 11);
+        assert_eq!(prompt[1], START);
+        assert_eq!(prompt[2], 397);
+        assert_eq!(prompt[259], 398);
+        assert_eq!(prompt[516], THUMB);
+        assert_eq!(prompt[533], END);
+        assert_eq!(prompt[534], 12);
+        assert_eq!(prompt[535], START);
+        assert_eq!(&prompt[536..542], &[IMAGE; 6]);
+        assert_eq!(prompt[542], END);
+        assert_eq!(prompt[543], 13);
+    }
+
+    #[test]
     fn rejects_placeholder_image_count_mismatch() {
         let mut prompt = vec![1, IMAGE, 2];
         let err = insert_lfm2_vl_image_tokens(

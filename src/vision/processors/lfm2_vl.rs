@@ -412,6 +412,31 @@ mod tests {
     }
 
     #[test]
+    fn split_views_follow_row_major_tile_order() {
+        let p = processor();
+        let mut image = image::RgbImage::new(1024, 1024);
+        for y in 0..1024 {
+            for x in 0..1024 {
+                let pixel = match (x >= 512, y >= 512) {
+                    (false, false) => image::Rgb([255, 0, 0]),
+                    (true, false) => image::Rgb([0, 255, 0]),
+                    (false, true) => image::Rgb([0, 0, 255]),
+                    (true, true) => image::Rgb([255, 255, 0]),
+                };
+                image.put_pixel(x, y, pixel);
+            }
+        }
+        let (views, rows, cols) = p.views_for_image(&DynamicImage::ImageRgb8(image));
+        assert_eq!((rows, cols), (2, 2));
+        assert_eq!(views.len(), 4);
+        let first_pixels: Vec<[u8; 3]> = views.iter().map(|view| view.get_pixel(0, 0).0).collect();
+        assert_eq!(
+            first_pixels,
+            vec![[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]]
+        );
+    }
+
+    #[test]
     fn small_image_keeps_single_view() {
         let p = processor();
         let image = solid(640, 480);
