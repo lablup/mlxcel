@@ -20,7 +20,7 @@
 //! deterministic synthetic weights, so it needs no checkpoint. The
 //! real-checkpoint gates live in `modernbert_real_checkpoint_tests.rs`.
 
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::MutexGuard;
 
 use mlxcel_core::utils::{array_to_vec_f32, create_bidirectional_window_mask};
 use mlxcel_core::weights::WeightMap;
@@ -52,11 +52,13 @@ use crate::models::{ModelType, get_model_type};
 ///
 /// A poisoned lock is recovered rather than propagated so one failing test does
 /// not cascade into false failures in the rest.
+///
+/// Delegates to the process-wide guard in
+/// [`crate::models::embedding_test_support`], which serializes every
+/// embedding and reranker family against each other and pins the default
+/// device back to the GPU.
 pub(super) fn mlx_guard() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    crate::models::embedding_test_support::mlx_test_guard()
 }
 
 // Synthetic checkpoint.
