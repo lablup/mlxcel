@@ -158,6 +158,7 @@ pub mod qwen3_vl_moe;
 pub mod recurrent_gemma;
 pub mod rwkv7;
 pub mod seed_oss;
+pub mod siglip_text;
 pub mod smollm3;
 pub mod solar_open;
 /// Runtime block-vs-chain exactness gate shared by the MTP speculative paths.
@@ -301,6 +302,7 @@ pub use sanitize::{
     warn_bf16_precision,
 };
 pub use seed_oss::SeedOssModel;
+pub use siglip_text::{SigLipTextArgs, SigLipTextModel};
 pub use smollm3::SmolLM3Model;
 pub use solar_open::SolarOpenModel;
 pub use stablelm::StableLMModel;

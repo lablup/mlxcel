@@ -526,6 +526,9 @@ Embedding checkpoints are served through `POST /v1/embeddings` and the offline `
 
 | Family | `model_type` | `ModelType` | Pooling | Validation checkpoint | Status |
 |--------|--------------|-------------|---------|-----------------------|--------|
+| SigLIP text tower | `siglip` | `SiglipText` | last position, fixed (no `1_Pooling`) | `google/siglip-base-patch16-224` | supported (text only) |
+
+SigLIP is the one family whose sequence width is fixed rather than derived: every input is truncated to 63 tokens plus the trailing `</s>` and right-padded to exactly the 64 learned positions, no attention mask is applied, and the vector is the projection `head` applied to the hidden state at position 63. The pad token and the EOS token are the same id (`</s>`, 1), which is what makes that slot meaningful for short inputs. Image embeddings through the SigLIP vision tower are not served yet.
 
 ## Quantization formats
 

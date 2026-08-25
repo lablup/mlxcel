@@ -2,7 +2,7 @@
 
 mlxcel serves embedding checkpoints through the OpenAI-compatible `POST /v1/embeddings` endpoint and the offline `mlxcel embed` command. This page covers the shared foundation every embedding family builds on: detection, pooling, normalization, length limits, the request and response schema, the server flags, and the CLI. Per-family details (prompt prefixes, instruction formats, image support) are filled in by each family as it lands; the family table lives in [supported-models.md](supported-models.md#embedding-models).
 
-**Current status.** The route, the worker thread, batching, pooling and the CLI are in place. Detection recognizes every family listed below, and the loader dispatches on it, but no family forward pass has landed yet: loading a recognized checkpoint reports `<family> is detected as an embedding checkpoint, but this embedding family is not yet supported by /v1/embeddings` until its port merges (epic #1348).
+**Current status.** The route, the worker thread, batching, pooling and the CLI are in place. Detection recognizes every family listed below and the loader dispatches on it, but the forward passes land one family at a time (epic #1348): loading a checkpoint whose family has not landed reports `<family> is detected as an embedding checkpoint, but this embedding family is not yet supported by /v1/embeddings`. The [Embedding models table](supported-models.md#embedding-models) records which families are served today.
 
 ## Implemented endpoints
 
@@ -92,6 +92,22 @@ Normalization is L2 per vector, `v / max(||v||_2, 1e-9)`, applied when `Embeddin
 For `sentence-transformers/all-MiniLM-L6-v2` this resolves to `256` (from `sentence_bert_config.json`); for `Qwen/Qwen3-Embedding-0.6B` to the cap of `8192` (no `sentence_bert_config.json`, `model_max_length` 131072, rotary positions so `max_position_embeddings` is not consulted).
 
 Micro-batches are right-padded to their longest member (or to a fixed width when the family requires one, as SigLIP text does) with the pad token id: `tokenizer_config.json` `pad_token`, falling back to `eos_token`, then `0`. Any padding or truncation baked into `tokenizer.json` (MiniLM pads to a fixed 128) is stripped at load, because the engine pads per micro-batch and truncates per checkpoint limit.
+
+## Family notes
+
+### SigLIP text (`siglip`, `SiglipModel` / `SiglipTextModel`)
+
+`src/models/siglip_text.rs` serves the text tower of a SigLIP checkpoint; the vision tower is not served on `/v1/embeddings` yet, so `image_url` items are rejected. The tower is the token plus learned-position embedding, the same pre-norm encoder block the VLM vision towers use (`src/vision/encoders/siglip.rs`), a final LayerNorm and a linear projection `head`.
+
+- The tokenizer normalizes before it splits: it lower-cases, strips ASCII punctuation and collapses runs of whitespace, so `"A photo of a Cat!"` and `"a photo of a cat"` produce the same vector. This is the checkpoint's own `tokenizer.json`, not an mlxcel choice.
+- Inputs are capped at 64 tokens (`tokenizer_config.json` `model_max_length`, and the tower's `max_position_embeddings`): 63 tokens plus the trailing `</s>` the post-processor appends. Every row is then right-padded to exactly 64, which the family requests through `EmbeddingModel::pad_to_max_length`.
+- `pad_token` is `</s>` (id 1), the same id the tokenizer appends, so position 63 always holds `</s>`: the "sticky EOS" the reference pools.
+- No attention mask is applied; every position attends to all 64. That is the training-time recipe, and the checkpoint agrees: its `tokenizer_config.json` declares `model_input_names: ["input_ids"]`, so the reference processor emits no mask either.
+- Pooling is fixed at position 63 followed by the projection `head` and L2 normalization. `1_Pooling/config.json` is not consulted and `MLXCEL_EMBEDDING_POOLING` does not apply; `EmbeddingModel::default_pooling` reports `lasttoken` for the startup log only.
+- `text_config` keys are all optional and fall back to the reference `SiglipTextConfig` defaults (`vocab_size` 32000, `hidden_size` 768, `intermediate_size` 3072, 12 heads, 12 layers, `max_position_embeddings` 64, `layer_norm_eps` 1e-6, `projection_size` = `hidden_size`, `hidden_act` `gelu_pytorch_tanh`). `google/siglip-base-patch16-224` declares only five of them.
+- `vision_model.*`, `logit_scale`, `logit_bias` and any `position_ids` buffer are dropped at load; the remaining keys are used as they are.
+
+One property to know before using these vectors for text-to-text retrieval: SigLIP's text tower is trained contrastively against images, never against other texts, so nothing in training pushes two unrelated captions apart and its text-only cosine similarities sit on a high anisotropic floor. Measured on `google/siglip-base-patch16-224` over six sentences spanning animals, machinery, finance, food and physics, the fourteen unrelated pairs scored between 0.519 and 0.725 (mean 0.653), while the one related pair (`a photo of a cat` against `a photo of a kitten`) reached 0.966. Rank candidates by margin rather than thresholding the absolute score, which is the opposite of what a sentence-transformers encoder invites.
 
 ## Attention masks
 
