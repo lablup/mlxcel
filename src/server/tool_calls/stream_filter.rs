@@ -2123,6 +2123,17 @@ mod tests {
     }
 
     #[test]
+    fn pythonic_single_quoted_tool_call_suppressed() {
+        let mut f = StreamFilter::new();
+        let out = f.feed(
+            "<|tool_call_start|>[get_weather(location='Warsaw', note='a, b')]<|tool_call_end|>",
+        );
+        assert_eq!(out.content, None);
+        let flushed = f.flush();
+        assert_eq!(flushed.content, None);
+    }
+
+    #[test]
     fn pythonic_content_before_call_emitted() {
         let mut f = StreamFilter::new();
         let out = f.feed(

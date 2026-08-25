@@ -453,6 +453,25 @@ mod tests {
     }
 
     #[test]
+    fn parse_pythonic_single_quoted_literals() {
+        let output = "<|tool_call_start|>[get_weather(location='Warsaw', verbose=True, fallback=None)]<|tool_call_end|>";
+        let tools = vec![make_tool("get_weather")];
+        let result = parse_tool_calls(output, Some(&tools));
+        assert!(result.has_tool_calls());
+        assert_eq!(result.tool_calls[0].name, "get_weather");
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(
+            args,
+            serde_json::json!({"location": "Warsaw", "verbose": true, "fallback": null})
+        );
+        assert_eq!(
+            result.format,
+            Some(crate::server::tool_calls::ToolCallFormat::Pythonic)
+        );
+    }
+
+    #[test]
     fn parse_gemma4_format() {
         let output = "<|tool_call>call:get_weather{location:<|\"|>Tokyo<|\"|>}<tool_call|>";
         let tools = vec![make_tool("get_weather")];
