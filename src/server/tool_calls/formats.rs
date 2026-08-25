@@ -1716,70 +1716,97 @@ pub fn try_pythonic(text: &str) -> Option<ToolCallParseResult> {
     })
 }
 
-/// Placeholder used to temporarily hide commas that sit inside a `[...]`
-/// list literal from the per-argument regex in [`pythonic_arguments`]
-/// (whose unquoted alternative `[^,]+` would otherwise stop at the first
-/// comma, breaking multi-element lists such as `tags=[1, 2, 3]`). Restored
-/// by [`unmask_bracketed_commas`] once the surrounding key=value span has
-/// been captured. A Unicode Private Use Area codepoint is used so it cannot
-/// collide with a comma that legitimately appears in real argument text.
-const MASKED_COMMA: char = '\u{E000}';
-
-/// Hide commas that occur inside an unquoted `[...]` list literal (bracket
-/// depth > 0, outside a quoted string) behind [`MASKED_COMMA`] so the
-/// per-argument regex's unquoted alternative can span the whole list.
-fn mask_bracketed_commas(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    let mut depth: i32 = 0;
-    let mut in_quotes = false;
-    for c in raw.chars() {
-        match c {
-            '"' => {
-                in_quotes = !in_quotes;
-                out.push(c);
-            }
-            '[' if !in_quotes => {
-                depth += 1;
-                out.push(c);
-            }
-            ']' if !in_quotes => {
-                depth = depth.saturating_sub(1);
-                out.push(c);
-            }
-            ',' if !in_quotes && depth > 0 => out.push(MASKED_COMMA),
-            _ => out.push(c),
+/// Unescape only the repr-style escapes the pythonic format needs: the
+/// matching quote character and backslashes. Everything else stays literal.
+fn unescape_pythonic_quoted_body(body: &str, quote: char) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\'
+            && let Some(&next) = chars.peek()
+            && (next == quote || next == '\\')
+        {
+            out.push(next);
+            let _ = chars.next();
+            continue;
         }
+        out.push(c);
     }
     out
 }
 
-/// Restore commas hidden by [`mask_bracketed_commas`].
-fn unmask_bracketed_commas(masked: &str) -> String {
-    masked.replace(MASKED_COMMA, ",")
+/// Split a pythonic comma-separated sequence while respecting quoted strings
+/// and nested bracketed list literals.
+fn split_pythonic_commas(raw: &str) -> Vec<&str> {
+    let mut items = Vec::new();
+    let mut start = 0usize;
+    let mut depth: i32 = 0;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    for (idx, c) in raw.char_indices() {
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+
+        match c {
+            '"' | '\'' => quote = Some(c),
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                items.push(&raw[start..idx]);
+                start = idx + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    items.push(&raw[start..]);
+    items
 }
 
 /// Build the JSON `arguments` object from a pythonic call's raw argument
-/// text (the `(.*?)` capture between the call's parentheses), using the
-/// per-argument regex `(\w+)=(?:"([^"]*)"|([^,]+))(?:,\s*|$)`: group 1 is
-/// the key; a matched quoted alternative (group 2) becomes a JSON string
-/// verbatim; a matched unquoted alternative (group 3) is coerced via
-/// [`coerce_pythonic_value`]. Returns `"{}"` for empty args (e.g. `ping()`).
+/// text (the `(.*?)` capture between the call's parentheses). The raw string
+/// is first split on top-level commas with [`split_pythonic_commas`] so quoted
+/// strings and nested list literals stay intact, then each `key=value` segment
+/// is matched against
+/// `^(\w+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|(.*))$`:
+/// group 1 is the key; groups 2/3 are double-/single-quoted bodies and become
+/// JSON strings after repr-style unescaping; group 4 is the unquoted token and
+/// is coerced via [`coerce_pythonic_value`]. Returns `"{}"` for empty args
+/// (e.g. `ping()`).
 fn pythonic_arguments(args_raw: &str) -> String {
-    let masked = mask_bracketed_commas(args_raw);
-    let Ok(args_re) = Regex::new(r#"(\w+)=(?:"([^"]*)"|([^,]+))(?:,\s*|$)"#) else {
+    let Ok(args_re) =
+        Regex::new(r#"^(\w+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|(.*))$"#)
+    else {
         return "{}".to_string();
     };
 
     let mut map = serde_json::Map::new();
-    for caps in args_re.captures_iter(&masked) {
-        let Ok(caps) = caps else { continue };
+    for segment in split_pythonic_commas(args_raw) {
+        let trimmed = segment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(caps) = args_re.captures(trimmed) else {
+            continue;
+        };
+        let Some(caps) = caps else { continue };
         let Some(key) = caps.get(1) else { continue };
 
         let value = if let Some(quoted) = caps.get(2) {
-            serde_json::Value::String(quoted.as_str().to_string())
-        } else if let Some(unquoted) = caps.get(3) {
-            let restored = unmask_bracketed_commas(unquoted.as_str());
-            coerce_pythonic_value(restored.trim())
+            serde_json::Value::String(unescape_pythonic_quoted_body(quoted.as_str(), '"'))
+        } else if let Some(quoted) = caps.get(3) {
+            serde_json::Value::String(unescape_pythonic_quoted_body(quoted.as_str(), '\''))
+        } else if let Some(unquoted) = caps.get(4) {
+            coerce_pythonic_value(unquoted.as_str().trim())
         } else {
             continue;
         };
@@ -1800,11 +1827,13 @@ fn pythonic_arguments(args_raw: &str) -> String {
 const PYTHONIC_MAX_LIST_DEPTH: usize = 32;
 
 /// Coerce a trimmed unquoted pythonic argument value (or list item) in the
-/// order the format spec prescribes: integer, float, bool (`true`/`false`),
-/// a bracketed list `[...]` (each inner comma-separated item coerced the
-/// same way, recursively), else the raw string. A quoted list item (e.g.
-/// `"a"` inside `tags=["a", "b"]`) has its surrounding quotes stripped
-/// rather than falling through to the raw-string branch verbatim.
+/// order the format spec prescribes: integer, float, bool
+/// (`true`/`false`/`True`/`False`), `None`/`null`, a bracketed list `[...]`
+/// (each inner comma-separated item coerced the same way, recursively), a
+/// string wrapped in matching single or double quotes, else the raw string. A
+/// quoted list item (e.g. `"a"` inside `tags=["a", "b"]`) has its
+/// surrounding quotes stripped rather than falling through to the raw-string
+/// branch verbatim.
 fn coerce_pythonic_value(raw: &str) -> serde_json::Value {
     coerce_pythonic_value_inner(raw, 0)
 }
@@ -1821,8 +1850,11 @@ fn coerce_pythonic_value_inner(raw: &str, depth: usize) -> serde_json::Value {
     {
         return serde_json::Value::Number(n);
     }
-    if raw == "true" || raw == "false" {
-        return serde_json::Value::Bool(raw == "true");
+    if matches!(raw, "true" | "false" | "True" | "False") {
+        return serde_json::Value::Bool(matches!(raw, "true" | "True"));
+    }
+    if matches!(raw, "None" | "null") {
+        return serde_json::Value::Null;
     }
     // Only descend into a `[...]` list while under the depth cap. Past the cap
     // the value is left as a raw string, so adversarial deeply-nested brackets
@@ -1830,15 +1862,24 @@ fn coerce_pythonic_value_inner(raw: &str, depth: usize) -> serde_json::Value {
     if depth < PYTHONIC_MAX_LIST_DEPTH
         && let Some(inner) = raw.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
     {
-        let items = inner
-            .split(',')
+        let items = split_pythonic_commas(inner)
+            .into_iter()
             .filter(|s| !s.trim().is_empty())
             .map(|item| coerce_pythonic_value_inner(item.trim(), depth + 1))
             .collect();
         return serde_json::Value::Array(items);
     }
     if raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
-        return serde_json::Value::String(raw[1..raw.len() - 1].to_string());
+        return serde_json::Value::String(unescape_pythonic_quoted_body(
+            &raw[1..raw.len() - 1],
+            '"',
+        ));
+    }
+    if raw.len() >= 2 && raw.starts_with('\'') && raw.ends_with('\'') {
+        return serde_json::Value::String(unescape_pythonic_quoted_body(
+            &raw[1..raw.len() - 1],
+            '\'',
+        ));
     }
     serde_json::Value::String(raw.to_string())
 }
@@ -3827,6 +3868,18 @@ mod tests {
     }
 
     #[test]
+    fn pythonic_single_quoted_string_args() {
+        let text = "[get_weather(location='Warsaw', unit='celsius')]";
+        let result = try_pythonic(text).unwrap();
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(
+            args,
+            serde_json::json!({"location": "Warsaw", "unit": "celsius"})
+        );
+    }
+
+    #[test]
     fn pythonic_unquoted_int_arg() {
         let text = "[set_count(count=42)]";
         let result = try_pythonic(text).unwrap();
@@ -3855,6 +3908,15 @@ mod tests {
     }
 
     #[test]
+    fn pythonic_python_bool_and_none_literals() {
+        let text = "[f(a=True, b=False, c=None)]";
+        let result = try_pythonic(text).unwrap();
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args, serde_json::json!({"a": true, "b": false, "c": null}));
+    }
+
+    #[test]
     fn pythonic_bracketed_list_arg() {
         // The unquoted alternative `[^,]+` in the per-argument regex cannot
         // itself cross a comma, so this exercises the comma-masking done in
@@ -3877,6 +3939,57 @@ mod tests {
         let args: serde_json::Value =
             serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
         assert_eq!(args["tags"], serde_json::json!(["a", "b"]));
+    }
+
+    #[test]
+    fn pythonic_list_with_single_quoted_items() {
+        let text = "[f(tags=['x', 'y'])]";
+        let result = try_pythonic(text).unwrap();
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args, serde_json::json!({"tags": ["x", "y"]}));
+    }
+
+    #[test]
+    fn pythonic_list_with_quoted_item_containing_comma() {
+        let text = "[f(tags=['a,b', 'c'])]";
+        let result = try_pythonic(text).unwrap();
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args, serde_json::json!({"tags": ["a,b", "c"]}));
+    }
+
+    #[test]
+    fn pythonic_single_quoted_value_with_comma() {
+        let text = "[f(note='a, b', n=1)]";
+        let result = try_pythonic(text).unwrap();
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(args, serde_json::json!({"note": "a, b", "n": 1}));
+    }
+
+    #[test]
+    fn pythonic_preserves_private_use_chars_in_values() {
+        let text = "[f(note='prefix \u{E000} suffix', tags=['x', '\u{E000}'])]";
+        let result = try_pythonic(text).unwrap();
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(
+            args,
+            serde_json::json!({"note": "prefix \u{E000} suffix", "tags": ["x", "\u{E000}"]})
+        );
+    }
+
+    #[test]
+    fn pythonic_quoted_values_unescape_matching_quotes_and_backslashes() {
+        let text = r#"[f(single='It\'s \\ ok', double="say \"hi\" \\ now")]"#;
+        let result = try_pythonic(text).unwrap();
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(
+            args,
+            serde_json::json!({"single": "It's \\ ok", "double": r#"say "hi" \ now"#})
+        );
     }
 
     #[test]
@@ -3915,6 +4028,21 @@ mod tests {
         let args: serde_json::Value =
             serde_json::from_str(&wrapped_result.tool_calls[0].arguments).unwrap();
         assert_eq!(args["x"], "y");
+    }
+
+    #[test]
+    fn pythonic_marker_wrapped_single_quotes() {
+        let wrapped = "<|tool_call_start|>[f(location='Warsaw', tags=['x', 'y'])]<|tool_call_end|>";
+        let bare = "[f(location='Warsaw', tags=['x', 'y'])]";
+        let wrapped_result = try_pythonic(wrapped).unwrap();
+        let bare_result = try_pythonic(bare).unwrap();
+        assert_eq!(wrapped_result.tool_calls, bare_result.tool_calls);
+        let args: serde_json::Value =
+            serde_json::from_str(&wrapped_result.tool_calls[0].arguments).unwrap();
+        assert_eq!(
+            args,
+            serde_json::json!({"location": "Warsaw", "tags": ["x", "y"]})
+        );
     }
 
     #[test]
