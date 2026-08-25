@@ -25,6 +25,17 @@
 //!
 //! Used by: Gemma3 VLM (SigLIP), LLaVA (CLIP or SigLIP), Idefics2 (via
 //! `forward_with_position_ids`, bucketized variable-resolution tiles)
+//!
+//! The encoder block itself ([`EncoderLayer`], [`VisionAttention`],
+//! [`VisionMLP`], [`VisionMlpActivation`], [`select_mlp_activation`] and
+//! [`load_layer_norm`]) is `pub(crate)` because the SigLIP *text* tower
+//! (`crate::models::siglip_text`, served on `/v1/embeddings`) is the same
+//! pre-norm block over token embeddings rather than patch embeddings.
+//! [`EncoderLayer::forward`] therefore takes an optional additive attention
+//! mask; every vision caller passes `None` and is byte-identical to the
+//! pre-mask implementation, which
+//! `siglip_block_tests::encoder_block_shared_with_vision_is_unchanged` pins
+//! against a captured golden.
 
 use super::{VisionEncoder, VisionEncoderOutput};
 use mlxcel_core::layers::{LayerNorm, UnifiedEmbedding, UnifiedLinear};
@@ -33,14 +44,23 @@ use mlxcel_core::{MlxArray, UniquePtr};
 
 use crate::vision::config::{VisionConfig, VisionHiddenActivation};
 
+/// Which GELU the encoder MLP evaluates.
+///
+/// Used by: this module and the SigLIP text tower
+/// (`crate::models::siglip_text`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VisionMlpActivation {
+pub(crate) enum VisionMlpActivation {
     Exact,
     PytorchTanh,
     FastSigmoid,
 }
 
-fn select_mlp_activation(
+/// Map a checkpoint's `hidden_act` onto the MLP activation.
+///
+/// Used by: this module and the SigLIP text tower
+/// (`crate::models::siglip_text`), which always passes
+/// `use_fast_gelu = false`.
+pub(crate) fn select_mlp_activation(
     hidden_act: VisionHiddenActivation,
     use_fast_gelu: bool,
 ) -> VisionMlpActivation {
@@ -55,7 +75,10 @@ fn select_mlp_activation(
 }
 
 // Vision MLP.
-struct VisionMLP {
+//
+// Used by: [`EncoderLayer`], and through it the SigLIP text tower
+// (`crate::models::siglip_text`).
+pub(crate) struct VisionMLP {
     fc1: UnifiedLinear,
     fc2: UnifiedLinear,
     activation: VisionMlpActivation,
@@ -135,7 +158,10 @@ impl VisionMLP {
 }
 
 // Vision Attention.
-struct VisionAttention {
+//
+// Used by: [`EncoderLayer`], and through it the SigLIP text tower
+// (`crate::models::siglip_text`).
+pub(crate) struct VisionAttention {
     q_proj: UnifiedLinear,
     k_proj: UnifiedLinear,
     v_proj: UnifiedLinear,
@@ -145,9 +171,13 @@ struct VisionAttention {
 }
 
 impl VisionAttention {
+    /// `mask` is an additive attention mask (`0.0` = attend, `-inf` =
+    /// blocked) broadcastable to `[B, heads, L, L]`. Vision towers pass
+    /// `None`, which is what the reference SigLIP/CLIP encoder does.
     fn forward_impl(
         &self,
         x: &MlxArray,
+        mask: Option<&MlxArray>,
         capture: bool,
     ) -> (UniquePtr<MlxArray>, Vec<UniquePtr<MlxArray>>) {
         let shape = mlxcel_core::array_shape(x);
@@ -174,16 +204,14 @@ impl VisionAttention {
         let values = mlxcel_core::reshape(&values, &[b, l, self.num_heads, head_dim]);
         let values = mlxcel_core::transpose_axes(&values, &[0, 2, 1, 3]);
 
-        // Scaled dot product attention (no mask for vision encoder)
+        // Scaled dot product attention (vision encoders pass no mask; the
+        // SigLIP text tower also runs unmasked, matching its reference)
+        let mask_ptr = mask.map_or(std::ptr::null(), |m| m as *const MlxArray);
+        // SAFETY: `mask_ptr` is either null or borrowed from `mask`, which
+        // outlives this call.
         let output = unsafe {
             mlxcel_core::layers::attention_from_ptr(
-                &queries,
-                &keys,
-                &values,
-                self.scale,
-                std::ptr::null(),
-                0.0,
-                0,
+                &queries, &keys, &values, self.scale, mask_ptr, 0.0, 0,
             )
         };
 
@@ -236,8 +264,26 @@ impl VisionAttention {
     }
 }
 
-// Encoder Layer.
-struct EncoderLayer {
+/// Shape values one encoder block needs, so a caller without a
+/// [`VisionConfig`] can build the block without inventing vision-only fields
+/// (`patch_size`, `image_size`).
+///
+/// Used by: the SigLIP text tower (`crate::models::siglip_text`), which reads
+/// them from `text_config`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EncoderBlockShape {
+    pub hidden_size: usize,
+    pub num_attention_heads: usize,
+    pub layer_norm_eps: f32,
+}
+
+// Encoder Layer: LayerNorm -> Attention -> residual -> LayerNorm -> MLP ->
+// residual.
+//
+// Used by: [`SigLipVisionModel`] and the SigLIP text tower
+// (`crate::models::siglip_text`), which runs the identical block over token
+// embeddings.
+pub(crate) struct EncoderLayer {
     self_attn: VisionAttention,
     layer_norm1: LayerNorm,
     mlp: VisionMLP,
@@ -245,13 +291,17 @@ struct EncoderLayer {
 }
 
 impl EncoderLayer {
-    fn forward(&self, x: &MlxArray) -> UniquePtr<MlxArray> {
-        self.forward_impl(x, false).0
+    /// `mask` is an additive attention mask (`0.0` = attend, `-inf` =
+    /// blocked). Every vision caller passes `None`, and so does the SigLIP
+    /// text tower, whose reference processor emits no attention mask.
+    pub(crate) fn forward(&self, x: &MlxArray, mask: Option<&MlxArray>) -> UniquePtr<MlxArray> {
+        self.forward_impl(x, mask, false).0
     }
 
     fn forward_impl(
         &self,
         x: &MlxArray,
+        mask: Option<&MlxArray>,
         capture: bool,
     ) -> (UniquePtr<MlxArray>, Vec<UniquePtr<MlxArray>>) {
         let mut diagnostics = Vec::new();
@@ -260,7 +310,7 @@ impl EncoderLayer {
         if capture {
             diagnostics.push(mlxcel_core::copy(&ln1));
         }
-        let (r, attention_diagnostics) = self.self_attn.forward_impl(&ln1, capture);
+        let (r, attention_diagnostics) = self.self_attn.forward_impl(&ln1, mask, capture);
         diagnostics.extend(attention_diagnostics);
         let h = mlxcel_core::add(x, &r);
         if capture {
@@ -288,11 +338,37 @@ impl EncoderLayer {
         bits: i32,
         activation: VisionMlpActivation,
     ) -> Result<Self, String> {
+        Self::from_weights_parts(
+            weights,
+            prefix,
+            EncoderBlockShape {
+                hidden_size: config.hidden_size,
+                num_attention_heads: config.num_attention_heads,
+                layer_norm_eps: config.layer_norm_eps,
+            },
+            group_size,
+            bits,
+            activation,
+        )
+    }
+
+    /// Build one block from the three shape values it actually needs.
+    ///
+    /// Used by: [`Self::from_weights`] and the SigLIP text tower
+    /// (`crate::models::siglip_text`).
+    pub(crate) fn from_weights_parts(
+        weights: &WeightMap,
+        prefix: &str,
+        shape: EncoderBlockShape,
+        group_size: i32,
+        bits: i32,
+        activation: VisionMlpActivation,
+    ) -> Result<Self, String> {
         let self_attn = VisionAttention::from_weights(
             weights,
             &format!("{}.self_attn", prefix),
-            config.num_attention_heads,
-            config.hidden_size,
+            shape.num_attention_heads,
+            shape.hidden_size,
             group_size,
             bits,
         )?;
@@ -300,12 +376,12 @@ impl EncoderLayer {
         let layer_norm1 = load_layer_norm(
             weights,
             &format!("{}.layer_norm1", prefix),
-            config.layer_norm_eps,
+            shape.layer_norm_eps,
         )?;
         let layer_norm2 = load_layer_norm(
             weights,
             &format!("{}.layer_norm2", prefix),
-            config.layer_norm_eps,
+            shape.layer_norm_eps,
         )?;
 
         let mlp = VisionMLP::from_weights(
@@ -606,7 +682,7 @@ impl SigLipVisionModel {
             store[0] = Some(mlxcel_core::copy(&h));
         }
         for (i, layer) in self.layers.iter().enumerate() {
-            h = layer.forward(&h);
+            h = layer.forward(&h, None);
             let lidx = i as i32 + 1;
             if want.contains(&lidx) {
                 store[lidx as usize] = Some(mlxcel_core::copy(&h));
@@ -633,7 +709,7 @@ impl SigLipVisionModel {
             .embeddings
             .forward_with_position_ids(pixel_values, position_ids);
         for layer in &self.layers {
-            h = layer.forward(&h);
+            h = layer.forward(&h, None);
         }
         self.post_layernorm.forward(&h)
     }
@@ -693,9 +769,9 @@ impl SigLipVisionModel {
 
             for (i, layer) in self.layers.iter().enumerate() {
                 if capture_hidden_states && i == 0 {
-                    (h, block0_diagnostics) = layer.forward_impl(&h, true);
+                    (h, block0_diagnostics) = layer.forward_impl(&h, None, true);
                 } else {
-                    h = layer.forward(&h);
+                    h = layer.forward(&h, None);
                 }
                 if capture_hidden_states {
                     hidden_states.push(mlxcel_core::copy(&h));
@@ -726,9 +802,9 @@ impl SigLipVisionModel {
         // Default path (Gemma3 SigLIP): pass through all layers + post_layernorm
         for (i, layer) in self.layers.iter().enumerate() {
             if capture_hidden_states && i == 0 {
-                (h, block0_diagnostics) = layer.forward_impl(&h, true);
+                (h, block0_diagnostics) = layer.forward_impl(&h, None, true);
             } else {
-                h = layer.forward(&h);
+                h = layer.forward(&h, None);
             }
             if capture_hidden_states {
                 hidden_states.push(mlxcel_core::copy(&h));
@@ -777,7 +853,15 @@ impl SigLipVisionModel {
 }
 
 // Helper functions.
-fn load_layer_norm(weights: &WeightMap, prefix: &str, eps: f32) -> Result<LayerNorm, String> {
+/// Load a `{prefix}.weight` / optional `{prefix}.bias` LayerNorm.
+///
+/// Used by: this module and the SigLIP text tower
+/// (`crate::models::siglip_text`), for its `final_layer_norm`.
+pub(crate) fn load_layer_norm(
+    weights: &WeightMap,
+    prefix: &str,
+    eps: f32,
+) -> Result<LayerNorm, String> {
     let weight_key = format!("{}.weight", prefix);
     let bias_key = format!("{}.bias", prefix);
 
@@ -790,6 +874,10 @@ fn load_layer_norm(weights: &WeightMap, prefix: &str, eps: f32) -> Result<LayerN
 
     Ok(LayerNorm::new(weight, bias, eps))
 }
+
+#[cfg(test)]
+#[path = "siglip_block_tests.rs"]
+mod siglip_block_tests;
 
 #[cfg(test)]
 mod tests {

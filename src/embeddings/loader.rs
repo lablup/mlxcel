@@ -29,6 +29,7 @@ use mlxcel_core::weights::{WeightMap, load_weights_from_dir_with_subfolders};
 use serde_json::Value;
 
 use crate::model_metadata::is_embedding_model_type;
+use crate::models::siglip_text::load_siglip_text_model;
 use crate::models::{
     ModelType, config_has_quantization_metadata, convert_bf16_weights, get_model_type,
     sanitize_config_json, should_convert_bf16_to_f16, warn_bf16_precision,
@@ -125,14 +126,14 @@ pub fn embedding_family_not_yet_supported(model_type: ModelType) -> anyhow::Erro
 /// [`load_embedding_weights`].
 fn build_family_model(
     model_type: ModelType,
-    _model_dir: &Path,
-    _config: &Value,
+    model_dir: &Path,
+    config: &Value,
 ) -> Result<Box<dyn EmbeddingModel>> {
     match model_type {
+        ModelType::SiglipText => load_siglip_text_model(model_dir, config),
         ModelType::Bert
         | ModelType::XlmRoberta
         | ModelType::ModernBert
-        | ModelType::SiglipText
         | ModelType::Gemma3Embedding
         | ModelType::Qwen3Embedding
         | ModelType::Qwen3VLEmbedding
