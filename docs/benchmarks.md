@@ -41,6 +41,11 @@ reference runtime) live alongside the snapshot:
 - [Gemma3n decode profile: is a compiled fusion justified?](benchmark_results/gemma3n-decode-profile.md)
 - [Gemma3n decode profile on M5 Max](benchmark_results/gemma3n-decode-profile-m5max.md)
 
+Embedding and rerank throughput (`/v1/embeddings`, `/v1/rerank`) has its own
+ladder, driven by `scripts/bench_embeddings.py`:
+
+- [Embedding and rerank throughput on GB10 - 2026-08-26](benchmark_results/embeddings-rerank-gb10-2026-08-26.md)
+
 ## Suggested benchmark commands
 
 The repository contains benchmark helper scripts under `scripts/`. The exact
