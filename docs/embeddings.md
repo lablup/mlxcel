@@ -30,6 +30,9 @@ mlxcel serves embedding checkpoints through the OpenAI-compatible `POST /v1/embe
 | `src/server/routes/embeddings.rs` | HTTP handler, validation order, error mapping. |
 | `src/server/types/embeddings.rs` | Request and response types, base64 encoding. |
 | `src/commands/embed.rs` | `mlxcel embed`. |
+| `src/models/embedding_sanitize.rs` | Weight-key normalization shared by the decoder-backbone families: `{N}_Dense.linear.*` folding, head dropping, `model.` prefixing. |
+| `src/models/gemma3_embedding.rs` | EmbeddingGemma: bidirectional Gemma 3, mean pooling, two `Dense` projections. |
+| `src/models/qwen3_embedding.rs` | Qwen3-Embedding: causal Qwen3, last-token pooling. |
 
 ## Detection
 
@@ -95,6 +98,27 @@ Micro-batches are right-padded to their longest member (or to a fixed width when
 
 ## Family notes
 
+Prompt prefixes are caller-side everywhere: nothing is injected server-side, so an input embeds exactly as it is sent. The `instruction` request field (and `mlxcel embed --instruction`) reaches `EmbeddingModel::format_text`, and only a family that documents a format below does anything with it.
+
+### ModernBERT (`modernbert`)
+
+ModernBERT is an 8192-context bidirectional encoder with RoPE instead of an absolute position table, so `max_position_embeddings` does not cap the input length; `max_length` comes from `sentence_bert_config.json` and `tokenizer_config.json` and resolves to `8192` for both published checkpoints. Two out of every three layers use a sliding window of `local_attention / 2` keys on each side (64 with the published `local_attention: 128`) and rotate with `local_rope_theta` (10000); the remaining layers see the whole sequence and rotate with `global_rope_theta` (160000). Layer 0 legitimately ships no `attn_norm` (upstream makes it `nn.Identity()`); a missing `attn_norm` on any other layer is a load error. `Wqkv` and `Wi` are fused tensors and are split after the projection, never by slicing the weight, so a quantized export loads unchanged. `ModernBertModel` and `ModernBertForMaskedLM` both load as embedders, the MLM `head.*` / `decoder.*` tensors being dropped.
+
+`nomic-ai/modernbert-embed-base` is asymmetric and expects an explicit task prefix in the text: `search_query: ` before a query and `search_document: ` before a passage. The prefixes are part of the input string, not a server-side wrapper, so pass them yourself in `input` (or in `mlxcel embed -p`); omitting them costs retrieval quality. It also supports Matryoshka truncation, so `dimensions` down to 256 stays meaningful (the engine re-normalizes after truncating).
+
+```sh
+mlxcel embed -m nomic-ai/modernbert-embed-base \
+  -p "search_query: What is TSNE?" \
+  -p "search_document: t-SNE is a dimensionality reduction technique used for visualizing high-dimensional data." \
+  -p "search_document: The Eiffel Tower is a wrought-iron lattice tower in Paris."
+
+mlxcel-server -m nomic-ai/modernbert-embed-base --port 8080
+curl -s localhost:8080/v1/embeddings -H 'Content-Type: application/json' \
+  -d '{"input": ["search_query: What is TSNE?", "search_document: t-SNE is a dimensionality reduction technique used for visualizing high-dimensional data."]}'
+```
+
+`Alibaba-NLP/gte-reranker-modernbert-base` declares `ModernBertForSequenceClassification`, which detection deliberately refuses to route to any embedding variant (a reranker is not an embedder), so `-m` on that directory is a "not an embedding checkpoint" error today. Its head is implemented as `crate::models::modernbert_heads::ModernBertSequenceClassifier`, which loads by directory and returns `[B, num_labels]` logits from `classifier(norm(gelu(dense(pooled))))` with `classifier_pooling` (`cls` or `mean`) deciding the pooling; `/v1/rerank` wiring is #1356.
+
 ### SigLIP text (`siglip`, `SiglipModel` / `SiglipTextModel`)
 
 `src/models/siglip_text.rs` serves the text tower of a SigLIP checkpoint; the vision tower is not served on `/v1/embeddings` yet, so `image_url` items are rejected. The tower is the token plus learned-position embedding, the same pre-norm encoder block the VLM vision towers use (`src/vision/encoders/siglip.rs`), a final LayerNorm and a linear projection `head`.
@@ -108,6 +132,46 @@ Micro-batches are right-padded to their longest member (or to a fixed width when
 - `vision_model.*`, `logit_scale`, `logit_bias` and any `position_ids` buffer are dropped at load; the remaining keys are used as they are.
 
 One property to know before using these vectors for text-to-text retrieval: SigLIP's text tower is trained contrastively against images, never against other texts, so nothing in training pushes two unrelated captions apart and its text-only cosine similarities sit on a high anisotropic floor. Measured on `google/siglip-base-patch16-224` over six sentences spanning animals, machinery, finance, food and physics, the fourteen unrelated pairs scored between 0.519 and 0.725 (mean 0.653), while the one related pair (`a photo of a cat` against `a photo of a kitten`) reached 0.966. Rank candidates by margin rather than thresholding the absolute score, which is the opposite of what a sentence-transformers encoder invites.
+
+### EmbeddingGemma (`Gemma3Embedding`)
+
+The Gemma 3 text backbone run bidirectionally: the full-attention layers get a padding-only mask, the sliding layers get the same padding mask intersected with a symmetric `|q - k| < sliding_window` band. Up to `sliding_window` tokens (512 on the published checkpoints) the two masks are identical, so the window only starts to matter on longer inputs. The final norm output is mean pooled, then projected through two bias-free `Dense` modules (`768 -> 3072 -> 768`, no activation) before the engine's L2 normalization.
+
+Both published layouts load. The mlx conversions fold the projections into the main shards as `dense.0.*` and `dense.1.*` and keep the `model.` prefix; the sentence-transformers original stores them in `2_Dense/` and `3_Dense/` module folders, which arrive as `2_Dense.linear.weight` and `3_Dense.linear.weight` and are ranked into `dense.0` and `dense.1`. The `Dense` widths are checked to chain from the backbone hidden size, so a swapped pair is a load error instead of a quietly wrong vector.
+
+The alternation period comes from `config.json` `layer_types` when present: transformers 4.57 renamed the scalar to `_sliding_window_pattern`, which the Gemma 3 args type does not parse, and a period that is off by one still loads and still runs.
+
+Prompt prefixes (from `config_sentence_transformers.json`), applied by the caller:
+
+| Task | Prefix |
+|------|--------|
+| Retrieval query, reranking, bitext mining | `task: search result \| query: ` |
+| Retrieval document | `title: none \| text: ` |
+| Semantic similarity (STS) | `task: sentence similarity \| query: ` |
+| Classification | `task: classification \| query: ` |
+| Clustering | `task: clustering \| query: ` |
+| Code retrieval query | `task: code retrieval \| query: ` |
+| Summarization | `task: summarization \| query: ` |
+
+`max_length` is 2048 (`sentence_bert_config.json`). The trained Matryoshka widths are 768, 512, 256 and 128, so `dimensions` at those values keeps the ranking; any other value in `1..=768` is accepted and re-normalized but is not a trained width.
+
+```sh
+mlxcel embed -m mlx-community/embeddinggemma-300m-4bit \
+  -p "task: search result | query: Which planet is known as the Red Planet?" \
+  -p "title: none | text: Mars, known for its reddish appearance, is often referred to as the Red Planet."
+```
+
+### Qwen3-Embedding (`Qwen3Embedding`)
+
+The causal Qwen3 backbone with a causal-plus-padding mask and last-token pooling: the sentence embedding is the hidden state at the `<|endoftext|>` the tokenizer appends. Batches are right-padded, which leaves the causal mask over the real tokens identical to the unpadded single-row case. The tied `lm_head` is dropped at load, and the backbone stops at the final norm, so no `[B, L, vocab_size]` logit tensor is ever built.
+
+Queries use `Instruct: {task}\nQuery: {query}` and documents are raw text. Pass the task through `instruction` (or `--instruction`) and the family wraps the text; send the fully formatted string and leave `instruction` unset to do it yourself. `instruction` applies to every input of the request, so a mixed query-and-document batch either splits into two requests or formats its queries in the text itself. `max_length` is the hard cap of 8192. The checkpoint supports `dimensions` from 32 to 1024.
+
+```sh
+mlxcel embed -m Qwen/Qwen3-Embedding-0.6B \
+  --instruction "Given a web search query, retrieve relevant passages that answer the query" \
+  -p "What is the capital of China?"
+```
 
 ## Attention masks
 
@@ -188,27 +252,6 @@ mlxcel embed -m <path or repo-id> -p "text" [-p "text2" ...] [--image <file> ...
 ```
 
 Prints one vector per input (`[v1, v2, ...]`, one line each; a list of rows for multi-vector models) and, with two or more inputs, the cosine-similarity matrix (for multi-vector models the MaxSim score averaged over the query rows). `--json` prints one object with `embeddings`, `shapes`, `prompt_tokens` and `similarity` instead. This is the offline validation tool for every family: the same loader, pooling, normalization and batching as the server, without a listener.
-
-## Family notes
-
-### ModernBERT (`modernbert`)
-
-ModernBERT is an 8192-context bidirectional encoder with RoPE instead of an absolute position table, so `max_position_embeddings` does not cap the input length; `max_length` comes from `sentence_bert_config.json` and `tokenizer_config.json` and resolves to `8192` for both published checkpoints. Two out of every three layers use a sliding window of `local_attention / 2` keys on each side (64 with the published `local_attention: 128`) and rotate with `local_rope_theta` (10000); the remaining layers see the whole sequence and rotate with `global_rope_theta` (160000). Layer 0 legitimately ships no `attn_norm` (upstream makes it `nn.Identity()`); a missing `attn_norm` on any other layer is a load error. `Wqkv` and `Wi` are fused tensors and are split after the projection, never by slicing the weight, so a quantized export loads unchanged. `ModernBertModel` and `ModernBertForMaskedLM` both load as embedders, the MLM `head.*` / `decoder.*` tensors being dropped.
-
-`nomic-ai/modernbert-embed-base` is asymmetric and expects an explicit task prefix in the text: `search_query: ` before a query and `search_document: ` before a passage. The prefixes are part of the input string, not a server-side wrapper, so pass them yourself in `input` (or in `mlxcel embed -p`); omitting them costs retrieval quality. It also supports Matryoshka truncation, so `dimensions` down to 256 stays meaningful (the engine re-normalizes after truncating).
-
-```sh
-mlxcel embed -m nomic-ai/modernbert-embed-base \
-  -p "search_query: What is TSNE?" \
-  -p "search_document: t-SNE is a dimensionality reduction technique used for visualizing high-dimensional data." \
-  -p "search_document: The Eiffel Tower is a wrought-iron lattice tower in Paris."
-
-mlxcel-server -m nomic-ai/modernbert-embed-base --port 8080
-curl -s localhost:8080/v1/embeddings -H 'Content-Type: application/json' \
-  -d '{"input": ["search_query: What is TSNE?", "search_document: t-SNE is a dimensionality reduction technique used for visualizing high-dimensional data."]}'
-```
-
-`Alibaba-NLP/gte-reranker-modernbert-base` declares `ModernBertForSequenceClassification`, which detection deliberately refuses to route to any embedding variant (a reranker is not an embedder), so `-m` on that directory is a "not an embedding checkpoint" error today. Its head is implemented as `crate::models::modernbert_heads::ModernBertSequenceClassifier`, which loads by directory and returns `[B, num_labels]` logits from `classifier(norm(gelu(dense(pooled))))` with `classifier_pooling` (`cls` or `mean`) deciding the pooling; `/v1/rerank` wiring is #1356.
 
 ## Adding a family
 
