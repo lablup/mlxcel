@@ -40,7 +40,7 @@ use crate::phi4_siglip_prompt::prepare_phi4_siglip_prompt_tokens;
 use crate::phi4mm_prompt::{expand_phi4mm_placeholders, prepare_phi4mm_prompt_tokens};
 use crate::pixtral_prompt::insert_pixtral_image_tokens;
 use crate::qwen_vl::{insert_qwen_vl_image_tokens, insert_qwen3_omni_image_tokens};
-use crate::smolvlm_prompt::insert_smolvlm_image_tokens;
+use crate::smolvlm_prompt::{insert_idefics2_image_tokens, insert_smolvlm_image_tokens};
 use crate::vision::KimiVLModel;
 use crate::vision::encoders::kimi_vl::KimiMediaGrid;
 use crate::vision::feature_cache::{CacheKey, ModelVisionCaches, image_hash_from_pixels};
@@ -384,6 +384,36 @@ where
         image_soft_tokens,
         encode,
     )
+}
+
+fn ensure_image_token_feature_cardinality<I>(
+    family: &str,
+    prompt_tokens: &[i32],
+    image_token_id: i32,
+    tiles_per_image: I,
+    num_image_token: usize,
+) -> Result<()>
+where
+    I: IntoIterator<Item = usize>,
+{
+    let expected = tiles_per_image
+        .into_iter()
+        .try_fold(0usize, |acc, tiles| {
+            tiles
+                .checked_mul(num_image_token)
+                .and_then(|count| acc.checked_add(count))
+        })
+        .ok_or_else(|| anyhow::anyhow!("{family} image-token cardinality overflowed"))?;
+    let actual = prompt_tokens
+        .iter()
+        .filter(|&&token| token == image_token_id)
+        .count();
+    if actual != expected {
+        anyhow::bail!(
+            "{family} prompt contains {actual} image token(s), but preprocessing produced {expected} image feature row(s)"
+        );
+    }
+    Ok(())
 }
 
 /// Cache-aware wrapper for [`prepare_and_compute_vlm_embeddings`].
@@ -1203,13 +1233,22 @@ where
                 &tiles_per_image,
                 smolvlm.num_image_token,
                 smolvlm.image_token_id,
-                smolvlm.fake_image_token_id,
-                smolvlm.global_image_token_id,
+                |marker| smolvlm.encode_prompt_marker(marker, &mut encode),
             )
             .map(|stats| VlmPreparationSummary::SmolVLM {
                 image_blocks: stats.image_blocks,
                 total_image_tokens: stats.total_image_tokens,
             });
+            ensure_image_token_feature_cardinality(
+                "SmolVLM",
+                prompt_tokens,
+                smolvlm.image_token_id,
+                tiles_per_image
+                    .iter()
+                    .copied()
+                    .map(|layout| layout.total_tiles()),
+                smolvlm.num_image_token,
+            )?;
 
             // SmolVLM processes all tiles for the request in one tower call;
             // skip the opportunistic vision cache for the first integration
@@ -1231,21 +1270,26 @@ where
             // `num_image_token` (64) perceiver-compressed image-feature tokens.
             let (pixel_values, tiles_per_image) = idefics2.processor.preprocess_with_tiles(images);
 
-            // Idefics2 frames each image with `<fake_token_around_image>` and has
-            // no `<global-img>` token, so reuse the Idefics-family inserter with a
-            // zero global-image id.
-            let preparation = insert_smolvlm_image_tokens(
+            // Idefics2 frames each image with `<fake_token_around_image>` only;
+            // keep it off the SmolVLM row/global framing path.
+            let preparation = insert_idefics2_image_tokens(
                 prompt_tokens,
                 &tiles_per_image,
                 idefics2.num_image_token,
                 idefics2.image_token_id,
                 idefics2.fake_image_token_id,
-                0,
             )
             .map(|stats| VlmPreparationSummary::Idefics2 {
                 image_blocks: stats.image_blocks,
                 total_image_tokens: stats.total_image_tokens,
             });
+            ensure_image_token_feature_cardinality(
+                "Idefics2",
+                prompt_tokens,
+                idefics2.image_token_id,
+                tiles_per_image.iter().copied(),
+                idefics2.num_image_token,
+            )?;
 
             // Idefics2 runs every tile in one tower call; skip the opportunistic
             // vision cache for this first integration (mirrors the SmolVLM decision).

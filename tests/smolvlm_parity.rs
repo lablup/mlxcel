@@ -40,7 +40,9 @@ use common::repo_model_dir;
 use mlxcel::models::{ModelType, get_model_type};
 use mlxcel::smolvlm_prompt::insert_smolvlm_image_tokens;
 use mlxcel::vision::processors::ImageProcessor;
-use mlxcel::vision::processors::smolvlm::SmolVLMProcessor;
+use mlxcel::vision::processors::smolvlm::{
+    DEFAULT_SIGLIP_MEAN, DEFAULT_SIGLIP_STD, SmolVLMProcessor, TileLayout,
+};
 
 const MODEL_NAME: &str = "SmolVLM-Instruct";
 
@@ -64,27 +66,39 @@ fn fixture_image() -> image::DynamicImage {
 #[test]
 fn processor_single_global_tile_shape() {
     // Splitting disabled -> one global tile resized to image_size x image_size.
-    let proc = SmolVLMProcessor::new(64, false, 4);
+    let proc = SmolVLMProcessor::new(64, false, 4, DEFAULT_SIGLIP_MEAN, DEFAULT_SIGLIP_STD);
     let img = fixture_image();
     let pixels = proc.preprocess(std::slice::from_ref(&img));
     let shape = mlxcel_core::array_shape(&pixels);
     assert_eq!(shape, vec![1, 3, 64, 64]);
+    assert_eq!(proc.mean, DEFAULT_SIGLIP_MEAN);
+    assert_eq!(proc.std, DEFAULT_SIGLIP_STD);
 }
 
 #[test]
-fn processor_siglip_normalization_range() {
-    // SigLIP normalization maps [0, 255] -> [-1, 1]; a solid-white image must
-    // land at +1.0 (255/255 = 1.0 -> (1.0 - 0.5) / 0.5 = 1.0).
-    let proc = SmolVLMProcessor::new(8, false, 4);
+fn processor_honors_checkpoint_normalization_stats() {
+    // Checkpoint-provided normalization maps each channel independently:
+    // white pixels become (1.0 - mean[c]) / std[c].
+    let mean = [0.25, 0.5, 0.75];
+    let std = [0.25, 0.5, 0.125];
+    let proc = SmolVLMProcessor::new(8, false, 32, mean, std);
     let white = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
         8,
         8,
         image::Rgb([255, 255, 255]),
     ));
     let pixels = proc.preprocess(std::slice::from_ref(&white));
-    let corner = mlxcel_core::slice(&pixels, &[0, 0, 0, 0], &[1, 1, 1, 1]);
-    mlxcel_core::eval(&corner);
-    assert!((mlxcel_core::item_f32(&corner) - 1.0).abs() < 1e-6);
+    let observed: Vec<f32> = (0..3)
+        .map(|channel| {
+            let corner = mlxcel_core::slice(&pixels, &[0, channel, 0, 0], &[1, channel + 1, 1, 1]);
+            mlxcel_core::eval(&corner);
+            mlxcel_core::item_f32(&corner)
+        })
+        .collect();
+    assert_eq!(observed.len(), 3);
+    assert!((observed[0] - 3.0).abs() < 1e-6);
+    assert!((observed[1] - 1.0).abs() < 1e-6);
+    assert!((observed[2] - 2.0).abs() < 1e-6);
 }
 
 #[test]
@@ -95,25 +109,47 @@ fn prompt_expansion_matches_reference_token_stream() {
     const FAKE: i32 = 49152;
     const GLOBAL: i32 = 49155;
     let num_image_token = 4;
-    let tiles = 1;
+    let layout = TileLayout::single();
 
     let mut prompt = vec![1, IMAGE, 2];
+    let mut encoded_markers = Vec::new();
     let stats =
-        insert_smolvlm_image_tokens(&mut prompt, &[tiles], num_image_token, IMAGE, FAKE, GLOBAL)
-            .expect("expansion happens for a prompt with an <image> placeholder");
+        insert_smolvlm_image_tokens(&mut prompt, &[layout], num_image_token, IMAGE, |marker| {
+            encoded_markers.push(marker.to_owned());
+            match marker {
+                "<fake_token_around_image><global-img>" => vec![FAKE, GLOBAL],
+                "<fake_token_around_image>" => vec![FAKE],
+                other => panic!("unexpected SmolVLM marker text: {other:?}"),
+            }
+        })
+        .expect("expansion happens for a prompt with an <image> placeholder");
 
     let mut expected = vec![1, FAKE, GLOBAL];
-    expected.extend(std::iter::repeat_n(IMAGE, num_image_token * tiles));
+    expected.extend(std::iter::repeat_n(
+        IMAGE,
+        num_image_token * layout.total_tiles(),
+    ));
     expected.push(FAKE);
     expected.push(2);
 
     assert_eq!(prompt, expected);
-    assert_eq!(stats.total_image_tokens, num_image_token * tiles);
+    assert_eq!(stats.image_blocks, 1);
+    assert_eq!(
+        stats.total_image_tokens,
+        num_image_token * layout.total_tiles()
+    );
+    assert_eq!(
+        encoded_markers,
+        vec![
+            "<fake_token_around_image><global-img>".to_string(),
+            "<fake_token_around_image>".to_string(),
+        ]
+    );
     // The number of surviving <image> tokens must equal the feature-row count
     // the merge will scatter, or the merge would panic on a length mismatch.
     assert_eq!(
         prompt.iter().filter(|&&t| t == IMAGE).count(),
-        num_image_token * tiles
+        num_image_token * layout.total_tiles()
     );
 }
 
