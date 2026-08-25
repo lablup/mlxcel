@@ -48,12 +48,34 @@ use safetensors::tensor::{Dtype as SafeTensorDtype, View};
 /// `make verify-test-cuda`, `make test-fast`) passes `--test-threads=1`. A
 /// raw multi-threaded `cargo test` over a wide filter is not a supported way
 /// to run this suite on either backend.
+///
+/// The guard also pins MLX's process-wide default device back to the GPU
+/// when one is available. Other test modules move the default device to the
+/// CPU for their own reasons and never move it back
+/// (`multimodal::host_preprocessor_tests::ensure_cpu_device` does so inside a
+/// `Once`), and libtest runs modules in name order, so a gate that happens to
+/// sort after such a module silently measures the CPU backend instead: under
+/// `make verify-test-cuda` the `rerank::real_checkpoint_tests` gates scored a
+/// 4-bit Qwen3 reranker at 0.35 instead of 0.99 and produced NaN image
+/// scores from a bf16 Qwen3-VL reranker, while the same tests passed in
+/// isolation. Every real-checkpoint number this repository records is a GPU
+/// number, so the guard makes that explicit instead of depending on module
+/// order.
+///
+/// The pin is unconditional on purpose. `mlxcel_core::is_gpu_available()`
+/// reports whether the *current default* device is the GPU, so after another
+/// module has moved the default to the CPU it answers `false` and a guarded
+/// pin would never fire. `Device::gpu` is always constructible: on a CPU-only
+/// build MLX resolves it to the single default compute device (see
+/// `gpu_device_count`), so selecting it is safe on every backend.
 pub(crate) fn mlx_test_guard() -> MutexGuard<'static, ()> {
     static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-    GUARD
+    let guard = GUARD
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    mlxcel_core::set_default_device(true);
+    guard
 }
 
 /// Deterministic xorshift64* generator.

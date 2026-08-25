@@ -16,7 +16,7 @@
 //! sanitization, position-id construction and the forward pass over a tiny
 //! deterministic random-weight checkpoint.
 
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::MutexGuard;
 
 use mlxcel_core::utils::array_to_vec_f32;
 use mlxcel_core::weights::WeightMap;
@@ -35,12 +35,13 @@ use super::{BertArgs, BertEncoder, BertVariant, sanitize, xlm_roberta_position_i
 /// measured under it is meaningless. A poisoned lock is recovered rather than
 /// propagated, so one failing test does not turn every later one into a
 /// confusing poisoning panic.
+///
+/// Delegates to the process-wide guard in
+/// [`crate::models::embedding_test_support`], which serializes every
+/// embedding and reranker family against each other and pins the default
+/// device back to the GPU.
 pub(crate) fn mlx_test_guard() -> MutexGuard<'static, ()> {
-    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-    GUARD
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    crate::models::embedding_test_support::mlx_test_guard()
 }
 
 // Geometry of the in-memory fixture. Small enough that a forward pass is
