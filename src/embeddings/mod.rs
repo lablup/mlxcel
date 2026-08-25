@@ -24,6 +24,8 @@
 //!   truncation and pair encoding.
 //! - [`loader`]: `load_embedding_model`, the family dispatcher.
 //! - [`engine`]: length-sorted micro-batching, normalization and readback.
+//! - [`maxsim`]: the late-interaction (ColBERT) score multi-vector
+//!   families are ranked with.
 //!
 //! No family lives here; each family sub-issue adds its constructor to
 //! [`loader`] and its module under `src/models/`.
@@ -31,6 +33,7 @@
 pub mod engine;
 pub mod limits;
 pub mod loader;
+pub mod maxsim;
 pub mod model;
 pub mod pooling;
 pub mod tokenize;
@@ -67,6 +70,7 @@ pub use loader::{
     EmbeddingLoadOptions, LoadedEmbeddingModel, load_embedding_model,
     load_embedding_model_with_options,
 };
+pub use maxsim::{maxsim, maxsim_mlx};
 pub use model::{EmbeddingBatch, EmbeddingModel, EmbeddingOutput, ImageInput};
 pub use pooling::{
     POOLING_ENV, PoolingConfig, PoolingMode, normalize_l2, pool, resolve_pooling_mode,

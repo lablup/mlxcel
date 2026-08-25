@@ -16,11 +16,13 @@
 //!
 //! All implementations use mlxcel-core for direct MLX C++ bindings.
 
+pub(crate) mod col_late_interaction;
 mod detection;
 pub(crate) mod embedding_sanitize;
 #[cfg(test)]
 pub(crate) mod embedding_test_support;
 mod gemma3n_helpers;
+pub(crate) mod headless_llama;
 mod llama4_helpers;
 pub(crate) mod model_owned;
 pub mod multimodal_placeholders;
@@ -66,6 +68,8 @@ pub mod bitnet;
 pub mod cohere;
 pub mod cohere2;
 pub mod cohere2_moe;
+pub mod colidefics3;
+pub mod colqwen2_5;
 pub mod dbrx;
 pub mod deepseek;
 pub mod deepseek_v2;

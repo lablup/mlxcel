@@ -78,29 +78,29 @@ fn norm(v: &[f32]) -> f32 {
     dot(v, v).sqrt()
 }
 
-/// Cosine similarity for single vectors; for multi-vector outputs the
-/// ColBERT MaxSim score normalized by the query row count, which reduces to
-/// cosine when both sides are single rows.
+/// Pairwise score between two results: cosine for single-vector models,
+/// the ColBERT MaxSim sum `sum_i max_j dot(q_i, d_j)` for multi-vector
+/// (late-interaction) models.
+///
+/// MaxSim is the score the multi-vector families are ranked with, so it is
+/// reported raw rather than averaged over the query rows: its scale is the
+/// query length, and comparing two documents for one query is what the
+/// matrix is read for.
 pub(crate) fn similarity(a: &EmbeddingVector, b: &EmbeddingVector) -> f32 {
     let rows_a: Vec<&[f32]> = a.rows().collect();
     let rows_b: Vec<&[f32]> = b.rows().collect();
     if rows_a.is_empty() || rows_b.is_empty() {
         return 0.0;
     }
-    let cosine = |x: &[f32], y: &[f32]| {
-        let denom = norm(x) * norm(y);
-        if denom > 0.0 { dot(x, y) / denom } else { 0.0 }
-    };
-    let total: f32 = rows_a
-        .iter()
-        .map(|qa| {
-            rows_b
-                .iter()
-                .map(|qb| cosine(qa, qb))
-                .fold(f32::NEG_INFINITY, f32::max)
-        })
-        .sum();
-    total / rows_a.len() as f32
+    if a.is_multi_vector() || b.is_multi_vector() {
+        return mlxcel::embeddings::maxsim(&rows_a, &rows_b);
+    }
+    let denom = norm(rows_a[0]) * norm(rows_b[0]);
+    if denom > 0.0 {
+        dot(rows_a[0], rows_b[0]) / denom
+    } else {
+        0.0
+    }
 }
 
 fn format_vector(vector: &EmbeddingVector) -> String {
@@ -221,8 +221,13 @@ pub(crate) fn run_embed(args: EmbedArgs) -> Result<()> {
         println!("{}", format_vector(vector));
     }
     if let Some(matrix) = matrix {
+        let label = if engine.multi_vector() {
+            "MaxSim similarity"
+        } else {
+            "cosine similarity"
+        };
         println!();
-        println!("cosine similarity ({} inputs):", vectors.len());
+        println!("{label} ({} inputs):", vectors.len());
         for (i, row) in matrix.iter().enumerate() {
             let cells: Vec<String> = row.iter().map(|v| format!("{v:7.4}")).collect();
             println!("  [{i}] {}", cells.join(" "));
@@ -268,8 +273,16 @@ mod tests {
             values: vec![1.0, 0.0],
             shape: vec![1, 2],
         };
-        // Row 0 matches perfectly (1.0), row 1 is orthogonal (0.0): mean 0.5.
-        assert!((similarity(&query, &doc) - 0.5).abs() < 1e-6);
+        // Row 0 matches perfectly (1.0), row 1 is orthogonal (0.0): the
+        // MaxSim sum is 1.0, not the per-row mean.
+        assert!((similarity(&query, &doc) - 1.0).abs() < 1e-6);
+
+        // A document holding both query directions scores the query length.
+        let both = EmbeddingVector {
+            values: vec![1.0, 0.0, 0.0, 1.0],
+            shape: vec![2, 2],
+        };
+        assert!((similarity(&query, &both) - 2.0).abs() < 1e-6);
     }
 
     #[test]

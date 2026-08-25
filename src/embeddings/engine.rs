@@ -243,6 +243,23 @@ impl EmbeddingEngine {
         let row = encode_row(&self.loaded.tokenizer, &formatted, encode)
             .map_err(|e| EmbeddingEngineError::Internal(e.to_string()))?;
         let images = [image];
+        // Expand the prompt's image placeholder into the run of image tokens
+        // the forward pass consumes, so `usage.prompt_tokens` and the row
+        // count of a multi-vector output describe the same sequence.
+        let ids = self
+            .loaded
+            .model
+            .expand_image_tokens(&row.ids, &images)
+            .map_err(|e| EmbeddingEngineError::Internal(e.to_string()))?;
+        if ids.is_empty() {
+            return Err(EmbeddingEngineError::Internal(
+                "image prompt expansion produced no tokens".to_string(),
+            ));
+        }
+        let row = EncodedRow {
+            type_ids: row.type_ids.map(|_| vec![0; ids.len()]),
+            ids,
+        };
         self.run_rows(vec![row], Some(&images), options.dimensions)
     }
 
