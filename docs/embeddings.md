@@ -201,6 +201,53 @@ mlxcel embed -m Qwen/Qwen3-Embedding-0.6B \
   -p "What is the capital of China?"
 ```
 
+### Qwen3-VL-Embedding (`Qwen3VLEmbedding`)
+
+The generative Qwen3-VL stack with pooling in place of the head: the same vision tower, the same DeepStack injection into the selected decoder layers, the same interleaved M-RoPE, loaded by the same VLM loader. `Qwen3VLModel::forward_hidden` stops at the final norm, so the tied `lm_head` is never applied and no `[B, L, vocab_size]` tensor is built. Pooling is last token over a causal-plus-padding mask, which is why a right-padded batch reproduces the single-input vector exactly.
+
+Unlike every other family, the input is not embedded verbatim: the checkpoint's `chat_template.jinja` wraps it in an instruction system message, and the pooled position is the final newline of the assistant header.
+
+```text
+<|im_start|>system
+{instruction}<|im_end|>
+<|im_start|>user
+[<|vision_start|><|image_pad|><|vision_end|>]{text}<|im_end|>
+<|im_start|>assistant
+```
+
+The instruction defaults to the checkpoint's `config_sentence_transformers.json` prompt (`Represent the user's input.` on the published 2B). Pass `instruction` on the request or `--instruction` on the CLI to override it; an instruction that ends mid-sentence gets a trailing `.`, matching the reference wrapper. `max_length` is the hard cap of 8192 and the vector is 2048-dimensional.
+
+Image items are accepted. The engine tokenizes before the family sees the image, so the template emits exactly one `<|image_pad|>` and `EmbeddingModel::expand_image_tokens` grows it to the patch count the Qwen2-VL processor computes for that image, before the row is padded; the forward pass then merges the vision features at those positions. The pixel bounds come from the checkpoint's `preprocessor_config.json` rather than the generative defaults, which keeps one image at 1280 visual tokens on the published 2B. Images run one per forward pass because both the DeepStack injection and the M-RoPE delta are per sequence.
+
+```sh
+mlxcel embed -m Qwen/Qwen3-VL-Embedding-2B \
+  -p "A woman playing with her dog on a beach" \
+  -p "Quarterly revenue report for a software company" \
+  --image beach.jpg
+
+curl -s localhost:8080/v1/embeddings -H 'Content-Type: application/json' \
+  -d '{"input": [{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}, {"type": "text", "text": "A woman playing with her dog on a beach"}]}'
+```
+
+### Llama-Nemotron-VL-Embed (`LlamaNemotronVLEmbedding`)
+
+Three pieces mlxcel already runs, composed: the SigLIP-400M tower at `vision_model.vision_model` (its `post_layernorm` output, which is what `select_layer: -1` selects), InternVL's `pixel_shuffle(0.5)` plus the `mlp1` connector (`LayerNorm(4608) -> Linear(4608 -> 2048) -> GELU -> Linear(2048 -> 2048)`), and a Llama 3.2 1B decoder driven with a bidirectional padding mask, mean pooled after the final norm. The checkpoint's `llm_config` declares `LlamaBidirectionalModel` (`model_type: llama_bidirec`), which is the Llama decoder with `is_causal = False` on every attention module. The SigLIP attention-pooling `head.*` is dropped at load; an embedder never reads it.
+
+Prompt prefixes are caller-side, as for the text-only sibling `nvidia/llama-nemotron-embed-1b-v2`: `query: ` before a question, `passage: ` before a document. `instruction` is not used by this family.
+
+An image item carries no caller text, so the family emits the document form itself: `passage: <img>{<IMG_CONTEXT> repeated 256 * tiles}</img> `. The tile count comes from InternVL-style dynamic tiling at 512 px with the checkpoint's own area-aware `find_closest_aspect_ratio`, capped at `max_input_tiles` (6) and followed by one full-image thumbnail whenever the image was actually split, so a landscape page reaches `7 * 256` visual tokens. Normalization is SigLIP's (mean and std `0.5`), not ImageNet's.
+
+Two things to know about this checkpoint. Its `modules.json` ships no `2_Normalize` module, but mlxcel L2-normalizes anyway (`config.json` carries no `normalize: false`); the checkpoint's own `similarity_fn_name` is cosine, so ranking is unaffected. And `max_length` resolves to the shared cap of 8192 rather than the reference's `p_max_length` of 4096 for documents and `q_max_length` of 512 for queries, because those keys live in `processor_config.json`, which the shared length derivation does not read. Pass `--embedding-max-length 4096` (or `--embedding-max-length 512` for a query-only server) to reproduce the reference truncation.
+
+```sh
+mlxcel embed -m nvidia/llama-nemotron-embed-vl-1b-v2 \
+  -p "query: what does the chart say about 2023 revenue" \
+  -p "passage: Revenue grew 12% in 2023 driven by subscriptions." \
+  --image chart.png
+```
+
+Both multimodal families implement `EmbeddingModel::expand_image_tokens`, so the placeholder becomes its real run before the row is padded and `usage.prompt_tokens` describes the sequence the forward pass actually consumes.
+
 ### ColIdefics3 (`idefics3`, `ColIdefics3`)
 
 A late-interaction visual document retriever on the SmolVLM / Idefics3 stack: the SigLIP tower, the `pixel_shuffle(scale_factor)` connector and the SmolLM2 decoder are the ones `mlxcel generate` already runs. Retrieval changes only the ends. The decoder stops at its final norm (the checkpoint ships no `lm_head` at all), one `Linear` (`linear.{weight,bias}`, `[128, 576]`) projects every token's hidden state to 128 dimensions, each token vector is L2-normalized and padding rows are zeroed.

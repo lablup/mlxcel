@@ -264,29 +264,32 @@ fn generation_loader_rejects_real_embedding_checkpoints() {
 }
 
 #[test]
-fn embedding_loader_reports_unported_families_on_real_checkpoints() {
-    // For a family whose forward pass has not landed yet, the dispatcher must
-    // name the family and the route rather than fail on a missing tensor.
-    // Ported families move out of this list: Gemma3Embedding and
-    // Qwen3Embedding did so in #1329, BERT in #1321, ColIdefics3 and
-    // ColQwen2.5 in #1337, and LFM2Embedding, Ministral3Embedding and
-    // LlamaBidirec in #1325. The two multimodal embedders are what is left.
-    for (repo, family) in [
-        (
-            "Qwen/Qwen3-VL-Embedding-2B",
-            "Qwen3-VL-Embedding (multimodal)",
-        ),
-        (
-            "nvidia/llama-nemotron-embed-vl-1b-v2",
-            "Llama-Nemotron-VL embedder (multimodal)",
-        ),
+fn every_embedding_family_has_a_forward_pass() {
+    // This test used to list the families whose forward pass had not landed
+    // and require the dispatcher to name the family and the route rather than
+    // fail on a missing tensor. Families left that list as they merged:
+    // Gemma3Embedding and Qwen3Embedding in #1329, BERT and XLM-RoBERTa in
+    // #1321, ColIdefics3 and ColQwen2.5 in #1337, LFM2Embedding,
+    // Ministral3Embedding and LlamaBidirec in #1325, and the two multimodal
+    // embedders in #1345. The list is now empty, so the property to hold is
+    // the inverse: no embedding variant may report "not yet supported".
+    //
+    // `embedding_family_not_yet_supported` is deliberately kept: it is the
+    // message a family added to `ModelType` before its port lands should use,
+    // and `loader_tests` still covers its wording.
+    for repo in [
+        "Qwen/Qwen3-VL-Embedding-2B",
+        "nvidia/llama-nemotron-embed-vl-1b-v2",
     ] {
         let Some(dir) = local_checkpoint(repo) else {
             continue;
         };
-        let err = err_string(load_embedding_model(&dir));
-        assert!(err.contains("not yet supported"), "{repo}: {err}");
-        assert!(err.contains(family), "{repo}: {err}");
+        let loaded = load_embedding_model(&dir).unwrap_or_else(|err| panic!("{repo}: {err:#}"));
+        assert!(loaded.limits.dim > 0, "{repo}: zero-width embedding");
+        assert!(
+            loaded.model.supports_images(),
+            "{repo}: a multimodal embedder must accept image items"
+        );
     }
 }
 

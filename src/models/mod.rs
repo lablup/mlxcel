@@ -122,6 +122,8 @@ pub mod llada2_moe;
 pub mod llama3;
 pub mod llama4;
 pub mod llama_bidirec;
+pub mod llama_nemotron_vl_embedding;
+pub(crate) mod llama_nemotron_vl_tiling;
 pub mod longcat_flash_ngram;
 pub mod mamba;
 pub mod mamba2;
@@ -173,6 +175,7 @@ pub mod qwen3_embedding;
 pub mod qwen3_moe;
 pub mod qwen3_next;
 pub mod qwen3_vl;
+pub mod qwen3_vl_embedding;
 pub mod qwen3_vl_moe;
 pub mod recurrent_gemma;
 pub mod rwkv7;
@@ -186,6 +189,8 @@ pub mod stablelm;
 pub mod starcoder2;
 pub mod step3p5;
 pub mod telechat3;
+#[cfg(test)]
+pub(crate) mod vl_embedding_test_images;
 pub mod whisper;
 pub mod youtu_vl_lm;
 
