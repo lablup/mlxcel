@@ -78,6 +78,22 @@ fn sidecar_or_config_usize(
         .unwrap_or_else(|| get_usize(full_config, key, default))
 }
 
+fn sidecar_or_config_bool(
+    sidecar: Option<&Value>,
+    full_config: &Value,
+    key: &str,
+    default: bool,
+) -> bool {
+    sidecar
+        .and_then(|v| v.get(key))
+        .and_then(|x| x.as_bool())
+        .unwrap_or_else(|| get_bool(full_config, key, default))
+}
+
+fn lfm2_processor_sidecar(config: &Value) -> &Value {
+    config.get("image_processor").unwrap_or(config)
+}
+
 fn parse_tiling_policy(processor_config: Option<&Value>) -> Lfm2VlTilingPolicy {
     let defaults = Lfm2VlTilingPolicy::default();
     let Some(config) = processor_config else {
@@ -353,33 +369,32 @@ pub(crate) fn load_lfm2_vl(model_path: &Path) -> Result<LoadedModel> {
     // Processor. LFM2-VL stores image-splitting policy in processor_config.json;
     // keep config.json as the compatibility fallback for the keys mlxcel already
     // read before splitting support.
-    let processor_config = read_json_file(&model_path.join("processor_config.json"));
+    let processor_config_json = read_json_file(&model_path.join("processor_config.json"));
+    let processor_config = processor_config_json.as_ref().map(lfm2_processor_sidecar);
     let patch_size = sidecar_or_config_usize(
-        processor_config.as_ref(),
+        processor_config,
         &full_config,
         "encoder_patch_size",
         vision_config.patch_size,
     );
-    let min_tokens = sidecar_or_config_usize(
-        processor_config.as_ref(),
-        &full_config,
-        "min_image_tokens",
-        64,
-    );
-    let max_tokens = sidecar_or_config_usize(
-        processor_config.as_ref(),
-        &full_config,
-        "max_image_tokens",
-        256,
-    );
-    let tiling = parse_tiling_policy(processor_config.as_ref());
+    let min_tokens =
+        sidecar_or_config_usize(processor_config, &full_config, "min_image_tokens", 64);
+    let max_tokens =
+        sidecar_or_config_usize(processor_config, &full_config, "max_image_tokens", 256);
+    let tiling = parse_tiling_policy(processor_config);
     let downsample_factor_usize = downsample_factor.max(1) as usize;
-    validate_tiling_policy(
-        tiling,
-        patch_size,
-        downsample_factor_usize,
-        vision_config.num_patches,
-    )?;
+    let tile_patch_side = tiling.tile_size / patch_size.max(1);
+    let default_max_num_patches = (max_tokens
+        .saturating_mul(downsample_factor_usize)
+        .saturating_mul(downsample_factor_usize))
+    .max(tile_patch_side.saturating_mul(tile_patch_side));
+    let max_num_patches = sidecar_or_config_usize(
+        processor_config,
+        &full_config,
+        "max_num_patches",
+        default_max_num_patches,
+    );
+    validate_tiling_policy(tiling, patch_size, downsample_factor_usize, max_num_patches)?;
     let processor = Lfm2VlProcessor::new(
         patch_size,
         downsample_factor_usize,
@@ -413,10 +428,12 @@ pub(crate) fn load_lfm2_vl(model_path: &Path) -> Result<LoadedModel> {
         "<|image_end|>",
     )
     .unwrap_or(DEFAULT_IMAGE_END_ID);
-    let use_image_special_tokens = full_config
-        .get("use_image_special_tokens")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+    let use_image_special_tokens = sidecar_or_config_bool(
+        processor_config,
+        &full_config,
+        "use_image_special_tokens",
+        true,
+    );
     let eos_token_ids = text_args.eos_token_ids();
 
     let vlm = Lfm2VlModel {
@@ -436,4 +453,48 @@ pub(crate) fn load_lfm2_vl(model_path: &Path) -> Result<LoadedModel> {
     };
 
     Ok(LoadedModel::Lfm2VL(vlm))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn tiling_validation_uses_processor_max_num_patches_not_vision_table_len() {
+        let policy = Lfm2VlTilingPolicy::default();
+        assert!(validate_tiling_policy(policy, 16, 2, 1024).is_ok());
+        assert!(validate_tiling_policy(policy, 16, 2, 256).is_err());
+    }
+
+    #[test]
+    fn processor_sidecar_unwraps_nested_image_processor_config() {
+        let full = json!({
+            "encoder_patch_size": 32,
+            "max_num_patches": 256,
+            "use_image_special_tokens": true
+        });
+        let sidecar = json!({
+            "image_processor": {
+                "encoder_patch_size": 16,
+                "max_num_patches": 1024,
+                "use_image_special_tokens": false
+            }
+        });
+        let sidecar = lfm2_processor_sidecar(&sidecar);
+        assert_eq!(
+            sidecar_or_config_usize(Some(sidecar), &full, "encoder_patch_size", 8),
+            16
+        );
+        assert_eq!(
+            sidecar_or_config_usize(Some(sidecar), &full, "max_num_patches", 512),
+            1024
+        );
+        assert!(!sidecar_or_config_bool(
+            Some(sidecar),
+            &full,
+            "use_image_special_tokens",
+            true
+        ));
+    }
 }
