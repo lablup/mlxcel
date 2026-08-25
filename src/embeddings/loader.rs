@@ -131,9 +131,11 @@ fn build_family_model(
 ) -> Result<Box<dyn EmbeddingModel>> {
     match model_type {
         ModelType::SiglipText => load_siglip_text_model(model_dir, config),
+        ModelType::ModernBert => Ok(Box::new(
+            crate::models::modernbert_heads::ModernBertEmbeddingModel::load(model_dir, config)?,
+        )),
         ModelType::Bert
         | ModelType::XlmRoberta
-        | ModelType::ModernBert
         | ModelType::Gemma3Embedding
         | ModelType::Qwen3Embedding
         | ModelType::Qwen3VLEmbedding

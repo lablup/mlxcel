@@ -189,6 +189,27 @@ mlxcel embed -m <path or repo-id> -p "text" [-p "text2" ...] [--image <file> ...
 
 Prints one vector per input (`[v1, v2, ...]`, one line each; a list of rows for multi-vector models) and, with two or more inputs, the cosine-similarity matrix (for multi-vector models the MaxSim score averaged over the query rows). `--json` prints one object with `embeddings`, `shapes`, `prompt_tokens` and `similarity` instead. This is the offline validation tool for every family: the same loader, pooling, normalization and batching as the server, without a listener.
 
+## Family notes
+
+### ModernBERT (`modernbert`)
+
+ModernBERT is an 8192-context bidirectional encoder with RoPE instead of an absolute position table, so `max_position_embeddings` does not cap the input length; `max_length` comes from `sentence_bert_config.json` and `tokenizer_config.json` and resolves to `8192` for both published checkpoints. Two out of every three layers use a sliding window of `local_attention / 2` keys on each side (64 with the published `local_attention: 128`) and rotate with `local_rope_theta` (10000); the remaining layers see the whole sequence and rotate with `global_rope_theta` (160000). Layer 0 legitimately ships no `attn_norm` (upstream makes it `nn.Identity()`); a missing `attn_norm` on any other layer is a load error. `Wqkv` and `Wi` are fused tensors and are split after the projection, never by slicing the weight, so a quantized export loads unchanged. `ModernBertModel` and `ModernBertForMaskedLM` both load as embedders, the MLM `head.*` / `decoder.*` tensors being dropped.
+
+`nomic-ai/modernbert-embed-base` is asymmetric and expects an explicit task prefix in the text: `search_query: ` before a query and `search_document: ` before a passage. The prefixes are part of the input string, not a server-side wrapper, so pass them yourself in `input` (or in `mlxcel embed -p`); omitting them costs retrieval quality. It also supports Matryoshka truncation, so `dimensions` down to 256 stays meaningful (the engine re-normalizes after truncating).
+
+```sh
+mlxcel embed -m nomic-ai/modernbert-embed-base \
+  -p "search_query: What is TSNE?" \
+  -p "search_document: t-SNE is a dimensionality reduction technique used for visualizing high-dimensional data." \
+  -p "search_document: The Eiffel Tower is a wrought-iron lattice tower in Paris."
+
+mlxcel-server -m nomic-ai/modernbert-embed-base --port 8080
+curl -s localhost:8080/v1/embeddings -H 'Content-Type: application/json' \
+  -d '{"input": ["search_query: What is TSNE?", "search_document: t-SNE is a dimensionality reduction technique used for visualizing high-dimensional data."]}'
+```
+
+`Alibaba-NLP/gte-reranker-modernbert-base` declares `ModernBertForSequenceClassification`, which detection deliberately refuses to route to any embedding variant (a reranker is not an embedder), so `-m` on that directory is a "not an embedding checkpoint" error today. Its head is implemented as `crate::models::modernbert_heads::ModernBertSequenceClassifier`, which loads by directory and returns `[B, num_labels]` logits from `classifier(norm(gelu(dense(pooled))))` with `classifier_pooling` (`cls` or `mean`) deciding the pooling; `/v1/rerank` wiring is #1356.
+
 ## Adding a family
 
 1. Add the family module under `src/models/` with an `EmbeddingModel` implementation. Read weights with `crate::embeddings::loader::load_embedding_weights` (module subfolders included, text bf16 rule applied) and resolve the pooling mode with `crate::embeddings::resolve_pooling_mode(model_dir, family_default)`. Build attention masks from `EmbeddingBatch::attention_mask` with the builders above. Return pooled `[B, D]` vectors (`[B, L, D]` with padding rows zeroed for multi-vector families); the engine normalizes and truncates.
