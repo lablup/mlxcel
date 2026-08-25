@@ -149,7 +149,7 @@ fn build_family_model(
         ModelType::Qwen3Embedding => Ok(Box::new(
             crate::models::qwen3_embedding::Qwen3EmbeddingModel::load(model_dir, config)?,
         )),
-        | ModelType::Qwen3VLEmbedding
+        ModelType::Qwen3VLEmbedding
         | ModelType::Lfm2Embedding
         | ModelType::Ministral3Embedding
         | ModelType::LlamaBidirec
