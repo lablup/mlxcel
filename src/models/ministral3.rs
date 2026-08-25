@@ -110,7 +110,11 @@ impl ModelArgs {
 // Llama 4 Attention Scaling.
 /// Compute Llama 4 attention scale per position
 /// scale = 1 + beta * ln(1 + floor(pos / max_pos))
-fn get_llama4_attn_scale(
+///
+/// Used by: Ministral 3 generation (`Ministral3Model::forward_with_caches`) and
+/// Nemotron-3-Embed (`crate::models::ministral3_embedding`), which needs the
+/// same schedule at offset 0 for its single bidirectional prefill.
+pub(crate) fn get_llama4_attn_scale(
     size: i32,
     offset: i32,
     beta: f32,
@@ -416,7 +420,9 @@ pub enum Cache {
 }
 
 impl Cache {
-    fn as_interface(&mut self) -> &mut dyn CacheInterface {
+    /// Used by: `Ministral3Model::forward_with_caches` and the Nemotron-3-Embed
+    /// bidirectional prefill in `crate::models::ministral3_embedding`.
+    pub(crate) fn as_interface(&mut self) -> &mut dyn CacheInterface {
         match self {
             Cache::Standard(c) => c,
             Cache::Rotating(c) => c,

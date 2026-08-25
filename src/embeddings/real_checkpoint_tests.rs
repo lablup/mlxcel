@@ -269,11 +269,18 @@ fn embedding_loader_reports_unported_families_on_real_checkpoints() {
     // name the family and the route rather than fail on a missing tensor.
     // Ported families move out of this list: Gemma3Embedding and
     // Qwen3Embedding did so in #1329, BERT in #1321, ColIdefics3 and
-    // ColQwen2.5 in #1337.
-    for (repo, family) in [(
-        "LiquidAI/LFM2.5-Embedding-350M",
-        "LFM2 bidirectional embedder",
-    )] {
+    // ColQwen2.5 in #1337, and LFM2Embedding, Ministral3Embedding and
+    // LlamaBidirec in #1325. The two multimodal embedders are what is left.
+    for (repo, family) in [
+        (
+            "Qwen/Qwen3-VL-Embedding-2B",
+            "Qwen3-VL-Embedding (multimodal)",
+        ),
+        (
+            "nvidia/llama-nemotron-embed-vl-1b-v2",
+            "Llama-Nemotron-VL embedder (multimodal)",
+        ),
+    ] {
         let Some(dir) = local_checkpoint(repo) else {
             continue;
         };
