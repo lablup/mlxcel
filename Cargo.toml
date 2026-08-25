@@ -272,10 +272,10 @@ panic = "unwind"
 # or speed up the *shipped* binary:
 #   - `codegen-units = 16` restores parallel codegen instead of serializing
 #     the whole crate onto one core.
-#   - `lto = "thin"` keeps cross-crate inlining across the mlxcel /
-#     mlxcel-core workspace boundary (the hot MLX FFI call sites), unlike
-#     `lto = false`, while dropping the whole-program fat-LTO link that
-#     dominates release build time.
+#   - `lto = false` disables cross-crate LTO for test binaries. The full
+#     workspace gate has enough large integration targets that ThinLTO can
+#     fail in the macOS linker with missing internal Rust drop-glue symbols,
+#     while the shipped release profile keeps its fat-LTO tuning.
 #   - `incremental = true` lets rustc reuse per-function codegen work between
 #     edits instead of recompiling the whole crate query graph from scratch.
 #   - `strip = false` skips a symbol-stripping pass nobody needs for a local
@@ -289,13 +289,15 @@ panic = "unwind"
 # As of #1000 this profile also backs `make verify-test`, so it is what the
 # CI-faithful gate and the nightly workflow run tests under. That is a
 # deliberate trade: `opt-level = 3` is what makes the optimised-codegen
-# argument for testing hold, and it is kept, while the fat LTO and single
+# argument for testing hold, and it is kept, while cross-crate LTO and the single
 # codegen unit that were consuming the nightly's entire budget in linking are
-# not. It does not change what ships; release.yml still builds the shipped
-# binaries under `[profile.release]`.
+# not. As of #1406 it also disables cross-crate ThinLTO for test binaries
+# because large macOS integration-test link graphs can otherwise fail before
+# any test runs. It does not change what ships; release.yml still builds the
+# shipped binaries under `[profile.release]`.
 [profile.test-fast]
 inherits = "release"
-lto = "thin"           # cross-crate inlining kept; drops the whole-program fat-LTO link
+lto = false            # no cross-crate LTO for test binaries; release stays fat-LTO
 codegen-units = 16     # parallel codegen instead of one serialized unit
 strip = false          # skip the strip pass; irrelevant for a local test binary
 incremental = true     # reuse per-function codegen work between edits

@@ -367,7 +367,7 @@ for anything you ship, but it is expensive for the day-to-day edit-test loop:
 measured at 4 to 6 minutes per incremental rebuild, so a typical issue cycle of
 several edit-test iterations pays 20+ minutes of pure compile time.
 
-For local and agent development, use `[profile.test-fast]` instead (thin LTO,
+For local and agent development, use `[profile.test-fast]` instead (no cross-crate LTO,
 `codegen-units = 16`, incremental compilation, `strip = false`; still
 `opt-level = 3` so MLX-heavy numerics stay representative):
 
@@ -406,7 +406,7 @@ that invokes it, builds the test binaries under `test-fast` as well. Linking
 roughly 77 test binaries under fat LTO was costing that job its entire
 180-minute budget before a single test ran. `opt-level = 3` is unchanged, so
 the optimised MLX numerics the suite depends on are the same; what is no longer
-covered is a defect that reproduces only under fat LTO or `codegen-units = 1`.
+covered is a defect that reproduces only under release LTO or `codegen-units = 1`.
 Reach for `cargo test --release --features metal,accelerate` by hand when you
 are chasing one of those.
 

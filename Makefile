@@ -232,7 +232,7 @@ test-doc: ## Run documentation tests
 # shipping validation but measured at 4 to 6 minutes per incremental rebuild on
 # the ~390k-line main crate, which is expensive for the edit-test-edit loop of
 # local and agent development. These targets build under [profile.test-fast]
-# instead (thin LTO, parallel codegen, incremental compilation); see the
+# instead (no cross-crate LTO, parallel codegen, incremental compilation); see the
 # profile's Cargo.toml comment and docs/installation.md ("Fast iteration
 # builds") for the measured speedup. Set FILTER to narrow the run, e.g.
 # `make test-fast-cuda FILTER=server::chat_request`.
@@ -474,12 +474,12 @@ pre-commit: fmt clippy test ## Pre-commit checks
 #   3. `--profile test-fast`: CI runs tests optimised, not in debug, for
 #      realistic MLX/Metal codegen. Debug-mode tests can pass while optimised
 #      tests hit different paths. `test-fast` keeps `opt-level = 3`, which is
-#      what that argument actually rests on, and drops the fat LTO and
+#      what that argument actually rests on, and drops cross-crate LTO plus
 #      `codegen-units = 1` of `[profile.release]`, which exist to tune a
 #      shipped binary and were costing the nightly its whole budget in
-#      codegen and linking (#1000). release.yml still builds and links what
-#      ships under `[profile.release]`. The residual gap is a defect that
-#      reproduces only under fat LTO or single-unit codegen; use
+#      codegen and linking (#1000/#1406). release.yml still builds and links
+#      what ships under `[profile.release]`. The residual gap is a defect that
+#      reproduces only under release LTO or single-unit codegen; use
 #      `cargo test --release --features metal,accelerate` by hand when you
 #      are chasing one.
 #   4. `--workspace`: all five members, not just the root package. The

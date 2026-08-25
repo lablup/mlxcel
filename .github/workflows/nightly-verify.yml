@@ -104,11 +104,11 @@
 # the ~390k-line main crate, paid once per test binary across roughly 77 of
 # them. `test-fast` keeps `opt-level = 3`, so the optimized MLX numerics these
 # tests depend on are unchanged, and relaxes only what exists to shrink or
-# speed up a *shipped* binary (thin LTO, parallel codegen, incremental, no
-# strip).
+# speed up a *shipped* binary (no test-time cross-crate LTO, parallel
+# codegen, incremental, no strip).
 #
 # What that gives up: the suite no longer runs under the exact codegen the
-# release binary ships with. A defect that only appears under fat LTO or
+# release binary ships with. A defect that only appears under release LTO or
 # `codegen-units = 1` (the f16 reduction-order jitter class this repo has hit
 # before, for instance) could in principle differ here. release.yml still
 # builds and links the shipping artifacts under `[profile.release]`, so the
