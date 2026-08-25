@@ -25,7 +25,8 @@ mlxcel serves embedding checkpoints through the OpenAI-compatible `POST /v1/embe
 | `src/lib/mlxcel-core/src/utils.rs` | `create_bidirectional_padding_mask`, `create_causal_padding_mask`, `create_bidirectional_window_mask`. |
 | `src/lib/mlxcel-core/src/weights.rs` | `load_weights_from_dir_with_subfolders` (`2_Dense/...` tensors prefixed `2_Dense.`). |
 | `src/models/detection.rs` | `is_embedding_checkpoint`: the detection rules below. |
-| `src/models/bert.rs` | BERT / XLM-RoBERTa encoder trunk: config, weight sanitization, position ids, blocks. |
+| `src/models/bert.rs` | BERT / XLM-RoBERTa encoder trunk: weight sanitization, position ids, blocks. |
+| `src/models/bert_config.rs` | BERT / XLM-RoBERTa config resolution, re-exported through `bert`. |
 | `src/models/bert_heads.rs` | `BertEmbeddingModel` and `BertSequenceClassifier` on that trunk. |
 | `src/server/embedding_model.rs` | `EmbeddingModelProvider` trait and `EmbeddingError`. |
 | `src/server/embedding_worker.rs` | `EmbeddingWorker`: the dedicated MLX-owning thread, bounded queue, timeout, panic boundary. |
