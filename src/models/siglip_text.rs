@@ -304,6 +304,43 @@ pub fn load_siglip_text_model(model_dir: &Path, config: &Value) -> Result<Box<dy
     Ok(Box::new(model))
 }
 
+/// Serializes every test that touches MLX through the SigLIP text tower or
+/// through the encoder block it shares with the vision towers.
+///
+/// [`EmbeddingModel`] is documented as single-threaded, and the product
+/// honors that (the server owns one embedding worker thread, `mlxcel embed`
+/// runs on the main thread). The test harness does not: `cargo test` runs
+/// test functions on a thread pool, and concurrent forward passes were
+/// measured corrupting each other's results, so two byte-identical inputs in
+/// one batch scored a cosine of 0.999912 rather than 1.0. Any tolerance
+/// tighter than that is therefore meaningless without this lock, and the
+/// numbers a gate reports from an unguarded parallel run are not evidence.
+///
+/// One guard covers both test modules on purpose: they exercise the same
+/// encoder block, so a per-module lock would still let them run against each
+/// other.
+///
+/// Used by: `siglip_text_tests` and
+/// `crate::vision::encoders::siglip::siglip_block_tests`.
+#[cfg(test)]
+pub(crate) mod test_guard {
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn guard() -> &'static Mutex<()> {
+        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+        GUARD.get_or_init(|| Mutex::new(()))
+    }
+
+    /// Take the lock, recovering it when a previous test panicked while
+    /// holding it. Propagating the poison would turn one real failure into a
+    /// cascade that hides which test actually broke.
+    pub(crate) fn lock() -> MutexGuard<'static, ()> {
+        guard()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 #[cfg(test)]
 #[path = "siglip_text_tests.rs"]
 mod siglip_text_tests;

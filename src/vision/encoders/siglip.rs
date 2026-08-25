@@ -902,6 +902,11 @@ mod tests {
 
     #[test]
     fn pytorch_tanh_gelu_matches_hugging_face_f32_golden() {
+        // This is the only pre-existing test in this module that evaluates MLX
+        // ops, and leaving it unguarded defeated the lock the sibling
+        // `siglip_block_tests` take: running the two concurrently aborted the
+        // process inside `cudaStreamEndCapture` in roughly one run in four.
+        let _guard = crate::models::siglip_text::test_guard::lock();
         let input = mlxcel_core::from_slice_f32(&[-3.0, -1.0, 0.0, 1.0, 3.0], &[5]);
         let output = gelu_pytorch_tanh(&input);
         mlxcel_core::eval(&output);

@@ -27,6 +27,7 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde_json::json;
 
+use super::test_guard;
 use super::{SigLipTextArgs, SigLipTextModel, sanitize_siglip_text_weights};
 use crate::embeddings::model::{EmbeddingBatch, EmbeddingModel};
 use crate::embeddings::pooling::PoolingMode;
@@ -328,6 +329,7 @@ fn text_config_overrides_are_read_including_projection_and_activation() {
 
 #[test]
 fn sanitize_drops_vision_and_logit_keys() {
+    let _guard = test_guard::lock();
     let mut weights = WeightMap::new();
     let mut rng = Lcg(7);
     for key in [
@@ -355,6 +357,7 @@ fn sanitize_drops_vision_and_logit_keys() {
 
 #[test]
 fn pooling_takes_the_last_position_and_not_cls_or_mean() {
+    let _guard = test_guard::lock();
     let (model, args) = synthetic_tower(12, 2);
     let ids: Vec<i32> = vec![5, 6, 7, 8, 9, 10, 11, 12, 13, 14, EOS_ID, EOS_ID];
     let pooled = embed_ids(&model, &ids);
@@ -392,6 +395,7 @@ fn pooling_takes_the_last_position_and_not_cls_or_mean() {
 
 #[test]
 fn every_position_reaches_the_pooled_slot() {
+    let _guard = test_guard::lock();
     let (model, _) = synthetic_tower(12, 2);
     let base: Vec<i32> = vec![5, 6, 7, 8, 9, 10, 11, 12, 13, 14, EOS_ID, EOS_ID];
     let reference = embed_ids(&model, &base);
@@ -414,6 +418,7 @@ fn every_position_reaches_the_pooled_slot() {
 
 #[test]
 fn trait_surface_reports_fixed_width_padding_and_last_token_pooling() {
+    let _guard = test_guard::lock();
     let (model, _) = synthetic_tower(12, 1);
     assert_eq!(model.pad_to_max_length(), Some(12));
     assert_eq!(model.default_pooling(), PoolingMode::LastToken);
@@ -430,6 +435,7 @@ fn trait_surface_reports_fixed_width_padding_and_last_token_pooling() {
 
 #[test]
 fn encode_rejects_more_tokens_than_learned_positions() {
+    let _guard = test_guard::lock();
     let (model, _) = synthetic_tower(12, 1);
     let too_long = vec![3i32; 13];
     let ids = ids_array(&too_long);
@@ -446,6 +452,7 @@ fn encode_rejects_more_tokens_than_learned_positions() {
 
 #[test]
 fn embed_rejects_image_inputs() {
+    let _guard = test_guard::lock();
     let (model, _) = synthetic_tower(12, 1);
     let input_ids = ids_array(&[3, 4, EOS_ID]);
     let mask = mlxcel_core::from_slice_i32(&[1, 1, 1], &[1, 3]);
@@ -470,6 +477,7 @@ fn embed_rejects_image_inputs() {
 
 #[test]
 fn siglip_base_detects_pads_to_64_and_keeps_trailing_eos() {
+    let _guard = test_guard::lock();
     let Some(dir) = local_checkpoint(SIGLIP_BASE) else {
         return;
     };
@@ -518,6 +526,7 @@ fn siglip_base_detects_pads_to_64_and_keeps_trailing_eos() {
 
 #[test]
 fn siglip_base_text_tower_passes_the_embedding_gate() {
+    let _guard = test_guard::lock();
     let Some(dir) = local_checkpoint(SIGLIP_BASE) else {
         return;
     };
@@ -577,15 +586,16 @@ fn siglip_base_text_tower_passes_the_embedding_gate() {
         related - unrelated >= 0.1,
         "cat/kitten {related} must beat cat/engine {unrelated} by at least 0.1"
     );
-    // SigLIP's text tower is trained against images, never against other
-    // texts, so its text-only cosines sit on a high anisotropic floor: over
-    // six deliberately unrelated sentences the off-diagonal cosines measured
-    // 0.52 to 0.73 (mean 0.67) while cat/kitten reached 0.966. An absolute
-    // "unrelated below 0.5" threshold is therefore unreachable for this
-    // family and would only encode a misunderstanding of its geometry; the
-    // margin above is what discriminates. The bound below is a loose sanity
-    // ceiling that a genuinely broken tower (one that collapses every input
-    // onto the padded `</s>` row, say) would still blow through.
+    // SigLIP's text tower is trained contrastively against images, never
+    // against other texts, so its text-only cosines sit on a high anisotropic
+    // floor: over six sentences spanning animals, machinery, finance, food
+    // and physics, the fourteen unrelated pairs measured 0.519 to 0.725
+    // (mean 0.653) while cat/kitten reached 0.966. An absolute "unrelated
+    // below 0.5" threshold is therefore unreachable for this family and would
+    // only encode a misunderstanding of its geometry; the margin above is
+    // what discriminates. The bound below is a loose sanity ceiling that a
+    // genuinely broken tower (one that collapses every input onto the padded
+    // `</s>` row, say) would still blow through.
     assert!(
         unrelated < related - 0.1 && unrelated < 0.9,
         "unrelated sentences must stay clearly below the related pair, got {unrelated} against {related}"
@@ -594,9 +604,16 @@ fn siglip_base_text_tower_passes_the_embedding_gate() {
     // Absolute parity against an independent NumPy implementation of the
     // reference forward pass (tokenize, truncate to 63 + `</s>`, pad to 64,
     // token + position embedding, 12 unmasked pre-norm blocks, final
-    // LayerNorm, `head`, L2 normalize) run over the same safetensors. The
-    // observed element-wise drift over the whole 768-wide vector was 3.4e-5,
-    // which is f32 accumulation noise across 12 layers.
+    // LayerNorm, `head`, L2 normalize) run over the same safetensors.
+    //
+    // This engine path reproduces the reference to 2.7e-8 on these twelve
+    // components, identically across three repeated guarded runs. The bound
+    // is nevertheless 2e-4, because the same vector computed through the
+    // `mlxcel embed` process rather than through the test binary lands 4.5e-5
+    // away from the reference at its worst component: MLX picks kernels per
+    // process, and each path is bit-stable on its own but not identical to
+    // the other. The bound has to clear that spread, and 2e-4 is roughly four
+    // times it.
     const CAT_REFERENCE_PREFIX: [f32; 12] = [
         0.016_063_286,
         -0.000_183_518,
@@ -631,5 +648,16 @@ fn siglip_base_text_tower_passes_the_embedding_gate() {
     assert!(
         (cosine(cat, &single.vectors[0].values) - 1.0).abs() <= 1e-6,
         "batch and single-input vectors must be collinear"
+    );
+
+    // Printed so a repeated run can be checked for spread rather than for a
+    // single pass: a concurrency-corrupted forward shows up as movement in
+    // `identical`, not as an outright failure.
+    eprintln!(
+        "SIGLIP_GATE identical={identical:.9} related={related:.6} unrelated={unrelated:.6} \
+         margin={:.6} batch_vs_single_drift={drift:.3e} numpy_parity={parity:.3e} \
+         prompt_tokens={}",
+        related - unrelated,
+        reply.prompt_tokens
     );
 }

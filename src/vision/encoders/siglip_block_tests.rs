@@ -26,6 +26,7 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::{EncoderLayer, VisionMlpActivation};
+use crate::models::siglip_text::test_guard;
 use crate::vision::config::{VisionConfig, VisionHiddenActivation};
 
 /// Deterministic linear congruential generator, so the golden below does not
@@ -198,6 +199,10 @@ const UNMASKED_GOLDEN: [f32; 32] = [
 
 #[test]
 fn encoder_block_shared_with_vision_is_unchanged() {
+    // Shared with the text tower: concurrent MLX forward passes were
+    // measured corrupting each other, so the 1e-6 golden below is only
+    // evidence when the forwards are serialized.
+    let _guard = test_guard::lock();
     let (layer, x) = fixture();
     let out = read(&layer.forward(&x, None));
     assert_eq!(out.len(), UNMASKED_GOLDEN.len());
@@ -210,6 +215,10 @@ fn encoder_block_shared_with_vision_is_unchanged() {
 
 #[test]
 fn an_all_attend_mask_is_a_no_op_and_a_blocking_mask_is_not() {
+    // Shared with the text tower: concurrent MLX forward passes were
+    // measured corrupting each other, so the 1e-6 golden below is only
+    // evidence when the forwards are serialized.
+    let _guard = test_guard::lock();
     let (layer, x) = fixture();
     let unmasked = read(&layer.forward(&x, None));
 
