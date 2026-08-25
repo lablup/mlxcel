@@ -2134,6 +2134,34 @@ mod tests {
     }
 
     #[test]
+    fn pythonic_single_quoted_tool_call_suppressed_across_fragments() {
+        let mut f = StreamFilter::new();
+        let fragments = [
+            "<|tool_call_sta",
+            "rt|>[get_weather(",
+            "location='Warsaw', ",
+            "note='a, b')]<|tool_",
+            "call_end|>",
+            "Done.",
+        ];
+
+        let mut total_content = String::new();
+        for frag in fragments {
+            if let Some(content) = f.feed(frag).content {
+                total_content.push_str(&content);
+            }
+        }
+        if let Some(content) = f.flush().content {
+            total_content.push_str(&content);
+        }
+
+        assert_eq!(
+            total_content, "",
+            "pythonic tool calls are terminal and intentionally keep the filter in ToolCall state",
+        );
+    }
+
+    #[test]
     fn pythonic_content_before_call_emitted() {
         let mut f = StreamFilter::new();
         let out = f.feed(

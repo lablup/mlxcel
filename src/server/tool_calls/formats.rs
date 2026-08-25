@@ -1716,65 +1716,6 @@ pub fn try_pythonic(text: &str) -> Option<ToolCallParseResult> {
     })
 }
 
-/// Placeholder used to temporarily hide commas that sit inside a `[...]`
-/// list literal from the per-argument regex in [`pythonic_arguments`]
-/// (whose unquoted alternative `[^,]+` would otherwise stop at the first
-/// comma, breaking multi-element lists such as `tags=[1, 2, 3]`). Restored
-/// by [`unmask_bracketed_commas`] once the surrounding key=value span has
-/// been captured. A Unicode Private Use Area codepoint is used so it cannot
-/// collide with a comma that legitimately appears in real argument text.
-const MASKED_COMMA: char = '\u{E000}';
-
-/// Hide commas that occur inside an unquoted `[...]` list literal (bracket
-/// depth > 0, outside a quoted string) behind [`MASKED_COMMA`] so the
-/// per-argument regex's unquoted alternative can span the whole list.
-fn mask_bracketed_commas(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    let mut depth: i32 = 0;
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    for c in raw.chars() {
-        if let Some(active_quote) = quote {
-            if c == ',' && depth > 0 {
-                out.push(MASKED_COMMA);
-            } else {
-                out.push(c);
-            }
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-
-        match c {
-            '"' | '\'' => {
-                quote = Some(c);
-                out.push(c);
-            }
-            '[' => {
-                depth += 1;
-                out.push(c);
-            }
-            ']' => {
-                depth = depth.saturating_sub(1);
-                out.push(c);
-            }
-            ',' if depth > 0 => out.push(MASKED_COMMA),
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-/// Restore commas hidden by [`mask_bracketed_commas`].
-fn unmask_bracketed_commas(masked: &str) -> String {
-    masked.replace(MASKED_COMMA, ",")
-}
-
 /// Unescape only the repr-style escapes the pythonic format needs: the
 /// matching quote character and backslashes. Everything else stays literal.
 fn unescape_pythonic_quoted_body(body: &str, quote: char) -> String {
@@ -1832,24 +1773,32 @@ fn split_pythonic_commas(raw: &str) -> Vec<&str> {
 }
 
 /// Build the JSON `arguments` object from a pythonic call's raw argument
-/// text (the `(.*?)` capture between the call's parentheses), using the
-/// per-argument regex
-/// `(\w+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|([^,]+))(?:,\s*|$)`:
+/// text (the `(.*?)` capture between the call's parentheses). The raw string
+/// is first split on top-level commas with [`split_pythonic_commas`] so quoted
+/// strings and nested list literals stay intact, then each `key=value` segment
+/// is matched against
+/// `^(\w+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|(.*))$`:
 /// group 1 is the key; groups 2/3 are double-/single-quoted bodies and become
 /// JSON strings after repr-style unescaping; group 4 is the unquoted token and
 /// is coerced via [`coerce_pythonic_value`]. Returns `"{}"` for empty args
 /// (e.g. `ping()`).
 fn pythonic_arguments(args_raw: &str) -> String {
-    let masked = mask_bracketed_commas(args_raw);
     let Ok(args_re) =
-        Regex::new(r#"(\w+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|([^,]+))(?:,\s*|$)"#)
+        Regex::new(r#"^(\w+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|(.*))$"#)
     else {
         return "{}".to_string();
     };
 
     let mut map = serde_json::Map::new();
-    for caps in args_re.captures_iter(&masked) {
-        let Ok(caps) = caps else { continue };
+    for segment in split_pythonic_commas(args_raw) {
+        let trimmed = segment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(caps) = args_re.captures(trimmed) else {
+            continue;
+        };
+        let Some(caps) = caps else { continue };
         let Some(key) = caps.get(1) else { continue };
 
         let value = if let Some(quoted) = caps.get(2) {
@@ -1857,8 +1806,7 @@ fn pythonic_arguments(args_raw: &str) -> String {
         } else if let Some(quoted) = caps.get(3) {
             serde_json::Value::String(unescape_pythonic_quoted_body(quoted.as_str(), '\''))
         } else if let Some(unquoted) = caps.get(4) {
-            let restored = unmask_bracketed_commas(unquoted.as_str());
-            coerce_pythonic_value(restored.trim())
+            coerce_pythonic_value(unquoted.as_str().trim())
         } else {
             continue;
         };
@@ -4018,6 +3966,18 @@ mod tests {
         let args: serde_json::Value =
             serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
         assert_eq!(args, serde_json::json!({"note": "a, b", "n": 1}));
+    }
+
+    #[test]
+    fn pythonic_preserves_private_use_chars_in_values() {
+        let text = "[f(note='prefix \u{E000} suffix', tags=['x', '\u{E000}'])]";
+        let result = try_pythonic(text).unwrap();
+        let args: serde_json::Value =
+            serde_json::from_str(&result.tool_calls[0].arguments).unwrap();
+        assert_eq!(
+            args,
+            serde_json::json!({"note": "prefix \u{E000} suffix", "tags": ["x", "\u{E000}"]})
+        );
     }
 
     #[test]
