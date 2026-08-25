@@ -60,9 +60,10 @@ pub fn derive_mm_token_type_ids(input_ids: &[i32], ids: UnifiedTokenIds) -> Vec<
 /// bidirectional overlay, or `None` when the overlay must be disabled.
 ///
 /// Enabled only when (issue §6): `use_bidirectional` is set, prefill
-/// (`len > 1`), at least one image/video token present, and **no** audio
-/// token present. Each contiguous image/video run gets a distinct non-negative
-/// id; every other position is `-1`.
+/// (`len > 1`), and at least one image/video token is present. Audio tokens do
+/// not participate in the overlay and stay at `-1`. Each contiguous
+/// image/video run gets a distinct non-negative id; every other position is
+/// `-1`.
 pub fn compute_vision_block_ids(
     input_ids: &[i32],
     ids: UnifiedTokenIds,
@@ -75,8 +76,7 @@ pub fn compute_vision_block_ids(
     let has_vision = types
         .iter()
         .any(|&t| t == token_type::IMAGE || t == token_type::VIDEO);
-    let has_audio = types.contains(&token_type::AUDIO);
-    if !has_vision || has_audio {
+    if !has_vision {
         return None;
     }
 

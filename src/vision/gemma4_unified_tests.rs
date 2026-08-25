@@ -14,6 +14,8 @@
 
 //! Unit tests for Gemma 4 Unified mask/token-type derivation.
 
+use crate::models::gemma4::overlay_block_bidirectional;
+
 use super::{UnifiedTokenIds, compute_vision_block_ids, derive_mm_token_type_ids, token_type};
 
 const IDS: UnifiedTokenIds = UnifiedTokenIds {
@@ -74,13 +76,11 @@ fn block_ids_video_frames_separated_by_eoi_boi_are_distinct() {
 }
 
 #[test]
-fn block_ids_disabled_when_audio_present() {
-    // image + audio → fully causal (overlay disabled per issue §6).
+fn block_ids_survive_audio_tokens() {
+    // image + audio keeps the vision block; audio stays outside all blocks.
     let input = vec![1, 258_880, 258_880, 258_881, 9];
-    assert!(
-        compute_vision_block_ids(&input, IDS, true).is_none(),
-        "audio token present must force fully-causal (None) masks",
-    );
+    let block = compute_vision_block_ids(&input, IDS, true).expect("vision block survives audio");
+    assert_eq!(block, vec![-1, 0, 0, -1, -1]);
 }
 
 #[test]
@@ -111,4 +111,33 @@ fn block_ids_adjacent_spans_separated_by_eoi_boi_are_distinct() {
     let input = vec![258_880, 258_880, 258_882, 255_999, 258_880, 258_880];
     let block = compute_vision_block_ids(&input, IDS, true).unwrap();
     assert_eq!(block, vec![0, 0, -1, -1, 1, 1]);
+}
+
+#[test]
+fn mask_overlay_with_audio_matches_image_only() {
+    // BOI, image, image, EOI, audio, audio, text
+    let input = vec![255_999, 258_880, 258_880, 258_882, 258_881, 258_881, 9];
+    let block_ids = compute_vision_block_ids(&input, IDS, true).expect("vision block present");
+    let len = block_ids.len() as i32;
+
+    let base = mlxcel_core::utils::create_causal_mask(len, 0);
+    let ids = mlxcel_core::from_slice_i32(&block_ids, &[len]);
+    let overlaid = overlay_block_bidirectional(&base, &ids);
+    mlxcel_core::eval(&overlaid);
+
+    let at = |q: i32, k: i32| -> f32 {
+        let scalar = mlxcel_core::slice(&overlaid, &[q, k], &[q + 1, k + 1]);
+        mlxcel_core::item_f32(&scalar)
+    };
+    let blocked = |v: f32| v.is_infinite() && v < 0.0;
+
+    assert_eq!(
+        at(1, 2),
+        0.0,
+        "image token attends forward within its block"
+    );
+    assert!(
+        blocked(at(4, 5)),
+        "audio token keeps the causal mask to later audio tokens",
+    );
 }

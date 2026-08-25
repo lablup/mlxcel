@@ -465,8 +465,8 @@ impl Gemma4UnifiedModel {
     /// bidirectional overlay during the embeddings-driven prefill forward, or
     /// `None` when the overlay is disabled.
     ///
-    /// Computed entirely with MLX ops (no full host readback): only the two
-    /// gate scalars (`has_vision`, `has_audio`) are read back via `sum_all`.
+    /// Computed entirely with MLX ops (no full host readback): only the gate
+    /// scalar `has_vision` is read back via `sum_all`.
     /// Returns a `[seq_len]` int32 array where each contiguous image/video run
     /// has a distinct non-negative id and every other position is `-1`.
     fn block_ids_array_for(&self, input_ids: &MlxArray) -> Option<UniquePtr<MlxArray>> {
@@ -490,17 +490,10 @@ impl Gemma4UnifiedModel {
         let is_video = mlxcel_core::equal(&ids, &video);
         let is_vision = mlxcel_core::logical_or(&is_image, &is_video);
 
-        // Gate: vision present AND audio absent. Reduce to scalars.
+        // Gate: vision present. Reduce to a scalar.
         let is_vision_i32 = mlxcel_core::astype(&is_vision, mlxcel_core::dtype::INT32);
         let vision_count = mlxcel_core::item_i32(&mlxcel_core::sum_all(&is_vision_i32));
         if vision_count == 0 {
-            return None;
-        }
-        let audio = mlxcel_core::from_slice_i32(&[self.audio_token_id], &[1]);
-        let is_audio = mlxcel_core::equal(&ids, &audio);
-        let is_audio_i32 = mlxcel_core::astype(&is_audio, mlxcel_core::dtype::INT32);
-        let audio_count = mlxcel_core::item_i32(&mlxcel_core::sum_all(&is_audio_i32));
-        if audio_count > 0 {
             return None;
         }
 
