@@ -204,29 +204,50 @@ fn modernbert_embed_base_is_padding_invariant_across_batches() {
 }
 
 #[test]
-fn modernbert_embed_base_handles_a_4096_token_document() {
+fn modernbert_embed_base_handles_a_document_beyond_4096_tokens() {
     let Some(dir) = local_checkpoint(EMBED) else {
         return;
     };
     let _mlx = mlx_guard();
     let engine = engine(&dir);
     // Well past the 128-token local window, so the alternating local layers
-    // are exercised over many windows rather than one.
+    // are exercised over dozens of windows rather than one.
     let sentence = "t-SNE embeds high-dimensional points into two dimensions while preserving \
                     local neighbourhood structure. ";
     let long = format!("{DOCUMENT_PREFIX}{}", sentence.repeat(220));
     let short = format!("{QUERY_PREFIX}What is TSNE?");
 
-    let solo = embed_all(&engine, &[&long]).remove(0);
+    // Assert the premise rather than assuming it: editing the sentence above
+    // must not silently shrink this into a short-sequence test that still
+    // passes while no longer covering long inputs.
+    let reply = engine
+        .embed_texts(std::slice::from_ref(&long), &EmbedOptions::default())
+        .expect("the long document embeds");
+    assert!(
+        reply.prompt_tokens > 4096,
+        "this gate must exceed 4096 tokens, got {}",
+        reply.prompt_tokens
+    );
+    assert!(
+        reply.prompt_tokens <= engine.max_length(),
+        "the document must fit under max_length {} without truncation, got {}",
+        engine.max_length(),
+        reply.prompt_tokens
+    );
+    let solo = reply.vectors[0].values.clone();
     assert!(solo.iter().all(|x| x.is_finite()));
     assert!((l2_norm(&solo) - 1.0).abs() <= 1e-5);
 
     let batched = embed_all(&engine, &[&long, &short]).remove(0);
     let drift = cosine(&solo, &batched);
-    eprintln!("4096-token document: batched-vs-solo cosine {drift:.9}");
+    eprintln!(
+        "long document ({} tokens): batched-vs-solo cosine {drift:.9}",
+        reply.prompt_tokens
+    );
     assert!(
         (drift - 1.0).abs() <= 1e-3,
-        "a 4096-token document drifted inside a batch: cosine {drift}"
+        "a {}-token document drifted inside a batch: cosine {drift}",
+        reply.prompt_tokens
     );
 }
 
