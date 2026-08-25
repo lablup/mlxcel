@@ -117,4 +117,15 @@ pub trait EmbeddingModel {
     fn pad_to_max_length(&self) -> Option<usize> {
         None
     }
+
+    /// Hard token cap the loaded weights impose, lowering the `max_length`
+    /// derived from the checkpoint's side files.
+    ///
+    /// Absolute position tables are the case that needs it: XLM-RoBERTa
+    /// indexes its table from `pad_token_id + 1`, so `bge-m3`'s 8194 rows
+    /// address only 8192 real tokens and a config-derived 8194 would gather
+    /// out of bounds. `None` means the derived limit already holds.
+    fn max_sequence_length(&self) -> Option<usize> {
+        None
+    }
 }

@@ -25,6 +25,9 @@ mlxcel serves embedding checkpoints through the OpenAI-compatible `POST /v1/embe
 | `src/lib/mlxcel-core/src/utils.rs` | `create_bidirectional_padding_mask`, `create_causal_padding_mask`, `create_bidirectional_window_mask`. |
 | `src/lib/mlxcel-core/src/weights.rs` | `load_weights_from_dir_with_subfolders` (`2_Dense/...` tensors prefixed `2_Dense.`). |
 | `src/models/detection.rs` | `is_embedding_checkpoint`: the detection rules below. |
+| `src/models/bert.rs` | BERT / XLM-RoBERTa encoder trunk: weight sanitization, position ids, blocks. |
+| `src/models/bert_config.rs` | BERT / XLM-RoBERTa config resolution, re-exported through `bert`. |
+| `src/models/bert_heads.rs` | `BertEmbeddingModel` and `BertSequenceClassifier` on that trunk. |
 | `src/server/embedding_model.rs` | `EmbeddingModelProvider` trait and `EmbeddingError`. |
 | `src/server/embedding_worker.rs` | `EmbeddingWorker`: the dedicated MLX-owning thread, bounded queue, timeout, panic boundary. |
 | `src/server/routes/embeddings.rs` | HTTP handler, validation order, error mapping. |
@@ -99,6 +102,24 @@ Micro-batches are right-padded to their longest member (or to a fixed width when
 ## Family notes
 
 Prompt prefixes are caller-side everywhere: nothing is injected server-side, so an input embeds exactly as it is sent. The `instruction` request field (and `mlxcel embed --instruction`) reaches `EmbeddingModel::format_text`, and only a family that documents a format below does anything with it.
+
+### BERT and XLM-RoBERTa
+
+One encoder covers both (`src/models/bert.rs`): a post-LayerNorm block stack over absolute position embeddings, selected by a `BertVariant` switch. `model_type: bert` builds position ids as `0..L` and carries a real `token_type_ids` axis; `model_type: xlm-roberta` builds them as `cumsum(input_ids != pad_token_id) * mask + pad_token_id`, so the first real token sits at `pad_token_id + 1` and padding stays at `pad_token_id`. `intfloat/multilingual-e5-small` is a `BertModel` despite shipping the XLM-RoBERTa tokenizer, and follows the BERT rule.
+
+| Checkpoint | Pooling | Prefix the checkpoint expects |
+|------------|---------|-------------------------------|
+| `sentence-transformers/all-MiniLM-L6-v2` | mean | none |
+| `intfloat/multilingual-e5-small` (and the other `multilingual-e5-*` sizes) | mean | `query: ` on a search query, `passage: ` on an indexed document, on every input including symmetric tasks |
+| `BAAI/bge-m3` | cls | none |
+
+Send them verbatim, for example `{"input": ["query: how much protein should a female eat", "passage: As a general guideline, the average daily protein intake is 46 grams."]}`. Omitting the e5 prefixes silently degrades retrieval quality rather than failing.
+
+Length is capped by the absolute position table. BERT indexes it from 0, so `max_position_embeddings` is the token cap directly. XLM-RoBERTa starts at `pad_token_id + 1`, so it holds `pad_token_id + 1` fewer tokens: `bge-m3`'s 8194 rows cap at 8192 real tokens, which the family reports through `EmbeddingModel::max_sequence_length()` and the loader folds into the derived `max_length`. A batch longer than that is a load-time truncation, never an out-of-bounds gather.
+
+Non-quantized f32 checkpoints run in f32. `all-MiniLM-L6-v2` ships f32 with `layer_norm_eps: 1e-12`, which underflows in f16, so the shared text bf16-to-f16 rule applies only to bf16 exports. Quantized checkpoints (`config.quantization`) load every projection and the word-embedding table through `UnifiedLinear` / `UnifiedEmbedding`.
+
+`BertForSequenceClassification` and `XLMRobertaForSequenceClassification` checkpoints (`BAAI/bge-reranker-v2-m3`) are rerankers: detection refuses to call them embedders, and `BertSequenceClassifier::load(dir)` in `src/models/bert_heads.rs` loads one by path. It reuses the same trunk, keeps the `pooler.` tensors that the embedder path drops, and returns `[B, num_labels]` logits from `tanh(dense(h[:, 0, :]))` followed by the label projection (`pooler.dense` plus `classifier` for BERT, `classifier.dense` plus `classifier.out_proj` for XLM-RoBERTa). The `/v1/rerank` wiring is a separate port.
 
 ### ModernBERT (`modernbert`)
 

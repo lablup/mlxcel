@@ -29,6 +29,8 @@ use mlxcel_core::weights::{WeightMap, load_weights_from_dir_with_subfolders};
 use serde_json::Value;
 
 use crate::model_metadata::is_embedding_model_type;
+use crate::models::bert::BertVariant;
+use crate::models::bert_heads::BertEmbeddingModel;
 use crate::models::siglip_text::load_siglip_text_model;
 use crate::models::{
     ModelType, config_has_quantization_metadata, convert_bf16_weights, get_model_type,
@@ -130,6 +132,13 @@ fn build_family_model(
     config: &Value,
 ) -> Result<Box<dyn EmbeddingModel>> {
     match model_type {
+        ModelType::Bert | ModelType::XlmRoberta => {
+            let variant = BertVariant::from_model_type(model_type)
+                .expect("Bert and XlmRoberta both map to a BertVariant");
+            Ok(Box::new(BertEmbeddingModel::load(
+                model_dir, config, variant,
+            )?))
+        }
         ModelType::SiglipText => load_siglip_text_model(model_dir, config),
         ModelType::ModernBert => Ok(Box::new(
             crate::models::modernbert_heads::ModernBertEmbeddingModel::load(model_dir, config)?,
@@ -140,9 +149,7 @@ fn build_family_model(
         ModelType::Qwen3Embedding => Ok(Box::new(
             crate::models::qwen3_embedding::Qwen3EmbeddingModel::load(model_dir, config)?,
         )),
-        ModelType::Bert
-        | ModelType::XlmRoberta
-        | ModelType::Qwen3VLEmbedding
+        ModelType::Qwen3VLEmbedding
         | ModelType::Lfm2Embedding
         | ModelType::Ministral3Embedding
         | ModelType::LlamaBidirec
@@ -214,6 +221,9 @@ pub(crate) fn finish_loaded_model(
     );
     if let Some(fixed) = model.pad_to_max_length() {
         limits.max_length = limits.max_length.min(fixed);
+    }
+    if let Some(cap) = model.max_sequence_length() {
+        limits.max_length = limits.max_length.min(cap);
     }
     let pad_token_id = resolve_pad_token_id(model_dir, &tokenizer);
     let vocab_size = resolve_vocab_size(config, &tokenizer);
