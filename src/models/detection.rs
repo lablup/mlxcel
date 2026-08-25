@@ -140,12 +140,49 @@ const EMBEDDING_ARCHITECTURES: &[&str] = &[
     "ColQwen2ForRetrieval",
 ];
 
+/// `model_type` values whose `ForSequenceClassification` export is a
+/// cross-encoder reranker mlxcel can serve on `/v1/rerank`.
+///
+/// Every entry has an encoder trunk and a one-label head sitting on it
+/// (`BertForSequenceClassification`, `XLMRobertaForSequenceClassification`,
+/// `ModernBertForSequenceClassification`). A classifier on any other family
+/// (`DebertaV2ForSequenceClassification`, for instance) has no port, so it
+/// falls through to the generation dispatch and is rejected there rather than
+/// being silently mistaken for a reranker.
+const RERANKER_CLASSIFIER_MODEL_TYPES: &[&str] =
+    &["bert", "xlm-roberta", "xlm_roberta", "modernbert"];
+
 fn first_architecture(config: &Value) -> Option<&str> {
     config
         .get("architectures")
         .and_then(Value::as_array)
         .and_then(|arr| arr.first())
         .and_then(Value::as_str)
+}
+
+/// `config.architectures[0]` ends with `ForSequenceClassification`.
+pub(crate) fn is_sequence_classification_architecture(config: &Value) -> bool {
+    first_architecture(config).is_some_and(|arch| arch.ends_with("ForSequenceClassification"))
+}
+
+/// Recognize a cross-encoder reranker checkpoint.
+///
+/// `Some(ModelType::SequenceClassifier)` when `architectures[0]` ends with
+/// `ForSequenceClassification` and `model_type` names one of the encoder
+/// families the `/v1/rerank` sequence-classifier path implements. Everything
+/// else is `None`, which keeps a classifier on an unported family on the
+/// existing dispatch path.
+pub(crate) fn is_sequence_classifier_checkpoint(config: &Value) -> Option<ModelType> {
+    if !is_sequence_classification_architecture(config) {
+        return None;
+    }
+    let model_type = config
+        .get("model_type")
+        .and_then(Value::as_str)?
+        .to_ascii_lowercase();
+    RERANKER_CLASSIFIER_MODEL_TYPES
+        .contains(&model_type.as_str())
+        .then_some(ModelType::SequenceClassifier)
 }
 
 /// `config.architectures[0]` names an embedding export (including the two
@@ -229,7 +266,7 @@ pub(crate) fn is_embedding_checkpoint(
     };
     let model_type = model_type_raw.to_ascii_lowercase();
 
-    if first_architecture(config).is_some_and(|arch| arch.ends_with("ForSequenceClassification")) {
+    if is_sequence_classification_architecture(config) {
         return Ok(None);
     }
 
@@ -277,6 +314,15 @@ pub fn get_model_type(model_path: &Path) -> Result<ModelType> {
     // filename) before the `model_type`-based dispatch below would error.
     if super::kokoro::is_kokoro_checkpoint(model_path, &v) {
         return Ok(ModelType::Kokoro);
+    }
+
+    // A cross-encoder reranker reuses an encoder `model_type` (`bert`,
+    // `xlm-roberta`, `modernbert`) that the embedding rules would otherwise
+    // claim, so the classifier check runs first (#1356). `is_embedding_checkpoint`
+    // refuses every `ForSequenceClassification` export for the same reason: a
+    // reranker scores a pair, it does not produce a vector.
+    if let Some(reranker) = is_sequence_classifier_checkpoint(&v) {
+        return Ok(reranker);
     }
 
     // Embedding exports reuse generator `model_type`s (`qwen3` for

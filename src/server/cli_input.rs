@@ -81,6 +81,11 @@ pub struct ServerStartupInput {
     pub embedding_queue_depth: usize,
     /// `--embedding-request-timeout-secs`: embedding worker reply timeout.
     pub embedding_request_timeout_secs: u64,
+    /// `--reranker-model`: resolved reranker checkpoint directory served on
+    /// `/v1/rerank` next to the chat model.
+    pub reranker_model_path: Option<PathBuf>,
+    /// `--rerank-batch-size`: query/document pairs per rerank forward pass.
+    pub rerank_batch_size: usize,
     pub prefill_chunk_size: usize,
     /// #1011: `--prefill-grant-interval`, the decode ticks a parked chunked
     /// prefill yields before the scheduler grants it one. `None` = env override
@@ -650,6 +655,8 @@ impl ServerStartupInput {
             embedding_max_length: self.embedding_max_length,
             embedding_queue_depth: self.embedding_queue_depth,
             embedding_request_timeout_secs: self.embedding_request_timeout_secs,
+            reranker_model_path: self.reranker_model_path,
+            rerank_batch_size: self.rerank_batch_size,
             prefill_chunk_size: resolution.prefill_chunk_size,
             prefill_grant_interval: self.prefill_grant_interval,
             batch_size_conflict: resolution.batch_size_conflict,
@@ -1069,6 +1076,28 @@ pub fn env_fallback_embedding_model(cli_value: &mut Option<String>) {
             } else {
                 tracing::info!(
                     "{ALIAS} env var is set but --embedding-model (or LLAMA_ARG_EMBEDDING_MODEL) \
+                     takes precedence; ignoring {ALIAS}"
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Apply the `MLXCEL_RERANKER_MODEL` env var fallback to `--reranker-model`.
+///
+/// Same precedence rule as [`env_fallback_embedding_model`]: `clap` reads
+/// `LLAMA_ARG_RERANKER_MODEL` through the flag's `env` attribute, the CLI flag
+/// (or that value) wins, and a conflicting alias is logged and ignored.
+pub fn env_fallback_reranker_model(cli_value: &mut Option<String>) {
+    const ALIAS: &str = "MLXCEL_RERANKER_MODEL";
+    match std::env::var(ALIAS) {
+        Ok(value) if !value.trim().is_empty() => {
+            if cli_value.is_none() {
+                *cli_value = Some(value);
+            } else {
+                tracing::info!(
+                    "{ALIAS} env var is set but --reranker-model (or LLAMA_ARG_RERANKER_MODEL) \
                      takes precedence; ignoring {ALIAS}"
                 );
             }

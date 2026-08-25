@@ -348,14 +348,16 @@ fn local_embedding_checkpoints_detect_to_their_families() {
             "mlx-community/Qwen3-Reranker-0.6B-4bit",
             Ok(ModelType::Qwen3),
         ),
+        // #1356: a one-label `ForSequenceClassification` export detects as
+        // the reranker family, never as an embedding one.
         (
             "cross-encoder/ms-marco-MiniLM-L6-v2",
-            Err("Unsupported model type"),
+            Ok(ModelType::SequenceClassifier),
         ),
-        ("BAAI/bge-reranker-v2-m3", Err("Unsupported model type")),
+        ("BAAI/bge-reranker-v2-m3", Ok(ModelType::SequenceClassifier)),
         (
             "Alibaba-NLP/gte-reranker-modernbert-base",
-            Err("Unsupported model type"),
+            Ok(ModelType::SequenceClassifier),
         ),
     ];
     let mut checked = 0;

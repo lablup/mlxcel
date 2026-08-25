@@ -103,7 +103,7 @@ fn checkpoint_default_instruction(model_dir: &Path) -> Option<String> {
 /// image at 1280 tokens and therefore well inside the embedder's 8192-token
 /// budget. Reading the file rather than hard-coding it keeps a re-exported
 /// checkpoint with different bounds correct.
-fn apply_pixel_bounds(
+pub(crate) fn apply_pixel_bounds(
     processor: &mut crate::vision::processors::qwen2_vl::Qwen2VLProcessor,
     model_dir: &Path,
 ) {

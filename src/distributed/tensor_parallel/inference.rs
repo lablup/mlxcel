@@ -440,6 +440,10 @@ fn fallback_architecture(model_type: ModelType) -> &'static str {
         | ModelType::LlamaNemotronVLEmbedding
         | ModelType::ColIdefics3
         | ModelType::ColQwen25 => "embedding",
+        // Rerankers are served through /v1/rerank on their own worker and never
+        // reach tensor-parallel text inference; the loader rejects them
+        // earlier. Placeholder keeps the table total.
+        ModelType::SequenceClassifier => "reranker",
     }
 }
 

@@ -34,8 +34,8 @@ use mlxcel::server::{
     env_fallback_prompt_cache_enabled, env_fallback_prompt_cache_max_entries,
     env_fallback_prompt_cache_min_prefix, env_fallback_prompt_cache_snapshot_capacity_bytes,
     env_fallback_prompt_cache_snapshot_max_entries, env_fallback_prompt_cache_snapshot_ttl,
-    env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, long_cli_flag_was_set,
-    start_server,
+    env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, env_fallback_reranker_model,
+    long_cli_flag_was_set, start_server,
 };
 
 /// mlxcel-server: llama-server compatible HTTP server for MLX inference
@@ -397,6 +397,36 @@ struct ServerArgs {
         default_value_t = 120
     )]
     embedding_request_timeout_secs: u64,
+
+    /// Reranker checkpoint to serve on /v1/rerank next to the chat model
+    ///
+    /// A local directory or a HuggingFace `owner/name` repo-id (resolved like
+    /// `-m`). Loads on its own worker thread; `-m` keeps serving chat. A
+    /// one-label `ForSequenceClassification` cross-encoder is also detected
+    /// from `-m` alone; the Qwen3 and Qwen3-VL generative rerankers are
+    /// indistinguishable from chat checkpoints and are only reachable through
+    /// this flag. Naming the same directory in `-m` and here serves that one
+    /// checkpoint as a reranker and leaves chat unloaded. Also reads
+    /// `MLXCEL_RERANKER_MODEL`.
+    #[arg(
+        long = "reranker-model",
+        env = "LLAMA_ARG_RERANKER_MODEL",
+        value_name = "PATH_OR_REPO_ID"
+    )]
+    reranker_model: Option<String>,
+
+    /// Query/document pairs per rerank forward pass (0 = the reranker kind's default)
+    ///
+    /// `/v1/rerank` scores documents in micro-batches of this size. The
+    /// default is 8 for a text reranker and 2 for the multimodal one, whose
+    /// rows each carry a full image's worth of visual tokens.
+    #[arg(
+        long = "rerank-batch-size",
+        env = "MLXCEL_RERANK_BATCH_SIZE",
+        default_value_t = 0,
+        value_name = "N"
+    )]
+    rerank_batch_size: usize,
 
     /// Prefill chunk size in tokens (0 = disabled, default: 512)
     #[arg(long = "prefill-chunk-size", default_value_t = 512)]
@@ -1472,6 +1502,20 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         })
         .transpose()?;
 
+    // `--reranker-model` accepts the same path-or-repo-id shapes as `-m`.
+    env_fallback_reranker_model(&mut args.reranker_model);
+    let reranker_model_path = args
+        .reranker_model
+        .as_deref()
+        .map(|value| {
+            resolve_model_source_with_override(
+                std::path::Path::new(value),
+                args.models_dir.as_deref(),
+                args.revision.as_deref(),
+            )
+        })
+        .transpose()?;
+
     Ok(ServerStartupInput {
         model_path,
         adapter_path: args.lora,
@@ -1501,6 +1545,8 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         embedding_max_length: args.embedding_max_length,
         embedding_queue_depth: args.embedding_queue_depth,
         embedding_request_timeout_secs: args.embedding_request_timeout_secs,
+        reranker_model_path,
+        rerank_batch_size: args.rerank_batch_size,
         prefill_chunk_size: args.prefill_chunk_size,
         prefill_grant_interval: args.prefill_grant_interval,
         batch_size: args.batch_size,

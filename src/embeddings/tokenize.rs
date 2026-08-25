@@ -44,7 +44,23 @@ pub struct EncodeOptions {
     pub with_token_type_ids: bool,
 }
 
-/// A right-padded `[B, L]` block ready to become MLX arrays.
+/// Which end of a row the padding is written to.
+///
+/// Encoders read the whole row through a bidirectional mask, so the padding
+/// end does not matter and [`PaddingSide::Right`] keeps the real tokens at
+/// index `0..n`. A causal decoder scored at one position is different: the
+/// generative rerankers read the logits at `L - 1`, which is only the last
+/// real token of every row when the padding sits in front of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PaddingSide {
+    /// Real tokens first, padding after them (the embedding engine).
+    #[default]
+    Right,
+    /// Padding first, real tokens flush against the end of the row.
+    Left,
+}
+
+/// A padded `[B, L]` block ready to become MLX arrays.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodedBatch {
     /// Row-major `[B, L]` token ids.
@@ -62,9 +78,22 @@ pub struct EncodedBatch {
 }
 
 impl EncodedBatch {
-    /// Pack rows into a block padded to the longest row (or to `pad_to` when
-    /// the family requires a fixed width) with `pad_id`.
+    /// Pack rows into a right-padded block, padded to the longest row (or to
+    /// `pad_to` when the family requires a fixed width) with `pad_id`.
     pub fn from_rows(rows: &[EncodedRow], pad_id: u32, pad_to: Option<usize>) -> Self {
+        Self::from_rows_with_padding(rows, pad_id, pad_to, PaddingSide::Right)
+    }
+
+    /// Pack rows into a block padded on `side`.
+    ///
+    /// `token_counts` reports the real tokens of each row either way; only the
+    /// columns a row occupies change.
+    pub fn from_rows_with_padding(
+        rows: &[EncodedRow],
+        pad_id: u32,
+        pad_to: Option<usize>,
+        side: PaddingSide,
+    ) -> Self {
         let longest = rows.iter().map(|r| r.ids.len()).max().unwrap_or(0);
         let width = pad_to.map_or(longest, |w| w.max(longest)).max(1);
         let batch = rows.len();
@@ -77,17 +106,24 @@ impl EncodedBatch {
 
         for row in rows {
             let n = row.ids.len();
+            let (before, after) = match side {
+                PaddingSide::Left => (width - n, 0),
+                PaddingSide::Right => (0, width - n),
+            };
             token_counts.push(n);
+            input_ids.extend(std::iter::repeat_n(pad_id as i32, before));
             input_ids.extend(row.ids.iter().map(|&id| id as i32));
-            input_ids.extend(std::iter::repeat_n(pad_id as i32, width - n));
+            input_ids.extend(std::iter::repeat_n(pad_id as i32, after));
+            attention_mask.extend(std::iter::repeat_n(0, before));
             attention_mask.extend(std::iter::repeat_n(1, n));
-            attention_mask.extend(std::iter::repeat_n(0, width - n));
+            attention_mask.extend(std::iter::repeat_n(0, after));
             if let Some(types) = token_type_ids.as_mut() {
+                types.extend(std::iter::repeat_n(0, before));
                 match &row.type_ids {
                     Some(ids) => types.extend(ids.iter().map(|&t| t as i32)),
                     None => types.extend(std::iter::repeat_n(0, n)),
                 }
-                types.extend(std::iter::repeat_n(0, width - n));
+                types.extend(std::iter::repeat_n(0, after));
             }
         }
 

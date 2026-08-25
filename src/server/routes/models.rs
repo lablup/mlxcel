@@ -45,6 +45,19 @@ pub async fn list_models(State(state): State<AppState>) -> Json<ModelsResponse> 
         });
     }
 
+    // Same rule for a separately loaded reranker (`--reranker-model`): it is
+    // its own served id unless `-m` is the reranker checkpoint itself.
+    if let Some(reranker) = state.rerank_model.as_ref()
+        && !models.iter().any(|model| model.id == reranker.model_id())
+    {
+        models.push(ModelInfo {
+            id: reranker.model_id().to_string(),
+            object: "model".to_string(),
+            created: reranker.created_at(),
+            owned_by: "user".to_string(),
+        });
+    }
+
     Json(ModelsResponse {
         object: "list".to_string(),
         data: models,

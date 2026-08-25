@@ -214,6 +214,7 @@ pub use deepseek_v2::DeepSeekV2Model;
 pub use deepseek_v3::DeepSeekV3Model;
 pub use deepseek_v32::DeepSeekV32Model;
 pub use detection::get_model_type;
+pub(crate) use detection::is_sequence_classification_architecture;
 pub use diffusion_gemma::DiffusionGemmaModel;
 pub use dots1::Dots1Model;
 pub use ernie4_5::Ernie45Model;
@@ -584,6 +585,13 @@ pub enum ModelType {
     LlamaNemotronVLEmbedding, // Llama-Nemotron-VL embedder (llama_nemotron_vl)
     ColIdefics3,              // ColIdefics3 late-interaction retriever (idefics3)
     ColQwen25,                // ColQwen2.5 late-interaction retriever (qwen2_5_vl)
+
+    // Rerankers served through /v1/rerank (#1356). Detected by an
+    // `architectures[0]` ending in `ForSequenceClassification` on one of the
+    // encoder families; the generative rerankers are indistinguishable from
+    // chat checkpoints and reach the reranker worker through
+    // `--reranker-model` instead.
+    SequenceClassifier, // BERT / XLM-RoBERTa / ModernBERT cross-encoder
 }
 
 /// All `ModelType` variants, in declaration order. Used as the iteration
@@ -786,6 +794,8 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::LlamaNemotronVLEmbedding,
     ModelType::ColIdefics3,
     ModelType::ColQwen25,
+    // Rerankers
+    ModelType::SequenceClassifier,
 ];
 
 impl ModelType {
@@ -1027,6 +1037,12 @@ impl ModelType {
             }
             ModelType::ColIdefics3 => ("ColIdefics3 (late interaction, multimodal)", "Embedding"),
             ModelType::ColQwen25 => ("ColQwen2.5 (late interaction, multimodal)", "Embedding"),
+
+            // ----- Rerankers (/v1/rerank) -----
+            ModelType::SequenceClassifier => (
+                "Cross-encoder sequence classifier (BERT / XLM-RoBERTa / ModernBERT)",
+                "Reranker",
+            ),
 
             // ----- Specialized / other small/text -----
             ModelType::Gpt2 => (
@@ -1333,6 +1349,7 @@ mod metadata_tests {
             LlamaNemotronVLEmbedding,
             ColIdefics3,
             ColQwen25,
+            SequenceClassifier,
         );
         for mt in variants {
             assert!(

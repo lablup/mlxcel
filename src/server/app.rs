@@ -121,6 +121,9 @@ pub fn create_app(state: AppState) -> Router {
         // Embeddings (OpenAI /v1/embeddings surface), served by the embedding
         // worker when one is loaded; a structured 501 otherwise.
         .route("/v1/embeddings", post(routes::create_embeddings))
+        // Reranking (Cohere / Jina compatible surface), served by the rerank
+        // worker when one is loaded; a structured 501 otherwise.
+        .route("/v1/rerank", post(routes::create_rerank))
         // Responses API (OpenAI /v1/responses surface).
         .route("/v1/responses", post(routes::create_response))
         .route(
@@ -154,6 +157,7 @@ pub fn create_app(state: AppState) -> Router {
         .route("/completions", post(routes::completions))
         .route("/models", get(routes::list_models))
         .route("/embeddings", post(routes::create_embeddings))
+        .route("/rerank", post(routes::create_rerank))
         .route("/responses", post(routes::create_response))
         .route(
             "/responses/:id",

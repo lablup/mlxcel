@@ -574,6 +574,18 @@ pub fn load_model(model_path: &Path) -> Result<(LoadedModel, MlxcelTokenizer)> {
         );
     }
 
+    // Reranker checkpoints have a relevance head instead of an `lm_head` and
+    // score a query/document pair rather than decoding, so they are served by
+    // the rerank worker (`/v1/rerank`, `mlxcel rerank`).
+    if crate::model_metadata::is_reranker_model_type(model_type) {
+        anyhow::bail!(
+            "{} is a reranker served through /v1/rerank (and `mlxcel rerank`), not a \
+             text-generation model. Start mlxcel-server with -m <this checkpoint> or \
+             --reranker-model <path> to serve it; chat generation is not available from it.",
+            model_type.display_name()
+        );
+    }
+
     let path_str = model_path_str(model_path)?;
 
     let policy = if model_type == ModelType::Mistral3 {

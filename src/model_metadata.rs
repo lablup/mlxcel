@@ -30,6 +30,10 @@ pub(crate) enum ModelKind {
     /// Encoder or bidirectional / last-token embedder served through
     /// `/v1/embeddings`; never a text generator and never adapter-loadable.
     Embedding,
+    /// Cross-encoder scored through `/v1/rerank`; it emits a relevance logit
+    /// rather than tokens or a vector, so it is neither a text generator nor
+    /// adapter-loadable.
+    Reranker,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,6 +270,11 @@ macro_rules! for_each_model_registration {
             LlamaNemotronVLEmbedding => { kind: Embedding, directory: Nonstandard, weight: None, adapter: Some("Llama-Nemotron-VL embedding is an embedding model served through /v1/embeddings; adapters are not supported") };
             ColIdefics3 => { kind: Embedding, directory: Nonstandard, weight: None, adapter: Some("ColIdefics3 is an embedding model served through /v1/embeddings; adapters are not supported") };
             ColQwen25 => { kind: Embedding, directory: Nonstandard, weight: None, adapter: Some("ColQwen2.5 is an embedding model served through /v1/embeddings; adapters are not supported") };
+            // Rerankers (#1356). The generative rerankers reuse the Qwen3 and
+            // Qwen3-VL registrations because their checkpoints are ordinary
+            // causal exports; only the one-label cross-encoder is detectable
+            // from `config.json` alone and therefore gets its own variant.
+            SequenceClassifier => { kind: Reranker, directory: Nonstandard, weight: None, adapter: Some("A sequence-classification cross-encoder is a reranker served through /v1/rerank; adapters are not supported") };
         }
     };
 }
@@ -323,6 +332,12 @@ pub(crate) fn is_vlm_model_type(model_type: ModelType) -> bool {
 /// text-generation loader.
 pub(crate) fn is_embedding_model_type(model_type: ModelType) -> bool {
     static_model_descriptor(model_type).kind == ModelKind::Embedding
+}
+
+/// `true` for every family served through `/v1/rerank` rather than the
+/// text-generation loader.
+pub(crate) fn is_reranker_model_type(model_type: ModelType) -> bool {
+    static_model_descriptor(model_type).kind == ModelKind::Reranker
 }
 
 #[cfg_attr(not(test), allow(dead_code))]

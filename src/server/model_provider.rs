@@ -323,6 +323,24 @@ impl ModelProvider {
             .ok()
             .map(std::sync::Arc::new);
 
+        // `-m` and `--reranker-model` naming the same directory means the
+        // operator is serving that one checkpoint as a reranker (#1356). The
+        // rerank worker holds the only copy of those weights; starting the
+        // chat worker as well would load a second full copy of a checkpoint
+        // nothing is going to generate from.
+        if config
+            .reranker_model_path
+            .as_deref()
+            .is_some_and(|reranker| reranker == model_path.as_path())
+        {
+            return Self::new_without_chat_model(
+                model_path,
+                batch_metrics,
+                batch_observability,
+                decode_hang_timeout,
+            );
+        }
+
         if config.no_batch {
             let mut provider = Self::new_with_legacy_worker(
                 model_path,
@@ -403,6 +421,52 @@ impl ModelProvider {
             provider.decode_hang_timeout = decode_hang_timeout;
             Ok(provider)
         }
+    }
+
+    /// Build a provider whose chat worker never loads a model.
+    ///
+    /// Used when `-m` names the checkpoint `--reranker-model` already owns
+    /// (#1356), so the reranker worker keeps the only copy of those weights.
+    /// The worker thread starts, logs why chat is unavailable and exits, which
+    /// drops the request receiver; every generation request then fails at
+    /// enqueue time. That is the same observable state a failed chat load
+    /// leaves behind (`-m <embedding checkpoint>` reaches it too), including
+    /// `/health` reporting `loading model`, so no route needs a new case.
+    fn new_without_chat_model(
+        model_path: PathBuf,
+        batch_metrics: Arc<BatchMetrics>,
+        batch_observability: Arc<BatchObservability>,
+        decode_hang_timeout: Duration,
+    ) -> Result<Self> {
+        let model_id = model_path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
+        let display_path = model_path.display().to_string();
+        let worker_handle = thread::Builder::new()
+            .name("model-worker-rerank-only".to_string())
+            .spawn(move || {
+                drop(request_rx);
+                tracing::info!(
+                    "Chat generation is disabled: {display_path} is served as a reranker on \
+                     /v1/rerank, so the chat worker did not load a second copy of its weights"
+                );
+            })?;
+        Ok(Self {
+            request_tx,
+            model_id,
+            created_at: chrono::Utc::now().timestamp(),
+            loaded: Arc::new(AtomicBool::new(false)),
+            batch_metrics,
+            batch_observability,
+            max_queue_depth: 1,
+            single_stream_queue_admission: Arc::new(AtomicBool::new(false)),
+            prompt_cache: None,
+            prompt_tokenizer: None,
+            decode_hang_timeout,
+            _worker_handle: worker_handle,
+        })
     }
 
     /// Create and start a new model provider using the legacy sequential worker.

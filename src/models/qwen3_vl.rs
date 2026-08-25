@@ -850,6 +850,16 @@ impl Qwen3VLModel {
         self.lm_head.forward(&h)
     }
 
+    /// Apply the language-model head to `[B, L, hidden_size]` hidden states.
+    ///
+    /// Used by: the Qwen3-VL reranker (#1356), which needs the yes/no logits at
+    /// a single position and would otherwise have to materialize the whole
+    /// `[B, L, vocab_size]` tensor through [`Self::forward_for_sequence`] just
+    /// to slice one row out of it.
+    pub(crate) fn lm_head_forward(&self, hidden: &MlxArray) -> UniquePtr<MlxArray> {
+        self.lm_head.forward(hidden)
+    }
+
     /// Run the decoder and the final norm, returning the `[B, L, hidden_size]`
     /// hidden states without applying `lm_head`.
     ///
