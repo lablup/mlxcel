@@ -228,8 +228,8 @@ The validation host is Linux with CUDA (GB10). The issue's `--features metal,acc
 | `src/models/lfm2.rs` | +182 / -20 | `conv_causal`, directional padding, padding multiplier, `forward_hidden_bidirectional` |
 | `src/models/lfm2_tests.rs` | +170 / -1 | impulse-response tests for both conv directions, MLX guard retrofit |
 | `src/models/ministral3.rs` | +8 / -2 | two `pub(crate)` widenings, no behaviour change |
-| `src/embeddings/loader.rs` | +9 / -3 | three family arms |
-| `src/embeddings/real_checkpoint_tests.rs` | +3 / -8 | LFM2 leaves the unported list |
+| `src/embeddings/loader.rs` | +12 / -3 | three family arms |
+| `src/embeddings/real_checkpoint_tests.rs` | +12 / -5 | LFM2 leaves the unported list, which now holds only the two multimodal embedders |
 | `src/models/mod.rs` | +3 | three module declarations |
 | `docs/embeddings.md` | +58 | three family sections, source map, bf16 batch-geometry note |
 | `docs/supported-models.md` | +3 | three Embedding rows |
@@ -257,5 +257,5 @@ The validation host is Linux with CUDA (GB10). The issue's `--features metal,acc
 ## References
 
 - Issue #1325, epic #1348, foundation PR #1408 / issue #1353
-- Merged sibling families: #1410 (SigLIP text), #1411 (BERT, XLM-RoBERTa), #1412 (ModernBERT), #1413 (EmbeddingGemma, Qwen3-Embedding)
+- Merged sibling families: #1410 (SigLIP text), #1411 (BERT, XLM-RoBERTa), #1412 (ModernBERT), #1413 (EmbeddingGemma, Qwen3-Embedding), #1414 (ColIdefics3, ColQwen2.5)
 - `docs/embeddings.md`, `docs/supported-models.md`

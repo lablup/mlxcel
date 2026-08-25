@@ -228,8 +228,8 @@ CLS 풀링은 토크나이저 post-processor가 앞에 붙이는 `<|startoftext|
 | `src/models/lfm2.rs` | +182 / -20 | `conv_causal`, 방향성 패딩, 패딩 곱셈자, `forward_hidden_bidirectional` |
 | `src/models/lfm2_tests.rs` | +170 / -1 | 양방향 conv 임펄스 응답 테스트, MLX 가드 소급 적용 |
 | `src/models/ministral3.rs` | +8 / -2 | `pub(crate)` 확대 두 건, 동작 변경 없음 |
-| `src/embeddings/loader.rs` | +9 / -3 | 계열 arm 세 개 |
-| `src/embeddings/real_checkpoint_tests.rs` | +3 / -8 | LFM2가 미포팅 목록을 떠남 |
+| `src/embeddings/loader.rs` | +12 / -3 | 계열 arm 세 개 |
+| `src/embeddings/real_checkpoint_tests.rs` | +12 / -5 | LFM2가 미포팅 목록을 떠나고, 목록에는 멀티모달 임베더 둘만 남음 |
 | `src/models/mod.rs` | +3 | 모듈 선언 세 개 |
 | `docs/embeddings.md` | +58 | 계열 절 세 개, 소스 맵, bf16 배치 기하 설명 |
 | `docs/supported-models.md` | +3 | Embedding 행 세 개 |
@@ -257,5 +257,5 @@ CLS 풀링은 토크나이저 post-processor가 앞에 붙이는 `<|startoftext|
 ## 참고
 
 - 이슈 #1325, 에픽 #1348, 기반 PR #1408 / 이슈 #1353
-- 머지된 형제 계열: #1410(SigLIP text), #1411(BERT, XLM-RoBERTa), #1412(ModernBERT), #1413(EmbeddingGemma, Qwen3-Embedding)
+- 머지된 형제 계열: #1410(SigLIP text), #1411(BERT, XLM-RoBERTa), #1412(ModernBERT), #1413(EmbeddingGemma, Qwen3-Embedding), #1414(ColIdefics3, ColQwen2.5)
 - `docs/embeddings.md`, `docs/supported-models.md`
