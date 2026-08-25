@@ -57,6 +57,8 @@ pub mod apertus;
 pub mod baichuan;
 pub mod bailing_moe;
 pub mod bailing_moe_linear;
+pub mod bert;
+pub mod bert_heads;
 pub mod bitnet;
 pub mod cohere;
 pub mod cohere2;

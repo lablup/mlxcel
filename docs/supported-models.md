@@ -526,10 +526,14 @@ Embedding checkpoints are served through `POST /v1/embeddings` and the offline `
 
 | Family | `model_type` | `ModelType` | Pooling | Validation checkpoint | Status |
 |--------|--------------|-------------|---------|-----------------------|--------|
+| BERT / MiniLM encoder | `bert` | `Bert` | mean (from `1_Pooling/config.json`) | `sentence-transformers/all-MiniLM-L6-v2`, `intfloat/multilingual-e5-small` | supported |
+| XLM-RoBERTa encoder | `xlm-roberta` | `XlmRoberta` | cls (from `1_Pooling/config.json`) | `BAAI/bge-m3` | supported |
 | ModernBERT (alternating local/global attention, RoPE, GeGLU) | `modernbert` | `ModernBert` | `mean` (family default; `1_Pooling/config.json` wins) | [`nomic-ai/modernbert-embed-base`](https://huggingface.co/nomic-ai/modernbert-embed-base) | supported. `ModernBertModel` and `ModernBertForMaskedLM` load as embedders. nomic's checkpoint is asymmetric and needs the `search_query: ` / `search_document: ` prefixes in the input text; Matryoshka `dimensions` down to 256 is meaningful. `Alibaba-NLP/gte-reranker-modernbert-base` loads through the sequence-classification head, which `/v1/rerank` (#1356) consumes. |
 | SigLIP text tower | `siglip` | `SiglipText` | last position, fixed (no `1_Pooling`) | `google/siglip-base-patch16-224` | supported (text only) |
 | EmbeddingGemma (bidirectional Gemma 3) | `gemma3_text`, `gemma3` | `Gemma3Embedding` | mean, then two bias-free `Dense` projections (768 -> 3072 -> 768) | `mlx-community/embeddinggemma-300m-4bit` | supported |
 | Qwen3-Embedding | `qwen3` | `Qwen3Embedding` | last token (the appended `<|endoftext|>`) | `Qwen/Qwen3-Embedding-0.6B` | supported |
+
+BERT and XLM-RoBERTa share one post-LayerNorm encoder over absolute position embeddings (`src/models/bert.rs`) and differ only in position-id construction, the `type_vocab_size` / `layer_norm_eps` / `pad_token_id` defaults and the checkpoint's weight-key prefix. `BertForSequenceClassification` and `XLMRobertaForSequenceClassification` checkpoints (`BAAI/bge-reranker-v2-m3`) load through the same trunk with the classification head in `src/models/bert_heads.rs`; they are rerankers, so they are deliberately not embedding variants and are reached by path rather than by detection. See [Embeddings API](embeddings.md#bert-and-xlm-roberta) for the prompt prefixes these checkpoints expect.
 
 SigLIP is the one family whose sequence width is fixed rather than derived: every input is truncated to 63 tokens plus the trailing `</s>` and right-padded to exactly the 64 learned positions, no attention mask is applied, and the vector is the projection `head` applied to the hidden state at position 63. The pad token and the EOS token are the same id (`</s>`, 1), which is what makes that slot meaningful for short inputs. Image embeddings through the SigLIP vision tower are not served yet.
 

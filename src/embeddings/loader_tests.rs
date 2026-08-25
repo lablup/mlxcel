@@ -24,7 +24,10 @@ use super::limits::{
     EMBEDDING_MAX_LENGTH_CAP, config_normalize_flag, derive_max_length, resolve_pad_token_id,
     resolve_vocab_size,
 };
-use super::loader::{QuantizationParams, load_embedding_model, quantization_params};
+use super::loader::{
+    QuantizationParams, embedding_family_not_yet_supported, load_embedding_model,
+    quantization_params,
+};
 use super::tokenize_tests::bert_like_tokenizer;
 use crate::models::{ModelType, get_model_type};
 
@@ -253,17 +256,35 @@ fn load_embedding_model_rejects_generation_checkpoints() {
 }
 
 #[test]
-fn load_embedding_model_reports_unported_family() {
-    let dir = temp_dir("bert_unported");
+fn unported_family_error_names_the_family_and_the_route() {
+    // Asserted on the shared error rather than on a fixture checkpoint of one
+    // particular family: the set of families still answering this shrinks to
+    // nothing as the epic's ports land, but the message must keep naming both
+    // the family and the endpoint.
+    let err = embedding_family_not_yet_supported(ModelType::ColQwen25).to_string();
+    assert!(err.contains("not yet supported"), "{err}");
+    assert!(err.contains("/v1/embeddings"), "{err}");
+    assert!(err.contains("ColQwen2.5"), "{err}");
+}
+
+#[test]
+fn load_embedding_model_reports_missing_weights_for_a_ported_family() {
+    // BERT is ported, so a config-only directory now fails inside the family
+    // constructor rather than at the dispatcher.
+    let dir = temp_dir("bert_no_weights");
     std::fs::write(
         dir.join("config.json"),
-        r#"{"model_type": "bert", "architectures": ["BertModel"], "hidden_size": 8}"#,
+        r#"{"model_type": "bert", "architectures": ["BertModel"], "vocab_size": 32,
+            "hidden_size": 8, "num_hidden_layers": 1, "num_attention_heads": 2,
+            "intermediate_size": 16, "max_position_embeddings": 16}"#,
     )
     .unwrap();
     assert_eq!(get_model_type(&dir).unwrap(), ModelType::Bert);
     let err = err_string(load_embedding_model(&dir));
-    assert!(err.contains("not yet supported"), "{err}");
-    assert!(err.contains("/v1/embeddings"), "{err}");
+    assert!(
+        err.contains("weight") || err.contains("Weight"),
+        "expected a missing-weight error, got: {err}"
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 

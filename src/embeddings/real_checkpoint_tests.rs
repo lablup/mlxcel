@@ -267,9 +267,12 @@ fn generation_loader_rejects_real_embedding_checkpoints() {
 fn embedding_loader_reports_unported_families_on_real_checkpoints() {
     // For a family whose forward pass has not landed yet, the dispatcher must
     // name the family and the route rather than fail on a missing tensor.
-    // Ported families move out of this list; Gemma3Embedding and
-    // Qwen3Embedding did so in #1329.
-    for (repo, family) in [(MINILM, "BERT")] {
+    // Ported families move out of this list: Gemma3Embedding and
+    // Qwen3Embedding did so in #1329, BERT in #1321.
+    for (repo, family) in [
+        ("LiquidAI/LFM2.5-Embedding-350M", "LFM2 bidirectional embedder"),
+        ("vidore/colqwen2.5-base", "ColQwen2.5"),
+    ] {
         let Some(dir) = local_checkpoint(repo) else {
             continue;
         };
