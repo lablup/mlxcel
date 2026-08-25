@@ -154,7 +154,9 @@ GB10(Linux, CUDA)에서 모두 `--profile test-fast --features cuda`로 실행�
 | `src/embeddings/model.rs` | +11 | `max_sequence_length()` |
 | `src/embeddings/loader_tests.rs` | +27/-6 | unported-family 테스트를 family 무관하게 변경 |
 | `src/embeddings/real_checkpoint_tests.rs` | +4/-3 | BERT를 unported 목록에서 제외 |
-| `docs/embeddings.md`, `docs/supported-models.md` | +31/-1 | family notes와 표 행 |
+| `docs/embeddings.md`, `docs/supported-models.md` | +48/-21 | family notes, 표 행, rebase 과정에서 형제 `Family notes` 세 절을 하나로 통합 |
+
+이 브랜치는 형제 포트가 머지되는 동안 두 번 rebase했다(#1410 SigLIP, #1412 ModernBERT). 둘 다 `docs/embeddings.md`에 자체 `## Family notes` 제목을 추가했기 때문에, rebase 과정에서 세 절을 family 표 순서대로 하나의 제목 아래로 모으고 형제들의 문장은 그대로 두었다. `build_family_model`에는 이제 실제 arm이 셋이고 `not yet supported` 목록이 그만큼 줄었다.
 
 ---
 

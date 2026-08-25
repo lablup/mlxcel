@@ -154,7 +154,9 @@ Local checks on GB10 (Linux, CUDA), all with `--profile test-fast --features cud
 | `src/embeddings/model.rs` | +11 | `max_sequence_length()` |
 | `src/embeddings/loader_tests.rs` | +27/-6 | Unported-family test made family-agnostic |
 | `src/embeddings/real_checkpoint_tests.rs` | +4/-3 | BERT leaves the unported list |
-| `docs/embeddings.md`, `docs/supported-models.md` | +31/-1 | Family notes and table rows |
+| `docs/embeddings.md`, `docs/supported-models.md` | +48/-21 | Family notes, table rows, and the rebase-time merge of three sibling `Family notes` sections into one |
+
+This branch was rebased twice while the sibling ports merged (#1410 SigLIP, #1412 ModernBERT). Both had added their own `## Family notes` heading to `docs/embeddings.md`; the rebase folded all three subsections under one heading in family-table order and left every sibling sentence verbatim. `build_family_model` now carries three real arms and one shrinking `not yet supported` list.
 
 ---
 
