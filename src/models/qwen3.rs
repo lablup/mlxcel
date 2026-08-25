@@ -850,9 +850,17 @@ impl Qwen3Model {
         self.forward_impl(input_ids, None, caches, mask)
     }
 
-    /// Forward with optional pre-computed embeddings (for VLM prefill).
-    /// Used by: MiniCPM-o VLM
-    pub fn forward_impl(
+    /// Everything up to and including the final norm: `[B, L, hidden_size]`
+    /// hidden states, with no head applied.
+    ///
+    /// Split out of [`Qwen3Model::forward_impl`] so an embedding wrapper can
+    /// reach the hidden states without materializing a `[B, L, vocab_size]`
+    /// logit tensor it would immediately discard. `forward_impl` calls this
+    /// and then applies the head, so the generation output is unchanged.
+    ///
+    /// Used by: Qwen3 generation, Qwen3Embedding, #1356 (Qwen3 generative
+    /// reranker).
+    pub(crate) fn forward_hidden(
         &self,
         input_ids: &MlxArray,
         input_embeddings: Option<&MlxArray>,
@@ -873,7 +881,19 @@ impl Qwen3Model {
         }
 
         // Final norm
-        let h = self.norm.forward(&h);
+        self.norm.forward(&h)
+    }
+
+    /// Forward with optional pre-computed embeddings (for VLM prefill).
+    /// Used by: MiniCPM-o VLM
+    pub fn forward_impl(
+        &self,
+        input_ids: &MlxArray,
+        input_embeddings: Option<&MlxArray>,
+        caches: &mut [KVCache],
+        mask: Option<&MlxArray>,
+    ) -> UniquePtr<MlxArray> {
+        let h = self.forward_hidden(input_ids, input_embeddings, caches, mask);
 
         // LM head
         if let Some(ref lm_head) = self.lm_head {

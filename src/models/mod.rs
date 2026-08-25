@@ -17,6 +17,9 @@
 //! All implementations use mlxcel-core for direct MLX C++ bindings.
 
 mod detection;
+pub(crate) mod embedding_sanitize;
+#[cfg(test)]
+pub(crate) mod embedding_test_support;
 mod gemma3n_helpers;
 mod llama4_helpers;
 pub(crate) mod model_owned;
@@ -78,6 +81,7 @@ pub mod florence2;
 pub mod gemma;
 pub mod gemma2;
 pub mod gemma3;
+pub mod gemma3_embedding;
 pub mod gemma3n;
 pub mod gemma4;
 pub mod gemma4_mtp_target;
@@ -153,6 +157,7 @@ pub mod qwen2_vl;
 pub mod qwen3;
 pub mod qwen3_5;
 pub mod qwen3_5_mtp_target;
+pub mod qwen3_embedding;
 pub mod qwen3_moe;
 pub mod qwen3_next;
 pub mod qwen3_vl;

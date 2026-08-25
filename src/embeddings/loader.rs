@@ -134,10 +134,14 @@ fn build_family_model(
         ModelType::ModernBert => Ok(Box::new(
             crate::models::modernbert_heads::ModernBertEmbeddingModel::load(model_dir, config)?,
         )),
+        ModelType::Gemma3Embedding => Ok(Box::new(
+            crate::models::gemma3_embedding::Gemma3EmbeddingModel::load(model_dir, config)?,
+        )),
+        ModelType::Qwen3Embedding => Ok(Box::new(
+            crate::models::qwen3_embedding::Qwen3EmbeddingModel::load(model_dir, config)?,
+        )),
         ModelType::Bert
         | ModelType::XlmRoberta
-        | ModelType::Gemma3Embedding
-        | ModelType::Qwen3Embedding
         | ModelType::Qwen3VLEmbedding
         | ModelType::Lfm2Embedding
         | ModelType::Ministral3Embedding
