@@ -75,6 +75,7 @@ pub mod deepseek;
 pub mod deepseek_v2;
 pub mod deepseek_v3;
 pub mod deepseek_v32;
+pub mod deepseek_v4;
 pub mod diffusion_gemma;
 pub mod dots1;
 pub mod ernie4_5;
@@ -213,6 +214,7 @@ pub use deepseek::DeepSeekModel;
 pub use deepseek_v2::DeepSeekV2Model;
 pub use deepseek_v3::DeepSeekV3Model;
 pub use deepseek_v32::DeepSeekV32Model;
+pub use deepseek_v4::DeepSeekV4Model;
 pub use detection::get_model_type;
 pub(crate) use detection::is_sequence_classification_architecture;
 pub use diffusion_gemma::DiffusionGemmaModel;
@@ -437,6 +439,8 @@ pub enum ModelType {
     DeepSeekV2,
     DeepSeekV3,
     DeepSeekV32,
+    /// DeepSeek-V4 (HyperConnections, pooled-KV compression, HiSA, hash-routed MoE).
+    DeepSeekV4,
     /// rednote dots.llm1 (DeepSeek-V3-style MoE without MLA).
     Dots1,
 
@@ -688,6 +692,7 @@ pub const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::DeepSeekV2,
     ModelType::DeepSeekV3,
     ModelType::DeepSeekV32,
+    ModelType::DeepSeekV4,
     ModelType::Dots1,
     // Cohere family
     ModelType::Cohere,
@@ -907,6 +912,7 @@ impl ModelType {
             ModelType::DeepSeekV2 => ("DeepSeek v2", "DeepSeek"),
             ModelType::DeepSeekV3 => ("DeepSeek v3 / R1", "DeepSeek"),
             ModelType::DeepSeekV32 => ("DeepSeek v3.2", "DeepSeek"),
+            ModelType::DeepSeekV4 => ("DeepSeek v4", "DeepSeek"),
 
             // ----- Cohere -----
             ModelType::Cohere => ("Command R (Cohere)", "Cohere"),
@@ -1265,6 +1271,7 @@ mod metadata_tests {
             DeepSeekV2,
             DeepSeekV3,
             DeepSeekV32,
+            DeepSeekV4,
             Dots1,
             Cohere,
             Cohere2,
