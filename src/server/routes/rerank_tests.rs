@@ -26,8 +26,8 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::{NO_RERANKER_MODEL_MESSAGE, rerank_error_response};
-use crate::rerank::RerankerKind;
 use crate::rerank::stub::stub_loaded_reranker;
+use crate::rerank::{RerankItem, RerankScores, RerankerKind};
 use crate::server::rerank_model::{RerankError, RerankModelProvider};
 use crate::server::rerank_worker::RerankWorkerProvider;
 use crate::server::{AppState, ChatTemplateProcessor, ModelProvider, ServerConfig, create_app};
@@ -38,6 +38,38 @@ const STUB_MODEL_ID: &str = "stub-reranker";
 /// A 1x1 PNG as a data URI, so an image item can reach the route without a
 /// file or a network fetch.
 const TINY_PNG: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+struct NonFiniteRerankProvider;
+
+impl RerankModelProvider for NonFiniteRerankProvider {
+    fn rerank(
+        &self,
+        _query: RerankItem,
+        documents: Vec<RerankItem>,
+        _instruction: Option<String>,
+    ) -> Result<RerankScores, RerankError> {
+        Ok(RerankScores {
+            scores: vec![f32::NAN; documents.len()],
+            prompt_tokens: 1,
+        })
+    }
+
+    fn model_id(&self) -> &str {
+        "non-finite-reranker"
+    }
+
+    fn created_at(&self) -> i64 {
+        0
+    }
+
+    fn kind(&self) -> RerankerKind {
+        RerankerKind::GenerativeText
+    }
+
+    fn max_length(&self) -> usize {
+        32
+    }
+}
 
 fn stub_provider(kind: RerankerKind, supports_images: bool) -> Arc<dyn RerankModelProvider> {
     Arc::new(
@@ -460,5 +492,47 @@ fn provider_errors_map_to_the_shared_status_codes() {
     assert_eq!(
         rerank_error_response(RerankError::Internal("boom".into())).status,
         StatusCode::INTERNAL_SERVER_ERROR
+    );
+}
+
+#[tokio::test]
+async fn too_many_images_are_rejected_before_resolution() {
+    let documents: Vec<Value> = (0..17).map(|_| json!({"image": TINY_PNG})).collect();
+    let app = app_with(Some(stub_provider(RerankerKind::GenerativeVl, true)));
+    let (status, body) = post(
+        app,
+        "/v1/rerank",
+        json!({"query": "alpha", "documents": documents}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("Too many image inputs"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn non_finite_scores_return_500() {
+    let app = app_with(Some(Arc::new(NonFiniteRerankProvider)));
+    let (status, body) = post(
+        app,
+        "/v1/rerank",
+        json!({"query": "alpha", "documents": ["alpha"]}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body["error"]["type"], "server_error");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("invalid numeric result"),
+        "{body}"
     );
 }

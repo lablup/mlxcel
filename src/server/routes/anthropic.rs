@@ -44,7 +44,7 @@ use crate::server::anthropic_translator::{
 };
 use crate::server::chat_request::{prepare_chat_request_with_cache, request_has_effective_input};
 use crate::server::config::ReasoningBudgetOverride;
-use crate::server::model_provider::QueueFullError;
+use crate::server::model_provider::{ChatWorkerGoneError, QueueFullError};
 use crate::server::streaming::sse_response;
 use crate::server::streaming_anthropic::{AnthropicBlockEmitter, anthropic_sse_channel};
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
@@ -67,6 +67,13 @@ fn generation_error_to_response(err: anyhow::Error) -> Response {
     if err.downcast_ref::<QueueFullError>().is_some() {
         AnthropicErrorResponse::overloaded("All slots are busy. Please try again later.")
             .into_response()
+    } else if err.downcast_ref::<ChatWorkerGoneError>().is_some() {
+        AnthropicErrorResponse::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The chat worker has exited; check the server log.",
+            "api_error",
+        )
+        .into_response()
     } else {
         AnthropicErrorResponse::api_error(format!("Generation failed: {err}")).into_response()
     }
@@ -79,6 +86,14 @@ pub async fn anthropic_messages(
     headers: HeaderMap,
     Json(request): Json<AnthropicRequest>,
 ) -> Response {
+    if let Some(message) = super::chat_unavailable_message(&state) {
+        return AnthropicErrorResponse::new(
+            StatusCode::NOT_IMPLEMENTED,
+            message,
+            "not_implemented",
+        )
+        .into_response();
+    }
     let translated = anthropic_request_to_chat(&request);
 
     // Reject requests with no effective input before any model dispatch

@@ -27,6 +27,7 @@ use tower::ServiceExt;
 
 use super::{NO_EMBEDDING_MODEL_MESSAGE, embedding_error_response};
 use crate::embeddings::stub::{STUB_DIM, STUB_VOCAB_SIZE, stub_loaded_model};
+use crate::embeddings::{EmbedOptions, EmbedReply, EmbeddingVector, ImageInput};
 use crate::server::embedding_model::{EmbeddingError, EmbeddingModelProvider};
 use crate::server::embedding_worker::EmbeddingWorkerProvider;
 use crate::server::types::embeddings::{
@@ -36,6 +37,70 @@ use crate::server::{AppState, ChatTemplateProcessor, ModelProvider, ServerConfig
 use crate::tokenizer::MlxcelTokenizer;
 
 const STUB_MODEL_ID: &str = "stub-embedding";
+
+struct NonFiniteEmbeddingProvider;
+
+impl NonFiniteEmbeddingProvider {
+    fn reply() -> EmbedReply {
+        EmbedReply {
+            vectors: vec![EmbeddingVector {
+                values: vec![f32::NAN],
+                shape: vec![1],
+            }],
+            prompt_tokens: 1,
+        }
+    }
+}
+
+impl EmbeddingModelProvider for NonFiniteEmbeddingProvider {
+    fn embed_texts(
+        &self,
+        _texts: Vec<String>,
+        _opts: EmbedOptions,
+    ) -> Result<EmbedReply, EmbeddingError> {
+        Ok(Self::reply())
+    }
+
+    fn embed_tokens(
+        &self,
+        _token_rows: Vec<Vec<u32>>,
+        _opts: EmbedOptions,
+    ) -> Result<EmbedReply, EmbeddingError> {
+        Ok(Self::reply())
+    }
+
+    fn embed_image(
+        &self,
+        _image: ImageInput,
+        _opts: EmbedOptions,
+    ) -> Result<EmbedReply, EmbeddingError> {
+        Ok(Self::reply())
+    }
+
+    fn model_id(&self) -> &str {
+        "non-finite-embedding"
+    }
+
+    fn created_at(&self) -> i64 {
+        0
+    }
+
+    fn dim(&self) -> usize {
+        1
+    }
+
+    fn multi_vector(&self) -> bool {
+        false
+    }
+
+    fn vocab_size(&self) -> usize {
+        128
+    }
+
+    fn max_length(&self) -> usize {
+        32
+    }
+}
 
 fn stub_provider(multi_vector: bool, batch_size: usize) -> Arc<dyn EmbeddingModelProvider> {
     Arc::new(
@@ -406,4 +471,43 @@ fn input_shapes_flatten_to_ordered_items() {
         Some(EmbeddingEncoding::Base64)
     );
     assert_eq!(EmbeddingEncoding::parse(Some("int8")), None);
+}
+
+#[tokio::test]
+async fn too_many_images_are_rejected_before_resolution() {
+    let input: Vec<Value> = (0..17)
+        .map(|_| {
+            json!({
+                "type": "image_url",
+                "image_url": {"url": "https://example.invalid/image.png"}
+            })
+        })
+        .collect();
+    let app = app_with(Some(stub_provider(false, 16)));
+    let (status, body) = post(app, "/v1/embeddings", json!({"input": input})).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("Too many image inputs"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn non_finite_embeddings_return_500() {
+    let app = app_with(Some(Arc::new(NonFiniteEmbeddingProvider)));
+    let (status, body) = post(app, "/v1/embeddings", json!({"input": "hello"})).await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body["error"]["type"], "server_error");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("invalid numeric result"),
+        "{body}"
+    );
 }

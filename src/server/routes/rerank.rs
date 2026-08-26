@@ -32,7 +32,10 @@ use serde_json::Value;
 
 use crate::rerank::{ImageInput, RerankItem};
 use crate::server::AppState;
-use crate::server::media::{current_image_input_limits, try_read_image_url_with_limits};
+use crate::server::media::{
+    ImageInputLimits, current_image_input_limits, try_read_image_url_with_limits,
+    validate_image_count,
+};
 use crate::server::model_provider::model_worker::decode_request_images_with_limits;
 use crate::server::rerank_model::{RerankError, RerankModelProvider};
 use crate::server::types::ErrorResponse;
@@ -75,10 +78,18 @@ fn validate_items(
     query: &RerankInput,
     documents: &[RerankInput],
     provider: &dyn RerankModelProvider,
+    limits: ImageInputLimits,
 ) -> Result<(), ErrorResponse> {
     if documents.is_empty() {
         return Err(invalid_request("`documents` must not be empty"));
     }
+    let image_count = usize::from(query.image_url().is_some())
+        + documents
+            .iter()
+            .filter(|document| document.image_url().is_some())
+            .count();
+    validate_image_count(image_count, limits).map_err(|err| invalid_request(err.to_string()))?;
+
     let supports_images = provider.supports_images();
     let check = |item: &RerankInput, label: String| -> Result<(), ErrorResponse> {
         if item.is_empty() {
@@ -101,11 +112,14 @@ fn validate_items(
 }
 
 /// Resolve an item's `image_url` into a decoded image.
-async fn fetch_image(item: &RerankInput, label: &str) -> Result<Option<ImageInput>, ErrorResponse> {
+async fn fetch_image(
+    item: &RerankInput,
+    label: &str,
+    limits: ImageInputLimits,
+) -> Result<Option<ImageInput>, ErrorResponse> {
     let Some(url) = item.image_url() else {
         return Ok(None);
     };
-    let limits = current_image_input_limits();
     let bytes = match try_read_image_url_with_limits(url, limits).await {
         Ok(Some(bytes)) => bytes,
         Ok(None) => {
@@ -130,10 +144,14 @@ async fn fetch_image(item: &RerankInput, label: &str) -> Result<Option<ImageInpu
 }
 
 /// Turn one request item into the worker's item type, fetching its image.
-async fn to_rerank_item(item: &RerankInput, label: &str) -> Result<RerankItem, ErrorResponse> {
+async fn to_rerank_item(
+    item: &RerankInput,
+    label: &str,
+    limits: ImageInputLimits,
+) -> Result<RerankItem, ErrorResponse> {
     Ok(RerankItem {
         text: item.text().map(str::to_string),
-        image: fetch_image(item, label).await?,
+        image: fetch_image(item, label, limits).await?,
     })
 }
 
@@ -176,17 +194,23 @@ pub async fn create_rerank(State(state): State<AppState>, Json(body): Json<Value
         .into_response();
     }
 
-    if let Err(err) = validate_items(&request.query, &request.documents, provider.as_ref()) {
+    let image_limits = current_image_input_limits();
+    if let Err(err) = validate_items(
+        &request.query,
+        &request.documents,
+        provider.as_ref(),
+        image_limits,
+    ) {
         return err.into_response();
     }
 
-    let query = match to_rerank_item(&request.query, "`query`").await {
+    let query = match to_rerank_item(&request.query, "`query`", image_limits).await {
         Ok(item) => item,
         Err(err) => return err.into_response(),
     };
     let mut documents = Vec::with_capacity(request.documents.len());
     for (index, document) in request.documents.iter().enumerate() {
-        match to_rerank_item(document, &format!("documents[{index}]")).await {
+        match to_rerank_item(document, &format!("documents[{index}]"), image_limits).await {
             Ok(item) => documents.push(item),
             Err(err) => return err.into_response(),
         }
@@ -222,6 +246,21 @@ pub async fn create_rerank(State(state): State<AppState>, Json(body): Json<Value
         return response.into_response();
     }
 
+    if let Some((index, score)) = scored
+        .scores
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|(_, score)| !score.is_finite() || !(0.0..=1.0).contains(score))
+    {
+        tracing::error!(index, score, "reranker returned an invalid relevance score");
+        let mut response = ErrorResponse::new(
+            "rerank inference returned an invalid numeric result",
+            "server_error",
+        );
+        response.status = StatusCode::INTERNAL_SERVER_ERROR;
+        return response.into_response();
+    }
     state.metrics.record_request(
         scored.prompt_tokens,
         0,

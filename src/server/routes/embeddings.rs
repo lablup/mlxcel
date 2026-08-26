@@ -35,7 +35,10 @@ use serde_json::Value;
 use crate::embeddings::{EmbedOptions, EmbeddingVector, ImageInput};
 use crate::server::AppState;
 use crate::server::embedding_model::{EmbeddingError, EmbeddingModelProvider};
-use crate::server::media::{current_image_input_limits, try_read_image_url_with_limits};
+use crate::server::media::{
+    ImageInputLimits, current_image_input_limits, try_read_image_url_with_limits,
+    validate_image_count,
+};
 use crate::server::model_provider::model_worker::decode_request_images_with_limits;
 use crate::server::types::ErrorResponse;
 use crate::server::types::embeddings::{
@@ -77,10 +80,17 @@ pub(crate) fn embedding_error_response(err: EmbeddingError) -> ErrorResponse {
 fn validate_items(
     items: &[EmbedItem],
     provider: &dyn EmbeddingModelProvider,
+    limits: ImageInputLimits,
 ) -> Result<(), ErrorResponse> {
     if items.is_empty() {
         return Err(invalid_request("`input` must not be empty"));
     }
+    let image_count = items
+        .iter()
+        .filter(|item| matches!(item, EmbedItem::ImageUrl(_)))
+        .count();
+    validate_image_count(image_count, limits).map_err(|err| invalid_request(err.to_string()))?;
+
     let vocab_size = provider.vocab_size();
     for (index, item) in items.iter().enumerate() {
         match item {
@@ -116,8 +126,10 @@ fn validate_items(
 }
 
 /// Resolve every `image_url` item into a decoded image, in item order.
-async fn fetch_images(items: &[EmbedItem]) -> Result<Vec<(usize, ImageInput)>, ErrorResponse> {
-    let limits = current_image_input_limits();
+async fn fetch_images(
+    items: &[EmbedItem],
+    limits: ImageInputLimits,
+) -> Result<Vec<(usize, ImageInput)>, ErrorResponse> {
     let mut images = Vec::new();
     for (index, item) in items.iter().enumerate() {
         let EmbedItem::ImageUrl(url) = item else {
@@ -256,10 +268,11 @@ pub async fn create_embeddings(State(state): State<AppState>, Json(body): Json<V
     }
 
     let items = request.input.into_items();
-    if let Err(err) = validate_items(&items, provider.as_ref()) {
+    let image_limits = current_image_input_limits();
+    if let Err(err) = validate_items(&items, provider.as_ref(), image_limits) {
         return err.into_response();
     }
-    let images = match fetch_images(&items).await {
+    let images = match fetch_images(&items, image_limits).await {
         Ok(images) => images,
         Err(err) => return err.into_response(),
     };
@@ -286,6 +299,26 @@ pub async fn create_embeddings(State(state): State<AppState>, Json(body): Json<V
             return response.into_response();
         }
     };
+
+    if let Some((vector_index, value_index)) = vectors.iter().enumerate().find_map(|(i, vector)| {
+        vector
+            .values
+            .iter()
+            .position(|value| !value.is_finite())
+            .map(|j| (i, j))
+    }) {
+        tracing::error!(
+            vector_index,
+            value_index,
+            "embedding inference returned a non-finite value"
+        );
+        let mut response = ErrorResponse::new(
+            "embedding inference returned an invalid numeric result",
+            "server_error",
+        );
+        response.status = StatusCode::INTERNAL_SERVER_ERROR;
+        return response.into_response();
+    }
 
     state
         .metrics

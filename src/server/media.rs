@@ -333,6 +333,18 @@ pub(crate) fn current_image_input_limits() -> ImageInputLimits {
     }
 }
 
+/// Reject a request before resolution when it declares more images than the
+/// configured per-request limit.
+pub(crate) fn validate_image_count(count: usize, limits: ImageInputLimits) -> Result<()> {
+    if count > limits.max_images_per_request {
+        bail!(
+            "Too many image inputs: received at least {count}, maximum is {}",
+            limits.max_images_per_request
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) async fn extract_chat_image_data(request: &ChatCompletionRequest) -> Vec<Vec<u8>> {
     match try_extract_chat_image_data(request).await {
@@ -1145,13 +1157,7 @@ where
     let mut images = Vec::new();
 
     for (index, url) in urls.into_iter().enumerate() {
-        if index >= limits.max_images_per_request {
-            bail!(
-                "Too many image inputs: received at least {}, maximum is {}",
-                index + 1,
-                limits.max_images_per_request
-            );
-        }
+        validate_image_count(index + 1, limits)?;
         match try_read_image_url_with_limits(url.as_ref(), limits).await {
             Ok(Some(bytes)) => images.push(bytes),
             Ok(None) => {}
