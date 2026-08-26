@@ -666,6 +666,92 @@ fn pooling_cache_prompt_then_decode_emits_full_windows_only() {
 }
 
 #[test]
+fn pooling_cache_eval_state_is_safe_and_neutral_in_every_state() {
+    // `eval_state` is a barrier, not a mutation: it must be callable in every
+    // state the cache can be in, and a cache driven WITH it must emit exactly
+    // what an identically driven cache without it emits.
+    // 8 tokens of width 2: 2 to leave a remainder, then 6 to complete two
+    // full ratio-4 windows across the remainder boundary.
+    let vals: Vec<f32> = (0..16).map(|v| v as f32).collect();
+    let mut barriered = PoolingCache::new(4);
+    let mut plain = PoolingCache::new(4);
+
+    // Freshly constructed: all three buffers are `None`, so the barrier has
+    // nothing to force and must still be a no-op rather than a panic.
+    barriered.eval_state();
+    assert_eq!(barriered.remainder, 0);
+
+    // Prompt mode completing NO window: 2 tokens at ratio 4 only fill the
+    // remainder buffer, so `pooled` is still `None` while `buf_kv` /
+    // `buf_gate` now carry live `slice_update` chains.
+    let head = mlxcel_core::from_slice_f32(&vals[..4], &[1, 2, 2]);
+    let (r_kv, _, _) = barriered.accumulate_windows(&head, &head, 0);
+    let (p_kv, _, _) = plain.accumulate_windows(&head, &head, 0);
+    assert_eq!(mlxcel_core::array_shape(&r_kv)[1], 0);
+    assert_eq!(mlxcel_core::array_shape(&p_kv)[1], 0);
+    assert_eq!(barriered.remainder, 2);
+    barriered.eval_state();
+    assert_eq!(barriered.remainder, 2);
+
+    // Prompt mode that DOES complete windows: 6 more tokens carry the
+    // 2-token remainder to 8 usable rows, two full ratio-4 windows, base 0.
+    let tail = mlxcel_core::from_slice_f32(&vals[4..], &[1, 6, 2]);
+    let (r_kv, r_gate, base) = barriered.accumulate_windows(&tail, &tail, 2);
+    let (p_kv, _, p_base) = plain.accumulate_windows(&tail, &tail, 2);
+    assert_eq!(mlxcel_core::array_shape(&r_kv), vec![1, 8, 2]);
+    assert_eq!(base, 0);
+    assert_eq!(base, p_base);
+    assert_eq!(barriered.remainder, 0);
+    barriered.eval_state();
+    assert_eq!(barriered.remainder, 0);
+    // Forcing the buffers must not disturb the rows the call already emitted,
+    // and the barriered cache must still agree with the plain one.
+    assert_close(
+        &array_to_vec_f32(&r_kv),
+        &vals,
+        1e-6,
+        "windows survive the barrier",
+    );
+    assert_close(
+        &array_to_vec_f32(&r_gate),
+        &vals,
+        1e-6,
+        "gate windows survive the barrier",
+    );
+    assert_close(
+        &array_to_vec_f32(&r_kv),
+        &array_to_vec_f32(&p_kv),
+        1e-6,
+        "barriered cache emits what the plain one emits",
+    );
+
+    // With `pooled` populated: force it, then confirm the borrow reads back
+    // unchanged and a later append still lands on top of it.
+    let px = mlxcel_core::from_slice_f32(&[7.0, -3.0], &[1, 1, 2]);
+    let pooled = barriered.update_and_fetch(px);
+    assert_eq!(mlxcel_core::array_shape(pooled), vec![1, 1, 2]);
+    barriered.eval_state();
+    let px2 = mlxcel_core::from_slice_f32(&[1.5, 0.25], &[1, 1, 2]);
+    let pooled = barriered.update_and_fetch(px2);
+    assert_eq!(mlxcel_core::array_shape(pooled), vec![1, 2, 2]);
+    assert_close(
+        &array_to_vec_f32(pooled),
+        &[7.0, -3.0, 1.5, 0.25],
+        1e-6,
+        "pooled rows survive the barrier and keep appending",
+    );
+
+    // And once more after a decode-mode accumulate, the state the real decode
+    // loop leaves the cache in between completed windows.
+    let t = mlxcel_core::from_slice_f32(&[2.0, -2.0], &[1, 1, 2]);
+    let (r_kv, _, _) = barriered.accumulate_windows(&t, &t, 8);
+    assert_eq!(mlxcel_core::array_shape(&r_kv)[1], 0);
+    assert_eq!(barriered.remainder, 1);
+    barriered.eval_state();
+    assert_eq!(barriered.remainder, 1);
+}
+
+#[test]
 fn pool_visibility_counts_match_reference_make_mask() {
     // Query at absolute position offset + j sees pooled rows
     // < (offset + 1 + j) / ratio.
@@ -1190,9 +1276,12 @@ fn tiny_model_prefill_and_decode_produce_finite_logits() {
         "prefill logits must be finite"
     );
 
-    // Three decode steps continue from the same caches (rotating window,
+    // Ten decode steps continue from the same caches (rotating window,
     // pooling remainders, HiSA decode fast path once Np >= block * keep).
-    for (step, &tok) in [3_i32, 14, 8].iter().enumerate() {
+    // Ten rather than three so the ratio-4 layer completes several more
+    // windows under decode and the per-forward pooling-cache barrier is
+    // exercised repeatedly rather than once or twice.
+    for (step, &tok) in [3_i32, 14, 8, 21, 5, 30, 12, 1, 27, 9].iter().enumerate() {
         let input = mlxcel_core::from_slice_i32(&[tok], &[1, 1]);
         let logits = model.forward_with_caches(&input, &mut caches);
         assert_eq!(mlxcel_core::array_shape(&logits), vec![1, 1, 32]);
@@ -1205,7 +1294,7 @@ fn tiny_model_prefill_and_decode_produce_finite_logits() {
 
     // The local rotating caches advanced in lockstep across all layers.
     for cache in &caches {
-        assert_eq!(cache.local.offset, 29);
+        assert_eq!(cache.local.offset, 36);
     }
     assert!(caches[0].pool.is_none() && caches[0].idx_pool.is_none());
     assert!(caches[1].pool.is_some() && caches[1].idx_pool.is_none());
@@ -1246,6 +1335,68 @@ fn tiny_model_chunked_prefill_matches_single_pass() {
     let chunked_last = array_to_vec_f32(&mlxcel_core::utils::slice_axis(&chunked, 1, 1, 2));
 
     assert_close(&chunked_last, &full_last, 5e-3, "chunked prefill parity");
+}
+
+#[test]
+fn tiny_model_cache_barrier_is_observationally_neutral() {
+    let args = tiny_args();
+    let weights = tiny_weight_map(&args);
+    let model = DeepSeekV4Model::from_weights(&weights, &args).expect("tiny model builds");
+
+    // `forward_with_caches` already forces the pooling caches once, after the
+    // layer loop. Forcing them AGAIN between steps must not move a single
+    // logit: an MLX `eval` materialises a graph, it does not change the values
+    // in it. Drift here would mean the barrier alters what the pooling caches
+    // subsequently emit rather than only when they are materialised, which is
+    // the one way the added barrier could be observable.
+    let prompt: Vec<i32> = (0..26).map(|v| v % 31).collect();
+    let input = mlxcel_core::from_slice_i32(&prompt, &[1, 26]);
+    let steps = [3_i32, 14, 8, 21, 5, 30, 12, 1, 27, 9];
+
+    let mut plain = model.make_internal_caches();
+    let _ = model.forward_with_caches(&input, &mut plain);
+    let mut plain_last = Vec::new();
+    for &tok in &steps {
+        let step = mlxcel_core::from_slice_i32(&[tok], &[1, 1]);
+        plain_last = array_to_vec_f32(&model.forward_with_caches(&step, &mut plain));
+    }
+
+    let mut barriered = model.make_internal_caches();
+    let _ = model.forward_with_caches(&input, &mut barriered);
+    for cache in &barriered {
+        cache.eval_state();
+    }
+    let mut barriered_last = Vec::new();
+    for &tok in &steps {
+        let step = mlxcel_core::from_slice_i32(&[tok], &[1, 1]);
+        barriered_last = array_to_vec_f32(&model.forward_with_caches(&step, &mut barriered));
+        for cache in &barriered {
+            cache.eval_state();
+        }
+    }
+
+    assert_eq!(plain_last.len(), 32);
+    assert!(
+        plain_last.iter().all(|x| x.is_finite()),
+        "decode logits must be finite"
+    );
+    assert_close(
+        &barriered_last,
+        &plain_last,
+        1e-6,
+        "extra cache barriers must not move the logits",
+    );
+    for (a, b) in barriered.iter().zip(&plain) {
+        assert_eq!(a.local.offset, b.local.offset);
+        assert_eq!(
+            a.pool.as_ref().map(|p| p.remainder),
+            b.pool.as_ref().map(|p| p.remainder)
+        );
+        assert_eq!(
+            a.idx_pool.as_ref().map(|p| p.remainder),
+            b.idx_pool.as_ref().map(|p| p.remainder)
+        );
+    }
 }
 
 #[test]

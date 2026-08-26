@@ -643,6 +643,30 @@ pub(crate) struct V4LayerCache {
     pub(crate) idx_pool: Option<PoolingCache>,
 }
 
+impl V4LayerCache {
+    /// Force this layer's pooling caches to materialise, so the graph that
+    /// produced them stops pinning the hidden states that fed it.
+    ///
+    /// See [`PoolingCache::eval_state`] for the whole story: the indexer
+    /// cache is the one that accumulates, because the `AttnKind::Sparse` arm
+    /// of `V4Attention::forward` drops the top-k selection (the indexer
+    /// pooled buffer's only consumer) on both of its non-sparse branches,
+    /// while the attention cache is already in the logits graph on every
+    /// branch and so is forced by the caller's eval anyway.
+    ///
+    /// `local` is deliberately absent. The rotating window is concatenated
+    /// into the SDPA input on every layer of every step, so it is in the
+    /// logits graph already and a barrier on it would buy nothing.
+    pub(crate) fn eval_state(&self) {
+        if let Some(pool) = self.pool.as_ref() {
+            pool.eval_state();
+        }
+        if let Some(idx_pool) = self.idx_pool.as_ref() {
+            idx_pool.eval_state();
+        }
+    }
+}
+
 // Decoder block.
 
 struct DeepseekV4Block {
@@ -848,6 +872,23 @@ impl DeepSeekV4Model {
 
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
             h = layer.forward(&h, mask.as_deref(), cache, input_ids);
+        }
+
+        // Cache-state barrier: the DeepSeek-V4 equivalent of the
+        // `[c.state for c in cache]` eval upstream mlx-lm runs after every
+        // step, and the reason `KVCache::eval_state` exists on the ordinary
+        // KV path. It sits AFTER the layer loop and BEFORE `hc_head` on
+        // purpose. The pooled buffers depend only on the layer stack, so
+        // forcing them here forces the stack while leaving the `hc_head` /
+        // `norm` / `lm_head` chain unevaluated: the full `[B, L, vocab]`
+        // logits tensor and its peak allocation are NOT forced by this, which
+        // is the same trade `KVCache::eval_state` documents. Without the
+        // barrier a sparse layer's indexer cache accumulates one unevaluated
+        // `slice_update` node per decode step, pinning that step's hidden
+        // state, for as long as the sparse selection path is not being taken
+        // (see `PoolingCache::eval_state`).
+        for cache in caches.iter() {
+            cache.eval_state();
         }
 
         let h = self.hc_head.forward(&h);

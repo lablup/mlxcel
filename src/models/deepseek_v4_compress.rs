@@ -237,6 +237,65 @@ impl PoolingCache {
         }
         self.pooled.as_deref().expect("pooled buffer set above")
     }
+
+    /// Force MLX to materialise this cache's three buffers (`buf_kv`,
+    /// `buf_gate`, `pooled`), detaching the graph that built them from the
+    /// hidden states that fed it.
+    ///
+    /// MLX is lazy, and an unevaluated array keeps its inputs alive through
+    /// its primitive until `eval` detaches it. For the ATTENTION compressor's
+    /// cache that never needs saying, because `V4Attention::forward` consumes
+    /// its `pooled` buffer on every branch it can take (the dense
+    /// `concatenate(local_kv, pooled)` path, or `sparse_pooled_attention`), so
+    /// `pooled` is in the logits graph and the caller's eval of the logits
+    /// already forces it, and forcing it transitively forces the
+    /// `copy(&buf_kv)` that fed it and the bounded `slice_update` chains
+    /// behind that. Calling this on the attention cache is therefore close to
+    /// free: the work is done by the time the barrier runs.
+    ///
+    /// The INDEXER's cache is what this is for. The only consumer of the
+    /// indexer's pooled buffer is the top-k selection `Indexer::forward`
+    /// returns, and the `AttnKind::Sparse` arm of `V4Attention::forward`
+    /// discards that selection on two of its three branches: `np == 0`, and
+    /// `np <= index_topk`, the short-context branch that falls back to the
+    /// dense concat. Nothing else reads `idx_pool`. So for as long as the
+    /// sparse selection path is not being taken, the indexer cache's `pooled`
+    /// concat chain grows by one unevaluated node per completed window and its
+    /// `buf_kv` / `buf_gate` `slice_update` chains grow by one per DECODE
+    /// STEP, none of them ever forced, each node pinning that step's normed
+    /// hidden state plus its `wkv` / `wgate` projections. The sparse branch
+    /// only fires past `index_topk * compress_ratio` tokens (512 * 4 = 2048 on
+    /// the real config), so every sequence pays this over its first ~2048
+    /// tokens and a sequence that never gets that long pays it for its whole
+    /// life: on the order of 190 KB per decode step across the real config's
+    /// 20 sparse layers, released only when the sparse path finally fires or
+    /// the sequence state is dropped, and then forced in one burst down a
+    /// chain thousands of nodes deep.
+    ///
+    /// Modelled on [`mlxcel_core::cache::KVCache::eval_state`], which plays
+    /// the same role on the ordinary KV path (upstream mlx-lm evaluates
+    /// `[c.state for c in cache]` after each step) and which deliberately
+    /// evaluates only the cache state so the LM-head matmul and its peak
+    /// allocation are not forced with it.
+    ///
+    /// The barrier belongs at the end of the model forward, not at the
+    /// consumer. A consumer-side eval would fire inside the layer loop, once
+    /// per compressed layer, cutting the graph while the rest of the stack is
+    /// still being built; and it could not run at all on the branches that
+    /// drop the selection, which are exactly the branches that accumulate.
+    /// One barrier after the layer loop forces every layer's cache state at a
+    /// point where the whole stack is already in the graph.
+    pub(crate) fn eval_state(&self) {
+        if let Some(buf_kv) = self.buf_kv.as_ref() {
+            mlxcel_core::eval(buf_kv);
+        }
+        if let Some(buf_gate) = self.buf_gate.as_ref() {
+            mlxcel_core::eval(buf_gate);
+        }
+        if let Some(pooled) = self.pooled.as_ref() {
+            mlxcel_core::eval(pooled);
+        }
+    }
 }
 
 /// Per-query visible pooled-row counts: query `j` of this call (absolute
