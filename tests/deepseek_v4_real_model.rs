@@ -79,7 +79,10 @@ fn deepseek_v4_real_model_loads_and_generates_coherently() {
     let gen_u32: Vec<u32> = tokens.iter().map(|&t| t as u32).collect();
     let text = tokenizer.decode(&gen_u32, true).expect("decode generation");
     eprintln!("[deepseek-v4] prompt: {prompt:?}");
-    eprintln!("[deepseek-v4] greedy continuation ({} tokens): {text:?}", tokens.len());
+    eprintln!(
+        "[deepseek-v4] greedy continuation ({} tokens): {text:?}",
+        tokens.len()
+    );
 
     assert!(
         text.chars().any(|c| c.is_ascii_alphabetic()),
@@ -178,11 +181,17 @@ fn deepseek_v4_real_model_long_context_hits_sparse_and_compressed_paths() {
         "long-context prompt must exceed index_topk * ratio tokens, got {}",
         prompt_ids.len()
     );
-    eprintln!("[deepseek-v4] long-context prompt: {} tokens", prompt_ids.len());
+    eprintln!(
+        "[deepseek-v4] long-context prompt: {} tokens",
+        prompt_ids.len()
+    );
 
     let mut generator = CxxGenerator::new(model.num_layers());
     let tokens = generator.generate(&model, &prompt_ids, 12, &SamplingConfig::greedy());
-    assert!(!tokens.is_empty(), "long-context decode must produce tokens");
+    assert!(
+        !tokens.is_empty(),
+        "long-context decode must produce tokens"
+    );
     let gen_u32: Vec<u32> = tokens.iter().map(|&t| t as u32).collect();
     let text = tokenizer.decode(&gen_u32, true).expect("decode generation");
     eprintln!("[deepseek-v4] long-context answer: {text:?}");
