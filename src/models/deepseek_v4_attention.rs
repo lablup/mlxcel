@@ -236,12 +236,15 @@ impl V4Attention {
                 let compressor = self.compressor.as_ref().expect("compressed layer");
                 let pool = cache.pool.as_mut().expect("compressed layer pool cache");
                 let ratio = compressor.ratio;
+                // Borrowed out of `cache.pool`, not copied out of it; the
+                // borrow lives to the end of this arm and nothing else here
+                // touches the cache.
                 let pooled = compressor.forward(x, pool, offset);
-                let np = mlxcel_core::array_shape(&pooled)[1];
+                let np = mlxcel_core::array_shape(pooled)[1];
                 if np > 0 {
                     let pmask = pool_mask_additive(l, offset, ratio, np);
                     let kv_full =
-                        mlxcel_core::concatenate(&kv, &mlxcel_core::expand_dims(&pooled, 1), 2);
+                        mlxcel_core::concatenate(&kv, &mlxcel_core::expand_dims(pooled, 1), 2);
                     let full_mask = aligned_mask
                         .as_ref()
                         .map(|m| extend_mask(m, pmask.as_deref(), np));
@@ -254,11 +257,17 @@ impl V4Attention {
                 let compressor = self.compressor.as_ref().expect("sparse layer");
                 let indexer = self.indexer.as_ref().expect("sparse layer");
                 let ratio = compressor.ratio;
+                // `pooled` borrows `cache.pool` for the rest of the arm and
+                // `idx_pool` borrows `cache.idx_pool`. Both are direct field
+                // projections through the same `&mut V4LayerCache`, which the
+                // borrow checker treats as disjoint; routing either one
+                // through an accessor method on `V4LayerCache` would borrow
+                // the whole struct and break this.
                 let pooled = {
                     let pool = cache.pool.as_mut().expect("sparse layer pool cache");
                     compressor.forward(x, pool, offset)
                 };
-                let np = mlxcel_core::array_shape(&pooled)[1];
+                let np = mlxcel_core::array_shape(pooled)[1];
                 let pmask = pool_mask_additive(l, offset, ratio, np);
                 let topk = {
                     let idx_pool = cache.idx_pool.as_mut().expect("sparse layer indexer cache");
@@ -271,7 +280,7 @@ impl V4Attention {
                     // Short context: dense concat of local + pooled, exactly
                     // the compressed path.
                     let kv_full =
-                        mlxcel_core::concatenate(&kv, &mlxcel_core::expand_dims(&pooled, 1), 2);
+                        mlxcel_core::concatenate(&kv, &mlxcel_core::expand_dims(pooled, 1), 2);
                     let full_mask = aligned_mask
                         .as_ref()
                         .map(|m| extend_mask(m, pmask.as_deref(), np));
@@ -291,7 +300,7 @@ impl V4Attention {
                     sparse_pooled_attention(
                         &q,
                         &kv,
-                        &pooled,
+                        pooled,
                         &topk,
                         aligned_mask.as_deref(),
                         sparse_mask.as_deref(),

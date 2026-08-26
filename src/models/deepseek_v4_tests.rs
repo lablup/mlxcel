@@ -336,6 +336,12 @@ fn deepseek_v4_config_rejects_hostile_values() {
         ),
         ("sliding_window", serde_json::json!(0)),
         ("num_hash_layers", serde_json::json!(4)),
+        ("index_block", serde_json::json!(0)),
+        ("index_keep", serde_json::json!(0)),
+        // Above i32::MAX: the cast to i32 truncates instead of failing, so
+        // the ceiling has to be enforced at validation.
+        ("hidden_size", serde_json::json!(4_294_967_296_u64)),
+        ("index_topk", serde_json::json!(4_294_967_296_u64)),
     ];
     for (field, value) in cases {
         let mut cfg = base.clone();
@@ -636,13 +642,27 @@ fn pooling_cache_prompt_then_decode_emits_full_windows_only() {
         "decode-completed window",
     );
 
-    // The pooled buffer grows only through update_and_fetch.
+    // The pooled buffer grows only through update_and_fetch, which hands back
+    // a borrow of the cache's own buffer rather than a copy of it.
     let px = mlxcel_core::from_slice_f32(&[1.0, 2.0], &[1, 1, 2]);
     let pooled = pool.update_and_fetch(px);
-    assert_eq!(mlxcel_core::array_shape(&pooled), vec![1, 1, 2]);
+    assert_eq!(mlxcel_core::array_shape(pooled), vec![1, 1, 2]);
+    assert_close(
+        &array_to_vec_f32(pooled),
+        &[1.0, 2.0],
+        1e-6,
+        "first pooled row",
+    );
     let empty = mlxcel_core::zeros(&[1, 0, 2], mlxcel_core::dtype::FLOAT32);
     let pooled = pool.update_and_fetch(empty);
-    assert_eq!(mlxcel_core::array_shape(&pooled), vec![1, 1, 2]);
+    assert_eq!(mlxcel_core::array_shape(pooled), vec![1, 1, 2]);
+    // The empty append must not disturb the contents it borrows back.
+    assert_close(
+        &array_to_vec_f32(pooled),
+        &[1.0, 2.0],
+        1e-6,
+        "empty append leaves the buffer intact",
+    );
 }
 
 #[test]
@@ -1044,6 +1064,104 @@ fn weight_coverage_rejects_missing_and_unknown_tensors() {
     assert!(
         err.contains("kv_b_proj"),
         "error must name the unknown tensor: {err}"
+    );
+}
+
+#[test]
+fn hash_routing_rejects_out_of_range_tid2eid_entries() {
+    let args = tiny_args();
+    let experts = args.n_routed_experts as i64;
+    let vocab = args.vocab_size as i32;
+    // Same table `tiny_weight_map` builds, so the only difference between the
+    // control and the hostile cases is the single poisoned entry.
+    let honest: Vec<i64> = (0..args.vocab_size as i64 * 2)
+        .map(|v| (v * 7 + 3) % experts)
+        .collect();
+
+    // Positive control: the honest table loads.
+    let weights = tiny_weight_map(&args);
+    DeepSeekV4Model::from_weights(&weights, &args).expect("honest tid2eid table loads");
+
+    // MLX gathers do not clamp, so an id at or above `n_routed_experts`, or a
+    // negative one that `offset_neg_idx` cannot fold back into range, is an
+    // out-of-bounds read at the first forward pass.
+    for (what, poison) in [("above n_routed_experts", experts), ("negative", -1)] {
+        let mut table = honest.clone();
+        table[5] = poison;
+        let mut weights = tiny_weight_map(&args);
+        weights.insert(
+            "model.layers.0.ffn.gate.tid2eid".to_string(),
+            mlxcel_core::from_slice_i64(&table, &[vocab, 2]),
+        );
+        let err = DeepSeekV4Model::from_weights(&weights, &args)
+            .err()
+            .unwrap_or_else(|| panic!("{what} tid2eid entry was accepted"));
+        assert!(
+            err.contains("tid2eid"),
+            "{what}: error must name the tensor: {err}"
+        );
+    }
+}
+
+#[test]
+fn biased_routing_rejects_wrong_length_score_correction_bias() {
+    let args = tiny_args();
+    let experts = args.n_routed_experts as i32;
+
+    // Positive control: the `[n_routed_experts]` bias loads.
+    let weights = tiny_weight_map(&args);
+    DeepSeekV4Model::from_weights(&weights, &args).expect("correct-length bias loads");
+
+    // `MoEGate::forward` adds this onto a `[B, L, n_routed_experts]` score
+    // row; a mismatched length is an MLX throw at the first forward pass, so
+    // it has to fail here instead.
+    for len in [experts - 1, experts + 1] {
+        let mut weights = tiny_weight_map(&args);
+        put(
+            &mut weights,
+            "model.layers.1.ffn.gate.e_score_correction_bias",
+            &[len],
+            77,
+        );
+        let err = DeepSeekV4Model::from_weights(&weights, &args)
+            .err()
+            .unwrap_or_else(|| panic!("bias of length {len} was accepted"));
+        assert!(
+            err.contains("e_score_correction_bias"),
+            "length {len}: error must name the tensor: {err}"
+        );
+    }
+}
+
+#[test]
+fn sanitize_rejects_wo_a_plane_that_does_not_divide_into_groups() {
+    let args = tiny_args();
+    let divisor = (args.o_groups * args.o_lora_rank) as i32;
+
+    // Positive control: the 2-D plane `tiny_weight_map` ships reshapes.
+    let weights = tiny_weight_map(&args);
+    sanitize::sanitize_weights(&weights, &args).expect("well-sized wo_a plane reshapes");
+
+    // 63 elements against a divisor of 8. Pass 5 runs before
+    // `validate_weight_coverage`, so without the guard MLX's `reshape` would
+    // throw and abort the process mid-load.
+    let mut weights = tiny_weight_map(&args);
+    put(&mut weights, "model.layers.0.attn.wo_a.weight", &[7, 9], 88);
+    let err = sanitize::sanitize_weights(&weights, &args)
+        .err()
+        .expect("indivisible wo_a plane must be rejected");
+    assert!(
+        err.contains("model.layers.0.attn.wo_a.weight") && err.contains(&divisor.to_string()),
+        "error must name the tensor and the divisor: {err}"
+    );
+
+    // The same rejection has to surface as a load error, not an abort.
+    let err = DeepSeekV4Model::from_weights(&weights, &args)
+        .err()
+        .expect("indivisible wo_a plane must fail the load");
+    assert!(
+        err.contains("model.layers.0.attn.wo_a.weight"),
+        "load error must name the tensor: {err}"
     );
 }
 

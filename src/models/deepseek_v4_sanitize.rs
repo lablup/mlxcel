@@ -188,6 +188,10 @@ pub(crate) fn sanitize_weights(weights: &WeightMap, args: &ModelArgs) -> Result<
     // Pass 5: reshape 2-D `wo_a` planes into the grouped MultiLinear layout.
     let o_groups = args.o_groups as i32;
     let o_lora_rank = args.o_lora_rank as i32;
+    // The divisor the `-1` axis has to resolve against. Computed in i64 so a
+    // config that has not yet been through `ModelArgs::validate` (the
+    // sanitize pass runs on whatever the caller hands it) cannot overflow it.
+    let plane_rows = args.o_groups as i64 * args.o_lora_rank as i64;
     for layer_idx in 0..n_layers {
         let prefix = format!("model.layers.{layer_idx}.attn.wo_a");
         for suffix in ["weight", "scales", "biases"] {
@@ -195,6 +199,22 @@ pub(crate) fn sanitize_weights(weights: &WeightMap, args: &ModelArgs) -> Result<
             if let Some(v) = weights.get(&key)
                 && mlxcel_core::array_ndim(v) == 2
             {
+                // The element count comes from the checkpoint, the divisor
+                // from `config.json`, and neither is trustworthy. MLX's
+                // `reshape` asserts the `-1` axis divides evenly and throws
+                // otherwise, and a throw crossing the cxx bridge is an
+                // uncatchable `std::terminate`. This pass runs BEFORE
+                // `validate_weight_coverage`, so an unguarded mismatch would
+                // abort the process mid-load instead of returning a load
+                // error that names the tensor.
+                let size = mlxcel_core::array_size(v) as i64;
+                if plane_rows <= 0 || size == 0 || size % plane_rows != 0 {
+                    return Err(format!(
+                        "{key}: 2-D wo_a plane has {size} elements (shape {shape:?}), which is \
+                         not a positive multiple of o_groups * o_lora_rank ({plane_rows})",
+                        shape = mlxcel_core::array_shape(v)
+                    ));
+                }
                 let reshaped = mlxcel_core::reshape(v, &[o_groups, o_lora_rank, -1]);
                 weights.insert(key, reshaped);
             }

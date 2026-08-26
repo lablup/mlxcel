@@ -197,23 +197,45 @@ impl PoolingCache {
         }
     }
 
-    /// Append newly pooled rows (`[B, Nw, D]`, possibly `Nw == 0`) and return
-    /// the full pooled buffer (`[B, Np, D]`, `Np` possibly 0).
-    pub(crate) fn update_and_fetch(&mut self, px: UniquePtr<MlxArray>) -> UniquePtr<MlxArray> {
+    /// Append newly pooled rows (`[B, Nw, D]`, possibly `Nw == 0`) and BORROW
+    /// back the full pooled buffer (`[B, Np, D]`, `Np` possibly 0).
+    ///
+    /// The borrow is the point. The reference
+    /// (`references/mlx-vlm/mlx_vlm/models/cache.py`,
+    /// `PoolingCache.update_and_fetch`) returns `self.pooled` itself, and
+    /// `mlxcel_core::copy` is `mlx::core::copy` (`mlx/ops.cpp:340`), which
+    /// builds a real `Copy` primitive rather than aliasing a handle. Copying
+    /// here materialised the whole `Np * D` buffer on EVERY call, including
+    /// the `n_new == 0` calls that dominate decode: 3 of every 4 steps at
+    /// compress ratio 4 and 127 of every 128 at ratio 128, with `Np` growing
+    /// with context. On the real 43-layer config that was on the order of a
+    /// gigabyte of pure memcpy per decoded token at 128k context. Do not
+    /// reintroduce the copy: hand callers the borrow and let them clone only
+    /// if they genuinely need an owned handle.
+    pub(crate) fn update_and_fetch(&mut self, px: UniquePtr<MlxArray>) -> &MlxArray {
         let n_new = mlxcel_core::array_shape(&px)[1];
-        if n_new == 0 {
-            return match &self.pooled {
-                Some(p) => mlxcel_core::copy(p),
+        if n_new > 0 {
+            // An empty placeholder from the branch below is dropped rather
+            // than concatenated: the reference never stores one, and feeding
+            // a `[B, 0, D]` array built from the hidden state's dtype into
+            // `concatenate` would put dtype promotion between the cache and
+            // the pooled rows for no gain.
+            let prev = self
+                .pooled
+                .take()
+                .filter(|p| mlxcel_core::array_shape(p)[1] > 0);
+            self.pooled = Some(match prev {
+                Some(prev) => mlxcel_core::concatenate(&prev, &px, 1),
                 None => px,
-            };
+            });
+        } else if self.pooled.is_none() {
+            // Nothing pooled yet and nothing new: park the empty `[B, 0, D]`
+            // array so there is always something to borrow back. The
+            // reference returns a freshly built empty array here; holding
+            // this one is what lets the return be a borrow.
+            self.pooled = Some(px);
         }
-        let merged = match self.pooled.take() {
-            Some(prev) => mlxcel_core::concatenate(&prev, &px, 1),
-            None => px,
-        };
-        let out = mlxcel_core::copy(&merged);
-        self.pooled = Some(merged);
-        out
+        self.pooled.as_deref().expect("pooled buffer set above")
     }
 }
 
@@ -345,15 +367,20 @@ impl Compressor {
         })
     }
 
-    /// Pool the window-complete portion of `x` (`[B, L, hidden]`) and return
-    /// the full pooled buffer `[B, Np, head_dim]`. `offset` is the pre-update
-    /// token offset of this call.
-    pub(crate) fn forward(
+    /// Pool the window-complete portion of `x` (`[B, L, hidden]`) and borrow
+    /// the full pooled buffer `[B, Np, head_dim]` out of `pool`. `offset` is
+    /// the pre-update token offset of this call.
+    ///
+    /// The return borrows `pool` for exactly the reason
+    /// [`PoolingCache::update_and_fetch`] documents: the buffer is the cache's
+    /// own, and copying it out per call is `Np * D` of memcpy that grows with
+    /// context.
+    pub(crate) fn forward<'a>(
         &self,
         x: &MlxArray,
-        pool: &mut PoolingCache,
+        pool: &'a mut PoolingCache,
         offset: i32,
-    ) -> UniquePtr<MlxArray> {
+    ) -> &'a MlxArray {
         let kv = self.wkv.forward(x);
         let gate = self.wgate.forward(x);
         let (ready_kv, ready_gate, pool_base) = pool.accumulate_windows(&kv, &gate, offset);

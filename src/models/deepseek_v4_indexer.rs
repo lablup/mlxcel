@@ -123,8 +123,11 @@ impl Indexer {
         let shape = mlxcel_core::array_shape(x);
         let (b, l) = (shape[0], shape[1]);
 
+        // Borrowed straight out of the cache: `update_and_fetch` hands back
+        // the live pooled buffer rather than a copy of it, and the borrow
+        // ends at the `astype` below, before any selection path runs.
         let pooled = self.compressor.forward(x, pool, offset);
-        let np = mlxcel_core::array_shape(&pooled)[1];
+        let np = mlxcel_core::array_shape(pooled)[1];
         if np == 0 {
             return None;
         }
@@ -134,14 +137,22 @@ impl Indexer {
         let q = mlxcel_core::transpose_axes(&q, &[0, 2, 1, 3]);
         let q = rope.apply(&q, offset, false);
         let q = mlxcel_core::astype(&q, mlxcel_core::dtype::FLOAT32);
-        let pooled = mlxcel_core::astype(&pooled, mlxcel_core::dtype::FLOAT32);
+        let pooled = mlxcel_core::astype(pooled, mlxcel_core::dtype::FLOAT32);
 
         let k = self.index_topk.min(np);
         let ratio = self.compressor.ratio;
         let w = self.head_weights(x);
-        let hierarchical = self.index_block > 0
-            && np >= self.index_block * self.index_keep
-            && self.index_keep * self.index_block >= k;
+        // `index_block * index_keep` in i64. Both sides of this gate use the
+        // product, and an i32 multiply that wraps in release can let the gate
+        // pass while `nb = np / index_block` is 0, which drives `kb` to 0 and
+        // reaches `topk_indices(.., 0)` -> `argpartition(kth = -1)`, an MLX
+        // throw and therefore an uncatchable abort. `ModelArgs::validate` now
+        // caps both scalars at `i32::MAX`, which makes the wrap unreachable
+        // from config, but this gate is the load-bearing arithmetic and is
+        // kept safe on its own.
+        let block_span = i64::from(self.index_block) * i64::from(self.index_keep);
+        let hierarchical =
+            self.index_block > 0 && i64::from(np) >= block_span && block_span >= i64::from(k);
 
         // Decode fast path: no pool mask exists for L == 1.
         if l == 1 && hierarchical {

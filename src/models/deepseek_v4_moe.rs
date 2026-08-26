@@ -90,7 +90,8 @@ fn score_logits(logits_f32: &MlxArray, func: ScoringFunc) -> UniquePtr<MlxArray>
 /// argpartition for the rest.
 pub(crate) enum Routing {
     /// `tid2eid` `[vocab_size, top_k]` int32; indices come from the token
-    /// ids, weights from the logits.
+    /// ids, weights from the logits. Values are bounded to
+    /// `0..n_routed_experts` at load, because nothing downstream bounds them.
     Hash { tid2eid: UniquePtr<MlxArray> },
     /// `e_score_correction_bias` `[n_routed_experts]` float32; biases the
     /// selection but never the weights.
@@ -135,11 +136,54 @@ impl MoEGate {
             // take_along_axis want int32 (reference sanitize does the same
             // cast).
             let tid2eid = mlxcel_core::astype(&tid2eid, mlxcel_core::dtype::INT32);
+            // The shape check above says nothing about the CONTENTS, and this
+            // is the one routing path in the tree whose expert indices are
+            // read out of a checkpoint tensor instead of produced by an
+            // `argpartition` over the score row, so the "in range by
+            // construction" argument that covers `bailing_moe` / `afmoe` /
+            // `klear` does not apply. At forward time these entries feed
+            // `take_along_axis` over a `[B, L, n_routed_experts]` score row
+            // and `gather_qmm` over the stacked
+            // `[n_routed_experts, out, packed_in]` expert planes. MLX gathers
+            // only fold negative indices (`offset_neg_idx`) and never clamp,
+            // so an out-of-range expert id from a hostile or corrupt
+            // checkpoint is a straight out-of-bounds read: garbage logits at
+            // best, a GPU fault or an in-process memory disclosure at worst.
+            // Bound the values here, at load, where a bad table is still a
+            // `Result` and not an MLX-side abort.
+            //
+            // `vocab_size` and `num_experts_per_tok` are both validated
+            // positive, so the table is never empty and the two reductions
+            // always yield a scalar. `min_all` / `max_all` cost one eval each,
+            // once per hash layer at load.
+            let n_experts = args.n_routed_experts as i32;
+            let lo = mlxcel_core::item_i32(&mlxcel_core::min_all(&tid2eid));
+            let hi = mlxcel_core::item_i32(&mlxcel_core::max_all(&tid2eid));
+            if lo < 0 || hi >= n_experts {
+                return Err(format!(
+                    "{prefix}.tid2eid: every expert id must be in 0..{n_experts}, checkpoint \
+                     ships values spanning {lo}..={hi}"
+                ));
+            }
             Routing::Hash { tid2eid }
         } else {
-            Routing::Biased {
-                bias: get_weight_copy(weights, &format!("{prefix}.e_score_correction_bias"))?,
+            let bias = get_weight_copy(weights, &format!("{prefix}.e_score_correction_bias"))?;
+            let b_shape = mlxcel_core::array_shape(&bias);
+            let expected = [args.n_routed_experts as i32];
+            // `forward` adds this straight onto a `[B, L, n_routed_experts]`
+            // score row. Any other length (barring a broadcastable 1, which
+            // would silently bias every expert alike) makes MLX's `add` throw,
+            // and a throw crossing the cxx bridge is an uncatchable
+            // `std::terminate` at the FIRST forward pass rather than a load
+            // error. Both sibling tensors in this constructor are shape
+            // checked; so is this one.
+            if b_shape != expected {
+                return Err(format!(
+                    "{prefix}.e_score_correction_bias: expected shape {expected:?}, checkpoint \
+                     ships {b_shape:?}"
+                ));
             }
+            Routing::Biased { bias }
         };
         Ok(Self {
             weight,

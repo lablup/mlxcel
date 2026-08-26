@@ -415,9 +415,28 @@ impl ModelArgs {
     /// Reject a config that cannot describe a real DeepSeek-V4 before any
     /// field sizes an allocation, divides, or reaches an MLX kernel.
     pub fn validate(&self) -> Result<(), String> {
+        // Bounded BOTH ways. Every scalar this helper checks is later cast
+        // `as i32` on its way into MLX: `DeepseekV4Block::from_weights` and
+        // `DeepSeekV4Model::build` here, `V4Attention::from_weights` and its
+        // output-projection reshapes, `Indexer::from_weights`, and the
+        // `wo_a` reshape in `sanitize_weights`. A `usize` above `i32::MAX`
+        // does not fail that cast: it truncates silently to zero or to a
+        // negative dimension, which then reaches `reshape` / `broadcast_to` /
+        // `zeros` / `from_slice_*` as an MLX precondition violation. An MLX
+        // throw crossing the cxx bridge is an uncatchable `std::terminate`,
+        // not a catchable Rust error, so the ceiling has to hold here at
+        // config validation rather than at the dozens of cast sites
+        // (docs/adding-models.md, Quantization Parameter Bounds, makes the
+        // same argument for the quantization pair).
         fn positive(name: &str, v: usize) -> Result<(), String> {
             if v == 0 {
                 return Err(format!("DeepSeek-V4 config: {name} must be > 0"));
+            }
+            if v > i32::MAX as usize {
+                return Err(format!(
+                    "DeepSeek-V4 config: {name} ({v}) exceeds i32::MAX; every architecture \
+                     scalar is cast to i32 before it reaches an MLX kernel"
+                ));
             }
             Ok(())
         }
@@ -436,6 +455,11 @@ impl ModelArgs {
         positive("index_n_heads", self.index_n_heads)?;
         positive("index_head_dim", self.index_head_dim)?;
         positive("index_topk", self.index_topk)?;
+        // `index_block` / `index_keep` are config-readable and reach
+        // `Indexer::from_weights` as `as i32` casts like the rest; they gate
+        // the HiSA hierarchical path and divide `Np` inside it.
+        positive("index_block", self.index_block)?;
+        positive("index_keep", self.index_keep)?;
         positive("max_position_embeddings", self.max_position_embeddings)?;
 
         if self.num_key_value_heads != 1 {
@@ -485,6 +509,17 @@ impl ModelArgs {
             return Err(format!(
                 "DeepSeek-V4 config: hc_mult ({}) must be in 1..=64",
                 self.hc_mult
+            ));
+        }
+        // `deepseek_v4_hyper.rs` builds the `fn` plane's expected shape as
+        // `hc_mult * hidden_size` in i32. Both factors are individually
+        // bounded now, but their PRODUCT still has to fit: an i32 overflow
+        // wraps in release and panics in debug, and a wrapped width turns the
+        // shape check into a comparison against a nonsense number.
+        if self.hidden_size.saturating_mul(self.hc_mult) > i32::MAX as usize {
+            return Err(format!(
+                "DeepSeek-V4 config: hidden_size ({}) * hc_mult ({}) exceeds i32::MAX",
+                self.hidden_size, self.hc_mult
             ));
         }
         if self.hc_sinkhorn_iters > 10_000 {
