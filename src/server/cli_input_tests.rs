@@ -755,7 +755,7 @@ fn prompt_cache_enabled_env_var_sets_false() {
     let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_ENABLED", "false");
 
     let mut enabled = true; // default
-    env_fallback_prompt_cache_enabled(&mut enabled, false);
+    env_fallback_prompt_cache_enabled(&mut enabled, false).expect("valid setting");
     assert!(
         !enabled,
         "MLXCEL_PROMPT_CACHE_ENABLED=false must set enabled=false"
@@ -771,55 +771,55 @@ fn prompt_cache_enabled_env_var_accepts_numeric_one() {
     let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_ENABLED", "1");
 
     let mut enabled = false;
-    env_fallback_prompt_cache_enabled(&mut enabled, false);
+    env_fallback_prompt_cache_enabled(&mut enabled, false).expect("valid setting");
     assert!(
         enabled,
         "MLXCEL_PROMPT_CACHE_ENABLED=1 must set enabled=true"
     );
 }
 
-/// `LLAMA_ARG_CACHE_REUSE=on` enables the cache (llama.cpp compat).
+/// `LLAMA_ARG_CACHE_REUSE` is an integer, not a boolean cache-enable alias.
 #[test]
-fn prompt_cache_llama_arg_cache_reuse_on_sets_true() {
+fn prompt_cache_llama_arg_cache_reuse_boolean_is_rejected() {
     use super::env_fallback_prompt_cache_enabled;
 
     let _env_guard = env_lock();
     let _guard = EnvGuard::set("LLAMA_ARG_CACHE_REUSE", "on");
 
     let mut enabled = false;
-    env_fallback_prompt_cache_enabled(&mut enabled, false);
-    assert!(enabled, "LLAMA_ARG_CACHE_REUSE=on must set enabled=true");
+    let error = env_fallback_prompt_cache_enabled(&mut enabled, false)
+        .expect_err("boolean cache-reuse value must fail");
+    assert!(error.contains("non-negative integer"));
+    assert!(error.contains("MLXCEL_PROMPT_CACHE_ENABLED"));
 }
 
-/// `LLAMA_ARG_CACHE_REUSE=off` disables the cache (llama.cpp compat).
+/// Positive minimum reuse chunk sizes are not implemented and fail clearly.
 #[test]
-fn prompt_cache_llama_arg_cache_reuse_off_sets_false() {
+fn prompt_cache_llama_arg_cache_reuse_positive_is_rejected() {
     use super::env_fallback_prompt_cache_enabled;
 
     let _env_guard = env_lock();
-    let _guard = EnvGuard::set("LLAMA_ARG_CACHE_REUSE", "off");
+    let _guard = EnvGuard::set("LLAMA_ARG_CACHE_REUSE", "256");
 
     let mut enabled = true;
-    env_fallback_prompt_cache_enabled(&mut enabled, false);
-    assert!(!enabled, "LLAMA_ARG_CACHE_REUSE=off must set enabled=false");
+    let error = env_fallback_prompt_cache_enabled(&mut enabled, false)
+        .expect_err("unsupported positive cache-reuse value must fail");
+    assert!(error.contains("minimum prompt-cache reuse chunk size"));
+    assert!(error.contains("LLAMA_ARG_CACHE_REUSE=0"));
 }
 
-/// When both `MLXCEL_PROMPT_CACHE_ENABLED` and `LLAMA_ARG_CACHE_REUSE` are
-/// set, the `MLXCEL_` key takes precedence.
+/// Cache enablement and cache-reuse tuning are validated independently.
 #[test]
-fn prompt_cache_mlxcel_env_wins_over_llama_arg_cache_reuse() {
+fn prompt_cache_mlxcel_env_does_not_hide_invalid_cache_reuse() {
     use super::env_fallback_prompt_cache_enabled;
 
     let _env_guard = env_lock();
     let _mlxcel = EnvGuard::set("MLXCEL_PROMPT_CACHE_ENABLED", "true");
-    let _llama = EnvGuard::set("LLAMA_ARG_CACHE_REUSE", "off");
+    let _llama = EnvGuard::set("LLAMA_ARG_CACHE_REUSE", "on");
 
     let mut enabled = false;
-    env_fallback_prompt_cache_enabled(&mut enabled, false);
-    assert!(
-        enabled,
-        "MLXCEL_PROMPT_CACHE_ENABLED must win over LLAMA_ARG_CACHE_REUSE"
-    );
+    assert!(env_fallback_prompt_cache_enabled(&mut enabled, false).is_err());
+    assert!(enabled, "the actual enable setting must still be applied");
 }
 
 /// CLI-set `enabled=false` wins over any env var.
@@ -831,7 +831,7 @@ fn prompt_cache_cli_wins_over_env_for_enabled() {
     let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_ENABLED", "true");
 
     let mut enabled = false; // CLI said false
-    env_fallback_prompt_cache_enabled(&mut enabled, true /* cli_was_set */);
+    env_fallback_prompt_cache_enabled(&mut enabled, true /* cli_was_set */).expect("valid setting");
     assert!(!enabled, "CLI value must win when cli_was_set=true");
 }
 
@@ -962,24 +962,27 @@ fn prompt_cache_enabled_unparseable_env_var_ignored() {
     let _guard = EnvGuard::set("MLXCEL_PROMPT_CACHE_ENABLED", "maybe-yes");
 
     let mut enabled = true;
-    env_fallback_prompt_cache_enabled(&mut enabled, false);
+    env_fallback_prompt_cache_enabled(&mut enabled, false).expect("invalid mlxcel bool is ignored");
     assert!(
         enabled,
         "unparseable MLXCEL_PROMPT_CACHE_ENABLED must leave original value in place"
     );
 }
 
-/// `LLAMA_ARG_CACHE_REUSE=0` disables the cache (numeric form).
+/// `LLAMA_ARG_CACHE_REUSE=0` is a no-op and leaves prompt caching enabled.
 #[test]
-fn prompt_cache_llama_arg_cache_reuse_zero_sets_false() {
+fn prompt_cache_llama_arg_cache_reuse_zero_leaves_cache_enabled() {
     use super::env_fallback_prompt_cache_enabled;
 
     let _env_guard = env_lock();
     let _guard = EnvGuard::set("LLAMA_ARG_CACHE_REUSE", "0");
 
     let mut enabled = true;
-    env_fallback_prompt_cache_enabled(&mut enabled, false);
-    assert!(!enabled, "LLAMA_ARG_CACHE_REUSE=0 must set enabled=false");
+    env_fallback_prompt_cache_enabled(&mut enabled, false).expect("zero is supported");
+    assert!(
+        enabled,
+        "LLAMA_ARG_CACHE_REUSE=0 must not disable the cache"
+    );
 }
 
 /// Integration: `into_startup_config` with `enabled=false` produces a

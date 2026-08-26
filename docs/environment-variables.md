@@ -25,6 +25,25 @@ and cached on first use. Set them before starting `mlxcel` or `mlxcel-server`.
   They exist for benchmarking, rollback, or kernel-development work and may
   change between releases.
 
+### llama-server compatibility variables
+
+Both server entry points accept the canonical llama-server b10621 variables below. An explicit CLI flag wins. Where a legacy mlxcel spelling is listed, the canonical variable wins over that legacy alias.
+
+| Canonical variable | Flag | Retained legacy alias |
+|--------------------|------|-----------------------|
+| `LLAMA_ARG_BATCH` | `--batch-size` | `LLAMA_ARG_BATCH_SIZE` |
+| `LLAMA_ARG_UBATCH` | `--ubatch-size` | `LLAMA_ARG_UBATCH_SIZE` |
+| `LLAMA_ARG_SPEC_DRAFT_MODEL` | `--draft-model` / `--model-draft` | `LLAMA_ARG_MODEL_DRAFT` |
+| `LLAMA_ARG_THINK_BUDGET` | `--reasoning-budget` | `LLAMA_ARG_REASONING_BUDGET` |
+| `LLAMA_ARG_LOG_FILE` | `--log-file` | `LLAMA_LOG_FILE` |
+| `LLAMA_ARG_CHAT_TEMPLATE` | `--chat-template` | — |
+| `LLAMA_ARG_CHAT_TEMPLATE_FILE` | `--chat-template-file` | — |
+| `LLAMA_ARG_ENDPOINT_METRICS` | `--metrics` | — |
+| `LLAMA_ARG_ENDPOINT_PROPS` | `--props` | — |
+| `LLAMA_ARG_ENDPOINT_SLOTS` | `--slots` | — |
+
+`LLAMA_ARG_CACHE_REUSE` is an integer minimum reuse chunk size in llama-server, not a prompt-cache enable switch. mlxcel accepts `0` without changing prompt-cache enablement and rejects positive values with an unsupported-setting error. Use `MLXCEL_PROMPT_CACHE_ENABLED` to enable or disable the cache.
+
 ## Common runtime variables
 
 | Variable | Values | Default | Notes |
@@ -137,9 +156,7 @@ These variables are applied when the corresponding CLI flag is absent.
 | `APC_NUM_BLOCKS` | unsigned integer | derived from max entries | `--apc-num-blocks` |
 | `APC_HASH` | `sha256` or `blake3` | `sha256` | `--apc-hash` |
 
-`MLXCEL_PROMPT_CACHE_ENABLED` has higher precedence than the llama.cpp
-compatibility alias `LLAMA_ARG_CACHE_REUSE` when both are set and no CLI flag is
-provided.
+`LLAMA_ARG_CACHE_REUSE` is validated independently of `MLXCEL_PROMPT_CACHE_ENABLED`; it is not a boolean alias for this table's enable switch.
 
 Automatic Prefix Caching is on by default; pass `--apc-enabled=false` or set
 `APC_ENABLED=false` to fall back to whole-prefix matching only (a stored prefix

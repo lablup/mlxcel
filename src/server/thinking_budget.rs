@@ -24,8 +24,9 @@
 //! 1. Per-request body field (`thinking_budget_tokens` primary,
 //!    `thinking_token_budget` vLLM alias, `thinking_budget` Qwen alias).
 //! 2. `mlxcel-server` CLI flag `--reasoning-budget`.
-//! 3. `LLAMA_ARG_REASONING_BUDGET` env var.
-//! 4. Default: unbounded (`-1`).
+//! 3. `LLAMA_ARG_THINK_BUDGET` env var.
+//! 4. Legacy `LLAMA_ARG_REASONING_BUDGET` env alias.
+//! 5. Default: unbounded (`-1`).
 //!
 //! Value semantics (match llama.cpp):
 //! - `-1` = unrestricted (unbounded reasoning).
@@ -126,40 +127,47 @@ impl std::fmt::Display for ThinkingBudgetError {
 
 impl std::error::Error for ThinkingBudgetError {}
 
-/// Apply `LLAMA_ARG_REASONING_BUDGET` env fallback on top of a CLI value.
+/// Apply the canonical `LLAMA_ARG_THINK_BUDGET` env fallback and the legacy
+/// `LLAMA_ARG_REASONING_BUDGET` alias on top of a CLI value.
 ///
 /// CLI wins when both are set. Unparseable env values trigger a warning and
 /// the CLI value (or default) is kept.
 ///
 /// Returns the raw `i32` ready for [`ThinkingBudget::from_raw_i32`].
-pub fn resolve_server_default_reasoning_budget(cli_value: i32) -> i32 {
+pub fn resolve_server_default_reasoning_budget(cli_value: i32, cli_was_set: bool) -> i32 {
     const DEFAULT: i32 = -1;
-    const KEY: &str = "LLAMA_ARG_REASONING_BUDGET";
+    const CANONICAL_KEY: &str = "LLAMA_ARG_THINK_BUDGET";
+    const LEGACY_KEY: &str = "LLAMA_ARG_REASONING_BUDGET";
 
-    if cli_value != DEFAULT {
-        // CLI explicitly set — warn on env-var collision but keep CLI.
-        if std::env::var_os(KEY).is_some() {
+    if cli_was_set || cli_value != DEFAULT {
+        for key in [CANONICAL_KEY, LEGACY_KEY] {
+            if std::env::var_os(key).is_none() {
+                continue;
+            }
             tracing::info!(
-                "{KEY} env var is set but --reasoning-budget CLI flag takes precedence; ignoring {KEY}"
+                "{key} env var is set but --reasoning-budget CLI flag takes precedence; ignoring {key}"
             );
         }
         return cli_value;
     }
 
-    // CLI left at default — try env.
-    match std::env::var(KEY) {
-        Ok(raw) => match raw.trim().parse::<i32>() {
-            Ok(v) => v,
+    for key in [CANONICAL_KEY, LEGACY_KEY] {
+        let Ok(raw) = std::env::var(key) else {
+            continue;
+        };
+        return match raw.trim().parse::<i32>() {
+            Ok(value) => value,
             Err(_) => {
                 tracing::warn!(
-                    "{KEY} env var has unparseable value {:?}; ignoring (expected integer >= -1)",
+                    "{key} env var has unparseable value {:?}; ignoring (expected integer >= -1)",
                     raw
                 );
                 DEFAULT
             }
-        },
-        Err(_) => DEFAULT,
+        };
     }
+
+    DEFAULT
 }
 
 /// Resolve the effective request-level budget given per-request override and
@@ -778,31 +786,34 @@ mod tests {
             std::env::set_var("LLAMA_ARG_REASONING_BUDGET", "64");
         }
         assert_eq!(
-            resolve_server_default_reasoning_budget(32),
+            resolve_server_default_reasoning_budget(32, true),
             32,
             "CLI set to 32 must win over env=64"
         );
 
-        // Case 2: env is used when CLI is at default (-1).
+        // Case 2: canonical env is used when CLI is at default (-1), and wins
+        // over the retained legacy spelling.
         unsafe {
             std::env::set_var("LLAMA_ARG_REASONING_BUDGET", "128");
+            std::env::set_var("LLAMA_ARG_THINK_BUDGET", "96");
         }
-        assert_eq!(resolve_server_default_reasoning_budget(-1), 128);
+        assert_eq!(resolve_server_default_reasoning_budget(-1, false), 96);
 
-        // Case 3: unparseable env falls back to default (-1).
+        // Case 3: unparseable canonical env falls back to default (-1).
         unsafe {
-            std::env::set_var("LLAMA_ARG_REASONING_BUDGET", "not-a-number");
+            std::env::set_var("LLAMA_ARG_THINK_BUDGET", "not-a-number");
         }
-        assert_eq!(resolve_server_default_reasoning_budget(-1), -1);
+        assert_eq!(resolve_server_default_reasoning_budget(-1, false), -1);
 
         // Case 4: no env var and CLI at default (-1) → unbounded (-1).
         // Regression guard: `mlxcel-server` with no `--reasoning-budget` flag
         // must leave reasoning unbounded (AC#7 unit test requirement).
         unsafe {
+            std::env::remove_var("LLAMA_ARG_THINK_BUDGET");
             std::env::remove_var("LLAMA_ARG_REASONING_BUDGET");
         }
         assert_eq!(
-            resolve_server_default_reasoning_budget(-1),
+            resolve_server_default_reasoning_budget(-1, false),
             -1,
             "no CLI flag and no env var must yield unbounded (-1)"
         );

@@ -241,7 +241,8 @@ pub struct ServerStartupInput {
     /// Resolved at [`ServerStartupInput::into_startup_config`] time into a
     /// typed `Option<ThinkingBudget>` on `ServerStartupConfig`. Per-request
     /// overrides on `/v1/chat/completions` and `/completion` take precedence.
-    /// The env-var fallback `LLAMA_ARG_REASONING_BUDGET` is applied by
+    /// Canonical `LLAMA_ARG_THINK_BUDGET` and legacy
+    /// `LLAMA_ARG_REASONING_BUDGET` are applied by
     /// [`env_fallback_reasoning_budget`] before this struct is constructed.
     pub reasoning_budget: i32,
 
@@ -293,8 +294,9 @@ pub struct ServerStartupInput {
     // `PromptCacheConfig`. `None` on the `Option`-typed fields means "not
     // provided by the CLI flag"; defaults come from `PromptCacheConfig::default()`.
     /// Whether the prompt-prefix KV cache is enabled. Defaults to `true`.
-    /// Also accepts `MLXCEL_PROMPT_CACHE_ENABLED` and the llama.cpp-compat
-    /// alias `LLAMA_ARG_CACHE_REUSE` (parsed as a boolean on/off).
+    /// Also accepts `MLXCEL_PROMPT_CACHE_ENABLED`. `LLAMA_ARG_CACHE_REUSE` is
+    /// validated separately as an integer tuning knob and never changes this
+    /// boolean.
     pub prompt_cache_enabled: bool,
 
     /// Maximum byte budget for the prompt cache.
@@ -1044,7 +1046,28 @@ fn apply_optional_string_env_fallback(value: &mut Option<String>, key: &str, fla
     }
 }
 
-/// Apply the `LLAMA_ARG_REASONING_BUDGET` env-var fallback to the raw CLI
+fn apply_optional_path_env_fallback(value: &mut Option<PathBuf>, key: &str, flag_name: &str) {
+    if value.is_some() {
+        if let Ok(raw) = std::env::var(key) {
+            let trimmed = raw.trim();
+            if value.as_deref() != Some(std::path::Path::new(trimmed)) {
+                tracing::info!(
+                    "{key} env var is set but --{flag_name} CLI flag takes precedence; ignoring {key}"
+                );
+            }
+        }
+        return;
+    }
+    if let Ok(raw) = std::env::var(key) {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            *value = Some(PathBuf::from(trimmed));
+        }
+    }
+}
+
+/// Apply the canonical `LLAMA_ARG_THINK_BUDGET` env-var fallback and the
+/// legacy `LLAMA_ARG_REASONING_BUDGET` alias to the raw CLI
 /// `--reasoning-budget` value.
 ///
 /// Precedence rule (matches existing `LLAMA_ARG_*` precedence helpers):
@@ -1057,8 +1080,50 @@ fn apply_optional_string_env_fallback(value: &mut Option<String>, key: &str, fla
 /// `ServerStartupInput` is constructed so the CLI flag, env var, and
 /// request-body paths all converge on the same [`ThinkingBudget::from_raw_i32`]
 /// validation point.
-pub fn env_fallback_reasoning_budget(cli_value: &mut i32) {
-    *cli_value = resolve_server_default_reasoning_budget(*cli_value);
+pub fn env_fallback_reasoning_budget(cli_value: &mut i32, cli_was_set: bool) {
+    *cli_value = resolve_server_default_reasoning_budget(*cli_value, cli_was_set);
+}
+
+/// Apply the legacy `LLAMA_ARG_BATCH_SIZE` alias after clap has resolved the
+/// canonical `LLAMA_ARG_BATCH` binding.
+pub fn env_fallback_batch_size(value: &mut Option<usize>) {
+    apply_optional_usize_env_fallback(value, "LLAMA_ARG_BATCH_SIZE", "batch-size");
+}
+
+/// Apply the legacy `LLAMA_ARG_UBATCH_SIZE` alias after clap has resolved the
+/// canonical `LLAMA_ARG_UBATCH` binding.
+pub fn env_fallback_ubatch_size(value: &mut Option<usize>) {
+    apply_optional_usize_env_fallback(value, "LLAMA_ARG_UBATCH_SIZE", "ubatch-size");
+}
+
+/// Apply the legacy `LLAMA_ARG_MODEL_DRAFT` alias after clap has resolved the
+/// canonical `LLAMA_ARG_SPEC_DRAFT_MODEL` binding.
+pub fn env_fallback_draft_model(value: &mut Option<PathBuf>) {
+    apply_optional_path_env_fallback(value, "LLAMA_ARG_MODEL_DRAFT", "draft-model");
+}
+
+/// Apply the legacy `LLAMA_LOG_FILE` alias after clap has resolved the
+/// canonical `LLAMA_ARG_LOG_FILE` binding.
+pub fn env_fallback_log_file(value: &mut Option<PathBuf>) {
+    apply_optional_path_env_fallback(value, "LLAMA_LOG_FILE", "log-file");
+}
+
+/// Apply `LLAMA_ARG_ENDPOINT_SLOTS` without making clap treat its env value as
+/// an explicit `--slots` occurrence that conflicts with `--no-slots`.
+pub fn env_fallback_endpoint_slots(value: &mut bool, slots_was_set: bool, no_slots_was_set: bool) {
+    const KEY: &str = "LLAMA_ARG_ENDPOINT_SLOTS";
+    if slots_was_set || no_slots_was_set {
+        return;
+    }
+    if let Ok(raw) = std::env::var(KEY) {
+        match parse_env_bool(&raw) {
+            Some(parsed) => *value = parsed,
+            None => tracing::warn!(
+                "{KEY} has unparseable value {:?}; ignoring (expected on/off/true/false/1/0)",
+                raw
+            ),
+        }
+    }
 }
 
 /// Apply the `MLXCEL_EMBEDDING_MODEL` env var fallback to `--embedding-model`.
@@ -1274,41 +1339,38 @@ pub fn long_cli_flag_was_set(name: &str) -> bool {
     })
 }
 
-/// Apply `MLXCEL_PROMPT_CACHE_ENABLED` and the llama.cpp-compat
-/// `LLAMA_ARG_CACHE_REUSE` alias to the raw CLI bool.
+/// Apply `MLXCEL_PROMPT_CACHE_ENABLED` to the raw CLI bool and validate
+/// llama.cpp's independent `LLAMA_ARG_CACHE_REUSE` setting.
 ///
 /// Precedence:
 /// 1. CLI flag — always wins.
 /// 2. `MLXCEL_PROMPT_CACHE_ENABLED` env var.
-/// 3. `LLAMA_ARG_CACHE_REUSE` env var (llama.cpp compat alias).
-/// 4. Compiled-in default (`true`).
+/// 3. Compiled-in default (`true`).
 ///
-/// Both env vars accept: `true`/`false`/`1`/`0`/`yes`/`no`/`on`/`off`
-/// (case-insensitive). Unparseable values are warn-logged and ignored.
+/// `LLAMA_ARG_CACHE_REUSE` is not a prompt-cache enable switch. llama.cpp
+/// interprets it as an integer minimum reusable chunk size. mlxcel does not
+/// implement that tuning knob: `0` is accepted as the upstream no-extra-reuse
+/// default and leaves prompt caching unchanged, while positive or non-integer
+/// values fail startup instead of mutating a different setting.
 ///
 /// The `cli_was_set` parameter must be `true` when the binary's clap arg was
 /// explicitly provided (not the default), so that a default `true` from clap
 /// doesn't shadow an env var that says `false`.
-pub fn env_fallback_prompt_cache_enabled(enabled: &mut bool, cli_was_set: bool) {
+pub fn env_fallback_prompt_cache_enabled(
+    enabled: &mut bool,
+    cli_was_set: bool,
+) -> Result<(), String> {
     const MLXCEL_KEY: &str = "MLXCEL_PROMPT_CACHE_ENABLED";
     const LLAMA_KEY: &str = "LLAMA_ARG_CACHE_REUSE";
 
     if cli_was_set {
-        // CLI explicitly set — log if either env var is also present.
-        if std::env::var_os(MLXCEL_KEY).is_some() || std::env::var_os(LLAMA_KEY).is_some() {
-            tracing::info!(
-                "Prompt-cache-enabled env var(s) are set but the CLI flag takes precedence"
-            );
+        if std::env::var_os(MLXCEL_KEY).is_some() {
+            tracing::info!("{MLXCEL_KEY} is set but --prompt-cache-enabled takes precedence");
         }
-        return;
-    }
-
-    // Try MLXCEL_PROMPT_CACHE_ENABLED first.
-    if let Ok(raw) = std::env::var(MLXCEL_KEY) {
+    } else if let Ok(raw) = std::env::var(MLXCEL_KEY) {
         match parse_env_bool(&raw) {
             Some(v) => {
                 *enabled = v;
-                return;
             }
             None => {
                 tracing::warn!(
@@ -1319,20 +1381,24 @@ pub fn env_fallback_prompt_cache_enabled(enabled: &mut bool, cli_was_set: bool) 
         }
     }
 
-    // Fall back to llama.cpp compat alias LLAMA_ARG_CACHE_REUSE.
     if let Ok(raw) = std::env::var(LLAMA_KEY) {
-        match parse_env_bool(&raw) {
-            Some(v) => {
-                *enabled = v;
+        let trimmed = raw.trim();
+        match trimmed.parse::<usize>() {
+            Ok(0) => {}
+            Ok(value) => {
+                return Err(format!(
+                    "{LLAMA_KEY}={value} requests a minimum prompt-cache reuse chunk size, which mlxcel does not support; unset it or use {LLAMA_KEY}=0"
+                ));
             }
-            None => {
-                tracing::warn!(
-                    "{LLAMA_KEY} has unparseable value {:?}; ignoring (expected on/off/true/false/1/0)",
-                    raw
-                );
+            Err(_) => {
+                return Err(format!(
+                    "{LLAMA_KEY}={raw:?} is invalid: expected a non-negative integer minimum reuse chunk size (0 is supported); use MLXCEL_PROMPT_CACHE_ENABLED to enable or disable prompt caching"
+                ));
             }
         }
     }
+
+    Ok(())
 }
 
 /// Apply `MLXCEL_PROMPT_CACHE_CAPACITY_BYTES` env var fallback.

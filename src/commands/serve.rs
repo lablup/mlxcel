@@ -25,16 +25,18 @@ use mlxcel::downloader::resolve_model_source_with_override;
 use mlxcel::memory_estimate::{QuantHint, estimate_total_memory, format_bytes, format_estimate};
 use mlxcel::server::{
     ServerStartupInput, env_fallback_apc_block_size, env_fallback_apc_enabled,
-    env_fallback_apc_hash, env_fallback_apc_num_blocks, env_fallback_cache_type_k,
-    env_fallback_cache_type_v, env_fallback_chat_template_kwargs, env_fallback_embedding_model,
+    env_fallback_apc_hash, env_fallback_apc_num_blocks, env_fallback_batch_size,
+    env_fallback_cache_type_k, env_fallback_cache_type_v, env_fallback_chat_template_kwargs,
+    env_fallback_draft_model, env_fallback_embedding_model, env_fallback_endpoint_slots,
     env_fallback_kv_bits, env_fallback_kv_group_size, env_fallback_kv_quant_scheme,
     env_fallback_kv_skip_last_layer, env_fallback_lang_bias,
-    env_fallback_lang_bias_include_byte_fragments, env_fallback_prompt_cache_capacity_bytes,
-    env_fallback_prompt_cache_enabled, env_fallback_prompt_cache_max_entries,
-    env_fallback_prompt_cache_min_prefix, env_fallback_prompt_cache_snapshot_capacity_bytes,
+    env_fallback_lang_bias_include_byte_fragments, env_fallback_log_file,
+    env_fallback_prompt_cache_capacity_bytes, env_fallback_prompt_cache_enabled,
+    env_fallback_prompt_cache_max_entries, env_fallback_prompt_cache_min_prefix,
+    env_fallback_prompt_cache_snapshot_capacity_bytes,
     env_fallback_prompt_cache_snapshot_max_entries, env_fallback_prompt_cache_snapshot_ttl,
     env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, env_fallback_reranker_model,
-    long_cli_flag_was_set, resolve_parallel_context_size, start_server,
+    env_fallback_ubatch_size, long_cli_flag_was_set, resolve_parallel_context_size, start_server,
 };
 use mlxcel_core::cache::KVCacheMode;
 
@@ -174,14 +176,18 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
     // env-var fallback for the byte-fragment opt-in flag.
     env_fallback_lang_bias_include_byte_fragments(&mut args.lang_bias);
     // env-var fallback for the thinking-budget default.
-    env_fallback_reasoning_budget(&mut args.reasoning_budget);
+    env_fallback_reasoning_budget(
+        &mut args.reasoning_budget,
+        long_cli_flag_was_set("reasoning-budget"),
+    );
     // env-var fallback for the chat-template kwargs default.
     env_fallback_chat_template_kwargs(&mut args.chat_template_kwargs);
     // env-var fallbacks for prompt-cache knobs.
     env_fallback_prompt_cache_enabled(
         &mut args.prompt_cache_enabled,
         long_cli_flag_was_set("prompt-cache-enabled"),
-    );
+    )
+    .map_err(anyhow::Error::msg)?;
     env_fallback_prompt_cache_capacity_bytes(&mut args.prompt_cache_capacity_bytes);
     env_fallback_prompt_cache_max_entries(&mut args.prompt_cache_max_entries);
     env_fallback_prompt_cache_ttl(&mut args.prompt_cache_ttl);
@@ -220,6 +226,15 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
     // pattern shared with the other `MLXCEL_*` / `LLAMA_ARG_*` pairs.
     env_fallback_draft_kind(&mut args.speculative.draft_kind);
     env_fallback_draft_block_size(&mut args.speculative.draft_block_size);
+    env_fallback_draft_model(&mut args.draft_model);
+    env_fallback_batch_size(&mut args.batch_size);
+    env_fallback_ubatch_size(&mut args.ubatch_size);
+    env_fallback_log_file(&mut args.log_file);
+    env_fallback_endpoint_slots(
+        &mut args.slots,
+        long_cli_flag_was_set("slots"),
+        long_cli_flag_was_set("no-slots"),
+    );
 
     // Axis B (B8): resolve --lang-bias / --lang-bias-config early so
     // errors surface before the server starts. Empty resolution = None =
@@ -307,7 +322,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         warmup: args.warmup,
         no_warmup: args._no_warmup,
         temperature: args.temp,
-        temperature_was_set: long_cli_flag_was_set("temp"),
+        temperature_was_set: long_cli_flag_was_set("temp") || long_cli_flag_was_set("temperature"),
         top_k: args.top_k,
         top_k_was_set: long_cli_flag_was_set("top-k")
             || std::env::var_os("LLAMA_ARG_TOP_K").is_some(),

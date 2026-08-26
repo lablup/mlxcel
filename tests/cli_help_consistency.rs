@@ -81,6 +81,7 @@ const EXPECTED_FLAGS: &[&str] = &[
 /// discover the alternate spellings without reading the source.
 const EXPECTED_MODES: &[&str] = &[
     "fp16",
+    "f16",
     "int8",
     "fp16+turbo4",
     "fp16+turbo3",

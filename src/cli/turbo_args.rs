@@ -48,7 +48,7 @@ pub struct TurboKvCacheArgs {
     /// K-side KV cache quantization type.
     ///
     /// Accepted values:
-    ///   fp16               Standard half-precision storage (default, no overhead).
+    ///   fp16 / f16         Standard half-precision storage (default, no overhead).
     ///   int8               Per-token INT8 absmax quantization. ~50% KV memory
     ///                      savings with small per-token quantization error.
     ///   fp16+turbo4        Asymmetric Fp16-K + Turbo4-V (alias: turbo4-asym).
@@ -218,11 +218,9 @@ pub fn resolve_kv_cache_mode(
         let k_str = cache_type_k.unwrap_or("fp16");
         let v_str = cache_type_v.unwrap_or("fp16");
 
-        let k_mode = k_str
-            .parse::<KVCacheMode>()
+        let k_mode = parse_split_cache_type(k_str)
             .map_err(|_| format!("unrecognised --cache-type-k value \"{k_str}\""))?;
-        let v_mode = v_str
-            .parse::<KVCacheMode>()
+        let v_mode = parse_split_cache_type(v_str)
             .map_err(|_| format!("unrecognised --cache-type-v value \"{v_str}\""))?;
 
         return map_kv_modes_to_cache_mode(k_mode, v_mode);
@@ -236,6 +234,18 @@ pub fn resolve_kv_cache_mode(
 
     // Default: FP16 (bit-exact baseline).
     Ok(KVCacheMode::Fp16)
+}
+
+/// Parse one split cache type, including llama.cpp's exact `f16` spelling for
+/// unquantized FP16 storage. GGML quantizer names are deliberately not
+/// translated here: accepting `q8_0` or `q4_0` as a mathematically different
+/// mlxcel mode would make a deployment appear compatible while changing its
+/// cache arithmetic.
+fn parse_split_cache_type(value: &str) -> Result<KVCacheMode, ()> {
+    if value.eq_ignore_ascii_case("f16") {
+        return Ok(KVCacheMode::Fp16);
+    }
+    value.parse::<KVCacheMode>().map_err(|_| ())
 }
 
 /// Map a (K-mode, V-mode) pair to the combined `KVCacheMode`.

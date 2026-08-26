@@ -114,7 +114,7 @@ Supported split-flag combinations:
 
 | `--cache-type-k` | `--cache-type-v` | Result |
 |------------------|------------------|--------|
-| `fp16` | `fp16` | `fp16` |
+| `fp16` or `f16` | `fp16` or `f16` | `fp16` |
 | `int8` | `int8` | `int8` |
 | `fp16` | `turbo4` or `turbo4-asym` | `fp16+turbo4` |
 | `turbo4` | `turbo4` | `turbo4` |
@@ -123,6 +123,8 @@ Supported split-flag combinations:
 
 If split flags and `--kv-cache-mode` are both supplied, split flags take
 precedence and a warning is logged.
+
+The exact llama.cpp `f16` spelling aliases FP16 storage. GGML quantizer names such as `q8_0` and `q4_0` remain errors because mlxcel has no mathematically equivalent cache format for them.
 
 Environment variables:
 
