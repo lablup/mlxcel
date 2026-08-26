@@ -161,7 +161,7 @@ fn deepseek_v4_real_model_long_context_hits_sparse_and_compressed_paths() {
     loop {
         prompt.push_str(facts[i % facts.len()]);
         i += 1;
-        if i % 8 == 0 {
+        if i.is_multiple_of(8) {
             let ids = tokenizer.encode(&prompt, true).expect("tokenize");
             if ids.len() > 2200 {
                 break;
