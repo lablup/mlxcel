@@ -128,6 +128,70 @@ fn deepseek_v4_real_model_decode_crosses_pooling_windows() {
     );
 }
 
+#[test]
+#[ignore]
+fn deepseek_v4_real_model_long_context_hits_sparse_and_compressed_paths() {
+    // The sparse split-softmax and the batched/decode HiSA selection only
+    // run once a ratio-4 layer's pooled count exceeds index_topk (512), i.e.
+    // past ~2048 prompt tokens; the same prompt pushes the ratio-128 layers
+    // past their first pooled window and rolls the 128-token local window
+    // several times. Short smokes cannot reach any of that.
+    let model_dir = repo_model_dir(MODEL_DIR);
+    if !model_dir.join("config.json").exists() {
+        eprintln!("Skipping: DeepSeek-V4 checkpoint not found");
+        return;
+    }
+
+    let _runtime = initialize_runtime();
+    let (model, tokenizer) = load_model(&model_dir).expect("load DeepSeek-V4 checkpoint");
+
+    let mut prompt = String::new();
+    let facts = [
+        "The Nile is the longest river in Africa. ",
+        "Mount Everest rises above the Himalayas. ",
+        "Photosynthesis converts light into chemical energy. ",
+        "The Pacific Ocean is the largest ocean on Earth. ",
+        "Copper conducts electricity better than iron. ",
+        "Honey never spoils when stored properly. ",
+    ];
+    let mut i = 0usize;
+    loop {
+        prompt.push_str(facts[i % facts.len()]);
+        i += 1;
+        if i % 8 == 0 {
+            let ids = tokenizer.encode(&prompt, true).expect("tokenize");
+            if ids.len() > 2200 {
+                break;
+            }
+        }
+    }
+    prompt.push_str("\n\nQuestion: Which ocean is the largest on Earth?\nAnswer:");
+
+    let prompt_ids: Vec<i32> = tokenizer
+        .encode(&prompt, true)
+        .expect("tokenize long prompt")
+        .iter()
+        .map(|&id| id as i32)
+        .collect();
+    assert!(
+        prompt_ids.len() > 2100,
+        "long-context prompt must exceed index_topk * ratio tokens, got {}",
+        prompt_ids.len()
+    );
+    eprintln!("[deepseek-v4] long-context prompt: {} tokens", prompt_ids.len());
+
+    let mut generator = CxxGenerator::new(model.num_layers());
+    let tokens = generator.generate(&model, &prompt_ids, 12, &SamplingConfig::greedy());
+    assert!(!tokens.is_empty(), "long-context decode must produce tokens");
+    let gen_u32: Vec<u32> = tokens.iter().map(|&t| t as u32).collect();
+    let text = tokenizer.decode(&gen_u32, true).expect("decode generation");
+    eprintln!("[deepseek-v4] long-context answer: {text:?}");
+    assert!(
+        text.to_lowercase().contains("pacific"),
+        "retrieval across the sparse pooled path should answer Pacific; got {text:?}"
+    );
+}
+
 /// Not `#[ignore]`: parsing the real config costs nothing and catches serde
 /// shape drift (e.g. the checkpoint ships BOTH `quantization` and
 /// `quantization_config`, and 44 `compress_ratios` for 43 layers) without
