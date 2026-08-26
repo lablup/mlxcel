@@ -127,3 +127,34 @@ fn deepseek_v4_real_model_decode_crosses_pooling_windows() {
         "a 48-token greedy decode should produce multiple words, got {text:?}"
     );
 }
+
+/// Not `#[ignore]`: parsing the real config costs nothing and catches serde
+/// shape drift (e.g. the checkpoint ships BOTH `quantization` and
+/// `quantization_config`, and 44 `compress_ratios` for 43 layers) without
+/// touching the shards. Skips when the checkpoint directory is absent.
+#[test]
+fn deepseek_v4_real_config_parses_and_validates() {
+    let config_path = repo_model_dir(MODEL_DIR).join("config.json");
+    let Ok(config_str) = std::fs::read_to_string(&config_path) else {
+        eprintln!("Skipping: {} not present", config_path.display());
+        return;
+    };
+    let args: mlxcel::models::deepseek_v4::ModelArgs =
+        serde_json::from_str(&config_str).expect("real config.json must parse");
+    let args = args.normalized().expect("real config.json must validate");
+    assert_eq!(args.num_hidden_layers, 43);
+    assert_eq!(args.compress_ratios.len(), 43);
+    assert_eq!(args.compress_ratios[0], 0);
+    assert_eq!(args.compress_ratios[42], 4);
+    assert_eq!(args.num_hash_layers, 3);
+    let (gs, bits, mode) = {
+        let o = args
+            .quantization_override("model.layers.0.ffn.switch_mlp.gate_proj")
+            .expect("real config declares the expert override");
+        (o.group_size, o.bits, o.mode.unwrap_or_default())
+    };
+    assert_eq!((gs, bits, mode.as_str()), (32, 4, "mxfp4"));
+    assert_eq!(args.group_size(), 64);
+    assert_eq!(args.bits(), 4);
+    assert_eq!(args.eos_token_ids(), vec![1]);
+}

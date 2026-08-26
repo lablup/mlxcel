@@ -227,8 +227,14 @@ pub struct ModelArgs {
     #[serde(default)]
     pub eos_token_id: Option<TokenIdField>,
 
-    #[serde(default, alias = "quantization_config")]
+    /// mlx-lm-style block. The real checkpoint ships BOTH `quantization`
+    /// and `quantization_config` (identical), so these are two fields with a
+    /// precedence accessor rather than a serde alias: an alias makes serde
+    /// reject the pair as a duplicate field.
+    #[serde(default)]
     pub quantization: Option<QuantizationV4>,
+    #[serde(default)]
+    pub quantization_config: Option<QuantizationV4>,
 }
 
 fn default_model_type() -> String {
@@ -322,21 +328,29 @@ fn default_rope_theta() -> f32 {
 const DEFAULT_EOS_TOKEN_ID: i32 = 1;
 
 impl ModelArgs {
-    pub fn group_size(&self) -> i32 {
+    /// The effective quantization block: `quantization` wins over
+    /// `quantization_config` when both are present (they are identical on
+    /// the real checkpoint).
+    pub fn quantization_block(&self) -> Option<&QuantizationV4> {
         self.quantization
             .as_ref()
+            .or(self.quantization_config.as_ref())
+    }
+
+    pub fn group_size(&self) -> i32 {
+        self.quantization_block()
             .map(|q| q.group_size)
             .unwrap_or(64)
     }
 
     pub fn bits(&self) -> i32 {
-        self.quantization.as_ref().map(|q| q.bits).unwrap_or(4)
+        self.quantization_block().map(|q| q.bits).unwrap_or(4)
     }
 
     /// The explicit per-module-path quantization override for `path`, if the
     /// config declares one (object-valued entries only).
     pub fn quantization_override(&self, path: &str) -> Option<QuantOverride> {
-        let value = self.quantization.as_ref()?.overrides.get(path)?;
+        let value = self.quantization_block()?.overrides.get(path)?;
         serde_json::from_value(value.clone()).ok()
     }
 
@@ -349,8 +363,7 @@ impl ModelArgs {
             return (o.group_size, o.bits, mode);
         }
         let mode = self
-            .quantization
-            .as_ref()
+            .quantization_block()
             .and_then(|q| q.mode.clone())
             .unwrap_or_else(|| "affine".to_string());
         (self.group_size(), self.bits(), mode)
@@ -542,7 +555,7 @@ impl ModelArgs {
         // per-path override (a bound on the defaults says nothing about an
         // individual override; docs/adding-models.md, Quantization Parameter
         // Bounds).
-        if let Some(q) = &self.quantization {
+        if let Some(q) = self.quantization_block() {
             mlxcel_core::layers::validate_quantization_params(q.group_size, q.bits)
                 .map_err(|e| format!("DeepSeek-V4 quantization: {e}"))?;
             if let Some(mode) = &q.mode {

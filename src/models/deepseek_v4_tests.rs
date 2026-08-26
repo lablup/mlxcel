@@ -1131,6 +1131,33 @@ fn tiny_model_chunked_prefill_matches_single_pass() {
 }
 
 #[test]
+fn real_checkpoint_config_shape_parses_with_both_quantization_keys() {
+    // The real DeepSeek-V4-Flash-4bit config.json carries BOTH `quantization`
+    // and `quantization_config` (identical blocks). serde must accept that
+    // rather than erroring on a duplicate field, and the 44-entry
+    // compress_ratios list (one extra for the dropped MTP layer) must be
+    // truncated to num_hidden_layers before validation, as the reference
+    // __post_init__ does.
+    let mut cfg: serde_json::Value = serde_json::from_str(tiny_args_json()).expect("parse");
+    let quant = serde_json::json!({
+        "group_size": 64, "bits": 4, "mode": "affine",
+        "model.layers.0.ffn.switch_mlp.gate_proj":
+            {"group_size": 32, "bits": 4, "mode": "mxfp4"}
+    });
+    cfg["quantization"] = quant.clone();
+    cfg["quantization_config"] = quant;
+    cfg["compress_ratios"] = serde_json::json!([0, 128, 4, 0]);
+    let args: ModelArgs =
+        serde_json::from_value(cfg).expect("config with both quantization keys must parse");
+    let args = args
+        .normalized()
+        .expect("over-length compress_ratios must truncate to num_hidden_layers");
+    assert_eq!(args.compress_ratios, vec![0, 128, 4]);
+    let (gs, bits, mode) = args.expert_quantization("model.layers.0.ffn.switch_mlp.gate_proj");
+    assert_eq!((gs, bits, mode.as_str()), (32, 4, "mxfp4"));
+}
+
+#[test]
 fn eos_token_id_parses_from_config() {
     let args = tiny_args();
     assert_eq!(args.eos_token_ids(), vec![1]);
