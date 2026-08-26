@@ -317,6 +317,47 @@ fn default_audio_format() -> String {
     "wav".to_string()
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OneOrManyStrings {
+    One(String),
+    Many(Vec<String>),
+}
+
+fn deserialize_optional_stop<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(
+        Option::<OneOrManyStrings>::deserialize(deserializer)?.map(|value| match value {
+            OneOrManyStrings::One(stop) => vec![stop],
+            OneOrManyStrings::Many(stops) => stops,
+        }),
+    )
+}
+
+fn deserialize_optional_seed<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(value) = Option::<serde_json::Number>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    if let Some(signed) = value.as_i64() {
+        return match signed {
+            -1 => Ok(None),
+            value if value < -1 => Err(serde::de::Error::custom(
+                "seed must be -1 (random) or a non-negative integer",
+            )),
+            value => Ok(Some(value as u64)),
+        };
+    }
+    value
+        .as_u64()
+        .map(Some)
+        .ok_or_else(|| serde::de::Error::custom("seed must be an integer"))
+}
+
 /// Message content: either a plain string or multimodal array
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -568,6 +609,7 @@ pub struct Message {
 pub struct SamplingParams {
     /// Maximum number of tokens to generate. Server routes silently clamp an
     /// explicit value to the effective per-slot context window.
+    #[serde(alias = "n_predict", alias = "max_completion_tokens")]
     pub max_tokens: Option<usize>,
     /// Sampling temperature (0.0 = greedy, higher = more random)
     pub temperature: Option<f32>,
@@ -578,14 +620,18 @@ pub struct SamplingParams {
     /// Min-p sampling threshold (0.0 = disabled)
     pub min_p: Option<f32>,
     /// Repetition penalty (1.0 = no penalty)
+    #[serde(alias = "repeat_penalty")]
     pub repetition_penalty: Option<f32>,
     /// Context size for repetition penalty
+    #[serde(alias = "repeat_last_n")]
     pub repetition_context_size: Option<usize>,
     /// Logit bias for specific tokens
     pub logit_bias: Option<HashMap<String, f32>>,
     /// Stop sequences
+    #[serde(deserialize_with = "deserialize_optional_stop")]
     pub stop: Option<Vec<String>>,
     /// Random seed for reproducibility
+    #[serde(deserialize_with = "deserialize_optional_seed")]
     pub seed: Option<u64>,
 
     // DRY (Don't Repeat Yourself) sampling parameters
@@ -631,6 +677,7 @@ pub struct SamplingParams {
     // name, vLLM alias, and Qwen alias. Value semantics: -1 unrestricted,
     // 0 immediate close, N > 0 cap at N tokens inside the `<think>` block.
     /// Primary / llama.cpp-compatible name for the reasoning-token cap.
+    #[serde(alias = "reasoning_budget_tokens")]
     pub thinking_budget_tokens: Option<i32>,
     /// vLLM-compatible alias for `thinking_budget_tokens`.
     pub thinking_token_budget: Option<i32>,
@@ -1012,8 +1059,10 @@ pub struct NativeCompletionRequest {
     /// Repetition penalty last N tokens
     pub repeat_last_n: Option<usize>,
     /// Stop sequences
+    #[serde(default, deserialize_with = "deserialize_optional_stop")]
     pub stop: Option<Vec<String>>,
     /// Random seed
+    #[serde(default, deserialize_with = "deserialize_optional_seed")]
     pub seed: Option<u64>,
     /// Frequency penalty
     pub frequency_penalty: Option<f32>,
@@ -1032,6 +1081,7 @@ pub struct NativeCompletionRequest {
 
     // thinking-token budget (Qwen3-family reasoning cap).
     /// Primary / llama.cpp-compatible name for the reasoning-token cap.
+    #[serde(alias = "reasoning_budget_tokens")]
     pub thinking_budget_tokens: Option<i32>,
     /// vLLM-compatible alias for `thinking_budget_tokens`.
     pub thinking_token_budget: Option<i32>,
@@ -1118,6 +1168,64 @@ pub struct AudioTranscriptionRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_request_accepts_llama_sampling_aliases_and_scalar_stop() {
+        let request: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "hello"}],
+            "n_predict": 17,
+            "repeat_penalty": 1.2,
+            "repeat_last_n": 31,
+            "reasoning_budget_tokens": 9,
+            "stop": "END",
+            "seed": -1
+        }))
+        .expect("llama.cpp-shaped chat request must deserialize");
+
+        assert_eq!(request.params.max_tokens, Some(17));
+        assert_eq!(request.params.repetition_penalty, Some(1.2));
+        assert_eq!(request.params.repetition_context_size, Some(31));
+        assert_eq!(request.params.thinking_budget_tokens, Some(9));
+        assert_eq!(request.params.stop, Some(vec!["END".to_string()]));
+        assert_eq!(request.params.seed, None);
+    }
+
+    #[test]
+    fn completion_request_accepts_alternate_max_tokens_and_stop_array() {
+        let request: CompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test",
+            "prompt": "hello",
+            "max_completion_tokens": 23,
+            "repeat_penalty": 1.1,
+            "repeat_last_n": 47,
+            "reasoning_budget_tokens": 11,
+            "stop": ["A", "B"],
+            "seed": 42
+        }))
+        .expect("llama.cpp-shaped completion request must deserialize");
+
+        assert_eq!(request.params.max_tokens, Some(23));
+        assert_eq!(request.params.repetition_penalty, Some(1.1));
+        assert_eq!(request.params.repetition_context_size, Some(47));
+        assert_eq!(request.params.thinking_budget_tokens, Some(11));
+        assert_eq!(
+            request.params.stop,
+            Some(vec!["A".to_string(), "B".to_string()])
+        );
+        assert_eq!(request.params.seed, Some(42));
+    }
+
+    #[test]
+    fn seed_values_below_random_sentinel_are_rejected() {
+        let error = serde_json::from_value::<CompletionRequest>(serde_json::json!({
+            "model": "test",
+            "prompt": "hello",
+            "seed": -2
+        }))
+        .expect_err("only -1 is the random seed sentinel");
+        assert!(error.to_string().contains("seed must be -1"), "{error}");
+    }
 
     #[test]
     fn message_content_default_is_empty_text() {

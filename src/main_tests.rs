@@ -13,11 +13,45 @@
 // limitations under the License.
 
 use clap::{CommandFactory, Parser};
+use std::ffi::OsString;
+use std::sync::{Mutex, OnceLock};
 
 use super::{
     Cli, Commands, FAMILY_ORDER, PipelineParallelOptions, TensorParallelOptions,
     write_supported_models,
 };
+
+static CLI_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct ScopedEnv(Vec<(&'static str, Option<OsString>)>);
+
+impl ScopedEnv {
+    fn set(values: &[(&'static str, &'static str)]) -> Self {
+        let saved = values
+            .iter()
+            .map(|(key, _)| (*key, std::env::var_os(key)))
+            .collect();
+        for (key, value) in values {
+            // SAFETY: every env-mutating test in this binary holds CLI_ENV_LOCK.
+            unsafe { std::env::set_var(key, value) };
+        }
+        Self(saved)
+    }
+}
+
+impl Drop for ScopedEnv {
+    fn drop(&mut self) {
+        for (key, value) in self.0.drain(..) {
+            // SAFETY: the guard is dropped before the outer CLI_ENV_LOCK guard.
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+}
 
 /// The `Default` impls for the parallelism option groups (used by the `mlxcel
 /// run` lowering in `commands::run`) MUST match the values clap fills when the
@@ -474,6 +508,106 @@ fn serve_draft_model_and_model_draft_aliases_resolve_identically() {
         primary_args.draft_model,
         Some(std::path::PathBuf::from("models/draft"))
     );
+}
+
+#[test]
+fn serve_temp_and_temperature_aliases_resolve_identically() {
+    let primary = Cli::try_parse_from(["mlxcel", "serve", "-m", "models/foo", "--temp", "0.37"])
+        .expect("--temp must parse");
+    let Commands::Serve(primary_args) = primary.command else {
+        panic!("expected serve command");
+    };
+    let alias = Cli::try_parse_from([
+        "mlxcel",
+        "serve",
+        "-m",
+        "models/foo",
+        "--temperature",
+        "0.37",
+    ])
+    .expect("--temperature must parse");
+    let Commands::Serve(alias_args) = alias.command else {
+        panic!("expected serve command");
+    };
+    assert_eq!(primary_args.temp, alias_args.temp);
+}
+
+#[test]
+fn serve_canonical_llama_envs_and_endpoint_precedence_parse_together() {
+    let _lock = CLI_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _env = ScopedEnv::set(&[
+        ("LLAMA_ARG_BATCH", "111"),
+        ("LLAMA_ARG_BATCH_SIZE", "999"),
+        ("LLAMA_ARG_UBATCH", "22"),
+        ("LLAMA_ARG_UBATCH_SIZE", "999"),
+        ("LLAMA_ARG_SPEC_DRAFT_MODEL", "models/canonical-draft"),
+        ("LLAMA_ARG_MODEL_DRAFT", "models/legacy-draft"),
+        ("LLAMA_ARG_LOG_FILE", "canonical.log"),
+        ("LLAMA_LOG_FILE", "legacy.log"),
+        ("LLAMA_ARG_CHAT_TEMPLATE", "{{ messages }}"),
+        ("LLAMA_ARG_CHAT_TEMPLATE_FILE", "canonical.jinja"),
+        ("LLAMA_ARG_ENDPOINT_METRICS", "true"),
+        ("LLAMA_ARG_ENDPOINT_PROPS", "true"),
+        ("LLAMA_ARG_ENDPOINT_SLOTS", "false"),
+    ]);
+
+    let cli = Cli::try_parse_from(["mlxcel", "serve", "-m", "models/foo"])
+        .expect("canonical llama envs must parse");
+    let Commands::Serve(mut args) = cli.command else {
+        panic!("expected serve command");
+    };
+    mlxcel::server::env_fallback_batch_size(&mut args.batch_size);
+    mlxcel::server::env_fallback_ubatch_size(&mut args.ubatch_size);
+    mlxcel::server::env_fallback_draft_model(&mut args.draft_model);
+    mlxcel::server::env_fallback_log_file(&mut args.log_file);
+    mlxcel::server::env_fallback_endpoint_slots(&mut args.slots, false, false);
+    assert_eq!(args.batch_size, Some(111));
+    assert_eq!(args.ubatch_size, Some(22));
+    assert_eq!(
+        args.draft_model.as_deref(),
+        Some(std::path::Path::new("models/canonical-draft"))
+    );
+    assert_eq!(
+        args.log_file.as_deref(),
+        Some(std::path::Path::new("canonical.log"))
+    );
+    assert_eq!(args.chat_template.as_deref(), Some("{{ messages }}"));
+    assert_eq!(
+        args.chat_template_file.as_deref(),
+        Some(std::path::Path::new("canonical.jinja"))
+    );
+    assert!(args.metrics);
+    assert!(args.props);
+    assert!(!args.slots);
+
+    let cli_override = Cli::try_parse_from([
+        "mlxcel",
+        "serve",
+        "-m",
+        "models/foo",
+        "--batch-size",
+        "333",
+        "--slots",
+    ])
+    .expect("CLI must override canonical env values");
+    let Commands::Serve(mut cli_args) = cli_override.command else {
+        panic!("expected serve command");
+    };
+    mlxcel::server::env_fallback_endpoint_slots(&mut cli_args.slots, true, false);
+    assert_eq!(cli_args.batch_size, Some(333));
+    assert!(cli_args.slots);
+
+    let no_slots = Cli::try_parse_from(["mlxcel", "serve", "-m", "models/foo", "--no-slots"])
+        .expect("--no-slots must parse with endpoint env");
+    let Commands::Serve(mut no_slots_args) = no_slots.command else {
+        panic!("expected serve command");
+    };
+    mlxcel::server::env_fallback_endpoint_slots(&mut no_slots_args.slots, false, true);
+    assert!(no_slots_args._no_slots);
+    assert!(!(no_slots_args.slots && !no_slots_args._no_slots));
 }
 
 #[test]

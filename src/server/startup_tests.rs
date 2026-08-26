@@ -1064,11 +1064,17 @@ fn build_server_config_prompt_cache_disabled_produces_false_is_enabled() {
 #[test]
 fn build_server_config_prompt_cache_default_is_enabled() {
     let startup = ServerStartupConfig::default();
+    assert_eq!(startup.top_p, 0.95);
+    assert_eq!(startup.min_p, 0.05);
+    assert_eq!(startup.dry_penalty_last_n, 64);
     let config = build_server_config(&startup, None);
     assert!(
         config.prompt_cache.is_enabled(),
         "default PromptCacheConfig must satisfy is_enabled() in ServerConfig"
     );
+    assert_eq!(config.default_top_p, 0.95);
+    assert_eq!(config.default_min_p, 0.05);
+    assert_eq!(config.default_dry_penalty_last_n, 64);
 }
 
 /// `build_server_config` propagates a custom `capacity_bytes` value from

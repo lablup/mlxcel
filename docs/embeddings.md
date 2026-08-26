@@ -14,6 +14,8 @@ Relevance scoring lives on the same page, under [Reranking](#reranking-v1rerank-
 | POST | `/embeddings` | Alias without the `/v1` prefix. |
 | POST | `/v1/rerank` | Score a query against a document list. Cohere and Jina compatible; see [Reranking](#reranking-v1rerank-and-mlxcel-rerank). |
 | POST | `/rerank` | Alias without the `/v1` prefix. |
+| POST | `/v1/reranking` | llama-server alias for `/v1/rerank`. |
+| POST | `/reranking` | llama-server alias for `/rerank`. |
 | GET | `/v1/models` | Lists the embedding model, and the reranker, next to the chat model when `--embedding-model` / `--reranker-model` load a second checkpoint. |
 
 ## Implementation source map

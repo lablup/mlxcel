@@ -124,6 +124,22 @@ fn resolve_split_flags_fp16_k_turbo3_v_returns_turbo3_asym() {
     assert_eq!(mode, KVCacheMode::Turbo3Asym);
 }
 
+#[test]
+fn split_cache_flags_accept_exact_llama_f16_alias() {
+    let mode = resolve_kv_cache_mode(Some("f16"), Some("f16"), None)
+        .expect("llama.cpp f16 cache spelling must resolve");
+    assert_eq!(mode, KVCacheMode::Fp16);
+}
+
+#[test]
+fn split_cache_flags_do_not_translate_ggml_quantizers() {
+    for unsupported in ["q8_0", "q4_0"] {
+        let error = resolve_kv_cache_mode(Some(unsupported), Some("f16"), None)
+            .expect_err("a GGML quantizer must not alias different cache math");
+        assert!(error.contains(unsupported), "{error}");
+    }
+}
+
 /// K=fp16, V=turbo3-asym (explicit alias) → Turbo3Asym.
 #[test]
 fn resolve_split_flags_fp16_k_turbo3_asym_v_returns_turbo3_asym() {

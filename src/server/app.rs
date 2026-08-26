@@ -43,7 +43,7 @@ async fn api_key_auth(
 
     // Skip auth for health check endpoints
     let path = request.uri().path();
-    if path == "/health" || path == "/" {
+    if is_unauthenticated_health_path(path) {
         return next.run(request).await;
     }
 
@@ -86,6 +86,10 @@ async fn api_key_auth(
     }
 }
 
+fn is_unauthenticated_health_path(path: &str) -> bool {
+    matches!(path, "/" | "/health" | "/v1/health")
+}
+
 /// Maximum request body size for audio upload endpoints. Overrides the Axum
 /// 2 MiB default because real audio uploads commonly exceed that threshold.
 const AUDIO_MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
@@ -124,6 +128,7 @@ pub fn create_app(state: AppState) -> Router {
         // Reranking (Cohere / Jina compatible surface), served by the rerank
         // worker when one is loaded; a structured 501 otherwise.
         .route("/v1/rerank", post(routes::create_rerank))
+        .route("/v1/reranking", post(routes::create_rerank))
         // Responses API (OpenAI /v1/responses surface).
         .route("/v1/responses", post(routes::create_response))
         .route(
@@ -158,6 +163,7 @@ pub fn create_app(state: AppState) -> Router {
         .route("/models", get(routes::list_models))
         .route("/embeddings", post(routes::create_embeddings))
         .route("/rerank", post(routes::create_rerank))
+        .route("/reranking", post(routes::create_rerank))
         .route("/responses", post(routes::create_response))
         .route(
             "/responses/:id",
@@ -192,6 +198,7 @@ pub fn create_app(state: AppState) -> Router {
     app
         // Health check
         .route("/health", get(routes::health_check))
+        .route("/v1/health", get(routes::health_check))
         .route("/", get(routes::health_check))
         // Middleware
         .layer(middleware::from_fn_with_state(state.clone(), api_key_auth))
@@ -202,7 +209,7 @@ pub fn create_app(state: AppState) -> Router {
 
 #[cfg(test)]
 mod tests {
-    use super::AUDIO_MAX_UPLOAD_BYTES;
+    use super::{AUDIO_MAX_UPLOAD_BYTES, is_unauthenticated_health_path};
     use axum::{
         Router,
         body::Body,
@@ -248,6 +255,14 @@ mod tests {
             25 * 1024 * 1024,
             "audio upload limit must be 25 MiB"
         );
+    }
+
+    #[test]
+    fn all_health_aliases_are_unauthenticated() {
+        for path in ["/", "/health", "/v1/health"] {
+            assert!(is_unauthenticated_health_path(path), "{path}");
+        }
+        assert!(!is_unauthenticated_health_path("/v1/models"));
     }
 
     #[tokio::test]

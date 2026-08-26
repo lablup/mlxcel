@@ -1002,7 +1002,12 @@ pub(crate) struct ServeArgs {
     /// speedup. `MLXCEL_ENABLE_MTP_B1` pins the decision, and
     /// `MLXCEL_MTP_ADAPTIVE=0` restores the static per-hardware gates. See
     /// docs/CONTINUOUS_BATCHING.md and docs/environment-variables.md.
-    #[arg(long, visible_alias = "model-draft", value_name = "PATH")]
+    #[arg(
+        long,
+        visible_alias = "model-draft",
+        env = "LLAMA_ARG_SPEC_DRAFT_MODEL",
+        value_name = "PATH"
+    )]
     draft_model: Option<PathBuf>,
 
     /// Maximum number of draft tokens per speculation step
@@ -1143,13 +1148,13 @@ pub(crate) struct ServeArgs {
     #[arg(
         short = 'b',
         long = "batch-size",
-        env = "LLAMA_ARG_BATCH_SIZE",
+        env = "LLAMA_ARG_BATCH",
         value_name = "N"
     )]
     batch_size: Option<usize>,
 
     /// Physical micro-batch size [not applicable on Apple Silicon unified memory; ignored]
-    #[arg(long = "ubatch-size", env = "LLAMA_ARG_UBATCH_SIZE", value_name = "N")]
+    #[arg(long = "ubatch-size", env = "LLAMA_ARG_UBATCH", value_name = "N")]
     ubatch_size: Option<usize>,
 
     /// Enable preemptive eviction of lower-priority sequences
@@ -1309,15 +1314,15 @@ pub(crate) struct ServeArgs {
     timeout: u64,
 
     /// Override chat template (Jinja2 template string)
-    #[arg(long, value_name = "TEMPLATE")]
+    #[arg(long, env = "LLAMA_ARG_CHAT_TEMPLATE", value_name = "TEMPLATE")]
     chat_template: Option<String>,
 
     /// Path to chat template file
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, env = "LLAMA_ARG_CHAT_TEMPLATE_FILE", value_name = "PATH")]
     chat_template_file: Option<PathBuf>,
 
     /// Enable /slots endpoint
-    #[arg(long = "slots", overrides_with = "_no_slots", default_value_t = true)]
+    #[arg(long = "slots", default_value_t = true)]
     slots: bool,
 
     /// Disable /slots endpoint
@@ -1325,11 +1330,11 @@ pub(crate) struct ServeArgs {
     _no_slots: bool,
 
     /// Enable /props endpoint
-    #[arg(long)]
+    #[arg(long, env = "LLAMA_ARG_ENDPOINT_PROPS")]
     props: bool,
 
     /// Enable /metrics endpoint
-    #[arg(long)]
+    #[arg(long, env = "LLAMA_ARG_ENDPOINT_METRICS")]
     metrics: bool,
 
     /// Enable model warmup on startup
@@ -1342,7 +1347,7 @@ pub(crate) struct ServeArgs {
 
     // Default sampling parameters.
     /// Default sampling temperature
-    #[arg(long = "temp", default_value_t = 0.8)]
+    #[arg(long = "temp", visible_alias = "temperature", default_value_t = 0.8)]
     temp: f32,
 
     /// Default top-K sampling
@@ -1350,11 +1355,11 @@ pub(crate) struct ServeArgs {
     top_k: i32,
 
     /// Default top-P (nucleus) sampling
-    #[arg(long, default_value_t = 0.9)]
+    #[arg(long, default_value_t = 0.95)]
     top_p: f32,
 
     /// Default min-P sampling
-    #[arg(long, default_value_t = 0.1)]
+    #[arg(long, default_value_t = 0.05)]
     min_p: f32,
 
     /// Random seed (-1 = random)
@@ -1391,7 +1396,7 @@ pub(crate) struct ServeArgs {
     dry_allowed_length: usize,
 
     /// DRY lookback window (-1 = full context)
-    #[arg(long, default_value_t = -1)]
+    #[arg(long, default_value_t = 64)]
     dry_penalty_last_n: i32,
 
     /// DRY sequence breaker token strings (e.g. "\n", "\t")
@@ -1430,7 +1435,7 @@ pub(crate) struct ServeArgs {
     log_disable: bool,
 
     /// Log output file
-    #[arg(long, env = "LLAMA_LOG_FILE", value_name = "PATH")]
+    #[arg(long, env = "LLAMA_ARG_LOG_FILE", value_name = "PATH")]
     log_file: Option<PathBuf>,
 
     // Distributed inference.
@@ -1772,11 +1777,16 @@ pub(crate) struct ServeArgs {
     ///    0 = immediate end of thinking (force </think> on first reasoning token)
     ///    N > 0 = cap reasoning at N tokens
     ///
-    /// Also honors `LLAMA_ARG_REASONING_BUDGET`; CLI flag wins on conflict.
+    /// Also honors canonical `LLAMA_ARG_THINK_BUDGET` and legacy
+    /// `LLAMA_ARG_REASONING_BUDGET`; CLI flag wins on conflict.
     /// Per-request `thinking_budget_tokens` / `thinking_token_budget` /
     /// `thinking_budget` on `/v1/chat/completions` or `/completion` overrides
     /// this value.
-    #[arg(long = "reasoning-budget", default_value_t = -1, value_name = "N")]
+    #[arg(
+        long = "reasoning-budget",
+        default_value_t = -1,
+        value_name = "N"
+    )]
     reasoning_budget: i32,
 
     /// Default chat-template kwargs (JSON object).
@@ -1812,9 +1822,9 @@ pub(crate) struct ServeArgs {
     /// is reserved for the cache. Disabling eliminates lock contention and
     /// matcher overhead.
     ///
-    /// Also reads `MLXCEL_PROMPT_CACHE_ENABLED` (on/off/true/false/1/0) and
-    /// the llama.cpp-compat alias `LLAMA_ARG_CACHE_REUSE` when the CLI flag
-    /// is absent. CLI flag takes precedence over env vars.
+    /// Also reads `MLXCEL_PROMPT_CACHE_ENABLED` (on/off/true/false/1/0) when
+    /// the CLI flag is absent. `LLAMA_ARG_CACHE_REUSE` is a separate integer
+    /// minimum-chunk setting; only its no-op value `0` is currently supported.
     #[arg(
         long = "prompt-cache-enabled",
         default_value_t = true,

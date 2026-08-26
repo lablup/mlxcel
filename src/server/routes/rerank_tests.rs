@@ -84,12 +84,19 @@ fn stub_provider(kind: RerankerKind, supports_images: bool) -> Arc<dyn RerankMod
 }
 
 fn app_with(provider: Option<Arc<dyn RerankModelProvider>>) -> axum::Router {
+    app_with_config(provider, ServerConfig::default())
+}
+
+fn app_with_config(
+    provider: Option<Arc<dyn RerankModelProvider>>,
+    config: ServerConfig,
+) -> axum::Router {
     let (options_tx, _options_rx) = mpsc::channel();
     let model_provider = Arc::new(ModelProvider::recording_for_route_tests(options_tx));
     let batch_metrics = model_provider.batch_metrics().clone();
     let state = AppState::new(
         model_provider,
-        ServerConfig::default(),
+        config,
         ChatTemplateProcessor::with_template("ok".to_string()),
         MlxcelTokenizer::stub(),
         PathBuf::from("route-test-model"),
@@ -436,16 +443,41 @@ async fn malformed_body_is_400() {
 }
 
 #[tokio::test]
-async fn the_unversioned_alias_is_mounted() {
-    let app = app_with(Some(text_provider()));
-    let (status, body) = post(
-        app,
-        "/rerank",
-        json!({"query": "alpha", "documents": ["alpha"]}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(indices(&body), vec![0]);
+async fn all_rerank_aliases_are_mounted() {
+    for path in ["/rerank", "/reranking", "/v1/rerank", "/v1/reranking"] {
+        // No worker is needed to prove route registration. The existing
+        // handler's structured 501 distinguishes a mounted alias from Axum's
+        // 404 while keeping this test hardware-independent.
+        let app = app_with(None);
+        let (status, body) =
+            post(app, path, json!({"query": "alpha", "documents": ["alpha"]})).await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{path}: {body}");
+        assert!(body["error"]["message"].is_string(), "{path}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn v1_health_alias_is_public_when_api_key_auth_is_enabled() {
+    let app = app_with_config(
+        None,
+        ServerConfig {
+            api_key: Some("secret".to_string()),
+            ..Default::default()
+        },
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v1/health")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("route responds");
+
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_ne!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

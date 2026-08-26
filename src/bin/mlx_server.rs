@@ -26,16 +26,18 @@ use mlxcel::downloader::{
 use mlxcel::lang_bias::LangBiasCliArgs;
 use mlxcel::server::{
     ServerStartupInput, env_fallback_apc_block_size, env_fallback_apc_enabled,
-    env_fallback_apc_hash, env_fallback_apc_num_blocks, env_fallback_cache_type_k,
-    env_fallback_cache_type_v, env_fallback_chat_template_kwargs, env_fallback_embedding_model,
+    env_fallback_apc_hash, env_fallback_apc_num_blocks, env_fallback_batch_size,
+    env_fallback_cache_type_k, env_fallback_cache_type_v, env_fallback_chat_template_kwargs,
+    env_fallback_draft_model, env_fallback_embedding_model, env_fallback_endpoint_slots,
     env_fallback_kv_bits, env_fallback_kv_group_size, env_fallback_kv_quant_scheme,
     env_fallback_kv_skip_last_layer, env_fallback_lang_bias,
-    env_fallback_lang_bias_include_byte_fragments, env_fallback_prompt_cache_capacity_bytes,
-    env_fallback_prompt_cache_enabled, env_fallback_prompt_cache_max_entries,
-    env_fallback_prompt_cache_min_prefix, env_fallback_prompt_cache_snapshot_capacity_bytes,
+    env_fallback_lang_bias_include_byte_fragments, env_fallback_log_file,
+    env_fallback_prompt_cache_capacity_bytes, env_fallback_prompt_cache_enabled,
+    env_fallback_prompt_cache_max_entries, env_fallback_prompt_cache_min_prefix,
+    env_fallback_prompt_cache_snapshot_capacity_bytes,
     env_fallback_prompt_cache_snapshot_max_entries, env_fallback_prompt_cache_snapshot_ttl,
     env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, env_fallback_reranker_model,
-    long_cli_flag_was_set, start_server,
+    env_fallback_ubatch_size, long_cli_flag_was_set, start_server,
 };
 
 /// mlxcel-server: llama-server compatible HTTP server for MLX inference
@@ -301,7 +303,7 @@ struct ServerArgs {
     #[arg(
         long = "model-draft",
         visible_alias = "draft-model",
-        env = "LLAMA_ARG_MODEL_DRAFT",
+        env = "LLAMA_ARG_SPEC_DRAFT_MODEL",
         value_name = "PATH"
     )]
     model_draft: Option<PathBuf>,
@@ -464,13 +466,13 @@ struct ServerArgs {
     #[arg(
         short = 'b',
         long = "batch-size",
-        env = "LLAMA_ARG_BATCH_SIZE",
+        env = "LLAMA_ARG_BATCH",
         value_name = "N"
     )]
     batch_size: Option<usize>,
 
     /// Physical micro-batch size [not applicable on Apple Silicon unified memory; ignored]
-    #[arg(long = "ubatch-size", env = "LLAMA_ARG_UBATCH_SIZE", value_name = "N")]
+    #[arg(long = "ubatch-size", env = "LLAMA_ARG_UBATCH", value_name = "N")]
     ubatch_size: Option<usize>,
 
     /// Enable preemptive eviction of lower-priority sequences
@@ -642,15 +644,23 @@ struct ServerArgs {
     conversation_store_ttl_secs: u64,
 
     /// Override chat template (Jinja2 template string)
-    #[arg(long = "chat-template", value_name = "TEMPLATE")]
+    #[arg(
+        long = "chat-template",
+        env = "LLAMA_ARG_CHAT_TEMPLATE",
+        value_name = "TEMPLATE"
+    )]
     chat_template: Option<String>,
 
     /// Path to chat template file
-    #[arg(long = "chat-template-file", value_name = "PATH")]
+    #[arg(
+        long = "chat-template-file",
+        env = "LLAMA_ARG_CHAT_TEMPLATE_FILE",
+        value_name = "PATH"
+    )]
     chat_template_file: Option<PathBuf>,
 
     /// Enable /slots endpoint
-    #[arg(long = "slots", overrides_with = "_no_slots", default_value_t = true)]
+    #[arg(long = "slots", default_value_t = true)]
     slots: bool,
 
     /// Disable /slots endpoint
@@ -658,11 +668,11 @@ struct ServerArgs {
     _no_slots: bool,
 
     /// Enable /props endpoint
-    #[arg(long = "props")]
+    #[arg(long = "props", env = "LLAMA_ARG_ENDPOINT_PROPS")]
     props: bool,
 
     /// Enable /metrics endpoint
-    #[arg(long = "metrics")]
+    #[arg(long = "metrics", env = "LLAMA_ARG_ENDPOINT_METRICS")]
     metrics: bool,
 
     /// Enable model warmup on startup
@@ -675,7 +685,7 @@ struct ServerArgs {
 
     // Default sampling parameters.
     /// Default sampling temperature
-    #[arg(long = "temp", default_value_t = 0.8)]
+    #[arg(long = "temp", visible_alias = "temperature", default_value_t = 0.8)]
     temp: f32,
 
     /// Default top-K sampling
@@ -683,11 +693,11 @@ struct ServerArgs {
     top_k: i32,
 
     /// Default top-P (nucleus) sampling
-    #[arg(long = "top-p", default_value_t = 0.9)]
+    #[arg(long = "top-p", default_value_t = 0.95)]
     top_p: f32,
 
     /// Default min-P sampling
-    #[arg(long = "min-p", default_value_t = 0.1)]
+    #[arg(long = "min-p", default_value_t = 0.05)]
     min_p: f32,
 
     /// Random seed (-1 = random)
@@ -724,7 +734,7 @@ struct ServerArgs {
     dry_allowed_length: usize,
 
     /// DRY lookback window (-1 = full context)
-    #[arg(long = "dry-penalty-last-n", default_value_t = -1)]
+    #[arg(long = "dry-penalty-last-n", default_value_t = 64)]
     dry_penalty_last_n: i32,
 
     /// DRY sequence breaker token strings (e.g. "\n", "\t")
@@ -763,7 +773,7 @@ struct ServerArgs {
     log_disable: bool,
 
     /// Log output file
-    #[arg(long = "log-file", env = "LLAMA_LOG_FILE", value_name = "PATH")]
+    #[arg(long = "log-file", env = "LLAMA_ARG_LOG_FILE", value_name = "PATH")]
     log_file: Option<PathBuf>,
 
     // Distributed inference.
@@ -1134,7 +1144,8 @@ struct ServerArgs {
     /// Per-request `thinking_budget_tokens` (primary), `thinking_token_budget`
     /// (vLLM alias), or `thinking_budget` (Qwen alias) on
     /// `/v1/chat/completions` and `/completion` override this value. Also
-    /// reads from `LLAMA_ARG_REASONING_BUDGET` (applied via
+    /// reads from canonical `LLAMA_ARG_THINK_BUDGET` and legacy
+    /// `LLAMA_ARG_REASONING_BUDGET` (applied via
     /// `env_fallback_reasoning_budget`); CLI wins on conflict. Unparseable
     /// env values are warn-logged and ignored. Silently ignored for models
     /// that do not expose `<think>` / `</think>` tokens.
@@ -1181,8 +1192,8 @@ struct ServerArgs {
     /// matcher overhead.
     ///
     /// Also reads `MLXCEL_PROMPT_CACHE_ENABLED` (boolean on/off/true/false/1/0)
-    /// and the llama.cpp-compat alias `LLAMA_ARG_CACHE_REUSE` when the CLI flag
-    /// is not explicitly provided. CLI flag takes precedence over env vars.
+    /// when the CLI flag is not explicitly provided. `LLAMA_ARG_CACHE_REUSE`
+    /// is a separate integer minimum-chunk setting; only `0` is supported.
     #[arg(
         long = "prompt-cache-enabled",
         default_value_t = true,
@@ -1198,8 +1209,8 @@ struct ServerArgs {
     /// `--prompt-cache-enabled=false`).
     ///
     /// The prompt cache is on by default; this flag is a clean opt-out that
-    /// overrides `--prompt-cache-enabled` and the `MLXCEL_PROMPT_CACHE_ENABLED`
-    /// / `LLAMA_ARG_CACHE_REUSE` env vars. When set, repeated shared prefixes
+    /// overrides `--prompt-cache-enabled` and `MLXCEL_PROMPT_CACHE_ENABLED`.
+    /// When set, repeated shared prefixes
     /// (for example a long system prompt) are re-prefilled every request.
     #[arg(long = "no-prompt-cache")]
     no_prompt_cache: bool,
@@ -1423,6 +1434,10 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     env_fallback_lang_bias_include_byte_fragments(&mut args.lang_bias);
     // env-var fallback for the chat-template kwargs default.
     env_fallback_chat_template_kwargs(&mut args.chat_template_kwargs);
+    env_fallback_reasoning_budget(
+        &mut args.reasoning_budget,
+        long_cli_flag_was_set("reasoning-budget"),
+    );
 
     // Env-var fallbacks for prompt-cache knobs. Detect explicit boolean flags
     // from argv so `--prompt-cache-enabled=false` keeps CLI-over-env precedence
@@ -1430,7 +1445,8 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     env_fallback_prompt_cache_enabled(
         &mut args.prompt_cache_enabled,
         long_cli_flag_was_set("prompt-cache-enabled"),
-    );
+    )
+    .map_err(anyhow::Error::msg)?;
     env_fallback_prompt_cache_capacity_bytes(&mut args.prompt_cache_capacity_bytes);
     env_fallback_prompt_cache_max_entries(&mut args.prompt_cache_max_entries);
     env_fallback_prompt_cache_ttl(&mut args.prompt_cache_ttl);
@@ -1477,6 +1493,15 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     // pattern shared with the other `MLXCEL_*` / `LLAMA_ARG_*` pairs.
     env_fallback_draft_kind(&mut args.speculative.draft_kind);
     env_fallback_draft_block_size(&mut args.speculative.draft_block_size);
+    env_fallback_draft_model(&mut args.model_draft);
+    env_fallback_batch_size(&mut args.batch_size);
+    env_fallback_ubatch_size(&mut args.ubatch_size);
+    env_fallback_log_file(&mut args.log_file);
+    env_fallback_endpoint_slots(
+        &mut args.slots,
+        long_cli_flag_was_set("slots"),
+        long_cli_flag_was_set("no-slots"),
+    );
 
     // Axis B (B8): resolve once up-front so CLI errors surface before the
     // server starts listening. Baseline path returns `None` (bit-exact).
@@ -1575,7 +1600,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         warmup: args.warmup,
         no_warmup: args._no_warmup,
         temperature: args.temp,
-        temperature_was_set: long_cli_flag_was_set("temp"),
+        temperature_was_set: long_cli_flag_was_set("temp") || long_cli_flag_was_set("temperature"),
         top_k: args.top_k,
         top_k_was_set: long_cli_flag_was_set("top-k")
             || std::env::var_os("LLAMA_ARG_TOP_K").is_some(),
@@ -1630,17 +1655,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         metrics_port: args.metrics_port,
         debug_pp_trace: args.debug_pp_trace,
         lang_bias_config,
-        // route through `env_fallback_reasoning_budget` so that
-        // CLI-vs-env precedence, unparseable-env handling, and the collision
-        // INFO log are handled consistently with `mlxcel serve` and with the
-        // other LLAMA_ARG_* env fallbacks. (Do NOT put `env = "..."` on the
-        // clap arg, that bypasses our warn-and-ignore policy for unparseable
-        // values and would emit a misleading collision warning.)
-        reasoning_budget: {
-            let mut v = args.reasoning_budget;
-            env_fallback_reasoning_budget(&mut v);
-            v
-        },
+        reasoning_budget: args.reasoning_budget,
         chat_template_kwargs: args.chat_template_kwargs,
         // prompt-cache knobs already resolved via env-var fallbacks above.
         // `--no-prompt-cache` is the highest-precedence opt-out: it wins over
@@ -1703,8 +1718,42 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+
+    static CLI_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    struct ScopedEnv(Vec<(&'static str, Option<OsString>)>);
+
+    impl ScopedEnv {
+        fn set(values: &[(&'static str, &'static str)]) -> Self {
+            let saved = values
+                .iter()
+                .map(|(key, _)| (*key, std::env::var_os(key)))
+                .collect();
+            for (key, value) in values {
+                // SAFETY: every env-mutating test in this binary holds CLI_ENV_LOCK.
+                unsafe { std::env::set_var(key, value) };
+            }
+            Self(saved)
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            for (key, value) in self.0.drain(..) {
+                // SAFETY: the guard is dropped before the outer CLI_ENV_LOCK guard.
+                unsafe {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn help_explains_embedding_and_reranking_server_modes() {
@@ -1742,6 +1791,77 @@ mod tests {
             "test argv should exercise legacy server-start mode"
         );
         cli.server
+    }
+
+    #[test]
+    fn temp_and_temperature_aliases_resolve_identically() {
+        let primary = parse_server_args(&["mlxcel-server", "-m", "models/foo", "--temp", "0.37"]);
+        let alias =
+            parse_server_args(&["mlxcel-server", "-m", "models/foo", "--temperature", "0.37"]);
+        assert_eq!(primary.temp, alias.temp);
+    }
+
+    #[test]
+    fn canonical_llama_envs_and_endpoint_precedence_parse_together() {
+        let _lock = CLI_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = ScopedEnv::set(&[
+            ("LLAMA_ARG_BATCH", "111"),
+            ("LLAMA_ARG_BATCH_SIZE", "999"),
+            ("LLAMA_ARG_UBATCH", "22"),
+            ("LLAMA_ARG_UBATCH_SIZE", "999"),
+            ("LLAMA_ARG_SPEC_DRAFT_MODEL", "models/canonical-draft"),
+            ("LLAMA_ARG_MODEL_DRAFT", "models/legacy-draft"),
+            ("LLAMA_ARG_LOG_FILE", "canonical.log"),
+            ("LLAMA_LOG_FILE", "legacy.log"),
+            ("LLAMA_ARG_CHAT_TEMPLATE", "{{ messages }}"),
+            ("LLAMA_ARG_CHAT_TEMPLATE_FILE", "canonical.jinja"),
+            ("LLAMA_ARG_ENDPOINT_METRICS", "true"),
+            ("LLAMA_ARG_ENDPOINT_PROPS", "true"),
+            ("LLAMA_ARG_ENDPOINT_SLOTS", "false"),
+        ]);
+
+        let mut args = parse_server_args(&["mlxcel-server", "-m", "models/foo"]);
+        env_fallback_batch_size(&mut args.batch_size);
+        env_fallback_ubatch_size(&mut args.ubatch_size);
+        env_fallback_draft_model(&mut args.model_draft);
+        env_fallback_log_file(&mut args.log_file);
+        env_fallback_endpoint_slots(&mut args.slots, false, false);
+        assert_eq!(args.batch_size, Some(111));
+        assert_eq!(args.ubatch_size, Some(22));
+        assert_eq!(
+            args.model_draft.as_deref(),
+            Some(Path::new("models/canonical-draft"))
+        );
+        assert_eq!(args.log_file.as_deref(), Some(Path::new("canonical.log")));
+        assert_eq!(args.chat_template.as_deref(), Some("{{ messages }}"));
+        assert_eq!(
+            args.chat_template_file.as_deref(),
+            Some(Path::new("canonical.jinja"))
+        );
+        assert!(args.metrics);
+        assert!(args.props);
+        assert!(!args.slots);
+
+        let mut cli_args = parse_server_args(&[
+            "mlxcel-server",
+            "-m",
+            "models/foo",
+            "--batch-size",
+            "333",
+            "--slots",
+        ]);
+        env_fallback_endpoint_slots(&mut cli_args.slots, true, false);
+        assert_eq!(cli_args.batch_size, Some(333));
+        assert!(cli_args.slots);
+
+        let mut no_slots_args =
+            parse_server_args(&["mlxcel-server", "-m", "models/foo", "--no-slots"]);
+        env_fallback_endpoint_slots(&mut no_slots_args.slots, false, true);
+        assert!(no_slots_args._no_slots);
+        assert!(!(no_slots_args.slots && !no_slots_args._no_slots));
     }
 
     fn make_complete_snapshot(models_root: &Path, repo_id: &str) -> PathBuf {
