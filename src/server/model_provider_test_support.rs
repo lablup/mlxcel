@@ -51,6 +51,7 @@ impl ModelProvider {
             model_id: "route-test-model".to_string(),
             created_at: 0,
             loaded,
+            chat_unavailable: Arc::new(AtomicBool::new(false)),
             batch_metrics,
             batch_observability,
             max_queue_depth,
@@ -61,4 +62,34 @@ impl ModelProvider {
             _worker_handle: worker_handle,
         }
     }
+
+    pub(crate) fn chat_unavailable_for_route_tests() -> Self {
+        Self::closed_worker_for_route_tests(true, false)
+    }
+
+    pub(crate) fn exited_chat_worker_for_route_tests() -> Self {
+        Self::closed_worker_for_route_tests(false, true)
+    }
+
+    fn closed_worker_for_route_tests(chat_unavailable: bool, loaded: bool) -> Self {
+        let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
+        drop(request_rx);
+        let batch_metrics = Arc::new(BatchMetrics::new());
+        Self {
+            request_tx,
+            model_id: "route-test-model".to_string(),
+            created_at: 0,
+            loaded: Arc::new(AtomicBool::new(loaded)),
+            chat_unavailable: Arc::new(AtomicBool::new(chat_unavailable)),
+            batch_metrics,
+            batch_observability: Arc::new(BatchObservability::new()),
+            max_queue_depth: usize::MAX,
+            single_stream_queue_admission: Arc::new(AtomicBool::new(false)),
+            prompt_cache: None,
+            prompt_tokenizer: None,
+            decode_hang_timeout: DECODE_HANG_TIMEOUT,
+            _worker_handle: thread::spawn(|| {}),
+        }
+    }
+
 }

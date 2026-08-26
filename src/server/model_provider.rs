@@ -111,6 +111,10 @@ pub(crate) struct QueueFullError {
     pub(crate) max_queue_depth: usize,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("the chat worker has exited; check the server log")]
+pub(crate) struct ChatWorkerGoneError;
+
 impl SingleStreamQueueReservation {
     fn try_new(batch_metrics: Arc<BatchMetrics>, max_queue_depth: usize) -> Result<Self> {
         if batch_metrics.try_reserve_queue_slot(max_queue_depth) {
@@ -188,6 +192,7 @@ pub struct ModelProvider {
     model_id: String,
     created_at: i64,
     loaded: Arc<AtomicBool>,
+    chat_unavailable: Arc<AtomicBool>,
     batch_metrics: Arc<BatchMetrics>,
     batch_observability: Arc<BatchObservability>,
     max_queue_depth: usize,
@@ -428,10 +433,10 @@ impl ModelProvider {
     /// Used when `-m` names the checkpoint `--reranker-model` already owns
     /// (#1356), so the reranker worker keeps the only copy of those weights.
     /// The worker thread starts, logs why chat is unavailable and exits, which
-    /// drops the request receiver; every generation request then fails at
-    /// enqueue time. That is the same observable state a failed chat load
-    /// leaves behind (`-m <embedding checkpoint>` reaches it too), including
-    /// `/health` reporting `loading model`, so no route needs a new case.
+    /// drops the request receiver and records a terminal no-chat state. Failed
+    /// chat loads record the same state (`-m <embedding checkpoint>` reaches
+    /// it too), so generation routes return a structured capability error while
+    /// `/health` keeps its existing `loading model` behavior.
     fn new_without_chat_model(
         model_path: PathBuf,
         batch_metrics: Arc<BatchMetrics>,
@@ -443,6 +448,7 @@ impl ModelProvider {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
+        let chat_unavailable = Arc::new(AtomicBool::new(true));
         let display_path = model_path.display().to_string();
         let worker_handle = thread::Builder::new()
             .name("model-worker-rerank-only".to_string())
@@ -458,6 +464,7 @@ impl ModelProvider {
             model_id,
             created_at: chrono::Utc::now().timestamp(),
             loaded: Arc::new(AtomicBool::new(false)),
+            chat_unavailable,
             batch_metrics,
             batch_observability,
             max_queue_depth: 1,
@@ -492,6 +499,8 @@ impl ModelProvider {
         let (request_tx, request_rx) = mpsc::channel::<ModelRequest>();
         let loaded = Arc::new(AtomicBool::new(false));
         let loaded_clone = loaded.clone();
+        let chat_unavailable = Arc::new(AtomicBool::new(false));
+        let chat_unavailable_clone = chat_unavailable.clone();
         let single_stream_queue_admission = Arc::new(AtomicBool::new(
             uses_single_stream_queue_admission(&model_path),
         ));
@@ -506,6 +515,7 @@ impl ModelProvider {
             reasoning_budget,
             request_rx,
             loaded_clone,
+            chat_unavailable_clone,
             worker_model_id,
             metrics_clone,
             obs_clone,
@@ -519,6 +529,7 @@ impl ModelProvider {
             loaded,
             batch_metrics,
             batch_observability,
+            chat_unavailable,
             max_queue_depth,
             single_stream_queue_admission,
             prompt_cache: None,
@@ -572,6 +583,7 @@ impl ModelProvider {
             loaded,
             batch_metrics,
             batch_observability,
+            chat_unavailable: Arc::new(AtomicBool::new(false)),
             max_queue_depth: usize::MAX,
             single_stream_queue_admission,
             prompt_cache: None,
@@ -809,6 +821,8 @@ impl ModelProvider {
         let single_stream_queue_admission = Arc::new(AtomicBool::new(
             uses_single_stream_queue_admission(&model_path),
         ));
+        let chat_unavailable = Arc::new(AtomicBool::new(false));
+        let chat_unavailable_clone = chat_unavailable.clone();
         let worker_model_id = model_id.clone();
         let metrics_clone = batch_metrics.clone();
         let obs_clone = batch_observability.clone();
@@ -866,6 +880,7 @@ impl ModelProvider {
             adapter_path,
             request_rx,
             loaded_clone,
+            chat_unavailable_clone,
             worker_model_id,
             sched_config,
             metrics_clone,
@@ -881,6 +896,7 @@ impl ModelProvider {
             batch_metrics,
             batch_observability,
             max_queue_depth,
+            chat_unavailable,
             single_stream_queue_admission,
             prompt_cache: prompt_cache_store,
             prompt_tokenizer: None,
@@ -913,6 +929,8 @@ impl ModelProvider {
         let single_stream_queue_admission = Arc::new(AtomicBool::new(
             uses_single_stream_queue_admission(&model_path),
         ));
+        let chat_unavailable = Arc::new(AtomicBool::new(false));
+        let chat_unavailable_clone = chat_unavailable.clone();
 
         // Clone model_id for the worker thread
         let worker_model_id = model_id.clone();
@@ -963,6 +981,7 @@ impl ModelProvider {
             adapter_path,
             request_rx,
             loaded_clone,
+            chat_unavailable_clone,
             worker_model_id,
             sched_config,
             metrics_clone,
@@ -978,6 +997,7 @@ impl ModelProvider {
             batch_metrics,
             batch_observability,
             max_queue_depth,
+            chat_unavailable,
             single_stream_queue_admission,
             prompt_cache: None,
             prompt_tokenizer: None,
@@ -1036,6 +1056,11 @@ impl ModelProvider {
     /// Check if model is loaded and ready for inference
     pub fn is_loaded(&self) -> bool {
         self.loaded.load(Ordering::Acquire)
+    }
+
+    /// Whether the generation worker reached a terminal no-chat state.
+    pub fn is_chat_unavailable(&self) -> bool {
+        self.chat_unavailable.load(Ordering::Acquire)
     }
 
     /// Generate text and return the full result
@@ -1433,19 +1458,23 @@ impl ModelProvider {
             QueueReservationMode::PreReserved(reservation) => reservation,
         };
 
-        if let Err(err) = self.request_tx.send(ModelRequest::Generate {
-            prompt,
-            prompt_token_ids,
-            options,
-            images,
-            audio,
-            videos,
-            media,
-            queue_reservation,
-            response_tx,
-            cancelled,
-        }) {
-            return Err(anyhow::anyhow!("Failed to send request: {err}"));
+        if self
+            .request_tx
+            .send(ModelRequest::Generate {
+                prompt,
+                prompt_token_ids,
+                options,
+                images,
+                audio,
+                videos,
+                media,
+                queue_reservation,
+                response_tx,
+                cancelled,
+            })
+            .is_err()
+        {
+            return Err(anyhow::Error::new(ChatWorkerGoneError));
         }
 
         Ok(response_rx)
@@ -1684,7 +1713,7 @@ where
                     ));
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(anyhow::anyhow!("Response channel closed"));
+                    return Err(anyhow::Error::new(ChatWorkerGoneError));
                 }
             }
         } else {
@@ -1692,7 +1721,7 @@ where
             // any timeout so we never spuriously abort a valid request.
             match response_rx.recv() {
                 Ok(ev) => ev,
-                Err(_) => return Err(anyhow::anyhow!("Response channel closed")),
+                Err(_) => return Err(anyhow::Error::new(ChatWorkerGoneError)),
             }
         };
 

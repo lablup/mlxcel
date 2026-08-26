@@ -30,7 +30,6 @@ use axum::{
 use crate::server::batch::RequestPriority;
 use crate::server::config::ReasoningBudgetOverride;
 use crate::server::media::MediaRequestMetadata;
-use crate::server::model_provider::QueueFullError;
 use crate::server::request_options::{
     RequestOptionOverrides, build_server_generate_options, resolve_server_max_tokens,
 };
@@ -42,11 +41,7 @@ use crate::server::types::{
 use crate::server::{AppState, ServerConfig, ServerGenerateOptions};
 
 fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
-    if err.downcast_ref::<QueueFullError>().is_some() {
-        ErrorResponse::service_unavailable("All slots are busy. Please try again later.")
-    } else {
-        ErrorResponse::new(format!("Generation error: {err}"), "server_error")
-    }
+    super::generation_error_to_response(err)
 }
 
 /// POST /completion
@@ -55,6 +50,10 @@ pub async fn native_completion(
     headers: HeaderMap,
     Json(request): Json<NativeCompletionRequest>,
 ) -> Response {
+    if let Some(response) = super::chat_not_available(&state) {
+        return response.into_response();
+    }
+
     // the native `/completion` endpoint does not support
     // `response_format`. Reject up front with a clear 400 so the client
     // does not assume their schema was honored — the chat-completions

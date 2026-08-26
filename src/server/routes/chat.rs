@@ -32,7 +32,6 @@ use crate::server::chat_request::{
     prepare_chat_request_with_cache, request_has_effective_input, resolve_effective_kwargs,
 };
 use crate::server::config::{PromptCacheRequestContext, ReasoningBudgetOverride};
-use crate::server::model_provider::QueueFullError;
 use crate::server::prompt_cache::key::{
     multimodal_digest_from_vecs, resolve_session_key, template_sig,
 };
@@ -76,11 +75,7 @@ pub(crate) fn structured_error_to_response(err: StructuredOutputError) -> ErrorR
 }
 
 fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
-    if err.downcast_ref::<QueueFullError>().is_some() {
-        ErrorResponse::service_unavailable("All slots are busy. Please try again later.")
-    } else {
-        ErrorResponse::new(format!("Generation error: {err}"), "server_error")
-    }
+    super::generation_error_to_response(err)
 }
 
 /// Build the per-request prompt-cache context.
@@ -222,6 +217,10 @@ pub async fn chat_completions(
     headers: HeaderMap,
     Json(request): Json<ChatCompletionRequest>,
 ) -> Response {
+    if let Some(response) = super::chat_not_available(&state) {
+        return response.into_response();
+    }
+
     // Reject requests with no effective input before any other validation or
     // model dispatch (issue #773): an empty `messages` array, or messages
     // whose content is empty/whitespace-only with no media/tool/reasoning

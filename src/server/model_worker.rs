@@ -196,6 +196,7 @@ pub(crate) fn spawn_model_worker_with_batch_config(
     adapter_path: Option<PathBuf>,
     request_rx: mpsc::Receiver<ModelRequest>,
     loaded: Arc<AtomicBool>,
+    chat_unavailable: Arc<AtomicBool>,
     worker_model_id: String,
     sched_config: WorkerSchedulerConfig,
     batch_metrics: Arc<BatchMetrics>,
@@ -281,6 +282,7 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                     (model, tokenizer)
                 }
                 Err(err) => {
+                    chat_unavailable.store(true, Ordering::Release);
                     tracing::error!("Failed to load model: {err}");
                     return;
                 }
@@ -898,6 +900,7 @@ pub(crate) fn spawn_legacy_model_worker(
     reasoning_budget: Option<crate::server::thinking_budget::ThinkingBudget>,
     request_rx: mpsc::Receiver<ModelRequest>,
     loaded: Arc<AtomicBool>,
+    chat_unavailable: Arc<AtomicBool>,
     worker_model_id: String,
     batch_metrics: Arc<BatchMetrics>,
     batch_observability: Arc<BatchObservability>,
@@ -966,6 +969,7 @@ pub(crate) fn spawn_legacy_model_worker(
                     (model, tokenizer)
                 }
                 Err(err) => {
+                    chat_unavailable.store(true, Ordering::Release);
                     tracing::error!("Failed to load model: {err}");
                     return;
                 }

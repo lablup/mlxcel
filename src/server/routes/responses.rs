@@ -61,11 +61,7 @@ use crate::server::types::responses_response::{
 use crate::server::types::responses_stream::ResponseStreamEvent;
 
 fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
-    if err.downcast_ref::<QueueFullError>().is_some() {
-        ErrorResponse::service_unavailable("All slots are busy. Please try again later.")
-    } else {
-        ErrorResponse::new(format!("Generation error: {err}"), "server_error")
-    }
+    super::generation_error_to_response(err)
 }
 
 use super::chat::{
@@ -80,6 +76,10 @@ pub async fn create_response(
     headers: HeaderMap,
     Json(request): Json<CreateResponseRequest>,
 ) -> Response {
+    if let Some(response) = super::chat_not_available(&state) {
+        return response.into_response();
+    }
+
     // -- Translate Responses request → ChatCompletionRequest ---------------
     let translated = match responses_request_to_chat(
         &request,

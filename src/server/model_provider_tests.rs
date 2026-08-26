@@ -21,8 +21,8 @@ use mlxcel_core::generate::SamplingConfig;
 use mlxcel_core::sampling::{LogprobsConfig, TokenLogprobData};
 
 use super::{
-    DECODE_HANG_TIMEOUT, GenerateEvent, GenerationResult, ModelProvider, ModelRequest,
-    QueueReservationMode, SingleStreamQueueReservation, drain_generation_events,
+    ChatWorkerGoneError, DECODE_HANG_TIMEOUT, GenerateEvent, GenerationResult, ModelProvider,
+    ModelRequest, QueueReservationMode, SingleStreamQueueReservation, drain_generation_events,
     send_shutdown_signal, tokenize_prompt_for_generation,
     tokenize_prompt_for_generation_with_ordered_media, validated_decode_hang_timeout,
 };
@@ -93,7 +93,7 @@ fn drain_generation_events_reports_closed_channel() {
     let (tx, rx) = mpsc::channel::<GenerateEvent>();
     drop(tx);
     let err = drain_generation_events(rx, DECODE_HANG_TIMEOUT, |_| {}).unwrap_err();
-    assert!(err.to_string().contains("Response channel closed"));
+    assert!(err.downcast_ref::<ChatWorkerGoneError>().is_some());
 }
 
 #[test]
@@ -257,6 +257,7 @@ fn pre_reserved_single_stream_enqueue_does_not_double_reserve() {
         model_id: "test-model".to_string(),
         created_at: 0,
         loaded: Arc::new(AtomicBool::new(true)),
+        chat_unavailable: Arc::new(AtomicBool::new(false)),
         batch_metrics: metrics.clone(),
         batch_observability: Arc::new(BatchObservability::new()),
         max_queue_depth: 1,
@@ -302,6 +303,7 @@ fn scheduler_paths_do_not_create_single_stream_reservations() {
         model_id: "test-model".to_string(),
         created_at: 0,
         loaded: Arc::new(AtomicBool::new(true)),
+        chat_unavailable: Arc::new(AtomicBool::new(false)),
         batch_metrics: Arc::new(BatchMetrics::new()),
         batch_observability: Arc::new(BatchObservability::new()),
         max_queue_depth: 0,

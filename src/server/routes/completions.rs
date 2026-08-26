@@ -32,7 +32,6 @@ use crate::server::AppState;
 use crate::server::batch::RequestPriority;
 use crate::server::config::ReasoningBudgetOverride;
 use crate::server::media::MediaRequestMetadata;
-use crate::server::model_provider::QueueFullError;
 use crate::server::request_options::resolve_server_max_tokens;
 use crate::server::streaming::{sse_channel, sse_response};
 use crate::server::structured::build_constraint_from_response_format;
@@ -47,11 +46,7 @@ use super::chat::{
 };
 
 fn generation_error_to_response(err: anyhow::Error) -> ErrorResponse {
-    if err.downcast_ref::<QueueFullError>().is_some() {
-        ErrorResponse::service_unavailable("All slots are busy. Please try again later.")
-    } else {
-        ErrorResponse::new(format!("Generation error: {err}"), "server_error")
-    }
+    super::generation_error_to_response(err)
 }
 
 /// Build a `CompletionLogprobs` from a list of `TokenLogprobData` (legacy format).
@@ -143,6 +138,10 @@ pub async fn completions(
     headers: HeaderMap,
     Json(request): Json<CompletionRequest>,
 ) -> Response {
+    if let Some(response) = super::chat_not_available(&state) {
+        return response.into_response();
+    }
+
     // Reject whitespace-only-but-nonempty prompts before any model dispatch,
     // alongside the route's other pre-dispatch validations (issue #806).
     // See `prompt_is_whitespace_only` for why an empty prompt is allowed

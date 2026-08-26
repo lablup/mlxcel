@@ -164,8 +164,7 @@ pub fn sort_and_truncate(
 ) -> Vec<RerankResult> {
     results.sort_by(|a, b| {
         b.relevance_score
-            .partial_cmp(&a.relevance_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&a.relevance_score)
             .then(a.index.cmp(&b.index))
     });
     if let Some(n) = top_n {
