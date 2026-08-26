@@ -631,6 +631,37 @@ fn serve_draft_max_and_draft_aliases_resolve_identically() {
     assert_eq!(primary_args.draft_max, 24);
 }
 
+#[test]
+fn serve_slots_flags_use_last_occurrence() {
+    let disabled = Cli::try_parse_from([
+        "mlxcel",
+        "serve",
+        "-m",
+        "models/foo",
+        "--slots",
+        "--no-slots",
+    ])
+    .expect("--slots --no-slots must parse");
+    let Commands::Serve(disabled) = disabled.command else {
+        panic!("expected serve command");
+    };
+    assert!(!(disabled.slots && !disabled._no_slots));
+
+    let enabled = Cli::try_parse_from([
+        "mlxcel",
+        "serve",
+        "-m",
+        "models/foo",
+        "--no-slots",
+        "--slots",
+    ])
+    .expect("--no-slots --slots must parse");
+    let Commands::Serve(enabled) = enabled.command else {
+        panic!("expected serve command");
+    };
+    assert!(enabled.slots && !enabled._no_slots);
+}
+
 // ── Server flag spelling parity (issue #1109) ───────────────────
 //
 // `mlxcel serve` and `mlxcel-server` are two hand-maintained clap

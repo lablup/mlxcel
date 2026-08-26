@@ -660,7 +660,7 @@ struct ServerArgs {
     chat_template_file: Option<PathBuf>,
 
     /// Enable /slots endpoint
-    #[arg(long = "slots", default_value_t = true)]
+    #[arg(long = "slots", default_value_t = true, overrides_with = "_no_slots")]
     slots: bool,
 
     /// Disable /slots endpoint
@@ -1862,6 +1862,17 @@ mod tests {
         env_fallback_endpoint_slots(&mut no_slots_args.slots, false, true);
         assert!(no_slots_args._no_slots);
         assert!(!(no_slots_args.slots && !no_slots_args._no_slots));
+    }
+
+    #[test]
+    fn slots_flags_use_last_occurrence() {
+        let disabled =
+            parse_server_args(&["mlxcel-server", "-m", "models/foo", "--slots", "--no-slots"]);
+        assert!(!(disabled.slots && !disabled._no_slots));
+
+        let enabled =
+            parse_server_args(&["mlxcel-server", "-m", "models/foo", "--no-slots", "--slots"]);
+        assert!(enabled.slots && !enabled._no_slots);
     }
 
     fn make_complete_snapshot(models_root: &Path, repo_id: &str) -> PathBuf {

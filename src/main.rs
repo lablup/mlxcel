@@ -1322,7 +1322,7 @@ pub(crate) struct ServeArgs {
     chat_template_file: Option<PathBuf>,
 
     /// Enable /slots endpoint
-    #[arg(long = "slots", default_value_t = true)]
+    #[arg(long = "slots", default_value_t = true, overrides_with = "_no_slots")]
     slots: bool,
 
     /// Disable /slots endpoint
