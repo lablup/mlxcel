@@ -1,10 +1,10 @@
-# Embeddings API (`/v1/embeddings`) and `mlxcel embed`
+# Embeddings and reranking APIs and CLI
 
-mlxcel serves embedding checkpoints through the OpenAI-compatible `POST /v1/embeddings` endpoint and the offline `mlxcel embed` command. This page covers the shared foundation every embedding family builds on: detection, pooling, normalization, length limits, the request and response schema, the server flags, and the CLI. Per-family details (prompt prefixes, instruction formats, image support) are filled in by each family as it lands; the family table lives in [supported-models.md](supported-models.md#embedding-models).
+mlxcel serves embedding checkpoints through the OpenAI-compatible `POST /v1/embeddings` endpoint and the offline `mlxcel embed` command. This page covers the shared foundation every embedding family builds on: detection, pooling, normalization, length limits, the request and response schema, the server flags, and the CLI. Per-family prompt prefixes, instruction formats, and image support are documented below; the maintained family table lives in [supported-models.md](supported-models.md#embedding-models).
 
 Relevance scoring lives on the same page, under [Reranking](#reranking-v1rerank-and-mlxcel-rerank): `POST /v1/rerank` and `mlxcel rerank` share this subsystem's tokenizer, length-limit and worker plumbing, and two of the three reranker kinds sit on encoders the embedding families already own.
 
-**Current status.** The route, the worker thread, batching, pooling and the CLI are in place. Detection recognizes every family listed below and the loader dispatches on it, but the forward passes land one family at a time (epic #1348): loading a checkpoint whose family has not landed reports `<family> is detected as an embedding checkpoint, but this embedding family is not yet supported by /v1/embeddings`. The [Embedding models table](supported-models.md#embedding-models) records which families are served today.
+**Current status.** Both endpoints, their dedicated worker threads, batching, the offline commands, and every forward pass in the embedding and reranker support tables are implemented. The [embedding](supported-models.md#embedding-models) and [reranker](supported-models.md#reranker-models) tables are the maintained source of truth for served families and checkpoint-specific limitations.
 
 ## Implemented endpoints
 
@@ -33,6 +33,8 @@ Relevance scoring lives on the same page, under [Reranking](#reranking-v1rerank-
 | `src/models/bert.rs` | BERT / XLM-RoBERTa encoder trunk: weight sanitization, position ids, blocks. |
 | `src/models/bert_config.rs` | BERT / XLM-RoBERTa config resolution, re-exported through `bert`. |
 | `src/models/bert_heads.rs` | `BertEmbeddingModel` and `BertSequenceClassifier` on that trunk. |
+| `src/models/modernbert.rs`, `src/models/modernbert_heads.rs` | ModernBERT encoder and its embedding / sequence-classification heads. |
+| `src/models/siglip_text.rs` | SigLIP text tower, fixed-width tokenization contract, projection and pooling. |
 | `src/server/embedding_model.rs` | `EmbeddingModelProvider` trait and `EmbeddingError`. |
 | `src/server/embedding_worker.rs` | `EmbeddingWorker`: the dedicated MLX-owning thread, bounded queue, timeout, panic boundary. |
 | `src/server/routes/embeddings.rs` | HTTP handler, validation order, error mapping. |
@@ -41,6 +43,8 @@ Relevance scoring lives on the same page, under [Reranking](#reranking-v1rerank-
 | `src/models/embedding_sanitize.rs` | Weight-key normalization shared by the decoder-backbone families: `{N}_Dense.linear.*` folding, head dropping, `model.` prefixing. |
 | `src/models/gemma3_embedding.rs` | EmbeddingGemma: bidirectional Gemma 3, mean pooling, two `Dense` projections. |
 | `src/models/qwen3_embedding.rs` | Qwen3-Embedding: causal Qwen3, last-token pooling. |
+| `src/models/qwen3_vl_embedding.rs` | Qwen3-VL-Embedding: multimodal chat formatting, vision injection and last-token pooling. |
+| `src/models/llama_nemotron_vl_embedding.rs` | Llama-Nemotron-VL-Embed: SigLIP tiling, projection and bidirectional Llama pooling. |
 | `src/models/col_late_interaction.rs` | Shared by the two late-interaction families: `embedding_dim`, the `1_Dense` projection override, the LoRA-only rejection, per-token projection and normalization, the query format. |
 | `src/models/colidefics3.rs` | ColIdefics3: SmolVLM / Idefics3 without a head plus a 128-dim projection. |
 | `src/models/colqwen2_5.rs` | ColQwen2.5: Qwen2.5-VL without a head plus a 128-dim projection. |
@@ -414,8 +418,8 @@ A mask is never built as `(1 - m) * C` with a finite `C` in the activation dtype
 | `--embedding-model <path or repo-id>` | `LLAMA_ARG_EMBEDDING_MODEL`, `MLXCEL_EMBEDDING_MODEL` | unset | A second checkpoint served on `/v1/embeddings` next to the chat model in `-m`. Resolved and auto-downloaded like `-m`. Combining it with an embedding checkpoint in `-m` is a startup error ("two embedding models"). A load failure of an explicit `--embedding-model` is a startup error; a load failure of an `-m` embedding checkpoint is logged and the route answers `501`. |
 | `--embedding-batch-size N` | `MLXCEL_EMBEDDING_BATCH_SIZE` | `16` | Texts per forward pass. |
 | `--embedding-max-length N` | `MLXCEL_EMBEDDING_MAX_LENGTH` | derived | Lowers the derived `max_length`. |
-| `--embedding-queue-depth N` | `MLXCEL_EMBEDDING_QUEUE_DEPTH` | `8` | Bound on the worker command queue; a full queue returns `503`. |
-| `--embedding-request-timeout-secs N` | `MLXCEL_EMBEDDING_REQUEST_TIMEOUT_SECS` | `120` | Per-request reply timeout; `0` falls back to the default. |
+| `--embedding-queue-depth N` | `MLXCEL_EMBEDDING_QUEUE_DEPTH` | `8` | Bound on each embedding/reranking worker command queue; a full queue returns `503`. |
+| `--embedding-request-timeout-secs N` | `MLXCEL_EMBEDDING_REQUEST_TIMEOUT_SECS` | `120` | Per-request embedding/reranking reply timeout; `0` falls back to the default. |
 
 Both `mlxcel serve` and `mlxcel-server` accept every flag. The embedding model runs on its own dedicated MLX thread (the model, tokenizer and every array live there), so chat and embeddings never share a stream.
 
@@ -434,7 +438,8 @@ curl -s localhost:8080/v1/embeddings -H 'Content-Type: application/json' \
 
 ```text
 mlxcel embed -m <path or repo-id> -p "text" [-p "text2" ...] [--image <file> ...]
-             [--instruction "..."] [--dimensions N] [--max-length N] [--batch-size N] [--json]
+             [--instruction "..."] [--dimensions N] [--max-length N] [--batch-size N]
+             [--models-dir PATH] [--json]
 ```
 
 Prints one vector per input (`[v1, v2, ...]`, one line each; a list of rows for multi-vector models) and, with two or more inputs, the similarity matrix: cosine for single-vector models, MaxSim for multi-vector ones (the header names which one). `--json` prints one object with `embeddings`, `shapes`, `prompt_tokens` and `similarity` instead. This is the offline validation tool for every family: the same loader, pooling, normalization and batching as the server, without a listener.
@@ -551,7 +556,7 @@ curl -s localhost:8080/v1/rerank -H 'Content-Type: application/json' -d '{
 ```text
 mlxcel rerank -m <path or repo-id> -q "query" -d "doc" [-d "doc2" ...] [--image <file> ...]
               [--query-image <file>] [--instruction "..."] [--top-n N]
-              [--max-length N] [--batch-size N] [--json]
+              [--max-length N] [--batch-size N] [--models-dir PATH] [--json]
 ```
 
 Prints one relevance score per document in request order, then the ranking. Image documents follow the text ones in the result order. `--json` prints one object with `scores`, `ranking`, `kind` and `prompt_tokens` instead. This is the offline validation tool for every reranker kind: the same loader, prompt assembly and batching as the server, without a listener.

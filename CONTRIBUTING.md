@@ -11,7 +11,7 @@ Thank you for your interest in contributing to mlxcel! This document covers the 
 | Build and test locally | [`docs/installation.md`](docs/installation.md) |
 | Understand the architecture | [`docs/architecture.md`](docs/architecture.md) |
 | Add a new model family | [`docs/adding-models.md`](docs/adding-models.md) |
-| Add or validate an embedding family (`/v1/embeddings`, `mlxcel embed`) | [`docs/embeddings.md`](docs/embeddings.md) |
+| Add or validate an embedding or reranker family (`/v1/embeddings`, `/v1/rerank`, `mlxcel embed`, `mlxcel rerank`) | [`docs/embeddings.md`](docs/embeddings.md) |
 | Understand the code guidelines (shared functions, file size and module splits) | [`docs/code-guidelines.md`](docs/code-guidelines.md) |
 
 ## How to contribute

@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Embeddings are available through `mlxcel embed` and the OpenAI-compatible `POST /v1/embeddings` endpoint** (#1408, #1410-#1416). The server can load an embedding checkpoint alone or next to a chat model with `--embedding-model`; supported families cover BERT/XLM-RoBERTa, ModernBERT, SigLIP text, EmbeddingGemma, Qwen3 and Qwen3-VL embeddings, bidirectional Llama/Nemotron/LFM2.5, Llama-Nemotron-VL, and ColBERT-style multimodal late-interaction models. Pooling, L2 normalization, Matryoshka dimensions, token and image inputs, bounded worker admission, and per-checkpoint length limits are shared by the CLI and server paths.
+- **Reranking is available through `mlxcel rerank` and the Cohere/Jina-compatible `POST /v1/rerank` endpoint** (#1417). One-label BERT/XLM-RoBERTa/ModernBERT cross-encoders, Qwen3 generative rerankers, and Qwen3-VL multimodal rerankers return ranked relevance probabilities; `--reranker-model` can serve one beside the chat and embedding workers.
+
 ## [v0.6.0] - 2026-08-22
 
 ### Changed

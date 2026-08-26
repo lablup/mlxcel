@@ -829,8 +829,8 @@ impl ModelType {
             ModelType::Qwen3 => ("Qwen 3", "Qwen"),
             ModelType::Qwen3Moe => ("Qwen 3 MoE", "Qwen"),
             ModelType::Qwen3Next => ("Qwen 3 Next (Attention + GatedDeltaNet + MoE)", "Qwen"),
-            ModelType::Qwen35 => ("Qwen 3.5 (Attention + GatedDeltaNet hybrid)", "Qwen"),
-            ModelType::Qwen35Moe => ("Qwen 3.5 MoE (hybrid)", "Qwen"),
+            ModelType::Qwen35 => ("Qwen 3.5 / 3.8 (Attention + GatedDeltaNet hybrid)", "Qwen"),
+            ModelType::Qwen35Moe => ("Qwen 3.5 / 3.6 MoE (hybrid)", "Qwen"),
             ModelType::Qwen2Moe => ("Qwen 2 MoE", "Qwen"),
 
             // ----- Qwen VLM -----
@@ -849,8 +849,8 @@ impl ModelType {
             ModelType::Glm4v => ("GLM-4V", "GLM VLM"),
             ModelType::Glm4vMoe => ("GLM-4V MoE", "GLM VLM"),
             ModelType::GlmOcr => ("GLM-OCR", "GLM VLM"),
-            ModelType::Qwen35VLM => ("Qwen 3.5 VLM", "Qwen VLM"),
-            ModelType::Qwen35MoeVLM => ("Qwen 3.5 MoE VLM", "Qwen VLM"),
+            ModelType::Qwen35VLM => ("Qwen 3.5 / 3.8 VLM", "Qwen VLM"),
+            ModelType::Qwen35MoeVLM => ("Qwen 3.5 / 3.6 MoE VLM", "Qwen VLM"),
 
             // ----- Gemma (text) -----
             ModelType::Gemma => ("Gemma 1", "Gemma"),
@@ -979,10 +979,7 @@ impl ModelType {
                 "MiniMax-M3-VL (CLIP ViT + M3 hybrid dense/MoE)",
                 "MiniMax VLM",
             ),
-            ModelType::MuseGlimmerVLM => (
-                "Muse Glimmer 30B VLM (BF16/MLX 4-bit, mixed 2048 sliding/full cache, ATEM)",
-                "Muse VLM",
-            ),
+            ModelType::MuseGlimmerVLM => ("Muse Glimmer 30B VLM", "Muse VLM"),
             ModelType::Mixtral => ("Mixtral (MoE)", "MoE (other)"),
             ModelType::Dbrx => ("Databricks DBRX (MoE)", "MoE (other)"),
             ModelType::KimiLinear => ("Kimi Linear (MLA + GatedDeltaNet hybrid)", "MoE (other)"),
@@ -1029,14 +1026,16 @@ impl ModelType {
             ModelType::Gemma3Embedding => ("EmbeddingGemma (bidirectional Gemma 3)", "Embedding"),
             ModelType::Qwen3Embedding => ("Qwen3-Embedding (last-token)", "Embedding"),
             ModelType::Qwen3VLEmbedding => ("Qwen3-VL-Embedding (multimodal)", "Embedding"),
-            ModelType::Lfm2Embedding => ("LFM2 bidirectional embedder", "Embedding"),
-            ModelType::Ministral3Embedding => ("Ministral 3 bidirectional embedder", "Embedding"),
-            ModelType::LlamaBidirec => ("Llama bidirectional embedder", "Embedding"),
-            ModelType::LlamaNemotronVLEmbedding => {
-                ("Llama-Nemotron-VL embedder (multimodal)", "Embedding")
+            ModelType::Lfm2Embedding => ("LFM2.5-Embedding (bidirectional LFM2)", "Embedding"),
+            ModelType::Ministral3Embedding => {
+                ("Nemotron-3-Embed (bidirectional Ministral 3)", "Embedding")
             }
-            ModelType::ColIdefics3 => ("ColIdefics3 (late interaction, multimodal)", "Embedding"),
-            ModelType::ColQwen25 => ("ColQwen2.5 (late interaction, multimodal)", "Embedding"),
+            ModelType::LlamaBidirec => ("Bidirectional Llama / LLM2Vec embedder", "Embedding"),
+            ModelType::LlamaNemotronVLEmbedding => {
+                ("Llama-Nemotron-VL-Embed (multimodal)", "Embedding")
+            }
+            ModelType::ColIdefics3 => ("ColIdefics3 (late-interaction, multimodal)", "Embedding"),
+            ModelType::ColQwen25 => ("ColQwen2.5 (late-interaction, multimodal)", "Embedding"),
 
             // ----- Rerankers (/v1/rerank) -----
             ModelType::SequenceClassifier => (

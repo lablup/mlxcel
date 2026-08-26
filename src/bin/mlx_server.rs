@@ -68,11 +68,11 @@ use mlxcel::server::{
     flatten_help = true,
     verbatim_doc_comment,
     after_help = "\
-Tensor Parallel Runtime:
-  Current multi-rank support: dense Llama, Qwen2/2.5, Qwen3, Qwen3.5 text, Gemma 3 text, Gemma 4 text, ERNIE 4.5, Hunyuan v1 Dense
-  Current constraints: --tp-embedding-mode replicated, --tp-lm-head-mode replicated
-                       LoRA unsupported, server batching supported for listed dense runtimes
-                       except Gemma 4 E2B-style conservative fallback checkpoints
+Model and Runtime Support:
+  Checkpoint-specific capabilities and limitations:
+    https://github.com/lablup/mlxcel/blob/main/docs/supported-models.md
+  Distributed setup and current constraints:
+    https://github.com/lablup/mlxcel/blob/main/docs/distributed.md
 
 Model store:
   -m/--model accepts either a local path or a HuggingFace owner/name repo-id.
@@ -80,6 +80,16 @@ Model store:
   then the HuggingFace cache, then the mlxcel store, with auto-download on miss.
   Use --models-dir (or MLXCEL_MODELS_DIR) to point the mlxcel store at another
   volume; snapshots live at <root>/<owner>/<name> under that root.
+
+Embeddings and Reranking:
+  -m <embedding checkpoint> serves POST /v1/embeddings without a chat model.
+  --embedding-model <checkpoint> adds embeddings beside the chat model in -m.
+  -m <cross-encoder checkpoint> serves POST /v1/rerank without a chat model.
+  --reranker-model <checkpoint> adds reranking beside chat and is required for
+  generative rerankers. Queue depth and timeout use the --embedding-* worker
+  flags for both endpoints.
+  Full request schemas, examples, and supported families:
+    https://github.com/lablup/mlxcel/blob/main/docs/embeddings.md
 
 Remote Pipeline Parallel Example (TCP):
   1. Generate a shared cluster config:
@@ -382,7 +392,7 @@ struct ServerArgs {
     )]
     embedding_max_length: Option<usize>,
 
-    /// Bound on the embedding worker command queue; a full queue returns 503 (default: 8)
+    /// Bound on each embedding/reranking worker command queue; a full queue returns 503 (default: 8)
     #[arg(
         long = "embedding-queue-depth",
         env = "MLXCEL_EMBEDDING_QUEUE_DEPTH",
@@ -390,7 +400,7 @@ struct ServerArgs {
     )]
     embedding_queue_depth: usize,
 
-    /// Per-request embedding reply timeout in seconds; 0 falls back to the default (default: 120)
+    /// Per-request embedding/reranking reply timeout in seconds; 0 uses the default (default: 120)
     #[arg(
         long = "embedding-request-timeout-secs",
         env = "MLXCEL_EMBEDDING_REQUEST_TIMEOUT_SECS",
@@ -1695,6 +1705,35 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn help_explains_embedding_and_reranking_server_modes() {
+        use clap::CommandFactory;
+
+        let mut command = Cli::command();
+        let help = command.render_long_help().to_string();
+        for expected in [
+            "POST /v1/embeddings",
+            "--embedding-model",
+            "POST /v1/rerank",
+            "--reranker-model",
+            "--embedding-* worker",
+            "docs/embeddings.md",
+            "docs/supported-models.md",
+            "docs/distributed.md",
+        ] {
+            assert!(
+                help.contains(expected),
+                "mlxcel-server --help is missing {expected:?}:\n{help}"
+            );
+        }
+        for model_specific in ["Current multi-rank support", "Gemma 4 E2B-style"] {
+            assert!(
+                !help.contains(model_specific),
+                "mlxcel-server --help must leave model-specific guidance in the model catalog; found {model_specific:?} in:\n{help}"
+            );
+        }
+    }
 
     fn parse_server_args(argv: &[&str]) -> ServerArgs {
         let cli = Cli::try_parse_from(argv).expect("mlxcel-server args should parse");

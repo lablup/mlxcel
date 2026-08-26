@@ -174,17 +174,19 @@ The OpenAI audio endpoints (`/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1
 | `MLXCEL_AUDIO_QUEUE_DEPTH` | unsigned integer | `8` | `--audio-queue-depth` | Bound on the audio worker command queue. When the queue is full, new audio requests get a structured `503` ("All slots are busy") instead of queueing without bound. A depth of `8` caps queued payload at roughly 200 MiB plus the one request in flight. A `0` is clamped to at least one queued command. |
 | `MLXCEL_AUDIO_REQUEST_TIMEOUT_SECS` | unsigned integer seconds | `120` | `--audio-request-timeout-secs` | Per-request reply timeout. A stuck or pathologically slow audio request frees its blocking thread and returns a structured `504` after this, instead of hanging. The timeout does not cancel the in-flight model work on the worker; it only frees the caller. A `0` falls back to the default rather than timing out instantly. |
 
-## Server embedding variables
+## Server embedding and reranking variables
 
-`POST /v1/embeddings` dispatches work to one dedicated embedding worker thread over a bounded command queue, the same design as the audio worker. These knobs pick the checkpoint, bound the queue and the per-request reply wait, and size the micro-batches. See [Embeddings API](embeddings.md) for the endpoint.
+`POST /v1/embeddings` and `POST /v1/rerank` dispatch work to separate dedicated worker threads over bounded command queues, following the same design as the audio worker. These knobs pick the side-model checkpoints, bound both queues and per-request reply waits, and size their micro-batches. See [Embeddings and reranking](embeddings.md) for both endpoints.
 
 | Variable | Values | Default | CLI flag | Notes |
 |----------|--------|---------|----------|-------|
 | `LLAMA_ARG_EMBEDDING_MODEL`, `MLXCEL_EMBEDDING_MODEL` | path or `owner/name` repo-id | unset | `--embedding-model` | A second checkpoint served on `/v1/embeddings` next to the chat model in `-m`; resolved like `-m`. The CLI flag wins over both variables, and `LLAMA_ARG_EMBEDDING_MODEL` wins over the `MLXCEL_` alias. Combining it with an embedding checkpoint in `-m` is a startup error. |
+| `LLAMA_ARG_RERANKER_MODEL`, `MLXCEL_RERANKER_MODEL` | path or `owner/name` repo-id | unset | `--reranker-model` | A checkpoint served on `/v1/rerank` next to the chat model in `-m`; resolved like `-m`. The CLI flag wins over both variables, and `LLAMA_ARG_RERANKER_MODEL` wins over the `MLXCEL_` alias. Generative rerankers require this setting because they cannot be distinguished from chat checkpoints. |
 | `MLXCEL_EMBEDDING_BATCH_SIZE` | unsigned integer | `16` | `--embedding-batch-size` | Texts per forward pass. Text inputs are sorted by token length and cut into micro-batches of this size, each right-padded to its longest member. |
 | `MLXCEL_EMBEDDING_MAX_LENGTH` | unsigned integer | derived | `--embedding-max-length` | Lowers the token cap derived from `sentence_bert_config.json`, `tokenizer_config.json` and `config.json` (hard cap 8192). |
-| `MLXCEL_EMBEDDING_QUEUE_DEPTH` | unsigned integer | `8` | `--embedding-queue-depth` | Bound on the embedding worker command queue; a full queue returns a structured `503`. A `0` is clamped to at least one queued command. |
-| `MLXCEL_EMBEDDING_REQUEST_TIMEOUT_SECS` | unsigned integer seconds | `120` | `--embedding-request-timeout-secs` | Per-request reply timeout; returns a structured `504` and frees the caller without cancelling the in-flight model work. A `0` falls back to the default. |
+| `MLXCEL_RERANK_BATCH_SIZE` | unsigned integer | `0` (kind default) | `--rerank-batch-size` | Query/document pairs per forward pass. `0` selects the reranker kind's default: 8 for text and 2 for multimodal. |
+| `MLXCEL_EMBEDDING_QUEUE_DEPTH` | unsigned integer | `8` | `--embedding-queue-depth` | Bound on each embedding/reranking worker command queue; a full queue returns a structured `503`. A `0` is clamped to at least one queued command. |
+| `MLXCEL_EMBEDDING_REQUEST_TIMEOUT_SECS` | unsigned integer seconds | `120` | `--embedding-request-timeout-secs` | Per-request embedding/reranking reply timeout; returns a structured `504` and frees the caller without cancelling the in-flight model work. A `0` falls back to the default. |
 | `MLXCEL_EMBEDDING_POOLING` | `cls`, `mean`, `max`, `lasttoken` | unset | none | Debugging override of the pooling mode resolved from `1_Pooling/config.json` or the family default; logged at load. Applies to the server and to `mlxcel embed`. |
 
 ## Speculative-decoding variables
