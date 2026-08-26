@@ -296,7 +296,7 @@ impl V4Attention {
                         aligned_mask.as_deref(),
                         sparse_mask.as_deref(),
                         self.scale,
-                        &self.attn_sink,
+                        &sinks,
                     )
                 }
             }
@@ -339,8 +339,9 @@ impl V4Attention {
 
 /// `_sparse_pooled_attention`: split softmax over the local KV and the
 /// gathered top-k pooled KV sharing one log-normalizer plus the per-head
-/// sink. Computed in float32 (the reference's sink `logaddexp` promotes its
-/// normalizer to f32 as well), cast back to `q`'s dtype.
+/// sink. Scores are computed in float32; `sinks` arrives in the activation
+/// dtype exactly as the reference passes it (the `logaddexp` against the f32
+/// normalizer promotes it), and the output is cast back to `q`'s dtype.
 #[allow(clippy::too_many_arguments)]
 fn sparse_pooled_attention(
     q: &MlxArray,
@@ -350,7 +351,7 @@ fn sparse_pooled_attention(
     local_mask: Option<&MlxArray>,
     pooled_mask: Option<&MlxArray>,
     scale: f32,
-    sinks_f32: &MlxArray,
+    sinks: &MlxArray,
 ) -> UniquePtr<MlxArray> {
     let q_shape = mlxcel_core::array_shape(q);
     let (b, h, l, d) = (q_shape[0], q_shape[1], q_shape[2], q_shape[3]);
@@ -389,7 +390,7 @@ fn sparse_pooled_attention(
     normalizer = mlxcel_core::logaddexp(&normalizer, &pooled_norm);
 
     // Per-head sink joins the shared normalizer.
-    let sinks = mlxcel_core::reshape(sinks_f32, &[1, h, 1, 1]);
+    let sinks = mlxcel_core::reshape(sinks, &[1, h, 1, 1]);
     normalizer = mlxcel_core::logaddexp(&normalizer, &sinks);
 
     let local_weights = mlxcel_core::exp(&mlxcel_core::subtract(&local_scores, &normalizer));
