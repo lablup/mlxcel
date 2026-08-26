@@ -38,6 +38,13 @@
 //! (`L > 1`) and decode mode (`L == 1`) take different branches, mirroring
 //! the reference exactly; the pooled-visibility mask is
 //! `pool_idx < (offset + 1 + j) / ratio` and is `None` for `L == 1`.
+//!
+//! One consequence worth knowing, faithfully ported: the overlap shift is
+//! applied WITHIN each ready batch, so the first window of any batch (every
+//! decode-completed window, and the first window a chunked-prefill
+//! continuation completes) gets the zero / `-inf` prefix instead of its real
+//! predecessor's half. Pooled rows therefore depend slightly on how the
+//! token stream was batched; that is reference behavior, not a cache bug.
 
 use mlxcel_core::layers::{RMSNorm, UnifiedLinear};
 use mlxcel_core::weights::WeightMap;
@@ -377,7 +384,11 @@ impl Compressor {
 
 /// `_simple_compress_kv`: softmax(gate_f32 + ape) over the window axis in
 /// f32, cast back to kv dtype, weighted sum.
-fn simple_compress_kv(kv: &MlxArray, gate: &MlxArray, ape: &MlxArray) -> UniquePtr<MlxArray> {
+pub(crate) fn simple_compress_kv(
+    kv: &MlxArray,
+    gate: &MlxArray,
+    ape: &MlxArray,
+) -> UniquePtr<MlxArray> {
     let gate_f32 = mlxcel_core::astype(gate, mlxcel_core::dtype::FLOAT32);
     let gate_f32 = mlxcel_core::add(
         &gate_f32,
@@ -393,13 +404,20 @@ fn simple_compress_kv(kv: &MlxArray, gate: &MlxArray, ape: &MlxArray) -> UniqueP
 /// the first half one window back (zero / `-inf` prefix window), concatenate
 /// on the window axis, softmax (precise) over the doubled window, weighted
 /// sum. Output feature width is `out_dim / 2 == head_dim`.
-fn overlap_compress_kv(kv: &MlxArray, gate: &MlxArray, ape: &MlxArray) -> UniquePtr<MlxArray> {
+pub(crate) fn overlap_compress_kv(
+    kv: &MlxArray,
+    gate: &MlxArray,
+    ape: &MlxArray,
+) -> UniquePtr<MlxArray> {
     let shape = mlxcel_core::array_shape(kv);
     let (b, nw, r, d) = (shape[0], shape[1], shape[2], shape[3]);
     let half = d / 2;
     let kv_dtype = mlxcel_core::array_dtype(kv);
 
-    let gate = mlxcel_core::add(gate, &mlxcel_core::astype(ape, mlxcel_core::array_dtype(gate)));
+    let gate = mlxcel_core::add(
+        gate,
+        &mlxcel_core::astype(ape, mlxcel_core::array_dtype(gate)),
+    );
 
     let shift_back = |t: &MlxArray, fill: f32| -> UniquePtr<MlxArray> {
         // t is [B, Nw, R, half]; prepend a fill window and drop the last.

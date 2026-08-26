@@ -158,19 +158,34 @@ impl V4Attention {
 
         Ok(Self {
             kind,
-            wq_a: UnifiedLinear::from_weights(weights, &format!("{prefix}.wq_a"), group_size, bits)?,
+            wq_a: UnifiedLinear::from_weights(
+                weights,
+                &format!("{prefix}.wq_a"),
+                group_size,
+                bits,
+            )?,
             q_norm: RMSNorm::new(
                 get_weight_copy(weights, &format!("{prefix}.q_norm.weight"))?,
                 args.rms_norm_eps,
             ),
-            wq_b: UnifiedLinear::from_weights(weights, &format!("{prefix}.wq_b"), group_size, bits)?,
+            wq_b: UnifiedLinear::from_weights(
+                weights,
+                &format!("{prefix}.wq_b"),
+                group_size,
+                bits,
+            )?,
             wkv: UnifiedLinear::from_weights(weights, &format!("{prefix}.wkv"), group_size, bits)?,
             kv_norm: RMSNorm::new(
                 get_weight_copy(weights, &format!("{prefix}.kv_norm.weight"))?,
                 args.rms_norm_eps,
             ),
             wo_a: MultiLinear::from_weights(weights, &format!("{prefix}.wo_a"), group_size, bits)?,
-            wo_b: UnifiedLinear::from_weights(weights, &format!("{prefix}.wo_b"), group_size, bits)?,
+            wo_b: UnifiedLinear::from_weights(
+                weights,
+                &format!("{prefix}.wo_b"),
+                group_size,
+                bits,
+            )?,
             attn_sink,
             rope,
             compressor,
@@ -216,9 +231,7 @@ impl V4Attention {
         let sinks = mlxcel_core::astype(&self.attn_sink, mlxcel_core::array_dtype(&q));
 
         let out = match self.kind {
-            AttnKind::Local => {
-                self.dense_sdpa(&q, &kv, aligned_mask.as_deref(), &sinks)
-            }
+            AttnKind::Local => self.dense_sdpa(&q, &kv, aligned_mask.as_deref(), &sinks),
             AttnKind::Compressed => {
                 let compressor = self.compressor.as_ref().expect("compressed layer");
                 let pool = cache.pool.as_mut().expect("compressed layer pool cache");
@@ -227,11 +240,8 @@ impl V4Attention {
                 let np = mlxcel_core::array_shape(&pooled)[1];
                 if np > 0 {
                     let pmask = pool_mask_additive(l, offset, ratio, np);
-                    let kv_full = mlxcel_core::concatenate(
-                        &kv,
-                        &mlxcel_core::expand_dims(&pooled, 1),
-                        2,
-                    );
+                    let kv_full =
+                        mlxcel_core::concatenate(&kv, &mlxcel_core::expand_dims(&pooled, 1), 2);
                     let full_mask = aligned_mask
                         .as_ref()
                         .map(|m| extend_mask(m, pmask.as_deref(), np));
@@ -260,11 +270,8 @@ impl V4Attention {
                 } else if np <= indexer.index_topk {
                     // Short context: dense concat of local + pooled, exactly
                     // the compressed path.
-                    let kv_full = mlxcel_core::concatenate(
-                        &kv,
-                        &mlxcel_core::expand_dims(&pooled, 1),
-                        2,
-                    );
+                    let kv_full =
+                        mlxcel_core::concatenate(&kv, &mlxcel_core::expand_dims(&pooled, 1), 2);
                     let full_mask = aligned_mask
                         .as_ref()
                         .map(|m| extend_mask(m, pmask.as_deref(), np));
@@ -298,10 +305,8 @@ impl V4Attention {
         // Un-rotate the attention output, then the grouped output projection.
         let out = self.rope.apply(&out, offset, true);
         let heads_per_group = self.n_heads / self.o_groups;
-        let out = mlxcel_core::reshape(
-            &out,
-            &[b, self.o_groups, heads_per_group, l, self.head_dim],
-        );
+        let out =
+            mlxcel_core::reshape(&out, &[b, self.o_groups, heads_per_group, l, self.head_dim]);
         let out = mlxcel_core::transpose_axes(&out, &[0, 1, 3, 2, 4]);
         let out = mlxcel_core::reshape(
             &out,
@@ -320,7 +325,9 @@ impl V4Attention {
         mask: Option<&MlxArray>,
         sinks: &MlxArray,
     ) -> UniquePtr<MlxArray> {
-        let mask_ptr = mask.map(|m| m as *const MlxArray).unwrap_or(std::ptr::null());
+        let mask_ptr = mask
+            .map(|m| m as *const MlxArray)
+            .unwrap_or(std::ptr::null());
         let sinks_ptr = sinks as *const MlxArray;
         unsafe {
             mlxcel_core::fast_scaled_dot_product_attention_with_sinks(

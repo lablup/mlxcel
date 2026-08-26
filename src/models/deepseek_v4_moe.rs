@@ -82,15 +82,13 @@ fn score_logits(logits_f32: &MlxArray, func: ScoringFunc) -> UniquePtr<MlxArray>
     match func {
         ScoringFunc::Softmax => mlxcel_core::softmax_precise(logits_f32, -1),
         ScoringFunc::Sigmoid => mlxcel_core::sigmoid(logits_f32),
-        ScoringFunc::SqrtSoftplus => {
-            mlxcel_core::sqrt(&mlxcel_core::utils::softplus(logits_f32))
-        }
+        ScoringFunc::SqrtSoftplus => mlxcel_core::sqrt(&mlxcel_core::utils::softplus(logits_f32)),
     }
 }
 
 /// Router: hash lookup for the first `num_hash_layers` layers, biased
 /// argpartition for the rest.
-enum Routing {
+pub(crate) enum Routing {
     /// `tid2eid` `[vocab_size, top_k]` int32; indices come from the token
     /// ids, weights from the logits.
     Hash { tid2eid: UniquePtr<MlxArray> },
@@ -110,7 +108,12 @@ pub(crate) struct MoEGate {
 }
 
 impl MoEGate {
-    fn from_weights(weights: &WeightMap, args: &ModelArgs, prefix: &str, hash: bool) -> Result<Self, String> {
+    pub(crate) fn from_weights(
+        weights: &WeightMap,
+        args: &ModelArgs,
+        prefix: &str,
+        hash: bool,
+    ) -> Result<Self, String> {
         let weight = get_weight_copy(weights, &format!("{prefix}.weight"))?;
         let w_shape = mlxcel_core::array_shape(&weight);
         let expected = [args.n_routed_experts as i32, args.hidden_size as i32];
@@ -149,7 +152,7 @@ impl MoEGate {
     }
 
     /// Returns `(indices [B, L, K] int32, weights [B, L, K] f32)`.
-    fn forward(
+    pub(crate) fn forward(
         &self,
         x: &MlxArray,
         input_ids: &MlxArray,

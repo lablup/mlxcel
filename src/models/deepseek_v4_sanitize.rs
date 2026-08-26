@@ -89,13 +89,19 @@ pub(crate) fn sanitize_weights(weights: &WeightMap, args: &ModelArgs) -> Result<
             && scale_last * 16 == weight_last
         {
             out.insert(format!("{k}s"), mlxcel_core::copy(v));
-            out.insert(wk.clone(), mlxcel_core::view(weight, mlxcel_core::dtype::UINT32));
+            out.insert(
+                wk.clone(),
+                mlxcel_core::view(weight, mlxcel_core::dtype::UINT32),
+            );
             consumed.insert(k.clone());
             consumed.insert(wk);
         } else if w_dtype == mlxcel_core::dtype::UINT8 {
             let scales = mlxcel_core::repeat(&mlxcel_core::repeat(v, 4, -1), 128, 0);
             out.insert(format!("{k}s"), scales);
-            out.insert(wk.clone(), mlxcel_core::view(weight, mlxcel_core::dtype::UINT32));
+            out.insert(
+                wk.clone(),
+                mlxcel_core::view(weight, mlxcel_core::dtype::UINT32),
+            );
             consumed.insert(k.clone());
             consumed.insert(wk);
         }
@@ -232,7 +238,11 @@ pub(crate) fn validate_weight_coverage(
     linear("model.embed_tokens", &mut required, &mut allowed);
     plain("model.norm.weight".to_string(), &mut required, &mut allowed);
     for param in ["fn", "base", "scale"] {
-        plain(format!("model.hc_head.{param}"), &mut required, &mut allowed);
+        plain(
+            format!("model.hc_head.{param}"),
+            &mut required,
+            &mut allowed,
+        );
     }
     // A tied-embedding export may still ship (and this model then ignores)
     // an lm_head; only require it when it will be read.

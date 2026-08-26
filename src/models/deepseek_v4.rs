@@ -718,7 +718,10 @@ impl DeepSeekV4Model {
             layers.push(DeepseekV4Block::from_weights(weights, args, i)?);
         }
 
-        let norm = RMSNorm::new(get_weight_copy(weights, "model.norm.weight")?, args.rms_norm_eps);
+        let norm = RMSNorm::new(
+            get_weight_copy(weights, "model.norm.weight")?,
+            args.rms_norm_eps,
+        );
         let hc_head = HyperHead::from_weights(
             weights,
             "model.hc_head",
@@ -785,10 +788,7 @@ impl DeepSeekV4Model {
         // reads `cache[0]` in the reference. Decode needs no mask: the
         // rotating cache returns only its window.
         let mask = if l > 1 {
-            let local_offset = caches
-                .first()
-                .map(|c| c.local.offset)
-                .unwrap_or(0);
+            let local_offset = caches.first().map(|c| c.local.offset).unwrap_or(0);
             Some(create_sliding_window_prefill_mask(
                 l,
                 local_offset,

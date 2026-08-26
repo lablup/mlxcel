@@ -63,6 +63,28 @@ fn temp_path(name: &str) -> PathBuf {
 }
 
 #[test]
+fn deepseek_v4_model_type_is_detected() {
+    let model_dir = temp_path("deepseek_v4");
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        r#"{
+            "model_type": "deepseek_v4",
+            "architectures": ["DeepseekV4ForCausalLM"],
+            "vocab_size": 129280,
+            "hidden_size": 4096,
+            "num_hidden_layers": 43
+        }"#,
+    )
+    .unwrap();
+
+    let detected = super::detection::get_model_type(&model_dir).unwrap();
+    assert_eq!(detected, ModelType::DeepSeekV4);
+
+    fs::remove_dir_all(model_dir).unwrap();
+}
+
+#[test]
 fn whisper_model_type_is_detected() {
     let model_dir = temp_path("whisper_asr");
     fs::create_dir_all(&model_dir).unwrap();

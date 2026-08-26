@@ -138,52 +138,68 @@ impl Indexer {
 
         let k = self.index_topk.min(np);
         let ratio = self.compressor.ratio;
+        let w = self.head_weights(x);
         let hierarchical = self.index_block > 0
             && np >= self.index_block * self.index_keep
             && self.index_keep * self.index_block >= k;
 
         // Decode fast path: no pool mask exists for L == 1.
         if l == 1 && hierarchical {
-            return Some(self.hisa_select_decode(&q, &pooled, x, k));
+            return Some(self.hisa_select_decode(&q, &pooled, &w, k));
         }
 
         if l > 1 && hierarchical {
             let counts = pool_visible_counts(l, offset, ratio, np);
-            return Some(self.hisa_select_batched(&q, &pooled, x, k, &counts));
+            return Some(self.hisa_select_batched(&q, &pooled, &w, k, &counts));
         }
 
-        // Flat fallback: score all Np pooled positions.
-        let pooled_b = mlxcel_core::expand_dims(&pooled, 1);
+        let counts = (l > 1).then(|| pool_visible_counts(l, offset, ratio, np));
+        Some(self.flat_select(&q, &pooled, &w, k, counts.as_deref()))
+    }
+
+    /// Flat fallback: score all `Np` pooled positions, mask, `argpartition`.
+    /// `q` is `[B, H, L, D]` f32, `pooled` `[B, Np, D]` f32, `w` the f32
+    /// per-head weights `[B, L, H]` (already scaled by `n_heads^-0.5`).
+    pub(crate) fn flat_select(
+        &self,
+        q: &MlxArray,
+        pooled: &MlxArray,
+        w: &MlxArray,
+        k: i32,
+        valid_counts: Option<&[i32]>,
+    ) -> UniquePtr<MlxArray> {
+        let l = mlxcel_core::array_shape(q)[2];
+        let np = mlxcel_core::array_shape(pooled)[1];
+        let pooled_b = mlxcel_core::expand_dims(pooled, 1);
         let pooled_t = mlxcel_core::transpose_axes(&pooled_b, &[0, 1, 3, 2]);
-        let scores = mlxcel_core::matmul(&q, &pooled_t);
+        let scores = mlxcel_core::matmul(q, &pooled_t);
         let zero = mlxcel_core::full_f32(&[1], 0.0, mlxcel_core::dtype::FLOAT32);
         let scores = mlxcel_core::maximum(&scores, &zero);
         let scores = mlxcel_core::multiply_scalar(&scores, self.scale);
-        let w = self.head_weights(x);
-        let w_t = mlxcel_core::transpose_axes(&w, &[0, 2, 1]);
+        let w_t = mlxcel_core::transpose_axes(w, &[0, 2, 1]);
         let w_t = mlxcel_core::expand_dims(&w_t, -1);
         let scores = mlxcel_core::multiply(&scores, &w_t);
         let scores = mlxcel_core::sum_axis(&scores, 1, false);
-        let scores = if l > 1 {
-            let counts = pool_visible_counts(l, offset, ratio, np);
-            let counts = mlxcel_core::from_slice_i32(&counts, &[1, l, 1]);
+        let scores = if let Some(counts) = valid_counts {
+            let counts = mlxcel_core::from_slice_i32(counts, &[1, l, 1]);
             let idx = mlxcel_core::reshape(&mlxcel_core::arange_i32(0, np, 1), &[1, 1, np]);
             let visible = mlxcel_core::less(&idx, &counts);
             masked_fill_min(&scores, &visible)
         } else {
             scores
         };
-        Some(topk_indices(&scores, k))
+        topk_indices(&scores, k)
     }
 
     /// Decode-time hierarchical selection (`Indexer._hisa_select`).
-    /// `q` is `[B, H, 1, D]` f32, `pooled` `[B, Np, D]` f32; returns
-    /// `[B, 1, k]` int32 indices into the pooled prefix.
-    fn hisa_select_decode(
+    /// `q` is `[B, H, 1, D]` f32, `pooled` `[B, Np, D]` f32, `w` the f32
+    /// per-head weights `[B, 1, H]`; returns `[B, 1, k]` int32 indices into
+    /// the pooled prefix.
+    pub(crate) fn hisa_select_decode(
         &self,
         q: &MlxArray,
         pooled: &MlxArray,
-        x: &MlxArray,
+        w: &MlxArray,
         k: i32,
     ) -> UniquePtr<MlxArray> {
         let pshape = mlxcel_core::array_shape(pooled);
@@ -192,9 +208,8 @@ impl Indexer {
         let nb = np / blk;
         let usable = nb * blk;
 
-        let w = self.head_weights(x);
         // (B, 1, H) -> (B, H, 1, 1)
-        let wq = mlxcel_core::transpose_axes(&w, &[0, 2, 1]);
+        let wq = mlxcel_core::transpose_axes(w, &[0, 2, 1]);
         let wq = mlxcel_core::expand_dims(&wq, -1);
 
         // Coarse: block-mean representatives.
@@ -232,12 +247,13 @@ impl Indexer {
 
     /// Batched hierarchical selection (`hisa_kernel.hisa_select`): honours
     /// causality through `valid_len` and tiles the fine stage over `L`.
-    /// `q` is `[B, H, L, D]` f32; returns `[B, L, k]` int32.
-    fn hisa_select_batched(
+    /// `q` is `[B, H, L, D]` f32, `w` the f32 per-head weights `[B, L, H]`;
+    /// returns `[B, L, k]` int32.
+    pub(crate) fn hisa_select_batched(
         &self,
         q: &MlxArray,
         pooled: &MlxArray,
-        x: &MlxArray,
+        w: &MlxArray,
         k: i32,
         valid_counts: &[i32],
     ) -> UniquePtr<MlxArray> {
@@ -250,8 +266,7 @@ impl Indexer {
         let neg_big = mlxcel_core::full_f32(&[1], -1e30, mlxcel_core::dtype::FLOAT32);
 
         // wk = weights * scale (per-head multiplier, scale folded in).
-        let wk = self.head_weights(x);
-        let wk = mlxcel_core::multiply_scalar(&wk, self.scale); // (B, L, H)
+        let wk = mlxcel_core::multiply_scalar(w, self.scale); // (B, L, H)
         let wk_h = mlxcel_core::transpose_axes(&wk, &[0, 2, 1]);
         let wk_h = mlxcel_core::expand_dims(&wk_h, -1); // (B, H, L, 1)
 

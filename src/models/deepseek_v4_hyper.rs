@@ -115,7 +115,11 @@ impl HyperConnection {
     pub(crate) fn forward(
         &self,
         x: &MlxArray,
-    ) -> (UniquePtr<MlxArray>, UniquePtr<MlxArray>, UniquePtr<MlxArray>) {
+    ) -> (
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+        UniquePtr<MlxArray>,
+    ) {
         let shape = mlxcel_core::array_shape(x);
         let (b, l, h, d) = (shape[0], shape[1], shape[2], shape[3]);
         let hc = self.hc_mult;
