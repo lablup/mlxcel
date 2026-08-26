@@ -29,8 +29,8 @@
 //! cargo test --test deepseek_v4_real_model --release --features metal,accelerate -- --ignored --nocapture
 //! ```
 //!
-//! `#[ignore]`-gated as real-model heavy (~145 GB checkpoint; needs a
-//! high-memory Apple Silicon host). Skips silently when the checkpoint
+//! `#[ignore]`-gated as real-model heavy (~151 GB checkpoint on disk; needs
+//! a high-memory Apple Silicon host). Skips silently when the checkpoint
 //! directory is absent.
 
 mod common;
