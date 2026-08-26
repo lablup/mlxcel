@@ -8,7 +8,7 @@ High-performance LLM/VLM inference runtime and server for Apple Silicon / NVIDIA
 
 ## Overview
 
-`mlxcel` provides a Rust command-line runtime and an OpenAI-compatible model server for MLX-format checkpoints. Loading, scheduling, and inference stay in one native process while model execution goes through MLX C++ bindings. It runs a broad range of text and vision-language model families directly from [mlx-community](https://huggingface.co/mlx-community) checkpoints, with no conversion step.
+`mlxcel` provides a Rust command-line runtime and an OpenAI-compatible model server for generation, embeddings, and reranking with MLX-format checkpoints. Loading, scheduling, and inference stay in one native process while model execution goes through MLX C++ bindings. It runs a broad range of text, vision-language, embedding, and reranker model families directly from HuggingFace checkpoints, with no conversion step.
 
 The project started as work on structural model fine-tuning and has grown into a general-purpose serving runtime for local and small-cluster inference.
 
@@ -118,6 +118,33 @@ Downloaded models land in a location-independent global store at `${MLXCEL_CACHE
 
 If you build from source instead, use `./target/release/mlxcel` and
 `./target/release/mlxcel-server` in place of the installed commands above.
+
+### Embed and rerank
+
+The offline commands use the same loaders and batching paths as the HTTP
+endpoints, which makes them useful both for local retrieval workflows and for
+validating a checkpoint before serving it.
+
+```bash
+# Embed two texts and print their vectors plus cosine similarity.
+mlxcel embed -m sentence-transformers/all-MiniLM-L6-v2 \
+  -p "The weather is lovely" -p "It is sunny"
+
+# Score and rank documents against one query.
+mlxcel rerank -m BAAI/bge-reranker-v2-m3 \
+  -q "what is panda?" -d "hi" -d "The giant panda is a bear species."
+
+# Serve an embedding checkpoint on POST /v1/embeddings.
+mlxcel-server -m sentence-transformers/all-MiniLM-L6-v2 --port 8080
+
+# Serve chat and POST /v1/rerank from separate checkpoints.
+mlxcel-server -m Qwen3.5-0.8B-4bit \
+  --reranker-model mlx-community/Qwen3-Reranker-0.6B-4bit --port 8080
+```
+
+Embedding and reranking also support multimodal checkpoints and side-model
+serving. See [Embeddings and reranking](docs/embeddings.md) for request schemas,
+model-specific input formats, server flags, and supported families.
 
 ### Manage downloaded models
 
@@ -396,7 +423,7 @@ Install with `pip install ./python`. See [Python client](docs/python-client.md) 
 - [Speculative-decoding acceptance](docs/speculative-acceptance.md)
 - [Adaptive MTP policy API](docs/mtp-policy-api.md)
 - [OpenAI Responses API](docs/responses-api.md)
-- [Embeddings API and `mlxcel embed`](docs/embeddings.md)
+- [Embeddings and reranking APIs and CLI](docs/embeddings.md)
 - [Audio input preprocessing](docs/audio-preprocessing.md)
 - [Python client](docs/python-client.md)
 - [Adding a new model](docs/adding-models.md)

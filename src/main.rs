@@ -23,17 +23,16 @@ use mlxcel::cli::turbo_args::TurboKvCacheArgs;
 use mlxcel::downloader::DownloadArgs;
 use mlxcel::lang_bias::LangBiasCliArgs;
 
-/// mlxcel: High-performance LLM/VLM/VLA inference on Apple Silicon and CUDA GPUs
+/// mlxcel: High-performance model inference on Apple Silicon and CUDA GPUs
 ///
-/// A Rust implementation for running Large Language Models, Vision-Language
-/// Models, and Vision-Language-Action Models efficiently on Apple Silicon and
-/// CUDA GPUs using the MLX framework.
+/// Runs generation, embedding, reranking, vision-language, and
+/// vision-language-action workloads efficiently using the MLX framework.
 #[derive(Parser, Debug)]
 #[command(
     name = "mlxcel",
     author = "Lablup Inc.",
     version,
-    about = "High-performance LLM/VLM/VLA inference on Apple Silicon and CUDA GPUs",
+    about = "High-performance model inference on Apple Silicon and CUDA GPUs",
     long_about = None,
     after_help = "\
 Environment Variables:
@@ -54,17 +53,12 @@ Environment Variables:
                              aborts long-lived shape-diverse decode, #818)
                            explicit value always wins
 
-Tensor Parallel Runtime:
-  Current multi-rank support: dense Llama, Qwen2/2.5, Qwen3, Qwen3.5 text, Gemma 3 text, Gemma 4 text, ERNIE 4.5, Hunyuan v1 Dense
-  Current constraints: --tp-embedding-mode replicated, --tp-lm-head-mode replicated
-                       LoRA unsupported, server batching supported for listed dense runtimes
-                       except Gemma 4 E2B-style conservative fallback checkpoints
-
-Muse Glimmer 30B checkpoints:
-  dense BF16 (~59.55 GB) and pinned mlx-community affine 4-bit (~19.41 GB)
-  text, single-image, multi-image CLI/server routes, reasoning strengths, and ATEM tools
-  unsupported: video, quantized vision tower/Turbo KV, speculative/DFlash, LoRA/adapters, TP/PP, XLA/distributed
-  qualified checkpoints and GB10 metrics are recorded in supported-models.md
+Model and Runtime Support:
+  `mlxcel arch` lists the supported model-architecture catalog.
+  Checkpoint-specific capabilities and limitations:
+    https://github.com/lablup/mlxcel/blob/main/docs/supported-models.md
+  Distributed setup and current constraints:
+    https://github.com/lablup/mlxcel/blob/main/docs/distributed.md
 
 For more information, visit: https://github.com/lablup/mlxcel"
 )]
@@ -1081,11 +1075,11 @@ pub(crate) struct ServeArgs {
     #[arg(long, env = "MLXCEL_EMBEDDING_MAX_LENGTH", value_name = "N")]
     embedding_max_length: Option<usize>,
 
-    /// Bound on the embedding worker command queue; a full queue returns 503 (default: 8)
+    /// Bound on each embedding/reranking worker command queue; a full queue returns 503 (default: 8)
     #[arg(long, env = "MLXCEL_EMBEDDING_QUEUE_DEPTH", default_value_t = 8)]
     embedding_queue_depth: usize,
 
-    /// Per-request embedding reply timeout in seconds; 0 falls back to the default (default: 120)
+    /// Per-request embedding/reranking reply timeout in seconds; 0 uses the default (default: 120)
     #[arg(
         long,
         env = "MLXCEL_EMBEDDING_REQUEST_TIMEOUT_SECS",
@@ -2227,6 +2221,37 @@ fn write_supported_models<W: std::fmt::Write>(out: &mut W) -> std::fmt::Result {
         }
         writeln!(out)?;
     }
+
+    writeln!(out, "Serving interfaces:")?;
+    writeln!(
+        out,
+        "  - Embedding entries: mlxcel embed or POST /v1/embeddings."
+    )?;
+    writeln!(
+        out,
+        "  - Reranker entries: auto-detected cross-encoders for mlxcel rerank or POST /v1/rerank."
+    )?;
+    writeln!(
+        out,
+        "  - Qwen3 and Qwen3-VL generative rerankers reuse their Qwen architecture entries;"
+    )?;
+    writeln!(
+        out,
+        "    use mlxcel rerank offline or --reranker-model when serving them."
+    )?;
+    writeln!(
+        out,
+        "  - Version aliases share architecture entries: Qwen 3.6 -> Qwen 3.5 MoE"
+    )?;
+    writeln!(
+        out,
+        "    (model_type: qwen3_5_moe); Qwen 3.8 -> Qwen 3.5 dense/VLM (qwen3_5)."
+    )?;
+    writeln!(
+        out,
+        "  - Details: docs/embeddings.md and docs/supported-models.md"
+    )?;
+    writeln!(out)?;
 
     Ok(())
 }

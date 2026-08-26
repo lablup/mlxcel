@@ -73,6 +73,51 @@ fn supported_models_output_mentions_every_display_name() {
     }
 }
 
+#[test]
+fn supported_models_output_explains_embedding_and_reranking_interfaces() {
+    let mut out = String::new();
+    write_supported_models(&mut out).unwrap();
+
+    for expected in [
+        "Embedding:",
+        "LFM2.5-Embedding",
+        "Nemotron-3-Embed",
+        "Llama-Nemotron-VL-Embed",
+        "Reranker:",
+        "Cross-encoder sequence classifier",
+        "Qwen3 and Qwen3-VL generative rerankers",
+        "mlxcel embed",
+        "mlxcel rerank",
+        "--reranker-model",
+        "docs/embeddings.md",
+    ] {
+        assert!(
+            out.contains(expected),
+            "`mlxcel arch` is missing {expected:?}:\n{out}"
+        );
+    }
+}
+
+#[test]
+fn supported_models_output_explains_qwen_version_aliases() {
+    let mut out = String::new();
+    write_supported_models(&mut out).unwrap();
+
+    for expected in [
+        "Qwen 3.5 / 3.8 (Attention + GatedDeltaNet hybrid)",
+        "Qwen 3.5 / 3.6 MoE (hybrid)",
+        "Qwen 3.5 / 3.8 VLM",
+        "Qwen 3.5 / 3.6 MoE VLM",
+        "model_type: qwen3_5_moe",
+        "Qwen 3.8 -> Qwen 3.5 dense/VLM (qwen3_5)",
+    ] {
+        assert!(
+            out.contains(expected),
+            "`mlxcel arch` is missing the Qwen alias {expected:?}:\n{out}"
+        );
+    }
+}
+
 /// Issue #26: the header must report the actual `ALL_MODEL_TYPES.len()`
 /// instead of the previously-hardcoded `"57+"`. This guards against a
 /// future regression where someone re-introduces a fixed count.
@@ -113,37 +158,108 @@ fn supported_models_output_has_no_dead_doc_link() {
 }
 
 #[test]
-fn supported_models_output_describes_muse_glimmer_baseline() {
+fn supported_models_output_keeps_muse_glimmer_as_an_architecture_name() {
     let mut out = String::new();
     write_supported_models(&mut out).unwrap();
 
     assert!(out.contains("Muse VLM:"), "missing Muse VLM family: {out}");
     assert!(
-        out.contains("Muse Glimmer 30B VLM (BF16/MLX 4-bit, mixed 2048 sliding/full cache, ATEM)"),
-        "missing Muse Glimmer operational summary: {out}"
+        out.contains("Muse Glimmer 30B VLM"),
+        "missing Muse Glimmer architecture: {out}"
     );
+    for checkpoint_detail in ["BF16/MLX 4-bit", "mixed 2048", "ATEM"] {
+        assert!(
+            !out.contains(checkpoint_detail),
+            "architecture list must not include Muse checkpoint detail {checkpoint_detail:?}: {out}"
+        );
+    }
 }
 
 #[test]
-fn top_level_help_mentions_muse_glimmer_limits() {
+fn top_level_help_keeps_model_specific_guidance_in_the_model_catalog() {
     let mut command = Cli::command();
     let help = command.render_long_help().to_string();
 
-    for expected in [
-        "Muse Glimmer 30B checkpoints",
-        "59.55 GB",
-        "19.41 GB",
-        "mlx-community affine 4-bit",
-        "reasoning strengths",
-        "ATEM tools",
-        "speculative/DFlash",
-        "TP/PP",
-        "XLA/distributed",
-        "qualified checkpoints and GB10 metrics",
-    ] {
+    for expected in ["mlxcel arch", "supported-models.md", "distributed.md"] {
         assert!(
             help.contains(expected),
             "missing {expected:?} in help:\n{help}"
+        );
+    }
+    for model_specific in [
+        "Muse Glimmer 30B checkpoints",
+        "59.55 GB",
+        "Gemma 4 E2B-style",
+    ] {
+        assert!(
+            !help.contains(model_specific),
+            "top-level help must leave checkpoint-specific guidance in the model catalog; \
+             found {model_specific:?} in:\n{help}"
+        );
+    }
+}
+
+#[test]
+fn embedding_and_reranking_commands_are_discoverable_in_help() {
+    let mut command = Cli::command();
+    let top_level = command.render_long_help().to_string();
+    for expected in [
+        "embed",
+        "Embed texts (or images) with an embedding checkpoint",
+        "rerank",
+        "Score query/document relevance with a reranker checkpoint",
+    ] {
+        assert!(
+            top_level.contains(expected),
+            "top-level help is missing {expected:?}:\n{top_level}"
+        );
+    }
+
+    let mut command = Cli::command();
+    let embed_help = command
+        .find_subcommand_mut("embed")
+        .expect("embed subcommand")
+        .render_long_help()
+        .to_string();
+    for option in [
+        "--model",
+        "--prompt",
+        "--image",
+        "--instruction",
+        "--dimensions",
+        "--max-length",
+        "--batch-size",
+        "--models-dir",
+        "--json",
+    ] {
+        assert!(
+            embed_help.contains(option),
+            "`mlxcel embed --help` is missing {option}:\n{embed_help}"
+        );
+    }
+
+    let mut command = Cli::command();
+    let rerank_help = command
+        .find_subcommand_mut("rerank")
+        .expect("rerank subcommand")
+        .render_long_help()
+        .to_string();
+    for option in [
+        "--model",
+        "--query",
+        "--query-image",
+        "--document",
+        "--image",
+        "--instruction",
+        "--top-n",
+        "--max-length",
+        "--batch-size",
+        "--models-dir",
+        "--json",
+    ] {
+        assert!(
+            rerank_help.contains(option),
+            "`mlxcel rerank --help` is missing {option}:\n{rerank_help}"
         );
     }
 }
