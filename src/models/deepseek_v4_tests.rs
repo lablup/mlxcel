@@ -437,6 +437,81 @@ fn v4_rope_yarn_freqs_match_reference() {
     assert_close(&plain, &[1.0, 100.0], 1e-5, "plain freqs");
 }
 
+/// `v4_rope_base_freqs` is reachable directly from `ModelArgs::validate`
+/// (there is no other guard on `qk_rope_head_dim` / `compress_rope_theta`
+/// once they pass their own earlier, narrower checks), and separately from
+/// any future caller that builds a `RopeScalingV4` by hand. The hostile-value
+/// table in `deepseek_v4_config_rejects_hostile_values` only exercises the
+/// "unsupported type" arm through a full config; the yarn-specific field
+/// checks below have no coverage at all before this test.
+#[test]
+fn v4_rope_base_freqs_rejects_bad_dims_base_and_incomplete_yarn_scaling() {
+    // `dims` must be a positive even number.
+    assert!(v4_rope_base_freqs(0, 10000.0, None).is_err());
+    assert!(v4_rope_base_freqs(-4, 10000.0, None).is_err());
+    assert!(v4_rope_base_freqs(3, 10000.0, None).is_err(), "odd dims");
+
+    // `base` must be finite and > 1.
+    assert!(v4_rope_base_freqs(8, 1.0, None).is_err());
+    assert!(v4_rope_base_freqs(8, 0.0, None).is_err());
+    assert!(v4_rope_base_freqs(8, f32::NAN, None).is_err());
+    assert!(v4_rope_base_freqs(8, f32::INFINITY, None).is_err());
+
+    // A complete yarn block is the positive control every case below is one
+    // field away from.
+    let complete = RopeScalingV4 {
+        scaling_type: Some("yarn".to_string()),
+        factor: Some(16.0),
+        original_max_position_embeddings: Some(65536),
+        beta_fast: Some(32.0),
+        beta_slow: Some(1.0),
+    };
+    assert!(v4_rope_base_freqs(8, 160000.0, Some(&complete)).is_ok());
+
+    // A real checkpoint's `rope_scaling` block is caller-supplied JSON, not a
+    // value this port controls, so `factor` / `original_max_position_embeddings`
+    // arriving absent (rather than merely zero) is a real shape a `deepseek_yarn`
+    // config can take.
+    let mut missing_factor = complete.clone();
+    missing_factor.factor = None;
+    let err = v4_rope_base_freqs(8, 160000.0, Some(&missing_factor)).unwrap_err();
+    assert!(err.contains("factor"), "error must name factor: {err}");
+
+    let mut missing_orig = complete.clone();
+    missing_orig.original_max_position_embeddings = None;
+    let err = v4_rope_base_freqs(8, 160000.0, Some(&missing_orig)).unwrap_err();
+    assert!(
+        err.contains("original_max_position_embeddings"),
+        "error must name the missing field: {err}"
+    );
+
+    let mut zero_factor = complete.clone();
+    zero_factor.factor = Some(0.0);
+    assert!(v4_rope_base_freqs(8, 160000.0, Some(&zero_factor)).is_err());
+
+    let mut negative_factor = complete.clone();
+    negative_factor.factor = Some(-1.0);
+    assert!(v4_rope_base_freqs(8, 160000.0, Some(&negative_factor)).is_err());
+
+    let mut zero_orig = complete.clone();
+    zero_orig.original_max_position_embeddings = Some(0);
+    assert!(v4_rope_base_freqs(8, 160000.0, Some(&zero_orig)).is_err());
+
+    // `"deepseek_yarn"` is the alias the reference also accepts; anything
+    // else is rejected.
+    let mut aliased = complete.clone();
+    aliased.scaling_type = Some("deepseek_yarn".to_string());
+    assert!(v4_rope_base_freqs(8, 160000.0, Some(&aliased)).is_ok());
+
+    let mut unsupported = complete;
+    unsupported.scaling_type = Some("linear".to_string());
+    let err = v4_rope_base_freqs(8, 160000.0, Some(&unsupported)).unwrap_err();
+    assert!(
+        err.contains("linear"),
+        "error must name the unsupported type: {err}"
+    );
+}
+
 #[test]
 fn v4_rope_padded_freqs_prefix_negate_and_scale() {
     let base = vec![1.0_f32, 20.0];
@@ -597,6 +672,64 @@ fn hyper_head_collapse_is_sigmoid_gated_sum() {
         &[(1.0 + 3.0) * 0.500001, (2.0 + 4.0) * 0.500001],
         1e-4,
         "hyper head",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Attention: ratio dispatch and load-time shape checks.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn attn_kind_for_ratio_maps_known_ratios_and_rejects_unknown() {
+    assert_eq!(
+        attention::AttnKind::for_ratio(0),
+        Ok(attention::AttnKind::Local)
+    );
+    assert_eq!(
+        attention::AttnKind::for_ratio(128),
+        Ok(attention::AttnKind::Compressed)
+    );
+    assert_eq!(
+        attention::AttnKind::for_ratio(4),
+        Ok(attention::AttnKind::Sparse)
+    );
+
+    // `ModelArgs::validate` rejects any other ratio before a layer is ever
+    // built, so this arm is defense in depth rather than a reachable load
+    // path; it is still worth pinning directly since nothing else calls it
+    // with an untrusted value.
+    let err = attention::AttnKind::for_ratio(7).unwrap_err();
+    assert!(
+        err.contains('7'),
+        "error must name the offending ratio: {err}"
+    );
+}
+
+#[test]
+fn attention_rejects_wrong_shaped_attn_sink() {
+    let args = tiny_args();
+
+    // Positive control: the honest `[num_attention_heads]` sink loads.
+    let weights = tiny_weight_map(&args);
+    DeepSeekV4Model::from_weights(&weights, &args).expect("honest attn_sink loads");
+
+    // `dense_sdpa` reshapes this straight to `[1, h, 1, 1]` and adds it into
+    // the softmax normalizer; a mismatched head count is an MLX throw at the
+    // first forward pass rather than a load error without this check.
+    let heads = args.num_attention_heads as i32;
+    let mut weights = tiny_weight_map(&args);
+    put(
+        &mut weights,
+        "model.layers.0.attn.attn_sink",
+        &[heads + 1],
+        61,
+    );
+    let err = DeepSeekV4Model::from_weights(&weights, &args)
+        .err()
+        .expect("wrong-length attn_sink must be rejected");
+    assert!(
+        err.contains("attn_sink"),
+        "error must name the tensor: {err}"
     );
 }
 
@@ -796,6 +929,35 @@ fn overlap_compress_matches_reference_math() {
     assert_close(&array_to_vec_f32(&out), OC_OUT, 2e-4, "overlap compress");
 }
 
+#[test]
+fn compressor_rejects_wrong_shaped_ape() {
+    let args = tiny_args();
+
+    // Positive control: `tiny_weight_map` ships an honest `[ratio, out_dim]`
+    // `ape` for every compressed / sparse layer.
+    let weights = tiny_weight_map(&args);
+    DeepSeekV4Model::from_weights(&weights, &args).expect("honest ape loads");
+
+    // Layer 1 runs the ratio-128 compressed path (`tiny_args`'s
+    // `compress_ratios` is `[0, 128, 4]`), so its `ape` must be exactly
+    // `[128, head_dim]`; `simple_compress_kv` broadcasts `ape` directly
+    // against the pooled window, so a wrong leading dimension is an MLX
+    // throw at the first forward pass rather than a load error without this
+    // check.
+    let head_dim = args.head_dim as i32;
+    let mut weights = tiny_weight_map(&args);
+    put(
+        &mut weights,
+        "model.layers.1.attn.compressor.ape",
+        &[127, head_dim],
+        62,
+    );
+    let err = DeepSeekV4Model::from_weights(&weights, &args)
+        .err()
+        .expect("wrong-shaped ape must be rejected");
+    assert!(err.contains("ape"), "error must name the tensor: {err}");
+}
+
 // ---------------------------------------------------------------------------
 // MoE: limited SwiGLU, sqrtsoftplus scoring, bias contract, hash routing.
 // ---------------------------------------------------------------------------
@@ -902,6 +1064,40 @@ fn moe_gate_hash_routing_takes_indices_from_tid2eid() {
             .iter()
             .all(|v| v.is_finite() && *v > 0.0)
     );
+}
+
+#[test]
+fn moe_gate_rejects_wrong_shaped_router_weight() {
+    let args = tiny_args();
+    let mut w = WeightMap::new();
+    // `tiny_args` has n_routed_experts = 4, hidden_size = 8; one extra row.
+    put(&mut w, "gate.weight", &[5, 8], 65);
+    let err = MoEGate::from_weights(&w, &args, "gate", false)
+        .err()
+        .expect("wrong-shaped router weight must be rejected");
+    assert!(
+        err.contains("gate.weight"),
+        "error must name the tensor: {err}"
+    );
+}
+
+#[test]
+fn moe_gate_rejects_wrong_shaped_tid2eid_table() {
+    let args = tiny_args();
+    let mut w = WeightMap::new();
+    put(&mut w, "gate.weight", &[4, 8], 66);
+    // The table must be `[vocab_size, num_experts_per_tok]` == `[32, 2]`; one
+    // extra column is a SHAPE defect distinct from the out-of-range VALUE
+    // defect `hash_routing_rejects_out_of_range_tid2eid_entries` covers.
+    let table: Vec<i64> = (0..32 * 3).map(|v| (v * 5 + 1) % 4).collect();
+    w.insert(
+        "gate.tid2eid".to_string(),
+        mlxcel_core::from_slice_i64(&table, &[32, 3]),
+    );
+    let err = MoEGate::from_weights(&w, &args, "gate", true)
+        .err()
+        .expect("wrong-shaped tid2eid table must be rejected");
+    assert!(err.contains("tid2eid"), "error must name the tensor: {err}");
 }
 
 // ---------------------------------------------------------------------------
@@ -1106,6 +1302,46 @@ fn sanitize_maps_legacy_plane_onto_canonical_names() {
         .get("model.layers.0.ffn.switch_mlp.down_proj.weight")
         .expect("stacked experts");
     assert_eq!(mlxcel_core::array_shape(stacked), vec![4, 8, 8]);
+}
+
+#[test]
+fn sanitize_rejects_incomplete_legacy_expert_plane() {
+    let args = tiny_args();
+
+    // Positive control: `tiny_args`' n_routed_experts (4) legacy per-expert
+    // planes present sanitizes fine.
+    let mut complete = WeightMap::new();
+    for e in 0..4 {
+        put(
+            &mut complete,
+            &format!("layers.0.ffn.experts.{e}.w2.weight"),
+            &[8, 8],
+            30 + e,
+        );
+    }
+    sanitize::sanitize_weights(&complete, &args).expect("complete expert set sanitizes");
+
+    // Missing expert 2 of 4. Pass 4 joins the legacy per-expert tensors by
+    // index into `switch_mlp`'s stacked `[num_experts, out, in]` layout; the
+    // same defect class `bailing_moe` documents (docs/supported-models.md):
+    // a checkpoint missing a late expert must be rejected here rather than
+    // register a short stack the router can index past.
+    let mut incomplete = WeightMap::new();
+    for e in [0, 1, 3] {
+        put(
+            &mut incomplete,
+            &format!("layers.0.ffn.experts.{e}.w2.weight"),
+            &[8, 8],
+            30 + e,
+        );
+    }
+    let err = sanitize::sanitize_weights(&incomplete, &args)
+        .err()
+        .expect("missing expert plane must be rejected");
+    assert!(
+        err.contains("layers.0.ffn.experts.2.w2.weight"),
+        "error must name the missing expert plane: {err}"
+    );
 }
 
 #[test]
@@ -1430,4 +1666,32 @@ fn real_checkpoint_config_shape_parses_with_both_quantization_keys() {
 fn eos_token_id_parses_from_config() {
     let args = tiny_args();
     assert_eq!(args.eos_token_ids(), vec![1]);
+}
+
+#[test]
+fn eos_token_ids_falls_back_to_default_when_absent_or_empty() {
+    // `eos_token_id` entirely absent from config.
+    let mut cfg: serde_json::Value = serde_json::from_str(tiny_args_json()).expect("parse");
+    cfg.as_object_mut()
+        .expect("config is a JSON object")
+        .remove("eos_token_id");
+    let args: ModelArgs = serde_json::from_value(cfg).expect("parse without eos_token_id");
+    assert_eq!(
+        args.eos_token_ids(),
+        vec![1],
+        "an absent eos_token_id must fall back to the default id"
+    );
+
+    // `eos_token_id: []`: the `TokenIdField::Multiple` arm guards against an
+    // empty list specifically (`if !ids.is_empty()`), since generation would
+    // otherwise carry no stop id at all.
+    let mut cfg: serde_json::Value = serde_json::from_str(tiny_args_json()).expect("parse");
+    cfg["eos_token_id"] = serde_json::json!([]);
+    let args: ModelArgs =
+        serde_json::from_value(cfg).expect("parse with an empty eos_token_id list");
+    assert_eq!(
+        args.eos_token_ids(),
+        vec![1],
+        "an empty eos_token_id list must also fall back to the default"
+    );
 }
