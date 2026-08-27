@@ -160,6 +160,39 @@ mlxcel's own `int8`, `fp16+turbo4`, `fp16+turbo3`, `turbo4` and `turbo4-delegate
 
 Value-taking options bind their `LLAMA_ARG_*` variable through clap, which passes the string through unchanged. Value-less flags and `--x` / `--no-x` pairs do not: b10621 fires a value-less option from the environment only for `on`, `enabled`, `true` or `1` (`common_arg_utils::is_truthy`, compared case-sensitively), and reads a bool pair through `parse_bool_value` plus a `LLAMA_ARG_NO_*` alias that means false. clap's own boolish parser accepts a wider vocabulary and *errors* outside it, so those nine are resolved at runtime against b10621's rules instead. `LLAMA_ARG_CPU_MOE=0` therefore does not enable `--cpu-moe`, and `LLAMA_ARG_PERF=sometimes` stops startup exactly as upstream throws.
 
+## Chat templates, reasoning, and output parsing
+
+`chat-templates.json` is the shard where matching names were least likely to mean matching behavior: mlxcel already had a Jinja engine, `reasoning_content`, a thinking budget and a `reasoning_effort` kwarg, but `--reasoning-format`, `--reasoning`, `--skip-chat-parsing` and `--prefill-assistant` did not parse at all, so a llama-server command line asking for any of them failed outright and a deployment could not move its thoughts out of `reasoning_content`.
+
+### Where the thoughts go
+
+`--reasoning-format` (`LLAMA_ARG_THINK`) chooses the placement, and mlxcel honors all four values on both chat paths:
+
+| Value | `message.content` | `message.reasoning_content` |
+|---|---|---|
+| `none` | the thoughts, tags and all, left unparsed | absent |
+| `deepseek` | the answer only | the thoughts |
+| `deepseek-legacy` | the answer with the `<think>` tags | the thoughts |
+| `auto` (default) | as `deepseek` here | the thoughts |
+
+mlxcel's pre-#1447 behavior was `deepseek` unconditionally. Two divergences remain and are recorded on the entry: `auto` resolves to `deepseek` rather than being detected from the template, because mlxcel's reasoning split uses one marker set for every family it supports and has nothing else to detect; and in a *streamed* response under `none` or `deepseek-legacy` the thinking text reaches `delta.content` but its literal delimiters do not, because the streaming filter drops them as it matches them.
+
+`--skip-chat-parsing` supersedes all of it, as it does upstream: everything the model emitted goes to `content` verbatim, reasoning and tool-call syntax included, and no `reasoning_content` or `tool_calls` is produced.
+
+### The flags that are template kwargs
+
+`--reasoning`, `--reasoning-effort` and `--reasoning-preserve` are not response shaping upstream: b10621 implements all three by writing `enable_thinking`, `reasoning_effort` and `preserve_reasoning` into `params.default_template_kwargs`, the same map `--chat-template-kwargs` fills. mlxcel writes the same keys into the same place, so the merge rule, the per-request override, and the template's freedom to ignore a key are shared with upstream rather than reimplemented.
+
+clap gives no command-line order, so when `--chat-template-kwargs` names one of those keys too, the dedicated flag wins here and the collision is logged; b10621 applies whichever handler ran last. Upstream itself deprecates setting `enable_thinking` through the kwargs in favour of `--reasoning`, so the two agree whenever the flag came last. Same shape for `--chat-template` and `--chat-template-file`, which write one field upstream: the inline template wins here.
+
+### `--chat-template` takes template text, not a name
+
+b10621 accepts either Jinja template text or one of 55 built-in identifiers (`chatml`, `llama3`, `deepseek3`, ...). mlxcel has no built-in template library: an MLX checkpoint carries its own template in `tokenizer_config.json`, which is what mlxcel renders by default. A bare built-in name would become the template itself and every prompt would render to the literal string, so the name set is recognised and refused before the model resolves.
+
+### Still deferred
+
+Three entries are `deferred` against #1470 rather than claimed. `--prefill-assistant` is b10621's default and mlxcel diverges from it *with no flag passed*: a trailing assistant message is answered with a fresh turn here and continued upstream. `--reasoning-budget-message` parses and warns at startup but is not yet injected before the end-of-thinking tag. The native `echo` field is a plain completion feature mlxcel lacks. Every other native field in this shard is `not_applicable`: mlxcel's `POST /completion` is a raw-prompt endpoint with no chat template and no chat parsing for them to configure.
+
 ## Regeneration
 
 ```bash

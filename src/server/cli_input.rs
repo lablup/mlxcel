@@ -44,6 +44,10 @@ pub struct ServerStartupInput {
     /// Raw `-a/--alias` value, still in b10621's comma-separated list form.
     /// [`ServerStartupInput::into_startup_config`] splits it (issue #1434).
     pub model_alias: Option<String>,
+    /// Resolved b10621 chat-template / reasoning / parsing settings
+    /// (issue #1447). `Default` is b10621's own default for every one of them,
+    /// so a caller that does not set this behaves exactly as before.
+    pub chat_compat: crate::cli::chat_compat_args::ChatCompatResolution,
     pub host: String,
     pub port: u16,
     /// `--api-key` occurrences, raw. Each is split with b10621's CSV rules in
@@ -602,6 +606,19 @@ impl ServerStartupInput {
         let chat_template_kwargs =
             resolve_server_default_kwargs(self.chat_template_kwargs.as_deref())
                 .map_err(|e| anyhow::anyhow!("--chat-template-kwargs: {e}"))?;
+        // b10621 implements `--reasoning`, `--reasoning-effort` and
+        // `--reasoning-preserve` by writing `enable_thinking`,
+        // `reasoning_effort` and `preserve_reasoning` into the same
+        // `default_template_kwargs` map `--chat-template-kwargs` fills, so
+        // they are layered onto it here rather than carried separately.
+        // Upstream applies whichever handler ran last and explicitly
+        // deprecates setting `enable_thinking` through the kwargs, so the
+        // dedicated flags win and a collision is logged instead of being
+        // silently resolved.
+        let chat_template_kwargs = apply_reasoning_template_kwargs(
+            chat_template_kwargs,
+            &self.chat_compat.template_kwargs,
+        );
         // build PromptCacheConfig from raw CLI/env-resolved values.
         // Any field left at `None` picks up the compiled-in default.
         // layer APC config on top.
@@ -766,6 +783,10 @@ impl ServerStartupInput {
             .unwrap_or_default();
 
         Ok(ServerStartupConfig {
+            reasoning_format: self.chat_compat.reasoning_format,
+            skip_chat_parsing: self.chat_compat.skip_chat_parsing,
+            no_prefill_assistant: self.chat_compat.no_prefill_assistant,
+            reasoning_budget_message: self.chat_compat.reasoning_budget_message.clone(),
             model_path: self.model_path,
             adapter_path: self.adapter_path,
             model_alias: model_aliases.first().cloned(),
@@ -1455,6 +1476,42 @@ fn parse_env_bool(s: &str) -> Option<bool> {
 /// Resolve a llama-server style `--flag` / `--no-flag` pair into a policy bool.
 pub fn resolve_compat_toggle(enabled: bool, disabled: bool) -> bool {
     enabled && !disabled
+}
+
+/// Layer the reasoning flags' template kwargs onto the server-wide default.
+///
+/// b10621 writes `--reasoning`, `--reasoning-effort` and
+/// `--reasoning-preserve` into the same `default_template_kwargs` map that
+/// `--chat-template-kwargs` fills, applying whichever handler ran last. clap
+/// gives no command-line order, so the dedicated flags win here: upstream
+/// itself warns that setting `enable_thinking` through the kwargs is
+/// deprecated in favour of `--reasoning`. A collision is logged rather than
+/// resolved in silence, and the ordering difference is recorded in
+/// `compat/llama-server/b10621/chat-templates.json`.
+///
+/// Returns `None` only when both sides are empty, matching
+/// [`resolve_server_default_kwargs`]'s "no server-default kwargs" case.
+fn apply_reasoning_template_kwargs(
+    base: Option<crate::server::chat_template_kwargs::ChatTemplateKwargs>,
+    from_flags: &[(String, serde_json::Value)],
+) -> Option<crate::server::chat_template_kwargs::ChatTemplateKwargs> {
+    if from_flags.is_empty() {
+        return base;
+    }
+    let mut merged = base.unwrap_or_default();
+    for (key, value) in from_flags {
+        if let Some(existing) = merged.get(key)
+            && existing != value
+        {
+            tracing::warn!(
+                "--chat-template-kwargs sets {key}={existing} but a dedicated reasoning flag \
+                 sets {key}={value}; the flag wins (llama-server deprecates setting {key} \
+                 through --chat-template-kwargs)"
+            );
+        }
+        merged.set(key, value.clone());
+    }
+    Some(merged)
 }
 
 /// Convert the CLI seed sentinel into the runtime representation.

@@ -86,6 +86,27 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
         .ensure_inert_before_model()
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
 
+    // b10621 chat-template / reasoning / parsing options (issue #1447):
+    // classified before the model reference resolves, like the GGML group, so
+    // `--reasoning-format legacy` is reported immediately.
+    args.chat_compat
+        .apply_env_bindings()
+        .map_err(|(var, raw)| anyhow::anyhow!("{var} has an invalid boolean value {raw:?}"))?;
+    // Resolved here only to fail fast; `build_startup_input` resolves the same
+    // (pure) function again to build the startup input, after
+    // `apply_env_bindings` has already folded the environment into `args`.
+    args.chat_compat
+        .resolve()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // b10621's `--chat-template` takes either template text or one of its
+    // built-in identifiers; mlxcel has no built-in library, so a bare name
+    // would become the template itself. Checked before the model resolves so
+    // the mistake is reported immediately (issue #1447).
+    if let Some(template) = args.chat_template.as_deref() {
+        mlxcel::server::ensure_chat_template_is_not_a_builtin_name(template)?;
+    }
+
     // The KV cache type is model-independent too, so validate it here rather
     // than leaving `--cache-type-k q8_0` to be reported after a multi-gigabyte
     // download (issue #1445). The resolved mode is recomputed later against the
@@ -370,6 +391,10 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         .transpose()?;
 
     Ok(ServerStartupInput {
+        chat_compat: args
+            .chat_compat
+            .resolve()
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
         model_path: args.model.clone().ok_or_else(|| {
             anyhow::anyhow!(
                 "--model/-m is required to start the server (set the \

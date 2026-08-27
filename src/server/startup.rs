@@ -59,6 +59,18 @@ pub const MIN_PARALLEL_CONTEXT_SIZE: usize = 512;
 /// Startup configuration for the server (shared between `mlxcel serve` and `mlxcel-server`).
 #[derive(Debug)]
 pub struct ServerStartupConfig {
+    // llama-server b10621 chat-template / reasoning / parsing settings
+    // (issue #1447).
+    /// Where a model's thoughts are reported (`--reasoning-format`).
+    pub reasoning_format: crate::server::ReasoningFormat,
+    /// `--skip-chat-parsing`: every parser off, everything in `content`.
+    pub skip_chat_parsing: bool,
+    /// `--no-prefill-assistant`: a trailing assistant message is complete.
+    pub no_prefill_assistant: bool,
+    /// `--reasoning-budget-message`, injected before the end-of-thinking tag
+    /// when the budget is exhausted.
+    pub reasoning_budget_message: Option<String>,
+
     // Model
     pub model_path: PathBuf,
     pub adapter_path: Option<PathBuf>,
@@ -454,6 +466,10 @@ pub struct ServerStartupConfig {
 impl Default for ServerStartupConfig {
     fn default() -> Self {
         Self {
+            reasoning_format: crate::server::ReasoningFormat::default(),
+            skip_chat_parsing: false,
+            no_prefill_assistant: false,
+            reasoning_budget_message: None,
             model_path: PathBuf::new(),
             adapter_path: None,
             model_alias: None,
@@ -902,13 +918,125 @@ fn validate_muse_glimmer_unsupported_startup(startup: &ServerStartupConfig) -> R
     Ok(())
 }
 
+/// The names b10621 accepts on `--chat-template` in place of a Jinja template.
+///
+/// Its `--chat-template` takes either template *text* or one of these built-in
+/// identifiers, and the help lists them. mlxcel has no built-in template
+/// library: an MLX checkpoint ships its own template in `tokenizer_config.json`
+/// and mlxcel renders that. Passing a bare name here would be taken as the
+/// template itself, so every prompt would render to the literal string
+/// `chatml`, which is why it is detected and refused rather than accepted
+/// (issue #1447). Verbatim from the b10621 `--help` text.
+const B10621_BUILTIN_CHAT_TEMPLATES: &[&str] = &[
+    "bailing",
+    "bailing-think",
+    "bailing2",
+    "chatglm3",
+    "chatglm4",
+    "chatml",
+    "command-r",
+    "deepseek",
+    "deepseek-ocr",
+    "deepseek2",
+    "deepseek3",
+    "exaone-moe",
+    "exaone3",
+    "exaone4",
+    "falcon3",
+    "gemma",
+    "gigachat",
+    "glmedge",
+    "gpt-oss",
+    "granite",
+    "granite-4.0",
+    "granite-4.1",
+    "grok-2",
+    "hunyuan-dense",
+    "hunyuan-moe",
+    "hunyuan-vl",
+    "kimi-k2",
+    "llama2",
+    "llama2-sys",
+    "llama2-sys-bos",
+    "llama2-sys-strip",
+    "llama3",
+    "llama4",
+    "megrez",
+    "minicpm",
+    "mistral-v1",
+    "mistral-v3",
+    "mistral-v3-tekken",
+    "mistral-v7",
+    "mistral-v7-tekken",
+    "monarch",
+    "openchat",
+    "orion",
+    "pangu-embedded",
+    "phi3",
+    "phi4",
+    "rwkv-world",
+    "seed_oss",
+    "smolvlm",
+    "solar-open",
+    "vicuna",
+    "vicuna-orca",
+    "yandex",
+    "zephyr",
+];
+
+/// True when `value` is one of b10621's built-in chat-template names rather
+/// than a Jinja template.
+#[must_use]
+pub fn is_b10621_builtin_chat_template(value: &str) -> bool {
+    B10621_BUILTIN_CHAT_TEMPLATES.contains(&value.trim())
+}
+
+/// Refuse a `--chat-template` value that names a b10621 built-in template.
+///
+/// Called from both binaries before the model reference resolves, so the
+/// mistake is reported immediately rather than after a load; the same guard
+/// sits inside [`resolve_chat_template`] as the backstop for any other caller.
+///
+/// # Errors
+///
+/// Returns the diagnostic when `value` is a built-in name.
+pub fn ensure_chat_template_is_not_a_builtin_name(value: &str) -> Result<()> {
+    if is_b10621_builtin_chat_template(value) {
+        anyhow::bail!(
+            "--chat-template {} names one of llama-server's built-in chat templates. \
+             mlxcel has no built-in template library: an MLX checkpoint carries its own \
+             template in tokenizer_config.json, which is what mlxcel renders by default, and \
+             this flag takes Jinja template text. Drop the flag to use the checkpoint's own \
+             template, or pass the template itself with --chat-template-file <PATH>.",
+            value.trim()
+        );
+    }
+    Ok(())
+}
+
 /// Resolve chat template from override string, file, or model's tokenizer metadata.
+///
+/// `--chat-template` and `--chat-template-file` write the same field upstream,
+/// so whichever appears last on the command line wins there. clap gives no
+/// order, so the inline template wins here and a collision is logged rather
+/// than resolved in silence; the manifest records the ordering difference
+/// (issue #1447).
 pub(super) fn resolve_chat_template(
     template_override: Option<&str>,
     template_file: Option<&Path>,
     model_path: &Path,
 ) -> Result<ChatTemplateProcessor> {
     if let Some(template) = template_override {
+        // A bare built-in name is not a template. Taken literally it would
+        // render every prompt to the name itself, so it is refused with the
+        // two ways to supply the real thing.
+        ensure_chat_template_is_not_a_builtin_name(template)?;
+        if template_file.is_some() {
+            tracing::warn!(
+                "--chat-template and --chat-template-file are both set; the inline template \
+                 wins (llama-server applies whichever came last on the command line)"
+            );
+        }
         return Ok(ChatTemplateProcessor::with_template(template.to_string()));
     }
     if let Some(path) = template_file {
@@ -988,6 +1116,10 @@ pub(super) fn build_server_config(
     };
 
     ServerConfig {
+        reasoning_format: startup.reasoning_format,
+        skip_chat_parsing: startup.skip_chat_parsing,
+        no_prefill_assistant: startup.no_prefill_assistant,
+        reasoning_budget_message: startup.reasoning_budget_message.clone(),
         api_keys,
         decode_timeout_seconds: startup.decode_timeout,
         api_prefix: startup.api_prefix.clone(),
@@ -2336,6 +2468,23 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
     // binds. A failing `--embedding-model` load is fatal for the same reason;
     // a failing `-m` embedding load logs and leaves the slot empty so the
     // server still answers with structured 501s.
+    // b10621 options this build parses but does not yet act on (issue #1447).
+    // Said once at startup rather than left silent: the manifest records them
+    // as deferred with a linked issue, and an operator who passed one needs to
+    // know the request path does not honour it yet.
+    if config.no_prefill_assistant {
+        tracing::info!(
+            "--no-prefill-assistant is what mlxcel already does: a trailing assistant message \
+             is answered with a fresh turn, not continued. llama-server continues it by default"
+        );
+    }
+    if config.reasoning_budget_message.is_some() {
+        tracing::warn!(
+            "--reasoning-budget-message is accepted but not yet injected before the \
+             end-of-thinking tag; the reasoning budget still ends the block without it"
+        );
+    }
+
     let served_chat_id = config
         .model_alias
         .clone()

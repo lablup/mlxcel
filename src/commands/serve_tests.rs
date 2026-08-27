@@ -124,7 +124,7 @@ fn sample_args() -> crate::ServeArgs {
         tp_lm_head_mode: "replicated".to_string(),
         _no_webui: false,
         ggml_compat: Default::default(),
-        _jinja: false,
+        chat_compat: Default::default(),
         _mmproj: None,
         cache_compat: mlxcel::cli::cache_args::CacheCompatArgs::default(),
         estimate_memory: false,

@@ -308,6 +308,18 @@ pub const DEFAULT_RERANK_BATCH_SIZE: usize = crate::rerank::DEFAULT_RERANK_BATCH
 /// so route handlers can apply one consistent set of defaults.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
+    /// Where a model's thoughts are reported (b10621 `--reasoning-format` /
+    /// `LLAMA_ARG_THINK`, issue #1447).
+    pub reasoning_format: crate::server::ReasoningFormat,
+    /// b10621 `--skip-chat-parsing`: force a pure content parser, so reasoning
+    /// and tool calls stay in `message.content`.
+    pub skip_chat_parsing: bool,
+    /// b10621 `--no-prefill-assistant`: a trailing assistant message is a
+    /// complete message rather than a prefix to continue.
+    pub no_prefill_assistant: bool,
+    /// b10621 `--reasoning-budget-message`: text injected before the
+    /// end-of-thinking tag when the reasoning budget is exhausted.
+    pub reasoning_budget_message: Option<String>,
     /// Configured API keys (#1437). Empty disables authentication, matching
     /// b10621's empty `api_keys` vector. `Debug` prints a count, never key
     /// material.
@@ -650,6 +662,10 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            reasoning_format: crate::server::ReasoningFormat::default(),
+            skip_chat_parsing: false,
+            no_prefill_assistant: false,
+            reasoning_budget_message: None,
             api_keys: crate::server::ApiKeys::default(),
             decode_timeout_seconds: crate::server::transport::DEFAULT_DECODE_TIMEOUT_SECS,
             api_prefix: String::new(),

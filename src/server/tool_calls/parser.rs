@@ -119,6 +119,20 @@ pub fn clean_structural_tokens(raw: &str) -> String {
     clean_content_markers(&content)
 }
 
+/// Strip structural tokens but leave the thinking block in place.
+///
+/// The `--reasoning-format none` and `deepseek-legacy` counterpart of
+/// [`clean_structural_tokens`] (issue #1447): b10621 leaves thoughts unparsed
+/// in `message.content` for `none`, and keeps the `<think>` tags there for
+/// `deepseek-legacy`, while both still drop tool-call and turn markers. Only
+/// the [`strip_thinking`] pass is skipped, so the two differ in exactly one
+/// step and cannot drift in their marker vocabulary.
+// Used by: routes/chat (non-streaming path, --reasoning-format)
+pub fn clean_structural_tokens_keeping_thinking(raw: &str) -> String {
+    let (content, _) = atem::split_muse_channels(raw);
+    clean_content_markers(&content)
+}
+
 /// Parse model output for tool calls, trying each known format in order.
 ///
 /// `tools` is the set of tools that were passed in the request.  When

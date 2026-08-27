@@ -30,6 +30,7 @@ use crate::test_support::env_lock::env_lock;
 
 fn sample_input() -> ServerStartupInput {
     ServerStartupInput {
+        chat_compat: Default::default(),
         model_path: PathBuf::from("models/foo"),
         adapter_path: Some(PathBuf::from("adapters/bar")),
         model_alias: Some("alias".to_string()),

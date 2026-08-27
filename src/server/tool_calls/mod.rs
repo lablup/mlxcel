@@ -27,7 +27,10 @@ pub mod stream_filter;
 pub mod types;
 
 pub use atem::render_muse_channels_for_display;
-pub use parser::{clean_structural_tokens, generate_tool_call_id, parse_tool_calls};
+pub use parser::{
+    clean_structural_tokens, clean_structural_tokens_keeping_thinking, generate_tool_call_id,
+    parse_tool_calls,
+};
 pub use types::{ParsedToolCall, ToolCallFormat, ToolCallParseResult};
 
 use super::types::request::ChatCompletionRequest;
