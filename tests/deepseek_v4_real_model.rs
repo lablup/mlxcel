@@ -26,8 +26,18 @@
 //! ## Invocation
 //!
 //! ```bash
-//! cargo test --test deepseek_v4_real_model --release --features metal,accelerate -- --ignored --nocapture
+//! cargo test --test deepseek_v4_real_model --release --features metal,accelerate -- --ignored --nocapture --test-threads=1
 //! ```
+//!
+//! `--test-threads=1` is REQUIRED, not tidiness. Every gate here loads its own
+//! copy of the checkpoint, so the default thread count runs as many ~96 GB
+//! resident models as there are gates. Three fit on a 512 GB host; the fourth
+//! pushes the long-context prefill's activations past the limit and Metal
+//! aborts the process with `Insufficient Memory
+//! (kIOGPUCommandBufferCallbackErrorOutOfMemory)`. That surfaces as a SIGABRT
+//! from C++, not a test failure, so it reads like a port bug rather than a
+//! host-capacity one. Adding a gate to this file without the flag is enough to
+//! trip it.
 //!
 //! `#[ignore]`-gated as real-model heavy (~151 GB checkpoint on disk; needs
 //! a high-memory Apple Silicon host). Skips silently when the checkpoint
@@ -198,6 +208,120 @@ fn deepseek_v4_real_model_long_context_hits_sparse_and_compressed_paths() {
     assert!(
         text.to_lowercase().contains("pacific"),
         "retrieval across the sparse pooled path should answer Pacific; got {text:?}"
+    );
+}
+
+/// The HiSA hierarchy itself, on real weights.
+///
+/// `deepseek_v4_real_model_long_context_hits_sparse_and_compressed_paths` runs
+/// at ~2234 tokens, which at ratio 4 is 558 pooled rows: past `index_topk`
+/// (512), so the sparse split-softmax combine engages, but short of
+/// `index_block * index_keep` (1024), so selection takes the FLAT scan. That
+/// test therefore says nothing about `hisa_select_decode` or
+/// `hisa_select_batched`, which until this gate existed had only ever run on
+/// synthetic unit fixtures.
+///
+/// This prompt clears `ratio * index_block * index_keep` tokens, so prefill
+/// takes the batched hierarchical path and every decode step takes the fast
+/// path. The thresholds are read from the real config rather than hardcoded,
+/// so a config change that quietly moves the boundary fails here instead of
+/// silently downgrading the test to the flat scan again.
+///
+/// What it proves: the hierarchy runs on real weights, end to end, and still
+/// retrieves a fact planted before the sparse region. What it does not prove:
+/// that retrieval REQUIRED the pooled path, since the planted fact is also
+/// world knowledge. Making the answer purely synthetic would test retrieval
+/// harder and be far less stable on a base checkpoint at this length.
+#[test]
+#[ignore]
+fn deepseek_v4_real_model_long_context_engages_hisa_hierarchy() {
+    let model_dir = repo_model_dir(MODEL_DIR);
+    if !model_dir.join("config.json").exists() {
+        eprintln!("Skipping: DeepSeek-V4 checkpoint not found");
+        return;
+    }
+
+    let config_str = std::fs::read_to_string(model_dir.join("config.json")).expect("read config");
+    let args: mlxcel::models::deepseek_v4::ModelArgs =
+        serde_json::from_str(&config_str).expect("parse config");
+    let args = args.normalized().expect("validate config");
+    let ratio = *args
+        .compress_ratios
+        .iter()
+        .filter(|r| **r > 0)
+        .min()
+        .expect("the real checkpoint has sparse layers") as usize;
+    let block = args.index_block;
+    let keep = args.index_keep;
+    // Pooled rows needed before `use_hierarchy` opens, and the prompt length
+    // that produces them at the sparse layers' ratio.
+    let pooled_needed = block * keep;
+    let tokens_needed = ratio * pooled_needed;
+
+    let _runtime = initialize_runtime();
+    let (model, tokenizer) = load_model(&model_dir).expect("load DeepSeek-V4 checkpoint");
+
+    // The answer fact leads, then filler pushes it deep into the pooled prefix.
+    let mut prompt = String::from("The Pacific Ocean is the largest ocean on Earth. ");
+    let filler = [
+        "The Nile is the longest river in Africa. ",
+        "Mount Everest rises above the Himalayas. ",
+        "Photosynthesis converts light into chemical energy. ",
+        "Copper conducts electricity better than iron. ",
+        "Honey never spoils when stored properly. ",
+        "Basalt forms when lava cools quickly. ",
+    ];
+    let mut i = 0usize;
+    loop {
+        prompt.push_str(filler[i % filler.len()]);
+        i += 1;
+        if i.is_multiple_of(16) {
+            let ids = tokenizer.encode(&prompt, true).expect("tokenize");
+            if ids.len() > tokens_needed + 300 {
+                break;
+            }
+        }
+    }
+    prompt.push_str("\n\nQuestion: Which ocean is the largest on Earth?\nAnswer:");
+
+    let prompt_ids: Vec<i32> = tokenizer
+        .encode(&prompt, true)
+        .expect("tokenize")
+        .iter()
+        .map(|&id| id as i32)
+        .collect();
+    let pooled_rows = prompt_ids.len() / ratio;
+    eprintln!(
+        "[deepseek-v4] hisa prompt: {} tokens -> ~{} pooled rows at ratio {} \
+         (hierarchy needs {})",
+        prompt_ids.len(),
+        pooled_rows,
+        ratio,
+        pooled_needed
+    );
+    assert!(
+        pooled_rows >= pooled_needed,
+        "prompt must clear index_block * index_keep = {pooled_needed} pooled rows \
+         to reach the hierarchy, got {pooled_rows}"
+    );
+    assert!(
+        pooled_rows > args.index_topk,
+        "prompt must also clear index_topk = {} so selection is consumed at all",
+        args.index_topk
+    );
+
+    let mut generator = CxxGenerator::new(model.num_layers());
+    let tokens = generator.generate(&model, &prompt_ids, 12, &SamplingConfig::greedy());
+    assert!(
+        !tokens.is_empty(),
+        "hierarchical decode must produce tokens"
+    );
+    let gen_u32: Vec<u32> = tokens.iter().map(|&t| t as u32).collect();
+    let text = tokenizer.decode(&gen_u32, true).expect("decode");
+    eprintln!("[deepseek-v4] hisa answer: {text:?}");
+    assert!(
+        text.to_lowercase().contains("pacific"),
+        "retrieval through the HiSA hierarchy should answer Pacific; got {text:?}"
     );
 }
 
