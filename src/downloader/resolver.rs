@@ -76,6 +76,24 @@
 //! Passing `--revision` with an existing local path is an error: step 1 returns
 //! such a path verbatim and has no revision to resolve against it.
 //!
+//! # Format gate and llama-server model-source controls (issue #1434)
+//!
+//! Every resolution starts with
+//! [`super::model_format::ensure_mlx_model_reference`], which rejects a GGUF
+//! file, a split GGUF shard, or a URL before step 1 with a format-specific
+//! diagnostic. Without it a `.gguf` path *exists*, so step 1 hands it to the
+//! loader and the operator sees a missing-`config.json` error that never
+//! mentions the format.
+//!
+//! [`ModelSourceOptions`] adds the two llama-server model-source controls that
+//! act on resolution itself:
+//!
+//! - `offline` (`--offline` / `LLAMA_ARG_OFFLINE`) keeps steps 1-2c and drops
+//!   step 2d: a repo-id absent from every reuse location is an error naming
+//!   what would have been fetched, never a download.
+//! - `token` (`--hf-token` / `HF_TOKEN`) is handed to [`download_repo`] as the
+//!   explicit token, ahead of its own environment fallback.
+//!
 //! Revision-namespacing the store would remove these restrictions, but it
 //! changes an on-disk layout shared with `list`, `rm` and the `download` verb,
 //! so it is deliberately left as follow-up work.
@@ -98,6 +116,7 @@ use anyhow::{Result, anyhow};
 
 use super::completeness::{SnapshotState, classify_snapshot};
 use super::filters::repo_basename;
+use super::model_format::ensure_mlx_model_reference;
 use super::store;
 use super::{DownloadOptions, download_repo};
 
@@ -112,6 +131,28 @@ const DEFAULT_ORG: &str = "mlx-community";
 
 /// Environment variable overriding [`DEFAULT_ORG`] for bare-name resolution.
 const DEFAULT_ORG_ENV: &str = "MLXCEL_DEFAULT_ORG";
+
+/// Resolution options shared by every `-m/--model`-taking entry point.
+///
+/// Grouped into a struct rather than added as further positional parameters:
+/// [`resolve_model_source_with_override`] already carried three, and issue
+/// #1434 adds offline mode and an explicit HuggingFace token on top. Every
+/// field defaults to "unset", so
+/// `ModelSourceOptions { offline: true, ..Default::default() }` is the whole
+/// call for the offline case.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ModelSourceOptions<'a> {
+    /// Inline `--models-dir <path>` override (issue #107).
+    pub models_dir: Option<&'a Path>,
+    /// Inline `--revision <rev>` (issue #1113). `None` means `main`.
+    pub revision: Option<&'a str>,
+    /// Explicit HuggingFace access token (`--hf-token`, issue #1434). `None`
+    /// keeps the downloader's `HF_TOKEN` / `HUGGING_FACE_HUB_TOKEN` fallback.
+    pub token: Option<&'a str>,
+    /// Forbid every network fetch (`--offline`, issue #1434). A repo-id that
+    /// is not already in a reuse location is an error instead of a download.
+    pub offline: bool,
+}
 
 /// Resolve a `-m/--model` value into a concrete on-disk model directory,
 /// auto-downloading a HuggingFace repo-id on a cache miss.
@@ -128,6 +169,80 @@ const DEFAULT_ORG_ENV: &str = "MLXCEL_DEFAULT_ORG";
 /// [`download_repo`] error is propagated with context).
 pub fn resolve_model_source(value: &Path) -> Result<PathBuf> {
     resolve_model_source_with_override(value, None, None)
+}
+
+/// Options-aware entry point for [`resolve_model_source`] (issue #1434).
+///
+/// Same precedence as [`resolve_model_source_with_override`], plus the two
+/// llama-server model-source controls that entry point cannot express:
+///
+/// - `opts.offline` (`--offline` / `LLAMA_ARG_OFFLINE`) forbids the download
+///   step. Every reuse location is still consulted in the same order; a miss
+///   becomes [`offline_cache_miss_error`] instead of a fetch, matching
+///   b10621's "forces use of cache, prevents network access".
+/// - `opts.token` (`--hf-token` / `HF_TOKEN`) is handed to the downloader as
+///   the explicit token, ahead of its own environment fallback.
+///
+/// Every reference is first put through
+/// [`super::model_format::ensure_mlx_model_reference`], so a GGUF path, a
+/// split GGUF shard, or a URL is refused with a format-specific diagnostic
+/// before any filesystem probe, rather than surfacing as a loader error much
+/// later.
+///
+/// # Errors
+///
+/// Adds two arms to [`resolve_model_source_with_override`]'s: the reference
+/// names an artifact mlxcel cannot load, or offline mode was requested and no
+/// reuse location holds a complete snapshot.
+pub fn resolve_model_source_with_options(
+    value: &Path,
+    opts: ModelSourceOptions<'_>,
+) -> Result<PathBuf> {
+    // Format gate first: a `.gguf` path exists on disk and would otherwise be
+    // returned verbatim by step 1 below, then fail inside the loader with a
+    // message that never mentions the format.
+    ensure_mlx_model_reference(value)?;
+
+    // 1. Existing on-disk path wins unconditionally — byte-identical to the
+    //    pre-#94 local-path behavior. Checked before any repo-id shape test so
+    //    a local directory literally named `owner/name` is still used as-is.
+    if value.exists() {
+        // A revision cannot be applied to a directory that is already
+        // materialized: this branch returns it verbatim and never consults a
+        // revision. Refusing is clearer than ignoring, because silently
+        // ignoring it would leave a user believing they had pinned something
+        // (issue #1113).
+        if let Some(rev) = opts.revision {
+            return Err(revision_with_local_path_error(value, rev));
+        }
+        return Ok(value.to_path_buf());
+    }
+
+    // The repo-id branch requires a UTF-8 string. A non-UTF-8 `-m` value can
+    // only be a (non-existent) local path, so fall through to the error arm.
+    let Some(value_str) = value.to_str() else {
+        return Err(not_a_model_error(value));
+    };
+
+    // 2. `owner/name` repo-id shape → reuse-or-download. An explicit
+    //    `owner/name` always wins over the bare-name default org below.
+    if is_repo_id_shape(value_str) {
+        return resolve_repo_id(value_str, opts);
+    }
+
+    // 3. Bare, prefix-less model name (issue #112): a single valid segment with
+    //    no `/`. Prepend the default org ($MLXCEL_DEFAULT_ORG, else
+    //    `mlx-community`) and resolve the result as a repo-id, so
+    //    `mlxcel run gemma-4-e4b-it-4bit` means
+    //    `mlx-community/gemma-4-e4b-it-4bit`. Steps 1 and 2 take precedence, so
+    //    an existing local path and an explicit `owner/name` are unaffected.
+    if is_repo_segment(value_str) {
+        let repo_id = expand_bare_name(value_str)?;
+        return resolve_repo_id(&repo_id, opts);
+    }
+
+    // 4. Neither an existing path, a valid repo-id, nor a bare model name.
+    Err(not_a_model_error(value))
 }
 
 /// Override-aware variant of [`resolve_model_source`] (issue #107).
@@ -150,46 +265,14 @@ pub fn resolve_model_source_with_override(
     models_dir: Option<&Path>,
     revision: Option<&str>,
 ) -> Result<PathBuf> {
-    // 1. Existing on-disk path wins unconditionally — byte-identical to the
-    //    pre-#94 local-path behavior. Checked before any repo-id shape test so
-    //    a local directory literally named `owner/name` is still used as-is.
-    if value.exists() {
-        // A revision cannot be applied to a directory that is already
-        // materialized: this branch returns it verbatim and never consults a
-        // revision. Refusing is clearer than ignoring, because silently
-        // ignoring it would leave a user believing they had pinned something
-        // (issue #1113).
-        if let Some(rev) = revision {
-            return Err(revision_with_local_path_error(value, rev));
-        }
-        return Ok(value.to_path_buf());
-    }
-
-    // The repo-id branch requires a UTF-8 string. A non-UTF-8 `-m` value can
-    // only be a (non-existent) local path, so fall through to the error arm.
-    let Some(value_str) = value.to_str() else {
-        return Err(not_a_model_error(value));
-    };
-
-    // 2. `owner/name` repo-id shape → reuse-or-download. An explicit
-    //    `owner/name` always wins over the bare-name default org below.
-    if is_repo_id_shape(value_str) {
-        return resolve_repo_id(value_str, revision, models_dir);
-    }
-
-    // 3. Bare, prefix-less model name (issue #112): a single valid segment with
-    //    no `/`. Prepend the default org ($MLXCEL_DEFAULT_ORG, else
-    //    `mlx-community`) and resolve the result as a repo-id, so
-    //    `mlxcel run gemma-4-e4b-it-4bit` means
-    //    `mlx-community/gemma-4-e4b-it-4bit`. Steps 1 and 2 take precedence, so
-    //    an existing local path and an explicit `owner/name` are unaffected.
-    if is_repo_segment(value_str) {
-        let repo_id = expand_bare_name(value_str)?;
-        return resolve_repo_id(&repo_id, revision, models_dir);
-    }
-
-    // 4. Neither an existing path, a valid repo-id, nor a bare model name.
-    Err(not_a_model_error(value))
+    resolve_model_source_with_options(
+        value,
+        ModelSourceOptions {
+            models_dir,
+            revision,
+            ..ModelSourceOptions::default()
+        },
+    )
 }
 
 /// Resolve a value already known to have `owner/name` repo-id shape: reuse an
@@ -214,21 +297,38 @@ pub fn resolve_model_source_with_override(
 /// deliberately out of scope here (it would change the on-disk layout shared
 /// with `list`, `rm` and the `download` verb) and is left as follow-up work.
 ///
-/// `models_dir` is the inline `--models-dir <path>` override (issue #107),
+/// `opts.models_dir` is the inline `--models-dir <path>` override (issue #107),
 /// threaded into the store-probe (step 2c) and the download destination
 /// (step 2d) so reuse and writes target the override-aware models root. It
 /// doubles as the escape hatch for holding two revisions at once, by pointing
 /// each at its own root.
-fn resolve_repo_id(
-    repo_id: &str,
-    revision: Option<&str>,
-    models_dir: Option<&Path>,
-) -> Result<PathBuf> {
+///
+/// `opts.offline` (`--offline`, issue #1434) removes step 2d entirely: every
+/// reuse location is still consulted in the same order, and a miss becomes
+/// [`offline_cache_miss_error`] rather than a download. `opts.token`
+/// (`--hf-token`) is forwarded to the downloader as the explicit token.
+fn resolve_repo_id(repo_id: &str, opts: ModelSourceOptions<'_>) -> Result<PathBuf> {
+    let ModelSourceOptions {
+        models_dir,
+        revision,
+        token,
+        offline,
+    } = opts;
     let cwd_models = PathBuf::from(LEGACY_MODELS_DIR);
 
     // 2a–2c: reuse an existing COMPLETE snapshot without re-downloading.
     if let Some(hit) = locate_cached_snapshot(repo_id, revision, &cwd_models, models_dir) {
         return Ok(hit);
+    }
+
+    // `--offline` forces use of the cache and forbids network access, exactly
+    // like b10621's `--offline`. Reuse above already ran; reaching here means
+    // no location holds a complete snapshot, so the only honest answer is an
+    // error naming what would have been fetched. Checked before the
+    // revision-occupied guard below so an offline run reports the offline
+    // reason rather than a download-destination conflict it will never reach.
+    if offline {
+        return Err(offline_cache_miss_error(repo_id, revision, models_dir));
     }
 
     // A revision-qualified request must not write into a store directory that
@@ -261,8 +361,10 @@ fn resolve_repo_id(
         _ => announce_fresh_download(repo_id),
     }
 
-    download_repo(download_options(repo_id, revision, models_dir, false))
-        .map_err(|err| anyhow!("failed to download model '{repo_id}': {err}"))?;
+    download_repo(download_options(
+        repo_id, revision, models_dir, token, false,
+    ))
+    .map_err(|err| anyhow!("failed to download model '{repo_id}': {err}"))?;
 
     // After a successful download/resume the snapshot is reachable via either the
     // HF cache (download_repo reuses an existing HF snapshot read-only) or the
@@ -279,7 +381,7 @@ fn resolve_repo_id(
         "[mlxcel] snapshot for '{repo_id}' still incomplete after resume; \
          re-fetching every file..."
     );
-    download_repo(download_options(repo_id, revision, models_dir, true))
+    download_repo(download_options(repo_id, revision, models_dir, token, true))
         .map_err(|err| anyhow!("failed to re-download model '{repo_id}': {err}"))?;
 
     locate_landed_snapshot(repo_id, revision, &cwd_models, models_dir).ok_or_else(|| {
@@ -410,6 +512,7 @@ fn download_options(
     repo_id: &str,
     revision: Option<&str>,
     models_dir: Option<&Path>,
+    token: Option<&str>,
     force: bool,
 ) -> DownloadOptions {
     DownloadOptions {
@@ -417,7 +520,10 @@ fn download_options(
         local_dir: None,
         models_dir: models_dir.map(Path::to_path_buf),
         revision: revision.map(str::to_string),
-        token: None,
+        // `None` keeps `super::resolve_token`'s HF_TOKEN /
+        // HUGGING_FACE_HUB_TOKEN fallback; `Some` is the explicit
+        // `--hf-token` (issue #1434), which outranks both.
+        token: token.map(str::to_string),
         force,
     }
 }
@@ -495,6 +601,31 @@ fn revision_with_local_path_error(value: &Path, revision: &str) -> anyhow::Error
 /// the download proceed would be worse than failing: `download_repo` treats
 /// same-named, non-zero files as "already present" and skips the fetch, so the
 /// caller would silently receive whichever revision was already there.
+/// Error for an offline (`--offline` / `LLAMA_ARG_OFFLINE`) request whose
+/// repo-id is not present in any reuse location (issue #1434).
+///
+/// b10621's `--offline` "forces use of cache, prevents network access", so the
+/// only difference from an online run is that the fetch does not happen. The
+/// message therefore names what would have been fetched, where mlxcel looked,
+/// and the two ways out: pre-populate the cache, or drop `--offline`.
+fn offline_cache_miss_error(
+    repo_id: &str,
+    revision: Option<&str>,
+    models_dir: Option<&Path>,
+) -> anyhow::Error {
+    let at_revision = match revision {
+        Some(rev) => format!(" at revision '{rev}'"),
+        None => String::new(),
+    };
+    let store_hint = match store::model_dir_with_override(repo_id, models_dir) {
+        Some(dest) => format!(" (expected under {})", dest.display()),
+        None => String::new(),
+    };
+    anyhow!(
+        "offline mode is on and no cached snapshot of '{repo_id}'{at_revision}          was found{store_hint}. mlxcel looked in ./models/, the HuggingFace          cache, and the mlxcel model store, and --offline forbids the          download. Fetch it once with `mlxcel download {repo_id}` (or point -m          at an existing checkpoint directory), then re-run with --offline."
+    )
+}
+
 fn revision_store_occupied_error(repo_id: &str, revision: &str, dest: &Path) -> anyhow::Error {
     anyhow!(
         "cannot resolve '{repo_id}' at revision '{revision}': the mlxcel store \

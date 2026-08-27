@@ -18,11 +18,13 @@
       "default": null,
       "description": "set model name aliases, comma-separated (to be used by API) (env: LLAMA_ARG_ALIAS)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "aliased",
       "issue": 1434,
-      "test": "tests/llama_compat_manifest.rs",
-      "notes": "b10621 takes a comma-separated alias list and exposes an aliases array per model; mlxcel treats the value as one opaque id, so `--alias a,b` yields the literal id `a,b`. The single-alias path is otherwise plumbed through /v1/models, /health and the response `model` field. #1434 owns the list form.",
-      "divergence": [],
+      "test": "src/server/model_source_tests.rs::alias_list_is_split_stripped_and_deduplicated",
+      "notes": "b10621 splits the value on commas, strips each entry, and keeps the set as the model's API-visible names. mlxcel now applies the same split in `ServerStartupInput::into_startup_config`: the first entry becomes the served model id (`AppState::display_model_id`, and so the `model` field of every response, /health and /v1/models) and the rest are kept in `ServerConfig::model_aliases`. Before #1434 the whole value was one opaque id, so `--alias a,b` served a model literally named `a,b`. The residual gap is reporting the extra names in the /v1/models model object's `aliases` array, which the GET /models and GET /v1/models route entries already record against #1438; mlxcel matches no request against the model name in single-model mode, so every alias in the list does reach the model.",
+      "divergence": [
+        "Aliases after the first are carried in ServerConfig::model_aliases and logged at startup, but are not yet reported in the /v1/models model object's aliases array (#1438 owns model-object response-field parity)."
+      ],
       "mlxcel": {
         "accepted_spellings": [
           "--alias"
@@ -47,12 +49,21 @@
       "default": "unused",
       "description": "Docker Hub model repository. repo is optional, default to ai/. quant is optional, default to :latest. example: gemma3 (default: unused) (env: LLAMA_ARG_DOCKER_REPO)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1434,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_model_source_cli.rs::docker_repo_is_refused_on_both_binaries",
+      "notes": "Docker Hub model repositories distribute GGUF artifacts for the GGML backend. mlxcel is an MLX runtime with no GGUF reader and no equivalent registry, so there is nothing to translate the value to. The flag is accepted as a hidden compatibility argument and rejected at startup, before any weight is read, with a diagnostic naming the value, the reason, and an `--hf-repo mlx-community/...` replacement. A blank value (an unset `LLAMA_ARG_DOCKER_REPO=` in an inherited environment) is inert, matching b10621's own `.empty()` test.",
+      "divergence": [
+        "Rejected at startup instead of resolving a Docker Hub repository; no MLX equivalent exists."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--docker-repo"
+        ],
+        "env": "LLAMA_ARG_DOCKER_REPO",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -70,12 +81,21 @@
       "default": "unused",
       "description": "Hugging Face model file. If specified, it will override the quant in --hf-repo (default: unused) (env: LLAMA_ARG_HF_FILE)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1434,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_model_source_cli.rs::hf_file_is_refused_on_both_binaries",
+      "notes": "Selects one GGUF file inside a repository. An MLX checkpoint is a whole snapshot whose shards are named by `model.safetensors.index.json`, so there is no single file for the value to select and honoring it would be guesswork. Accepted as a hidden compatibility argument and rejected at startup with a diagnostic naming the value and the `--hf-repo` replacement. A blank value is inert.",
+      "divergence": [
+        "Rejected at startup instead of selecting a file inside the repository; MLX loads the whole snapshot."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--hf-file"
+        ],
+        "env": "LLAMA_ARG_HF_FILE",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -94,12 +114,21 @@
       "default": "unused",
       "description": "Hugging Face model repository; quant is optional, case-insensitive, default to Q4_K_M, or falls back to the first file in the repo if Q4_K_M doesn't exist. mmproj is also downloaded automatically if available. to disable, add --no-mmproj example: ggml-org/GLM-4.7-Flash-GGUF:Q4_K_M (default: unused) (env: LLAMA_ARG_HF_REPO)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "aliased",
       "issue": 1434,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_model_source_cli.rs::an_hf_repo_quant_suffix_is_refused_on_both_binaries",
+      "notes": "Translated onto mlxcel's repo-id resolution: the `<owner>/<name>` value is resolved exactly like the same value passed to `-m`, reusing `./models/<name>`, the HuggingFace cache, or the mlxcel store and downloading into the store on a miss. Precedence matches b10621, where the resolved repository path is assigned to `params.model.path` after `-m` has been applied, so `--hf-repo` wins over `-m` and the superseded value is logged. b10621's automatic mmproj sidecar download has no counterpart because an MLX snapshot already contains its vision weights.",
+      "divergence": [
+        "The `:<quant>` suffix is rejected rather than selecting a GGUF quantization inside the repository; MLX checkpoints carry their quantization in the repository name.",
+        "Resolves an MLX SafeTensors snapshot, so a GGUF repository that b10621 accepts fails to load."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--hf-repo"
+        ],
+        "env": "LLAMA_ARG_HF_REPO",
+        "env_binding": "clap"
+      }
     },
     {
       "kind": "option",
@@ -117,12 +146,20 @@
       "default": "value from HF_TOKEN environment variable",
       "description": "Hugging Face access token (default: value from HF_TOKEN environment variable) (env: HF_TOKEN)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "aliased",
       "issue": 1434,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_model_source_cli.rs::help_never_renders_a_resolved_credential_from_the_environment",
+      "notes": "Forwarded to the mlxcel downloader as its explicit token (`DownloadOptions::token`), which outranks the environment, so a gated MLX repository authenticates the same way b10621 authenticates a gated GGUF one. The value is never rendered in `--help` (`hide_env_values`), never logged, and never written to disk. mlxcel keeps one extra environment fallback of its own, which is the recorded divergence.",
+      "divergence": [
+        "With HF_TOKEN unset, mlxcel still falls back to HUGGING_FACE_HUB_TOKEN, so a request that b10621 would send anonymously is authenticated."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--hf-token"
+        ],
+        "env": "HF_TOKEN",
+        "env_binding": "clap"
+      }
     },
     {
       "kind": "option",
@@ -140,12 +177,12 @@
       "default": null,
       "description": "model path to load (env: LLAMA_ARG_MODEL)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "aliased",
       "issue": 1434,
-      "test": "tests/llama_compat_manifest.rs",
-      "notes": "Value domain differs by runtime nature: llama-server loads a GGUF file, mlxcel loads an MLX safetensors checkpoint directory or HuggingFace repo id. The flag, env binding, and role are identical.",
+      "test": "tests/llama_model_source_cli.rs::a_gguf_model_path_is_refused_on_both_binaries",
+      "notes": "Same flag, same env binding, same role; the value domain is the runtime's, not the flag's. b10621 takes a GGUF file, mlxcel takes an MLX SafeTensors checkpoint directory, a HuggingFace `owner/name` repo id, or a bare name expanded against `MLXCEL_DEFAULT_ORG`. Since #1434 the untranslatable shapes are refused before any resolution step rather than at load time: a `.gguf` path, a `-NNNNN-of-NNNNN.gguf` split shard, and any URL each produce a diagnostic naming the value, why mlxcel cannot load it, and a concrete `-m mlx-community/...` replacement derived from the requested name. The gate lives in the shared resolver, so `mlxcel generate`, `mlxcel chat`, `mlxcel serve` and `mlxcel-server` all refuse identically.",
       "divergence": [
-        "Value domain differs: b10621 takes a GGUF file, mlxcel takes an MLX safetensors directory or a HuggingFace repo id, so a llama-server command line pointing at a .gguf file does not load (#1434)."
+        "Value domain differs: b10621 takes a GGUF file, mlxcel takes an MLX safetensors directory or a HuggingFace repo id. A llama-server command line pointing at a .gguf file is rejected at startup with a replacement example instead of loading."
       ],
       "mlxcel": {
         "accepted_spellings": [
@@ -171,12 +208,21 @@
       "default": "unused",
       "description": "model download url (default: unused) (env: LLAMA_ARG_MODEL_URL)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1434,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "tests/llama_model_source_cli.rs::model_url_is_refused_and_translates_a_huggingface_url",
+      "notes": "mlxcel resolves models by HuggingFace repository identifier through the mlxcel store and the HuggingFace cache, and has no arbitrary-URL fetch path; adding one would be a new download surface rather than a translation. Accepted as a hidden compatibility argument and rejected at startup. When the URL is a HuggingFace one (`https://huggingface.co/<owner>/<name>`, `hf.co`, `hf://`) the diagnostic names the exact `--hf-repo <owner>/<name>` to use instead; otherwise it names the `mlx-community` convention. A blank value is inert.",
+      "divergence": [
+        "Rejected at startup instead of downloading the URL; mlxcel has no arbitrary-URL model fetch."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--model-url"
+        ],
+        "env": "LLAMA_ARG_MODEL_URL",
+        "env_binding": "clap",
+        "hidden": true
+      }
     },
     {
       "kind": "option",
@@ -193,12 +239,22 @@
       "default": null,
       "description": "Offline mode: forces use of cache, prevents network access (env: LLAMA_ARG_OFFLINE)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1434,
-      "test": null,
-      "notes": null,
+      "test": "tests/llama_model_source_cli.rs::offline_mode_refuses_an_uncached_repo_without_downloading",
+      "notes": "Forces use of the cache and prevents network access, as in b10621. Every reuse location is still consulted in the same order (`./models/<name>`, the HuggingFace cache, the mlxcel store); only the download step is removed, and a miss is an error naming the repository, where mlxcel looked, and the `mlxcel download` command that would populate the cache. Applies to `-m`, `--hf-repo`, `--embedding-model` and `--reranker-model`, which are the only resolution paths that can reach the network. `LLAMA_ARG_OFFLINE` is bound at runtime rather than through clap because b10621 fires a value-less option from the environment only for the truthy set `on`/`enabled`/`true`/`1` (`common_arg_utils::is_truthy`), while clap's boolish env parser accepts a wider vocabulary and errors outside it; `env_fallback_offline` reproduces b10621's set exactly.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "accepted_spellings": [
+          "--offline"
+        ],
+        "defaults": [
+          "false"
+        ],
+        "env": "LLAMA_ARG_OFFLINE",
+        "env_binding": "runtime",
+        "env_test": "src/server/model_source_tests.rs"
+      }
     },
     {
       "kind": "option",
@@ -217,10 +273,10 @@
       "default": "enabled",
       "description": "whether to perform warmup with an empty run (default: enabled)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1434,
-      "test": "tests/llama_compat_manifest.rs",
-      "notes": "--warmup / --no-warmup accepted; whether --no-warmup actually skips the warmup pass to b10621 semantics is owned by #1434.",
+      "test": "src/bin/mlx_server.rs::warmup_defaults_to_enabled_and_no_warmup_disables_it",
+      "notes": "`--warmup` / `--no-warmup` resolve through `resolve_compat_toggle` on both binaries and gate the startup warmup pass in `server::startup`: with `--no-warmup` no generation runs before the listener binds. b10621 warms up with an empty run and mlxcel with a single-token \"Hello\" that bypasses the prompt cache; both are a throwaway forward pass with no externally observable result beyond startup latency. b10621 binds no environment variable to this option and neither does mlxcel.",
       "divergence": [],
       "mlxcel": {
         "accepted_spellings": [

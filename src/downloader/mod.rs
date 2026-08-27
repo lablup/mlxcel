@@ -89,6 +89,7 @@ mod cli;
 mod completeness;
 mod errors;
 mod filters;
+mod model_format;
 mod progress;
 mod resolver;
 mod store;
@@ -96,9 +97,15 @@ mod store;
 pub use cli::DownloadArgs;
 pub use errors::map_hf_error;
 pub use filters::{is_wanted_file, repo_basename};
+pub use model_format::{
+    UnsupportedModelReference, classify_model_reference, ensure_mlx_model_reference,
+    huggingface_repo_from_url,
+};
 pub use progress::should_show_progress;
+pub use resolver::ModelSourceOptions;
 pub use resolver::normalize_repo_id;
 pub use resolver::resolve_model_source;
+pub use resolver::resolve_model_source_with_options;
 pub use resolver::resolve_model_source_with_override;
 pub use store::{
     RemoveError, RemoveOutcome, StoredModel, dir_size, hf_cache_snapshot, list_models,

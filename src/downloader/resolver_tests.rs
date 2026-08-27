@@ -896,3 +896,141 @@ fn revision_request_refuses_to_download_into_an_occupied_store() {
     // fetched.
     assert!(!msg.contains("failed to download"), "got: {msg}");
 }
+
+// ── format gate (issue #1434) ───────────────────────────────────────────────
+
+#[test]
+fn an_existing_gguf_file_is_rejected_before_the_existing_path_branch() {
+    // The whole point of running the format gate before step 1: this file
+    // EXISTS, so without the gate it is returned verbatim and the operator
+    // gets a missing-`config.json` error from the loader instead.
+    let tmp = tempfile::tempdir().unwrap();
+    let gguf = tmp.path().join("gemma-3-4b-it-Q4_K_M.gguf");
+    fs::write(&gguf, b"GGUF").unwrap();
+
+    let err = resolve_model_source(&gguf).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("GGUF file"), "got: {msg}");
+    assert!(
+        msg.contains("-m mlx-community/gemma-3-4b-it-4bit"),
+        "got: {msg}"
+    );
+}
+
+#[test]
+fn a_model_url_shaped_value_is_rejected_with_the_repo_id_to_use() {
+    let err = resolve_model_source(Path::new(
+        "https://huggingface.co/mlx-community/Qwen3-4B-4bit",
+    ))
+    .unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("-m mlx-community/Qwen3-4B-4bit"), "got: {msg}");
+    // Not the generic "not a model name" arm.
+    assert!(!msg.contains("is not an existing path"), "got: {msg}");
+}
+
+// ── offline mode (issue #1434) ──────────────────────────────────────────────
+
+/// Point every reuse location at empty temp directories so a repo-id request
+/// is a guaranteed miss, and run `body` with that environment installed.
+fn with_empty_caches<T>(tmp: &Path, body: impl FnOnce() -> T) -> T {
+    let _guard = env_lock();
+    let prev_cache_dir = std::env::var("MLXCEL_CACHE_DIR").ok();
+    let prev_models_dir = std::env::var("MLXCEL_MODELS_DIR").ok();
+    let prev_hf_cache = std::env::var("HF_HUB_CACHE").ok();
+    let prev_hf_home = std::env::var("HF_HOME").ok();
+    let empty_store = tmp.join("store");
+    let empty_hf = tmp.join("hf");
+    fs::create_dir_all(&empty_store).unwrap();
+    fs::create_dir_all(&empty_hf).unwrap();
+    unsafe {
+        std::env::set_var("MLXCEL_CACHE_DIR", &empty_store);
+        std::env::remove_var("MLXCEL_MODELS_DIR");
+        std::env::set_var("HF_HUB_CACHE", &empty_hf);
+        std::env::remove_var("HF_HOME");
+    }
+    let out = body();
+    restore_env("MLXCEL_CACHE_DIR", prev_cache_dir);
+    restore_env("MLXCEL_MODELS_DIR", prev_models_dir);
+    restore_env("HF_HUB_CACHE", prev_hf_cache);
+    restore_env("HF_HOME", prev_hf_home);
+    out
+}
+
+#[test]
+fn offline_mode_turns_a_repo_id_miss_into_an_error_without_downloading() {
+    let tmp = tempfile::tempdir().unwrap();
+    let msg = with_empty_caches(tmp.path(), || {
+        let err = resolve_model_source_with_options(
+            Path::new("mlx-community/Qwen3-4B-4bit"),
+            ModelSourceOptions {
+                offline: true,
+                ..ModelSourceOptions::default()
+            },
+        )
+        .unwrap_err();
+        format!("{err}")
+    });
+    assert!(msg.contains("offline mode is on"), "got: {msg}");
+    assert!(msg.contains("mlx-community/Qwen3-4B-4bit"), "got: {msg}");
+    assert!(msg.contains("mlxcel download"), "got: {msg}");
+    // The refusal must be the offline arm, not a download failure.
+    assert!(!msg.contains("failed to download"), "got: {msg}");
+}
+
+#[test]
+fn offline_mode_still_answers_from_the_mlxcel_store() {
+    // `--offline` forces use of the cache; it does not disable the cache.
+    let tmp = tempfile::tempdir().unwrap();
+    let models_root = tmp.path().join("store-root");
+    let store_dir = models_root.join("mlx-community").join("Qwen3-4B-4bit");
+    make_complete_snapshot(&store_dir);
+
+    let resolved = with_empty_caches(tmp.path(), || {
+        resolve_model_source_with_options(
+            Path::new("mlx-community/Qwen3-4B-4bit"),
+            ModelSourceOptions {
+                models_dir: Some(models_root.as_path()),
+                offline: true,
+                ..ModelSourceOptions::default()
+            },
+        )
+        .expect("a cached snapshot must resolve offline")
+    });
+    assert_eq!(resolved, store_dir);
+}
+
+#[test]
+fn offline_mode_leaves_an_existing_local_path_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let model = tmp.path().join("Qwen3-4B-4bit");
+    make_complete_snapshot(&model);
+
+    let resolved = resolve_model_source_with_options(
+        &model,
+        ModelSourceOptions {
+            offline: true,
+            ..ModelSourceOptions::default()
+        },
+    )
+    .expect("a local path resolves offline");
+    assert_eq!(resolved, model);
+}
+
+#[test]
+fn the_offline_diagnostic_reports_the_revision_when_one_was_requested() {
+    let tmp = tempfile::tempdir().unwrap();
+    let msg = with_empty_caches(tmp.path(), || {
+        let err = resolve_model_source_with_options(
+            Path::new("mlx-community/Qwen3-4B-4bit"),
+            ModelSourceOptions {
+                revision: Some("v2"),
+                offline: true,
+                ..ModelSourceOptions::default()
+            },
+        )
+        .unwrap_err();
+        format!("{err}")
+    });
+    assert!(msg.contains("revision 'v2'"), "got: {msg}");
+}

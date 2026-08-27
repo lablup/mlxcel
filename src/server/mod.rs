@@ -38,6 +38,7 @@ pub mod kokoro_tts;
 mod listen;
 mod media;
 pub mod model_provider;
+pub mod model_source;
 pub mod prompt_cache;
 mod read_budget;
 mod request_options;
@@ -86,7 +87,7 @@ pub use cli_input::{
     env_fallback_prompt_cache_snapshot_max_entries, env_fallback_prompt_cache_snapshot_ttl,
     env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, env_fallback_reranker_model,
     env_fallback_ubatch_size, long_cli_flag_was_set, resolve_batch_kv_quant_config,
-    resolve_kv_cache_mode,
+    resolve_compat_toggle, resolve_kv_cache_mode,
 };
 pub use config::{
     DecodeStorageBackend, PipelineParallelRuntimeConfig, PreemptionPolicy,
@@ -99,6 +100,10 @@ pub use media::{
     DEFAULT_MAX_IMAGE_WIDTH, DEFAULT_MAX_IMAGES_PER_REQUEST, ImageInputLimits,
 };
 pub use model_provider::{GenerationResult, ModelProvider};
+pub use model_source::{
+    LLAMA_ARG_OFFLINE, LlamaModelSourceArgs, ResolvedModelSource, env_fallback_offline,
+    parse_hf_repo, parse_model_aliases, resolve_llama_model_source, superseded_model_notice,
+};
 pub use prompt_cache::{
     ApcBlockHash, ApcConfig, ApcHashAlgo, BlockHashChain, CacheEntry, DEFAULT_APC_BLOCK_SIZE,
     HYBRID_SSM_MODEL_TYPES, InsertError as PromptCacheInsertError, MultimodalDigest,

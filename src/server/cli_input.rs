@@ -41,6 +41,8 @@ use crate::lang_bias::LangBiasCliArgs;
 pub struct ServerStartupInput {
     pub model_path: PathBuf,
     pub adapter_path: Option<PathBuf>,
+    /// Raw `-a/--alias` value, still in b10621's comma-separated list form.
+    /// [`ServerStartupInput::into_startup_config`] splits it (issue #1434).
     pub model_alias: Option<String>,
     pub host: String,
     pub port: u16,
@@ -706,10 +708,22 @@ impl ServerStartupInput {
             );
         }
 
+        // `-a/--alias` is a comma-separated list in b10621; mlxcel serves the
+        // first entry and carries the rest for the `/v1/models` aliases array
+        // (#1438). Splitting here rather than at each binary keeps both entry
+        // points on one rule, and stops `--alias a,b` from serving a model
+        // literally named "a,b" (issue #1434).
+        let model_aliases = self
+            .model_alias
+            .as_deref()
+            .map(crate::server::model_source::parse_model_aliases)
+            .unwrap_or_default();
+
         Ok(ServerStartupConfig {
             model_path: self.model_path,
             adapter_path: self.adapter_path,
-            model_alias: self.model_alias,
+            model_alias: model_aliases.first().cloned(),
+            model_aliases,
             host: self.host,
             port: self.port,
             api_keys: self.api_keys,

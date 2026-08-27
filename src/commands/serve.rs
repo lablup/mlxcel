@@ -22,8 +22,9 @@
 use anyhow::Context;
 use mlxcel::cli::speculative_args::{env_fallback_draft_block_size, env_fallback_draft_kind};
 use mlxcel::cli::turbo_args::resolve_kv_cache_mode;
-use mlxcel::downloader::resolve_model_source_with_override;
+use mlxcel::downloader::{ModelSourceOptions, resolve_model_source_with_options};
 use mlxcel::memory_estimate::{QuantHint, estimate_total_memory, format_bytes, format_estimate};
+use mlxcel::server::{LlamaModelSourceArgs, resolve_llama_model_source, superseded_model_notice};
 use mlxcel::server::{
     ServerStartupInput, env_fallback_apc_block_size, env_fallback_apc_enabled,
     env_fallback_apc_hash, env_fallback_apc_num_blocks, env_fallback_api_key_files,
@@ -32,7 +33,7 @@ use mlxcel::server::{
     env_fallback_draft_model, env_fallback_embedding_model, env_fallback_endpoint_slots,
     env_fallback_kv_bits, env_fallback_kv_group_size, env_fallback_kv_quant_scheme,
     env_fallback_kv_skip_last_layer, env_fallback_lang_bias,
-    env_fallback_lang_bias_include_byte_fragments, env_fallback_log_file,
+    env_fallback_lang_bias_include_byte_fragments, env_fallback_log_file, env_fallback_offline,
     env_fallback_prompt_cache_capacity_bytes, env_fallback_prompt_cache_enabled,
     env_fallback_prompt_cache_max_entries, env_fallback_prompt_cache_min_prefix,
     env_fallback_prompt_cache_snapshot_capacity_bytes,
@@ -57,24 +58,46 @@ pub(crate) fn run_serve(args: crate::ServeArgs) -> anyhow::Result<()> {
 }
 
 async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
-    // Resolve `-m` into a concrete model directory (epic #92, issue #94)
-    // before the memory preflight or the server reads it. An existing path is
-    // used verbatim (byte-identical to the pre-#94 local-path behavior); an
-    // `owner/name` HuggingFace repo-id is reused from the legacy CWD / HF cache
-    // / mlxcel store, or auto-downloaded into the mlxcel store on a miss. Done
-    // here (not in `build_startup_input`) so the preflight estimate also sees
-    // the resolved path.
-    args.model = resolve_model_source_with_override(
-        &args.model,
-        args.models_dir.as_deref(),
-        args.revision.as_deref(),
+    // Resolve the model reference into a concrete directory (epic #92, issue
+    // #94) before the memory preflight or the server reads it. An existing
+    // path is used verbatim (byte-identical to the pre-#94 local-path
+    // behavior); an `owner/name` HuggingFace repo-id is reused from the legacy
+    // CWD / HF cache / mlxcel store, or auto-downloaded into the mlxcel store
+    // on a miss. Done here (not in `build_startup_input`) so the preflight
+    // estimate also sees the resolved path.
+    //
+    // Which reference that is comes from the llama-server model-source
+    // translation (issue #1434): `--hf-repo` may supply it instead of `-m`,
+    // and `--docker-repo`, `--model-url` and `--hf-file` are refused here
+    // rather than accepted and silently resolved to something else.
+    // `--offline` / `--hf-token` then shape how the reference resolves.
+    env_fallback_offline(&mut args.offline);
+    let source = resolve_llama_model_source(&LlamaModelSourceArgs {
+        model: args.model.clone(),
+        hf_repo: args.hf_repo.clone(),
+        hf_file: args.hf_file.clone(),
+        model_url: args.model_url.clone(),
+        docker_repo: args.docker_repo.clone(),
+    })?;
+    if let Some(superseded) = source.superseded_model.as_deref() {
+        tracing::info!("{}", superseded_model_notice(&source.reference, superseded));
+    }
+    let model_path = resolve_model_source_with_options(
+        &source.reference,
+        ModelSourceOptions {
+            models_dir: args.models_dir.as_deref(),
+            revision: args.revision.as_deref(),
+            token: args.hf_token.as_deref(),
+            offline: args.offline,
+        },
     )?;
+    args.model = Some(model_path.clone());
 
     // Issue #56: preflight memory check before the server begins
     // accepting connections. Refuses to start when total > available
     // unless --force was passed. Skipped when --estimate-memory is
     // off.
-    run_serve_memory_preflight(&args)?;
+    run_serve_memory_preflight(&args, &model_path)?;
 
     start_server(build_startup_input(args)?.into_startup_config()?).await
 }
@@ -87,7 +110,10 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
 /// what `--recommend-quant` historically used). When `total >
 /// available` and `--force` was not set, returns `Err` so the server
 /// aborts before any worker thread is spawned.
-fn run_serve_memory_preflight(args: &crate::ServeArgs) -> anyhow::Result<()> {
+fn run_serve_memory_preflight(
+    args: &crate::ServeArgs,
+    model_path: &std::path::Path,
+) -> anyhow::Result<()> {
     if !args.estimate_memory {
         return Ok(());
     }
@@ -108,15 +134,15 @@ fn run_serve_memory_preflight(args: &crate::ServeArgs) -> anyhow::Result<()> {
     // `into_startup_config` performs the same substitution and reports it once
     // logging exists.
     let (kv_cache_mode, _) =
-        mlxcel::cli::turbo_args::resolve_effective_kv_cache_mode(requested, &args.model);
+        mlxcel::cli::turbo_args::resolve_effective_kv_cache_mode(requested, model_path);
     let kv_int8 = matches!(kv_cache_mode, KVCacheMode::Int8);
 
     let ctx_len = serve_preflight_ctx_len(args);
     let batch = serve_preflight_batch(args);
 
-    let estimate = estimate_total_memory(&args.model, ctx_len, batch, QuantHint::Default, kv_int8);
+    let estimate = estimate_total_memory(model_path, ctx_len, batch, QuantHint::Default, kv_int8);
 
-    let banner = format_estimate(&args.model, &estimate);
+    let banner = format_estimate(model_path, &estimate);
     println!("{banner}");
 
     if !estimate.fits {
@@ -272,10 +298,14 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         .embedding_model
         .as_deref()
         .map(|value| {
-            resolve_model_source_with_override(
+            resolve_model_source_with_options(
                 std::path::Path::new(value),
-                args.models_dir.as_deref(),
-                args.revision.as_deref(),
+                ModelSourceOptions {
+                    models_dir: args.models_dir.as_deref(),
+                    revision: args.revision.as_deref(),
+                    token: args.hf_token.as_deref(),
+                    offline: args.offline,
+                },
             )
         })
         .transpose()?;
@@ -286,16 +316,26 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         .reranker_model
         .as_deref()
         .map(|value| {
-            resolve_model_source_with_override(
+            resolve_model_source_with_options(
                 std::path::Path::new(value),
-                args.models_dir.as_deref(),
-                args.revision.as_deref(),
+                ModelSourceOptions {
+                    models_dir: args.models_dir.as_deref(),
+                    revision: args.revision.as_deref(),
+                    token: args.hf_token.as_deref(),
+                    offline: args.offline,
+                },
             )
         })
         .transpose()?;
 
     Ok(ServerStartupInput {
-        model_path: args.model,
+        model_path: args.model.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "--model/-m is required to start the server (set the \
+                 LLAMA_ARG_MODEL environment variable, pass -m \
+                 <PATH_OR_REPO_ID>, or pass --hf-repo <owner>/<name>)"
+            )
+        })?,
         adapter_path: args.adapter,
         model_alias: args.alias,
         host: args.host,
