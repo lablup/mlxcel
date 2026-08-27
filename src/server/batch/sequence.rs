@@ -46,8 +46,8 @@ use mlxcel_core::generate::SamplingConfig;
 use mlxcel_core::sampling::{LogprobsConfig, SamplerState, TokenLogprobData};
 
 use super::stop_matcher::StopMatcher;
-use crate::server::model_provider::GenerateEvent;
 use crate::server::model_provider::model_worker::StreamingDecodeState;
+use crate::server::model_provider::{GenerateEvent, PrefillStats};
 use crate::server::thinking_budget::ThinkingState;
 use crate::vision::merge::InputEmbeddings;
 
@@ -342,6 +342,30 @@ impl SequenceInfo {
     /// Returns `true` if this request carries VLM image data.
     pub fn is_vlm_request(&self) -> bool {
         self.vlm_embeddings.is_some() || !self.images.is_empty()
+    }
+
+    /// Stamp the first decoded token and publish the prefill snapshot
+    /// (issue #1441).
+    ///
+    /// Called from every path that produces the first token (prefill
+    /// completion and the speculative burst driver), and idempotent, so the
+    /// snapshot reaches the client exactly once, before the first
+    /// [`GenerateEvent::Token`] of the request. `prompt_ms` uses `created_at`
+    /// as its origin, which is the same origin
+    /// [`take_generation_result`](Self::take_generation_result) later hands to
+    /// `finish_with_cache`, so the streamed prefill figures and the final
+    /// frame's cannot disagree.
+    pub(crate) fn mark_first_token(&mut self) {
+        if self.first_token_time.is_some() {
+            return;
+        }
+        let now = Instant::now();
+        self.first_token_time = Some(now);
+        let _ = self.response_tx.send(GenerateEvent::Prefill(PrefillStats {
+            prompt_tokens: self.prompt_tokens.len(),
+            cached_tokens: self.already_cached_tokens,
+            prompt_ms: now.duration_since(self.created_at).as_millis() as u64,
+        }));
     }
 
     /// Stream one newly decoded piece to the client through the request's stop

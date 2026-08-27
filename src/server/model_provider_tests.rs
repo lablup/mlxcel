@@ -454,6 +454,7 @@ fn drain_generation_events_impl_survives_long_prefill_before_first_token() {
             received_tokens.push(t);
             Ok(None)
         }
+        GenerateEvent::Prefill(_) => Ok(None),
         GenerateEvent::Done(r) => {
             final_result = Some(r.clone());
             Ok(Some(r))
@@ -519,6 +520,7 @@ fn drain_generation_events_impl_detects_phase2_decode_hang() {
             received_tokens.push(t);
             Ok(None)
         }
+        GenerateEvent::Prefill(_) => Ok(None),
         GenerateEvent::Done(r) => Ok(Some(r)),
         GenerateEvent::Error(e) => Err(anyhow::anyhow!(e)),
     });

@@ -6706,7 +6706,7 @@ impl BatchScheduler {
         // inside the reasoning block when `enter_block_on_start == true`.
         let first_token = Self::apply_thinking_budget(&mut seq.thinking, sampled_first_token);
 
-        seq.first_token_time = Some(Instant::now());
+        seq.mark_first_token();
 
         // if the budget fired and substituted the first token,
         // drop the logprob below (computed against the sampled token) so the

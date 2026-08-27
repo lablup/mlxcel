@@ -334,6 +334,7 @@ pub(super) fn collect_stream(rx: &mpsc::Receiver<GenerateEvent>) -> StreamSummar
         match rx.recv_timeout(Duration::from_secs(2)) {
             Ok(GenerateEvent::Token(text)) => tokens.push(text),
             Ok(GenerateEvent::TokenWithLogprobs(text, _)) => tokens.push(text),
+            Ok(GenerateEvent::Prefill(_)) => {}
             Ok(GenerateEvent::Done(result)) => return StreamSummary { tokens, result },
             Ok(GenerateEvent::Error(error)) => panic!("unexpected generation error: {error}"),
             Err(err) => panic!("generation did not finish: {err}"),

@@ -213,6 +213,19 @@ async fn manifest_route_claims_match_the_mounted_router() {
 /// The struct is read as source text rather than probed by deserializing:
 /// `NativeCompletionRequest` does not set `deny_unknown_fields`, so a
 /// round-trip cannot distinguish "accepted" from "silently ignored".
+///
+/// An entry with a non-null `parent` is a SUBFIELD of a nested b10621 block
+/// (`stream_options.include_usage` is the only one at b10621), so it is
+/// modeled by a nested struct rather than by a key on
+/// `NativeCompletionRequest` itself. Those claims are checked against the
+/// whole of `request.rs`, and additionally require the parent block to be
+/// declared on the request struct, so a subfield cannot be claimed without the
+/// block that carries it. That is deliberately a weaker check than the
+/// root-field one, because the module also carries the OpenAI routes'
+/// `StreamOptions`: it is a ratchet against claiming a subfield nothing
+/// models, not a proof that the native path reads it. The behavioral half
+/// (the type diagnostic, and the value being inert on `/completion` exactly
+/// as it is upstream) is asserted in `routes/native_route_tests.rs`.
 #[test]
 fn manifest_native_field_claims_match_native_completion_request() {
     let source = std::fs::read_to_string(
@@ -228,8 +241,8 @@ fn manifest_native_field_claims_match_native_completion_request() {
         .expect("struct block terminated");
     let block = &source[start..end];
 
-    let declares = |field: &str| {
-        block.contains(&format!("pub {field}:")) || block.contains(&format!("alias = \"{field}\""))
+    let declared_in = |scope: &str, field: &str| {
+        scope.contains(&format!("pub {field}:")) || scope.contains(&format!("alias = \"{field}\""))
     };
 
     for entry in manifest_entries() {
@@ -238,6 +251,23 @@ fn manifest_native_field_claims_match_native_completion_request() {
         }
         let id = entry["id"].as_str().expect("id");
         let field = entry["field"].as_str().expect("field");
+        // A subfield lives on the nested struct that models its parent block,
+        // so its scope is the whole module; a root field's scope is the
+        // request struct alone.
+        let parent = entry["parent"].as_str();
+        let scope = if parent.is_some() {
+            source.as_str()
+        } else {
+            block
+        };
+        let declares = |name: &str| declared_in(scope, name);
+        if let Some(parent) = parent {
+            assert!(
+                declared_in(block, parent),
+                "{id}: a subfield claim needs its parent block {parent:?} \
+                 declared on NativeCompletionRequest"
+            );
+        }
         if entry["mlxcel"].is_null() {
             assert!(
                 !declares(field),

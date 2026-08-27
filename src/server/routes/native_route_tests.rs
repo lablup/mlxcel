@@ -305,3 +305,168 @@ async fn the_native_embedding_path_accepts_the_content_spelling() {
     let (status, _) = post("/embedding", serde_json::json!({"content": "hello"})).await;
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
 }
+
+// ---------------------------------------------------------------------------
+// `response_fields`, `stream_options` and the `n_predict` value domain (#1441)
+//
+// The expectations are captures of the pinned b10621 binary answering the same
+// bodies against a real checkpoint.
+// ---------------------------------------------------------------------------
+
+fn keys(body: &serde_json::Value) -> Vec<String> {
+    body.as_object().expect("object").keys().cloned().collect()
+}
+
+#[tokio::test]
+async fn response_fields_projects_the_native_body() {
+    let (status, body) = post(
+        "/completion",
+        serde_json::json!({
+            "prompt": "hello",
+            "n_predict": 4,
+            "response_fields": ["content", "tokens_predicted"],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(keys(&body), ["content", "tokens_predicted"], "{body}");
+}
+
+#[tokio::test]
+async fn response_fields_keys_a_slashed_path_by_the_whole_path() {
+    let (_, body) = post(
+        "/completion",
+        serde_json::json!({
+            "prompt": "hello",
+            "n_predict": 4,
+            "response_fields": ["generation_settings/n_predict", "timings/cache_n"],
+        }),
+    )
+    .await;
+    assert_eq!(
+        keys(&body),
+        ["generation_settings/n_predict", "timings/cache_n"],
+        "{body}"
+    );
+    assert_eq!(body["generation_settings/n_predict"], 4, "{body}");
+}
+
+#[tokio::test]
+async fn a_wrongly_typed_response_fields_is_ignored_rather_than_refused() {
+    // Upstream reads the field with a `std::vector<std::string>` default, so a
+    // string or a mixed array falls back to the whole object with a 200. A 422
+    // here would turn away a request llama-server serves.
+    for value in [
+        serde_json::json!("content"),
+        serde_json::json!(["content", 5]),
+        serde_json::Value::Null,
+    ] {
+        let (status, body) = post(
+            "/completion",
+            serde_json::json!({"prompt": "hello", "n_predict": 4, "response_fields": value}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body.get("timings").is_some(),
+            "must be the full object: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn stream_options_is_accepted_and_inert_on_the_native_route() {
+    // Measured on the pinned binary: `stream_options.include_usage` changes
+    // nothing on `/completion`, because the native final frame always carries
+    // the counts and the timing block. mlxcel now declares the field so its
+    // type is validated, and answers the same body with and without it.
+    let (status, with_option) = post(
+        "/completion",
+        serde_json::json!({
+            "prompt": "hello",
+            "n_predict": 4,
+            "stream_options": {"include_usage": true},
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{with_option}");
+    let (_, without_option) = post(
+        "/completion",
+        serde_json::json!({"prompt": "hello", "n_predict": 4}),
+    )
+    .await;
+    assert_eq!(keys(&with_option), keys(&without_option));
+    assert_eq!(with_option["content"], without_option["content"]);
+    assert_eq!(
+        with_option["tokens_predicted"],
+        without_option["tokens_predicted"]
+    );
+}
+
+#[tokio::test]
+async fn a_non_object_stream_options_is_tolerated() {
+    // `"stream_options": "garbage"` answers a normal completion upstream.
+    let (status, body) = post(
+        "/completion",
+        serde_json::json!({"prompt": "hello", "n_predict": 4, "stream_options": "garbage"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn a_non_boolean_include_usage_is_refused_with_the_field_named() {
+    let (status, body) = post(
+        "/completion",
+        serde_json::json!({
+            "prompt": "hello",
+            "n_predict": 4,
+            "stream_options": {"include_usage": "yes"},
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("include_usage"), "{message:?}");
+    assert!(message.contains("boolean"), "{message:?}");
+}
+
+#[tokio::test]
+async fn n_predict_minus_one_is_accepted_as_the_unbounded_spelling() {
+    // b10621's hard limits are [-1, INT32_MAX] with -1 meaning "as many as the
+    // context allows". Before this change serde refused it with a 422.
+    let (status, body) = post(
+        "/completion",
+        serde_json::json!({"prompt": "hello", "n_predict": -1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.get("content").is_some(), "{body}");
+}
+
+#[tokio::test]
+async fn n_predict_zero_is_accepted_as_the_prompt_only_spelling() {
+    let (status, body) = post(
+        "/completion",
+        serde_json::json!({"prompt": "hello", "n_predict": 0}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["generation_settings"]["n_predict"], 0, "{body}");
+}
+
+#[tokio::test]
+async fn n_predict_below_the_hard_limit_is_refused_with_the_upstream_wording() {
+    let (status, body) = post(
+        "/completion",
+        serde_json::json!({"prompt": "hello", "n_predict": -2}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("n_predict"), "{message:?}");
+    assert!(
+        message.contains("-1 <= value <= 2147483647"),
+        "the diagnostic must state upstream's domain, got {message:?}"
+    );
+}
