@@ -1043,7 +1043,34 @@ pub struct NativeCompletionRequest {
     pub prompt: String,
     /// Maximum number of tokens to predict. The server silently clamps an
     /// explicit value to the effective per-slot context window.
+    ///
+    /// b10621 declares `max_tokens` and `max_completion_tokens` as aliases of
+    /// this field, so a request written for either OpenAI spelling reaches the
+    /// native route unchanged (#1441).
+    #[serde(alias = "max_tokens", alias = "max_completion_tokens")]
     pub n_predict: Option<usize>,
+    /// Attach the timing block to every streaming frame instead of only the
+    /// final one (#1441).
+    pub timings_per_token: Option<bool>,
+    /// Number of completions to generate. mlxcel serves one completion per
+    /// request; a value above 1 is rejected with a diagnostic rather than
+    /// silently producing one result where b10621 would produce an array.
+    #[serde(alias = "n")]
+    pub n_cmpl: Option<i64>,
+    /// Minimum line indentation for the generated text, a FIM feature with no
+    /// mlxcel equivalent. Rejected when set to a value that would change
+    /// behavior.
+    pub n_indent: Option<i64>,
+    /// Time limit in milliseconds for the prediction phase. mlxcel bounds a
+    /// stalled decode with `--decode-timeout` per server, not per request.
+    pub t_max_predict_ms: Option<i64>,
+    /// Include prompt-processing progress events in stream mode. mlxcel's
+    /// scheduler emits no prefill progress events on this path.
+    pub return_progress: Option<bool>,
+    /// Include an `__verbose` debug block in the response.
+    pub verbose: Option<bool>,
+    /// Return the raw generated token ids in the `tokens` field.
+    pub return_tokens: Option<bool>,
     /// Whether to stream the response
     pub stream: Option<bool>,
     /// Per-request override for the SSE comment ping interval, in seconds

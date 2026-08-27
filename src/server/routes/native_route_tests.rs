@@ -1,0 +1,274 @@
+// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Native versus OpenAI route separation (#1441).
+//!
+//! `llama-server` b10621 sends `/completion` and `/completions` to one handler
+//! and `/v1/completions` to a different one, and does the same for
+//! `/embedding` / `/embeddings` against `/v1/embeddings`. mlxcel answered the
+//! OpenAI shape on all of them. These tests assert the split by the shape of
+//! the body each path returns, which is the only thing a client can observe.
+
+use std::path::PathBuf;
+use std::sync::{Arc, mpsc};
+
+use axum::Router;
+use axum::body::Body;
+use axum::http::{Method, Request, StatusCode, header};
+use tower::ServiceExt;
+
+use crate::server::{AppState, ChatTemplateProcessor, ModelProvider, ServerConfig, create_app};
+use crate::tokenizer::MlxcelTokenizer;
+
+fn app() -> Router {
+    let (options_tx, _options_rx) = mpsc::channel();
+    let provider = Arc::new(ModelProvider::recording_for_route_tests(options_tx));
+    let batch_metrics = provider.batch_metrics().clone();
+    let state = AppState::new(
+        provider,
+        ServerConfig::default(),
+        ChatTemplateProcessor::with_template("ok".to_string()),
+        MlxcelTokenizer::stub(),
+        PathBuf::from("native-route-test-model"),
+        batch_metrics,
+    );
+    create_app(state)
+}
+
+async fn post(path: &str, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("request builds");
+    let response = app().oneshot(request).await.expect("router responds");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body collects");
+    let parsed = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, parsed)
+}
+
+/// The native completion body, whose shape is what separates the handlers.
+fn native_prompt() -> serde_json::Value {
+    serde_json::json!({"prompt": "hello", "n_predict": 4})
+}
+
+#[tokio::test]
+async fn the_native_completion_paths_answer_the_native_shape() {
+    // `content` at the top level with `tokens_predicted` beside it is the
+    // native object; the OpenAI one nests text under `choices`.
+    for path in ["/completion", "/completions"] {
+        let (status, body) = post(path, native_prompt()).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+        assert!(
+            body.get("content").is_some(),
+            "{path} must answer the native shape, got {body}"
+        );
+        assert!(
+            body.get("choices").is_none(),
+            "{path} must not answer the OpenAI shape, got {body}"
+        );
+        assert!(body.get("tokens_predicted").is_some(), "{path}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn the_v1_completion_path_stays_openai() {
+    let (status, body) = post(
+        "/v1/completions",
+        serde_json::json!({"model": "native-route-test-model", "prompt": "hello", "max_tokens": 4}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.get("choices").is_some(),
+        "/v1/completions must stay OpenAI compatible, got {body}"
+    );
+    assert_eq!(body["object"], "text_completion");
+    assert!(
+        body.get("content").is_none(),
+        "/v1/completions must not answer the native shape, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn the_native_completion_response_carries_the_b10621_key_set() {
+    let (_, body) = post("/completion", native_prompt()).await;
+    for key in [
+        "index",
+        "content",
+        "tokens",
+        "id_slot",
+        "stop",
+        "model",
+        "tokens_predicted",
+        "tokens_evaluated",
+        "generation_settings",
+        "prompt",
+        "has_new_line",
+        "truncated",
+        "stop_type",
+        "stopping_word",
+        "tokens_cached",
+        "timings",
+    ] {
+        assert!(body.get(key).is_some(), "missing {key} in {body}");
+    }
+    assert!(
+        body["timings"].get("cache_n").is_some(),
+        "timings must lead with cache_n: {body}"
+    );
+    assert!(
+        body["generation_settings"]
+            .as_object()
+            .is_some_and(|m| !m.is_empty()),
+        "generation_settings must report the resolved settings, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn the_native_completion_echoes_the_prompt_and_stop_metadata() {
+    let (_, body) = post("/completion", native_prompt()).await;
+    assert_eq!(body["prompt"], "hello");
+    assert_eq!(body["index"], 0);
+    assert_eq!(body["stop"], true);
+    assert_eq!(body["stopping_word"], "");
+    assert!(
+        ["limit", "eos"].contains(&body["stop_type"].as_str().unwrap_or("")),
+        "stop_type must be one of the reasons mlxcel can distinguish: {body}"
+    );
+}
+
+#[tokio::test]
+async fn n_predict_accepts_the_openai_aliases() {
+    // b10621 declares `max_tokens` and `max_completion_tokens` as aliases, so
+    // the same body reaches the native route whichever spelling a client uses.
+    for key in ["n_predict", "max_tokens", "max_completion_tokens"] {
+        let (status, body) = post(
+            "/completion",
+            serde_json::json!({"prompt": "hello", key: 4}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{key}: {body}");
+        assert_eq!(
+            body["generation_settings"]["n_predict"], 4,
+            "{key} must resolve the token budget: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn unsupported_native_fields_are_refused_with_a_diagnostic() {
+    // The epic's rule is that a field whose value has observable semantics is
+    // never silently ignored. Each of these names the field and the
+    // alternative.
+    for (field, body) in [
+        ("n_cmpl", serde_json::json!({"prompt": "hi", "n_cmpl": 2})),
+        ("n_cmpl", serde_json::json!({"prompt": "hi", "n": 2})),
+        (
+            "n_indent",
+            serde_json::json!({"prompt": "hi", "n_indent": 4}),
+        ),
+        (
+            "t_max_predict_ms",
+            serde_json::json!({"prompt": "hi", "t_max_predict_ms": 500}),
+        ),
+        (
+            "return_progress",
+            serde_json::json!({"prompt": "hi", "return_progress": true}),
+        ),
+        (
+            "verbose",
+            serde_json::json!({"prompt": "hi", "verbose": true}),
+        ),
+        (
+            "return_tokens",
+            serde_json::json!({"prompt": "hi", "return_tokens": true}),
+        ),
+    ] {
+        let (status, response) = post("/completion", body).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{field} must be refused, got {response}"
+        );
+        let message = response["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(field),
+            "the diagnostic must name {field}, got {message:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_inert_value_of_an_unsupported_field_is_accepted() {
+    // A client that sends the whole schema at its defaults must not be turned
+    // away: only a value that would change behavior is refused.
+    let (status, body) = post(
+        "/completion",
+        serde_json::json!({
+            "prompt": "hello",
+            "n_predict": 4,
+            "n_cmpl": 1,
+            "n_indent": 0,
+            "t_max_predict_ms": -1,
+            "return_progress": false,
+            "verbose": false,
+            "return_tokens": false,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn an_unknown_native_field_is_ignored_as_upstream_ignores_it() {
+    // b10621 has no deny-unknown-fields equivalent: an unrecognised key is
+    // accepted and the request succeeds. Rejecting here would turn away a
+    // request llama-server serves.
+    let (status, body) = post(
+        "/completion",
+        serde_json::json!({"prompt": "hello", "n_predict": 4, "totally_unknown_field": 123}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn the_native_embedding_paths_are_mounted_and_separate_from_v1() {
+    // No embedding model is loaded in this fixture, so all three answer 501.
+    // What matters here is that the native paths resolve at all: `/embedding`
+    // was not mounted before this change.
+    for path in ["/embedding", "/embeddings", "/v1/embeddings"] {
+        let (status, body) = post(path, serde_json::json!({"input": "hello"})).await;
+        assert_ne!(status, StatusCode::NOT_FOUND, "{path} must be mounted");
+        assert_ne!(
+            status,
+            StatusCode::METHOD_NOT_ALLOWED,
+            "{path} must accept POST"
+        );
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{path}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn the_native_embedding_path_accepts_the_content_spelling() {
+    // Upstream's legacy `/embedding` takes `{"content": ...}` rather than
+    // `{"input": ...}`; reaching the same 501 proves the body parsed.
+    let (status, _) = post("/embedding", serde_json::json!({"content": "hello"})).await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+}

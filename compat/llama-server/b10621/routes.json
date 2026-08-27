@@ -161,9 +161,14 @@
       "discovery": "source-route-registration",
       "state": "deferred",
       "issue": 1441,
-      "test": "src/server/llama_compat_tests.rs",
-      "notes": "mlxcel mounts a native (non-OpenAI) handler here; response-envelope parity with the b10621 native schema is owned by #1441.",
-      "divergence": [],
+      "test": "src/server/routes/native_route_tests.rs",
+      "notes": "Route separation done: /completion and /completions both reach the native handler and answer the b10621 native object (index, content, tokens, id_slot, stop, model, tokens_predicted, tokens_evaluated, generation_settings, prompt, has_new_line, truncated, stop_type, stopping_word, tokens_cached, timings with cache_n), and the streaming form ends with that same object rather than a [DONE] sentinel. The key set and order were taken from a capture of the pinned binary. The remaining differences are listed in divergence and keep this entry deferred; the stop-sequence half is tracked separately as #1466 because the fix belongs to the MLX scheduler and to the field:stop entry in sampling-and-grammar.json.",
+      "divergence": [
+        "String stop sequences reach ServerGenerateOptions and are never enforced on the MLX serving path, so `stop` has no effect on the emitted text and `stop_type` can never report `word` (#1466).",
+        "`generation_settings` echoes the settings mlxcel actually resolved rather than b10621's full task_params block, so keys mlxcel has no analogue for are absent (#1441).",
+        "`id_slot` is always -1: the continuous-batching scheduler exposes no stable per-request slot number (#1441).",
+        "`return_tokens`, `return_progress`, `verbose`, `n_indent`, `t_max_predict_ms` and `n_cmpl` above 1 are refused with a diagnostic rather than honored (#1441)."
+      ],
       "mlxcel": {
         "route": "POST /completion"
       }
@@ -178,9 +183,14 @@
       "discovery": "source-route-registration",
       "state": "deferred",
       "issue": 1441,
-      "test": "src/server/llama_compat_tests.rs",
-      "notes": "SEMANTIC COLLISION: mounted, but mlxcel selects the OpenAI-shaped handler while b10621 serves the native llama-server schema. #1441 owns the split.",
-      "divergence": [],
+      "test": "src/server/routes/native_route_tests.rs",
+      "notes": "Route separation done: /completion and /completions both reach the native handler and answer the b10621 native object (index, content, tokens, id_slot, stop, model, tokens_predicted, tokens_evaluated, generation_settings, prompt, has_new_line, truncated, stop_type, stopping_word, tokens_cached, timings with cache_n), and the streaming form ends with that same object rather than a [DONE] sentinel. The key set and order were taken from a capture of the pinned binary. The remaining differences are listed in divergence and keep this entry deferred; the stop-sequence half is tracked separately as #1466 because the fix belongs to the MLX scheduler and to the field:stop entry in sampling-and-grammar.json.",
+      "divergence": [
+        "String stop sequences reach ServerGenerateOptions and are never enforced on the MLX serving path, so `stop` has no effect on the emitted text and `stop_type` can never report `word` (#1466).",
+        "`generation_settings` echoes the settings mlxcel actually resolved rather than b10621's full task_params block, so keys mlxcel has no analogue for are absent (#1441).",
+        "`id_slot` is always -1: the continuous-batching scheduler exposes no stable per-request slot number (#1441).",
+        "`return_tokens`, `return_progress`, `verbose`, `n_indent`, `t_max_predict_ms` and `n_cmpl` above 1 are refused with a diagnostic rather than honored (#1441)."
+      ],
       "mlxcel": {
         "route": "POST /completions"
       }
@@ -212,10 +222,14 @@
       "discovery": "source-route-registration",
       "state": "deferred",
       "issue": 1441,
-      "test": null,
-      "notes": "Legacy native alias, not mounted. #1441 owns it.",
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/server/routes/native_route_tests.rs",
+      "notes": "Route separation done: /embedding and /embeddings answer b10621's native shape, a bare JSON array of {index, embedding} whose embedding is an array OF arrays, and /v1/embeddings keeps the OpenAI object. /embedding was not mounted at all before this change, and all three paths used to answer the OpenAI shape. The native handler also accepts upstream's legacy `content` spelling for the input. Shape verified against a capture of the pinned binary serving a real embedding checkpoint.",
+      "divergence": [
+        "With no embedding checkpoint loaded the 501 body names the mlxcel flags instead of b10621's \"Start it with `--embeddings`\"; the flag itself is #1452's entry."
+      ],
+      "mlxcel": {
+        "route": "POST /embedding"
+      }
     },
     {
       "kind": "route",
@@ -227,9 +241,11 @@
       "discovery": "source-route-registration",
       "state": "deferred",
       "issue": 1441,
-      "test": "src/server/llama_compat_tests.rs",
-      "notes": "SEMANTIC COLLISION: mounted, but mlxcel selects the OpenAI-shaped handler while b10621 serves the native schema. #1441 owns the split.",
-      "divergence": [],
+      "test": "src/server/routes/native_route_tests.rs",
+      "notes": "Route separation done: /embedding and /embeddings answer b10621's native shape, a bare JSON array of {index, embedding} whose embedding is an array OF arrays, and /v1/embeddings keeps the OpenAI object. /embedding was not mounted at all before this change, and all three paths used to answer the OpenAI shape. The native handler also accepts upstream's legacy `content` spelling for the input. Shape verified against a capture of the pinned binary serving a real embedding checkpoint.",
+      "divergence": [
+        "With no embedding checkpoint loaded the 501 body names the mlxcel flags instead of b10621's \"Start it with `--embeddings`\"; the flag itself is #1452's entry."
+      ],
       "mlxcel": {
         "route": "POST /embeddings"
       }
@@ -521,12 +537,14 @@
       "field_type": "num",
       "description": "Number of completions to generate. If the input has multiple prompts, total outputs will be N prompts times n_cmpl",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1441,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/native_route_tests.rs",
+      "notes": "No equivalent: mlxcel serves exactly one completion per request, so there is no path that could return b10621's array of results. `n_cmpl` (and its `n` alias) is accepted at 1, the inert value, and any higher value is refused with a 400 naming the field and telling the caller to send one request per completion.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "field": "n_cmpl"
+      }
     },
     {
       "kind": "native_request_field",
@@ -537,12 +555,14 @@
       "field_type": "num",
       "description": "Specify the minimum line indentation for the generated text in number of whitespace characters. Useful for code completion tasks",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1441,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/native_route_tests.rs",
+      "notes": "No equivalent: mlxcel has no minimum-indentation stop rule for fill-in-the-middle completions. Accepted at 0, the inert value, and refused with a 400 naming the field otherwise.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "field": "n_indent"
+      }
     },
     {
       "kind": "native_request_field",
@@ -558,9 +578,11 @@
       "discovery": "source-schema-declaration",
       "state": "deferred",
       "issue": 1441,
-      "test": "src/server/llama_compat_tests.rs",
-      "notes": "VALUE-DOMAIN MISMATCH: NativeCompletionRequest declares n_predict as Option<usize>, so b10621's documented -1 (infinity) is rejected during deserialization. The max_tokens / max_completion_tokens aliases are honored on the OpenAI routes, not here. #1441 owns it.",
-      "divergence": [],
+      "test": "src/server/routes/native_route_tests.rs",
+      "notes": "Accepted, clamped to the effective per-slot context window, and now reachable through b10621's `max_tokens` and `max_completion_tokens` aliases as well. Still deferred because upstream additionally defines `n_predict: 0` as \"evaluate the prompt into the cache and generate nothing\", which mlxcel has not been verified against.",
+      "divergence": [
+        "The `n_predict: 0` prompt-only evaluation upstream defines is unverified on mlxcel (#1441)."
+      ],
       "mlxcel": {
         "field": "n_predict"
       }
@@ -590,12 +612,14 @@
       "field_type": "bool",
       "description": "Include prompt processing progress events in stream mode",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1441,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/native_route_tests.rs",
+      "notes": "No equivalent: the mlxcel scheduler emits no prompt-processing progress events on this path, so there is nothing to attach to a stream frame. Accepted at false, the inert value, and refused with a 400 naming the field otherwise.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "field": "return_progress"
+      }
     },
     {
       "kind": "native_request_field",
@@ -606,12 +630,14 @@
       "field_type": "bool",
       "description": "Return the raw generated token ids in the `tokens` field",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1441,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/native_route_tests.rs",
+      "notes": "No equivalent on this path: mlxcel's streaming decoder emits detokenized text and does not surface the raw token ids to the native route. Accepted at false, the inert value, and refused with a 400 naming the field and pointing at POST /tokenize otherwise.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "field": "return_tokens"
+      }
     },
     {
       "kind": "native_request_field",
@@ -672,12 +698,14 @@
       "field_type": "num",
       "description": "Set a time limit in milliseconds for the prediction phase. The timeout triggers if generation exceeds this time (measured since the first token) and a newline has been generated. Useful for FIM applications",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1441,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/native_route_tests.rs",
+      "notes": "No per-request equivalent: mlxcel bounds a stalled decode with the server-wide --decode-timeout / MLXCEL_DECODE_TIMEOUT watchdog, which cannot be narrowed per request. Accepted at -1 or 0, the inert values, and refused with a 400 naming the field and the alternative otherwise.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "field": "t_max_predict_ms"
+      }
     },
     {
       "kind": "native_request_field",
@@ -690,10 +718,14 @@
       "discovery": "source-schema-declaration",
       "state": "deferred",
       "issue": 1441,
-      "test": null,
-      "notes": null,
-      "divergence": [],
-      "mlxcel": null
+      "test": "src/server/routes/native_route_tests.rs",
+      "notes": "Accepted and honored: a streaming frame carries the timing block when it is set and omits it otherwise, which is the observable half of the field. Deferred because the per-frame block reports the running predicted counts with zeroed prompt figures, while upstream reports the real prefill numbers on every frame.",
+      "divergence": [
+        "Per-frame timings report zeroed prompt_n / prompt_ms rather than the real prefill figures (#1441)."
+      ],
+      "mlxcel": {
+        "field": "timings_per_token"
+      }
     },
     {
       "kind": "native_request_field",
@@ -704,12 +736,14 @@
       "field_type": "bool",
       "description": "Include __verbose field in the response with additional debug information",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
+      "state": "not_applicable",
       "issue": 1441,
-      "test": null,
-      "notes": null,
+      "test": "src/server/routes/native_route_tests.rs",
+      "notes": "No equivalent: mlxcel has no __verbose debug block. Accepted at false, the inert value, and refused with a 400 naming the field and pointing at GET /slots and GET /metrics otherwise.",
       "divergence": [],
-      "mlxcel": null
+      "mlxcel": {
+        "field": "verbose"
+      }
     }
   ]
 }

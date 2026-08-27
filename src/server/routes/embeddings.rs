@@ -228,8 +228,43 @@ fn embed_items(
     Ok((vectors, prompt_tokens))
 }
 
+/// Which wire shape an embedding response is rendered in.
+///
+/// b10621 routes `/embeddings` and `/embedding` to its native handler and
+/// `/v1/embeddings` to the OpenAI one, and the two shapes genuinely differ:
+/// the native one is a bare JSON array of `{index, embedding}` whose
+/// `embedding` is an array OF arrays, while the OpenAI one is an object with
+/// `object` / `data` / `model` / `usage` and a flat `embedding`. mlxcel used
+/// to answer the OpenAI shape on all three paths (#1441).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmbeddingShape {
+    /// `POST /v1/embeddings`.
+    OpenAi,
+    /// `POST /embeddings` and `POST /embedding`.
+    Native,
+}
+
 /// POST /v1/embeddings
 pub async fn create_embeddings(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
+    embeddings_impl(state, body, EmbeddingShape::OpenAi).await
+}
+
+/// POST /embeddings and POST /embedding (the b10621 native routes).
+///
+/// Accepts the native `content` spelling as well as `input`, because upstream's
+/// legacy `/embedding` takes `{"content": ...}`.
+pub async fn native_embeddings(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
+    let mut body = body;
+    if let Some(object) = body.as_object_mut()
+        && !object.contains_key("input")
+        && let Some(content) = object.remove("content")
+    {
+        object.insert("input".to_string(), content);
+    }
+    embeddings_impl(state, body, EmbeddingShape::Native).await
+}
+
+async fn embeddings_impl(state: AppState, body: Value, shape: EmbeddingShape) -> Response {
     let request: EmbeddingsRequest = match serde_json::from_value(body) {
         Ok(request) => request,
         Err(err) => return invalid_request(format!("invalid request body: {err}")).into_response(),
@@ -324,21 +359,41 @@ pub async fn create_embeddings(State(state): State<AppState>, Json(body): Json<V
         .metrics
         .record_request(prompt_tokens, 0, started.elapsed().as_millis() as u64);
 
-    let data = vectors
-        .iter()
-        .enumerate()
-        .map(|(index, vector)| EmbeddingData::from_vector(index, vector, encoding))
-        .collect();
-    Json(EmbeddingsResponse {
-        object: "list".to_string(),
-        data,
-        model: provider.model_id().to_string(),
-        usage: EmbeddingUsage {
-            prompt_tokens,
-            total_tokens: prompt_tokens,
-        },
-    })
-    .into_response()
+    match shape {
+        EmbeddingShape::Native => {
+            // A bare array of `{index, embedding}`, with `embedding` nested one
+            // level deeper than the OpenAI shape: upstream reports one row per
+            // pooled sequence, and mlxcel pools to exactly one.
+            let rows: Vec<Value> = vectors
+                .iter()
+                .enumerate()
+                .map(|(index, vector)| {
+                    serde_json::json!({
+                        "index": index,
+                        "embedding": [vector.values],
+                    })
+                })
+                .collect();
+            Json(rows).into_response()
+        }
+        EmbeddingShape::OpenAi => {
+            let data = vectors
+                .iter()
+                .enumerate()
+                .map(|(index, vector)| EmbeddingData::from_vector(index, vector, encoding))
+                .collect();
+            Json(EmbeddingsResponse {
+                object: "list".to_string(),
+                data,
+                model: provider.model_id().to_string(),
+                usage: EmbeddingUsage {
+                    prompt_tokens,
+                    total_tokens: prompt_tokens,
+                },
+            })
+            .into_response()
+        }
+    }
 }
 
 #[cfg(test)]

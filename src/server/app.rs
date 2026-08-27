@@ -170,9 +170,17 @@ fn build_routes(state: &AppState) -> Router<AppState> {
         .merge(audio_routes)
         // Aliases (some clients use these)
         .route("/chat/completions", post(routes::chat_completions))
-        .route("/completions", post(routes::completions))
+        // BREAKING (#1441): `/completions` and `/embeddings` are llama-server
+        // NATIVE routes, not OpenAI aliases. b10621 sends `/completion` and
+        // `/completions` to one handler and `/v1/completions` to a different
+        // one, and does the same for `/embedding` / `/embeddings` against
+        // `/v1/embeddings`. mlxcel used to answer the OpenAI shape on all of
+        // them, so a llama-server client reading the native schema got an
+        // object it could not parse.
+        .route("/completions", post(routes::native_completion))
         .route("/models", get(routes::list_models))
-        .route("/embeddings", post(routes::create_embeddings))
+        .route("/embedding", post(routes::native_embeddings))
+        .route("/embeddings", post(routes::native_embeddings))
         .route("/rerank", post(routes::create_rerank))
         .route("/reranking", post(routes::create_rerank))
         .route("/responses", post(routes::create_response))
