@@ -19,6 +19,7 @@ use std::path::PathBuf;
 mod commands;
 use mlxcel::cli::batch_quant_args::BatchKvQuantArgs;
 use mlxcel::cli::cache_args::CacheCompatArgs;
+use mlxcel::cli::chat_compat_args::ChatCompatArgs;
 use mlxcel::cli::ggml_compat_args::GgmlCompatArgs;
 use mlxcel::cli::rope_args::RopeOverrideArgs;
 use mlxcel::cli::speculative_args::SpeculativeArgs;
@@ -1829,10 +1830,6 @@ pub(crate) struct ServeArgs {
     #[arg(long, hide = true)]
     _no_webui: bool,
 
-    /// Accepted for llama-server CLI compatibility (ignored, mlxcel always processes templates)
-    #[arg(long, hide = true)]
-    _jinja: bool,
-
     /// Accepted for llama-server CLI compatibility (ignored, vision projector loaded automatically)
     #[arg(long, hide = true)]
     _mmproj: Option<String>,
@@ -1981,6 +1978,15 @@ pub(crate) struct ServeArgs {
     /// exactly the same set (issue #1445).
     #[command(flatten)]
     ggml_compat: GgmlCompatArgs,
+
+    /// llama-server b10621 chat-template, reasoning, and output-parsing
+    /// options (`--reasoning`, `--reasoning-format`, `--skip-chat-parsing`,
+    /// `--prefill-assistant`, ...). Hidden compatibility surfaces, classified
+    /// at startup like the GGML group. Defined once in
+    /// `mlxcel::cli::chat_compat_args` so both server binaries accept exactly
+    /// the same set (issue #1447).
+    #[command(flatten)]
+    chat_compat: ChatCompatArgs,
 
     /// Continuous-batching KV quantization flag group
     /// (`--kv-bits`, `--kv-group-size`, `--kv-quant-scheme`,

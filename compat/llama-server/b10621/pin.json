@@ -42,7 +42,8 @@
     },
     "chat-templates": {
       "owners": [
-        1447
+        1447,
+        1470
       ]
     },
     "embeddings-and-rerank": {

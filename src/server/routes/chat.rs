@@ -43,7 +43,7 @@ use crate::server::streaming::{sse_channel, sse_response};
 use crate::server::structured::{StructuredOutputError, build_constraint_from_response_format};
 use crate::server::thinking_budget::{pick_budget_alias, resolve_request_budget};
 use crate::server::tool_calls;
-use crate::server::tool_calls::stream_filter::StreamFilter;
+use crate::server::tool_calls::stream_filter::{FilterOutput, StreamFilter};
 use crate::server::types::response::{ChatLogprobs, TokenLogprob, TopLogprob};
 use crate::server::types::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ErrorResponse,
@@ -490,6 +490,33 @@ async fn non_stream_chat_completion(
 
     let cached_tokens = result.cached_tokens;
 
+    // b10621 `--skip-chat-parsing` (issue #1447): force a pure content parser.
+    // Everything the model emitted goes to `content` verbatim, reasoning and
+    // tool-call syntax included, and no `reasoning_content` or `tool_calls` is
+    // produced. Placed before every other shaping step so nothing downstream
+    // can re-introduce a parser.
+    if state.config.skip_chat_parsing {
+        return Ok(Json(
+            ChatCompletionResponse::new_with_logprobs(
+                request_id,
+                model_id,
+                result.text,
+                result.prompt_tokens,
+                result.completion_tokens,
+                Some(result.finish_reason),
+                logprobs,
+            )
+            .with_cached_tokens(cached_tokens, prompt_cache_enabled)
+            .with_florence2_result(florence2_result),
+        ));
+    }
+
+    // Where the thoughts end up: b10621 `--reasoning-format`
+    // (`LLAMA_ARG_THINK`). mlxcel's historical behavior is `deepseek`, which is
+    // also what `auto` resolves to here; `none` and `deepseek-legacy` keep the
+    // thinking block in `content`.
+    let reasoning_format = state.config.reasoning_format;
+
     // Surface the thinking scratchpad as `reasoning_content`. This is additive:
     // the `content` computation below (strip_unclosed_primed_thinking /
     // clean_structural_tokens / tool-call parsing) is unchanged. Reusing the
@@ -533,23 +560,35 @@ async fn non_stream_chat_completion(
         if parsed.has_tool_calls() {
             let tool_call_responses = tool_calls::build_tool_call_responses(&parsed, &request);
             if !tool_call_responses.is_empty() {
-                let content = strip_unclosed_primed_thinking(
+                let answer = strip_unclosed_primed_thinking(
                     parsed.content.clone(),
                     &result.text,
                     primed_open_thinking,
+                );
+                let shaped = crate::server::shape_response(
+                    reasoning_format,
+                    answer.clone(),
+                    || {
+                        tool_calls::content_with_thinking_block(
+                            &result.text,
+                            &answer,
+                            reasoning.as_deref(),
+                        )
+                    },
+                    reasoning.clone(),
                 );
                 return Ok(Json(
                     ChatCompletionResponse::new_with_tool_calls(
                         request_id,
                         model_id,
-                        content,
+                        shaped.content,
                         tool_call_responses,
                         result.prompt_tokens,
                         result.completion_tokens,
                         logprobs,
                     )
                     .with_cached_tokens(cached_tokens, prompt_cache_enabled)
-                    .with_reasoning_content(reasoning.clone()),
+                    .with_reasoning_content(shaped.reasoning_content),
                 ));
             }
         }
@@ -557,20 +596,26 @@ async fn non_stream_chat_completion(
         // No tool calls found, but tool parsing was enabled — use the cleaned
         // content from the parser (thinking blocks and structural markers
         // stripped) instead of the raw generation output.
-        let content =
+        let answer =
             strip_unclosed_primed_thinking(parsed.content, &result.text, primed_open_thinking);
+        let shaped = crate::server::shape_response(
+            reasoning_format,
+            answer.clone(),
+            || tool_calls::content_with_thinking_block(&result.text, &answer, reasoning.as_deref()),
+            reasoning.clone(),
+        );
         return Ok(Json(
             ChatCompletionResponse::new_with_logprobs(
                 request_id,
                 model_id,
-                content,
+                shaped.content,
                 result.prompt_tokens,
                 result.completion_tokens,
                 Some(result.finish_reason),
                 logprobs,
             )
             .with_cached_tokens(cached_tokens, prompt_cache_enabled)
-            .with_reasoning_content(reasoning.clone())
+            .with_reasoning_content(shaped.reasoning_content)
             .with_florence2_result(florence2_result),
         ));
     }
@@ -582,6 +627,18 @@ async fn non_stream_chat_completion(
         tool_calls::clean_structural_tokens(&result.text),
         &result.text,
         primed_open_thinking,
+    );
+    let shaped = crate::server::shape_response(
+        reasoning_format,
+        cleaned_text.clone(),
+        || {
+            tool_calls::content_with_thinking_block(
+                &result.text,
+                &cleaned_text,
+                reasoning.as_deref(),
+            )
+        },
+        reasoning.clone(),
     );
 
     // Warm the next turn's history prefix in the background (issue #1144).
@@ -596,14 +653,14 @@ async fn non_stream_chat_completion(
         ChatCompletionResponse::new_with_logprobs(
             request_id,
             model_id,
-            cleaned_text,
+            shaped.content,
             result.prompt_tokens,
             result.completion_tokens,
             Some(result.finish_reason),
             logprobs,
         )
         .with_cached_tokens(cached_tokens, prompt_cache_enabled)
-        .with_reasoning_content(reasoning)
+        .with_reasoning_content(shaped.reasoning_content)
         .with_florence2_result(florence2_result),
     ))
 }
@@ -796,7 +853,14 @@ async fn stream_chat_completion(
         Err(err) => return generation_error_to_response(err).into_response(),
     };
 
-    let parse_tools = tool_calls::should_parse_tool_calls(&request);
+    // b10621 `--skip-chat-parsing` forces a pure content parser, so tool calls
+    // are NOT extracted (issue #1447). Gating here rather than at the emission
+    // site turns off the accumulator, the end-of-stream parse, and the
+    // `finish_reason` override together: leaving any of them on would report
+    // the same call twice, once as the raw syntax in `delta.content` and once
+    // as a tool-call delta.
+    let parse_tools =
+        !state.config.skip_chat_parsing && tool_calls::should_parse_tool_calls(&request);
     let tools_for_parser = if parse_tools {
         request.tools.clone()
     } else {
@@ -861,6 +925,12 @@ async fn stream_chat_completion(
         // entries; pop `suppressed` entries for placeholder chunks). This
         // preserves the upstream mlx-lm `replace(t, text="")` semantics so OpenAI
         // clients aligning by `choices[].logprobs.content` keep position info.
+        // b10621 chat-parsing and reasoning-placement settings (issue #1447),
+        // read once so both the per-token callback and the flush below see the
+        // same values without reaching back into the shared state.
+        let skip_chat_parsing = state.config.skip_chat_parsing;
+        let reasoning_format = state.config.reasoning_format;
+
         let cb_state = std::sync::Arc::new(std::sync::Mutex::new(StreamCallbackState {
             accumulated: String::new(),
             warmup_content: String::new(),
@@ -911,7 +981,23 @@ async fn stream_chat_completion(
                         // Split thinking scratchpad from user-facing content.
                         // Thinking goes out as `delta.reasoning_content`; regular
                         // text goes as `delta.content`.
-                        let emit = cb.stream_filter.feed(&token);
+                        //
+                        // b10621 `--skip-chat-parsing` (issue #1447) turns every
+                        // parser off, so the filter is bypassed and the token is
+                        // emitted verbatim. Synthesizing the pass-through output
+                        // rather than skipping the block keeps the logprob
+                        // bookkeeping below on one code path: one position in,
+                        // one position emitted, none suppressed.
+                        let emit = if skip_chat_parsing {
+                            FilterOutput {
+                                content: Some(token.clone()),
+                                reasoning: None,
+                                suppressed_positions: 0,
+                                consumed_positions: 1,
+                            }
+                        } else {
+                            cb.stream_filter.feed(&token)
+                        };
 
                         // Drain the parallel lp_data buffer in lockstep with the
                         // filter's consumed_positions output:
@@ -933,14 +1019,28 @@ async fn stream_chat_completion(
                             Vec::new()
                         };
 
+                        // Where the thoughts go is `--reasoning-format`'s
+                        // decision: `deepseek` / `auto` route them to
+                        // `delta.reasoning_content` only, `deepseek-legacy` to
+                        // both, and `none` to `delta.content` only.
                         if let Some(reasoning_text) = emit.reasoning
                             && !reasoning_text.is_empty()
                         {
-                            pending.push(ChatCompletionChunk::reasoning_content(
-                                request_id_inner.clone(),
-                                model_id_inner.clone(),
-                                reasoning_text,
-                            ));
+                            if reasoning_format.emits_reasoning_content() {
+                                pending.push(ChatCompletionChunk::reasoning_content(
+                                    request_id_inner.clone(),
+                                    model_id_inner.clone(),
+                                    reasoning_text.clone(),
+                                ));
+                            }
+                            if reasoning_format.keeps_thoughts_in_content() {
+                                pending.push(ChatCompletionChunk::content_with_logprobs(
+                                    request_id_inner.clone(),
+                                    model_id_inner.clone(),
+                                    reasoning_text,
+                                    None,
+                                ));
+                            }
                         }
 
                         if let Some(text) = emit.content
@@ -1002,12 +1102,23 @@ async fn stream_chat_completion(
         if let Some(text) = remaining.reasoning
             && !text.is_empty()
         {
-            let chunk = ChatCompletionChunk::reasoning_content(
-                request_id_clone.clone(),
-                model_id_clone.clone(),
-                text,
-            );
-            let _ = finish_events.json(&chunk);
+            if reasoning_format.emits_reasoning_content() {
+                let chunk = ChatCompletionChunk::reasoning_content(
+                    request_id_clone.clone(),
+                    model_id_clone.clone(),
+                    text.clone(),
+                );
+                let _ = finish_events.json(&chunk);
+            }
+            if reasoning_format.keeps_thoughts_in_content() {
+                let chunk = ChatCompletionChunk::content_with_logprobs(
+                    request_id_clone.clone(),
+                    model_id_clone.clone(),
+                    text,
+                    None,
+                );
+                let _ = finish_events.json(&chunk);
+            }
         }
         if let Some(text) = remaining.content
             && !text.is_empty()
@@ -1815,5 +1926,122 @@ mod tests {
             response.error.message,
             "Request must include at least one non-empty message content or media input."
         );
+    }
+}
+
+#[cfg(test)]
+mod reasoning_format_route_tests {
+    use crate::server::ReasoningFormat;
+    use crate::server::tool_calls::{clean_structural_tokens, content_with_thinking_block};
+
+    /// One Qwen-style generation with a thinking block, as the model emits it.
+    const RAW: &str = "<think>Let me count.</think>The answer is 42.";
+
+    /// The two content forms the route hands to `shape_response`, built the
+    /// same way the route builds them so a change to either shows up here
+    /// rather than only in a live request.
+    fn content_forms(raw: &str) -> (String, String) {
+        let answer = clean_structural_tokens(raw);
+        let reasoning = super::extract_reasoning_content(raw, false);
+        let with_thoughts = content_with_thinking_block(raw, &answer, reasoning.as_deref());
+        (answer, with_thoughts)
+    }
+
+    #[test]
+    fn the_thoughts_form_is_the_answer_with_its_block_restored() {
+        let (answer, with_thoughts) = content_forms(RAW);
+        assert_eq!(answer, "The answer is 42.");
+        assert_eq!(with_thoughts, RAW, "byte-exact for a Qwen-style block");
+    }
+
+    #[test]
+    fn each_format_places_the_thoughts_where_b10621_does() {
+        let (answer, with_thoughts) = content_forms(RAW);
+        for (format, expected_content, expected_reasoning) in [
+            (
+                ReasoningFormat::Auto,
+                answer.as_str(),
+                Some("Let me count."),
+            ),
+            (
+                ReasoningFormat::DeepSeek,
+                answer.as_str(),
+                Some("Let me count."),
+            ),
+            (ReasoningFormat::None, with_thoughts.as_str(), None),
+            (
+                ReasoningFormat::DeepSeekLegacy,
+                with_thoughts.as_str(),
+                Some("Let me count."),
+            ),
+        ] {
+            let shaped = crate::server::shape_response(
+                format,
+                answer.clone(),
+                || with_thoughts.clone(),
+                super::extract_reasoning_content(RAW, false),
+            );
+            assert_eq!(shaped.content, expected_content, "{format} content");
+            assert_eq!(
+                shaped.reasoning_content.as_deref(),
+                expected_reasoning,
+                "{format} reasoning_content"
+            );
+        }
+    }
+
+    #[test]
+    fn a_gemma_style_channel_block_keeps_its_delimiters_too() {
+        // Reconstructing from the extracted reasoning preserves the Gemma
+        // markers, which the raw-text cleaning pass strips out.
+        const GEMMA: &str = "<|channel>thinking<channel|>the answer";
+        let (answer, with_thoughts) = content_forms(GEMMA);
+        assert_eq!(answer, "the answer");
+        assert_eq!(with_thoughts, GEMMA);
+    }
+
+    #[test]
+    fn the_thoughts_form_never_restores_tool_call_syntax() {
+        // The whole reason the form is built from the parser's content rather
+        // than from the raw text: restoring the raw text would report the same
+        // call twice, once as `content` and once as `tool_calls`.
+        const WITH_CALL: &str = concat!(
+            "<think>I should call it.</think>",
+            r#"<tool_call>{"name": "get_weather", "arguments": {}}</tool_call>"#
+        );
+        let parsed = crate::server::tool_calls::parse_tool_calls(WITH_CALL, None);
+        let reasoning = super::extract_reasoning_content(WITH_CALL, false);
+        let with_thoughts =
+            content_with_thinking_block(WITH_CALL, &parsed.content, reasoning.as_deref());
+        assert!(
+            with_thoughts.contains("I should call it."),
+            "the thoughts must be kept: {with_thoughts:?}"
+        );
+        assert!(
+            !with_thoughts.contains("get_weather"),
+            "the tool call must NOT be restored into content: {with_thoughts:?}"
+        );
+    }
+
+    #[test]
+    fn text_without_a_thinking_block_is_identical_under_every_format() {
+        const PLAIN: &str = "just an answer";
+        let (answer, with_thoughts) = content_forms(PLAIN);
+        assert_eq!(answer, with_thoughts);
+        for format in [
+            ReasoningFormat::Auto,
+            ReasoningFormat::None,
+            ReasoningFormat::DeepSeek,
+            ReasoningFormat::DeepSeekLegacy,
+        ] {
+            let shaped = crate::server::shape_response(
+                format,
+                answer.clone(),
+                || with_thoughts.clone(),
+                super::extract_reasoning_content(PLAIN, false),
+            );
+            assert_eq!(shaped.content, PLAIN, "{format}");
+            assert_eq!(shaped.reasoning_content, None, "{format}");
+        }
     }
 }

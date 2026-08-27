@@ -69,10 +69,13 @@ use clap::Args;
 
 /// b10621's truthy set for a value-less option read from the environment.
 /// Compared case-sensitively, exactly as `common_arg_utils::is_truthy` does.
-const TRUTHY: [&str; 4] = ["on", "enabled", "true", "1"];
+///
+/// Shared with [`crate::cli::chat_compat_args`], whose `--reasoning` handler
+/// tests the same set upstream.
+pub(crate) const TRUTHY: [&str; 4] = ["on", "enabled", "true", "1"];
 
 /// b10621's falsey set (`common_arg_utils::is_falsey`).
-const FALSEY: [&str; 4] = ["off", "disabled", "false", "0"];
+pub(crate) const FALSEY: [&str; 4] = ["off", "disabled", "false", "0"];
 
 /// True when `var` is set to a value b10621 would treat as enabling a
 /// value-less option.

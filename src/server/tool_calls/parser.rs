@@ -38,10 +38,17 @@ use crate::server::types::request::Tool;
 /// as the close of an implicit open.
 ///
 /// Used by: tool_calls::parser
+/// (open, close) thinking-marker pairs by family: Qwen-style
+/// `<think>...</think>` and Gemma 4 `<|channel>...<channel|>`.
+///
+/// Shared by [`strip_thinking`], which removes them, and
+/// [`thinking_marker_pair`], which reports which one a generation used, so the
+/// two cannot disagree about what delimits a thinking block.
+const THINKING_MARKER_PAIRS: [(&str, &str); 2] =
+    [("<think>", "</think>"), ("<|channel>", "<channel|>")];
+
 fn strip_thinking(text: &str) -> String {
-    // (open, close) marker pairs by family: Qwen-style `<think>...</think>`
-    // and Gemma 4 `<|channel>...<channel|>`.
-    let pairs: &[(&str, &str)] = &[("<think>", "</think>"), ("<|channel>", "<channel|>")];
+    let pairs: &[(&str, &str)] = &THINKING_MARKER_PAIRS;
 
     // Prompt-primed pass: when a close marker appears with no opening marker
     // before it, the generation prompt primed the open (Gemma 4
@@ -117,6 +124,53 @@ pub fn clean_structural_tokens(raw: &str) -> String {
     let without_thinking = strip_thinking(raw);
     let (content, _) = atem::split_muse_channels(&without_thinking);
     clean_content_markers(&content)
+}
+
+/// The open/close marker pair `raw` used for its thinking block, if any.
+///
+/// The `--reasoning-format none` and `deepseek-legacy` placements keep the
+/// thinking block in `message.content` **with its tags** (issue #1447), and
+/// the tags are family-specific: Qwen-style `<think>` / `</think>` and Gemma 4
+/// `<|channel>` / `<channel|>`. Detected from the close marker, because a
+/// generation prompt can prime the open one so that only the close appears in
+/// the generated text.
+///
+/// The pair list is the same one [`strip_thinking`] removes, so the two cannot
+/// disagree about which markers delimit a thinking block.
+// Used by: routes/chat (non-streaming path, --reasoning-format)
+#[must_use]
+pub fn thinking_marker_pair(raw: &str) -> Option<(&'static str, &'static str)> {
+    THINKING_MARKER_PAIRS
+        .iter()
+        .copied()
+        .find(|(_, close)| raw.contains(close))
+}
+
+/// Rebuild the `--reasoning-format none` / `deepseek-legacy` content form:
+/// the thinking block, tags included, followed by the answer.
+///
+/// Built from the already-cleaned `answer` rather than from the raw text,
+/// because the raw text also carries the tool-call syntax the parser removed;
+/// restoring it would report the same call twice, once as `message.content`
+/// and once as `message.tool_calls`. Reconstructing from the extracted
+/// `reasoning` also preserves the Gemma 4 `<|channel>` delimiters, which
+/// [`clean_content_markers`] strips out of the raw form.
+///
+/// Falls back to `answer` unchanged when the generation carried no thinking
+/// block or no recognizable marker pair, which is what both placements want:
+/// with no thoughts there is nothing to keep.
+///
+/// A model that emitted visible text *before* opening a thinking block has
+/// that text ordered after the block here; every family mlxcel supports opens
+/// the block first (often primed by the generation prompt), so this has no
+/// effect in practice.
+// Used by: routes/chat (non-streaming path, --reasoning-format)
+#[must_use]
+pub fn content_with_thinking_block(raw: &str, answer: &str, reasoning: Option<&str>) -> String {
+    match (thinking_marker_pair(raw), reasoning) {
+        (Some((open, close)), Some(thoughts)) => format!("{open}{thoughts}{close}{answer}"),
+        _ => answer.to_owned(),
+    }
 }
 
 /// Parse model output for tool calls, trying each known format in order.

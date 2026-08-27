@@ -18,6 +18,7 @@ use std::path::PathBuf;
 
 use mlxcel::cli::batch_quant_args::BatchKvQuantArgs;
 use mlxcel::cli::cache_args::CacheCompatArgs;
+use mlxcel::cli::chat_compat_args::ChatCompatArgs;
 use mlxcel::cli::ggml_compat_args::{GgmlCompatArgs, read_model_layer_count};
 use mlxcel::cli::rope_args::RopeOverrideArgs;
 use mlxcel::cli::speculative_args::{
@@ -1213,10 +1214,6 @@ struct ServerArgs {
     #[arg(long, hide = true)]
     _no_webui: bool,
 
-    /// Accepted for llama-server CLI compatibility (ignored: mlxcel always processes templates)
-    #[arg(long, hide = true)]
-    _jinja: bool,
-
     /// Accepted for llama-server CLI compatibility (ignored: vision projector loaded automatically)
     #[arg(long, hide = true)]
     _mmproj: Option<String>,
@@ -1354,6 +1351,15 @@ struct ServerArgs {
     /// exactly the same set (issue #1445).
     #[command(flatten)]
     ggml_compat: GgmlCompatArgs,
+
+    /// llama-server b10621 chat-template, reasoning, and output-parsing
+    /// options (`--reasoning`, `--reasoning-format`, `--skip-chat-parsing`,
+    /// `--prefill-assistant`, ...). Hidden compatibility surfaces, classified
+    /// at startup like the GGML group. Defined once in
+    /// `mlxcel::cli::chat_compat_args` so both server binaries accept exactly
+    /// the same set (issue #1447).
+    #[command(flatten)]
+    chat_compat: ChatCompatArgs,
 
     /// Continuous-batching KV quantization flag group
     /// (`--kv-bits`, `--kv-group-size`, `--kv-quant-scheme`,
@@ -1849,6 +1855,25 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         .ensure_inert_before_model()
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
 
+    // b10621 chat-template / reasoning / parsing options (issue #1447):
+    // classified before the model reference resolves, like the GGML group, so
+    // `--reasoning-format legacy` is reported immediately.
+    args.chat_compat
+        .apply_env_bindings()
+        .map_err(|(var, raw)| anyhow::anyhow!("{var} has an invalid boolean value {raw:?}"))?;
+    let chat_compat = args
+        .chat_compat
+        .resolve()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // b10621's `--chat-template` takes either template text or one of its
+    // built-in identifiers; mlxcel has no built-in library, so a bare name
+    // would become the template itself. Checked before the model resolves so
+    // the mistake is reported immediately (issue #1447).
+    if let Some(template) = args.chat_template.as_deref() {
+        mlxcel::server::ensure_chat_template_is_not_a_builtin_name(template)?;
+    }
+
     // The KV cache type is model-independent too, so validate it here rather
     // than leaving `--cache-type-k q8_0` to be reported after a multi-gigabyte
     // download (issue #1445). The resolved mode is recomputed later against the
@@ -1935,6 +1960,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         .transpose()?;
 
     Ok(ServerStartupInput {
+        chat_compat,
         model_path,
         adapter_path: args.lora,
         model_alias: args.alias,

@@ -680,6 +680,14 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
         StreamFilter::new()
     };
 
+    // b10621 chat-parsing and reasoning-placement settings (issue #1447). This
+    // route serves the same `/v1/chat/completions` as the single-node one, so
+    // it has to honour them too: without this a disaggregated deployment would
+    // report thoughts in `reasoning_content` whatever `--reasoning-format`
+    // said, and `--skip-chat-parsing` would do nothing at all.
+    let skip_chat_parsing = state.config.skip_chat_parsing;
+    let reasoning_format = state.config.reasoning_format;
+
     // Resolve sampling and token budget using the same defaults as the
     // model worker.
     //
@@ -725,11 +733,22 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
                 if let Some(reasoning) = emit.reasoning
                     && !reasoning.is_empty()
                 {
-                    let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_reasoning(
-                        &request_id_str2,
-                        &model,
-                        &reasoning,
-                    ))));
+                    // `--reasoning-format` decides where the thoughts go, the
+                    // same way the single-node route decides it.
+                    if reasoning_format.emits_reasoning_content() {
+                        let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_reasoning(
+                            &request_id_str2,
+                            &model,
+                            &reasoning,
+                        ))));
+                    }
+                    if reasoning_format.keeps_thoughts_in_content() {
+                        let _ = chunk_tx.send(Ok(sse_event(&chat_chunk_content(
+                            &request_id_str2,
+                            &model,
+                            &reasoning,
+                        ))));
+                    }
                 }
                 if let Some(content) = emit.content
                     && !content.is_empty()
@@ -754,7 +773,18 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
                 max_tokens,
                 |text| {
                     frame_counted += 1;
-                    emit_filtered(filter.feed(text));
+                    // `--skip-chat-parsing` forces a pure content parser, so
+                    // the filter is bypassed and the piece is emitted verbatim.
+                    if skip_chat_parsing {
+                        emit_filtered(FilterOutput {
+                            content: Some(text.to_owned()),
+                            reasoning: None,
+                            suppressed_positions: 0,
+                            consumed_positions: 1,
+                        });
+                    } else {
+                        emit_filtered(filter.feed(text));
+                    }
                 },
             )
             .await;
@@ -837,7 +867,15 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
             let mut frame_counted = 0usize;
             let mut absorb = |emit: FilterOutput| {
                 if let Some(r) = emit.reasoning {
-                    reasoning.push_str(&r);
+                    // `--reasoning-format`: `none` and `deepseek-legacy` keep
+                    // the thoughts in `content` as well as, or instead of,
+                    // `reasoning_content`.
+                    if reasoning_format.keeps_thoughts_in_content() {
+                        content.push_str(&r);
+                    }
+                    if reasoning_format.emits_reasoning_content() {
+                        reasoning.push_str(&r);
+                    }
                 }
                 if let Some(c) = emit.content {
                     content.push_str(&c);
@@ -850,7 +888,16 @@ async fn route_chat(state: Arc<RouterState>, request: ChatCompletionRequest) -> 
                 opts.max_tokens,
                 |text| {
                     frame_counted += 1;
-                    absorb(filter.feed(text));
+                    if skip_chat_parsing {
+                        absorb(FilterOutput {
+                            content: Some(text.to_owned()),
+                            reasoning: None,
+                            suppressed_positions: 0,
+                            consumed_positions: 1,
+                        });
+                    } else {
+                        absorb(filter.feed(text));
+                    }
                 },
             )
             .await;

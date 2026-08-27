@@ -38,6 +38,15 @@ Both server entry points accept the canonical llama-server b10621 variables belo
 | `LLAMA_ARG_LOG_FILE` | `--log-file` | `LLAMA_LOG_FILE` |
 | `LLAMA_ARG_CHAT_TEMPLATE` | `--chat-template` | — |
 | `LLAMA_ARG_CHAT_TEMPLATE_FILE` | `--chat-template-file` | — |
+| `LLAMA_ARG_CHAT_TEMPLATE_KWARGS` | `--chat-template-kwargs` | — |
+| `LLAMA_ARG_THINK` | `--reasoning-format` | — |
+| `LLAMA_ARG_REASONING` | `--reasoning` | — |
+| `LLAMA_ARG_REASONING_EFFORT` | `--reasoning-effort` | — |
+| `LLAMA_ARG_REASONING_PRESERVE` | `--reasoning-preserve` / `--no-reasoning-preserve` | — |
+| `LLAMA_ARG_THINK_BUDGET_MESSAGE` | `--reasoning-budget-message` (accepted, not yet injected) | — |
+| `LLAMA_ARG_SKIP_CHAT_PARSING` | `--skip-chat-parsing` / `--no-skip-chat-parsing` | — |
+| `LLAMA_ARG_PREFILL_ASSISTANT` | `--prefill-assistant` / `--no-prefill-assistant` | — |
+| `LLAMA_ARG_JINJA` | `--jinja` / `--no-jinja` | — |
 | `LLAMA_ARG_ENDPOINT_METRICS` | `--metrics` | — |
 | `LLAMA_ARG_ENDPOINT_PROPS` | `--props` | — |
 | `LLAMA_ARG_ENDPOINT_SLOTS` | `--slots` | — |
@@ -68,6 +77,8 @@ Both server entry points accept the canonical llama-server b10621 variables belo
 `LLAMA_ARG_OFFLINE` is the one variable in this table that is not bound through clap either, for a different reason (#1434). `--offline` carries no value, and llama-server fires a value-less option from the environment only when the value is exactly `on`, `enabled`, `true`, or `1`; anything else, an empty value and `0` included, leaves the flag alone. mlxcel reproduces that set exactly rather than using a general boolean parser, so a variable inherited as `LLAMA_ARG_OFFLINE=0` does not pin a deployment offline and a value outside the set does not abort startup.
 
 `HF_TOKEN` is a credential, so `--help` never renders its resolved value. `LLAMA_API_KEY` is not bound through clap at all, so it cannot be rendered either. Everything else in this table is printed by `--help` the way clap normally does.
+
+`LLAMA_ARG_THINK` chooses where a model's thoughts are reported (`none`, `deepseek`, `deepseek-legacy`, `auto`); `LLAMA_ARG_REASONING`, `LLAMA_ARG_REASONING_EFFORT` and `LLAMA_ARG_REASONING_PRESERVE` write the `enable_thinking`, `reasoning_effort` and `preserve_reasoning` chat-template kwargs, exactly as llama-server does, and win over `LLAMA_ARG_CHAT_TEMPLATE_KWARGS` when both name the same key. `LLAMA_ARG_JINJA`, `LLAMA_ARG_REASONING_PRESERVE`, `LLAMA_ARG_SKIP_CHAT_PARSING` and `LLAMA_ARG_PREFILL_ASSISTANT` are `--x` / `--no-x` pairs read at runtime, so their vocabulary is llama-server's rather than clap's. See [llama-server-compat.md](llama-server-compat.md#chat-templates-reasoning-and-output-parsing).
 
 The b10621 GGML runtime options (`--n-gpu-layers`, `--split-mode`, `--mlock`, `--numa`, `--rpc`, the CPU thread-pool knobs, and the rest) bind their own `LLAMA_ARG_*` variables too (#1445). They are hidden compatibility surfaces: an inert value is accepted and anything else stops startup with a diagnostic. Value-less flags and `--x` / `--no-x` pairs among them are read at runtime rather than through clap, so their vocabulary is b10621's: a value-less option fires only on `on`/`enabled`/`true`/`1`, and a pair reads `parse_bool_value` plus a `LLAMA_ARG_NO_*` alias meaning false. See [llama-server-compat.md](llama-server-compat.md#ggml-runtime-placement-and-memory-options).
 

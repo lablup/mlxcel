@@ -30,6 +30,7 @@ use crate::test_support::env_lock::env_lock;
 
 fn sample_input() -> ServerStartupInput {
     ServerStartupInput {
+        chat_compat: Default::default(),
         model_path: PathBuf::from("models/foo"),
         adapter_path: Some(PathBuf::from("adapters/bar")),
         model_alias: Some("alias".to_string()),
@@ -1821,4 +1822,105 @@ fn into_startup_config_carries_every_api_key_source() {
     let cfg = input.into_startup_config().expect("valid");
     assert_eq!(cfg.api_keys, vec!["a,b".to_string()]);
     assert!(cfg.api_key_files.is_empty());
+}
+
+// ── b10621 reasoning template kwargs (issue #1447) ──────────────────────────
+
+mod reasoning_template_kwargs {
+    use super::super::apply_reasoning_template_kwargs;
+    use crate::server::chat_template_kwargs::ChatTemplateKwargs;
+    use serde_json::{Value, json};
+
+    fn base(pairs: &[(&str, Value)]) -> Option<ChatTemplateKwargs> {
+        if pairs.is_empty() {
+            return None;
+        }
+        let mut kwargs = ChatTemplateKwargs::new();
+        for (key, value) in pairs {
+            kwargs.set(key, value.clone());
+        }
+        Some(kwargs)
+    }
+
+    fn apply(
+        start: &[(&str, Value)],
+        flags: &[(&str, Option<Value>)],
+    ) -> Option<ChatTemplateKwargs> {
+        let flags: Vec<(String, Option<Value>)> = flags
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), v.clone()))
+            .collect();
+        apply_reasoning_template_kwargs(base(start), &flags)
+    }
+
+    #[test]
+    fn no_flags_leaves_the_base_untouched() {
+        assert!(apply(&[], &[]).is_none());
+        let kept = apply(&[("a", json!(1))], &[]).expect("base survives");
+        assert_eq!(kept.get("a"), Some(&json!(1)));
+    }
+
+    #[test]
+    fn a_flag_writes_its_key_onto_an_absent_base() {
+        let merged = apply(&[], &[("enable_thinking", Some(json!(true)))]).expect("some");
+        assert_eq!(merged.get("enable_thinking"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn a_flag_wins_over_the_same_key_from_chat_template_kwargs() {
+        // b10621 applies whichever handler ran last and deprecates setting
+        // `enable_thinking` through the kwargs, so the dedicated flag wins.
+        let merged = apply(
+            &[("enable_thinking", json!(true)), ("other", json!("keep"))],
+            &[("enable_thinking", Some(json!(false)))],
+        )
+        .expect("some");
+        assert_eq!(merged.get("enable_thinking"), Some(&json!(false)));
+        assert_eq!(
+            merged.get("other"),
+            Some(&json!("keep")),
+            "unrelated kwargs must survive"
+        );
+    }
+
+    #[test]
+    fn an_erase_removes_the_key_rather_than_setting_a_sentinel() {
+        // `--reasoning-effort default` calls
+        // `default_template_kwargs.erase("reasoning_effort")` upstream. A
+        // template testing `reasoning_effort is defined` must see it undefined,
+        // so a null sentinel would not do.
+        let merged = apply(
+            &[("reasoning_effort", json!("high")), ("other", json!(1))],
+            &[("reasoning_effort", None)],
+        )
+        .expect("some");
+        assert_eq!(merged.get("reasoning_effort"), None);
+        assert_eq!(merged.get("other"), Some(&json!(1)));
+    }
+
+    #[test]
+    fn erasing_a_key_that_was_never_set_is_a_no_op() {
+        let merged = apply(&[("other", json!(1))], &[("reasoning_effort", None)]).expect("some");
+        assert_eq!(merged.get("reasoning_effort"), None);
+        assert_eq!(merged.get("other"), Some(&json!(1)));
+    }
+
+    #[test]
+    fn a_per_request_kwarg_still_wins_over_both() {
+        // The layering here is the SERVER default; the request map is applied
+        // over it by `merge_server_and_request`, which is the precedence the
+        // whole chain depends on.
+        let server = apply(&[], &[("enable_thinking", Some(json!(false)))]);
+        let mut per_request = ChatTemplateKwargs::new();
+        per_request.set("enable_thinking", json!(true));
+        let merged = crate::server::chat_template_kwargs::merge_server_and_request(
+            server.as_ref(),
+            &per_request,
+        );
+        assert_eq!(
+            merged.get("enable_thinking"),
+            Some(&json!(true)),
+            "a per-request kwarg outranks both the flag and --chat-template-kwargs"
+        );
+    }
 }
