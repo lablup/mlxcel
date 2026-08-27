@@ -431,6 +431,17 @@ pub struct ServerStartupConfig {
     pub diffusion_sampler: String,
     /// `--diffusion-threshold` (issue #217 phase 3).
     pub diffusion_threshold: f32,
+
+    /// Resolved llama-server b10621 RoPE override (`--rope-scaling`,
+    /// `--rope-scale`, `--rope-freq-base`, `--rope-freq-scale`), or `None` when
+    /// the operator asked for the checkpoint's own rotation.
+    ///
+    /// Installed process-wide by [`start_server`] before the model worker
+    /// loads anything, because every model family reads its own `config.json`
+    /// inside its own loader and there is no argument to thread. See
+    /// [`crate::models::rope_overrides`] for why that installation is verified
+    /// afterwards rather than trusted.
+    pub rope_override: Option<crate::models::rope_overrides::RopeRuntimeOverride>,
 }
 
 impl Default for ServerStartupConfig {
@@ -576,6 +587,7 @@ impl Default for ServerStartupConfig {
             max_denoising_steps: None,
             diffusion_sampler: "entropy-bound".to_string(),
             diffusion_threshold: 0.9,
+            rope_override: None,
         }
     }
 }
@@ -1834,9 +1846,54 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         anyhow::bail!("--dry-run was requested but --pp-auto was not provided; nothing to plan");
     }
 
+    // Install the b10621 RoPE override before anything can load a checkpoint.
+    // It is process-wide because each model family reads its own `config.json`
+    // inside its own loader, so there is no argument to thread; the worker
+    // confirms it actually reached the model once the load returns
+    // (`rope_overrides::verify_applied`).
+    crate::models::rope_overrides::install(startup.rope_override)
+        .map_err(|message| anyhow::anyhow!("{message}"))?;
+    if let Some(over) = startup.rope_override.as_ref() {
+        tracing::info!(
+            "RoPE runtime override: {} (applied to the checkpoint's rope_scaling block and \
+             rope_theta before the model is built)",
+            over.describe()
+        );
+    }
+
     validate_parallel_context_startup(&startup)?;
     validate_pipeline_parallel_startup(&startup)?;
     let tp_support = resolve_tensor_parallel_runtime_support(&startup)?;
+
+    // One line naming what the context and batch flags actually resolved to.
+    // Until #1450 none of these was logged anywhere: `--ctx-size` reached a
+    // per-slot divisor and a KV cap and the operator had no way to see either
+    // number, so an aggregate that silently became 512 per slot looked exactly
+    // like one that stayed at 8192. The per-slot value is the one a single
+    // request is bounded by, so it is reported next to the total rather than
+    // instead of it.
+    {
+        let slots = effective_parallel_context_slots(
+            startup.n_parallel,
+            startup.max_batch_size,
+            startup.no_batch,
+        );
+        let per_slot = resolve_parallel_context_size(
+            startup.ctx_size,
+            startup.n_parallel,
+            startup.max_batch_size,
+            startup.no_batch,
+        );
+        tracing::info!(
+            ctx_size = startup.ctx_size,
+            ctx_size_per_slot = per_slot,
+            context_slots = slots,
+            n_parallel = startup.n_parallel,
+            prefill_chunk_size = startup.prefill_chunk_size,
+            max_kv_size = ?startup.max_kv_size,
+            "resolved context and batch geometry (0 = the checkpoint's own trained context)"
+        );
+    }
 
     if startup.ubatch_size_provided {
         tracing::info!("--ubatch-size is not applicable on Apple Silicon unified memory; ignored");

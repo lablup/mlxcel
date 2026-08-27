@@ -134,6 +134,14 @@ fn main() -> Result<()> {
     // context length can be varied independently.
     let prefill: usize = args.get(6).and_then(|s| s.parse().ok()).unwrap_or(0);
 
+    // The b10621 RoPE override is process-wide (see
+    // `mlxcel::models::rope_overrides`), so comparing two rotations means two
+    // processes, exactly as this harness already handles `MLXCEL_QMV_WIDE`.
+    // Installing it from `LLAMA_ARG_ROPE_*` here means the arms are selected the
+    // same way the server selects them, through one set of flag definitions.
+    let rope_override = mlxcel::cli::rope_args::install_from_env()
+        .map_err(|message| anyhow::anyhow!("{message}"))?;
+
     let text = std::fs::read_to_string(text_file)
         .with_context(|| format!("reading corpus {text_file}"))?;
     let (model, tokenizer) = mlxcel::load_model(std::path::Path::new(model_dir))
@@ -158,6 +166,9 @@ fn main() -> Result<()> {
         .unwrap_or_default();
 
     println!("# model\t{model_dir}");
+    if let Some(over) = rope_override.as_ref() {
+        println!("# rope_override\t{}", over.describe());
+    }
     println!("# corpus\t{text_file}\ttokens\t{}", ids.len());
     println!(
         "# chunks\t{n_chunks}\tchunk_tokens\t{chunk_tokens}\ttopk\t{topk}\tprefill\t{prefill}"

@@ -136,7 +136,14 @@ impl DynamicNtkRope {
         scaling: Option<&RopeScalingSpec>,
         model_label: &str,
     ) -> Result<Self, String> {
-        let mode = Self::resolve_mode(scaling, max_position_embeddings, model_label)?;
+        // An operator `--rope-scaling` / `--rope-freq-scale` / `--rope-freq-base`
+        // request replaces the checkpoint's block and base before the schedule
+        // is resolved, so the NTK rescale past `max_position_embeddings` is
+        // computed from the base the operator asked for rather than the one the
+        // checkpoint shipped.
+        let overridden = crate::models::rope_overrides::resolve_spec(scaling);
+        let mode = Self::resolve_mode(overridden.as_ref(), max_position_embeddings, model_label)?;
+        let base = crate::models::rope_overrides::resolve_base(base);
         Ok(Self {
             dims,
             base,

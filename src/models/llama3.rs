@@ -1068,7 +1068,7 @@ impl Attention {
             head_dim,
             scale: 1.0 / (head_dim as f32).sqrt(),
             rope_dims: head_dim,
-            rope_base: args.rope_theta,
+            rope_base: crate::models::rope_overrides::resolve_base(args.rope_theta),
             rope_traditional: args.rope_traditional,
             rope_scale,
             rope_freqs,

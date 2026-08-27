@@ -28,6 +28,14 @@
 //! `Qwen2Model`, the `llama` / `mistral` pipeline stage executors and the
 //! tensor-parallel Llama runtime), Qwen3 / Qwen3-MoE, Apertus, Gemma 3, and
 //! InternLM3 / InternLM2 through `dynamic_ntk_rope`.
+//!
+//! Since #1450 this is also the seam llama-server b10621's `--rope-scaling`,
+//! `--rope-scale`, `--rope-freq-scale` and `--rope-freq-base` are applied at:
+//! [`RopeScalingKind::resolve`] consults [`crate::models::rope_overrides`]
+//! before it reads the checkpoint's block or its base. The list above is
+//! therefore also the list of families that honor the override, and a family
+//! added to it starts honoring it with no other change; one that is not on it
+//! is reported at startup rather than silently ignoring the flag.
 
 use mlxcel_core::{MlxArray, UniquePtr};
 use serde::{Deserialize, Deserializer};
@@ -145,6 +153,15 @@ impl RopeScalingKind {
         base: f32,
         model_label: &str,
     ) -> Self {
+        // An operator-supplied `--rope-scaling` / `--rope-scale` /
+        // `--rope-freq-scale` / `--rope-freq-base` replaces the checkpoint's own
+        // block and base here, before the table is built and therefore before
+        // any layer or KV cache exists. With no override installed both calls
+        // hand back what they were given.
+        let overridden = super::rope_overrides::resolve_spec(spec);
+        let spec = overridden.as_ref();
+        let base = super::rope_overrides::resolve_base(base);
+
         let Some(spec) = spec else {
             return Self::Default;
         };

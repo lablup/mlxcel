@@ -191,6 +191,7 @@ fn sample_input() -> ServerStartupInput {
         max_denoising_steps: None,
         diffusion_sampler: "entropy-bound".to_string(),
         diffusion_threshold: 0.9,
+        rope: crate::cli::rope_args::RopeOverrideArgs::default(),
     }
 }
 

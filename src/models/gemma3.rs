@@ -154,10 +154,19 @@ impl ModelArgs {
     /// only failure available is the one a load error prevents, a `yarn` or
     /// `llama3` block silently decoding at `1.0`, which reads as fluent text.
     pub fn global_rope_scale(&self) -> Result<f32, String> {
-        let Some(block) = self.rope_scaling.as_ref() else {
+        let declared = self
+            .rope_scaling
+            .as_ref()
+            .map(|block| RopeScalingSpec::from_lookup(|key| block.get(key)));
+        // An operator `--rope-scaling` / `--rope-freq-scale` request replaces
+        // the checkpoint's block before it is read, the same way it does on the
+        // shared `rope_utils` path. Gemma 3's global layers are the only ones a
+        // position scale reaches; the sliding layers keep unit scale (see
+        // [`layer_rope_params`]), which is also what llama.cpp does with its
+        // separate SWA rope parameters.
+        let Some(spec) = crate::models::rope_overrides::resolve_spec(declared.as_ref()) else {
             return Ok(1.0);
         };
-        let spec = RopeScalingSpec::from_lookup(|key| block.get(key));
 
         match spec.rope_type() {
             "default" => Ok(1.0),
@@ -210,9 +219,16 @@ fn layer_rope_params(args: &ModelArgs, layer_idx: usize) -> Result<(bool, f32, f
     let global_rope_scale = args.global_rope_scale()?;
 
     Ok(if is_sliding {
+        // The sliding layers keep the checkpoint's local base: llama.cpp holds
+        // Gemma 3's SWA rotation in its own `rope_freq_base_train_swa`, which
+        // `--rope-freq-base` does not reach either.
         (true, args.rope_local_base_freq, 1.0)
     } else {
-        (false, args.rope_theta, global_rope_scale)
+        (
+            false,
+            crate::models::rope_overrides::resolve_base(args.rope_theta),
+            global_rope_scale,
+        )
     })
 }
 

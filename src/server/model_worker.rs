@@ -278,6 +278,18 @@ pub(crate) fn spawn_model_worker_with_batch_config(
                         load_elapsed.as_secs_f64(),
                         snap.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
                     );
+                    // A `--rope-scaling` / `--rope-scale` / `--rope-freq-base`
+                    // request that reached no RoPE code path is fatal to
+                    // serving, not a warning: the server would answer every
+                    // request with the checkpoint's own rotation, fluently, and
+                    // nothing downstream would ever say otherwise (#1450).
+                    if let Err(message) =
+                        crate::models::rope_overrides::verify_applied(&worker_model_id)
+                    {
+                        chat_unavailable.store(true, Ordering::Release);
+                        tracing::error!("{message}");
+                        return;
+                    }
                     loaded.store(true, Ordering::Release);
                     (model, tokenizer)
                 }
@@ -965,6 +977,18 @@ pub(crate) fn spawn_legacy_model_worker(
                         load_elapsed.as_secs_f64(),
                         snap.active_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
                     );
+                    // A `--rope-scaling` / `--rope-scale` / `--rope-freq-base`
+                    // request that reached no RoPE code path is fatal to
+                    // serving, not a warning: the server would answer every
+                    // request with the checkpoint's own rotation, fluently, and
+                    // nothing downstream would ever say otherwise (#1450).
+                    if let Err(message) =
+                        crate::models::rope_overrides::verify_applied(&worker_model_id)
+                    {
+                        chat_unavailable.store(true, Ordering::Release);
+                        tracing::error!("{message}");
+                        return;
+                    }
                     loaded.store(true, Ordering::Release);
                     (model, tokenizer)
                 }

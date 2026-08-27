@@ -17,6 +17,7 @@ use clap::{Args as ClapArgs, Parser, Subcommand};
 use std::path::PathBuf;
 
 use mlxcel::cli::batch_quant_args::BatchKvQuantArgs;
+use mlxcel::cli::rope_args::RopeOverrideArgs;
 use mlxcel::cli::speculative_args::{
     SpeculativeArgs, env_fallback_draft_block_size, env_fallback_draft_kind,
 };
@@ -1299,6 +1300,15 @@ struct ServerArgs {
     #[command(flatten)]
     speculative: SpeculativeArgs,
 
+    /// RoPE / YaRN runtime-override flag group (`--rope-scaling`,
+    /// `--rope-scale`, `--rope-freq-base`, `--rope-freq-scale`, and the five
+    /// `--yarn-*` knobs). Defined once in `mlxcel::cli::rope_args` so both
+    /// server binaries (`mlxcel serve`, `mlxcel-server`) accept the same
+    /// llama-server b10621 command line. Resolved before the model is loaded;
+    /// see `ServerStartupConfig::rope_override`.
+    #[command(flatten)]
+    rope: RopeOverrideArgs,
+
     /// Language-bias options for server-wide output
     /// steering. See `--lang-bias`, `--lang-bias-config`, `--lang-bias-policy`,
     /// and the `--lang-bias-include-*` family of flags.
@@ -1946,6 +1956,7 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         max_denoising_steps: args.max_denoising_steps,
         diffusion_sampler: args.diffusion_sampler.clone(),
         diffusion_threshold: args.diffusion_threshold,
+        rope: args.rope.clone(),
     })
 }
 

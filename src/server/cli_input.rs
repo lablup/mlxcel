@@ -498,6 +498,11 @@ pub struct ServerStartupInput {
     pub diffusion_sampler: String,
     /// `--diffusion-threshold` (issue #217 phase 3). Diffusion models only.
     pub diffusion_threshold: f32,
+    /// llama-server b10621 RoPE / YaRN runtime overrides, straight off the
+    /// shared clap group. Resolved (and refused, when unserveable) by
+    /// [`ServerStartupInput::into_startup_config`] so both server binaries
+    /// reject the same command lines with the same message.
+    pub rope: crate::cli::rope_args::RopeOverrideArgs,
 }
 
 impl ServerStartupInput {
@@ -510,6 +515,15 @@ impl ServerStartupInput {
     /// confusing state where the operator thinks they configured kwargs but
     /// didn't.
     pub fn into_startup_config(self) -> anyhow::Result<ServerStartupConfig> {
+        // Resolved before anything else so an unserveable rotation request
+        // fails the command line rather than the first token. The two failure
+        // modes are a YaRN request (no arm on the shared RoPE path) and a
+        // self-contradictory RoPE request; both are startup errors by epic
+        // #1431's rule that a value-bearing option is never silently ignored.
+        let rope_override = self
+            .rope
+            .resolve()
+            .map_err(|message| anyhow::anyhow!("{message}"))?;
         let resolution =
             resolve_prefill_chunk_size(self.prefill_chunk_size, self.batch_size, self.ubatch_size);
         // resolve the server-wide thinking budget once, up-front.
@@ -828,6 +842,7 @@ impl ServerStartupInput {
             max_denoising_steps: self.max_denoising_steps,
             diffusion_sampler: self.diffusion_sampler,
             diffusion_threshold: self.diffusion_threshold,
+            rope_override,
         })
     }
 }
