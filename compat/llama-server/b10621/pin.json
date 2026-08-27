@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "reference": {
     "project": "llama.cpp",
     "release_tag": "b10621",
@@ -34,25 +34,100 @@
       "speculative params"
     ]
   },
-  "shards": [
-    "authentication",
-    "chat-templates",
-    "embeddings-and-rerank",
-    "ggml-runtime",
-    "logging-and-presets",
-    "lora-adapters",
-    "model-source",
-    "multimodal-and-audio",
-    "observability-and-slots",
-    "router-models",
-    "routes",
-    "runtime-and-context",
-    "sampling-and-grammar",
-    "speculative",
-    "streams-and-realtime",
-    "transport-tls-cors",
-    "ui-tools-mcp-gcp"
-  ],
+  "shards": {
+    "authentication": {
+      "owners": [
+        1437
+      ]
+    },
+    "chat-templates": {
+      "owners": [
+        1447
+      ]
+    },
+    "embeddings-and-rerank": {
+      "owners": [
+        1452
+      ]
+    },
+    "ggml-runtime": {
+      "owners": [
+        1445
+      ]
+    },
+    "logging-and-presets": {
+      "owners": [
+        1448
+      ]
+    },
+    "lora-adapters": {
+      "owners": [
+        1439
+      ]
+    },
+    "model-source": {
+      "owners": [
+        1434
+      ]
+    },
+    "multimodal-and-audio": {
+      "owners": [
+        1446,
+        1451
+      ]
+    },
+    "observability-and-slots": {
+      "owners": [
+        1440
+      ]
+    },
+    "router-models": {
+      "owners": [
+        1438
+      ]
+    },
+    "routes": {
+      "owners": [
+        1441,
+        1442,
+        1452
+      ]
+    },
+    "runtime-and-context": {
+      "owners": [
+        1449,
+        1450,
+        1453
+      ]
+    },
+    "sampling-and-grammar": {
+      "owners": [
+        1377,
+        1436
+      ]
+    },
+    "speculative": {
+      "owners": [
+        1433
+      ]
+    },
+    "streams-and-realtime": {
+      "owners": [
+        1444
+      ]
+    },
+    "transport-tls-cors": {
+      "owners": [
+        1432
+      ]
+    },
+    "ui-tools-mcp-gcp": {
+      "owners": [
+        1435,
+        1456
+      ]
+    }
+  },
   "mlxcel_baseline": {
     "description": "Informational snapshot of the mlxcel side at manifest creation; maintained by hand, not by the extractor. The maintained truth is the per-entry state and mlxcel claim data in the shards.",
     "measured_at_commit": "a74bf75fa",

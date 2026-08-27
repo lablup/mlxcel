@@ -60,6 +60,14 @@ which the CI validator rejects, so a nightly bump produces a reviewable
 diff that cannot be merged until a human classifies the additions. Entries
 that disappeared upstream are dropped (visible in the diff).
 
+``pin.json``'s ``shards`` map (shard name -> its owning-issue set) is policy
+too, in the same sense as ``mlxcel_baseline``: it is preserved verbatim from
+the existing ``pin.json`` rather than re-derived, so this script never
+decides who owns a shard. A brand-new shard (one with no prior entry under
+it) gets an empty owner set and needs a human to populate it before
+``scripts/ci/check_llama_compat_manifest.py`` will accept entries pointing
+at issues in it.
+
 Output is deterministic: running the script twice against the same inputs
 leaves the worktree clean.
 """
@@ -76,6 +84,13 @@ import sys
 import tarfile
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
+
+# Manifest document schema, independent of the pinned llama.cpp release.
+# Bumped to 2 alongside `scripts/ci/check_llama_compat_manifest.py`,
+# `tests/llama_compat_manifest.rs`, and `src/server/llama_compat_tests.rs`
+# when pin.json's `shards` field changed from a bare name list to a mapping
+# of shard name to its owning-issue set (issue #1443 follow-up).
+MANIFEST_SCHEMA_VERSION = 2
 
 PINNED_TAG = "b10621"
 PINNED_BUILD = 10621
@@ -589,11 +604,27 @@ def main() -> None:
         entries.sort(key=lambda e: (kind_order[e["kind"]], e["id"]))
         dump_json(
             manifest_dir / f"{name}.json",
-            {"schema_version": 1, "area": name, "entries": entries},
+            {"schema_version": MANIFEST_SCHEMA_VERSION, "area": name, "entries": entries},
         )
 
+    # Shard ownership (which implementation issues may add/edit entries in a
+    # shard) is policy, not a fact re-derived from the binary or sources, so
+    # it is carried forward from the existing pin.json by shard name, the
+    # same way `mlxcel_baseline` is. A shard with no prior recorded owners
+    # (new shard) starts with an empty set; the CI validator then rejects
+    # any entry in it that names an issue, until a human populates the set.
+    old_shard_owners: dict[str, list[int]] = {}
+    old_shards_field = old_pin.get("shards")
+    if isinstance(old_shards_field, dict):
+        for name, meta in old_shards_field.items():
+            owners = meta.get("owners") if isinstance(meta, dict) else None
+            if isinstance(owners, list):
+                old_shard_owners[name] = sorted(
+                    {o for o in owners if isinstance(o, int) and not isinstance(o, bool)}
+                )
+
     pin = {
-        "schema_version": 1,
+        "schema_version": MANIFEST_SCHEMA_VERSION,
         "reference": {
             "project": "llama.cpp",
             "release_tag": PINNED_TAG,
@@ -620,7 +651,9 @@ def main() -> None:
             "native_request_fields": len(fields),
             "help_sections": sections,
         },
-        "shards": sorted(shards),
+        "shards": {
+            name: {"owners": old_shard_owners.get(name, [])} for name in sorted(shards)
+        },
     }
     # Informational snapshot maintained by hand; see the shard docs.
     if "mlxcel_baseline" in old_pin:

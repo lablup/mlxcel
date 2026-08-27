@@ -48,6 +48,13 @@ use common::resolve_repo_binary;
 
 const MANIFEST_REL: &str = "compat/llama-server/b10621";
 
+/// Manifest document schema, independent of the pinned llama.cpp release.
+/// Kept in lockstep with `scripts/ci/check_llama_compat_manifest.py` and
+/// `scripts/compat/extract_b10621_manifest.py`; bump all three together
+/// (issue #1443 follow-up: pin.json's `shards` field changed from a bare
+/// name list to a mapping of shard name to its owning-issue set).
+const MANIFEST_SCHEMA_VERSION: i64 = 2;
+
 fn manifest_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(MANIFEST_REL)
 }
@@ -65,6 +72,10 @@ fn load_manifest_entries() -> BTreeMap<String, serde_json::Value> {
         let doc: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).expect("shard readable"))
                 .unwrap_or_else(|e| panic!("{path:?} is not valid JSON: {e}"));
+        assert_eq!(
+            doc["schema_version"], MANIFEST_SCHEMA_VERSION,
+            "{path:?}: unsupported manifest schema_version"
+        );
         for entry in doc["entries"].as_array().expect("entries array") {
             let id = entry["id"].as_str().expect("entry id").to_owned();
             let prev = entries.insert(id.clone(), entry.clone());

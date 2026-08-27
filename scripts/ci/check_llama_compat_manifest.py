@@ -23,8 +23,19 @@ fields).
 
 Enforced here:
 
-- pin.json counts equal what the shards actually contain, and the shards
-  listed in pin.json equal the files on disk.
+- pin.json counts equal what the shards actually contain, and the shard
+  names listed in pin.json's ``shards`` map equal the files on disk.
+- Every shard in pin.json's ``shards`` map declares a non-empty, sorted,
+  de-duplicated set of owning issue numbers (``shards[name].owners``), and
+  every entry's ``issue`` is a member of its own shard's owner set. This is
+  what makes shard ownership machine-checked rather than prose in
+  docs/llama-server-compat.md: two concurrent chains editing one file is
+  now a gate failure, not just a merge conflict.
+- An entry's ``mlxcel`` claim block only carries keys from a known
+  allowlist (``accepted_spellings``, ``accepted_on_one_binary_only``,
+  ``env``, ``env_binding``, ``env_test``, ``defaults``, ``hidden``,
+  ``route``, ``field``); an unrecognized key fails loudly instead of being
+  a silent no-op that nothing downstream ever reads.
 - The b10621 inventory invariants hold against constants frozen HERE, not
   only against pin.json: 249 help entries, 323 distinct long-option
   spellings, 134 ``LLAMA_*`` environment variables, 53 routes, 74 native
@@ -56,8 +67,8 @@ Enforced here:
   with no ``..`` component, resolving under the repository root. An absolute
   or upward-walking value is rejected rather than satisfying the gate with a
   file that is not in the tree.
-- Shard serialization is canonical (sorted entries, two-space indent,
-  trailing newline), so regeneration diffs stay minimal.
+- Shard and pin.json serialization is canonical (sorted entries, two-space
+  indent, trailing newline), so regeneration diffs stay minimal.
 """
 
 from __future__ import annotations
@@ -75,6 +86,30 @@ MANIFEST_DIR = REPO / "compat" / "llama-server" / "b10621"
 
 VALID_STATES = {"supported", "aliased", "not_applicable", "deferred"}
 KIND_ORDER = {"option": 0, "route": 1, "native_request_field": 2}
+
+# Manifest document schema, independent of the pinned llama.cpp release.
+# Bumped to 2 alongside `scripts/compat/extract_b10621_manifest.py`,
+# `tests/llama_compat_manifest.rs`, and `src/server/llama_compat_tests.rs`
+# when pin.json's `shards` field changed from a bare name list to a mapping
+# of shard name to its owning-issue set (issue #1443 follow-up).
+MANIFEST_SCHEMA_VERSION = 2
+
+# Keys recognized inside an entry's `mlxcel` claim block. A key outside this
+# set is very likely a typo (`accepted_spelling` for `accepted_spellings`,
+# say), and without this allowlist a typo'd key is a silent no-op: nothing
+# reads it, nothing checks it, and a downstream chain can believe it
+# recorded a claim that this gate never verifies.
+MLXCEL_CLAIM_KEYS = {
+    "accepted_spellings",
+    "accepted_on_one_binary_only",
+    "env",
+    "env_binding",
+    "env_test",
+    "defaults",
+    "hidden",
+    "route",
+    "field",
+}
 
 # Frozen-reference invariants for the b10621 pin. These are properties of
 # the pinned upstream release, so they can never drift while the pin holds;
@@ -141,6 +176,14 @@ def check_entry(shard: str, e: dict) -> None:
         return
     mlxcel = e.get("mlxcel")
     test = e.get("test")
+
+    if isinstance(mlxcel, dict):
+        unknown = sorted(set(mlxcel) - MLXCEL_CLAIM_KEYS)
+        if unknown:
+            err(
+                f"{where}: mlxcel claim block has unknown key(s) {unknown}; "
+                f"allowed keys are {sorted(MLXCEL_CLAIM_KEYS)}"
+            )
 
     if state == "deferred":
         issue = e.get("issue")
@@ -231,6 +274,28 @@ def check_entry(shard: str, e: dict) -> None:
         err(f"{where}: test {test!r} is not an existing repository-relative file")
 
 
+def check_shard_ownership(shard: str, e: dict, owners: set[int]) -> None:
+    """An entry's ``issue`` must belong to its shard's declared owner set.
+
+    ``pin.json``'s ``shards`` map is the only thing that makes "which chain
+    may touch which file" machine-checked rather than prose in
+    docs/llama-server-compat.md. Without this, two concurrent chains editing
+    the same shard is caught only by a merge conflict or a human reviewer,
+    not by this gate.
+    """
+    issue = e.get("issue")
+    if not isinstance(issue, int) or isinstance(issue, bool) or issue <= 0:
+        return
+    if issue not in owners:
+        where = f"{shard}.json entry {e.get('id')!r}"
+        err(
+            f"{where}: issue #{issue} is not an owner of shard {shard!r} "
+            f"(owners: {sorted(owners)}). Add #{issue} to pin.json "
+            f"shards[{shard!r}].owners, or move the entry to a shard that "
+            "issue's chain already owns."
+        )
+
+
 def issue_state(issue: int) -> tuple[str | None, str | None]:
     """Return ``(state, None)`` for ``issue``, or ``(None, reason)`` on failure.
 
@@ -268,18 +333,49 @@ def main() -> int:
     if not pin_path.is_file():
         print(f"error: {pin_path} missing", file=sys.stderr)
         return 1
-    pin = json.loads(pin_path.read_text(encoding="utf-8"))
+    pin_raw = pin_path.read_text(encoding="utf-8")
+    pin = json.loads(pin_raw)
+    if pin.get("schema_version") != MANIFEST_SCHEMA_VERSION:
+        err(
+            f"pin.json: unsupported schema_version {pin.get('schema_version')!r} "
+            f"(expected {MANIFEST_SCHEMA_VERSION})"
+        )
+    if canonical_dump(pin) != pin_raw:
+        err("pin.json is not in canonical JSON serialization")
     if pin["reference"]["archive_sha256"] != EXPECTED_ARCHIVE_SHA256:
         err("pin.json archive_sha256 does not match the pinned official archive")
 
     shard_files = sorted(
         p for p in MANIFEST_DIR.glob("*.json") if p.name != "pin.json"
     )
-    if sorted(pin.get("shards", [])) != [p.stem for p in shard_files]:
+    shards_field = pin.get("shards")
+    if not isinstance(shards_field, dict):
+        err("pin.json shards must be an object mapping shard name to its owner-issue set")
+        shards_field = {}
+    if sorted(shards_field) != [p.stem for p in shard_files]:
         err(
-            "pin.json shards list does not match the shard files on disk: "
-            f"{sorted(pin.get('shards', []))} vs {[p.stem for p in shard_files]}"
+            "pin.json shards keys do not match the shard files on disk: "
+            f"{sorted(shards_field)} vs {[p.stem for p in shard_files]}"
         )
+
+    shard_owners: dict[str, set[int]] = {}
+    for name, meta in shards_field.items():
+        owners = meta.get("owners") if isinstance(meta, dict) else None
+        if not isinstance(owners, list) or not owners:
+            err(f"pin.json shards[{name!r}] must declare a non-empty owners list")
+            owners = []
+        cleaned: set[int] = set()
+        for o in owners:
+            if not isinstance(o, int) or isinstance(o, bool) or o <= 0:
+                err(f"pin.json shards[{name!r}].owners contains a non-issue value {o!r}")
+                continue
+            cleaned.add(o)
+        if sorted(cleaned) != owners:
+            err(
+                f"pin.json shards[{name!r}].owners must be a sorted, de-duplicated "
+                "list of positive issue numbers"
+            )
+        shard_owners[name] = cleaned
 
     entries_by_id: dict[str, dict] = {}
     deferred_issues: set[int] = set()
@@ -289,7 +385,7 @@ def main() -> int:
     for shard_path in shard_files:
         raw = shard_path.read_text(encoding="utf-8")
         doc = json.loads(raw)
-        if doc.get("schema_version") != 1:
+        if doc.get("schema_version") != MANIFEST_SCHEMA_VERSION:
             err(f"{shard_path.name}: unsupported schema_version")
         if doc.get("area") != shard_path.stem:
             err(f"{shard_path.name}: area field must equal the file stem")
@@ -317,6 +413,7 @@ def main() -> int:
                 err(f"{shard_path.name} entry {eid!r}: unknown kind {kind!r}")
                 continue
             check_entry(shard_path.stem, e)
+            check_shard_ownership(shard_path.stem, e, shard_owners.get(shard_path.stem, set()))
             issue = e.get("issue")
             if (
                 e.get("state") == "deferred"

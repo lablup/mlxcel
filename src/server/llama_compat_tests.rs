@@ -46,6 +46,14 @@ use tower::ServiceExt;
 use super::{AppState, ChatTemplateProcessor, ModelProvider, ServerConfig, create_app};
 use crate::tokenizer::MlxcelTokenizer;
 
+/// Manifest document schema, independent of the pinned llama.cpp release.
+/// Kept in lockstep with `scripts/ci/check_llama_compat_manifest.py`,
+/// `scripts/compat/extract_b10621_manifest.py`, and
+/// `tests/llama_compat_manifest.rs`; bump all four together (issue #1443
+/// follow-up: pin.json's `shards` field changed from a bare name list to a
+/// mapping of shard name to its owning-issue set).
+const MANIFEST_SCHEMA_VERSION: i64 = 2;
+
 fn manifest_entries() -> Vec<serde_json::Value> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("compat/llama-server/b10621");
     let mut entries = Vec::new();
@@ -58,6 +66,10 @@ fn manifest_entries() -> Vec<serde_json::Value> {
         let doc: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).expect("shard readable"))
                 .unwrap_or_else(|e| panic!("{path:?} is not valid JSON: {e}"));
+        assert_eq!(
+            doc["schema_version"], MANIFEST_SCHEMA_VERSION,
+            "{path:?}: unsupported manifest schema_version"
+        );
         entries.extend(
             doc["entries"]
                 .as_array()
