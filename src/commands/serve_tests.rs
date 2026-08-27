@@ -117,6 +117,7 @@ fn sample_args() -> crate::ServeArgs {
         turbo: mlxcel::cli::turbo_args::TurboKvCacheArgs::default(),
         batch_quant: mlxcel::cli::batch_quant_args::BatchKvQuantArgs::default(),
         speculative: mlxcel::cli::speculative_args::SpeculativeArgs::default(),
+        rope: mlxcel::cli::rope_args::RopeOverrideArgs::default(),
         decode_storage_backend: None,
         vision_cache_size: 20,
         max_image_payload_size: mlxcel::server::DEFAULT_MAX_IMAGE_PAYLOAD_SIZE,

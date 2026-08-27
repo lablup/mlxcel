@@ -435,6 +435,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         max_denoising_steps: args.diffusion.max_denoising_steps,
         diffusion_sampler: args.diffusion.diffusion_sampler,
         diffusion_threshold: args.diffusion.diffusion_threshold,
+        rope: args.rope.clone(),
     })
 }
 

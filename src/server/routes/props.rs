@@ -50,6 +50,30 @@ pub(crate) fn default_generation_settings(config: &ServerConfig) -> serde_json::
         // operator typed, because the IDs are what the sampler compares
         // against and what a per-request `dry_sequence_breakers` overrides.
         "dry_sequence_breakers": config.default_dry_sequence_breakers,
+        // Context and batch geometry, reported for the same reason the
+        // sampling defaults are: an operator passes `--ctx-size` and
+        // `--batch-size` and has no other way to confirm what the server
+        // resolved them to (#1450). `n_ctx` is the PER-SLOT window, which is
+        // the number a request is actually bounded by, not the `--ctx-size`
+        // total: `--ctx-size 8192 --parallel 4` gives each slot 2048. That
+        // matches llama-server, whose `/props` also reports the per-slot
+        // `n_ctx` rather than the aggregate. `0` means the checkpoint's own
+        // trained context, which mlxcel does not clamp.
+        "n_ctx": config.context_size,
+        // The logical prefill batch `--batch-size` / `-b` resolves to.
+        // mlxcel has no separate physical micro-batch (`--ubatch-size` is
+        // accepted and ignored on unified memory), so the two are reported at
+        // the same value rather than one of them being invented.
+        "n_batch": config.prefill_chunk_size,
+        "n_ubatch": config.prefill_chunk_size,
+        // The decode batch width `--max-batch-size` (or `--parallel`)
+        // resolved to, before the scheduler's per-family clamp.
+        "n_batch_decode": config.max_batch_size,
+        // The KV live-window cap in tokens, `null` when unbounded. Folds
+        // `--max-kv-size` and the per-slot share of `--ctx-size` together the
+        // way `resolve_context_kv_cap` does, so what is reported is the bound
+        // that is actually enforced.
+        "n_kv_max": config.max_kv_size,
     })
 }
 

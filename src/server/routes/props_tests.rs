@@ -70,7 +70,12 @@ fn props_reports_exactly_the_documented_key_set() {
             "dry_sequence_breakers",
             "frequency_penalty",
             "min_p",
+            "n_batch",
+            "n_batch_decode",
+            "n_ctx",
+            "n_kv_max",
             "n_predict",
+            "n_ubatch",
             "presence_penalty",
             "repeat_last_n",
             "repeat_penalty",
@@ -82,6 +87,44 @@ fn props_reports_exactly_the_documented_key_set() {
         "the /props payload key set changed. Adding a key is fine, update this list; \
          losing one is a silent break for anyone reading it back."
     );
+}
+
+/// The resolved context and batch geometry an operator passed on the command
+/// line has to come back out somewhere, or `--ctx-size` and `--batch-size` are
+/// only confirmable by reading the source (#1450). `n_ctx` in particular is the
+/// per-slot window rather than the `--ctx-size` total, which is the number a
+/// single request is bounded by and the one llama-server reports.
+#[test]
+fn props_reports_the_resolved_context_and_batch_geometry() {
+    let config = ServerConfig {
+        context_size: 2048,
+        n_parallel: 4,
+        max_batch_size: 4,
+        prefill_chunk_size: 1024,
+        max_kv_size: Some(2048),
+        ..ServerConfig::default()
+    };
+    let settings = default_generation_settings(&config);
+
+    assert_eq!(settings["n_ctx"], 2048);
+    assert_eq!(settings["n_batch"], 1024);
+    // mlxcel has no separate physical micro-batch, so `n_ubatch` reports the
+    // same logical batch rather than a number nothing enforces.
+    assert_eq!(settings["n_ubatch"], 1024);
+    assert_eq!(settings["n_batch_decode"], 4);
+    assert_eq!(settings["n_kv_max"], 2048);
+}
+
+/// An unbounded KV window is reported as JSON `null`, not as `0`: `0` is a
+/// legal cap value elsewhere in this payload and conflating the two would make
+/// "no limit" and "limit of zero" indistinguishable to a client.
+#[test]
+fn props_reports_an_unbounded_kv_window_as_null() {
+    let settings = default_generation_settings(&ServerConfig {
+        max_kv_size: None,
+        ..ServerConfig::default()
+    });
+    assert!(settings["n_kv_max"].is_null(), "{}", settings["n_kv_max"]);
 }
 
 #[test]

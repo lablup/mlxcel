@@ -46,6 +46,13 @@ pub(crate) mod conv_decode;
 // `rope_scaling` block at deserialization so the base never moved.
 pub mod dynamic_ntk_rope;
 pub mod gated_delta;
+// `rope_overrides` carries llama-server b10621's `--rope-scaling`,
+// `--rope-scale`, `--rope-freq-scale` and `--rope-freq-base` from the server
+// CLI down to the RoPE seams in `rope_utils` and `dynamic_ntk_rope` (#1450).
+// It is process-wide because every family reads `config.json` inside its own
+// `load()`, so there is no argument to thread; the applications counter is what
+// keeps that from becoming a silent no-op on a family that is not on the seam.
+pub mod rope_overrides;
 // `rope_utils` is the shared reader for the `rope_scaling` block plus the
 // frequency tables it selects (#1355). It exists because two families needed
 // the same decision and only one made it: Apertus computed the `llama3` table

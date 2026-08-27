@@ -18,6 +18,7 @@ use std::path::PathBuf;
 
 mod commands;
 use mlxcel::cli::batch_quant_args::BatchKvQuantArgs;
+use mlxcel::cli::rope_args::RopeOverrideArgs;
 use mlxcel::cli::speculative_args::SpeculativeArgs;
 use mlxcel::cli::turbo_args::TurboKvCacheArgs;
 use mlxcel::downloader::DownloadArgs;
@@ -1766,6 +1767,15 @@ pub(crate) struct ServeArgs {
     /// parses on both.
     #[command(flatten)]
     speculative: SpeculativeArgs,
+
+    /// RoPE / YaRN runtime-override flag group (`--rope-scaling`,
+    /// `--rope-scale`, `--rope-freq-base`, `--rope-freq-scale`, and the five
+    /// `--yarn-*` knobs). Defined once in `mlxcel::cli::rope_args` so both
+    /// server binaries (`mlxcel serve`, `mlxcel-server`) accept the same
+    /// llama-server b10621 command line. Resolved before the model is loaded;
+    /// see `ServerStartupConfig::rope_override`.
+    #[command(flatten)]
+    pub(crate) rope: RopeOverrideArgs,
 
     /// Language-bias options for server-wide output
     /// steering. Mirrors the same flags exposed on the `generate` subcommand.
