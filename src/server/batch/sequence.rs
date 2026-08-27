@@ -43,8 +43,9 @@ use std::time::Instant;
 
 use mlxcel_core::cache::SequenceId;
 use mlxcel_core::generate::SamplingConfig;
-use mlxcel_core::sampling::{LogprobsConfig, SamplerState};
+use mlxcel_core::sampling::{LogprobsConfig, SamplerState, TokenLogprobData};
 
+use super::stop_matcher::StopMatcher;
 use crate::server::model_provider::GenerateEvent;
 use crate::server::model_provider::model_worker::StreamingDecodeState;
 use crate::server::thinking_budget::ThinkingState;
@@ -124,6 +125,13 @@ pub enum SequenceState {
 pub enum FinishReason {
     /// An EOS token was emitted.
     Stop,
+    /// A request-supplied string stop sequence matched the decoded text
+    /// (issue #1466). Distinct from [`Stop`](Self::Stop) so the response layer
+    /// can report b10621's `stop_type: "word"` rather than `"eos"`; the string
+    /// that matched is held by the sequence's
+    /// [`StopMatcher`](super::stop_matcher::StopMatcher), which is the single
+    /// source of truth for it on every serving path.
+    StopSequence,
     /// `max_tokens` was reached.
     Length,
     /// The N-gram loop detector tripped: the raw generated stream collapsed
@@ -147,7 +155,7 @@ impl SequenceState {
     /// Valid transitions:
     /// - `Queued -> Prefilling` (scheduler begins prefill)
     /// - `Prefilling -> Decoding` (prefill complete, enter decode loop)
-    /// - `Prefilling -> Finished(Stop | Length | RepetitionLoop)` (completed on first token)
+    /// - `Prefilling -> Finished(Stop | StopSequence | Length | RepetitionLoop)` (completed on first token)
     /// - `Decoding -> Finished(*)` (normal completion)
     /// - `Decoding -> Queued` (preemptive eviction for re-prefill)
     /// - Any non-terminal state -> `Finished(Cancelled | Error)` (early abort)
@@ -157,6 +165,11 @@ impl SequenceState {
             (SequenceState::Queued, SequenceState::Prefilling) => true,
             (SequenceState::Prefilling, SequenceState::Decoding) => true,
             (SequenceState::Prefilling, SequenceState::Finished(FinishReason::Stop)) => true,
+            // The first sampled token is decoded during prefill, so a stop
+            // string short enough to complete on it finishes the request there.
+            (SequenceState::Prefilling, SequenceState::Finished(FinishReason::StopSequence)) => {
+                true
+            }
             (SequenceState::Prefilling, SequenceState::Finished(FinishReason::Length)) => true,
             (SequenceState::Prefilling, SequenceState::Finished(FinishReason::RepetitionLoop)) => {
                 true
@@ -236,6 +249,14 @@ pub struct SequenceInfo {
     /// Streaming decode helper for incremental text emission.
     /// Used by `BatchScheduler` during prefill and decode steps.
     pub(crate) decode_state: StreamingDecodeState,
+    /// Streaming-safe matcher for the request's string stop sequences
+    /// (issue #1466). Every decoded piece passes through it before reaching
+    /// `response_tx`, so a piece that could still turn into a stop string is
+    /// held back rather than streamed. Inactive
+    /// ([`StopMatcher::default`](super::stop_matcher::StopMatcher::default))
+    /// when the request supplied no `stop` field, in which case it is an exact
+    /// pass-through and the emitted bytes are unchanged.
+    pub(crate) stop_matcher: StopMatcher,
     /// Incrementally maintained token history for penalty-based sampling.
     /// Initialized from prompt tokens during prefill, then appended per decode
     /// step. Avoids O(prompt_len + generated_len) Vec reconstruction on every
@@ -321,6 +342,137 @@ impl SequenceInfo {
     /// Returns `true` if this request carries VLM image data.
     pub fn is_vlm_request(&self) -> bool {
         self.vlm_embeddings.is_some() || !self.images.is_empty()
+    }
+
+    /// Stream one newly decoded piece to the client through the request's stop
+    /// matcher, returning the stop string that matched, if this piece completed
+    /// one (issue #1466).
+    ///
+    /// This is the single funnel every serving path uses to reach `response_tx`
+    /// with generated text: classic decode, the fused batched decode, prefill's
+    /// first token, and the speculative burst driver. Routing all of them
+    /// through one method is what makes the streamed concatenation equal the
+    /// non-streaming text, because the held-back ambiguous tail lives in one
+    /// place instead of being re-derived per call site.
+    ///
+    /// With no stop strings configured the matcher is a pass-through, so the
+    /// event sent is byte-for-byte the one the call site sent before.
+    ///
+    /// A caller that receives `Some(word)` must finish the sequence with
+    /// [`FinishReason::StopSequence`] and stop feeding tokens.
+    pub(crate) fn stream_decoded_text(
+        &mut self,
+        text: String,
+        logprobs: Option<TokenLogprobData>,
+    ) -> Option<String> {
+        // No stop strings: send the piece verbatim, exactly as every call site
+        // did before #1466, without building a `StopChunk` per decoded token.
+        // This is the overwhelmingly common case on the decode hot path.
+        if !self.stop_matcher.is_active() {
+            let event = match logprobs {
+                Some(lp) => GenerateEvent::TokenWithLogprobs(text, lp),
+                None => GenerateEvent::Token(text),
+            };
+            let _ = self.response_tx.send(event);
+            return None;
+        }
+
+        let chunk = self.stop_matcher.push(&text);
+        if !chunk.emit.is_empty() {
+            let event = match logprobs {
+                Some(lp) => GenerateEvent::TokenWithLogprobs(chunk.emit, lp),
+                None => GenerateEvent::Token(chunk.emit),
+            };
+            let _ = self.response_tx.send(event);
+        }
+        chunk.matched
+    }
+
+    /// Close the text stream at the end of generation: push the incremental
+    /// detokenizer's held tail (if any) through the stop matcher, then release
+    /// whatever the matcher itself was holding.
+    ///
+    /// The tail can itself complete a stop string, because `StreamingDecodeState`
+    /// withholds a piece whose trailing bytes are an incomplete UTF-8 sequence,
+    /// so text that completes one can first become visible here. The finish is
+    /// then reclassified as [`FinishReason::StopSequence`], which the caller must
+    /// not have to remember: this method is the only place that closes the
+    /// stream, so folding the reclassification in makes it unmissable.
+    ///
+    /// A `Cancelled` or `Error` finish is never reclassified. Those outcomes
+    /// gate the prompt-cache donate-back and the wire response, and a stop string
+    /// that happens to surface while a request is failing does not make it a
+    /// healthy stop.
+    ///
+    /// After a stop string has already matched the matcher is inert, so neither
+    /// the tail nor the held text is emitted and the client never sees a byte
+    /// past the match.
+    pub(crate) fn close_text_stream(&mut self, tail: Option<String>) {
+        let tail_matched = tail
+            .and_then(|t| self.stream_decoded_text(t, None))
+            .is_some();
+        if !self.stop_matcher.has_matched() {
+            let held = self.stop_matcher.flush();
+            if !held.is_empty() {
+                let _ = self.response_tx.send(GenerateEvent::Token(held));
+            }
+        }
+        if tail_matched
+            && matches!(
+                self.state,
+                SequenceState::Finished(
+                    FinishReason::Stop | FinishReason::Length | FinishReason::RepetitionLoop
+                )
+            )
+        {
+            self.state = SequenceState::Finished(FinishReason::StopSequence);
+        }
+    }
+
+    /// The stop string that ended this request, or `None` when no string stop
+    /// sequence matched.
+    pub(crate) fn matched_stop(&self) -> Option<&str> {
+        self.stop_matcher.matched()
+    }
+
+    /// Build the final [`GenerationResult`] for this sequence, taking the
+    /// incremental decode state with it.
+    ///
+    /// When a string stop sequence matched, the accumulated text is truncated to
+    /// the bytes that actually reached the client, so the non-streaming `text`
+    /// equals the concatenation of the streamed chunks, and the finish is
+    /// stamped as [`StopKind::Word`] carrying the matched string. Otherwise this
+    /// is exactly the `finish_with_cache` the call sites used before.
+    ///
+    /// Takes `&mut self` rather than `self` because every call site still needs
+    /// the sequence afterwards (prompt-cache donate-back reads `prompt_tokens`
+    /// and `generated_tokens`). The decode state is swapped out for an empty
+    /// one, which is never read again.
+    ///
+    /// [`StopKind::Word`]: crate::server::model_provider::StopKind::Word
+    pub(crate) fn take_generation_result(
+        &mut self,
+        tokenizer: &crate::tokenizer::MlxcelTokenizer,
+        cached_tokens: usize,
+    ) -> crate::server::model_provider::GenerationResult {
+        let state = std::mem::replace(
+            &mut self.decode_state,
+            StreamingDecodeState::new(tokenizer, &[]),
+        );
+        let prompt_len = self.prompt_tokens.len();
+        match self.stop_matcher.matched() {
+            Some(word) => state.finish_stopped_by_word(
+                word.to_string(),
+                self.stop_matcher.emitted_len(),
+                self.created_at,
+                prompt_len,
+                self.max_tokens,
+                cached_tokens,
+            ),
+            None => {
+                state.finish_with_cache(self.created_at, prompt_len, self.max_tokens, cached_tokens)
+            }
+        }
     }
 }
 

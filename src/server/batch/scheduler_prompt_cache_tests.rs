@@ -378,6 +378,7 @@ fn sequence_info_fields_transport_cache_hit_metadata() {
     use std::sync::mpsc;
 
     use crate::server::batch::sequence::{SequenceInfo, SequenceState};
+    use crate::server::batch::stop_matcher::StopMatcher;
     use crate::server::model_provider::GenerateEvent;
     use crate::server::model_provider::model_worker::StreamingDecodeState;
     use mlxcel_core::generate::SamplingConfig;
@@ -402,6 +403,7 @@ fn sequence_info_fields_transport_cache_hit_metadata() {
         generated_tokens: Vec::new(),
         generated_text: String::new(),
         decode_state,
+        stop_matcher: StopMatcher::default(),
         prefill_offset: 0,
         prefill_start_offset: 73,
         already_cached_tokens: 73,

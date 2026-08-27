@@ -1374,10 +1374,10 @@
       "field_type": "json",
       "description": "Specify stopping strings. Generation stops when one is produced, and the string is not included in the output",
       "discovery": "source-schema-declaration",
-      "state": "deferred",
-      "issue": 1436,
-      "test": "src/server/llama_compat_tests.rs",
-      "notes": "Deserialized as scalar or array (#1430) and carried to ServerGenerateOptions, but only the default-off OpenXLA worker consumes it (src/server/batch/stop_matcher.rs); the shipped MLX decode path never truncates on a stop string. #1436 owns it.",
+      "state": "supported",
+      "issue": 1466,
+      "test": "src/server/batch/stop_sequence_tests.rs::a_stop_string_truncates_the_text_and_excludes_the_match",
+      "notes": "Deserialized as scalar or array (#1430), carried to ServerGenerateOptions, and enforced on the shipping MLX serving path since #1466: every decoded piece passes through StopMatcher (src/server/batch/stop_matcher.rs) before it reaches the client, so a match truncates the text, the stop string is excluded, generation ends, and the matched string is reported as stopping_word with stop_type \"word\". Verified against the pinned b10621 binary on Qwen3-0.6B: `stop: [\"5\"]` on `Count: 1 2 3` returns content \" 4 \" with tokens_predicted 4 on both.",
       "divergence": [],
       "mlxcel": {
         "field": "stop"

@@ -90,6 +90,7 @@ use super::queue::PrefillQueue;
 use super::sequence::{
     BatchSchedulerAction, FinishReason, RequestPriority, SequenceInfo, SequenceState,
 };
+use super::stop_matcher::StopMatcher;
 use super::tick_policy::{
     TickChoice, TickState, decide_tick, mixed_step_enabled, resolve_prefill_grant_interval,
 };
@@ -1187,6 +1188,9 @@ impl BatchScheduler {
             generated_tokens: Vec::new(),
             generated_text: String::new(),
             decode_state,
+            // The prefill-role handoff carries no request options, so no string
+            // stop sequences reach it; the matcher is an exact pass-through.
+            stop_matcher: StopMatcher::default(),
             prefill_offset: 0,
             prefill_start_offset: 0,
             already_cached_tokens: 0,
@@ -1282,6 +1286,9 @@ impl BatchScheduler {
             generated_tokens,
             generated_text: String::new(),
             decode_state,
+            // The decode-role ingest is driven by the handoff frame, which
+            // carries no string stop sequences (#126 B2c scope).
+            stop_matcher: StopMatcher::default(),
             prefill_offset,
             prefill_start_offset: 0,
             already_cached_tokens: 0,
@@ -4122,6 +4129,10 @@ impl BatchScheduler {
             generated_tokens: Vec::new(),
             generated_text: String::new(),
             decode_state,
+            // Honor the request's string stop sequences on the MLX serving path
+            // (issue #1466). Empty / absent leaves the matcher inactive, in
+            // which case every decoded piece is emitted verbatim.
+            stop_matcher: StopMatcher::new(options.stop_sequences.clone().unwrap_or_default()),
             prefill_offset: 0,
             prefill_start_offset,
             already_cached_tokens,
@@ -6760,15 +6771,17 @@ impl BatchScheduler {
         seq.merged_eos = eos_tokens;
         seq.token_history = token_history;
 
-        if let Some(new_text) = seq.decode_state.on_token(first_token, &self.tokenizer) {
-            let event = match token_lp {
-                Some(lp) => GenerateEvent::TokenWithLogprobs(new_text, lp),
-                None => GenerateEvent::Token(new_text),
-            };
-            let _ = seq.response_tx.send(event);
-        }
+        // Stream the first token's text through the request's stop matcher
+        // (issue #1466). A short stop string can complete on this very token, in
+        // which case generation ends here and the matched text is never emitted.
+        let prefill_stop_word = match seq.decode_state.on_token(first_token, &self.tokenizer) {
+            Some(new_text) => seq.stream_decoded_text(new_text, token_lp),
+            None => None,
+        };
 
-        let prefill_finish_reason = if structured_stopped {
+        let prefill_finish_reason = if prefill_stop_word.is_some() {
+            Some(FinishReason::StopSequence)
+        } else if structured_stopped {
             Some(FinishReason::Stop)
         } else if seq.generated_tokens.len() >= seq.max_tokens {
             Some(FinishReason::Length)
@@ -6785,17 +6798,13 @@ impl BatchScheduler {
             // Forward any tail the incremental detokenizer held back (a final
             // token carrying complete text plus a trailing incomplete UTF-8
             // byte) as one last token event before Done, so streaming clients
-            // receive it (issue #633).
-            if let Some(tail) = seq.decode_state.flush(&self.tokenizer) {
-                let _ = seq.response_tx.send(GenerateEvent::Token(tail));
-            }
+            // receive it (issue #633). It goes through the stop matcher too, so
+            // a stop string that only becomes visible in the tail still fires
+            // and the tail is dropped rather than leaked.
+            let tail = seq.decode_state.flush(&self.tokenizer);
+            seq.close_text_stream(tail);
             let cached = seq.already_cached_tokens;
-            let result = seq.decode_state.finish_with_cache(
-                seq.created_at,
-                seq.prompt_tokens.len(),
-                seq.max_tokens,
-                cached,
-            );
+            let result = seq.take_generation_result(&self.tokenizer, cached);
             tracing::info!(
                 prompt_tokens = seq.prompt_tokens.len(),
                 cached_tokens = cached,
@@ -6942,6 +6951,10 @@ impl BatchScheduler {
             victim.prefill_start_offset = 0;
             victim.already_cached_tokens = 0;
             victim.decode_state = StreamingDecodeState::new(&self.tokenizer, &victim.prompt_tokens);
+            // The matcher's held tail and emitted-byte count describe the decode
+            // being discarded, so they reset with it (issue #1466). The
+            // request's stop strings survive: re-prefill must still honor them.
+            victim.stop_matcher.reset();
             victim.token_history.clear();
             victim.merged_eos.clear();
 
@@ -7733,15 +7746,24 @@ impl BatchScheduler {
                 seq.token_history.push(token_val);
             }
 
-            if let Some(new_text) = seq.decode_state.on_token(token_val, &self.tokenizer) {
-                let event = match token_lp {
-                    Some(lp) => GenerateEvent::TokenWithLogprobs(new_text, lp),
-                    None => GenerateEvent::Token(new_text),
-                };
-                let _ = seq.response_tx.send(event);
+            // Stream through the request's stop matcher (issue #1466): text that
+            // could still become a stop string is held back, and a completed
+            // stop string ends the sequence with the match excluded.
+            let stop_word = match seq.decode_state.on_token(token_val, &self.tokenizer) {
+                Some(new_text) => seq.stream_decoded_text(new_text, token_lp),
+                None => None,
+            };
+
+            if stop_word.is_some()
+                && let Err(err) = seq
+                    .state
+                    .transition_to(SequenceState::Finished(FinishReason::StopSequence))
+            {
+                tracing::error!("State transition error: {err}");
             }
 
-            if structured_stopped
+            if !seq.state.is_finished()
+                && structured_stopped
                 && let Err(err) = seq
                     .state
                     .transition_to(SequenceState::Finished(FinishReason::Stop))
@@ -7878,11 +7900,25 @@ impl BatchScheduler {
                 seq.token_history.push(token_val);
             }
 
-            if let Some(new_text) = seq.decode_state.on_token(token_val, &self.tokenizer) {
-                let _ = seq.response_tx.send(GenerateEvent::Token(new_text));
+            // Same stop-string enforcement as the per-row loop (issue #1466).
+            // The fast path excludes penalty-bearing configs, not stop strings,
+            // so it must honor them or a request would silently change behavior
+            // depending on which decode kernel the batch happened to take.
+            let stop_word = match seq.decode_state.on_token(token_val, &self.tokenizer) {
+                Some(new_text) => seq.stream_decoded_text(new_text, None),
+                None => None,
+            };
+
+            if stop_word.is_some()
+                && let Err(err) = seq
+                    .state
+                    .transition_to(SequenceState::Finished(FinishReason::StopSequence))
+            {
+                tracing::error!("State transition error: {err}");
             }
 
-            if seq.generated_tokens.len() >= seq.max_tokens
+            if !seq.state.is_finished()
+                && seq.generated_tokens.len() >= seq.max_tokens
                 && let Err(err) = seq
                     .state
                     .transition_to(SequenceState::Finished(FinishReason::Length))
@@ -8092,15 +8128,22 @@ impl BatchScheduler {
             seq.token_history.push(token_val);
         }
 
-        if let Some(new_text) = seq.decode_state.on_token(token_val, &self.tokenizer) {
-            let event = match token_lp {
-                Some(lp) => GenerateEvent::TokenWithLogprobs(new_text, lp),
-                None => GenerateEvent::Token(new_text),
-            };
-            let _ = seq.response_tx.send(event);
+        // Stop-string enforcement for the single-step decode path (issue #1466).
+        let stop_word = match seq.decode_state.on_token(token_val, &self.tokenizer) {
+            Some(new_text) => seq.stream_decoded_text(new_text, token_lp),
+            None => None,
+        };
+
+        if stop_word.is_some()
+            && let Err(err) = seq
+                .state
+                .transition_to(SequenceState::Finished(FinishReason::StopSequence))
+        {
+            tracing::error!("State transition error: {err}");
         }
 
-        if structured_stopped
+        if !seq.state.is_finished()
+            && structured_stopped
             && let Err(err) = seq
                 .state
                 .transition_to(SequenceState::Finished(FinishReason::Stop))
@@ -8237,16 +8280,12 @@ impl BatchScheduler {
                 // Forward the incremental detokenizer's held tail as one final
                 // token event before Done, so streaming clients are not missing
                 // text the non-streaming result.text still carries (issue #633).
-                if let Some(tail) = seq.decode_state.flush(&self.tokenizer) {
-                    let _ = seq.response_tx.send(GenerateEvent::Token(tail));
-                }
+                // The tail passes through the stop matcher, which also releases
+                // whatever the matcher itself was holding back (issue #1466).
+                let tail = seq.decode_state.flush(&self.tokenizer);
+                seq.close_text_stream(tail);
                 let cached = seq.already_cached_tokens;
-                let result = seq.decode_state.finish_with_cache(
-                    seq.created_at,
-                    seq.prompt_tokens.len(),
-                    seq.max_tokens,
-                    cached,
-                );
+                let result = seq.take_generation_result(&self.tokenizer, cached);
                 // Per-request TTFT / decode-rate telemetry (epic #623 #624).
                 // Recorded once here, where the finished sequence's timings are
                 // available, never on the per-token hot path.
@@ -8269,13 +8308,14 @@ impl BatchScheduler {
 
                 // donate the full KV cache back to
                 // the prompt-cache store on *healthy* finishes (Stop /
-                // Length / Cancelled) so the next turn of the same
-                // conversation can adopt it. `Finished(Error)` paths bypass
+                // StopSequence / Length / Cancelled) so the next turn of the
+                // same conversation can adopt it. `Finished(Error)` paths bypass
                 // this branch — their cache is assumed tainted.
                 let healthy = matches!(
                     seq.state,
                     SequenceState::Finished(
                         FinishReason::Stop
+                            | FinishReason::StopSequence
                             | FinishReason::Length
                             | FinishReason::RepetitionLoop
                             | FinishReason::Cancelled,

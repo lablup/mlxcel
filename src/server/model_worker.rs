@@ -46,7 +46,7 @@ use crate::vlm_runtime::{
 };
 use crate::worker_failfast::run_core_thread_or_abort;
 
-use super::{GenerationResult, ModelRequest};
+use super::{GenerationResult, ModelRequest, StopKind};
 
 /// Configuration for the scheduler, passed from `ModelProvider` to the
 /// worker thread.
@@ -2832,11 +2832,8 @@ pub(crate) fn build_generation_result_with_cache(
     max_tokens: usize,
     cached_tokens: usize,
 ) -> GenerationResult {
-    let finish_reason = if completion_tokens >= max_tokens {
-        "length"
-    } else {
-        "stop"
-    };
+    let hit_limit = completion_tokens >= max_tokens;
+    let finish_reason = if hit_limit { "length" } else { "stop" };
 
     GenerationResult {
         text,
@@ -2846,6 +2843,15 @@ pub(crate) fn build_generation_result_with_cache(
         prompt_eval_ms,
         generation_only_ms: elapsed_ms.saturating_sub(prompt_eval_ms),
         finish_reason: finish_reason.to_string(),
+        // The EOS-or-length split this function has always made. A string
+        // stop-sequence match cannot be seen from the token counts, so the
+        // scheduler overrides this through `finish_stopped_by_word`
+        // (issue #1466); every other producer keeps the derived value.
+        stop_kind: if hit_limit {
+            StopKind::Limit
+        } else {
+            StopKind::Eos
+        },
         logprobs: None,
         cached_tokens,
         // Structured coordinate output is produced only by the Florence-2
@@ -3092,11 +3098,25 @@ impl StreamingDecodeState {
     /// it is floored to the nearest boundary defensively rather than panicking.
     #[cfg(feature = "xla-iree")]
     pub(crate) fn finish_truncated(
+        self,
+        keep_bytes: usize,
+        start: Instant,
+        prompt_token_count: usize,
+        max_tokens: usize,
+    ) -> GenerationResult {
+        self.finish_truncated_with_cache(keep_bytes, start, prompt_token_count, max_tokens, 0)
+    }
+
+    /// [`finish_truncated`](Self::finish_truncated) with the prompt-prefix cache
+    /// count, for the MLX scheduler (issue #1466), which reports
+    /// `usage.cached_tokens` on every finish.
+    pub(crate) fn finish_truncated_with_cache(
         mut self,
         keep_bytes: usize,
         start: Instant,
         prompt_token_count: usize,
         max_tokens: usize,
+        cached_tokens: usize,
     ) -> GenerationResult {
         if keep_bytes < self.generated_text.len() {
             let mut cut = keep_bytes;
@@ -3105,7 +3125,36 @@ impl StreamingDecodeState {
             }
             self.generated_text.truncate(cut);
         }
-        self.finish_with_cache(start, prompt_token_count, max_tokens, 0)
+        self.finish_with_cache(start, prompt_token_count, max_tokens, cached_tokens)
+    }
+
+    /// Finish a request that a string stop sequence ended (issue #1466):
+    /// truncate the accumulated text to the bytes that actually reached the
+    /// client, then stamp the finish as a stop-word match.
+    ///
+    /// The wire `finish_reason` is forced to `"stop"` even when the stop string
+    /// completed on the last budgeted token, because the request did not run out
+    /// of budget: it was ended by the caller's own stop string, and reporting
+    /// `"length"` would tell an OpenAI client to continue.
+    pub(crate) fn finish_stopped_by_word(
+        self,
+        word: String,
+        keep_bytes: usize,
+        start: Instant,
+        prompt_token_count: usize,
+        max_tokens: usize,
+        cached_tokens: usize,
+    ) -> GenerationResult {
+        let mut result = self.finish_truncated_with_cache(
+            keep_bytes,
+            start,
+            prompt_token_count,
+            max_tokens,
+            cached_tokens,
+        );
+        result.finish_reason = "stop".to_string();
+        result.stop_kind = StopKind::Word(word);
+        result
     }
 }
 

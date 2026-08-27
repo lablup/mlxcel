@@ -26,6 +26,20 @@ impl ModelProvider {
                         ..
                     } => {
                         drop(queue_reservation);
+                        // A request carrying string stop sequences is answered
+                        // as a generation that one of them ended (issue #1466),
+                        // so route tests can assert the b10621
+                        // `stop_type` / `stopping_word` mapping without a model.
+                        // A request without `stop` keeps the empty canned
+                        // generation every other route test depends on.
+                        let stop_kind = options
+                            .stop_sequences
+                            .as_deref()
+                            .and_then(<[String]>::first)
+                            .map(|word| {
+                                crate::server::model_provider::StopKind::Word(word.clone())
+                            })
+                            .unwrap_or(crate::server::model_provider::StopKind::Eos);
                         let _ = options_tx.send(options);
                         let _ = response_tx.send(GenerateEvent::Done(GenerationResult {
                             text: String::new(),
@@ -35,6 +49,7 @@ impl ModelProvider {
                             prompt_eval_ms: 0,
                             generation_only_ms: 0,
                             finish_reason: "stop".to_string(),
+                            stop_kind,
                             logprobs: None,
                             cached_tokens: 0,
                             structured_output: None,

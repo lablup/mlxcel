@@ -2019,15 +2019,18 @@ pub(crate) fn stream_burst_tokens(
             // classic path does the same when `compute_logprobs`
             // returns `None`, e.g. on a sampler override). A fired
             // thinking-budget override also forces plain `Token`.
-            let event = if logprobs_on && !override_fired {
-                match logprobs.get(idx).and_then(|lp| lp.clone()) {
-                    Some(lp) => GenerateEvent::TokenWithLogprobs(new_text, lp),
-                    None => GenerateEvent::Token(new_text),
-                }
+            let lp = if logprobs_on && !override_fired {
+                logprobs.get(idx).and_then(|lp| lp.clone())
             } else {
-                GenerateEvent::Token(new_text)
+                None
             };
-            let _ = seq.response_tx.send(event);
+            // Same stop-string enforcement as the classic decode path
+            // (issue #1466): a speculative request must not outrun its own
+            // stop strings just because its tokens arrive several at a time.
+            if seq.stream_decoded_text(new_text, lp).is_some() {
+                stream.done = true;
+                return true;
+            }
         }
     }
     // Budget saturation terminates the stream even when the last committed
@@ -2049,8 +2052,12 @@ pub(crate) fn finalize_burst_stream(
     mut seq: SequenceInfo,
     stream: &BurstStreamState,
 ) -> FinalizeOutcome {
-    // Final state classification.
-    let finish_reason = if stream.hit_eos {
+    // Final state classification. A matched string stop sequence outranks the
+    // budget: the request ended because the caller's own stop string appeared,
+    // not because it ran out of tokens (issue #1466).
+    let finish_reason = if seq.matched_stop().is_some() {
+        FinishReason::StopSequence
+    } else if stream.hit_eos {
         FinishReason::Stop
     } else if seq.generated_tokens.len() >= stream.max_tokens {
         FinishReason::Length
@@ -2064,15 +2071,18 @@ pub(crate) fn finalize_burst_stream(
     // classify the finish for the prompt-cache donate gate
     // BEFORE `finish_reason` is moved into `transition_to`. Mirrors the
     // `healthy` gate in `scheduler.rs::finalize_completed` — only
-    // `Stop` / `Length` / `Cancelled` finishes donate their cache back.
-    // `finalize_burst_success` only ever classifies `Stop` or `Length`
-    // (the `Error` / `Cancelled` outcomes never reach this function),
-    // so this is always `true` here; computing it explicitly keeps the
-    // burst path's gate bit-identical to the classic path's and robust
-    // if the classification above ever gains a new arm.
+    // `Stop` / `StopSequence` / `Length` / `Cancelled` finishes donate their
+    // cache back. `finalize_burst_success` only ever classifies `Stop`,
+    // `StopSequence` or `Length` (the `Error` / `Cancelled` outcomes never
+    // reach this function), so this is always `true` here; computing it
+    // explicitly keeps the burst path's gate bit-identical to the classic
+    // path's and robust if the classification above ever gains a new arm.
     let healthy_finish = matches!(
         finish_reason,
-        FinishReason::Stop | FinishReason::Length | FinishReason::Cancelled
+        FinishReason::Stop
+            | FinishReason::StopSequence
+            | FinishReason::Length
+            | FinishReason::Cancelled
     );
     if let Err(err) = seq
         .state
@@ -2083,17 +2093,13 @@ pub(crate) fn finalize_burst_stream(
 
     let tokens_generated = seq.generated_tokens.len();
     // Forward the incremental detokenizer's held tail as one final token event
-    // before Done so streaming clients receive it (issue #633).
-    if let Some(tail) = seq.decode_state.flush(tokenizer) {
-        let _ = seq.response_tx.send(GenerateEvent::Token(tail));
-    }
+    // before Done so streaming clients receive it (issue #633), through the stop
+    // matcher so a stop string that only completes in the tail still fires and
+    // the tail is dropped rather than leaked (issue #1466).
+    let tail = seq.decode_state.flush(tokenizer);
+    seq.close_text_stream(tail);
     let cached = seq.already_cached_tokens;
-    let result = seq.decode_state.finish_with_cache(
-        seq.created_at,
-        seq.prompt_tokens.len(),
-        seq.max_tokens,
-        cached,
-    );
+    let result = seq.take_generation_result(tokenizer, cached);
     tracing::info!(
         prompt_tokens = seq.prompt_tokens.len(),
         generated_tokens = tokens_generated,

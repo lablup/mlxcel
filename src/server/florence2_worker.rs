@@ -57,7 +57,7 @@ use crate::models::florence2::{
 };
 use crate::server::ServerGenerateOptions;
 use crate::server::model_provider::model_worker::decode_request_images;
-use crate::server::model_provider::{GenerateEvent, GenerationResult, ModelRequest};
+use crate::server::model_provider::{GenerateEvent, GenerationResult, ModelRequest, StopKind};
 
 /// Error message sent for an audio/video Florence-2 request.
 pub(crate) const FLORENCE2_MEDIA_UNSUPPORTED_MSG: &str =
@@ -404,6 +404,13 @@ fn handle_florence2_request(
         prompt_eval_ms: 0,
         generation_only_ms: elapsed_ms,
         finish_reason: finish_reason.to_string(),
+        // Florence-2 has no string stop sequences: the task decode is
+        // model-owned and ends on EOS or the token budget (issue #1466).
+        stop_kind: if finish_reason == "length" {
+            StopKind::Limit
+        } else {
+            StopKind::Eos
+        },
         logprobs: None,
         cached_tokens: 0,
         structured_output: Some(structured),

@@ -30,6 +30,7 @@ use axum::{
 use crate::server::batch::RequestPriority;
 use crate::server::config::ReasoningBudgetOverride;
 use crate::server::media::MediaRequestMetadata;
+use crate::server::model_provider::StopKind;
 use crate::server::request_options::{
     RequestOptionOverrides, build_server_generate_options, resolve_server_max_tokens,
 };
@@ -187,7 +188,7 @@ async fn non_stream_native_completion(
             tokens_predicted: result.completion_tokens,
             tokens_evaluated: result.prompt_tokens,
             cached_tokens: result.cached_tokens,
-            finish_reason: result.finish_reason.as_str(),
+            stop_kind: &result.stop_kind,
             prompt_ms,
             predicted_ms: gen_ms,
         },
@@ -204,28 +205,32 @@ struct NativeOutcome<'a> {
     tokens_predicted: usize,
     tokens_evaluated: usize,
     cached_tokens: usize,
-    finish_reason: &'a str,
+    /// Why generation ended, at b10621's granularity: the `n_predict` budget, an
+    /// EOS token, or a string stop sequence, in which case it carries the
+    /// matched string (issue #1466). `GenerationResult::finish_reason` is the
+    /// OpenAI wire string and collapses the last two into one `"stop"`, so it
+    /// cannot drive `stop_type` and is not carried here.
+    stop_kind: &'a StopKind,
     prompt_ms: f64,
     predicted_ms: f64,
 }
 
 /// Assemble the b10621 native completion object.
 ///
-/// `stop_type` is derived from the finish reason. mlxcel cannot yet report
-/// `word`, because string stop sequences are not enforced on the MLX serving
-/// path at all (they reach `ServerGenerateOptions::stop_sequences` and are
-/// never read); that gap has its own issue and is recorded on the route's
-/// manifest entry, which is why `POST /completion` is not claimed as
-/// `supported` here.
+/// `stop_type` and `stopping_word` come from the scheduler's `StopKind`, which
+/// distinguishes a string stop-sequence match from an EOS token and from the
+/// `n_predict` budget. The matched string cannot be recovered from `content`,
+/// because b10621 (and mlxcel, since #1466) excludes it from the returned text.
 fn build_native_response(
     state: &AppState,
     request: &NativeCompletionRequest,
     options: &ServerGenerateOptions,
     outcome: NativeOutcome<'_>,
 ) -> NativeCompletionResponse {
-    let stop_type = match outcome.finish_reason {
-        "length" => StopType::Limit,
-        _ => StopType::Eos,
+    let (stop_type, stopping_word) = match outcome.stop_kind {
+        StopKind::Word(word) => (StopType::Word, word.clone()),
+        StopKind::Limit => (StopType::Limit, String::new()),
+        StopKind::Eos => (StopType::Eos, String::new()),
     };
     NativeCompletionResponse {
         index: 0,
@@ -246,7 +251,7 @@ fn build_native_response(
         // prompt, so no request reaches here with a dropped prefix.
         truncated: false,
         stop_type,
-        stopping_word: String::new(),
+        stopping_word,
         tokens_cached: outcome.cached_tokens,
         timings: NativeTimings::new(
             outcome.cached_tokens,
@@ -381,7 +386,7 @@ async fn stream_native_completion(
                         tokens_predicted: result.completion_tokens,
                         tokens_evaluated: result.prompt_tokens,
                         cached_tokens: result.cached_tokens,
-                        finish_reason: result.finish_reason.as_str(),
+                        stop_kind: &result.stop_kind,
                         prompt_ms: result.prompt_eval_ms as f64,
                         predicted_ms: result.generation_only_ms as f64,
                     },

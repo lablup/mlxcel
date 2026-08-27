@@ -119,6 +119,53 @@ impl MlxcelTokenizer {
         Self::HuggingFace(tokenizer)
     }
 
+    /// Build a tokenizer whose vocab holds every byte-fallback token
+    /// `<0x00>`..`<0xFF>` (token id == byte value) plus two regular ASCII word
+    /// tokens, with a `ByteFallback` decoder.
+    ///
+    /// This lets a test drive the incremental detokenizer with the exact byte
+    /// sequence of any UTF-8 string, so streaming behavior can be checked at
+    /// every token boundary against a one-shot decode of the same ids. Shared by
+    /// the detokenizer regression tests and the stop-sequence tests (#1466),
+    /// which need the same byte-level control over the decoded stream.
+    #[cfg(test)]
+    pub(crate) fn stub_all_byte_fallback() -> Self {
+        let mut vocab_entries: Vec<String> = (0u16..=255)
+            .map(|b| format!("\"<0x{b:02X}>\": {b}"))
+            .collect();
+        // Regular word tokens after the 256 byte ids, exercising the mixed
+        // regular-piece + byte-fallback path.
+        vocab_entries.push("\"Hello\": 256".to_string());
+        vocab_entries.push("\"world\": 257".to_string());
+        let vocab = vocab_entries.join(", ");
+        let json = format!(
+            r#"{{
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": [],
+            "normalizer": null,
+            "pre_tokenizer": null,
+            "post_processor": null,
+            "decoder": {{"type": "ByteFallback"}},
+            "model": {{
+                "type": "BPE",
+                "dropout": null,
+                "unk_token": null,
+                "continuing_subword_prefix": null,
+                "end_of_word_suffix": null,
+                "fuse_unk": false,
+                "byte_fallback": true,
+                "vocab": {{{vocab}}},
+                "merges": []
+            }}
+        }}"#
+        );
+        let tokenizer = tokenizers::Tokenizer::from_bytes(json.as_bytes())
+            .expect("failed to build all-byte-fallback stub tokenizer");
+        Self::HuggingFace(tokenizer)
+    }
+
     pub fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>> {
         match self {
             Self::HuggingFace(t) => {
