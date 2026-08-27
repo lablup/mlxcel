@@ -129,7 +129,7 @@ fn sample_args() -> crate::ServeArgs {
         _flash_attn: false,
         _mlock: false,
         _no_mmap: false,
-        _cont_batching: false,
+        cache_compat: mlxcel::cli::cache_args::CacheCompatArgs::default(),
         estimate_memory: false,
         force_memory: false,
         turbo: mlxcel::cli::turbo_args::TurboKvCacheArgs::default(),

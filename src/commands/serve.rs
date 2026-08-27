@@ -233,8 +233,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
     env_fallback_prompt_cache_enabled(
         &mut args.prompt_cache_enabled,
         long_cli_flag_was_set("prompt-cache-enabled"),
-    )
-    .map_err(anyhow::Error::msg)?;
+    );
     env_fallback_prompt_cache_capacity_bytes(&mut args.prompt_cache_capacity_bytes);
     env_fallback_prompt_cache_max_entries(&mut args.prompt_cache_max_entries);
     env_fallback_prompt_cache_ttl(&mut args.prompt_cache_ttl);
@@ -525,6 +524,7 @@ fn build_startup_input(mut args: crate::ServeArgs) -> anyhow::Result<ServerStart
         diffusion_sampler: args.diffusion.diffusion_sampler,
         diffusion_threshold: args.diffusion.diffusion_threshold,
         rope: args.rope.clone(),
+        cache_compat: args.cache_compat.clone(),
     })
 }
 
