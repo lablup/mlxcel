@@ -431,13 +431,11 @@
       "default": "-1, -1 = infinity",
       "description": "number of tokens to predict (default: -1, -1 = infinity) (env: LLAMA_ARG_N_PREDICT)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1450,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Both spellings (--predict, --n-predict) accepted; default -1 = until EOS/context, matching llama-server per request.",
-      "divergence": [
-        "A negative value must be written as --predict=-1 or --n-predict=-1; the space-separated --predict -1 that llama-server accepts is rejected by mlxcel's argv parser (#1450)."
-      ],
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--predict",

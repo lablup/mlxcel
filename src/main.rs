@@ -863,6 +863,12 @@ fn parse_kv_cache_budget(s: &str) -> Result<mlxcel::memory_estimate::PagedBudget
 
 /// Server options
 #[derive(Args, Debug)]
+// `allow_negative_numbers` lands on the generated `serve` subcommand the same
+// way the `after_help` below does, so `mlxcel serve --seed -1` parses like the
+// b10621 `llama-server --seed -1` it is copied from (#1459). See the matching
+// comment on the `mlxcel-server` root command in `src/bin/mlx_server.rs` for
+// why this is not `allow_hyphen_values`.
+#[command(allow_negative_numbers = true)]
 #[command(after_help = "\
 Remote Pipeline Parallel Example (TCP):
   1. Generate a shared cluster config:

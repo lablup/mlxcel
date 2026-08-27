@@ -670,7 +670,6 @@
       "test": "tests/llama_compat_manifest.rs",
       "notes": "seed -1 = nondeterministic accepted exactly. The below-minus-one rejection added by #1430 lives on the HTTP field (see field:seed), not on this flag: the flag maps every negative value to the random sentinel.",
       "divergence": [
-        "A negative value must be written as --seed=-1; the space-separated --seed -1 that llama-server accepts is rejected by mlxcel's argv parser (#1436).",
         "Every negative value is treated as the random-seed sentinel; b10621 parses the value with std::stoul, so a value below -1 becomes one specific uint32 seed (#1436)."
       ],
       "mlxcel": {

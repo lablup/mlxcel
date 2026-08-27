@@ -206,13 +206,11 @@
       "default": "-1",
       "description": "token budget for thinking: -1 for unrestricted, 0 for immediate end, N>0 for token budget (default: -1) (env: LLAMA_ARG_THINK_BUDGET)",
       "discovery": "help-entry-head",
-      "state": "deferred",
+      "state": "supported",
       "issue": 1447,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Same -1/0/N semantics; canonical LLAMA_ARG_THINK_BUDGET honored at runtime (clap binds the flag, the env bridge is code, covered by tests/thinking_budget.rs).",
-      "divergence": [
-        "A negative value must be written as --reasoning-budget=-1; the space-separated --reasoning-budget -1 that llama-server accepts is rejected by mlxcel's argv parser (#1447)."
-      ],
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--reasoning-budget"
