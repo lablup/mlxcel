@@ -40,7 +40,21 @@ fn sample_input() -> ServerStartupInput {
         n_parallel: 2,
         ctx_size: 4096,
         n_predict: 256,
-        timeout: 600,
+        timeout: 3600,
+        timeout_was_set: false,
+        decode_timeout: 600,
+        decode_timeout_was_set: false,
+        api_prefix: String::new(),
+        sse_ping_interval: 30,
+        threads_http: -1,
+        reuse_port: false,
+        ssl_cert_file: None,
+        ssl_key_file: None,
+        cors_origins: "*".to_string(),
+        cors_methods: "GET, POST, DELETE, OPTIONS".to_string(),
+        cors_headers: "*".to_string(),
+        cors_credentials: true,
+        no_cors_credentials: false,
         draft_model_path: Some(PathBuf::from("models/draft")),
         draft_max: 8,
         // speculative-decoding selector flags default off
@@ -1520,4 +1534,106 @@ fn into_startup_config_accepts_zero_and_typical_max_kv_size() {
         .into_startup_config()
         .expect("typical value must be accepted");
     assert_eq!(cfg.max_kv_size, Some(4096));
+}
+
+// ---------------------------------------------------------------------------
+// b10621 HTTP transport resolution (#1432)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cors_credentials_env_can_disable_the_enabled_by_default_flag() {
+    // clap resolves a flag's env binding by treating only a truthy value as an
+    // occurrence, so a falsey `LLAMA_ARG_CORS_CREDENTIALS` would silently lose
+    // to the `true` default. The runtime fallback is what makes it work.
+    let _env_guard = env_lock();
+    let _guard = EnvGuard::set("LLAMA_ARG_CORS_CREDENTIALS", "0");
+
+    let mut value = true;
+    super::env_fallback_cors_credentials(&mut value, false, false);
+    assert!(
+        !value,
+        "LLAMA_ARG_CORS_CREDENTIALS=0 must disable credentials"
+    );
+}
+
+#[test]
+fn cors_credentials_env_is_overridden_by_an_explicit_flag() {
+    let _env_guard = env_lock();
+    let _guard = EnvGuard::set("LLAMA_ARG_CORS_CREDENTIALS", "0");
+
+    let mut explicit = true;
+    super::env_fallback_cors_credentials(&mut explicit, true, false);
+    assert!(explicit, "--cors-credentials outranks the environment");
+
+    let mut explicit_off = false;
+    super::env_fallback_cors_credentials(&mut explicit_off, false, true);
+    assert!(
+        !explicit_off,
+        "--no-cors-credentials outranks the environment"
+    );
+}
+
+#[test]
+fn cors_credentials_env_can_enable_the_flag() {
+    let _env_guard = env_lock();
+    let _guard = EnvGuard::set("LLAMA_ARG_CORS_CREDENTIALS", "true");
+
+    let mut value = false;
+    super::env_fallback_cors_credentials(&mut value, false, false);
+    assert!(value);
+}
+
+#[test]
+fn into_startup_config_splits_the_socket_and_decode_timeouts() {
+    let mut input = sample_input();
+    input.timeout = 7;
+    input.decode_timeout = 900;
+    let cfg = input.into_startup_config().expect("valid");
+    assert_eq!(cfg.http_timeout, 7, "--timeout is the socket budget");
+    assert_eq!(
+        cfg.decode_timeout, 900,
+        "--decode-timeout is the decode watchdog"
+    );
+}
+
+#[test]
+fn into_startup_config_rejects_an_unusable_api_prefix() {
+    let mut input = sample_input();
+    input.api_prefix = "llama".to_string();
+    let err = input
+        .into_startup_config()
+        .expect_err("a prefix without a leading slash must fail startup");
+    assert!(format!("{err}").contains("--api-prefix"), "{err}");
+}
+
+#[test]
+fn into_startup_config_rejects_half_a_tls_configuration() {
+    let mut input = sample_input();
+    input.ssl_cert_file = Some(PathBuf::from("cert.pem"));
+    let err = input
+        .into_startup_config()
+        .expect_err("a certificate without a key must fail startup");
+    assert!(format!("{err}").contains("--ssl-key-file"), "{err}");
+}
+
+#[test]
+fn into_startup_config_builds_the_b10621_cors_policy() {
+    let mut input = sample_input();
+    input.cors_origins = "localhost".to_string();
+    let cfg = input.into_startup_config().expect("valid");
+    assert_eq!(
+        cfg.cors_policy.origins,
+        crate::server::OriginPolicy::Localhost
+    );
+}
+
+#[test]
+fn into_startup_config_prefers_the_mlxcel_allow_list_when_it_is_set() {
+    let mut input = sample_input();
+    input.allowed_origins = vec!["https://app.example.com".to_string()];
+    let cfg = input.into_startup_config().expect("valid");
+    assert!(matches!(
+        cfg.cors_policy.origins,
+        crate::server::OriginPolicy::AllowList(_)
+    ));
 }

@@ -104,6 +104,13 @@ mlxcel-server -m Qwen3.5-0.8B-4bit --port 8080
 # Restrict browser CORS to specific origins (default reflects any origin).
 mlxcel-server -m Qwen3.5-0.8B-4bit --port 8080 --allowed-origins https://app.example.com,https://admin.example.com
 
+# HTTPS, served from a path prefix, on a Unix domain socket, or with the
+# llama-server CORS flags (--cors-origins accepts * , localhost, or an origin).
+mlxcel-server -m Qwen3.5-0.8B-4bit --ssl-cert-file cert.pem --ssl-key-file key.pem
+mlxcel-server -m Qwen3.5-0.8B-4bit --api-prefix /llama
+mlxcel-server -m Qwen3.5-0.8B-4bit --host /run/mlxcel.sock
+mlxcel-server -m Qwen3.5-0.8B-4bit --cors-origins localhost --no-cors-credentials
+
 # Read-only memory budget: weights + KV cache vs. available unified memory.
 mlxcel inspect -m Qwen3.5-0.8B-4bit --max-tokens 32768
 

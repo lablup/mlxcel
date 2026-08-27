@@ -354,7 +354,8 @@ async fn stream_messages(
         Err(err) => return generation_error_to_response(err),
     };
 
-    let (sender, stream, cancelled, keepalive) = anthropic_sse_channel(128);
+    let (sender, stream, cancelled, keepalive) =
+        anthropic_sse_channel(128, state.config.sse_ping_interval);
 
     let model_id_for_task = model_id.clone();
     let stop_sequences = request.stop_sequences.clone();

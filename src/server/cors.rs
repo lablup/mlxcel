@@ -12,22 +12,250 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! CORS policy construction for the HTTP server (#244).
+//! CORS policy for the HTTP server (#244, realigned onto b10621 in #1432).
 //!
-//! The server historically applied [`CorsLayer::permissive`] unconditionally,
-//! which reflects any `Origin` and is a CSRF / origin-spoofing surface for any
-//! browser-reachable deployment. The `--allowed-origins` flag lets an operator
-//! pin the server to a known set of front-end origins. When the flag is unset
-//! the permissive default is retained so existing deployments are unaffected.
+//! `llama-server` b10621 implements CORS in one pre-routing handler
+//! (upstream `tools/server/server-http.cpp`, `set_pre_routing_handler`):
 //!
-//! tower-http's CORS middleware never rejects a request; it only governs the
-//! `Access-Control-Allow-Origin` response header and preflight handling. A
-//! request with no `Origin` header (curl, Unix-domain-socket clients) is
-//! unaffected by the restrictive layer, so the same layer is safe on every
-//! transport.
+//! - `Access-Control-Allow-Origin` is set on **every** response. With
+//!   `--cors-origins *` (the default) and credentials enabled it echoes the
+//!   request `Origin`; with the special value `localhost` it echoes the
+//!   `Origin` only when its host is `localhost`, `127.0.0.1` or `::1`;
+//!   otherwise it emits the configured string verbatim.
+//! - `OPTIONS` is answered by the middleware itself, before authentication and
+//!   before routing, with `Access-Control-Allow-Credentials`,
+//!   `-Allow-Methods` and `-Allow-Headers` and an empty `text/html` body.
+//! - No other CORS response header is emitted, in particular no
+//!   `Access-Control-Expose-Headers`.
+//!
+//! [`CorsPolicy`] reproduces that, and adds one mlxcel-native origin mode:
+//! [`OriginPolicy::AllowList`], reached through `--allowed-origins`
+//! (`MLXCEL_ALLOWED_ORIGINS`, #244). b10621's `--cors-origins` echoes its
+//! configured string unchanged, so a comma-separated list there produces an
+//! `Access-Control-Allow-Origin` no browser accepts; `--allowed-origins`
+//! instead reflects the request `Origin` when it matches one of a validated
+//! set. The two spellings are mutually exclusive at the CLI, so exactly one
+//! origin rule is ever in force.
 
-use axum::http::HeaderValue;
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::{HeaderName, HeaderValue, Method, Request, StatusCode, header};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+
+use super::AppState;
+use super::transport::{DEFAULT_CORS_HEADERS, DEFAULT_CORS_METHODS, DEFAULT_CORS_ORIGINS};
+
+/// b10621's special `--cors-origins` value that reflects only localhost
+/// origins.
+pub(crate) const CORS_ORIGINS_LOCALHOST: &str = "localhost";
+
+/// How the `Access-Control-Allow-Origin` value is decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OriginPolicy {
+    /// b10621 `--cors-origins *`. With credentials enabled the request
+    /// `Origin` is echoed back; with credentials disabled the literal `*` is
+    /// emitted, which is what upstream's `else` branch produces.
+    Wildcard,
+    /// b10621 `--cors-origins localhost`: reflect the request `Origin` only
+    /// when its host is `localhost`, `127.0.0.1` or `::1`, at any port.
+    Localhost,
+    /// b10621 `--cors-origins <anything else>`: emit the configured string
+    /// verbatim, whatever the request `Origin` is.
+    Literal(HeaderValue),
+    /// mlxcel `--allowed-origins` (#244): reflect the request `Origin` only
+    /// when it is one of these validated origins, and emit nothing otherwise.
+    AllowList(Vec<HeaderValue>),
+}
+
+/// The resolved CORS policy, built once at startup and consumed per request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorsPolicy {
+    pub origins: OriginPolicy,
+    /// `Access-Control-Allow-Methods` sent on a preflight.
+    pub methods: HeaderValue,
+    /// `Access-Control-Allow-Headers` sent on a preflight.
+    pub headers: HeaderValue,
+    /// `Access-Control-Allow-Credentials` sent on a preflight, and the switch
+    /// that turns `*` into an echoed `Origin`.
+    pub credentials: bool,
+}
+
+impl Default for CorsPolicy {
+    fn default() -> Self {
+        Self {
+            origins: OriginPolicy::Wildcard,
+            methods: HeaderValue::from_static(DEFAULT_CORS_METHODS),
+            headers: HeaderValue::from_static(DEFAULT_CORS_HEADERS),
+            credentials: true,
+        }
+    }
+}
+
+impl CorsPolicy {
+    /// Build the policy from the resolved CLI values.
+    ///
+    /// `allow_list` is the validated `--allowed-origins` set; when it is
+    /// non-empty it selects [`OriginPolicy::AllowList`] and `cors_origins` is
+    /// ignored, which is safe because the CLI rejects setting both.
+    pub fn resolve(
+        cors_origins: &str,
+        cors_methods: &str,
+        cors_headers: &str,
+        credentials: bool,
+        allow_list: Option<Vec<HeaderValue>>,
+    ) -> anyhow::Result<Self> {
+        let header_value = |flag: &str, raw: &str| -> anyhow::Result<HeaderValue> {
+            HeaderValue::from_str(raw).map_err(|_| {
+                anyhow::anyhow!(
+                    "invalid {flag} value {raw:?}: it must be a valid HTTP header value (no \
+                     control characters and no newlines)"
+                )
+            })
+        };
+
+        let origins = match allow_list {
+            Some(list) if !list.is_empty() => OriginPolicy::AllowList(list),
+            _ => match cors_origins.trim() {
+                DEFAULT_CORS_ORIGINS => OriginPolicy::Wildcard,
+                CORS_ORIGINS_LOCALHOST => OriginPolicy::Localhost,
+                other => OriginPolicy::Literal(header_value("--cors-origins", other)?),
+            },
+        };
+
+        Ok(Self {
+            origins,
+            methods: header_value("--cors-methods", cors_methods)?,
+            headers: header_value("--cors-headers", cors_headers)?,
+            credentials,
+        })
+    }
+
+    /// The `Access-Control-Allow-Origin` value for a request carrying
+    /// `origin`, or `None` when the header is omitted entirely.
+    ///
+    /// Under [`OriginPolicy::Wildcard`] with credentials enabled the value is
+    /// the request `Origin` verbatim, including the empty string when the
+    /// request carries no `Origin`. That empty header is what b10621 emits
+    /// (`res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"))`
+    /// on a request with no `Origin` yields an empty value), and reproducing
+    /// it keeps a non-browser client's view of the two servers identical.
+    pub(crate) fn allow_origin(&self, origin: Option<&HeaderValue>) -> Option<HeaderValue> {
+        match &self.origins {
+            OriginPolicy::Wildcard if self.credentials => {
+                Some(origin.cloned().unwrap_or_else(empty_header_value))
+            }
+            OriginPolicy::Wildcard => Some(HeaderValue::from_static(DEFAULT_CORS_ORIGINS)),
+            OriginPolicy::Localhost => match origin {
+                Some(value) if origin_is_localhost(value) => Some(value.clone()),
+                Some(value) => {
+                    tracing::warn!(
+                        "(CORS) skip non-localhost origin: {}",
+                        value.to_str().unwrap_or("<non-utf8>")
+                    );
+                    None
+                }
+                None => None,
+            },
+            OriginPolicy::Literal(value) => Some(value.clone()),
+            OriginPolicy::AllowList(list) => match origin {
+                Some(value) if list.contains(value) => Some(value.clone()),
+                _ => None,
+            },
+        }
+    }
+
+    /// The three headers b10621 adds to a preflight response.
+    pub(crate) fn preflight_headers(&self) -> [(HeaderName, HeaderValue); 3] {
+        [
+            (
+                header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
+                HeaderValue::from_static(if self.credentials { "true" } else { "false" }),
+            ),
+            (header::ACCESS_CONTROL_ALLOW_METHODS, self.methods.clone()),
+            (header::ACCESS_CONTROL_ALLOW_HEADERS, self.headers.clone()),
+        ]
+    }
+}
+
+fn empty_header_value() -> HeaderValue {
+    HeaderValue::from_static("")
+}
+
+/// True when `origin`'s host is `localhost`, `127.0.0.1` or `::1`, at any
+/// port, matching upstream `origin_is_localhost`.
+///
+/// Upstream parses the origin as a URL and compares the host component, so a
+/// value such as `https://localhost.evil.com` does not match and neither does
+/// a bare `localhost` with no scheme.
+fn origin_is_localhost(origin: &HeaderValue) -> bool {
+    let Ok(text) = origin.to_str() else {
+        return false;
+    };
+    let Some((_scheme, rest)) = text.split_once("://") else {
+        return false;
+    };
+    // Strip userinfo, then any path/query/fragment, then the port. An IPv6
+    // literal is bracketed, so the port split has to happen after the bracket.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = if let Some(end) = host_port.find(']') {
+        host_port
+            .get(1..end)
+            .filter(|_| host_port.starts_with('['))
+            .unwrap_or("")
+    } else {
+        host_port.split_once(':').map_or(host_port, |(h, _)| h)
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+/// Axum middleware implementing the b10621 pre-routing CORS handler.
+///
+/// Mounted OUTSIDE the API-key middleware so a preflight is answered without
+/// credentials, exactly as upstream does ("browsers don't include
+/// Authorization header"). Because it runs before routing, an `OPTIONS` to an
+/// unrouted path is answered 200 here rather than 404, which is also what the
+/// upstream pre-routing handler does.
+///
+/// Used by: `crate::server::create_app`.
+pub(crate) async fn cors_middleware(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    // The policy itself stays behind the shared `Arc<ServerConfig>`; only the
+    // handful of header values a response actually carries is cloned.
+    let policy = &state.config.cors_policy;
+    let allow_origin = policy.allow_origin(request.headers().get(header::ORIGIN));
+
+    if request.method() == Method::OPTIONS {
+        let preflight = policy.preflight_headers();
+        let mut response = (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, HeaderValue::from_static("text/html"))],
+            "",
+        )
+            .into_response();
+        for (name, value) in preflight {
+            response.headers_mut().insert(name, value);
+        }
+        if let Some(value) = allow_origin {
+            response
+                .headers_mut()
+                .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
+        }
+        return response;
+    }
+
+    let mut response = next.run(request).await;
+    if let Some(value) = allow_origin {
+        response
+            .headers_mut()
+            .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
+    }
+    response
+}
 
 /// Parse and validate comma-split origin strings into header values.
 ///
@@ -122,25 +350,6 @@ fn validate_origin(value: &str) -> anyhow::Result<()> {
         Ok(())
     } else {
         Err(bad())
-    }
-}
-
-/// Build the CORS layer for the HTTP router.
-///
-/// When a non-empty validated origin list is supplied the layer restricts
-/// cross-origin requests to exactly those origins while preserving the methods
-/// and headers that [`CorsLayer::permissive`] allows; otherwise it falls back
-/// to the permissive default. `CorsLayer::permissive()` is exactly
-/// `new().allow_headers(Any).allow_methods(Any).allow_origin(Any).expose_headers(Any)`,
-/// so the restrictive branch narrows only the origin.
-pub(crate) fn build_cors_layer(origins: Option<&[HeaderValue]>) -> CorsLayer {
-    match origins {
-        Some(list) if !list.is_empty() => CorsLayer::new()
-            .allow_headers(Any)
-            .allow_methods(Any)
-            .allow_origin(AllowOrigin::list(list.iter().cloned()))
-            .expose_headers(Any),
-        _ => CorsLayer::permissive(),
     }
 }
 

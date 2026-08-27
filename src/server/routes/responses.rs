@@ -367,7 +367,8 @@ async fn stream_create_response(
         Err(err) => return generation_error_to_response(err).into_response(),
     };
 
-    let (sender, stream, cancelled, keepalive) = responses_sse_channel(128);
+    let (sender, stream, cancelled, keepalive) =
+        responses_sse_channel(128, state.config.sse_ping_interval);
 
     // Review H2: register this response in the in-flight registry so
     // POST /v1/responses/:id/cancel can abort it from a different

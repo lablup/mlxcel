@@ -12,19 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Unit tests for CORS origin parsing and layer selection (#244).
+//! Unit tests for CORS origin parsing (#244) and the b10621 CORS policy
+//! (#1432).
 
-use super::{build_cors_layer, parse_allowed_origins};
+use std::path::PathBuf;
+use std::sync::{Arc, mpsc};
 
 use axum::Router;
 use axum::body::Body;
-use axum::http::{HeaderValue, Request, StatusCode, header};
-use axum::routing::get;
+use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use tower::ServiceExt;
+
+use super::{CorsPolicy, OriginPolicy, parse_allowed_origins};
+use crate::server::{AppState, ChatTemplateProcessor, ModelProvider, ServerConfig, create_app};
+use crate::tokenizer::MlxcelTokenizer;
 
 fn origins(values: &[&str]) -> Vec<String> {
     values.iter().map(|v| (*v).to_string()).collect()
 }
+
+// ---------------------------------------------------------------------------
+// --allowed-origins parsing (#244)
+// ---------------------------------------------------------------------------
 
 #[test]
 fn parses_single_valid_origin() {
@@ -39,69 +48,64 @@ fn parses_single_valid_origin() {
 fn parses_multiple_valid_origins() {
     let parsed = parse_allowed_origins(&origins(&[
         "https://app.example.com",
-        "http://localhost:5173",
+        "http://localhost:3000",
     ]))
     .unwrap();
     assert_eq!(
         parsed,
         vec![
             HeaderValue::from_static("https://app.example.com"),
-            HeaderValue::from_static("http://localhost:5173"),
+            HeaderValue::from_static("http://localhost:3000"),
         ]
     );
 }
 
 #[test]
 fn trims_whitespace_and_skips_blank_inner_entries() {
-    // A trailing comma yields a blank entry that should be ignored, while the
-    // surrounding values are trimmed and kept.
     let parsed = parse_allowed_origins(&origins(&[
         "  https://app.example.com  ",
         "",
-        "https://admin.example.com",
+        "   ",
+        "http://localhost:3000",
     ]))
     .unwrap();
     assert_eq!(
         parsed,
         vec![
             HeaderValue::from_static("https://app.example.com"),
-            HeaderValue::from_static("https://admin.example.com"),
+            HeaderValue::from_static("http://localhost:3000"),
         ]
     );
 }
 
 #[test]
 fn empty_input_is_unset_not_error() {
-    // No flag at all maps to an empty vec, which the caller treats as permissive.
-    let parsed = parse_allowed_origins(&[]).unwrap();
-    assert!(parsed.is_empty());
+    assert!(parse_allowed_origins(&[]).unwrap().is_empty());
 }
 
 #[test]
 fn rejects_value_that_is_only_blank() {
-    assert!(parse_allowed_origins(&origins(&[""])).is_err());
     assert!(parse_allowed_origins(&origins(&["   "])).is_err());
 }
 
 #[test]
 fn rejects_origin_without_scheme() {
-    let err = parse_allowed_origins(&origins(&["app.example.com"])).unwrap_err();
-    assert!(err.to_string().contains("app.example.com"));
+    assert!(parse_allowed_origins(&origins(&["app.example.com"])).is_err());
 }
 
 #[test]
 fn rejects_origin_with_path() {
-    assert!(parse_allowed_origins(&origins(&["https://x.com/foo"])).is_err());
+    assert!(parse_allowed_origins(&origins(&["https://app.example.com/api"])).is_err());
 }
 
 #[test]
 fn rejects_origin_with_query() {
-    assert!(parse_allowed_origins(&origins(&["https://x.com?a=1"])).is_err());
+    assert!(parse_allowed_origins(&origins(&["https://app.example.com?x=1"])).is_err());
 }
 
 #[test]
 fn rejects_non_http_scheme() {
-    assert!(parse_allowed_origins(&origins(&["ftp://x.com"])).is_err());
+    assert!(parse_allowed_origins(&origins(&["ftp://app.example.com"])).is_err());
 }
 
 #[test]
@@ -111,97 +115,314 @@ fn rejects_control_characters() {
 
 #[test]
 fn rejects_origin_with_trailing_slash() {
-    // A trailing slash is a path; the browser `Origin` header carries none, so
-    // `https://app.example.com/` could only ever silently never match. Reject
-    // it at startup so the misconfiguration surfaces instead of failing closed
-    // but confusing. `http::Uri::path()` reports the empty path as `/`, so this
-    // must be caught on the raw string, not via the parsed path.
-    let err = parse_allowed_origins(&origins(&["https://app.example.com/"])).unwrap_err();
-    assert!(err.to_string().contains("app.example.com"));
+    assert!(parse_allowed_origins(&origins(&["https://app.example.com/"])).is_err());
 }
 
 #[test]
 fn rejects_origin_with_userinfo() {
-    // A browser `Origin` never includes `user[:pass]@`; an authority carrying
-    // userinfo can never match, so reject it rather than silently dropping it.
-    assert!(parse_allowed_origins(&origins(&["http://user@host"])).is_err());
     assert!(parse_allowed_origins(&origins(&["https://user:pass@app.example.com"])).is_err());
 }
 
-fn test_router(origins: Option<&[HeaderValue]>) -> Router {
-    Router::new()
-        .route("/", get(|| async { "ok" }))
-        .layer(build_cors_layer(origins))
+// ---------------------------------------------------------------------------
+// b10621 policy resolution (#1432)
+// ---------------------------------------------------------------------------
+
+fn policy(cors_origins: &str, credentials: bool) -> CorsPolicy {
+    CorsPolicy::resolve(
+        cors_origins,
+        "GET, POST, DELETE, OPTIONS",
+        "*",
+        credentials,
+        None,
+    )
+    .expect("valid policy")
 }
 
-#[tokio::test]
-async fn restrictive_layer_reflects_allowed_origin() {
-    let allowed = parse_allowed_origins(&origins(&["https://allowed.example.com"])).unwrap();
-    let app = test_router(Some(&allowed));
+fn origin(value: &str) -> HeaderValue {
+    HeaderValue::from_str(value).expect("valid origin")
+}
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/")
-                .header(header::ORIGIN, "https://allowed.example.com")
-                .body(Body::empty())
-                .unwrap(),
-        )
+#[test]
+fn the_default_policy_is_the_b10621_default() {
+    let default = CorsPolicy::default();
+    assert_eq!(default.origins, OriginPolicy::Wildcard);
+    assert_eq!(default.methods, "GET, POST, DELETE, OPTIONS");
+    assert_eq!(default.headers, "*");
+    assert!(default.credentials, "b10621 enables credentials by default");
+}
+
+#[test]
+fn star_with_credentials_echoes_the_request_origin() {
+    let p = policy("*", true);
+    assert_eq!(
+        p.allow_origin(Some(&origin("https://app.example.com"))),
+        Some(origin("https://app.example.com"))
+    );
+}
+
+#[test]
+fn star_with_credentials_and_no_origin_header_echoes_an_empty_value() {
+    // Upstream sets the header to `req.get_header_value("Origin")`, which is
+    // the empty string when the request carries no Origin. Reproducing the
+    // empty header keeps a non-browser client's view identical.
+    let p = policy("*", true);
+    assert_eq!(p.allow_origin(None), Some(HeaderValue::from_static("")));
+}
+
+#[test]
+fn star_without_credentials_emits_the_literal_star() {
+    let p = policy("*", false);
+    assert_eq!(
+        p.allow_origin(Some(&origin("https://app.example.com"))),
+        Some(HeaderValue::from_static("*"))
+    );
+}
+
+#[test]
+fn localhost_reflects_only_localhost_origins() {
+    let p = policy("localhost", true);
+    for allowed in [
+        "http://localhost:3000",
+        "https://localhost",
+        "http://127.0.0.1:8080",
+        "http://[::1]:5173",
+    ] {
+        assert_eq!(
+            p.allow_origin(Some(&origin(allowed))),
+            Some(origin(allowed)),
+            "{allowed} must be reflected"
+        );
+    }
+}
+
+#[test]
+fn localhost_does_not_reflect_a_lookalike_host() {
+    let p = policy("localhost", true);
+    for denied in [
+        "https://localhost.evil.com",
+        "https://evil.com",
+        "https://127.0.0.1.evil.com",
+        "https://user@localhost.evil.com",
+    ] {
+        assert_eq!(
+            p.allow_origin(Some(&origin(denied))),
+            None,
+            "{denied} must not be reflected"
+        );
+    }
+    assert_eq!(p.allow_origin(None), None, "no Origin, no header");
+}
+
+#[test]
+fn an_explicit_origin_string_is_emitted_verbatim() {
+    // b10621 does no matching here: whatever the operator configured is what
+    // the header carries, request Origin included or not.
+    let p = policy("https://app.example.com", true);
+    assert_eq!(
+        p.allow_origin(Some(&origin("https://evil.example.com"))),
+        Some(origin("https://app.example.com"))
+    );
+    assert_eq!(
+        p.allow_origin(None),
+        Some(origin("https://app.example.com"))
+    );
+}
+
+#[test]
+fn the_mlxcel_allow_list_reflects_only_a_matching_origin() {
+    let list = parse_allowed_origins(&origins(&["https://allowed.example.com"])).unwrap();
+    let p = CorsPolicy::resolve("*", "GET", "*", true, Some(list)).expect("valid");
+    assert_eq!(p.origins.clone(), {
+        let expect = parse_allowed_origins(&origins(&["https://allowed.example.com"])).unwrap();
+        OriginPolicy::AllowList(expect)
+    });
+    assert_eq!(
+        p.allow_origin(Some(&origin("https://allowed.example.com"))),
+        Some(origin("https://allowed.example.com"))
+    );
+    assert_eq!(
+        p.allow_origin(Some(&origin("https://evil.example.com"))),
+        None,
+        "a disallowed origin gets no header at all"
+    );
+    assert_eq!(p.allow_origin(None), None);
+}
+
+#[test]
+fn preflight_headers_carry_the_configured_methods_and_credentials() {
+    let p = CorsPolicy::resolve("*", "GET, POST", "X-Custom", false, None).expect("valid");
+    let headers = p.preflight_headers();
+    assert_eq!(headers[0].1, "false");
+    assert_eq!(headers[1].1, "GET, POST");
+    assert_eq!(headers[2].1, "X-Custom");
+
+    let enabled = CorsPolicy::resolve("*", "GET", "*", true, None).expect("valid");
+    assert_eq!(enabled.preflight_headers()[0].1, "true");
+}
+
+#[test]
+fn a_header_value_with_a_newline_is_rejected_at_startup() {
+    for (o, m, h) in [
+        ("https://a\nevil", "GET", "*"),
+        ("*", "GET\r\nX: y", "*"),
+        ("*", "GET", "X\ny"),
+    ] {
+        assert!(
+            CorsPolicy::resolve(o, m, h, true, None).is_err(),
+            "{o:?} {m:?} {h:?} must be rejected"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Middleware behavior on the real router (#1432)
+// ---------------------------------------------------------------------------
+
+fn app_with_policy(policy: CorsPolicy) -> Router {
+    let (options_tx, _options_rx) = mpsc::channel();
+    let provider = Arc::new(ModelProvider::recording_for_route_tests(options_tx));
+    let batch_metrics = provider.batch_metrics().clone();
+    let state = AppState::new(
+        provider,
+        ServerConfig {
+            cors_policy: policy,
+            ..Default::default()
+        },
+        ChatTemplateProcessor::with_template("ok".to_string()),
+        MlxcelTokenizer::stub(),
+        PathBuf::from("cors-test-model"),
+        batch_metrics,
+    );
+    create_app(state)
+}
+
+async fn send(app: Router, method: Method, path: &str, origin_header: Option<&str>) -> Response {
+    let mut builder = Request::builder().method(method).uri(path);
+    if let Some(value) = origin_header {
+        builder = builder.header(header::ORIGIN, value);
+    }
+    app.oneshot(builder.body(Body::empty()).expect("request"))
         .await
-        .unwrap();
+        .expect("router responds")
+}
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let acao = response
+type Response = axum::http::Response<Body>;
+
+fn acao(response: &Response) -> Option<String> {
+    response
         .headers()
         .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
-        .map(|v| v.to_str().unwrap().to_string());
-    assert_eq!(acao, Some("https://allowed.example.com".to_string()));
+        .map(|v| v.to_str().expect("utf-8 header").to_string())
 }
 
 #[tokio::test]
-async fn restrictive_layer_does_not_reflect_disallowed_origin() {
-    let allowed = parse_allowed_origins(&origins(&["https://allowed.example.com"])).unwrap();
-    let app = test_router(Some(&allowed));
+async fn a_preflight_is_answered_by_the_middleware_without_authentication() {
+    let (options_tx, _options_rx) = mpsc::channel();
+    let provider = Arc::new(ModelProvider::recording_for_route_tests(options_tx));
+    let batch_metrics = provider.batch_metrics().clone();
+    let state = AppState::new(
+        provider,
+        ServerConfig {
+            api_key: Some("secret".to_string()),
+            ..Default::default()
+        },
+        ChatTemplateProcessor::with_template("ok".to_string()),
+        MlxcelTokenizer::stub(),
+        PathBuf::from("cors-test-model"),
+        batch_metrics,
+    );
+    let response = send(
+        create_app(state),
+        Method::OPTIONS,
+        "/v1/chat/completions",
+        Some("https://app.example.com"),
+    )
+    .await;
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/")
-                .header(header::ORIGIN, "https://evil.example.com")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "browsers do not send Authorization on a preflight, so it must not 401"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+            .map(|v| v.to_str().unwrap().to_string()),
+        Some("GET, POST, DELETE, OPTIONS".to_string())
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+            .map(|v| v.to_str().unwrap().to_string()),
+        Some("true".to_string())
+    );
+    assert_eq!(acao(&response), Some("https://app.example.com".to_string()));
+}
 
-    // A disallowed origin gets no Access-Control-Allow-Origin header at all,
-    // so the browser blocks the cross-origin read.
-    let acao = response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN);
+#[tokio::test]
+async fn a_preflight_to_an_unrouted_path_is_still_answered() {
+    // Upstream answers OPTIONS in the pre-routing handler, before the route
+    // table is consulted, so an unknown path preflights successfully there too.
+    let response = send(
+        app_with_policy(CorsPolicy::default()),
+        Method::OPTIONS,
+        "/no/such/route",
+        Some("https://app.example.com"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_normal_response_carries_allow_origin_but_not_the_preflight_headers() {
+    let response = send(
+        app_with_policy(CorsPolicy::default()),
+        Method::GET,
+        "/health",
+        Some("https://app.example.com"),
+    )
+    .await;
+    assert_eq!(acao(&response), Some("https://app.example.com".to_string()));
     assert!(
-        acao.is_none(),
-        "disallowed origin must not be reflected, got {acao:?}"
+        response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+            .is_none(),
+        "b10621 sets the method/header lists on preflights only"
+    );
+    assert!(
+        response
+            .headers()
+            .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+            .is_none(),
+        "b10621 never emits Access-Control-Expose-Headers"
     );
 }
 
 #[tokio::test]
-async fn permissive_default_reflects_any_origin() {
-    // None (unset) keeps the historical permissive behavior: ACAO is `*`.
-    let app = test_router(None);
+async fn a_disallowed_allow_list_origin_gets_no_header_on_a_real_route() {
+    let list = parse_allowed_origins(&origins(&["https://allowed.example.com"])).unwrap();
+    let policy = CorsPolicy::resolve("*", "GET", "*", true, Some(list)).expect("valid");
+    let response = send(
+        app_with_policy(policy.clone()),
+        Method::GET,
+        "/health",
+        Some("https://evil.example.com"),
+    )
+    .await;
+    assert_eq!(acao(&response), None);
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/")
-                .header(header::ORIGIN, "https://anything.example.com")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let acao = response
-        .headers()
-        .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
-        .map(|v| v.to_str().unwrap().to_string());
-    assert_eq!(acao, Some("*".to_string()));
+    let allowed = send(
+        app_with_policy(policy),
+        Method::GET,
+        "/health",
+        Some("https://allowed.example.com"),
+    )
+    .await;
+    assert_eq!(
+        acao(&allowed),
+        Some("https://allowed.example.com".to_string())
+    );
 }

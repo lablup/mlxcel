@@ -1046,6 +1046,10 @@ pub struct NativeCompletionRequest {
     pub n_predict: Option<usize>,
     /// Whether to stream the response
     pub stream: Option<bool>,
+    /// Per-request override for the SSE comment ping interval, in seconds
+    /// (#1432). `-1` disables the pings for this stream. Absent falls back to
+    /// the server's `--sse-ping-interval`.
+    pub sse_ping_interval: Option<i64>,
     /// Sampling temperature
     pub temperature: Option<f32>,
     /// Top-k sampling

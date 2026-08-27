@@ -19,7 +19,15 @@ use crate::memory_estimate::PagedBudgetDirective;
 fn server_config_default_matches_llama_server_compatibility_defaults() {
     let config = ServerConfig::default();
 
-    assert_eq!(config.timeout_seconds, 600);
+    // #1432: `--timeout` is the HTTP socket budget now; the decode watchdog
+    // kept its 600-second default under `--decode-timeout`.
+    assert_eq!(config.decode_timeout_seconds, 600);
+    assert_eq!(config.api_prefix, "");
+    assert_eq!(
+        config.sse_ping_interval,
+        Some(std::time::Duration::from_secs(30)),
+        "b10621 --sse-ping-interval default"
+    );
     assert_eq!(config.context_size, 0);
     // Serving-throughput default: 4 concurrent decode slots (#628).
     assert_eq!(config.n_parallel, 4);

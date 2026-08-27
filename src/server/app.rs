@@ -26,7 +26,7 @@ use axum::{
 use tower_http::trace::TraceLayer;
 
 use super::AppState;
-use super::cors::build_cors_layer;
+use super::cors::cors_middleware;
 use super::routes;
 use super::types::ErrorResponse;
 
@@ -94,14 +94,40 @@ fn is_unauthenticated_health_path(path: &str) -> bool {
 /// 2 MiB default because real audio uploads commonly exceed that threshold.
 const AUDIO_MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 
-/// Create the Axum application router
+/// Create the Axum application router.
+///
+/// Layer order matters and mirrors b10621's pre-routing handler (#1432): the
+/// CORS middleware sits OUTSIDE the API-key middleware, so a browser preflight
+/// is answered without credentials, and both sit outside the route table.
+///
+/// `--api-prefix` nests the whole route set under the configured path. The
+/// authentication middleware stays outside the nest so it sees the request
+/// path as the client sent it, which is what upstream's `req.path` carries.
 pub fn create_app(state: AppState) -> Router {
+    let api_prefix = state.config.api_prefix.clone();
+    let routes = build_routes(&state);
+    let routes = if api_prefix.is_empty() {
+        routes
+    } else {
+        Router::new().nest(&api_prefix, routes)
+    };
+
+    routes
+        // Middleware, innermost first.
+        .layer(middleware::from_fn_with_state(state.clone(), api_key_auth))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            cors_middleware,
+        ))
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
+}
+
+/// Register every route, without middleware and without the API prefix.
+fn build_routes(state: &AppState) -> Router<AppState> {
     let enable_slots = state.config.enable_slots_endpoint;
     let enable_props = state.config.enable_props_endpoint;
     let enable_metrics = state.config.enable_metrics_endpoint;
-    // CORS policy (#244): restrict to the configured allow-list when set,
-    // otherwise keep the historical permissive default.
-    let cors = build_cors_layer(state.config.cors_allowed_origins.as_deref());
 
     // Audio upload endpoints carry a larger body limit via a sub-router.
     // Merging keeps the outer auth, CORS, and trace layers applying normally.
@@ -200,12 +226,11 @@ pub fn create_app(state: AppState) -> Router {
         .route("/health", get(routes::health_check))
         .route("/v1/health", get(routes::health_check))
         .route("/", get(routes::health_check))
-        // Middleware
-        .layer(middleware::from_fn_with_state(state.clone(), api_key_auth))
-        .layer(cors)
-        .layer(TraceLayer::new_for_http())
-        .with_state(state)
 }
+
+#[cfg(test)]
+#[path = "api_prefix_tests.rs"]
+mod api_prefix_tests;
 
 #[cfg(test)]
 mod tests {
