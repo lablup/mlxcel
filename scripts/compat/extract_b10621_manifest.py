@@ -36,7 +36,12 @@ Inputs
   Pass the extracted ``llama-server`` binary via ``--llama-server``; its
   ``--help`` output is the authority for options, spellings, defaults, and
   environment variables. Pass the archive itself via ``--archive`` to have
-  the SHA-256 verified against the pinned value.
+  its SHA-256 verified against the pinned value AND the ``--llama-server``
+  binary required to be byte-identical to a member of that archive: this
+  script executes that binary with ``DYLD_LIBRARY_PATH`` /
+  ``LD_LIBRARY_PATH`` pointed at its directory, so hashing the tarball alone
+  would be assurance about a file that is never run. Without ``--archive``
+  the binary is executed unverified and the script says so on stderr.
 - A pinned llama.cpp source checkout (or a flat directory) providing
   ``tools/server/server.cpp``, ``tools/server/server-http.cpp``, and
   ``tools/server/server-schema.cpp`` at commit
@@ -68,7 +73,9 @@ import os
 import re
 import subprocess
 import sys
-from pathlib import Path
+import tarfile
+from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 
 PINNED_TAG = "b10621"
 PINNED_BUILD = 10621
@@ -393,13 +400,67 @@ def find_source(source_dir: Path, name: str) -> Path:
     raise SystemExit(f"cannot find {name} under {source_dir} (flat or tools/server/)")
 
 
+def sha256_stream(reader: BinaryIO) -> str:
+    """SHA-256 of a binary stream, read in chunks.
+
+    Chunked rather than ``read()`` so neither the archive nor a member is ever
+    materialised in memory in full.
+    """
+    h = hashlib.sha256()
+    for chunk in iter(lambda: reader.read(1 << 20), b""):
+        h.update(chunk)
+    return h.hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    with path.open("rb") as fh:
+        return sha256_stream(fh)
+
+
 def verify_archive(archive: Path) -> None:
-    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    digest = sha256_file(archive)
     if digest != PINNED_ARCHIVE_SHA256:
         raise SystemExit(
             f"archive SHA-256 mismatch: expected {PINNED_ARCHIVE_SHA256}, got {digest}"
         )
     print(f"archive SHA-256 verified: {digest}")
+
+
+def verify_binary_matches_archive(archive: Path, binary: Path) -> None:
+    """Bind the binary this script EXECUTES to the archive it verified.
+
+    Hashing the tarball says nothing about the separately supplied
+    ``--llama-server`` path, and ``run_help`` executes that path with
+    ``DYLD_LIBRARY_PATH`` / ``LD_LIBRARY_PATH`` pointed at its own directory,
+    so every dylib beside it is loaded too. Without this check, a verified
+    archive digest is assurance about a file that is never used.
+
+    The archive is read through ``tarfile`` in read mode and compared member
+    by member; nothing is ever extracted or written to disk, so there is no
+    path-traversal or symlink handling to get wrong. Call this only AFTER
+    ``verify_archive`` has pinned the archive digest, so the bytes being
+    decompressed are known-good rather than attacker-chosen.
+    """
+    want = sha256_file(binary)
+    with tarfile.open(archive, "r:*") as tf:
+        for member in tf:
+            if not member.isfile():
+                continue
+            if PurePosixPath(member.name).name != binary.name:
+                continue
+            reader = tf.extractfile(member)
+            if reader is None:
+                continue
+            with reader:
+                if sha256_stream(reader) == want:
+                    print(f"{binary.name} matches archive member {member.name}")
+                    return
+    raise SystemExit(
+        f"{binary} (SHA-256 {want}) does not match any '{binary.name}' member of "
+        f"{archive}. The verified archive and the binary being executed must be "
+        "the same artifact; re-extract the pinned archive and point "
+        "--llama-server at it."
+    )
 
 
 def load_existing(manifest_dir: Path) -> tuple[dict[str, dict], dict[str, str], dict]:
@@ -409,23 +470,35 @@ def load_existing(manifest_dir: Path) -> tuple[dict[str, dict], dict[str, str], 
     pin = {}
     pin_path = manifest_dir / "pin.json"
     if pin_path.is_file():
-        pin = json.loads(pin_path.read_text())
+        pin = json.loads(pin_path.read_text(encoding="utf-8"))
     for shard_path in sorted(manifest_dir.glob("*.json")):
         if shard_path.name == "pin.json":
             continue
-        doc = json.loads(shard_path.read_text())
+        doc = json.loads(shard_path.read_text(encoding="utf-8"))
         for entry in doc.get("entries", []):
             entry_id = entry["id"]
             if entry_id in policy:
                 raise SystemExit(f"entry {entry_id} appears in two shards")
-            facts = set(FACT_KEYS.get(entry.get("kind", "option"), []))
+            kind = entry.get("kind", "option")
+            if kind not in FACT_KEYS:
+                # Without this, `facts` would be empty, every key would be
+                # treated as policy, and the merge below would overwrite the
+                # freshly extracted facts with the stale ones from disk.
+                raise SystemExit(
+                    f"entry {entry_id} in {shard_path.name} has unknown kind {kind!r}"
+                )
+            facts = set(FACT_KEYS[kind])
             policy[entry_id] = {k: v for k, v in entry.items() if k not in facts}
             shard_of[entry_id] = shard_path.stem
     return policy, shard_of, pin
 
 
 def dump_json(path: Path, doc: dict) -> None:
-    path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+    # Explicit UTF-8: the "run it twice, the worktree stays clean" contract
+    # must not depend on the ambient locale's default encoding.
+    path.write_text(
+        json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
 
 
 def main() -> None:
@@ -446,7 +519,9 @@ def main() -> None:
         "--archive",
         type=Path,
         default=None,
-        help="optional path to the official archive; SHA-256 is verified when given",
+        help="path to the official archive; when given, its SHA-256 is verified "
+        "against the pin AND the --llama-server binary is required to match a "
+        "member of it, so the binary that gets executed is the verified one",
     )
     ap.add_argument(
         "--manifest-dir",
@@ -455,16 +530,29 @@ def main() -> None:
     )
     args = ap.parse_args()
 
+    if not args.llama_server.is_file():
+        raise SystemExit(f"--llama-server {args.llama_server} is not a file")
+
     if args.archive is not None:
         verify_archive(args.archive)
+        verify_binary_matches_archive(args.archive, args.llama_server)
+    else:
+        print(
+            f"warning: --archive was not given, so {args.llama_server} is executed "
+            "unverified (with DYLD_LIBRARY_PATH/LD_LIBRARY_PATH pointed at its own "
+            f"directory). Pass --archive to pin it to SHA-256 {PINNED_ARCHIVE_SHA256}.",
+            file=sys.stderr,
+        )
 
     help_text = run_help(args.llama_server)
     options = parse_help(help_text)
     routes = parse_routes(
-        find_source(args.source_dir, "server.cpp").read_text(),
-        find_source(args.source_dir, "server-http.cpp").read_text(),
+        find_source(args.source_dir, "server.cpp").read_text(encoding="utf-8"),
+        find_source(args.source_dir, "server-http.cpp").read_text(encoding="utf-8"),
     )
-    fields = parse_schema(find_source(args.source_dir, "server-schema.cpp").read_text())
+    fields = parse_schema(
+        find_source(args.source_dir, "server-schema.cpp").read_text(encoding="utf-8")
+    )
 
     long_spellings = sorted({s for o in options for s in o["long_spellings"]})
     envs = sorted({o["env"] for o in options if o["env"]})

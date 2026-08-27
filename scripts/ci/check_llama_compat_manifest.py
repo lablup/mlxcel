@@ -25,10 +25,14 @@ Enforced here:
 
 - pin.json counts equal what the shards actually contain, and the shards
   listed in pin.json equal the files on disk.
-- The b10621 inventory invariants hold: 249 help entries, 323 distinct
-  long-option spellings, 134 ``LLAMA_*`` environment variables. Duplicate
-  aliases live inside their entry (no spelling appears in two entries), so
-  aliases never inflate the feature count.
+- The b10621 inventory invariants hold against constants frozen HERE, not
+  only against pin.json: 249 help entries, 323 distinct long-option
+  spellings, 134 ``LLAMA_*`` environment variables, 53 routes, 74 native
+  request fields. pin.json is written by the same extractor run that writes
+  the shards, so comparing against it alone cannot catch an extractor
+  regression that drops entries and lowers the recorded count to match.
+  Duplicate aliases live inside their entry (no spelling appears in two
+  entries), so aliases never inflate the feature count.
 - Every entry has exactly one policy state out of ``supported`` /
   ``aliased`` / ``not_applicable`` / ``deferred``. The extractor's
   ``unclassified`` marker is rejected, which is what turns a nightly bump
@@ -47,7 +51,11 @@ Enforced here:
 - ``supported`` entries carry a self-consistent mlxcel claim (canonical
   spelling accepted, env binding recorded when b10621 defines one, route
   and field claims matching the entry identity).
-- Every referenced test file exists in the repository.
+- Every referenced test (``test``, and ``mlxcel.env_test`` for a runtime env
+  binding) names an existing file INSIDE the repository: a repo-relative path
+  with no ``..`` component, resolving under the repository root. An absolute
+  or upward-walking value is rejected rather than satisfying the gate with a
+  file that is not in the tree.
 - Shard serialization is canonical (sorted entries, two-space indent,
   trailing newline), so regeneration diffs stay minimal.
 """
@@ -58,7 +66,9 @@ import argparse
 import json
 import subprocess
 import sys
-from pathlib import Path
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path, PurePosixPath
 
 REPO = Path(__file__).resolve().parents[2]
 MANIFEST_DIR = REPO / "compat" / "llama-server" / "b10621"
@@ -73,6 +83,13 @@ KIND_ORDER = {"option": 0, "route": 1, "native_request_field": 2}
 EXPECTED_HELP_ENTRIES = 249
 EXPECTED_LONG_SPELLINGS = 323
 EXPECTED_LLAMA_ENVS = 134
+# Routes and native request fields are frozen properties of the pin too.
+# They need their OWN constants rather than a pin.json comparison alone:
+# pin.json is written by the same extractor run that writes the shards, so
+# a regression in `parse_routes` / `parse_schema` that drops entries also
+# lowers the recorded count and the two agree on the wrong number.
+EXPECTED_ROUTES = 53
+EXPECTED_NATIVE_FIELDS = 74
 EXPECTED_ARCHIVE_SHA256 = (
     "429c8270608600188035e5e92f7d78dffb7900904fe7dd7e6a84f48068cd13cf"
 )
@@ -88,6 +105,34 @@ def canonical_dump(doc: dict) -> str:
     return json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
 
 
+def repo_relative_file(value: object) -> bool:
+    """True when ``value`` names an existing file INSIDE the repository.
+
+    A bare ``(REPO / value).is_file()`` does not answer that question. Under
+    pathlib join semantics an absolute ``value`` discards ``REPO`` entirely
+    (``REPO / "/etc/passwd"`` is ``/etc/passwd``), and a ``..``-laden relative
+    value walks out of the tree just as easily, so a manifest entry could
+    satisfy the "referenced test exists" gate with a path that is not in the
+    repository at all, and could probe the CI runner's filesystem while doing
+    it. Require a repo-relative POSIX path with no upward component and
+    confirm the resolved path is still under ``REPO``.
+    """
+    if not isinstance(value, str) or not value:
+        return False
+    rel = PurePosixPath(value)
+    if rel.is_absolute() or ".." in rel.parts:
+        return False
+    # A Windows-style drive or UNC prefix is absolute on Windows but not
+    # under PurePosixPath, so reject backslashes outright.
+    if "\\" in value:
+        return False
+    try:
+        resolved = (REPO / rel).resolve()
+    except OSError:
+        return False
+    return resolved.is_relative_to(REPO) and resolved.is_file()
+
+
 def check_entry(shard: str, e: dict) -> None:
     where = f"{shard}.json entry {e.get('id')!r}"
     state = e.get("state")
@@ -98,8 +143,14 @@ def check_entry(shard: str, e: dict) -> None:
     test = e.get("test")
 
     if state == "deferred":
-        if not isinstance(e.get("issue"), int):
-            err(f"{where}: deferred entry must link an implementation issue")
+        issue = e.get("issue")
+        # `isinstance(True, int)` is True in Python, and a JSON `true` would
+        # otherwise reach `gh issue view` as the literal string "True".
+        if not isinstance(issue, int) or isinstance(issue, bool) or issue <= 0:
+            err(
+                f"{where}: deferred entry must link a positive implementation "
+                "issue number"
+            )
     if state == "not_applicable":
         if not test:
             err(f"{where}: not_applicable entry must name a diagnostic/documentation test")
@@ -119,7 +170,7 @@ def check_entry(shard: str, e: dict) -> None:
             if kind == "route":
                 if not mlxcel.get("route"):
                     err(f"{where}: aliased route must record the mlxcel method/path in mlxcel.route")
-                elif mlxcel["route"] == e["id"]:
+                elif mlxcel["route"] == e.get("id"):
                     err(
                         f"{where}: aliased route must map onto a different "
                         "method/path; use state 'supported' when mlxcel serves "
@@ -128,7 +179,7 @@ def check_entry(shard: str, e: dict) -> None:
             elif kind == "native_request_field":
                 if not mlxcel.get("field"):
                     err(f"{where}: aliased field must record the mlxcel field name in mlxcel.field")
-                elif mlxcel["field"] == e["field"]:
+                elif mlxcel["field"] == e.get("field"):
                     err(
                         f"{where}: aliased field must map onto a different field "
                         "name; use state 'supported' when mlxcel accepts the "
@@ -144,7 +195,11 @@ def check_entry(shard: str, e: dict) -> None:
             err(f"{where}: supported entry must name its conformance test")
         kind = e.get("kind")
         if kind == "option":
-            canonical = e["long_spellings"][0]
+            longs = e.get("long_spellings") or []
+            if not longs:
+                err(f"{where}: option entry has no long_spellings")
+                return
+            canonical = longs[0]
             if canonical not in mlxcel.get("accepted_spellings", []):
                 err(
                     f"{where}: supported option must accept its canonical "
@@ -156,10 +211,10 @@ def check_entry(shard: str, e: dict) -> None:
                     f"records {mlxcel.get('env')!r}"
                 )
         elif kind == "route":
-            if mlxcel.get("route") != e["id"]:
+            if mlxcel.get("route") != e.get("id"):
                 err(f"{where}: supported route claim must match the entry id")
         elif kind == "native_request_field":
-            if mlxcel.get("field") != e["field"]:
+            if mlxcel.get("field") != e.get("field"):
                 err(f"{where}: supported field claim must match the field name")
 
     if isinstance(mlxcel, dict):
@@ -167,10 +222,35 @@ def check_entry(shard: str, e: dict) -> None:
             env_test = mlxcel.get("env_test")
             if not env_test:
                 err(f"{where}: runtime env binding must name its covering test")
-            elif not (REPO / env_test).is_file():
-                err(f"{where}: env_test file {env_test} does not exist")
-    if test and not (REPO / str(test).split("::")[0]).is_file():
-        err(f"{where}: test file {test} does not exist")
+            elif not repo_relative_file(env_test):
+                err(
+                    f"{where}: env_test {env_test!r} is not an existing "
+                    "repository-relative file"
+                )
+    if test and not repo_relative_file(str(test).split("::")[0]):
+        err(f"{where}: test {test!r} is not an existing repository-relative file")
+
+
+def issue_state(issue: int) -> tuple[str | None, str | None]:
+    """Return ``(state, None)`` for ``issue``, or ``(None, reason)`` on failure.
+
+    ``issue`` is already known to be an ``int``, and it is passed as a separate
+    ``subprocess`` argv element with no shell, so no manifest-controlled string
+    ever reaches a command line.
+    """
+    try:
+        proc = subprocess.run(
+            ["gh", "issue", "view", str(issue), "--json", "state", "-q", ".state"],
+            capture_output=True,
+            text=True,
+            cwd=REPO,
+            check=False,
+        )
+    except OSError as exc:  # `gh` not installed / not executable
+        return None, f"cannot run gh: {exc}"
+    if proc.returncode != 0:
+        return None, proc.stderr.strip()
+    return proc.stdout.strip(), None
 
 
 def main() -> int:
@@ -188,7 +268,7 @@ def main() -> int:
     if not pin_path.is_file():
         print(f"error: {pin_path} missing", file=sys.stderr)
         return 1
-    pin = json.loads(pin_path.read_text())
+    pin = json.loads(pin_path.read_text(encoding="utf-8"))
     if pin["reference"]["archive_sha256"] != EXPECTED_ARCHIVE_SHA256:
         err("pin.json archive_sha256 does not match the pinned official archive")
 
@@ -207,7 +287,8 @@ def main() -> int:
     routes = 0
     fields = 0
     for shard_path in shard_files:
-        doc = json.loads(shard_path.read_text())
+        raw = shard_path.read_text(encoding="utf-8")
+        doc = json.loads(raw)
         if doc.get("schema_version") != 1:
             err(f"{shard_path.name}: unsupported schema_version")
         if doc.get("area") != shard_path.stem:
@@ -218,7 +299,7 @@ def main() -> int:
         keys = [(KIND_ORDER.get(e.get("kind"), 9), e.get("id", "")) for e in entries]
         if keys != sorted(keys):
             err(f"{shard_path.name}: entries are not in canonical (kind, id) order")
-        if canonical_dump(doc) != shard_path.read_text():
+        if canonical_dump(doc) != raw:
             err(f"{shard_path.name}: not in canonical JSON serialization")
         for e in entries:
             eid = e.get("id")
@@ -236,8 +317,14 @@ def main() -> int:
                 err(f"{shard_path.name} entry {eid!r}: unknown kind {kind!r}")
                 continue
             check_entry(shard_path.stem, e)
-            if e.get("state") == "deferred" and isinstance(e.get("issue"), int):
-                deferred_issues.add(e["issue"])
+            issue = e.get("issue")
+            if (
+                e.get("state") == "deferred"
+                and isinstance(issue, int)
+                and not isinstance(issue, bool)
+                and issue > 0
+            ):
+                deferred_issues.add(issue)
 
     # Inventory invariants of the frozen reference.
     all_spellings: list[str] = []
@@ -254,11 +341,19 @@ def main() -> int:
             f"spellings, found {len(set(all_spellings))}"
         )
     if len(all_spellings) != len(set(all_spellings)):
-        dupes = sorted({s for s in all_spellings if all_spellings.count(s) > 1})
+        counts_by_spelling = Counter(all_spellings)
+        dupes = sorted(s for s, n in counts_by_spelling.items() if n > 1)
         err(f"spellings appear in more than one entry (alias inflation): {dupes}")
     llama_envs = {v for v in envs if v.startswith("LLAMA_")}
     if len(llama_envs) != EXPECTED_LLAMA_ENVS:
         err(f"expected {EXPECTED_LLAMA_ENVS} LLAMA_* env vars, found {len(llama_envs)}")
+    if routes != EXPECTED_ROUTES:
+        err(f"expected {EXPECTED_ROUTES} b10621 routes, found {routes}")
+    if fields != EXPECTED_NATIVE_FIELDS:
+        err(
+            f"expected {EXPECTED_NATIVE_FIELDS} native request fields, "
+            f"found {fields}"
+        )
 
     counts = pin.get("counts", {})
     for key, actual in [
@@ -273,22 +368,21 @@ def main() -> int:
             err(f"pin.json counts.{key}={counts.get(key)} but shards contain {actual}")
 
     if args.check_issues_open:
-        for issue in sorted(deferred_issues):
-            proc = subprocess.run(
-                ["gh", "issue", "view", str(issue), "--json", "state", "-q", ".state"],
-                capture_output=True,
-                text=True,
-                cwd=REPO,
-                check=False,
-            )
-            state = proc.stdout.strip()
-            if proc.returncode != 0:
-                err(f"deferred issue #{issue}: gh lookup failed: {proc.stderr.strip()}")
-            elif state != "OPEN":
-                err(
-                    f"deferred issue #{issue} is {state}; flip its manifest "
-                    "entries or reopen the issue"
-                )
+        # One `gh` round trip per issue, but issued concurrently: serially this
+        # was ~0.6s x the deferred-issue count on every CI run for the whole
+        # epic. Results are collected in sorted issue order so the error output
+        # stays deterministic regardless of completion order.
+        issues = sorted(deferred_issues)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for issue, result in zip(issues, pool.map(issue_state, issues)):
+                state, failure = result
+                if failure is not None:
+                    err(f"deferred issue #{issue}: gh lookup failed: {failure}")
+                elif state != "OPEN":
+                    err(
+                        f"deferred issue #{issue} is {state}; flip its manifest "
+                        "entries or reopen the issue"
+                    )
 
     if errors:
         for e in errors:
