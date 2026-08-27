@@ -19,7 +19,7 @@
       "description": "set model name aliases, comma-separated (to be used by API) (env: LLAMA_ARG_ALIAS)",
       "discovery": "help-entry-head",
       "state": "aliased",
-      "issue": 1434,
+      "issue": 1438,
       "test": "src/server/model_source_tests.rs::the_alias_list_is_sorted_like_b10621s_set",
       "notes": "b10621 splits the value on commas, strips each entry, drops empty ones, and inserts the rest into a `std::set<std::string>`, then serves the set's first element, which is the lexicographically smallest entry rather than the one typed first. mlxcel now reproduces that exactly in `ServerStartupInput::into_startup_config`: `parse_model_aliases` returns the same sorted, de-duplicated sequence, its first element becomes the served model id (`AppState::display_model_id`, and so the `model` field of every response, /health and /v1/models), and the whole list is kept in `ServerConfig::model_aliases`. Before #1434 the value was one opaque id, so `--alias a,b` served a model literally named `a,b`. mlxcel matches no request against the model name in single-model mode, so every alias in the list does reach the model; what is left is reporting them, which the GET /models and GET /v1/models route entries already record against #1438.",
       "divergence": [

@@ -202,7 +202,7 @@ impl CacheCompatArgs {
              operation in this tree rewrites a cached key's rotation. Accepting the number and \
              continuing would leave the cache behaving exactly as it does at 0 while the \
              operator believed otherwise. Pass --cache-reuse 0, or drop the flag, for the \
-             upstream default. Tracked by #1453."
+             upstream default. Tracked by #1473."
         ))
     }
 

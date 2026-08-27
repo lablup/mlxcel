@@ -83,18 +83,18 @@ The manifest is sharded by area so that the concurrent implementation chains of 
 |---|---|---|
 | `transport-tls-cors.json` | A | #1432 |
 | `authentication.json` | A | #1437 |
-| `routes.json` | A | #1441, #1442, #1452 |
+| `routes.json` | A | #1438, #1440, #1441, #1442, #1452, #1466 |
 | `embeddings-and-rerank.json` | A | #1452 |
 | `observability-and-slots.json` | A | #1440 |
 | `router-models.json` | A | #1438 |
 | `lora-adapters.json` | A | #1439 |
-| `model-source.json` | B | #1434 |
+| `model-source.json` | B | #1434, #1438 |
 | `ggml-runtime.json` | B | #1445 |
-| `chat-templates.json` | B | #1447 |
+| `chat-templates.json` | B | #1447, #1470 |
 | `multimodal-and-audio.json` | B | #1451, #1446 |
 | `ui-tools-mcp-gcp.json` | B | #1435, #1456 |
 | `streams-and-realtime.json` | B | #1444 |
-| `runtime-and-context.json` | C | #1450, #1453, #1449 |
+| `runtime-and-context.json` | C | #1449, #1450, #1453, #1472, #1473 |
 | `sampling-and-grammar.json` | C | #1436, #1377 |
 | `speculative.json` | C | #1433 |
 | `logging-and-presets.json` | C | #1448 |

@@ -68,7 +68,8 @@
     },
     "model-source": {
       "owners": [
-        1434
+        1434,
+        1438
       ]
     },
     "multimodal-and-audio": {
@@ -89,16 +90,21 @@
     },
     "routes": {
       "owners": [
+        1438,
+        1440,
         1441,
         1442,
-        1452
+        1452,
+        1466
       ]
     },
     "runtime-and-context": {
       "owners": [
         1449,
         1450,
-        1453
+        1453,
+        1472,
+        1473
       ]
     },
     "sampling-and-grammar": {

@@ -220,7 +220,7 @@ impl RopeOverrideArgs {
              unchanged without saying so. Checkpoints whose own config declares YaRN (DeepSeek \
              V2/V3.2/V4, gpt-oss, Mellum, TeleChat3) build it from that config and are \
              unaffected. Pass the b10621 defaults ({} / --yarn-orig-ctx 0), or drop the flags, \
-             to use the checkpoint's own values. Tracked by #1450.",
+             to use the checkpoint's own values. Tracked by #1472.",
             requested.join(", "),
             YARN_SENTINEL
         ))

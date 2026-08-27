@@ -19,7 +19,7 @@
       "description": "logical maximum batch size (default: 2048) (env: LLAMA_ARG_BATCH)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1450,
+      "issue": 1472,
       "test": "src/server/routes/props_tests.rs",
       "notes": "Accepted as an alias for --prefill-chunk-size, which is the logical prefill batch and does have an observable effect on chunked prefill. The resolved value is now reported as `n_batch` in /props. It is not b10621's n_batch: the default differs (512 against 2048) and mlxcel schedules chunked prefill rather than filling a llama_batch, so a given value does not produce the same per-forward token count.",
       "divergence": [
@@ -52,7 +52,7 @@
       "description": "save idle slots to the prompt cache on new task, and clear them when using unified KV (default: enabled, requires cache-ram) (env: LLAMA_ARG_CACHE_IDLE_SLOTS)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1453,
+      "issue": 1473,
       "test": null,
       "notes": "Not accepted. It depends on both a per-slot retained prompt and --cache-ram-backed saving of it; mlxcel has neither the slot state nor the on-new-task save point.",
       "divergence": [
@@ -78,7 +78,7 @@
       "description": "whether to enable prompt caching (default: enabled) (env: LLAMA_ARG_CACHE_PROMPT)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1453,
+      "issue": 1473,
       "test": "tests/prompt_cache_compat_e2e.rs",
       "notes": "Accepted on both binaries with the b10621 spellings and the LLAMA_ARG_CACHE_PROMPT binding, defaulting to enabled as upstream does, and it really does turn the prompt-prefix KV cache on and off. It is not `supported` because the cache it controls does not cover the same surface: mlxcel looks up and donates prompt prefixes only on the chat-shaped routes (/v1/chat/completions, /v1/messages, /v1/responses), so a client on /v1/completions or /completion is never cached whatever this flag says. Per-request `cache_prompt` is honored on those same chat routes; see the field:cache_prompt entry.",
       "divergence": [
@@ -111,7 +111,7 @@
       "description": "set the maximum cache size in MiB (default: 8192, -1 - no limit, 0 - disable)[(more info)](https://github.com/ggml-org/llama.cpp/pull/16391) (env: LLAMA_ARG_CACHE_RAM)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1453,
+      "issue": 1473,
       "test": "src/cli/cache_args_tests.rs",
       "notes": "Accepted with its LLAMA_ARG_CACHE_RAM binding and read in MiB with upstream's sentinels (-1 = no limit, 0 = disable), setting the same byte budget as mlxcel's own --prompt-cache-capacity-bytes. That flag wins when both are given, matching how --prefill-chunk-size wins over --batch-size: the native spelling is the more specific request. The unset default differs and the budget covers the chat-route prompt cache only.",
       "divergence": [
@@ -143,7 +143,7 @@
       "description": "min chunk size to attempt reusing from the cache via KV shifting, requires prompt caching to be enabled (default: 0) [(card)](https://ggml.ai/f0.png) (env: LLAMA_ARG_CACHE_REUSE)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1453,
+      "issue": 1473,
       "test": "src/cli/cache_args_tests.rs",
       "notes": "The flag is now accepted with its LLAMA_ARG_CACHE_REUSE binding rather than the environment variable being validated inside the prompt-cache enable fallback, so a command-line value beats the environment the way every other option does. `0`, upstream's default, is accepted and inert. Any positive value is refused at startup with a diagnostic naming the missing operation: mlxcel's prompt cache reuses a strict token prefix, and reusing a chunk that is not a prefix means deleting a span from the middle of a cached KV set and re-basing the rotary positions of everything after it. Nothing in this tree rewrites a cached key's rotation (`KVCache::trim_front_keep_sink` advances live_start and leaves offset alone; `gather_positions` and `gather_within_tail` compact survivors without re-rotating them), so the capability is absent rather than merely unwired.",
       "divergence": [
@@ -175,7 +175,7 @@
       "description": "minimum spacing between context checkpoints in tokens (default: 8192, 0 = no minimum) (env: LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1453,
+      "issue": 1473,
       "test": null,
       "notes": "Not accepted. The spacing applies between successive context checkpoints, and mlxcel creates none; its single history-boundary snapshot is taken at the prompt/generation boundary rather than at a token interval.",
       "divergence": [
@@ -204,7 +204,7 @@
       "description": "whether to enable continuous batching (a.k.a dynamic batching) (default: enabled) (env: LLAMA_ARG_CONT_BATCHING)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1453,
+      "issue": 1473,
       "test": "src/cli/cache_args_tests.rs",
       "notes": "No longer accepted-and-ignored. Both long spellings are visible on both binaries with the LLAMA_ARG_CONT_BATCHING binding and the upstream default of enabled, and --no-cont-batching now has an effect: it pins the decode width to one sequence (--max-batch-size 1). That is deliberately not mlxcel's --no-batch, which swaps the batch scheduler for a sequential worker and takes the prompt cache and speculative decoding out with it; upstream's -nocb keeps the slots and stops them interleaving.",
       "divergence": [
@@ -238,7 +238,7 @@
       "description": "whether to use context shift on infinite text generation (default: disabled) (env: LLAMA_ARG_CONTEXT_SHIFT)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1450,
+      "issue": 1472,
       "test": null,
       "notes": "Not accepted, and the behaviour differs in both directions. b10621 defaults context shift OFF, so a request that outgrows its context fails. mlxcel front-trims the KV live window (keeping a 4-token attention sink) once --ctx-size or --max-kv-size bounds it, which is a context shift that is always on and not switchable; with neither flag set nothing bounds the window at all.",
       "divergence": [
@@ -332,7 +332,7 @@
       "description": "max number of context checkpoints to create per slot (default: 32)[(more info)](https://github.com/ggml-org/llama.cpp/pull/15293) (env: LLAMA_ARG_CTX_CHECKPOINTS)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1453,
+      "issue": 1473,
       "test": null,
       "notes": "Not accepted. mlxcel captures at most one history-boundary snapshot per sequence (`capture_history_boundary_snapshot`), not a ring of N per-slot context checkpoints, so a maximum count has nothing to bound.",
       "divergence": [
@@ -389,7 +389,7 @@
       "description": "number of tokens to keep from the initial prompt (default: 0, -1 = all)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1450,
+      "issue": 1472,
       "test": null,
       "notes": "Not accepted. mlxcel does pin a leading attention-sink prefix when the KV live window exceeds its cap, but the length is the fixed MAX_KV_SIZE_SINK_KEEP = 4 in src/server/batch/scheduler.rs, not an operator-settable count, and there is no -1 = keep-all form. Making it settable is what #1450 leaves open.",
       "divergence": [
@@ -418,7 +418,7 @@
       "description": "use single unified KV buffer shared across all sequences (default: enabled if number of slots is auto) (env: LLAMA_ARG_KV_UNIFIED)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1453,
+      "issue": 1473,
       "test": null,
       "notes": "Not accepted. mlxcel allocates KV per sequence through its cache pool and has no single shared buffer to switch to, so there is no topology for this to select.",
       "divergence": [
@@ -443,7 +443,7 @@
       "description": "number of server slots (default: -1, -1 = auto) (env: LLAMA_ARG_N_PARALLEL)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1450,
+      "issue": 1472,
       "test": "src/bin/mlx_server.rs",
       "notes": "Spelling and env match and the flag genuinely sizes both the per-slot context share (ctx_size / slots) and the decode batch width. Two things still differ: b10621 defaults to -1 (auto) while mlxcel defaults to 4, and mlxcel's field is usize so -1 is rejected by the value parser with a message naming the option and the value rather than resolving to auto.",
       "divergence": [
@@ -626,7 +626,7 @@
       "description": "how much the prompt of a request must match the prompt of a slot in order to use that slot (default: 0.10, 0.0 = disabled)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1453,
+      "issue": 1473,
       "test": null,
       "notes": "Not accepted. The threshold selects which slot's retained prompt a request may take over, and mlxcel has no per-slot retained prompt: /slots is synthesized from the active count and queue depth, and reuse goes through a process-wide radix trie over token prefixes that is consulted for every request regardless of which sequence last held them. Accepting the flag inert (upstream's default is 0.10, not 0, so a script passing the default would have to be honored) would claim a slot-selection policy that does not exist.",
       "divergence": [
@@ -651,7 +651,7 @@
       "description": "use full-size SWA cache (default: false) [(more info)](https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055) (env: LLAMA_ARG_SWA_FULL)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1450,
+      "issue": 1472,
       "test": null,
       "notes": "Not accepted. Sliding-window families (Gemma 3/4, Exaone 4, gpt-oss, RecurrentGemma, Step 3.5, Mellum, Ministral 3, AFMoE, DeepSeek V4) build their own RotatingKVCache inside each model's make_cache from the checkpoint's sliding_window, and nothing on the server reaches into that construction. Forcing a full-size SWA cache needs a plumbing path into every one of those call sites.",
       "divergence": [
@@ -676,7 +676,7 @@
       "description": "physical maximum batch size (default: 512) (env: LLAMA_ARG_UBATCH)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1450,
+      "issue": 1472,
       "test": "src/server/routes/props_tests.rs",
       "notes": "Accepted, logged as not applicable at startup, and reported in /props as `n_ubatch` at the same value as `n_batch`. MLX on unified memory has no separate physical micro-batch to size, so there is no quantity for this to set; the value itself is read only to decide whether to emit the notice.",
       "divergence": [
@@ -707,7 +707,7 @@
       "description": "YaRN: scale sqrt(t) or attention magnitude (default: -1.00) (env: LLAMA_ARG_YARN_ATTN_FACTOR)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1450,
+      "issue": 1472,
       "test": "src/cli/rope_args_tests.rs",
       "notes": "Spelling and env accepted. b10621's sentinel default (-1.0) means \"use the values the model was trained with\" and is accepted inert, so a deployment script that spells out the upstream defaults keeps working. Any other value is refused at startup with a diagnostic naming every non-sentinel flag at once: mlxcel's shared RoPE path (models::rope_utils::RopeScalingKind) has no YaRN arm, so there is nothing for these to tune and accepting them would leave the rotation unchanged without saying so. Checkpoints whose own config declares YaRN (DeepSeek V2/V3.2/V4, gpt-oss, Mellum, TeleChat3) build it from that config and are unaffected.",
       "divergence": [
@@ -738,7 +738,7 @@
       "description": "YaRN: low correction dim or beta (default: -1.00) (env: LLAMA_ARG_YARN_BETA_FAST)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1450,
+      "issue": 1472,
       "test": "src/cli/rope_args_tests.rs",
       "notes": "Spelling and env accepted. b10621's sentinel default (-1.0) means \"use the values the model was trained with\" and is accepted inert, so a deployment script that spells out the upstream defaults keeps working. Any other value is refused at startup with a diagnostic naming every non-sentinel flag at once: mlxcel's shared RoPE path (models::rope_utils::RopeScalingKind) has no YaRN arm, so there is nothing for these to tune and accepting them would leave the rotation unchanged without saying so. Checkpoints whose own config declares YaRN (DeepSeek V2/V3.2/V4, gpt-oss, Mellum, TeleChat3) build it from that config and are unaffected.",
       "divergence": [
@@ -769,7 +769,7 @@
       "description": "YaRN: high correction dim or alpha (default: -1.00) (env: LLAMA_ARG_YARN_BETA_SLOW)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1450,
+      "issue": 1472,
       "test": "src/cli/rope_args_tests.rs",
       "notes": "Spelling and env accepted. b10621's sentinel default (-1.0) means \"use the values the model was trained with\" and is accepted inert, so a deployment script that spells out the upstream defaults keeps working. Any other value is refused at startup with a diagnostic naming every non-sentinel flag at once: mlxcel's shared RoPE path (models::rope_utils::RopeScalingKind) has no YaRN arm, so there is nothing for these to tune and accepting them would leave the rotation unchanged without saying so. Checkpoints whose own config declares YaRN (DeepSeek V2/V3.2/V4, gpt-oss, Mellum, TeleChat3) build it from that config and are unaffected.",
       "divergence": [
@@ -800,7 +800,7 @@
       "description": "YaRN: extrapolation mix factor (default: -1.00, 0.0 = full interpolation) (env: LLAMA_ARG_YARN_EXT_FACTOR)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1450,
+      "issue": 1472,
       "test": "src/cli/rope_args_tests.rs",
       "notes": "Spelling and env accepted. b10621's sentinel default (-1.0) means \"use the values the model was trained with\" and is accepted inert, so a deployment script that spells out the upstream defaults keeps working. Any other value is refused at startup with a diagnostic naming every non-sentinel flag at once: mlxcel's shared RoPE path (models::rope_utils::RopeScalingKind) has no YaRN arm, so there is nothing for these to tune and accepting them would leave the rotation unchanged without saying so. Checkpoints whose own config declares YaRN (DeepSeek V2/V3.2/V4, gpt-oss, Mellum, TeleChat3) build it from that config and are unaffected.",
       "divergence": [
@@ -831,7 +831,7 @@
       "description": "YaRN: original context size of model (default: 0 = model training context size) (env: LLAMA_ARG_YARN_ORIG_CTX)",
       "discovery": "help-entry-head",
       "state": "deferred",
-      "issue": 1450,
+      "issue": 1472,
       "test": "src/cli/rope_args_tests.rs",
       "notes": "Spelling and env accepted. b10621's sentinel default (0) means \"use the values the model was trained with\" and is accepted inert, so a deployment script that spells out the upstream defaults keeps working. Any other value is refused at startup with a diagnostic naming every non-sentinel flag at once: mlxcel's shared RoPE path (models::rope_utils::RopeScalingKind) has no YaRN arm, so there is nothing for these to tune and accepting them would leave the rotation unchanged without saying so. Checkpoints whose own config declares YaRN (DeepSeek V2/V3.2/V4, gpt-oss, Mellum, TeleChat3) build it from that config and are unaffected.",
       "divergence": [
@@ -856,7 +856,7 @@
       "description": "Re-use KV cache from a previous request if possible. This way the common prefix does not have to be re-processed, only the suffix that differs between the requests",
       "discovery": "source-schema-declaration",
       "state": "deferred",
-      "issue": 1453,
+      "issue": 1473,
       "test": "src/server/chat_request_tests.rs",
       "notes": "Honored on the chat-shaped routes, where mlxcel's prompt cache actually operates: `cache_prompt: false` withholds the request's cache context, which is the single handle the scheduler reaches the store through for both the prefix lookup and the donate-back, so the request is prefilled cold AND leaves every entry another request might reuse untouched. It reaches the server at the request root, through the flattened OpenAI-SDK extra_body, or nested inside extra_body. It is not accepted on native /completion, whose NativeCompletionRequest has no prompt-cache context to withhold, so the manifest records no claim there and the field stays unaccepted on that surface.",
       "divergence": [
@@ -875,7 +875,7 @@
       "description": "Min chunk size to attempt reusing from the cache via KV shifting. See --cache-reuse arg",
       "discovery": "source-schema-declaration",
       "state": "deferred",
-      "issue": 1453,
+      "issue": 1473,
       "test": null,
       "notes": "Not accepted, for the same reason as --cache-reuse: there is no KV operation that re-bases the rotary positions of a cached span, so a per-request minimum chunk size has nothing to tune. The server-wide flag reports that at startup; a request field would have to report it per request, which is worse than not accepting it.",
       "divergence": [
@@ -893,7 +893,7 @@
       "description": "Number of tokens after n_keep that may be discarded when shifting context (0 = half context)",
       "discovery": "source-schema-declaration",
       "state": "deferred",
-      "issue": 1450,
+      "issue": 1472,
       "test": null,
       "notes": "Not accepted on /completion. mlxcel discards exactly the excess over the KV cap on every trim, which is b10621's behaviour only when n_discard happens to equal that excess; the 0 = half-the-context default and any explicit depth have no representation.",
       "divergence": [
@@ -912,7 +912,7 @@
       "description": "Specify the number of tokens from the initial prompt to retain when context size is exceeded. Use -1 to retain all tokens from the prompt",
       "discovery": "source-schema-declaration",
       "state": "deferred",
-      "issue": 1450,
+      "issue": 1472,
       "test": null,
       "notes": "Not accepted on /completion. NativeCompletionRequest does not carry n_keep and does not deny unknown fields, so a client that sends it is not told it was dropped. The server-wide retention is the fixed 4-token attention sink described on --keep.",
       "divergence": [
