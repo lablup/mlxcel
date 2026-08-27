@@ -43,7 +43,7 @@ use mlxcel_core::weights::WeightMap;
 use mlxcel_core::{MlxArray, UniquePtr};
 
 use super::compress::{Compressor, align_local_mask, extend_mask, pool_mask_additive};
-use super::indexer::Indexer;
+use super::indexer::{Indexer, force_dense_pooled};
 use super::rope::V4Rope;
 use super::{ModelArgs, OVERLAP_COMPRESS_RATIO, V4LayerCache, get_weight_copy};
 
@@ -276,9 +276,13 @@ impl V4Attention {
 
                 if np == 0 {
                     self.dense_sdpa(&q, &kv, aligned_mask.as_deref(), &sinks)
-                } else if np <= indexer.index_topk {
+                } else if np <= indexer.index_topk || force_dense_pooled() {
                     // Short context: dense concat of local + pooled, exactly
-                    // the compressed path.
+                    // the compressed path. `force_dense_pooled` extends this
+                    // arm past `index_topk` for A/B against the sparse path;
+                    // the selection above still ran, so the indexer's pooled
+                    // cache advanced either way (it must, or its pooled rows
+                    // do not exist once the switch is removed).
                     let kv_full =
                         mlxcel_core::concatenate(&kv, &mlxcel_core::expand_dims(pooled, 1), 2);
                     let full_mask = aligned_mask
