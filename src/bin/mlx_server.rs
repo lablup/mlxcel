@@ -1371,10 +1371,11 @@ async fn main() -> anyhow::Result<()> {
     // manifest (issue #1443): `mlxcel-server --dump-flag-surface` prints the
     // complete clap surface, hidden compatibility arguments included, as
     // deterministic JSON and exits. Intercepted before `Cli::parse` and
-    // matched positionally, so the operator-facing `--help` surface and
+    // matched positionally over `args_os` (never `args`, which panics on a
+    // non-UTF-8 argument), so the operator-facing `--help` surface and
     // ordinary argument values are unaffected. See `src/cli/flag_surface.rs`
     // for the contract and consumers.
-    let raw_args: Vec<String> = std::env::args().collect();
+    let raw_args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     if mlxcel::cli::flag_surface::dump_requested(&raw_args, 1) {
         use clap::CommandFactory;
         let mut cmd = Cli::command();

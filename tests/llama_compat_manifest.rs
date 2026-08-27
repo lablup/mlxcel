@@ -226,6 +226,71 @@ fn manifest_option_claims_hold_on_both_server_binaries() {
     );
 }
 
+/// The other direction: an option entry the manifest records NO mlxcel claim
+/// for must genuinely not be accepted by either binary. Without this, a chain
+/// could add a b10621 flag and leave its entry untouched, which is exactly
+/// the silent drift the manifest exists to prevent. `src/server/llama_compat_tests.rs`
+/// already asserts the same property for routes and native request fields;
+/// this closes the option third of it.
+#[test]
+fn unclaimed_option_entries_are_accepted_by_neither_server_binary() {
+    let entries = load_manifest_entries();
+    let surfaces = surfaces();
+    let mut checked = 0usize;
+
+    for (id, entry) in &entries {
+        if entry["kind"] != "option" || !entry["mlxcel"].is_null() {
+            continue;
+        }
+        for spelling in entry["long_spellings"].as_array().expect("long_spellings") {
+            let spelling = spelling.as_str().expect("spelling");
+            for surface in &surfaces {
+                assert!(
+                    surface.arg(spelling).is_none(),
+                    "{id}: {} accepts {spelling}, but the manifest records no \
+                     mlxcel claim for this b10621 entry. Flip the entry \
+                     (state, mlxcel, notes, test) in the same change that adds \
+                     the argument.",
+                    surface.label
+                );
+            }
+        }
+        checked += 1;
+    }
+
+    // Seeded at 195 unclaimed option entries; the epic only ever converts
+    // them into claims, so a collapse here means the manifest lost entries.
+    assert!(
+        checked >= 150,
+        "only {checked} option entries were unclaimed; the manifest has lost entries"
+    );
+}
+
+/// The sentinel that produces the dumped surfaces must stay invisible to the
+/// operator: it is not a clap argument, so neither binary's `--help` may
+/// mention it. This is the assertion behind "the operator-facing surface is
+/// unchanged" in `src/cli/flag_surface.rs`.
+#[test]
+fn the_flag_surface_sentinel_never_appears_in_help() {
+    for (bin, args) in [
+        ("mlxcel", &["serve", "--help"][..]),
+        ("mlxcel-server", &["--help"][..]),
+        ("mlxcel", &["--help"][..]),
+    ] {
+        let (path, resolution) = resolve_repo_binary(bin);
+        let output = Command::new(&path)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to spawn {bin} from {path:?}: {e}\n{resolution}"));
+        let help = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !help.contains("dump-flag-surface"),
+            "{bin} {args:?} renders the hidden flag-surface sentinel; it must \
+             not be a clap argument"
+        );
+    }
+}
+
 /// Minimal Rust reimplementation of the extractor's `--help` entry parser,
 /// used by the archive-gated conformance test below. Returns canonical
 /// entry id -> (sorted long spellings, env var).

@@ -14,9 +14,11 @@
 
 //! Unit tests for the machine-readable flag-surface dump.
 
+use std::ffi::OsString;
+
 use clap::{Arg, ArgAction, Command};
 
-use super::{FLAG_SURFACE_SCHEMA_VERSION, dump_requested, flag_surface_json};
+use super::{FLAG_SURFACE_SCHEMA_VERSION, dump_requested, flag_surface_json, serve_dump_requested};
 
 fn sample_command() -> Command {
     Command::new("sample")
@@ -37,10 +39,12 @@ fn sample_command() -> Command {
         )
 }
 
+fn argv(v: &[&str]) -> Vec<OsString> {
+    v.iter().map(OsString::from).collect()
+}
+
 #[test]
 fn dump_requested_matches_only_the_exact_position() {
-    let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-
     assert!(dump_requested(
         &argv(&["mlxcel-server", "--dump-flag-surface"]),
         1
@@ -55,6 +59,54 @@ fn dump_requested_matches_only_the_exact_position() {
         1
     ));
     assert!(!dump_requested(&argv(&["mlxcel-server"]), 1));
+}
+
+#[test]
+fn serve_dump_requires_the_serve_subcommand_in_front_of_the_sentinel() {
+    assert!(serve_dump_requested(&argv(&[
+        "mlxcel",
+        "serve",
+        "--dump-flag-surface"
+    ])));
+    // Another subcommand at the same position must not dump.
+    assert!(!serve_dump_requested(&argv(&[
+        "mlxcel",
+        "generate",
+        "--dump-flag-surface"
+    ])));
+    // `serve` without the sentinel is an ordinary server start.
+    assert!(!serve_dump_requested(&argv(&[
+        "mlxcel", "serve", "--port", "8080"
+    ])));
+    assert!(!serve_dump_requested(&argv(&["mlxcel"])));
+}
+
+/// Argv is inspected as `OsString`, so an argument that is not valid Unicode
+/// (a legal Unix path, and accepted today by every `PathBuf` argument such as
+/// `--model`) is compared and rejected rather than aborting the process.
+/// Reading argv as `String` made both shipped binaries panic before clap ran
+/// on any such invocation.
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_argument_is_compared_rather_than_aborting() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let non_utf8 = OsString::from_vec(vec![b'/', b't', b'm', b'p', b'/', 0xff, 0xfe]);
+    let args = vec![
+        OsString::from("mlxcel-server"),
+        OsString::from("--model"),
+        non_utf8.clone(),
+    ];
+    assert!(!dump_requested(&args, 1));
+    assert!(!dump_requested(&args, 2));
+
+    // The sentinel still matches when a non-UTF-8 argument follows it.
+    let args = vec![
+        OsString::from("mlxcel-server"),
+        OsString::from("--dump-flag-surface"),
+        non_utf8,
+    ];
+    assert!(dump_requested(&args, 1));
 }
 
 #[test]

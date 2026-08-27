@@ -21,8 +21,12 @@
 //! `/completion` fields `NativeCompletionRequest` actually accepts. These
 //! tests hold both claim sets against the code in BOTH directions:
 //!
-//! - a claimed route must resolve on the real router (anything but
-//!   404/405), and a claimed field must exist on the struct;
+//! - a claim naming the b10621 identity itself (`mlxcel.route` equal to the
+//!   entry id, `mlxcel.field` equal to the b10621 field) must resolve on the
+//!   real router / exist on the struct;
+//! - a claim naming a DIFFERENT identity is an `aliased` mapping: the alias
+//!   must resolve / exist and the b10621 identity must NOT, which is what
+//!   distinguishes `aliased` from `supported` mechanically;
 //! - an UNCLAIMED route must NOT resolve and an unclaimed field must NOT
 //!   exist, so implementing part of the surface without flipping the
 //!   manifest entry fails CI and produces the reviewable diff the manifest
@@ -110,11 +114,13 @@ async fn probe(method: &str, path: &str) -> StatusCode {
         .status()
 }
 
-/// A route entry with an `mlxcel.route` claim must resolve on the router
-/// (any status except 404/405 counts: a 400/401/422/501 from the mounted
-/// handler still proves the method/path pair is served). A route entry
-/// WITHOUT a claim must not resolve, so adding the route later forces the
-/// manifest entry to flip in the same change.
+/// A route entry claiming the b10621 method/path itself must resolve on the
+/// router (any status except 404/405 counts: a 400/401/422/501 from the
+/// mounted handler still proves the method/path pair is served). A claim
+/// naming a different method/path is an `aliased` mapping, so the alias must
+/// resolve and the b10621 pair must not. A route entry WITHOUT a claim must
+/// not resolve, so adding the route later forces the manifest entry to flip
+/// in the same change.
 #[tokio::test]
 async fn manifest_route_claims_match_the_mounted_router() {
     for entry in manifest_entries() {
@@ -144,23 +150,49 @@ async fn manifest_route_claims_match_the_mounted_router() {
                  change that mounts the route."
             );
         } else {
-            assert_eq!(
-                entry["mlxcel"]["route"].as_str(),
-                Some(id),
-                "{id}: mlxcel.route claim must match the entry id"
-            );
-            assert!(
-                resolved,
-                "{id}: the manifest claims this route is mounted, but the \
-                 router answered {status}"
-            );
+            let claimed = entry["mlxcel"]["route"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{id}: a route claim must record mlxcel.route"));
+            if claimed == id {
+                assert!(
+                    resolved,
+                    "{id}: the manifest claims this route is mounted, but the \
+                     router answered {status}"
+                );
+            } else {
+                // `aliased`: mlxcel serves the equivalent elsewhere. Both
+                // halves are asserted so the state cannot drift into a
+                // mislabelled `supported`.
+                assert!(
+                    !resolved,
+                    "{id}: the manifest records an alias to {claimed:?}, but \
+                     mlxcel also serves the b10621 route itself ({status}). \
+                     Use state `supported` with mlxcel.route = the entry id."
+                );
+                let (alias_method, alias_path) = claimed.split_once(' ').unwrap_or_else(|| {
+                    panic!("{id}: mlxcel.route must be \"METHOD /path\", got {claimed:?}")
+                });
+                let alias_status = probe(alias_method, alias_path).await;
+                assert!(
+                    alias_status != StatusCode::NOT_FOUND
+                        && alias_status != StatusCode::METHOD_NOT_ALLOWED,
+                    "{id}: the manifest maps this b10621 route onto \
+                     {claimed:?}, but the router answered {alias_status} there"
+                );
+            }
         }
     }
 }
 
-/// A native request-field entry with an `mlxcel.field` claim must exist on
-/// `NativeCompletionRequest` (as a field or serde alias); an unclaimed one
-/// must not, so accepting a new b10621 field forces the manifest flip.
+/// A native request-field entry claiming the b10621 field name itself must
+/// exist on `NativeCompletionRequest` (as a field or serde alias). A claim
+/// naming a different field is an `aliased` mapping, so the alias must exist
+/// and the b10621 name must not. An unclaimed entry must not exist at all,
+/// so accepting a new b10621 field forces the manifest flip.
+///
+/// The struct is read as source text rather than probed by deserializing:
+/// `NativeCompletionRequest` does not set `deny_unknown_fields`, so a
+/// round-trip cannot distinguish "accepted" from "silently ignored".
 #[test]
 fn manifest_native_field_claims_match_native_completion_request() {
     let source = std::fs::read_to_string(
@@ -194,16 +226,24 @@ fn manifest_native_field_claims_match_native_completion_request() {
                  entry in the same change that adds the field."
             );
         } else {
-            assert_eq!(
-                entry["mlxcel"]["field"].as_str(),
-                Some(field),
-                "{id}: mlxcel.field claim must match the schema field name"
-            );
+            let claimed = entry["mlxcel"]["field"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{id}: a field claim must record mlxcel.field"));
             assert!(
-                declares(field),
+                declares(claimed),
                 "{id}: the manifest claims NativeCompletionRequest accepts \
-                 {field:?}, but the struct no longer declares it"
+                 {claimed:?}, but the struct no longer declares it"
             );
+            if claimed != field {
+                // `aliased`: mlxcel spells the same concept differently.
+                assert!(
+                    !declares(field),
+                    "{id}: the manifest records {claimed:?} as the mlxcel \
+                     spelling, but NativeCompletionRequest also declares the \
+                     b10621 name {field:?}. Use state `supported` with \
+                     mlxcel.field = the b10621 field name."
+                );
+            }
         }
     }
 }

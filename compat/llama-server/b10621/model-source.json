@@ -18,10 +18,10 @@
       "default": null,
       "description": "set model name aliases, comma-separated (to be used by API) (env: LLAMA_ARG_ALIAS)",
       "discovery": "help-entry-head",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1434,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": "Model alias reported by /v1/models and /props.",
+      "notes": "b10621 takes a comma-separated alias list and exposes an aliases array per model; mlxcel treats the value as one opaque id, so `--alias a,b` yields the literal id `a,b`. The single-alias path is otherwise plumbed through /v1/models, /health and the response `model` field. #1434 owns the list form.",
       "mlxcel": {
         "accepted_spellings": [
           "--alias"

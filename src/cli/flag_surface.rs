@@ -33,6 +33,13 @@
 //! binary name), happens before `Cli::parse`, and the token is not a clap
 //! argument, so the operator-facing `--help` surface is unchanged.
 //!
+//! Argv is inspected as [`OsString`], never as `String`. `std::env::args()`
+//! panics when any argument is not valid Unicode, which would abort both
+//! shipped binaries before clap ever ran on an invocation carrying a
+//! non-UTF-8 path (legal on Unix, and accepted today by every `PathBuf`
+//! argument such as `--model`). `std::env::args_os()` has no such failure
+//! mode, so an unrelated argument cannot be broken by this interception.
+//!
 //! Consumers:
 //! - `tests/llama_compat_manifest.rs` validates the checked-in manifest's
 //!   `supported` / `aliased` claims against this dump.
@@ -43,6 +50,8 @@
 //! field rename or semantic change so the consumers fail loudly instead of
 //! misreading the dump.
 
+use std::ffi::{OsStr, OsString};
+
 use serde_json::{Map, Value, json};
 
 /// Sentinel token answered by [`dump_requested`]. Not a clap argument.
@@ -51,6 +60,11 @@ pub const DUMP_FLAG_SURFACE_TOKEN: &str = "--dump-flag-surface";
 /// Version of the JSON document layout produced by [`flag_surface_json`].
 pub const FLAG_SURFACE_SCHEMA_VERSION: u32 = 1;
 
+/// True when `args[index]` is exactly `token`, compared as a raw OS string.
+fn arg_is(args: &[OsString], index: usize, token: &str) -> bool {
+    args.get(index).map(OsString::as_os_str) == Some(OsStr::new(token))
+}
+
 /// True when `args` (the raw process argv, program name included) requests a
 /// flag-surface dump: the sentinel token must be the first argument after
 /// `skip` leading tokens (1 for a plain binary, 2 for `mlxcel serve`).
@@ -58,8 +72,18 @@ pub const FLAG_SURFACE_SCHEMA_VERSION: u32 = 1;
 /// Positional matching keeps the sentinel out of the way of ordinary
 /// argument values: only `mlxcel-server --dump-flag-surface` and
 /// `mlxcel serve --dump-flag-surface` trigger the dump.
-pub fn dump_requested(args: &[String], skip: usize) -> bool {
-    args.get(skip).map(String::as_str) == Some(DUMP_FLAG_SURFACE_TOKEN)
+pub fn dump_requested(args: &[OsString], skip: usize) -> bool {
+    arg_is(args, skip, DUMP_FLAG_SURFACE_TOKEN)
+}
+
+/// True when `args` requests `mlxcel serve --dump-flag-surface`: the `serve`
+/// subcommand immediately followed by the sentinel.
+///
+/// The subcommand check belongs here rather than at the call site so both
+/// entry points share one definition of the sentinel position, and so the
+/// `mlxcel` case is covered by the unit tests below.
+pub fn serve_dump_requested(args: &[OsString]) -> bool {
+    arg_is(args, 1, "serve") && dump_requested(args, 2)
 }
 
 /// Render the complete argument surface of `cmd` as deterministic JSON.

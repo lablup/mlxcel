@@ -20,7 +20,7 @@
       "state": "supported",
       "issue": 1440,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": "Flag gates the Prometheus /metrics endpoint on both servers, default disabled, same env binding. Metric-name parity is tracked on the GET /metrics route entry (#1440).",
+      "notes": "Flag gates the Prometheus /metrics endpoint on both servers, default disabled, same env binding. Metric-name parity is tracked on the GET /metrics route entry (#1440). With the flag off mlxcel does not mount GET /metrics at all (404) while b10621 mounts it and answers with a diagnostic; --metrics-port is a second enablement path b10621 has no equivalent for. #1440 owns both.",
       "mlxcel": {
         "accepted_spellings": [
           "--metrics"
@@ -124,7 +124,7 @@
       "state": "deferred",
       "issue": 1440,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": "Spelling and default (enabled) match, but b10621 binds LLAMA_ARG_ENDPOINT_SLOTS and mlxcel does not. #1440 owns the env binding and /slots response parity.",
+      "notes": "Spelling and default (enabled) match, and LLAMA_ARG_ENDPOINT_SLOTS is honored at runtime (env_fallback_endpoint_slots, src/server/cli_input.rs) rather than as a clap env attribute, so --slots / --no-slots keep precedence over it. #1440 owns /slots response parity.",
       "mlxcel": {
         "accepted_spellings": [
           "--slots",
@@ -132,7 +132,10 @@
         ],
         "defaults": [
           "true"
-        ]
+        ],
+        "env": "LLAMA_ARG_ENDPOINT_SLOTS",
+        "env_binding": "runtime",
+        "env_test": "src/bin/mlx_server.rs"
       }
     },
     {

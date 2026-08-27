@@ -38,7 +38,12 @@ Enforced here:
   CI job passes it, the offline ``make verify-llama-compat`` does not).
 - ``not_applicable`` entries carry a diagnostic/documentation test id and
   an explanation.
-- ``aliased`` entries carry an mlxcel mapping and a test id.
+- ``aliased`` entries carry an mlxcel mapping and a test id, and the
+  mapping names a DIFFERENT mlxcel identity than the b10621 one. When
+  mlxcel answers the b10621 spelling / route / field itself the entry is
+  ``supported``; keeping the two mechanically distinguishable is what
+  lets ``src/server/llama_compat_tests.rs`` assert that an aliased
+  b10621 route or field is NOT served under its own name.
 - ``supported`` entries carry a self-consistent mlxcel claim (canonical
   spelling accepted, env binding recorded when b10621 defines one, route
   and field claims matching the entry identity).
@@ -105,6 +110,32 @@ def check_entry(shard: str, e: dict) -> None:
             err(f"{where}: aliased entry must record the mlxcel mapping")
         if not test:
             err(f"{where}: aliased entry must name its translation test")
+        # An alias maps the b10621 surface onto a DIFFERENT mlxcel identity.
+        # When mlxcel answers the b10621 identity itself the entry is
+        # `supported`, and the route/field conformance test relies on that
+        # split to know whether to assert the b10621 name is served or not.
+        if isinstance(mlxcel, dict):
+            kind = e.get("kind")
+            if kind == "route":
+                if not mlxcel.get("route"):
+                    err(f"{where}: aliased route must record the mlxcel method/path in mlxcel.route")
+                elif mlxcel["route"] == e["id"]:
+                    err(
+                        f"{where}: aliased route must map onto a different "
+                        "method/path; use state 'supported' when mlxcel serves "
+                        "the b10621 route itself"
+                    )
+            elif kind == "native_request_field":
+                if not mlxcel.get("field"):
+                    err(f"{where}: aliased field must record the mlxcel field name in mlxcel.field")
+                elif mlxcel["field"] == e["field"]:
+                    err(
+                        f"{where}: aliased field must map onto a different field "
+                        "name; use state 'supported' when mlxcel accepts the "
+                        "b10621 field itself"
+                    )
+            elif kind == "option" and not mlxcel.get("accepted_spellings"):
+                err(f"{where}: aliased option must record the mlxcel spellings it accepts instead")
     if state == "supported":
         if not isinstance(mlxcel, dict):
             err(f"{where}: supported entry must carry an mlxcel claim")

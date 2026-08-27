@@ -59,10 +59,10 @@
       "default": "2",
       "description": "set allowed length for DRY sampling (default: 2)",
       "discovery": "help-entry-head",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1436,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": null,
+      "notes": "OFF-BY-ONE: mlxcel penalizes when match_len > dry_allowed_length, b10621 at >=, so the base^0 tier (a repeat exactly dry_allowed_length long) is never penalized. #1436 owns it.",
       "mlxcel": {
         "accepted_spellings": [
           "--dry-allowed-length"
@@ -90,7 +90,7 @@
       "state": "supported",
       "issue": 1436,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": null,
+      "notes": "b10621 ignores a value below 1.0 (the CLI keeps 1.75, the HTTP schema falls back to the server default); mlxcel uses it verbatim.",
       "mlxcel": {
         "accepted_spellings": [
           "--dry-base"
@@ -143,10 +143,10 @@
       "default": "64, 0 = disable",
       "description": "set DRY penalty for the last n tokens (default: 64, 0 = disable)",
       "discovery": "help-entry-head",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1436,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": "Default aligned by #1430.",
+      "notes": "INVERTED SENTINEL: b10621 disables DRY at 0 and rejects negatives; mlxcel reads 0 as 'scan the whole history' and maps a negative to 0, i.e. also full scan. #1436 owns the reconciliation.",
       "mlxcel": {
         "accepted_spellings": [
           "--dry-penalty-last-n"
@@ -171,10 +171,10 @@
       "default": null,
       "description": "add sequence breaker for DRY sampling, clearing out default breakers ('\\n', ':', '\"', '*') in the process; use \"none\" to not use any sequence breakers",
       "discovery": "help-entry-head",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1436,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": null,
+      "notes": "Spelling accepted, but b10621's default breaker set ('\\n', ':', '\"', '*') is not applied (mlxcel starts with none), the \"none\" sentinel is not recognized, and a breaker that is not exactly one token fails startup. #1436 owns the reconciliation.",
       "mlxcel": {
         "accepted_spellings": [
           "--dry-sequence-breaker"
@@ -238,10 +238,10 @@
       "default": "0.00, 0.0 = disabled",
       "description": "repeat alpha frequency penalty (default: 0.00, 0.0 = disabled)",
       "discovery": "help-entry-head",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1436,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": null,
+      "notes": "PENALTY-WINDOW DRIFT: the value is applied, but over the whole token history. b10621 bounds it to the --repeat-last-n window (default 64) and disables the penalty entirely at 0; mlxcel's SamplingConfig carries no window field (src/lib/mlxcel-core/src/sampling.rs). #1436 owns the window.",
       "mlxcel": {
         "accepted_spellings": [
           "--frequency-penalty"
@@ -486,10 +486,10 @@
       "default": "0.00, 0.0 = disabled",
       "description": "repeat alpha presence penalty (default: 0.00, 0.0 = disabled)",
       "discovery": "help-entry-head",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1436,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": null,
+      "notes": "PENALTY-WINDOW DRIFT: the value is applied, but over the whole token history. b10621 bounds it to the --repeat-last-n window (default 64) and disables the penalty entirely at 0; mlxcel's SamplingConfig carries no window field (src/lib/mlxcel-core/src/sampling.rs). #1436 owns the window.",
       "mlxcel": {
         "accepted_spellings": [
           "--presence-penalty"
@@ -514,10 +514,10 @@
       "default": "64, 0 = disabled",
       "description": "last n tokens to consider for penalize (default: 64, 0 = disabled)",
       "discovery": "help-entry-head",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1436,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": "Spelling and default (64) match; the request-field mapping landed in #1430. Penalty-window arithmetic validation stays with the owning issue of this area.",
+      "notes": "Accepted with the b10621 spelling and default (64) and echoed by GET /props, but no penalty window reaches the sampler: SamplingConfig has no repetition/frequency/presence window field, so every penalty scans the full history. #1436 owns the window.",
       "mlxcel": {
         "accepted_spellings": [
           "--repeat-last-n"
@@ -542,10 +542,10 @@
       "default": "1.00, 1.0 = disabled",
       "description": "penalize repeat sequence of tokens (default: 1.00, 1.0 = disabled)",
       "discovery": "help-entry-head",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1436,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": null,
+      "notes": "PENALTY-WINDOW DRIFT: the value is applied, but over the whole token history. b10621 bounds it to the --repeat-last-n window (default 64) and disables the penalty entirely at 0; mlxcel's SamplingConfig carries no window field (src/lib/mlxcel-core/src/sampling.rs). #1436 owns the window.",
       "mlxcel": {
         "accepted_spellings": [
           "--repeat-penalty"
@@ -670,7 +670,7 @@
       "state": "supported",
       "issue": 1436,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": "Both spellings (--temp, --temperature) accepted since #1430.",
+      "notes": "Both spellings (--temp, --temperature) accepted since #1430. When the flag is absent the effective server default comes from the checkpoint's generation_config.json (resolve_generation_sampling_defaults, src/server/startup.rs), not from the clap default; b10621 has no such mechanism.",
       "mlxcel": {
         "accepted_spellings": [
           "--temp",
@@ -699,7 +699,7 @@
       "state": "supported",
       "issue": 1436,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": null,
+      "notes": "When the flag is absent the effective server default comes from the checkpoint's generation_config.json (resolve_generation_sampling_defaults, src/server/startup.rs), not from the clap default; b10621 has no such mechanism.",
       "mlxcel": {
         "accepted_spellings": [
           "--top-k"
@@ -752,7 +752,7 @@
       "state": "supported",
       "issue": 1436,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": "Default aligned to 0.95 by #1430.",
+      "notes": "Default aligned to 0.95 by #1430. When the flag is absent the effective server default comes from the checkpoint's generation_config.json (resolve_generation_sampling_defaults, src/server/startup.rs), not from the clap default; b10621 has no such mechanism.",
       "mlxcel": {
         "accepted_spellings": [
           "--top-p"
@@ -881,10 +881,10 @@
       "field_type": "num",
       "description": "Tokens that extend repetition beyond this length receive exponentially increasing penalty: multiplier * base ^ (sequence_length - allowed_length)",
       "discovery": "source-schema-declaration",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1436,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": null,
+      "notes": "OFF-BY-ONE: mlxcel penalizes at match_len > dry_allowed_length, b10621 at >=. #1436 owns it.",
       "mlxcel": {
         "field": "dry_allowed_length"
       }
@@ -901,7 +901,7 @@
       "state": "supported",
       "issue": 1436,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": null,
+      "notes": "b10621 replaces a value below 1.0 with the server default; mlxcel uses it verbatim.",
       "mlxcel": {
         "field": "dry_base"
       }
@@ -932,10 +932,10 @@
       "field_type": "num",
       "description": "How many tokens to scan for repetitions (0 = disabled)",
       "discovery": "source-schema-declaration",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1436,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": null,
+      "notes": "INVERTED SENTINEL: b10621 disables DRY at 0 (schema domain [0, INT32_MAX]); mlxcel reads 0 as 'scan the whole history'. #1436 owns the reconciliation.",
       "mlxcel": {
         "field": "dry_penalty_last_n"
       }
@@ -996,10 +996,10 @@
       "field_type": "num",
       "description": "Repeat alpha frequency penalty (0 = disabled)",
       "discovery": "source-schema-declaration",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1436,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": null,
+      "notes": "PENALTY-WINDOW DRIFT: the value is applied, but over the whole token history. b10621 bounds it to the --repeat-last-n window (default 64) and disables the penalty entirely at 0; mlxcel's SamplingConfig carries no window field (src/lib/mlxcel-core/src/sampling.rs). #1436 owns the window.",
       "mlxcel": {
         "field": "frequency_penalty"
       }
@@ -1199,10 +1199,10 @@
       "field_type": "num",
       "description": "Repeat alpha presence penalty (0 = disabled)",
       "discovery": "source-schema-declaration",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1436,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": null,
+      "notes": "PENALTY-WINDOW DRIFT: the value is applied, but over the whole token history. b10621 bounds it to the --repeat-last-n window (default 64) and disables the penalty entirely at 0; mlxcel's SamplingConfig carries no window field (src/lib/mlxcel-core/src/sampling.rs). #1436 owns the window.",
       "mlxcel": {
         "field": "presence_penalty"
       }
@@ -1231,10 +1231,10 @@
       "field_type": "num",
       "description": "Last n tokens to consider for penalizing repetition (0 = disabled)",
       "discovery": "source-schema-declaration",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1436,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": null,
+      "notes": "Declared on NativeCompletionRequest but never read; no penalty window reaches the sampler. #1436 owns it.",
       "mlxcel": {
         "field": "repeat_last_n"
       }
@@ -1248,10 +1248,10 @@
       "field_type": "num",
       "description": "Control the repetition of token sequences in the generated text (1.0 = disabled)",
       "discovery": "source-schema-declaration",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1436,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": null,
+      "notes": "PENALTY-WINDOW DRIFT: the value is applied, but over the whole token history. b10621 bounds it to the --repeat-last-n window (default 64) and disables the penalty entirely at 0; mlxcel's SamplingConfig carries no window field (src/lib/mlxcel-core/src/sampling.rs). #1436 owns the window.",
       "mlxcel": {
         "field": "repeat_penalty"
       }
@@ -1297,10 +1297,10 @@
       "field_type": "json",
       "description": "Specify stopping strings. Generation stops when one is produced, and the string is not included in the output",
       "discovery": "source-schema-declaration",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1436,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": "Scalar or array accepted since #1430.",
+      "notes": "Deserialized as scalar or array (#1430) and carried to ServerGenerateOptions, but only the default-off OpenXLA worker consumes it (src/server/batch/stop_matcher.rs); the shipped MLX decode path never truncates on a stop string. #1436 owns it.",
       "mlxcel": {
         "field": "stop"
       }

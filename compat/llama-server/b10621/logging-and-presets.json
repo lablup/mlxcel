@@ -255,7 +255,7 @@
       "state": "supported",
       "issue": null,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": "Both binaries print clap-generated help.",
+      "notes": "Both binaries print clap-generated help. The b10621 twin spelling --usage is not accepted; -h / --help are.",
       "mlxcel": {
         "accepted_spellings": [
           "--help"
@@ -447,7 +447,7 @@
       "state": "supported",
       "issue": 1448,
       "test": "tests/llama_compat_manifest.rs",
-      "notes": "--verbose accepted; the --log-verbose twin spelling is not, see notes of the owning area issue #1448.",
+      "notes": "--verbose accepted; the --log-verbose twin spelling is not, see notes of the owning area issue #1448. RUST_LOG takes precedence over --verbose in mlxcel (EnvFilter::try_from_default_env wins), while b10621's -v is unconditional.",
       "mlxcel": {
         "accepted_spellings": [
           "--verbose"

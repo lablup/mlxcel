@@ -34,7 +34,7 @@
       "state": "supported",
       "issue": 1441,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": null,
+      "notes": "BEHAVIOR DRIFT: mlxcel's /health answers 503 {\"status\":\"no slot available\"} when the request queue is full, which b10621 reports on /slots?fail_on_no_slot instead, and its loading-state body differs from b10621's error envelope. A load balancer ejects mlxcel under load where llama-server stays healthy. #1440 owns it.",
       "mlxcel": {
         "route": "GET /health"
       }
@@ -50,7 +50,7 @@
       "state": "supported",
       "issue": 1441,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": null,
+      "notes": "Response-field subset: mlxcel emits {id, object, created, owned_by}; b10621 adds aliases, tags, architecture, source, can_remove and the modality lists, and reports owned_by \"llamacpp\". #1438 owns response-field parity.",
       "mlxcel": {
         "route": "GET /models"
       }
@@ -66,7 +66,7 @@
       "state": "supported",
       "issue": 1441,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": "Kept public under API-key auth (#1430).",
+      "notes": "Kept public under API-key auth (#1430). BEHAVIOR DRIFT: see GET /health. #1440 owns it.",
       "mlxcel": {
         "route": "GET /v1/health"
       }
@@ -82,7 +82,7 @@
       "state": "supported",
       "issue": 1441,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": null,
+      "notes": "Response-field subset: see GET /models. #1438 owns response-field parity.",
       "mlxcel": {
         "route": "GET /v1/models"
       }
@@ -234,7 +234,7 @@
       "state": "supported",
       "issue": 1452,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": "All four aliases mounted (#1430).",
+      "notes": "All four aliases mounted (#1430). Mounted with all four b10621 spellings (#1430); the response omits b10621's top-level \"object\": \"list\" and mlxcel uses the Cohere return_documents/document spelling rather than b10621's TEI return_text. #1452 owns envelope parity.",
       "mlxcel": {
         "route": "POST /rerank"
       }
@@ -250,7 +250,7 @@
       "state": "supported",
       "issue": 1452,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": "All four aliases mounted (#1430).",
+      "notes": "All four aliases mounted (#1430). See POST /rerank for the envelope gap. #1452 owns envelope parity.",
       "mlxcel": {
         "route": "POST /reranking"
       }
@@ -406,7 +406,7 @@
       "state": "supported",
       "issue": 1452,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": "All four aliases mounted (#1430).",
+      "notes": "All four aliases mounted (#1430). See POST /rerank for the envelope gap. #1452 owns envelope parity.",
       "mlxcel": {
         "route": "POST /v1/rerank"
       }
@@ -422,7 +422,7 @@
       "state": "supported",
       "issue": 1452,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": "All four aliases mounted (#1430).",
+      "notes": "All four aliases mounted (#1430). See POST /rerank for the envelope gap. #1452 owns envelope parity.",
       "mlxcel": {
         "route": "POST /v1/reranking"
       }
@@ -501,10 +501,10 @@
       "field_type": "num",
       "description": "Set the maximum number of tokens to predict. When 0, no tokens will be generated but the prompt is evaluated into the cache",
       "discovery": "source-schema-declaration",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1441,
       "test": "src/server/llama_compat_tests.rs",
-      "notes": "Accepted as n_predict; the max_tokens / max_completion_tokens aliases are honored on the OpenAI routes but not on the native /completion route (owned by #1441). Values are clamped to the per-slot context window.",
+      "notes": "VALUE-DOMAIN MISMATCH: NativeCompletionRequest declares n_predict as Option<usize>, so b10621's documented -1 (infinity) is rejected during deserialization. The max_tokens / max_completion_tokens aliases are honored on the OpenAI routes, not here. #1441 owns it.",
       "mlxcel": {
         "field": "n_predict"
       }
