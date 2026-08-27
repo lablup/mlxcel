@@ -89,6 +89,7 @@ mod cli;
 mod completeness;
 mod errors;
 mod filters;
+mod model_format;
 mod progress;
 mod resolver;
 mod store;
@@ -96,9 +97,15 @@ mod store;
 pub use cli::DownloadArgs;
 pub use errors::map_hf_error;
 pub use filters::{is_wanted_file, repo_basename};
+pub use model_format::{
+    UnsupportedModelReference, classify_model_reference, ensure_mlx_model_reference,
+    huggingface_repo_from_url, redact_url_userinfo,
+};
 pub use progress::should_show_progress;
+pub use resolver::ModelSourceOptions;
 pub use resolver::normalize_repo_id;
 pub use resolver::resolve_model_source;
+pub use resolver::resolve_model_source_with_options;
 pub use resolver::resolve_model_source_with_override;
 pub use store::{
     RemoveError, RemoveOutcome, StoredModel, dir_size, hf_cache_snapshot, list_models,
@@ -114,6 +121,7 @@ use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::io::AsyncWriteExt;
 
@@ -659,6 +667,52 @@ async fn stream_to_tempfile(
     Ok(bytes_written)
 }
 
+/// Process-wide offline mode (`--offline` / `LLAMA_ARG_OFFLINE`, issue #1434).
+///
+/// b10621 carries offline mode as one `params.offline` boolean consulted at
+/// every download site, and mlxcel mirrors that rather than threading a
+/// parameter through every loader: the resolver takes it explicitly through
+/// [`ModelSourceOptions`], and the sites that are reached from deep inside a
+/// loader (the moondream starmie tokenizer fetch, the request-path media
+/// fetch) read it here. The flag only ever turns network access off, so a
+/// caller that forgets to pass it cannot re-enable a fetch this forbids.
+static OFFLINE: AtomicBool = AtomicBool::new(false);
+
+/// Turn process-wide offline mode on (or off, for a test that set it).
+///
+/// Called once per process by each server entry point after `--offline` and
+/// `LLAMA_ARG_OFFLINE` have been resolved, before any model is loaded.
+pub fn set_offline_mode(offline: bool) {
+    OFFLINE.store(offline, Ordering::Relaxed);
+}
+
+/// True when this process is in offline mode.
+#[must_use]
+pub fn offline_mode() -> bool {
+    OFFLINE.load(Ordering::Relaxed)
+}
+
+/// `Ok(())` unless offline mode forbids the fetch `what` describes.
+///
+/// `what` is a short noun phrase naming the artifact, and lands in the
+/// diagnostic as "offline mode is on, so mlxcel will not fetch {what}". Use it
+/// at every site that would otherwise reach the network.
+///
+/// # Errors
+///
+/// Returns an error naming the artifact and how to pre-populate it whenever
+/// [`offline_mode`] is true.
+pub fn ensure_online(what: &str) -> Result<()> {
+    if offline_mode() {
+        return Err(anyhow!(
+            "offline mode is on (--offline / LLAMA_ARG_OFFLINE), so mlxcel will \
+             not fetch {what}. Pre-populate it on a host with network access, or \
+             re-run without --offline."
+        ));
+    }
+    Ok(())
+}
+
 /// Download a HuggingFace model repository snapshot into a local directory.
 ///
 /// On success, every allow-listed file from the upstream repository is present
@@ -670,6 +724,12 @@ async fn stream_to_tempfile(
 /// invalid repo id, missing authentication on a gated repo, missing revision,
 /// network failure, and on-disk I/O errors.
 pub fn download_repo(opts: DownloadOptions) -> Result<()> {
+    // Offline mode forbids every snapshot fetch (issue #1434). The resolver
+    // already reports a cache miss with a repo-specific diagnostic before
+    // reaching here; this is the backstop for any other caller, including
+    // `mlxcel download` itself.
+    ensure_online(&format!("the model snapshot '{}'", opts.repo_id))?;
+
     // Issue #463: this function creates its own Tokio runtime and calls
     // `block_on`, which Tokio forbids on a thread that is already driving a
     // runtime ("Cannot start a runtime from within a runtime", an abort). The

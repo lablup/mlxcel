@@ -461,6 +461,67 @@ fn serve_command_surgery_flag_defaults_to_none() {
     );
 }
 
+// ── llama-server model-source flags on `mlxcel serve` (issue #1434) ──
+//
+// `src/bin/mlx_server.rs`'s test module carries the matching assertions for
+// `mlxcel-server`; both binaries must accept the same b10621 spellings, which
+// is what `tests/llama_compat_manifest.rs` then holds the manifest to.
+
+#[test]
+fn serve_warmup_defaults_to_enabled_and_no_warmup_disables_it() {
+    let cli = Cli::try_parse_from(["mlxcel", "serve", "-m", "models/foo"])
+        .expect("clap must accept serve without --warmup");
+    let Commands::Serve(args) = cli.command else {
+        panic!("expected serve command");
+    };
+    assert!(args.warmup, "warmup defaults to enabled");
+
+    let cli = Cli::try_parse_from(["mlxcel", "serve", "-m", "models/foo", "--no-warmup"])
+        .expect("clap must accept --no-warmup on serve");
+    let Commands::Serve(args) = cli.command else {
+        panic!("expected serve command");
+    };
+    assert!(
+        !mlxcel::server::resolve_compat_toggle(args.warmup, args._no_warmup),
+        "--no-warmup must disable the warmup pass on `mlxcel serve` too"
+    );
+}
+
+#[test]
+fn serve_accepts_every_b10621_model_source_flag() {
+    let cli = Cli::try_parse_from([
+        "mlxcel",
+        "serve",
+        "--hf-repo",
+        "mlx-community/Qwen3-4B-4bit",
+        "--hf-token",
+        "hf_example",
+        "--offline",
+        "--hf-file",
+        "model.gguf",
+        "--model-url",
+        "https://example.com/model.gguf",
+        "--docker-repo",
+        "ai/gemma3",
+    ])
+    .expect("clap must accept the b10621 model-source flags on serve");
+    let Commands::Serve(args) = cli.command else {
+        panic!("expected serve command");
+    };
+    assert_eq!(args.hf_repo.as_deref(), Some("mlx-community/Qwen3-4B-4bit"));
+    assert_eq!(args.hf_token.as_deref(), Some("hf_example"));
+    assert!(args.offline);
+    assert_eq!(args.hf_file.as_deref(), Some("model.gguf"));
+    assert_eq!(
+        args.model_url.as_deref(),
+        Some("https://example.com/model.gguf")
+    );
+    assert_eq!(args.docker_repo.as_deref(), Some("ai/gemma3"));
+    // `-m` is no longer required when another source is supplied; the
+    // model-source translation reports a missing source instead of clap.
+    assert_eq!(args.model, None);
+}
+
 // ── Drafter flag aliases (issue #464) ───────────────────────────
 //
 // `mlxcel serve` uses the mlx-lm-style `--draft-model` / `--draft-max`

@@ -23,6 +23,7 @@
 
 pub mod batch_quant_args;
 pub mod flag_surface;
+pub mod llama_short_flags;
 pub mod max_tokens;
 pub mod rope_args;
 pub mod speculative_args;

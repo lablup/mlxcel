@@ -915,8 +915,78 @@ pub(crate) struct ServeArgs {
     /// without a slash (e.g. `Qwen3-4B-4bit`) is resolved as
     /// `mlx-community/<name>`; override the org with the
     /// `MLXCEL_DEFAULT_ORG` environment variable.
+    /// Optional so `--hf-repo <owner>/<name>` can supply the source instead,
+    /// matching llama-server; exactly one of the two is required.
     #[arg(short, long, env = "LLAMA_ARG_MODEL", value_name = "PATH_OR_REPO_ID")]
-    model: PathBuf,
+    model: Option<PathBuf>,
+
+    /// HuggingFace repository to serve, as `<owner>/<name>`.
+    ///
+    /// llama-server compatible spelling. Resolved exactly like the same value
+    /// passed to `-m`: reused from `./models/`, the HuggingFace cache, or the
+    /// mlxcel store, and downloaded into the mlxcel store on a miss. Takes
+    /// precedence over `-m` when both are given, matching llama-server. The
+    /// `:<quant>` suffix llama-server accepts selects a GGUF quantization and
+    /// is rejected; MLX checkpoints carry their quantization in the repository
+    /// name (`mlx-community/Qwen3-4B-4bit`).
+    #[arg(
+        long = "hf-repo",
+        env = "LLAMA_ARG_HF_REPO",
+        value_name = "<owner>/<name>"
+    )]
+    hf_repo: Option<String>,
+
+    /// HuggingFace access token used when downloading a repository.
+    ///
+    /// Takes precedence over the `HF_TOKEN` and `HUGGING_FACE_HUB_TOKEN`
+    /// environment variables. The value is never rendered in `--help`, logged,
+    /// or written to disk.
+    #[arg(
+        long = "hf-token",
+        env = "HF_TOKEN",
+        hide_env_values = true,
+        value_name = "TOKEN"
+    )]
+    hf_token: Option<String>,
+
+    /// Offline mode: resolve models from local caches only, never download.
+    ///
+    /// A repository identifier that is not already present in `./models/`, the
+    /// HuggingFace cache, or the mlxcel store is an error instead of a
+    /// download. Also reads `LLAMA_ARG_OFFLINE`.
+    #[arg(long = "offline", default_value_t = false)]
+    offline: bool,
+
+    /// Accepted for llama-server CLI compatibility; rejected at startup
+    /// (selects one GGUF file inside a repository, and MLX loads a whole
+    /// SafeTensors snapshot).
+    #[arg(
+        long = "hf-file",
+        env = "LLAMA_ARG_HF_FILE",
+        value_name = "FILE",
+        hide = true
+    )]
+    hf_file: Option<String>,
+
+    /// Accepted for llama-server CLI compatibility; rejected at startup
+    /// (mlxcel resolves models by repository identifier, not by URL).
+    #[arg(
+        long = "model-url",
+        env = "LLAMA_ARG_MODEL_URL",
+        value_name = "MODEL_URL",
+        hide = true
+    )]
+    model_url: Option<String>,
+
+    /// Accepted for llama-server CLI compatibility; rejected at startup
+    /// (Docker Hub model repositories distribute GGUF artifacts).
+    #[arg(
+        long = "docker-repo",
+        env = "LLAMA_ARG_DOCKER_REPO",
+        value_name = "[<repo>/]<model>[:quant]",
+        hide = true
+    )]
+    docker_repo: Option<String>,
 
     /// Model-store root for resolving / downloading an `owner/name` repo-id.
     ///
@@ -2275,7 +2345,27 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let cli = Cli::parse();
+    // llama.cpp writes its multi-letter options with one dash (`-hf`, `-hft`,
+    // `-mu`); clap reads that as a cluster of one-letter shorts, so `-hf`
+    // parses as `-h -f` and renders `--help` with exit status 0. Rewrite those
+    // exact tokens to their long spellings before clap sees them, so a
+    // llama-server command line reaches the real option (issue #1434). Scoped
+    // to `mlxcel serve`, which is the drop-in surface; the other subcommands
+    // have their own vocabulary and are not llama-server compatible.
+    let cli = if raw_args.get(1).is_some_and(|a| a == "serve") {
+        use clap::CommandFactory;
+        let mut cli_cmd = Cli::command();
+        cli_cmd.build();
+        let mut serve_cmd = cli_cmd
+            .find_subcommand("serve")
+            .expect("the `serve` subcommand is statically defined")
+            .clone();
+        let args =
+            mlxcel::cli::llama_short_flags::expand_llama_short_options(&mut serve_cmd, raw_args, 2);
+        Cli::parse_from(args)
+    } else {
+        Cli::parse()
+    };
 
     init_cli_tracing(&cli.command);
 

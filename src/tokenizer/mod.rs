@@ -635,6 +635,12 @@ fn remote_tokenizer_override_for_model(model_path: &Path) -> Option<&'static str
 }
 
 fn download_remote_tokenizer(repo_id: &str) -> Result<tokenizers::Tokenizer> {
+    // `--offline` / `LLAMA_ARG_OFFLINE` forbids every fetch, and this one is
+    // reached from inside the loader rather than through the `-m` resolver, so
+    // it consults the process-wide flag directly (issue #1434). Without this,
+    // an air-gapped `--offline` run of a starmie-era moondream2 checkpoint
+    // still tried to reach huggingface.co and failed to start.
+    crate::downloader::ensure_online(&format!("the tokenizer for '{repo_id}'"))?;
     let api = Api::new()
         .map_err(|err| anyhow::anyhow!("Failed to initialize Hugging Face API: {}", err))?;
     let repo = api.model(repo_id.to_string());

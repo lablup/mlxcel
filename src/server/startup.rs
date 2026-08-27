@@ -62,7 +62,11 @@ pub struct ServerStartupConfig {
     // Model
     pub model_path: PathBuf,
     pub adapter_path: Option<PathBuf>,
+    /// Served model id: the first `--alias` entry, or `None`.
     pub model_alias: Option<String>,
+    /// Every `--alias` entry, primary first (issue #1434). Empty when the flag
+    /// was not given.
+    pub model_aliases: Vec<String>,
 
     // Network
     pub host: String,
@@ -453,6 +457,7 @@ impl Default for ServerStartupConfig {
             model_path: PathBuf::new(),
             adapter_path: None,
             model_alias: None,
+            model_aliases: Vec::new(),
             host: "127.0.0.1".to_string(),
             port: 8080,
             api_keys: Vec::new(),
@@ -988,6 +993,7 @@ pub(super) fn build_server_config(
         api_prefix: startup.api_prefix.clone(),
         sse_ping_interval: startup.sse_ping_interval,
         model_alias: startup.model_alias.clone(),
+        model_aliases: startup.model_aliases.clone(),
         context_size,
         n_parallel: startup.n_parallel,
         enable_slots_endpoint: startup.enable_slots,
@@ -2334,6 +2340,18 @@ pub async fn start_server(mut startup: ServerStartupConfig) -> Result<()> {
         .model_alias
         .clone()
         .unwrap_or_else(|| model_provider.model_id().to_string());
+    // b10621 keeps every `--alias a,b,c` entry as an API-visible name; mlxcel
+    // serves the first and does not yet report the rest on `/v1/models`
+    // (#1438 owns the model-object `aliases` array). Say so once at startup so
+    // an operator who passed a list is not left guessing which name the server
+    // answers to (issue #1434).
+    if config.model_aliases.len() > 1 {
+        tracing::info!(
+            "serving model id '{served_chat_id}'; the additional --alias entries [{}] are \
+             recorded but not yet reported on /v1/models",
+            config.model_aliases[1..].join(", ")
+        );
+    }
     let embedding_model = resolve_embedding_provider(&startup, &config, &served_chat_id)?;
     // Rerank wiring (#1356) follows the same rule, with one addition: a
     // generative reranker's checkpoint is indistinguishable from a chat

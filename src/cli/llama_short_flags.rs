@@ -1,0 +1,176 @@
+// Copyright 2025-2026 Lablup Inc. and Jeongkyu Shin
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Argv pre-pass translating llama.cpp's multi-letter single-dash options
+//! into the long spellings clap accepts (issue #1434).
+//!
+//! llama.cpp's own argument parser treats `-hf`, `-hft`, `-mu` and friends as
+//! whole tokens, and its documentation uses the short forms almost
+//! exclusively (`llama-server -hf ggml-org/…`). clap has no such concept: a
+//! single dash introduces a cluster of one-letter shorts, so `-hf` parses as
+//! `-h -f`. On both mlxcel server binaries `-h` is `--help`, which means
+//! `mlxcel-server -hf ggml-org/foo` renders the help text and **exits 0**.
+//! That is the worst possible outcome for a compatibility surface: a command
+//! line that upstream honours neither runs nor reports an error.
+//!
+//! This pass rewrites those exact tokens before clap sees them, so they reach
+//! the real option (and, for the ones mlxcel cannot support, the diagnostic
+//! that explains why) instead of the help screen.
+//!
+//! # Why it needs the clap surface
+//!
+//! Rewriting every occurrence of `-hf` anywhere in argv would corrupt a
+//! *value* that happens to look like one of these tokens
+//! (`--chat-template -hf`, say). The pass therefore walks argv with the same
+//! knowledge clap has: it asks the built [`clap::Command`] which tokens
+//! consume the following argument, skips those values, and stops entirely at
+//! a `--` terminator. Only a token in an option position is ever rewritten.
+//!
+//! Argv is handled as [`OsString`] throughout, never `String`:
+//! `std::env::args()` panics on a non-UTF-8 argument, which is legal on Unix
+//! and accepted today by every `PathBuf` option such as `--model`.
+
+use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
+
+/// llama.cpp single-dash multi-letter options and the mlxcel long spelling
+/// each maps onto.
+///
+/// Only options mlxcel actually defines belong here; a token that maps to
+/// nothing must keep failing as an unknown argument rather than being
+/// silently swallowed. Sorted by token for readability. Extend this table
+/// alongside the flag it names, and add a case to
+/// `llama_short_flags_tests.rs`.
+const SHORT_ALIASES: &[(&str, &str)] = &[
+    ("-dr", "--docker-repo"),
+    ("-hf", "--hf-repo"),
+    ("-hff", "--hf-file"),
+    ("-hfr", "--hf-repo"),
+    ("-hft", "--hf-token"),
+    ("-mu", "--model-url"),
+];
+
+/// The long spelling `token` maps onto, if any.
+fn long_for(token: &str) -> Option<&'static str> {
+    SHORT_ALIASES
+        .iter()
+        .find(|(short, _)| *short == token)
+        .map(|(_, long)| *long)
+}
+
+/// Every accepted token of `cmd` that consumes the following argv entry.
+///
+/// Built from the command itself rather than a hand-written list so the pass
+/// cannot drift from the real surface as flags are added.
+fn value_taking_tokens(cmd: &mut clap::Command) -> HashSet<String> {
+    cmd.build();
+    let mut tokens = HashSet::new();
+    for arg in cmd.get_arguments() {
+        if !arg.get_num_args().is_some_and(|r| r.takes_values()) {
+            continue;
+        }
+        if let Some(long) = arg.get_long() {
+            tokens.insert(format!("--{long}"));
+        }
+        for alias in arg.get_all_aliases().unwrap_or_default() {
+            tokens.insert(format!("--{alias}"));
+        }
+        if let Some(short) = arg.get_short() {
+            tokens.insert(format!("-{short}"));
+        }
+        for short in arg.get_all_short_aliases().unwrap_or_default() {
+            tokens.insert(format!("-{short}"));
+        }
+    }
+    tokens
+}
+
+/// Rewrite llama.cpp short options in `args`, starting at index `start`.
+///
+/// `start` is the index of the first argument that could be an option: 1 for
+/// a plain binary, 2 for `mlxcel serve`. Entries before it are copied
+/// verbatim. `cmd` is the command those options are parsed against.
+///
+/// Returns the rewritten argv. When nothing matched, it is equal to the
+/// input.
+#[must_use]
+pub fn expand_llama_short_options(
+    cmd: &mut clap::Command,
+    args: Vec<OsString>,
+    start: usize,
+) -> Vec<OsString> {
+    let value_taking = value_taking_tokens(cmd);
+    let mut out = Vec::with_capacity(args.len());
+    let mut skip_value = false;
+    let mut past_terminator = false;
+
+    for (position, arg) in args.into_iter().enumerate() {
+        if position < start || past_terminator {
+            out.push(arg);
+            continue;
+        }
+        if skip_value {
+            // This entry is the value of the preceding option; never an
+            // option position, so never rewritten.
+            skip_value = false;
+            out.push(arg);
+            continue;
+        }
+        // Everything after `--` is positional by definition.
+        if arg == OsStr::new("--") {
+            past_terminator = true;
+            out.push(arg);
+            continue;
+        }
+
+        let Some(text) = arg.to_str() else {
+            // A non-UTF-8 entry cannot be one of these ASCII tokens, but it
+            // can still be the option whose value follows.
+            out.push(arg);
+            continue;
+        };
+
+        // `-hf value` and `-hf=value` are both rewritten; llama.cpp only
+        // accepts the former, but clap accepts `=` on long options and a user
+        // translating a command line by hand may well write it.
+        let (token, inline_value) = match text.split_once('=') {
+            Some((token, value)) => (token, Some(value)),
+            None => (text, None),
+        };
+
+        if let Some(long) = long_for(token) {
+            match inline_value {
+                Some(value) => out.push(OsString::from(format!("{long}={value}"))),
+                None => {
+                    out.push(OsString::from(long));
+                    // Every token in the table takes a value, so the next
+                    // entry is that value and must not be inspected.
+                    skip_value = true;
+                }
+            }
+            continue;
+        }
+
+        if inline_value.is_none() && value_taking.contains(text) {
+            skip_value = true;
+        }
+        out.push(arg);
+    }
+
+    out
+}
+
+#[cfg(test)]
+#[path = "llama_short_flags_tests.rs"]
+mod tests;

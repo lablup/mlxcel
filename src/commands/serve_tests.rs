@@ -18,7 +18,13 @@ use super::{build_startup_input, serve_preflight_batch, serve_preflight_ctx_len}
 
 fn sample_args() -> crate::ServeArgs {
     crate::ServeArgs {
-        model: PathBuf::from("models/foo"),
+        model: Some(PathBuf::from("models/foo")),
+        hf_repo: None,
+        hf_token: None,
+        offline: false,
+        hf_file: None,
+        model_url: None,
+        docker_repo: None,
         models_dir: None,
         revision: None,
         adapter: Some(PathBuf::from("adapters/bar")),

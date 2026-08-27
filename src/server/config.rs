@@ -325,7 +325,16 @@ pub struct ServerConfig {
     /// b10621 `--sse-ping-interval` (`LLAMA_ARG_SSE_PING_INTERVAL`). `None`
     /// disables the SSE comment pings (`-1` upstream).
     pub sse_ping_interval: Option<std::time::Duration>,
+    /// Served model id: the first entry of `model_aliases`, or `None` when
+    /// `--alias` was not given (the provider's own id is then served).
     pub model_alias: Option<String>,
+    /// Every name `--alias` supplied, primary first (issue #1434).
+    ///
+    /// b10621 takes `--alias a,b,c` and keeps all three as API-visible names.
+    /// mlxcel serves the first; the rest are carried here so the `/v1/models`
+    /// `aliases` array (#1438) can report them without re-parsing the CLI
+    /// value. Empty when `--alias` was not given.
+    pub model_aliases: Vec<String>,
     /// Effective per-slot context window in tokens (`0` = model default).
     ///
     /// Startup lowers `--ctx-size C --parallel N` to `C / N` for continuous
@@ -648,6 +657,7 @@ impl Default for ServerConfig {
                 crate::server::transport::DEFAULT_SSE_PING_INTERVAL_SECS as u64,
             )),
             model_alias: None,
+            model_aliases: Vec::new(),
             context_size: 0,
             // Serving-throughput default: admit up to 4 concurrent decode
             // sequences so weight reads amortize across the batch (#628). The

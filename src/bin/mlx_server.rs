@@ -23,24 +23,26 @@ use mlxcel::cli::speculative_args::{
 };
 use mlxcel::cli::turbo_args::TurboKvCacheArgs;
 use mlxcel::downloader::{
-    DownloadArgs, DownloadOptions, download_repo, resolve_model_source_with_override,
+    DownloadArgs, DownloadOptions, ModelSourceOptions, download_repo,
+    resolve_model_source_with_options, set_offline_mode,
 };
 use mlxcel::lang_bias::LangBiasCliArgs;
 use mlxcel::server::{
-    ServerStartupInput, env_fallback_apc_block_size, env_fallback_apc_enabled,
-    env_fallback_apc_hash, env_fallback_apc_num_blocks, env_fallback_api_key_files,
-    env_fallback_api_keys, env_fallback_batch_size, env_fallback_cache_type_k,
-    env_fallback_cache_type_v, env_fallback_chat_template_kwargs, env_fallback_cors_credentials,
-    env_fallback_draft_model, env_fallback_embedding_model, env_fallback_endpoint_slots,
-    env_fallback_kv_bits, env_fallback_kv_group_size, env_fallback_kv_quant_scheme,
-    env_fallback_kv_skip_last_layer, env_fallback_lang_bias,
-    env_fallback_lang_bias_include_byte_fragments, env_fallback_log_file,
+    LlamaModelSourceArgs, ServerStartupInput, env_fallback_apc_block_size,
+    env_fallback_apc_enabled, env_fallback_apc_hash, env_fallback_apc_num_blocks,
+    env_fallback_api_key_files, env_fallback_api_keys, env_fallback_batch_size,
+    env_fallback_cache_type_k, env_fallback_cache_type_v, env_fallback_chat_template_kwargs,
+    env_fallback_cors_credentials, env_fallback_draft_model, env_fallback_embedding_model,
+    env_fallback_endpoint_slots, env_fallback_kv_bits, env_fallback_kv_group_size,
+    env_fallback_kv_quant_scheme, env_fallback_kv_skip_last_layer, env_fallback_lang_bias,
+    env_fallback_lang_bias_include_byte_fragments, env_fallback_log_file, env_fallback_offline,
     env_fallback_prompt_cache_capacity_bytes, env_fallback_prompt_cache_enabled,
     env_fallback_prompt_cache_max_entries, env_fallback_prompt_cache_min_prefix,
     env_fallback_prompt_cache_snapshot_capacity_bytes,
     env_fallback_prompt_cache_snapshot_max_entries, env_fallback_prompt_cache_snapshot_ttl,
     env_fallback_prompt_cache_ttl, env_fallback_reasoning_budget, env_fallback_reranker_model,
-    env_fallback_ubatch_size, long_cli_flag_was_set, start_server,
+    env_fallback_ubatch_size, long_cli_flag_was_set, resolve_llama_model_source, start_server,
+    superseded_model_notice,
 };
 
 /// mlxcel-server: llama-server compatible HTTP server for MLX inference
@@ -212,6 +214,74 @@ struct ServerArgs {
         value_name = "PATH_OR_REPO_ID"
     )]
     model: Option<PathBuf>,
+
+    /// HuggingFace repository to serve, as `<owner>/<name>`.
+    ///
+    /// llama-server compatible spelling. Resolved exactly like the same value
+    /// passed to `-m`: reused from `./models/`, the HuggingFace cache, or the
+    /// mlxcel store, and downloaded into the mlxcel store on a miss. Takes
+    /// precedence over `-m` when both are given, matching llama-server. The
+    /// `:<quant>` suffix llama-server accepts selects a GGUF quantization and
+    /// is rejected; MLX checkpoints carry their quantization in the repository
+    /// name (`mlx-community/Qwen3-4B-4bit`).
+    #[arg(
+        long = "hf-repo",
+        env = "LLAMA_ARG_HF_REPO",
+        value_name = "<owner>/<name>"
+    )]
+    hf_repo: Option<String>,
+
+    /// HuggingFace access token used when downloading a repository.
+    ///
+    /// Takes precedence over the `HF_TOKEN` and `HUGGING_FACE_HUB_TOKEN`
+    /// environment variables. The value is never rendered in `--help`, logged,
+    /// or written to disk.
+    #[arg(
+        long = "hf-token",
+        env = "HF_TOKEN",
+        hide_env_values = true,
+        value_name = "TOKEN"
+    )]
+    hf_token: Option<String>,
+
+    /// Offline mode: resolve models from local caches only, never download.
+    ///
+    /// A repository identifier that is not already present in `./models/`, the
+    /// HuggingFace cache, or the mlxcel store is an error instead of a
+    /// download. Also reads `LLAMA_ARG_OFFLINE`.
+    #[arg(long = "offline", default_value_t = false)]
+    offline: bool,
+
+    /// Accepted for llama-server CLI compatibility; rejected at startup
+    /// (selects one GGUF file inside a repository, and MLX loads a whole
+    /// SafeTensors snapshot).
+    #[arg(
+        long = "hf-file",
+        env = "LLAMA_ARG_HF_FILE",
+        value_name = "FILE",
+        hide = true
+    )]
+    hf_file: Option<String>,
+
+    /// Accepted for llama-server CLI compatibility; rejected at startup
+    /// (mlxcel resolves models by repository identifier, not by URL).
+    #[arg(
+        long = "model-url",
+        env = "LLAMA_ARG_MODEL_URL",
+        value_name = "MODEL_URL",
+        hide = true
+    )]
+    model_url: Option<String>,
+
+    /// Accepted for llama-server CLI compatibility; rejected at startup
+    /// (Docker Hub model repositories distribute GGUF artifacts).
+    #[arg(
+        long = "docker-repo",
+        env = "LLAMA_ARG_DOCKER_REPO",
+        value_name = "[<repo>/]<model>[:quant]",
+        hide = true
+    )]
+    docker_repo: Option<String>,
 
     /// Model-store root for resolving / downloading an `owner/name` repo-id.
     ///
@@ -1586,7 +1656,18 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let cli = Cli::parse();
+    // llama.cpp writes its multi-letter options with one dash (`-hf`, `-hft`,
+    // `-mu`); clap reads that as a cluster of one-letter shorts, so `-hf`
+    // parses as `-h -f` and renders `--help` with exit status 0. Rewrite those
+    // exact tokens to their long spellings before clap sees them, so a
+    // llama-server command line reaches the real option (issue #1434).
+    let cli = {
+        use clap::CommandFactory;
+        let mut cmd = Cli::command();
+        let args =
+            mlxcel::cli::llama_short_flags::expand_llama_short_options(&mut cmd, raw_args, 1);
+        Cli::parse_from(args)
+    };
 
     // Default the CUDA kernel JIT cache to a persistent, MLX-pin-scoped dir so
     // the first-run kernel compilation is paid once per machine, not every boot.
@@ -1751,17 +1832,38 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         .resolve()
         .map_err(|e| anyhow::anyhow!("--lang-bias: {e}"))?;
 
-    let model_path = args.model.ok_or_else(|| {
-        anyhow::anyhow!(
-            "--model/-m is required to start the server \
-             (set the LLAMA_ARG_MODEL env var or pass -m <PATH_OR_REPO_ID>)"
-        )
+    // llama-server model-source translation (issue #1434): pick the reference
+    // from `-m` / `--hf-repo`, and refuse `--docker-repo`, `--model-url` and
+    // `--hf-file` here rather than accepting them and resolving something
+    // else. `--offline` and `--hf-token` then shape how the reference is
+    // resolved.
+    env_fallback_offline(&mut args.offline);
+    // One process-wide flag, as in b10621, so the fetch sites reached from
+    // inside a loader (the moondream starmie tokenizer, request-path media
+    // URLs) honour --offline too, not just the `-m` resolver.
+    set_offline_mode(args.offline);
+    let source = resolve_llama_model_source(&LlamaModelSourceArgs {
+        model: args.model.clone(),
+        hf_repo: args.hf_repo.clone(),
+        hf_file: args.hf_file.clone(),
+        model_url: args.model_url.clone(),
+        docker_repo: args.docker_repo.clone(),
     })?;
-    let model_path = resolve_model_source_with_override(
-        &model_path,
-        args.models_dir.as_deref(),
-        args.revision.as_deref(),
-    )?;
+    if let Some(superseded) = source.superseded_model.as_deref() {
+        tracing::info!("{}", superseded_model_notice(&source.reference, superseded));
+    }
+    let model_path = resolve_model_source_with_options(
+        &source.reference,
+        ModelSourceOptions {
+            models_dir: args.models_dir.as_deref(),
+            revision: args.revision.as_deref(),
+            token: args.hf_token.as_deref(),
+            offline: args.offline,
+        },
+    )
+    // Name the flag the operator actually typed. Without this a failure to
+    // resolve an `--hf-repo` value reports it as a `-m` problem.
+    .with_context(|| format!("resolving {} {}", source.origin, source.reference.display()))?;
 
     // `--embedding-model` accepts the same path-or-repo-id shapes as `-m`
     // and resolves through the same store lookup / auto-download.
@@ -1770,10 +1872,14 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         .embedding_model
         .as_deref()
         .map(|value| {
-            resolve_model_source_with_override(
+            resolve_model_source_with_options(
                 std::path::Path::new(value),
-                args.models_dir.as_deref(),
-                args.revision.as_deref(),
+                ModelSourceOptions {
+                    models_dir: args.models_dir.as_deref(),
+                    revision: args.revision.as_deref(),
+                    token: args.hf_token.as_deref(),
+                    offline: args.offline,
+                },
             )
         })
         .transpose()?;
@@ -1784,10 +1890,14 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
         .reranker_model
         .as_deref()
         .map(|value| {
-            resolve_model_source_with_override(
+            resolve_model_source_with_options(
                 std::path::Path::new(value),
-                args.models_dir.as_deref(),
-                args.revision.as_deref(),
+                ModelSourceOptions {
+                    models_dir: args.models_dir.as_deref(),
+                    revision: args.revision.as_deref(),
+                    token: args.hf_token.as_deref(),
+                    offline: args.offline,
+                },
             )
         })
         .transpose()?;
@@ -2054,6 +2164,66 @@ mod tests {
             "test argv should exercise legacy server-start mode"
         );
         cli.server
+    }
+
+    // ── llama-server model-source flags (issue #1434) ───────────────
+
+    #[test]
+    fn warmup_defaults_to_enabled_and_no_warmup_disables_it() {
+        // b10621: "whether to perform warmup with an empty run (default:
+        // enabled)". Both spellings must parse and `--no-warmup` must win,
+        // because it is the only thing that makes `--no-warmup` more than an
+        // accepted-and-ignored flag.
+        let default = parse_server_args(&["mlxcel-server", "-m", "models/foo"]);
+        assert!(default.warmup, "warmup defaults to enabled");
+        assert!(!default._no_warmup);
+
+        let disabled = parse_server_args(&["mlxcel-server", "-m", "models/foo", "--no-warmup"]);
+        assert!(
+            !mlxcel::server::resolve_compat_toggle(disabled.warmup, disabled._no_warmup),
+            "--no-warmup must disable the warmup pass"
+        );
+
+        let re_enabled = parse_server_args(&[
+            "mlxcel-server",
+            "-m",
+            "models/foo",
+            "--no-warmup",
+            "--warmup",
+        ]);
+        assert!(
+            mlxcel::server::resolve_compat_toggle(re_enabled.warmup, re_enabled._no_warmup),
+            "a later --warmup must override an earlier --no-warmup"
+        );
+    }
+
+    #[test]
+    fn model_source_compatibility_flags_parse_into_their_own_fields() {
+        let args = parse_server_args(&[
+            "mlxcel-server",
+            "--hf-repo",
+            "mlx-community/Qwen3-4B-4bit",
+            "--hf-token",
+            "hf_example",
+            "--offline",
+            "--hf-file",
+            "model.gguf",
+            "--model-url",
+            "https://example.com/model.gguf",
+            "--docker-repo",
+            "ai/gemma3",
+        ]);
+        assert_eq!(args.hf_repo.as_deref(), Some("mlx-community/Qwen3-4B-4bit"));
+        assert_eq!(args.hf_token.as_deref(), Some("hf_example"));
+        assert!(args.offline);
+        assert_eq!(args.hf_file.as_deref(), Some("model.gguf"));
+        assert_eq!(
+            args.model_url.as_deref(),
+            Some("https://example.com/model.gguf")
+        );
+        assert_eq!(args.docker_repo.as_deref(), Some("ai/gemma3"));
+        // `-m` is no longer required when another source is supplied.
+        assert_eq!(args.model, None);
     }
 
     #[test]
