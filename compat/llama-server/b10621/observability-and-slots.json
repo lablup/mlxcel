@@ -1,0 +1,231 @@
+{
+  "schema_version": 3,
+  "area": "observability-and-slots",
+  "entries": [
+    {
+      "kind": "option",
+      "id": "--metrics",
+      "section": "example-specific params",
+      "spellings": [
+        "--metrics"
+      ],
+      "long_spellings": [
+        "--metrics"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_ENDPOINT_METRICS",
+      "default": "disabled",
+      "description": "enable prometheus compatible metrics endpoint (default: disabled) (env: LLAMA_ARG_ENDPOINT_METRICS)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1440,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Flag gates the Prometheus /metrics endpoint on both servers, default disabled, same env binding. Metric-name parity is tracked on the GET /metrics route entry (#1440). With the flag off mlxcel does not mount GET /metrics at all (404) while b10621 mounts it and answers with a diagnostic; --metrics-port is a second enablement path b10621 has no equivalent for. #1440 owns both.",
+      "divergence": [
+        "Exported series carry the mlxcel_ name prefix; b10621 exports llamacpp: prefixed names, so a Prometheus scrape config written for llama-server matches none of them (#1440).",
+        "With the flag off mlxcel does not mount GET /metrics at all (404); b10621 mounts it and answers with the \"This server does not support metrics endpoint. Start it with `--metrics`\" diagnostic (#1440)."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--metrics"
+        ],
+        "env": "LLAMA_ARG_ENDPOINT_METRICS",
+        "env_binding": "clap",
+        "defaults": [
+          "false"
+        ]
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--props",
+      "section": "example-specific params",
+      "spellings": [
+        "--props"
+      ],
+      "long_spellings": [
+        "--props"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_ENDPOINT_PROPS",
+      "default": "disabled",
+      "description": "enable changing global properties via POST /props (default: disabled) (env: LLAMA_ARG_ENDPOINT_PROPS)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1440,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "FLAG-SEMANTICS DRIFT: b10621's --props gates POST /props (GET /props is always on); mlxcel's --props gates GET /props and has no POST /props. #1440 owns the reconciliation.",
+      "divergence": [],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--props"
+        ],
+        "env": "LLAMA_ARG_ENDPOINT_PROPS",
+        "env_binding": "clap",
+        "defaults": [
+          "false"
+        ]
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--sleep-idle-seconds",
+      "section": "example-specific params",
+      "spellings": [
+        "--sleep-idle-seconds"
+      ],
+      "long_spellings": [
+        "--sleep-idle-seconds"
+      ],
+      "value_hint": "SECONDS",
+      "env": null,
+      "default": "-1; -1 = disabled",
+      "description": "number of seconds of idleness after which the server will sleep (default: -1; -1 = disabled)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1440,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--slot-save-path",
+      "section": "example-specific params",
+      "spellings": [
+        "--slot-save-path"
+      ],
+      "long_spellings": [
+        "--slot-save-path"
+      ],
+      "value_hint": "PATH",
+      "env": null,
+      "default": "disabled",
+      "description": "path to save slot kv cache (default: disabled)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1440,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--slots",
+      "section": "example-specific params",
+      "spellings": [
+        "--slots",
+        "--no-slots"
+      ],
+      "long_spellings": [
+        "--slots",
+        "--no-slots"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_ENDPOINT_SLOTS",
+      "default": "enabled",
+      "description": "expose slots monitoring endpoint (default: enabled) (env: LLAMA_ARG_ENDPOINT_SLOTS)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1440,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Spelling and default (enabled) match, and LLAMA_ARG_ENDPOINT_SLOTS is honored at runtime (env_fallback_endpoint_slots, src/server/cli_input.rs) rather than as a clap env attribute, so --slots / --no-slots keep precedence over it. #1440 owns /slots response parity.",
+      "divergence": [],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--slots",
+          "--no-slots"
+        ],
+        "defaults": [
+          "true"
+        ],
+        "env": "LLAMA_ARG_ENDPOINT_SLOTS",
+        "env_binding": "runtime",
+        "env_test": "src/bin/mlx_server.rs"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "GET /metrics",
+      "method": "GET",
+      "path": "/metrics",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1440,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "Mounted behind --metrics like b10621; metric-name parity owned by #1440.",
+      "divergence": [],
+      "mlxcel": {
+        "route": "GET /metrics"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "GET /props",
+      "method": "GET",
+      "path": "/props",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1440,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "b10621 serves GET /props unconditionally; mlxcel mounts it only behind --props (default off). #1440 owns the reconciliation.",
+      "divergence": [],
+      "mlxcel": {
+        "route": "GET /props"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "GET /slots",
+      "method": "GET",
+      "path": "/slots",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1440,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "Mounted, enabled by default like b10621; response-field parity owned by #1440.",
+      "divergence": [],
+      "mlxcel": {
+        "route": "GET /slots"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "POST /props",
+      "method": "POST",
+      "path": "/props",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1440,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "POST /slots/:id_slot",
+      "method": "POST",
+      "path": "/slots/:id_slot",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1440,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    }
+  ]
+}

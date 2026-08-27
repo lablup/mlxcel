@@ -1,0 +1,82 @@
+{
+  "schema_version": 3,
+  "area": "streams-and-realtime",
+  "entries": [
+    {
+      "kind": "route",
+      "id": "DELETE /v1/stream",
+      "method": "DELETE",
+      "path": "/v1/stream",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1444,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "GET /v1/stream",
+      "method": "GET",
+      "path": "/v1/stream",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1444,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "POST /v1/chat/completions/control",
+      "method": "POST",
+      "path": "/v1/chat/completions/control",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1444,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "POST /v1/streams/lookup",
+      "method": "POST",
+      "path": "/v1/streams/lookup",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1444,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:reasoning_control",
+      "field": "reasoning_control",
+      "aliases": [],
+      "parent": null,
+      "field_type": "bool",
+      "description": "Create the budget sampler on demand so reasoning can be ended at runtime",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1444,
+      "test": null,
+      "notes": "Realtime reasoning control is owned by #1444.",
+      "divergence": [],
+      "mlxcel": null
+    }
+  ]
+}

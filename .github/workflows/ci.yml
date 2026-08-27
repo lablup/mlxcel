@@ -241,6 +241,39 @@ jobs:
       - name: Check every CUDA JIT launch keys its cache on the input dtypes
         run: python3 scripts/ci/check_kernel_dtype_keys.py
 
+  llama-compat-manifest:
+    name: llama-compat manifest
+    # Deliberately not behind the `changes` filter, like `crate-versions`: it
+    # needs no toolchain and runs in seconds. Validates the checked-in
+    # llama-server b10621 compatibility manifest (compat/llama-server/b10621/,
+    # issue #1443, epic #1431): pinned counts (249 help entries, 323 long
+    # spellings, 134 LLAMA_* env vars), one policy state per entry, issue links
+    # on deferred entries, test ids on non-supported entries, the entry key
+    # allowlist, the rule that a non-empty `divergence` forbids `supported`,
+    # and canonical serialization. --check-issues-open additionally asserts
+    # every issue a deferred entry links is still open, so closing a chain
+    # issue without flipping its manifest entries fails here. The second step
+    # is the validator's own negative coverage: it mutates a throwaway copy of
+    # the manifest and asserts the gate rejects it. The binary-facing half of the
+    # gate (option spellings, env bindings, defaults against both server
+    # binaries, hidden arguments included, plus mounted routes and native
+    # request fields) runs inside the workspace test suite as
+    # tests/llama_compat_manifest.rs and src/server/llama_compat_tests.rs.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Validate the b10621 compatibility manifest
+        run: python3 scripts/ci/check_llama_compat_manifest.py --check-issues-open
+      - name: Validator negative coverage
+        run: bash scripts/ci/check_llama_compat_manifest_test.sh
+
   mlx-pin:
     name: MLX pin extraction
     needs: changes

@@ -1,0 +1,159 @@
+{
+  "schema_version": 3,
+  "reference": {
+    "project": "llama.cpp",
+    "release_tag": "b10621",
+    "build": 10621,
+    "commit": "c1d0e7a004015f23bc0233470b747b596f29b264",
+    "published": "2026-08-25",
+    "archive": "llama-b10621-bin-macos-arm64.tar.gz",
+    "archive_url": "https://github.com/ggml-org/llama.cpp/releases/download/b10621/llama-b10621-bin-macos-arm64.tar.gz",
+    "archive_sha256": "429c8270608600188035e5e92f7d78dffb7900904fe7dd7e6a84f48068cd13cf",
+    "sources": {
+      "arguments": "https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/common/arg.cpp",
+      "routes": "https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/tools/server/server.cpp",
+      "http": "https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/tools/server/server-http.cpp",
+      "schema": "https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/tools/server/server-schema.cpp"
+    }
+  },
+  "counts": {
+    "help_entries": 249,
+    "long_option_spellings": 323,
+    "environment_variables": 136,
+    "llama_environment_variables": 134,
+    "other_environment_variables": [
+      "HF_TOKEN",
+      "MTMD_BACKEND_DEVICE"
+    ],
+    "routes": 53,
+    "native_request_fields": 74,
+    "help_sections": [
+      "common params",
+      "example-specific params",
+      "sampling params",
+      "speculative params"
+    ]
+  },
+  "shards": {
+    "authentication": {
+      "owners": [
+        1437
+      ]
+    },
+    "chat-templates": {
+      "owners": [
+        1447
+      ]
+    },
+    "embeddings-and-rerank": {
+      "owners": [
+        1452
+      ]
+    },
+    "ggml-runtime": {
+      "owners": [
+        1445
+      ]
+    },
+    "logging-and-presets": {
+      "owners": [
+        1448
+      ]
+    },
+    "lora-adapters": {
+      "owners": [
+        1439
+      ]
+    },
+    "model-source": {
+      "owners": [
+        1434
+      ]
+    },
+    "multimodal-and-audio": {
+      "owners": [
+        1446,
+        1451
+      ]
+    },
+    "observability-and-slots": {
+      "owners": [
+        1440
+      ]
+    },
+    "router-models": {
+      "owners": [
+        1438
+      ]
+    },
+    "routes": {
+      "owners": [
+        1441,
+        1442,
+        1452
+      ]
+    },
+    "runtime-and-context": {
+      "owners": [
+        1449,
+        1450,
+        1453
+      ]
+    },
+    "sampling-and-grammar": {
+      "owners": [
+        1377,
+        1436
+      ]
+    },
+    "speculative": {
+      "owners": [
+        1433
+      ]
+    },
+    "streams-and-realtime": {
+      "owners": [
+        1444
+      ]
+    },
+    "transport-tls-cors": {
+      "owners": [
+        1432
+      ]
+    },
+    "ui-tools-mcp-gcp": {
+      "owners": [
+        1435,
+        1456
+      ]
+    }
+  },
+  "mlxcel_baseline": {
+    "description": "Informational snapshot of the mlxcel side at manifest creation; maintained by hand, not by the extractor. The maintained truth is the per-entry state and mlxcel claim data in the shards.",
+    "measured_at_commit": "a74bf75fa",
+    "method": {
+      "help_spellings": "distinct regex matches of --[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9] over the rendered --help text (counts spellings mentioned in prose, e.g. --embedding, and misses hidden arguments)",
+      "accepted_spellings": "primary longs plus all aliases from the --dump-flag-surface machine dump, hidden arguments included"
+    },
+    "help_long_spellings": {
+      "mlxcel serve": 150,
+      "mlxcel-server": 152,
+      "union": 154
+    },
+    "accepted_long_spellings": {
+      "mlxcel serve": 159,
+      "mlxcel-server": 157,
+      "union": 160
+    },
+    "b10621_intersections": {
+      "help_spellings": 50,
+      "accepted_spellings_visible": 48,
+      "accepted_spellings_with_hidden": 58,
+      "environment_variables_clap_bound": 21,
+      "environment_variables_incl_runtime_handled": 24
+    },
+    "pre_1430_audit_snapshot": {
+      "note": "The epic #1431 audit summary predates #1430 (merged as PR #1454) and recorded 149 union help spellings, 47 exact spelling intersections, and 15 exact environment-variable intersections; those figures are the pre-#1430 baseline, not the current state."
+    }
+  }
+}

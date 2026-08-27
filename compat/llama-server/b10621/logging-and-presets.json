@@ -1,0 +1,584 @@
+{
+  "schema_version": 3,
+  "area": "logging-and-presets",
+  "entries": [
+    {
+      "kind": "option",
+      "id": "--cache-list",
+      "section": "common params",
+      "spellings": [
+        "-cl",
+        "--cache-list"
+      ],
+      "long_spellings": [
+        "--cache-list"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": null,
+      "description": "show list of models in cache",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1448,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--completion-bash",
+      "section": "common params",
+      "spellings": [
+        "--completion-bash"
+      ],
+      "long_spellings": [
+        "--completion-bash"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": null,
+      "description": "print source-able bash completion script for llama.cpp",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1448,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--embd-gemma-default",
+      "section": "example-specific params",
+      "spellings": [
+        "--embd-gemma-default"
+      ],
+      "long_spellings": [
+        "--embd-gemma-default"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": null,
+      "description": "use default EmbeddingGemma model (note: can download weights from the internet)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1448,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--fim-qwen-1.5b-default",
+      "section": "example-specific params",
+      "spellings": [
+        "--fim-qwen-1.5b-default"
+      ],
+      "long_spellings": [
+        "--fim-qwen-1.5b-default"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": null,
+      "description": "use default Qwen 2.5 Coder 1.5B (note: can download weights from the internet)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1448,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--fim-qwen-14b-spec",
+      "section": "example-specific params",
+      "spellings": [
+        "--fim-qwen-14b-spec"
+      ],
+      "long_spellings": [
+        "--fim-qwen-14b-spec"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": null,
+      "description": "use Qwen 2.5 Coder 14B + 0.5B draft for speculative decoding (note: can download weights from the internet)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1448,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--fim-qwen-30b-default",
+      "section": "example-specific params",
+      "spellings": [
+        "--fim-qwen-30b-default"
+      ],
+      "long_spellings": [
+        "--fim-qwen-30b-default"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": null,
+      "description": "use default Qwen 3 Coder 30B A3B Instruct (note: can download weights from the internet)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1448,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--fim-qwen-3b-default",
+      "section": "example-specific params",
+      "spellings": [
+        "--fim-qwen-3b-default"
+      ],
+      "long_spellings": [
+        "--fim-qwen-3b-default"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": null,
+      "description": "use default Qwen 2.5 Coder 3B (note: can download weights from the internet)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1448,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--fim-qwen-7b-default",
+      "section": "example-specific params",
+      "spellings": [
+        "--fim-qwen-7b-default"
+      ],
+      "long_spellings": [
+        "--fim-qwen-7b-default"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": null,
+      "description": "use default Qwen 2.5 Coder 7B (note: can download weights from the internet)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1448,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--fim-qwen-7b-spec",
+      "section": "example-specific params",
+      "spellings": [
+        "--fim-qwen-7b-spec"
+      ],
+      "long_spellings": [
+        "--fim-qwen-7b-spec"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": null,
+      "description": "use Qwen 2.5 Coder 7B + 0.5B draft for speculative decoding (note: can download weights from the internet)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1448,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--gpt-oss-120b-default",
+      "section": "example-specific params",
+      "spellings": [
+        "--gpt-oss-120b-default"
+      ],
+      "long_spellings": [
+        "--gpt-oss-120b-default"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": null,
+      "description": "use gpt-oss-120b (note: can download weights from the internet)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1448,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--gpt-oss-20b-default",
+      "section": "example-specific params",
+      "spellings": [
+        "--gpt-oss-20b-default"
+      ],
+      "long_spellings": [
+        "--gpt-oss-20b-default"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": null,
+      "description": "use gpt-oss-20b (note: can download weights from the internet)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1448,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--help",
+      "section": "common params",
+      "spellings": [
+        "-h",
+        "--help",
+        "--usage"
+      ],
+      "long_spellings": [
+        "--help",
+        "--usage"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": null,
+      "description": "print usage and exit",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1448,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Both binaries print clap-generated help. The b10621 twin spelling --usage is not accepted; -h / --help are.",
+      "divergence": [
+        "The b10621 twin spelling --usage is not accepted; only -h and --help are (#1448)."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--help"
+        ]
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--log-colors",
+      "section": "common params",
+      "spellings": [
+        "--log-colors"
+      ],
+      "long_spellings": [
+        "--log-colors"
+      ],
+      "value_hint": "[on|off|auto]",
+      "env": "LLAMA_ARG_LOG_COLORS",
+      "default": null,
+      "description": "Set colored logging ('on', 'off', or 'auto', default: 'auto') 'auto' enables colors when output is to a terminal (env: LLAMA_ARG_LOG_COLORS)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1448,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--log-disable",
+      "section": "common params",
+      "spellings": [
+        "--log-disable"
+      ],
+      "long_spellings": [
+        "--log-disable"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": null,
+      "description": "Log disable",
+      "discovery": "help-entry-head",
+      "state": "supported",
+      "issue": 1448,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": null,
+      "divergence": [],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--log-disable"
+        ],
+        "defaults": [
+          "false"
+        ]
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--log-file",
+      "section": "common params",
+      "spellings": [
+        "--log-file"
+      ],
+      "long_spellings": [
+        "--log-file"
+      ],
+      "value_hint": "FNAME",
+      "env": "LLAMA_ARG_LOG_FILE",
+      "default": null,
+      "description": "Log to file (env: LLAMA_ARG_LOG_FILE)",
+      "discovery": "help-entry-head",
+      "state": "supported",
+      "issue": 1448,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": null,
+      "divergence": [],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--log-file"
+        ],
+        "env": "LLAMA_ARG_LOG_FILE",
+        "env_binding": "clap"
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--log-prefix",
+      "section": "common params",
+      "spellings": [
+        "--log-prefix",
+        "--no-log-prefix"
+      ],
+      "long_spellings": [
+        "--log-prefix",
+        "--no-log-prefix"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_LOG_PREFIX",
+      "default": null,
+      "description": "Enable prefix in log messages (env: LLAMA_ARG_LOG_PREFIX)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1448,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--log-prompts-dir",
+      "section": "example-specific params",
+      "spellings": [
+        "--log-prompts-dir"
+      ],
+      "long_spellings": [
+        "--log-prompts-dir"
+      ],
+      "value_hint": "PATH",
+      "env": null,
+      "default": null,
+      "description": "Log prompts to directory (auto-created if not present; only used for debugging, default: disabled)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1448,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--log-timestamps",
+      "section": "common params",
+      "spellings": [
+        "--log-timestamps",
+        "--no-log-timestamps"
+      ],
+      "long_spellings": [
+        "--log-timestamps",
+        "--no-log-timestamps"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_LOG_TIMESTAMPS",
+      "default": null,
+      "description": "Enable timestamps in log messages (env: LLAMA_ARG_LOG_TIMESTAMPS)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1448,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-default",
+      "section": "example-specific params",
+      "spellings": [
+        "--spec-default"
+      ],
+      "long_spellings": [
+        "--spec-default"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": null,
+      "description": "enable default speculative decoding config",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1448,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--verbose",
+      "section": "common params",
+      "spellings": [
+        "-v",
+        "--verbose",
+        "--log-verbose"
+      ],
+      "long_spellings": [
+        "--verbose",
+        "--log-verbose"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": null,
+      "description": "Set verbosity level to infinity (i.e. log all messages, useful for debugging)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1448,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "--verbose accepted; the --log-verbose twin spelling is not, see notes of the owning area issue #1448. RUST_LOG takes precedence over --verbose in mlxcel (EnvFilter::try_from_default_env wins), while b10621's -v is unconditional.",
+      "divergence": [
+        "The b10621 twin spelling --log-verbose is not accepted (#1448).",
+        "RUST_LOG overrides --verbose in mlxcel because EnvFilter::try_from_default_env wins, while b10621's -v is unconditional (#1448)."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--verbose"
+        ],
+        "defaults": [
+          "false"
+        ]
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--verbosity",
+      "section": "common params",
+      "spellings": [
+        "-lv",
+        "--verbosity",
+        "--log-verbosity"
+      ],
+      "long_spellings": [
+        "--verbosity",
+        "--log-verbosity"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_LOG_VERBOSITY",
+      "default": "3",
+      "description": "Set the verbosity threshold. Messages with a higher verbosity will be ignored. Values: - 0: generic output - 1: error - 2: warning - 3: info - 4: trace (more info) - 5: debug (default: 3) (env: LLAMA_ARG_LOG_VERBOSITY)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1448,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--version",
+      "section": "common params",
+      "spellings": [
+        "--version"
+      ],
+      "long_spellings": [
+        "--version"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": null,
+      "description": "show version and build info",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1448,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": null,
+      "divergence": [],
+      "mlxcel": {
+        "accepted_spellings": [],
+        "accepted_on_one_binary_only": {
+          "server": [
+            "--version"
+          ]
+        }
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--vision-gemma-12b-default",
+      "section": "example-specific params",
+      "spellings": [
+        "--vision-gemma-12b-default"
+      ],
+      "long_spellings": [
+        "--vision-gemma-12b-default"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": null,
+      "description": "use Gemma 3 12B QAT (note: can download weights from the internet)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1448,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--vision-gemma-4b-default",
+      "section": "example-specific params",
+      "spellings": [
+        "--vision-gemma-4b-default"
+      ],
+      "long_spellings": [
+        "--vision-gemma-4b-default"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": null,
+      "description": "use Gemma 3 4B QAT (note: can download weights from the internet)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1448,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    }
+  ]
+}

@@ -1,0 +1,338 @@
+{
+  "schema_version": 3,
+  "area": "transport-tls-cors",
+  "entries": [
+    {
+      "kind": "option",
+      "id": "--api-prefix",
+      "section": "example-specific params",
+      "spellings": [
+        "--api-prefix"
+      ],
+      "long_spellings": [
+        "--api-prefix"
+      ],
+      "value_hint": "PREFIX",
+      "env": "LLAMA_ARG_API_PREFIX",
+      "default": "",
+      "description": "prefix path the server serves from, without the trailing slash (default: ) (env: LLAMA_ARG_API_PREFIX)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1432,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--cors-credentials",
+      "section": "example-specific params",
+      "spellings": [
+        "--cors-credentials",
+        "--no-cors-credentials"
+      ],
+      "long_spellings": [
+        "--cors-credentials",
+        "--no-cors-credentials"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_CORS_CREDENTIALS",
+      "default": "enabled",
+      "description": "whether to allow credentials for CORS (default: enabled) note: if this is enabled and --cors-origins is set to * (default), the Origin header will be echoed back, and credentials will always be allowed (env: LLAMA_ARG_CORS_CREDENTIALS)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1432,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--cors-headers",
+      "section": "example-specific params",
+      "spellings": [
+        "--cors-headers"
+      ],
+      "long_spellings": [
+        "--cors-headers"
+      ],
+      "value_hint": "HEADERS",
+      "env": "LLAMA_ARG_CORS_HEADERS",
+      "default": "*",
+      "description": "comma-separated list of allowed headers for CORS (default: *) (env: LLAMA_ARG_CORS_HEADERS)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1432,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--cors-methods",
+      "section": "example-specific params",
+      "spellings": [
+        "--cors-methods"
+      ],
+      "long_spellings": [
+        "--cors-methods"
+      ],
+      "value_hint": "METHODS",
+      "env": "LLAMA_ARG_CORS_METHODS",
+      "default": "GET, POST, DELETE, OPTIONS",
+      "description": "comma-separated list of allowed methods for CORS (default: GET, POST, DELETE, OPTIONS) (env: LLAMA_ARG_CORS_METHODS)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1432,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--cors-origins",
+      "section": "example-specific params",
+      "spellings": [
+        "--cors-origins"
+      ],
+      "long_spellings": [
+        "--cors-origins"
+      ],
+      "value_hint": "ORIGINS",
+      "env": "LLAMA_ARG_CORS_ORIGINS",
+      "default": "*",
+      "description": "comma-separated list of allowed origins for CORS (default: *) if set to special value 'localhost', reflect the Origin header only if it is localhost (env: LLAMA_ARG_CORS_ORIGINS)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1432,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--host",
+      "section": "example-specific params",
+      "spellings": [
+        "--host"
+      ],
+      "long_spellings": [
+        "--host"
+      ],
+      "value_hint": "HOST",
+      "env": "LLAMA_ARG_HOST",
+      "default": "127.0.0.1",
+      "description": "ip address to listen, or bind to an UNIX socket if the address ends with .sock (default: 127.0.0.1) (env: LLAMA_ARG_HOST)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1432,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "TCP binding matches (default 127.0.0.1, env LLAMA_ARG_HOST). b10621 additionally treats values ending in .sock as a unix domain socket; mlxcel has no socket support. #1432 owns socket semantics.",
+      "divergence": [],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--host"
+        ],
+        "env": "LLAMA_ARG_HOST",
+        "env_binding": "clap",
+        "defaults": [
+          "127.0.0.1"
+        ]
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--port",
+      "section": "example-specific params",
+      "spellings": [
+        "--port"
+      ],
+      "long_spellings": [
+        "--port"
+      ],
+      "value_hint": "PORT",
+      "env": "LLAMA_ARG_PORT",
+      "default": "8080",
+      "description": "port to listen (default: 8080) (env: LLAMA_ARG_PORT)",
+      "discovery": "help-entry-head",
+      "state": "supported",
+      "issue": 1432,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Default 8080 matches.",
+      "divergence": [],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--port"
+        ],
+        "env": "LLAMA_ARG_PORT",
+        "env_binding": "clap",
+        "defaults": [
+          "8080"
+        ]
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--reuse-port",
+      "section": "example-specific params",
+      "spellings": [
+        "--reuse-port"
+      ],
+      "long_spellings": [
+        "--reuse-port"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_REUSE_PORT",
+      "default": "disabled",
+      "description": "allow multiple sockets to bind to the same port (default: disabled) (env: LLAMA_ARG_REUSE_PORT)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1432,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--sse-ping-interval",
+      "section": "example-specific params",
+      "spellings": [
+        "--sse-ping-interval"
+      ],
+      "long_spellings": [
+        "--sse-ping-interval"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_SSE_PING_INTERVAL",
+      "default": null,
+      "description": "server SSE ping interval in seconds (-1 = disabled, default: 30) (env: LLAMA_ARG_SSE_PING_INTERVAL)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1432,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--ssl-cert-file",
+      "section": "example-specific params",
+      "spellings": [
+        "--ssl-cert-file"
+      ],
+      "long_spellings": [
+        "--ssl-cert-file"
+      ],
+      "value_hint": "FNAME",
+      "env": "LLAMA_ARG_SSL_CERT_FILE",
+      "default": null,
+      "description": "path to file a PEM-encoded SSL certificate (env: LLAMA_ARG_SSL_CERT_FILE)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1432,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--ssl-key-file",
+      "section": "example-specific params",
+      "spellings": [
+        "--ssl-key-file"
+      ],
+      "long_spellings": [
+        "--ssl-key-file"
+      ],
+      "value_hint": "FNAME",
+      "env": "LLAMA_ARG_SSL_KEY_FILE",
+      "default": null,
+      "description": "path to file a PEM-encoded SSL private key (env: LLAMA_ARG_SSL_KEY_FILE)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1432,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--threads-http",
+      "section": "example-specific params",
+      "spellings": [
+        "--threads-http"
+      ],
+      "long_spellings": [
+        "--threads-http"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_THREADS_HTTP",
+      "default": "-1",
+      "description": "number of threads used to process HTTP requests (default: -1) (env: LLAMA_ARG_THREADS_HTTP)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1432,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--timeout",
+      "section": "example-specific params",
+      "spellings": [
+        "-to",
+        "--timeout"
+      ],
+      "long_spellings": [
+        "--timeout"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_TIMEOUT",
+      "default": "3600",
+      "description": "server read/write timeout in seconds (default: 3600) (env: LLAMA_ARG_TIMEOUT)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1432,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "SEMANTIC COLLISION: mlxcel parses --timeout / LLAMA_ARG_TIMEOUT as a per-request decode watchdog, while b10621 defines it as the HTTP server read/write timeout (default 600). Spelling and env are accepted today; #1432 owns the reconciliation.",
+      "divergence": [],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--timeout"
+        ],
+        "env": "LLAMA_ARG_TIMEOUT",
+        "env_binding": "clap",
+        "defaults": [
+          "600"
+        ]
+      }
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:sse_ping_interval",
+      "field": "sse_ping_interval",
+      "aliases": [],
+      "parent": null,
+      "field_type": "num",
+      "description": "Interval in seconds between SSE comment pings emitted while the stream stays silent, -1 disables pings",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1432,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    }
+  ]
+}

@@ -1,0 +1,546 @@
+{
+  "schema_version": 3,
+  "area": "chat-templates",
+  "entries": [
+    {
+      "kind": "option",
+      "id": "--chat-template",
+      "section": "example-specific params",
+      "spellings": [
+        "--chat-template"
+      ],
+      "long_spellings": [
+        "--chat-template"
+      ],
+      "value_hint": "JINJA_TEMPLATE",
+      "env": "LLAMA_ARG_CHAT_TEMPLATE",
+      "default": "template taken from model's metadata",
+      "description": "set custom jinja chat template (default: template taken from model's metadata) if suffix/prefix are specified, template will be disabled only commonly used templates are accepted (unless --jinja is set before this flag): list of built-in templates: bailing, bailing-think, bailing2, chatglm3, chatglm4, chatml, command-r, deepseek, deepseek-ocr, deepseek2, deepseek3, exaone-moe, exaone3, exaone4, falcon3, gemma, gigachat, glmedge, gpt-oss, granite, granite-4.0, granite-4.1, grok-2, hunyuan-dense, hunyuan-moe, hunyuan-vl, kimi-k2, llama2, llama2-sys, llama2-sys-bos, llama2-sys-strip, llama3, llama4, megrez, minicpm, mistral-v1, mistral-v3, mistral-v3-tekken, mistral-v7, mistral-v7-tekken, monarch, openchat, orion, pangu-embedded, phi3, phi4, rwkv-world, seed_oss, smolvlm, solar-open, vicuna, vicuna-orca, yandex, zephyr (env: LLAMA_ARG_CHAT_TEMPLATE)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1447,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Spelling and env accepted; b10621 also accepts built-in template names and suffix/prefix interaction, owned by #1447.",
+      "divergence": [],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--chat-template"
+        ],
+        "env": "LLAMA_ARG_CHAT_TEMPLATE",
+        "env_binding": "clap"
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--chat-template-file",
+      "section": "example-specific params",
+      "spellings": [
+        "--chat-template-file"
+      ],
+      "long_spellings": [
+        "--chat-template-file"
+      ],
+      "value_hint": "JINJA_TEMPLATE_FILE",
+      "env": "LLAMA_ARG_CHAT_TEMPLATE_FILE",
+      "default": "template taken from model's metadata",
+      "description": "set custom jinja chat template file (default: template taken from model's metadata) if suffix/prefix are specified, template will be disabled only commonly used templates are accepted (unless --jinja is set before this flag): list of built-in templates: bailing, bailing-think, bailing2, chatglm3, chatglm4, chatml, command-r, deepseek, deepseek-ocr, deepseek2, deepseek3, exaone-moe, exaone3, exaone4, falcon3, gemma, gigachat, glmedge, gpt-oss, granite, granite-4.0, granite-4.1, grok-2, hunyuan-dense, hunyuan-moe, hunyuan-vl, kimi-k2, llama2, llama2-sys, llama2-sys-bos, llama2-sys-strip, llama3, llama4, megrez, minicpm, mistral-v1, mistral-v3, mistral-v3-tekken, mistral-v7, mistral-v7-tekken, monarch, openchat, orion, pangu-embedded, phi3, phi4, rwkv-world, seed_oss, smolvlm, solar-open, vicuna, vicuna-orca, yandex, zephyr (env: LLAMA_ARG_CHAT_TEMPLATE_FILE)",
+      "discovery": "help-entry-head",
+      "state": "supported",
+      "issue": 1447,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Custom chat template file loading with the canonical env binding.",
+      "divergence": [],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--chat-template-file"
+        ],
+        "env": "LLAMA_ARG_CHAT_TEMPLATE_FILE",
+        "env_binding": "clap"
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--chat-template-kwargs",
+      "section": "example-specific params",
+      "spellings": [
+        "--chat-template-kwargs"
+      ],
+      "long_spellings": [
+        "--chat-template-kwargs"
+      ],
+      "value_hint": "STRING",
+      "env": "LLAMA_ARG_CHAT_TEMPLATE_KWARGS",
+      "default": null,
+      "description": "sets additional params for the json template parser, must be a valid json object string, e.g. '{\"key1\":\"value1\",\"key2\":\"value2\"}' (env: LLAMA_ARG_CHAT_TEMPLATE_KWARGS)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1447,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Spelling accepted and the canonical env is honored at runtime (src/server/chat_template_kwargs.rs); jinja engine behavior parity is owned by #1447.",
+      "divergence": [],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--chat-template-kwargs"
+        ],
+        "env": "LLAMA_ARG_CHAT_TEMPLATE_KWARGS",
+        "env_binding": "runtime",
+        "env_test": "src/server/chat_template_kwargs_tests.rs"
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--escape",
+      "section": "common params",
+      "spellings": [
+        "-e",
+        "--escape",
+        "--no-escape"
+      ],
+      "long_spellings": [
+        "--escape",
+        "--no-escape"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": "true",
+      "description": "whether to process escapes sequences (\\n, \\r, \\t, \\', \\\", \\\\) (default: true)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1447,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--jinja",
+      "section": "example-specific params",
+      "spellings": [
+        "--jinja",
+        "--no-jinja"
+      ],
+      "long_spellings": [
+        "--jinja",
+        "--no-jinja"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_JINJA",
+      "default": "enabled",
+      "description": "whether to use jinja template engine for chat (default: enabled) (env: LLAMA_ARG_JINJA)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1447,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Accepted and ignored (hidden): mlxcel always processes templates. #1447 decides whether --no-jinja must disable templating to match b10621.",
+      "divergence": [],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--jinja"
+        ],
+        "defaults": [
+          "false"
+        ],
+        "hidden": true
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--prefill-assistant",
+      "section": "example-specific params",
+      "spellings": [
+        "--prefill-assistant",
+        "--no-prefill-assistant"
+      ],
+      "long_spellings": [
+        "--prefill-assistant",
+        "--no-prefill-assistant"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_PREFILL_ASSISTANT",
+      "default": "prefill enabled",
+      "description": "whether to prefill the assistant's response if the last message is an assistant message (default: prefill enabled) when this flag is set, if the last message is an assistant message then it will be treated as a full message and not prefilled (env: LLAMA_ARG_PREFILL_ASSISTANT)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1447,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--reasoning",
+      "section": "example-specific params",
+      "spellings": [
+        "-rea",
+        "--reasoning"
+      ],
+      "long_spellings": [
+        "--reasoning"
+      ],
+      "value_hint": "[on|off|auto]",
+      "env": "LLAMA_ARG_REASONING",
+      "default": null,
+      "description": "Use reasoning/thinking in the chat ('on', 'off', or 'auto', default: 'auto' (detect from template)) (env: LLAMA_ARG_REASONING)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1447,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--reasoning-budget",
+      "section": "example-specific params",
+      "spellings": [
+        "--reasoning-budget"
+      ],
+      "long_spellings": [
+        "--reasoning-budget"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_THINK_BUDGET",
+      "default": "-1",
+      "description": "token budget for thinking: -1 for unrestricted, 0 for immediate end, N>0 for token budget (default: -1) (env: LLAMA_ARG_THINK_BUDGET)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1447,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Same -1/0/N semantics; canonical LLAMA_ARG_THINK_BUDGET honored at runtime (clap binds the flag, the env bridge is code, covered by tests/thinking_budget.rs).",
+      "divergence": [
+        "A negative value must be written as --reasoning-budget=-1; the space-separated --reasoning-budget -1 that llama-server accepts is rejected by mlxcel's argv parser (#1447)."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--reasoning-budget"
+        ],
+        "env": "LLAMA_ARG_THINK_BUDGET",
+        "env_binding": "runtime",
+        "env_test": "src/server/cli_input_tests.rs",
+        "defaults": [
+          "-1"
+        ]
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--reasoning-budget-message",
+      "section": "example-specific params",
+      "spellings": [
+        "--reasoning-budget-message"
+      ],
+      "long_spellings": [
+        "--reasoning-budget-message"
+      ],
+      "value_hint": "MESSAGE",
+      "env": "LLAMA_ARG_THINK_BUDGET_MESSAGE",
+      "default": "none",
+      "description": "message injected before the end-of-thinking tag when reasoning budget is exhausted (default: none) (env: LLAMA_ARG_THINK_BUDGET_MESSAGE)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1447,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--reasoning-effort",
+      "section": "example-specific params",
+      "spellings": [
+        "--reasoning-effort"
+      ],
+      "long_spellings": [
+        "--reasoning-effort"
+      ],
+      "value_hint": "LEVEL",
+      "env": "LLAMA_ARG_REASONING_EFFORT",
+      "default": "default",
+      "description": "reasoning effort level given to the chat template: 'default' to keep the template default, or a level such as 'minimal', 'low', 'medium', 'high', 'xhigh' or 'max' (default: default) (env: LLAMA_ARG_REASONING_EFFORT)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1447,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--reasoning-format",
+      "section": "example-specific params",
+      "spellings": [
+        "--reasoning-format"
+      ],
+      "long_spellings": [
+        "--reasoning-format"
+      ],
+      "value_hint": "FORMAT",
+      "env": "LLAMA_ARG_THINK",
+      "default": "auto",
+      "description": "controls whether thought tags are allowed and/or extracted from the response, and in which format they're returned; one of: - none: leaves thoughts unparsed in `message.content` - deepseek: puts thoughts in `message.reasoning_content` - deepseek-legacy: keeps `<think>` tags in `message.content` while also populating `message.reasoning_content` (default: auto) (env: LLAMA_ARG_THINK)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1447,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--reasoning-preserve",
+      "section": "example-specific params",
+      "spellings": [
+        "--reasoning-preserve",
+        "--no-reasoning-preserve"
+      ],
+      "long_spellings": [
+        "--reasoning-preserve",
+        "--no-reasoning-preserve"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_REASONING_PRESERVE",
+      "default": "template default",
+      "description": "preserve reasoning trace in the full history, not just the last assistant message (default: template default) compatible with certain templates having 'supports_preserve_reasoning' capability example: https://docs.z.ai/guides/capabilities/thinking-mode#preserved-thinking (env: LLAMA_ARG_REASONING_PRESERVE)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1447,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--skip-chat-parsing",
+      "section": "example-specific params",
+      "spellings": [
+        "--skip-chat-parsing",
+        "--no-skip-chat-parsing"
+      ],
+      "long_spellings": [
+        "--skip-chat-parsing",
+        "--no-skip-chat-parsing"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_SKIP_CHAT_PARSING",
+      "default": "disabled",
+      "description": "force a pure content parser, even if a Jinja template is specified; model will output everything in the content section, including any reasoning and/or tool calls (default: disabled) (env: LLAMA_ARG_SKIP_CHAT_PARSING)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1447,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--special",
+      "section": "example-specific params",
+      "spellings": [
+        "-sp",
+        "--special"
+      ],
+      "long_spellings": [
+        "--special"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": "false",
+      "description": "special tokens output enabled (default: false)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1447,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:chat_format",
+      "field": "chat_format",
+      "aliases": [],
+      "parent": null,
+      "field_type": "json",
+      "description": "Chat format used internally by the server",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1447,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:chat_parser",
+      "field": "chat_parser",
+      "aliases": [],
+      "parent": null,
+      "field_type": "str",
+      "description": "Chat parser configuration string",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1447,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:continue_final_message",
+      "field": "continue_final_message",
+      "aliases": [],
+      "parent": null,
+      "field_type": "json",
+      "description": "Whether to continue the final message of the chat template",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1447,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:echo",
+      "field": "echo",
+      "aliases": [],
+      "parent": null,
+      "field_type": "bool",
+      "description": "Whether to echo the input tokens in the output",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1447,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:generation_prompt",
+      "field": "generation_prompt",
+      "aliases": [],
+      "parent": null,
+      "field_type": "str",
+      "description": "Generation prompt appended to the chat template output",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1447,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:parse_tool_calls",
+      "field": "parse_tool_calls",
+      "aliases": [],
+      "parent": null,
+      "field_type": "bool",
+      "description": "Whether to parse tool calls from the generated output",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1447,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:reasoning_budget_end_tags",
+      "field": "reasoning_budget_end_tags",
+      "aliases": [
+        "reasoning_budget_end_tag"
+      ],
+      "parent": null,
+      "field_type": "json",
+      "description": "Token strings marking the end of the reasoning budget section; the first is forced when the budget expires",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1447,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:reasoning_budget_message",
+      "field": "reasoning_budget_message",
+      "aliases": [],
+      "parent": null,
+      "field_type": "str",
+      "description": "Message to prepend to the reasoning budget end tag when forcing it",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1447,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:reasoning_budget_start_tag",
+      "field": "reasoning_budget_start_tag",
+      "aliases": [],
+      "parent": null,
+      "field_type": "str",
+      "description": "Token string marking the start of the reasoning budget section",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1447,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:reasoning_budget_tokens",
+      "field": "reasoning_budget_tokens",
+      "aliases": [],
+      "parent": null,
+      "field_type": "num",
+      "description": "Number of tokens in the reasoning budget (-1 = disabled)",
+      "discovery": "source-schema-declaration",
+      "state": "supported",
+      "issue": 1447,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "Accepted as a serde alias of thinking_budget_tokens.",
+      "divergence": [],
+      "mlxcel": {
+        "field": "reasoning_budget_tokens"
+      }
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:reasoning_format",
+      "field": "reasoning_format",
+      "aliases": [],
+      "parent": null,
+      "field_type": "str",
+      "description": "Reasoning format for chain-of-thought models",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1447,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    }
+  ]
+}

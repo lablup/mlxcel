@@ -1,0 +1,790 @@
+{
+  "schema_version": 3,
+  "area": "runtime-and-context",
+  "entries": [
+    {
+      "kind": "option",
+      "id": "--batch-size",
+      "section": "common params",
+      "spellings": [
+        "-b",
+        "--batch-size"
+      ],
+      "long_spellings": [
+        "--batch-size"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_BATCH",
+      "default": "2048",
+      "description": "logical maximum batch size (default: 2048) (env: LLAMA_ARG_BATCH)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1450,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Spelling and env accepted; logical-batch semantics equivalence with llama.cpp batching is owned by #1450.",
+      "divergence": [],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--batch-size"
+        ],
+        "env": "LLAMA_ARG_BATCH",
+        "env_binding": "clap"
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--cache-idle-slots",
+      "section": "example-specific params",
+      "spellings": [
+        "--cache-idle-slots",
+        "--no-cache-idle-slots"
+      ],
+      "long_spellings": [
+        "--cache-idle-slots",
+        "--no-cache-idle-slots"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_CACHE_IDLE_SLOTS",
+      "default": "enabled, requires cache-ram",
+      "description": "save idle slots to the prompt cache on new task, and clear them when using unified KV (default: enabled, requires cache-ram) (env: LLAMA_ARG_CACHE_IDLE_SLOTS)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1453,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--cache-prompt",
+      "section": "example-specific params",
+      "spellings": [
+        "--cache-prompt",
+        "--no-cache-prompt"
+      ],
+      "long_spellings": [
+        "--cache-prompt",
+        "--no-cache-prompt"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_CACHE_PROMPT",
+      "default": "enabled",
+      "description": "whether to enable prompt caching (default: enabled) (env: LLAMA_ARG_CACHE_PROMPT)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1453,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--cache-ram",
+      "section": "example-specific params",
+      "spellings": [
+        "-cram",
+        "--cache-ram"
+      ],
+      "long_spellings": [
+        "--cache-ram"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_CACHE_RAM",
+      "default": "8192, -1 - no limit, 0 - disable",
+      "description": "set the maximum cache size in MiB (default: 8192, -1 - no limit, 0 - disable)[(more info)](https://github.com/ggml-org/llama.cpp/pull/16391) (env: LLAMA_ARG_CACHE_RAM)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1453,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--cache-reuse",
+      "section": "example-specific params",
+      "spellings": [
+        "--cache-reuse"
+      ],
+      "long_spellings": [
+        "--cache-reuse"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_CACHE_REUSE",
+      "default": "0",
+      "description": "min chunk size to attempt reusing from the cache via KV shifting, requires prompt caching to be enabled (default: 0) [(card)](https://ggml.ai/f0.png) (env: LLAMA_ARG_CACHE_REUSE)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1453,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "The flag spelling is not accepted, but LLAMA_ARG_CACHE_REUSE is parsed at runtime as an integer chunk size (0 = no-op, unsupported positive values fail startup) since #1430. #1453 owns chunk-level reuse.",
+      "divergence": [],
+      "mlxcel": {
+        "accepted_spellings": [],
+        "env": "LLAMA_ARG_CACHE_REUSE",
+        "env_binding": "runtime",
+        "env_test": "src/server/cli_input_tests.rs"
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--checkpoint-min-step",
+      "section": "example-specific params",
+      "spellings": [
+        "-cms",
+        "--checkpoint-min-step"
+      ],
+      "long_spellings": [
+        "--checkpoint-min-step"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT",
+      "default": "8192, 0 = no minimum",
+      "description": "minimum spacing between context checkpoints in tokens (default: 8192, 0 = no minimum) (env: LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1453,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--cont-batching",
+      "section": "example-specific params",
+      "spellings": [
+        "-cb",
+        "--cont-batching",
+        "-nocb",
+        "--no-cont-batching"
+      ],
+      "long_spellings": [
+        "--cont-batching",
+        "--no-cont-batching"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_CONT_BATCHING",
+      "default": "enabled",
+      "description": "whether to enable continuous batching (a.k.a dynamic batching) (default: enabled) (env: LLAMA_ARG_CONT_BATCHING)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1453,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Accepted and ignored (hidden): mlxcel always batches continuously. #1453 owns the --no-cont-batching observable semantics.",
+      "divergence": [],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--cont-batching"
+        ],
+        "defaults": [
+          "false"
+        ],
+        "hidden": true
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--context-shift",
+      "section": "example-specific params",
+      "spellings": [
+        "--context-shift",
+        "--no-context-shift"
+      ],
+      "long_spellings": [
+        "--context-shift",
+        "--no-context-shift"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_CONTEXT_SHIFT",
+      "default": "disabled",
+      "description": "whether to use context shift on infinite text generation (default: disabled) (env: LLAMA_ARG_CONTEXT_SHIFT)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1450,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--control-vector",
+      "section": "common params",
+      "spellings": [
+        "--control-vector"
+      ],
+      "long_spellings": [
+        "--control-vector"
+      ],
+      "value_hint": "FNAME",
+      "env": null,
+      "default": null,
+      "description": "add a control vector note: use comma-separated values to add multiple control vectors",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1449,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--control-vector-layer-range",
+      "section": "common params",
+      "spellings": [
+        "--control-vector-layer-range"
+      ],
+      "long_spellings": [
+        "--control-vector-layer-range"
+      ],
+      "value_hint": "START END",
+      "env": null,
+      "default": null,
+      "description": "layer range to apply the control vector(s) to, start and end inclusive",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1449,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--control-vector-scaled",
+      "section": "common params",
+      "spellings": [
+        "--control-vector-scaled"
+      ],
+      "long_spellings": [
+        "--control-vector-scaled"
+      ],
+      "value_hint": "FNAME:SCALE,...",
+      "env": null,
+      "default": null,
+      "description": "add a control vector with user defined scaling SCALE note: use comma-separated values (format: FNAME:SCALE,...)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1449,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--ctx-checkpoints",
+      "section": "example-specific params",
+      "spellings": [
+        "-ctxcp",
+        "--ctx-checkpoints",
+        "--swa-checkpoints"
+      ],
+      "long_spellings": [
+        "--ctx-checkpoints",
+        "--swa-checkpoints"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_CTX_CHECKPOINTS",
+      "default": "32",
+      "description": "max number of context checkpoints to create per slot (default: 32)[(more info)](https://github.com/ggml-org/llama.cpp/pull/15293) (env: LLAMA_ARG_CTX_CHECKPOINTS)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1453,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--ctx-size",
+      "section": "common params",
+      "spellings": [
+        "-c",
+        "--ctx-size"
+      ],
+      "long_spellings": [
+        "--ctx-size"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_CTX_SIZE",
+      "default": "0, 0 = loaded from model",
+      "description": "size of the prompt context (default: 0, 0 = loaded from model) (env: LLAMA_ARG_CTX_SIZE)",
+      "discovery": "help-entry-head",
+      "state": "supported",
+      "issue": 1450,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Same semantics: 0 = derive from the model.",
+      "divergence": [],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--ctx-size"
+        ],
+        "env": "LLAMA_ARG_CTX_SIZE",
+        "env_binding": "clap",
+        "defaults": [
+          "0"
+        ]
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--keep",
+      "section": "common params",
+      "spellings": [
+        "--keep"
+      ],
+      "long_spellings": [
+        "--keep"
+      ],
+      "value_hint": "N",
+      "env": null,
+      "default": "0, -1 = all",
+      "description": "number of tokens to keep from the initial prompt (default: 0, -1 = all)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1450,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--kv-unified",
+      "section": "example-specific params",
+      "spellings": [
+        "-kvu",
+        "--kv-unified",
+        "-no-kvu",
+        "--no-kv-unified"
+      ],
+      "long_spellings": [
+        "--kv-unified",
+        "--no-kv-unified"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_KV_UNIFIED",
+      "default": "enabled if number of slots is auto",
+      "description": "use single unified KV buffer shared across all sequences (default: enabled if number of slots is auto) (env: LLAMA_ARG_KV_UNIFIED)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1453,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--parallel",
+      "section": "example-specific params",
+      "spellings": [
+        "-np",
+        "--parallel"
+      ],
+      "long_spellings": [
+        "--parallel"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_N_PARALLEL",
+      "default": "-1, -1 = auto",
+      "description": "number of server slots (default: -1, -1 = auto) (env: LLAMA_ARG_N_PARALLEL)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1450,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Spelling and env match, but the default drifts: b10621 defaults to -1 (auto) while mlxcel defaults to 4 slots. #1450 owns default/precedence alignment.",
+      "divergence": [],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--parallel"
+        ],
+        "env": "LLAMA_ARG_N_PARALLEL",
+        "env_binding": "clap",
+        "defaults": [
+          "4"
+        ]
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--predict",
+      "section": "common params",
+      "spellings": [
+        "-n",
+        "--predict",
+        "--n-predict"
+      ],
+      "long_spellings": [
+        "--predict",
+        "--n-predict"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_N_PREDICT",
+      "default": "-1, -1 = infinity",
+      "description": "number of tokens to predict (default: -1, -1 = infinity) (env: LLAMA_ARG_N_PREDICT)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1450,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Both spellings (--predict, --n-predict) accepted; default -1 = until EOS/context, matching llama-server per request.",
+      "divergence": [
+        "A negative value must be written as --predict=-1 or --n-predict=-1; the space-separated --predict -1 that llama-server accepts is rejected by mlxcel's argv parser (#1450)."
+      ],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--predict",
+          "--n-predict"
+        ],
+        "env": "LLAMA_ARG_N_PREDICT",
+        "env_binding": "clap",
+        "defaults": [
+          "-1"
+        ]
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--rope-freq-base",
+      "section": "common params",
+      "spellings": [
+        "--rope-freq-base"
+      ],
+      "long_spellings": [
+        "--rope-freq-base"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_ROPE_FREQ_BASE",
+      "default": "loaded from model",
+      "description": "RoPE base frequency, used by NTK-aware scaling (default: loaded from model) (env: LLAMA_ARG_ROPE_FREQ_BASE)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1450,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--rope-freq-scale",
+      "section": "common params",
+      "spellings": [
+        "--rope-freq-scale"
+      ],
+      "long_spellings": [
+        "--rope-freq-scale"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_ROPE_FREQ_SCALE",
+      "default": null,
+      "description": "RoPE frequency scaling factor, expands context by a factor of 1/N (env: LLAMA_ARG_ROPE_FREQ_SCALE)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1450,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--rope-scale",
+      "section": "common params",
+      "spellings": [
+        "--rope-scale"
+      ],
+      "long_spellings": [
+        "--rope-scale"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_ROPE_SCALE",
+      "default": null,
+      "description": "RoPE context scaling factor, expands context by a factor of N (env: LLAMA_ARG_ROPE_SCALE)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1450,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--rope-scaling",
+      "section": "common params",
+      "spellings": [
+        "--rope-scaling"
+      ],
+      "long_spellings": [
+        "--rope-scaling"
+      ],
+      "value_hint": "{none,linear,yarn}",
+      "env": "LLAMA_ARG_ROPE_SCALING_TYPE",
+      "default": null,
+      "description": "RoPE frequency scaling method, defaults to linear unless specified by the model (env: LLAMA_ARG_ROPE_SCALING_TYPE)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1450,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--slot-prompt-similarity",
+      "section": "example-specific params",
+      "spellings": [
+        "-sps",
+        "--slot-prompt-similarity"
+      ],
+      "long_spellings": [
+        "--slot-prompt-similarity"
+      ],
+      "value_hint": "SIMILARITY",
+      "env": null,
+      "default": "0.10, 0.0 = disabled",
+      "description": "how much the prompt of a request must match the prompt of a slot in order to use that slot (default: 0.10, 0.0 = disabled)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1453,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--swa-full",
+      "section": "common params",
+      "spellings": [
+        "--swa-full"
+      ],
+      "long_spellings": [
+        "--swa-full"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_SWA_FULL",
+      "default": "false",
+      "description": "use full-size SWA cache (default: false) [(more info)](https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055) (env: LLAMA_ARG_SWA_FULL)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1450,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--ubatch-size",
+      "section": "common params",
+      "spellings": [
+        "-ub",
+        "--ubatch-size"
+      ],
+      "long_spellings": [
+        "--ubatch-size"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_UBATCH",
+      "default": "512",
+      "description": "physical maximum batch size (default: 512) (env: LLAMA_ARG_UBATCH)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1450,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Spelling and env accepted; physical-batch semantics equivalence is owned by #1450.",
+      "divergence": [],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--ubatch-size"
+        ],
+        "env": "LLAMA_ARG_UBATCH",
+        "env_binding": "clap"
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--yarn-attn-factor",
+      "section": "common params",
+      "spellings": [
+        "--yarn-attn-factor"
+      ],
+      "long_spellings": [
+        "--yarn-attn-factor"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_YARN_ATTN_FACTOR",
+      "default": "-1.00",
+      "description": "YaRN: scale sqrt(t) or attention magnitude (default: -1.00) (env: LLAMA_ARG_YARN_ATTN_FACTOR)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1450,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--yarn-beta-fast",
+      "section": "common params",
+      "spellings": [
+        "--yarn-beta-fast"
+      ],
+      "long_spellings": [
+        "--yarn-beta-fast"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_YARN_BETA_FAST",
+      "default": "-1.00",
+      "description": "YaRN: low correction dim or beta (default: -1.00) (env: LLAMA_ARG_YARN_BETA_FAST)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1450,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--yarn-beta-slow",
+      "section": "common params",
+      "spellings": [
+        "--yarn-beta-slow"
+      ],
+      "long_spellings": [
+        "--yarn-beta-slow"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_YARN_BETA_SLOW",
+      "default": "-1.00",
+      "description": "YaRN: high correction dim or alpha (default: -1.00) (env: LLAMA_ARG_YARN_BETA_SLOW)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1450,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--yarn-ext-factor",
+      "section": "common params",
+      "spellings": [
+        "--yarn-ext-factor"
+      ],
+      "long_spellings": [
+        "--yarn-ext-factor"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_YARN_EXT_FACTOR",
+      "default": "-1.00, 0.0 = full interpolation",
+      "description": "YaRN: extrapolation mix factor (default: -1.00, 0.0 = full interpolation) (env: LLAMA_ARG_YARN_EXT_FACTOR)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1450,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--yarn-orig-ctx",
+      "section": "common params",
+      "spellings": [
+        "--yarn-orig-ctx"
+      ],
+      "long_spellings": [
+        "--yarn-orig-ctx"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_YARN_ORIG_CTX",
+      "default": "0 = model training context size",
+      "description": "YaRN: original context size of model (default: 0 = model training context size) (env: LLAMA_ARG_YARN_ORIG_CTX)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1450,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:cache_prompt",
+      "field": "cache_prompt",
+      "aliases": [],
+      "parent": null,
+      "field_type": "bool",
+      "description": "Re-use KV cache from a previous request if possible. This way the common prefix does not have to be re-processed, only the suffix that differs between the requests",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1453,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:n_cache_reuse",
+      "field": "n_cache_reuse",
+      "aliases": [],
+      "parent": null,
+      "field_type": "num",
+      "description": "Min chunk size to attempt reusing from the cache via KV shifting. See --cache-reuse arg",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1453,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:n_discard",
+      "field": "n_discard",
+      "aliases": [],
+      "parent": null,
+      "field_type": "num",
+      "description": "Number of tokens after n_keep that may be discarded when shifting context (0 = half context)",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1450,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:n_keep",
+      "field": "n_keep",
+      "aliases": [],
+      "parent": null,
+      "field_type": "num",
+      "description": "Specify the number of tokens from the initial prompt to retain when context size is exceeded. Use -1 to retain all tokens from the prompt",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1450,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    }
+  ]
+}

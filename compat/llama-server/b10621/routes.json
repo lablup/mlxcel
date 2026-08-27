@@ -1,0 +1,715 @@
+{
+  "schema_version": 3,
+  "area": "routes",
+  "entries": [
+    {
+      "kind": "option",
+      "id": "--spm-infill",
+      "section": "example-specific params",
+      "spellings": [
+        "--spm-infill"
+      ],
+      "long_spellings": [
+        "--spm-infill"
+      ],
+      "value_hint": null,
+      "env": null,
+      "default": "disabled",
+      "description": "use Suffix/Prefix/Middle pattern for infill (instead of Prefix/Suffix/Middle) as some models prefer this. (default: disabled)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1442,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "GET /health",
+      "method": "GET",
+      "path": "/health",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1441,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "BEHAVIOR DRIFT: mlxcel's /health answers 503 {\"status\":\"no slot available\"} when the request queue is full, which b10621 reports on /slots?fail_on_no_slot instead, and its loading-state body differs from b10621's error envelope. A load balancer ejects mlxcel under load where llama-server stays healthy. #1440 owns it.",
+      "divergence": [
+        "Answers 503 {\"status\":\"no slot available\"} when the request queue is full; b10621 keeps /health healthy under load and reports slot exhaustion on GET /slots?fail_on_no_slot (#1440).",
+        "The model-loading response body differs from b10621's error envelope (#1440)."
+      ],
+      "mlxcel": {
+        "route": "GET /health"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "GET /models",
+      "method": "GET",
+      "path": "/models",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1441,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "Response-field subset: mlxcel emits {id, object, created, owned_by}; b10621 adds aliases, tags, architecture, source, can_remove and the modality lists, and reports owned_by \"llamacpp\". #1438 owns response-field parity.",
+      "divergence": [
+        "Model objects omit b10621's aliases, tags, architecture, source, can_remove and modality lists (#1438).",
+        "Reports owned_by \"user\" where b10621 reports \"llamacpp\" (#1438)."
+      ],
+      "mlxcel": {
+        "route": "GET /models"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "GET /v1/health",
+      "method": "GET",
+      "path": "/v1/health",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1441,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "Kept public under API-key auth (#1430). BEHAVIOR DRIFT: see GET /health. #1440 owns it.",
+      "divergence": [
+        "Answers 503 {\"status\":\"no slot available\"} when the request queue is full; b10621 keeps /health healthy under load and reports slot exhaustion on GET /slots?fail_on_no_slot (#1440).",
+        "The model-loading response body differs from b10621's error envelope (#1440)."
+      ],
+      "mlxcel": {
+        "route": "GET /v1/health"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "GET /v1/models",
+      "method": "GET",
+      "path": "/v1/models",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1441,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "Response-field subset: see GET /models. #1438 owns response-field parity.",
+      "divergence": [
+        "Model objects omit b10621's aliases, tags, architecture, source, can_remove and modality lists (#1438).",
+        "Reports owned_by \"user\" where b10621 reports \"llamacpp\" (#1438)."
+      ],
+      "mlxcel": {
+        "route": "GET /v1/models"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "POST /apply-template",
+      "method": "POST",
+      "path": "/apply-template",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1442,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "POST /chat/completions",
+      "method": "POST",
+      "path": "/chat/completions",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "supported",
+      "issue": 1441,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": null,
+      "divergence": [],
+      "mlxcel": {
+        "route": "POST /chat/completions"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "POST /chat/completions/input_tokens",
+      "method": "POST",
+      "path": "/chat/completions/input_tokens",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1442,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "POST /completion",
+      "method": "POST",
+      "path": "/completion",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1441,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "mlxcel mounts a native (non-OpenAI) handler here; response-envelope parity with the b10621 native schema is owned by #1441.",
+      "divergence": [],
+      "mlxcel": {
+        "route": "POST /completion"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "POST /completions",
+      "method": "POST",
+      "path": "/completions",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1441,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "SEMANTIC COLLISION: mounted, but mlxcel selects the OpenAI-shaped handler while b10621 serves the native llama-server schema. #1441 owns the split.",
+      "divergence": [],
+      "mlxcel": {
+        "route": "POST /completions"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "POST /detokenize",
+      "method": "POST",
+      "path": "/detokenize",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1442,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "Mounted; schema parity owned by #1442.",
+      "divergence": [],
+      "mlxcel": {
+        "route": "POST /detokenize"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "POST /embedding",
+      "method": "POST",
+      "path": "/embedding",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1441,
+      "test": null,
+      "notes": "Legacy native alias, not mounted. #1441 owns it.",
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "POST /embeddings",
+      "method": "POST",
+      "path": "/embeddings",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1441,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "SEMANTIC COLLISION: mounted, but mlxcel selects the OpenAI-shaped handler while b10621 serves the native schema. #1441 owns the split.",
+      "divergence": [],
+      "mlxcel": {
+        "route": "POST /embeddings"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "POST /infill",
+      "method": "POST",
+      "path": "/infill",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1442,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "POST /rerank",
+      "method": "POST",
+      "path": "/rerank",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1452,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "All four aliases mounted (#1430). Mounted with all four b10621 spellings (#1430); the response omits b10621's top-level \"object\": \"list\" and mlxcel uses the Cohere return_documents/document spelling rather than b10621's TEI return_text. #1452 owns envelope parity.",
+      "divergence": [
+        "The response omits b10621's top-level \"object\": \"list\" (#1452).",
+        "Echoing documents uses the Cohere return_documents/document spelling instead of b10621's TEI return_text (#1452)."
+      ],
+      "mlxcel": {
+        "route": "POST /rerank"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "POST /reranking",
+      "method": "POST",
+      "path": "/reranking",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1452,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "All four aliases mounted (#1430). See POST /rerank for the envelope gap. #1452 owns envelope parity.",
+      "divergence": [
+        "The response omits b10621's top-level \"object\": \"list\" (#1452).",
+        "Echoing documents uses the Cohere return_documents/document spelling instead of b10621's TEI return_text (#1452)."
+      ],
+      "mlxcel": {
+        "route": "POST /reranking"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "POST /responses",
+      "method": "POST",
+      "path": "/responses",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "supported",
+      "issue": 1441,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": null,
+      "divergence": [],
+      "mlxcel": {
+        "route": "POST /responses"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "POST /responses/input_tokens",
+      "method": "POST",
+      "path": "/responses/input_tokens",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1442,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "POST /tokenize",
+      "method": "POST",
+      "path": "/tokenize",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1442,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "Mounted; request/response schema parity (add_special, pieces, ...) is owned by #1442.",
+      "divergence": [],
+      "mlxcel": {
+        "route": "POST /tokenize"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "POST /v1/chat/completions",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "supported",
+      "issue": 1441,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": null,
+      "divergence": [],
+      "mlxcel": {
+        "route": "POST /v1/chat/completions"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "POST /v1/chat/completions/input_tokens",
+      "method": "POST",
+      "path": "/v1/chat/completions/input_tokens",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1442,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "POST /v1/completions",
+      "method": "POST",
+      "path": "/v1/completions",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "supported",
+      "issue": 1441,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "OpenAI-shaped on both sides.",
+      "divergence": [],
+      "mlxcel": {
+        "route": "POST /v1/completions"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "POST /v1/embeddings",
+      "method": "POST",
+      "path": "/v1/embeddings",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "supported",
+      "issue": 1441,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "OpenAI-shaped on both sides.",
+      "divergence": [],
+      "mlxcel": {
+        "route": "POST /v1/embeddings"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "POST /v1/messages",
+      "method": "POST",
+      "path": "/v1/messages",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "supported",
+      "issue": 1441,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "Anthropic-messages-compatible on both sides.",
+      "divergence": [],
+      "mlxcel": {
+        "route": "POST /v1/messages"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "POST /v1/messages/count_tokens",
+      "method": "POST",
+      "path": "/v1/messages/count_tokens",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "supported",
+      "issue": 1442,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": null,
+      "divergence": [],
+      "mlxcel": {
+        "route": "POST /v1/messages/count_tokens"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "POST /v1/rerank",
+      "method": "POST",
+      "path": "/v1/rerank",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1452,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "All four aliases mounted (#1430). See POST /rerank for the envelope gap. #1452 owns envelope parity.",
+      "divergence": [
+        "The response omits b10621's top-level \"object\": \"list\" (#1452).",
+        "Echoing documents uses the Cohere return_documents/document spelling instead of b10621's TEI return_text (#1452)."
+      ],
+      "mlxcel": {
+        "route": "POST /v1/rerank"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "POST /v1/reranking",
+      "method": "POST",
+      "path": "/v1/reranking",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1452,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "All four aliases mounted (#1430). See POST /rerank for the envelope gap. #1452 owns envelope parity.",
+      "divergence": [
+        "The response omits b10621's top-level \"object\": \"list\" (#1452).",
+        "Echoing documents uses the Cohere return_documents/document spelling instead of b10621's TEI return_text (#1452)."
+      ],
+      "mlxcel": {
+        "route": "POST /v1/reranking"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "POST /v1/responses",
+      "method": "POST",
+      "path": "/v1/responses",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "supported",
+      "issue": 1441,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": null,
+      "divergence": [],
+      "mlxcel": {
+        "route": "POST /v1/responses"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "POST /v1/responses/input_tokens",
+      "method": "POST",
+      "path": "/v1/responses/input_tokens",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1442,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:n_cmpl",
+      "field": "n_cmpl",
+      "aliases": [
+        "n"
+      ],
+      "parent": null,
+      "field_type": "num",
+      "description": "Number of completions to generate. If the input has multiple prompts, total outputs will be N prompts times n_cmpl",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1441,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:n_indent",
+      "field": "n_indent",
+      "aliases": [],
+      "parent": null,
+      "field_type": "num",
+      "description": "Specify the minimum line indentation for the generated text in number of whitespace characters. Useful for code completion tasks",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1441,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:n_predict",
+      "field": "n_predict",
+      "aliases": [
+        "max_completion_tokens",
+        "max_tokens"
+      ],
+      "parent": null,
+      "field_type": "num",
+      "description": "Set the maximum number of tokens to predict. When 0, no tokens will be generated but the prompt is evaluated into the cache",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1441,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "VALUE-DOMAIN MISMATCH: NativeCompletionRequest declares n_predict as Option<usize>, so b10621's documented -1 (infinity) is rejected during deserialization. The max_tokens / max_completion_tokens aliases are honored on the OpenAI routes, not here. #1441 owns it.",
+      "divergence": [],
+      "mlxcel": {
+        "field": "n_predict"
+      }
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:response_fields",
+      "field": "response_fields",
+      "aliases": [],
+      "parent": null,
+      "field_type": "json",
+      "description": "A list of response fields to return. Missing fields are omitted without error. Fields with a slash are unnested (e.g. generation_settings/n_predict moves n_predict to the root)",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1441,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:return_progress",
+      "field": "return_progress",
+      "aliases": [],
+      "parent": null,
+      "field_type": "bool",
+      "description": "Include prompt processing progress events in stream mode",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1441,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:return_tokens",
+      "field": "return_tokens",
+      "aliases": [],
+      "parent": null,
+      "field_type": "bool",
+      "description": "Return the raw generated token ids in the `tokens` field",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1441,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:stream",
+      "field": "stream",
+      "aliases": [],
+      "parent": null,
+      "field_type": "bool",
+      "description": "Allows receiving each predicted token in real-time instead of waiting for the completion to finish",
+      "discovery": "source-schema-declaration",
+      "state": "supported",
+      "issue": 1441,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": null,
+      "divergence": [],
+      "mlxcel": {
+        "field": "stream"
+      }
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:stream_options",
+      "field": "stream_options",
+      "aliases": [],
+      "parent": null,
+      "field_type": "nested",
+      "description": "Whether to include usage information in the stream",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1441,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:stream_options.include_usage",
+      "field": "include_usage",
+      "aliases": [],
+      "parent": "stream_options",
+      "field_type": "bool",
+      "description": null,
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1441,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:t_max_predict_ms",
+      "field": "t_max_predict_ms",
+      "aliases": [],
+      "parent": null,
+      "field_type": "num",
+      "description": "Set a time limit in milliseconds for the prediction phase. The timeout triggers if generation exceeds this time (measured since the first token) and a newline has been generated. Useful for FIM applications",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1441,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:timings_per_token",
+      "field": "timings_per_token",
+      "aliases": [],
+      "parent": null,
+      "field_type": "bool",
+      "description": "Include prompt processing and text generation speed information in each response",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1441,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:verbose",
+      "field": "verbose",
+      "aliases": [],
+      "parent": null,
+      "field_type": "bool",
+      "description": "Include __verbose field in the response with additional debug information",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1441,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    }
+  ]
+}

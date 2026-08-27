@@ -35,6 +35,7 @@ Current GitHub-facing docs:
 19. `mtp-policy-api.md` - the supported read interface for the adaptive B=1 MTP verdict (`GET /v1/internal/mtp-policy`): the response body, the four states, the unavailable reasons, and the schema versioning and compatibility policy.
 20. `code-guidelines.md` - the file-size and module-split thresholds, including when to extract a `<name>_helpers.rs` and when inline tests move to a sibling `_tests.rs`, the `// Used by:` annotation convention for shared functions, the JIT kernel rule that every varying input dtype must appear in `template_args` because CUDA keys the compiled-module cache on it, and the `HashMap` iteration-order rule covering what counts as an order-sensitive consumer, why a stable sort on a non-total key does not pin the result, the fresh-map-per-iteration testing requirement, and why no static check enforces it.
 21. `embeddings.md` - the `/v1/embeddings` and `/v1/rerank` endpoints plus `mlxcel embed` and `mlxcel rerank`: embedding and reranker detection, pooling and scoring, multimodal and late-interaction inputs, request/response schemas, server flags, error codes, and family-registration guidance.
+22. `llama-server-compat.md` - the verified llama-server b10621 compatibility boundary: how to read the machine-readable manifest under `compat/llama-server/b10621/`, the compatibility-policy states, the area sharding used by epic #1431, the CI gates, and the deterministic regeneration procedure.
 
 ## Architecture Decision Records
 

@@ -699,6 +699,23 @@ verify-kernel-dtype-keys: ## Assert every CUDA JIT kernel launch keys its cache 
 	@echo "$(CYAN)[verify] kernel dtype cache keys...$(RESET)"
 	@python3 scripts/ci/check_kernel_dtype_keys.py
 
+# Offline structural half of the llama-server b10621 compatibility gate
+# (issue #1443, epic #1431): validates the checked-in manifest under
+# compat/llama-server/b10621/ without network or the b10621 archive. The
+# `llama-compat manifest` CI job runs the same script with
+# --check-issues-open added (it has a GH token; a local run may not). The
+# binary-facing half runs inside `verify-test` as
+# tests/llama_compat_manifest.rs and src/server/llama_compat_tests.rs.
+# check_llama_compat_manifest_test.sh is the validator's own negative
+# coverage: it mutates a throwaway copy of the manifest and asserts the gate
+# rejects it, so the rules keep failing on a bad manifest rather than only
+# passing on a good one.
+.PHONY: verify-llama-compat
+verify-llama-compat: ## Assert the llama-server b10621 compatibility manifest is structurally valid (issue #1443)
+	@echo "$(CYAN)[verify] llama-server b10621 compatibility manifest...$(RESET)"
+	@python3 scripts/ci/check_llama_compat_manifest.py
+	@bash scripts/ci/check_llama_compat_manifest_test.sh
+
 .PHONY: bump-version
 bump-version: ## Release: set every version-tracking crate to VERSION and sync Cargo.lock (make bump-version VERSION=0.5.0)
 	@test -n "$(VERSION)" || { echo "$(RED)usage: make bump-version VERSION=0.5.0$(RESET)"; exit 1; }
@@ -707,7 +724,7 @@ bump-version: ## Release: set every version-tracking crate to VERSION and sync C
 	@$(MAKE) --no-print-directory verify-versions
 
 .PHONY: verify
-verify: verify-versions verify-kernel-dtype-keys verify-fmt verify-clippy verify-test ## Run the full CI-faithful gate locally (recommended before push)
+verify: verify-versions verify-kernel-dtype-keys verify-llama-compat verify-fmt verify-clippy verify-test ## Run the full CI-faithful gate locally (recommended before push)
 	@echo "$(GREEN)[verify] OK: matches the nightly-verify GitHub Actions job$(RESET)"
 
 .PHONY: verify-clean

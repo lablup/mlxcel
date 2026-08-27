@@ -1,0 +1,1197 @@
+{
+  "schema_version": 3,
+  "area": "speculative",
+  "entries": [
+    {
+      "kind": "option",
+      "id": "--draft",
+      "section": "speculative params",
+      "spellings": [
+        "--draft",
+        "--draft-n",
+        "--draft-max"
+      ],
+      "long_spellings": [
+        "--draft",
+        "--draft-n",
+        "--draft-max"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_DRAFT_MAX",
+      "default": null,
+      "description": "the argument has been removed. use --spec-draft-n-max or --spec-ngram-mod-n-max (env: LLAMA_ARG_DRAFT_MAX)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Accepted (--draft, --draft-max; default 16) with the canonical env. b10621 marks this spelling family as removed in favor of --spec-draft-n-max / --spec-ngram-mod-n-max; #1433 owns the mapping onto MTP/DFlash.",
+      "divergence": [],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--draft",
+          "--draft-max"
+        ],
+        "env": "LLAMA_ARG_DRAFT_MAX",
+        "env_binding": "clap",
+        "defaults": [
+          "16"
+        ]
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--draft-min",
+      "section": "speculative params",
+      "spellings": [
+        "--draft-min",
+        "--draft-n-min"
+      ],
+      "long_spellings": [
+        "--draft-min",
+        "--draft-n-min"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_DRAFT_MIN",
+      "default": null,
+      "description": "the argument has been removed. use --spec-draft-n-min or --spec-ngram-mod-n-min (env: LLAMA_ARG_DRAFT_MIN)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--lookup-cache-dynamic",
+      "section": "example-specific params",
+      "spellings": [
+        "-lcd",
+        "--lookup-cache-dynamic"
+      ],
+      "long_spellings": [
+        "--lookup-cache-dynamic"
+      ],
+      "value_hint": "FNAME",
+      "env": null,
+      "default": null,
+      "description": "path to dynamic lookup cache to use for lookup decoding (updated by generation)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--lookup-cache-static",
+      "section": "example-specific params",
+      "spellings": [
+        "-lcs",
+        "--lookup-cache-static"
+      ],
+      "long_spellings": [
+        "--lookup-cache-static"
+      ],
+      "value_hint": "FNAME",
+      "env": null,
+      "default": null,
+      "description": "path to static lookup cache to use for lookup decoding (not updated by generation)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-backend-sampling",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-draft-backend-sampling",
+        "--no-spec-draft-backend-sampling"
+      ],
+      "long_spellings": [
+        "--spec-draft-backend-sampling",
+        "--no-spec-draft-backend-sampling"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_SPEC_DRAFT_BACKEND_SAMPLING",
+      "default": "enabled",
+      "description": "offload draft sampling to the backend (default: enabled) (env: LLAMA_ARG_SPEC_DRAFT_BACKEND_SAMPLING)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-cpu-mask",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-draft-cpu-mask",
+        "-Cd",
+        "--cpu-mask-draft"
+      ],
+      "long_spellings": [
+        "--spec-draft-cpu-mask",
+        "--cpu-mask-draft"
+      ],
+      "value_hint": "M",
+      "env": null,
+      "default": "same as --cpu-mask",
+      "description": "Draft model CPU affinity mask. Complements cpu-range-draft (default: same as --cpu-mask)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-cpu-mask-batch",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-draft-cpu-mask-batch",
+        "-Cbd",
+        "--cpu-mask-batch-draft"
+      ],
+      "long_spellings": [
+        "--spec-draft-cpu-mask-batch",
+        "--cpu-mask-batch-draft"
+      ],
+      "value_hint": "M",
+      "env": null,
+      "default": "same as --cpu-mask",
+      "description": "Draft model CPU affinity mask. Complements cpu-range-draft (default: same as --cpu-mask)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-cpu-moe",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-draft-cpu-moe",
+        "-cmoed",
+        "--cpu-moe-draft"
+      ],
+      "long_spellings": [
+        "--spec-draft-cpu-moe",
+        "--cpu-moe-draft"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_SPEC_DRAFT_CPU_MOE",
+      "default": null,
+      "description": "keep all Mixture of Experts (MoE) weights in the CPU for the draft model (env: LLAMA_ARG_SPEC_DRAFT_CPU_MOE)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-cpu-range",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-draft-cpu-range",
+        "-Crd",
+        "--cpu-range-draft"
+      ],
+      "long_spellings": [
+        "--spec-draft-cpu-range",
+        "--cpu-range-draft"
+      ],
+      "value_hint": "lo-hi",
+      "env": null,
+      "default": null,
+      "description": "Ranges of CPUs for affinity. Complements --cpu-mask-draft",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-cpu-strict",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-draft-cpu-strict",
+        "--cpu-strict-draft"
+      ],
+      "long_spellings": [
+        "--spec-draft-cpu-strict",
+        "--cpu-strict-draft"
+      ],
+      "value_hint": "<0|1>",
+      "env": null,
+      "default": "same as --cpu-strict",
+      "description": "Use strict CPU placement for draft model (default: same as --cpu-strict)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-cpu-strict-batch",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-draft-cpu-strict-batch",
+        "--cpu-strict-batch-draft"
+      ],
+      "long_spellings": [
+        "--spec-draft-cpu-strict-batch",
+        "--cpu-strict-batch-draft"
+      ],
+      "value_hint": "<0|1>",
+      "env": null,
+      "default": "--cpu-strict-draft",
+      "description": "Use strict CPU placement for draft model (default: --cpu-strict-draft)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-device",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-draft-device",
+        "-devd",
+        "--device-draft"
+      ],
+      "long_spellings": [
+        "--spec-draft-device",
+        "--device-draft"
+      ],
+      "value_hint": "<dev1,dev2,..>",
+      "env": null,
+      "default": null,
+      "description": "comma-separated list of devices to use for offloading the draft model (none = don't offload) use --list-devices to see a list of available devices",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-hf",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-draft-hf",
+        "-hfd",
+        "-hfrd",
+        "--hf-repo-draft"
+      ],
+      "long_spellings": [
+        "--spec-draft-hf",
+        "--hf-repo-draft"
+      ],
+      "value_hint": "<user>/<model>[:quant]",
+      "env": "LLAMA_ARG_SPEC_DRAFT_HF_REPO",
+      "default": "unused",
+      "description": "Same as --hf-repo, but for the draft model (default: unused) (env: LLAMA_ARG_SPEC_DRAFT_HF_REPO)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-model",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-draft-model",
+        "-md",
+        "--model-draft"
+      ],
+      "long_spellings": [
+        "--spec-draft-model",
+        "--model-draft"
+      ],
+      "value_hint": "FNAME",
+      "env": "LLAMA_ARG_SPEC_DRAFT_MODEL",
+      "default": "unused",
+      "description": "draft model for speculative decoding (default: unused) (env: LLAMA_ARG_SPEC_DRAFT_MODEL)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "--model-draft accepted with the canonical env; the --spec-draft-model canonical spelling is not. Draft-model semantics map onto MTP/DFlash checkpoints, owned by #1433.",
+      "divergence": [],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--model-draft"
+        ],
+        "env": "LLAMA_ARG_SPEC_DRAFT_MODEL",
+        "env_binding": "clap"
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-n-cpu-moe",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-draft-n-cpu-moe",
+        "--spec-draft-ncmoe",
+        "-ncmoed",
+        "--n-cpu-moe-draft"
+      ],
+      "long_spellings": [
+        "--spec-draft-n-cpu-moe",
+        "--spec-draft-ncmoe",
+        "--n-cpu-moe-draft"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_SPEC_DRAFT_N_CPU_MOE",
+      "default": null,
+      "description": "keep the Mixture of Experts (MoE) weights of the first N layers in the CPU for the draft model (env: LLAMA_ARG_SPEC_DRAFT_N_CPU_MOE)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-n-max",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-draft-n-max"
+      ],
+      "long_spellings": [
+        "--spec-draft-n-max"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_SPEC_DRAFT_N_MAX",
+      "default": "3",
+      "description": "number of tokens to draft for speculative decoding (default: 3) (env: LLAMA_ARG_SPEC_DRAFT_N_MAX)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-n-min",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-draft-n-min"
+      ],
+      "long_spellings": [
+        "--spec-draft-n-min"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_SPEC_DRAFT_N_MIN",
+      "default": "0",
+      "description": "minimum number of draft tokens to use for speculative decoding (default: 0) (env: LLAMA_ARG_SPEC_DRAFT_N_MIN)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-ngl",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-draft-ngl",
+        "-ngld",
+        "--gpu-layers-draft",
+        "--n-gpu-layers-draft"
+      ],
+      "long_spellings": [
+        "--spec-draft-ngl",
+        "--gpu-layers-draft",
+        "--n-gpu-layers-draft"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_N_GPU_LAYERS_DRAFT",
+      "default": "auto",
+      "description": "max. number of draft model layers to store in VRAM, either an exact number, 'auto', or 'all' (default: auto) (env: LLAMA_ARG_N_GPU_LAYERS_DRAFT)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-override-tensor",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-draft-override-tensor",
+        "-otd",
+        "--override-tensor-draft"
+      ],
+      "long_spellings": [
+        "--spec-draft-override-tensor",
+        "--override-tensor-draft"
+      ],
+      "value_hint": "<tensor name pattern>=<buffer type>,...",
+      "env": null,
+      "default": null,
+      "description": "override tensor buffer type for draft model",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-p-min",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-draft-p-min",
+        "--draft-p-min"
+      ],
+      "long_spellings": [
+        "--spec-draft-p-min",
+        "--draft-p-min"
+      ],
+      "value_hint": "P",
+      "env": "LLAMA_ARG_SPEC_DRAFT_P_MIN",
+      "default": "0.00",
+      "description": "minimum speculative decoding probability (greedy) (default: 0.00) (env: LLAMA_ARG_SPEC_DRAFT_P_MIN)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-p-split",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-draft-p-split",
+        "--draft-p-split"
+      ],
+      "long_spellings": [
+        "--spec-draft-p-split",
+        "--draft-p-split"
+      ],
+      "value_hint": "P",
+      "env": "LLAMA_ARG_SPEC_DRAFT_P_SPLIT",
+      "default": "0.10",
+      "description": "speculative decoding split probability (default: 0.10) (env: LLAMA_ARG_SPEC_DRAFT_P_SPLIT)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-poll",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-draft-poll",
+        "--poll-draft"
+      ],
+      "long_spellings": [
+        "--spec-draft-poll",
+        "--poll-draft"
+      ],
+      "value_hint": "<0|1>",
+      "env": null,
+      "default": "same as --poll",
+      "description": "Use polling to wait for draft model work (default: same as --poll)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-poll-batch",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-draft-poll-batch",
+        "--poll-batch-draft"
+      ],
+      "long_spellings": [
+        "--spec-draft-poll-batch",
+        "--poll-batch-draft"
+      ],
+      "value_hint": "<0|1>",
+      "env": null,
+      "default": "--poll-draft",
+      "description": "Use polling to wait for draft model work (default: --poll-draft)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-prio",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-draft-prio",
+        "--prio-draft"
+      ],
+      "long_spellings": [
+        "--spec-draft-prio",
+        "--prio-draft"
+      ],
+      "value_hint": "N",
+      "env": null,
+      "default": "0",
+      "description": "set draft process/thread priority : 0-normal, 1-medium, 2-high, 3-realtime (default: 0)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-prio-batch",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-draft-prio-batch",
+        "--prio-batch-draft"
+      ],
+      "long_spellings": [
+        "--spec-draft-prio-batch",
+        "--prio-batch-draft"
+      ],
+      "value_hint": "N",
+      "env": null,
+      "default": "0",
+      "description": "set draft process/thread priority : 0-normal, 1-medium, 2-high, 3-realtime (default: 0)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-threads",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-draft-threads",
+        "-td",
+        "--threads-draft"
+      ],
+      "long_spellings": [
+        "--spec-draft-threads",
+        "--threads-draft"
+      ],
+      "value_hint": "N",
+      "env": null,
+      "default": "same as --threads",
+      "description": "number of threads to use during generation (default: same as --threads)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-threads-batch",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-draft-threads-batch",
+        "-tbd",
+        "--threads-batch-draft"
+      ],
+      "long_spellings": [
+        "--spec-draft-threads-batch",
+        "--threads-batch-draft"
+      ],
+      "value_hint": "N",
+      "env": null,
+      "default": "same as --threads-draft",
+      "description": "number of threads to use during batch and prompt processing (default: same as --threads-draft)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-type-k",
+      "section": "common params",
+      "spellings": [
+        "--spec-draft-type-k",
+        "-ctkd",
+        "--cache-type-k-draft"
+      ],
+      "long_spellings": [
+        "--spec-draft-type-k",
+        "--cache-type-k-draft"
+      ],
+      "value_hint": "TYPE",
+      "env": "LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_K",
+      "default": "f16",
+      "description": "KV cache data type for K for the draft model allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1 (default: f16) (env: LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_K)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-draft-type-v",
+      "section": "common params",
+      "spellings": [
+        "--spec-draft-type-v",
+        "-ctvd",
+        "--cache-type-v-draft"
+      ],
+      "long_spellings": [
+        "--spec-draft-type-v",
+        "--cache-type-v-draft"
+      ],
+      "value_hint": "TYPE",
+      "env": "LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_V",
+      "default": "f16",
+      "description": "KV cache data type for V for the draft model allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1 (default: f16) (env: LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_V)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-ngram-map-k-min-hits",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-ngram-map-k-min-hits"
+      ],
+      "long_spellings": [
+        "--spec-ngram-map-k-min-hits"
+      ],
+      "value_hint": "N",
+      "env": null,
+      "default": "1",
+      "description": "minimum hits for ngram-map-k speculative decoding (default: 1)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-ngram-map-k-size-m",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-ngram-map-k-size-m"
+      ],
+      "long_spellings": [
+        "--spec-ngram-map-k-size-m"
+      ],
+      "value_hint": "N",
+      "env": null,
+      "default": "48",
+      "description": "ngram size M for ngram-map-k speculative decoding, length of draft m-gram (default: 48)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-ngram-map-k-size-n",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-ngram-map-k-size-n"
+      ],
+      "long_spellings": [
+        "--spec-ngram-map-k-size-n"
+      ],
+      "value_hint": "N",
+      "env": null,
+      "default": "12",
+      "description": "ngram size N for ngram-map-k speculative decoding, length of lookup n-gram (default: 12)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-ngram-map-k4v-min-hits",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-ngram-map-k4v-min-hits"
+      ],
+      "long_spellings": [
+        "--spec-ngram-map-k4v-min-hits"
+      ],
+      "value_hint": "N",
+      "env": null,
+      "default": "1",
+      "description": "minimum hits for ngram-map-k4v speculative decoding (default: 1)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-ngram-map-k4v-size-m",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-ngram-map-k4v-size-m"
+      ],
+      "long_spellings": [
+        "--spec-ngram-map-k4v-size-m"
+      ],
+      "value_hint": "N",
+      "env": null,
+      "default": "48",
+      "description": "ngram size M for ngram-map-k4v speculative decoding, length of draft m-gram (default: 48)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-ngram-map-k4v-size-n",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-ngram-map-k4v-size-n"
+      ],
+      "long_spellings": [
+        "--spec-ngram-map-k4v-size-n"
+      ],
+      "value_hint": "N",
+      "env": null,
+      "default": "12",
+      "description": "ngram size N for ngram-map-k4v speculative decoding, length of lookup n-gram (default: 12)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-ngram-min-hits",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-ngram-min-hits"
+      ],
+      "long_spellings": [
+        "--spec-ngram-min-hits"
+      ],
+      "value_hint": "N",
+      "env": null,
+      "default": null,
+      "description": "the argument has been removed. use the respective --spec-ngram-*-min-hits",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-ngram-mod-n-match",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-ngram-mod-n-match"
+      ],
+      "long_spellings": [
+        "--spec-ngram-mod-n-match"
+      ],
+      "value_hint": "N",
+      "env": null,
+      "default": "24",
+      "description": "ngram-mod lookup length (default: 24)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-ngram-mod-n-max",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-ngram-mod-n-max"
+      ],
+      "long_spellings": [
+        "--spec-ngram-mod-n-max"
+      ],
+      "value_hint": "N",
+      "env": null,
+      "default": "64",
+      "description": "maximum number of ngram tokens to use for ngram-based speculative decoding (default: 64)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-ngram-mod-n-min",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-ngram-mod-n-min"
+      ],
+      "long_spellings": [
+        "--spec-ngram-mod-n-min"
+      ],
+      "value_hint": "N",
+      "env": null,
+      "default": "48",
+      "description": "minimum number of ngram tokens to use for ngram-based speculative decoding (default: 48)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-ngram-simple-min-hits",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-ngram-simple-min-hits"
+      ],
+      "long_spellings": [
+        "--spec-ngram-simple-min-hits"
+      ],
+      "value_hint": "N",
+      "env": null,
+      "default": "1",
+      "description": "minimum hits for ngram-simple speculative decoding (default: 1)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-ngram-simple-size-m",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-ngram-simple-size-m"
+      ],
+      "long_spellings": [
+        "--spec-ngram-simple-size-m"
+      ],
+      "value_hint": "N",
+      "env": null,
+      "default": "48",
+      "description": "ngram size M for ngram-simple speculative decoding, length of draft m-gram (default: 48)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-ngram-simple-size-n",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-ngram-simple-size-n"
+      ],
+      "long_spellings": [
+        "--spec-ngram-simple-size-n"
+      ],
+      "value_hint": "N",
+      "env": null,
+      "default": "12",
+      "description": "ngram size N for ngram-simple speculative decoding, length of lookup n-gram (default: 12)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-ngram-size-m",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-ngram-size-m"
+      ],
+      "long_spellings": [
+        "--spec-ngram-size-m"
+      ],
+      "value_hint": "N",
+      "env": null,
+      "default": null,
+      "description": "the argument has been removed. use the respective --spec-ngram-*-size-m",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-ngram-size-n",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-ngram-size-n"
+      ],
+      "long_spellings": [
+        "--spec-ngram-size-n"
+      ],
+      "value_hint": "N",
+      "env": null,
+      "default": null,
+      "description": "the argument has been removed. use the respective --spec-ngram-*-size-n or --spec-ngram-mod-n-match",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--spec-type",
+      "section": "speculative params",
+      "spellings": [
+        "--spec-type"
+      ],
+      "long_spellings": [
+        "--spec-type"
+      ],
+      "value_hint": "none,draft-simple,draft-eagle3,draft-mtp,draft-dflash,draft-dspark,ngram-simple,ngram-map-k,ngram-map-k4v,ngram-mod,ngram-cache",
+      "env": "LLAMA_ARG_SPEC_TYPE",
+      "default": "none",
+      "description": "comma-separated list of types of speculative decoding to use (default: none) (env: LLAMA_ARG_SPEC_TYPE)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:speculative.n_max",
+      "field": "speculative.n_max",
+      "aliases": [],
+      "parent": null,
+      "field_type": "num",
+      "description": "Maximum number of tokens to draft during speculative decoding",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:speculative.n_min",
+      "field": "speculative.n_min",
+      "aliases": [],
+      "parent": null,
+      "field_type": "num",
+      "description": "Minimum number of draft tokens to use for speculative decoding",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:speculative.ngram_min_hits",
+      "field": "speculative.ngram_min_hits",
+      "aliases": [],
+      "parent": null,
+      "field_type": "num",
+      "description": "Minimum hits at ngram lookup for mgram to be proposed",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:speculative.ngram_size_m",
+      "field": "speculative.ngram_size_m",
+      "aliases": [],
+      "parent": null,
+      "field_type": "num",
+      "description": "Mgram size for speculative tokens in ngram-based speculative decoding",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:speculative.ngram_size_n",
+      "field": "speculative.ngram_size_n",
+      "aliases": [],
+      "parent": null,
+      "field_type": "num",
+      "description": "Ngram size for lookup in ngram-based speculative decoding",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:speculative.p_min",
+      "field": "speculative.p_min",
+      "aliases": [],
+      "parent": null,
+      "field_type": "num",
+      "description": "Minimum speculative decoding probability for draft tokens (0 = greedy)",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "native_request_field",
+      "id": "field:speculative.type",
+      "field": "speculative.type",
+      "aliases": [],
+      "parent": null,
+      "field_type": "str",
+      "description": "Speculative decoding method (for debugging and research purposes)",
+      "discovery": "source-schema-declaration",
+      "state": "deferred",
+      "issue": 1433,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    }
+  ]
+}

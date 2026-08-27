@@ -1,0 +1,197 @@
+{
+  "schema_version": 3,
+  "area": "router-models",
+  "entries": [
+    {
+      "kind": "option",
+      "id": "--models-autoload",
+      "section": "example-specific params",
+      "spellings": [
+        "--models-autoload",
+        "--no-models-autoload"
+      ],
+      "long_spellings": [
+        "--models-autoload",
+        "--no-models-autoload"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_MODELS_AUTOLOAD",
+      "default": "enabled",
+      "description": "for router server, whether to automatically load models (default: enabled) (env: LLAMA_ARG_MODELS_AUTOLOAD)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1438,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--models-dir",
+      "section": "example-specific params",
+      "spellings": [
+        "--models-dir"
+      ],
+      "long_spellings": [
+        "--models-dir"
+      ],
+      "value_hint": "PATH",
+      "env": "LLAMA_ARG_MODELS_DIR",
+      "default": "disabled",
+      "description": "directory containing models for the router server (default: disabled) (env: LLAMA_ARG_MODELS_DIR)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1438,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "SEMANTIC COLLISION: mlxcel's --models-dir names the local model-store root used by `mlxcel list`/download, while b10621 uses it to enable router mode over a directory of GGUF files. #1438 owns the reconciliation.",
+      "divergence": [],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--models-dir"
+        ]
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--models-max",
+      "section": "example-specific params",
+      "spellings": [
+        "--models-max"
+      ],
+      "long_spellings": [
+        "--models-max"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_MODELS_MAX",
+      "default": "4, 0 = unlimited",
+      "description": "for router server, maximum number of models to load simultaneously (default: 4, 0 = unlimited) (env: LLAMA_ARG_MODELS_MAX)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1438,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--models-preset",
+      "section": "example-specific params",
+      "spellings": [
+        "--models-preset"
+      ],
+      "long_spellings": [
+        "--models-preset"
+      ],
+      "value_hint": "PATH",
+      "env": "LLAMA_ARG_MODELS_PRESET",
+      "default": "disabled",
+      "description": "path to INI file containing model presets for the router server (default: disabled) (env: LLAMA_ARG_MODELS_PRESET)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1438,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--tags",
+      "section": "example-specific params",
+      "spellings": [
+        "--tags"
+      ],
+      "long_spellings": [
+        "--tags"
+      ],
+      "value_hint": "STRING",
+      "env": "LLAMA_ARG_TAGS",
+      "default": null,
+      "description": "set model tags, comma-separated (informational, not used for routing) (env: LLAMA_ARG_TAGS)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1438,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "DELETE /models",
+      "method": "DELETE",
+      "path": "/models",
+      "source": "tools/server/server.cpp",
+      "condition": "router-mode",
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1438,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "GET /models/sse",
+      "method": "GET",
+      "path": "/models/sse",
+      "source": "tools/server/server.cpp",
+      "condition": "router-mode",
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1438,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "POST /models",
+      "method": "POST",
+      "path": "/models",
+      "source": "tools/server/server.cpp",
+      "condition": "router-mode",
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1438,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "POST /models/load",
+      "method": "POST",
+      "path": "/models/load",
+      "source": "tools/server/server.cpp",
+      "condition": "router-mode",
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1438,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "POST /models/unload",
+      "method": "POST",
+      "path": "/models/unload",
+      "source": "tools/server/server.cpp",
+      "condition": "router-mode",
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1438,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    }
+  ]
+}

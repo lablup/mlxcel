@@ -1,0 +1,252 @@
+{
+  "schema_version": 3,
+  "area": "multimodal-and-audio",
+  "entries": [
+    {
+      "kind": "option",
+      "id": "--image-max-tokens",
+      "section": "example-specific params",
+      "spellings": [
+        "--image-max-tokens"
+      ],
+      "long_spellings": [
+        "--image-max-tokens"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_IMAGE_MAX_TOKENS",
+      "default": "read from model",
+      "description": "maximum number of tokens each image can take, only used by vision models with dynamic resolution (default: read from model) (env: LLAMA_ARG_IMAGE_MAX_TOKENS)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1451,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--image-min-tokens",
+      "section": "example-specific params",
+      "spellings": [
+        "--image-min-tokens"
+      ],
+      "long_spellings": [
+        "--image-min-tokens"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_IMAGE_MIN_TOKENS",
+      "default": "read from model",
+      "description": "minimum number of tokens each image can take, only used by vision models with dynamic resolution (default: read from model) (env: LLAMA_ARG_IMAGE_MIN_TOKENS)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1451,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--media-path",
+      "section": "example-specific params",
+      "spellings": [
+        "--media-path"
+      ],
+      "long_spellings": [
+        "--media-path"
+      ],
+      "value_hint": "PATH",
+      "env": null,
+      "default": "disabled",
+      "description": "directory for loading local media files; files can be accessed via file:// URLs using relative paths (default: disabled)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1451,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--mmproj",
+      "section": "example-specific params",
+      "spellings": [
+        "-mm",
+        "--mmproj"
+      ],
+      "long_spellings": [
+        "--mmproj"
+      ],
+      "value_hint": "FILE",
+      "env": "LLAMA_ARG_MMPROJ",
+      "default": null,
+      "description": "path to a multimodal projector file. see tools/mtmd/README.md note: if -hf is used, this argument can be omitted (env: LLAMA_ARG_MMPROJ)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1451,
+      "test": "tests/llama_compat_manifest.rs",
+      "notes": "Accepted and ignored (hidden): mlxcel loads the vision projector automatically from the checkpoint. #1451 owns projector flag classification.",
+      "divergence": [],
+      "mlxcel": {
+        "accepted_spellings": [
+          "--mmproj"
+        ],
+        "hidden": true
+      }
+    },
+    {
+      "kind": "option",
+      "id": "--mmproj-auto",
+      "section": "example-specific params",
+      "spellings": [
+        "--mmproj-auto",
+        "--no-mmproj",
+        "--no-mmproj-auto"
+      ],
+      "long_spellings": [
+        "--mmproj-auto",
+        "--no-mmproj",
+        "--no-mmproj-auto"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_MMPROJ_AUTO",
+      "default": "enabled",
+      "description": "whether to use multimodal projector file (if available), useful when using -hf (default: enabled) (env: LLAMA_ARG_MMPROJ_AUTO)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1451,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--mmproj-device",
+      "section": "example-specific params",
+      "spellings": [
+        "-mmdev",
+        "--mmproj-device"
+      ],
+      "long_spellings": [
+        "--mmproj-device"
+      ],
+      "value_hint": "DEVICE",
+      "env": "MTMD_BACKEND_DEVICE",
+      "default": null,
+      "description": "device to use for multimodal projector (none = don't offload, default: auto) use --list-devices to see a list of available devices (env: MTMD_BACKEND_DEVICE)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1451,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--mmproj-offload",
+      "section": "example-specific params",
+      "spellings": [
+        "--mmproj-offload",
+        "--no-mmproj-offload"
+      ],
+      "long_spellings": [
+        "--mmproj-offload",
+        "--no-mmproj-offload"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_MMPROJ_OFFLOAD",
+      "default": "enabled",
+      "description": "whether to enable GPU offloading for multimodal projector (default: enabled) (env: LLAMA_ARG_MMPROJ_OFFLOAD)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1451,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--mmproj-url",
+      "section": "example-specific params",
+      "spellings": [
+        "-mmu",
+        "--mmproj-url"
+      ],
+      "long_spellings": [
+        "--mmproj-url"
+      ],
+      "value_hint": "URL",
+      "env": "LLAMA_ARG_MMPROJ_URL",
+      "default": null,
+      "description": "URL to a multimodal projector file. see tools/mtmd/README.md (env: LLAMA_ARG_MMPROJ_URL)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1451,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--mtmd-batch-max-tokens",
+      "section": "example-specific params",
+      "spellings": [
+        "--mtmd-batch-max-tokens"
+      ],
+      "long_spellings": [
+        "--mtmd-batch-max-tokens"
+      ],
+      "value_hint": "N",
+      "env": "LLAMA_ARG_MTMD_BATCH_MAX_TOKENS",
+      "default": "1024",
+      "description": "maximum number of image tokens per batch when encoding images (default: 1024) (env: LLAMA_ARG_MTMD_BATCH_MAX_TOKENS)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1451,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "route",
+      "id": "POST /audio/transcriptions",
+      "method": "POST",
+      "path": "/audio/transcriptions",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1446,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "Mounted, OpenAI-shaped on both sides; shared-route semantics owned by #1446.",
+      "divergence": [],
+      "mlxcel": {
+        "route": "POST /audio/transcriptions"
+      }
+    },
+    {
+      "kind": "route",
+      "id": "POST /v1/audio/transcriptions",
+      "method": "POST",
+      "path": "/v1/audio/transcriptions",
+      "source": "tools/server/server.cpp",
+      "condition": null,
+      "discovery": "source-route-registration",
+      "state": "deferred",
+      "issue": 1446,
+      "test": "src/server/llama_compat_tests.rs",
+      "notes": "Mounted, OpenAI-shaped on both sides; shared-route semantics owned by #1446.",
+      "divergence": [],
+      "mlxcel": {
+        "route": "POST /v1/audio/transcriptions"
+      }
+    }
+  ]
+}

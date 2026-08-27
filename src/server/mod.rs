@@ -105,6 +105,9 @@ pub use startup::{
 pub use state::{AppState, BatchMetrics, Metrics, ModelMediaSupport};
 
 #[cfg(test)]
+mod llama_compat_tests;
+
+#[cfg(test)]
 mod max_tokens_route_tests;
 
 #[cfg(test)]

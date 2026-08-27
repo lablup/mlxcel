@@ -1,0 +1,98 @@
+{
+  "schema_version": 3,
+  "area": "embeddings-and-rerank",
+  "entries": [
+    {
+      "kind": "option",
+      "id": "--embd-normalize",
+      "section": "example-specific params",
+      "spellings": [
+        "--embd-normalize"
+      ],
+      "long_spellings": [
+        "--embd-normalize"
+      ],
+      "value_hint": "N",
+      "env": null,
+      "default": "2",
+      "description": "normalisation for embeddings (default: 2) (-1=none, 0=max absolute int16, 1=taxicab, 2=euclidean, >2=p-norm)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1452,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--embedding",
+      "section": "example-specific params",
+      "spellings": [
+        "--embedding",
+        "--embeddings"
+      ],
+      "long_spellings": [
+        "--embedding",
+        "--embeddings"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_EMBEDDINGS",
+      "default": "disabled",
+      "description": "restrict to only support embedding use case; use only with dedicated embedding models (default: disabled) (env: LLAMA_ARG_EMBEDDINGS)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1452,
+      "test": null,
+      "notes": "mlxcel serves embeddings through dedicated models/endpoints rather than a server-wide restriction flag. #1452 owns the mode semantics.",
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--pooling",
+      "section": "example-specific params",
+      "spellings": [
+        "--pooling"
+      ],
+      "long_spellings": [
+        "--pooling"
+      ],
+      "value_hint": "{none,mean,cls,last,rank}",
+      "env": "LLAMA_ARG_POOLING",
+      "default": null,
+      "description": "pooling type for embeddings, use model default if unspecified (env: LLAMA_ARG_POOLING)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1452,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    },
+    {
+      "kind": "option",
+      "id": "--rerank",
+      "section": "example-specific params",
+      "spellings": [
+        "--rerank",
+        "--reranking"
+      ],
+      "long_spellings": [
+        "--rerank",
+        "--reranking"
+      ],
+      "value_hint": null,
+      "env": "LLAMA_ARG_RERANKING",
+      "default": "disabled",
+      "description": "enable reranking endpoint on server (default: disabled) (env: LLAMA_ARG_RERANKING)",
+      "discovery": "help-entry-head",
+      "state": "deferred",
+      "issue": 1452,
+      "test": null,
+      "notes": null,
+      "divergence": [],
+      "mlxcel": null
+    }
+  ]
+}
