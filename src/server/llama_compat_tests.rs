@@ -32,6 +32,13 @@
 //!   manifest entry fails CI and produces the reviewable diff the manifest
 //!   exists for.
 //!
+//! It also carries the Rust-side copy of one structural rule: an entry whose
+//! `divergence` list is non-empty may not be `supported`. That rule's full
+//! enforcement (shape, wording, guidance) is in the Python validator, but
+//! this file loads every shard anyway, so restating the rule here costs
+//! nothing and keeps `cargo test` from passing a manifest `make verify`
+//! would reject.
+//!
 //! The clap option surface half of the gate lives in
 //! `tests/llama_compat_manifest.rs`; the structural half in
 //! `scripts/ci/check_llama_compat_manifest.py`.
@@ -49,10 +56,11 @@ use crate::tokenizer::MlxcelTokenizer;
 /// Manifest document schema, independent of the pinned llama.cpp release.
 /// Kept in lockstep with `scripts/ci/check_llama_compat_manifest.py`,
 /// `scripts/compat/extract_b10621_manifest.py`, and
-/// `tests/llama_compat_manifest.rs`; bump all four together (issue #1443
-/// follow-up: pin.json's `shards` field changed from a bare name list to a
-/// mapping of shard name to its owning-issue set).
-const MANIFEST_SCHEMA_VERSION: i64 = 2;
+/// `tests/llama_compat_manifest.rs`; bump all four together. Issue #1443
+/// follow-ups: 2 when pin.json's `shards` field changed from a bare name
+/// list to a mapping of shard name to its owning-issue set, 3 when every
+/// entry gained the structured `divergence` list.
+const MANIFEST_SCHEMA_VERSION: i64 = 3;
 
 fn manifest_entries() -> Vec<serde_json::Value> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("compat/llama-server/b10621");
@@ -258,4 +266,36 @@ fn manifest_native_field_claims_match_native_completion_request() {
             }
         }
     }
+}
+
+/// No entry may claim `supported` while recording an externally observable
+/// divergence from b10621. Epic #1431 defines `supported` as "the spelling,
+/// value domain, default, precedence, and externally observable behavior
+/// match", so a non-empty `divergence` contradicts the state outright; the
+/// honest states are `aliased`, `not_applicable` or `deferred`, each with an
+/// owning issue. `scripts/ci/check_llama_compat_manifest.py` is the primary
+/// gate and additionally checks the field's shape; this keeps a `cargo test`
+/// run from passing a manifest that gate would reject.
+#[test]
+fn supported_entries_record_no_divergence_from_b10621() {
+    let mut checked = 0usize;
+    for entry in manifest_entries() {
+        let id = entry["id"].as_str().expect("id");
+        let divergence = entry["divergence"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{id}: every entry must carry a divergence list"));
+        checked += 1;
+        if entry["state"] != "supported" {
+            continue;
+        }
+        assert!(
+            divergence.is_empty(),
+            "{id}: state `supported` with {} recorded divergence(s) {divergence:?}.              An entry that differs from b10621 in externally observable behavior              is `aliased`, `not_applicable`, or `deferred` with the owning issue              named.",
+            divergence.len()
+        );
+    }
+    assert_eq!(
+        checked, 376,
+        "the manifest must hold all 376 b10621 entries (249 options, 53 routes,          74 native request fields)"
+    );
 }

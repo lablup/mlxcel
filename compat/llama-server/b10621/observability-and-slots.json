@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "area": "observability-and-slots",
   "entries": [
     {
@@ -17,10 +17,14 @@
       "default": "disabled",
       "description": "enable prometheus compatible metrics endpoint (default: disabled) (env: LLAMA_ARG_ENDPOINT_METRICS)",
       "discovery": "help-entry-head",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1440,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Flag gates the Prometheus /metrics endpoint on both servers, default disabled, same env binding. Metric-name parity is tracked on the GET /metrics route entry (#1440). With the flag off mlxcel does not mount GET /metrics at all (404) while b10621 mounts it and answers with a diagnostic; --metrics-port is a second enablement path b10621 has no equivalent for. #1440 owns both.",
+      "divergence": [
+        "Exported series carry the mlxcel_ name prefix; b10621 exports llamacpp: prefixed names, so a Prometheus scrape config written for llama-server matches none of them (#1440).",
+        "With the flag off mlxcel does not mount GET /metrics at all (404); b10621 mounts it and answers with the \"This server does not support metrics endpoint. Start it with `--metrics`\" diagnostic (#1440)."
+      ],
       "mlxcel": {
         "accepted_spellings": [
           "--metrics"
@@ -51,6 +55,7 @@
       "issue": 1440,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "FLAG-SEMANTICS DRIFT: b10621's --props gates POST /props (GET /props is always on); mlxcel's --props gates GET /props and has no POST /props. #1440 owns the reconciliation.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--props"
@@ -81,6 +86,7 @@
       "issue": 1440,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -102,6 +108,7 @@
       "issue": 1440,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -125,6 +132,7 @@
       "issue": 1440,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Spelling and default (enabled) match, and LLAMA_ARG_ENDPOINT_SLOTS is honored at runtime (env_fallback_endpoint_slots, src/server/cli_input.rs) rather than as a clap env attribute, so --slots / --no-slots keep precedence over it. #1440 owns /slots response parity.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--slots",
@@ -150,6 +158,7 @@
       "issue": 1440,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "Mounted behind --metrics like b10621; metric-name parity owned by #1440.",
+      "divergence": [],
       "mlxcel": {
         "route": "GET /metrics"
       }
@@ -166,6 +175,7 @@
       "issue": 1440,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "b10621 serves GET /props unconditionally; mlxcel mounts it only behind --props (default off). #1440 owns the reconciliation.",
+      "divergence": [],
       "mlxcel": {
         "route": "GET /props"
       }
@@ -182,6 +192,7 @@
       "issue": 1440,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "Mounted, enabled by default like b10621; response-field parity owned by #1440.",
+      "divergence": [],
       "mlxcel": {
         "route": "GET /slots"
       }
@@ -198,6 +209,7 @@
       "issue": 1440,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -212,6 +224,7 @@
       "issue": 1440,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     }
   ]

@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "area": "speculative",
   "entries": [
     {
@@ -25,6 +25,7 @@
       "issue": 1433,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Accepted (--draft, --draft-max; default 16) with the canonical env. b10621 marks this spelling family as removed in favor of --spec-draft-n-max / --spec-ngram-mod-n-max; #1433 owns the mapping onto MTP/DFlash.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--draft",
@@ -58,6 +59,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -80,6 +82,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -102,6 +105,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -125,6 +129,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -149,6 +154,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -173,6 +179,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -197,6 +204,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -221,6 +229,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -244,6 +253,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -267,6 +277,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -291,6 +302,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -316,6 +328,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -340,6 +353,7 @@
       "issue": 1433,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "--model-draft accepted with the canonical env; the --spec-draft-model canonical spelling is not. Draft-model semantics map onto MTP/DFlash checkpoints, owned by #1433.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--model-draft"
@@ -372,6 +386,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -393,6 +408,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -414,6 +430,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -440,6 +457,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -464,6 +482,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -487,6 +506,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -510,6 +530,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -533,6 +554,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -556,6 +578,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -579,6 +602,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -602,6 +626,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -626,6 +651,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -650,6 +676,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -674,6 +701,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -698,6 +726,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -719,6 +748,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -740,6 +770,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -761,6 +792,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -782,6 +814,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -803,6 +836,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -824,6 +858,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -845,6 +880,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -866,6 +902,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -887,6 +924,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -908,6 +946,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -929,6 +968,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -950,6 +990,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -971,6 +1012,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -992,6 +1034,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -1013,6 +1056,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -1034,6 +1078,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -1049,6 +1094,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -1064,6 +1110,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -1079,6 +1126,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -1094,6 +1142,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -1109,6 +1158,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -1124,6 +1174,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -1139,6 +1190,7 @@
       "issue": 1433,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     }
   ]

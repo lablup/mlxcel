@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "area": "lora-adapters",
   "entries": [
     {
@@ -21,6 +21,7 @@
       "issue": 1439,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Single-adapter --lora works; comma-separated multi-adapter loading and scaling are owned by #1439.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--lora"
@@ -46,6 +47,7 @@
       "issue": 1439,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -67,6 +69,7 @@
       "issue": 1439,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -81,6 +84,7 @@
       "issue": 1439,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -95,6 +99,7 @@
       "issue": 1439,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -110,6 +115,7 @@
       "issue": 1439,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     }
   ]

@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "area": "multimodal-and-audio",
   "entries": [
     {
@@ -21,6 +21,7 @@
       "issue": 1451,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -42,6 +43,7 @@
       "issue": 1451,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -63,6 +65,7 @@
       "issue": 1451,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -85,6 +88,7 @@
       "issue": 1451,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Accepted and ignored (hidden): mlxcel loads the vision projector automatically from the checkpoint. #1451 owns projector flag classification.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--mmproj"
@@ -115,6 +119,7 @@
       "issue": 1451,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -137,6 +142,7 @@
       "issue": 1451,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -160,6 +166,7 @@
       "issue": 1451,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -182,6 +189,7 @@
       "issue": 1451,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -203,6 +211,7 @@
       "issue": 1451,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -217,6 +226,7 @@
       "issue": 1446,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "Mounted, OpenAI-shaped on both sides; shared-route semantics owned by #1446.",
+      "divergence": [],
       "mlxcel": {
         "route": "POST /audio/transcriptions"
       }
@@ -233,6 +243,7 @@
       "issue": 1446,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "Mounted, OpenAI-shaped on both sides; shared-route semantics owned by #1446.",
+      "divergence": [],
       "mlxcel": {
         "route": "POST /v1/audio/transcriptions"
       }

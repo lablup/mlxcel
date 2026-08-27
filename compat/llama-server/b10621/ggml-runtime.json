@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "area": "ggml-runtime",
   "entries": [
     {
@@ -22,6 +22,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -44,6 +45,7 @@
       "issue": 1445,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "VALUE-DOMAIN MISMATCH: same spelling, incompatible accepted values. b10621 accepts GGML quantizer names (f32, f16, bf16, q8_0, q4_0, ...); mlxcel accepts f16 and the TurboQuant modes and rejects GGML quantizer names rather than mapping them to different arithmetic (#1430). #1445 owns the explicit-rejection diagnostics.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--cache-type-k"
@@ -72,6 +74,7 @@
       "issue": 1445,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "VALUE-DOMAIN MISMATCH: see --cache-type-k.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--cache-type-v"
@@ -99,6 +102,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -121,6 +125,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -143,6 +148,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -165,6 +171,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -187,6 +194,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -209,6 +217,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -230,6 +239,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -251,6 +261,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -273,6 +284,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -295,6 +307,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -320,6 +333,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -342,6 +356,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -364,6 +379,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -386,6 +402,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -408,6 +425,7 @@
       "issue": 1445,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Accepted and ignored (hidden). b10621 exposes on/off/auto with observable behavior; #1445 owns explicit rejection or honest mapping.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--flash-attn"
@@ -440,6 +458,7 @@
       "issue": 1445,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "--n-gpu-layers accepted and ignored (hidden); --gpu-layers spelling not accepted. mlxcel always runs fully on the accelerator; #1445 owns the diagnostic.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--n-gpu-layers"
@@ -470,6 +489,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -491,6 +511,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -513,6 +534,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -535,6 +557,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -556,6 +579,7 @@
       "issue": 1445,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Accepted and ignored (hidden). No MLX equivalent; #1445 owns the diagnostic.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--mlock"
@@ -587,6 +611,7 @@
       "issue": 1445,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "--no-mmap accepted and ignored (hidden); --mmap spelling not accepted. #1445 owns the diagnostic.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--no-mmap"
@@ -617,6 +642,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -638,6 +664,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -659,6 +686,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -682,6 +710,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -703,6 +732,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -725,6 +755,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -748,6 +779,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -769,6 +801,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -790,6 +823,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -811,6 +845,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -832,6 +867,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -856,6 +892,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -877,6 +914,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -899,6 +937,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -921,6 +960,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -943,6 +983,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -965,6 +1006,7 @@
       "issue": 1445,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     }
   ]

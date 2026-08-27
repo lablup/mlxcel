@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "area": "router-models",
   "entries": [
     {
@@ -23,6 +23,7 @@
       "issue": 1438,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -44,6 +45,7 @@
       "issue": 1438,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "SEMANTIC COLLISION: mlxcel's --models-dir names the local model-store root used by `mlxcel list`/download, while b10621 uses it to enable router mode over a directory of GGUF files. #1438 owns the reconciliation.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--models-dir"
@@ -69,6 +71,7 @@
       "issue": 1438,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -90,6 +93,7 @@
       "issue": 1438,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -111,6 +115,7 @@
       "issue": 1438,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -125,6 +130,7 @@
       "issue": 1438,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -139,6 +145,7 @@
       "issue": 1438,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -153,6 +160,7 @@
       "issue": 1438,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -167,6 +175,7 @@
       "issue": 1438,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -181,6 +190,7 @@
       "issue": 1438,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     }
   ]

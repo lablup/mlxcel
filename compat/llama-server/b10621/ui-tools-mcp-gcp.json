@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "area": "ui-tools-mcp-gcp",
   "entries": [
     {
@@ -25,6 +25,7 @@
       "issue": 1435,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -46,6 +47,7 @@
       "issue": 1435,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -67,6 +69,7 @@
       "issue": 1435,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -88,6 +91,7 @@
       "issue": 1435,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -109,6 +113,7 @@
       "issue": 1435,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -130,6 +135,7 @@
       "issue": 1435,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -157,6 +163,7 @@
       "issue": 1435,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "--no-webui accepted and ignored (hidden); mlxcel has no Web UI. #1435 owns the classification.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--no-webui"
@@ -188,6 +195,7 @@
       "issue": 1435,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -211,6 +219,7 @@
       "issue": 1435,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -238,6 +247,7 @@
       "issue": 1435,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -252,6 +262,7 @@
       "issue": 1456,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -266,6 +277,7 @@
       "issue": 1435,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -280,6 +292,7 @@
       "issue": 1435,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -294,6 +307,7 @@
       "issue": 1435,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -308,6 +322,7 @@
       "issue": 1456,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -322,6 +337,7 @@
       "issue": 1435,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -336,6 +352,7 @@
       "issue": 1435,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     }
   ]

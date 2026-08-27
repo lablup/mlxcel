@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "area": "authentication",
   "entries": [
     {
@@ -21,6 +21,7 @@
       "issue": 1437,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Single-key authentication works with the same spelling and env. b10621 accepts a comma-separated key list; multi-key semantics are owned by #1437.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--api-key"
@@ -48,6 +49,7 @@
       "issue": 1437,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Flag accepted; file-format parity (one key per line, hash comments) owned by #1437.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--api-key-file"

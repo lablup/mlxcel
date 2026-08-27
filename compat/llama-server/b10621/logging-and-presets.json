@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "area": "logging-and-presets",
   "entries": [
     {
@@ -22,6 +22,7 @@
       "issue": 1448,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -43,6 +44,7 @@
       "issue": 1448,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -64,6 +66,7 @@
       "issue": 1448,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -85,6 +88,7 @@
       "issue": 1448,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -106,6 +110,7 @@
       "issue": 1448,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -127,6 +132,7 @@
       "issue": 1448,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -148,6 +154,7 @@
       "issue": 1448,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -169,6 +176,7 @@
       "issue": 1448,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -190,6 +198,7 @@
       "issue": 1448,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -211,6 +220,7 @@
       "issue": 1448,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -232,6 +242,7 @@
       "issue": 1448,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -252,10 +263,13 @@
       "default": null,
       "description": "print usage and exit",
       "discovery": "help-entry-head",
-      "state": "supported",
-      "issue": null,
+      "state": "deferred",
+      "issue": 1448,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Both binaries print clap-generated help. The b10621 twin spelling --usage is not accepted; -h / --help are.",
+      "divergence": [
+        "The b10621 twin spelling --usage is not accepted; only -h and --help are (#1448)."
+      ],
       "mlxcel": {
         "accepted_spellings": [
           "--help"
@@ -281,6 +295,7 @@
       "issue": 1448,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -302,6 +317,7 @@
       "issue": 1448,
       "test": "tests/llama_compat_manifest.rs",
       "notes": null,
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--log-disable"
@@ -330,6 +346,7 @@
       "issue": 1448,
       "test": "tests/llama_compat_manifest.rs",
       "notes": null,
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--log-file"
@@ -359,6 +376,7 @@
       "issue": 1448,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -380,6 +398,7 @@
       "issue": 1448,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -403,6 +422,7 @@
       "issue": 1448,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -424,6 +444,7 @@
       "issue": 1448,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -444,10 +465,14 @@
       "default": null,
       "description": "Set verbosity level to infinity (i.e. log all messages, useful for debugging)",
       "discovery": "help-entry-head",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1448,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "--verbose accepted; the --log-verbose twin spelling is not, see notes of the owning area issue #1448. RUST_LOG takes precedence over --verbose in mlxcel (EnvFilter::try_from_default_env wins), while b10621's -v is unconditional.",
+      "divergence": [
+        "The b10621 twin spelling --log-verbose is not accepted (#1448).",
+        "RUST_LOG overrides --verbose in mlxcel because EnvFilter::try_from_default_env wins, while b10621's -v is unconditional (#1448)."
+      ],
       "mlxcel": {
         "accepted_spellings": [
           "--verbose"
@@ -479,6 +504,7 @@
       "issue": 1448,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -500,6 +526,7 @@
       "issue": 1448,
       "test": "tests/llama_compat_manifest.rs",
       "notes": null,
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [],
         "accepted_on_one_binary_only": {
@@ -528,6 +555,7 @@
       "issue": 1448,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -549,6 +577,7 @@
       "issue": 1448,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     }
   ]

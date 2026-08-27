@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "area": "chat-templates",
   "entries": [
     {
@@ -21,6 +21,7 @@
       "issue": 1447,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Spelling and env accepted; b10621 also accepts built-in template names and suffix/prefix interaction, owned by #1447.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--chat-template"
@@ -48,6 +49,7 @@
       "issue": 1447,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Custom chat template file loading with the canonical env binding.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--chat-template-file"
@@ -75,6 +77,7 @@
       "issue": 1447,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Spelling accepted and the canonical env is honored at runtime (src/server/chat_template_kwargs.rs); jinja engine behavior parity is owned by #1447.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--chat-template-kwargs"
@@ -106,6 +109,7 @@
       "issue": 1447,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -129,6 +133,7 @@
       "issue": 1447,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Accepted and ignored (hidden): mlxcel always processes templates. #1447 decides whether --no-jinja must disable templating to match b10621.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--jinja"
@@ -160,6 +165,7 @@
       "issue": 1447,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -182,6 +188,7 @@
       "issue": 1447,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -199,10 +206,13 @@
       "default": "-1",
       "description": "token budget for thinking: -1 for unrestricted, 0 for immediate end, N>0 for token budget (default: -1) (env: LLAMA_ARG_THINK_BUDGET)",
       "discovery": "help-entry-head",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1447,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Same -1/0/N semantics; canonical LLAMA_ARG_THINK_BUDGET honored at runtime (clap binds the flag, the env bridge is code, covered by tests/thinking_budget.rs).",
+      "divergence": [
+        "A negative value must be written as --reasoning-budget=-1; the space-separated --reasoning-budget -1 that llama-server accepts is rejected by mlxcel's argv parser (#1447)."
+      ],
       "mlxcel": {
         "accepted_spellings": [
           "--reasoning-budget"
@@ -234,6 +244,7 @@
       "issue": 1447,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -255,6 +266,7 @@
       "issue": 1447,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -276,6 +288,7 @@
       "issue": 1447,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -299,6 +312,7 @@
       "issue": 1447,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -322,6 +336,7 @@
       "issue": 1447,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -344,6 +359,7 @@
       "issue": 1447,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -359,6 +375,7 @@
       "issue": 1447,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -374,6 +391,7 @@
       "issue": 1447,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -389,6 +407,7 @@
       "issue": 1447,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -404,6 +423,7 @@
       "issue": 1447,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -419,6 +439,7 @@
       "issue": 1447,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -434,6 +455,7 @@
       "issue": 1447,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -451,6 +473,7 @@
       "issue": 1447,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -466,6 +489,7 @@
       "issue": 1447,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -481,6 +505,7 @@
       "issue": 1447,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -496,6 +521,7 @@
       "issue": 1447,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "Accepted as a serde alias of thinking_budget_tokens.",
+      "divergence": [],
       "mlxcel": {
         "field": "reasoning_budget_tokens"
       }
@@ -513,6 +539,7 @@
       "issue": 1447,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     }
   ]

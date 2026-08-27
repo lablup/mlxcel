@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "area": "streams-and-realtime",
   "entries": [
     {
@@ -14,6 +14,7 @@
       "issue": 1444,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -28,6 +29,7 @@
       "issue": 1444,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -42,6 +44,7 @@
       "issue": 1444,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -56,6 +59,7 @@
       "issue": 1444,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -71,6 +75,7 @@
       "issue": 1444,
       "test": null,
       "notes": "Realtime reasoning control is owned by #1444.",
+      "divergence": [],
       "mlxcel": null
     }
   ]

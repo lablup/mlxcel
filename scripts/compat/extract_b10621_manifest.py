@@ -52,13 +52,16 @@ Behavior
 --------
 Facts (spellings, sections, env vars, defaults, descriptions, routes,
 schema fields) are re-extracted wholesale. Policy fields (``state``,
-``issue``, ``test``, ``notes``, ``mlxcel``, and any other non-fact key) are
-preserved from the existing shard files, keyed by entry id, and each entry
-is written back to the shard file it currently lives in. Entries that are
-new upstream land in ``_unclassified.json`` with ``state: "unclassified"``,
-which the CI validator rejects, so a nightly bump produces a reviewable
-diff that cannot be merged until a human classifies the additions. Entries
-that disappeared upstream are dropped (visible in the diff).
+``issue``, ``test``, ``notes``, ``divergence``, ``mlxcel``, and any other
+non-fact key) are preserved from the existing shard files, keyed by entry id,
+and each entry is written back to the shard file it currently lives in, with
+its policy keys normalized to the canonical ``NEW_POLICY`` order and any
+policy key the entry is missing backfilled from that skeleton. Entries that
+are new upstream land in ``_unclassified.json`` with ``state:
+"unclassified"``, which the CI validator rejects, so a nightly bump produces
+a reviewable diff that cannot be merged until a human classifies the
+additions. Entries that disappeared upstream are dropped (visible in the
+diff).
 
 ``pin.json``'s ``shards`` map (shard name -> its owning-issue set) is policy
 too, in the same sense as ``mlxcel_baseline``: it is preserved verbatim from
@@ -86,11 +89,12 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
 # Manifest document schema, independent of the pinned llama.cpp release.
-# Bumped to 2 alongside `scripts/ci/check_llama_compat_manifest.py`,
-# `tests/llama_compat_manifest.rs`, and `src/server/llama_compat_tests.rs`
-# when pin.json's `shards` field changed from a bare name list to a mapping
-# of shard name to its owning-issue set (issue #1443 follow-up).
-MANIFEST_SCHEMA_VERSION = 2
+# Bumped alongside `scripts/ci/check_llama_compat_manifest.py`,
+# `tests/llama_compat_manifest.rs`, and `src/server/llama_compat_tests.rs`:
+# 2 when pin.json's `shards` field changed from a bare name list to a mapping
+# of shard name to its owning-issue set, 3 when every entry gained the
+# structured `divergence` list (both issue #1443 follow-ups).
+MANIFEST_SCHEMA_VERSION = 3
 
 PINNED_TAG = "b10621"
 PINNED_BUILD = 10621
@@ -131,12 +135,20 @@ FACT_KEYS = {
     ],
 }
 
-# Policy skeleton stamped onto brand-new upstream entries.
+# Policy skeleton stamped onto brand-new upstream entries. The key ORDER is
+# load-bearing: `main` writes fact keys (in `FACT_KEYS` order) followed by
+# policy keys in the order they appear on disk, and
+# `scripts/ci/check_llama_compat_manifest.py` requires exactly this sequence,
+# so a new entry lands already canonical.
 NEW_POLICY = {
     "state": "unclassified",
     "issue": None,
     "test": None,
     "notes": None,
+    # A list of short strings, each naming one externally observable way
+    # mlxcel differs from b10621 for this entry. Non-empty forbids
+    # `state: "supported"`; see the validator.
+    "divergence": [],
     "mlxcel": None,
 }
 
@@ -588,7 +600,12 @@ def main() -> None:
         entry_id = entry["id"]
         merged = dict(entry)
         if entry_id in policy:
-            merged.update(policy[entry_id])
+            # `NEW_POLICY` first, then the on-disk values: the skeleton fixes
+            # the policy key ORDER (which the validator pins) and backfills a
+            # key an older schema version never wrote, while every value the
+            # entry already carries wins. For a manifest already at the
+            # current schema this is a byte-level no-op.
+            merged.update({**NEW_POLICY, **policy[entry_id]})
             shard = shard_of[entry_id]
         else:
             merged.update(NEW_POLICY)

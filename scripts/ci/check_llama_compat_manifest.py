@@ -31,11 +31,24 @@ Enforced here:
   what makes shard ownership machine-checked rather than prose in
   docs/llama-server-compat.md: two concurrent chains editing one file is
   now a gate failure, not just a merge conflict.
+- Every entry carries exactly the fact keys of its kind plus the six
+  policy keys (``state``, ``issue``, ``test``, ``notes``, ``divergence``,
+  ``mlxcel``), in that order. A misspelled or missing key fails loudly
+  instead of being a silent no-op that nothing downstream ever reads.
 - An entry's ``mlxcel`` claim block only carries keys from a known
   allowlist (``accepted_spellings``, ``accepted_on_one_binary_only``,
   ``env``, ``env_binding``, ``env_test``, ``defaults``, ``hidden``,
-  ``route``, ``field``); an unrecognized key fails loudly instead of being
-  a silent no-op that nothing downstream ever reads.
+  ``route``, ``field``); an unrecognized key fails loudly for the same
+  reason. ``divergence`` is deliberately NOT in that set: it is an
+  entry-level field, so burying it inside the claim block fails too.
+- ``divergence`` is the structured, machine-checked half of what used to
+  live only in ``notes`` prose: a list of short strings, each naming one
+  externally observable way mlxcel differs from b10621 for that entry. A
+  non-empty ``divergence`` makes ``supported`` a hard error. Epic #1431
+  defines ``supported`` as "the spelling, value domain, default,
+  precedence, and externally observable behavior match", and its remaining
+  sub-issues will each flip entries into it; scanning free prose for an
+  admitted divergence is too brittle to be that gate.
 - The b10621 inventory invariants hold against constants frozen HERE, not
   only against pin.json: 249 help entries, 323 distinct long-option
   spellings, 134 ``LLAMA_*`` environment variables, 53 routes, 74 native
@@ -88,11 +101,44 @@ VALID_STATES = {"supported", "aliased", "not_applicable", "deferred"}
 KIND_ORDER = {"option": 0, "route": 1, "native_request_field": 2}
 
 # Manifest document schema, independent of the pinned llama.cpp release.
-# Bumped to 2 alongside `scripts/compat/extract_b10621_manifest.py`,
-# `tests/llama_compat_manifest.rs`, and `src/server/llama_compat_tests.rs`
-# when pin.json's `shards` field changed from a bare name list to a mapping
-# of shard name to its owning-issue set (issue #1443 follow-up).
-MANIFEST_SCHEMA_VERSION = 2
+# Bumped alongside `scripts/compat/extract_b10621_manifest.py`,
+# `tests/llama_compat_manifest.rs`, and `src/server/llama_compat_tests.rs`:
+# 2 when pin.json's `shards` field changed from a bare name list to a mapping
+# of shard name to its owning-issue set, 3 when every entry gained the
+# structured `divergence` list (both issue #1443 follow-ups).
+MANIFEST_SCHEMA_VERSION = 3
+
+# Fact keys the extractor owns, per entry kind, in the order it emits them.
+# Mirrors `FACT_KEYS` in `scripts/compat/extract_b10621_manifest.py`.
+ENTRY_FACT_KEYS = {
+    "option": [
+        "kind",
+        "id",
+        "section",
+        "spellings",
+        "long_spellings",
+        "value_hint",
+        "env",
+        "default",
+        "description",
+        "discovery",
+    ],
+    "route": ["kind", "id", "method", "path", "source", "condition", "discovery"],
+    "native_request_field": [
+        "kind",
+        "id",
+        "field",
+        "aliases",
+        "parent",
+        "field_type",
+        "description",
+        "discovery",
+    ],
+}
+
+# Policy keys every entry carries, in the order the extractor writes them.
+# Mirrors `NEW_POLICY` in `scripts/compat/extract_b10621_manifest.py`.
+ENTRY_POLICY_KEYS = ["state", "issue", "test", "notes", "divergence", "mlxcel"]
 
 # Keys recognized inside an entry's `mlxcel` claim block. A key outside this
 # set is very likely a typo (`accepted_spelling` for `accepted_spellings`,
@@ -168,8 +214,69 @@ def repo_relative_file(value: object) -> bool:
     return resolved.is_relative_to(REPO) and resolved.is_file()
 
 
+def check_entry_keys(where: str, e: dict) -> None:
+    """Every entry carries exactly its kind's fact keys plus the policy keys.
+
+    Without this, a misspelled key is a silent no-op: ``divergance`` on a
+    ``supported`` entry records nothing, fails nothing, and leaves the author
+    believing the divergence is on file. The same hazard applies to ``state``,
+    ``notes`` and the rest, so the allowlist covers the whole entry rather than
+    just the new field. Order is pinned too, because the extractor emits fact
+    keys in ``FACT_KEYS`` order followed by policy keys in ``NEW_POLICY``
+    order; requiring the same on disk is what keeps in-place regeneration a
+    byte-level no-op.
+    """
+    expected = ENTRY_FACT_KEYS[e["kind"]] + ENTRY_POLICY_KEYS
+    actual = list(e)
+    if set(actual) != set(expected):
+        unknown = sorted(set(actual) - set(expected))
+        missing = sorted(set(expected) - set(actual))
+        parts = []
+        if unknown:
+            parts.append(f"unknown key(s) {unknown}")
+        if missing:
+            parts.append(f"missing key(s) {missing}")
+        err(f"{where}: {', and '.join(parts)}; an entry carries exactly {expected}")
+    elif actual != expected:
+        err(
+            f"{where}: keys are not in canonical order; expected {expected}, "
+            f"found {actual}"
+        )
+
+
+def check_divergence(where: str, state: str, e: dict) -> None:
+    """``divergence`` is well-formed, and a non-empty one forbids ``supported``.
+
+    Epic #1431 defines ``supported`` as "the spelling, value domain, default,
+    precedence, and externally observable behavior match", and its Definition
+    of Done says no option with observable b10621 semantics is accepted and
+    silently ignored. Twenty-two entries once claimed ``supported`` while
+    diverging observably; nineteen of them said so in their own ``notes``,
+    two of those opening with "BEHAVIOR DRIFT". Prose cannot be the gate that
+    catches that, so the divergence moves into a field a machine can read.
+    """
+    divergence = e.get("divergence")
+    if not isinstance(divergence, list):
+        err(f"{where}: divergence must be a list of short strings, found {divergence!r}")
+        return
+    for item in divergence:
+        if not isinstance(item, str) or not item.strip():
+            err(f"{where}: divergence entries must be non-empty strings, found {item!r}")
+    if divergence and state == "supported":
+        err(
+            f"{where}: state 'supported' with a non-empty divergence "
+            f"({len(divergence)} recorded). An entry that differs from b10621 "
+            "in externally observable behavior is 'aliased' (a tested "
+            "translation with no loss of requested semantics), "
+            "'not_applicable' (no MLX/CUDA equivalent, rejected with a "
+            "diagnostic), or 'deferred' (a linked implementation issue owns "
+            "closing the gap). Pick one and name the owning issue."
+        )
+
+
 def check_entry(shard: str, e: dict) -> None:
     where = f"{shard}.json entry {e.get('id')!r}"
+    check_entry_keys(where, e)
     state = e.get("state")
     if state not in VALID_STATES:
         err(f"{where}: state {state!r} is not one of {sorted(VALID_STATES)}")
@@ -177,12 +284,15 @@ def check_entry(shard: str, e: dict) -> None:
     mlxcel = e.get("mlxcel")
     test = e.get("test")
 
+    check_divergence(where, state, e)
+
     if isinstance(mlxcel, dict):
         unknown = sorted(set(mlxcel) - MLXCEL_CLAIM_KEYS)
         if unknown:
             err(
                 f"{where}: mlxcel claim block has unknown key(s) {unknown}; "
-                f"allowed keys are {sorted(MLXCEL_CLAIM_KEYS)}"
+                f"allowed keys are {sorted(MLXCEL_CLAIM_KEYS)}. `divergence` "
+                "is an entry-level field, not an mlxcel claim key."
             )
 
     if state == "deferred":
@@ -327,9 +437,20 @@ def main() -> int:
         "deferred entry is still open (requires network and GH_TOKEN; the "
         "CI job passes this, local `make verify-llama-compat` does not)",
     )
+    ap.add_argument(
+        "--manifest-dir",
+        type=Path,
+        default=MANIFEST_DIR,
+        help="manifest directory to validate (default: the checked-in "
+        "compat/llama-server/b10621). Referenced test paths are still resolved "
+        "against the repository root, so a copy elsewhere validates the same "
+        "way; this exists for the companion negative test "
+        "scripts/ci/check_llama_compat_manifest_test.sh",
+    )
     args = ap.parse_args()
+    manifest_dir: Path = args.manifest_dir
 
-    pin_path = MANIFEST_DIR / "pin.json"
+    pin_path = manifest_dir / "pin.json"
     if not pin_path.is_file():
         print(f"error: {pin_path} missing", file=sys.stderr)
         return 1
@@ -346,7 +467,7 @@ def main() -> int:
         err("pin.json archive_sha256 does not match the pinned official archive")
 
     shard_files = sorted(
-        p for p in MANIFEST_DIR.glob("*.json") if p.name != "pin.json"
+        p for p in manifest_dir.glob("*.json") if p.name != "pin.json"
     )
     shards_field = pin.get("shards")
     if not isinstance(shards_field, dict):

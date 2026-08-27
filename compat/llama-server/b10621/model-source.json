@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "area": "model-source",
   "entries": [
     {
@@ -22,6 +22,7 @@
       "issue": 1434,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "b10621 takes a comma-separated alias list and exposes an aliases array per model; mlxcel treats the value as one opaque id, so `--alias a,b` yields the literal id `a,b`. The single-alias path is otherwise plumbed through /v1/models, /health and the response `model` field. #1434 owns the list form.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--alias"
@@ -50,6 +51,7 @@
       "issue": 1434,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -72,6 +74,7 @@
       "issue": 1434,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -95,6 +98,7 @@
       "issue": 1434,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -117,6 +121,7 @@
       "issue": 1434,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -135,10 +140,13 @@
       "default": null,
       "description": "model path to load (env: LLAMA_ARG_MODEL)",
       "discovery": "help-entry-head",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1434,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Value domain differs by runtime nature: llama-server loads a GGUF file, mlxcel loads an MLX safetensors checkpoint directory or HuggingFace repo id. The flag, env binding, and role are identical.",
+      "divergence": [
+        "Value domain differs: b10621 takes a GGUF file, mlxcel takes an MLX safetensors directory or a HuggingFace repo id, so a llama-server command line pointing at a .gguf file does not load (#1434)."
+      ],
       "mlxcel": {
         "accepted_spellings": [
           "--model"
@@ -167,6 +175,7 @@
       "issue": 1434,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -188,6 +197,7 @@
       "issue": 1434,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -211,6 +221,7 @@
       "issue": 1434,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "--warmup / --no-warmup accepted; whether --no-warmup actually skips the warmup pass to b10621 semantics is owned by #1434.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--warmup",

@@ -706,10 +706,15 @@ verify-kernel-dtype-keys: ## Assert every CUDA JIT kernel launch keys its cache 
 # --check-issues-open added (it has a GH token; a local run may not). The
 # binary-facing half runs inside `verify-test` as
 # tests/llama_compat_manifest.rs and src/server/llama_compat_tests.rs.
+# check_llama_compat_manifest_test.sh is the validator's own negative
+# coverage: it mutates a throwaway copy of the manifest and asserts the gate
+# rejects it, so the rules keep failing on a bad manifest rather than only
+# passing on a good one.
 .PHONY: verify-llama-compat
 verify-llama-compat: ## Assert the llama-server b10621 compatibility manifest is structurally valid (issue #1443)
 	@echo "$(CYAN)[verify] llama-server b10621 compatibility manifest...$(RESET)"
 	@python3 scripts/ci/check_llama_compat_manifest.py
+	@bash scripts/ci/check_llama_compat_manifest_test.sh
 
 .PHONY: bump-version
 bump-version: ## Release: set every version-tracking crate to VERSION and sync Cargo.lock (make bump-version VERSION=0.5.0)

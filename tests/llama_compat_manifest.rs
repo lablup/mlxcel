@@ -50,10 +50,11 @@ const MANIFEST_REL: &str = "compat/llama-server/b10621";
 
 /// Manifest document schema, independent of the pinned llama.cpp release.
 /// Kept in lockstep with `scripts/ci/check_llama_compat_manifest.py` and
-/// `scripts/compat/extract_b10621_manifest.py`; bump all three together
-/// (issue #1443 follow-up: pin.json's `shards` field changed from a bare
-/// name list to a mapping of shard name to its owning-issue set).
-const MANIFEST_SCHEMA_VERSION: i64 = 2;
+/// `scripts/compat/extract_b10621_manifest.py`; bump all three together.
+/// Issue #1443 follow-ups: 2 when pin.json's `shards` field changed from a
+/// bare name list to a mapping of shard name to its owning-issue set, 3 when
+/// every entry gained the structured `divergence` list.
+const MANIFEST_SCHEMA_VERSION: i64 = 3;
 
 fn manifest_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(MANIFEST_REL)

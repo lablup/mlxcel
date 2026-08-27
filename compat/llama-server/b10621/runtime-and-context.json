@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "area": "runtime-and-context",
   "entries": [
     {
@@ -22,6 +22,7 @@
       "issue": 1450,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Spelling and env accepted; logical-batch semantics equivalence with llama.cpp batching is owned by #1450.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--batch-size"
@@ -51,6 +52,7 @@
       "issue": 1453,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -74,6 +76,7 @@
       "issue": 1453,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -96,6 +99,7 @@
       "issue": 1453,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -117,6 +121,7 @@
       "issue": 1453,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "The flag spelling is not accepted, but LLAMA_ARG_CACHE_REUSE is parsed at runtime as an integer chunk size (0 = no-op, unsupported positive values fail startup) since #1430. #1453 owns chunk-level reuse.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [],
         "env": "LLAMA_ARG_CACHE_REUSE",
@@ -144,6 +149,7 @@
       "issue": 1453,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -169,6 +175,7 @@
       "issue": 1453,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Accepted and ignored (hidden): mlxcel always batches continuously. #1453 owns the --no-cont-batching observable semantics.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--cont-batching"
@@ -200,6 +207,7 @@
       "issue": 1450,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -221,6 +229,7 @@
       "issue": 1449,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -242,6 +251,7 @@
       "issue": 1449,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -263,6 +273,7 @@
       "issue": 1449,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -287,6 +298,7 @@
       "issue": 1453,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -309,6 +321,7 @@
       "issue": 1450,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Same semantics: 0 = derive from the model.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--ctx-size"
@@ -339,6 +352,7 @@
       "issue": 1450,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -364,6 +378,7 @@
       "issue": 1453,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -386,6 +401,7 @@
       "issue": 1450,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Spelling and env match, but the default drifts: b10621 defaults to -1 (auto) while mlxcel defaults to 4 slots. #1450 owns default/precedence alignment.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--parallel"
@@ -415,10 +431,13 @@
       "default": "-1, -1 = infinity",
       "description": "number of tokens to predict (default: -1, -1 = infinity) (env: LLAMA_ARG_N_PREDICT)",
       "discovery": "help-entry-head",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1450,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Both spellings (--predict, --n-predict) accepted; default -1 = until EOS/context, matching llama-server per request.",
+      "divergence": [
+        "A negative value must be written as --predict=-1 or --n-predict=-1; the space-separated --predict -1 that llama-server accepts is rejected by mlxcel's argv parser (#1450)."
+      ],
       "mlxcel": {
         "accepted_spellings": [
           "--predict",
@@ -450,6 +469,7 @@
       "issue": 1450,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -471,6 +491,7 @@
       "issue": 1450,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -492,6 +513,7 @@
       "issue": 1450,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -513,6 +535,7 @@
       "issue": 1450,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -535,6 +558,7 @@
       "issue": 1453,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -556,6 +580,7 @@
       "issue": 1450,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -578,6 +603,7 @@
       "issue": 1450,
       "test": "tests/llama_compat_manifest.rs",
       "notes": "Spelling and env accepted; physical-batch semantics equivalence is owned by #1450.",
+      "divergence": [],
       "mlxcel": {
         "accepted_spellings": [
           "--ubatch-size"
@@ -605,6 +631,7 @@
       "issue": 1450,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -626,6 +653,7 @@
       "issue": 1450,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -647,6 +675,7 @@
       "issue": 1450,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -668,6 +697,7 @@
       "issue": 1450,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -689,6 +719,7 @@
       "issue": 1450,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -704,6 +735,7 @@
       "issue": 1453,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -719,6 +751,7 @@
       "issue": 1453,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -734,6 +767,7 @@
       "issue": 1450,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -749,6 +783,7 @@
       "issue": 1450,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     }
   ]

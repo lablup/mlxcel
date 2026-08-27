@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "area": "routes",
   "entries": [
     {
@@ -21,6 +21,7 @@
       "issue": 1442,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -31,10 +32,14 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1441,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "BEHAVIOR DRIFT: mlxcel's /health answers 503 {\"status\":\"no slot available\"} when the request queue is full, which b10621 reports on /slots?fail_on_no_slot instead, and its loading-state body differs from b10621's error envelope. A load balancer ejects mlxcel under load where llama-server stays healthy. #1440 owns it.",
+      "divergence": [
+        "Answers 503 {\"status\":\"no slot available\"} when the request queue is full; b10621 keeps /health healthy under load and reports slot exhaustion on GET /slots?fail_on_no_slot (#1440).",
+        "The model-loading response body differs from b10621's error envelope (#1440)."
+      ],
       "mlxcel": {
         "route": "GET /health"
       }
@@ -47,10 +52,14 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1441,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "Response-field subset: mlxcel emits {id, object, created, owned_by}; b10621 adds aliases, tags, architecture, source, can_remove and the modality lists, and reports owned_by \"llamacpp\". #1438 owns response-field parity.",
+      "divergence": [
+        "Model objects omit b10621's aliases, tags, architecture, source, can_remove and modality lists (#1438).",
+        "Reports owned_by \"user\" where b10621 reports \"llamacpp\" (#1438)."
+      ],
       "mlxcel": {
         "route": "GET /models"
       }
@@ -63,10 +72,14 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1441,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "Kept public under API-key auth (#1430). BEHAVIOR DRIFT: see GET /health. #1440 owns it.",
+      "divergence": [
+        "Answers 503 {\"status\":\"no slot available\"} when the request queue is full; b10621 keeps /health healthy under load and reports slot exhaustion on GET /slots?fail_on_no_slot (#1440).",
+        "The model-loading response body differs from b10621's error envelope (#1440)."
+      ],
       "mlxcel": {
         "route": "GET /v1/health"
       }
@@ -79,10 +92,14 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1441,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "Response-field subset: see GET /models. #1438 owns response-field parity.",
+      "divergence": [
+        "Model objects omit b10621's aliases, tags, architecture, source, can_remove and modality lists (#1438).",
+        "Reports owned_by \"user\" where b10621 reports \"llamacpp\" (#1438)."
+      ],
       "mlxcel": {
         "route": "GET /v1/models"
       }
@@ -99,6 +116,7 @@
       "issue": 1442,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -113,6 +131,7 @@
       "issue": 1441,
       "test": "src/server/llama_compat_tests.rs",
       "notes": null,
+      "divergence": [],
       "mlxcel": {
         "route": "POST /chat/completions"
       }
@@ -129,6 +148,7 @@
       "issue": 1442,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -143,6 +163,7 @@
       "issue": 1441,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "mlxcel mounts a native (non-OpenAI) handler here; response-envelope parity with the b10621 native schema is owned by #1441.",
+      "divergence": [],
       "mlxcel": {
         "route": "POST /completion"
       }
@@ -159,6 +180,7 @@
       "issue": 1441,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "SEMANTIC COLLISION: mounted, but mlxcel selects the OpenAI-shaped handler while b10621 serves the native llama-server schema. #1441 owns the split.",
+      "divergence": [],
       "mlxcel": {
         "route": "POST /completions"
       }
@@ -175,6 +197,7 @@
       "issue": 1442,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "Mounted; schema parity owned by #1442.",
+      "divergence": [],
       "mlxcel": {
         "route": "POST /detokenize"
       }
@@ -191,6 +214,7 @@
       "issue": 1441,
       "test": null,
       "notes": "Legacy native alias, not mounted. #1441 owns it.",
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -205,6 +229,7 @@
       "issue": 1441,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "SEMANTIC COLLISION: mounted, but mlxcel selects the OpenAI-shaped handler while b10621 serves the native schema. #1441 owns the split.",
+      "divergence": [],
       "mlxcel": {
         "route": "POST /embeddings"
       }
@@ -221,6 +246,7 @@
       "issue": 1442,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -231,10 +257,14 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1452,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "All four aliases mounted (#1430). Mounted with all four b10621 spellings (#1430); the response omits b10621's top-level \"object\": \"list\" and mlxcel uses the Cohere return_documents/document spelling rather than b10621's TEI return_text. #1452 owns envelope parity.",
+      "divergence": [
+        "The response omits b10621's top-level \"object\": \"list\" (#1452).",
+        "Echoing documents uses the Cohere return_documents/document spelling instead of b10621's TEI return_text (#1452)."
+      ],
       "mlxcel": {
         "route": "POST /rerank"
       }
@@ -247,10 +277,14 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1452,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "All four aliases mounted (#1430). See POST /rerank for the envelope gap. #1452 owns envelope parity.",
+      "divergence": [
+        "The response omits b10621's top-level \"object\": \"list\" (#1452).",
+        "Echoing documents uses the Cohere return_documents/document spelling instead of b10621's TEI return_text (#1452)."
+      ],
       "mlxcel": {
         "route": "POST /reranking"
       }
@@ -267,6 +301,7 @@
       "issue": 1441,
       "test": "src/server/llama_compat_tests.rs",
       "notes": null,
+      "divergence": [],
       "mlxcel": {
         "route": "POST /responses"
       }
@@ -283,6 +318,7 @@
       "issue": 1442,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -297,6 +333,7 @@
       "issue": 1442,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "Mounted; request/response schema parity (add_special, pieces, ...) is owned by #1442.",
+      "divergence": [],
       "mlxcel": {
         "route": "POST /tokenize"
       }
@@ -313,6 +350,7 @@
       "issue": 1441,
       "test": "src/server/llama_compat_tests.rs",
       "notes": null,
+      "divergence": [],
       "mlxcel": {
         "route": "POST /v1/chat/completions"
       }
@@ -329,6 +367,7 @@
       "issue": 1442,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -343,6 +382,7 @@
       "issue": 1441,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "OpenAI-shaped on both sides.",
+      "divergence": [],
       "mlxcel": {
         "route": "POST /v1/completions"
       }
@@ -359,6 +399,7 @@
       "issue": 1441,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "OpenAI-shaped on both sides.",
+      "divergence": [],
       "mlxcel": {
         "route": "POST /v1/embeddings"
       }
@@ -375,6 +416,7 @@
       "issue": 1441,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "Anthropic-messages-compatible on both sides.",
+      "divergence": [],
       "mlxcel": {
         "route": "POST /v1/messages"
       }
@@ -391,6 +433,7 @@
       "issue": 1442,
       "test": "src/server/llama_compat_tests.rs",
       "notes": null,
+      "divergence": [],
       "mlxcel": {
         "route": "POST /v1/messages/count_tokens"
       }
@@ -403,10 +446,14 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1452,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "All four aliases mounted (#1430). See POST /rerank for the envelope gap. #1452 owns envelope parity.",
+      "divergence": [
+        "The response omits b10621's top-level \"object\": \"list\" (#1452).",
+        "Echoing documents uses the Cohere return_documents/document spelling instead of b10621's TEI return_text (#1452)."
+      ],
       "mlxcel": {
         "route": "POST /v1/rerank"
       }
@@ -419,10 +466,14 @@
       "source": "tools/server/server.cpp",
       "condition": null,
       "discovery": "source-route-registration",
-      "state": "supported",
+      "state": "deferred",
       "issue": 1452,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "All four aliases mounted (#1430). See POST /rerank for the envelope gap. #1452 owns envelope parity.",
+      "divergence": [
+        "The response omits b10621's top-level \"object\": \"list\" (#1452).",
+        "Echoing documents uses the Cohere return_documents/document spelling instead of b10621's TEI return_text (#1452)."
+      ],
       "mlxcel": {
         "route": "POST /v1/reranking"
       }
@@ -439,6 +490,7 @@
       "issue": 1441,
       "test": "src/server/llama_compat_tests.rs",
       "notes": null,
+      "divergence": [],
       "mlxcel": {
         "route": "POST /v1/responses"
       }
@@ -455,6 +507,7 @@
       "issue": 1442,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -472,6 +525,7 @@
       "issue": 1441,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -487,6 +541,7 @@
       "issue": 1441,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -505,6 +560,7 @@
       "issue": 1441,
       "test": "src/server/llama_compat_tests.rs",
       "notes": "VALUE-DOMAIN MISMATCH: NativeCompletionRequest declares n_predict as Option<usize>, so b10621's documented -1 (infinity) is rejected during deserialization. The max_tokens / max_completion_tokens aliases are honored on the OpenAI routes, not here. #1441 owns it.",
+      "divergence": [],
       "mlxcel": {
         "field": "n_predict"
       }
@@ -522,6 +578,7 @@
       "issue": 1441,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -537,6 +594,7 @@
       "issue": 1441,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -552,6 +610,7 @@
       "issue": 1441,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -567,6 +626,7 @@
       "issue": 1441,
       "test": "src/server/llama_compat_tests.rs",
       "notes": null,
+      "divergence": [],
       "mlxcel": {
         "field": "stream"
       }
@@ -584,6 +644,7 @@
       "issue": 1441,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -599,6 +660,7 @@
       "issue": 1441,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -614,6 +676,7 @@
       "issue": 1441,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -629,6 +692,7 @@
       "issue": 1441,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -644,6 +708,7 @@
       "issue": 1441,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     }
   ]

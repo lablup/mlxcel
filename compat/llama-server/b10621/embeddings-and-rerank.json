@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "area": "embeddings-and-rerank",
   "entries": [
     {
@@ -21,6 +21,7 @@
       "issue": 1452,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -44,6 +45,7 @@
       "issue": 1452,
       "test": null,
       "notes": "mlxcel serves embeddings through dedicated models/endpoints rather than a server-wide restriction flag. #1452 owns the mode semantics.",
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -65,6 +67,7 @@
       "issue": 1452,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     },
     {
@@ -88,6 +91,7 @@
       "issue": 1452,
       "test": null,
       "notes": null,
+      "divergence": [],
       "mlxcel": null
     }
   ]
