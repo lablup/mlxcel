@@ -193,6 +193,15 @@ fn inert_values_fail_only_for_the_missing_model() {
         &["--n-cpu-moe", "0"][..],
         &["--fit", "off"][..],
         &["--cache-type-k", "f16", "--cache-type-v", "f16"][..],
+        // b10621's `--defrag-thold` handler is `GGML_UNUSED` plus a
+        // deprecation warning, so no value of it changes anything upstream.
+        &["--defrag-thold", "0.1"][..],
+        // `--threads <= 0` is upstream's "use hardware concurrency", which is
+        // the same request as its `-1` default.
+        &["--threads", "0"][..],
+        // `--load-mode` supersedes the deprecated loading flags upstream.
+        &["--no-mmap", "--load-mode", "mmap"][..],
+        &["--mlock", "--load-mode", "auto"][..],
     ] {
         for entry in ENTRY_POINTS {
             let text = expect_failure(entry, invocation);
@@ -306,6 +315,89 @@ fn unsupported_values_are_rejected_with_option_value_limitation_and_alternative(
                 entry.0
             );
         }
+    }
+}
+
+// ── llama.cpp short spellings reach the real option ─────────────────────────
+
+/// Every b10621 short spelling in this shard, with a value where the option
+/// takes one, paired with a fragment that proves it reached the right option.
+const SHORT_SPELLINGS: &[(&[&str], &str)] = &[
+    (&["-bs"], "--model/-m is required"),
+    (&["-ctk", "q8_0"], "--cache-type-k"),
+    (&["-ctv", "q8_0"], "--cache-type-v"),
+    (&["-C", "ff"], "--cpu-mask"),
+    (&["-Cb", "0f"], "--cpu-mask-batch"),
+    (&["-cmoe"], "--cpu-moe"),
+    (&["-Cr", "0-7"], "--cpu-range"),
+    (&["-Crb", "0-3"], "--cpu-range-batch"),
+    (&["-dev", "CUDA0"], "--device"),
+    (&["-dio"], "--direct-io"),
+    (&["-dt", "0.1"], "--model/-m is required"),
+    (&["-fa", "off"], "--flash-attn"),
+    (&["-fit", "on"], "--fit"),
+    (&["-fitc", "8192"], "--fit-ctx"),
+    (&["-fitt", "1024"], "--fit-target"),
+    (&["-ngl", "all"], "--model/-m is required"),
+    (&["-kvo"], "--model/-m is required"),
+    (&["-nkvo"], "--no-kv-offload"),
+    (&["-lm", "mlock"], "--load-mode"),
+    (&["-mg", "1"], "--main-gpu"),
+    (&["-ncmoe", "4"], "--n-cpu-moe"),
+    (&["-ndio"], "--model/-m is required"),
+    (&["-nr"], "--model/-m is required"),
+    (&["-ot", "blk=CPU"], "--override-tensor"),
+    (&["-sm", "row"], "--split-mode"),
+    (&["-t", "8"], "--threads"),
+    (&["-tb", "4"], "--threads-batch"),
+    (&["-ts", "3,1"], "--tensor-split"),
+];
+
+#[test]
+fn every_b10621_short_spelling_reaches_its_own_option() {
+    // `-ngl` is the single most common llama-server flag, and clap reads a
+    // single dash as a cluster of one-letter shorts, so without the argv
+    // pre-pass in `src/cli/llama_short_flags.rs` every one of these is an
+    // unknown argument (or, worse for `-h`-prefixed ones, the help screen).
+    for (invocation, marker) in SHORT_SPELLINGS {
+        for entry in ENTRY_POINTS {
+            let text = expect_failure(entry, invocation);
+            assert!(
+                !text.contains("unexpected argument"),
+                "{} {invocation:?}: must not reach clap as an unknown token: {text}",
+                entry.0
+            );
+            assert!(
+                text.contains(marker),
+                "{} {invocation:?}: must reach its own option (looking for {marker:?}): {text}",
+                entry.0
+            );
+        }
+    }
+}
+
+#[test]
+fn no_short_spelling_shadows_an_mlxcel_option() {
+    // The pre-pass rewrites its table's tokens before consulting clap, so a
+    // token that is also an mlxcel short would be swallowed rather than
+    // parsed. Checked against the real surfaces: `-m`, `-a`, `-b`, `-c`, `-n`,
+    // `-s`, `-v` and `-V` must all still do what they did.
+    for entry in ENTRY_POINTS {
+        // `-m` still names the model: a GGUF value reaches the model-source
+        // diagnostic rather than anything in this shard.
+        let text = expect_failure(entry, &["-m", "model.gguf"]);
+        assert!(
+            text.contains("GGUF"),
+            "{}: -m must still be --model: {text}",
+            entry.0
+        );
+        // `-a` still names the alias, so the run fails for the missing model.
+        let text = expect_failure(entry, &["-a", "friendly"]);
+        assert!(
+            text.contains("--model/-m is required"),
+            "{}: -a must still be --alias: {text}",
+            entry.0
+        );
     }
 }
 

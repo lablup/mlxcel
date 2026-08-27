@@ -51,12 +51,56 @@ fn expand(argv: &[&str]) -> Vec<String> {
 fn every_table_entry_is_rewritten_to_its_long_spelling() {
     for (short, long) in SHORT_ALIASES {
         let out = expand(&["sample", short, "value"]);
-        assert_eq!(
-            out,
-            vec!["sample".to_owned(), (*long).to_owned(), "value".to_owned()],
-            "{short} must become {long}"
+        assert_eq!(out[1], **long, "{short} must become {long}");
+        // The stand-in command below knows only a few of these longs, so
+        // whether `value` was consumed varies; `tests/llama_ggml_runtime_cli.rs`
+        // checks the value-consuming half against the real surfaces.
+        assert_eq!(out[2], "value", "{short}: the following entry must survive");
+    }
+}
+
+#[test]
+fn no_table_token_shadows_a_real_mlxcel_short_option() {
+    // The pass rewrites a table token BEFORE consulting the command, so a
+    // token that is also an mlxcel short would be swallowed instead of parsed.
+    // Checked against both real surfaces in `tests/llama_ggml_runtime_cli.rs`;
+    // this is the cheap structural half: no single-letter token may collide
+    // with the shorts both binaries are known to define.
+    const MLXCEL_SHORTS: &[&str] = &["-V", "-a", "-b", "-c", "-h", "-m", "-n", "-s", "-v"];
+    for (short, long) in SHORT_ALIASES {
+        assert!(
+            !MLXCEL_SHORTS.contains(short),
+            "{short} (-> {long}) collides with an mlxcel short option"
         );
     }
+}
+
+#[test]
+fn a_value_less_token_does_not_swallow_the_next_entry() {
+    // `-cmoe` maps to `--cpu-moe`, which takes no value, so the entry after it
+    // is a separate option and must stay one.
+    let mut cmd = sample_command().arg(
+        clap::Arg::new("cpu-moe")
+            .long("cpu-moe")
+            .action(clap::ArgAction::SetTrue),
+    );
+    let args: Vec<OsString> = ["sample", "-cmoe", "-hf", "owner/name"]
+        .iter()
+        .map(OsString::from)
+        .collect();
+    let out: Vec<String> = expand_llama_short_options(&mut cmd, args, 1)
+        .into_iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        out,
+        vec![
+            "sample".to_owned(),
+            "--cpu-moe".to_owned(),
+            "--hf-repo".to_owned(),
+            "owner/name".to_owned()
+        ]
+    );
 }
 
 #[test]
@@ -107,6 +151,8 @@ fn a_value_that_looks_like_a_short_option_is_left_alone() {
 
 #[test]
 fn the_value_of_a_rewritten_option_is_never_itself_rewritten() {
+    // `--hf-repo` takes a value on the stand-in command, so the entry after
+    // the rewritten `-hf` is a value and must survive verbatim.
     assert_eq!(
         expand(&["sample", "-hf", "-hft"]),
         vec![

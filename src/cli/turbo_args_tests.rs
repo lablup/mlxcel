@@ -294,6 +294,14 @@ fn every_other_ggml_quantizer_is_rejected_with_its_own_explanation() {
     for value in [
         "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1", "f32", "bf16",
     ] {
+        // `f32` and `bf16` are unquantized GGML float types, not quantizers,
+        // so they get their own sentence. Conflating the two would tell an
+        // operator something untrue about b10621.
+        let expected_reason = if matches!(value, "f32" | "bf16") {
+            "unquantized GGML float type"
+        } else {
+            "GGML KV cache quantizer"
+        };
         for (k, v) in [(Some(value), None), (None, Some(value))] {
             let err =
                 resolve_kv_cache_mode(k, v, None).expect_err(&format!("{value} must be rejected"));
@@ -302,7 +310,7 @@ fn every_other_ggml_quantizer_is_rejected_with_its_own_explanation() {
                 "the diagnostic must quote the requested value: {err}"
             );
             assert!(
-                err.contains("GGML KV cache quantizer"),
+                err.contains(expected_reason),
                 "the diagnostic must name the platform limitation: {err}"
             );
             assert!(

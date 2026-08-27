@@ -86,6 +86,18 @@ async fn run_serve_async(mut args: crate::ServeArgs) -> anyhow::Result<()> {
         .ensure_inert_before_model()
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
 
+    // The KV cache type is model-independent too, so validate it here rather
+    // than leaving `--cache-type-k q8_0` to be reported after a multi-gigabyte
+    // download (issue #1445). The resolved mode is recomputed later against the
+    // loaded model's family, which can only substitute a supported mode for
+    // another supported one; this pass exists to reject the value outright.
+    resolve_kv_cache_mode(
+        args.turbo.cache_type_k.as_deref(),
+        args.turbo.cache_type_v.as_deref(),
+        args.turbo.kv_cache_mode.as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
     env_fallback_offline(&mut args.offline);
     // One process-wide flag, as in b10621, so the fetch sites reached from
     // inside a loader (the moondream starmie tokenizer, request-path media

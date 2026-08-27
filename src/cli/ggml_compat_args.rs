@@ -486,46 +486,61 @@ impl GgmlCompatArgs {
                 "--check-tensors",
                 "mlxcel validates a SafeTensors header's shapes and dtypes while loading but has \
                  no GGML tensor-data scan to run",
-                Some("`mlxcel inspect <model>` to report a checkpoint's tensors before serving"),
+                Some(
+                    "the `mlxcel` CLI's `inspect <model>` subcommand to report a checkpoint's \
+                     tensors before serving",
+                ),
             ));
         }
+        // `--load-mode`, `--mlock`, `--mmap` and `--direct-io` all write one
+        // `params.load_mode` field upstream, applied in command-line order, and
+        // b10621 deprecates the last three in favour of the first and warns
+        // that combining them is last-wins. So when `--load-mode` is present it
+        // is the authority here and the deprecated three are not classified at
+        // all: `--no-mmap --load-mode mmap` asks for mmap upstream, and
+        // rejecting it on the superseded half would refuse a command line that
+        // starts there. The residual difference is a deprecated flag written
+        // *after* `--load-mode`, which upstream would let win; that is recorded
+        // as a divergence rather than reconstructed from argv order.
         if let Some(mode) = present(self.load_mode.as_deref()) {
             // `auto` and `mmap` both describe what mlxcel already does.
             if !matches!(mode, "auto" | "mmap") {
+                let residency = matches!(mode, "mlock" | "mmap+mlock");
                 return Some(reject_owned(
                     "--load-mode",
                     mode,
                     "mlxcel memory-maps its SafeTensors shards and cannot lock, pin, or \
                      DirectIO-read them; only `auto` and `mmap` describe what it already does",
+                    residency.then_some("MLXCEL_WIRED_LIMIT to bound Apple Silicon wired memory"),
+                ));
+            }
+        } else {
+            if self.mlock {
+                return Some(reject(
+                    "--mlock",
+                    "--mlock",
+                    "mlxcel cannot pin its weights into resident memory; MLX owns the allocation \
+                     and the operating system owns the residency policy",
                     Some("MLXCEL_WIRED_LIMIT to bound Apple Silicon wired memory"),
                 ));
             }
-        }
-        if self.mlock {
-            return Some(reject(
-                "--mlock",
-                "--mlock",
-                "mlxcel cannot pin its weights into resident memory; MLX owns the allocation and \
-                 the operating system owns the residency policy",
-                Some("MLXCEL_WIRED_LIMIT to bound Apple Silicon wired memory"),
-            ));
-        }
-        if self.no_mmap {
-            return Some(reject(
-                "--no-mmap",
-                "--no-mmap",
-                "mlxcel always memory-maps its SafeTensors shards and has no read-into-anonymous \
-                 loading path",
-                None,
-            ));
-        }
-        if self.direct_io {
-            return Some(reject(
-                "--direct-io",
-                "--direct-io",
-                "mlxcel reads weights through the page cache and has no DirectIO path",
-                None,
-            ));
+            if self.no_mmap {
+                return Some(reject(
+                    "--no-mmap",
+                    "--no-mmap",
+                    "mlxcel always memory-maps its SafeTensors shards and has no \
+                     read-into-anonymous loading path",
+                    None,
+                ));
+            }
+            if self.direct_io {
+                return Some(reject(
+                    "--direct-io",
+                    "--direct-io",
+                    "mlxcel reads weights through the page cache and has no DirectIO path",
+                    None,
+                ));
+            }
         }
 
         // ── attention kernel ────────────────────────────────────────────
@@ -565,7 +580,10 @@ impl GgmlCompatArgs {
                 "--list-devices",
                 "--list-devices",
                 "mlxcel has no GGML device registry to enumerate; it drives one MLX device",
-                Some("`mlxcel inspect <model>` to report the device a model would load on"),
+                Some(
+                    "MLXCEL_DEVICE to choose the execution device, or the `mlxcel` CLI's \
+                     `inspect <model>` subcommand to report the device a model would load on",
+                ),
             ));
         }
         if check_gpu_layers
@@ -575,13 +593,13 @@ impl GgmlCompatArgs {
             return Some(rejection);
         }
         if let Some(index) = present(self.main_gpu.as_deref())
-            && index.trim() != "0"
+            && !numeric_equals(index, 0)
         {
             return Some(reject_owned(
                 "--main-gpu",
                 index,
                 NO_MULTI_DEVICE,
-                Some("docs/distributed.md for mlxcel's tensor- and pipeline-parallel setup"),
+                Some("--tp-size / --pp-size; see docs/distributed.md"),
             ));
         }
         if let Some(mode) = present(self.split_mode.as_deref())
@@ -592,8 +610,8 @@ impl GgmlCompatArgs {
                 mode,
                 NO_MULTI_DEVICE,
                 Some(
-                    "--tensor-parallel / --pipeline-parallel; see docs/distributed.md. \
-                     `--split-mode none` is accepted as the single-device case",
+                    "--tp-size / --pp-size; see docs/distributed.md. `--split-mode none` is \
+                     accepted as the single-device case",
                 ),
             ));
         }
@@ -602,7 +620,7 @@ impl GgmlCompatArgs {
                 "--tensor-split",
                 split,
                 NO_MULTI_DEVICE,
-                Some("--tensor-parallel / --pipeline-parallel; see docs/distributed.md"),
+                Some("--tp-size / --pp-size; see docs/distributed.md"),
             ));
         }
         if let Some(servers) = present(self.rpc.as_deref()) {
@@ -611,7 +629,7 @@ impl GgmlCompatArgs {
                 servers,
                 "mlxcel has no GGML RPC backend; its distributed execution uses its own transport \
                  and node roles",
-                Some("--node-role / --peers; see docs/distributed.md"),
+                Some("--node-role / --cluster-peers; see docs/distributed.md"),
             ));
         }
         if self.no_host {
@@ -647,7 +665,7 @@ impl GgmlCompatArgs {
             ));
         }
         if let Some(count) = present(self.n_cpu_moe.as_deref())
-            && count.trim() != "0"
+            && !numeric_equals(count, 0)
         {
             return Some(reject_owned(
                 "--n-cpu-moe",
@@ -659,18 +677,29 @@ impl GgmlCompatArgs {
         }
 
         // ── CPU thread pool ─────────────────────────────────────────────
-        for (option, value, inert) in [
-            ("--threads", self.threads.as_deref(), "-1"),
-            ("--threads-batch", self.threads_batch.as_deref(), "-1"),
-            ("--cpu-strict", self.cpu_strict.as_deref(), "0"),
-            ("--cpu-strict-batch", self.cpu_strict_batch.as_deref(), "0"),
-            ("--poll", self.poll.as_deref(), "50"),
-            ("--poll-batch", self.poll_batch.as_deref(), "50"),
-            ("--prio", self.prio.as_deref(), "0"),
-            ("--prio-batch", self.prio_batch.as_deref(), "0"),
+        // `--threads` and `--threads-batch` treat any value `<= 0` as "use
+        // hardware concurrency" upstream, so the whole range is the same
+        // request as the `-1` default. The rest have one inert value each.
+        for (option, value) in [
+            ("--threads", self.threads.as_deref()),
+            ("--threads-batch", self.threads_batch.as_deref()),
         ] {
             if let Some(value) = present(value)
-                && value.trim() != inert
+                && !numeric_at_most(value, 0)
+            {
+                return Some(reject_owned(option, value, NO_CPU_POOL, None));
+            }
+        }
+        for (option, value, inert) in [
+            ("--cpu-strict", self.cpu_strict.as_deref(), 0),
+            ("--cpu-strict-batch", self.cpu_strict_batch.as_deref(), 0),
+            ("--poll", self.poll.as_deref(), 50),
+            ("--poll-batch", self.poll_batch.as_deref(), 50),
+            ("--prio", self.prio.as_deref(), 0),
+            ("--prio-batch", self.prio_batch.as_deref(), 0),
+        ] {
+            if let Some(value) = present(value)
+                && !numeric_equals(value, inert)
             {
                 return Some(reject_owned(option, value, NO_CPU_POOL, None));
             }
@@ -685,7 +714,15 @@ impl GgmlCompatArgs {
                 return Some(reject_owned(option, value, NO_CPU_POOL, None));
             }
         }
-        if let Some(numa) = present(self.numa.as_deref()) {
+        // The only option in this shard where an empty value is NOT absent:
+        // b10621 reads `--numa ""` as `distribute`
+        // (<https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/common/arg.cpp>).
+        if let Some(numa) = self.numa.as_deref() {
+            let numa = if numa.trim().is_empty() {
+                "distribute"
+            } else {
+                numa.trim()
+            };
             return Some(reject_owned(
                 "--numa",
                 numa,
@@ -734,17 +771,6 @@ impl GgmlCompatArgs {
                     Some("--estimate-memory, with --ctx-size chosen explicitly"),
                 ));
             }
-        }
-
-        // ── KV cache maintenance ────────────────────────────────────────
-        if let Some(thold) = present(self.defrag_thold.as_deref()) {
-            return Some(reject_owned(
-                "--defrag-thold",
-                thold,
-                "mlxcel's paged KV cache reclaims blocks on release and has no defragmentation \
-                 pass to threshold (b10621 deprecates this option too)",
-                None,
-            ));
         }
 
         // ── profiling ───────────────────────────────────────────────────
@@ -804,6 +830,20 @@ impl GgmlCompatArgs {
         // `--op-offload` has no environment binding in b10621.
         Ok(())
     }
+}
+
+/// True when `value` parses as an integer equal to `inert`.
+///
+/// Compared as a number rather than a string so `00`, `+0` and ` 0 ` are the
+/// same request as `0`, which is what upstream's `std::stoi` makes of them. A
+/// value that is not an integer at all is not inert.
+fn numeric_equals(value: &str, inert: i64) -> bool {
+    value.trim().parse::<i64>().is_ok_and(|n| n == inert)
+}
+
+/// True when `value` parses as an integer at most `bound`.
+fn numeric_at_most(value: &str, bound: i64) -> bool {
+    value.trim().parse::<i64>().is_ok_and(|n| n <= bound)
 }
 
 /// `Some(trimmed)` when a value is present and not whitespace-only.
@@ -887,23 +927,27 @@ fn gpu_layers_rejection(value: &str, model_layers: Option<usize>) -> Option<Ggml
 
 /// The transformer layer count in a checkpoint's `config.json`, if readable.
 ///
-/// Looks at `num_hidden_layers`, then `text_config.num_hidden_layers` for the
-/// VLM checkpoints that nest their decoder configuration. Returns `None` for
-/// an unreadable or unrecognized config rather than guessing; the caller then
-/// treats every non-negative `--gpu-layers` as unsupported.
+/// Goes through [`crate::execution::config_fields`] rather than reading
+/// `num_hidden_layers` directly, because that field has four spellings in the
+/// wild (`num_hidden_layers`, `n_layers`, `num_layers`, `n_layer`) and gpt2,
+/// gpt_bigcode, dbrx, exaone, falcon_ocr, jina_vlm and molmo use the others.
+/// Hand-rolling the alias chain here is what reproduced the #927 gap five
+/// times over; `config_fields` exists so a new spelling is added once. It also
+/// handles the `text_config` nesting VLM checkpoints use.
+///
+/// Returns `None` for an unreadable or unrecognized config rather than
+/// guessing; the caller then treats every non-negative `--gpu-layers` as
+/// unsupported.
 #[must_use]
 pub fn read_model_layer_count(model_path: &Path) -> Option<usize> {
     let content = std::fs::read_to_string(model_path.join("config.json")).ok()?;
     let config = serde_json::from_str::<serde_json::Value>(&content).ok()?;
-    config
-        .get("num_hidden_layers")
-        .or_else(|| {
-            config
-                .get("text_config")
-                .and_then(|text| text.get("num_hidden_layers"))
-        })
-        .and_then(serde_json::Value::as_u64)
-        .map(|n| n as usize)
+    let text = crate::execution::config_fields::text_config(&config);
+    crate::execution::config_fields::get_u64(
+        text,
+        crate::execution::config_fields::LAYER_COUNT_KEYS,
+    )
+    .map(|n| n as usize)
 }
 
 #[cfg(test)]

@@ -142,6 +142,23 @@ if run_case missing-divergence "$dir" 1; then
   assert_contains missing-divergence "missing key(s) ['divergence']"
 fi
 
+# A `file::name` test pointer must name a function that is really there. The
+# file half was always checked; the function half was not, so an entry could
+# point at a renamed test, or at one covering a different option, and nothing
+# noticed. Several #1445 entries drifted exactly that way before the rule
+# existed.
+dir="$(make_case drifted-test-pointer routes 'POST /rerank' \
+  'entry["test"] = "src/server/llama_compat_tests.rs::a_test_that_does_not_exist"')"
+if run_case drifted-test-pointer "$dir" 1; then
+  assert_contains drifted-test-pointer "names no \`fn a_test_that_does_not_exist\`"
+fi
+
+# The positive control: a pointer naming a real function still passes, so the
+# rule cannot degrade into one that rejects every pointer.
+dir="$(make_case valid-test-pointer routes 'POST /rerank' \
+  'entry["test"] = "src/server/llama_compat_tests.rs::manifest_route_claims_match_the_mounted_router"')"
+run_case valid-test-pointer "$dir" 0
+
 if [ "$failures" -ne 0 ]; then
   echo "$failures case(s) failed" >&2
   exit 1

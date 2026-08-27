@@ -15,14 +15,15 @@
 //! Argv pre-pass translating llama.cpp's multi-letter single-dash options
 //! into the long spellings clap accepts (issue #1434).
 //!
-//! llama.cpp's own argument parser treats `-hf`, `-hft`, `-mu` and friends as
+//! llama.cpp's own argument parser treats `-hf`, `-ngl`, `-fa` and friends as
 //! whole tokens, and its documentation uses the short forms almost
-//! exclusively (`llama-server -hf ggml-org/…`). clap has no such concept: a
-//! single dash introduces a cluster of one-letter shorts, so `-hf` parses as
-//! `-h -f`. On both mlxcel server binaries `-h` is `--help`, which means
-//! `mlxcel-server -hf ggml-org/foo` renders the help text and **exits 0**.
-//! That is the worst possible outcome for a compatibility surface: a command
-//! line that upstream honours neither runs nor reports an error.
+//! exclusively (`llama-server -hf ggml-org/… -ngl 99`). clap has no such
+//! concept: a single dash introduces a cluster of one-letter shorts, so `-hf`
+//! parses as `-h -f`. On both mlxcel server binaries `-h` is `--help`, which
+//! means `mlxcel-server -hf ggml-org/foo` renders the help text and **exits
+//! 0**. That is the worst possible outcome for a compatibility surface: a
+//! command line that upstream honours neither runs nor reports an error, and
+//! `-ngl` is the single most common llama-server flag there is.
 //!
 //! This pass rewrites those exact tokens before clap sees them, so they reach
 //! the real option (and, for the ones mlxcel cannot support, the diagnostic
@@ -49,16 +50,48 @@ use std::ffi::{OsStr, OsString};
 ///
 /// Only options mlxcel actually defines belong here; a token that maps to
 /// nothing must keep failing as an unknown argument rather than being
-/// silently swallowed. Sorted by token for readability. Extend this table
-/// alongside the flag it names, and add a case to
+/// silently swallowed, and a token that is already an mlxcel short would be
+/// shadowed by this pass rather than parsed (the tests assert neither
+/// happens). Whether the rewritten option consumes the next argv entry is
+/// read from the command, so value-less tokens such as `-cmoe` and
+/// value-taking ones such as `-ngl` can sit in the same table. Sorted by
+/// token. Extend it alongside the flag it names, and add a case to
 /// `llama_short_flags_tests.rs`.
 const SHORT_ALIASES: &[(&str, &str)] = &[
+    ("-C", "--cpu-mask"),
+    ("-Cb", "--cpu-mask-batch"),
+    ("-Cr", "--cpu-range"),
+    ("-Crb", "--cpu-range-batch"),
+    ("-bs", "--backend-sampling"),
+    ("-cmoe", "--cpu-moe"),
+    ("-ctk", "--cache-type-k"),
+    ("-ctv", "--cache-type-v"),
+    ("-dev", "--device"),
+    ("-dio", "--direct-io"),
     ("-dr", "--docker-repo"),
+    ("-dt", "--defrag-thold"),
+    ("-fa", "--flash-attn"),
+    ("-fit", "--fit"),
+    ("-fitc", "--fit-ctx"),
+    ("-fitt", "--fit-target"),
     ("-hf", "--hf-repo"),
     ("-hff", "--hf-file"),
     ("-hfr", "--hf-repo"),
     ("-hft", "--hf-token"),
+    ("-kvo", "--kv-offload"),
+    ("-lm", "--load-mode"),
+    ("-mg", "--main-gpu"),
     ("-mu", "--model-url"),
+    ("-ncmoe", "--n-cpu-moe"),
+    ("-ndio", "--no-direct-io"),
+    ("-ngl", "--gpu-layers"),
+    ("-nkvo", "--no-kv-offload"),
+    ("-nr", "--no-repack"),
+    ("-ot", "--override-tensor"),
+    ("-sm", "--split-mode"),
+    ("-t", "--threads"),
+    ("-tb", "--threads-batch"),
+    ("-ts", "--tensor-split"),
 ];
 
 /// The long spelling `token` maps onto, if any.
@@ -154,9 +187,10 @@ pub fn expand_llama_short_options(
                 Some(value) => out.push(OsString::from(format!("{long}={value}"))),
                 None => {
                     out.push(OsString::from(long));
-                    // Every token in the table takes a value, so the next
-                    // entry is that value and must not be inspected.
-                    skip_value = true;
+                    // Whether the next entry is this option's value is a
+                    // property of the LONG form, which the command knows.
+                    // `-ngl 99` consumes the 99; `-cmoe` consumes nothing.
+                    skip_value = value_taking.contains(long);
                 }
             }
             continue;

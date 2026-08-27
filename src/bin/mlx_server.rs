@@ -23,7 +23,7 @@ use mlxcel::cli::rope_args::RopeOverrideArgs;
 use mlxcel::cli::speculative_args::{
     SpeculativeArgs, env_fallback_draft_block_size, env_fallback_draft_kind,
 };
-use mlxcel::cli::turbo_args::TurboKvCacheArgs;
+use mlxcel::cli::turbo_args::{TurboKvCacheArgs, resolve_kv_cache_mode};
 use mlxcel::downloader::{
     DownloadArgs, DownloadOptions, ModelSourceOptions, download_repo,
     resolve_model_source_with_options, set_offline_mode,
@@ -1848,6 +1848,18 @@ fn build_startup_input(mut args: ServerArgs) -> anyhow::Result<ServerStartupInpu
     args.ggml_compat
         .ensure_inert_before_model()
         .map_err(|rejection| anyhow::anyhow!("{rejection}"))?;
+
+    // The KV cache type is model-independent too, so validate it here rather
+    // than leaving `--cache-type-k q8_0` to be reported after a multi-gigabyte
+    // download (issue #1445). The resolved mode is recomputed later against the
+    // loaded model's family, which can only substitute a supported mode for
+    // another supported one; this pass exists to reject the value outright.
+    resolve_kv_cache_mode(
+        args.turbo.cache_type_k.as_deref(),
+        args.turbo.cache_type_v.as_deref(),
+        args.turbo.kv_cache_mode.as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     env_fallback_offline(&mut args.offline);
     // One process-wide flag, as in b10621, so the fetch sites reached from

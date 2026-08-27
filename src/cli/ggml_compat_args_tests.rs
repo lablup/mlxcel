@@ -84,12 +84,14 @@ fn values_matching_what_mlxcel_already_does_are_inert() {
 fn a_blank_environment_value_is_treated_as_absent() {
     // `LLAMA_ARG_DEVICE=` inherited from a llama.cpp deployment must not stop
     // the server; b10621 tests these fields with `.empty()` too.
+    // `--numa` is excluded on purpose: b10621 reads an empty value there as
+    // `distribute`, which is covered by its own test below.
     let blank = GgmlCompatArgs {
         device: Some(String::new()),
         rpc: Some("   ".to_owned()),
-        numa: Some(String::new()),
         tensor_split: Some(String::new()),
         override_kv: Some(String::new()),
+        fit_target: Some("  ".to_owned()),
         ..args()
     };
     assert_eq!(reject_for(blank), None);
@@ -372,7 +374,7 @@ fn every_memory_and_loading_request_mlxcel_cannot_honour_is_rejected() {
                 check_tensors: true,
                 ..args()
             },
-            "mlxcel inspect",
+            "`inspect <model>`",
         ),
     ] {
         let text = message(build);
@@ -449,13 +451,21 @@ fn enabling_libllama_timers_points_at_the_http_counters() {
 }
 
 #[test]
-fn a_defrag_threshold_is_rejected_as_deprecated_and_unmodelled() {
-    let text = message(GgmlCompatArgs {
-        defrag_thold: Some("0.1".to_owned()),
-        ..args()
-    });
-    assert!(text.contains("--defrag-thold 0.1"), "{text}");
-    assert!(text.contains("deprecates"), "{text}");
+fn a_defrag_threshold_is_inert_because_it_is_inert_upstream_too() {
+    // b10621's handler is literally `GGML_UNUSED(params); GGML_UNUSED(value);`
+    // plus a deprecation warning, so NO value of `--defrag-thold` changes
+    // anything upstream. Rejecting it would refuse a command line that starts
+    // there, which is the opposite of what the issue asks for.
+    for value in ["0.1", "-1", "0", "0.5"] {
+        assert_eq!(
+            reject_for(GgmlCompatArgs {
+                defrag_thold: Some(value.to_owned()),
+                ..args()
+            }),
+            None,
+            "--defrag-thold {value} is a no-op upstream and must be inert here"
+        );
+    }
 }
 
 #[test]
@@ -473,7 +483,7 @@ fn listing_devices_points_at_inspect() {
         list_devices: true,
         ..args()
     });
-    assert!(text.contains("mlxcel inspect"), "{text}");
+    assert!(text.contains("`inspect <model>`"), "{text}");
 }
 
 // ── diagnostic shape ────────────────────────────────────────────────────────
@@ -697,4 +707,184 @@ fn the_layer_count_is_read_from_either_config_shape() {
     assert_eq!(read_model_layer_count(&missing), None);
     std::fs::write(missing.join("config.json"), b"not json").unwrap();
     assert_eq!(read_model_layer_count(&missing), None);
+}
+
+// ── review follow-ups (issue #1445) ─────────────────────────────────────────
+
+#[test]
+fn load_mode_is_the_authority_over_the_deprecated_loading_flags() {
+    // All four write one `params.load_mode` field upstream, applied in
+    // command-line order, and b10621 deprecates the three in favour of
+    // `--load-mode` while warning that combining them is last-wins. Rejecting
+    // on a superseded half would refuse a command line that starts there.
+    for deprecated in [
+        GgmlCompatArgs {
+            no_mmap: true,
+            load_mode: Some("mmap".to_owned()),
+            ..args()
+        },
+        GgmlCompatArgs {
+            mlock: true,
+            load_mode: Some("auto".to_owned()),
+            ..args()
+        },
+        GgmlCompatArgs {
+            direct_io: true,
+            load_mode: Some("mmap".to_owned()),
+            ..args()
+        },
+    ] {
+        assert_eq!(
+            reject_for(deprecated),
+            None,
+            "--load-mode supersedes the deprecated loading flag"
+        );
+    }
+    // Without `--load-mode` the deprecated flags are classified as before.
+    assert!(
+        reject_for(GgmlCompatArgs {
+            no_mmap: true,
+            ..args()
+        })
+        .is_some()
+    );
+    // And an unsupported `--load-mode` is still reported, on its own name.
+    let rejection = reject_for(GgmlCompatArgs {
+        no_mmap: true,
+        load_mode: Some("mlock".to_owned()),
+        ..args()
+    })
+    .expect("mlock is unsupported");
+    assert_eq!(rejection.option, "--load-mode");
+}
+
+#[test]
+fn only_the_residency_load_modes_point_at_the_wired_memory_limit() {
+    for (mode, wants_hint) in [
+        ("mlock", true),
+        ("mmap+mlock", true),
+        ("none", false),
+        ("dio", false),
+    ] {
+        let rejection = reject_for(GgmlCompatArgs {
+            load_mode: Some(mode.to_owned()),
+            ..args()
+        })
+        .expect("unsupported");
+        assert_eq!(
+            rejection.alternative.is_some(),
+            wants_hint,
+            "--load-mode {mode}: MLXCEL_WIRED_LIMIT is a residency control and is only \
+             relevant to the residency modes"
+        );
+    }
+}
+
+#[test]
+fn any_non_positive_thread_count_is_inert_because_upstream_treats_it_as_auto() {
+    // `arg.cpp`: `if (n_threads <= 0) n_threads = hardware_concurrency();`, so
+    // `0` and `-8` are the same request as the `-1` default.
+    for value in ["-1", "0", "-8"] {
+        for build in [
+            GgmlCompatArgs {
+                threads: Some(value.to_owned()),
+                ..args()
+            },
+            GgmlCompatArgs {
+                threads_batch: Some(value.to_owned()),
+                ..args()
+            },
+        ] {
+            assert_eq!(reject_for(build), None, "--threads {value} must be inert");
+        }
+    }
+    assert!(
+        reject_for(GgmlCompatArgs {
+            threads: Some("8".to_owned()),
+            ..args()
+        })
+        .is_some()
+    );
+}
+
+#[test]
+fn inert_numeric_values_are_compared_as_numbers_not_spellings() {
+    for (build, what) in [
+        (
+            GgmlCompatArgs {
+                main_gpu: Some(" 00 ".to_owned()),
+                ..args()
+            },
+            "--main-gpu",
+        ),
+        (
+            GgmlCompatArgs {
+                n_cpu_moe: Some("+0".to_owned()),
+                ..args()
+            },
+            "--n-cpu-moe",
+        ),
+        (
+            GgmlCompatArgs {
+                prio: Some("+0".to_owned()),
+                ..args()
+            },
+            "--prio",
+        ),
+    ] {
+        assert_eq!(
+            reject_for(build),
+            None,
+            "{what} must compare its value as a number, as upstream's std::stoi does"
+        );
+    }
+}
+
+#[test]
+fn an_empty_numa_value_is_b10621s_distribute_and_is_still_rejected() {
+    // The one option in this shard where an empty value is not absent:
+    // `arg.cpp` reads `--numa ""` as `distribute`.
+    let rejection = reject_for(GgmlCompatArgs {
+        numa: Some(String::new()),
+        ..args()
+    })
+    .expect("an empty --numa is a distribute request");
+    assert_eq!(rejection.option, "--numa");
+    assert_eq!(rejection.value, "distribute");
+}
+
+#[test]
+fn an_override_tensor_specification_is_rejected() {
+    let text = message(GgmlCompatArgs {
+        override_tensor: Some("blk\\.\\d+\\.ffn.*=CPU".to_owned()),
+        ..args()
+    });
+    assert!(text.contains("--override-tensor"), "{text}");
+    assert!(text.contains("GGML"), "{text}");
+}
+
+#[test]
+fn the_layer_count_survives_every_config_spelling_in_tree() {
+    // gpt2 / gpt_bigcode use `n_layer`; dbrx, falcon_ocr, jina_vlm and molmo
+    // use `n_layers`; exaone uses `num_layers`. Reading only
+    // `num_hidden_layers` here is how #927 reproduced five times, and it would
+    // make every non-negative `--gpu-layers` unsupported on those families.
+    let tmp = tempfile::tempdir().unwrap();
+    for (index, key) in ["num_hidden_layers", "n_layers", "num_layers", "n_layer"]
+        .iter()
+        .enumerate()
+    {
+        let dir = tmp.path().join(format!("m{index}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("config.json"),
+            format!("{{\"{key}\": 24}}").as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            read_model_layer_count(&dir),
+            Some(24),
+            "{key} must be recognised"
+        );
+    }
 }

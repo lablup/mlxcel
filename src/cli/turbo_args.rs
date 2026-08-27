@@ -248,15 +248,19 @@ fn parse_split_cache_type(value: &str) -> Result<KVCacheMode, ()> {
     value.parse::<KVCacheMode>().map_err(|_| ())
 }
 
-/// The GGML KV cache types b10621 accepts, minus `f16`, which mlxcel answers.
+/// b10621's quantized KV cache types.
 ///
-/// From b10621's `kv_cache_types` table
+/// From its `kv_cache_types` table
 /// (<https://github.com/ggml-org/llama.cpp/blob/c1d0e7a004015f23bc0233470b747b596f29b264/common/arg.cpp>).
-/// `--cache-type-k`'s help advertises exactly `f32, f16, bf16, q8_0, q4_0,
-/// q4_1, iq4_nl, q5_0, q5_1`.
-const GGML_KV_CACHE_TYPES: [&str; 8] = [
-    "f32", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1",
-];
+/// `--cache-type-k`'s help advertises `f32, f16, bf16, q8_0, q4_0, q4_1,
+/// iq4_nl, q5_0, q5_1`; these are the quantizers among them.
+const GGML_KV_QUANTIZERS: [&str; 6] = ["q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"];
+
+/// b10621's unquantized KV cache types other than `f16`.
+///
+/// `GGML_TYPE_F32` and `GGML_TYPE_BF16` are plain float types, not quantizers,
+/// so they are refused for a different reason and get their own sentence.
+const GGML_KV_FLOAT_TYPES: [&str; 2] = ["f32", "bf16"];
 
 /// Build the rejection for an unrecognized `--cache-type-k` / `--cache-type-v`
 /// value (issue #1445).
@@ -274,16 +278,24 @@ const GGML_KV_CACHE_TYPES: [&str; 8] = [
 /// they copied from a llama-server command line does not carry over; anything
 /// else gets the plain list of what mlxcel accepts.
 fn cache_type_error(option: &str, value: &str) -> String {
+    const ALTERNATIVES: &str = "Use instead: f16 (identical storage), int8 (per-token absmax), \
+                                fp16+turbo4, fp16+turbo3, turbo4, or turbo4-delegated. See \
+                                docs/turbo-kv-cache.md for what each one costs and measures.";
     let lowered = value.to_ascii_lowercase();
-    if GGML_KV_CACHE_TYPES.contains(&lowered.as_str()) {
+    if GGML_KV_QUANTIZERS.contains(&lowered.as_str()) {
         return format!(
             "{option} {value} is not supported: `{lowered}` is a GGML KV cache quantizer, and \
              mlxcel stores its KV cache in MLX arrays with no numerically equivalent \
              representation. `f16` is the one spelling the two vocabularies share, and it is \
-             accepted.\n\
-             Use instead: f16 (identical storage), int8 (per-token absmax), fp16+turbo4, \
-             fp16+turbo3, turbo4, or turbo4-delegated. See docs/turbo-kv-cache.md for what each \
-             one costs and measures."
+             accepted.\n{ALTERNATIVES}"
+        );
+    }
+    if GGML_KV_FLOAT_TYPES.contains(&lowered.as_str()) {
+        return format!(
+            "{option} {value} is not supported: `{lowered}` is an unquantized GGML float type, \
+             and mlxcel's KV cache stores f16 or one of its own quantized modes; there is no f32 \
+             or bf16 KV storage to select. `f16` is the one spelling the two vocabularies share, \
+             and it is accepted.\n{ALTERNATIVES}"
         );
     }
     format!(
